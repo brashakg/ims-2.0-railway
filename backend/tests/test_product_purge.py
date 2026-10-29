@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("ENVIRONMENT", "test")
@@ -250,19 +251,50 @@ U2, U4 = "https://cdn.example.com/p2.jpg", "https://cdn.example.com/p4.jpg"
 M2, M4 = "gid://shopify/MediaImage/2", "gid://shopify/MediaImage/4"
 
 
+VG1 = "gid://shopify/ProductVariant/11"
+VG4 = "gid://shopify/ProductVariant/44"
+
+
 class _FakeShopify:
     """The ONLY network call (shopify_push._graphql), faked: the set of nodes
-    that exist on Shopify; `fail` = gids whose delete Shopify refuses."""
+    that exist on Shopify, and what each listing holds ({product gid:
+    {variant gid: sku}}); `fail` = gids whose delete Shopify refuses.
+    `calls` = the writes (and the after-failure node probe); `reads` = the
+    ground-truth reads made before any delete."""
 
-    def __init__(self, nodes=()):
+    def __init__(self, nodes=(), listings=None):
         self.nodes = set(nodes)
+        self.listings = listings if listings is not None else {
+            GID1: {VG1: "SKU-P1"}, GID4: {VG4: "SKU-P4", VGID2: "SKU-P2"}}
         self.fail = set()
+        self.lost_answer = set()  # Shopify deletes it but the answer is an error
         self.calls = []
+        self.reads = []
 
     async def __call__(self, db, query, variables):
+        if "imsListingTruth" in query:
+            gid = variables["id"]
+            self.reads.append(("listing", gid))
+            if gid not in self.nodes:
+                return {"data": {"node": None}}
+            vs = [{"id": v, "sku": sku} for v, sku in self.listings.get(gid, {}).items()]
+            return {"data": {"node": {"id": gid, "variants": {
+                "pageInfo": {"hasNextPage": False}, "nodes": vs}}}}
+        if "imsVariantTruth" in query:
+            vid = variables["id"]
+            self.reads.append(("variant", vid))
+            if vid not in self.nodes:
+                return {"data": {"node": None}}
+            for pg, vs in self.listings.items():
+                if vid in vs:
+                    return {"data": {"node": {"id": vid, "sku": vs[vid], "product": {"id": pg}}}}
+            return {"data": {"node": {"id": vid, "sku": None, "product": None}}}
         if "productDelete(" in query:
             gid = variables["input"]["id"]
             self.calls.append(("productDelete", gid))
+            if gid in self.lost_answer:
+                self.nodes.discard(gid)
+                return {"errors": [{"message": "Internal error (the delete landed)"}]}
             if gid in self.fail or gid not in self.nodes:
                 msg = "Internal error" if gid in self.fail else "Product does not exist"
                 return {"data": {"productDelete": {"deletedProductId": None,
@@ -276,6 +308,7 @@ class _FakeShopify:
                 return {"data": {"productVariantsBulkDelete": {"product": None, "userErrors": [
                     {"field": ["variantsIds"], "message": "nope", "code": "X"}]}}}
             self.nodes.discard(vid)
+            self.listings.get(variables["productId"], {}).pop(vid, None)
             return {"data": {"productVariantsBulkDelete": {"product": {"id": variables["productId"]},
                                                            "userErrors": []}}}
         if "productDeleteMedia(" in query:
@@ -288,8 +321,8 @@ class _FakeShopify:
         raise AssertionError("unexpected Shopify call: %s" % query[:80])
 
 
-def _live(env, nodes=()):
-    fake = _FakeShopify(nodes)
+def _live(env, nodes=(), listings=None):
+    fake = _FakeShopify(nodes, listings)
     mp = env["mp"]
     mp.setattr(shopify_push, "ims_shopify_writes_enabled", lambda: True)
     mp.setattr(shopify_push, "shopify_dispatch_mode", lambda: "live")
@@ -443,7 +476,7 @@ def test_already_gone_on_shopify_proceeds(env):
     fake = _live(env, set())  # not on Shopify any more
     res = _purge(env, "P1")
     assert res.status_code == 200, res.text
-    assert fake.calls == [("productDelete", GID1), ("node", GID1)]
+    assert fake.reads == [("listing", GID1)] and fake.calls == []  # nothing to delete
     assert not db.products.find_one({"product_id": "P1"})
     assert db.deleted_products_backup.find_one()["shopify"]["result"]["action"] == "already_gone"
 
@@ -452,7 +485,7 @@ def test_bulk_one_failure_never_stops_the_others(env):
     db = env["db"]
     _on_shopify(db)
     db.catalog_products.update_one({"id": "T-P2"}, {"$set": {"ecom.shopify_product_id": GID4}})
-    fake = _live(env, {GID1, GID4})
+    fake = _live(env, {GID1, GID4}, {GID1: {VG1: "SKU-P1"}, GID4: {VG4: "SKU-P2"}})
     fake.fail.add(GID1)
     dry = {r["product_id"]: r for r in _bulk(env, ["P1", "P2"], False).json()["results"]}
     assert dry["P1"]["website"] is True and dry["P1"]["status"] == "ready"
@@ -599,25 +632,18 @@ def test_restored_while_shopify_was_answering_deletes_nothing_in_ims(env):
     assert db.deleted_products_backup.find_one()["status"] == "aborted"
 
 
-def test_history_that_lands_after_the_first_check_stops_it_before_the_backup(env):
-    # A sale lands between the door's check and the delete: the re-check
-    # inside purge refuses BEFORE anything is backed up or sent to Shopify.
+def test_a_refused_apply_writes_no_backup_and_sends_nothing(env):
+    # The delete checks again itself, after the claim and BEFORE the backup:
+    # a product with history is refused with nothing written or sent.
     db = env["db"]
-    real = product_purge.purge_check
-    calls = []
-
-    def _stale_first(db_, spine, twin, **kw):
-        calls.append(1)
-        if len(calls) == 1:
-            db.stock_units.insert_one({"product_id": "P1", "status": "SOLD"})
-            return None, None  # the door's check saw nothing yet
-        return real(db_, spine, twin, **kw)
-
-    env["mp"].setattr(product_purge, "purge_check", _stale_first)
+    _on_shopify(db)
+    fake = _live(env, {GID1})
+    db.stock_units.insert_one({"product_id": "P1", "status": "SOLD"})
     res = _purge(env, "P1")
     assert res.status_code == 409 and "stock units" in res.json()["detail"]
-    assert _still_there(db, "P1")
     assert db.deleted_products_backup.count_documents({}) == 0
+    assert fake.calls == [] and fake.reads == []
+    assert db.products.find_one({"product_id": "P1"})["purge_run"] is None  # claim given back
 
 
 def test_the_claim_takes_it_off_the_sync_queue_and_gives_it_back(env):
@@ -663,6 +689,8 @@ def test_another_skus_row_under_it_refuses_and_is_never_taken(env):
 
 @pytest.mark.parametrize("field", ["shopify_variant_id", "shopify_inventory_item_id"])
 def test_the_twins_own_variant_ids_count_as_a_website_link(env, field):
+    # With no catalog_variants row of its own, the twin's ecom ids are its link.
+    env["db"].catalog_variants.delete_many({})
     env["db"].catalog_products.update_one({"id": "T-P1"}, {"$set": {f"ecom.{field}": "gid://x/1"}})
     _live(env)
     res = _purge(env, "P1")
@@ -770,3 +798,475 @@ def test_rbac_rows_are_superadmin_only():
 
     assert row("DELETE", "/api/v1/catalog/products/{product_id}/permanent") == {"SUPERADMIN"}
     assert row("POST", "/api/v1/catalog/products/bulk-purge") == {"SUPERADMIN"}
+
+
+# ---------------------------------------------------------------------------
+# Re-review of ed42c746 (#1273): each repro below failed (or deleted the
+# wrong thing) before its fix
+# ---------------------------------------------------------------------------
+
+
+def _two_colour_model(db):
+    """A (archived, P2) and B (live, P5) are colours of the live model P4."""
+    _size_of_live_model(db)
+    db.products.insert_one(_spine("P5", is_active=True, deleted_at=None, variant_of="P4"))
+    db.catalog_products.insert_one(_twin("P5", is_active=True, deleted_at=None, ecom={
+        "variant_of": {"product_id": "P4", "twin_id": "T-P4", "sku": "SKU-P4"}}))
+
+
+def test_review1_adopted_variant_on_the_twin_is_never_deleted(env):
+    # BLOCK 1: B took over A's variant (writeback._writeback_variant): A's
+    # row lost the ids (variant_taken_over_by), A's twin ecom still names
+    # them. Deleting A must not touch B's live variant.
+    db = env["db"]
+    _two_colour_model(db)
+    db.catalog_products.update_one({"id": "T-P2"}, {"$set": {
+        "ecom.shopify_variant_id": VGID2, "ecom.shopify_inventory_item_id": "gid://shopify/InventoryItem/2"}})
+    db.catalog_variants.update_one({"sku": "SKU-P2"}, {"$unset": {"shopify_variant_id": ""},
+                                                       "$set": {"variant_taken_over_by": "SKU-P5"}})
+    db.catalog_variants.insert_one({"sku": "SKU-P5", "parent_product_id": "T-P4", "shopify_variant_id": VGID2,
+                                    "shopify_inventory_item_id": "gid://shopify/InventoryItem/2"})
+    fake = _live(env, {GID4, VGID2}, {GID4: {VG4: "SKU-P4", VGID2: "SKU-P5"}})
+    res = _purge(env, "P2")
+    assert res.status_code == 200, res.text
+    assert fake.calls == [] and VGID2 in fake.nodes  # B's variant untouched
+    assert db.catalog_variants.find_one({"sku": "SKU-P5"})["shopify_variant_id"] == VGID2
+
+
+def test_review1_a_lone_twin_variant_id_another_row_holds_is_unclear(env):
+    db = env["db"]
+    db.catalog_variants.delete_many({})
+    db.catalog_products.update_one({"id": "T-P1"}, {"$set": {"ecom.shopify_product_id": GID1,
+                                                             "ecom.shopify_variant_id": VGID2}})
+    db.catalog_variants.insert_one({"sku": "SKU-OTHER", "parent_product_id": "T-X", "shopify_variant_id": "22"})
+    fake = _live(env, {GID1})
+    res = _purge(env, "P1")
+    assert res.status_code == 409 and "website link is unclear" in res.json()["detail"]
+    assert fake.calls == [] and fake.reads == []
+
+
+def test_review2_a_colour_linked_only_by_its_spine_deletes_only_its_variant(env):
+    # BLOCK 2: a half-finished hand-over left the colour's twin holding the
+    # model's listing id with no ecom.variant_of; only spine.variant_of says
+    # it is a colour. Never productDelete the model.
+    db = env["db"]
+    _size_of_live_model(db)
+    db.catalog_products.update_one({"id": "T-P2"}, {"$unset": {"ecom.variant_of": ""},
+                                                    "$set": {"ecom.shopify_product_id": GID4}})
+    fake = _live(env, {GID4, VGID2})
+    res = _purge(env, "P2")
+    assert res.status_code == 200, res.text
+    assert [c[0] for c in fake.calls if c[0] != "productDeleteMedia"] == ["productVariantsBulkDelete"]
+    assert GID4 in fake.nodes
+
+
+def test_review2_a_listing_id_another_catalogue_row_holds_is_unclear(env):
+    db = env["db"]
+    _on_shopify(db)
+    db.catalog_products.insert_one({"id": "T-X", "sku": "SKU-X", "ecom": {"shopify_product_id": "1"}})
+    fake = _live(env, {GID1})
+    res = _purge(env, "P1")
+    assert res.status_code == 409 and "website link is unclear" in res.json()["detail"]
+    assert fake.calls == [] and fake.reads == []
+
+
+@pytest.mark.parametrize("dark", [True, False])
+def test_review3_a_twin_linked_only_by_sku_refuses(env, dark):
+    # BLOCK 3: no pim / id link, the SKU is the only link (as has_listing and
+    # online_delist read it). Before: the spine went, the twin and its
+    # listing were orphaned, the dry run said website=false.
+    db = env["db"]
+    db.products.update_one({"product_id": "P2"}, {"$unset": {"pim_product_id": ""}})
+    db.catalog_products.update_one({"id": "T-P2"}, {"$set": {"ecom.shopify_product_id": GID1}})
+    fake = None if dark else _live(env, {GID1})
+    (dry,) = _bulk(env, ["P2"], False).json()["results"]
+    assert dry["status"] == "refused" and "only by SKU" in dry["reason"]
+    res = _purge(env, "P2")
+    assert res.status_code == 409 and "only by SKU" in res.json()["detail"]
+    assert db.products.find_one({"product_id": "P2"}) and db.catalog_products.find_one({"id": "T-P2"})
+    assert fake is None or fake.calls == []
+
+
+def test_ground_truth_a_listing_holding_another_colour_deletes_nothing(env):
+    # A variant IMS does not know of (Shopify admin, a merge revert, BVI).
+    db = env["db"]
+    _on_shopify(db)
+    fake = _live(env, {GID1}, {GID1: {VG1: "SKU-P1", "gid://shopify/ProductVariant/99": "SKU-STRAY"}})
+    res = _purge(env, "P1")
+    assert res.status_code == 502 and "holds other colours" in res.json()["detail"]
+    assert fake.reads == [("listing", GID1)] and fake.calls == []
+    assert _still_there(db, "P1") and GID1 in fake.nodes
+
+
+@pytest.mark.parametrize("shopify_says", ["other_sku", "other_listing"])
+def test_ground_truth_a_variant_that_is_not_this_products_is_never_deleted(env, shopify_says):
+    db = env["db"]
+    _size_of_live_model(db)
+    if shopify_says == "other_sku":
+        listing = {GID4: {VG4: "SKU-P4", VGID2: "SKU-P9"}}
+    else:
+        listing = {"gid://shopify/Product/7": {VGID2: "SKU-P2"}, GID4: {VG4: "SKU-P4"}}
+    fake = _live(env, {GID4, VGID2}, listing)
+    res = _purge(env, "P2")
+    assert res.status_code == 502, res.text
+    assert fake.reads == [("variant", VGID2)] and fake.calls == []
+    assert _still_there(db, "P2")
+
+
+def test_ground_truth_already_gone_needs_no_delete(env):
+    db = env["db"]
+    _on_shopify(db)
+    fake = _live(env, set())
+    assert _purge(env, "P1").status_code == 200
+    assert fake.reads == [("listing", GID1)] and fake.calls == []
+
+
+def test_review4_the_plan_is_read_fresh_and_a_changed_plan_stops_it(env):
+    # SHOULD-FIX: B takes over A's variant on another worker after the backup:
+    # the delete must not send the old plan.
+    db = env["db"]
+    _two_colour_model(db)
+    real = product_purge._gather
+    seen = []
+
+    def _adopt_after_first_gather(*a, **k):
+        out = real(*a, **k)
+        if not seen:
+            seen.append(1)
+            db.catalog_variants.update_one({"sku": "SKU-P2"}, {"$unset": {"shopify_variant_id": ""},
+                                                               "$set": {"variant_taken_over_by": "SKU-P5"}})
+            db.catalog_variants.insert_one({"sku": "SKU-P5", "parent_product_id": "T-P4",
+                                            "shopify_variant_id": VGID2})
+        return out
+
+    env["mp"].setattr(product_purge, "_gather", _adopt_after_first_gather)
+    fake = _live(env, {GID4, VGID2})
+    res = _purge(env, "P2")
+    assert res.status_code == 409 and "changed meanwhile" in res.json()["detail"]
+    assert fake.calls == [] and VGID2 in fake.nodes
+    assert [b["status"] for b in db.deleted_products_backup.find()] == ["aborted"]
+
+
+def test_review5_two_runs_never_share_the_claim(env):
+    # SHOULD-FIX: a re-press while the first run waits on Shopify. One run
+    # gets "already running"; the queue flag is given back exactly once.
+    import asyncio
+
+    db = env["db"]
+    _on_shopify(db)
+    db.catalog_products.update_one({"id": "T-P1"}, {"$set": {"ecom.locally_modified": True}})
+    fake = _live(env, {GID1})
+    fake.fail.add(GID1)
+    real = fake.__call__
+
+    async def _slow(db_, query, variables):
+        await asyncio.sleep(0.3)
+        return await real(db_, query, variables)
+
+    env["mp"].setattr(shopify_push, "_graphql", _slow)
+
+    async def _both():
+        return await asyncio.gather(catalog_mod._purge_rows(["P1"], ROOT, True),
+                                    catalog_mod._purge_rows(["P1"], ROOT, True))
+
+    (a,), (b,) = asyncio.run(_both())
+    assert sorted([a["code"], b["code"]]) == [409, 502]
+    assert "already running" in (a if a["code"] == 409 else b)["reason"]
+    twin = db.catalog_products.find_one({"id": "T-P1"})
+    assert twin["ecom"]["locally_modified"] is True and "purge_run" not in twin
+    assert [c[0] for c in fake.calls].count("productDelete") == 1
+
+
+@pytest.mark.parametrize("minutes_ago,expect", [(60, 200), (5, 409)])
+def test_review5_only_a_dead_claim_is_taken_over(env, minutes_ago, expect):
+    from datetime import timedelta, timezone
+
+    at = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    env["db"].products.update_one({"product_id": "P1"}, {"$set": {"purge_run": "PURGE-OLD", "purge_run_at": at}})
+    assert _purge(env, "P1").status_code == expect
+
+
+def test_review5_restore_cannot_take_a_product_a_delete_holds(env):
+    from datetime import timezone
+
+    db = env["db"]
+    db.products.update_one({"product_id": "P1"},
+                           {"$set": {"purge_run": "PURGE-LIVE", "purge_run_at": datetime.now(timezone.utc)}})
+    for apply in (False, True):
+        (row,) = env["call"](ROOT, "POST", "/api/v1/catalog/products/bulk-restore",
+                             json={"product_ids": ["P1"], "apply": apply}).json()["results"]
+        assert row["status"] == "refused" and "running" in row["reason"]
+    assert db.products.find_one({"product_id": "P1"})["deleted_at"] == GONE
+
+
+def test_review5_the_restore_write_itself_is_fenced_by_the_claim(env):
+    # The race across workers: Restore read "free", then the purge claimed.
+    from datetime import timezone
+
+    db = env["db"]
+    env["mp"].setattr(catalog_mod, "_purge_open", lambda spine: None)  # read before the claim
+    db.products.update_one({"product_id": "P1"},
+                           {"$set": {"purge_run": "PURGE-LIVE", "purge_run_at": datetime.now(timezone.utc)}})
+    (row,) = env["call"](ROOT, "POST", "/api/v1/catalog/products/bulk-restore",
+                         json={"product_ids": ["P1"], "apply": True}).json()["results"]
+    assert row["status"] == "refused"
+    assert db.products.find_one({"product_id": "P1"})["deleted_at"] == GONE
+    assert db.catalog_products.find_one({"id": "T-P1"})["deleted_at"] == GONE
+
+
+def test_nit6_a_stale_removing_backup_lets_restore_through(env):
+    from datetime import timedelta, timezone
+
+    db = env["db"]
+    db.deleted_products_backup.insert_one({"backup_id": "DPB-OLD", "product_id": "P1", "status": "removing",
+                                           "deleted_at": datetime.now(timezone.utc) - timedelta(hours=2)})
+    (row,) = env["call"](ROOT, "POST", "/api/v1/catalog/products/bulk-restore",
+                         json={"product_ids": ["P1"], "apply": False}).json()["results"]
+    assert row["status"] == "ready"
+
+
+def test_review6_the_colours_design_row_photos_come_off_the_model_listing(env):
+    db = env["db"]
+    _size_of_live_model(db)
+    db.product_images.insert_one({"image_id": "I2", "product_id": "T-P2", "url": "https://cdn.example.com/d2.jpg",
+                                  "status": "APPROVED", "shopify_image_id": "gid://shopify/MediaImage/77"})
+    fake = _live(env, {GID4, VGID2})
+    assert _purge(env, "P2").status_code == 200
+    (media,) = [c for c in fake.calls if c[0] == "productDeleteMedia"]
+    assert set(media[2]) == {M2, "gid://shopify/MediaImage/77"}
+
+
+def test_review14_a_photo_another_colour_still_uses_stays(env):
+    db = env["db"]
+    _two_colour_model(db)
+    db.catalog_products.update_one({"id": "T-P5"}, {"$set": {"images": [U2]}})
+    fake = _live(env, {GID4, VGID2})
+    assert _purge(env, "P2").status_code == 200
+    assert fake.calls == [("productVariantsBulkDelete", GID4, VGID2)]
+    assert {r["id"] for r in db.catalog_products.find_one({"id": "T-P4"})["ecom"]["media_map"]} == {M4, M2}
+
+
+def test_review7_an_unsettled_create_claim_is_unclear(env):
+    db = env["db"]
+    db.catalog_products.update_one({"id": "T-P1"}, {"$set": {"ecom.create_claim": {"state": "UNCERTAIN"}}})
+    res = _purge(env, "P1")
+    assert res.status_code == 409 and "may have created it" in res.json()["detail"]
+
+
+class _DeleteFails:
+    """A db whose `name` delete_many raises (a stop part-way)."""
+
+    def __init__(self, db, name):
+        self._db, self._name = db, name
+
+    def __getitem__(self, name):
+        coll = self._db[name]
+        if name != self._name:
+            return coll
+        bad = self._name
+
+        class _Coll:
+            def __getattr__(self, attr):
+                if attr == "delete_many":
+                    def _boom(*a, **k):
+                        raise RuntimeError(bad + ": connection reset")
+                    return _boom
+                return getattr(coll, attr)
+
+        return _Coll()
+
+    def get_collection(self, name):
+        return self[name]
+
+
+def test_nit2_pressing_again_after_shopify_finished_skips_shopify_and_the_dark_gate(env):
+    db = env["db"]
+    _on_shopify(db)
+    fake = _live(env, {GID1})
+    env["mp"].setattr(catalog_mod, "_get_db", lambda: _DeleteFails(db, "catalog_products"))
+    assert _purge(env, "P1").status_code == 503
+    assert fake.calls == [("productDelete", GID1)] and db.catalog_products.find_one({"id": "T-P1"})
+    # Website writes switched off now: the second press still finishes.
+    env["mp"].setattr(shopify_push, "ims_shopify_writes_enabled", lambda: False)
+    env["mp"].setattr(catalog_mod, "_get_db", lambda: db)
+    res = _purge(env, "P1")
+    assert res.status_code == 200, res.text
+    assert fake.calls == [("productDelete", GID1)]  # no second Shopify call
+    assert not db.products.find_one({"product_id": "P1"}) and not db.catalog_products.find_one({"id": "T-P1"})
+
+
+def test_review15_a_restore_after_the_last_check_keeps_the_spine(env):
+    # The "only while still archived" delete filter (review 15, mutation A).
+    db = env["db"]
+    real = product_purge._gather
+    calls = []
+
+    def _restore_on_second_gather(*a, **k):
+        calls.append(1)
+        out = real(*a, **k)
+        if len(calls) == 2:  # inside _after_shopify, after its re-check
+            db.products.update_one({"product_id": "P1"}, {"$set": {"deleted_at": None}})
+        return out
+
+    env["mp"].setattr(product_purge, "_gather", _restore_on_second_gather)
+    res = _purge(env, "P1")
+    assert res.status_code == 503 and "stopped part-way" in res.json()["detail"]
+    assert db.products.find_one({"product_id": "P1"})
+    assert db.deleted_products_backup.find_one()["status"] == "deleting"
+
+
+def test_review15_a_twin_restored_before_the_claim_is_never_claimed(env):
+    # The claim's "still archived" filter (review 15, mutation B).
+    db = env["db"]
+    real = product_purge._claim
+
+    def _restore_then_claim(db_, pid, twin_id, run_id):
+        db.catalog_products.update_one({"id": twin_id}, {"$set": {"deleted_at": None,
+                                                                  "ecom.locally_modified": True}})
+        return real(db_, pid, twin_id, run_id)
+
+    env["mp"].setattr(product_purge, "_claim", _restore_then_claim)
+    res = _purge(env, "P1")
+    assert res.status_code == 409 and "changed meanwhile" in res.json()["detail"]
+    twin = db.catalog_products.find_one({"id": "T-P1"})
+    assert "purge_run" not in twin and twin["ecom"]["locally_modified"] is True
+    assert db.deleted_products_backup.count_documents({}) == 0
+
+
+def test_nit7_a_family_row_deletes_its_colours_then_the_lead(env):
+    db = env["db"]
+    db.products.update_one({"product_id": "P2"}, {"$set": {"variant_of": "P1"}})
+    dry = {r["product_id"]: r for r in _bulk(env, ["P1", "P2"], False).json()["results"]}
+    assert dry["P2"]["status"] == "ready"
+    assert dry["P1"]["status"] == "ready" and "after its colours" in dry["P1"]["note"]
+    rows = {r["product_id"]: r for r in _bulk(env, ["P1", "P2"], True).json()["results"]}
+    assert rows["P1"]["status"] == "done" and rows["P2"]["status"] == "done"
+    # Alone, a lead still refuses while a colour is linked.
+    db.products.insert_one(_spine("P7", variant_of="P3"))
+    db.products.update_one({"product_id": "P3"}, {"$set": {"deleted_at": GONE}})
+    db.catalog_products.update_one({"id": "T-P3"}, {"$set": {"deleted_at": GONE}})
+    assert "colours" in _purge(env, "P3").json()["detail"]
+
+
+def test_nit8_the_permanent_delete_is_its_own_ungrantable_capability():
+    from api.services.capabilities import capability_for, is_ungrantable
+
+    for method, path in (("DELETE", "/api/v1/catalog/products/{product_id}/permanent"),
+                         ("POST", "/api/v1/catalog/products/bulk-purge")):
+        assert capability_for(method, path) == "catalog:purge"
+    assert is_ungrantable("catalog:purge")
+    assert capability_for("DELETE", "/api/v1/catalog/products/{product_id}") == "catalog:write"
+
+
+def test_nit5_rows_added_while_shopify_answered_are_backed_up_and_deleted(env):
+    db = env["db"]
+    _on_shopify(db)
+    fake = _live(env, {GID1})
+    real = fake.__call__
+
+    async def _late_image(db_, query, variables):
+        if "productDelete(" in query:
+            db.product_images.insert_one({"image_id": "I-LATE", "product_id": "T-P1",
+                                          "url": "https://x/late.jpg"})
+        return await real(db_, query, variables)
+
+    env["mp"].setattr(shopify_push, "_graphql", _late_image)
+    assert _purge(env, "P1").status_code == 200
+    assert not db.product_images.find_one({"image_id": "I-LATE"})
+    bk = db.deleted_products_backup.find_one()
+    assert {r["image_id"] for r in bk["docs"]["product_images"]} == {"I1", "I-LATE"}
+
+
+def test_review11_a_take_over_never_gives_back_a_stale_queue_flag(env):
+    # A run died holding the claim (its False on the twin, the real flag kept
+    # as purge_prior_queue). The next press takes the dead claim over and,
+    # when Shopify then refuses, gives back the REAL flag, not False.
+    from datetime import timedelta, timezone
+
+    db = env["db"]
+    _on_shopify(db)
+    old = datetime.now(timezone.utc) - timedelta(hours=1)
+    db.products.update_one({"product_id": "P1"}, {"$set": {"purge_run": "PURGE-DEAD", "purge_run_at": old}})
+    db.catalog_products.update_one({"id": "T-P1"}, {"$set": {
+        "purge_run": "PURGE-DEAD", "purge_run_at": old, "purge_prior_queue": True,
+        "ecom.locally_modified": False}})
+    fake = _live(env, {GID1})
+    fake.fail.add(GID1)
+    assert _purge(env, "P1").status_code == 502
+    twin = db.catalog_products.find_one({"id": "T-P1"})
+    assert twin["ecom"]["locally_modified"] is True and "purge_run" not in twin
+
+
+# ---------------------------------------------------------------------------
+# Guards the first mutation pass found untested (reverting them stayed green)
+# ---------------------------------------------------------------------------
+
+
+def test_a_claim_taken_over_before_shopify_sends_nothing(env):
+    # Another run took the claim over between the backup and the Shopify
+    # call (the product is still archived): nothing goes to Shopify.
+    db = env["db"]
+    _on_shopify(db)
+    real = product_purge._gather
+    seen = []
+
+    def _take_over_after_backup_gather(*a, **k):
+        out = real(*a, **k)
+        if not seen:
+            seen.append(1)
+            db.products.update_one({"product_id": "P1"}, {"$set": {"purge_run": "PURGE-OTHER"}})
+        return out
+
+    env["mp"].setattr(product_purge, "_gather", _take_over_after_backup_gather)
+    fake = _live(env, {GID1})
+    res = _purge(env, "P1")
+    assert res.status_code == 409 and "changed meanwhile" in res.json()["detail"]
+    assert fake.calls == [] and fake.reads == []
+    assert _still_there(db, "P1")
+
+
+def test_the_spine_is_deleted_only_while_this_run_holds_it(env):
+    # Another run took the claim over after the last check: this run's
+    # delete leaves the spine to it.
+    db = env["db"]
+    real = product_purge._gather
+    calls = []
+
+    def _take_over_on_second_gather(*a, **k):
+        calls.append(1)
+        out = real(*a, **k)
+        if len(calls) == 2:
+            db.products.update_one({"product_id": "P1"}, {"$set": {"purge_run": "PURGE-OTHER"}})
+        return out
+
+    env["mp"].setattr(product_purge, "_gather", _take_over_on_second_gather)
+    res = _purge(env, "P1")
+    assert res.status_code == 503 and "stopped part-way" in res.json()["detail"]
+    assert db.products.find_one({"product_id": "P1"})
+
+
+def test_review2_only_the_spine_says_it_is_a_colour(env):
+    # No catalog_variants row of its own and no ecom.variant_of: the spine's
+    # variant_of alone makes it a colour of the model. Only its variant goes.
+    db = env["db"]
+    _size_of_live_model(db)
+    db.catalog_variants.delete_many({"sku": "SKU-P2"})
+    db.catalog_products.update_one({"id": "T-P2"}, {"$unset": {"ecom.variant_of": ""}, "$set": {
+        "ecom.shopify_product_id": GID4, "ecom.shopify_variant_id": VGID2}})
+    fake = _live(env, {GID4, VGID2})
+    res = _purge(env, "P2")
+    assert res.status_code == 200, res.text
+    assert [c[:3] for c in fake.calls if c[0] != "productDeleteMedia"] == [
+        ("productVariantsBulkDelete", GID4, VGID2)]
+    assert GID4 in fake.nodes
+
+
+def test_a_delete_whose_answer_was_lost_but_landed_counts_as_done(env):
+    db = env["db"]
+    _on_shopify(db)
+    fake = _live(env, {GID1})
+    fake.lost_answer.add(GID1)
+    res = _purge(env, "P1")
+    assert res.status_code == 200, res.text
+    assert fake.calls == [("productDelete", GID1), ("node", GID1)]
+    assert db.deleted_products_backup.find_one()["shopify"]["result"]["action"] == "already_gone"

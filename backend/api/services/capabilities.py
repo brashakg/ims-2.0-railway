@@ -143,6 +143,14 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # (its roles already edit the catalogue).
     if tmpl == "/api/v1/catalog/flags":
         return "catalog:flag"
+    # Curated finer capability: the PERMANENT delete of an archived product
+    # (owner 2026-10-24, #1273). Every route under it is SUPERADMIN-only, so
+    # _build_universe makes the key UNGRANTABLE: no per-user grant of the
+    # generic catalog:write can ever reach it (no module deny maps 'catalog',
+    # as for catalog:flag).
+    if tmpl in ("/api/v1/catalog/products/{product_id}/permanent",
+                "/api/v1/catalog/products/bulk-purge"):
+        return "catalog:purge"
     # Curated finer capability: LOGGING a vendor return. Owner ruling
     # 2026-10-12 lets WORKSHOP_STAFF log one (unpriced); on the generic
     # vendor-returns:write key they would join the approve / ship / credit

@@ -7,7 +7,7 @@ variant seeding, photos, publish) and `push_product_delist`.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from agents.nexus_providers import _as_shopify_gid
 
@@ -1447,6 +1447,15 @@ class RemovalUnclear(Exception):
     """The product's Shopify link cannot be resolved safely; nothing is sent."""
 
 
+def _gid_forms(gid: Any, kind: str) -> List[str]:
+    """Every spelling IMS stores a Shopify id in: the gid and its numeric tail."""
+    if not gid:
+        return []
+    full = _as_shopify_gid(gid, kind)
+    tail = str(full).rsplit("/", 1)[-1]
+    return sorted({str(gid), full, tail})
+
+
 def removal_plan(
     db, product: Optional[Dict[str, Any]], spine: Optional[Dict[str, Any]] = None
 ) -> Optional[Dict[str, Any]]:
@@ -1454,31 +1463,44 @@ def removal_plan(
     product is on no listing. Reads only (never the network); a read error
     RAISES (never "not on Shopify"); an unclear link raises RemovalUnclear.
 
-    Every Shopify link counts: the twin's / spine's listing id, the twin's own
-    variant / inventory-item ids, its catalog_variants row (by ITS OWN sku
-    only), and ecom.listing_moved_to (a lead whose listing was handed to the
-    next colour, product_master._hand_over_listing).
-
-      * A colour/size that rides a model's listing (is_variant_of, a moved
-        listing, or its row hangs off another twin): ONLY its own variant
-        {kind: variant, product_gid: the model's, variant_gid,
-        inventory_item_gid, parent_twin_id}. Never the model's product.
+      * A colour/size that rides a model's listing (twin ecom.variant_of,
+        ecom.listing_moved_to, spine.variant_of, or its own catalog_variants
+        row hangs off another twin): ONLY its own variant {kind: variant,
+        product_gid: the model's, variant_gid, inventory_item_gid,
+        parent_twin_id}. Never the model's product.
       * Otherwise its own listing {kind: product, product_gid, ...} -- the
-        caller has already refused a model lead whose colours are linked."""
+        caller has already refused a model lead whose colours are linked.
+
+    Variant ids come from its OWN catalog_variants row (by its own SKU) when
+    that row exists -- a row whose variant another colour took over
+    (variant_taken_over_by, writeback._writeback_variant) has nothing of this
+    product left on Shopify. The twin's own ecom ids count only when there is
+    no row. Any id that another row or twin also holds makes it unclear: one
+    Shopify id, one owner. push_product_remove still reads Shopify itself
+    before deleting (shopify_removal_truth)."""
     product = product or {}
     spine = spine or {}
     ecom = product.get("ecom") or {}
+    twin_id = product.get("id")
     sku = str(product.get("sku") or spine.get("sku") or "").strip()
+    skus = sorted({s for s in (product.get("sku"), spine.get("sku")) if s})
     own_gid = (
         ecom.get("shopify_product_id")
         or (spine.get("ecom") or {}).get("shopify_product_id")
         or spine.get("shopify_product_id")
     )
-    row = db["catalog_variants"].find_one({"sku": sku}) if sku else None
-    row = row or {}
-    variant_gid = row.get("shopify_variant_id") or ecom.get("shopify_variant_id")
-    item_gid = row.get("shopify_inventory_item_id") or ecom.get("shopify_inventory_item_id")
+    if not own_gid and ecom.get("create_claim"):
+        raise RemovalUnclear("an earlier send may have created it on the website")
+    row = (db["catalog_variants"].find_one({"sku": sku}) if sku else None) or {}
+    if row:
+        taken = bool(row.get("variant_taken_over_by"))
+        variant_gid = None if taken else row.get("shopify_variant_id")
+        item_gid = None if taken else row.get("shopify_inventory_item_id")
+    else:
+        variant_gid = ecom.get("shopify_variant_id")
+        item_gid = ecom.get("shopify_inventory_item_id")
     moved_to = ecom.get("listing_moved_to")
+    spine_lead = spine.get("variant_of")
     parent: Dict[str, Any] = {}
     if row:
         from ..online_catalog import _parent_from, _parents_for_variants
@@ -1487,21 +1509,43 @@ def removal_plan(
     if not parent.get("id"):
         link = ecom.get("variant_of") if isinstance(ecom.get("variant_of"), dict) else {}
         parent_id = moved_to or link.get("twin_id")
-        if parent_id and parent_id != product.get("id"):
+        if parent_id and parent_id != twin_id:
             parent = db["catalog_products"].find_one({"id": parent_id}) or {}
+        elif spine_lead and spine_lead != spine.get("product_id"):
+            from ..online_delist import _resolve_twin
+
+            lead = db["products"].find_one({"product_id": spine_lead}) or {}
+            parent = _resolve_twin(
+                db, {k: lead.get(k) for k in ("pim_product_id", "product_id", "sku")}, strict=True
+            ) or {}
     rides_model = bool(
         is_variant_of(product)
         or moved_to
-        or (parent.get("id") and product.get("id") and parent.get("id") != product.get("id"))
+        # The parent is another twin: through its row, its ecom link, a moved
+        # listing, or its SPINE's variant_of (resolved above).
+        or (parent.get("id") and twin_id and parent.get("id") != twin_id)
     )
+    # One Shopify id, one owner: another row or another twin holding the
+    # same variant / inventory item means IMS's map is not this product's.
+    for gid, kind, field in (
+        (variant_gid, "ProductVariant", "shopify_variant_id"),
+        (item_gid, "InventoryItem", "shopify_inventory_item_id"),
+    ):
+        forms = _gid_forms(gid, kind)
+        if forms and (
+            db["catalog_variants"].find_one({field: {"$in": forms}, "sku": {"$nin": skus}})
+            or db["catalog_products"].find_one({f"ecom.{field}": {"$in": forms}, "id": {"$ne": twin_id}})
+        ):
+            raise RemovalUnclear(f"its website {field.split('_')[1]} id belongs to another product too")
     extra = {
         "sku": sku,
+        "skus": skus,
         "variant_gid": _as_shopify_gid(variant_gid, "ProductVariant") if variant_gid else None,
         "inventory_item_gid": _as_shopify_gid(item_gid, "InventoryItem") if item_gid else None,
     }
     if rides_model:
         if not variant_gid:
-            if own_gid or item_gid:
+            if (own_gid or item_gid) and not row.get("variant_taken_over_by"):
                 raise RemovalUnclear(
                     "it is a colour/size of a model with a website id but no variant id"
                 )
@@ -1520,10 +1564,67 @@ def removal_plan(
             **extra,
         }
     if own_gid:
+        forms = _gid_forms(own_gid, "Product")
+        if db["catalog_products"].find_one(
+            {"ecom.shopify_product_id": {"$in": forms}, "id": {"$ne": twin_id}}
+        ):
+            raise RemovalUnclear("another catalogue row holds the same website listing")
         return {"kind": "product", "product_gid": _as_shopify_gid(own_gid, "Product"), **extra}
     if variant_gid or item_gid:
         raise RemovalUnclear("it has a website variant id but no listing id")
     return None
+
+
+_VARIANT_TRUTH = """
+query imsVariantTruth($id: ID!) {
+  node(id: $id) { ... on ProductVariant { id sku product { id } } }
+}
+"""
+
+_LISTING_TRUTH = """
+query imsListingTruth($id: ID!) {
+  node(id: $id) {
+    ... on Product { id variants(first: 250) { pageInfo { hasNextPage } nodes { id sku } } }
+  }
+}
+"""
+
+
+async def shopify_removal_truth(db, plan: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+    """THE ground-truth guard, read from SHOPIFY immediately before any
+    permanent delete: (gone, refusal). gone True = Shopify answers node null
+    (already gone, nothing to delete). refusal = why the delete must not go
+    out (the listing holds other colours, the variant is not this product's,
+    or Shopify could not be read) -- delete nothing. Never raises."""
+    own_skus = {str(s).strip() for s in (plan.get("skus") or [plan.get("sku")]) if s}
+    try:
+        if plan["kind"] == "variant":
+            body = await _graphql(db, _VARIANT_TRUTH, {"id": plan["variant_gid"]})
+        else:
+            body = await _graphql(db, _LISTING_TRUTH, {"id": plan["product_gid"]})
+    except Exception as exc:  # noqa: BLE001
+        return False, f"the website could not be read ({exc})"
+    if not isinstance(body, dict) or body.get("errors") or not isinstance(body.get("data"), dict):
+        return False, "the website could not be read"
+    node = body["data"].get("node")
+    if node is None:
+        return True, None
+    if plan["kind"] == "variant":
+        if str(node.get("sku") or "").strip() not in own_skus:
+            return False, "that website variant is not this product's (its SKU differs)"
+        if _as_shopify_gid((node.get("product") or {}).get("id"), "Product") != plan["product_gid"]:
+            return False, "that website variant sits on a different listing"
+        return False, None
+    variants = node.get("variants") or {}
+    if (variants.get("pageInfo") or {}).get("hasNextPage"):
+        return False, "the listing holds other colours"
+    for v in variants.get("nodes") or []:
+        mine = str(v.get("sku") or "").strip() in own_skus or (
+            plan.get("variant_gid") and _as_shopify_gid(v.get("id"), "ProductVariant") == plan["variant_gid"]
+        )
+        if not mine:
+            return False, "the listing holds other colours"
+    return False, None
 
 
 async def _gone_on_shopify(db, gid: str) -> bool:
@@ -1542,12 +1643,40 @@ async def _gone_on_shopify(db, gid: str) -> bool:
     )
 
 
+def _listing_member_twins(db, lead_id: str, exclude_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Every twin on the model's listing except `exclude_id`: the lead, the
+    twins behind its catalog_variants rows, its spine's variant_of children,
+    and twins whose ecom.variant_of names it."""
+    lead = db["catalog_products"].find_one({"id": lead_id}) or {}
+    out: Dict[str, Dict[str, Any]] = {}
+    if lead.get("id"):
+        out[lead["id"]] = lead
+    from ..online_catalog import variant_rows_for_product
+
+    skus = {r.get("sku") for r in variant_rows_for_product(db, lead, strict=True) if r.get("sku")}
+    for t in db["catalog_products"].find({"$or": [
+        {"sku": {"$in": sorted(skus)}}, {"ecom.variant_of.twin_id": lead_id},
+    ]}):
+        out.setdefault(t.get("id"), t)
+    from ..online_delist import _resolve_twin
+
+    lead_spine = db["products"].find_one({"$or": [{"pim_product_id": lead_id}, {"product_id": lead_id}]})
+    if lead_spine:
+        for child in db["products"].find({"variant_of": lead_spine.get("product_id")}):
+            t = _resolve_twin(db, {k: child.get(k) for k in ("pim_product_id", "product_id", "sku")}, strict=True)
+            if t:
+                out.setdefault(t.get("id"), t)
+    return [t for i, t in out.items() if i and i != exclude_id]
+
+
 async def _prune_variant_media(db, plan: Dict[str, Any], product: Dict[str, Any]) -> Dict[str, Any]:
     """After a colour's variant is deleted, take ITS photos off the model's
-    listing (the rows of the model's ecom.media_map whose photo belongs to
-    no other colour still on it) and drop them from that map. Nothing else
-    of the model's listing is touched. Fail-soft: the answer is recorded."""
-    from .media import _delete_media, _writeback_media_map, owned_media
+    listing and drop them from IMS's records: the rows of the model's
+    ecom.media_map whose photo no other colour on the listing uses, and the
+    colour's own design-row media (product_images shopify_image_id /
+    answers) that no other owner records. Nothing else of the model's
+    listing is touched. Fail-soft: the answer is recorded."""
+    from .media import _ANSWERS, _delete_media, _recorded_elsewhere, _writeback_media_map, owned_media
 
     lead_id = plan.get("parent_twin_id")
     try:
@@ -1555,12 +1684,18 @@ async def _prune_variant_media(db, plan: Dict[str, Any], product: Dict[str, Any]
         if lead is None:
             return {"pruned": [], "note": "model listing row not found"}
         mine = set(product_photo_urls(product))
-        others = set(product_photo_urls(lead))
-        for m in db["catalog_products"].find({"ecom.variant_of.twin_id": lead_id}):
-            if m.get("id") != product.get("id"):
-                others |= set(product_photo_urls(m))
+        others: set = set()
+        for m in _listing_member_twins(db, lead_id, product.get("id")):
+            others |= set(product_photo_urls(m))
         owned = owned_media(lead)
         drop = [r for r in owned if r["url"] in mine and r["url"] not in others]
+        elsewhere = {r["id"] for r in owned if r["url"] in others}
+        for row in db["product_images"].find({"product_id": product.get("id")}) if product.get("id") else []:
+            ids, _ = _recorded_elsewhere(db, row)
+            answered = [str(a.get("id")) for a in row.get(_ANSWERS) or [] if isinstance(a, dict) and a.get("id")]
+            for mid in ([str(row["shopify_image_id"])] if row.get("shopify_image_id") else []) + answered:
+                if mid not in ids and mid not in elsewhere and mid not in {d["id"] for d in drop}:
+                    drop.append({"id": mid, "url": str(row.get("url") or "")})
         if not drop:
             return {"pruned": []}
         err = await _delete_media(db, lead_id, plan["product_gid"], drop)
@@ -1578,9 +1713,11 @@ async def push_product_remove(
 ) -> PushResult:
     """Delete a removal_plan on Shopify: productDelete for its own listing,
     productVariantsBulkDelete for a colour/size (never the model's product;
-    its photos then come off the model's listing). Already gone (Shopify
-    answers node null) is success. The same dark gates as every push:
-    SIMULATED (nothing sent) unless LIVE. Never raises."""
+    its photos then come off the model's listing). FIRST reads Shopify
+    (shopify_removal_truth): a listing holding other colours, or a variant
+    that is not this product's, deletes nothing. Already gone (node null) is
+    success. The same dark gates as every push: SIMULATED (nothing sent)
+    unless LIVE. Never raises."""
     kind = plan["kind"]
     if kind == "product":
         query, field = _PRODUCT_DELETE, "productDelete"
@@ -1597,24 +1734,32 @@ async def push_product_remove(
             mode=MODE_SIMULATED, entity=entity, action="delete", target_id=target_id,
             ok=True, shopify_id=gid, payload=variables, reason=reason,
         )
+    gone, refusal = await shopify_removal_truth(db, plan)
+    if refusal:
+        return PushResult(
+            mode=MODE_LIVE, entity=entity, action="delete", target_id=target_id, ok=False,
+            shopify_id=gid, payload={"variables": variables}, error=refusal,
+        )
     body: Any = None
-    try:
-        body = await _graphql(db, query, variables)
-        err = _user_errors(body, field)
-        if not err and kind == "product" and not ((body.get("data") or {}).get(field) or {}).get(
-            "deletedProductId"
-        ):
-            err = "Shopify did not confirm the delete"
-    except Exception as exc:  # noqa: BLE001 -- fail-soft, reported
-        err = str(exc)
-    action = "delete"
-    if err:
-        if not await _gone_on_shopify(db, gid):
-            return PushResult(
-                mode=MODE_LIVE, entity=entity, action="delete", target_id=target_id, ok=False,
-                shopify_id=gid, payload={"variables": variables, "response": body}, error=err,
-            )
-        action = "already_gone"
+    action = "already_gone"
+    if not gone:
+        action = "delete"
+        try:
+            body = await _graphql(db, query, variables)
+            err = _user_errors(body, field)
+            if not err and kind == "product" and not ((body.get("data") or {}).get(field) or {}).get(
+                "deletedProductId"
+            ):
+                err = "Shopify did not confirm the delete"
+        except Exception as exc:  # noqa: BLE001 -- fail-soft, reported
+            err = str(exc)
+        if err:
+            if not await _gone_on_shopify(db, gid):
+                return PushResult(
+                    mode=MODE_LIVE, entity=entity, action="delete", target_id=target_id, ok=False,
+                    shopify_id=gid, payload={"variables": variables, "response": body}, error=err,
+                )
+            action = "already_gone"
     out: Dict[str, Any] = {"variables": variables, "response": body}
     if kind == "variant" and product is not None:
         out["media"] = await _prune_variant_media(db, plan, product)

@@ -1267,7 +1267,8 @@ export function CatalogManagerPage({
                         <div className="text-gray-500">{added.edited}</div>
                       </td>
                       <td className="px-3 py-2 align-middle text-right">
-                        {archivedView && isSuperAdmin && doc.deleted_at ? (
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                        {archivedView && isSuperAdmin && Boolean(doc.deleted_at) && (
                           <button
                             type="button"
                             onClick={() => setPurgeIds(ids)}
@@ -1275,7 +1276,8 @@ export function CatalogManagerPage({
                           >
                             <Trash2 className="h-3.5 w-3.5" /> Delete permanently
                           </button>
-                        ) : !canEdit ? null : hasPhoto === false ? (
+                        )}
+                        {!canEdit ? null : hasPhoto === false ? (
                           <button
                             type="button"
                             onClick={() => openEditor(it, '#images')}
@@ -1292,6 +1294,7 @@ export function CatalogManagerPage({
                             <Pencil className="h-3.5 w-3.5" /> Edit
                           </button>
                         )}
+                        </div>
                       </td>
                     </tr>
                     {isOpen &&

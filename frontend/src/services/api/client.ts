@@ -286,11 +286,19 @@ export class ApiError extends Error {
 export const PUSH_TIMEOUT_MESSAGE =
   'The push is still running on the server. Refresh in a minute to see the result; do not press again.';
 
+// The Catalog page's permanent delete keeps running on the server after the
+// request times out (it goes one product at a time, Shopify first).
+export const PURGE_TIMEOUT_MESSAGE =
+  'The permanent delete is still running on the server. Refresh in a minute to see the result; do not press again.';
+
 // axios timeout = ECONNABORTED (ETIMEDOUT only under clarifyTimeoutError);
 // a plain network failure is ERR_NETWORK and keeps the generic message.
+const isTimeout = (error: AxiosError): boolean =>
+  error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT';
 const isPushTimeout = (error: AxiosError): boolean =>
-  (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') &&
-  String(error.config?.url || '').includes('/online-store/push/');
+  isTimeout(error) && String(error.config?.url || '').includes('/online-store/push/');
+const isPurgeTimeout = (error: AxiosError): boolean =>
+  isTimeout(error) && String(error.config?.url || '').includes('/catalog/products/bulk-purge');
 
 // Pure transform: axios error -> the ApiError components actually receive.
 // Exported so tests reject fixtures through the REAL production transform
@@ -309,7 +317,9 @@ export function buildApiError(
     // "try again" is the second press that pushes twice.
     message = isPushTimeout(error)
       ? PUSH_TIMEOUT_MESSAGE
-      : 'Network error. Please check your internet connection and try again.';
+      : isPurgeTimeout(error)
+        ? PURGE_TIMEOUT_MESSAGE
+        : 'Network error. Please check your internet connection and try again.';
   } else if (error.response.status >= 500) {
     // 503 is the only 5xx this API raises DELIBERATELY: it is a safety stop, not
     // a crash. Goods-receipt acceptance uses it to say "N units were received

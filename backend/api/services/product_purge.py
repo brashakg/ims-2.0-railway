@@ -5,37 +5,44 @@ The catalogue's Delete is an archive (catalog._archive_product): the rows stay,
 so an archived product still holds its identity_key (the unique duplicate key
 on `products`) and clutters the catalogue. This is the ONE rule for removing
 one for good -- the single door (DELETE /catalog/products/{id}/permanent) and
-the Catalog page's bulk door (POST /catalog/products/bulk-purge) both call
-`purge_check` (the dry run's answer too), then `purge`. SUPERADMIN only (the
-routes' gate).
+the Catalog page's bulk door (POST /catalog/products/bulk-purge) both use it:
+`purge_check` answers the dry run, `purge` does the delete (and checks again
+itself). SUPERADMIN only (the routes' gate, and its own capability key).
 
 Refused (nothing deleted):
   * not archived (its spine, or ANY catalogue row of it)      -> 409
-  * more than one catalogue row claims it                     -> 409
-  * leads a model family (another product's variant_of)       -> 409
+  * more than one catalogue row claims it, or one by SKU only -> 409
+  * leads a model family (another product's variant_of) not in the same batch -> 409
   * ANY history a record or tax document points at (HISTORY)  -> 409
   * named in a promotion                                      -> 409
   * another SKU's website row sits under it                   -> 409
   * a website order for it not yet booked in IMS              -> 409
   * on Shopify while website writes are switched off (DARK)   -> 409
   * its Shopify link cannot be resolved safely                -> 409
-  * Shopify did not remove it                                 -> 502
+  * a permanent delete of it is already running               -> 409
+  * Shopify did not remove it, or Shopify says the listing holds other colours -> 502
   * a read that failed                                        -> 503
 
 On Shopify (owner ruling 2026-10-24 on #1273, "want that yes") it comes off
 the website through the push engine (shopify_push.removal_plan /
 push_product_remove, the same LIVE gates as every push): its own listing with
 productDelete; a colour/size of a model only its own variant (and its photos
-on that listing), never the model's product. Already gone counts as done.
+on that listing), never the model's product. Shopify is READ first
+(shopify_push.shopify_removal_truth): only a listing that holds nothing but
+this product's SKU, or a variant whose SKU and listing are this product's, is
+deleted. Already gone counts as done.
 
-`purge` order: claim the twin (still archived; off the auto-sync queue) ->
-check again -> BACKUP every doc it will delete or change into
-`deleted_products_backup` (status removing/deleting) -> Shopify -> check
-again -> change / delete (the spine LAST, spine and twin only while still
-archived) -> backup status done -> audit row. A failed backup changes
-nothing; a Shopify failure deletes nothing in IMS. While a backup is
-removing/deleting, Restore refuses (catalog bulk-restore), so a part-deleted
-product never comes back broken; pressing Delete permanently again finishes it.
+`purge` order, one product at a time, the Mongo work off the event loop:
+CLAIM the spine (the lock: exclusive, still archived; Restore cannot take it)
+and the twin (off the auto-sync queue) -> check again, fresh -> BACKUP every
+doc it will delete or change into `deleted_products_backup` -> re-assert the
+claim and check again (the plan must not have changed) -> Shopify -> check
+again -> gather again and add anything new to the backup -> change / delete
+(the spine LAST; spine and twin only while still archived and still ours) ->
+backup done -> audit row. A failed backup changes nothing; a Shopify failure
+deletes nothing in IMS. While a backup is deleting, Restore refuses, so a
+part-deleted product never comes back broken; pressing Delete permanently
+again finishes it.
 
 Stored image FILES are left alone: the codebase has no helper that removes a
 stored file (DELETE /online-store/images/{id} removes the record only).
@@ -44,11 +51,12 @@ No emoji (Windows cp1252).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +75,10 @@ TWO_ROWS = (
     "More than one catalogue row belongs to it, so it stays archived. "
     "This needs sorting out by hand."
 )
+SKU_ONLY_ROW = (
+    "Its catalogue row is linked to it only by SKU, so it stays archived. "
+    "This needs sorting out by hand."
+)
 OTHER_SKUS_UNDER = (
     "Other sizes' website rows sit under it, so it stays archived. "
     "Delete or move those first."
@@ -76,17 +88,21 @@ UNBOOKED_ORDER = (
     "Try again once the order shows in Online Orders."
 )
 CHANGED_MEANWHILE = "It was restored or changed meanwhile, so nothing was deleted."
+RUNNING = "A permanent delete of it is already running. Refresh in a minute; do not press again."
 BACKUP_FAILED = "Could not write the backup, so nothing was deleted. Try again in a minute."
 PART_DELETED = (
     "Deleting stopped part-way. Nothing is lost: the backup holds every record. "
     "Press Delete permanently again to finish."
 )
+LEAD_AFTER_COLOURS = "Goes after its colours in this same delete."
 BACKUP_COLLECTION = "deleted_products_backup"
 # A backup in one of these states means a delete is under way or stopped
-# part-way: Restore refuses (restore_refusal).
+# part-way (restore_refusal).
 OPEN_STATES = ("removing", "deleting")
+# A claim older than this belongs to a run that died (a crash, a killed
+# worker): a new press may take it over, and Restore is no longer held by it.
+CLAIM_STALE = timedelta(minutes=15)
 
-# Every collection that records or a tax document keep a product reference in
 # (grepped 2026-10-24: product_id / sku / ims_product_id on the doc, or on its
 # items / lines). A hit in any of them keeps the product archived.
 HISTORY: List[Tuple[str, str]] = [
@@ -182,14 +198,50 @@ def _unbooked_order(db, skus: List[str], plan: Optional[Dict]) -> bool:
     return False
 
 
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _free_claim() -> Dict[str, Any]:
+    """Mongo filter: nobody holds the purge claim, or its holder died."""
+    return {"$or": [{"purge_run": None}, {"purge_run_at": {"$lt": _now() - CLAIM_STALE}}]}
+
+
+def linked_members(db, pid: str, twin_id: Optional[str]) -> Tuple[Set[str], bool]:
+    """The products linked to this one as its model's colours/sizes, as spine
+    ids, and whether every link could be put to a spine (a twin-only member
+    cannot be in a batch of spine ids)."""
+    members = {d["product_id"] for d in db["products"].find({"variant_of": pid, "product_id": {"$ne": pid}})}
+    lead_q: List[Dict] = [{"ecom.variant_of.product_id": pid}]
+    if twin_id:
+        lead_q.append({"ecom.variant_of.twin_id": twin_id})
+    complete = True
+    for t in db["catalog_products"].find({"$or": lead_q, "id": {"$ne": twin_id}}):
+        s = db["products"].find_one({"$or": [{"pim_product_id": t.get("id")}, {"product_id": t.get("id")}]})
+        if s and s.get("product_id"):
+            members.add(s["product_id"])
+        else:
+            complete = False
+    return members, complete
+
+
 def purge_check(
-    db, spine: Optional[Dict], twin: Optional[Dict], *, gate: bool = True
+    db,
+    spine: Optional[Dict],
+    twin: Optional[Dict],
+    *,
+    gate: bool = True,
+    batch: FrozenSet[str] = frozenset(),
+    website_done: bool = False,
 ) -> Tuple[Optional[Tuple[int, str]], Optional[Dict]]:
     """(refusal, website plan). refusal is (status, reason), None when it may
     go; the plan (shopify_push.removal_plan) is what must come off Shopify
     first, None when it is on no listing. A read that fails refuses (503) --
     never "no history", never "not on Shopify". `gate` False skips the
-    website-writes-off refusal (the re-checks inside purge)."""
+    website-writes-off refusal; `batch` = the products going before it in the
+    same delete (a model lead may go after ALL its colours); `website_done` =
+    an earlier run of this delete already took it off Shopify."""
     from . import shopify_push
     from .online_delist import _resolve_twin
 
@@ -204,7 +256,8 @@ def purge_check(
     twin_id = (twin or {}).get("id")
     try:
         # Every catalogue row that could be its twin: by its ids (the
-        # convergence and create-door links) and by the delist rule.
+        # convergence and create-door links) and by the delist rule (which
+        # falls back to the SKU, as has_listing and the stock writer do).
         rows = list(db["catalog_products"].find(
             {"id": {"$in": [i for i in (pid, spine.get("pim_product_id")) if i]}}
         ))
@@ -215,12 +268,10 @@ def purge_check(
         row_ids = {r.get("id") for r in rows} | {(resolved or {}).get("id")} | {twin_id}
         if len({i for i in row_ids if i}) > 1:
             return (409, TWO_ROWS), None
-        lead_q: List[Dict] = [{"ecom.variant_of.product_id": pid}]
-        if twin_id:
-            lead_q.append({"ecom.variant_of.twin_id": twin_id})
-        if db["products"].find_one({"variant_of": pid, "product_id": {"$ne": pid}}) or db[
-            "catalog_products"
-        ].find_one({"$or": lead_q, "id": {"$ne": twin_id}}):
+        if twin is None and (rows or resolved):
+            return (409, SKU_ONLY_ROW), None
+        members, complete = linked_members(db, pid, twin_id)
+        if members and not (complete and members <= set(batch)):
             return (409, LEADS_FAMILY), None
         query = _ref_query(ids + skus)
         found: List[str] = []
@@ -246,7 +297,7 @@ def purge_check(
             "sku": {"$nin": skus},
         }):
             return (409, OTHER_SKUS_UNDER), None
-        plan = shopify_push.removal_plan(db, twin, spine)
+        plan = None if website_done else shopify_push.removal_plan(db, twin, spine)
         if _unbooked_order(db, skus, plan):
             return (409, UNBOOKED_ORDER), None
     except shopify_push.RemovalUnclear as exc:
@@ -259,13 +310,23 @@ def purge_check(
     return None, plan
 
 
-def restore_refusal(db, product_id: Optional[str]) -> Optional[str]:
-    """Why Restore must refuse: a permanent delete of it is under way or
-    stopped part-way (its backup is removing/deleting). Raises on a read error
-    (the restore door answers 503)."""
+def restore_refusal(db, spine: Optional[Dict]) -> Optional[str]:
+    """Why Restore must refuse: a permanent delete of it holds the claim, is
+    taking it off the website, or stopped part-way with records already
+    deleted. A claim or a 'removing' backup older than CLAIM_STALE belongs to
+    a run that died: then Restore may go (nothing in IMS was deleted yet).
+    Raises on a read error (the restore door answers that)."""
+    product_id = (spine or {}).get("product_id")
     if not product_id or db is None:
         return None
-    if db[BACKUP_COLLECTION].find_one({"product_id": product_id, "status": {"$in": list(OPEN_STATES)}}):
+    stale = _now() - CLAIM_STALE
+    at = spine.get("purge_run_at")
+    if spine.get("purge_run") and not (isinstance(at, datetime) and _aware(at) < stale):
+        return "A permanent delete of it is running, so it cannot be restored."
+    for b in db[BACKUP_COLLECTION].find({"product_id": product_id, "status": {"$in": list(OPEN_STATES)}}):
+        started = b.get("deleted_at")
+        if b.get("status") == "removing" and isinstance(started, datetime) and _aware(started) < stale:
+            continue
         return (
             "It is being deleted permanently (or that stopped part-way), so it cannot be "
             "restored. Press Delete permanently again to finish."
@@ -273,14 +334,26 @@ def restore_refusal(db, product_id: Optional[str]) -> Optional[str]:
     return None
 
 
-def _fresh_refusal(db, pid: str, twin_id: Optional[str]) -> Optional[Tuple[int, str]]:
-    """purge_check on freshly read docs (the time between the first check and
-    the delete is where a restore, a sale or a receipt could land)."""
+def _aware(at: datetime) -> datetime:
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def _website_done(db, pid: str) -> bool:
+    """An earlier run of this delete took it off Shopify and then stopped
+    part-way: its open 'deleting' backup records the removal."""
+    return db[BACKUP_COLLECTION].find_one(
+        {"product_id": pid, "status": "deleting", "shopify.result.ok": True}
+    ) is not None
+
+
+def _fresh(db, pid: str, twin_id: Optional[str], *, website_done: bool):
+    """purge_check on freshly read docs: (refusal, plan, spine, twin)."""
     spine = db["products"].find_one({"product_id": pid})
     twin = db["catalog_products"].find_one({"id": twin_id}) if twin_id else None
     if twin_id and twin is None:
-        return 409, CHANGED_MEANWHILE
-    return purge_check(db, spine, twin, gate=False)[0]
+        return (409, CHANGED_MEANWHILE), None, spine, twin
+    refusal, plan = purge_check(db, spine, twin, gate=not website_done, website_done=website_done)
+    return refusal, plan, spine, twin
 
 
 def _gather(db, spine: Dict, twin: Optional[Dict], plan: Optional[Dict]) -> Dict[str, Any]:
@@ -319,6 +392,73 @@ def _gather(db, spine: Dict, twin: Optional[Dict], plan: Optional[Dict]) -> Dict
     return {"docs": docs, "updated": updated, "skus": skus}
 
 
+def _claim(db, pid: str, twin_id: Optional[str], run_id: str) -> Optional[Tuple[int, str]]:
+    """Take the purge claim: the SPINE is the lock (exclusive; a live claim
+    of another run refuses, only a dead one older than CLAIM_STALE is taken
+    over; Restore's spine write needs it free), then the twin, taken OFF the
+    auto-sync queue so the 01:00 / 09:00 sync cannot re-create it mid-delete.
+    The queue flag it had BEFORE any purge touched it is kept on the twin
+    (purge_prior_queue), so a take-over never gives back a stale False."""
+    from pymongo import ReturnDocument
+
+    now = _now()
+    spine = db["products"].find_one_and_update(
+        {"product_id": pid, "deleted_at": _ARCHIVED, **_free_claim()},
+        {"$set": {"purge_run": run_id, "purge_run_at": now}},
+        return_document=ReturnDocument.BEFORE,
+    )
+    if spine is None:
+        held = db["products"].find_one({"product_id": pid}) or {}
+        if not held.get("deleted_at"):
+            return 409, ARCHIVE_FIRST
+        return (409, RUNNING) if held.get("purge_run") else (409, CHANGED_MEANWHILE)
+    if not twin_id:
+        return None
+    before = db["catalog_products"].find_one_and_update(
+        {"id": twin_id, "deleted_at": _ARCHIVED, **_free_claim()},
+        {"$set": {"purge_run": run_id, "purge_run_at": now}},
+        return_document=ReturnDocument.BEFORE,
+    )
+    if before is None:
+        _release(db, pid, None, run_id)
+        held = db["catalog_products"].find_one({"id": twin_id}) or {}
+        return (409, RUNNING) if held.get("purge_run") and held.get("deleted_at") else (409, CHANGED_MEANWHILE)
+    ecom = before.get("ecom")
+    if isinstance(ecom, dict):
+        prior = before.get("purge_prior_queue", ecom.get("locally_modified"))
+        db["catalog_products"].update_one(
+            {"id": twin_id, "purge_run": run_id},
+            {"$set": {"ecom.locally_modified": False, "purge_prior_queue": prior}},
+        )
+    return None
+
+
+def _release(db, pid: str, twin_id: Optional[str], run_id: str) -> None:
+    """Give the claim back (only our own), and the twin its queue flag."""
+    try:
+        db["products"].update_one(
+            {"product_id": pid, "purge_run": run_id}, {"$set": {"purge_run": None, "purge_run_at": None}}
+        )
+        if twin_id:
+            twin = db["catalog_products"].find_one({"id": twin_id, "purge_run": run_id})
+            if twin is not None:
+                patch: Dict[str, Any] = {"$unset": {"purge_run": "", "purge_run_at": "", "purge_prior_queue": ""}}
+                if isinstance(twin.get("ecom"), dict) and "purge_prior_queue" in twin:
+                    patch["$set"] = {"ecom.locally_modified": twin["purge_prior_queue"]}
+                db["catalog_products"].update_one({"id": twin_id, "purge_run": run_id}, patch)
+    except Exception:  # noqa: BLE001
+        logger.warning("[PURGE] could not release the claim on %s", pid, exc_info=True)
+
+
+def _still_ours(db, pid: str, twin_id: Optional[str], run_id: str) -> bool:
+    """The claim is still this run's and both rows are still archived."""
+    if db["products"].find_one({"product_id": pid, "purge_run": run_id, "deleted_at": _ARCHIVED}) is None:
+        return False
+    return not twin_id or db["catalog_products"].find_one(
+        {"id": twin_id, "purge_run": run_id, "deleted_at": _ARCHIVED}
+    ) is not None
+
+
 def _forget_shopify(db, twin_id: Optional[str], plan: Dict) -> None:
     """The listing (or variant) is gone from Shopify but the IMS delete was
     refused afterwards: drop the dead Shopify ids so the archived product
@@ -334,72 +474,30 @@ def _forget_shopify(db, twin_id: Optional[str], plan: Dict) -> None:
         )
 
 
-def _refused(code: int, reason: str) -> Dict[str, Any]:
-    return {"status": "refused", "code": code, "reason": reason}
+def _refused(code: int, reason: str, **extra: Any) -> Dict[str, Any]:
+    return {"status": "refused", "code": code, "reason": reason, **extra}
 
 
-async def purge(
-    db,
-    spine: Dict,
-    twin: Optional[Dict],
-    actor: Dict,
-    *,
-    run_id: str,
-    plan: Optional[Dict],
-    audit_repo=None,
-) -> Dict[str, Any]:
-    """Delete one product for good. Call only after purge_check answered no
-    refusal (`plan` is its website plan). Returns {status: done, backup_id}
-    or {status: refused, code, reason}. Never raises."""
-    from . import shopify_push
-
-    pid = spine["product_id"]
-    twin_id = (twin or {}).get("id")
-    twin_ecom = (twin or {}).get("ecom")
-    prior_queue = twin_ecom.get("locally_modified") if isinstance(twin_ecom, dict) else None
-
-    def _release() -> None:
-        if not twin_id:
-            return
-        try:
-            patch: Dict[str, Any] = {"$unset": {"purge_run": ""}}
-            if isinstance(twin_ecom, dict):
-                patch["$set"] = {"ecom.locally_modified": prior_queue}
-            db["catalog_products"].update_one({"id": twin_id, "purge_run": run_id}, patch)
-        except Exception:  # noqa: BLE001
-            logger.warning("[PURGE] could not release the claim on %s", twin_id, exc_info=True)
-
-    backup_id = f"DPB-{uuid.uuid4().hex[:12].upper()}"
-
-    def _mark(status: str, **extra: Any) -> None:
-        try:
-            db[BACKUP_COLLECTION].update_one({"backup_id": backup_id}, {"$set": {"status": status, **extra}})
-        except Exception:  # noqa: BLE001
-            logger.warning("[PURGE] backup %s not marked %s", backup_id, status, exc_info=True)
-
-    # 1. Claim the twin: still archived, and OFF the auto-sync queue, so the
-    #    01:00 / 09:00 sync never re-creates it between the Shopify delete and
-    #    the IMS delete.
+def _prepare(db, pid: str, twin_id: Optional[str], run_id: str, backup_id: str, actor: Dict):
+    """Steps 1-3 (sync, off the loop): claim, fresh check, backup. Returns
+    (refusal_row, plan, spine, twin, found)."""
     try:
-        if twin_id:
-            patch: Dict[str, Any] = {"purge_run": run_id}
-            if isinstance(twin_ecom, dict):
-                patch["ecom.locally_modified"] = False
-            if db["catalog_products"].update_one(
-                {"id": twin_id, "deleted_at": _ARCHIVED}, {"$set": patch}
-            ).matched_count != 1:
-                return _refused(409, CHANGED_MEANWHILE)
-        # 2. Check again, on fresh docs, immediately before the backup.
-        again = _fresh_refusal(db, pid, twin_id)
+        refused = _claim(db, pid, twin_id, run_id)
     except Exception:  # noqa: BLE001
-        logger.error("[PURGE] claim / re-check failed for %s", pid, exc_info=True)
-        _release()
-        return _refused(503, UNREADABLE)
+        logger.error("[PURGE] claim failed for %s", pid, exc_info=True)
+        return _refused(503, UNREADABLE), None, None, None, None
+    if refused is not None:
+        return _refused(*refused), None, None, None, None
+    try:
+        done = _website_done(db, pid)
+        again, plan, spine, twin = _fresh(db, pid, twin_id, website_done=done)
+    except Exception:  # noqa: BLE001
+        logger.error("[PURGE] re-check failed for %s", pid, exc_info=True)
+        _release(db, pid, twin_id, run_id)
+        return _refused(503, UNREADABLE), None, None, None, None
     if again is not None:
-        _release()
-        return _refused(*again)
-
-    # 3. Backup BEFORE anything leaves Shopify or IMS.
+        _release(db, pid, twin_id, run_id)
+        return _refused(*again, website=plan is not None), plan, None, None, None
     try:
         found = _gather(db, spine, twin, plan)
         db[BACKUP_COLLECTION].insert_one(
@@ -409,7 +507,7 @@ async def purge(
                 "product_id": pid,
                 "sku": spine.get("sku"),
                 "actor": actor.get("user_id"),
-                "deleted_at": datetime.now(timezone.utc),
+                "deleted_at": _now(),
                 "status": "removing" if plan else "deleting",
                 "docs": found["docs"],
                 "updated_docs": found["updated"],
@@ -418,85 +516,93 @@ async def purge(
         )
     except Exception:  # noqa: BLE001
         logger.error("[PURGE] backup failed for %s", pid, exc_info=True)
-        _release()
-        return _refused(503, BACKUP_FAILED)
+        _release(db, pid, twin_id, run_id)
+        return _refused(503, BACKUP_FAILED, website=plan is not None), plan, None, None, None
+    return None, plan, spine, twin, found
 
-    # 4. Off the website first. Anything but "gone" deletes nothing in IMS.
-    shopify: Optional[Dict[str, Any]] = None
-    if plan:
-        try:
-            res = await shopify_push.push_product_remove(db, plan, target_id=pid, product=twin)
-        except Exception as exc:  # noqa: BLE001 -- it never raises; nothing deleted if it does
-            logger.error("[PURGE] website removal raised for %s", pid, exc_info=True)
-            _mark("aborted")
-            _release()
-            return _refused(502, f"The website (Shopify) did not remove it, so it stays archived: {exc}")
-        shopify = {"plan": plan, "result": res.to_dict()}
-        if res.mode != shopify_push.MODE_LIVE:
-            _mark("aborted", shopify=shopify)
-            _release()
-            return _refused(409, WEBSITE_DARK)  # the gate closed after the check
-        if not res.ok:
-            _mark("aborted", shopify=shopify)
-            _release()
-            return _refused(
-                502, f"The website (Shopify) did not remove it, so it stays archived: {res.error}"
-            )
-        _mark("deleting", shopify=shopify)
 
-    # 5. Check again: the Shopify call took time.
+def _mark(db, backup_id: str, status: str, **extra: Any) -> None:
     try:
-        again = _fresh_refusal(db, pid, twin_id)
+        db[BACKUP_COLLECTION].update_one({"backup_id": backup_id}, {"$set": {"status": status, **extra}})
     except Exception:  # noqa: BLE001
-        again = (503, UNREADABLE)
+        logger.warning("[PURGE] backup %s not marked %s", backup_id, status, exc_info=True)
+
+
+def _abort(db, pid: str, twin_id: Optional[str], run_id: str, backup_id: str, **extra: Any) -> None:
+    _mark(db, backup_id, "aborted", **extra)
+    _release(db, pid, twin_id, run_id)
+
+
+def _before_shopify(db, pid: str, twin_id: Optional[str], run_id: str, plan: Dict) -> Optional[Tuple[int, str]]:
+    """Immediately before the Shopify call: the claim is still ours, both rows
+    still archived, and a fresh check gives the SAME plan."""
+    if not _still_ours(db, pid, twin_id, run_id):
+        return 409, CHANGED_MEANWHILE
+    again, fresh_plan, _, _ = _fresh(db, pid, twin_id, website_done=False)
     if again is not None:
-        if plan:
-            try:
-                _forget_shopify(db, twin_id, plan)
-            except Exception:  # noqa: BLE001
-                logger.warning("[PURGE] dead Shopify ids kept on %s", pid, exc_info=True)
-        _mark("aborted")
-        _release()
-        note = " It was already taken off the website." if plan else ""
-        return _refused(again[0], again[1] + note)
+        return again
+    if fresh_plan != plan:
+        return 409, CHANGED_MEANWHILE
+    return None
 
-    # 6. Change, then delete -- the spine LAST, spine and twin only while
-    #    still archived. A stop part-way leaves the backup "deleting":
-    #    Restore refuses and pressing again finishes it.
-    docs, updated, skus = found["docs"], found["updated"], found["skus"]
-    try:
-        if updated["ecom_collections"]:
-            db["ecom_collections"].update_many(
-                {"_id": {"$in": [c["_id"] for c in updated["ecom_collections"]]}},
-                {"$pull": {"products": {"sku": {"$in": skus}}}},
-            )
-        if updated["tasks"]:
-            db["tasks"].update_many(
-                {"_id": {"$in": [t["_id"] for t in updated["tasks"]]}},
-                {"$pull": {"payload.product_ids": pid}},
-            )
-        for parent in updated["catalog_products"]:
-            db["catalog_products"].update_one(
-                {"_id": parent["_id"]},
-                {"$unset": {f"ecom.online_stock.quantities.{s}": "" for s in skus}},
-            )
-        for coll, rows in docs.items():  # dict order: the spine last
-            if not rows:
-                continue
-            flt: Dict[str, Any] = {"_id": {"$in": [r["_id"] for r in rows]}}
-            if coll in ("catalog_products", "products"):
-                flt["deleted_at"] = _ARCHIVED
-            if db[coll].delete_many(flt).deleted_count != len(rows) and coll in (
-                "catalog_products",
-                "products",
-            ):
-                raise RuntimeError(f"{coll}: not every row was still archived")
-    except Exception:  # noqa: BLE001
-        logger.error("[PURGE] delete stopped part-way for %s", pid, exc_info=True)
-        return _refused(503, PART_DELETED)
 
-    # 7. Done: every open backup of it (an earlier run that stopped part-way
-    #    too), the model's options, the audit row.
+def _after_shopify(db, pid: str, twin_id: Optional[str], run_id: str, backup_id: str,
+                   spine: Dict, twin: Optional[Dict], plan: Optional[Dict], found: Dict):
+    """Steps 5-6 (sync, off the loop): check again, gather again (anything
+    new goes into the backup too), change, delete. Returns a refusal row or
+    None plus the docs deleted."""
+    again, _, _, _ = _fresh(db, pid, twin_id, website_done=bool(plan) or _website_done(db, pid))
+    if again is None and not _still_ours(db, pid, twin_id, run_id):
+        again = (409, CHANGED_MEANWHILE)
+    if again is not None:
+        return again, None
+    fresh = _gather(db, spine, twin, plan)
+    for part in ("docs", "updated"):
+        for coll, rows in fresh[part].items():
+            have = {r["_id"] for r in found[part].get(coll, [])}
+            new = [r for r in rows if r["_id"] not in have]
+            if new:
+                db[BACKUP_COLLECTION].update_one(
+                    {"backup_id": backup_id},
+                    {"$push": {f"{'docs' if part == 'docs' else 'updated_docs'}.{coll}": {"$each": new}}},
+                )
+    docs, updated, skus = fresh["docs"], fresh["updated"], fresh["skus"]
+    if updated["ecom_collections"]:
+        db["ecom_collections"].update_many(
+            {"_id": {"$in": [c["_id"] for c in updated["ecom_collections"]]}},
+            {"$pull": {"products": {"sku": {"$in": skus}}}},
+        )
+    if updated["tasks"]:
+        db["tasks"].update_many(
+            {"_id": {"$in": [t["_id"] for t in updated["tasks"]]}},
+            {"$pull": {"payload.product_ids": pid}},
+        )
+    for parent in updated["catalog_products"]:
+        db["catalog_products"].update_one(
+            {"_id": parent["_id"]},
+            {"$unset": {f"ecom.online_stock.quantities.{s}": "" for s in skus}},
+        )
+    for coll, rows in docs.items():  # dict order: the spine last
+        if not rows:
+            continue
+        flt: Dict[str, Any] = {"_id": {"$in": [r["_id"] for r in rows]}}
+        if coll in ("catalog_products", "products"):
+            # Only while still archived AND still this run's (a Restore or
+            # another run that got in has the row now).
+            flt["deleted_at"] = _ARCHIVED
+            flt["purge_run"] = run_id
+        if db[coll].delete_many(flt).deleted_count != len(rows) and coll in (
+            "catalog_products",
+            "products",
+        ):
+            raise RuntimeError(f"{coll}: not every row was still archived and claimed")
+    return None, docs
+
+
+def _finish(db, pid: str, spine: Dict, twin_id: Optional[str], backup_id: str, run_id: str,
+            plan: Optional[Dict], shopify: Optional[Dict], docs: Dict, actor: Dict, audit_repo) -> None:
+    """Step 7 (sync): every open backup of it done, the model's options, the
+    audit row."""
     try:
         db[BACKUP_COLLECTION].update_many(
             {"product_id": pid, "status": {"$in": list(OPEN_STATES)}}, {"$set": {"status": "done"}}
@@ -524,7 +630,7 @@ async def purge(
         if audit_repo is not None:
             from .name_resolver import actor_name
 
-            now = datetime.now(timezone.utc)
+            now = _now()
             audit_repo.create(
                 {
                     "action": "product.deleted_permanently",
@@ -548,4 +654,81 @@ async def purge(
             )
     except Exception:  # noqa: BLE001 - the audit never undoes the delete
         logger.warning("[PURGE] audit row failed for %s", pid, exc_info=True)
-    return {"status": "done", "backup_id": backup_id}
+
+
+async def purge(
+    db,
+    pid: str,
+    twin_id: Optional[str],
+    actor: Dict,
+    *,
+    run_id: str,
+    audit_repo=None,
+) -> Dict[str, Any]:
+    """Delete one product for good: {status: done, backup_id, website} or
+    {status: refused, code, reason, website}. Checks everything again itself.
+    Every Mongo step runs off the event loop (asyncio.to_thread), so a long
+    bulk run never freezes the worker serving the tills. Never raises."""
+    from . import shopify_push
+
+    backup_id = f"DPB-{uuid.uuid4().hex[:12].upper()}"
+    refused, plan, spine, twin, found = await asyncio.to_thread(
+        _prepare, db, pid, twin_id, run_id, backup_id, actor
+    )
+    if refused is not None:
+        return refused
+
+    shopify: Optional[Dict[str, Any]] = None
+    if plan:
+        try:
+            moved = await asyncio.to_thread(_before_shopify, db, pid, twin_id, run_id, plan)
+        except Exception:  # noqa: BLE001
+            moved = (503, UNREADABLE)
+        if moved is not None:
+            await asyncio.to_thread(_abort, db, pid, twin_id, run_id, backup_id)
+            return _refused(*moved, website=True)
+        try:
+            res = await shopify_push.push_product_remove(db, plan, target_id=pid, product=twin)
+        except Exception as exc:  # noqa: BLE001 -- it never raises; nothing deleted if it does
+            logger.error("[PURGE] website removal raised for %s", pid, exc_info=True)
+            await asyncio.to_thread(_abort, db, pid, twin_id, run_id, backup_id)
+            return _refused(502, f"The website (Shopify) did not remove it, so it stays archived: {exc}",
+                            website=True)
+        shopify = {"plan": plan, "result": res.to_dict()}
+        if res.mode != shopify_push.MODE_LIVE:
+            await asyncio.to_thread(_abort, db, pid, twin_id, run_id, backup_id, shopify=shopify)
+            return _refused(409, WEBSITE_DARK, website=True)  # the gate closed after the check
+        if not res.ok:
+            await asyncio.to_thread(_abort, db, pid, twin_id, run_id, backup_id, shopify=shopify)
+            return _refused(
+                502, f"The website (Shopify) did not remove it, so it stays archived: {res.error}",
+                website=True,
+            )
+        await asyncio.to_thread(_mark, db, backup_id, "deleting", shopify=shopify)
+
+    try:
+        again, docs = await asyncio.to_thread(
+            _after_shopify, db, pid, twin_id, run_id, backup_id, spine, twin, plan, found
+        )
+    except Exception:  # noqa: BLE001
+        logger.error("[PURGE] delete stopped part-way for %s", pid, exc_info=True)
+        # The backup stays 'deleting' (Restore refuses it); the claim is
+        # given back so pressing again can finish at once.
+        await asyncio.to_thread(_release, db, pid, twin_id, run_id)
+        return _refused(503, PART_DELETED, website=bool(plan))
+    if again is not None:
+        def _keep() -> None:
+            if plan:
+                try:
+                    _forget_shopify(db, twin_id, plan)
+                except Exception:  # noqa: BLE001
+                    logger.warning("[PURGE] dead Shopify ids kept on %s", pid, exc_info=True)
+            _abort(db, pid, twin_id, run_id, backup_id)
+
+        await asyncio.to_thread(_keep)
+        note = " It was already taken off the website." if plan else ""
+        return _refused(again[0], again[1] + note, website=bool(plan))
+    await asyncio.to_thread(
+        _finish, db, pid, spine, twin_id, backup_id, run_id, plan, shopify, docs, actor, audit_repo
+    )
+    return {"status": "done", "backup_id": backup_id, "website": bool(plan)}

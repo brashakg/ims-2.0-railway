@@ -306,6 +306,8 @@ describe('who sees which bulk button', () => {
     const bar = await tickFirstRow();
     expect(within(bar).getByText('Restore')).toBeTruthy();
     expect(screen.queryAllByRole('button', { name: /Delete permanently/ })).toHaveLength(n);
+    // The row keeps its Edit button beside it (review nit 10).
+    expect(screen.getByRole('button', { name: /^Edit$/ })).toBeTruthy();
   });
 });
 

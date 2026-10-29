@@ -373,6 +373,7 @@ from .product import (  # noqa: F401
     RemovalUnclear,
     removal_plan,
     push_product_remove,
+    shopify_removal_truth,
 )
 from .webhooks import (  # noqa: F401
     _WEBHOOK_SUBSCRIPTIONS_QUERY,

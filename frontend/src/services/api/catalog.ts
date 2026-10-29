@@ -336,10 +336,13 @@ export const catalogBulkApi = {
   /** Delete ARCHIVED products permanently (SUPERADMIN only). Refused while
    *  any history points at them. `apply: false` is the confirm dialog's dry run. */
   purge: async (productIds: string[], apply: boolean) => {
-    const response = await api.post('/catalog/products/bulk-purge', {
-      product_ids: productIds,
-      apply,
-    });
+    // Long: it goes one product at a time, Shopify first. The server keeps
+    // going if this times out (PURGE_TIMEOUT_MESSAGE says so).
+    const response = await api.post(
+      '/catalog/products/bulk-purge',
+      { product_ids: productIds, apply },
+      { timeout: 180_000 }
+    );
     return response.data as { applied: boolean; results: BulkRowResult[] };
   },
 
