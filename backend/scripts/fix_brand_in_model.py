@@ -68,6 +68,7 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.services import product_master as pm  # noqa: E402
+from api.utils.ist import ist_date_str_from_stored  # noqa: E402
 
 BACKUPS = "fix_brand_in_model_backups"
 ACTOR = "script:fix_brand_in_model"
@@ -153,7 +154,7 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "twin": twin, "on_shopify": on_shopify, "refs": refs, "photos": photos, "price": price,
         "created": pm._created_sort_value(doc.get("created_at")),
-        "created_at": str(doc.get("created_at") or "unknown")[:10],
+        "created_at": ist_date_str_from_stored(doc.get("created_at")) or "unknown",
         "variants": db["products"].count_documents({"variant_of": {"$in": ids}}),
         "archived": bool(doc.get("deleted_at")),
     }
