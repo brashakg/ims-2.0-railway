@@ -346,7 +346,7 @@ describe('the add / edit page saves the new order', () => {
         <QuickAddPage />
       </MemoryRouter>,
     );
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fill(/^Brand Name/, 'Ray-Ban');
     fill(/^Model No/, 'RB4165');
     fill(/^Colour Code/, '601');

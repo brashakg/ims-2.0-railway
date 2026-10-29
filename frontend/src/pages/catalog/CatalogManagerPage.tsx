@@ -1320,7 +1320,13 @@ export function CatalogManagerPage({
                           <td className="px-3 py-1.5 text-right tabular-nums text-gray-900">
                             {fmtINR(m.offer_price ?? m.mrp ?? null)}
                           </td>
-                          <td colSpan={4} />
+                          <td colSpan={2} />
+                          <td className="px-3 py-1.5 text-[11.5px] leading-snug" data-testid="member-added-cell">
+                            <div className="font-medium text-gray-900">{addedColumn({ ...m }).by}</div>
+                            <div className="text-gray-600">{addedColumn({ ...m }).when}</div>
+                            <div className="text-gray-500">{addedColumn({ ...m }).edited}</div>
+                          </td>
+                          <td />
                         </tr>
                       ))}
                     </Fragment>

@@ -309,8 +309,10 @@ def group_page(
     page_ids = order[skip : skip + limit] if limit else order[skip:]
     families: Dict[Any, List[Dict[str, Any]]] = defaultdict(list)
     if page_ids:
-        for m in collection.find(
-            {"$or": [{"product_id": {"$in": page_ids}}, {"variant_of": {"$in": page_ids}}]}
+        for m in page(
+            collection,
+            {"$or": [{"product_id": {"$in": page_ids}}, {"variant_of": {"$in": page_ids}}]},
+            "oldest", 0, 0,
         ):
             if bool(m.get("deleted_at")) == archived:
                 families[m.get("variant_of") or m.get("product_id")].append(m)
@@ -334,6 +336,10 @@ def group_page(
                         "offer_price": m.get("offer_price"),
                         "is_active": m.get("is_active", True) is not False,
                         "is_lead": m.get("product_id") == lead_id,
+                        **{field: m.get(field) for field in (
+                            "created_by", "created_by_name", "created_at",
+                            "updated_by", "updated_by_name", "last_edited_at",
+                        )},
                     }
                     for m in members
                 ],
@@ -348,6 +354,7 @@ def stamp_people(db, docs: Iterable[Dict[str, Any]]) -> None:
     users name first, the name stored on the product second. One users read
     for the whole batch."""
     rows = [d for d in docs if isinstance(d, dict)]
+    rows += [m for d in rows for m in (d.get("family") or {}).get("members", [])]
     names = user_name_map(
         db, [d.get(f) for d in rows for f in ("created_by", "updated_by")]
     )

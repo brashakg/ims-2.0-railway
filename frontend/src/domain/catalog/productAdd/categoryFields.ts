@@ -22,7 +22,7 @@ import type { TaxedCategory } from '../../../constants/gst';
 
 // Product categories with display names + emoji (used in the category picker).
 export const CATEGORIES = [
-  { code: 'SG', name: 'Sunglass', icon: '🕶️' },
+  { code: 'SG', name: 'Sunglasses', icon: '🕶️' },
   { code: 'FR', name: 'Frame', icon: '👓' },
   { code: 'CL', name: 'Contact Lens', icon: '👁️' },
   // Owner 2026-07-05 split: colour/cosmetic lenses are their own category

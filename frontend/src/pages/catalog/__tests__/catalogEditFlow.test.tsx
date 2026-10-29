@@ -330,7 +330,7 @@ describe('SKU preview: asked only when the SKU can change', () => {
   it('a field that decides the SKU asks once after the pause; any other field does not', async () => {
     const user = userEvent.setup();
     renderAt('/catalog/add');
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fireEvent.change(screen.getByLabelText(/^Brand Name/), { target: { value: 'Ray' } });
     fireEvent.change(screen.getByLabelText(/^Brand Name/), { target: { value: 'Ray-Ban' } });
     await waitFor(() => expect(productSpies.previewSku).toHaveBeenCalledTimes(1));
@@ -352,7 +352,7 @@ describe('a new product: plain Save lands on the Catalog', () => {
   it('opens the Catalog with the new product in view (not Inventory)', async () => {
     const user = userEvent.setup();
     renderAt('/catalog/add');
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fireEvent.change(screen.getByLabelText(/^Brand Name/), { target: { value: 'Ray-Ban' } });
     fireEvent.change(screen.getByLabelText(/^Model No/), { target: { value: 'RB4165' } });
     fireEvent.change(screen.getByLabelText(/^Colour Code/), { target: { value: '601' } });
@@ -364,7 +364,7 @@ describe('a new product: plain Save lands on the Catalog', () => {
   it('Save + New stays on the form', async () => {
     const user = userEvent.setup();
     renderAt('/catalog/add');
-    await user.click(screen.getByText('Sunglass'));
+    await user.click(screen.getByText('Sunglasses'));
     fireEvent.change(screen.getByLabelText(/^Brand Name/), { target: { value: 'Ray-Ban' } });
     fireEvent.change(screen.getByLabelText(/^Model No/), { target: { value: 'RB4165' } });
     fireEvent.change(screen.getByLabelText(/^Colour Code/), { target: { value: '601' } });

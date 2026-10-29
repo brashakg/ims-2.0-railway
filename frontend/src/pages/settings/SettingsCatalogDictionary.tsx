@@ -92,7 +92,12 @@ export function CatalogDictionarySection() {
         if (saved.brand_managed_fields.includes(f.name)) return;
         const row = byName.get(f.name) || { name: f.name, label: f.label || f.name, categories: [] };
         if (!row.categories.some((c) => c.code === cat.code)) {
-          row.categories.push({ code: cat.code, name: cat.name, prefix: cat.sku_prefix });
+          row.categories.push({
+            code: cat.code,
+            // The registry's display value also feeds Shopify; normalize only this UI label.
+            name: cat.code === 'SUNGLASS' ? 'Sunglasses' : cat.name,
+            prefix: cat.sku_prefix,
+          });
         }
         byName.set(f.name, row);
       });
