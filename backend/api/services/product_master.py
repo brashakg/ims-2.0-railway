@@ -3735,7 +3735,14 @@ def identity_conflict(
         and hasattr(product_repo, "find_by_barcode")
     ):
         try:
-            existing = _other(product_repo.find_by_barcode(spine["barcode"]))
+            # The row itself excluded IN the query (a find_one that returned
+            # it first would hide a second holder, e.g. in attributes.gtin).
+            found = (
+                product_repo.find_by_barcode(spine["barcode"], exclude_product_id=self_id)
+                if self_id
+                else product_repo.find_by_barcode(spine["barcode"])
+            )
+            existing = _other(found)
         except Exception:  # noqa: BLE001
             existing = None
     if existing is not None:

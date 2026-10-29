@@ -683,3 +683,41 @@ def test_script_cleans_the_twins_flat_model_too():
     assert db["catalog_products"].find_one({"id": "t-solo"})["model"] == "1001/S"
     fix.revert(db, "run-tw")
     assert db["catalog_products"].find_one({"id": "t-solo"})["model"] == "CARRERA 1001/S"
+
+
+
+# ---------------------------------------------------------------------------
+# Follow-up (fix/restore-barcode-probe): the barcode half of the one rule
+# ---------------------------------------------------------------------------
+
+_CODE = "8056597054324"
+
+
+def test_identity_conflict_sees_another_holder_of_its_own_barcode(door):
+    """With self_id, the barcode read excludes the row itself IN the query: a
+    find_one that returned the row first used to hide a second, live holder
+    (here holding the code in attributes.gtin)."""
+    me = _arch(door, "P-ME", "SGME", "7001", barcode=_CODE)
+    # A second, LIVE holder of the code in attributes.gtin (a twin made before
+    # the barcode rule; the create door refuses one today).
+    door.repo.collection.insert_one(_row("P-OTHER", "SG-OTHER", "7002/S", "C1", "54", "carrera|7002s|c1|54",
+                                         attributes={"brand_name": "Carrera", "model_no": "7002/S",
+                                                     "colour_code": "C1", "lens_size": "54", "gtin": _CODE}))
+    other = door.repo.find_by_id("P-OTHER")
+    probe = dict(pm.identity_spine(me), barcode=_CODE)
+    err = pm.identity_conflict(probe, door.repo, self_id="P-ME")
+    assert err is not None and err.code == "DUPLICATE_PRODUCT" and err.conflict["sku"] == other["sku"]
+
+
+def test_restore_reads_the_gtin_attribute_as_the_barcode(door):
+    """Restore asks the barcode the way Add product does (assert_gtin_free):
+    the code may sit in attributes.gtin, not the legacy products.barcode."""
+    from api.routers import catalog as cat
+
+    live = door("3001/S")
+    door.repo.collection.update_one({"product_id": live["product_id"]}, {"$set": {"barcode": _CODE}})
+    arch = _arch(door, "P-GT", "SGGT", "5002")
+    door.repo.collection.update_one({"product_id": "P-GT"}, {"$set": {"attributes.gtin": _CODE}})
+    why = cat._restore_refusal(door.repo, door.repo.find_by_id("P-GT"))
+    assert why and live["sku"] in why
+    assert arch["product_id"] == "P-GT"

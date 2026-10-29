@@ -3779,9 +3779,8 @@ def _restore_refusal(repo, spine: Optional[Dict]) -> Optional[str]:
         return None  # a stored value that is not a number: keyless as before
     if not probe.get("identity_key"):
         return None
-    # The create door's inputs in full: its SKU (never its own twin: self_id)
-    # and its barcode are asked too.
-    probe.update(sku=spine.get("sku"), barcode=spine.get("barcode"))
+    # The create door's SKU check too (never its own twin: self_id).
+    probe["sku"] = spine.get("sku")
     err = _pm.identity_conflict(probe, repo, self_id=spine.get("product_id"))
     code = getattr(err, "code", None)
     if code == "DUPLICATE_PRODUCT":
@@ -3801,6 +3800,14 @@ def _restore_refusal(repo, spine: Optional[Dict]) -> Optional[str]:
         )
     if err is not None:
         return f"Not restored: {err.message}"
+    # The barcode by Add product's own rule (assert_gtin_free): the legacy
+    # products.barcode or the gtin attribute, every spelling, spines and
+    # catalogue twins alike.
+    code = spine.get("barcode") or (spine.get("attributes") or {}).get("gtin")
+    try:
+        _pm.assert_gtin_free(code, repo, spine.get("product_id"))
+    except _pm.ProductMasterError as clash:
+        return f"Not restored: {clash.message}"
     return None
 
 
