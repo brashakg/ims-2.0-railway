@@ -3631,6 +3631,18 @@ async def _archive_product(
         # on the storefront. Removing a live listing has its own path
         # (shopify_push.push_product_delist).
         _save_catalog_product(product, mark_dirty=False)
+        # NEVER PUBLISHED -> OUT OF THE WEBSITE QUEUE (owner 2026-10-29): an
+        # archived product is never first-published (listing.
+        # first_publish_not_ready), so a queued one only printed a red
+        # "archived -- stays queued" line on every sync. The edit_rev rule
+        # (catalog_ecom.unqueue_in). A listing on the website is left to the
+        # take-down below, whose write-back owns its flag.
+        ecom = product.get("ecom") or {}
+        coll = _catalog_coll()
+        if coll is not None and ecom.get("locally_modified") and not ecom.get("shopify_product_id"):
+            from api.services.catalog_ecom import EDIT_REV, unqueue_in
+
+            unqueue_in(coll, product["id"], ecom.get(EDIT_REV))
 
     # Products-convergence: deactivate the SPINE twin too (shared id) so a
     # soft-deleted catalog product can't still be sold at POS, and stamp it

@@ -82,3 +82,18 @@ def update_ecom_in(
             return new
     logger.warning("[ECOM] %s: ecom kept changing under the write -- not written", product_id)
     return None
+
+
+def unqueue_in(coll, product_id: str, sent_rev: Optional[str]) -> bool:
+    """Take a product OFF the push queue (clear `locally_modified`) -- only
+    while it still carries `sent_rev`, the edit revision the caller read
+    (rule 1): an edit saved after that read stays queued. Returns True when
+    the flag was cleared. Raises only what the database raises."""
+
+    def _clear(ecom: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if not ecom.get("locally_modified") or ecom.get(EDIT_REV) != sent_rev:
+            return None
+        ecom["locally_modified"] = False
+        return ecom
+
+    return update_ecom_in(coll, product_id, _clear) is not None

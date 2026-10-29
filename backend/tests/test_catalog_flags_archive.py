@@ -681,8 +681,42 @@ def test_restore_keeps_the_take_down_marker_so_no_sync_relists_it(env):
     assert twin["ecom"]["status"] == "DRAFT"
     # Someone edits it afterwards: the 01:00 / 09:00 sync still leaves it off.
     env["db"].catalog_products.update_one({"id": "T-P1"}, {"$set": {"ecom.locally_modified": True}})
-    dirty, skipped = select_dirty_products(env["db"])
+    dirty, skipped, _ = select_dirty_products(env["db"])
     assert [d["id"] for d in dirty] == [] and skipped == 1
+
+
+def test_archiving_a_never_published_product_takes_it_off_the_publish_queue(env):
+    """Owner 2026-10-29 (prod: SG-MAUIJIM-S3357-C5P-55): an archived product
+    stayed in the website queue and every scheduled sync printed a red
+    "archived -- stays queued" line. Archive clears ecom.locally_modified
+    (the edit_rev rule, catalog_ecom.unqueue_in) and restore does not put it
+    back (restore never re-publishes, owner 2026-10-12)."""
+    from api.services.shopify_live_sync import select_dirty_products
+
+    db = env["db"]
+    db.catalog_products.update_one(
+        {"id": "T-P2"}, {"$set": {"ecom.locally_modified": True, "ecom.edit_rev": "r1"}}
+    )
+    _archive(env, ["P2"])
+    ecom = db.catalog_products.find_one({"id": "T-P2"})["ecom"]
+    assert ecom["locally_modified"] is False and ecom["edit_rev"] == "r1"
+    dirty, _, archived = select_dirty_products(db)
+    assert dirty == [] and archived == 0, "off the queue, not merely skipped"
+    _restore(env, ["P2"])
+    assert db.catalog_products.find_one({"id": "T-P2"})["ecom"]["locally_modified"] is False
+
+
+def test_unqueue_keeps_an_edit_saved_after_the_read(env):
+    """The edit_rev rule (SF-04): the flag is cleared only while the row still
+    carries the revision the caller read -- a later edit stays queued."""
+    from api.services.catalog_ecom import unqueue_in
+
+    coll = env["db"].catalog_products
+    coll.update_one({"id": "T-P2"}, {"$set": {"ecom.locally_modified": True, "ecom.edit_rev": "r2"}})
+    assert unqueue_in(coll, "T-P2", "r1") is False
+    assert coll.find_one({"id": "T-P2"})["ecom"]["locally_modified"] is True
+    assert unqueue_in(coll, "T-P2", "r2") is True
+    assert coll.find_one({"id": "T-P2"})["ecom"]["locally_modified"] is False
 
 
 def test_restoring_a_size_on_a_live_listing_keeps_it_off_sale(env):

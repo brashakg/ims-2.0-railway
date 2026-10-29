@@ -32,7 +32,6 @@ import {
   Package,
   Layers,
   Menu as MenuIcon,
-  Image as ImageIcon,
   Tag,
   Play,
   Rocket,
@@ -67,7 +66,7 @@ import { getErrorMessage } from '../../utils/errorHandler';
 // ----------------------------------------------------------------------------
 // Per-entity descriptor: which status-count block + all-pending filter it uses.
 // ----------------------------------------------------------------------------
-type EntityKey = 'products' | 'collections' | 'menus' | 'images' | 'variant-prices';
+type EntityKey = 'products' | 'collections' | 'menus' | 'variant-prices';
 
 interface EntityDef {
   key: EntityKey;
@@ -90,7 +89,6 @@ const ENTITIES: EntityDef[] = [
   { key: 'products', token: 'products', label: 'Products', icon: Package, pushedLabel: 'pushed', pendingLabel: 'pending' },
   { key: 'collections', token: 'collections', label: 'Collections', icon: Layers, pushedLabel: 'pushed', pendingLabel: 'pending' },
   { key: 'menus', token: 'menus', label: 'Menus', icon: MenuIcon, pushedLabel: 'pushed', pendingLabel: 'pending' },
-  { key: 'images', token: 'images', label: 'Images', icon: ImageIcon, pushedLabel: 'pushed', pendingLabel: 'pending' },
   {
     // Opt-in bulk price/compare-at/barcode resync over every product already on
     // Shopify (the "MRP revision" resync). NOT in the default sweep -- a normal
@@ -127,7 +125,7 @@ function fmt(n: number | null | undefined): string {
 }
 
 /** Read a per-entity count block from the status payload (shapes differ slightly
- *  per entity — products/images use staged/approved, all carry pushed/pending). */
+ *  per entity — products use staged, all carry pushed/pending). */
 function countsFor(
   status: PushStatus | null,
   key: EntityKey,
@@ -136,9 +134,9 @@ function countsFor(
   const block = (c[key] ?? {}) as Record<string, number | null | undefined>;
   const pushed = Number(block.pushed ?? 0);
   const pending = Number(block.pending ?? 0);
-  // Products -> staged; collections/menus -> total; images -> approved.
-  const total = Number(block.staged ?? block.total ?? block.approved ?? 0);
-  const totalLabel = key === 'products' ? 'staged' : key === 'images' ? 'approved' : 'total';
+  // Products -> staged; collections/menus -> total.
+  const total = Number(block.staged ?? block.total ?? 0);
+  const totalLabel = key === 'products' ? 'staged' : 'total';
   return { pushed, pending, total, totalLabel };
 }
 

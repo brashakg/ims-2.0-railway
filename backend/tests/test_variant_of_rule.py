@@ -748,7 +748,7 @@ def test_live_sync_never_selects_a_child_as_a_listing(monkeypatch):
     # dirtied by hand (a drawer edit / the discount engine's product pass)
     db["catalog_products"].update_one({"id": "tw-child"}, {"$set": {"ecom.locally_modified": True}})
 
-    dirty, skipped = ls.select_dirty_products(db)
+    dirty, skipped, _ = ls.select_dirty_products(db)
     assert [d["id"] for d in dirty] == [] and skipped == 0
     run = _run(ls.sync_live_products(db, trigger="manual", actor="u-admin"))
     assert run["selected"] == 0 and run["awaiting_first_publish"] == 0 and run["attempted"] == 0
@@ -1093,7 +1093,7 @@ def test_catalog_drawer_mrp_edit_on_a_child_lands_on_its_row_and_queues_the_pare
     assert _spine(db, "sp-child")["mrp"] == 47000.0, "the spine follows (the P1 resolver)"
     assert _twin(db, "tw-child")["mrp"] == 47000.0
     assert _twin(db, "tw-parent")["ecom"]["locally_modified"] is True, "the PARENT carries the price"
-    dirty, _ = ls.select_dirty_products(db)
+    dirty, _, _ = ls.select_dirty_products(db)
     assert [d["id"] for d in dirty] == ["tw-parent"], "the child twin is never a listing"
 
     spy.calls.clear()

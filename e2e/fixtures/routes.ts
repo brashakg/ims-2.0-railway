@@ -165,7 +165,6 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string; scrollTo?: st
   { path: '/online-store/collections/browse' },
   { path: '/online-store/discount-rules' },
   { path: '/online-store/menus' },
-  { path: '/online-store/images' },
   { path: '/online-store/orders' },
   { path: '/online-store/refund-reviews' },
   { path: '/online-store/customers' },
@@ -283,6 +282,12 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
   {
     path: '/clinical',
     reason: 'redirect-only: the index Navigates to /clinical/queue. All five sections are probed above.',
+  },
+  {
+    path: '/online-store/images',
+    reason:
+      'redirect-only: the Image design queue was retired (owner 2026-10-29: the editor and '
+      + 'the cataloguer work from one Catalog page); the address forwards to /catalog.',
   },
   {
     path: '/clinical/test',

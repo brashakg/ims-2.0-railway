@@ -746,7 +746,7 @@ async def push_all_pending(
         # (services/shopify_live_sync): dirty minus taken-down, the block
         # classification hoisted once per batch (findings #17/#18/#20), one
         # audit row per push. Only the ORDER and the CAPS are this door's:
-        dirty_products, taken_down_skipped = live_sync.select_dirty_products(db)
+        dirty_products, taken_down_skipped, archived_skipped = live_sync.select_dirty_products(db)
         # THE QUEUE MUST DRAIN. See _queue_order: without this the same first 25
         # stuck rows are retried on every press and nothing behind them ever
         # reaches bettervision.in.
@@ -773,6 +773,10 @@ async def push_all_pending(
             summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
                 "taken_down_skipped"
             ] = taken_down_skipped
+        if archived_skipped:
+            summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
+                "archived_skipped"
+            ] = archived_skipped
         # A press also pushes STOCK (owner ruling 2026-09-07): every listing
         # whose PER-SHOP quantities changed since they were last sent, in one pass,
         # AFTER the product pushes so a product this press just created is

@@ -212,9 +212,10 @@ def variants_for_product(db, product: Dict) -> List[Dict]:
         return []
 
 
-def select_dirty_products(db) -> Tuple[List[Dict], int]:
+def select_dirty_products(db) -> Tuple[List[Dict], int, int]:
     """The product push queue: every catalog_products doc whose ecom sub-doc is
-    dirty (``locally_modified``), MINUS the rows a human took down by hand.
+    dirty (``locally_modified``), MINUS the rows a human took down by hand and
+    the ARCHIVED rows never published.
 
     TAKEN DOWN BY HAND -> a sweep NEVER puts it back. The take-down writes
     DRAFT and clears the flag, but any catalogue edit re-queues the row and
@@ -223,9 +224,20 @@ def select_dirty_products(db) -> Tuple[List[Dict], int]:
     sweep (or the 01:00 sync, unattended) re-lists it mid-fix. Only an
     explicit per-product press clears the marker (a successful publish does).
 
-    Returns (dirty_docs, taken_down_skipped)."""
+    ARCHIVED, NEVER PUBLISHED -> skipped quietly (owner 2026-10-29). The
+    product gate never first-publishes an archived row, so queued it was a
+    red FIRST_PUBLISH_REFUSED line on every sync. THE archived rule is
+    product_master._is_archived; the archive door also clears the flag
+    (catalog._archive_product), this covers rows archived before it did. A
+    listing already on the website keeps syncing, as the gate says
+    (listing.first_publish_not_ready); its take-down is its own door.
+
+    Returns (dirty_docs, taken_down_skipped, archived_skipped)."""
+    from . import product_master as pm
+
     dirty: List[Dict] = []
     taken_down_skipped = 0
+    archived_skipped = 0
     for doc in all_docs(db, "catalog_products"):
         ecom = doc.get("ecom")
         if not (ecom and ecom.get("locally_modified")):
@@ -240,8 +252,11 @@ def select_dirty_products(db) -> Tuple[List[Dict], int]:
         if ecom.get("taken_down_at"):
             taken_down_skipped += 1
             continue
+        if not ecom.get("shopify_product_id") and pm._is_archived(doc):
+            archived_skipped += 1
+            continue
         dirty.append(doc)
-    return dirty, taken_down_skipped
+    return dirty, taken_down_skipped, archived_skipped
 
 
 async def push_product_docs(
@@ -630,7 +645,7 @@ async def sync_live_products(
         db, never_sell[: min(NEVER_SELL_SWEEP_CAP, limit)], actor={"user_id": actor}
     )
 
-    dirty, taken_down_skipped = select_dirty_products(db)
+    dirty, taken_down_skipped, archived_skipped = select_dirty_products(db)
     live = [d for d in dirty if (d.get("ecom") or {}).get("shopify_product_id")]
     mode = shopify_push.push_mode_status(db)["mode"]
 
@@ -836,6 +851,8 @@ async def sync_live_products(
         "first_publish_not_checked": first_not_checked,
         "awaiting_first_publish": awaiting_first_publish,
         "taken_down_skipped": taken_down_skipped,
+        # Archived, never published: out of the queue, not a refusal.
+        "archived_skipped": archived_skipped,
         "blocked_skipped": batch["blocked_skipped"] + first["blocked_skipped"],
         "live_not_pushed": len(batch["refused"]),
         "never_sell_live": len(never_sell),

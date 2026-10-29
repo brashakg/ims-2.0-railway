@@ -533,8 +533,10 @@ def test_always_refused_never_sell_take_downs_never_starve_the_other_passes(worl
 
 
 def test_a_refused_product_is_not_first_published_and_is_named(world, live_engine, monkeypatch):
-    """The REAL product gate: a Never-sell-online brand and an unfinished
-    (archived) row are refused, stay queued, and ride the run's failures."""
+    """The REAL product gate: a Never-sell-online brand is refused, stays
+    queued, and rides the run's failures. An ARCHIVED never-published row is
+    not a refusal (owner 2026-10-29): it is out of the queue, counted on its
+    own line and never named in red."""
     db, _ = world
     monkeypatch.setattr(catalog_dictionary, "brand_website_refusal", _REAL_BRAND_REFUSAL)
     db.seed("brand_masters", [
@@ -551,15 +553,29 @@ def test_a_refused_product_is_not_first_published_and_is_named(world, live_engin
     run = _run(ls.scheduled_tick(ist(2026, 10, 21, 9, 0)))
 
     assert [c[0] for c in live_engine] == ["N1"]
-    assert run["first_published"] == 1 and run["first_publish_refused"] == 2
-    assert run["awaiting_first_publish"] == 2 and run["first_publish_not_checked"] == 0
+    assert run["first_published"] == 1 and run["first_publish_refused"] == 1
+    assert run["awaiting_first_publish"] == 1 and run["first_publish_not_checked"] == 0
+    assert run["first_publish_queued"] == 2 and run["archived_skipped"] == 1
     refused = {f["product_id"]: f for f in run["failures"] if f["code"] == ls.FIRST_PUBLISH_REFUSED}
-    assert set(refused) == {"N2", "N3"}
+    assert set(refused) == {"N2"}
     assert "has not allowed online selling" in refused["N2"]["reason"]
-    assert "archived" in refused["N3"]["reason"]
-    for pid in ("N2", "N3"):
-        row = db["catalog_products"].find_one({"id": pid})
-        assert row["ecom"]["locally_modified"] is True and not row["ecom"].get("shopify_product_id")
+    assert "N3" not in {f["product_id"] for f in run["failures"]}, "archived is never a red line"
+    row = db["catalog_products"].find_one({"id": "N2"})
+    assert row["ecom"]["locally_modified"] is True and not row["ecom"].get("shopify_product_id")
+
+
+def test_an_archived_listing_still_on_the_website_keeps_syncing(world, live_engine):
+    """Only a NEVER-published archived row leaves the queue. One still live
+    (its take-down failed, so no taken_down_at) keeps its re-push -- the
+    same line the product gate draws (listing.first_publish_not_ready)."""
+    db, _ = world
+    db.seed("catalog_products", [
+        {"id": "A-live", "sku": "AS1", "title": "Archived, still live", "brand": "RB", "mrp": 1000,
+         "images": PHOTO, "deleted_at": "2026-10-01T00:00:00+00:00",
+         "ecom": {"shopify_product_id": "gid://shopify/Product/9", "locally_modified": True}},
+    ])
+    run = _run(ls.sync_live_products(db, trigger="manual", actor="u"))
+    assert live_engine == [("A-live", "update")] and run["archived_skipped"] == 0
 
 
 def test_the_scheduled_first_publish_cap_is_100_and_the_rest_stay_queued(world, live_engine):
