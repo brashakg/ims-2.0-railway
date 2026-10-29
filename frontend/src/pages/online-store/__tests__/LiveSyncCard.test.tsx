@@ -220,14 +220,17 @@ describe('Live sync card', () => {
       failed: 0,
       pushed_ok: 3,
       photos_not_synced: 1,
-      failures: [
+      failures: [],
+      // The backend files a first-pass photo delay here (and live_sync.last_run
+      // splits an old ledger the same way) -- the screen never re-sorts it.
+      photo_warnings: [
         {
           product_id: 'P12',
           sku: 'RB-4165',
           name: 'Justin',
           code: 'PHOTOS_NOT_SYNCED',
           reason: null,
-          error: 'Live on the website, but its photos there do not match IMS.',
+          error: 'Photos still attaching -- will finish on the next sync.',
         },
       ],
     };
@@ -291,6 +294,28 @@ describe('Live sync card', () => {
     expect(warn.msg).toContain('0 updated, 0 would be first published, 0 failed, 0 awaiting first publish, 1 NOT made visible');
     expect(warn.msg).toContain('stock pass NOT ok [STOCK_TRACKING_FAILED]');
     expect(warn.msg).toContain('WITHOUT LIMIT');
+    expect(toastCalls.filter((t) => t.kind === 'success')).toEqual([]);
+  });
+
+  // Review of #1277: a run whose only trouble is photos (still attaching, or
+  // failed) read "0 failed" in GREEN -- photo rows are live, so not in failed.
+  it.each([
+    [{ photos_not_synced: 1 }, '1 photos still attaching'],
+    [{ photos_failed: 1 }, '1 with photos FAILED'],
+  ])('the button is a WARNING when only photos are not done (%o)', async (counts, text) => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue(status({ ...SCHEDULE_ON, last_run: null }) as any);
+    vi.mocked(pushApi.syncLiveNow).mockResolvedValue({
+      run: {
+        ...LAST_RUN, trigger: 'manual', mode: 'SIMULATED', pushed_ok: 1, failed: 0, awaiting_first_publish: 0,
+        publish_withheld: 0, failures: [], stock: { ok: true }, ...counts,
+      },
+      live_sync: SCHEDULE_ON,
+    } as any);
+    render(<OnlineShopifySyncPage />);
+    const card = await screen.findByTestId('live-sync-card');
+    await userEvent.click(within(card).getByRole('button', { name: /sync live products now/i }));
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'warning')).toBe(true));
+    expect(toastCalls.find((t) => t.kind === 'warning')!.msg).toContain(text);
     expect(toastCalls.filter((t) => t.kind === 'success')).toEqual([]);
   });
 

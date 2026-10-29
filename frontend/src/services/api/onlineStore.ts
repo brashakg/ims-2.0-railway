@@ -1563,7 +1563,8 @@ export interface LiveSyncRun {
   price_not_synced?: number | null;
   /** Live, but a photo step failed (PHOTOS_NOT_SYNCED): the website's photos are not IMS's, in IMS's order. Still queued. */
   photos_not_synced?: number | null;
-  /** Repeated incomplete photo passes (at least two consecutive runs). */
+  /** Live, but the photos failed: Shopify refused them, or they were still
+   *  incomplete on a later run. Counted in pushed_ok, never in `failed`. */
   photos_failed?: number | null;
   photo_warnings?: LiveSyncFailure[] | null;
   /** First-published by this run (owner ruling 2026-10-20; SIMULATED in a dry-run). */
