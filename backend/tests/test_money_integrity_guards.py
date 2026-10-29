@@ -734,6 +734,17 @@ def store_credit_ctx(monkeypatch):
                 if all(d.get(k) == v for k, v in q.items())
             )
 
+        # THE posting door reads and settles its row (PR #1264 round 9).
+        def find_one(self, query=None, projection=None):
+            return next(self.find(query), None)
+
+        def update_one(self, query, update, upsert=False):
+            for d in self.docs:
+                if all(d.get(k) == v for k, v in (query or {}).items()):
+                    d.update((update or {}).get("$set") or {})
+                    return type("R", (), {"matched_count": 1, "modified_count": 1})()
+            return type("R", (), {"matched_count": 0, "modified_count": 0})()
+
     ledger = _LedgerColl()
     monkeypatch.setattr(customers_module, "get_customer_repository", lambda: repo)
     monkeypatch.setattr(customers_module, "_ledger_coll", lambda: ledger)

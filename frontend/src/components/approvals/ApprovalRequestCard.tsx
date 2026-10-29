@@ -224,7 +224,11 @@ export function ApprovalRequestCard({
   }
 
   const isDiscount = request.action_type === 'discount_override';
-  const ctxSummary = isDiscount ? null : summariseContext(request.context);
+  const ctxSummary = isDiscount
+    ? null
+    : request.action_type === 'REFUND_APPROVAL_MATRIX'
+      ? refundSummary(request.context)
+      : summariseContext(request.context);
 
   return (
     <div className="border border-gray-200 rounded-lg bg-white p-4">
@@ -320,6 +324,20 @@ export function ApprovalRequestCard({
       )}
     </div>
   );
+}
+
+/** A refund approval: only the server-read bill fields, in plain words. */
+function refundSummary(context?: Record<string, unknown>): string | null {
+  if (!context) return null;
+  const already = context.already_refunded;
+  const parts = [
+    `Bill ${String(context.order_number ?? '—')}`,
+    `Customer ${String(context.customer_name || '—')}`,
+    typeof already === 'number'
+      ? `Already refunded on this bill: ₹${already.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+      : 'Already refunded on this bill: could not read',
+  ];
+  return parts.join('  ·  ');
 }
 
 /** Compact one-line summary of the action-specific context object. */

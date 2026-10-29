@@ -269,16 +269,17 @@ def _cancelled_behind_credit_note(db, store_ids, start, end, store_states, custo
     like the deemed supply. Same field expressions as the books leg above."""
     from ...utils.real_sale import is_real_sale
 
+    # Exactly the gap between the two rules: every refunded order the GST
+    # returns file and the books drop -- cancelled, or with its cancel pending.
     match = {
         "created_at": {"$gte": start, "$lt": end},
-        "status": {"$in": ["CANCELLED", "CANCELED", "cancelled", "canceled"]},
         "advance_refund_status": "COMPLETED",
     }
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
     out = {"count": 0, "taxableValue": 0.0, "tax": 0.0, "cgst": 0.0, "sgst": 0.0, "igst": 0.0}
     for o in db.get_collection("orders").find(match):
-        if not is_real_sale(o, gst_documents=True):
+        if not is_real_sale(o, gst_documents=True) or is_real_sale(o):
             continue
         grand = float(o.get("grand_total") or o.get("total") or 0)
         tax = float(o.get("tax_amount") or o.get("tax_total") or 0)

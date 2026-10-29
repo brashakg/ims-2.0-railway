@@ -18,8 +18,8 @@ dropping a legacy balance.
 Only rows that MOVED the balance are summed: a row written but not applied
 (applied: False -- an advance credit whose balance move is still owed, or an
 unfinished / voided write) is left out unless its id is already in the
-customer's advance_credit_refs. Such a row is applied exactly once later by
-its own door (the advance_credit_refs guard), so nobody is locked out and
+customer's store_credit_refs. Such a row is applied exactly once later by
+its own door (the store_credit_refs guard), so nobody is locked out and
 nothing is paid twice. A NEGATIVE total is refused and reported, never set.
 
 SAFETY: dry run by default; nothing is written without --apply. The dry run
@@ -46,13 +46,21 @@ from datetime import datetime, timezone
 
 def plan(db) -> dict:
     """{"sets": [(customer_id, balance)], "unapplied_left": [customer_id],
-    "negative": [(customer_id, total)]} -- reads only."""
+    "negative": [(customer_id, total)], "non_numeric": [(customer_id, value)]}
+    -- reads only. ``non_numeric``: a store_credit that is not a number (a
+    string, say) -- the $inc refuses it, so it is a stop before deploy."""
     sets, unapplied, negative = [], [], []
+    non_numeric = [
+        (c.get("customer_id"), c.get("store_credit"))
+        for c in db["customers"].find({})  # ponytail: one pass; fine at shop scale
+        if c.get("store_credit") is not None
+        and (isinstance(c.get("store_credit"), bool) or not isinstance(c.get("store_credit"), (int, float)))
+    ]
     for cust in db["customers"].find({"store_credit": None}):
         cid = cust.get("customer_id")
         if not cid:
             continue
-        refs = set(cust.get("advance_credit_refs") or [])
+        refs = set(cust.get("store_credit_refs") or [])
         balance = 0.0
         for r in db["credit_note_ledger"].find({"customer_id": cid}):
             if r.get("applied") is False and r.get("entry_id") not in refs:
@@ -64,7 +72,8 @@ def plan(db) -> dict:
             negative.append((cid, balance))
             continue
         sets.append((cid, balance))
-    return {"sets": sets, "unapplied_left": sorted(set(unapplied)), "negative": negative}
+    return {"sets": sets, "unapplied_left": sorted(set(unapplied)), "negative": negative,
+            "non_numeric": non_numeric}
 
 
 def apply(db, sets, backup_path: str) -> int:
@@ -126,8 +135,11 @@ def main() -> int:
     for cid, bal in nonzero:
         print(f"  {cid}: Rs {bal:.2f}")
     if out["unapplied_left"]:
-        print(f"[UNAPPLIED] {len(out['unapplied_left'])} customer(s) hold a credit row not yet applied; it is left "
-              "out of the sum and applied by its own door later: " + ", ".join(out["unapplied_left"]))
+        print(f"[UNAPPLIED] {len(out['unapplied_left'])} customer(s) hold a credit row left out of the sum "
+              "(unfinished or voided - its own door finishes it, once): " + ", ".join(out["unapplied_left"]))
+    if out["non_numeric"]:
+        print(f"[NON-NUMERIC] {len(out['non_numeric'])} customer(s) whose store_credit is not a number - STOP, "
+              "fix each by hand before the deploy: " + ", ".join(f"{c} ({v!r})" for c, v in out["non_numeric"]))
     if out["negative"]:
         print(f"[REFUSED] {len(out['negative'])} customer(s) with a NEGATIVE ledger total, not set - check by hand: "
               + ", ".join(f"{c} (Rs {b:.2f})" for c, b in out["negative"]))
@@ -136,6 +148,9 @@ def main() -> int:
         return 0
     n = apply(db, out["sets"], args.backup)
     print(f"[APPLIED] set {n} customers; backup of the rows before: {args.backup}")
+    if n < len(out["sets"]):
+        print(f"[SKIPPED] {len(out['sets']) - n} (the field was set by a live door between plan and apply - "
+              "re-run the dry run: it must show 0 customers)")
     return 0
 
 

@@ -119,7 +119,8 @@ _REGISTRY_LIST: List[PolicySpec] = [
         write_roles=("SUPERADMIN", "ADMIN"),
         group="Refunds & Returns",
         label="Refund auto-approve below",
-        help="Refunds strictly below this amount are auto-approved (no manager).",
+        help="Approval amount band for other approval types (e.g. supplier returns). Customer "
+        "refunds follow the Rs 2,000 manager rule (refund approval matrix), not this.",
         minimum=0,
     ),
     _spec(
@@ -130,7 +131,8 @@ _REGISTRY_LIST: List[PolicySpec] = [
         write_roles=("SUPERADMIN", "ADMIN"),
         group="Refunds & Returns",
         label="Refund needs ADMIN above",
-        help="Refunds at/above this amount require ADMIN approval.",
+        help="Approval amount band for other approval types (e.g. supplier returns). Customer "
+        "refunds follow the Rs 2,000 manager rule (refund approval matrix), not this.",
         minimum=0,
     ),
     _spec(
@@ -141,7 +143,8 @@ _REGISTRY_LIST: List[PolicySpec] = [
         write_roles=("SUPERADMIN",),
         group="Refunds & Returns",
         label="Refund needs SUPERADMIN above",
-        help="Refunds at/above this amount require SUPERADMIN approval.",
+        help="Approval amount band for other approval types (e.g. supplier returns). Customer "
+        "refunds follow the Rs 2,000 manager rule (refund approval matrix), not this.",
         minimum=0,
     ),
     # F27 refund approval matrix. ON by default -- OWNER RULING 2026-10-23: a
@@ -155,7 +158,9 @@ _REGISTRY_LIST: List[PolicySpec] = [
         type="bool",
         default=True,
         scopes=("global", "entity", "store"),
-        write_roles=("SUPERADMIN", "ADMIN"),
+        # The owner's rule: only a Superadmin may switch it (an Admin may only
+        # make the matrix STRICTER -- refund.approval_matrix, max'd with it).
+        write_roles=("SUPERADMIN",),
         group="Refunds & Returns",
         label="Refund approval matrix enabled",
         help="Require a tiered approval (per the refund approval matrix) before "

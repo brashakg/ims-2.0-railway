@@ -93,11 +93,17 @@ def real_sale_match(db=None, *, orders=None, gst_documents: bool = False) -> Dic
         orders = db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
     # ponytail: the GST view also reads every cancelled order per query; fine
     # while they number in the hundreds -- stamp a bool if they ever do not.
+    candidates = list(orders.find({"status": {"$in": judged}}))
+    if gst_documents:
+        # Refunded orders whose cancel is still pending are judged too.
+        candidates += [o for o in orders.find({"advance_refund_status": {"$in": ["COMPLETED", "completed"]}})
+                       if isinstance(o, dict) and str(o.get("status") or "").upper() not in judged_upper]
     out = [
         o
-        for o in orders.find({"status": {"$in": judged}})
+        for o in candidates
         if isinstance(o, dict)
-        and str(o.get("status") or "").upper() in judged_upper
+        and (str(o.get("status") or "").upper() in judged_upper
+             or str(o.get("advance_refund_status") or "").upper() == "COMPLETED")
         and not is_real_sale(o, gst_documents=gst_documents)
     ]
     if gst_documents:
@@ -118,7 +124,11 @@ def is_real_sale(order: Dict[str, Any], gst_documents: bool = False) -> bool:
     """THE definition, for an order in hand (real_sale_match is its query).
     ``gst_documents``: the GST-document view (module docstring)."""
     status = str((order or {}).get("status") or "").upper()
-    if gst_documents and status in _CANCELLED:
+    refunded = str((order or {}).get("advance_refund_status") or "").upper() == "COMPLETED"
+    if gst_documents and (status in _CANCELLED or (refunded and status not in _NOT_SALE)):
+        # A refunded order (cancelled, or its cancel pending) is filed only
+        # behind the credit note for its whole invoice; an un-invoiced one
+        # was an advance handed back -- no supply.
         return _reversed_by_whole_credit_note(order)
     if status in _NOT_SALE:
         return False

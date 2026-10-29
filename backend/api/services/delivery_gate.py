@@ -142,6 +142,12 @@ def refuse_handover_of_refunded(order: dict) -> None:
     """409 when the order is cancelled or its advance was refunded: the goods
     must not go out with the money already back."""
     status = str((order or {}).get("status") or "").strip().upper()
+    if status not in ("CANCELLED", "CANCELED") and (order or {}).get("advance_refund_id"):
+        # A claim whose press died before writing anything is freed (THE
+        # stale-claim rule), never a handover lock for good.
+        from ..routers.returns import release_stale_advance_claim
+
+        order = release_stale_advance_claim(order)
     if status in ("CANCELLED", "CANCELED") or (order or {}).get("advance_refund_id"):
         raise HTTPException(
             status_code=409,

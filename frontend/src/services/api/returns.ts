@@ -121,7 +121,8 @@ export interface AdvanceRefundPlan {
   reason?: string;
   total?: number;
   credit?: number;
-  refund_tenders?: { method: string; amount: number }[];
+  /** paid_from: 'HQ' on a cash leg HQ pays (an unfinished refund's record). */
+  refund_tenders?: { method: string; amount: number; paid_from?: string }[];
   invoice_number?: string | null;
   /** 'finish_cancel' once the advance is refunded but the order not cancelled. */
   action?: 'refund_and_cancel' | 'finish_cancel' | 'finish_refund';

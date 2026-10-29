@@ -87,11 +87,24 @@ def apply(db, links, backup_path: str) -> int:
     return done
 
 
+def revert(db) -> int:
+    """Undo every link this script made: exact, because only its own links
+    carry tender_backfilled_at (a live payment's claim never does)."""
+    txns = db["loyalty_transactions"]
+    done = 0
+    for row in list(txns.find({"tender_backfilled_at": {"$ne": None}})):
+        res = txns.update_one({"txn_id": row["txn_id"], "tender_backfilled_at": row["tender_backfilled_at"]},
+                              {"$unset": {"tender_payment_id": "", "tender_backfilled_at": ""}})
+        done += int(getattr(res, "modified_count", 0) or 0)
+    return done
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument("--apply", action="store_true", help="write (default: dry run)")
     ap.add_argument("--backup",
                     default=os.path.join("backups", f"loyalty_claims_backup_{datetime.now():%Y%m%d_%H%M%S}.json"))
+    ap.add_argument("--revert", action="store_true", help="undo every link this script made")
     args = ap.parse_args()
     url = os.getenv("MONGO_PUBLIC_URL") or os.getenv("MONGO_URL") or os.getenv("MONGODB_URL")
     print(f"[MONGO] connection string: {'SET' if url else 'NOT SET'}")
@@ -106,6 +119,9 @@ def main() -> int:
         print(f"[MONGO] connect failed: {type(exc).__name__}")
         return 1
     db = client[os.getenv("MONGO_DATABASE", "ims_2_0")]
+    if args.revert:
+        print(f"[REVERTED] unlinked {revert(db)} redemptions")
+        return 0
     out = plan(db)
     print(f"[PLAN] redemptions to link: {len(out['links'])}; with no matching payment (left alone): {out['unmatched']}")
     print(f"[PLAN] redemptions with no order (inert, never claimable): {out['no_order']}")
@@ -116,6 +132,9 @@ def main() -> int:
         return 0
     n = apply(db, out["links"], args.backup)
     print(f"[APPLIED] linked {n} redemptions; backup of the rows before: {args.backup}")
+    if n < len(out["links"]):
+        print(f"[SKIPPED] {len(out['links']) - n} (claimed by a live payment between plan and apply - "
+              "re-run the dry run: it must show 0 to link)")
     return 0
 
 

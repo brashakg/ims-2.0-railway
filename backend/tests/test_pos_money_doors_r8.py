@@ -105,7 +105,7 @@ async def test_a_refund_claimed_before_the_booking_lands_stops_it_before_the_cou
 
     monkeypatch.setattr(shipping, "_resolve_order", _read)
     # The refund door claims the order between the shipping door's read and its booking.
-    till["db"].get_collection("orders").update_one({"order_id": "ORD-1"}, {"$set": {"advance_refund_id": "RET-X"}})
+    till["db"].get_collection("orders").update_one({"order_id": "ORD-1"}, {"$set": {"advance_refund_id": "RET-X", "advance_refund_at": _ago(0)}})
     called = []
 
     async def _courier(*a, **k):
@@ -287,7 +287,8 @@ def test_the_advance_claim_loses_to_an_admin_credit_note_marker(till):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("over", [{"advance_refund_id": "RET-1"}, {"status": "CANCELLED"}])
+@pytest.mark.parametrize("over", [{"advance_refund_id": "RET-1", "advance_refund_record": "RET-1"},
+                                  {"status": "CANCELLED"}])
 async def test_no_admin_credit_note_on_a_refunded_or_cancelled_order(till, monkeypatch, over):
     from api.routers.orders import admin_edit
     from api.routers.orders.models import SuperadminInvoiceChange
@@ -373,7 +374,8 @@ def test_books_drop_a_refunded_order_whose_cancel_is_pending():
 
     db = StrictDB()
     db.get_collection("orders").insert_one({"_id": "a", "order_id": "ORD-1", "status": "CONFIRMED",
-                                            "invoice_number": "INV/1", "advance_refund_status": "COMPLETED"})
+                                            "invoice_number": "INV/1", "advance_refund_status": "COMPLETED",
+                                            "advance_refund_credit_note": "TST01/C2627/0001"})
     order = db.get_collection("orders").find_one({"order_id": "ORD-1"})
     assert is_real_sale(order) is False and is_real_sale(order, gst_documents=True) is True
     assert db.get_collection("orders").count_documents(real_sale_match(db)) == 0
@@ -522,6 +524,7 @@ async def test_a_referral_reward_is_refused_for_an_unready_customer_before_the_c
     assert exc.value.status_code == 503
     assert till["db"].get_collection("referrals").find_one({"referral_id": "REF-1"})["status"] == "COMPLETED"
     assert "store_credit" not in till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})
+    assert [r["entry_id"] for r in _ledger(till).find({"customer_id": "CUST-1"})] == ["old"]  # no new row
 
 
 @pytest.mark.asyncio
@@ -529,7 +532,7 @@ async def test_a_referral_reward_writes_its_ledger_row_and_moves_the_balance_onc
     marketing = _referral(till, monkeypatch, {"customer_id": "CUST-1", "store_credit": 0.0})
     await marketing.redeem_referral("REF-1", current_user=_user("ADMIN"))
     rows = list(_ledger(till).find({"customer_id": "CUST-1"}))
-    assert [(r["type"], r["delta"], r["applied"]) for r in rows] == [("ISSUED", 100.0, True)]
+    assert [(r["type"], r["delta"], r["applied"]) for r in rows] == [("ADJUSTED", 100.0, True)]
     assert till["db"].get_collection("customers").find_one({"customer_id": "CUST-1"})["store_credit"] == 100.0
 
 
