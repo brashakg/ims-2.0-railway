@@ -1764,7 +1764,7 @@ export function useQuickAddForm() {
   // mounted; import review has no strip, so the form asks for it itself.
   const [hintBrandInModel, setHintBrandInModel] = useState(false);
   const reviewSimilar = useSimilarProducts({ category: selectedCategory, attributes }, isReviewMode);
-  const brandInModel = isReviewMode ? Boolean(reviewSimilar.data?.brand_in_model) : hintBrandInModel;
+  const brandInModel = isReviewMode ? Boolean(reviewSimilar?.data?.brand_in_model) : hintBrandInModel;
 
   // Soft warnings: shown amber, NEVER a block (the validator alone blocks).
   // Review mode (an imported product) shows the field hints too -- a brand
