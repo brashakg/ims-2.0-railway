@@ -124,7 +124,7 @@ export interface AdvanceRefundPlan {
   refund_tenders?: { method: string; amount: number }[];
   invoice_number?: string | null;
   /** 'finish_cancel' once the advance is refunded but the order not cancelled. */
-  action?: 'refund_and_cancel' | 'finish_cancel';
+  action?: 'refund_and_cancel' | 'finish_cancel' | 'finish_refund';
   /** A cash part is refunded: say whether from the shop drawer or HQ. */
   has_cash?: boolean;
 }

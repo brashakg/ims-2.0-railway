@@ -481,6 +481,16 @@ def undo_handover_if_order_refunded(repo, job: dict, previous_status: str) -> bo
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("[WORKSHOP] job %s handover NOT undone: %s", job.get("job_id"), exc)
+        return True
+    # Write, then read: a cancel whose job sweep ran while this job still read
+    # DELIVERED skipped it -- the order now reads CANCELLED, so end the job too.
+    if back != "CANCELLED":
+        again = _resolve_job_order(job) or {}
+        if str(again.get("status") or "").strip().upper() in ("CANCELLED", "CANCELED"):
+            try:
+                repo.collection.update_one({"job_id": job.get("job_id")}, {"$set": {"status": "CANCELLED"}})
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[WORKSHOP] job %s not cancelled with its order: %s", job.get("job_id"), exc)
     return True
 
 

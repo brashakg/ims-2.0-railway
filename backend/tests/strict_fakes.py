@@ -360,6 +360,11 @@ class StrictCollection:
     # -- writes -----------------------------------------------------------
     def insert_one(self, doc):
         stored = dict(doc)
+        if "_id" in stored and any(d.get("_id") == stored["_id"] for d in self.docs):
+            # Real Mongo's unique _id index refuses the second write.
+            from pymongo.errors import DuplicateKeyError
+
+            raise DuplicateKeyError(f"E11000 duplicate key _id {stored['_id']!r}")
         self.docs.append(stored)
         return type("R", (), {"inserted_id": stored.get("_id"), "acknowledged": True})()
 

@@ -584,6 +584,15 @@ async def superadmin_invoice_change(
     # mode == CREDIT_NOTE  -> issue a credit (reduction) / debit (increase) note
     # for the DELTA, linked to the ORIGINAL invoice. The original invoice +
     # order totals are LEFT INTACT.
+    # A cancelled order, or one whose advance the refund door holds, takes no
+    # delta note: the door's whole-invoice note already reverses it. Claim the
+    # order (compare-and-set on the door's claim) BEFORE the note: the door's
+    # own claim requires this marker unset, so of the two exactly one wins.
+    if str(order.get("status") or "").upper() in ("CANCELLED", "CANCELED") or order.get("advance_refund_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="This order is cancelled or its advance was refunded, so no credit note can be issued on it.",
+        )
     delta = compute_invoice_delta(before, after)
     if delta["direction"] == "NONE":
         raise HTTPException(
@@ -593,6 +602,12 @@ async def superadmin_invoice_change(
                 "there is no delta to issue a credit/debit note for."
             ),
         )
+
+    if delta["note_type"] == "CREDIT_NOTE" and not repo.update_if(
+        order_id, {"advance_refund_id": None, "status": order.get("status")},
+        {"post_invoice_credit_note_at": utc_now_iso()},
+    ):
+        raise HTTPException(status_code=409, detail="This order changed - reload it and check.")
 
     # Rule 53 (owner 2026-10-18): the note's number from the sale shop's
     # credit-note (C) or debit-note (D) series -- refused, never guessed,

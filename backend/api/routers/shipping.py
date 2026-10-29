@@ -177,6 +177,8 @@ def _live_shipment_for_order(order_id: str, strict: bool = False) -> Optional[Di
     error raises instead of reading as "nothing shipped"."""
     coll = _shipments_coll()
     if coll is None:
+        if strict:
+            raise RuntimeError("shipments collection unavailable")
         return None
     try:
         return coll.find_one(
@@ -447,11 +449,54 @@ async def book_shipment(
     address = _merge_address(body.address, order)
 
     db = _get_db()
-    result = await shiprocket.create_shipment(
-        order, address, db=db, pickup_location=body.pickup_location
-    )
-
     shipment_id = generate_shipment_id()
+    coll = _shipments_coll()
+    if coll is not None:
+        # WRITE, THEN READ -- the advance-refund door's own rule, mirrored. The
+        # booking goes on record as live (BOOKING) BEFORE the courier is called,
+        # then the order is read again: a refund that claimed first is refused
+        # here; one that claims during the courier call sees this row in its
+        # post-claim handover check and backs off. Read-then-await-then-write
+        # shipped goods on an order whose advance had just been paid back.
+        try:
+            coll.insert_one({
+                "shipment_id": shipment_id,
+                "order_id": order.get("order_id") or body.order_id,
+                "store_id": store_id,
+                "status": "BOOKING",
+                "created_by": current_user.get("user_id"),
+                "created_at": utc_now_iso(),
+                "updated_at": utc_now_iso(),
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[SHIPROCKET] booking not recorded, courier not called: %s", exc)
+            raise HTTPException(status_code=503, detail="Could not record the booking - please retry.")
+        fresh = _resolve_order(order.get("order_id") or body.order_id) if order.get("status") else None
+        if fresh is not None:
+            from ..services.delivery_gate import refuse_handover_of_refunded
+
+            try:
+                refuse_handover_of_refunded(fresh)
+            except HTTPException:
+                coll.update_one({"shipment_id": shipment_id},
+                                {"$set": {"status": "FAILED", "updated_at": utc_now_iso(),
+                                          "error": "order cancelled or advance refunded before the courier was called"}})
+                raise
+
+    try:
+        result = await shiprocket.create_shipment(
+            order, address, db=db, pickup_location=body.pickup_location
+        )
+    except BaseException:
+        if coll is not None:  # the courier call died: the booking is not live
+            try:
+                coll.update_one({"shipment_id": shipment_id},
+                                {"$set": {"status": "FAILED", "error": "courier call failed",
+                                          "updated_at": utc_now_iso()}})
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[SHIPROCKET] %s left BOOKING: %s", shipment_id, exc)
+        raise
+
     now = utc_now_iso()
     simulated = result.status == "SIMULATED"
 
@@ -489,10 +534,10 @@ async def book_shipment(
         "updated_at": now,
     }
 
-    coll = _shipments_coll()
     if coll is not None:
         try:
-            coll.insert_one(dict(doc))
+            doc.pop("created_at", None)
+            coll.update_one({"shipment_id": shipment_id}, {"$set": dict(doc)})
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SHIPROCKET] persist failed: %s", exc)
 
