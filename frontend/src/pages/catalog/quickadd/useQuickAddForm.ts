@@ -64,6 +64,7 @@ import {
   type ReviewQueueStash,
 } from '../reviewQueue';
 import { IDENTITY_DEBOUNCE_MS, answerStillHolds, typedAttributes } from '../identityAnswer';
+import { useSimilarProducts } from '../useSimilarProducts';
 import { existingProductPath, sectionOfError, type EditMode, type SectionId } from './shared';
 import { useProductImages } from './useProductImages';
 import { copyableSpecs, softWarnings as buildSoftWarnings } from './formHelpers';
@@ -1757,6 +1758,14 @@ export function useQuickAddForm() {
     setFlaggedFields((prev) => new Set([...prev, ...Object.keys(fills)]));
   }, [copyFromLastFields]);
 
+  // "The model number repeats the brand": the SERVER's answer (GET
+  // /products/similar brand_in_model, the duplicate key's own fold), never a
+  // rule of its own here. The similar-products strip reports it where it is
+  // mounted; import review has no strip, so the form asks for it itself.
+  const [hintBrandInModel, setHintBrandInModel] = useState(false);
+  const reviewSimilar = useSimilarProducts({ category: selectedCategory, attributes }, isReviewMode);
+  const brandInModel = isReviewMode ? Boolean(reviewSimilar.data?.brand_in_model) : hintBrandInModel;
+
   // Soft warnings: shown amber, NEVER a block (the validator alone blocks).
   // Review mode (an imported product) shows the field hints too -- a brand
   // typed in the model number came in this way -- but not the photo hint.
@@ -1765,8 +1774,9 @@ export function useQuickAddForm() {
       buildSoftWarnings({
         attributes, mrp, modelMrp: variantCtx?.modelMrp, imageCount: images.length,
         showPhotoHint: !isReviewMode && Boolean(selectedCategory),
+        brandInModel,
       }),
-    [isReviewMode, attributes, mrp, variantCtx, images.length, selectedCategory],
+    [isReviewMode, attributes, mrp, variantCtx, images.length, selectedCategory, brandInModel],
   );
 
   const setAttr = (name: string, value: string) => {
@@ -1814,7 +1824,7 @@ export function useQuickAddForm() {
     // duplicate rescue
     dupInfo, setDupInfo, dupBusy, handleDupAddVariant, handleDupOpenExisting,
     // similar products
-    handleSimilarPick, handleSimilarOpen, handleFamilyFound,
+    handleSimilarPick, handleSimilarOpen, handleFamilyFound, setHintBrandInModel,
     // submit
     isSubmitting, handleSubmit,
     // edit queue (?edit= from the Catalog list)

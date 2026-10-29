@@ -40,16 +40,13 @@ describe('softWarnings', () => {
     expect(softWarnings({ ...base, attributes: { lens_size: '54', bridge_width: '18', temple_length: '145' } })).toEqual([]);
     expect(softWarnings({ ...base, attributes: { lens_size: '540', temple_length: '14' } })).toHaveLength(2);
   });
-  it('brand repeated in the model number', () => {
-    expect(softWarnings({ ...base, attributes: { brand_name: 'Ray-Ban', model_no: 'RAYBAN RB4165' } })[0]).toMatch(
-      /repeats the brand/,
-    );
-    expect(softWarnings({ ...base, attributes: { brand_name: 'Ray-Ban', model_no: 'RB4165' } })).toEqual([]);
-    expect(softWarnings({ ...base, attributes: { brand_name: 'Ray-Ban', model_no: 'RAY BAN RB4165' } })).toHaveLength(1);
-    // The prod 10-24 case: saved as typed, but the cataloguer is told.
-    expect(softWarnings({ ...base, attributes: { brand_name: 'Carrera', model_no: 'CARRERA 3001/S' } })).toHaveLength(1);
-    // a whole word only, never a substring of a code
-    expect(softWarnings({ ...base, attributes: { brand_name: 'Prada', model_no: 'PRADAX01' } })).toEqual([]);
+  it('brand repeated in the model number: the server says so, no rule here', () => {
+    // #1271: the hint is the duplicate key's own fold (GET /products/similar
+    // brand_in_model); the form keeps no copy of the rule.
+    const carrera = { brand_name: 'Carrera', model_no: 'CARRERA 3001/S' };
+    expect(softWarnings({ ...base, attributes: carrera, brandInModel: true })[0]).toMatch(/repeats the brand/);
+    expect(softWarnings({ ...base, attributes: carrera, brandInModel: false })).toEqual([]);
+    expect(softWarnings({ ...base, attributes: carrera })).toEqual([]);
   });
   it('price far from the model, and fewer than 2 photos', () => {
     expect(softWarnings({ ...base, attributes: {}, mrp: '20000', modelMrp: '7890' })[0]).toMatch(/far from/);

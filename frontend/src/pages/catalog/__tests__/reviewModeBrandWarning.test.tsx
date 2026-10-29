@@ -17,6 +17,10 @@ vi.mock('../../../context/AuthContext', () => ({
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
 }));
+const getSimilarProducts = vi.fn(async (..._a: unknown[]) => ({
+  exact_match: null, eye_size_needed: [], siblings: [], model_colour_count: 0,
+  identity_fields: ['brand_name', 'model_no', 'colour_code', 'lens_size'], brand_in_model: true,
+}));
 vi.mock('../../../services/api/products', () => ({
   DuplicateProductError: class DuplicateProductError extends Error {},
   productApi: {
@@ -28,6 +32,8 @@ vi.mock('../../../services/api/products', () => ({
     updateProduct: vi.fn(async () => ({})),
     previewSku: vi.fn(async () => ({ category: 'SUNGLASS', sku: 'SG-CARRERA-CARRERA3001S-086HA-54' })),
     getWebsiteVerdict: vi.fn(async (brand: string) => ({ brand, online: true, reason: null })),
+    // The server's answer: the duplicate key's own fold says the brand is in the model.
+    getSimilarProducts: (...a: unknown[]) => getSimilarProducts(...a),
   },
 }));
 vi.mock('../../../services/api/catalog', () => ({
@@ -66,5 +72,6 @@ describe('import review', () => {
     const box = await screen.findByTestId('qa-soft-warnings', {}, { timeout: 5000 });
     expect(box.textContent).toMatch(/repeats the brand/);
     expect(box.textContent).not.toMatch(/photo/i);
+    expect(getSimilarProducts).toHaveBeenCalled();
   });
 });
