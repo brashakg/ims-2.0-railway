@@ -323,7 +323,9 @@ def restore_refusal(db, spine: Optional[Dict]) -> Optional[str]:
     at = spine.get("purge_run_at")
     if spine.get("purge_run") and not (isinstance(at, datetime) and _aware(at) < stale):
         return "A permanent delete of it is running, so it cannot be restored."
-    for b in db[BACKUP_COLLECTION].find({"product_id": product_id, "status": {"$in": list(OPEN_STATES)}}):
+    # get_collection: the Restore door's databases (every test fake too).
+    backups = db.get_collection(BACKUP_COLLECTION)
+    for b in backups.find({"product_id": product_id, "status": {"$in": list(OPEN_STATES)}}):
         started = b.get("deleted_at")
         if b.get("status") == "removing" and isinstance(started, datetime) and _aware(started) < stale:
             continue

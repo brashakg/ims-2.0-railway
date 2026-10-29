@@ -615,6 +615,9 @@ def _bulk(door, monkeypatch, ids, apply, twins=None):
     monkeypatch.setattr(cat, "_twins_or_503",
                         lambda repo, spines: [twins.get((s or {}).get("product_id")) for s in spines])
     monkeypatch.setattr(cat, "_get_catalog_product", lambda pid: dict(twins[pid]) if pid in twins else None)
+    # The Restore door also reads the permanent-delete state (#1273): an
+    # empty store of it (this fixture's get_db is the database itself).
+    monkeypatch.setattr(cat, "_get_db", lambda: StrictDB())
     body = cat.BulkProductIds(product_ids=ids, apply=apply)
     return asyncio.run(cat.bulk_restore_products(body, _ADMIN))["results"]
 
