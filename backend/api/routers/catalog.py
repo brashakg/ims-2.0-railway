@@ -3761,23 +3761,43 @@ def _live_skus(skus: List[str]) -> Optional[set]:
 
 
 def _restore_refusal(repo, spine: Optional[Dict]) -> Optional[str]:
-    """Why an archived product may not come back: another LIVE product is
-    already the same item by the create door's key (identity_key_of over its
-    attributes, never its stored key -- an archived twin may have given its
-    key up to the copy that stayed). Restoring it would put a duplicate back
-    on sale. None when it may come back (or its key cannot be read)."""
+    """Why an archived product may not come back: THE create door's "we
+    already have this" rule (product_master.identity_conflict, over the key
+    the create rule gives the row -- never its stored key, which an archived
+    twin may have given up) names ANOTHER row, live or archived. A live one
+    would be a duplicate on sale; an archived one holds the key, so this row
+    would come back without one, invisible to the duplicate guard -- restore
+    that one instead. An eye-size item with no eye size whose frame is
+    catalogued by eye size is refused the same way (EYE_SIZE_NEEDED). Asked
+    per row, so a bulk restore sees each earlier restore. None when it may
+    come back; a read failure refuses (never a guess)."""
     if not spine:
         return None
     try:
-        key = _pm.identity_key_of(spine)
-        holder = repo.find_by_identity_key(key) if key else None
+        probe = _pm.identity_spine(spine)
     except _pm.ProductMasterError:
+        return None  # a stored value that is not a number: keyless as before
+    if not probe.get("identity_key"):
         return None
-    if holder and holder.get("product_id") != spine.get("product_id") and not holder.get("deleted_at"):
+    err = _pm.identity_conflict(probe, repo, self_id=spine.get("product_id"))
+    code = getattr(err, "code", None)
+    if code == "DUPLICATE_PRODUCT":
+        other = err.conflict or {}
+        try:
+            row = repo.find_by_id(other.get("product_id")) if other.get("product_id") else None
+        except Exception:  # noqa: BLE001 - the refusal stands either way
+            row = None
+        if row is not None and row.get("deleted_at"):
+            return (
+                f"Not restored: the same product is archived as {other.get('sku')}. "
+                "Restore that one instead (or edit this one so it is a different product)."
+            )
         return (
-            f"Not restored: the same product is already in the catalogue as {holder.get('sku')}. "
+            f"Not restored: the same product is already in the catalogue as {other.get('sku')}. "
             "Archive that one first, or edit this one so it is a different product."
         )
+    if err is not None:
+        return f"Not restored: {err.message}"
     return None
 
 

@@ -138,7 +138,8 @@ def _coll_raybans():
 
 
 # One shape for every answer: eye_size_needed (PR #1171) rides the empty one too.
-EMPTY = {"exact_match": None, "eye_size_needed": [], "siblings": [], "model_colour_count": 0}
+EMPTY = {"exact_match": None, "eye_size_needed": [], "siblings": [], "model_colour_count": 0,
+         "brand_in_model": False}
 
 
 def _similar(coll, category="FRAME", brand="Ray-Ban", model="RB-2140", colour=None, size=None):
@@ -404,6 +405,8 @@ def test_endpoint_returns_shape_for_any_authenticated_role(client, staff_headers
     # eye_size_needed (PR #1171): the eye sizes Save would ask for -- in every
     # answer, the empty one included.
     assert body == {
+        # #1271: the form's "brand in the model number" hint, the key's own fold.
+        "brand_in_model": False,
         "exact_match": None,
         "eye_size_needed": [],
         "siblings": [],

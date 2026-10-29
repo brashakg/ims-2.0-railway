@@ -573,9 +573,11 @@ def test_family_key_folds_a_brand_typed_into_the_model_number():
     assert _key("Polaroid", "1001/S") != _key("Carrera", "1001/S")
     assert _key("Oakley", "OO9208") != _key("Oakley", "OO9208A")
     assert _key("Carrera", "CARRERA") == ("SUNGLASS", "carrera", "carrera")
-    # with no separator the brand folds only before a model-number shape
-    assert _key("Carrera", "CARRERACA1001")[2] == "ca1001"
-    assert _key("Ray-Ban", "RAYBANRB2140")[2] == "rb2140"
+    # with no separator the brand folds only before a digit: a glued word is
+    # never cut (#1271 review; the identity key reads the same rule)
+    assert _key("Carrera", "CARRERA1001")[2] == "1001"
+    assert _key("Carrera", "CARRERACA1001")[2] == "carreraca1001"
+    assert _key("Ray-Ban", "RAYBANRB2140")[2] == "raybanrb2140"
     assert _key("Titan", "TITANIUM 12")[2] == "titanium12"
     assert _key("Titan", "Titanium12")[2] == "titanium12"
     assert _key("Titan", "TITAN 12")[2] == "12"
