@@ -87,6 +87,14 @@ def run(products, *, apply: bool) -> Dict[str, Any]:
         if new == old:
             stats["unchanged"] += 1
             continue
+        if doc.get("deleted_at"):
+            holder = products.find_one({"identity_key": new})
+            if holder is not None and not holder.get("deleted_at"):
+                # An archived twin whose live copy holds the key (#1271's clean-up
+                # frees it there): expected, never a collision to merge.
+                stats["archived_twin"] = stats.get("archived_twin", 0) + 1
+                print(f"  [archived twin] {doc.get('sku')}: {holder.get('sku')} holds {new!r} (expected)")
+                continue
         planned[pid] = (old, new, doc.get("sku"))
         by_new[new].append(doc.get("sku") or pid)
 

@@ -297,7 +297,7 @@ def test_script_apply_archives_first_then_rekeys_and_reverts():
     before = _snapshot(db)
     stats = fix.apply(db, fix.plan(db), "run-1")
     # Pair 2's survivor needed no write: only real writes are counted.
-    assert stats == {"archived": 3, "rekeyed": 3, "skipped": 1}
+    assert stats == {"archived": 3, "rekeyed": 3, "skipped": 1, "failed": 0}
     rows = {d["product_id"]: d for d in db["products"].docs}
     # Pair 1: the new-format copy archived and off the key; the live one takes it, cleaned.
     assert rows["p-new1"]["is_active"] is False and rows["p-new1"]["deleted_at"]
@@ -331,16 +331,29 @@ def test_script_apply_archives_first_then_rekeys_and_reverts():
     assert fix.revert(db, "run-1") == 0  # a second revert is a no-op
 
 
-def test_script_an_archived_row_never_survives():
-    """B2: an archived copy loses whatever else it has, and the report says so."""
+def test_script_an_archived_row_never_survives_and_an_archived_key_holder_is_resolved():
+    """B2 + re-review: an archived copy loses whatever else it has (the report
+    says ARCHIVED). The prod Flag Lab 16 case -- the live brand-in-model row,
+    its new-format twin archived by hand still holding the key -- is the safest
+    pair of all: the archived twin gives the key up, the live row takes it, and
+    Restore of the twin is then refused."""
+    from api.routers import catalog as cat
     from scripts import fix_brand_in_model as fix
 
     db = _seeded()
     db["products"].update_one({"product_id": "p-new2"}, {"$set": {"deleted_at": "2026-10-01", "is_active": False}})
-    e = _pairs(fix.plan(db))["carrera|flaglab16|ky21v|99"]
+    p = fix.plan(db)
+    e = _pairs(p)["carrera|flaglab16|ky21v|99"]
     assert e["survivor"]["sku"] == "SGCARRERACARRERAFLAGLAB16KY21V"  # despite the archived row's photos
-    assert e["blockers"] == ["already archived"]
-    assert fix._why(e["fl"]).startswith("ARCHIVED")
+    assert e["blockers"] == [] and fix._why(e["fl"]).startswith("ARCHIVED")
+    fix.apply(db, p, "run-arch")
+    rows = {d["product_id"]: d for d in db["products"].docs}
+    assert "identity_key" not in rows["p-new2"]
+    assert rows["p-new2"]["deleted_at"] == "2026-10-01"  # left archived as it was
+    assert rows["p-old2"]["identity_key"] == "carrera|flaglab16|ky21v|99" and not rows["p-old2"].get("deleted_at")
+    assert rows["p-old2"]["attributes"]["model_no"] == "FLAGLAB16"
+    repo = ProductRepository(db["products"])
+    assert "SGCARRERACARRERAFLAGLAB16KY21V" in cat._restore_refusal(repo, rows["p-new2"])
 
 
 def test_script_one_row_matched_twice_is_report_only_and_untouched():
@@ -384,3 +397,201 @@ def test_script_any_reference_or_unreadable_collection_blocks_the_archive():
     db._collections["workshop_jobs"] = _Broken("workshop_jobs")
     blockers = _pairs(fix.plan(db))["carrera|flaglab16|ky21v|99"]["blockers"]
     assert blockers == ["has workshop_jobs unreadable (RuntimeError)"]
+
+
+# ---------------------------------------------------------------------------
+# Re-review of 591c73df (the reviewer's probes as tests)
+# ---------------------------------------------------------------------------
+
+
+def test_script_a_sizeless_twin_next_to_another_eye_size_is_report_only():
+    """BLOCK 1: a size-less copy may be the 52, not the 99: never guessed."""
+    from scripts import fix_brand_in_model as fix
+
+    db = _seeded()
+    db["products"].insert_one(_row("p-c52", "SG-CARRERA-FLAGLAB16-FG486-52", "FLAGLAB16", "FG486", "52",
+                                   "carrera|flaglab16|fg486|52"))
+    db.seed("stock_units", [{"product_id": "p-new3", "sku": "SG-CARRERA-FLAGLAB16-FG486"}])
+    before = _snapshot(db)
+    p = fix.plan(db)
+    e = _pairs(p)["carrera|flaglab16|fg486|99"]
+    assert e["blockers"] and "SG-CARRERA-FLAGLAB16-FG486-52" in e["blockers"][-1]
+    fix.apply(db, p, "run-b1")
+    for pid in ("p-old3", "p-new3", "p-c52"):
+        assert db["products"].find_one({"product_id": pid}) == next(
+            d for d in before["products"] if d["product_id"] == pid)
+
+
+def _arch(door, pid, sku, model, **extra):
+    door.repo.collection.insert_one({
+        "product_id": pid, "sku": sku, "category": "SUNGLASS", "brand": "Carrera", "model": model,
+        "is_active": False, "deleted_at": "2026-10-24",
+        "attributes": {"brand_name": "Carrera", "model_no": model, "colour_code": "086HA", "lens_size": "54"},
+        **extra})
+    return door.repo.find_by_id(pid)
+
+
+def test_restore_never_brings_back_a_second_copy_whoever_is_archived(door, monkeypatch):
+    """BLOCK 2: both twins archived (the survivor by hand, keeping its key):
+    the keyless one is refused -- restore the one holding the key -- and after
+    the survivor is back, it is refused as a live duplicate."""
+    from api.routers import catalog as cat
+
+    kept = door("3001/S")
+    loser = _arch(door, "P-ARCH", "SGX", "CARRERA 3001/S")
+    door.repo.collection.update_one({"product_id": kept["product_id"]},
+                                    {"$set": {"deleted_at": "x", "is_active": False}})
+    monkeypatch.setattr(deps, "get_product_repository", lambda: door.repo)
+    why = cat._restore_refusal(door.repo, loser)
+    assert why and "archived as " + kept["sku"] in why
+    survivor = door.repo.find_by_id(kept["product_id"])
+    assert cat._restore_refusal(door.repo, survivor) is None
+    cat._restore_product(None, survivor, _ADMIN, on_website=False)
+    assert "already in the catalogue as " + kept["sku"] in cat._restore_refusal(door.repo, loser)
+
+
+def test_restore_refuses_a_sizeless_twin_of_a_frame_catalogued_by_eye_size(door):
+    """Restore runs the create door's own rule: EYE_SIZE_NEEDED too."""
+    from api.routers import catalog as cat
+
+    door("3001/S")
+    door.repo.collection.insert_one({
+        "product_id": "P-SL", "sku": "SGSL", "category": "SUNGLASS", "identity_key": "carrera|3001s|086ha",
+        "brand": "Carrera", "model": "3001/S", "is_active": False, "deleted_at": "2026-10-24",
+        "attributes": {"brand_name": "Carrera", "model_no": "3001/S", "colour_code": "086HA"}})
+    why = cat._restore_refusal(door.repo, door.repo.find_by_id("P-SL"))
+    assert why and why.startswith("Not restored")
+
+
+def test_an_identity_edit_of_a_stale_row_is_checked_against_its_stored_key(door):
+    """BLOCK 3: a row still on the brand-in-model key, edited to drop the brand,
+    is re-keyed -- and refused, its twin already holds that key."""
+    door("3001/S")
+    door.repo.collection.insert_one({
+        "product_id": "P-X", "sku": "SGXX", "category": "SUNGLASS", "identity_key": "carrera|carrera3001s|086ha|54",
+        "brand": "Carrera", "model": "CARRERA 3001/S", "color": "086HA", "is_active": True,
+        "attributes": {"brand_name": "Carrera", "model_no": "CARRERA 3001/S", "colour_code": "086HA",
+                       "lens_size": "54"}})
+    cur = door.repo.find_by_id("P-X")
+    patch = {"attributes": {**cur["attributes"], "model_no": "3001/S"}, "model": "3001/S"}
+    with pytest.raises(pm.ProductMasterError) as exc:
+        pm.rekey_on_edit(cur, patch, door.repo)
+    assert exc.value.code == "DUPLICATE_PRODUCT"
+
+
+def test_script_a_rerun_after_apply_finds_nothing_left():
+    from scripts import fix_brand_in_model as fix
+
+    db = _seeded()
+    for pid in ("p-old4", "p-new4"):  # the Shopify-blocked pair: a human's
+        db["products"].delete_one({"product_id": pid})
+    first = fix.plan(db)
+    assert fix.unresolved(first) == 0
+    fix.apply(db, first, "run-1")
+    again = fix.plan(db)
+    assert again["changes"] == [] and again["pairs"] == [] and fix.unresolved(again) == 0
+
+
+def test_script_prints_the_undo_before_writing_and_stops_on_a_failure(monkeypatch, capsys):
+    import pymongo
+    from scripts import fix_brand_in_model as fix
+
+    db = _seeded()
+    monkeypatch.setenv("MONGO_URL", "mongodb://fake")
+    monkeypatch.setattr(pymongo, "MongoClient", lambda *a, **k: {"ims_2_0": db})
+    real = db["products"].update_one
+
+    def boom(filt, update, *a, **k):
+        if "identity_key" in (update.get("$set") or {}):
+            raise RuntimeError("net drop")
+        return real(filt, update, *a, **k)
+
+    monkeypatch.setattr(db["products"], "update_one", boom)
+    assert fix.main(["--apply"]) == 1
+    out = capsys.readouterr().out
+    rid = out.split("APPLYING run ", 1)[1].split(" ", 1)[0]
+    assert out.index("APPLYING run") < out.index("FAILED at pair")
+    assert f"--revert --run-id {rid}" in out.split("FAILED at", 1)[1]
+    monkeypatch.setattr(db["products"], "update_one", real)
+    assert fix.revert(db, rid) > 0
+    assert db["products"].find_one({"product_id": "p-new1"})["identity_key"] == "carrera|3001s|086ha|54"
+
+
+def _mongo_seeded():
+    import mongomock
+
+    db = mongomock.MongoClient()["ims_2_0"]
+    db["products"].create_index("identity_key", unique=True, sparse=True)
+    src = _seeded()
+    for name in ("products", "catalog_products", "catalog_variants", "product_images"):
+        if src[name].docs:
+            db[name].insert_many([dict(d) for d in src[name].docs])
+    return db
+
+
+def test_revert_keeps_a_later_edit_goes_on_past_a_refused_row_and_drops_the_cache(monkeypatch):
+    from scripts import fix_brand_in_model as fix
+
+    calls = []
+    monkeypatch.setattr(fix, "_invalidate_lists", lambda: calls.append(1))
+    db = _mongo_seeded()
+    fix.apply(db, fix.plan(db), "run-r")
+    # A later edit of the cleaned solo row is never overwritten.
+    db["products"].update_one({"product_id": "p-solo"}, {"$set": {"attributes.model_no": "1001 S"}})
+    # The survivor moves off K and a new product takes K: the loser cannot get it back.
+    k = "carrera|3001s|086ha|54"
+    db["products"].update_one({"product_id": "p-old1"}, {"$set": {"identity_key": "carrera|3001s|086hb|54"}})
+    db["products"].insert_one(_row("p-fresh", "SG-FRESH", "3001/S", "086HA", "54", k))
+    assert fix.revert(db, "run-r") > 0 and len(calls) == 2
+    solo = db["products"].find_one({"product_id": "p-solo"})
+    assert solo["attributes"]["model_no"] == "1001 S"  # the edit stands
+    assert solo["identity_key"] == "carrera|carrera1001s|807|52"  # the script's own key write reverted
+    assert "identity_key" not in db["products"].find_one({"product_id": "p-new1"})  # refused, reported
+    assert not db["products"].find_one({"product_id": "p-old2"}).get("deleted_at")  # the rest went on
+
+
+def test_the_form_hint_is_the_keys_own_fold():
+    """One rule: GET /products/similar says brand_in_model exactly when the
+    key folds the brand away -- glued only before a digit, as often as typed."""
+    sg = "SUNGLASS"
+    yes = [("Carrera", "CARRERA 3001/S"), ("Carrera", "Carrera3001/S"), ("Carrera", "CARRERA CARRERA 3001/S"),
+           ("CK", "CK 19500"), ("CK", "CK19500")]
+    no = [("Carrera", "3001/S"), ("Prada", "PRADAX01"), ("Ray-Ban", "RAYBANRB2140"), ("Titan", "TITANIUM12"),
+          ("Carrera", "CARRERA")]
+    for brand, model in yes:
+        assert pm.brand_in_model({"brand_name": brand, "model_no": model}, sg), model
+    for brand, model in no:
+        assert not pm.brand_in_model({"brand_name": brand, "model_no": model}, sg), model
+    assert pm.model_without_brand("Carrera", "CARRERA CARRERA 3001/S") == pm.model_without_brand(
+        "Carrera", "3001/S")
+    hit = pm.find_similar_products(None, category=sg, attributes={"brand_name": "Carrera", "model_no": "CARRERA 1"})
+    assert hit["brand_in_model"] is True
+
+
+def test_the_key_backfill_never_writes_a_key_another_row_holds():
+    from scripts import backfill_dedupe_prep as dd
+
+    coll = StrictCollection("products", [
+        {"product_id": "P1", "sku": "A", "category": "SUNGLASS", "identity_key": "carrera|3001s|086ha|54",
+         "attributes": {"brand_name": "Carrera", "model_no": "3001/S", "colour_code": "086HA", "lens_size": "54"}},
+        {"product_id": "P2", "sku": "B", "category": "SUNGLASS", "deleted_at": "x",
+         "attributes": {"brand_name": "Carrera", "model_no": "CARRERA 3001/S", "colour_code": "086HA",
+                        "lens_size": "54"}},
+    ])
+    stats = dd.run_dedupe(coll, apply=True)
+    assert stats["identity_held"] == 1 and stats["identity_backfilled"] == 0
+    assert "identity_key" not in coll.find_one({"product_id": "P2"})
+
+
+def test_the_identity_migration_calls_an_archived_twin_expected_not_a_collision():
+    from scripts import migrate_identity_key_tighten as mig
+
+    coll = StrictCollection("products", [
+        {"product_id": "P1", "sku": "A", "category": "SUNGLASS", "identity_key": "carrera|3001s|086ha|54",
+         "attributes": {"brand_name": "Carrera", "model_no": "3001/S", "colour_code": "086HA", "lens_size": "54"}},
+        {"product_id": "P2", "sku": "B", "category": "SUNGLASS", "deleted_at": "x",
+         "attributes": {"brand_name": "Carrera", "model_no": "CARRERA 3001/S", "colour_code": "086HA",
+                        "lens_size": "54"}},
+    ])
+    stats = mig.run(coll, apply=False)
+    assert stats["collisions"] == 0 and stats["archived_twin"] == 1
