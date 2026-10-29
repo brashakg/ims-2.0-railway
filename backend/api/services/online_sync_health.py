@@ -6,14 +6,13 @@ the SUPERADMIN integrations/status surface (council D10). It answers:
 
   1. last_shopify_sync    -- when did NEXUS last successfully sync Shopify?
   2. failed_webhooks      -- inbound webhook envelopes that failed or were skipped.
-  3. drift                -- gids that Shopify updated AFTER our last_pushed_at
-                             (dual-writer violation detector, Step 3).
+  3. drift                -- differences in IMS-owned product content.
   4. parity              -- catalog counts vs what has a Shopify gid (Step 6a).
   5. uploads_audit        -- product images still pointing at /uploads/ local paths
                              (Step 6b; hard cutover prereq).
 
 Additional callables (NEXUS / endpoint use):
-  detect_drift(db, limit)          -- async, per-gid Shopify updatedAt check.
+  detect_drift(db, limit)          -- async, owned-product-content check.
   parity_summary(db)               -- sync, IMS-vs-Shopify catalog count diff.
   uploads_image_audit(db)          -- sync, images with local /uploads/ URLs.
 
@@ -35,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 # "On hand" is decided by item_events.on_hand_match (its docstring says which
@@ -909,201 +908,127 @@ def online_stock_miss_summary(db) -> Dict[str, Any]:
 # ===========================================================================
 # STEP 3 -- Dual-writer DRIFT detector
 # ===========================================================================
-# Invariant: only ONE system (IMS or BVI) should be writing to Shopify at any
-# time. After the Phase-6 baton flip (IMS_SHOPIFY_WRITES=1), any Shopify
-# updatedAt newer than our last_pushed_at means a second writer touched the
-# object -- a DRIFT violation. This detector surfaces those gids.
+# Compare content IMS owns. Shopify background updates can advance updatedAt
+# without changing that content; a timestamp alone is never drift evidence.
 #
 # The Shopify read uses shopify_push._graphql -- the ONLY network boundary --
 # so monkeypatching it in tests captures all live calls.
 #
 # Fail-soft: no creds / no gids -> {checked: False, reason: ...}, NEVER raises.
 
-_DRIFT_QUERY = """
-query imsDriftCheck($ids: [ID!]!) {
-  nodes(ids: $ids) {
-    ... on Product {
-      id
-      updatedAt
-    }
-    ... on Collection {
-      id
-      updatedAt
-    }
+_DRIFT_FIELDS = """
+  id updatedAt title status tags
+  variants(first: 25, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id sku price compareAtPrice selectedOptions { name value } }
   }
-}
 """
-
-_DRIFT_SCAN_LIMIT = 50  # Shopify nodes() supports up to 250; keep cheap.
+_DRIFT_QUERY = "query imsDriftCheck($ids: [ID!]!, $after: String) { nodes(ids: $ids) { ... on Product { " + _DRIFT_FIELDS + " } } }"
+_DRIFT_SCAN_LIMIT = 50
+# Ten listings a read at variants(first: 25) keeps the requested query cost
+# near 550 points, under Shopify's 1000 cap; a listing with more variants
+# pages on. 50 listings = 5 sequential reads.
+_DRIFT_BATCH = 10
 
 
 async def detect_drift(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
-    """Check each pushed IMS ecom object against Shopify's updatedAt and flag
-    any gid that Shopify updated AFTER our last_pushed_at (dual-writer drift).
+    """Compare IMS-owned product content. Timestamps are context, never evidence.
 
-    Returns:
-        {
-            "checked": bool,        # False when creds absent / no gids
-            "reason": str | None,   # why checked=False
-            "drifted": [            # empty list when no drift
-                {"gid": str, "sku": str, "shopify_updated_at": str,
-                 "our_last_pushed_at": str}
-            ],
-            "counts": {
-                "scanned": int,
-                "drifted": int,
-                "no_timestamp": int,  # gids pushed before last_pushed_at was
-            }                         # recorded (pre-Step-3 rows)
-        }
-
-    Fail-soft: every error path returns checked=False with a reason string.
-    Never raises.
+    Product scope only (collections are not compared). The sample is the
+    ``limit`` most recently pushed listings; ``counts.candidates`` is how many
+    pushed listings exist. Every variant page is read. Any incomplete
+    local/remote read is reported as unknown with its reason, never a clean
+    result or fabricated drift. Never raises.
     """
-    _empty: Dict[str, Any] = {
-        "checked": False,
-        "reason": None,
-        "drifted": [],
-        "counts": {"scanned": 0, "drifted": 0, "no_timestamp": 0},
-    }
-
-    # ---- Gate: need creds -----------------------------------------------
+    empty = {"checked": False, "reason": None, "drifted": [], "unknown": [], "scope": "products",
+             "counts": {"scanned": 0, "candidates": 0, "drifted": 0, "no_timestamp": 0, "unknown": 0}}
     try:
-        from .shopify_push import _has_shopify_creds, _graphql
-        from agents.nexus_providers import ims_shopify_writes_enabled
-    except Exception as exc:  # noqa: BLE001
-        return {**_empty, "reason": f"import error: {exc}"}
+        return await _detect_drift(db, limit, empty)
+    except Exception as exc:  # noqa: BLE001 -- the documented never-raises contract
+        logger.warning("[DRIFT] check failed: %s", exc)
+        return {**empty, "reason": "Drift check failed: %s" % exc}
+
+
+async def _detect_drift(db, limit: int, empty: Dict[str, Any]) -> Dict[str, Any]:
+    from agents.nexus_providers import _as_shopify_gid
+    from .shopify_push import _has_shopify_creds, _graphql
+    from .online_content_diagnostics import expected_content, content_differences
 
     if not _has_shopify_creds(db):
-        return {
-            **_empty,
-            "reason": "shopify creds not configured -- drift check skipped",
-        }
-
-    # ---- Collect pushed gids from catalog_products + ecom_collections ----
-    candidates: List[Dict[str, Any]] = []
+        return {**empty, "reason": "shopify creds not configured -- drift check skipped"}
+    query = {"ecom.shopify_product_id": {"$exists": True, "$nin": [None, ""]}}
     try:
-        if db is not None:
-            for doc in (
-                _coll(db, "catalog_products")
-                .find(
-                    {"ecom.shopify_product_id": {"$exists": True, "$nin": [None, ""]}},
-                    {
-                        "_id": 0,
-                        "sku": 1,
-                        "ecom.shopify_product_id": 1,
-                        "ecom.last_pushed_at": 1,
-                    },
-                )
-                .limit(limit)
-            ):
-                ecom = doc.get("ecom") or {}
-                candidates.append(
-                    {
-                        "gid": str(ecom.get("shopify_product_id") or ""),
-                        "sku": str(doc.get("sku") or ""),
-                        "last_pushed_at": ecom.get("last_pushed_at"),
-                    }
-                )
-            remaining = max(0, limit - len(candidates))
-            if remaining:
-                for col in (
-                    _coll(db, "ecom_collections")
-                    .find(
-                        {
-                            "shopify_collection_id": {
-                                "$exists": True,
-                                "$nin": [None, ""],
-                            }
-                        },
-                        {
-                            "_id": 0,
-                            "handle": 1,
-                            "shopify_collection_id": 1,
-                            "last_synced_at": 1,
-                        },
-                    )
-                    .limit(remaining)
-                ):
-                    candidates.append(
-                        {
-                            "gid": str(col.get("shopify_collection_id") or ""),
-                            "sku": str(col.get("handle") or ""),
-                            "last_pushed_at": col.get("last_synced_at"),
-                        }
-                    )
+        prods = _coll(db, "catalog_products")
+        total = int(prods.count_documents(query))
+        candidates = list(prods.find(query, {"_id": 0}).sort("ecom.last_pushed_at", -1)
+                          .limit(max(1, min(int(limit), 250))))
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[DRIFT] candidate fetch failed: %s", exc)
-        return {**_empty, "reason": f"candidate fetch failed: {exc}"}
-
+        return {**empty, "reason": "Product content could not be read: %s" % exc}
     if not candidates:
-        return {**_empty, "checked": True, "reason": "no pushed gids found"}
-
-    # ---- Ask Shopify for updatedAt on all gids (one batch call) ----------
-    gids = [c["gid"] for c in candidates if c["gid"]]
-    gid_to_candidate = {c["gid"]: c for c in candidates if c["gid"]}
-
-    try:
-        body = await _graphql(db, _DRIFT_QUERY, {"ids": gids})
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[DRIFT] Shopify graphql call failed: %s", exc)
-        return {**_empty, "reason": f"shopify graphql error: {exc}"}
-
-    nodes = (body.get("data") or {}).get("nodes") or []
-
-    drifted: List[Dict[str, Any]] = []
-    no_timestamp = 0
-
-    for node in nodes:
-        if not isinstance(node, dict):
-            continue
-        gid = node.get("id") or ""
-        shopify_updated_at_str = node.get("updatedAt") or ""
-        cand = gid_to_candidate.get(gid) or {}
-        last_pushed = cand.get("last_pushed_at")
-
-        if not last_pushed:
-            # Row was pushed before we started recording last_pushed_at;
-            # we cannot compare -- report as no_timestamp (not drift).
-            no_timestamp += 1
-            continue
-
-        # Normalise timestamps for comparison
+        return {**empty, "checked": True, "reason": "no pushed gids found"}
+    by_gid: Dict[str, Dict[str, Any]] = {}
+    unknown: List[Dict[str, Any]] = []
+    for p in candidates:
+        gid = _as_shopify_gid(p["ecom"]["shopify_product_id"], "Product")
+        first = by_gid.setdefault(gid, p)
+        if first is not p:  # never collapse two twins claiming one page
+            unknown.append({"gid": gid, "sku": p.get("sku", ""),
+                            "reason": "same Shopify page as %s -- two IMS rows claim one listing" % first.get("sku", "")})
+    nodes = {}
+    gids = list(by_gid)
+    for offset in range(0, len(gids), _DRIFT_BATCH):
+        batch = gids[offset:offset + _DRIFT_BATCH]
         try:
-            shopify_dt = datetime.fromisoformat(
-                shopify_updated_at_str.replace("Z", "+00:00")
-            )
-            if isinstance(last_pushed, datetime):
-                our_dt = (
-                    last_pushed.replace(tzinfo=timezone.utc)
-                    if last_pushed.tzinfo is None
-                    else last_pushed
-                )
-            else:
-                our_dt = datetime.fromisoformat(str(last_pushed).replace("Z", "+00:00"))
-        except (ValueError, TypeError, AttributeError):
-            no_timestamp += 1
+            body = await _graphql(db, _DRIFT_QUERY, {"ids": batch, "after": None})
+            if body.get("errors") or not isinstance((body.get("data") or {}).get("nodes"), list):
+                continue
+            for node in body["data"]["nodes"]:
+                if isinstance(node, dict) and node.get("id") in batch:
+                    nodes[node["id"]] = node
+        except Exception:  # noqa: BLE001 -- reported per product below
             continue
-
-        if shopify_dt > our_dt:
-            drifted.append(
-                {
-                    "gid": gid,
-                    "sku": cand.get("sku", ""),
-                    "shopify_updated_at": shopify_updated_at_str,
-                    "our_last_pushed_at": str(last_pushed),
-                }
-            )
-
-    return {
-        "checked": True,
-        "reason": None,
-        "drifted": drifted,
-        "counts": {
-            "scanned": len(nodes),
-            "drifted": len(drifted),
-            "no_timestamp": no_timestamp,
-        },
-    }
+    drifted = []
+    scanned = 0
+    for gid, product in by_gid.items():
+        node = nodes.get(gid)
+        try:
+            if node is None:
+                raise ValueError("Shopify product missing or unreadable")
+            # Never compare a truncated variant set. Read subsequent pages with
+            # the same complete field selection, bounded against broken cursors.
+            conn = node.get("variants") or {}
+            seen = set()
+            for _ in range(20):
+                info = conn.get("pageInfo") or {}
+                if not info.get("hasNextPage"):
+                    break
+                after = info.get("endCursor")
+                if not after or after in seen:
+                    raise ValueError("Shopify variant pagination incomplete")
+                seen.add(after)
+                body = await _graphql(db, _DRIFT_QUERY, {"ids": [gid], "after": after})
+                page_nodes = (body.get("data") or {}).get("nodes") or []
+                page = page_nodes[0] if page_nodes else None
+                if body.get("errors") or not page or page.get("id") != gid:
+                    raise ValueError("Shopify variant pagination incomplete")
+                next_conn = page.get("variants") or {}
+                if "nodes" not in next_conn or "pageInfo" not in next_conn:
+                    raise ValueError("Shopify variant pagination incomplete")
+                conn["nodes"] = conn.get("nodes", []) + next_conn["nodes"]
+                conn["pageInfo"] = next_conn["pageInfo"]
+            fields = content_differences(expected_content(db, product), node)
+            scanned += 1
+            if fields:
+                drifted.append({"gid": gid, "sku": product.get("sku", ""), "fields": fields,
+                                "shopify_updated_at": node.get("updatedAt"),
+                                "our_last_pushed_at": str(product["ecom"].get("last_pushed_at") or "")})
+        except Exception as exc:  # noqa: BLE001 -- cannot establish content, no alarm
+            unknown.append({"gid": gid, "sku": product.get("sku", ""),
+                            "reason": "Owned product content could not be fully compared: %s" % exc})
+    return {"checked": True, "reason": "Some product content could not be compared" if unknown else None,
+            "scope": "products", "drifted": drifted, "unknown": unknown,
+            "counts": {"scanned": scanned, "candidates": total, "drifted": len(drifted), "unknown": len(unknown),
+                       "no_timestamp": sum(not p["ecom"].get("last_pushed_at") for p in candidates)}}
 
 
 def _drift_sync_shim(db, limit: int = _DRIFT_SCAN_LIMIT) -> Dict[str, Any]:
@@ -1182,7 +1107,7 @@ def parity_summary(db) -> Dict[str, Any]:
 
     if db is None:
         empty = {k: {"total": 0, "pushed": 0, "missing": 0} for k in entities}
-        return {"entities": empty, "ok": False}
+        return {"entities": empty, "ok": False, "colours_sizes": {"checked": False, "reason": "Database unavailable"}}
 
     result: Dict[str, Any] = {}
     all_ok = True
@@ -1201,7 +1126,10 @@ def parity_summary(db) -> Dict[str, Any]:
             result[coll_name] = {"total": 0, "pushed": 0, "missing": 0}
             all_ok = False
 
-    return {"entities": result, "ok": all_ok}
+    from .online_content_diagnostics import colour_size_parity
+
+    colours = colour_size_parity(db)
+    return {"entities": result, "ok": all_ok, "colours_sizes": colours}
 
 
 def uploads_image_audit(db, limit: int = 500) -> Dict[str, Any]:

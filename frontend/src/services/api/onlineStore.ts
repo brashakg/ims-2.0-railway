@@ -2004,6 +2004,15 @@ export const pushApi = {
  *  which also carries an uploads_audit block). All fields optional + nullable. */
 export interface SyncParity {
   parity?: {
+    colours_sizes?: {
+      checked?: boolean;
+      reason?: string;
+      total?: number;
+      online?: number;
+      website_pages?: number;
+      missing?: number;
+      missing_items?: Array<{ sku?: string; product_id?: string; reason?: string; code?: string | null }>;
+    } | null;
     entities?: Record<
       string,
       { total?: number; pushed?: number; missing?: number } | null
@@ -2059,8 +2068,9 @@ export interface SyncHealth {
 export interface SyncDrift {
   checked?: boolean | null;
   reason?: string | null;
-  drifted?: Array<{ gid?: string; sku?: string }> | null;
-  counts?: { scanned?: number; drifted?: number; no_timestamp?: number } | null;
+  drifted?: Array<{ gid?: string; sku?: string; fields?: string[] }> | null;
+  unknown?: Array<{ gid?: string; sku?: string; reason?: string }> | null;
+  counts?: { scanned?: number; candidates?: number; drifted?: number; no_timestamp?: number; unknown?: number } | null;
   unavailable?: boolean;
 }
 
@@ -2087,8 +2097,9 @@ export const syncHealthApi = {
     }
   },
 
-  /** Run the LIVE dual-writer drift check (a real Shopify READ — no writes; needs
-   *  creds, else it degrades to {checked:false}). Fail-soft -> {unavailable:true}. */
+  /** Run the owned-content drift check over the newest pushed listings (a real
+   *  Shopify READ — no writes; needs creds, else {checked:false}). Fail-soft ->
+   *  {unavailable:true}. */
   getDrift: async (limit = 50): Promise<SyncDrift> => {
     try {
       const res = await api.get(`${ADMIN_ONLINE_BASE}/drift`, { params: { limit } });
