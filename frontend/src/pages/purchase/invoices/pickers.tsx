@@ -20,9 +20,9 @@ import { useToast } from '../../../context/ToastContext';
 import { PurchaseShopName, usePurchaseShop } from '../purchaseShop';
 import { matchingTotal } from '../purchaseQueries';
 import type { Supplier } from '../purchaseTypes';
-import { errMsg } from './shared';
 import { heldLinesSummary } from '../grnAcceptToast';
 import { istDayString } from '../../../utils/datetime';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 /** On All stores, each row of a Purchase list names the shop it belongs to --
  *  the shop a bill, receipt or return is booked to, the shop an order
@@ -223,7 +223,7 @@ export function DcPickerModal({
         draft.lines ?? [],
       );
     } catch (e) {
-      toast.error(errMsg(e, 'Could not build a draft invoice from the selected DCs'));
+      toast.error(getErrorMessage(e, 'Could not build a draft invoice from the selected DCs'));
     } finally {
       setBusy(false);
     }

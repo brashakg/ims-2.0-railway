@@ -13,6 +13,7 @@
 // newly-added services do not resolve through the barrel re-export (TS2614).
 
 import api from './client';
+import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 
 // ============================================================================
 // Types
@@ -67,6 +68,32 @@ export interface PoolRedeemResponse {
 // API
 // ============================================================================
 
+// The wallet router answers with machine codes (`already_in_household`);
+// staff read sentences. An unknown code reads as '' so the screen's own
+// fallback shows instead; a real sentence from the server passes through.
+const WALLET_ERROR_TEXT: Record<string, string> = {
+  already_in_household: 'This customer is already in another household.',
+  already_member: 'This customer is already a member of this household.',
+  customer_not_found: 'Customer not found.',
+  invalid_customer: 'That customer record is not valid.',
+  household_not_found: 'Household not found.',
+  household_inactive: 'This household is no longer active.',
+  household_full: 'This household already has the most members it can hold.',
+  insufficient_balance: 'The household does not have enough points.',
+  invalid_points: 'Enter a valid number of points.',
+  not_a_member: 'This customer is not a member of the household.',
+  primary_irremovable: 'The primary member cannot be removed.',
+  otp_amount_mismatch: 'That OTP was issued for a different number of points.',
+  otp_household_mismatch: 'That OTP was issued for a different household.',
+  otp_unavailable: 'OTP delivery is not available right now.',
+  voucher_mint_failed: 'The voucher could not be created. The points were returned to the household.',
+};
+
+export function walletErrorText(error: unknown): string {
+  const text = getErrorMessage(error, '');
+  return WALLET_ERROR_TEXT[text] ?? (/^[a-z_]+$/.test(text) ? '' : text);
+}
+
 export const familyWalletApi = {
   /** The ACTIVE household containing this customer, or null if none. Chain-wide. */
   getByCustomer: async (customerId: string): Promise<Household | null> => {
@@ -75,8 +102,7 @@ export const familyWalletApi = {
       return r.data as Household;
     } catch (err: unknown) {
       // 404 => the customer is not in any household (a normal, expected state).
-      const status = (err as { response?: { status?: number } })?.response?.status;
-      if (status === 404) return null;
+      if (getErrorStatus(err) === 404) return null;
       throw err;
     }
   },

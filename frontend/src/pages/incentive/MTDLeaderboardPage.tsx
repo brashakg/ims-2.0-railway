@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — MTD Leaderboard (Pune Incentive Module ii, Phase 3 + F33)
 // ============================================================================
@@ -28,6 +27,7 @@ import { incentiveApi } from '../../services/api';
 import type { MTDStaffEntry, LeaderboardScope, LeaderboardTier } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 import { EligibilityChip } from './DailyScorecardPage';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const CATEGORY_KEYS = [
   'attendance', 'conversion', 'task', 'visufit', 'punctuality',

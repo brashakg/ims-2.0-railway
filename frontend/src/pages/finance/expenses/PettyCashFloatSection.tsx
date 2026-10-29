@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // /finance/expenses/float -- F17 Petty Cash Float (manager / area-manager /
 // accountant / admin; route-gated). CASH SURFACE: its loader, handler and
 // modal are moved byte-identical from the old ExpenseTracker 'float' tab and
@@ -13,6 +12,7 @@ import { expensesApi, type PettyCashBalance } from '../../../services/api/expens
 import { formatDateIST } from '../../../utils/datetime';
 import { fc, useExpensesContext } from './expenseShared';
 import { Labeled } from './expenseWidgets';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 export function PettyCashFloatSection() {
   const { user } = useAuth();

@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — TechCherry R1.1 — Footfall Audit
 // ============================================================================
@@ -8,6 +7,7 @@ import { getErrorMessage } from '../../../utils/errorHandler';
 import { useEffect, useState } from 'react';
 import { AlertTriangle, Loader2, TrendingUp } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getFootfallAudit>>;
 

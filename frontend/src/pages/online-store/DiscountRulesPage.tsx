@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store : Discount Rules  (rebuild of BVI DiscountRule; DARK)
 // ============================================================================
@@ -22,6 +21,7 @@ import {
   type RuleCreatePayload,
   type RecomputeResult,
 } from '../../services/api/onlineDiscountRules';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // The IMS canonical product categories a rule may target (mirrors
 // product_master._CATEGORY_SPECS; the backend validates + 400s an unknown one).

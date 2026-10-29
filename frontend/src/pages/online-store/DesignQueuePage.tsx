@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Image Design Queue  (BVI Phase 4, "push-dark")
 // ============================================================================
@@ -59,6 +58,7 @@ import OnlineStoreSyncBanner, {
   formatPhotoPublish,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Status presentation (label + on-brand light-theme colours + the legal next

@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - F39 Customer tags panel (Customer 360)
 // ============================================================================
@@ -10,6 +9,7 @@ import { getErrorMessage } from '../../utils/errorHandler';
 import { useCallback, useEffect, useState } from 'react';
 import api from '../../services/api/client';
 import { useAuth } from '../../context/AuthContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface TagSuggestion {
   suggestion_id: string;

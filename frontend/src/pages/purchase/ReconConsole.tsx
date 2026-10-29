@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Accountant Reconciliation Console (Purchase S6 / Phase 3 rework)
 // ============================================================================
@@ -45,6 +44,7 @@ import { PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
 import { useToast } from '../../context/ToastContext';
 import type { UserRole } from '../../types';
 import { COST_ROLES } from '../../components/common/CostCell';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -1139,10 +1139,7 @@ export default function ReconConsole() {
           return next;
         });
       } catch (err) {
-        failures[id] =
-          err && typeof err === 'object' && 'response' in err
-            ? String(getErrorMessage(err, 'Failed'))
-            : err instanceof Error ? err.message : 'Failed';
+        failures[id] = getErrorMessage(err, 'Failed');
         console.error(err);
       } finally {
         setSavingIds((prev) => {

@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Opening-Stock Importer (go-live)
 // ============================================================================
@@ -19,6 +18,7 @@ import { inventoryApi } from '../../services/api';
 import type {
   OpeningStockInputRow, OpeningStockResultRow, OpeningStockResponse,
 } from '../../services/api/inventory';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const SAMPLE = `sku,quantity,unit_cost,location_code
 RB3025-001,12,3450,Counter-A

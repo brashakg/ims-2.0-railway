@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Payout Dashboard (Pune Incentive Module iii)
 // ============================================================================
@@ -30,6 +29,7 @@ import { payoutApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import type { PayoutEnvelope, PayoutSnapshot } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 function inr(n: number | null | undefined): string {
   if (n == null) return '—';

@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Customers Page
 // ============================================================================
@@ -57,6 +56,7 @@ import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/cus
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
 import { calculateRFMScore, type CustomerRFMData } from '../../utils/rfmSegmentation';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type ViewMode = 'list' | 'detail';
 

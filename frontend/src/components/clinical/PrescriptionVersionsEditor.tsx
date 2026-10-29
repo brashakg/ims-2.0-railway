@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — 4-version prescription editor (May 2026)
 // ============================================================================
@@ -23,6 +22,7 @@ import { useToast } from '../../context/ToastContext';
 import { validateEyePair, validateRxField } from '../../constants/rxLimits';
 import { RxPowerInput } from './RxPowerInput';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type VersionName = 'before_testing' | 'after_testing' | 'manual' | 'final';
 

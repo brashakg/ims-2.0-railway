@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Family/Household Loyalty Wallet (Feature #49)
 // ============================================================================
@@ -19,8 +18,9 @@ import { Loader2, Search, Users, Wallet, UserPlus, X, Gift } from 'lucide-react'
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { customerApi } from '../../services/api/customers';
-import { familyWalletApi } from '../../services/api/familyWallet';
+import { familyWalletApi, walletErrorText } from '../../services/api/familyWallet';
 import type { Household } from '../../services/api/familyWallet';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const MAX_MEMBERS = 7;
 
@@ -123,7 +123,7 @@ export function FamilyWalletPage() {
       success('Household wallet created.');
       await refreshHousehold(hh.household_id);
     } catch (e: unknown) {
-      const detail = getErrorMessage(e, '');
+      const detail = walletErrorText(e);
       toastError(detail || 'Could not create the household.');
     } finally {
       setBusy(false);
@@ -148,7 +148,7 @@ export function FamilyWalletPage() {
       setAddPhone('');
       await refreshHousehold(household.household_id);
     } catch (e: unknown) {
-      const detail = getErrorMessage(e, '');
+      const detail = walletErrorText(e);
       toastError(detail ? `Could not add member: ${detail}` : 'Could not add member.');
     } finally {
       setBusy(false);
@@ -164,7 +164,7 @@ export function FamilyWalletPage() {
         success('Member removed.');
         await refreshHousehold(household.household_id);
       } catch (e: unknown) {
-        const detail = getErrorMessage(e, '');
+        const detail = walletErrorText(e);
         toastError(detail ? `Could not remove: ${detail}` : 'Could not remove member.');
       } finally {
         setBusy(false);
@@ -195,8 +195,8 @@ export function FamilyWalletPage() {
       setRedeemPoints('');
       await refreshHousehold(household.household_id);
     } catch (e: unknown) {
-      const detail = getErrorMessage(e, '');
-      if (detail === 'otp_required') {
+      const detail = walletErrorText(e);
+      if (getErrorMessage(e, '') === 'otp_required') {
         toastError(
           'Redemption needs an OTP, but OTP delivery (SMS/WhatsApp) is currently ' +
             'disabled. Ask an admin to waive the OTP policy to redeem from the counter.',

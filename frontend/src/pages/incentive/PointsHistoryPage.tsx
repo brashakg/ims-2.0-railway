@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Points History (Pune Incentive Module ii, Phase 3)
 // ============================================================================
@@ -11,6 +10,7 @@ import { incentiveApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import type { PointsLog } from '../../types';
 import { EligibilityChip } from './DailyScorecardPage';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const CATEGORY_KEYS = [
   'attendance', 'conversion', 'task', 'visufit', 'punctuality',

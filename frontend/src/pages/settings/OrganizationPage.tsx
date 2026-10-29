@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Organization Setup (merged Entities + Stores)
 // ============================================================================
@@ -19,6 +18,7 @@ import { useToast } from '../../context/ToastContext';
 import { validateGstin, validateIfsc, validatePincode, validatePhone, validateGeoRadius, firstError } from '../../utils/validators';
 import { isOnlineStore } from '../../utils/storeMode';
 import { exactLocationMatch } from '../../utils/shopifyLocationMatch';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const BRANDS = ['BETTER_VISION', 'WIZOPT'];
 const STORE_TYPES = ['RETAIL', 'HQ', 'WAREHOUSE'];
@@ -26,8 +26,6 @@ const STORE_CATEGORIES = [
   'FRAME', 'OPTICAL_LENS', 'CONTACT_LENS', 'COLORED_CONTACT_LENS', 'READING_GLASSES',
   'SUNGLASS', 'WATCH', 'SMARTWATCH', 'WALL_CLOCK', 'HEARING_AID', 'ACCESSORIES', 'SERVICES',
 ];
-
-const errMsg = getErrorMessage;
 
 const inputCls =
   'w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200';
@@ -72,7 +70,7 @@ export default function OrganizationPage() {
       }
       setStoresByEntity(grouped);
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to load organization'));
+      toast.error(getErrorMessage(e, 'Failed to load organization'));
     } finally {
       setLoading(false);
     }
@@ -338,7 +336,7 @@ function EntityModal({
       toast.success(entity ? 'Entity updated' : 'Entity created');
       onSaved();
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to save entity'));
+      toast.error(getErrorMessage(e, 'Failed to save entity'));
     } finally { setSaving(false); }
   };
 
@@ -487,7 +485,7 @@ function StoreModal({
       toast.success(store ? 'Store updated' : 'Store created');
       onSaved();
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to save store'));
+      toast.error(getErrorMessage(e, 'Failed to save store'));
     } finally { setSaving(false); }
   };
 

@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Shopify live sync — Settings section (SUPERADMIN)
 // ============================================================================
@@ -21,6 +20,7 @@ import { Link } from 'react-router-dom';
 import { RefreshCw, Save, Loader2, Plus, X, Info, ExternalLink } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { policiesApi } from '../../services/api/settings';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const K_ENABLED = 'shopify.live_sync.enabled';
 const K_SLOTS = 'shopify.live_sync.slots';

@@ -1,4 +1,3 @@
-import { getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Settings: Login Devices (approved-device gate, owner 2026-09-02)
 // ============================================================================
@@ -25,6 +24,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { devicesApi } from '../../services/api/devices';
 import type { LoginDevice } from '../../services/api/devices';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 const MODE_COPY: Record<string, { label: string; tone: string; blurb: string }> = {
   off: {

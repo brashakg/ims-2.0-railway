@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Campaign Manager
 // ============================================================================
@@ -19,6 +18,7 @@ import {
   type Segment,
   type ScheduleKind,
 } from '../../services/api/marketing';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Templates the backend sender knows how to populate (notification_service.TEMPLATES).
 const TEMPLATE_OPTIONS: { id: string; label: string }[] = [

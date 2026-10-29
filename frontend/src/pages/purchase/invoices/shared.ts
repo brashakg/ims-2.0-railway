@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // Purchase Invoices - shared helpers (INR formatting, GST rate list, approval
 // role list). The tax head is NOT decided here: the form shows the server's
@@ -18,13 +17,6 @@ export const GST_RATES = [0, 5, 12, 18, 28];
 // drawer all say it, as visible text (a touch tablet shows no tooltip).
 export const rcmNote = (tax?: number, owed?: number) =>
   `You pay this GST (${inr(tax)}) to the government; the supplier is owed ${inr(owed)}`;
-
-// The server's `detail` is a string on some routes and a structured object
-// ({code, message, lines}) on others -- the purchase-invoice gates are the
-// latter. String()-ing an object rendered "[object Object]" at the user, which
-// is how a precise refusal ("...is still missing Selling Price") became
-// unreadable. Prefer the object's own message.
-export const errMsg = getErrorMessage;
 
 // The accounts roles: they approve a 3-way-match exception (release an ON_HOLD
 // invoice for payment despite a variance) and alone see the bill form's

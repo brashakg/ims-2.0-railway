@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Lens range pricing (May 2026)
 // ============================================================================
@@ -18,6 +17,7 @@ import { Loader2, Plus, Trash2, Save, RefreshCw } from 'lucide-react';
 import { adminLensApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type Parameter = 'sphere' | 'cylinder' | 'addition';
 type Category = 'SINGLE_VISION' | 'BIFOCAL' | 'PROGRESSIVE' | 'OFFICE';

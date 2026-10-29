@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Go-Live Readiness Checklist
 // ============================================================================
@@ -14,6 +13,7 @@ import {
 } from 'lucide-react';
 import { storeApi } from '../../services/api';
 import type { GoLiveChecklist, GoLiveCheck } from '../../services/api/stores';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const ICON: Record<GoLiveCheck['status'], ReactElement> = {
   PASS: <CheckCircle2 className="w-5 h-5 text-emerald-600" />,

@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // /finance/expenses/advances -- Advances (every signed-in user; the server
 // decides whose rows come back). Moved byte-identical from the old
 // ExpenseTracker 'advances' tab, with its loader, handlers and request modal.
@@ -18,6 +17,7 @@ import {
 import { formatDateIST } from '../../../utils/datetime';
 import { fc, useExpensesContext } from './expenseShared';
 import { Labeled } from './expenseWidgets';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 const ADVANCE_STATUS_META: Record<string, { label: string; badge: string }> = {
   PENDING: { label: 'Awaiting approval', badge: 'bg-amber-50 text-amber-700' },

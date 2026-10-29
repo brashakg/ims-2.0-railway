@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Loyalty engine settings (SUPERADMIN only — write)
 // ============================================================================
@@ -12,6 +11,7 @@ import { Loader2, Save, RotateCcw, Plus, Trash2 } from 'lucide-react';
 import { loyaltyApi, type LoyaltySettings } from '../../services/api/loyalty';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Tier thresholds + multipliers share the same key set in practice but
 // are stored separately on the doc; we render them side-by-side.

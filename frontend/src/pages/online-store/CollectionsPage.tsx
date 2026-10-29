@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Collections editor  (BVI Phase 2, "push-dark")
 // ============================================================================
@@ -63,6 +62,7 @@ import OnlineStoreSyncBanner, {
   formatPushResult,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Smart-rule vocabulary (kept small + storefront-meaningful — Shopify-like).

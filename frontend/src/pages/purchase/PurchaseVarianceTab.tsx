@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - F8: PO vs GRN variance / backorder tab
 // ============================================================================
@@ -18,8 +17,7 @@ import { vendorsApi, type VarianceLine } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { usePurchaseShop } from './purchaseShop';
-
-const errMsg = getErrorMessage;
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const inr = (n?: number | null) =>
   n == null ? '-' : `₹${(Math.round(n * 100) / 100).toLocaleString('en-IN')}`;
@@ -56,7 +54,7 @@ export function PurchaseVarianceTab() {
       const res = await vendorsApi.getVarianceReport(storeId ? { store_id: storeId } : {});
       setRows(res?.lines ?? []);
     } catch (e) {
-      setError(errMsg(e, 'Failed to load the variance report'));
+      setError(getErrorMessage(e, 'Failed to load the variance report'));
       setRows([]);
     } finally {
       setLoading(false);
@@ -216,7 +214,7 @@ function DismissModal({
         onDismissed();
       }
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to dismiss the variance'));
+      toast.error(getErrorMessage(e, 'Failed to dismiss the variance'));
     } finally {
       setSaving(false);
     }

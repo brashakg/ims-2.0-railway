@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Settings: TDS Rates (SUPERADMIN editable)
 // ============================================================================
@@ -12,6 +11,7 @@ import { Save, RefreshCw, AlertCircle, Loader2, Info, RotateCcw } from 'lucide-r
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { settingsApi } from '../../services/api/settings';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Friendly labels for the canonical TDS sections (backend ap_engine.TDS_SECTIONS).
 const SECTION_LABELS: Record<string, string> = {

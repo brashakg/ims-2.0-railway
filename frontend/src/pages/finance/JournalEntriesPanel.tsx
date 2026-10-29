@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - F17/#25 Maker-checker Journal Entries panel
 // ============================================================================
@@ -15,6 +14,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { financeApi } from '../../services/api/finance';
 import type { JournalEntry, JeStatus, ChartAccount } from './financeTypes';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const STATUS_STYLE: Record<JeStatus, string> = {
   DRAFT: 'bg-gray-100 text-gray-700',

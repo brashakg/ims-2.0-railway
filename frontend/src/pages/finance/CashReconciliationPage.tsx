@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Cash-register vs blind-EOD reconciliation console (#7)
 // ============================================================================
@@ -41,6 +40,7 @@ import {
   type ReconStatus,
 } from '../../services/api/cashReconciliation';
 import { OFF_TILL_EXPENSE_NOTICE } from './offTillExpenseCopy';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 

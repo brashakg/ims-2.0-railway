@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Walkouts Dashboard (Pune Incentive Module i, Phase 4)
 // ============================================================================
@@ -20,6 +19,7 @@ import type {
   FUStatusResponse,
   WalkinTodayResponse,
 } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const REATTRIBUTE_ROLES = new Set([
   'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT',

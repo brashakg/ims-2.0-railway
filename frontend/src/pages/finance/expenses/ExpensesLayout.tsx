@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Expense Tracking & Approval System (layout)
 // ============================================================================
@@ -38,6 +37,7 @@ import {
   type ExpensesOutletContext,
 } from './expenseShared';
 import { Card, Labeled } from './expenseWidgets';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type TabType =
   | 'my' | 'approvals' | 'entry' | 'aging' | 'duplicates' | 'summary'

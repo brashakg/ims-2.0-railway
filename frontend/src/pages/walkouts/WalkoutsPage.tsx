@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Walkouts Page (Pune Incentive Module i, Phases 1-2)
 // ============================================================================
@@ -20,6 +19,7 @@ import {
 } from '../../types';
 import { WalkoutIntakeModal } from './WalkoutIntakeModal';
 import { WalkoutResultBadge } from './ResultPanel';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const RESULT_OPTIONS = ['DUE', 'NEGATIVE', 'CONVERTED', 'none'] as const;
 type ResultOption = typeof RESULT_OPTIONS[number];

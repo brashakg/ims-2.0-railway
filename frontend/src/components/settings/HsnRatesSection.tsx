@@ -1,4 +1,3 @@
-import { getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Settings: HSN & GST Rates (SUPERADMIN/ADMIN)
 // ============================================================================
@@ -13,6 +12,7 @@ import { useToast } from '../../context/ToastContext';
 // Direct import (barrel re-export gotcha for newly-added services).
 import { hsnApi, type HsnRate } from '../../services/api/hsn';
 import { categoryHintOptions, loadHsnRates } from '../../constants/gstRuntime';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 // The Category selects offer the backend's REPORTING-HINT vocabulary
 // (gst_rates.py _CATEGORY_HINT distinct values), SERVER-FED via

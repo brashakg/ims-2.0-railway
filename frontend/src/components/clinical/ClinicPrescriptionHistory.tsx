@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Clinic Prescription History + Edit (per customer)
 // ============================================================================
@@ -27,6 +26,7 @@ import { PrescriptionForm } from '../pos/PrescriptionForm';
 import { formatRxPower, type RxPowerKind } from './RxPowerInput';
 // PATIENT SAFETY: one display formatter, one blank-vs-zero rule.
 import { formatPowerOrDash } from '../../utils/rxPowerValue';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface FamilyMember {
   patient_id: string | null;

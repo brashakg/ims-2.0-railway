@@ -1,4 +1,3 @@
-import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Vendor Portal (public, token-auth via URL)
 // ============================================================================
@@ -23,6 +22,7 @@ import {
   type VendorPortalListResponse,
   type VendorPortalStatus,
 } from '../../services/api/vendorPortal';
+import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 
 // ----------------------------------------------------------------------------
 // Status taxonomy — mirrors the backend PORTAL_STATUSES set

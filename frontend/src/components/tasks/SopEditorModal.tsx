@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — SOP Editor Modal (Phase 6.14)
 // ============================================================================
@@ -18,6 +17,7 @@ import { tasksApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { useStoreStaff } from '../../pages/tasks/tasksQueries';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 export interface SopStep {
   step_number: number;

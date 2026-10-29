@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // Purchase Invoices - P3 variance-approval panel + quick-approve modal.
 // MOVED verbatim out of ../PurchaseInvoicesTab.tsx by the Wave 6 file diet.
@@ -15,6 +14,7 @@ import {
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import { inr, APPROVE_ROLES } from './shared';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 // ============================================================================
 // P3: Variance-Approval panel

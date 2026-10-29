@@ -18,8 +18,9 @@ import {
   isAwaitingSalesConfirmation,
   QC_ACTIONABLE_STATUSES,
   resolveItemPrescriptionId,
-  backendMessage,
+  dcHardlockMessage,
 } from '../qcHandover';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 describe('hasQcOnFile', () => {
   it('accepts a QC pass or an audited waiver', () => {
@@ -174,35 +175,34 @@ describe('resolveItemPrescriptionId', () => {
   });
 });
 
-describe('backendMessage', () => {
-  it('renders a canonical API rejection without an axios response wrapper', () => {
-    const err = buildApiError({ response: { status: 409, data: {
-      detail: { code: 'DC_HARDLOCK', message: 'No DC logged.' },
-    } } } as unknown as Parameters<typeof buildApiError>[0]);
-    expect(backendMessage(err, 'generic')).toBe('No DC logged.');
+const rejected = (status: number, detail: unknown) => buildApiError({
+  response: { status, data: { detail } },
+} as unknown as Parameters<typeof buildApiError>[0]);
+
+describe('workshop rejections reach the counter', () => {
+  it('renders the gate sentence from the real client error', () => {
+    const err = rejected(409, 'Lens QC has not been recorded for workshop job WS-1. Ask workshop staff...');
+    expect(getErrorMessage(err, 'generic')).toContain('Lens QC has not been recorded');
   });
 
-  it('renders the gate sentence the counter needs to read', () => {
-    const err = {
-      response: {
-        data: {
-          detail:
-            'Lens QC has not been recorded for workshop job WS-1. Ask workshop staff...',
-        },
-      },
-    };
-    expect(backendMessage(err, 'generic')).toContain('Lens QC has not been recorded');
-  });
-
-  it('unwraps an object detail (the DC hardlock shape)', () => {
-    const err = { response: { data: { detail: { code: 'DC_HARDLOCK', message: 'No DC logged.' } } } };
-    expect(backendMessage(err, 'generic')).toBe('No DC logged.');
-  });
-
-  it('falls back when there is no detail at all', () => {
-    expect(backendMessage(new Error('boom'), 'Failed to update job status')).toBe(
+  it("keeps the operation's fallback for a local fault", () => {
+    expect(getErrorMessage(new TypeError("Cannot read properties of undefined (reading 'x')"), 'Failed to update job status')).toBe(
       'Failed to update job status',
     );
-    expect(backendMessage({ response: { data: { detail: '' } } }, 'generic')).toBe('generic');
+  });
+});
+
+describe('dcHardlockMessage (F9 create-job banner)', () => {
+  it('opens the banner from the canonical ApiError, which has no .response', () => {
+    expect(dcHardlockMessage(rejected(422, { code: 'DC_HARDLOCK', message: 'No DC logged.' }))).toBe('No DC logged.');
+    expect(dcHardlockMessage(rejected(403, { code: 'DC_HARDLOCK_OVERRIDE_FORBIDDEN' }))).toBe(
+      'No Delivery Challan logged for this lens.',
+    );
+  });
+
+  it('stays closed for every other rejection', () => {
+    expect(dcHardlockMessage(rejected(422, 'Prescription belongs to another patient'))).toBeNull();
+    expect(dcHardlockMessage(rejected(409, { code: 'OTHER', message: 'x' }))).toBeNull();
+    expect(dcHardlockMessage(new TypeError('boom'))).toBeNull();
   });
 });

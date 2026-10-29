@@ -3,6 +3,7 @@
 // ============================================================================
 
 import api from './client';
+import { getErrorDetail } from '../../utils/errorHandler';
 
 // ── Family-member guard (owner ruling 2026-09-04: "block it outright") ──────
 // Customer identity is mobile-primary. POST /customers REFUSES (409) a number
@@ -95,8 +96,7 @@ export type CustomerConflict = FamilyMemberConflict | OwnAccountConflict | House
 /** The structured `detail` of a rejected request, from the ApiError the client
  *  throws (`.detail`) or a raw axios error alike; undefined when not an object. */
 function conflictDetailFrom(err: unknown): Record<string, unknown> | undefined {
-  const e = err as { detail?: unknown; response?: { data?: { detail?: unknown } } } | null;
-  const detail = e?.detail ?? e?.response?.data?.detail;
+  const detail = getErrorDetail(err);
   return detail && typeof detail === 'object' ? (detail as Record<string, unknown>) : undefined;
 }
 

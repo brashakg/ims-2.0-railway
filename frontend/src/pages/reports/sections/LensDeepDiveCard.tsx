@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — TechCherry R1.3 — Lens Deep Dive
 // ============================================================================
@@ -8,6 +7,7 @@ import { getErrorMessage } from '../../../utils/errorHandler';
 import { useEffect, useState } from 'react';
 import { AlertTriangle, Eye, Info, Loader2 } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getLensDeepDive>>;
 

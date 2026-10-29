@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - New Collection (Phase 1) — governed chip builder
 // ============================================================================
@@ -41,6 +40,7 @@ import {
   type CollectionPreview,
 } from '../../services/api/collectionsInsights';
 import { rupee, fmtInt } from './collectionsShared';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Fields whose vocabulary is owned by a dedicated chip group (or that make no
 // sense as attribute chips) — excluded from the generic attribute groups.

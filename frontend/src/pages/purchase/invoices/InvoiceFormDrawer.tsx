@@ -33,8 +33,9 @@ import { useAuth } from '../../../context/AuthContext';
 import { useStores } from '../../../hooks/usePOSQueries';
 import { PurchaseShopName, shopNameOf, usePurchaseShop } from '../purchaseShop';
 import type { Supplier } from '../purchaseTypes';
-import { inr, GST_RATES, errMsg, APPROVE_ROLES, rcmNote } from './shared';
+import { inr, GST_RATES, APPROVE_ROLES, rcmNote } from './shared';
 import { istDayString } from '../../../utils/datetime';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 // The product ids a PRODUCT_NOT_CATALOGUED refusal names, so the accountant can
 // ask the cataloguer without retyping them. Read off the client's ApiError
@@ -174,7 +175,7 @@ export function InvoiceFormDrawer({
       purchaseInvoicesApi
         .preview(payload)
         .then((data) => { if (live) setPreview({ key: taxKey, data }); })
-        .catch((e) => { if (live) setPreview({ key: taxKey, error: errMsg(e, 'Could not work out the tax for this bill') }); });
+        .catch((e) => { if (live) setPreview({ key: taxKey, error: getErrorMessage(e, 'Could not work out the tax for this bill') }); });
     }, 250);
     return () => { live = false; clearTimeout(t); };
     // taxKey carries every input the preview depends on.
@@ -223,7 +224,7 @@ export function InvoiceFormDrawer({
       onBooked(bookedAt);
     } catch (e) {
       const blocked = blockedProductIds(e);
-      toast.error(errMsg(e, 'Failed to book purchase invoice'));
+      toast.error(getErrorMessage(e, 'Failed to book purchase invoice'));
       if (blocked.length > 0) {
         // The accountant holds no products:write, so the refusal has to come
         // with a way forward: raise the task for the cataloguer.
@@ -238,7 +239,7 @@ export function InvoiceFormDrawer({
           toast.info(ask.message);
         } catch (askErr) {
           // Never silent: the accountant must know nobody was asked.
-          toast.warning(errMsg(askErr, 'The catalogue manager could not be asked. Try again.'));
+          toast.warning(getErrorMessage(askErr, 'The catalogue manager could not be asked. Try again.'));
         }
       }
     } finally {

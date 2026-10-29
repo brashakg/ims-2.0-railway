@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // Shift Setup (HR Page - "Shifts" tab)
 // ============================================================================
@@ -13,6 +12,7 @@ import { hrApi } from '../../services/api';
 import type { Shift } from '../../services/api/hr';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Python weekday() convention: Monday=0 .. Sunday=6.
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];

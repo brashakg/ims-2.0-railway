@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - POS sale-completion screen (Wave 4, owner spec 12)
 // ============================================================================
@@ -63,6 +62,7 @@ import { inr } from '../../../components/print/legalPrimitives';
 import { istDayString } from '../../../utils/datetime';
 import { useAuth } from '../../../context/AuthContext';
 import type { MTDStaffEntry, PerStaffCard, PointsLog } from '../../../types';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Server shapes (GET /orders/{id} is camelCase via order_to_frontend; the axios

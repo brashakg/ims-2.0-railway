@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Store-credit / credit-note ledger card
 // ============================================================================
@@ -13,6 +12,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { formatDateTimeIST } from '../../utils/datetime';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface Entry {
   entry_id: string; type: string; amount: number; delta: number;

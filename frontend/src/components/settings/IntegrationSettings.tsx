@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Integration Settings (supplementary panel)
 // ============================================================================
@@ -24,6 +23,7 @@ import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { adminIntegrationApi } from '../../services/api/settings';
 import { IntegrationStatusCard } from '../integrations/IntegrationStatusCard';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 export function IntegrationSettings() {
   return (

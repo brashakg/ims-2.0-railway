@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Follow-up Panel (Pune Incentive Module i, 3-round + approval)
 // ============================================================================
@@ -39,6 +38,7 @@ import {
   type FollowUpStatus,
   type FollowUpApprovalDecision,
 } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type RoundNum = 1 | 2 | 3;
 

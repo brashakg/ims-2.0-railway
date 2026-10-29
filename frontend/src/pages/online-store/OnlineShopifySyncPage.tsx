@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store : Shopify sync CONTROL PANEL  (BVI Phase 6)
 // ============================================================================
@@ -63,6 +62,7 @@ import OnlineStoreSyncBanner, {
 } from '../../components/online-store/OnlineStoreSyncBanner';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ----------------------------------------------------------------------------
 // Per-entity descriptor: which status-count block + all-pending filter it uses.

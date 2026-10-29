@@ -1,4 +1,3 @@
-import { getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — F50 Send-to-Floor Drawer (clinical -> retail handover)
 // ============================================================================
@@ -13,6 +12,7 @@ import { useState } from 'react';
 import { X, Plus } from 'lucide-react';
 import { clinicalApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 const CATEGORY_OPTIONS = [
   'Progressive',

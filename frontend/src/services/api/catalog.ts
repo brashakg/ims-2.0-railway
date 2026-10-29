@@ -8,6 +8,7 @@
 // services/api barrel — the barrel re-export fails for new modules (TS2614).
 
 import api from './client';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // A catalog_products doc as the list/detail endpoints return it. Everything is
 // optional so a partial/legacy doc never breaks rendering.
@@ -153,17 +154,11 @@ export class CatalogRequestError extends Error {
   }
 }
 
-// Mirror of the interceptor's detail flattening for the validateStatus path.
+// The validateStatus path reads the body itself; the ONE message parser
+// (errorHandler.getErrorMessage) turns it into the sentence staff see.
 function flattenErrorDetail(data: unknown, fallback: string): string {
-  const detail = (data as { detail?: unknown } | null | undefined)?.detail;
-  if (typeof detail === 'string' && detail) return detail;
-  if (Array.isArray(detail) && detail.length > 0) {
-    return detail
-      .map((d) => (d && typeof d === 'object' && 'msg' in d ? String((d as { msg: unknown }).msg) : String(d)))
-      .join('. ');
-  }
-  const message = (data as { message?: unknown } | null | undefined)?.message;
-  return typeof message === 'string' && message ? message : fallback;
+  const body = data as { detail?: unknown; message?: unknown } | null | undefined;
+  return getErrorMessage({ detail: body?.detail, message: body?.message }, fallback);
 }
 
 // One review-checklist row from the promote dry-run (a door validation gap).

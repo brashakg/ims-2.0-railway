@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Catalog Manager: product slide-over drawer
 // ============================================================================
@@ -71,6 +70,7 @@ import {
 } from './productAddShared';
 import { writeReviewQueue } from './reviewQueue';
 import { ModelFamilyPanel } from './ModelFamilyPanel';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Shared item shape with CatalogManagerPage.

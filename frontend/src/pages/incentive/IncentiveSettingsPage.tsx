@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Incentive Settings (Pune Incentive Module iii configuration)
 // ============================================================================
@@ -31,6 +30,7 @@ import type {
   EligibilityBand,
   SupervisorBonus,
 } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type StaffOpt = { user_id: string; name: string };
 

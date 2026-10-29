@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Promotions admin (F11 advanced promotions + F12 cross-category bundles)
 // ============================================================================
@@ -20,6 +19,7 @@ import {
   type PromoRuleCreate,
   type PromoType,
 } from '../../services/api/promotions';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const PROMO_TYPES: { id: PromoType; label: string; hint: string }[] = [
   { id: 'THRESHOLD', label: 'Threshold spend', hint: 'Spend >= X, get % off' },

@@ -26,11 +26,12 @@ import {
 import { useToast } from '../../../context/ToastContext';
 import { usePurchaseShop } from '../purchaseShop';
 import type { Supplier } from '../purchaseTypes';
-import { inr, errMsg, rcmNote } from './shared';
+import { inr, rcmNote } from './shared';
 import { ExceptionsPanel } from './ExceptionsPanel';
 import { GrnPickerModal, DcPickerModal, RowShop } from './pickers';
 import { InvoiceFormDrawer, blankLine, type EditLine } from './InvoiceFormDrawer';
 import { InvoiceDetailDrawer, MatchBadge, ConfigNote } from './InvoiceDetailDrawer';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 // ============================================================================
 // Tab root: list + GRN picker + invoice form
@@ -58,7 +59,7 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
       const res = await purchaseInvoicesApi.list(storeId ? { store_id: storeId } : {});
       setInvoices(res.purchase_invoices);
     } catch (e) {
-      setError(errMsg(e, 'Failed to load purchase invoices'));
+      setError(getErrorMessage(e, 'Failed to load purchase invoices'));
     } finally {
       setLoading(false);
     }
@@ -108,7 +109,7 @@ export function PurchaseInvoicesTab({ suppliers }: { suppliers: Supplier[] }) {
         draft.lines ?? [],
       );
     } catch (e) {
-      toast.error(errMsg(e, 'Could not open the invoice draft for this receipt'));
+      toast.error(getErrorMessage(e, 'Could not open the invoice draft for this receipt'));
     }
   };
 

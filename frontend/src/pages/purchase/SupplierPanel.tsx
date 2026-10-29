@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Suppliers List Panel
 // ============================================================================
@@ -26,6 +25,7 @@ import { useGstStateCodes } from '../../hooks/useGstStateCodes';
 import { gstinStateCode } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
 import { owedText, rupees } from './PurchasesThisMonthSection';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // How a purchase from this vendor is taxed: the SERVER's verdict
 // (GET /vendors/po-gst-heads -> usePoGstHeads: org_validation.shop_gstin +

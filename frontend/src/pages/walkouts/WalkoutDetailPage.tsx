@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Walkout Detail Page (Pune Incentive Module i, Phase 2)
 // ============================================================================
@@ -37,6 +36,7 @@ import {
 } from '../../types';
 import { FollowUpPanel } from './FollowUpPanel';
 import { ResultPanel, WalkoutResultBadge } from './ResultPanel';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const REATTRIBUTE_ROLES = new Set([
   'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT',

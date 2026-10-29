@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Clinical Patient Intake Modal
 // ============================================================================
@@ -33,6 +32,7 @@ import {
 } from '../../utils/customerPayload';
 import { validateEyePair, VA_OPTIONS } from '../../constants/rxLimits';
 import { RxPowerInput } from './RxPowerInput';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Per-eye refraction values (strings while editing; parsed on submit).
 interface EyeRx {

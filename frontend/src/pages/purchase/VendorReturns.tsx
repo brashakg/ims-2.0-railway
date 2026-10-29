@@ -23,7 +23,7 @@ import api from '../../services/api/client';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
 import { COST_ROLES } from '../../components/common/CostCell';
 import { PURCHASE_ROLES } from './purchaseRoles';
-import { errMsg } from './invoices/shared';
+import { getErrorMessage } from '../../utils/errorHandler';
 import { SupplierCreditConfirmation } from './SupplierCreditConfirmation';
 import type { SupplierCreditResult } from '../../services/api/supplierCredits';
 
@@ -352,7 +352,7 @@ export function VendorReturns() {
       })).data;
     } catch (e) {
       if ((e as { response?: { status?: number } })?.response?.status !== 404) {
-        toast.error(errMsg(e, 'Could not look that barcode up'));
+        toast.error(getErrorMessage(e, 'Could not look that barcode up'));
         return;
       }
     }
@@ -403,7 +403,7 @@ export function VendorReturns() {
         options,
       }));
     } catch (e) {
-      toast.error(errMsg(e, 'Could not look that product up'));
+      toast.error(getErrorMessage(e, 'Could not look that product up'));
     }
   };
 
@@ -469,7 +469,7 @@ export function VendorReturns() {
       setReturns((refreshResp.data.returns || [])
         .filter((ret: VendorReturn) => !linkedVendorId || ret.vendor_id === linkedVendorId).map(shownReturn));
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to create vendor return'));
+      toast.error(getErrorMessage(e, 'Failed to create vendor return'));
     } finally {
       setCreating(false);
     }
@@ -508,7 +508,7 @@ export function VendorReturns() {
       }
       toast.success(`Status updated to ${STATUS_LABELS[newStatus] || newStatus}`);
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to update return status'));
+      toast.error(getErrorMessage(e, 'Failed to update return status'));
     }
   };
 
@@ -536,7 +536,7 @@ export function VendorReturns() {
       setReturns((prev) => prev.map((r) => r.return_id === ret.return_id ? updated : r));
       toast.success('Return confirmed; the debit note is not yet issued');
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to confirm return'));
+      toast.error(getErrorMessage(e, 'Failed to confirm return'));
     } finally {
       setConfirmingDraft(null);
     }
@@ -564,7 +564,7 @@ export function VendorReturns() {
       toast.success('Prices set');
       setPricing(null);
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to set the prices'));
+      toast.error(getErrorMessage(e, 'Failed to set the prices'));
     } finally {
       setPricingBusy(false);
     }
@@ -583,7 +583,7 @@ export function VendorReturns() {
           : `Debit note ${res.debit_note.debit_note_number} issued`,
       );
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to issue debit note (ADMIN / ACCOUNTANT only)'));
+      toast.error(getErrorMessage(e, 'Failed to issue debit note (ADMIN / ACCOUNTANT only)'));
     } finally {
       setDnBusy(null);
     }

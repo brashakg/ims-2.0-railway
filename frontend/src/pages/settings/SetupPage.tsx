@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Employee Onboarding Wizard
 // ============================================================================
@@ -47,6 +46,7 @@ import {
   FileText, Upload, Trash2, Loader2, CreditCard, Eye,
 } from 'lucide-react';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Store shape (read-only) — used only for the onboarding store-assignment picker.

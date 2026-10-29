@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Add / Edit Supplier Modal
 // ============================================================================
@@ -30,6 +29,7 @@ import { vendorsApi } from '../../services/api';
 import { useGstStateCodes } from '../../hooks/useGstStateCodes';
 import { gstinStateCode, validateGSTNumber } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface SupplierFormModalProps {
   onClose: () => void;

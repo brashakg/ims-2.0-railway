@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Daily Scorecard (Pune Incentive Module ii)
 // ============================================================================
@@ -25,6 +24,7 @@ import type {
   EligibilityBand,
   WalkinStatusResponse,
 } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const CATEGORIES: Array<{ key: keyof DailyScores; label: string; max: number; auto?: boolean }> = [
   { key: 'attendance', label: 'Attendance', max: 10 },

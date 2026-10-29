@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Workshop: vendor / lens-lab capture block
 // ============================================================================
@@ -8,6 +7,7 @@ import { useState, useEffect } from 'react';
 import { workshopApi, vendorsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import type { Job } from './shared';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ============================================================================
 // Vendor capture block — admin stamps the lens lab + their order ID +

@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Online Orders  (BVI Phase 3b)
 // ============================================================================
@@ -63,6 +62,7 @@ import {
   type OnlineStoreLoadFailure,
 } from '../../services/api/onlineStore';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Row model + fetch (page-local; the backend list is server-projected truth).

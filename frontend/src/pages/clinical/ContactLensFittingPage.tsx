@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Contact Lens Fitting Page
 // ============================================================================
@@ -28,6 +27,7 @@ import { customerApi, prescriptionApi } from '../../services/api';
 import { RxPowerInput, type RxPowerKind } from '../../components/clinical/RxPowerInput';
 import { formatPowerOrDash } from '../../utils/rxPowerValue';
 import { validateEyeDetailed } from '../../constants/rxLimits';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Kept in sync with backend prescriptions.CL_MODALITIES.
 const MODALITIES = ['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY', 'COLOR'] as const;

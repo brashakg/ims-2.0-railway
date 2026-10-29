@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — TechCherry R1.2 — Price Band Analysis
 // ============================================================================
@@ -8,6 +7,7 @@ import { getErrorMessage } from '../../../utils/errorHandler';
 import { Fragment, useEffect, useState } from 'react';
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, BarChart3, Loader2 } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getPriceBands>>;
 

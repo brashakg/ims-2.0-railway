@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Cash Register / EOD reconciliation (Accounts)
 // ============================================================================
@@ -39,6 +38,7 @@ import {
   hasCount,
   type DenomRow,
 } from '../../utils/denominations';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 

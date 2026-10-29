@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — TechCherry R1.4 — Seasonality
 // ============================================================================
@@ -8,6 +7,7 @@ import { getErrorMessage } from '../../../utils/errorHandler';
 import { useEffect, useState } from 'react';
 import { AlertTriangle, CalendarDays, Loader2 } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getSeasonality>>;
 

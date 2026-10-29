@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // E2 - Policy Matrix (schema-driven form)
 // The /settings/policies/registry response IS the form definition: every control
@@ -14,6 +13,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { policiesApi } from '../../services/api';
 import type { PolicySpecPublic, PolicyEffective } from '../../services/api';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const SOURCE_TINT: Record<string, string> = {
   store: 'bg-blue-50 text-blue-700',

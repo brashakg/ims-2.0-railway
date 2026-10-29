@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Cataloguing Scorecard + QC review (attribution phase 2)
 // ============================================================================
@@ -34,6 +33,7 @@ import {
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const WINDOWS = [7, 30, 90] as const;
 

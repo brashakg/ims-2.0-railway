@@ -1,4 +1,3 @@
-import { getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Settings: User Management & Auth
 // ============================================================================
@@ -23,6 +22,7 @@ import {
   getHighestRoleLevel,
   CATEGORY_DEFINITIONS,
 } from './settingsTypes';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 // ============================================================================
 // Transform helpers

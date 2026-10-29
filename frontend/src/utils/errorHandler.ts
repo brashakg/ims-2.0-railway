@@ -12,6 +12,7 @@ type ErrorShape = {
   status?: number;
   detail?: unknown;
   message?: unknown;
+  isAxiosError?: boolean;
   response?: { status?: number; data?: { detail?: unknown; message?: unknown } };
 };
 
@@ -27,18 +28,48 @@ export function getErrorStatus(error: unknown): number | undefined {
 
 export function getErrorDetail(error: unknown): unknown {
   const value = errorShape(error);
-  // Canonical errors deliberately omit 5xx payloads. Never reconstruct one.
-  return value?.detail ?? value?.response?.data?.detail;
+  if (value?.detail !== undefined) return value.detail;
+  // Same barrier as buildApiError: a 5xx payload is internal (a traceback, a
+  // KeyError), except the deliberate 503 safe-stop. Never reconstruct one.
+  const status = value?.response?.status;
+  if (status !== undefined && status >= 500 && status !== 503) return undefined;
+  return value?.response?.data?.detail;
+}
+
+/**
+ * The request-time RBAC middleware's developer text:
+ *   "Forbidden: GET /api/v1/payroll/run/rows requires one of ADMIN"
+ * A store manager must never be shown an HTTP method and a URL path, so every
+ * reader in this file drops text in that shape for the caller's fallback.
+ */
+export function isMiddlewareText(text: string): boolean {
+  return /^forbidden:/i.test(text.trim()) || text.includes('/api/v1/');
+}
+
+const usable = (text: unknown): text is string =>
+  typeof text === 'string' && text.trim() !== '' && !isMiddlewareText(text);
+
+// A JS runtime fault, a browser DOMException or a raw axios error carries
+// developer text ("Cannot read properties of undefined", "Network Error",
+// "Request failed with status code 500"). The shared client's ApiError and a
+// plain Error our own code threw on purpose (printDocuments rethrowing the
+// server's refusal) carry a sentence written for staff.
+const DEVELOPER_ERRORS = [TypeError, SyntaxError, RangeError, ReferenceError, EvalError, URIError];
+
+function messageIsForStaff(value: ErrorShape): boolean {
+  if (value.isAxiosError || 'response' in value) return false;
+  if (typeof DOMException !== 'undefined' && value instanceof DOMException) return false;
+  return !DEVELOPER_ERRORS.some((E) => value instanceof E);
 }
 
 /** One plain-text message for every screen; structured details never reach JSX. */
 export function getErrorMessage(error: unknown, fallback: string): string {
   const value = errorShape(error);
   const detail = getErrorDetail(error);
-  if (typeof detail === 'string' && detail.trim()) return detail;
+  if (usable(detail)) return detail;
   if (Array.isArray(detail) && detail.length > 0) {
     const first = detail[0] as { loc?: unknown[]; msg?: unknown } | null;
-    if (typeof first?.msg === 'string' && first.msg.trim()) {
+    if (usable(first?.msg)) {
       const field = Array.isArray(first.loc) ? String(first.loc[first.loc.length - 1] ?? '') : '';
       return field ? `${field}: ${first.msg}` : first.msg;
     }
@@ -46,10 +77,10 @@ export function getErrorMessage(error: unknown, fallback: string): string {
   if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
     const payload = detail as { message?: unknown; error?: unknown };
     const message = payload.message ?? payload.error;
-    if (typeof message === 'string' && message.trim()) return message;
+    if (usable(message)) return message;
   }
-  if (typeof value?.message === 'string' && value.message.trim()) return value.message;
-  if (typeof error === 'string' && error.trim()) return error;
+  if (value && messageIsForStaff(value) && usable(value.message)) return value.message;
+  if (usable(error)) return error;
   return fallback;
 }
 
@@ -71,34 +102,13 @@ export function isForbiddenError(error: unknown): boolean {
  *
  * The payroll router writes its details for humans ("Payroll and salary data is
  * restricted to administrators. Please ask an administrator."), so showing that
- * verbatim beats inventing a second wording on the client.
- *
- * BUT the request-time RBAC middleware answers first when a role is denied by
- * the policy table, and its body is developer text:
- *   "Forbidden: GET /api/v1/payroll/run/rows requires one of ADMIN"
- * A store manager must never be shown an HTTP method and a URL path. Details in
- * that shape are dropped in favour of the caller's plain-English fallback.
+ * verbatim beats inventing a second wording on the client. Middleware text
+ * (isMiddlewareText) falls back to the caller's plain-English wording.
  */
 export function forbiddenDetail(error: unknown, fallback: string): string {
   const detail = getErrorDetail(error);
-  if (typeof detail !== 'string' || !detail.trim()) return fallback;
-  const looksLikeMiddlewareText = /^forbidden:/i.test(detail.trim()) || detail.includes('/api/v1/');
-  return looksLikeMiddlewareText ? fallback : detail;
+  return usable(detail) ? detail : fallback;
 }
-
-/**
- * The server's OWN message for a rejected write, in the two shapes FastAPI
- * sends it: a plain `detail` string (a deliberate business/clinical rejection,
- * e.g. "Right eye CYL value -50 is outside the valid range (-6 to 6)"), and the
- * 422 validation list, where the useful part is the last element of `loc` plus
- * `msg`. Anything else falls back to the caller's plain-English wording.
- *
- * Shared because an eye exam is now saved from TWO screens -- the first
- * recording and the clinic's Edit screen -- and a clinician must not be told
- * WHICH FIELD is wrong on one of them and "failed to save" on the other.
- */
-// Kept as an alias for existing clinical callers; no second message parser.
-export const apiDetailMessage = getErrorMessage;
 
 export function formatApiError(error: unknown): FormattedError {
   if (error instanceof Error) {

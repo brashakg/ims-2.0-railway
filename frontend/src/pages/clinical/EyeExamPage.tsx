@@ -29,7 +29,7 @@ import { Loader2, Play } from 'lucide-react';
 import { clinicalApi, prescriptionApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { apiDetailMessage } from '../../utils/errorHandler';
+import { getErrorMessage } from '../../utils/errorHandler';
 import { EyeExamWorkbench } from '../../components/clinical/EyeExamWorkbench';
 import { eyeTestWriteBody } from '../../components/clinical/eyeTestPayload';
 import { previousRxFromFamily } from '../../components/clinical/rxDrift';
@@ -157,7 +157,7 @@ export function EyeExamPage() {
     } catch (err: unknown) {
       // The backend's specific message (e.g. "Right eye CYL value -50 is
       // outside the valid range") so the optometrist knows which field to fix.
-      toast.error(apiDetailMessage(err, mode === 'exam' ? 'Failed to save eye test' : 'Failed to update eye test'));
+      toast.error(getErrorMessage(err, mode === 'exam' ? 'Failed to save eye test' : 'Failed to update eye test'));
     }
   };
 
@@ -170,7 +170,7 @@ export function EyeExamPage() {
       await invalidate();
       navigate('/clinical/queue');
     } catch (err: unknown) {
-      toast.error(apiDetailMessage(err, 'Could not save the exam'));
+      toast.error(getErrorMessage(err, 'Could not save the exam'));
     }
   };
 

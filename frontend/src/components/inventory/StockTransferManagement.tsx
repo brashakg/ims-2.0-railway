@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Stock Transfer Management
 // ============================================================================
@@ -39,6 +38,7 @@ import * as gates from './transferPermissions';
 import { cancelWithFreshCheck } from './transferCancelGuard';
 // Shop time: naive backend stamps are UTC (audit F53).
 import { formatDateIST, formatDateTimeIST } from '../../utils/datetime';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type TransferDirection = 'outgoing' | 'incoming' | 'all';
 // Which sub-flow the details modal is showing.

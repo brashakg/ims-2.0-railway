@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Workshop Productivity Report
 // ============================================================================
@@ -10,6 +9,7 @@ import { useEffect, useState } from 'react';
 import { AlertTriangle, Download, Loader2, Wrench } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
 import { exportToCSV } from '../../../utils/exportUtils';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getWorkshopProductivity>>;
 

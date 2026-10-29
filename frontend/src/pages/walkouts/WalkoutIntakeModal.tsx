@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Walkout Intake Modal (Pune Incentive Module i, Phase 1)
 // ============================================================================
@@ -34,6 +33,7 @@ import type {
   PurchasePlan,
   CreateWalkoutRequest,
 } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface WalkoutIntakeModalProps {
   isOpen: boolean;

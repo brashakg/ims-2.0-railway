@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Payout Snapshots List (Pune Incentive Module iii)
 // ============================================================================
@@ -12,6 +11,7 @@ import { ArrowLeft, RefreshCw, Loader2, Download, Lock, Check } from 'lucide-rea
 import { payoutApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import type { PayoutSnapshot } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 function inr(n: number | null | undefined): string {
   if (n == null) return '—';

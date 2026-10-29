@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Walkout Result Panel (Pune Incentive Module i, Phase 3)
 // ============================================================================
@@ -12,6 +11,7 @@ import { ShoppingCart, Loader2 } from 'lucide-react';
 import { walkoutsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import type { Walkout, WalkoutResultValue } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface ResultPanelProps {
   walkout: Walkout;

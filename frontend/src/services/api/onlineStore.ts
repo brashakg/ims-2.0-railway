@@ -10,6 +10,7 @@
 // the shell always renders. Import directly (not via the api barrel).
 
 import api from './client';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 /** Per-section count surfaced on the shell cards. All optional + nullable so a
  *  partial backend payload never breaks rendering. */
@@ -54,10 +55,9 @@ export type OnlineStoreLoadFailure = 'forbidden' | 'unavailable' | 'error';
 /** Classify a failed online-store read (see OnlineStoreLoadFailure). 401s are
  *  intercepted by the api client (redirect to /login) and never reach here. */
 export function classifyLoadError(err: unknown): OnlineStoreLoadFailure {
-  const status = (err as { response?: { status?: number } } | undefined)?.response
-    ?.status;
+  const status = getErrorStatus(err);
   if (status === 403) return 'forbidden';
-  if (_isUnavailable(err)) return 'unavailable';
+  if (status === 404 || status === 501) return 'unavailable';
   return 'error';
 }
 
@@ -569,13 +569,6 @@ export interface CatalogPick {
 }
 
 const COLLECTIONS_BASE = '/online-store/collections';
-
-/** Whether an axios error is a "backend not deployed yet" signal (404/501) —
- *  reads degrade silently on these so the screen renders pre-Phase-2-backend. */
-function _isUnavailable(err: unknown): boolean {
-  const status = (err as { response?: { status?: number } } | undefined)?.response?.status;
-  return status === 404 || status === 501;
-}
 
 // Map the backend smart-rule relation vocabulary <-> the FE `op` vocabulary.
 // The backend stores rules flat (top-level `rules:[{field,relation,value}]` +

@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Notifications (full screen)
 // ============================================================================
@@ -11,6 +10,7 @@ import { useToast } from '../../context/ToastContext';
 import { notificationsApi, MAX_SNOOZE, type AppNotification } from '../../services/api/notifications';
 import { formatDateTimeIST, toDate } from '../../utils/datetime';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type Filter = 'all' | 'unread';
 

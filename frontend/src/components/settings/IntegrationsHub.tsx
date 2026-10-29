@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Unified Integrations Hub
 // ============================================================================
@@ -40,6 +39,7 @@ import {
   type IntegrationStatusReport,
   type AnthropicModel,
 } from '../../services/api/integrations';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Types

@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Workshop Page - state, loaders and handlers
 // ============================================================================
@@ -19,9 +18,10 @@ import type { LabelModalSpec } from '../../components/labels/LabelPreviewModal';
 import { printJobLabel } from '../../components/labels/printLabel';
 import { resolveStoreIdentity } from '../../components/print/storeIdentity';
 import type { LensFittingFormValue } from '../../components/pos/LensFittingFormModal';
-import { resolveItemPrescriptionId, backendMessage } from './qcHandover';
+import { resolveItemPrescriptionId, dcHardlockMessage } from './qcHandover';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import type { Job, LensStatus } from './shared';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 export function useWorkshopPage() {
   const { user } = useAuth();
@@ -83,7 +83,7 @@ export function useWorkshopPage() {
       setSelectedJob(null);
       await loadJobs();
     } catch (err) {
-      toast.error(backendMessage(err, 'Failed to save fitting details'));
+      toast.error(getErrorMessage(err, 'Failed to save fitting details'));
     } finally {
       setFittingSaving(false);
     }
@@ -270,13 +270,9 @@ const loadJobs = async () => {
       }
     } catch (err: any) {
       // F9 — surface the DC hardlock as an actionable banner inside the modal.
-      const detail = err?.response?.data?.detail;
-      const code = typeof detail === 'object' ? detail?.code : undefined;
-      if (code === 'DC_HARDLOCK' || code === 'DC_HARDLOCK_OVERRIDE_FORBIDDEN') {
-        setDcHardlock(
-          (typeof detail === 'object' && detail?.message) ||
-            'No Delivery Challan logged for this lens.',
-        );
+      const hardlock = dcHardlockMessage(err);
+      if (hardlock) {
+        setDcHardlock(hardlock);
       } else {
         // The create-time Rx 422s (unknown / WRONG-PATIENT / expired) return a
         // plain-string detail. The wrong-patient sentence and the "a Store
@@ -325,7 +321,7 @@ const loadJobs = async () => {
       // only true if we actually render it. A bare catch turned every refusal
       // into "Failed to update job status", which reads like a server fault and
       // sends staff hunting for a manager instead of running QC.
-      toast.error(backendMessage(err, 'Failed to update job status'));
+      toast.error(getErrorMessage(err, 'Failed to update job status'));
     }
   };
 

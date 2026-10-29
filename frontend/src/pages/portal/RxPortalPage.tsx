@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Customer Prescription (Rx) Portal (public, OTP-gated)
 // ============================================================================
@@ -23,10 +22,9 @@ import {
 } from '../../services/api/portal';
 // ONE display formatter for a dioptric power (explicit "+", blank stays blank).
 import { formatPowerOrDash } from '../../utils/rxPowerValue';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type Step = 'phone' | 'otp' | 'view';
-
-const errMessage = getErrorMessage;
 
 function formatDate(value: string | null | undefined): string {
   if (!value) return '—';
@@ -65,7 +63,7 @@ export default function RxPortalPage() {
         if (resp.debug_otp) setOtp(resp.debug_otp);
         setStep('otp');
       } catch (e2: unknown) {
-        toast.error(errMessage(e2, 'Could not send a verification code. Please try again.'));
+        toast.error(getErrorMessage(e2, 'Could not send a verification code. Please try again.'));
       } finally {
         setSubmitting(false);
       }
@@ -90,7 +88,7 @@ export default function RxPortalPage() {
         setRx(data);
         setStep('view');
       } catch (e2: unknown) {
-        toast.error(errMessage(e2, 'That code did not work. Please try again.'));
+        toast.error(getErrorMessage(e2, 'That code did not work. Please try again.'));
       } finally {
         setSubmitting(false);
       }

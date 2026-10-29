@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Edit Customer modal (shared: Customers page + both POS tills)
 // ============================================================================
@@ -22,6 +21,7 @@ import { X, Loader2, AlertTriangle } from 'lucide-react';
 import { customerApi } from '../../services/api/customers';
 import type { UserRole } from '../../types';
 import { useAuth } from '../../context/AuthContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 /** Who may open the customer-edit door. Owner ruling 2026-09-03 added
  *  CASHIER + SALES_STAFF to the manager tier. */

@@ -1,4 +1,3 @@
-import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - New Lens Line modal (Power Grid cataloguing, P1)
 // ============================================================================
@@ -24,6 +23,7 @@ import {
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { COST_ROLES } from '../../components/common/CostCell';
+import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 
 interface Props {
   meta: LensCatalogMetaOptions | null;

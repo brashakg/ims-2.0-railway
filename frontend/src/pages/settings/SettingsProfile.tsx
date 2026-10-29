@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Settings: Profile & Business Settings
 // ============================================================================
@@ -12,6 +11,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api';
 import { authApi } from '../../services/api/auth';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ============================================================================
 // Profile Tab

@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Menus / Mega-Menu editor  (BVI Phase 3, "push-dark")
 // ============================================================================
@@ -66,6 +65,7 @@ import OnlineStoreSyncBanner, {
   formatPushResult,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Item-type vocabulary (mirrors the Shopify MenuItemType enum / BVI MenuItem).

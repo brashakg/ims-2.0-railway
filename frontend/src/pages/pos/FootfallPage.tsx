@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - N3 Footfall + conversion % (manual) page
 // ============================================================================
@@ -32,6 +31,7 @@ import type {
   PerStaffCard,
   FootfallEntryStatus,
 } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const EDIT_ROLES = new Set([
   'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER',

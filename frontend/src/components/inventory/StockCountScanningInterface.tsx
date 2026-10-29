@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Stock Count: scan every piece
 // ============================================================================
@@ -18,6 +17,7 @@ import { getErrorMessage } from '../../utils/errorHandler';
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Barcode, AlertCircle, Loader2, Search } from 'lucide-react';
 import { inventoryApi, productApi } from '../../services/api';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface Props {
   /** The in-progress count session every scan is written onto. */

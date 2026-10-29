@@ -1,4 +1,3 @@
-import { getErrorMessage } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 - Online Store - Products / PIM  (BVI Phase 1, rebuilt on the PIM)
 // ============================================================================
@@ -56,6 +55,7 @@ import OnlineStoreSyncBanner, {
 import { Pagination } from '../../components/common/Pagination';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const PAGE_SIZE = 50;
 

@@ -1,4 +1,3 @@
-import { getErrorStatus } from '../../utils/errorHandler';
 // ============================================================================
 // IMS 2.0 — Customer Order Tracking (public, tokenized link)
 // ============================================================================
@@ -14,6 +13,7 @@ import {
   AlertTriangle, RefreshCw,
 } from 'lucide-react';
 import { portalApi, type OrderTracking } from '../../services/api/portal';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 // Canonical order lifecycle, in display order. We render every step and mark
 // the ones that have happened (present in status_history) as complete, with
