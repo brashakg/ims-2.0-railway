@@ -371,6 +371,7 @@ export function PurgeDialog({
   const label = (r: BulkRowResult) => r.sku || r.name || r.product_id;
   const ready = (preview || []).filter((r) => r.status === 'ready');
   const refused = (preview || []).filter((r) => r.status === 'refused');
+  const onWebsite = ready.filter((r) => r.website);
 
   const apply = async () => {
     setBusy(true);
@@ -407,6 +408,12 @@ export function PurgeDialog({
                 This cannot be undone from the screen. These go for good:{' '}
                 <span className="font-mono font-semibold">{ready.map(label).join(', ')}</span>.
               </p>
+              {onWebsite.length > 0 && (
+                <p className="rounded-lg bg-red-50 px-3 py-2 text-red-900" data-testid="purge-website">
+                  These will also be REMOVED FROM THE WEBSITE:{' '}
+                  <span className="font-mono font-semibold">{onWebsite.map(label).join(', ')}</span>.
+                </p>
+              )}
               <p>Their names, sizes and colours become free to add again.</p>
             </>
           ) : (

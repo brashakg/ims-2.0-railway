@@ -286,6 +286,8 @@ export interface BulkRowResult {
   /** Permanent delete: the product's SKU, and the HTTP code of a refusal. */
   sku?: string;
   code?: number;
+  /** Permanent delete: it is on the website and is removed from it first. */
+  website?: boolean;
 }
 
 /** Who gets a flag task (the server's own rule names them). */

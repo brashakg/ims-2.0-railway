@@ -261,7 +261,8 @@ export function CatalogManagerPage({
   const canFlag = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
   const isAdmin = hasRole(['SUPERADMIN', 'ADMIN']);
   // Delete permanently (an archived product): SUPERADMIN only, as the server.
-  const isSuperAdmin = hasRole(['SUPERADMIN']);
+  // NOT hasRole: it answers true for every ADMIN (AuthContext.hasRole).
+  const isSuperAdmin = (user?.roles || []).includes('SUPERADMIN');
   const isCataloguer = (user?.roles || []).includes('CATALOG_MANAGER');
 
   // Page lives in the URL (not useState) so the full-page review editor's

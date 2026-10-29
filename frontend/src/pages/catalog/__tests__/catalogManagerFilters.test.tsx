@@ -289,6 +289,24 @@ describe('who sees which bulk button', () => {
     expect(within(bar).getByText('Restore')).toBeTruthy();
     expect(within(bar).queryByText(/Flag 1 item/)).toBeNull();
   });
+
+  // Review BLOCK 1 (#1273): hasRole answers true for every ADMIN, so the
+  // page reads the SUPERADMIN role itself -- an ADMIN never sees the button.
+  it.each([
+    [['ADMIN'], 0],
+    [['SUPERADMIN'], 2],
+  ])('Delete permanently on an archived row and the bar: %s sees %i', async (roles, n) => {
+    auth.roles = roles;
+    getProducts.mockResolvedValue({
+      products: [{ ...ROW, is_active: false, deleted_at: '2026-10-20T06:00:00' }],
+      total: 1,
+      total_count: 1,
+    });
+    renderAt('?flag=archived');
+    const bar = await tickFirstRow();
+    expect(within(bar).getByText('Restore')).toBeTruthy();
+    expect(screen.queryAllByRole('button', { name: /Delete permanently/ })).toHaveLength(n);
+  });
 });
 
 // ---------------------------------------------------------------------------

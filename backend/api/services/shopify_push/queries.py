@@ -432,3 +432,31 @@ mutation imsCollectionDelete($input: CollectionDeleteInput!) {
   }
 }
 """
+
+# Permanent delete of an ARCHIVED product (owner 2026-10-24, product_purge):
+# its OWN listing goes with productDelete; a colour/size that rides its
+# model's listing loses only its own variant (never the model's product).
+# _NODE_EXISTS answers "already gone" (node null) after a refused delete.
+_PRODUCT_DELETE = """
+mutation imsProductDelete($input: ProductDeleteInput!) {
+  productDelete(input: $input) {
+    deletedProductId
+    userErrors { field message }
+  }
+}
+"""
+
+_VARIANTS_BULK_DELETE = """
+mutation imsVariantsBulkDelete($productId: ID!, $variantsIds: [ID!]!) {
+  productVariantsBulkDelete(productId: $productId, variantsIds: $variantsIds) {
+    product { id }
+    userErrors { field message code }
+  }
+}
+"""
+
+_NODE_EXISTS = """
+query imsNodeExists($id: ID!) {
+  node(id: $id) { id }
+}
+"""

@@ -4100,6 +4100,10 @@ async def bulk_restore_products(
             results.append({"product_id": pid, "status": "refused", "reason": "Not archived"})
         elif why := _restore_refusal(repo, spine, twin):
             results.append({"product_id": pid, "status": "refused", "reason": why})
+        elif _purge_open(spine):
+            # A permanent delete under way or stopped part-way: restoring it
+            # would bring back a product missing some of its rows.
+            results.append({"product_id": pid, "status": "refused", "reason": _purge_open(spine)})
         elif not body.apply:
             results.append({"product_id": pid, "status": "ready"})
         else:
@@ -4120,10 +4124,24 @@ async def bulk_restore_products(
     return {"applied": body.apply, "results": results}
 
 
-def _purge_rows(ids: List[str], actor: Dict, apply: bool) -> List[Dict[str, Any]]:
+def _purge_open(spine: Optional[Dict]) -> Optional[str]:
+    """Why Restore refuses: a permanent delete of it is under way or stopped
+    part-way (product_purge.restore_refusal). A read error refuses too."""
+    from ..services import product_purge
+
+    try:
+        return product_purge.restore_refusal(_get_db(), (spine or {}).get("product_id"))
+    except Exception:  # noqa: BLE001 -- unread is never "no delete under way"
+        logger.warning("[CATALOG] purge-state read for restore failed", exc_info=True)
+        return "Could not check whether it is being deleted permanently, so it was not restored. Try again."
+
+
+async def _purge_rows(ids: List[str], actor: Dict, apply: bool) -> List[Dict[str, Any]]:
     """THE permanent-delete door body (services/product_purge), for the
-    single door and the Catalog page's bulk door. Per spine id: ready / done
-    / refused with the reason and its HTTP code."""
+    single door and the Catalog page's bulk door. One product at a time: a
+    failure never stops or undoes the others. Per spine id: ready / done /
+    refused with the reason and its HTTP code; `website` True when it is
+    (or was) on Shopify and comes off it first."""
     from ..dependencies import get_audit_repository, get_product_repository
     from ..services import product_purge
 
@@ -4140,25 +4158,26 @@ def _purge_rows(ids: List[str], actor: Dict, apply: bool) -> List[Dict[str, Any]
         if spine is not None:
             row["sku"] = spine.get("sku")
             row["name"] = spine.get("name") or spine.get("model") or spine.get("sku")
-        refused = product_purge.purge_refusal(db, spine, twin)
+        refused, plan = product_purge.purge_check(db, spine, twin)
+        row["website"] = plan is not None
         if refused is not None:
             row.update(status="refused", code=refused[0], reason=refused[1])
-        elif not apply:
+            rows.append(row)
+            continue
+        if not apply:
             row["status"] = "ready"
-        else:
-            try:
-                row["backup_id"] = product_purge.purge_product(
-                    db, spine, twin, actor, run_id=run_id, audit_repo=get_audit_repository()
+            rows.append(row)
+            continue
+        try:
+            row.update(
+                await product_purge.purge(
+                    db, spine, twin, actor, run_id=run_id, plan=plan,
+                    audit_repo=get_audit_repository(),
                 )
-                row["status"] = "done"
-            except Exception:  # noqa: BLE001
-                logger.error("[CATALOG] permanent delete failed for %s", pid, exc_info=True)
-                row.update(
-                    status="refused",
-                    code=503,
-                    reason="Could not delete it right now (nothing was lost: it is backed up "
-                    "first). Try again in a minute.",
-                )
+            )
+        except Exception:  # noqa: BLE001 -- purge never raises; belt and braces
+            logger.error("[CATALOG] permanent delete failed for %s", pid, exc_info=True)
+            row.update(status="refused", code=503, reason=product_purge.PART_DELETED)
         rows.append(row)
     if apply and any(r["status"] == "done" for r in rows):
         invalidate_product_lists()
@@ -4171,9 +4190,12 @@ async def purge_catalog_product(
     current_user: dict = Depends(require_roles("SUPERADMIN")),
 ):
     """Delete an ARCHIVED product for good (owner 2026-10-24), SUPERADMIN only.
-    Refused 409 (not archived / on Shopify / leads a model / any history) or
-    503 (a check could not read) -- nothing deleted. Backed up first."""
-    (row,) = _purge_rows([product_id], current_user, apply=True)
+    Refused 409 (not archived / leads a model / any history / on Shopify
+    while website writes are off), 502 (Shopify did not remove its listing)
+    or 503 (a check could not read) -- nothing deleted in IMS. On Shopify:
+    its listing (or, for a colour/size, its variant) is deleted there first.
+    Backed up first."""
+    (row,) = await _purge_rows([product_id], current_user, apply=True)
     if row["status"] != "done":
         raise HTTPException(status_code=row["code"], detail=row["reason"])
     return {"message": "Product deleted permanently", **row}
@@ -4185,10 +4207,11 @@ async def bulk_purge_products(
     current_user: dict = Depends(require_roles("SUPERADMIN")),
 ):
     """The Catalog page's 'Delete permanently' (Flags: Archived), SUPERADMIN
-    only: the same rule as the single door, up to 200 spine ids. The dry run
-    (apply=false) tells the confirm dialog which would be refused and why."""
+    only: the same rule as the single door, up to 200 spine ids, one at a
+    time. The dry run (apply=false) tells the confirm dialog which would be
+    refused and why, and which also come off the website (`website`)."""
     ids = list(dict.fromkeys(p for p in body.product_ids if p))
-    return {"applied": body.apply, "results": _purge_rows(ids, current_user, body.apply)}
+    return {"applied": body.apply, "results": await _purge_rows(ids, current_user, body.apply)}
 
 
 # ============================================================================

@@ -27,18 +27,22 @@ describe('PurgeDialog', () => {
       results: apply
         ? ids.map((id) => ({ product_id: id, sku: 'SKU-P1', status: 'done' }))
         : [
-            { product_id: 'P1', sku: 'SKU-P1', status: 'ready' },
+            { product_id: 'P1', sku: 'SKU-P1', status: 'ready', website: true },
+            { product_id: 'P3', sku: 'SKU-P3', status: 'ready', website: false },
             { product_id: 'P2', sku: 'SKU-P2', status: 'refused', code: 409, reason: HISTORY },
           ],
     }));
     const onDone = vi.fn();
     render(<PurgeDialog ids={['P1', 'P2']} onClose={() => {}} onDone={onDone} />);
     expect(await screen.findByText(/cannot be undone from the screen/)).toBeTruthy();
-    expect(screen.getByText('SKU-P1')).toBeTruthy();
+    // Website removals are listed separately, in the owner's words.
+    expect(screen.getByTestId('purge-website').textContent).toContain('REMOVED FROM THE WEBSITE');
+    expect(screen.getByTestId('purge-website').textContent).toContain('SKU-P1');
+    expect(screen.getByTestId('purge-website').textContent).not.toContain('SKU-P3');
     expect(screen.getByTestId('purge-refused').textContent).toContain(HISTORY);
-    fireEvent.click(screen.getByRole('button', { name: /Delete 1 item permanently/ }));
-    await waitFor(() => expect(onDone).toHaveBeenCalledWith('1 item deleted permanently', true));
-    expect(purge).toHaveBeenLastCalledWith(['P1'], true);
+    fireEvent.click(screen.getByRole('button', { name: /Delete 2 items permanently/ }));
+    await waitFor(() => expect(onDone).toHaveBeenCalledWith('2 items deleted permanently', true));
+    expect(purge).toHaveBeenLastCalledWith(['P1', 'P3'], true);
   });
 });
 
