@@ -612,7 +612,8 @@ def _bulk(door, monkeypatch, ids, apply, twins=None):
     twins = twins or {}
     monkeypatch.setattr(deps, "get_product_repository", lambda: door.repo)
     monkeypatch.setattr(cat, "_live_skus", lambda skus: set())
-    monkeypatch.setattr(cat, "_twins_or_503", lambda repo, spines: [None for _ in spines])
+    monkeypatch.setattr(cat, "_twins_or_503",
+                        lambda repo, spines: [twins.get((s or {}).get("product_id")) for s in spines])
     monkeypatch.setattr(cat, "_get_catalog_product", lambda pid: dict(twins[pid]) if pid in twins else None)
     body = cat.BulkProductIds(product_ids=ids, apply=apply)
     return asyncio.run(cat.bulk_restore_products(body, _ADMIN))["results"]
@@ -809,6 +810,12 @@ def test_bulk_restore_refuses_a_spineless_twin_whose_gtin_a_live_product_has(doo
     for apply in (False, True):
         [row] = _bulk(door, monkeypatch, ["T-SPINELESS"], apply, twins={"T-SPINELESS": twin})
         assert row["status"] == "refused" and live["sku"] in row["reason"], (apply, row)
+    # A SPINE id whose twin carries the code: dry run and apply give one answer.
+    _arch(door, "P-SP", "SGSP", "5007")
+    sp_twin = {"id": "P-SP", "sku": "SGSP", "deleted_at": "x", "attributes": {"gtin": _CODE}}
+    for apply in (False, True):
+        [row] = _bulk(door, monkeypatch, ["P-SP"], apply, twins={"P-SP": sp_twin})
+        assert row["status"] == "refused" and live["sku"] in row["reason"], (apply, row)
 
 
 def test_restore_checks_the_codes_of_the_spine_and_its_twin_alike(door):
@@ -822,3 +829,20 @@ def test_restore_checks_the_codes_of_the_spine_and_its_twin_alike(door):
     twin = {"id": "P-UN", "sku": "SGUN", "deleted_at": "x", "gtin": _CODE}
     assert live["sku"] in cat._restore_refusal(door.repo, spine, twin)
     assert cat._restore_refusal(door.repo, spine, None) is None
+
+
+
+def test_restore_never_refuses_on_a_code_the_website_would_not_publish(door):
+    """One rule with the push (sanitise_gtin): a junk stub two rows share, or a
+    restricted in-store code (GS1 20-29), is no public barcode -- never a clash."""
+    from api.routers import catalog as cat
+    from api.services.gtin import sanitise_gtin
+
+    for code in ("92939293", "2000000000015"):
+        assert sanitise_gtin(code) is None, code
+        live = door.repo.collection.find_one({"sku": "SG-CARRERA-3001S-086HA-54"}) or door("3001/S")
+        door.repo.collection.update_one({"product_id": live["product_id"]}, {"$set": {"barcode": code}})
+        pid = "P-J" + code
+        _arch(door, pid, "SG" + code, "6" + code[:3], barcode=code)
+        twin = {"id": pid, "sku": "SG" + code, "deleted_at": "x", "attributes": {"gtin": code}}
+        assert cat._restore_refusal(door.repo, door.repo.find_by_id(pid), twin) is None, code

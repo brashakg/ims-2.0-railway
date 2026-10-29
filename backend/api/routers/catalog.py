@@ -3814,20 +3814,24 @@ def _restore_identity_refusal(repo, spine: Dict) -> Optional[str]:
 def _restore_barcode_refusal(repo, spine: Optional[Dict], twin: Optional[Dict]) -> Optional[str]:
     """Add product's own barcode rule (assert_gtin_free) over EVERY barcode
     the row and its catalogue twin carry (barcode, gtin, attributes.gtin on
-    either), each distinct value; a stored value that is not text or a number
-    is no code. Only a LIVE product or twin holds a code (live_only), so two
+    either), each distinct value -- only a code the website would publish
+    (gtin.sanitise_gtin, the push's own rule: a junk stub, all zeros or a
+    restricted in-store GS1 20-29 code is no public barcode, never a clash).
+    Only a LIVE product or twin holds a code (live_only), so two
     archived copies sharing an EAN never block each other: once one is back,
     the other is refused here. A read failure is a plain refusal, never a
     guess."""
     own = (spine or {}).get("product_id") or (twin or {}).get("id")
+    from ..services.gtin import sanitise_gtin
+
     try:
         codes: List[str] = []
         for doc in (spine or {}, twin or {}):
             attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
             for value in (doc.get("barcode"), attrs.get("gtin"), doc.get("gtin")):
-                if isinstance(value, (str, int)) and not isinstance(value, bool) and str(value).strip():
-                    if str(value).strip() not in codes:
-                        codes.append(str(value).strip())
+                code = sanitise_gtin(value)
+                if code and code not in codes:
+                    codes.append(code)
         for code in codes:
             _pm.assert_gtin_free(code, repo, own, live_only=True)
     except _pm.ProductMasterError as clash:
@@ -4064,10 +4068,11 @@ async def bulk_restore_products(
         raise HTTPException(
             status_code=503, detail="Could not read the catalogue right now. Try again in a minute."
         ) from None
-    if body.apply:  # a spine id: its twin by the same rule the drawer's twin id took
-        bare = [p for p in ids if pairs[p][0] is not None and pairs[p][1] is None]
-        for p, twin in zip(bare, _twins_or_503(repo, [pairs[p][0] for p in bare])):
-            pairs[p] = (pairs[p][0], twin)
+    # A spine id: its twin by the same rule the drawer's twin id took -- in the
+    # dry run too, so the confirm dialog's answer is the one Restore gives.
+    bare = [p for p in ids if pairs[p][0] is not None and pairs[p][1] is None]
+    for p, twin in zip(bare, _twins_or_503(repo, [pairs[p][0] for p in bare])):
+        pairs[p] = (pairs[p][0], twin)
     live_skus = (
         _live_skus([(s or t).get("sku") for s, t in pairs.values() if s or t])
         if body.apply
