@@ -544,8 +544,9 @@ def test_revert_keeps_a_later_edit_goes_on_past_a_refused_row_and_drops_the_cach
     db["products"].insert_one(_row("p-fresh", "SG-FRESH", "3001/S", "086HA", "54", k))
     assert fix.revert(db, "run-r") > 0 and len(calls) == 2
     solo = db["products"].find_one({"product_id": "p-solo"})
-    assert solo["attributes"]["model_no"] == "1001 S"  # the edit stands
-    assert solo["identity_key"] == "carrera|carrera1001s|807|52"  # the script's own key write reverted
+    assert solo["attributes"]["model_no"] == "1001 S"  # the edit stands ...
+    # ... and the write it was part of is left WHOLE: no old key beside a newer model.
+    assert solo["identity_key"] == "carrera|1001s|807|52"
     assert "identity_key" not in db["products"].find_one({"product_id": "p-new1"})  # refused, reported
     assert not db["products"].find_one({"product_id": "p-old2"}).get("deleted_at")  # the rest went on
 
@@ -595,3 +596,90 @@ def test_the_identity_migration_calls_an_archived_twin_expected_not_a_collision(
     ])
     stats = mig.run(coll, apply=False)
     assert stats["collisions"] == 0 and stats["archived_twin"] == 1
+
+
+
+# ---------------------------------------------------------------------------
+# Round 5 (final)
+# ---------------------------------------------------------------------------
+
+
+def _bulk(door, monkeypatch, ids, apply):
+    import asyncio
+
+    from api.routers import catalog as cat
+
+    monkeypatch.setattr(deps, "get_product_repository", lambda: door.repo)
+    monkeypatch.setattr(cat, "_live_skus", lambda skus: set())
+    monkeypatch.setattr(cat, "_twins_or_503", lambda repo, spines: [None for _ in spines])
+    monkeypatch.setattr(cat, "_get_catalog_product", lambda pid: None)
+    body = cat.BulkProductIds(product_ids=ids, apply=apply)
+    return asyncio.run(cat.bulk_restore_products(body, _ADMIN))["results"]
+
+
+def test_bulk_restore_of_both_twins_brings_back_one(door, monkeypatch):
+    """The endpoint asks the rule per row: in one body, the twin holding the
+    key comes back, the other is refused -- dry run and apply alike."""
+    kept = door("3001/S")
+    _arch(door, "P-ARCH", "SGX", "CARRERA 3001/S")
+    door.repo.collection.update_one({"product_id": kept["product_id"]},
+                                    {"$set": {"deleted_at": "x", "is_active": False}})
+    dry = {r["product_id"]: r for r in _bulk(door, monkeypatch, ["P-ARCH", kept["product_id"]], False)}
+    assert dry["P-ARCH"]["status"] == "refused" and "archived as" in dry["P-ARCH"]["reason"]
+    assert dry[kept["product_id"]]["status"] == "ready"
+    done = {r["product_id"]: r for r in _bulk(door, monkeypatch, [kept["product_id"], "P-ARCH"], True)}
+    assert done[kept["product_id"]]["status"] == "done"
+    assert done["P-ARCH"]["status"] == "refused"
+    assert "already in the catalogue as " + kept["sku"] in done["P-ARCH"]["reason"]
+    assert door.repo.find_by_id("P-ARCH")["deleted_at"]
+
+
+def test_restore_refuses_a_copy_whose_barcode_a_live_product_has(door):
+    """The create door's whole rule: the barcode is asked too."""
+    from api.routers import catalog as cat
+
+    live = door("3001/S")
+    door.repo.collection.update_one({"product_id": live["product_id"]}, {"$set": {"barcode": "8056597054324"}})
+    other = _arch(door, "P-BC", "SGBC", "5001", barcode="8056597054324")
+    why = cat._restore_refusal(door.repo, other)
+    assert why and live["sku"] in why
+
+
+def test_script_a_failed_pair_stops_the_run_and_writes_nothing_after_it(monkeypatch):
+    from scripts import fix_brand_in_model as fix
+
+    db = _seeded()
+    before = _snapshot(db)
+    p = fix.plan(db)
+    first = next(e for e in p["pairs"] if e.get("other") and not e["blockers"])
+    real = db["products"].update_one
+
+    def boom(filt, update, *a, **k):
+        if filt.get("product_id") == first["survivor"]["product_id"]:
+            raise RuntimeError("net drop")
+        return real(filt, update, *a, **k)
+
+    monkeypatch.setattr(db["products"], "update_one", boom)
+    stats = fix.apply(db, p, "run-stop")
+    assert stats["failed"] == 1
+    later = [e for e in p["pairs"] if e is not first and e.get("other") and not e["blockers"]]
+    touched = {first["survivor"]["product_id"], first["loser"]["product_id"]}
+    for pid in {d["product_id"] for d in before["products"]} - touched:
+        assert db["products"].find_one({"product_id": pid}) == next(
+            d for d in before["products"] if d["product_id"] == pid), pid
+    assert later  # there was work after the failure, and none of it ran
+    rows = db[fix.BACKUPS].docs
+    assert rows and all(r["filter"].get("product_id") in touched or r["collection"] == "catalog_products"
+                        for r in rows)
+    assert all(r["filter"].get("id") in touched or r["collection"] == "products" for r in rows)
+
+
+def test_script_cleans_the_twins_flat_model_too():
+    from scripts import fix_brand_in_model as fix
+
+    db = _seeded()
+    db["catalog_products"].update_one({"id": "t-solo"}, {"$set": {"model": "CARRERA 1001/S"}})
+    fix.apply(db, fix.plan(db), "run-tw")
+    assert db["catalog_products"].find_one({"id": "t-solo"})["model"] == "1001/S"
+    fix.revert(db, "run-tw")
+    assert db["catalog_products"].find_one({"id": "t-solo"})["model"] == "CARRERA 1001/S"

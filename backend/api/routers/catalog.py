@@ -3779,6 +3779,9 @@ def _restore_refusal(repo, spine: Optional[Dict]) -> Optional[str]:
         return None  # a stored value that is not a number: keyless as before
     if not probe.get("identity_key"):
         return None
+    # The create door's inputs in full: its SKU (never its own twin: self_id)
+    # and its barcode are asked too.
+    probe.update(sku=spine.get("sku"), barcode=spine.get("barcode"))
     err = _pm.identity_conflict(probe, repo, self_id=spine.get("product_id"))
     code = getattr(err, "code", None)
     if code == "DUPLICATE_PRODUCT":

@@ -388,6 +388,8 @@ def _fix_row(db, run_id: str, doc: Dict[str, Any], c: Optional[Dict[str, Any]], 
             spine_set["model"] = c["cleaned"]
         if tattrs.get(f) == c["raw"]:
             twin_set[f"attributes.{f}"] = c["cleaned"]
+        if (twin or {}).get("model") == c["raw"]:
+            twin_set["model"] = c["cleaned"]  # the mirror's flat copy too
     if size:
         attrs["lens_size"] = spine_set["attributes.lens_size"] = size
         if not doc.get("size"):
@@ -479,21 +481,24 @@ def _duplicate_key_error():
 
 
 def revert(db, run_id: str) -> int:
-    """Puts back, newest write first, every field still holding what this run
-    wrote. A field changed since is reported and left (a later edit is never
-    overwritten); a row the unique index refuses is reported and the rest go
-    on. Returns the number of backed-up writes reverted."""
+    """Puts back, newest write first, every backed-up write whose fields all
+    still hold what this run wrote. A write any field of which changed since is
+    reported and left WHOLE (a later edit is never overwritten, and a key is
+    never put back beside a model edited after it); a row the unique index
+    refuses is reported and the rest go on. Returns the number reverted."""
     dup = _duplicate_key_error()
     rows = list(db[BACKUPS].find({"run_id": run_id, "reverted_at": {"$exists": False}}).sort("_id", 1))
     reverted = 0
     for r in reversed(rows):
         current = db[r["collection"]].find_one(r["filter"])
         after = r.get("after") or {}
-        sets, unsets, changed = {}, {}, []
+        sets, unsets = {}, {}
+        changed = [f for f in r["before"] if f in after and _get(current, f) != after[f]]
+        if changed:
+            print(f"  [kept] {r['collection']} {r['filter']}: {', '.join(changed)} changed since the run;"
+                  " this write is left as it is")
+            continue
         for f, before in r["before"].items():
-            if f in after and _get(current, f) != after[f]:
-                changed.append(f)
-                continue
             if before == _MISSING:
                 unsets[f] = ""
             else:
@@ -509,8 +514,6 @@ def revert(db, run_id: str) -> int:
         except dup as exc:
             print(f"  [not reverted] {r['collection']} {r['filter']}: {exc}")
             continue
-        if changed:
-            print(f"  [kept] {r['collection']} {r['filter']}: {', '.join(changed)} changed since the run")
         db[BACKUPS].update_one({"_id": r["_id"]}, {"$set": {"reverted_at": datetime.now(timezone.utc).isoformat()}})
         reverted += 1
     if reverted:
