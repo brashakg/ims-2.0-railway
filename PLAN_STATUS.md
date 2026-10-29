@@ -595,7 +595,16 @@ Fixed one PR at a time (this PC runs short of memory with parallel test runs), e
 
 **Duplicate fix #1271:** re-review 2026-10-29 BLOCKED again (11 confirmed): the clean-up script could guess a wrong eye size when the same frame exists in another size; restoring two archived copies could bring back a duplicate; editing an old-style product skipped the duplicate check. Prod dry run changed: the two newer Flag Lab 16 copies were archived by hand, so the older copies are live; the script will also clean live copies whose twin was archived by hand. Being fixed.
 
-**In build since resume:** POS fix 1 #1264 (round-7 fixes pushed, money review 8 next); duplicate fix #1271 (reopened - it had been closed by mistake on 10-24; review fixes pushed, re-review next); delete archived products #1273 (review fixes + the owner-approved website delete).
+**In build since resume (2026-10-29, latest first):**
+
+| PR | Latest review | State |
+|---|---|---|
+| POS fix 1 #1264 | Money review 8 (four reviewers: two presses / crashes, GST + accounts, roles + the Rs 2,000 rule, clean-up scripts): GST and scripts APPROVE; BLOCKED on 3 - a courier booking already in progress is not re-checked (goods could ship after the advance is refunded), a store-credit retry could file a second credit note, a manager approval raised with no amount cleared a refund of any size. Read-only prod check: 0 cancelled orders without an order number, 0 duplicates | being fixed; full CI suite was green before (20,216 passed, 0 failed) |
+| Delete archived products #1273 | Re-review (three reviewers) BLOCKED on 4: after a colour is re-entered in place of an archived one it could delete the NEW colour's website entry; after an interrupted hand-over it could delete a whole model page; a website-linked record could slip past the checks; the bulk delete hit the screen's 10-second timeout. Added: just before any website delete IMS reads Shopify and deletes only if everything there is this one product's SKU | being fixed |
+| Duplicate fix #1271 | Round 4 fixes in (CI 20,113 passed, 0 failed); prod dry run now handles all 3 pairs (Flag Lab White/Black keep the live copies; Carrera 3001/S Havana archives the extra copy); brand glued to the model ("RAYBANRB2140") is no longer folded - prod has 0 such models | round-5 review running |
+| Self-maintaining menu #1280 | three-lens review loop | in review |
+
+**Deploy rule from 2026-10-29: Railway now deploys main automatically on every merge.** Any live-data step that must run before new code (e.g. #1264's two clean-up scripts) runs before the merge, from the PR's own copy.
 
 ## 4x. The agreed order of work (owner 2026-10-18)
 
