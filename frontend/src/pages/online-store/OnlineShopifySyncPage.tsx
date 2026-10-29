@@ -1030,7 +1030,9 @@ export default function OnlineShopifySyncPage() {
                 {lastRun.variant_warnings!.map((warning, i) => (
                   <li key={`${warning.sku}-${i}`}>
                     {warning.error || `${warning.sku || '?'} left off website page: ${warning.reason || 'incomplete options'}`}
-                    {' — stays queued; complete variants were sent.'}
+                    {lastRun.mode === 'LIVE'
+                      ? ' — complete variants were sent; filling it in queues the page again.'
+                      : ' — dry run: complete variants would be sent.'}
                   </li>
                 ))}
               </ul>

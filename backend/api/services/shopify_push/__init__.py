@@ -275,7 +275,9 @@ from .listing import (  # noqa: F401
     OPTION_CLASH,
     OPTION_MISSING,
     listing_view,
+    missing_option_holds,
     model_listing,
+    only_missing_options,
     plan_summary,
 )
 from .tags import (  # noqa: F401

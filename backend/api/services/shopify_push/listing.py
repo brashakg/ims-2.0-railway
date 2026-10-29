@@ -20,7 +20,8 @@ OPTIONS come from what VARIES in the model: colour only -> Color, size only
 family_option_values: 'Gold (001)'; two members of one frame colour get their
 lens label, 'Gold (001) / Green Polarized'). A value is never left blank and
 never shared by two variants. A FIRST publish omits siblings missing an
-option and keeps the lead queued until corrected. An incomplete lead,
+option (named by SKU; the edit that fills it in queues the page again --
+never a re-queue every run, review of #1276). An incomplete lead,
 clashing identities or unpriced sent variants still REFUSE publication
 (OPTION_MISSING / OPTION_CLASH / UNPRICED_SIZE). A LIVE listing holds
 back only the colour(s) at fault, names them by SKU and sends everything
@@ -82,6 +83,10 @@ ADOPT_GID = "_adopt_variant_id"
 ARCHIVED = "_archived"
 # A colour held back from a LIVE listing this press (named on the result).
 HELD = "_held"
+# On a held entry: the option ("colour" / "lens size") the sibling has no
+# value for -- the ONE marker missing_option_holds reads (review of #1276:
+# never the reason's wording).
+MISSING_OPTION = "missing_option"
 UNPRICED_SIZE = "UNPRICED_SIZE"
 # ecom field on the lead's twin: [colours, sizes] the AI paragraph was written
 # for (the colours / sizes ON the listing, never linked drafts that wait).
@@ -89,6 +94,28 @@ PARAGRAPH_COUNTS = "model_paragraph_counts"
 
 _ID_FIELDS = ("shopify_variant_id", "shopify_inventory_item_id")
 _BARCODE_KEYS = ("gtin", "upc")
+
+
+def missing_option_holds(listing: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """THE rule for "a sibling left off the page because it has no value for
+    an option the model is chosen by". Every reader (the scheduled run's
+    warnings, the bulk press's count) uses this, never the reason text."""
+    return [h for h in ((listing or {}).get("held") or []) if h.get(MISSING_OPTION)]
+
+
+def only_missing_options(result: Optional[Dict[str, Any]]) -> bool:
+    """A press whose ONLY trouble is siblings left off for a missing option:
+    a partial success named by sibling, not a failed lead. Any other hold
+    (listing or seeding) keeps the press on its own line."""
+    r = result or {}
+    omitted = missing_option_holds(r.get("listing"))
+    return bool(
+        r.get("ok")
+        and r.get("code") == OPTION_MISSING
+        and omitted
+        and len(omitted) == len((r.get("listing") or {}).get("held") or [])
+        and not (r.get("variants_seeded") or {}).get("held_data")
+    )
 
 
 def _metafield_key(key: Any) -> str:
@@ -247,9 +274,9 @@ def model_listing(
     def _creating(sku: str) -> bool:
         return sku in member_skus and not (by_sku.get(sku) or {}).get("shopify_variant_id")
 
-    def _hold(sku: str, code: str, reason: str) -> None:
+    def _hold(sku: str, code: str, reason: str, missing: Optional[str] = None) -> None:
         if not any(h["sku"] == sku for h in held):
-            held.append({"sku": sku, "code": code, "reason": reason})
+            held.append({"sku": sku, "code": code, "reason": reason, **({MISSING_OPTION: missing} if missing else {})})
             by_sku[sku][HELD] = True
 
     def _not_held(ms: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -274,7 +301,8 @@ def model_listing(
             sku = str(m["sku"])
             for name, field in AXES:
                 if _creating(sku) and name in axes and not str(values[sku][field] or "").strip():
-                    _hold(sku, OPTION_MISSING, f"no {'colour' if name == 'Color' else 'lens size'}")
+                    what = "colour" if name == "Color" else "lens size"
+                    _hold(sku, OPTION_MISSING, f"no {what}", missing=what)
         members = _not_held(kept)
         axes = _axes_of(members, values)
         # A colour that would ADD an option the listing's own variants have no
@@ -329,7 +357,7 @@ def model_listing(
                     )
                 else:
                     for sku, field in missing:
-                        _hold(sku, OPTION_MISSING, f"no {field}")
+                        _hold(sku, OPTION_MISSING, f"no {field}", missing=field)
                     members = _not_held(members)
                     axes = _axes_of(members, values)
                     dropped = {h["sku"] for h in held}

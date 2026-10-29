@@ -871,7 +871,7 @@ def test_two_variants_that_look_the_same_are_refused_unless_the_lens_tells_them_
 
 
 @pytest.mark.parametrize("third_complete", [False, True])
-def test_first_publish_skips_missing_sibling_and_retries_on_the_same_page(monkeypatch, third_complete):
+def test_first_publish_skips_missing_sibling_and_its_fix_queues_the_page(monkeypatch, third_complete):
     db = _world()
     pids = _family(db, [("Gold", "001", "55"), ("Gold", "001", "58")])
     db["products"].update_one({"product_id": pids[1]}, {"$unset": {"attributes.lens_size": ""}})
@@ -885,26 +885,70 @@ def test_first_publish_skips_missing_sibling_and_retries_on_the_same_page(monkey
     assert res.ok is True, res.error
     missing_sku = db["products"].find_one({"product_id": pids[1]})["sku"]
     assert res.code == "OPTION_MISSING" and missing_sku in res.error
-    assert res.listing["held"] == [{"sku": missing_sku, "code": "OPTION_MISSING", "reason": "no lens size"}]
+    assert res.listing["held"] == [{"sku": missing_sku, "code": "OPTION_MISSING", "reason": "no lens size",
+                                    "missing_option": "lens size"}]
+    assert missing_sku not in {v["sku"] for v in res.listing["variants"]}, "the plan never shows it as sent"
     page = _only_product(fake)
     _assert_every_variant_is_its_item(db, fake, page, complete)
     assert not _row(db, pids[1]).get("shopify_variant_id")
-    assert _twin(db, pids[0])["ecom"]["locally_modified"] is True
+    # Review of #1276: never re-queued for the sibling (no loop every run) --
+    # the edit that fills its size is what queues the page again.
+    assert _twin(db, pids[0])["ecom"]["locally_modified"] is False
     original_ids = {pid: _row(db, pid)["shopify_variant_id"] for pid in complete}
 
-    # An unchanged retry must keep the missing sibling queued and never
-    # duplicate the variants that already reached the website.
+    # An unchanged press never duplicates the variants already on the website.
     again = _push(db, pids[0])
     assert again.ok and again.code == "OPTION_MISSING"
-    assert _twin(db, pids[0])["ecom"]["locally_modified"] is True
+    assert _twin(db, pids[0])["ecom"]["locally_modified"] is False
     _assert_every_variant_is_its_item(db, fake, _only_product(fake), complete)
 
-    db["products"].update_one({"product_id": pids[1]}, {"$set": {"attributes.lens_size": "58"}})
+    # The fix goes through the product edit door, which queues the model's listing.
+    spine = db["products"].find_one({"product_id": pids[1]})
+    attrs = {**spine["attributes"], "lens_size": "58"}
+    db["products"].update_one({"product_id": pids[1]}, {"$set": {"attributes": attrs}})
+    pm.mirror_update_to_catalog_twin(product_id=pids[1], current=spine, patch={"attributes": attrs}, db=db)
+    assert _twin(db, pids[0])["ecom"]["locally_modified"] is True, "filling the size queued the page"
     fixed = _push(db, pids[0])
     assert fixed.ok and not fixed.listing["held"], fixed.error
     _assert_every_variant_is_its_item(db, fake, _only_product(fake), pids)
     assert {pid: _row(db, pid)["shopify_variant_id"] for pid in original_ids} == original_ids
     assert _twin(db, pids[0])["ecom"]["locally_modified"] is False
+
+
+def test_first_publish_drops_the_omitted_siblings_row_so_its_missing_price_cannot_refuse(monkeypatch):
+    """Review of #1276: the omitted sibling's ROW leaves the plan too -- kept,
+    an unpriced omitted sibling would turn the whole press into UNPRICED_SIZE."""
+    db = _world()
+    pids = _family(db, [("Gold", "001", "55"), ("Gold", "001", "58")])
+    db["products"].update_one({"product_id": pids[1]}, {"$unset": {"attributes.lens_size": ""},
+                                                       "$set": {"mrp": 0.0, "offer_price": 0.0}})
+    fake = FakeShopify()
+    _live(monkeypatch, fake)
+    res = _push(db, pids[0])
+    missing_sku = _sku(db, pids[1])
+    assert res.ok and res.code == "OPTION_MISSING", (res.error, res.code)
+    assert [h["sku"] for h in res.listing["held"]] == [missing_sku]
+    assert [v["sku"] for v in res.listing["variants"]] == [_sku(db, pids[0])]
+    _assert_every_variant_is_its_item(db, fake, _only_product(fake), [pids[0]])
+
+
+def test_a_live_lead_with_no_size_and_a_new_sized_colour_is_not_requeued_every_run(monkeypatch):
+    """Review of #1276: the seeding step's own OPTION_MISSING hold ('no new
+    colour or size was added: there is no size on <lead>') is a data hold,
+    never a press re-queued every run (review of #1233)."""
+    db = _world()
+    fake = FakeShopify()
+    pids, p, var = _live_lead(db, fake)
+    _live(monkeypatch, fake)
+    assert _push(db, pids[0]).ok
+    assert _twin(db, pids[0])["ecom"]["locally_modified"] is False
+    db["products"].update_one({"product_id": pids[0]}, {"$unset": {"attributes.lens_size": ""}})
+    bronze = _item(db, 4, "Bronze", "9196/31", "62")
+    pm.link_to_family(db, bronze, pids[0], actor="u-admin")
+    res = _push(db, pids[0])
+    assert res.ok and res.code == "OPTION_MISSING", (res.error, res.code)
+    assert res.listing["held"] == [] and res.variants_seeded["held_data"] is True
+    assert _twin(db, pids[0])["ecom"]["locally_modified"] is False, "re-queued every run"
 
 
 def test_first_publish_still_refuses_a_lead_missing_the_required_size(monkeypatch):
@@ -1188,7 +1232,11 @@ def test_a_live_listing_holds_back_only_a_colour_with_no_size(monkeypatch, photo
     assert silver_sku in res.error
     if photos_pending:
         assert res.photos["sync_state"] == "pending"
-    assert [h["sku"] for h in res.listing["held"]] == [silver_sku]
+    assert res.listing["held"] == [{"sku": silver_sku, "code": "OPTION_MISSING", "reason": "no lens size",
+                                    "missing_option": "lens size"}]
+    # The held colour never re-queues the lead (#1276); still-attaching
+    # photos do, on their own retry rule (#1277).
+    assert _twin(db, pids[0])["ecom"]["locally_modified"] is photos_pending, "a held colour never loops the lead"
     assert [o["name"] for o in p["options"]] == ["Color", "Size"]
     assert var["opts"] == {"Color": "Gold (001)", "Size": "58"}, "the lead's variant took the lead's size"
     assert len(p["variants"]) == 2 and var["price"] == "11990.00"

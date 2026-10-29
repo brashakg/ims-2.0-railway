@@ -172,22 +172,25 @@ def test_dirty_products_are_synced_and_dark_first_publish_stays_queued(world):
     assert audit.rows[0]["details"]["mode"] == "SIMULATED"
 
 
+MISSING = {"sku": "BLUE-SIZE", "code": "OPTION_MISSING", "reason": "no lens size", "missing_option": "lens size"}
+
+
+def _one_push(monkeypatch, **fields):
+    async def push(*args, **kwargs):
+        return shopify_push.PushResult(mode="LIVE", entity="product", action="update", target_id="P-live",
+                                       ok=True, **fields)
+
+    monkeypatch.setattr(shopify_push, "push_product", push)
+
+
 @pytest.mark.parametrize("push_code,expected_failures", [("OPTION_MISSING", 0), ("PRICE_NOT_SYNCED", 1)])
 @pytest.mark.parametrize("seed_hold", [False, True])
 def test_missing_sibling_is_named_separately_without_hiding_other_push_failures(world, monkeypatch, push_code, expected_failures, seed_hold):
     db, _ = world
     _seed_products(db)
     db["catalog_products"].delete_one({"id": "P-new"})
-
-    async def push(*args, **kwargs):
-        return shopify_push.PushResult(
-            mode="LIVE", entity="product", action="update", target_id="P-live", ok=True,
-            code=push_code, error="price failed" if expected_failures else "missing sibling",
-            listing={"held": [{"sku": "BLUE-SIZE", "code": "OPTION_MISSING", "reason": "no lens size"}]},
-            variants_seeded={"held_data": seed_hold},
-        )
-
-    monkeypatch.setattr(shopify_push, "push_product", push)
+    _one_push(monkeypatch, code=push_code, error="price failed" if expected_failures else "missing sibling",
+              listing={"held": [MISSING]}, variants_seeded={"held_data": seed_hold})
     run = _run(ls.sync_live_products(db, trigger="manual", actor="u"))
     assert run["variant_warnings"] == [{
         "product_id": "P-live", "sku": "BLUE-SIZE", "code": "OPTION_MISSING", "reason": "no lens size",
@@ -197,6 +200,38 @@ def test_missing_sibling_is_named_separately_without_hiding_other_push_failures(
     assert run["failed"] == 0
     if expected_failures:
         assert run["failures"][0]["code"] == "PRICE_NOT_SYNCED"
+
+
+def test_a_missing_option_is_known_by_its_marker_never_by_its_wording(world, monkeypatch):
+    """Review of #1276: one rule (shopify_push.missing_option_holds), read off
+    the marker the hold is made with -- a reworded reason changes nothing, and
+    an unmarked OPTION_MISSING hold that happens to start "no " is no sibling."""
+    db, _ = world
+    _seed_products(db)
+    db["catalog_products"].delete_one({"id": "P-new"})
+    reworded = {**MISSING, "reason": "lens size not filled in"}
+    seedlike = {"sku": "new colours/sizes", "code": "OPTION_MISSING", "reason": "no new colour or size was added"}
+    _one_push(monkeypatch, code="OPTION_MISSING", error="x", listing={"held": [reworded, seedlike]})
+    run = _run(ls.sync_live_products(db, trigger="manual", actor="u"))
+    assert [w["sku"] for w in run["variant_warnings"]] == ["BLUE-SIZE"]
+    assert [f["product_id"] for f in run["failures"]] == ["P-live"], "the unmarked hold is not hidden"
+
+
+def test_a_missing_sibling_beside_another_hold_keeps_the_lead_in_failures(world, monkeypatch):
+    """Review of #1276 (hollow guard): 'no lens size' next to an 'adds a size'
+    hold -- the second sibling is named only by the lead's failure line, so
+    the lead must stay in failures."""
+    db, _ = world
+    _seed_products(db)
+    db["catalog_products"].delete_one({"id": "P-new"})
+    adds = {"sku": "SILVER-62", "code": "OPTION_MISSING",
+            "reason": "adds a size the listing has none of -- fill the size of LEAD first"}
+    _one_push(monkeypatch, code="OPTION_MISSING", error="held: BLUE-SIZE, SILVER-62",
+              listing={"held": [MISSING, adds]})
+    run = _run(ls.sync_live_products(db, trigger="manual", actor="u"))
+    assert [w["sku"] for w in run["variant_warnings"]] == ["BLUE-SIZE"]
+    assert [f["product_id"] for f in run["failures"]] == ["P-live"]
+    assert "SILVER-62" in run["failures"][0]["error"]
 
 
 def test_scheduled_run_stamps_the_scheduler_actor(world):
