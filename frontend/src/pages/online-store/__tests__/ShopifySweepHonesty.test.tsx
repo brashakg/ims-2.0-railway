@@ -135,6 +135,16 @@ beforeEach(() => {
 });
 
 describe('the bulk press reports what it refused', () => {
+  it('reports omitted sibling options as an amber catalogue warning', async () => {
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 1, failed: 0, noop: 0, variants_held: 1 }, 1),
+    );
+    await pressProducts();
+    expect(await screen.findByText(/1 colours\/sizes left off \(incomplete options\)/)).toBeTruthy();
+    expect(screen.queryByText(/NO stock written/)).toBeNull();
+    expect(toastCalls.some((t) => t.kind === 'warning' && /incomplete options/.test(t.msg))).toBe(true);
+  });
+
   it('shows the photo refusals and does not fold them into "processed"', async () => {
     // 25 went to Shopify; 10 were refused for having no photograph.
     (pushApi.pushAllPending as any).mockResolvedValue(

@@ -973,6 +973,10 @@ async def push_product(
         # the wrong price or with the wrong photos. Either way the row goes
         # BACK in the queue so the next press / scheduled sync retries it. See
         # _requeue_unpublished for why this is not the ping-pong hazard.
+        # A sibling left off for a missing option does NOT re-queue the lead
+        # (review of #1276): the edit that fills it in queues the model's
+        # listing (product_master.queue_model_listing_of); a re-queue here
+        # would only re-send the same page on every run.
         if pid and (not published_ok or price_not_synced or photo_requeue):
             _requeue_unpublished(db, pid)
         return PushResult(
