@@ -23,11 +23,12 @@ from ._shared import (
     PushResult,
     _blocked_result,
     _live_or_reason,
+    logger,
     is_variant_of,
     price_on_update_enabled,
     product_push_refusal,
 )
-from ..catalog_ecom import EDIT_REV
+from ..catalog_ecom import EDIT_REV, update_ecom
 from ..web_page_type import effective_page_type
 from .transport import ShopifyOutcomeUnknown, _graphql, _user_errors
 from .create_claim import (
@@ -1506,6 +1507,8 @@ def removal_plan(
         from ..online_catalog import _parent_from, _parents_for_variants
 
         parent = _parent_from(_parents_for_variants(db, [row], strict=True), row)
+        if parent.get("id") and parent.get("id") == twin_id:
+            parent = {}  # its row sits under its OWN twin: that is no model
     if not parent.get("id"):
         link = ecom.get("variant_of") if isinstance(ecom.get("variant_of"), dict) else {}
         parent_id = moved_to or link.get("twin_id")
@@ -1590,6 +1593,31 @@ query imsListingTruth($id: ID!) {
 """
 
 
+_SKU_SEARCH = """
+query imsSkuSearch($q: String!) {
+  productVariants(first: 5, query: $q) { nodes { id sku product { id } } }
+}
+"""
+
+
+async def _sku_still_listed(db, own_skus: set) -> Optional[str]:
+    """After Shopify says the planned node is gone: is this product's SKU
+    still selling under ANOTHER id (a variant added in the admin, a merge
+    revert)? The refusal, or None. A failed search refuses too."""
+    for sku in sorted(own_skus):
+        q = 'sku:"' + sku.replace(chr(92), "").replace(chr(34), "") + '"'
+        try:
+            body = await _graphql(db, _SKU_SEARCH, {"q": q})
+        except Exception as exc:  # noqa: BLE001
+            return f"the website could not be searched for {sku} ({exc})"
+        if not isinstance(body, dict) or body.get("errors") or not isinstance(body.get("data"), dict):
+            return f"the website could not be searched for {sku}"
+        nodes = ((body["data"].get("productVariants") or {}).get("nodes")) or []
+        if any(str(n.get("sku") or "").strip() == sku for n in nodes):
+            return f"its SKU {sku} is still on the website under another listing"
+    return None
+
+
 async def shopify_removal_truth(db, plan: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
     """THE ground-truth guard, read from SHOPIFY immediately before any
     permanent delete: (gone, refusal). gone True = Shopify answers node null
@@ -1608,7 +1636,9 @@ async def shopify_removal_truth(db, plan: Dict[str, Any]) -> Tuple[bool, Optiona
         return False, "the website could not be read"
     node = body["data"].get("node")
     if node is None:
-        return True, None
+        # Gone -- unless its SKU still sells under another id.
+        still = await _sku_still_listed(db, own_skus)
+        return (False, still) if still else (True, None)
     if plan["kind"] == "variant":
         if str(node.get("sku") or "").strip() not in own_skus:
             return False, "that website variant is not this product's (its SKU differs)"
@@ -1676,7 +1706,7 @@ async def _prune_variant_media(db, plan: Dict[str, Any], product: Dict[str, Any]
     colour's own design-row media (product_images shopify_image_id /
     answers) that no other owner records. Nothing else of the model's
     listing is touched. Fail-soft: the answer is recorded."""
-    from .media import _ANSWERS, _delete_media, _recorded_elsewhere, _writeback_media_map, owned_media
+    from .media import _ANSWERS, _delete_media, _recorded_elsewhere, owned_media
 
     lead_id = plan.get("parent_twin_id")
     try:
@@ -1700,12 +1730,36 @@ async def _prune_variant_media(db, plan: Dict[str, Any], product: Dict[str, Any]
             return {"pruned": []}
         err = await _delete_media(db, lead_id, plan["product_gid"], drop)
         if err:
+            _queue_model(db, lead_id)
             return {"pruned": [], "error": err}
         gone = {r["id"] for r in drop}
-        _writeback_media_map(db, lead_id, [r for r in owned if r["id"] not in gone])
+
+        def _without_gone(e: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            # The map as it is NOW (another write may have landed meanwhile).
+            rows = e.get("media_map")
+            if not isinstance(rows, list):
+                return None
+            kept = [r for r in rows if not (isinstance(r, dict) and str(r.get("id")) in gone)]
+            return None if len(kept) == len(rows) else {**e, "media_map": kept}
+
+        update_ecom(db, lead_id, _without_gone)
         return {"pruned": sorted(gone)}
     except Exception as exc:  # noqa: BLE001
+        _queue_model(db, lead_id)
         return {"pruned": [], "error": str(exc)}
+
+
+def _queue_model(db, lead_id: Optional[str]) -> None:
+    """A photo prune that failed: queue the model's listing (dirty), so the
+    next push sends its photos again from IMS's list. Fail-soft."""
+    if not lead_id:
+        return
+    try:
+        from ..catalog_ecom import dirty_marks
+
+        update_ecom(db, lead_id, lambda e: {**e, **dirty_marks()})
+    except Exception:  # noqa: BLE001
+        logger.warning("[SHOPIFY_PUSH] could not queue model %s after a photo prune", lead_id, exc_info=True)
 
 
 async def push_product_remove(

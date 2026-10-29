@@ -3833,6 +3833,12 @@ def revive_discarded_draft(
     spine = product_repo.find_by_id(product_id)
     if not revivable_discarded_draft(spine):
         return False
+    from .product_purge import _free_claim, claim_is_live
+
+    if claim_is_live(spine):
+        # A permanent delete holds it (#1273): never revive it under that.
+        logger.warning("[PRODUCT_MASTER] %s is being deleted permanently: not revived", product_id)
+        return False
     now = utc_now_iso()
     price: Dict[str, Any] = {}
     if mrp not in (None, "") and mrp != spine.get("mrp"):
@@ -3857,20 +3863,26 @@ def revive_discarded_draft(
                 "$unset": {"is_active": "", "deleted_at": "", "deleted_by": ""},
             },
         )
-    product_repo.update(
-        product_id,
-        {
-            "provisional": True,
-            "is_active": False,
-            # No longer deleted: a revived draft is a new buy again, not a
-            # discontinued product (reorder_policy.discontinued reads this).
-            "deleted_at": None,
-            "discarded_draft": False,
-            "revived_at": now,
-            "revived_by": actor,
-            **price,
-        },
-    )
+    revived = {
+        "provisional": True,
+        "is_active": False,
+        # No longer deleted: a revived draft is a new buy again, not a
+        # discontinued product (reorder_policy.discontinued reads this).
+        "deleted_at": None,
+        "discarded_draft": False,
+        "revived_at": now,
+        "revived_by": actor,
+        **price,
+    }
+    if spine.get("purge_run"):
+        # A dead purge claim on it: the write is fenced like Restore's, so a
+        # delete that takes the claim meanwhile and this revive never both win.
+        revived.update(purge_run=None, purge_run_at=None)
+        if not product_repo.update(product_id, revived, expected=_free_claim()):
+            logger.warning("[PRODUCT_MASTER] %s was claimed by a permanent delete: not revived", product_id)
+            return False
+    else:
+        product_repo.update(product_id, revived)
     logger.info(
         "[PRODUCT_MASTER] discarded draft %s ordered again by %s: back in Needs review",
         product_id,

@@ -3912,11 +3912,21 @@ def _restore_product(
             raise RestoreRaced()
     if product is not None:
         product.pop("_id", None)
+        # A dead permanent-delete claim (#1273): its marks go, and the twin
+        # gets back the queue flag it had before the claim took it off.
+        prior_queue = product.pop("purge_prior_queue", None)
+        claimed = any(product.pop(k, None) is not None for k in ("purge_run", "purge_run_at"))
         product["is_active"] = active
         product["deleted_at"] = None
         product["deleted_by"] = None
         product[ACTIVE_BEFORE_ARCHIVE] = None
         _save_catalog_product(product, mark_dirty=False)
+        coll = _catalog_coll()
+        if coll is not None and (claimed or prior_queue is not None):
+            patch: Dict[str, Any] = {"$unset": {"purge_run": "", "purge_run_at": "", "purge_prior_queue": ""}}
+            if prior_queue is not None and isinstance(product.get("ecom"), dict):
+                patch["$set"] = {"ecom.locally_modified": prior_queue}
+            coll.update_one({"id": product["id"]}, patch)
     try:
         audit_repo = get_audit_repository()
         if audit_repo is not None:
@@ -4110,10 +4120,10 @@ async def bulk_restore_products(
             results.append({"product_id": pid, "status": "refused", "reason": "Not archived"})
         elif why := _restore_refusal(repo, spine, twin):
             results.append({"product_id": pid, "status": "refused", "reason": why})
-        elif _purge_open(spine):
+        elif purge_why := _purge_open(spine):
             # A permanent delete under way or stopped part-way: restoring it
             # would bring back a product missing some of its rows.
-            results.append({"product_id": pid, "status": "refused", "reason": _purge_open(spine)})
+            results.append({"product_id": pid, "status": "refused", "reason": purge_why})
         elif not body.apply:
             results.append({"product_id": pid, "status": "ready"})
         else:

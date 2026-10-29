@@ -1828,3 +1828,26 @@ def test_ai_paragraph_is_cut_at_a_sentence_never_mid_sentence():
     assert clip_to_sentence(text, 70) == "Reflect your style with the RB3025. It comes in 3 colours."
     assert clip_to_sentence(text, 20) is None
     assert clip_to_sentence(text, 500) == text
+
+
+def test_a_colour_being_deleted_permanently_keeps_its_variant(monkeypatch):
+    """#1273 review 3: while a permanent delete holds the archived colour's
+    claim (its variant is about to be deleted on Shopify), a colour
+    catalogued again in its place never takes that variant over."""
+    from datetime import datetime, timezone
+
+    db = _world()
+    fake = FakeShopify()
+    pids, p, var = _live_lead(db, fake)
+    _live(monkeypatch, fake)
+    assert _push(db, pids[0]).ok
+    old_black = _row(db, pids[1])
+    db["products"].update_one({"product_id": pids[1]}, {"$set": {
+        "deleted_at": "2026-10-19T00:00:00+00:00", "is_active": False,
+        "purge_run": "PURGE-LIVE", "purge_run_at": datetime.now(timezone.utc)}})
+    again = _item(db, 8, "Black", "002/58", units=(4, 0))
+    pm.link_to_family(db, again, pids[0], actor="u-admin")
+    _price_edit(db, pids[0], 11990.0)
+    _push(db, pids[0])
+    assert _row(db, pids[1])["shopify_variant_id"] == old_black["shopify_variant_id"], "not taken over"
+    assert (_row(db, again) or {}).get("shopify_variant_id") != old_black["shopify_variant_id"]

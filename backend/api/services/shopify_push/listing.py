@@ -377,11 +377,17 @@ def model_listing(
     # label, which may differ from the one Shopify shows: review of #1233),
     # and the archived row lets go of it only when the id written back is
     # that one (writeback._writeback_variant).
+    # Never from a colour whose permanent delete holds its claim (#1273): its
+    # variant is about to be deleted on Shopify, and adopting it now would
+    # hand the new colour a variant that disappears under it.
+    from ..product_purge import claim_is_live
+
+    being_purged = {str(m["sku"]) for m in members if claim_is_live(m)}
     for r in list(rows):
         if r.get("shopify_variant_id") or not r.get(FULL_OPTIONS) or str(r.get("sku")) not in member_skus:
             continue
         mine = {k: str(v).strip().lower() for k, v in r[FULL_OPTIONS].items()}
-        for a in sorted(archived_listed):
+        for a in sorted(archived_listed - being_purged):
             other = by_sku.get(a) or {}
             if other.get(FULL_OPTIONS) and {k: str(v).strip().lower() for k, v in other[FULL_OPTIONS].items()} == mine:
                 r[ADOPTS] = a

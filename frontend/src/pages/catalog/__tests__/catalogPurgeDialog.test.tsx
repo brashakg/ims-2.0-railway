@@ -17,7 +17,7 @@ vi.mock('../../../services/api/catalog', () => ({
 
 import { catalogBulkApi, type BulkRowResult } from '../../../services/api/catalog';
 import { PURGE_TIMEOUT_MESSAGE } from '../../../services/api/client';
-import { PurgeDialog, SelectionBar } from '../CatalogBulkActions';
+import { CHECK_TIMEOUT_MESSAGE, PurgeDialog, SelectionBar } from '../CatalogBulkActions';
 
 const purge = catalogBulkApi.purge as unknown as ReturnType<typeof vi.fn>;
 const HISTORY =
@@ -101,6 +101,32 @@ describe('PurgeDialog', () => {
     expect(screen.queryByRole('button', { name: /permanently/ })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(onDone).toHaveBeenCalledWith(PURGE_TIMEOUT_MESSAGE, false));
+  });
+});
+
+describe('PurgeDialog while the delete runs (review 3)', () => {
+  it('Escape and the backdrop do nothing mid-delete; the results still arrive', async () => {
+    server({ P1: {} });
+    let finish: (v: unknown) => void = () => {};
+    const onClose = vi.fn();
+    const onDone = vi.fn();
+    render(<PurgeDialog ids={['P1']} onClose={onClose} onDone={onDone} />);
+    const button = await screen.findByRole('button', { name: /Delete 1 item permanently/ });
+    purge.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    fireEvent.click(button);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    fireEvent.click(screen.getByRole('dialog').parentElement as HTMLElement); // the backdrop
+    expect(onClose).not.toHaveBeenCalled();
+    finish({ applied: true, results: [{ product_id: 'P1', sku: 'SKU-P1', status: 'done' }] });
+    expect((await screen.findByTestId('purge-results')).textContent).toContain('SKU-P1');
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }));
+    expect(onDone).toHaveBeenCalledWith('1 item deleted permanently', true);
+  });
+
+  it('a slow CHECK says so, never that a delete is still running', async () => {
+    purge.mockRejectedValue(new Error(PURGE_TIMEOUT_MESSAGE));
+    render(<PurgeDialog ids={['P1']} onClose={() => {}} onDone={() => {}} />);
+    expect((await screen.findByRole('alert')).textContent).toBe(CHECK_TIMEOUT_MESSAGE);
   });
 });
 

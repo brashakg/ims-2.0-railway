@@ -340,6 +340,8 @@ export function ArchiveDialog({
  *  The server's dry run first: which SKUs would go, and which stay archived
  *  and why (sales / stock / purchase history, a website listing, a model
  *  they lead). Nothing is deleted until the button is pressed. */
+export const CHECK_TIMEOUT_MESSAGE = 'Checking took too long. Close and try again.';
+
 export function PurgeDialog({
   ids,
   onClose,
@@ -366,7 +368,10 @@ export function PurgeDialog({
         if (alive) setPreview(r.results);
       })
       .catch((e: unknown) => {
-        if (alive) setError(e instanceof Error ? e.message : 'Could not check the products.');
+        if (!alive) return;
+        const message = e instanceof Error ? e.message : 'Could not check the products.';
+        // A slow CHECK is not a delete still running: nothing was changed.
+        setError(message === PURGE_TIMEOUT_MESSAGE ? CHECK_TIMEOUT_MESSAGE : message);
       });
     return () => {
       alive = false;
@@ -398,8 +403,11 @@ export function PurgeDialog({
     }
   };
 
-  // Closing after an apply (or a timed-out one) reloads the list.
+  // Closing after an apply (or a timed-out one) reloads the list. While the
+  // delete runs nothing closes the dialog (Escape, the backdrop, Cancel):
+  // its results and the list reload must not be lost.
   const close = () => {
+    if (busy) return;
     if (results) {
       onDone(
         `${plural(done.length, 'item')} deleted permanently` +
@@ -491,7 +499,7 @@ export function PurgeDialog({
           </button>
         ) : (
           <>
-            <button type="button" onClick={onClose} className="btn-secondary" disabled={busy}>
+            <button type="button" onClick={close} className="btn-secondary" disabled={busy}>
               Cancel
             </button>
             <button
