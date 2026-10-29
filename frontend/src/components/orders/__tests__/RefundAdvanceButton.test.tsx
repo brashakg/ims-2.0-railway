@@ -97,3 +97,25 @@ describe('RefundAdvanceButton - round 2 review', () => {
     await waitFor(() => expect(post).toHaveBeenCalledWith('ORD-1', 'customer cancelled the order', 'HQ'));
   });
 });
+
+describe('RefundAdvanceButton - round 8 review', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('shows the money still to hand back when a refund was started but not finished', async () => {
+    preview.mockResolvedValue({
+      ok: true, action: 'finish_refund', total: 1000, has_cash: true,
+      refund_tenders: [{ method: 'CASH', amount: 600 }, { method: 'UPI', amount: 400 }],
+      reason: 'A refund was started but not finished.',
+    } as any);
+    post.mockResolvedValue({ message: 'Refund of Rs 1,000.00 recorded and the order cancelled.' });
+    render(<RefundAdvanceButton orderId="ORD-1" onDone={() => {}} />);
+    const btn = await screen.findByRole('button', { name: /Finish refund and cancel/ });
+    await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(btn);
+    expect(screen.getByText('Cash')).toBeTruthy();
+    expect(screen.queryByText(/The cash is paid back from/)).toBeNull(); // chosen on the first press
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'customer cancelled the order' } });
+    fireEvent.click(screen.getByRole('button', { name: /Refund ₹1,000.00 and cancel/ }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith('ORD-1', 'customer cancelled the order', undefined));
+  });
+});

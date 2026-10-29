@@ -202,6 +202,7 @@ export default function ReturnsPage() {
     amount: number;
     reason?: string;
     requiredTier?: string;
+    priorRefunds?: number;
   } | null>(null);
 
   const searchOrders = async () => {
@@ -570,6 +571,7 @@ export default function ReturnsPage() {
           amount: netRefund,
           reason: dominantMatrixReason(),
           requiredTier: detail?.required_tier,
+          priorRefunds: Number(detail?.prior_refunds) || 0,
         });
         return;
       }
@@ -1190,6 +1192,7 @@ export default function ReturnsPage() {
           customerName={selectedOrder?.customerName || selectedOrder?.customer_name}
           reason={approvalGate.reason}
           requiredTier={approvalGate.requiredTier}
+          priorRefunds={approvalGate.priorRefunds}
           requestedByName={user?.name}
           onClose={() => setApprovalGate(null)}
           onApproved={onRefundApproved}

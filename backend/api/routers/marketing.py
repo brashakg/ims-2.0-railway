@@ -738,6 +738,21 @@ async def redeem_referral(
         raise HTTPException(status_code=404, detail="Referral not found")
 
     reward = referral.get("reward_amount", 500)
+    referrer_id = referral["referrer_customer_id"]
+    # THE balance rule (customers.post_ledger_credit): a legacy customer whose
+    # balance lives only in the ledger is refused BEFORE the claim is spent.
+    from .customers import post_ledger_credit, store_credit_balance_unready
+    from ..dependencies import get_customer_repository
+    from ..services import store_credit_ledger as scl
+
+    cust_repo = get_customer_repository()
+    if cust_repo is None or cust_repo.find_by_id(referrer_id) is None:
+        raise HTTPException(status_code=404, detail="Referrer customer not found")
+    if store_credit_balance_unready(cust_repo, referrer_id):
+        raise HTTPException(
+            status_code=503,
+            detail="The referrer's store-credit balance has not been set up yet - nothing was credited. Ask an admin.",
+        )
 
     # Atomic claim: only the caller that flips it to REWARD_CREDITED proceeds to
     # credit the wallet. A concurrent / repeat call matches nothing and is a
@@ -779,13 +794,26 @@ async def redeem_referral(
             "already_credited": True,
         }
 
-    # We hold the claim — credit the referrer exactly once.
-    referrer_id = referral["referrer_customer_id"]
-    # 1. Store credit: lives on the customers doc (correct canonical field).
-    db.get_collection("customers").update_one(
-        {"customer_id": referrer_id},
-        {"$inc": {"store_credit": reward}},
+    # We hold the claim — credit the referrer exactly once, with a ledger row
+    # (the audit trail every other credit has). A refused credit gives the
+    # claim back so the reward can be pressed again.
+    from .customers import _current_credit_balance
+
+    entry = scl.make_entry(
+        customer_id=referrer_id,
+        entry_type=scl.ISSUED,
+        amount=float(reward),
+        current_balance=_current_credit_balance(referrer_id, cust_repo.find_by_id(referrer_id)),
+        reason=f"Referral reward {referral_id}",
+        ref=referral_id,
+        store_id=referral.get("store_id") or current_user.get("active_store_id"),
+        user_id=current_user.get("user_id"),
     )
+    entry["source"] = "REFERRAL_REWARD"
+    if not post_ledger_credit(cust_repo, entry):
+        coll.update_one({"referral_id": referral_id, "status": "REWARD_CREDITED"},
+                        {"$set": {"status": referral.get("status")}})
+        raise HTTPException(status_code=503, detail="The reward could not be credited just now - try again.")
     # 2. Loyalty points: must go through the loyalty_accounts ledger, not the
     #    customers doc (which has a phantom loyalty_points field the real engine
     #    never reads — fixed CRM-1). Route via adjust_balance so the balance +

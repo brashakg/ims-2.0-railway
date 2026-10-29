@@ -83,20 +83,32 @@ def real_sale_match(db=None, *, orders=None, gst_documents: bool = False) -> Dic
         judged = [*_VOID_STATUSES, _VOID_RE]
         judged_upper = _VOID
     match: Dict[str, Any] = {"status": {"$nin": not_sale}}
+    if not gst_documents:
+        # Books: a refund that went through with its cancel still pending is
+        # not a sale either -- it reads the same as once the cancel lands.
+        match["advance_refund_status"] = {"$nin": ["COMPLETED", "completed"]}
     if orders is None:
         if db is None:
             return match
         orders = db.get_collection("orders") if hasattr(db, "get_collection") else db["orders"]
     # ponytail: the GST view also reads every cancelled order per query; fine
     # while they number in the hundreds -- stamp a bool if they ever do not.
-    not_sales = [
-        o.get("order_id")
+    out = [
+        o
         for o in orders.find({"status": {"$in": judged}})
         if isinstance(o, dict)
-        and o.get("order_id")
         and str(o.get("status") or "").upper() in judged_upper
         and not is_real_sale(o, gst_documents=gst_documents)
     ]
+    if gst_documents:
+        # By _id -- always present and unique -- so a cancelled order with no
+        # order_id is not filed, and a cancelled twin of a live order_id does
+        # not pull the live invoice out of the return.
+        ids = [o["_id"] for o in out if o.get("_id") is not None]
+        if ids:
+            match["_id"] = {"$nin": ids}
+        out = [o for o in out if o.get("_id") is None]  # an in-memory test double only
+    not_sales = [o.get("order_id") for o in out if o.get("order_id")]
     if not_sales:
         match["order_id"] = {"$nin": not_sales}
     return match
@@ -109,6 +121,8 @@ def is_real_sale(order: Dict[str, Any], gst_documents: bool = False) -> bool:
     if gst_documents and status in _CANCELLED:
         return _reversed_by_whole_credit_note(order)
     if status in _NOT_SALE:
+        return False
+    if not gst_documents and str((order or {}).get("advance_refund_status") or "").upper() == "COMPLETED":
         return False
     if status in _VOID:
         return bool(str(order.get("invoice_number") or "").strip()) or (

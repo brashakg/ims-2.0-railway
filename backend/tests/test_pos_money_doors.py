@@ -300,7 +300,8 @@ def test_refund_above_2000_by_sales_or_cashier_needs_a_manager(monkeypatch, role
     detail = r.json()["detail"]
     assert detail["reason"] == "REFUND_APPROVAL_REQUIRED"
     assert detail["required_tier"] == "auto"
-    assert "Rs 2,000" in detail["message"]
+    assert "needs a manager's approval" in detail["message"]
+    assert detail["running_total"] == pytest.approx(2808.4)
     assert returns.count_documents({}) == 0
 
 
@@ -356,6 +357,7 @@ def test_refund_request_routes_to_a_store_manager():
     from api.services.approvals import ApprovalEngine
 
     db = StrictDB()
+    db.get_collection("orders").insert_one(_order("ORD-BOK01"))
     res = ApprovalEngine(db=db).request(
         action_type="REFUND_APPROVAL_MATRIX",
         requested_by="U-cash",
@@ -1391,7 +1393,8 @@ def test_a_crash_after_numbering_is_written_off_on_the_next_press(till, monkeypa
     r2 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
     assert r2.status_code == 201, r2.text
     unused = [a for a in audits if a.get("action") == "CREDIT_NOTE_NUMBER_UNUSED"]
-    assert len(unused) == 1 and "unknown" in unused[0]["details"]["unused_credit_note_number"]
+    # Round 8: the crashed press recorded its serial, so it is written off BY NAME.
+    assert [u["details"]["unused_credit_note_number"] for u in unused] == ["TST01/C2627/0001"]
     assert till["db"].get_collection("returns").find_one({"order_id": "ORD-1"})["credit_note_number"] == "TST01/C2627/0002"
 
 
@@ -1902,7 +1905,9 @@ def test_probe_backfill_never_doubles_a_stranded_advance_credit(till, tmp_path):
                               "type": "ADJUSTED", "delta": 1000.0, "ref": "RET-A", "applied": False,
                               "source": "ADVANCE_REFUND"})
     out = bf.plan(db)
-    assert out["sets"] == [] and out["skipped_unapplied"] == ["CUST-1"]
+    # Round 8: never skipped (that locked the customer out); the unapplied row
+    # is left out of the sum and applied once by its own press.
+    assert out["sets"] == [("CUST-1", 0.0)] and out["unapplied_left"] == ["CUST-1"]
     bf.apply(db, out["sets"], str(tmp_path / "b.json"))
     # The next press applies its own row once: 1,000, never 2,000.
     assert returns_router._credit_back_advance(_stored(till), 1000.0, "RET-A", _user("ACCOUNTANT")) is not None
@@ -1995,7 +2000,9 @@ def test_two_returns_at_once_cannot_dodge_the_2000_rule(till, monkeypatch):
     assert second.status_code == 403, second.text
     assert second.json()["detail"]["reason"] == "REFUND_APPROVAL_REQUIRED"
     assert till["db"].get_collection("returns").count_documents({"status": "COMPLETED"}) == 1
-    assert _stored(till)["refunds_reserved"] == pytest.approx(1800.0)  # the refused one released its share
+    # The refused one released its hold; the recorded one's doc counts it now.
+    holds = _stored(till)["refund_holds"]
+    assert list(holds) == [till["db"].get_collection("returns").find_one({"status": "COMPLETED"})["return_id"]]
 
 
 # --- 6: freeing a stale claim and a press stamping its record cannot interleave ----

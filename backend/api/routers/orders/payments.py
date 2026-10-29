@@ -7,6 +7,7 @@ rounding or validation was changed.
 
 from api.utils.event_time import utc_now_iso
 
+import re
 import uuid
 from datetime import datetime
 from fastapi import Depends, HTTPException, Header
@@ -62,7 +63,18 @@ def _claim_loyalty_redemption(order: dict, amount: float, payment_id: str, idem_
     unused = txns.collection.find(
         {"order_id": order_id, "customer_id": customer_id, "type": "REDEEM", "tender_payment_id": None}
     )
+    # A burn an old (pre-claim) LOYALTY payment on this order already names
+    # ("<pts>pts txn <id>") paid once: never again, backfilled or not.
+    named = {
+        m.group(1)
+        for p in order.get("payments") or []
+        if str((p or {}).get("method") or "").upper() == "LOYALTY"
+        for m in [re.search(r"\btxn\s+(\S+)", str((p or {}).get("reference") or ""))]
+        if m
+    }
     for row in unused:
+        if row.get("txn_id") in named:
+            continue
         if abs(float(row.get("rupee_value") or 0) - float(amount)) > 0.01:
             continue
         claim = {"tender_payment_id": payment_id}

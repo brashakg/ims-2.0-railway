@@ -1854,10 +1854,54 @@ def store_credit_balance_unready(repo, customer_id: str, exclude_entry_id: Optio
     ledger = _ledger_coll()
     if ledger is None:
         return True
-    flt: Dict[str, Any] = {"customer_id": customer_id}
+    # Only rows that MOVED money count: a GST-only document (zero / no delta,
+    # a superadmin note doc) or a row not yet applied never made a balance.
+    flt: Dict[str, Any] = {"customer_id": customer_id, "delta": {"$nin": [0, 0.0, None]},
+                           "applied": {"$ne": False}, "source": {"$ne": "SUPERADMIN_ORDER_EDIT"}}
     if exclude_entry_id:
         flt["entry_id"] = {"$ne": exclude_entry_id}
     return ledger.find_one(flt) is not None
+
+
+def post_ledger_credit(repo, entry: Dict[str, Any], *, pending_type: Optional[str] = None, ledger=None) -> bool:
+    """THE insert-then-move of a balance-moving ledger row: the row lands
+    ``applied: False`` (and as ``pending_type`` while pending, when given:
+    ISSUING keeps a credit note off the GST returns until it is real), the
+    balance moves once (apply_store_credit_delta), then the row is marked
+    applied. A refused move voids the row, so no ledger sum, backfill or GST
+    return ever counts a credit the balance does not carry. True when moved."""
+    ledger = ledger if ledger is not None else _ledger_coll()
+    if ledger is None:
+        return False
+    final_type = entry.get("type")
+    row = dict(entry, applied=False)
+    if pending_type:
+        row["type"] = pending_type
+    try:
+        ledger.insert_one(row)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] credit row %s not written: %s", entry.get("entry_id"), exc)
+        return False
+    try:
+        moved = apply_store_credit_delta(repo, entry.get("customer_id"), float(entry.get("delta") or 0),
+                                         balance_after=entry.get("balance_after"), entry_id=entry.get("entry_id"))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] store credit balance not moved for %s: %s", entry.get("customer_id"), exc)
+        moved = False
+    if not moved:
+        try:
+            ledger.update_one({"entry_id": entry.get("entry_id"), "applied": False},
+                              {"$set": {"type": "VOID", "void_reason": "balance not moved"}})
+        except Exception as exc:  # noqa: BLE001 -- applied False: still never counted
+            logger.error("[CUSTOMERS] credit row %s not voided: %s", entry.get("entry_id"), exc)
+        return False
+    for _ in range(2):
+        try:
+            ledger.update_one({"entry_id": entry.get("entry_id")}, {"$set": {"type": final_type, "applied": True}})
+            break
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[CUSTOMERS] credit row %s not marked applied: %s", entry.get("entry_id"), exc)
+    return True
 
 
 def apply_store_credit_delta(
@@ -1956,20 +2000,10 @@ def _post_credit_entry(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    coll = _ledger_coll()
-    if coll is not None:
-        coll.insert_one(dict(entry))
-    # Keep the legacy number in sync so the rest of the app stays correct.
-    try:
-        moved = apply_store_credit_delta(repo, customer_id, entry["delta"],
-                                         balance_after=entry["balance_after"], entry_id=entry.get("entry_id"))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("[CUSTOMERS] store credit balance not moved for %s: %s", customer_id, exc)
-        moved = False
-    if not moved:
+    if not post_ledger_credit(repo, entry):
         raise HTTPException(
             status_code=503,
-            detail="The store-credit entry was recorded but the balance could not be moved - ask an admin.",
+            detail="The store credit could not be recorded just now - nothing was given. Try again.",
         )
     entry.pop("_id", None)
     return {"entry": entry, "balance": entry["balance_after"]}

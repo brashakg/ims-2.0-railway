@@ -27,8 +27,9 @@ _EPS = 1e-9
 
 
 def compute_balance(entries: List[Dict[str, Any]]) -> float:
-    """Running balance = sum of signed deltas."""
-    return round(sum(float(e.get("delta", 0) or 0) for e in entries), 2)
+    """Running balance = sum of signed deltas of the rows that moved it (an
+    ``applied: False`` row has not -- an unfinished or voided write)."""
+    return round(sum(float(e.get("delta", 0) or 0) for e in entries if e.get("applied") is not False), 2)
 
 
 def make_entry(

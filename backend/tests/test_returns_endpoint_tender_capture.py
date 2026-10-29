@@ -124,6 +124,14 @@ class _QueryColl(_FakeColl):
                 return out
         return None
 
+    def update_one(self, query, update, upsert=False):
+        # $set only: the ledger marks a credit row applied once its balance moved (#1264).
+        for d in self.docs:
+            if self._match(d, query or {}):
+                d.update((update or {}).get("$set") or {})
+                return type("R", (), {"matched_count": 1, "modified_count": 1})()
+        return type("R", (), {"matched_count": 0, "modified_count": 0})()
+
 
 class _ClaimingOrdersColl:
     """Fake `orders` collection implementing the SAME atomic positional claim as

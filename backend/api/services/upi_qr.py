@@ -290,8 +290,12 @@ def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> bool:
     from database.repositories.order_repository import derive_bill_type
 
     try:
-        orders_coll.update_one(
-            {"order_id": order_id},
+        res = orders_coll.update_one(
+            # Compare-and-set on what was read (PR #1264): never onto a
+            # cancelled order, one an advance refund holds, or money that
+            # moved meanwhile -- the same conditions add_payment writes under.
+            {"order_id": order_id, "status": {"$ne": "CANCELLED"}, "advance_refund_id": None,
+             "amount_paid": order.get("amount_paid")},
             {
                 "$push": {"payments": payment_row},
                 "$set": {
@@ -303,6 +307,10 @@ def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> bool:
                 },
             },
         )
+        if not getattr(res, "matched_count", getattr(res, "modified_count", 1)):
+            logger.warning("[UPI_RECONCILE] order %s changed or is refunded/cancelled; payment %s not recorded",
+                           order_id, razorpay_payment_id)
+            return False
         logger.info(
             "[UPI_RECONCILE] auto-reconciled order %s (order_number=%s) "
             "razorpay_id=%s amount=%.2f status=%s",

@@ -52,7 +52,7 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
   const submit = async () => {
     setBusy(true);
     try {
-      const res = await returnsApi.refundAdvanceAndCancel(orderId, reason.trim(), finishOnly ? undefined : cashFrom);
+      const res = await returnsApi.refundAdvanceAndCancel(orderId, reason.trim(), needsCashFrom ? cashFrom : undefined);
       if (res?.cancel_error) toast.error(res.message);
       else toast.success(res?.message || 'Advance refunded and order cancelled');
       setOpen(false);
@@ -67,8 +67,10 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
   const allowed = plan?.ok === true;
   // The advance is refunded but the cancel did not finish: one press finishes it.
   const finishOnly = plan?.action === 'finish_cancel';
-  const needsCashFrom = !finishOnly && plan?.has_cash === true;
-  const label = finishOnly ? 'Finish cancel' : 'Refund advance and cancel';
+  // A refund started but not finished: the same money, the cash source already chosen.
+  const finishRefund = plan?.action === 'finish_refund';
+  const needsCashFrom = !finishOnly && !finishRefund && plan?.has_cash === true;
+  const label = finishOnly ? 'Finish cancel' : finishRefund ? 'Finish refund and cancel' : 'Refund advance and cancel';
   return (
     <>
       <button
@@ -97,6 +99,7 @@ export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDo
                 The advance is already refunded. This cancels the order.
               </p>
             )}
+            {finishRefund && <p className="text-sm text-gray-700">{plan?.reason}</p>}
             {!finishOnly && (
             <div className="rounded-md bg-gray-50 border border-gray-200 px-3 py-2 text-sm space-y-1">
               {(plan?.refund_tenders || []).map((t) => (

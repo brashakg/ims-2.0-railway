@@ -84,7 +84,8 @@ def _refuse_cancel_holding_money(order: Dict[str, Any], order_id: str, current_u
     if not any(r in current_user.get("roles", []) for r in CANCEL_ADVANCE_ROLES):
         raise HTTPException(
             status_code=403,
-            detail="Only accounts or an admin can cancel an order that took an advance.",
+            detail=("Only an admin can cancel an order that took an advance here; accounts use "
+                    "'Refund advance and cancel' on the Orders screen."),
         )
 
 
