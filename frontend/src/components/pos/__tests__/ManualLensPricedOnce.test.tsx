@@ -31,7 +31,7 @@ import { LensDetailsModal, addManualLensToCart } from '../LensDetailsModal';
 import { usePOSStore } from '../../../stores/posStore';
 import { orderLinesOf } from '../billQuote';
 
-async function ringUpLens(category: 'Single Vision' | 'Progressive') {
+async function ringUpLens(category: 'Single Vision' | 'Progressive' | 'Bifocal', base = 1000) {
   render(
     <LensDetailsModal
       onClose={() => undefined}
@@ -40,7 +40,7 @@ async function ringUpLens(category: 'Single Vision' | 'Progressive') {
   );
   fireEvent.click(await screen.findByText('ZEISS'));
   fireEvent.click(screen.getByText(category));
-  fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: '1000' } });
+  fireEvent.change(screen.getByPlaceholderText('0'), { target: { value: String(base) } });
   fireEvent.click(screen.getByText('Next'));
   fireEvent.click(screen.getByText('1.67'));
   fireEvent.click(screen.getByText('Next'));
@@ -80,5 +80,44 @@ describe('a made-to-order lens is priced once at the till', () => {
     expect(shownPair).toBe('₹4,400');
     expect(line.unit_price).toBe(2200);
     expect(line.unit_price * line.quantity).toBe(4400);
+  });
+
+  it('bifocal 1.67 + coating + add-on: per lens 2,950, pair 5,900 shown and billed', async () => {
+    // Per lens: 1000 x 1.5 index x 1.5 bifocal = 2250, + 500 + 200 = 2950.
+    const { shownPair, line, payload } = await ringUpLens('Bifocal');
+    expect(shownPair).toBe('₹5,900');
+    expect(line.unit_price).toBe(2950);
+    expect(line.quantity).toBe(2);
+    expect(payload.unit_price * payload.quantity).toBe(5900);
+  });
+
+  it('bifocal with an odd base: shown pair = per-lens x 2 = what the server is sent', async () => {
+    // 999 x 1.5 x 1.5 = 2247.75 + 700 = 2947.75 -> 2948 per lens, pair 5896.
+    const { shownPair, line, payload } = await ringUpLens('Bifocal', 999);
+    expect(line.unit_price).toBe(2948);
+    expect(shownPair).toBe('₹5,896');
+    expect(payload.unit_price * payload.quantity).toBe(line.unit_price * 2);
+  });
+
+  it('one eye only: quantity 1 bills one per-lens price, not half a pair', async () => {
+    const { line } = await ringUpLens('Progressive');
+    usePOSStore.getState().updateQuantity(line.id, 1);
+    const [payload] = orderLinesOf(usePOSStore.getState().cart);
+    expect(payload.unit_price).toBe(3700);
+    expect(payload.quantity).toBe(1);
+    expect(usePOSStore.getState().cart[0].line_total).toBe(3700);
+  });
+
+  it('a line discount comes off per-lens x 2, not off the pair billed twice', async () => {
+    const { line } = await ringUpLens('Progressive');
+    usePOSStore.getState().applyDiscount(line.id, 10, 'test');
+    const after = usePOSStore.getState().cart[0];
+    // 10% of 3700 x 2 = 740; line 6660.
+    expect(after.discount_amount).toBe(740);
+    expect(after.line_total).toBe(6660);
+    const [payload] = orderLinesOf(usePOSStore.getState().cart);
+    expect(payload.unit_price).toBe(3700);
+    expect(payload.quantity).toBe(2);
+    expect(payload.discount_percent).toBe(10);
   });
 });

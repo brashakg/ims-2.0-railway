@@ -546,7 +546,8 @@ export default LensDetailsModal;
  * A lens the customer needs GROUND is not a catalogue product: there is no SKU
  * to scan, so without this door those orders simply cannot be rung up.
  *
- * ONE builder, called by both tills, because the line it produces carries
+ * ONE builder, used by the billing till (the general counter refuses optical
+ * lines), because the line it produces carries
  * decisions the rest of the system depends on:
  *   * quantity 2 at the PER-LENS price - a prescription lens is sold as a
  *     PAIR. Booking one would halve the price and send a single lens to the
