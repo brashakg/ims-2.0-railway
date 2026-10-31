@@ -607,6 +607,17 @@ Codex PRs: all five closed out - #1278, #1277, #1275, #1276 (2026-10-29) and #12
 | Restore barcode check #1284 (follow-up to #1271) | Two review rounds + two final checks | **DONE #1284** (merged 2026-10-31, 4fded152): Restore refuses only when a LIVE product already holds the same public barcode (checked on the product and its catalogue copy, with the website push's own barcode rule, so junk and internal 20-29 codes never block); the dry run and the real restore give the same answer |
 | Self-maintaining menu #1280 | Review round 1 (three reviewers) BLOCKED on 5: an unreadable catalogue could have been read as 'no products' and pushed a menu with only About Us; a collection that cannot be checked could stop every product push; plus untested push paths. Fix round was interrupted on 10-29 (agent access outage) | fix round restarted 2026-10-31 (rebase onto today's main first), then review round 2 |
 
+**Wave 2 started 2026-10-31** (owner: "run more tasks in parallel", memory ceiling raised to 94%). Seven builds in four lanes, each built, reviewed by two independent reviewers, every serious finding re-checked, fixed and re-reviewed before it can merge (none merged yet):
+
+| Lane | Work | Owner ask / source |
+|---|---|---|
+| 1 | POS 3: a made-to-order lens priced twice at the till; then POS 4: selling more than is in stock refused (never-stocked products, last unit sold twice) | POS fixes approved 2026-10-23; oversell BLOCKS (2026-08-25) |
+| 2 | Website 1: online orders match what Shopify charged (discount codes, shipping), keep the shipping address, never marked "shipped" by a simulated courier booking; then Website 2: bulk price changes reach bettervision.in, archived products can never be re-listed | 2026-10-23 review |
+| 3 | Review follow-ups from #1274-#1277/#1284 and plain wording on the Shopify pages; then GST: section 17(5) default blocked expense types + input credit reversed on written-off stock (GSTR-3B 4(B)(1)) | 4ad; owner "check yourself" on 17(5) |
+| 4 | Suggested colour name from each product's own photo, with Accept / Change | owner 2026-10-23 |
+
+POS 2 (invoice number at the moment of sale, HSN from the product) waits for POS fix 1 #1264 to merge (same invoice code). Returns (lower) waits for #1264 too.
+
 **Deploy rule from 2026-10-29: Railway now deploys main automatically on every merge.** Any live-data step that must run before new code (e.g. #1264's two clean-up scripts) runs before the merge, from the PR's own copy.
 
 ## 4x. The agreed order of work (owner 2026-10-18)
