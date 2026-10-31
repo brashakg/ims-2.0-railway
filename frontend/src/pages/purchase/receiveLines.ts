@@ -38,6 +38,8 @@ export interface ReceiveLine {
   damaged: number;
   damageReason: string;
   damageChoice: DamageChoice;
+  /** The damaged piece's photo (POST /vendors/grn/upload-doc file id). */
+  damagePhotoId?: string;
   counted: boolean;
   shelf: string;
   batch: string;
@@ -225,9 +227,18 @@ export function receiptSums(lines: ReceiveLine[]) {
     over: sum(beyondOrder),
     catalogue,
     short: lines.reduce((s, l) => s + (l.due !== null ? Math.max(0, l.due - l.arrived) : 0), 0),
+    credited: sum(creditClosed),
     onShelf: good - catalogue,
   };
 }
+
+/** Damaged pieces of an order line the supplier credits: the server closes
+ *  them off the order (D9), up to what is still due once the good pieces are
+ *  in. A replacement, or a line already cancelled on the order, closes nothing. */
+export const creditClosed = (l: ReceiveLine) =>
+  l.due !== null && !l.rejectOnly && l.damageChoice === 'credit_note'
+    ? Math.min(rejectedOf(l), Math.max(0, l.due - goodOf(l)))
+    : 0;
 
 /** Contact-lens expiry: expired or within six months is a WARNING only. */
 export function expiryWarning(expiry: string, today: string): 'expired' | 'short' | null {
@@ -310,7 +321,12 @@ export function receiveProblem(h: ReceiveHeader, lines: ReceiveLine[], rejectOnl
   if (h.kind === 'DELIVERY_CHALLAN' && !h.dcNumber.trim()) return 'Enter the challan number';
   if (h.kind === 'DELIVERY_CHALLAN' && !h.dcDate) return 'Enter the challan date';
   if (h.kind === 'STANDARD' && !h.billNo.trim()) return 'Enter the vendor bill number';
-  if (h.kind !== 'DELIVERY_CHALLAN' && !h.billFileId) return 'Attach the bill photo or PDF - no paper, no stock';
+  // No paper, no stock -- a challan too (owner 2026-10-23; the server refuses).
+  if (!h.billFileId) {
+    return h.kind === 'DELIVERY_CHALLAN'
+      ? 'Attach a photo of the delivery challan - no paper, no stock'
+      : 'Attach the bill photo or PDF - no paper, no stock';
+  }
   return null;
 }
 
@@ -322,6 +338,7 @@ export interface GrnItemPayload {
   rejected_qty: number;
   rejection_reason?: string;
   rejection_disposition?: 'credit_note' | 'replacement';
+  rejection_photo_file_id?: string;
   tallied: boolean;
   location_code?: string;
   batch_code?: string;
@@ -340,6 +357,7 @@ export function grnItems(kind: ReceiveKind, lines: ReceiveLine[], canEnterPrice:
       rejected_qty: rejected,
       rejection_reason: rejected > 0 ? l.damageReason.trim() : undefined,
       rejection_disposition: rejected > 0 && l.damageChoice ? l.damageChoice : undefined,
+      rejection_photo_file_id: rejected > 0 ? l.damagePhotoId || undefined : undefined,
       tallied: l.counted,
       location_code: l.shelf.trim().toUpperCase() || undefined,
       batch_code: l.batch.trim() || undefined,

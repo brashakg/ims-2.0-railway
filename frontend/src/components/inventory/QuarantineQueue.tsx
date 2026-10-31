@@ -24,6 +24,7 @@ import {
   type QuarantineUnit,
   type QuarantineLabel,
 } from '../../services/api/inventory';
+import { printUnitLabels } from '../labels/unitLabel';
 
 const QUARANTINE_REASONS = [
   'DEFECTIVE',
@@ -34,30 +35,20 @@ const QUARANTINE_REASONS = [
   'OTHER',
 ] as const;
 
-// Open the browser print dialog with a minimal red label rendition. QZ Tray
-// (silent raw printing) is wired separately; this is the always-available
-// HTML fallback the rest of the label system already relies on.
-function printLabel(label: QuarantineLabel): void {
-  const w = window.open('', '_blank', 'width=420,height=320');
-  if (!w) return;
-  const safe = (s?: string) => (s || '').replace(/[<>&]/g, '');
-  w.document.write(`
-    <html><head><title>Quarantine label ${safe(label.stock_id)}</title></head>
-    <body style="font-family:sans-serif;margin:0;padding:16px;">
-      <div style="border:3px solid ${label.background_color || '#DC2626'};border-radius:8px;padding:16px;">
-        <div style="background:${label.background_color || '#DC2626'};color:#fff;font-weight:700;padding:8px;text-align:center;border-radius:4px;">
-          ${safe(label.header)}
-        </div>
-        <p style="margin:8px 0 0;font-weight:600;">${safe(label.name)} ${safe(label.brand)}</p>
-        <p style="margin:4px 0;font-family:monospace;font-size:18px;">${safe(label.barcode_value)}</p>
-        <p style="margin:4px 0;font-size:12px;">Reason: ${safe(label.quarantine_reason)}</p>
-        <p style="margin:4px 0;font-size:12px;">Store: ${[safe(label.store_brand), safe(label.store_name), label.store_code ? '(' + safe(label.store_code) + ')' : ''].filter(Boolean).join(' ')} &middot; ${safe(label.quarantine_at)}</p>
-        ${label.luxury_brand_line ? `<p style="margin:6px 0 0;font-weight:700;color:${label.background_color || '#DC2626'};">${safe(label.luxury_brand_line)}</p>` : ''}
-      </div>
-    </body></html>`);
-  w.document.close();
-  w.focus();
-  w.print();
+// The red DO NOT SHELVE label is the ONE thermal unit label (unitLabel.ts,
+// TSC TE244 100 x 15 mm) in its quarantine form -- the same label receiving
+// prints for a damaged piece.
+function printLabel(label: QuarantineLabel): string | null {
+  const r = printUnitLabels([
+    {
+      barcode: label.barcode_value,
+      brand: label.brand,
+      model: label.name,
+      doNotShelve: true,
+      note: label.luxury_brand_line,
+    },
+  ]);
+  return r.method === 'html' ? null : r.message;
 }
 
 export function QuarantineQueue() {
@@ -127,7 +118,8 @@ export function QuarantineQueue() {
     setBusyId(stockId);
     try {
       const label = await inventoryApi.printQuarantineLabel(stockId);
-      printLabel(label);
+      const problem = printLabel(label);
+      if (problem) toast.error(problem);
       await load();
     } catch {
       toast.error('Could not print the quarantine label');

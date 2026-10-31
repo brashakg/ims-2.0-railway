@@ -469,7 +469,8 @@ export const inventoryApi = {
   },
 
   // F27: every serialised unit of one product -- or one goods receipt -- at a shop.
-  getUnits: async (params: { store_id?: string; product_id?: string; grn_id?: string }) => {
+  // `rejected` (with grn_id): the receipt's quarantined pieces instead (S2b).
+  getUnits: async (params: { store_id?: string; product_id?: string; grn_id?: string; rejected?: boolean }) => {
     const response = await api.get('/inventory/units', { params });
     return response.data as { units: StockUnit[]; total: number };
   },
@@ -499,6 +500,8 @@ export interface StockUnit {
   /** IST day it arrived at THIS shop (a transfer's receipt day, else minting). */
   received_on: string;
   barcode_printed: boolean;
+  /** The red DO NOT SHELVE label was produced for this (quarantined) piece. */
+  quarantine_label_printed?: boolean;
   location_code: string;
   name: string;
   brand: string;
