@@ -245,7 +245,7 @@ export function InvoiceDetailDrawer({
       setRowStatus(newStatus);
       if (res.exception_override) setOverride(res.exception_override);
       onChanged({ purchase_invoice_id: id, match_status: newStatus, exception_override: res.exception_override });
-      toast.success('Exception approved - bill released for payment; its cost and MRP are now on the products');
+      toast.success('Exception approved - invoice released for payment');
     } catch (e) {
       toast.error(getErrorMessage(e, 'Failed to approve the exception'));
     } finally {
