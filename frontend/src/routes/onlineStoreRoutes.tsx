@@ -4,6 +4,7 @@
 import { lazy } from 'react';
 import { Navigate, Route } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
+import { useAuth } from '../context/AuthContext';
 
 const OnlineStorePage = lazy(() => import('../pages/online-store/OnlineStorePage'));
 const OnlineProductsPage = lazy(() => import('../pages/online-store/OnlineProductsPage'));
@@ -22,6 +23,20 @@ const OnlineStockTallyPage = lazy(() => import('../pages/online-store/OnlineStoc
 const OnlineStoreHealthPage = lazy(() => import('../pages/online-store/OnlineStoreHealthPage'));
 const OndcSellerPage = lazy(() => import('../pages/online-store/OndcSellerPage'));
 const OnlineShopifySyncPage = lazy(() => import('../pages/online-store/OnlineShopifySyncPage'));
+
+/** /catalog for the catalogue roles; a DESIGN_MANAGER-only user (whom the
+ *  /catalog gate refuses) lands on the Online Store home instead of a denial.
+ *  The role list is the /catalog gate's minus STORE_MANAGER, which never had
+ *  this page. */
+function RetiredImagesRedirect() {
+  const { hasRole } = useAuth();
+  return (
+    <Navigate
+      to={hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']) ? '/catalog' : '/online-store'}
+      replace
+    />
+  );
+}
 
 export const onlineStoreRoutes = (
   <>
@@ -110,8 +125,18 @@ export const onlineStoreRoutes = (
 
     {/* The Image design queue was retired (owner 2026-10-29): the editor
         and the cataloguer both work from the Catalog page, and a product's
-        photos reach the website with its own push. Old links forward. */}
-    <Route path="online-store/images" element={<Navigate to="/catalog" replace />} />
+        photos reach the website with its own push. Old links forward; the
+        old gate stays so a signed-out or unknown user is handled as before. */}
+    <Route
+      path="online-store/images"
+      element={
+        <ProtectedRoute
+          allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
+        >
+          <RetiredImagesRedirect />
+        </ProtectedRoute>
+      }
+    />
 
     {/* Online Store — Online orders (BVI Phase 3b). Read-only list
         of storefront orders flowing into the IMS books; the in-page

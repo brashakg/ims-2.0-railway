@@ -288,7 +288,7 @@ export default function HubPage() {
           to: '/online-store',
           title: 'Online Store',
           eyebrow: 'Storefront',
-          desc: 'Products/PIM, collections, mega-menu, image design queue, stock tally and the Shopify sync panel — the storefront back office.',
+          desc: 'Products/PIM, collections, mega-menu, stock tally and the Shopify sync panel — the storefront back office.',
           iconName: 'store',
           meta: [['Today', meta.salesToday], ['Tasks', meta.openTasks]],
           feature: true,

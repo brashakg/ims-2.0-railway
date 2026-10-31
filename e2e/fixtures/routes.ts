@@ -287,7 +287,8 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
     path: '/online-store/images',
     reason:
       'redirect-only: the Image design queue was retired (owner 2026-10-29: the editor and '
-      + 'the cataloguer work from one Catalog page); the address forwards to /catalog.',
+      + 'the cataloguer work from one Catalog page); the address forwards to /catalog '
+      + '(/online-store for a DESIGN_MANAGER, whom /catalog refuses).',
   },
   {
     path: '/clinical/test',

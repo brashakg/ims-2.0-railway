@@ -231,6 +231,10 @@ def select_dirty_products(db) -> Tuple[List[Dict], int, int]:
     (catalog._archive_product), this covers rows archived before it did. A
     listing already on the website keeps syncing, as the gate says
     (listing.first_publish_not_ready); its take-down is its own door.
+    This looks at the catalog_products twin only; the gate also refuses when
+    the SPINE is archived, so a never-published twin whose product row is
+    archived (the twin itself not) still queues and is refused there (a red
+    line, not a silent skip).
 
     Returns (dirty_docs, taken_down_skipped, archived_skipped)."""
     from . import product_master as pm
