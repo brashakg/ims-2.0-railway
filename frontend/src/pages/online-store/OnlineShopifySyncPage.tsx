@@ -201,6 +201,9 @@ function sweepToast(
   const archivedLeft = n('archived_skipped');
   const oldPrice = n('price_not_synced');
   const variantsHeld = n('variants_held');
+  // LIVE, BUT A COLOUR/SIZE HELD FOR A CATALOGUE REASON (no price, looks the
+  // same as another): its own line, never "NO stock written" (review of #1276).
+  const catalogueHeld = n('catalogue_held');
   // LIVE, BUT ITS PHOTOS ARE NOT IMS's (a photo step failed): still queued,
   // and the website's photo 1 may not be the main photo IMS shows.
   const oldPhotos = n('photos_not_synced');
@@ -252,6 +255,7 @@ function sweepToast(
     (archived ? ` · ${archived} archived (not listed)` : '') +
     (archivedLeft ? ` · ${archivedLeft} archived (left the queue)` : '') +
     (variantsHeld ? ` · ${variantsHeld} colours/sizes left off (incomplete options)` : '') +
+    (catalogueHeld ? ` · ${catalogueHeld} live with a colour/size held back (fix it in the catalogue)` : '') +
     (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
     (oldPhotos ? ` · ${oldPhotos} photos still attaching — will finish on the next sync` : '') +
     (photosFailed ? ` · ${photosFailed} live with photos FAILED (check the photographs)` : '') +
@@ -261,7 +265,7 @@ function sweepToast(
     why +
     stockPassLine;
   const bad =
-    refused || withheld || variantsHeld || oldPhotos || photosFailed || noStock || stockWarn || stockPassBad || failed;
+    refused || withheld || variantsHeld || catalogueHeld || oldPhotos || photosFailed || noStock || stockWarn || stockPassBad || failed;
   return { level: bad ? 'warning' : 'success', msg };
 }
 
@@ -1222,6 +1226,18 @@ export default function OnlineShopifySyncPage() {
                           <span className="inline-flex items-center gap-1 text-amber-700">
                             <AlertTriangle className="w-3 h-3" /> {fmt(variantsHeld)} colours/sizes left
                             off (incomplete options)
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const catalogueHeld = Number(sweep.summary?.[ent.token]?.catalogue_held ?? 0);
+                        return catalogueHeld > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-amber-700"
+                            title="Live on the website, but a colour or size was held back for a catalogue reason (no price, looks the same as another). The product line names it; fix it in the catalogue and press again."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(catalogueHeld)} with a colour/size held
+                            back
                           </span>
                         ) : null;
                       })()}

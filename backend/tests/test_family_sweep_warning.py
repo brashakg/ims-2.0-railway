@@ -39,3 +39,37 @@ def test_bulk_family_omission_is_a_catalogue_warning(client, auth_headers, patch
     assert bucket.get("variants_held", 0) == omitted
     if held == [MISSING]:
         assert "stock_not_written" not in bucket and "stock_warning" not in bucket
+
+
+UNPRICED = {"sku": "NOPRICE-58", "code": "VARIANT_UNPRICED", "reason": "no price"}
+
+
+@pytest.mark.parametrize("listing,seeded,code", [
+    ({"held": [UNPRICED]}, None, "VARIANT_UNPRICED"),
+    ({"held": [MISSING, ADDS]}, None, "OPTION_MISSING"),
+    ({"held": []}, {"held_data": True, "code": "LISTING_OPTIONS_UNKNOWN", "held": "options unknown"}, "LISTING_OPTIONS_UNKNOWN"),
+])
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_catalogue_hold_has_its_own_line_never_sold_out(client, auth_headers, patched_db, monkeypatch, listing, seeded, code):
+    # Review of #1276: a colour held for a catalogue reason read
+    # "NO stock written (sold out)".
+    conn, _ = patched_db
+    conn.db["catalog_products"].insert_one(_live_reordered())
+
+    async def push(db, product, variants, blocked=None):
+        return PushResult(
+            mode="LIVE", entity="product", action="update", target_id=product["id"],
+            ok=True, code=code, listing=listing, variants_seeded=seeded,
+            stock={"ok": True, "set": 0},
+        )
+
+    async def stock(db):
+        return PushResult(mode="LIVE", entity="stock", action="noop", ok=True)
+
+    monkeypatch.setattr(shopify_push, "push_product", push)
+    monkeypatch.setattr(shopify_push, "sync_stock_levels", stock)
+    response = client.post("/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers)
+    assert response.status_code == 200, response.text
+    bucket = response.json()["summary"]["products"]
+    assert bucket.get("catalogue_held") == 1, bucket
+    assert "stock_not_written" not in bucket and "stock_warning" not in bucket
