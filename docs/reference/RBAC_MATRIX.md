@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 393 |
-| Role-gated (one or more roles) | 867 |
-| **Total `/api/v1` (method x path)** | **1306** |
+| Role-gated (one or more roles) | 868 |
+| **Total `/api/v1` (method x path)** | **1307** |
 | ...of which `store_scoped` | 235 |
 | ...of which `self_enforced` | 47 |
 
@@ -1238,6 +1238,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/products/similar` | AUTH |  |  |
 | `POST` | `/api/v1/products/sku-preview` | ADMIN, CATALOG_MANAGER |  |  |
 | `GET` | `/api/v1/products/sku/{sku}` | AUTH |  |  |
+| `POST` | `/api/v1/products/suggest-colour-name` | ADMIN, CATALOG_MANAGER |  |  |
 | `GET` | `/api/v1/products/tags/list` | AUTH |  |  |
 | `GET` | `/api/v1/products/website-verdict` | AUTH |  |  |
 | `GET` | `/api/v1/products/{product_id}` | AUTH |  |  |
