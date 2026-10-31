@@ -3844,9 +3844,10 @@ def _restore_barcode_refusal(repo, spine: Optional[Dict], twin: Optional[Dict]) 
                 # An INT that lost a UPC/EAN's leading zero(s) (036000291452
                 # -> 36000291452, 9-11 digits) is read zero-padded. Ints
                 # only, never 8 digits: a padded GTIN-8 in 20-29 would pass
-                # as a public code (review of #1284).
-                if type(value) is int and 9 <= len(str(value)) <= 11:
-                    value = str(value).zfill(12)
+                # as a public code (review of #1284). isinstance, not type():
+                # a real MongoDB hands an 11-digit number back as bson Int64.
+                if isinstance(value, int) and not isinstance(value, bool) and 9 <= len(str(int(value))) <= 11:
+                    value = str(int(value)).zfill(12)
                 code = sanitise_gtin(value)
                 if code and code not in codes:
                     codes.append(code)
