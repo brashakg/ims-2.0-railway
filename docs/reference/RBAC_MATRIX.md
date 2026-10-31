@@ -1620,6 +1620,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/vendors/` | AUTH |  |  |
 | `POST` | `/api/v1/vendors/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/vendors/ap-aging` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/vendors/expense-types` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/vendors/goods-receipt/cockpit` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/vendors/grn` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `POST` | `/api/v1/vendors/grn` | ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |

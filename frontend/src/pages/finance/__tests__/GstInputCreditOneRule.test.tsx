@@ -24,7 +24,7 @@ vi.mock('../../../services/api/finance', () => ({
 const apis = vi.hoisted(() => ({
   cashFlowApi: { ownerDashboard: vi.fn(), forecast: vi.fn() },
   vendorApApi: {
-    apAging: vi.fn(), ledger: vi.fn(), listBills: vi.fn(), createBill: vi.fn(), setItcBlocked: vi.fn(),
+    apAging: vi.fn(), ledger: vi.fn(), listBills: vi.fn(), createBill: vi.fn(), setItcBlocked: vi.fn(), listExpenseTypes: vi.fn(),
     createPayment: vi.fn(), createDebitNote: vi.fn(), listReceipts: vi.fn(), listPayments: vi.fn(),
   },
 }));
@@ -89,6 +89,10 @@ beforeEach(() => {
   apis.vendorApApi.listReceipts.mockResolvedValue([]);
   apis.vendorApApi.listPayments.mockResolvedValue({ payments: [] });
   apis.vendorApApi.createBill.mockResolvedValue({ bill_id: 'B-NEW', store_id: 'BV-DHN-01' });
+  apis.vendorApApi.listExpenseTypes.mockResolvedValue([
+    { value: 'RENT', label: 'Rent / lease', blocked_by_default: false },
+    { value: 'FOOD', label: 'Food and drinks', blocked_by_default: true },
+  ]);
 });
 
 describe('the Finance GST table is one row per GSTIN', () => {
@@ -146,12 +150,36 @@ describe('section 17(5) on the Cash Flow bill', () => {
     fireEvent.change(screen.getByPlaceholderText('Bill / invoice no'), { target: { value: 'FOOD-2' } });
     fireEvent.change(screen.getByPlaceholderText('Taxable amount'), { target: { value: '1000' } });
     fireEvent.change(screen.getByPlaceholderText('Tax (GST)'), { target: { value: '180' } });
+    await screen.findByRole('option', { name: 'Rent / lease' });
+    fireEvent.change(screen.getByTestId('bill-expense-type'), { target: { value: 'RENT' } });
     const tick = screen.getByTestId('bill-itc-blocked') as HTMLInputElement;
     expect(tick.checked).toBe(false);
     fireEvent.click(tick);
     fireEvent.click(screen.getByRole('button', { name: /Save/ }));
     await waitFor(() => expect(apis.vendorApApi.createBill).toHaveBeenCalled());
-    expect(apis.vendorApApi.createBill.mock.calls[0][1]).toMatchObject({ bill_kind: 'SERVICES', itc_blocked: true });
+    expect(apis.vendorApApi.createBill.mock.calls[0][1]).toMatchObject({ bill_kind: 'SERVICES', itc_blocked: true, expense_type: 'RENT' });
+  });
+
+  it('the expense type sets the tick to its default (server table); a services bill must name one', async () => {
+    await openSupplier();
+    fireEvent.click(await screen.findByRole('button', { name: 'Bill' }));
+    fireEvent.change(await screen.findByDisplayValue('This bill is for…'), { target: { value: 'SERVICES' } });
+    await screen.findByRole('option', { name: 'Food and drinks (credit not claimable)' });
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith('Say what this expense is for'));
+    expect(apis.vendorApApi.createBill).not.toHaveBeenCalled();
+    const type = screen.getByTestId('bill-expense-type');
+    const tick = screen.getByTestId('bill-itc-blocked') as HTMLInputElement;
+    fireEvent.change(type, { target: { value: 'FOOD' } });
+    expect(tick.checked).toBe(true);
+    fireEvent.change(type, { target: { value: 'RENT' } });
+    expect(tick.checked).toBe(false);
+    // The accountant can still change it.
+    fireEvent.change(type, { target: { value: 'FOOD' } });
+    fireEvent.click(tick);
+    fireEvent.click(screen.getByRole('button', { name: /Save/ }));
+    await waitFor(() => expect(apis.vendorApApi.createBill).toHaveBeenCalled());
+    expect(apis.vendorApApi.createBill.mock.calls[0][1]).toMatchObject({ expense_type: 'FOOD', itc_blocked: false });
   });
 
   it('a booked services bill is ticked later; a locked month is refused in words', async () => {
