@@ -259,3 +259,21 @@ def test_resolved_products_resolves_migrated_collection(
     assert body["rules"][0] == {
         "field": "brand", "relation": "EQUALS", "value": "Ray-Ban"
     }
+
+
+def test_resolved_products_counts_a_custom_collection_by_the_one_rule(client, auth_headers, seeded):
+    """A CUSTOM collection: ``skus`` / ``count`` are the listings ON THE
+    WEBSITE (the menu's number); the hand-picked list rides, labelled, as
+    ``manual_skus`` -- "count" means one thing for both types."""
+    custom = seeded["repo"].create({
+        "title": "Picks", "handle": "picks", "collection_type": "CUSTOM",
+        "products": [{"sku": "GONE-1", "position": 0}, {"sku": "BOSS-1", "position": 1}],
+    })
+    r = client.get(
+        f"/api/v1/online-store/collections/{custom['collection_id']}/resolved-products",
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["skus"] == ["BOSS-1"] and body["count"] == 1 and body["source"] == "website_rule"
+    assert body["manual_skus"] == ["GONE-1", "BOSS-1"]

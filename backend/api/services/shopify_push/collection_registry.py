@@ -138,7 +138,12 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
         lst = None
     tags = ims_product_tags(view)
     rows = (lst or {}).get("rows") or raw or [{}]
-    prices = [p for p in (_resolve_variant_pricing(view, r)[0] for r in rows) if p]
+    # (row sku, price) per listing row: a count that cuts the colours not on
+    # the website (collection_membership.online_facts) cuts their prices too.
+    priced = [(str(r.get("sku") or "") if isinstance(r, dict) else "", _resolve_variant_pricing(view, r)[0])
+              for r in rows]
+    priced = [(s, p) for s, p in priced if p]
+    prices = [p for _s, p in priced]
     # Every SKU the listing carries, lead first then in listing order: "is
     # SKU X in a collection" is answered by the listing it sells on.
     skus = [str(doc["sku"])] if doc.get("sku") else []
@@ -151,6 +156,7 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
         "type": ims_to_shopify_type(doc["category"]) if doc.get("category") else "",
         "tags": set(tags),
         "prices": prices,
+        "priced": priced,
         # product_input sends vendor = the listing view's own brand field.
         "brand": str(view.get("brand") or "").strip(),
         "skus": skus,
@@ -382,7 +388,8 @@ async def shop_collections(db) -> List[Dict[str, Any]]:
     while True:
         body = await _graphql(db, _COLLECTIONS_READ, {"after": after})
         page = ((body or {}).get("data") or {}).get("collections")
-        if page is None:
+        if page is None or (body or {}).get("errors"):
+            # A partial read (data AND errors) silently drops counts / rows.
             raise RuntimeError(f"collections read failed: {(body or {}).get('errors')}")
         for c in page.get("nodes") or []:
             out.append({

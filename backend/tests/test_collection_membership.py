@@ -122,10 +122,11 @@ def test_boss_and_hugo_boss_are_separate_collections():
 
 
 def test_a_rule_the_website_cannot_read_is_reported_never_guessed():
-    """An IMS-only field (shape on the raw doc) or an IN list is never sent
-    to Shopify as written: IMS reports it, counts 0, never guesses."""
+    """An IMS-only field the push makes no tag for (hsn_code) or an IN list
+    is never sent to Shopify as written: IMS reports it, counts 0, never
+    guesses."""
     db = _db()
-    for rules in ([{"field": "shape", "relation": "EQUALS", "value": "Aviator"}],
+    for rules in ([{"field": "hsn_code", "relation": "EQUALS", "value": "9004"}],
                   [{"field": "brand", "relation": "IN", "value": ["Ray-Ban", "Boss"]}]):
         found, why = cm.members(db, {"collection_type": "SMART", "rules": rules})
         assert found == [] and why and "cannot evaluate" in why
@@ -260,3 +261,66 @@ def test_a_colour_is_in_a_website_collection_only_when_it_is_online():
     db["catalog_variants"].update_one({"sku": colour}, {"$set": {"shopify_variant_id": "gid://shopify/ProductVariant/9"}})
     fact = next(f for f in cm.online_facts(db, strict=True) if f["sku"] == lead_sku)
     assert fact["skus"] == [lead_sku, colour]
+
+
+def test_builder_chip_rules_read_as_the_push_sends_them():
+    """The New Collection builder's chips (category, shape, gender,
+    polarization) are carried as the push's own productType and filter
+    tags (shape_aviator, gender_men, polarization_yes), so the one rule --
+    and Shopify -- can match them (review round 2)."""
+    from api.services.shopify_push.collections import convert_rule_set
+
+    db = _db()
+
+    def skus(rule):
+        found, why = cm.members(db, {"collection_type": "SMART", "rules": [rule]})
+        assert why is None, why
+        return sorted(f["sku"] for f in found)
+
+    assert convert_rule_set([{"field": "shape", "relation": "EQUALS", "value": "Aviator"}])[0] == [
+        {"column": "TAG", "relation": "EQUALS", "condition": "shape_aviator"}]
+    assert convert_rule_set([{"field": "category", "relation": "EQUALS", "value": "SUNGLASS"}])[0] == [
+        {"column": "TYPE", "relation": "EQUALS", "condition": "Sunglass"}]
+    assert skus({"field": "shape", "relation": "EQUALS", "value": "Aviator"}) == ["A"]
+    assert skus({"field": "gender", "relation": "EQUALS", "value": "Men"}) == ["A", "D", "F"]
+    assert skus({"field": "polarization", "relation": "EQUALS", "value": "Yes"}) == ["B"]
+    assert skus({"field": "category", "relation": "EQUALS", "value": "SUNGLASS"}) == ["A", "B", "C", "D"]
+
+
+def test_the_view_counts_listings_and_browses_by_listing():
+    """products_count and the browse total are LISTINGS (the number the
+    menu and the website show); the view keeps a row per colour SKU for the
+    insights' stock joins."""
+    db = _db()
+    coll = {"collection_id": "c-rb", "handle": "ray-ban", "collection_type": "SMART",
+            "rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_rayban"}]}
+    db["ecom_collections"].insert_one(dict(coll))
+    facts = cm.online_facts(db, strict=True)
+    next(f for f in facts if f["sku"] == "A")["skus"] = ["A", "A-BLUE"]  # an online colour of A
+    assert mat.materialize_collection(db, coll, facts) == 2
+    assert len(list(db["collection_products"].find({"collection_id": "c-rb"}))) == 3
+    assert db["ecom_collections"].find_one({"collection_id": "c-rb"})["products_count"] == 2
+    page = mat.browse(db, coll)
+    assert page["total"] == 2 and [r["sku"] for r in page["products"]] == ["A", "B"]
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_colour_not_online_does_not_put_its_price_in_a_band():
+    """online_facts cuts a listing's colours to the ones on the website --
+    and their prices with them: a colour at Rs 9,000 with no Shopify
+    variant does not put a Rs 12,990 listing in the Rs 5,000-10,000 band
+    until it is online."""
+    from tests import test_shopify_model_listings as ml
+
+    db = ml._world()
+    pids = ml._family(db, [("Gold", "001"), ("Black", "002/58", "58", {"offer": 9000.0})])
+    lead_sku = db["products"].find_one({"product_id": pids[0]})["sku"]
+    colour = db["products"].find_one({"product_id": pids[1]})["sku"]
+    db["catalog_products"].update_one({"sku": lead_sku}, {"$set": {
+        "ecom.shopify_product_id": "gid://shopify/Product/5", "ecom.status": "ACTIVE"}})
+    band = {"collection_type": "SMART", "rules": [
+        {"field": "variant_price", "relation": "GREATER_THAN", "value": "4999.99"},
+        {"field": "variant_price", "relation": "LESS_THAN", "value": "10000"}]}
+    assert cm.member_skus(db, band, cm.online_facts(db, strict=True)) == []
+    db["catalog_variants"].update_one({"sku": colour}, {"$set": {"shopify_variant_id": "gid://shopify/ProductVariant/9"}})
+    assert cm.member_skus(db, band, cm.online_facts(db, strict=True)) == [lead_sku]

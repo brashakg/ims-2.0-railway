@@ -1148,6 +1148,8 @@ export interface GeneratedMenuLastPush {
   action?: string | null;
   error?: string | null;
   reason?: string | null;
+  /** The first LIVE overwrite waits for a person's "Regenerate & push now". */
+  waiting?: boolean | null;
 }
 
 export interface GeneratedMenu {
@@ -1163,7 +1165,17 @@ export interface GeneratedMenu {
   last_push?: GeneratedMenuLastPush | null;
   in_sync?: boolean;
   backup_taken_at?: string | null;
-  preview?: { items: GeneratedMenuItem[]; hidden: HiddenMenuItem[]; changed_since_push: boolean } | null;
+  /** Collection links in the tree last pushed LIVE (the push confirm's "was M"). */
+  pushed_collection_nodes?: number | null;
+  /** Whether IMS has ever pushed this menu LIVE. */
+  pushed_live?: boolean;
+  preview?: {
+    items: GeneratedMenuItem[];
+    hidden: HiddenMenuItem[];
+    changed_since_push: boolean;
+    /** Set when the website listings could not be read (no preview shown). */
+    unreadable?: string | null;
+  } | null;
 }
 
 export const generatedMenusApi = {
@@ -1624,6 +1636,7 @@ export interface GeneratedMenuStatus {
   last_pushed_at?: string | null;
   last_push?: GeneratedMenuLastPush | null;
   in_sync?: boolean;
+  pushed_live?: boolean;
   item_count?: number;
   hidden_count?: number;
 }

@@ -39,19 +39,25 @@ TEMPLATE  ``{"sections": [section, ...]}`` -- a section is one of
       are static links appended after the generated items (Shop all).
 
 PUSH  only when the generated tree differs from what was last pushed (a
-stable content hash on the doc). LIVE: the shop's menu with the same handle
-is read first -- the first push ADOPTS it (menuUpdate of its gid, its name
-and its heading URLs; never a second menu with the same handle) -- and every
-LIVE overwrite saves the tree it replaces in ``ecom_menu_backups`` and keeps
-the live item ids of unchanged items. Before a LIVE push the tree is rebuilt
-with Shopify's own productsCount (a collection Shopify shows empty or lacks
-is left out), and an AUTOMATIC push is refused when IMS read no listing, the
-tree has no collection link, or it would lose more than half of the last
-pushed collection links -- only the human "Regenerate & push now" (force)
-sends such a tree. The listings are read STRICTLY: an unreadable catalogue
-skips the run and the last pushed menu stands. DARK / SIMULATED vs LIVE
-follows ``_live_or_reason``; every attempt writes the same chained audit
-row as the other pushes. A failed or refused push is recorded on the doc
+stable content hash on the doc). The FIRST LIVE overwrite of the hand-made
+website menu is only ever a person's "Regenerate & push now": until then an
+automatic run records "waiting for the first push by a person" and sends
+nothing. LIVE: the shop's menu with the same handle is read first -- the
+person's first push ADOPTS it (menuUpdate of its gid, its name and its
+heading URLs; never a second menu with the same handle; a menu recreated on
+Shopify is re-adopted only by a person) -- and every LIVE overwrite saves
+the tree it replaces in ``ecom_menu_backups`` (scripts/
+restore_main_menu_backup.py puts it back) and keeps the live item ids of
+unchanged items. Before a LIVE push the tree is rebuilt with Shopify's own
+productsCount (a collection Shopify shows empty or lacks is left out, and
+stays out of the preview until a later read sees it filled; a partial read
+pushes nothing). A push is refused when IMS read no listing or the tree has
+no collection link (even for a person), and an AUTOMATIC one when it would
+lose more than half of the last pushed collection links. The listings are
+read STRICTLY: an unreadable catalogue skips the run and the last pushed
+menu stands. DARK / SIMULATED vs LIVE is decided once per push
+(``_live_or_reason``); every attempt writes the same chained audit row as
+the other pushes. A failed or refused push is recorded on the doc
 (``last_push``) and retried on the next run.
 
 No emoji (Windows cp1252).
@@ -79,6 +85,9 @@ SECTION_KINDS = ("collection", "links", "panel")
 _GENDER_ORDER = ("men", "women", "unisex", "kids")
 _GENDER_LABEL = {"men": "Men's", "women": "Women's", "unisex": "Unisex", "kids": "Kids"}
 SCHEDULER_USER = {"user_id": "scheduler:shopify-live-sync"}
+SHOP_EMPTY = "Shopify shows no products in it"
+SHOP_MISSING = "not found on Shopify"
+WAITING_FIRST = "waiting for the first push by a person (Regenerate & push now)"
 
 
 def _now() -> datetime:
@@ -192,11 +201,15 @@ def _count(row: Optional[Dict[str, Any]], counts: Dict[str, Dict[str, Any]]) -> 
 def _usable(
     row: Optional[Dict[str, Any]], counts: Dict[str, Dict[str, Any]],
     shop_counts: Optional[Dict[str, Any]] = None,
+    shop_hidden: Optional[Dict[str, str]] = None,
 ) -> Tuple[bool, str]:
     """(shown, why hidden) for one collection row. ``shop_counts`` ({gid:
     Shopify productsCount}, read right before a LIVE push) also hides what
-    Shopify itself shows empty or does not have, and a row whose latest
-    rules did not reach Shopify (the collection sync just tried and failed)."""
+    Shopify itself shows empty or does not have -- its count for the live
+    gid is what the website shows, even while newer rules wait to be pushed.
+    Without a read, ``shop_hidden`` ({handle: reason}, what the last LIVE
+    read hid) keeps those rows out, so the preview and the stored tree never
+    link a collection the last push left out."""
     from agents.nexus_providers import _as_shopify_gid
 
     if row is None:
@@ -209,13 +222,13 @@ def _usable(
     if row.get("push_problem"):
         return False, f"not on the website yet ({row['push_problem']})"
     if shop_counts is not None:
-        if row.get("locally_modified"):
-            return False, "not on the website yet (its latest rules have not reached Shopify)"
-        on_shop = shop_counts.get(_as_shopify_gid(row["shopify_collection_id"], "Collection"))
-        if on_shop is None:
-            return False, "not found on Shopify"
-        if not on_shop:
-            return False, "Shopify shows no products in it"
+        gid = _as_shopify_gid(row["shopify_collection_id"], "Collection")
+        if gid not in shop_counts:
+            return False, SHOP_MISSING
+        if not shop_counts[gid]:
+            return False, SHOP_EMPTY
+    elif shop_hidden and row.get("handle") in shop_hidden:
+        return False, shop_hidden[row["handle"]]
     return True, ""
 
 
@@ -254,23 +267,29 @@ def generate(
     collections: List[Dict[str, Any]],
     counts: Dict[str, Dict[str, Any]],
     shop_counts: Optional[Dict[str, Any]] = None,
+    shop_hidden: Optional[Dict[str, str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """(items, hidden): the menu tree in the ecom_menus item shape (what
     shopify_push.menus.build_menu_items sends) and every collection left out
-    with why. ``collections`` are ecom_collections rows (registry rows carry
-    ``ims_key``), ``counts`` is collection_membership.counts_by_handle,
-    ``shop_counts`` Shopify's own productsCount per gid (LIVE push only).
-    Pure and deterministic."""
-    by_key = {str(c["ims_key"]): c for c in collections if c.get("ims_key") and not c.get("retired")}
-    by_handle = {str(c["handle"]): c for c in collections if c.get("handle") and not c.get("retired")}
+    with why (once per collection). ``collections`` are the live
+    ecom_collections rows (collection_membership.live_collections: retired
+    ones are already out; registry rows carry ``ims_key``), ``counts`` is
+    collection_membership.counts_by_handle, ``shop_counts`` Shopify's own
+    productsCount per gid (LIVE push only), ``shop_hidden`` what the last
+    LIVE read hid. Pure and deterministic."""
+    by_key = {str(c["ims_key"]): c for c in collections if c.get("ims_key")}
+    by_handle = {str(c["handle"]): c for c in collections if c.get("handle")}
     items: List[Dict[str, Any]] = []
     hidden: List[Dict[str, Any]] = []
 
     def usable(row):
-        return _usable(row, counts, shop_counts)
+        return _usable(row, counts, shop_counts, shop_hidden)
 
     def hide(section: str, title: str, row: Optional[Dict[str, Any]], why: str, handle: Optional[str] = None):
-        hidden.append({"section": section, "title": title, "handle": (row or {}).get("handle") or handle, "reason": why})
+        h = (row or {}).get("handle") or handle
+        if h and any(x["handle"] == h for x in hidden):
+            return  # a brand left out of Top N and of A-Z is listed once
+        hidden.append({"section": section, "title": title, "handle": h, "reason": why})
 
     for s in (template or {}).get("sections") or []:
         kind, title = s.get("kind"), str(s.get("title") or "").strip()
@@ -364,6 +383,12 @@ def make_template_doc(template: Optional[Dict[str, Any]] = None, handle: str = M
     }
 
 
+def shop_hidden_of(doc: Dict[str, Any]) -> Dict[str, str]:
+    """{handle: reason} the last LIVE read of Shopify hid (empty / missing
+    there). Pure."""
+    return {str(h["handle"]): str(h["reason"]) for h in doc.get("shop_hidden") or [] if h.get("handle")}
+
+
 def regenerate(db, doc: Dict[str, Any], facts: List[Dict[str, Any]],
                shop_counts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Fill ``doc`` from the registry + live membership over ``facts`` (a
@@ -374,12 +399,16 @@ def regenerate(db, doc: Dict[str, Any], facts: List[Dict[str, Any]],
 
     collections = collection_membership.live_collections(db)
     counts = collection_membership.counts_by_handle(db, facts, collections)
-    items, hidden = generate(doc.get("template") or {}, collections, counts, shop_counts)
+    stored = None if shop_counts is not None else shop_hidden_of(doc)
+    items, hidden = generate(doc.get("template") or {}, collections, counts, shop_counts, stored)
     title = doc.get("title") or doc.get("handle") or MAIN_MENU
-    upd = {
+    upd: Dict[str, Any] = {
         "items": items, "hidden": hidden, "generated_hash": menu_hash(title, doc.get("handle") or MAIN_MENU, items),
         "last_generated_at": _now(),
     }
+    if shop_counts is not None:
+        upd["shop_hidden"] = [{"handle": h["handle"], "reason": h["reason"]} for h in hidden
+                              if h.get("handle") and h["reason"] in (SHOP_EMPTY, SHOP_MISSING)]
     db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": upd})
     doc.update(upd)
     return upd
@@ -393,8 +422,8 @@ _MENU_BY_HANDLE = """
 query imsMenuByHandle($after: String) {
   menus(first: 50, after: $after) {
     pageInfo { hasNextPage endCursor }
-    nodes { id handle title items { id title type url resourceId
-      items { id title type url resourceId items { id title type url resourceId } } } }
+    nodes { id handle title items { id title type url resourceId tags
+      items { id title type url resourceId tags items { id title type url resourceId tags } } } }
   }
 }
 """
@@ -480,76 +509,51 @@ def _carry_ids(items: List[Dict[str, Any]], shop_items: List[Dict[str, Any]]) ->
 DROP_LIMIT = 0.5  # an auto push may not lose more than half the collection links
 
 
-def _refusal(doc: Dict[str, Any], facts: List[Dict[str, Any]]) -> Optional[str]:
-    """Why an AUTOMATIC live push of ``doc``'s tree is refused (None = send
-    it). A menu that suddenly has no or far fewer collection links is far
-    likelier a bad read than a real catalogue -- only a human pressing
-    "Regenerate & push now" (force) sends it."""
+def _refusal(doc: Dict[str, Any], facts: List[Dict[str, Any]], force: bool = False) -> Optional[str]:
+    """Why a live push of ``doc``'s tree is refused (None = send it). No
+    listing read and no collection link at all are refused EVEN for the
+    human press (that menu is About Us only -- a bad read, never a real
+    catalogue). A menu that suddenly lost more than half its collection
+    links is refused automatically; only "Regenerate & push now" (force)
+    sends it, after the page's confirm."""
     nodes = collection_nodes(doc.get("items") or [])
     prev = int(doc.get("pushed_collection_nodes") or 0)
     if not facts:
         return "refused: IMS read no listing on the website (the menu would lose every collection)"
     if nodes == 0:
         return "refused: the generated menu has no collection with products"
-    if prev and nodes < prev * DROP_LIMIT:
+    if not force and prev and nodes < prev * DROP_LIMIT:
         return f"refused: the menu would drop from {prev} to {nodes} collection links (more than half)"
     return None
 
 
-async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]] = None,
-                         force: bool = False, facts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-    """Push ``doc``'s generated tree when it differs from what was last
-    pushed (or ``force``: the human "Regenerate & push now"). Records
-    ``last_push`` on the doc and an audit row. Never raises.
+async def _shop_counts(db) -> Dict[str, Any]:
+    """{gid: productsCount} of every shop collection. Raises when the read
+    is partial: an IMS collection Shopify returned without a count would
+    otherwise read as "not on the website" and silently thin the menu."""
+    from agents.nexus_providers import _as_shopify_gid
 
-    LIVE: read the shop's menu (adopt it the first time) and every
-    collection's Shopify productsCount, rebuild hiding what Shopify shows
-    empty, refuse a suspicious automatic push (_refusal), back the live tree
-    up, then menuUpdate carrying the live item ids. Any failure pushes
-    nothing and is retried next run."""
-    from .shopify_live_sync import write_push_audit
-    from .shopify_push import MODE_LIVE, PushResult, _live_or_reason, push_menu
+    from . import collection_membership
     from .shopify_push.collection_registry import shop_collections
 
-    live, _reason = _live_or_reason(db)
-    if not force and doc.get("generated_hash") and doc.get("generated_hash") == doc.get("pushed_hash"):
-        return {"handle": doc.get("handle"), "changed": False}
-    if not live and not force and doc.get("generated_hash") == doc.get("simulated_hash"):
-        # DARK: this exact tree was already simulated -- no new audit row.
-        return {"handle": doc.get("handle"), "changed": False, "mode": "SIMULATED"}
-    error, shop, send = None, None, doc
-    if live:
-        try:
-            if facts is None:
-                from . import collection_membership
+    counts = {str(c.get("id")): c.get("products") for c in await shop_collections(db)}
+    unread = [
+        r.get("handle") for r in collection_membership.live_collections(db)
+        if r.get("shopify_collection_id")
+        and _as_shopify_gid(r["shopify_collection_id"], "Collection") in counts
+        and counts[_as_shopify_gid(r["shopify_collection_id"], "Collection")] is None
+    ]
+    if unread:
+        raise RuntimeError(f"Shopify returned no product count for {', '.join(sorted(map(str, unread)))}")
+    return counts
 
-                facts = collection_membership.online_facts(db, strict=True)
-            shop = await _shop_menu(db, doc.get("handle") or MAIN_MENU)
-            shop_counts = {str(c.get("id")): c.get("products") for c in await shop_collections(db)}
-        except Exception as e:  # noqa: BLE001 -- no read => no overwrite
-            error = f"the listings or the existing Shopify menu could not be read or backed up: {e}"
-        if error is None:
-            if shop is not None and not doc.get("shopify_menu_id"):
-                _adopt(db, doc, shop)
-            regenerate(db, doc, facts, shop_counts)
-            if not force and doc.get("generated_hash") == doc.get("pushed_hash"):
-                return {"handle": doc.get("handle"), "changed": False}
-            error = None if force else _refusal(doc, facts)
-        if error is None and shop is not None:
-            try:  # every LIVE overwrite saves the tree it replaces
-                db[BACKUPS].insert_one({
-                    "menu_id": doc["menu_id"], "handle": shop.get("handle"), "shopify_menu_id": shop.get("id"),
-                    "title": shop.get("title"), "items": shop.get("items") or [], "taken_at": _now(),
-                })
-                db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": {"backup_taken_at": _now()}})
-                send = dict(doc, items=_carry_ids(doc.get("items") or [], shop.get("items") or []))
-            except Exception as e:  # noqa: BLE001
-                error = f"the existing Shopify menu could not be read or backed up: {e}"
-    if error:
-        result = PushResult(mode=MODE_LIVE, entity="menu", action="update", target_id=doc.get("menu_id"),
-                            ok=False, error=error).to_dict()
-    else:
-        result = (await push_menu(db, send)).to_dict()
+
+def _record(db, doc: Dict[str, Any], result: Dict[str, Any], actor: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Save one push attempt on the doc (last_push; the pushed / simulated
+    hash on success) and write its chained audit row."""
+    from .shopify_live_sync import write_push_audit
+    from .shopify_push import MODE_LIVE
+
     at = _now()
     upd: Dict[str, Any] = {"last_push": {"at": at, "mode": result.get("mode"), "ok": bool(result.get("ok")),
                                          "action": result.get("action"), "error": result.get("error"),
@@ -565,6 +569,89 @@ async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]
     doc.update(upd)
     write_push_audit(result, actor or SCHEDULER_USER)
     return {"handle": doc.get("handle"), "changed": True, **upd["last_push"]}
+
+
+async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]] = None,
+                         force: bool = False, facts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """Push ``doc``'s generated tree when it differs from what was last
+    pushed (or ``force``: the human "Regenerate & push now"). Records
+    ``last_push`` on the doc and an audit row. Never raises.
+
+    The LIVE/DARK decision is made ONCE, here. DARK: a SIMULATED result
+    built here (no network). LIVE: the FIRST overwrite of the hand-made
+    website menu is only ever a person's press -- an automatic run waits.
+    Then: read the shop's menu (adopt it on the press) and every
+    collection's Shopify productsCount, rebuild hiding what Shopify shows
+    empty, refuse a suspicious push (_refusal), back the live tree up,
+    then menuUpdate carrying the live item ids. Any failure pushes nothing
+    and is retried next run."""
+    from .shopify_push import MODE_LIVE, MODE_SIMULATED, PushResult, _live_or_reason, push_menu
+    from .shopify_push.menus import build_menu_items
+
+    handle = doc.get("handle") or MAIN_MENU
+    live, reason = _live_or_reason(db)
+    if (not force and doc.get("generated_hash") and doc.get("generated_hash") == doc.get("pushed_hash")
+            and not doc.get("shop_hidden")):
+        # Unchanged, and the last LIVE read hid nothing: no Shopify read at
+        # all. (While Shopify still shows a collection empty, every run
+        # re-reads it so the link comes back once Shopify catches up.)
+        return {"handle": handle, "changed": False}
+    gid = doc.get("shopify_menu_id")
+    if not live:
+        if not force and doc.get("generated_hash") == doc.get("simulated_hash"):
+            # DARK: this exact tree was already simulated -- no new audit row.
+            return {"handle": handle, "changed": False, "mode": MODE_SIMULATED}
+        payload = {"title": doc.get("title") or handle, "handle": handle,
+                   "items": build_menu_items(doc.get("items") or [], with_ids=bool(gid))}
+        return _record(db, doc, PushResult(
+            mode=MODE_SIMULATED, entity="menu", action="update" if gid else "create",
+            target_id=doc.get("menu_id"), ok=True, shopify_id=gid, payload=payload, reason=reason,
+        ).to_dict(), actor)
+    if not force and not (doc.get("pushed_hash") and gid):
+        last = {"at": _now(), "mode": MODE_LIVE, "ok": False, "action": None, "error": None,
+                "reason": WAITING_FIRST, "waiting": True}
+        db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": {"last_push": last}})
+        doc["last_push"] = last
+        return {"handle": handle, "changed": False, **last}
+
+    error, shop, send = None, None, doc
+    try:
+        if facts is None:
+            from . import collection_membership
+
+            facts = collection_membership.online_facts(db, strict=True)
+        shop = await _shop_menu(db, handle)
+        shop_counts = await _shop_counts(db)
+    except Exception as e:  # noqa: BLE001 -- no read => no overwrite
+        error = f"the listings or the existing Shopify menu could not be read or backed up: {e}"
+    if error is None and shop is not None and shop.get("id") != gid:
+        if gid and not force:
+            error = ("refused: the website main-menu was recreated on Shopify; "
+                     "press Regenerate & push now to adopt it")
+        else:
+            _adopt(db, doc, shop)  # a person's press: first push, or the menu was recreated
+    if error is None:
+        regenerate(db, doc, facts, shop_counts)
+        if not force and doc.get("generated_hash") == doc.get("pushed_hash"):
+            return {"handle": handle, "changed": False}
+        error = _refusal(doc, facts, force)
+    if error is None and shop is not None:
+        try:  # every LIVE overwrite saves the tree it replaces
+            db[BACKUPS].insert_one({
+                "menu_id": doc["menu_id"], "handle": shop.get("handle"), "shopify_menu_id": shop.get("id"),
+                "title": shop.get("title"), "items": shop.get("items") or [], "taken_at": _now(),
+            })
+            db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": {"backup_taken_at": _now()}})
+            doc["backup_taken_at"] = _now()
+            send = dict(doc, items=_carry_ids(doc.get("items") or [], shop.get("items") or []))
+        except Exception as e:  # noqa: BLE001
+            error = f"the existing Shopify menu could not be read or backed up: {e}"
+    if error:
+        result = PushResult(mode=MODE_LIVE, entity="menu", action="update", target_id=doc.get("menu_id"),
+                            ok=False, error=error).to_dict()
+    else:
+        result = (await push_menu(db, send)).to_dict()
+    return _record(db, doc, result, actor)
 
 
 async def regenerate_and_push(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]] = None,
@@ -625,4 +712,7 @@ def status(doc: Dict[str, Any]) -> Dict[str, Any]:
         "last_push": last or None, "in_sync": bool(doc.get("generated_hash"))
         and doc.get("generated_hash") == doc.get("pushed_hash"),
         "backup_taken_at": iso(doc.get("backup_taken_at")),
+        # The page's confirm: "N collection links (was M at the last push)".
+        "pushed_collection_nodes": doc.get("pushed_collection_nodes"),
+        "pushed_live": bool(doc.get("pushed_hash")),
     }

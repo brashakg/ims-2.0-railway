@@ -163,13 +163,17 @@ export function GeneratedMenuLine({ menus }: { menus: GeneratedMenuStatus[] | nu
       </p>
       {menus.map((m) => {
         const lp = m.last_push;
-        const failed = lp && lp.ok === false;
+        const failed = lp && lp.ok === false && !lp.waiting;
         return (
           <p key={m.menu_id} className={'text-[11px] ' + (failed ? 'text-red-700' : 'text-gray-600')}>
             <span className="font-mono">{m.handle}</span>: {m.item_count ?? 0} top-level items
             {m.hidden_count ? `, ${m.hidden_count} hidden (empty)` : ''} - last pushed{' '}
             {m.last_pushed_at ? fmtIST(m.last_pushed_at) : 'never'}
-            {lp ? ` - last attempt ${lp.mode === 'LIVE' ? 'LIVE' : 'dry-run'} ${lp.ok ? 'ok' : 'FAILED'}` : ''}
+            {lp?.waiting
+              ? ' - waiting for the first push by a person (Menus page, Regenerate & push now)'
+              : lp
+                ? ` - last attempt ${lp.mode === 'LIVE' ? 'LIVE' : 'dry-run'} ${lp.ok ? 'ok' : 'FAILED'}`
+                : ''}
             {failed && (lp?.error || lp?.reason) ? `: ${lp?.error || lp?.reason}` : ''}
           </p>
         );

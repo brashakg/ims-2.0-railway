@@ -75,6 +75,8 @@ const MENU = {
   last_pushed_at: null,
   last_push: { at: '2026-10-29T03:30:00+00:00', mode: 'LIVE', ok: false, error: 'Menu items limit reached' },
   in_sync: false,
+  pushed_live: true,
+  pushed_collection_nodes: 40,
   preview: {
     items: [
       { title: 'New Arrivals', item_type: 'COLLECTION', handle: 'new-arrivals', count: 12 },
@@ -98,7 +100,9 @@ const MENU = {
 beforeEach(() => {
   toastCalls.length = 0;
   roles = ['ADMIN'];
+  vi.restoreAllMocks();
   vi.clearAllMocks();
+  vi.spyOn(window, 'confirm').mockReturnValue(true);
   (generatedMenusApi.list as any).mockResolvedValue([MENU]);
   (menusApi.list as any).mockResolvedValue([
     { id: 'm1', handle: 'main-menu', title: 'Boost Mega Menu' },
@@ -130,12 +134,102 @@ describe('Menus page: the self-maintaining menu', () => {
     expect(within(screen.getByTestId('other-menus')).queryByText('Boost Mega Menu')).toBeNull();
   });
 
-  it('Regenerate & push now presses the push for the generated menu', async () => {
+  it('Regenerate & push now confirms the LIVE overwrite with the link counts, then pushes', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     render(<MenusPage />);
     const btn = await screen.findByRole('button', { name: /Regenerate & push now/ });
     await userEvent.click(btn);
+    expect(confirm).toHaveBeenCalledWith(
+      'This overwrites the LIVE website menu: 3 collection links (was 40 at the last push).',
+    );
     await waitFor(() => expect(pushApi.pushMenu).toHaveBeenCalledWith('m1'));
     expect(toastCalls.some((t) => t.kind === 'success')).toBe(true);
+  });
+
+  it('cancelling the overwrite confirm pushes nothing', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(<MenusPage />);
+    await userEvent.click(await screen.findByRole('button', { name: /Regenerate & push now/ }));
+    expect(pushApi.pushMenu).not.toHaveBeenCalled();
+  });
+
+  it('a failed push shows an error toast with the reason, never a success', async () => {
+    (pushApi.pushMenu as any).mockResolvedValue({ mode: 'LIVE', entity: 'menu', ok: false, error: 'X-throttled' });
+    render(<MenusPage />);
+    await userEvent.click(await screen.findByRole('button', { name: /Regenerate & push now/ }));
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'error' && t.msg.includes('X-throttled'))).toBe(true));
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+  });
+
+  it('a rejected template save shows an error toast and keeps the edit', async () => {
+    (generatedMenusApi.saveTemplate as any).mockRejectedValue(
+      Object.assign(new Error('Request failed'), { response: { status: 400, data: { detail: 'section 1: needs a title' } } }),
+    );
+    render(<MenusPage />);
+    await screen.findByTestId('menu-preview');
+    const titles = screen.getAllByLabelText('Section title') as HTMLInputElement[];
+    await userEvent.type(titles[0], '!');
+    await userEvent.click(screen.getByRole('button', { name: /Save template/ }));
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'error')).toBe(true));
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+    expect((screen.getAllByLabelText('Section title') as HTMLInputElement[])[0].value).toBe('New Arrivals!');
+  });
+
+  it('pushing (confirmed) or Refresh never throws away an unsaved template edit', async () => {
+    render(<MenusPage />);
+    await screen.findByTestId('menu-preview');
+    const titles = screen.getAllByLabelText('Section title') as HTMLInputElement[];
+    await userEvent.clear(titles[1]);
+    await userEvent.type(titles[1], 'Shades');
+    await userEvent.click(screen.getByRole('button', { name: /Regenerate & push now/ }));
+    await waitFor(() => expect(pushApi.pushMenu).toHaveBeenCalled());
+    await waitFor(() => expect(generatedMenusApi.list).toHaveBeenCalledTimes(2));
+    expect((screen.getAllByLabelText('Section title') as HTMLInputElement[])[1].value).toBe('Shades');
+    await userEvent.click(screen.getByRole('button', { name: /Refresh/ }));
+    await waitFor(() => expect(generatedMenusApi.list).toHaveBeenCalledTimes(3));
+    expect((screen.getAllByLabelText('Section title') as HTMLInputElement[])[1].value).toBe('Shades');
+    expect((screen.getByRole('button', { name: /Save template/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('warns before leaving the tab while the template is unsaved', async () => {
+    render(<MenusPage />);
+    await screen.findByTestId('menu-preview');
+    const titles = screen.getAllByLabelText('Section title') as HTMLInputElement[];
+    await userEvent.type(titles[0], '!');
+    const ev = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(ev);
+    expect(ev.defaultPrevented).toBe(true);
+  });
+
+  it('an unreadable menu read shows the could-not-be-read card, not "not set up"', async () => {
+    (generatedMenusApi.list as any).mockResolvedValue(null);
+    render(<MenusPage />);
+    expect(await screen.findByText(/could not be read from the server/)).toBeTruthy();
+    expect(screen.queryByTestId('no-generated-menu')).toBeNull();
+  });
+
+  it('unreadable listings show that instead of an empty preview', async () => {
+    (generatedMenusApi.list as any).mockResolvedValue([{ ...MENU, preview: { items: [], hidden: [],
+      changed_since_push: false, unreadable: 'The website listings could not be read just now (x).' } }]);
+    render(<MenusPage />);
+    expect((await screen.findByTestId('preview-unreadable')).textContent).toMatch(/could not be read/);
+    expect(screen.queryByText(/No collection has products/)).toBeNull();
+  });
+
+  it('dry-run mode and the waiting-for-a-person state are named as such', async () => {
+    (generatedMenusApi.list as any).mockResolvedValue([{ ...MENU, pushed_live: false,
+      last_push: { at: '2026-10-29T03:30:00+00:00', mode: 'SIMULATED', ok: true } }]);
+    const { unmount } = render(<MenusPage />);
+    expect((await screen.findByTestId('dry-run-note')).textContent).toBe('dry-run mode - not sent to the website');
+    expect(screen.queryByText('Changes waiting for the next push')).toBeNull();
+    unmount();
+    (generatedMenusApi.list as any).mockResolvedValue([{ ...MENU, pushed_live: false, last_push: {
+      at: '2026-10-29T03:30:00+00:00', mode: 'LIVE', ok: false, waiting: true,
+      reason: 'waiting for the first push by a person (Regenerate & push now)' } }]);
+    render(<MenusPage />);
+    const last = await screen.findByTestId('last-push');
+    expect(last.textContent).toMatch(/waiting for the first push by a person/);
+    expect(last.textContent).not.toMatch(/FAILED/);
   });
 
   it('an ADMIN edits the template (section titles) and saves it', async () => {

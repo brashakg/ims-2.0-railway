@@ -708,15 +708,15 @@ def test_register_webhooks_paginates_past_first_page(monkeypatch):
 # ===========================================================================
 
 def _unreadable_block_db():
-    """Blocked: brand = Gucci (readable: VENDOR) AND shape = Aviator (an
-    IMS-only field the website cannot read). S1 is a Gucci (the unreadable
+    """Blocked: brand = Gucci (readable: VENDOR) AND hsn_code = 9004 (an
+    IMS-only field the push makes no tag for, so the website cannot read it). S1 is a Gucci (the unreadable
     rule decides), S2 a Ray-Ban (the readable rule already says no)."""
     db = _EngineDB()
     db["ecom_collections"].insert_one(
         {"collection_id": "C-X", "handle": "gucci-aviators", "collection_type": "SMART",
          "online_sync_blocked": True, "disjunctive": False,
          "rules": [{"field": "brand", "relation": "EQUALS", "value": "Gucci"},
-                   {"field": "shape", "relation": "EQUALS", "value": "Aviator"}]}
+                   {"field": "hsn_code", "relation": "EQUALS", "value": "9004"}]}
     )
     db["products"].insert_one({"sku": "S1", "brand": "Gucci"})
     db["products"].insert_one({"sku": "S2", "brand": "Ray-Ban"})
@@ -746,7 +746,7 @@ def test_unverifiable_blocks_are_listed_for_store_health_and_the_prod_check():
 
     db = _unreadable_block_db()
     rows = online_block.unverifiable_blocks(db)
-    assert [r["handle"] for r in rows] == ["gucci-aviators"] and "shape" in rows[0]["rules"][0].lower()
+    assert [r["handle"] for r in rows] == ["gucci-aviators"] and "hsn_code" in rows[0]["rules"][0].lower()
     health = store_health.readiness_score(db)
     assert health["unverifiable_blocks"][0]["handle"] == "gucci-aviators"
     assert health["fixes_needed"][0]["check"] == "unverifiable_block"
