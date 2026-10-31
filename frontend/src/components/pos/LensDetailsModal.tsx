@@ -21,6 +21,9 @@ export interface LensDetails {
   addOnIds: string[];
   lensCategory: 'single-vision' | 'bifocal' | 'progressive';
   basePrice: number;
+  /** Price of ONE lens; the bill line is this x quantity 2. */
+  unitPrice: number;
+  /** The pair (unitPrice x 2), as shown on the summary. */
   totalPrice: number;
   finalPrice: number;
   discountAmount: number;
@@ -120,36 +123,21 @@ export function LensDetailsModal({ onClose, onSave }: LensDetailsModalProps) {
     }
   };
 
-  // Calculate total price
-  const calculateTotal = () => {
-    let total = basePrice;
-
-    // Apply index multiplier
-    if (selectedIndex?.multiplier) {
-      total *= selectedIndex.multiplier;
-    }
-
-    // Apply lens category multiplier
-    if (lensCategory === 'progressive') {
-      total *= 2;
-    } else if (lensCategory === 'bifocal') {
-      total *= 1.5;
-    }
-
-    // Add coating price
-    if (selectedCoating?.price) {
-      total += selectedCoating.price * 2; // Per pair
-    }
-
-    // Add addons
-    selectedAddons.forEach(addon => {
-      total += addon.price * 2; // Per pair
-    });
-
-    return Math.round(total);
-  };
-
-  const totalPrice = calculateTotal();
+  // THE made-to-order lens price. Every figure on this window is per LENS
+  // (base price, coating, add-on); a pair is two lenses. The bill line is
+  // this per-lens price x quantity 2, so the "Total (Pair)" shown here is
+  // exactly what the bill charges. (It used to add the base once and the
+  // coatings twice, then bill that pair figure x 2 - the doubled price.)
+  const unitPrice = (() => {
+    let perLens = basePrice;
+    if (selectedIndex?.multiplier) perLens *= selectedIndex.multiplier;
+    if (lensCategory === 'progressive') perLens *= 2;
+    else if (lensCategory === 'bifocal') perLens *= 1.5;
+    perLens += selectedCoating?.price || 0;
+    selectedAddons.forEach(addon => { perLens += addon.price || 0; });
+    return Math.round(perLens);
+  })();
+  const totalPrice = unitPrice * 2; // the pair
   const discountAmount = 0; // Can be modified to add discount logic
   const finalPrice = totalPrice - discountAmount;
 
@@ -188,6 +176,7 @@ export function LensDetailsModal({ onClose, onSave }: LensDetailsModalProps) {
       addOnIds: selectedAddons.map(a => a.id),
       lensCategory,
       basePrice,
+      unitPrice,
       totalPrice,
       finalPrice,
       discountAmount,
@@ -559,8 +548,9 @@ export default LensDetailsModal;
  *
  * ONE builder, called by both tills, because the line it produces carries
  * decisions the rest of the system depends on:
- *   * quantity 2 - a prescription lens is sold as a PAIR. Booking one would
- *     halve the price and send a single lens to the lab.
+ *   * quantity 2 at the PER-LENS price - a prescription lens is sold as a
+ *     PAIR. Booking one would halve the price and send a single lens to the
+ *     lab; booking the pair total as the unit price doubles the bill.
  *   * a `lens-` product id and RX-CUSTOM sku, which is how the pricing caps and
  *     the identity rules recognise a virtual, non-catalogue line.
  *   * linked_prescription_id, without which the Rx gate refuses the order, and
@@ -574,8 +564,8 @@ export function addManualLensToCart(store: any, details: any) {
     name: `${details.lensCategory} - ${details.indexLabel}`,
     sku: `RX-CUSTOM-${stamp}`,
     category: 'RX_LENSES',
-    unit_price: details.totalPrice || 0,
-    mrp: details.totalPrice || 0,
+    unit_price: details.unitPrice || 0,
+    mrp: details.unitPrice || 0,
     quantity: 2,
     is_optical: true,
     linked_prescription_id: store.prescription?.id,
