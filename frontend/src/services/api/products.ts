@@ -1002,7 +1002,8 @@ export const adminLensApi = {
   // ----- Range pricing (May 2026) ------------------------------------
   // Bracket-based tier pricing (e.g. SPH 0-2.00 = ₹1,200 · 2.25-4.00 =
   // ₹1,500). Avoids the per-SKU explosion when there are 80+ Rx combos.
-  // POS calls /admin/lens/pricing-ranges/quote at the prescription step.
+  // /admin/lens/pricing-ranges/quote is not called anywhere yet (the till
+  // prices a made-to-order lens in LensDetailsModal).
   listLensPricingRanges: async (params?: {
     brand_id?: string;
     index_id?: string;
