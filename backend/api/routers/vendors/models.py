@@ -221,6 +221,10 @@ class GRNItemCreate(BaseModel):
     # Older pending receipts have no choice; their return remains a draft
     # until a manager explicitly chooses credit or replacement.
     rejection_disposition: Optional[Literal["credit_note", "replacement"]] = None
+    # S2b: a photo of the damaged piece (uploaded via POST /grn/upload-doc and
+    # checked like the bill photo). Optional; kept on the quarantined piece
+    # and the supplier-return draft as the debit note's evidence.
+    rejection_photo_file_id: Optional[str] = None
     # Ruling 14 -- THE TALLY TICK. The receiver ticks each line to say "I have
     # counted this one against what was ordered". Defaults to False so the tick
     # is a real act: a clerk who touches nothing can no longer post a perfect
@@ -327,9 +331,10 @@ class GRNCreate(BaseModel):
     # invoice/challan image or PDF BEFORE the GRN can be created -- so the
     # accountant always has the source document to reconcile against. The file
     # is uploaded first via POST /vendors/grn/upload-doc, which returns a
-    # file_id that is then passed here. STANDARD GRNs require it; a
-    # DELIVERY_CHALLAN is exempt at receipt time (its tax invoice arrives later
-    # and is attached at reconciliation -- see P3). Gate enforced in create_grn.
+    # file_id that is then passed here. Every receipt requires it: the bill
+    # photo, or for a DELIVERY_CHALLAN the challan's own photo (owner
+    # 2026-10-23: no paper, no stock; its tax invoice is attached later on the
+    # bill). Gate enforced in create_grn.
     attachment_file_id: Optional[str] = None
     attachment_filename: Optional[str] = None
     attachment_mime: Optional[str] = None

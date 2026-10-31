@@ -848,6 +848,64 @@ def _cancel_remainder(line: dict, received: int) -> int:
     return due
 
 
+def close_credited_short(po: dict, items: list, received: list) -> tuple:
+    """D9 (owner 2026-10-23): a damaged piece the supplier CREDITS closes its
+    order line short -- nothing is coming for it -- where a replacement keeps
+    it open. The receipt rejects the piece with rejection_disposition
+    'credit_note'; once that receipt is accepted, the credited units are
+    withdrawn from what is still due on the order, exactly as "cancel what is
+    still due" withdraws them (_cancel_remainder's fields), shared over the
+    product's lines in order -- receipts count per PRODUCT, never per line.
+
+    Applied in place on `items` (each line's units already `received`) by the
+    one re-derivation every accept runs (grn_accept.refresh_po_received), so
+    a lost write is caught up by the next one. Once per receipt: the order
+    lists the receipts it has closed for in `credit_closed_grns`.
+
+    Answers (the receipts now closed for -- [] when none was waiting --, the
+    timeline events, the units withdrawn)."""
+    done = set(po.get("credit_closed_grns") or [])
+    closed, events, units = [], [], 0
+    due = [_qty(it.get("quantity")) - r for it, r in zip(items, received)]
+    for g in _order_receipts(po.get("po_id")):
+        gid = g.get("grn_id")
+        if gid in done or g.get("status") not in ("ACCEPTED", "PARTIALLY_ACCEPTED"):
+            continue
+        credited: dict = {}
+        for line in g.get("items") or []:
+            if line.get("rejection_disposition") == "credit_note":
+                pid = line.get("product_id")
+                credited[pid] = credited.get(pid, 0) + _qty(line.get("rejected_qty"))
+        if not any(credited.values()):
+            continue
+        closed.append(gid)
+        for pid, left in credited.items():
+            for i, it in enumerate(items):
+                take = min(left, due[i]) if it.get("product_id") == pid else 0
+                if take <= 0:
+                    continue
+                left -= take
+                due[i] -= take
+                units += take
+                it["cancelled_qty"] = _qty(it.get("cancelled_qty")) + take
+                it["quantity"] = it["ordered_qty"] = _qty(it.get("quantity")) - take
+                if not it["quantity"]:
+                    it["line_status"] = "CANCELLED"
+                events.append(
+                    {
+                        "kind": "line_cancelled",
+                        "label": "Closed short",
+                        "detail": (
+                            f"{_line_label(it)}: {_units(take)} credited by the "
+                            f"supplier on {g.get('grn_number') or 'a receipt'} "
+                            "(damaged), so not coming."
+                        ),
+                        "actor": g.get("accepted_by"),
+                    }
+                )
+    return closed, events, units
+
+
 def _status_after_cancel(po: dict, items: list, by_product: dict) -> str:
     """Status once units were withdrawn: the receipt rule decides when anything
     arrived; nothing arrived and nothing left -> CANCELLED; else unchanged."""

@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  creditClosed,
   expiryWarning,
   goesExpress,
   grnItems,
@@ -273,15 +274,46 @@ describe('what stops the Receive button', () => {
     expect(receiveProblem(header({ billFileId: null }), ls, false)).toMatch(/no paper, no stock/);
     expect(receiveProblem(header({ kind: 'NO_PO', hasOrder: false, vendorId: 'V', billNo: '', billFileId: null }), ls.filter((l) => l.arrived > 0), false)).toMatch(/no paper/);
   });
-  it('a challan needs its number, not a photo; with no order, a supplier', () => {
+  it('a challan needs its number and its photo (owner 2026-10-23), not a bill number; with no order, a supplier', () => {
     expect(receiveProblem(header({ kind: 'DELIVERY_CHALLAN', billFileId: null }), ls, false)).toMatch(/challan number/);
-    expect(receiveProblem(header({ kind: 'DELIVERY_CHALLAN', billFileId: null, dcNumber: 'DC/1' }), ls, false)).toBeNull();
+    expect(receiveProblem(header({ kind: 'DELIVERY_CHALLAN', billFileId: null, dcNumber: 'DC/1' }), ls, false)).toMatch(
+      /photo of the delivery challan - no paper, no stock/,
+    );
+    expect(receiveProblem(header({ kind: 'DELIVERY_CHALLAN', billNo: '', dcNumber: 'DC/1' }), ls, false)).toBeNull();
     // The server refuses a challan with no date (dc_date is required).
     expect(receiveProblem(header({ kind: 'DELIVERY_CHALLAN', billFileId: null, dcNumber: 'DC/1', dcDate: '' }), ls, false)).toMatch(/challan date/);
     expect(receiveProblem(header({ kind: 'DELIVERY_CHALLAN', hasOrder: false, dcNumber: 'DC/1' }), ls, false)).toMatch(/Pick the supplier/);
   });
+  it('a cash memo (bought without PO) needs no bill number, only the photo', () => {
+    const typed = ls.filter((l) => l.arrived > 0);
+    const noPo = { kind: 'NO_PO' as const, hasOrder: false, vendorId: 'V', billNo: '' };
+    expect(receiveProblem(header(noPo), typed, false)).toBeNull();
+    expect(receiveProblem(header({ ...noPo, billFileId: null }), typed, false)).toMatch(/bill photo/);
+  });
   it('nothing arrived on a cancel-closed order says so', () => {
     const closed = counted(linesFromPO(order({ closed_by_cancel: true })));
     expect(receiveProblem(header(), closed, true)).toMatch(/each one is logged as rejected/);
+  });
+});
+
+describe('a damaged piece: its photo, and a credit closes the order line (S2b)', () => {
+  const [a] = counted(linesFromPO(order()));
+  const damaged = { ...a, damaged: 1, damageReason: 'Scratched lens' };
+  it('the photo goes with the damaged line only', () => {
+    const [sent] = grnItems('STANDARD', [{ ...damaged, damageChoice: 'credit_note', damagePhotoId: 'F-DMG' }], false);
+    expect(sent.rejection_photo_file_id).toBe('F-DMG');
+    const [clean] = grnItems('STANDARD', [{ ...a, damagePhotoId: 'F-DMG' }], false);
+    expect(clean.rejection_photo_file_id).toBeUndefined();
+  });
+  it('a credit on an order line closes it short; a replacement, no order or a cancelled line do not', () => {
+    expect(creditClosed({ ...damaged, damageChoice: 'credit_note' })).toBe(1);
+    expect(creditClosed({ ...damaged, damageChoice: 'replacement' })).toBe(0);
+    expect(creditClosed({ ...damaged, damageChoice: 'credit_note', due: null })).toBe(0);
+    expect(creditClosed({ ...damaged, damageChoice: 'credit_note', rejectOnly: true })).toBe(0);
+    expect(receiptSums([{ ...damaged, damageChoice: 'credit_note' }]).credited).toBe(1);
+    // Only what is still due closes (the server's cap): an over-delivered
+    // line has nothing left on the order to close.
+    expect(creditClosed({ ...damaged, damageChoice: 'credit_note', due: 2, arrived: 4 })).toBe(0);
+    expect(creditClosed({ ...damaged, damageChoice: 'credit_note', due: 4, arrived: 4, damaged: 2 })).toBe(2);
   });
 });
