@@ -131,9 +131,19 @@ class _Coll:
         return [dict(d) for d in self.rows if _hit(d)]
 
     def update_one(self, flt, update, upsert=False):
+        def _eq(d, k, v):
+            # $ne on an array field: the value is not among its items (the S4
+            # cost key guard, services/product_cost._move).
+            if isinstance(v, dict) and "$ne" in v:
+                cur = d.get(k)
+                return v["$ne"] not in cur if isinstance(cur, list) else cur != v["$ne"]
+            return d.get(k) == v
+
         for d in self.rows:
-            if all(d.get(k) == v for k, v in flt.items()):
+            if all(_eq(d, k, v) for k, v in flt.items()):
                 d.update(update.get("$set", {}))
+                for k, v in (update.get("$push") or {}).items():
+                    d[k] = [*(d.get(k) or []), v]
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         return type("R", (), {"modified_count": 0, "matched_count": 0})()
 

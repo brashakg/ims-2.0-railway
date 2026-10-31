@@ -40,7 +40,8 @@ def test_route_count_and_no_duplicate_paths():
     # + PUT /reorder-levels/{product_id} (per-shop reorder level, D12).
     # 47 = 46 + POST /stock-count/{id}/write-off-request (S1)
     # 48 = 47 + GET /reorder-list (S5, the one Reorder list)
-    assert len(routes) == 48, "inventory.router route count changed: %d" % len(routes)
+    # 50 = 48 + GET /products/{id}/cost + POST /products/{id}/cost-correction (S4)
+    assert len(routes) == 50, "inventory.router route count changed: %d" % len(routes)
     assert len(set(routes)) == len(routes), "duplicate (method, path) on the router"
 
 
