@@ -12,7 +12,8 @@ from .online_catalog import is_archived_row, product_online_state, skus_on_shopi
 from .shopify_push._shared import is_variant_of, product_push_refusal
 from .shopify_push.listing import UNPRICED_SIZE, model_listing, listing_view
 from .shopify_push.media import product_photo_urls
-from .shopify_push.product_input import build_product_input, ims_product_tags, unpriced_size_names
+from .shopify_push.product import press_unpriced_sizes
+from .shopify_push.product_input import build_product_input, ims_product_tags
 from .shopify_push.tags import plan_product_tags
 from .shopify_push.variants import build_variant_seed_rows
 
@@ -92,6 +93,9 @@ def colour_size_parity(db):
             "website_pages": len(pages), "missing": len(missing), "missing_items": missing}
 
 
+_PUSH_THE_MODEL = "a colour/size of another model - it goes on the website with its model's page"
+
+
 def _press_verdict(db, lead):
     """(code, reason, plan) for a press of this listing, asked of the writer's
     OWN gates in push_product's order -- never a re-derived queue rule. A
@@ -102,21 +106,24 @@ def _press_verdict(db, lead):
     refusal = product_push_refusal(db, lead)
     if refusal:
         return "NOT_FOR_WEBSITE", "not for the website - " + refusal, None
+    if is_variant_of(lead):
+        return "variant_of", _PUSH_THE_MODEL, None
     blocked = online_block.is_blocked_from_online_strict(lead, db)
     if blocked is None:
         return "block_status_unverifiable", "block status could not be read - the push skips it", None
     if blocked:
         return "online_sync_blocked", "blocked from online - in an online_sync_blocked collection", None
     rows, plan = listing_plan(db, lead)
+    if plan and plan.get("variant_of"):
+        return "variant_of", _PUSH_THE_MODEL, None
     if plan and plan.get("refusal"):
         return plan["refusal"][0], "family push refused - " + plan["refusal"][0], plan
     view = listing_view(lead, plan) if plan else lead
     if not product_photo_urls(view):
         return "no_photo", "no photo - the push refuses a product with no photograph", plan
-    live = (lead.get("ecom") or {}).get("shopify_product_id")
-    unpriced = [] if live else unpriced_size_names(view, plan["rows"] if plan else rows)
+    unpriced = press_unpriced_sizes(view, plan["rows"] if plan else rows, plan)
     if unpriced:
-        return UNPRICED_SIZE, "no selling price on " + ", ".join(unpriced) + " - the first publish is refused", plan
+        return UNPRICED_SIZE, "no selling price on " + ", ".join(unpriced) + " - the push is refused until it is priced", plan
     if product_online_state(lead, None)["queued"]:
         return None, "queued - awaiting publish; no current refusal found", plan
     return None, "not queued", plan

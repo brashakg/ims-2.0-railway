@@ -370,6 +370,10 @@ export default function OnlineShopifySyncPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadStatus, loadDiagnostics]);
 
+  // Every read Refresh starts, the slow Shopify drift read included: a press
+  // while one still runs would start a second one (review of #1275).
+  const refreshBusy = loading || diagLoading.health || diagLoading.parity || diagLoading.drift;
+
   const refreshAll = () => {
     loadStatus();
     loadDiagnostics();
@@ -664,10 +668,10 @@ export default function OnlineShopifySyncPage() {
         <button
           type="button"
           onClick={refreshAll}
-          disabled={loading || diagLoading.health || diagLoading.parity}
+          disabled={refreshBusy}
           className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg px-3 py-1.5 disabled:opacity-60"
         >
-          <RefreshCw className={'w-4 h-4 ' + (loading || diagLoading.health || diagLoading.parity ? 'animate-spin' : '')} /> Refresh
+          <RefreshCw className={'w-4 h-4 ' + (refreshBusy ? 'animate-spin' : '')} /> Refresh
         </button>
       </div>
       <p className="text-sm text-gray-500 mb-4 max-w-3xl">
