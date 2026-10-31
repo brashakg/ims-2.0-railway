@@ -1360,7 +1360,11 @@ def _mark_online_dirty(product: Dict) -> None:
     would stay blind. Queuing is not yet publishing: the next press or the
     scheduled sync sends it (a FIRST publish too, owner ruling 2026-10-20),
     through the product gate, and only a SUCCESSFUL Shopify write clears the
-    flag again (shopify_push._writeback_product)."""
+    flag again (shopify_push._writeback_product).
+
+    Never an ARCHIVED product (Website 2): a push would put it back on sale."""
+    if _pm._is_archived(product):
+        return
     ecom = product.get("ecom")
     if not isinstance(ecom, dict):
         ecom = {}

@@ -1431,6 +1431,19 @@ def _audit_bulk(
         logger.warning("[BULK-PRICING] audit log skipped: %s", exc)
 
 
+def _price_reaches_website(pid: str, product: dict, price_patch: dict) -> None:
+    """A committed bulk price takes THE spine -> website-twin rule a single
+    product edit takes (product_master.mirror_update_to_catalog_twin): the
+    twin's price moves, the twin is queued with a fresh edit revision, a size's
+    row and its model's listing follow, and a moved MRP re-derives the
+    discount rule's online price. Fail-soft (the mirror never raises)."""
+    from ..dependencies import get_db as _bulk_db
+
+    _pm.mirror_update_to_catalog_twin(
+        product_id=pid, current=product, patch=price_patch, db=_bulk_db()
+    )
+
+
 class CloneVaryRequest(BaseModel):
     """Hub Phase 4 clone-and-vary: clone `source_id` across N attribute
     variations into N DRAFT variants. Each variation is a dict of attribute
@@ -1566,11 +1579,14 @@ async def bulk_price_update(
         # Commit path: only valid + actually-changed rows are written.
         if body.apply and verdict["ok"] and changed and repo is not None and pid:
             try:
+                price_patch = {
+                    "mrp": _round_money(new_mrp),
+                    "offer_price": _round_money(new_offer),
+                }
                 ok = repo.update(
                     pid,
                     {
-                        "mrp": _round_money(new_mrp),
-                        "offer_price": _round_money(new_offer),
+                        **price_patch,
                         "price_updated_at": datetime.utcnow(),
                         "price_updated_by": current_user.get("user_id"),
                         # A price change by a person IS a catalogue edit.
@@ -1581,6 +1597,7 @@ async def bulk_price_update(
                 )
                 row["applied"] = bool(ok)
                 if ok:
+                    _price_reaches_website(pid, p, price_patch)
                     committed.append(
                         {
                             "product_id": pid,
@@ -1708,10 +1725,11 @@ async def bulk_offer_update(
 
         if body.apply and verdict["ok"] and changed and repo is not None and pid:
             try:
+                price_patch = {"offer_price": _round_money(new_offer)}
                 ok = repo.update(
                     pid,
                     {
-                        "offer_price": _round_money(new_offer),
+                        **price_patch,
                         "price_updated_at": datetime.utcnow(),
                         "price_updated_by": current_user.get("user_id"),
                         # A price change by a person IS a catalogue edit.
@@ -1722,6 +1740,7 @@ async def bulk_offer_update(
                 )
                 row["applied"] = bool(ok)
                 if ok:
+                    _price_reaches_website(pid, p, price_patch)
                     committed.append(
                         {
                             "product_id": pid,

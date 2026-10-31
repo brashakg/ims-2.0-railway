@@ -215,7 +215,7 @@ def variants_for_product(db, product: Dict) -> List[Dict]:
 def select_dirty_products(db) -> Tuple[List[Dict], int, int]:
     """The product push queue: every catalog_products doc whose ecom sub-doc is
     dirty (``locally_modified``), MINUS the rows a human took down by hand and
-    the ARCHIVED rows never published.
+    the ARCHIVED rows.
 
     TAKEN DOWN BY HAND -> a sweep NEVER puts it back. The take-down writes
     DRAFT and clears the flag, but any catalogue edit re-queues the row and
@@ -224,17 +224,17 @@ def select_dirty_products(db) -> Tuple[List[Dict], int, int]:
     sweep (or the 01:00 sync, unattended) re-lists it mid-fix. Only an
     explicit per-product press clears the marker (a successful publish does).
 
-    ARCHIVED, NEVER PUBLISHED -> skipped quietly (owner 2026-10-29). The
-    product gate never first-publishes an archived row, so queued it was a
-    red FIRST_PUBLISH_REFUSED line on every sync. THE archived rule is
-    product_master._is_archived; the archive door also clears the flag
-    (catalog._archive_product), this covers rows archived before it did. A
-    listing already on the website keeps syncing, as the gate says
-    (listing.first_publish_not_ready); its take-down is its own door.
-    This looks at the catalog_products twin only; the gate also refuses when
-    the SPINE is archived, so a never-published twin whose product row is
-    archived (the twin itself not) still queues and is refused there (a red
-    line, not a silent skip).
+    ARCHIVED -> skipped quietly (owner 2026-10-29; Website 2 2026-10-23 for a
+    listing already on the website). The product gate never pushes an
+    archived row (shopify_push.product_push_refusal: a re-push would send
+    the taken-down listing back as ACTIVE), so queued it was a red line on
+    every sync. THE archived rule is product_master._is_archived; the archive
+    door also clears the flag of a never-published row
+    (catalog._archive_product) and no queueing door flags an archived one,
+    this covers rows queued before they did. Its take-down is its own door.
+    This looks at the catalog_products twin only; the gate also refuses a
+    never-published twin whose SPINE is archived (the twin itself not), so
+    that one still queues and is refused there (a red line, not a skip).
 
     Returns (dirty_docs, taken_down_skipped, archived_skipped)."""
     from . import product_master as pm
@@ -256,7 +256,7 @@ def select_dirty_products(db) -> Tuple[List[Dict], int, int]:
         if ecom.get("taken_down_at"):
             taken_down_skipped += 1
             continue
-        if not ecom.get("shopify_product_id") and pm._is_archived(doc):
+        if pm._is_archived(doc):
             archived_skipped += 1
             continue
         dirty.append(doc)

@@ -680,7 +680,11 @@ def recompute_online_price(
         # ever carries ("0 pending" while prices are stranded locally). Only an
         # ACTUAL change marks dirty: an idempotent re-run re-stamps the same
         # numbers and adds nothing to the queue.
-        if price_changed:
+        from .product_master import _is_archived
+
+        # Never an ARCHIVED product (Website 2): its price is stored, but a
+        # push would put it back on sale.
+        if price_changed and not _is_archived(product):
             # Flag + a fresh edit revision (SF-04, catalog_ecom.dirty_marks).
             marks = dirty_marks()
             ecom_now = product.get("ecom")

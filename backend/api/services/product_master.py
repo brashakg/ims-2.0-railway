@@ -4298,7 +4298,9 @@ def queue_model_listing(db, lead: Optional[Dict[str, Any]]) -> None:
         cat = db.get_collection("catalog_products")
         twin_id = _twin_id(lead)
         twin = cat.find_one({"id": twin_id}) if twin_id else None
-        if twin is None or (twin.get("ecom") or {}).get("variant_of"):
+        # An archived lead's listing is never queued (Website 2): a push
+        # would put it back on sale.
+        if twin is None or (twin.get("ecom") or {}).get("variant_of") or _is_archived(twin):
             return
         patch = {f"ecom.{k}": v for k, v in dirty_marks().items()}
         if not (twin.get("ecom") or {}).get("status"):
@@ -4364,15 +4366,13 @@ def _set_twin_link(db, spine: Dict[str, Any], parent: Optional[Dict[str, Any]]) 
             },
         )
     else:
-        cat.update_one(
-            {"id": _twin_id(spine)},
-            {
-                "$unset": {"ecom.variant_of": ""},
-                # Queued like any edit: flag + a fresh edit_rev (SF-04), so a
-                # revert keyed on an older revision cannot un-queue it.
-                "$set": {f"ecom.{k}": v for k, v in dirty_marks().items()},
-            },
-        )
+        update: Dict[str, Any] = {"$unset": {"ecom.variant_of": ""}}
+        if not _is_archived(spine):
+            # Queued like any edit: flag + a fresh edit_rev (SF-04), so a
+            # revert keyed on an older revision cannot un-queue it. Never an
+            # archived one (Website 2).
+            update["$set"] = {f"ecom.{k}": v for k, v in dirty_marks().items()}
+        cat.update_one({"id": _twin_id(spine)}, update)
 
 
 def _link_one(db, child: Dict[str, Any], parent: Dict[str, Any]) -> bool:
@@ -4777,21 +4777,29 @@ def _mirror_variant_row_update(
     if parent_twin is None:
         return True
     if "mrp" in row_patch:
-        try:
-            from .online_discount_engine import recompute_online_price
-
-            # The engine subscripts db[...] (fail-soft: a wrapper without
-            # __getitem__ makes every load/persist a silent no-op). Both real
-            # doors pass the DatabaseConnection wrapper; hand it the raw db.
-            raw_db = db if hasattr(type(db), "__getitem__") else getattr(db, "db", db)
-            recompute_online_price(parent_twin, db=raw_db)
-        except Exception:  # noqa: BLE001 -- the engine is fail-soft by contract
-            logger.warning("[PM] online price recompute skipped for %s", sku, exc_info=True)
+        _recompute_online_price(db, parent_twin)
     cat.update_one(
         {"id": parent_twin_id},
         {"$set": {f"ecom.{k}": v for k, v in dirty_marks().items()}},
     )
     return True
+
+
+def _recompute_online_price(db, twin: Optional[Dict[str, Any]]) -> None:
+    """The discount engine re-derives (and, when it moved, queues) a twin's
+    online price after its MRP moved. Fail-soft."""
+    if not twin:
+        return
+    try:
+        from .online_discount_engine import recompute_online_price
+
+        # The engine subscripts db[...] (fail-soft: a wrapper without
+        # __getitem__ makes every load/persist a silent no-op). Both real
+        # doors pass the DatabaseConnection wrapper; hand it the raw db.
+        raw_db = db if hasattr(type(db), "__getitem__") else getattr(db, "db", db)
+        recompute_online_price(twin, db=raw_db)
+    except Exception:  # noqa: BLE001 -- the engine is fail-soft by contract
+        logger.warning("[PM] online price recompute skipped for %s", twin.get("sku"), exc_info=True)
 
 
 def mirror_update_to_catalog_twin(
@@ -4841,6 +4849,12 @@ def mirror_update_to_catalog_twin(
         DOES queue -- the pending count must be truthful about copy changes.
         cost / tier / hsn / gst / is_active / model are in NO pushed payload:
         queuing on them would send a push that changes nothing on Shopify.
+        An ARCHIVED product (_is_archived) mirrors but is never queued.
+      * an MRP that moves re-derives the discount rule's online price (the
+        price the push sends when a rule owns it) -- the twin's own here, the
+        PARENT's for a size (_mirror_variant_row_update). Every door that
+        writes a price calls here: the product editor, /products/master and
+        the bulk Pricing & Offers tools.
       * twin key: current.pim_product_id first (door-created products key the
         twin on that separate uuid), spine product_id as the legacy /
         convergence fallback.
@@ -4923,7 +4937,10 @@ def mirror_update_to_catalog_twin(
         # there, shopify_push.product_input.with_spine_weights; the catalogue
         # screens through catalog._stamp_spine_weight). It still QUEUES: the
         # shipping weight is on the Shopify variant.
-        if mark_dirty and any(
+        # An ARCHIVED product's fields still mirror, but it never enters the
+        # website queue (Website 2): a push would put it back on sale.
+        queue_twin = mark_dirty and not _is_archived(current)
+        if queue_twin and any(
             k in patch
             for k in (
                 "mrp", "offer_price", "description", "images",
@@ -4949,7 +4966,7 @@ def mirror_update_to_catalog_twin(
             if new_name and new_name != (twin.get("title") or twin.get("name")):
                 cat_patch["name"] = new_name
                 cat_patch["title"] = new_name
-                if mark_dirty:
+                if queue_twin:
                     cat_patch.update({f"ecom.{k}": v for k, v in dirty_marks().items()})
         row_ok = True
         if current.get("variant_of"):
@@ -4977,6 +4994,10 @@ def mirror_update_to_catalog_twin(
             if not (twin.get("ecom") or {}).get("status"):
                 cat_patch["ecom.status"] = "DRAFT"
         cat.update_one({"id": twin_id}, {"$set": cat_patch})
+        if "mrp" in patch and mark_dirty and not current.get("variant_of"):
+            # A rule's online price is a cut off the MRP and the push sends
+            # it: it moves with the MRP (as a size's row does, below).
+            _recompute_online_price(db, cat.find_one({"id": twin_id}))
         return row_ok
     except Exception:  # noqa: BLE001 -- the spine save must stand regardless
         logger.warning(

@@ -864,10 +864,13 @@ async def unblock_collection(
     skus, truncated = _resolve_block_members(updated)
     requeued = 0
     if db is not None and skus:
+        from api.services.product_master import _is_archived
+
         for member in _synced_member_products(db, skus):
             try:
                 pid = member.get("id") or member.get("product_id")
-                if not pid:
+                # An archived member stays off the website (Website 2).
+                if not pid or _is_archived(member):
                     continue
                 from api.services.catalog_ecom import dirty_marks, update_ecom
 
