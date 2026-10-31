@@ -77,7 +77,6 @@ vi.mock('../inventoryQueries', async (importOriginal) => {
 });
 
 import { InventoryStockPage } from '../InventoryStockPage';
-import { ReorderDashboard } from '../../../components/inventory/ReorderDashboard';
 
 type Call = { method: string; url: string; body: unknown };
 const writes = (): Call[] =>
@@ -133,19 +132,5 @@ describe('F73/D12 - the stock ledger', () => {
   });
 });
 
-describe('F73/D12 - the Reorder dashboard', () => {
-  it("saves the level for the manager's own shop, never one chain-wide reorder_point", async () => {
-    render(
-      <MemoryRouter>
-        <ReorderDashboard />
-      </MemoryRouter>,
-    );
-    fireEvent.click(await screen.findByTitle('Configure reorder point'));
-    // The level is sent only when it changed (round 4): 2 -> 3.
-    fireEvent.change(await screen.findByPlaceholderText('not set'), { target: { value: '3' } });
-    fireEvent.click(await screen.findByRole('button', { name: /save/i }));
-    await waitFor(() => expect(writes().length).toBeGreaterThan(0));
-    expect(chainWrite()).toBeUndefined();
-    expect(shopWrite(3)).toBeTruthy();
-  });
-});
+// The Reorder dashboard's half moved with the screen to the one Reorder list
+// (S5): ReorderListPage.test.tsx saves the ROW's shop level, never /products.

@@ -6,7 +6,7 @@
 //
 //   kind='spine'    — a billing/POS product (`products` collection): read-only
 //                     facts + actions Edit (/catalog/add?edit=), Clone
-//                     (/catalog/add?clone=), Order stock (Buy Desk deep link).
+//                     (/catalog/add?clone=), Order stock (a new PO with it on).
 //   kind='imported' — a catalog_products doc awaiting review (BVI import):
 //                     the REVIEW panel runs a promote dry-run and renders a
 //                     gap checklist + a quick-fix mini-form (category, the
@@ -71,6 +71,7 @@ import {
 import { writeReviewQueue } from './reviewQueue';
 import { ModelFamilyPanel } from './ModelFamilyPanel';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { PURCHASE_ROLES } from '../purchase/purchaseRoles';
 
 // ---------------------------------------------------------------------------
 // Shared item shape with CatalogManagerPage.
@@ -243,6 +244,9 @@ export function CatalogProductDrawer({
   const canPush = hasRole(['SUPERADMIN', 'ADMIN']);
   // The add / edit door's roles (catalogRoutes /catalog/add).
   const canEdit = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
+  // Who may raise a purchase order (the server's PO gate; owner 2026-10-08:
+  // not the catalogue manager).
+  const canOrder = hasRole(PURCHASE_ROLES);
   // The restore door's roles (POST /catalog/products/bulk-restore): admins.
   const canRestore = hasRole(['SUPERADMIN', 'ADMIN']);
 
@@ -1058,10 +1062,10 @@ export function CatalogProductDrawer({
                 <CopyPlus className="w-3.5 h-3.5" /> Clone
               </button>
             )}
-            {!orderedDraft && (
+            {!orderedDraft && canOrder && (
               <button
                 type="button"
-                onClick={() => navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(id)}`)}
+                onClick={() => navigate(`/purchase/orders?new=1&product=${encodeURIComponent(id)}`)}
                 className="ml-auto flex items-center gap-1.5 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
               >
                 <ShoppingCart className="w-3.5 h-3.5" /> Order stock

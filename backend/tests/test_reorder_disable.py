@@ -12,7 +12,7 @@ Covers the 2026-07-04 owner decision:
      suggestion / auto-order:
        - inventory._build_stock_alert: no REORDER_ALERT; LOW_STOCK stays
          informational (recommendedOrder 0).
-       - buy_desk.build_row: buy_signal is None (FE shows "-").
+       - reorder_policy.buy_qty (THE buy rule the Reorder list reads): 0.
        - jarvis _compute_inventory_live: low-stock alert kept, reorder
          recommendation dropped.
      (TASKMASTER's own draft-PO scan is deleted -- ORACLE is the one reorder
@@ -33,7 +33,6 @@ os.environ.setdefault("ENVIRONMENT", "test")
 import pytest  # noqa: E402
 
 from api.services.reorder_policy import auto_reorder_disabled  # noqa: E402
-from api.services import buy_desk as bd  # noqa: E402
 from api.services import product_master as pm  # noqa: E402
 from api.routers import inventory as inv  # noqa: E402
 from api.routers import catalog as cat  # noqa: E402
@@ -184,31 +183,22 @@ class TestStockAlertGuard:
 
 
 # ---------------------------------------------------------------------------
-# 3b. Buy Desk buy_signal
+# 3b. THE buy rule (the Reorder list's number, S5)
 # ---------------------------------------------------------------------------
 
 
-class TestBuyDeskGuard:
-    def _row(self, product):
-        return bd.build_row(
-            product,
-            readiness={"complete": True, "missing": [], "blockers": [],
-                       "purchasable": True},
-            on_hand=1,
-            on_order=0,
-            velocity_per_day=2.0,
-        )
+class TestBuyRuleGuard:
+    def test_disabled_product_buys_nothing(self):
+        from api.services.reorder_policy import buy_qty
 
-    def test_disabled_product_has_no_buy_signal(self):
-        row = self._row({"product_id": "P1", "sku": "S1",
-                         "reorder_quantity": -1})
-        assert row["buy_signal"] is None
+        p = {"product_id": "P1", "reorder_quantity": -1, "reorder_levels": {SHOP: 5}}
+        assert buy_qty(p, store_id=SHOP, on_hand=1, sold_30d=60)[0] == 0
 
-    def test_enabled_product_keeps_buy_signal(self):
-        row = self._row({"product_id": "P1", "sku": "S1",
-                         "reorder_quantity": 10})
-        assert isinstance(row["buy_signal"], int)
-        assert row["buy_signal"] > 0
+    def test_enabled_product_buys(self):
+        from api.services.reorder_policy import buy_qty
+
+        p = {"product_id": "P1", "reorder_quantity": 10, "reorder_levels": {SHOP: 5}}
+        assert buy_qty(p, store_id=SHOP, on_hand=1, sold_30d=60) == (10, "level")
 
 
 # ---------------------------------------------------------------------------

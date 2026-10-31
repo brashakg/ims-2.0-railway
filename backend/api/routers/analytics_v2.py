@@ -19,7 +19,7 @@ from api.utils.event_time import utc_now_iso
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Dict, List, Optional
 from datetime import date, datetime, timedelta
 import uuid
 
@@ -29,7 +29,6 @@ from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.cost_mask import mask_cost_list, can_see_cost
 from ..services.margin_basis import margin_pct_ex_gst, price_ex_gst, product_gst_rate
 from ..services.notification_service import send_notification
-from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
 from ..services.name_resolver import order_actor_id, order_actor_name_map
 
@@ -335,6 +334,14 @@ async def demand_forecast(
         product_sales.items(), key=lambda x: x[1]["qty"], reverse=True
     )[:20]
 
+    # THE buy rule's number per product at this shop: the Reorder list's
+    # (owner S5 -- one number everywhere, never a forecast of our own).
+    from ..services.reorder_list import build as _reorder_list
+
+    to_buy: Dict[str, int] = {}
+    for r in _reorder_list(db, store_id=active_store or None)["rows"]:
+        to_buy[r["product_id"]] = to_buy.get(r["product_id"], 0) + int(r["buy"])
+
     forecasts = []
     for pid, data in top_products:
         avg_daily = _safe_div(data["qty"], 90)
@@ -356,13 +363,9 @@ async def demand_forecast(
         current_stock = int(
             prod_doc.get("quantity", 0) or prod_doc.get("stock", 0) or 0
         )
-        # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
-        # default) disables auto-reorder -- the forecast row stays (info)
-        # but never recommends a reorder qty (api/services/reorder_policy.py).
-        if _reorder_disabled(prod_doc):
-            reorder = 0
-        else:
-            reorder = max(0, predicted_30 - current_stock)
+        # The Reorder list's number (0 when auto-reorder is off: the forecast
+        # row stays as information).
+        reorder = to_buy.get(pid, 0)
 
         forecasts.append(
             {

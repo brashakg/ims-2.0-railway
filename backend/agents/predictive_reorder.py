@@ -13,9 +13,10 @@ Intent (packet F7):
     the 7-day window saw zero sales (avoids a phantom "never sells" reading for
     a SKU that sells weekly). The 30d fallback is the same units/day basis.
   - days_remaining = on_hand / effective_burn_rate ; +inf when burn rate == 0
-  - a reorder is suggested when days_remaining < horizon_days (default 14)
-  - recommended_qty tops the SKU back up to cover (lead_time + horizon) days of
-    burn, never below 1 unit and never below the reorder-point gap.
+  - HOW MANY to buy (and whether to buy at all) is NOT decided here: it is THE
+    buy rule, api/services/reorder_policy.buy_qty (owner S5: the shop's level
+    if set, else its 30-day sales). tally_demand_by_product_store is the one
+    30-day sales reader that rule reads (reorder_policy.sold_by_shop).
 
 NO emoji (Windows cp1252). Everything here is deterministic + DB-free.
 """
@@ -58,33 +59,6 @@ def days_remaining(on_hand: float, effective_rate: float) -> float:
     if rate <= 0:
         return math.inf
     return max(0.0, float(on_hand or 0)) / rate
-
-
-def recommended_qty(
-    *,
-    on_hand: float,
-    effective_rate: float,
-    horizon_days: int,
-    lead_time_days: int,
-    reorder_point: Optional[int] = None,
-) -> int:
-    """Units to order so stock covers (lead_time + horizon) days of burn.
-
-    The target cover is generous on purpose: by the time the order lands
-    (lead_time) the SKU should still hold a full horizon of cover. Never less
-    than 1 (a flagged SKU always gets a non-zero suggestion) and never below
-    reorder_policy.top_up for the shop's level.
-    """
-    rate = max(0.0, float(effective_rate or 0))
-    cover_days = max(1, int(lead_time_days) + int(horizon_days))
-    target_cover = math.ceil(rate * cover_days)
-    gap = target_cover - max(0.0, float(on_hand or 0))
-    # The shop's level floors the order at the ONE top-up rule (None = not set).
-    from api.services.reorder_policy import top_up
-
-    rp_gap = float(top_up(reorder_point, on_hand))
-    qty = max(gap, rp_gap, 1.0)
-    return int(math.ceil(qty))
 
 
 def projected_stockout_iso(now: datetime, days_left: float) -> Optional[str]:

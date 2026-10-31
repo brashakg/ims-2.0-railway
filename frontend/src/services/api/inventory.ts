@@ -1162,7 +1162,59 @@ export interface VarianceLine {
 // Reorder Settings API (per-product reorder configuration)
 // ============================================================================
 
+/** The product-wide settings + this shop's level, carried on every row. */
+interface ReorderSettingsFields {
+  product_id: string;
+  sku: string;
+  name: string;
+  store_id: string;
+  store_name: string;
+  /** This shop's level; null = not set. */
+  level: number | null;
+  reorder_quantity: number | null;
+  max_stock: number | null;
+  lead_time_days: number | null;
+}
+
+/** One line of THE Reorder list (GET /inventory/reorder-list, S5). Every
+ *  number is the server's: `buy` is THE buy rule (reorder_policy.buy_qty). */
+export interface ReorderRow extends ReorderSettingsFields {
+  brand: string;
+  vendor_id: string;
+  vendor_name: string;
+  basis: 'level' | 'sales';
+  sold_30d: number;
+  on_hand: number;
+  /** On SENT orders: already taken off `buy`. */
+  on_order: number;
+  /** On drafts nobody sent: shown, never taken off (owner D11). */
+  in_draft: number;
+  runs_out_days: number | null;
+  band: 'out-of-stock' | 'critical' | 'low' | 'healthy' | 'not-set';
+  buy: number;
+  /** Other shops holding pieces beyond their own need, most first. */
+  spares: Array<{ store_id: string; store_name: string; spare: number }>;
+  /** One shop's spares cover the whole buy: a transfer instead. */
+  transfer_instead: boolean;
+  /** At cost; sent to the cost roles only. */
+  unit_cost?: number | null;
+  est_value?: number | null;
+}
+
+export interface ReorderSkipped extends ReorderSettingsFields {
+  reason: 'discontinued' | 'auto-reorder off' | 'catalogue incomplete' | 'no vendor set';
+  missing?: string[];
+}
+
 export const reorderApi = {
+  /** THE Reorder list for one shop, or every shop (admins, storeId empty). */
+  getList: async (storeId?: string) => {
+    const response = await api.get('/inventory/reorder-list', {
+      params: storeId ? { store_id: storeId } : {},
+    });
+    return response.data as { store_id: string | null; rows: ReorderRow[]; skipped: ReorderSkipped[] };
+  },
+
   /** ONE shop's reorder level (owner ruling D12: levels are per shop).
    *  null clears it = not set = no low-stock alert. */
   setShopLevel: async (productId: string, storeId: string, level: number | null) => {

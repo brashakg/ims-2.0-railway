@@ -203,54 +203,6 @@ def test_the_bill_drafted_off_an_auto_po_is_not_tax_free(monkeypatch):
     assert computed["total"] == 12600.0
 
 
-def test_forecast_auto_draft_charges_the_hsn_rate_not_a_flat_18(monkeypatch):
-    """The demand-forecast door: same flat 18%, same missing tax_rate."""
-    product = {
-        "product_id": "P1",
-        "name": "Ray-Ban RB3025",
-        "sku": "RB1",
-        "hsn_code": "900311",
-        "gst_rate": 5.0,
-        "cost_price": 1000.0,
-        "quantity": 0,
-        "preferred_vendor_id": "V1",
-        "reorder_quantity": 10,
-    }
-    order = {
-        "items": [
-            {
-                "product_id": "P1",
-                "quantity": 90,
-                "product_name": "Ray-Ban",
-                "sku": "RB1",
-            }
-        ]
-    }
-    po_repo = _Repo()
-    company = {"entity_id": "E1", "gstins": [{"gstin": _JH_STORE["gstin"], "state_code": "20"}]}
-    monkeypatch.setattr(
-        v, "_get_db", lambda: _DB(orders=[order], products=[product], entities=[company])
-    )
-    monkeypatch.setattr(v, "is_online_store", lambda db_, sid: False)
-    monkeypatch.setattr(v, "get_purchase_order_repository", lambda: po_repo)
-    monkeypatch.setattr(v, "get_vendor_repository", lambda: _Repo(_MH_VENDOR))
-    monkeypatch.setattr(v, "get_store_repository", lambda: _Repo(_JH_STORE))
-    monkeypatch.setattr(v, "generate_po_number", lambda sid: "PO-FC-1")
-
-    body = v.ForecastPoRequest(store_id="BV-TEST-01", dry_run=False)
-    asyncio.run(v.create_pos_from_forecast(body, current_user=_user()))
-
-    doc = po_repo.created[0]
-    line = doc["items"][0]
-    assert line["tax_rate"] == 5.0, "HSN 900311 frames are 5%, not 18%"
-    assert line["hsn"] == "900311"
-    # Maharashtra vendor into a Jharkhand shop -> one IGST charge, no CGST/SGST.
-    assert line["cgst"] == 0.0 and line["sgst"] == 0.0
-    assert line["igst"] == round(doc["tax_amount"], 2)
-    assert doc["tax_amount"] == round(doc["subtotal"] * 0.05, 2)
-    assert doc["interstate"] is True
-
-
 # ============================================================================
 # MUST-FIX 2 -- "27-Maharashtra" is the GST portal's own display form
 # ============================================================================

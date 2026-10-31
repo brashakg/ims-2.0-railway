@@ -24,8 +24,7 @@ import httpx
 import logging
 
 from .auth import get_current_user
-from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
-from ..services.reorder_policy import low_stock_rows, top_up
+from ..services.reorder_policy import buy_qty, low_stock_rows, open_orders, top_up
 
 # IST (TZ-P3): the server clock is UTC; every business "today" key below must be
 # the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
@@ -459,6 +458,8 @@ class JarvisAnalyticsEngine:
                 products_col, get_db_collection("stock_units"), store_id=None
             )
             low = len(lows)
+            # THE buy rule (S5): sent orders are taken off what to buy.
+            sent, _drafts = open_orders(get_db_collection("purchase_orders"))
             for r in lows:
                 p = by_id.get(r["product_id"]) or {}
                 name = r["name"] or p.get("product_name") or "Unknown"
@@ -473,19 +474,21 @@ class JarvisAnalyticsEngine:
                         "reorder_point": r["reorder_point"],
                     }
                 )
-                # Owner decision: reorder_quantity <= 0 (default -1) means
-                # "no auto-reorder" -- keep the low-stock ALERT but never
-                # SUGGEST an order for a disabled product.
-                if p and not _reorder_disabled(p):
+                # The one buy rule (reorder_policy.buy_qty, S5): 0 when
+                # auto-reorder is off or sent orders already cover it -- keep
+                # the low-stock ALERT, suggest no order.
+                buy, _basis = buy_qty(
+                    p, store_id=r["store_id"], on_hand=r["quantity"],
+                    on_order=sent.get((r["product_id"], r["store_id"]), 0),
+                )
+                if p and buy > 0:
                     reorder_recs.append(
                         {
                             "sku": sku,
                             "product": name,
                             "store_id": r["store_id"],
                             "current": r["quantity"],
-                            "recommended_order": top_up(
-                                r["reorder_point"], r["quantity"]
-                            ),
+                            "recommended_order": buy,
                             "supplier": p.get("vendor") or p.get("brand") or "—",
                         }
                     )

@@ -420,18 +420,17 @@ class OracleAgent(JarvisAgent):
 
     async def _propose_reorders(self) -> int:
         """
-        #7 Predictive purchasing. For every (product, store) that is on track to
-        run OUT of stock within the configured horizon (default 14 days) at its
-        recent SALES VELOCITY, enqueue a reversible ``draft_po`` change-proposal
-        for human review. Approving it (SUPERADMIN/ADMIN) creates a DRAFT
+        #7 Predictive purchasing. For every (product, store) that sold in the
+        last 30 days and that THE buy rule says to buy for (reorder_policy.
+        buy_qty, owner S5: the shop's level if set, else its 30-day sales,
+        minus stock and sent orders -- the Reorder list's number), enqueue a
+        reversible ``draft_po`` change-proposal for human review. Approving it (SUPERADMIN/ADMIN) creates a DRAFT
         purchase order via the shared executor; SENDING the PO to the vendor
         remains a separate, non-reversible, human step.
 
         This is READ-ONLY analytics + a suggestion record only. It NEVER auto-
-        creates or sends a PO that commits money. The trigger is the projected
-        days-of-stock horizon (NOT a static reorder_point breach): a fast-moving
-        SKU above its reorder point can still be flagged, and a slow SKU below it
-        is left alone if demand won't exhaust it inside the horizon.
+        creates or sends a PO that commits money. The days of stock left (burn
+        rate below) are told in the rationale; they no longer decide (S5).
 
         Burn rate (units/day) is computed in PYTHON from booked ``orders`` line
         items over a 7-day + 30-day trailing window (no aggregation pipeline, so
@@ -451,7 +450,10 @@ class OracleAgent(JarvisAgent):
             from ..proposals import create_proposal
             from ..predictive_reorder import (
                 tally_demand_by_product_store, burn_rates, days_remaining,
-                recommended_qty, projected_stockout_iso,
+                projected_stockout_iso,
+            )
+            from api.services.reorder_policy import (
+                auto_reorder_disabled, buy_qty, open_orders, reorder_level,
             )
         except Exception as e:  # pragma: no cover
             logger.debug(f"[ORACLE] predictive-reorder import failed: {e}")
@@ -575,6 +577,9 @@ class OracleAgent(JarvisAgent):
                     if val is not None and str(val) in wanted:
                         prod_by_id.setdefault(str(val), p)
 
+        # Pieces on SENT orders per (product, shop): THE buy rule takes them off.
+        sent, _drafts = open_orders(self.get_collection("purchase_orders"), wanted_ids)
+
         today = now.strftime("%y%m%d")
         enqueued = 0
         CAP = 50
@@ -585,32 +590,31 @@ class OracleAgent(JarvisAgent):
             eff = rates["effective"]
             on_hand = on_hand_map.get((pid, store_id), 0)
             d_left = days_remaining(on_hand, eff)
-            if not (d_left < horizon):
-                continue  # not at risk inside the horizon -> no suggestion
 
             prod = prod_by_id.get(pid, {})
             # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
             # default) means auto-reorder is DISABLED for this product -- no
             # predictive reorder proposal. Missing field = legacy doc, enabled.
-            try:
-                from api.services.reorder_policy import auto_reorder_disabled
-                if auto_reorder_disabled(prod):
-                    continue
-            except ImportError:  # pragma: no cover - defensive
-                pass
+            if auto_reorder_disabled(prod):
+                continue
+            # THE buy rule (owner S5: the shop's level if set, else its 30-day
+            # sales, minus stock and sent orders) decides WHETHER and HOW MANY:
+            # the same number the Reorder list shows. Nothing to buy -> no
+            # proposal, however fast the last week sold.
+            qty, _basis = buy_qty(
+                prod, store_id=store_id, on_hand=on_hand,
+                on_order=sent.get((pid, store_id), 0),
+                sold_30d=int(d.get("units_30d") or 0),
+            )
+            if qty <= 0:
+                continue
             preferred_vendor_id = (
                 prod.get("preferred_vendor_id")
                 or prod.get("default_vendor_id")
                 or prod.get("vendor_id")
             )
-            # THIS shop's level (D12); None = not set (no floor, velocity only).
-            from api.services.reorder_policy import reorder_level
+            # THIS shop's level (D12); None = not set (30-day sales decide).
             reorder_point = reorder_level(prod, store_id=store_id)
-            qty = recommended_qty(
-                on_hand=on_hand, effective_rate=eff, horizon_days=horizon,
-                lead_time_days=self._DEFAULT_LEAD_TIME_DAYS,
-                reorder_point=reorder_point,
-            )
             name = d.get("name") or pid
             brand = d.get("brand") or ""
             label = (f"{brand} {name}".strip()) or pid
@@ -622,12 +626,17 @@ class OracleAgent(JarvisAgent):
                     self.db,
                     created_by_agent=self.agent_id,
                     proposal_type="draft_po",
-                    title=f"Reorder {label} - {d_left:.1f} days of stock left",
+                    title=f"Reorder {label} - buy {qty}",
                     rationale=(
                         f"{label} at store {store_id} has {on_hand} on hand and is "
-                        f"selling ~{eff:.2f}/day, so stock runs out in about "
-                        f"{d_left:.1f} days - inside the {horizon}-day horizon. "
-                        f"Approving drafts a purchase order for {qty} unit(s) "
+                        f"selling ~{eff:.2f}/day"
+                        + ("" if d_left == float("inf") else
+                           f", so stock runs out in about {d_left:.1f} days")
+                        + (f". The shop's level is {reorder_point}, so buy back "
+                           f"above it" if reorder_point is not None else
+                           ". No level is set for this shop, so buy the last 30 "
+                           "days' sales")
+                        + f". Approving drafts a purchase order for {qty} unit(s) "
                         f"(NOT sent to the vendor - sending is a separate manual "
                         f"step)."
                         + ("" if not vendor_missing else

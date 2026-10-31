@@ -4,9 +4,9 @@
 // sections in useState (?tab= deep links only), while the menu linked three
 // screens - most of the module was finished work nobody could reach. Each
 // section is now a real page under the InventoryLayout:
-//   /inventory/stock · /inventory/display-layout · /inventory/low-stock ·
+//   /inventory/stock · /inventory/display-layout ·
 //   /inventory/non-moving · /inventory/aging · /inventory/alerts ·
-//   /inventory/reorders · /inventory/transfers · /inventory/movements ·
+//   /inventory/transfers · /inventory/movements ·
 //   /inventory/rebalance · /inventory/quarantine · /inventory/serial-numbers ·
 //   /inventory/contact-lens · /inventory/sell-through · /inventory/overstock ·
 //   /inventory/brand-insights · /inventory/collection-insights
@@ -22,6 +22,11 @@
 // Legacy /inventory?tab=<x> deep links (QuickAdd, ReportCardsGrid, old
 // bookmarks) forward via InventoryTabRedirect below.
 //
+// Stock redesign S5 (owner 2026-10-22/23): Buy Desk, Replenishment and Low
+// stock became ONE Reorder list at /inventory/reorders (its own page, outside
+// the layout: the accountant who raises POs opens it too). /inventory/low-stock,
+// /inventory/replenishment and /catalog/buy-desk forward to it.
+//
 // Role gates come from ONE list, pages/inventory/inventoryRoles.ts. The same
 // manager-ladder list used to be hand-typed four times in this file.
 import { lazy } from 'react';
@@ -32,6 +37,7 @@ import {
   INVENTORY_MODULE_ROLES,
   INVENTORY_MANAGE_ROLES,
   POWER_GRID_ROLES,
+  REORDER_LIST_ROLES,
   STOCK_LOOKUP_ROLES,
 } from '../pages/inventory/inventoryRoles';
 
@@ -40,8 +46,6 @@ const InventoryStockPage = lazy(() => import('../pages/inventory/InventoryStockP
 const InventoryMovementsPage = lazy(() => import('../pages/inventory/InventoryMovementsPage').then(m => ({ default: m.InventoryMovementsPage })));
 const InventoryAlertsPage = lazy(() => import('../pages/inventory/InventorySections').then(m => ({ default: m.InventoryAlertsPage })));
 const InventoryDisplayLayoutPage = lazy(() => import('../pages/inventory/InventorySections').then(m => ({ default: m.InventoryDisplayLayoutPage })));
-const InventoryLowStockPage = lazy(() => import('../pages/inventory/InventorySections').then(m => ({ default: m.InventoryLowStockPage })));
-const InventoryReordersPage = lazy(() => import('../pages/inventory/InventorySections').then(m => ({ default: m.InventoryReordersPage })));
 const InventorySerialNumbersPage = lazy(() => import('../pages/inventory/InventorySections').then(m => ({ default: m.InventorySerialNumbersPage })));
 const InventoryAgingPage = lazy(() => import('../pages/inventory/InventorySections').then(m => ({ default: m.InventoryAgingPage })));
 const InventoryTransfersPage = lazy(() => import('../pages/inventory/InventorySections').then(m => ({ default: m.InventoryTransfersPage })));
@@ -56,7 +60,7 @@ const InventoryQuarantinePage = lazy(() => import('../pages/inventory/InventoryS
 const PowerGridPage = lazy(() => import('../pages/inventory/PowerGridPage'));
 const OnlineStockPage = lazy(() => import('../pages/inventory/OnlineStockPage'));
 const StockLookupPage = lazy(() => import('../pages/inventory/StockLookupPage'));
-const StockReplenishment = lazy(() => import('../pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
+const ReorderListPage = lazy(() => import('../pages/inventory/ReorderListPage').then(m => ({ default: m.ReorderListPage })));
 const StockAudit = lazy(() => import('../pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const StockCountResult = lazy(() => import('../pages/inventory/StockCountResult').then(m => ({ default: m.StockCountResult })));
 const OpeningStockImport = lazy(() => import('../pages/inventory/OpeningStockImport').then(m => ({ default: m.OpeningStockImport })));
@@ -97,11 +101,9 @@ export const inventoryRoutes = (
       <Route index element={<InventoryTabRedirect />} />
       {section('stock', InventoryStockPage)}
       {section('display-layout', InventoryDisplayLayoutPage)}
-      {section('low-stock', InventoryLowStockPage)}
       {section('non-moving', InventoryNonMovingPage)}
       {section('aging', InventoryAgingPage)}
       {section('alerts', InventoryAlertsPage)}
-      {section('reorders', InventoryReordersPage)}
       {section('transfers', InventoryTransfersPage)}
       {section('movements', InventoryMovementsPage)}
       {section('rebalance', InventoryRebalancePage)}
@@ -118,15 +120,18 @@ export const inventoryRoutes = (
         split; the role lists now come from inventoryRoles.ts instead of
         being re-typed per route. */}
 
-    {/* Phase 4: Stock Replenishment */}
+    {/* S5: THE Reorder list - what to buy, per product and shop. */}
     <Route
-      path="inventory/replenishment"
+      path="inventory/reorders"
       element={
-        <ProtectedRoute allowedRoles={INVENTORY_MANAGE_ROLES}>
-          <StockReplenishment />
+        <ProtectedRoute allowedRoles={REORDER_LIST_ROLES}>
+          <ReorderListPage />
         </ProtectedRoute>
       }
     />
+    {/* Retired into the Reorder list (S5): old bookmarks forward. */}
+    <Route path="inventory/replenishment" element={<Navigate to="/inventory/reorders" replace />} />
+    <Route path="inventory/low-stock" element={<Navigate to="/inventory/reorders" replace />} />
 
     {/* Phase 4: Stock Audit (the blind day-end count - also where the old
         ?tab=stock-count deep link lands now) */}

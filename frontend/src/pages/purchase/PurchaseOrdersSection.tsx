@@ -37,6 +37,9 @@ export function PurchaseOrdersSection() {
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<POStatus | 'ALL'>('ALL');
   const [showCreatePO, setShowCreatePO] = useState(false);
+  // ?new=1&product=<id>: a new order for one product (Order stock / Order
+  // this now, and the retired Buy Desk's links -- S5).
+  const [prefillProductId, setPrefillProductId] = useState<string | undefined>();
   const [selectedPO, setSelectedPO] = useState<PurchaseOrder | null>(null);
   const [editingPO, setEditingPO] = useState<PurchaseOrder | null>(null);
 
@@ -64,9 +67,11 @@ export function PurchaseOrdersSection() {
   // Header "New PO" button navigates to ?new=1 (see PurchaseLayout).
   useEffect(() => {
     if (searchParams.get('new')) {
+      setPrefillProductId(searchParams.get('product') || undefined);
       setShowCreatePO(true);
       const next = new URLSearchParams(searchParams);
       next.delete('new');
+      next.delete('product');
       setSearchParams(next, { replace: true });
     }
   }, [searchParams, setSearchParams]);
@@ -195,7 +200,11 @@ export function PurchaseOrdersSection() {
           suppliers={suppliers}
           suppliersLoading={suppliersQ.isPending}
           existingPOCount={totalOrders}
-          onClose={() => setShowCreatePO(false)}
+          prefillProductId={prefillProductId}
+          onClose={() => {
+            setShowCreatePO(false);
+            setPrefillProductId(undefined);
+          }}
           onCreated={(newPO) => {
             // A new PO delivers to the creator's own shop (W1.4): it joins that
             // shop's list and the all-stores list, never the list of a shop

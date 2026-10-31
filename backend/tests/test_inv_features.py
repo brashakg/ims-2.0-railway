@@ -7,8 +7,7 @@ INV-7  Vendor-SKU-alias: CRUD routes on /vendors/{vendor_id}/sku-aliases
 INV-8  Cycle-count reconcile: POST /inventory/stock-count/{count_id}/reconcile
         - gate (only inventory roles), state machine (must be completed),
         - happy path produces shrinkage records + status transition.
-INV-9  Demand-forecast -> draft-PO: POST /vendors/purchase-orders/from-forecast
-        - dry_run=True returns suggestions without persisting POs.
+INV-9  Demand-forecast -> draft-PO: RETIRED (S5, the Reorder list makes the drafts)
 
 All tests run without a live database (fail-soft pattern) or with a minimal
 in-memory stub, matching the style of test_inventory_intel.py.
@@ -284,113 +283,14 @@ class TestVendorSkuAliasGating:
 
 
 # ---------------------------------------------------------------------------
-# INV-9: from-forecast PO — ROLE GATING + dry_run shape
+# INV-9: the from-forecast PO door is RETIRED (stock redesign S5): reorder
+# drafts come from THE Reorder list (test_one_reorder_list.py).
 # ---------------------------------------------------------------------------
 
-class TestForecastPoGating:
-    """POST /vendors/purchase-orders/from-forecast must require vendor roles."""
 
-    BLOCKED_ROLES = [["SALES_STAFF"], ["CASHIER"], ["OPTOMETRIST"], ["WORKSHOP_STAFF"]]
-    ALLOWED_WRITE = [["STORE_MANAGER"], ["ADMIN"], ["ACCOUNTANT"], ["AREA_MANAGER"]]
-
-    @pytest.mark.parametrize("roles", BLOCKED_ROLES)
-    def test_blocked(self, roles):
-        app = _make_vendors_app()
-        c = TestClient(app)
-        resp = c.post(
-            "/vendors/purchase-orders/from-forecast",
-            json={"store_id": "BV-01", "dry_run": True},
-            headers=_headers(roles),
-        )
-        assert resp.status_code == 403
-
-    @pytest.mark.parametrize("roles", ALLOWED_WRITE)
-    def test_allowed_not_403(self, roles):
-        app = _make_vendors_app()
-        c = TestClient(app)
-        resp = c.post(
-            "/vendors/purchase-orders/from-forecast",
-            json={"store_id": "BV-01", "dry_run": True},
-            headers=_headers(roles),
-        )
-        # Without DB: may be 200 with empty suggestions or 400/503
-        assert resp.status_code != 403
-
-
-class TestForecastPoShape:
-    """dry_run=True must always return pos_created=0 and the suggestions key."""
-
-    def test_dry_run_never_creates_pos(self):
-        """Even with a stubbed DB that has sales data, dry_run must not create POs."""
-        import api.routers.vendors as ven_mod
-
-        # Fake DB: no orders -> empty suggestions -> pos_created=0
-        class _FakeOrders:
-            def find(self, *_a, **_kw):
-                return self
-
-            def limit(self, _n):
-                return []
-
-        class _FakeProducts:
-            def find(self, *_a, **_kw):
-                return []
-
-        class _FakeDB:
-            def get_collection(self, name):
-                if name == "orders":
-                    return _FakeOrders()
-                return _FakeProducts()
-
-        original = ven_mod._get_db
-        ven_mod._get_db = lambda: _FakeDB()
-
-        app = FastAPI()
-        app.include_router(ven_mod.router, prefix="/vendors")
-
-        async def _user():
-            return {
-                "user_id": "u1",
-                "active_store_id": "BV-01",
-                "roles": ["ADMIN", "SUPERADMIN"],
-            }
-
-        app.dependency_overrides[get_current_user] = _user
-        c = TestClient(app)
-
-        resp = c.post(
-            "/vendors/purchase-orders/from-forecast",
-            json={"store_id": "BV-01", "dry_run": True},
-        )
-        ven_mod._get_db = original  # restore
-
-        assert resp.status_code == 201
-        data = resp.json()
-        assert data["dry_run"] is True
-        assert data["pos_created"] == 0
-        assert "suggestions" in data
-
-    def test_missing_store_id_rejected(self):
-        """No active store and no body store_id -> 400."""
-        import api.routers.vendors as ven_mod
-
-        original = ven_mod._get_db
-        ven_mod._get_db = lambda: object()  # non-None so we reach store check
-
-        app = FastAPI()
-        app.include_router(ven_mod.router, prefix="/vendors")
-
-        async def _user():
-            # active_store_id absent
-            return {"user_id": "u1", "roles": ["ADMIN", "SUPERADMIN"]}
-
-        app.dependency_overrides[get_current_user] = _user
-        c = TestClient(app)
-
-        resp = c.post(
-            "/vendors/purchase-orders/from-forecast",
-            json={"dry_run": True},
-        )
-        ven_mod._get_db = original
-
-        assert resp.status_code == 400
+def test_the_forecast_po_door_is_gone():
+    app = _make_vendors_app(lambda: {"user_id": "u1", "active_store_id": "BV-01",
+                                     "roles": ["ADMIN", "SUPERADMIN"]})
+    resp = TestClient(app).post("/vendors/purchase-orders/from-forecast",
+                                json={"store_id": "BV-01", "dry_run": True})
+    assert resp.status_code in (404, 405)

@@ -42,7 +42,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.predictive_reorder import (  # noqa: E402
     burn_rates,
     days_remaining,
-    recommended_qty,
     projected_stockout_iso,
     tally_demand_by_product_store,
 )
@@ -265,17 +264,6 @@ class TestBurnRateMath:
     def test_days_remaining_basic(self):
         assert abs(days_remaining(10, 8 / 7) - 8.75) < 1e-6
 
-    def test_recommended_qty_never_below_one(self):
-        # Tiny burn rate but flagged -> still suggest at least 1.
-        assert recommended_qty(on_hand=0, effective_rate=0.01, horizon_days=14,
-                               lead_time_days=7) >= 1
-
-    def test_recommended_qty_covers_lead_plus_horizon(self):
-        # 1/day, on_hand 2, horizon 14 + lead 7 = 21 cover -> order ~19.
-        q = recommended_qty(on_hand=2, effective_rate=1.0, horizon_days=14,
-                            lead_time_days=7)
-        assert q == 19
-
     def test_projected_stockout_none_when_infinite(self):
         assert projected_stockout_iso(NOW, float("inf")) is None
 
@@ -318,10 +306,11 @@ class TestT1ProposalGeneration:
     def _seed(self) -> FakeDB:
         db = FakeDB()
         orders = db.get_collection("orders")
-        # 8 sales in last 7 days (1 unit each), none in prior 23 days.
+        # 8 sales in last 7 days (1 unit each), none in prior 23 days. 5 on
+        # hand: THE buy rule (no level: the last 30 days' sales, S5) buys 3.
         for i in range(8):
             orders.insert_one(_order("S1", "P1", days_ago=i % 7))
-        db.get_collection("stock_units").insert_one(_stock("S1", "P1", 10))
+        db.get_collection("stock_units").insert_one(_stock("S1", "P1", 5))
         db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
         return db
 
@@ -338,7 +327,7 @@ class TestT1ProposalGeneration:
         assert pl["days_remaining"] < 14
         assert pl["projected_stockout_date"] is not None
         assert pl["vendor_missing"] is False
-        assert pl["quantity"] >= 1
+        assert pl["quantity"] == 3  # 8 sold in 30 days - 5 on hand
 
     def test_second_run_dedups_same_day(self):
         db = self._seed()
@@ -401,9 +390,9 @@ class TestT2Fallback:
         return db
 
     def test_high_stock_no_proposal(self):
-        # burn30 = 15/30 = 0.5/day; 5 on hand -> 10 days? No: 5/0.5 = 10 < 14.
-        # Use 8 on hand -> 16 days > 14 -> NO proposal.
-        db = self._seed(on_hand=8)
+        # S5 one buy rule: 15 sold in 30 days, 15 on hand -> the 30-day sales
+        # are covered, nothing to buy -> NO proposal.
+        db = self._seed(on_hand=15)
         assert _run_oracle(db) == 0
         assert _pending(db) == []
 

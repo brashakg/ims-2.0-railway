@@ -288,26 +288,19 @@ class TestPurchaseRecommendations:
         p = body["params"]
         assert p["store_id"] == "BV-TEST-01"
         assert p["lookback_days"] == 90
-        assert p["lead_time_days"] == 30
-        assert p["reorder_cycle_days"] == 30
-        assert p["safety_buffer_days"] == 7
+        # S5: the quantity is THE buy rule's -- no cover-days knobs of its own.
+        assert "lead_time_days" not in p and "cover_days_total" not in p
 
     def test_query_params_propagate(self, client, auth_headers):
         r = client.get(
             "/api/v1/reports/purchase/recommendations"
-            "?lookback_days=60&lead_time_days=14&reorder_cycle_days=14"
-            "&safety_buffer_days=3&min_velocity=5&limit=50",
+            "?lookback_days=60&min_velocity=5&limit=50",
             headers=auth_headers,
         )
         assert r.status_code == 200
         p = r.json()["params"]
         assert p["lookback_days"] == 60
-        assert p["lead_time_days"] == 14
-        assert p["reorder_cycle_days"] == 14
-        assert p["safety_buffer_days"] == 3
         assert p["min_velocity"] == 5
-        # cover_days = 14+14+3 = 31
-        assert p["cover_days_total"] == 31
 
     def test_param_bounds(self, client, auth_headers):
         # lookback_days hard floor at 14

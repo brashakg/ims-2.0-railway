@@ -215,6 +215,15 @@ ROWS: List[Dict[str, object]] = [
         "allowed": "AUTHENTICATED",
         "store_scoped": True,
     },
+    # THE Reorder list (stock redesign S5): what to buy, per product and shop.
+    # A read (inventory:read already carries AUTHENTICATED): it broadens no
+    # capability grant (rbac capability-union gotcha).
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/reorder-list",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "CATALOG_MANAGER", "ACCOUNTANT", "SUPERADMIN"],
+        "store_scoped": True,
+    },
     # One shop's reorder level (owner ruling D12): store / area managers
     # their own shops (the handler's validate_store_access), admins any shop.
     {

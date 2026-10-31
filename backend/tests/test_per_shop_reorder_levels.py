@@ -627,7 +627,7 @@ def test_top_up_is_one_rule():
     assert top_up(-1, 0) == 0
 
 
-def test_the_low_stock_feed_carries_the_servers_top_up_and_band(world):
+def test_the_low_stock_feed_carries_the_band_and_the_report_buys_by_the_rule(world):
     from api.services.reorder_policy import low_stock_rows, top_up
 
     world.products.insert_one(_product("P-TOP", **_levels({DHN: 6})))
@@ -635,15 +635,16 @@ def test_the_low_stock_feed_carries_the_servers_top_up_and_band(world):
     rows = [r for r in low_stock_rows(world.products, world.stock_units, store_id=DHN)
             if r["product_id"] == "P-TOP"]
     assert len(rows) == 1
-    assert rows[0]["top_up_qty"] == top_up(6, 2) == 5
     assert rows[0]["stock_status"] == "critical"  # 2 <= half of 6
-    # Purchase report agrees: same product, same shop, same quantity.
+    # Purchase report: THE buy rule's number (S5) -- back to one above the
+    # level (5), rounded up to the order quantity of 2.
     world.orders.insert_many(_orders("P-TOP", DHN, 2))  # slow: only the level recommends
     body = _get("/api/v1/reports/purchase/recommendations", store_id=DHN, min_velocity=2)
     rec = [r for r in body["recommendations"] if r["product_id"] == "P-TOP"]
-    assert rec and rec[0]["suggested_order_qty"] == rows[0]["top_up_qty"]
+    assert top_up(6, 2) == 5
+    assert rec and rec[0]["suggested_order_qty"] == 6
     feed = _get("/api/v1/inventory/low-stock", store_id=DHN)["items"]
-    assert [i["top_up_qty"] for i in feed if i["product_id"] == "P-TOP"] == [5]
+    assert [i["stock_status"] for i in feed if i["product_id"] == "P-TOP"] == ["critical"]
 
 
 def test_stock_status_bands_come_from_the_server():

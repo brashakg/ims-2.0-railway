@@ -33,6 +33,7 @@ from . import contact_lenses
 from . import power_grids
 from . import analytics
 from . import alerts
+from . import reorders
 from . import serials
 from . import quarantine
 from . import lookup
@@ -59,6 +60,7 @@ _SUBMODULES = (
     power_grids,
     analytics,
     alerts,
+    reorders,
     serials,
     quarantine,
     lookup,

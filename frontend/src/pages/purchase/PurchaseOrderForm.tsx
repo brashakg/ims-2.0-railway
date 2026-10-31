@@ -16,7 +16,7 @@ import { COST_ROLES } from '../../components/common/CostCell';
 import { vendorsApi, productApi } from '../../services/api';
 import { ApiError } from '../../services/api/client';
 import { usePoGstHeads } from '../../hooks/usePoGstHeads';
-import { PurchaseOrderComposer } from '../../components/purchase/PurchaseOrderComposer';
+import { PurchaseOrderComposer, applyPickedProduct, blankLine } from '../../components/purchase/PurchaseOrderComposer';
 import type {
   ComposerVendorOption,
   ComposerNewProduct,
@@ -118,6 +118,11 @@ export function productDetail(hit: ProductHit): string {
   if (size) bits.push(size);
   if (Number(hit.mrp) > 0) bits.push(`MRP ${'₹'}${Number(hit.mrp).toLocaleString('en-IN')}`);
   return bits.join(' · ');
+}
+
+/** A new order's first line for one catalogued product (prefillProductId). */
+export function lineForProduct(hit: ProductHit): ComposerLine {
+  return applyPickedProduct(blankLine(), hitToPicked(hit));
 }
 
 function hitToPicked(hit: ProductHit): PickedProduct {
@@ -483,6 +488,10 @@ interface PurchaseOrderFormProps {
    *  add / remove lines). Same form, same pricing rule on the server; saving
    *  hands back the server's copy through onCreated. */
   editing?: PurchaseOrder;
+  /** A new order opened for one product (?product=<id> on /purchase/orders:
+   *  "Order stock" / "Order this now", and the retired Buy Desk's deep links).
+   *  The product is read once and starts as the order's first line. */
+  prefillProductId?: string;
   onClose: () => void;
   onCreated: (po: PurchaseOrder) => void;
 }
@@ -517,6 +526,7 @@ export function PurchaseOrderForm({
   suppliersLoading = false,
   existingPOCount,
   editing,
+  prefillProductId,
   onClose,
   onCreated,
 }: PurchaseOrderFormProps) {
@@ -537,6 +547,31 @@ export function PurchaseOrderForm({
   };
 
   const vendorOptions = suppliers.map(supplierToVendor);
+
+  // Opened for one product: read it, then start the order with it. A product
+  // that cannot be read leaves an empty form and says so.
+  const [prefill, setPrefill] = useState<ComposerLine | null | undefined>(
+    prefillProductId && !editing ? undefined : null,
+  );
+  useEffect(() => {
+    if (!prefillProductId || editing) return;
+    let live = true;
+    productApi
+      .getProduct(prefillProductId)
+      .then((res: unknown) => {
+        const hit = ((res as { product?: ProductHit })?.product ?? res) as ProductHit;
+        if (live) setPrefill(hit && (hit.product_id || hit.productId) ? lineForProduct(hit) : null);
+      })
+      .catch(() => {
+        if (!live) return;
+        setPrefill(null);
+        toast.error('Could not read that product - pick it below.');
+      });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillProductId]);
 
   // Which of OUR GSTINs is receiving decides CGST+SGST vs IGST, and the SERVER
   // decides it (shop_gstin + classify_supply, the rule the order and the bill
@@ -568,6 +603,11 @@ export function PurchaseOrderForm({
 
         {/* Body — shared composer */}
         <div className="p-6">
+          {prefill === undefined ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
+            </div>
+          ) : (
           <PurchaseOrderComposer
             mode="page"
             vendors={vendorOptions}
@@ -576,7 +616,7 @@ export function PurchaseOrderForm({
             interstate={interstate}
             onVendorChange={setVendorId}
             initialVendorId={editing?.supplierId}
-            initialLines={editing?.items.map(lineFromSaved)}
+            initialLines={editing ? editing.items.map(lineFromSaved) : prefill ? [prefill] : undefined}
             initialExpectedDate={editing?.expectedDelivery}
             initialNotes={editing?.notes}
             allowAddLine
@@ -748,6 +788,7 @@ export function PurchaseOrderForm({
               }
             }}
           />
+          )}
         </div>
       </div>
     </div>
