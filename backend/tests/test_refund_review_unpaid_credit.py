@@ -864,6 +864,10 @@ def test_hand_credit_typed_like_the_refunds_return_id_is_counted(env):
     env.get_collection("credit_note_ledger").insert_one({
         "customer_id": "CUST-1", "type": "ISSUED", "amount": 200.0, "delta": 200.0,
         "ref": "ret-261020-ab12cd", "entry_id": "hand-7"})
+    # A real hand credit (POST /customers/{id}/store-credit) moves the balance
+    # field too; the field is the one balance rule (#1264), not a ledger re-sum.
+    env.get_collection("customers").update_one(
+        {"customer_id": "CUST-1"}, {"$inc": {"store_credit": 200.0}})
     res = sr.post_from_review(env, row)
     assert res["status"] == "credited"
     assert sorted(r["delta"] for r in _ledger(env)) == [200.0, 800.0]

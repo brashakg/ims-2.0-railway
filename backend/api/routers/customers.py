@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from typing import Any, Dict, List, Optional
 from datetime import date, datetime
 import uuid
+import logging
 import re
 from .auth import get_current_user, require_roles
 from ..utils.ist import ist_day_start_utc, now_ist
@@ -205,6 +206,7 @@ def _scoped_customer_or_404(customer_id, current_user, *, write: bool = False):
     return doc
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _audit_customer(
@@ -1835,6 +1837,235 @@ def redeem_store_credit_atomic(
     return {"entry": entry, "balance": entry["balance_after"]}
 
 
+def store_credit_balance_unready(repo, customer_id: str, exclude_entry_id: Optional[str] = None) -> bool:
+    """True when the customer's store_credit field is missing / null but the
+    ledger already holds rows for them (``exclude_entry_id``: the row the
+    caller itself is writing): a legacy balance scripts/
+    backfill_store_credit_field.py has not set yet. Starting such a field at 0
+    would silently drop that balance, so the doors refuse instead (deploy
+    order: the backfill runs BEFORE PR #1264). An unreadable ledger reads as
+    unready too -- never a guess."""
+    coll = getattr(repo, "collection", None)
+    if coll is None:
+        return False
+    doc = coll.find_one({"customer_id": customer_id}) or {}
+    if doc.get("store_credit") is not None:
+        return False
+    ledger = _ledger_coll()
+    if ledger is None:
+        return True
+    # Only rows that MOVED money count: a GST-only document (zero / no delta,
+    # a superadmin note doc) or a row not yet applied never made a balance.
+    flt: Dict[str, Any] = {"customer_id": customer_id, "delta": {"$nin": [0, 0.0, None]},
+                           "applied": {"$ne": False}}
+    if exclude_entry_id:
+        flt["entry_id"] = {"$ne": exclude_entry_id}
+    return ledger.find_one(flt) is not None
+
+
+# --------------------------------------------------------------------------- #
+# THE posting of a balance-moving ledger row (PR #1264, design in the PR body).
+# Production Mongo is a standalone: no multi-document transaction, so the row
+# and the balance move are two writes made safe as a resumable state machine:
+#
+#   ISSUING (applied False) --balance moved--> final type (ISSUED / ADJUSTED),
+#                           |                  applied True
+#                           +--never moved---> VOID (its credit-note number is
+#                                              written off)
+#
+# The move is ONE atomic $inc guarded by the row's entry_id in the customer's
+# store_credit_refs (pushed in the same write), so it applies at most once and
+# "did it land?" is always answerable by reading the guard -- an unclear write
+# (landed, then raised) is resolved by that read, never by void-and-retry.
+# reconcile_pending_credits finishes or voids every row left ISSUING past
+# PENDING_TIMEOUT_SECONDS, consistently with the guard; it runs on the
+# scheduler and before any posting for the same customer.
+# --------------------------------------------------------------------------- #
+STORE_CREDIT_REFS = "store_credit_refs"
+PENDING = "ISSUING"
+VOID = "VOID"
+PENDING_TIMEOUT_SECONDS = 600
+POSTED, REFUSED, UNCLEAR = "POSTED", "REFUSED", "UNCLEAR"
+
+
+def _guard_landed(repo, customer_id: str, entry_id: str) -> Optional[bool]:
+    """Did this row's balance move land? Read from the guard. None when it
+    cannot be read (the row stays pending for the reconciler)."""
+    coll = getattr(repo, "collection", None)
+    if coll is None:
+        return False
+    try:
+        return coll.find_one({"customer_id": customer_id, STORE_CREDIT_REFS: entry_id}) is not None
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] credit guard %s unreadable: %s", entry_id, exc)
+        return None
+
+
+def _finish_credit_row(ledger, row: Dict[str, Any]) -> None:
+    for _ in range(2):  # left ISSUING if both fail: the reconciler finishes it
+        try:
+            ledger.update_one({"entry_id": row["entry_id"], "applied": False},
+                              {"$set": {"type": row.get("final_type") or "ISSUED", "applied": True}})
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[CUSTOMERS] credit row %s not finished: %s", row.get("entry_id"), exc)
+
+
+def _void_credit_row(ledger, row: Dict[str, Any], why: str) -> None:
+    """VOID a row whose balance never moved; its credit-note number (if it
+    took one) is written off -- the row owns its number once inserted."""
+    try:
+        res = ledger.update_one({"entry_id": row["entry_id"], "applied": False},
+                                {"$set": {"type": VOID, "void_reason": why}})
+    except Exception as exc:  # noqa: BLE001 -- applied False: still never counted
+        logger.error("[CUSTOMERS] credit row %s not voided: %s", row.get("entry_id"), exc)
+        return
+    if row.get("note_number") and getattr(res, "matched_count", getattr(res, "modified_count", 1)):
+        from .returns import _record_unused_credit_note
+
+        _record_unused_credit_note(row["note_number"], {"order_id": row.get("order_id"), "store_id": row.get("store_id")},
+                                   row.get("ref") or row["entry_id"], {"user_id": "system"}, why)
+
+
+def _settle_credit_row(repo, ledger, row: Dict[str, Any]) -> str:
+    cid, eid = row.get("customer_id"), row["entry_id"]
+    try:
+        moved: Optional[bool] = apply_store_credit_delta(
+            repo, cid, float(row.get("delta") or 0), guard_ref=eid,
+            balance_after=row.get("balance_after"), entry_id=eid)
+    except Exception as exc:  # noqa: BLE001 -- unclear: the guard says whether it landed
+        logger.error("[CUSTOMERS] balance move for %s raised: %s", eid, exc)
+        moved = _guard_landed(repo, cid, eid)
+    if moved is None:
+        return UNCLEAR
+    if moved:
+        _finish_credit_row(ledger, row)
+        return POSTED
+    _void_credit_row(ledger, row, "balance not moved")
+    return REFUSED
+
+
+def post_ledger_credit(repo, entry: Dict[str, Any], *, ledger=None) -> str:
+    """THE posting door for every balance-moving ledger row (returns, the
+    manual credit door, the advance refund, the superadmin credit note, the
+    Shopify refund re-drive, referral rewards). Resumable and idempotent on
+    entry_id: pressing it again for the same row finishes it, never posts
+    twice. Returns POSTED (the balance carries it), REFUSED (it never moved;
+    the row is VOID) or UNCLEAR (unreadable; the reconciler settles it)."""
+    ledger = ledger if ledger is not None else _ledger_coll()
+    if ledger is None:
+        return REFUSED
+    eid, cid = entry["entry_id"], entry.get("customer_id")
+    reconcile_pending_credits(repo, customer_id=cid, ledger=ledger)
+    row = ledger.find_one({"entry_id": eid})
+    if row is None:
+        row = dict(entry, type=PENDING, final_type=entry.get("type"), applied=False, pending_at=utc_now_iso())
+        try:
+            ledger.insert_one({**row, "_id": eid})
+        except Exception as exc:  # noqa: BLE001 -- a concurrent press wrote it first, or the write failed
+            row = ledger.find_one({"entry_id": eid})
+            if row is None:
+                logger.error("[CUSTOMERS] credit row %s not written: %s", eid, exc)
+                return REFUSED
+    row = dict(row)
+    row.pop("_id", None)
+    if row.get("applied"):
+        return POSTED
+    if row.get("type") == VOID:
+        if row.get("note_number"):
+            return REFUSED  # its number was written off: a new note takes a new one
+        ledger.update_one({"entry_id": eid, "type": VOID}, {"$set": {"type": PENDING, "pending_at": utc_now_iso()}})
+        row["type"] = PENDING
+    return _settle_credit_row(repo, ledger, row)
+
+
+def reconcile_pending_credits(repo=None, *, customer_id: Optional[str] = None, ledger=None,
+                              older_than_s: int = PENDING_TIMEOUT_SECONDS) -> Dict[str, int]:
+    """Finish (guard landed) or void (it never did) every row left ISSUING
+    longer than any press runs. Never touches a younger row: that press may
+    still be writing. Fail-soft: an unreadable guard leaves the row for the
+    next pass."""
+    from datetime import timedelta, timezone as _tz
+
+    out = {"finished": 0, "voided": 0}
+    ledger = ledger if ledger is not None else _ledger_coll()
+    repo = repo if repo is not None else get_customer_repository()
+    if ledger is None or repo is None:
+        return out
+    cutoff = (datetime.now(_tz.utc) - timedelta(seconds=older_than_s)).isoformat()
+    flt: Dict[str, Any] = {"type": PENDING, "pending_at": {"$lt": cutoff}}
+    if customer_id:
+        flt["customer_id"] = customer_id
+    try:
+        stale = list(ledger.find(flt))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] pending credits unreadable: %s", exc)
+        return out
+    for row in stale:
+        landed = _guard_landed(repo, row.get("customer_id"), row.get("entry_id"))
+        if landed is None:
+            continue
+        if landed:
+            _finish_credit_row(ledger, row)
+            out["finished"] += 1
+        else:
+            _void_credit_row(ledger, row, "never applied (stale)")
+            out["voided"] += 1
+    if out["finished"] or out["voided"]:
+        logger.warning("[CUSTOMERS] pending credits settled: %s", out)
+    return out
+
+
+async def scheduled_credit_reconcile() -> None:
+    """Scheduler tick (agents/scheduler)."""
+    reconcile_pending_credits()
+
+
+def apply_store_credit_delta(
+    repo, customer_id: str, delta: float, *, guard_ref: Optional[str] = None,
+    balance_after: Optional[float] = None, entry_id: Optional[str] = None,
+) -> bool:
+    """THE way customer.store_credit moves: ONE atomic $inc of the delta --
+    never a read-then-$set, which overwrote a concurrent door's $inc (500 + a
+    manual 200 racing an advance refund's 1000 read 700, not 1700).
+
+    A missing or null store_credit starts from 0 (Mongo refuses $inc on null)
+    and is logged -- but ONLY when the ledger holds nothing else for the
+    customer: a legacy balance living only in the ledger is the backfill
+    script's to set (store_credit_balance_unready -> logged, False), never
+    seeded here (which double counted) nor dropped by a silent 0. ``guard_ref`` (the
+    ledger row's entry_id, post_ledger_credit) makes the move apply once: the
+    $inc lands only while the ref is not yet in the customer's
+    store_credit_refs, and pushes it in the same write.
+
+    True when the balance moved (or, with guard_ref, had already moved). A
+    repository with no raw collection (test doubles only) gets balance_after."""
+    coll = getattr(repo, "collection", None)
+    if coll is None:
+        repo.update(customer_id, {"store_credit": balance_after})
+        return True
+    if store_credit_balance_unready(repo, customer_id, exclude_entry_id=entry_id or guard_ref):
+        logger.error("[CUSTOMERS] %s has ledger history but no store_credit field: run "
+                     "scripts/backfill_store_credit_field.py; balance NOT moved", customer_id)
+        return False
+    seeded = coll.update_one({"customer_id": customer_id, "store_credit": None},
+                             {"$set": {"store_credit": 0.0}})
+    if getattr(seeded, "matched_count", getattr(seeded, "modified_count", 0)):
+        logger.warning("[CUSTOMERS] %s had no store_credit field; starting it at 0 "
+                       "(run scripts/backfill_store_credit_field.py for legacy balances)", customer_id)
+    flt: Dict[str, Any] = {"customer_id": customer_id}
+    upd: Dict[str, Any] = {"$inc": {"store_credit": float(delta)}}
+    if guard_ref:
+        flt[STORE_CREDIT_REFS] = {"$ne": guard_ref}
+        upd["$push"] = {STORE_CREDIT_REFS: guard_ref}
+    res = coll.update_one(flt, upd)
+    if getattr(res, "matched_count", getattr(res, "modified_count", 0)):
+        return True
+    if guard_ref:
+        return coll.find_one({"customer_id": customer_id, STORE_CREDIT_REFS: guard_ref}) is not None
+    return False
+
+
 def _post_credit_entry(
     customer_id: str, entry_type: str, body: StoreCreditEntryRequest, current_user: dict
 ):
@@ -1867,6 +2098,11 @@ def _post_credit_entry(
     # ISSUE / ADJUST (credit). A credit cannot overspend, so the snapshot
     # path is safe for it; a REDEEM never reaches here (returned above).
     # ------------------------------------------------------------------
+    if store_credit_balance_unready(repo, customer_id):
+        raise HTTPException(
+            status_code=503,
+            detail="This customer's store-credit balance has not been set up yet - nothing was recorded. Ask an admin.",
+        )
     balance = _current_credit_balance(customer_id, existing)
     try:
         entry = scl.make_entry(
@@ -1882,14 +2118,15 @@ def _post_credit_entry(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    coll = _ledger_coll()
-    if coll is not None:
-        coll.insert_one(dict(entry))
-    # Keep the legacy number in sync so the rest of the app stays correct.
-    try:
-        repo.update(customer_id, {"store_credit": entry["balance_after"]})
-    except Exception:  # noqa: BLE001
-        pass
+    status = post_ledger_credit(repo, entry)
+    if status != POSTED:
+        raise HTTPException(
+            status_code=503,
+            detail=("The store credit could not be recorded just now - nothing was given. Try again."
+                    if status == REFUSED else
+                    "The store credit could not be confirmed just now - check the customer's balance "
+                    "before trying again."),
+        )
     entry.pop("_id", None)
     return {"entry": entry, "balance": entry["balance_after"]}
 

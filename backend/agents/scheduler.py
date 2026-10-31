@@ -231,6 +231,8 @@ class AgentScheduler:
 
         # System job (not an agent): the twice-daily Shopify live-product sync.
         self._add_live_sync_job()
+        # System job: settle store-credit ledger rows a dead press left pending.
+        self._add_credit_reconcile_job()
 
         if APSCHEDULER_AVAILABLE and self._scheduler:
             if not getattr(self._scheduler, "running", False):
@@ -270,6 +272,26 @@ class AgentScheduler:
                 )
         except Exception as e:  # noqa: BLE001
             logger.error(f"[SCHEDULER] live-sync job not scheduled: {e}", exc_info=True)
+
+    def _add_credit_reconcile_job(self):
+        """Every 10 minutes: finish or void store-credit ledger rows a dead
+        press left ISSUING (customers.reconcile_pending_credits, PR #1264).
+        Lazy import, fail-soft like the live-sync job."""
+        try:
+            from api.routers import customers as _cust
+
+            if APSCHEDULER_AVAILABLE and self._scheduler:
+                self._scheduler.add_job(
+                    _cust.scheduled_credit_reconcile,
+                    trigger=IntervalTrigger(minutes=10),
+                    id="store_credit_reconcile",
+                    name="Store-credit pending rows",
+                    replace_existing=True,
+                )
+            else:
+                self._add_fallback_loop("store_credit_reconcile", _cust.scheduled_credit_reconcile, 600)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[SCHEDULER] credit reconcile job not scheduled: {e}", exc_info=True)
 
     def _start_leader_wait_loop(self):
         """Spawn the background leadership-retry task (idempotent)."""

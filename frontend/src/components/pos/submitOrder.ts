@@ -16,6 +16,7 @@ import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
 import { orderLinesOf, refreshBillQuote } from './billQuote';
 import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
+import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
 
 // The order-line vocabulary lives with the line builder the quote shares.
 export { mapCategory } from './billQuote';
@@ -119,6 +120,13 @@ const DEAD_APPROVAL_CODES = new Set([
   'DISCOUNT_APPROVAL_EXPIRED',
   'DISCOUNT_APPROVAL_NOT_FOUND',
 ]);
+
+/** The server's refusal, in words staff can act on ('' when there is none). */
+function serverReason(e: unknown): string {
+  const d = getErrorDetail(e) as { reason?: unknown } | undefined;
+  if (d && typeof d === 'object' && d.reason === 'insufficient_balance') return 'Not enough loyalty points';
+  return getErrorMessage(e, '');
+}
 
 /** `store` is the bound posStore instance (usePOSStore()). Validations run
     here too so both surfaces refuse identically. */
@@ -239,11 +247,12 @@ export async function submitPosOrder(
             `(₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} was applied on screen) — ` +
             `collect the remaining ₹${Math.round(shortfall).toLocaleString('en-IN')} before closing the bill.`;
         }
-      } catch {
+      } catch (e) {
+        const why = serverReason(e);
         loyaltyWarning =
-          `Loyalty redeem failed — points were NOT debited, and ` +
+          `Loyalty redeem failed${why ? ` (${why})` : ''} — points were NOT debited, and ` +
           `₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} is still due on the order. ` +
-          `Collect it another way, or re-apply the points from the Orders screen.`;
+          `Collect it another way.`;
       }
       store.clearPendingLoyaltyRedeem();
     }
@@ -279,14 +288,17 @@ export async function submitPosOrder(
         const body = buildPaymentBody(leg, leg.method === 'CASH' ? cashCapture : null);
         if (leg.method === 'CASH') cashCapture = null;
         await orderApi.addPayment(result.order_id, body as any);
-      } catch {
+      } catch (e) {
         // Still does not block the order - it exists, and a tender can be
         // recorded against it later. But it is no longer SILENT: money taken
         // at the counter that never reached the order is exactly what a
         // day-end blind count cannot explain. (For a LOYALTY leg the points
-        // ARE burned and the REDEEM ledger row is linked to this order_id,
-        // so staff can record the tender from the Orders screen.)
-        unrecordedPayments.push(`${leg.method} ₹${Math.round(leg.amount).toLocaleString('en-IN')}`);
+        // ARE burned and the REDEEM ledger row is linked to this order_id;
+        // the server keeps that burn unclaimed for a later LOYALTY tender.)
+        const why = serverReason(e);
+        unrecordedPayments.push(
+          `${leg.method} ₹${Math.round(leg.amount).toLocaleString('en-IN')}${why ? ` (${why})` : ''}`,
+        );
       }
     }
     store.setCashTender(null);
@@ -297,7 +309,12 @@ export async function submitPosOrder(
     if (unrecordedPayments.length) {
       warningParts.push(
         `Order saved, but ${unrecordedPayments.join(' and ')} did NOT record against it. `
-          + `Add the payment from the Orders screen before closing the till.`,
+          + `Add the payment from the Orders screen before closing the till.`
+          // The Orders screen takes cash / card / UPI / bank only: a loyalty
+          // leg cannot be added there, so say what IS true.
+          + (unrecordedPayments.some((u) => u.startsWith('LOYALTY'))
+            ? ` Loyalty points cannot be added there - ask an admin; the redeemed points stay reserved for this bill.`
+            : ''),
       );
     }
     if (loyaltyWarning) warningParts.push(loyaltyWarning);

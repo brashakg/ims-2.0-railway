@@ -115,7 +115,40 @@ export interface ReturnQuote {
   tenders_unverifiable: boolean;
 }
 
+/** What 'Refund advance and cancel' would give back, or why it cannot. */
+export interface AdvanceRefundPlan {
+  ok: boolean;
+  reason?: string;
+  total?: number;
+  credit?: number;
+  /** paid_from: 'HQ' on a cash leg HQ pays (an unfinished refund's record). */
+  refund_tenders?: { method: string; amount: number; paid_from?: string }[];
+  invoice_number?: string | null;
+  /** 'finish_cancel' once the advance is refunded but the order not cancelled. */
+  action?: 'refund_and_cancel' | 'finish_cancel' | 'finish_refund';
+  /** A cash part is refunded: say whether from the shop drawer or HQ. */
+  has_cash?: boolean;
+}
+
+export type CashPaidFrom = 'STORE_DRAWER' | 'HQ';
+
 export const returnsApi = {
+  advanceRefundPreview: async (orderId: string): Promise<AdvanceRefundPlan> => {
+    const response = await api.get(`/returns/advance-refund/${encodeURIComponent(orderId)}`);
+    return response.data;
+  },
+
+  /** Refund the advance (back the way it was paid; store credit for a
+   *  store-credit / voucher / EMI part) and cancel the order. */
+  refundAdvanceAndCancel: async (orderId: string, reason: string, cashPaidFrom?: CashPaidFrom) => {
+    const response = await api.post('/returns/advance-refund', {
+      order_id: orderId,
+      reason,
+      ...(cashPaidFrom ? { cash_paid_from: cashPaidFrom } : {}),
+    });
+    return response.data;
+  },
+
   create: async (payload: CreateReturnPayload) => {
     const response = await api.post('/returns', payload);
     return response.data;

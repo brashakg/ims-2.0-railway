@@ -33,6 +33,8 @@ interface Props {
   requestedByName?: string;
   /** The tier the server said is required (auto / admin / super) — display only. */
   requiredTier?: string;
+  /** What this bill has already refunded, from the server's 403 (split refunds). */
+  priorRefunds?: number;
   onClose: () => void;
   /** Called once a manager has approved — the page re-submits with these. */
   onApproved: (args: { requestId: string; approvalToken?: string }) => void;
@@ -55,6 +57,7 @@ export function RefundApprovalModal({
   reason,
   requestedByName,
   requiredTier,
+  priorRefunds,
   onClose,
   onApproved,
 }: Props) {
@@ -84,6 +87,8 @@ export function RefundApprovalModal({
         store_id: storeId,
         amount,
         reason: reason || 'Refund',
+        // The tier the refund door named, so the request reaches the right approvers.
+        required_tier: requiredTier,
         context: {
           order_id: orderId,
           order_number: orderNumber,
@@ -93,7 +98,7 @@ export function RefundApprovalModal({
         },
         // Dedupe an identical live request so a double-click / re-open reuses
         // the same pending approval instead of stacking duplicates.
-        dedupe_key: orderId ? `refund:${orderId}:${Math.round(amount)}` : undefined,
+        dedupe_key: orderId ? `refundp:${orderId}:${Math.round(amount * 100)}` : undefined,
       });
       setRequestId(res.request_id);
       setTier(res.required_tier || requiredTier);
@@ -197,6 +202,12 @@ export function RefundApprovalModal({
               <span className="text-gray-600">Refund amount</span>
               <span className="font-mono font-semibold text-gray-900">{fc(amount)}</span>
             </div>
+            {!!priorRefunds && (
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-gray-600">Already refunded on this bill</span>
+                <span className="font-mono text-gray-900">{fc(priorRefunds)} (total {fc(priorRefunds + amount)})</span>
+              </div>
+            )}
             {orderNumber && (
               <div className="flex items-center justify-between mt-1">
                 <span className="text-gray-600">Order</span>
