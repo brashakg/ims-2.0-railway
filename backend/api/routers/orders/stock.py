@@ -6,9 +6,12 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
+import asyncio
+from datetime import datetime, timedelta
+
 from fastapi import HTTPException
 from typing import Dict, List, Optional
-from ...dependencies import get_stock_repository
+from ...dependencies import get_order_repository, get_stock_repository
 from ._shared import logger
 
 
@@ -511,8 +514,18 @@ def _claim_units(
     claim is one atomic guarded write, so the loser gets a 409 here, before any
     bill exists. Scanned units are claimed first, so a typed line of the same
     product can never take the unit another line scanned. A lost claim gives
-    back this call's earlier claims first. An unknown scanned unit or a stock
-    backend error stays fail-soft, as the gate is.
+    back this call's earlier claims first. An unknown scanned unit stays
+    fail-soft, as the gate is; a stock backend error during a first-available
+    claim fails CLOSED (503 "try again"), never "out of stock" and never a
+    sale that took nothing off the shelf.
+
+    ponytail: the claim and the bill are two writes (standalone Mongo, no
+    transaction). A server that dies between them leaves the units SOLD to an
+    order that never exists, and a retry is refused the last unit until
+    sweep_unsaved_claims gives them back (CLAIM_SWEEP_MINUTES). Not keyed on
+    the Idempotency-Key: the lens hook's reserve is idempotent on
+    order_id#line, so a reused order id would read a released cell as still
+    reserved. Upgrade path: stamp the key on the claimed unit and adopt it.
     """
     try:
         stock_repo = get_stock_repository()
@@ -545,26 +558,52 @@ def _claim_units(
             raise
     if not store_id:
         return claimed
+    # The refusal counts the whole bill per product, as the gate adds it up.
+    on_bill: Dict[str, int] = {}
+    held: Dict[str, int] = {}
     for line in lines:
         pid = line.get("product_id") or ""
+        on_bill[pid] = on_bill.get(pid, 0) + int(line.get("quantity") or 1)
+        if line.get("stock_id") and str(line["stock_id"]) in claimed:
+            held[pid] = held.get(pid, 0) + 1
+    for line in lines:
+        pid = line.get("product_id") or ""
+        label = line.get("product_name") or pid
         qty = int(line.get("quantity") or 1) - (1 if line.get("stock_id") else 0)
-        for got_so_far in range(max(qty, 0)):
+        for _ in range(max(qty, 0)):
             try:
                 got = stock_repo.claim_one_available(pid, store_id, order_id, set(claimed))
-            except Exception as exc:  # noqa: BLE001 -- backend error: fail-soft
-                logger.warning("[STOCK] claim_one_available(%s,%s) failed: %s", pid, store_id, exc)
-                break
+            except Exception as exc:  # noqa: BLE001 -- fail closed, never oversell
+                logger.error("[STOCK] claim_one_available(%s,%s) failed: %s", pid, store_id, exc)
+                _release_claimed_units(order_id, claimed)
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"Stock could not be checked for '{label}'. Try again.",
+                )
             if not got:
                 # Another bill took the last unit since the gate read the shelf.
                 _release_claimed_units(order_id, claimed)
-                raise _not_in_stock(line.get("product_name") or pid, got_so_far, qty)
+                raise _not_in_stock(label, held.get(pid, 0), on_bill[pid])
             claimed[str(got)] = pid
+            held[pid] = held.get(pid, 0) + 1
     return claimed
 
 
-def _release_claimed_units(order_id: str, stock_ids) -> None:
-    """Give back units _claim_units took for an order never saved."""
+def _release_claimed_units(order_id: str, stock_ids, was_saved=None) -> None:
+    """Give back units _claim_units took for an order never saved.
+
+    `was_saved` (optional) is asked first, as discount_approval.give_back asks
+    it: the write may have landed before the error, and a unit is never put
+    back on the shelf under a bill that exists. A check that fails keeps the
+    units SOLD (fail closed); sweep_unsaved_claims frees them if no bill
+    turns up."""
     if not stock_ids:
+        return
+    try:
+        if was_saved is not None and was_saved():
+            return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK] could not tell if order %s was saved: %s", order_id, exc)
         return
     try:
         stock_repo = get_stock_repository()
@@ -580,6 +619,68 @@ def _release_claimed_units(order_id: str, stock_ids) -> None:
             order_id,
             exc,
         )
+
+
+CLAIM_SWEEP_MINUTES = 15  # an in-flight sale writes its bill within seconds
+
+
+def sweep_unsaved_claims() -> List[str]:
+    """Give back units claimed for a bill that was never written: the server
+    died between _claim_units and the insert, so no compensating release ran.
+
+    Picks SOLD units whose order_id matches no orders document, stamped more
+    than CLAIM_SWEEP_MINUTES ago and less than a day ago (older strays are
+    history for a human, never a sweep's). Idempotent: the release matches
+    SOLD + that order_id only, so a re-run frees nothing twice. Returns the
+    stock_ids put back. A unit claimed onto an EXISTING draft whose line never
+    landed is not caught here; cancelling that bill gives it back."""
+    try:
+        stock_repo = get_stock_repository()
+        order_repo = get_order_repository()
+    except Exception:  # noqa: BLE001
+        return []
+    if stock_repo is None or order_repo is None:
+        return []
+    now = datetime.now()  # the clock the claim stamps sold_at with
+    try:
+        stray = stock_repo.collection.distinct(
+            "order_id",
+            {
+                "status": "SOLD",
+                "order_id": {"$type": "string", "$ne": ""},
+                "sold_at": {
+                    "$lt": now - timedelta(minutes=CLAIM_SWEEP_MINUTES),
+                    "$gt": now - timedelta(days=1),
+                },
+            },
+        )
+        saved = {
+            d.get("order_id")
+            for d in order_repo.collection.find(
+                {"order_id": {"$in": list(stray)}}, {"order_id": 1}
+            )
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK] unsaved-claim sweep skipped: %s", exc)
+        return []
+    freed: List[str] = []
+    for oid in stray:
+        if oid in saved:
+            continue
+        res = stock_repo.release_sold_units_for_order(oid, reason="ORDER_NOT_SAVED")
+        freed += list(getattr(res, "released", res) or [])
+    if freed:
+        logger.warning(
+            "[STOCK] gave back %d unit(s) claimed for bills never saved: %s",
+            len(freed),
+            freed,
+        )
+    return freed
+
+
+async def scheduled_claim_sweep() -> None:
+    """The scheduler's tick (agents/scheduler) -- the sweep off the event loop."""
+    await asyncio.to_thread(sweep_unsaved_claims)
 
 
 def _mark_units_sold(

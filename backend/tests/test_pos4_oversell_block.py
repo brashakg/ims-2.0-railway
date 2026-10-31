@@ -34,6 +34,8 @@ STORE = "BV-TEST-01"  # the conftest admin token's active store
 PID = "FR-LAST-1"
 NEW_PID = "FR-NEVER-STOCKED"
 SVC_PID = "SVC-FITTING"
+SKU_PID = "FR-BY-SKU"  # canonical id; the till may send its SKU instead
+SKU = "CA3-BLU-50"
 
 
 def _token():
@@ -102,6 +104,9 @@ def till(monkeypatch):
     prod_repo.create(_product(PID, "Carrera CA 1 Havana 54", "FRAME"))
     prod_repo.create(_product(NEW_PID, "Carrera CA 2 Black 52", "FRAME"))
     prod_repo.create(_product(SVC_PID, "Frame fitting", "SERVICES"))
+    sku_doc = _product(SKU_PID, "Carrera CA 3 Blue 50", "FRAME")
+    sku_doc["sku"] = SKU
+    prod_repo.create(sku_doc)
     stock_repo.create(
         {
             "stock_id": "SU-LAST",
@@ -113,7 +118,7 @@ def till(monkeypatch):
             "cost_price": 4000.0,
         }
     )
-    return {"db": db, "stock": stock_repo}
+    return {"db": db, "stock": stock_repo, "orders": order_repo}
 
 
 def _line(pid=PID, item_type="FRAME", name="Carrera CA 1 Havana 54", **over):
@@ -254,3 +259,209 @@ def test_non_stock_lines_are_never_blocked_or_claimed(till, line):
     guard._assert_serialized_stock_available([line], STORE)
     assert not guard._claim_units("ORD-X", [line], STORE)
     assert _unit(till)["status"] == "AVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# Review round 1 (PR #1300)
+# ---------------------------------------------------------------------------
+
+
+def _draft(client, till):
+    """A DRAFT bill holding one service line, ready for the add-line door."""
+    r = _sell(client, [_line(SVC_PID, item_type="SERVICE", name="Frame fitting")])
+    assert r.status_code in (200, 201), r.text
+    return _order_id(r)
+
+
+def _add(client, order_id, line):
+    return client.post(f"/api/v1/orders/{order_id}/items", json=line, headers=_token())
+
+
+def _sold(till):
+    return list(till["db"].get_collection("stock_units").find({"status": "SOLD"}, {"_id": 0}))
+
+
+def _claimed_minutes_ago(till, order_id, minutes):
+    from datetime import datetime, timedelta
+
+    till["db"].get_collection("stock_units").update_many(
+        {"order_id": order_id},
+        {"$set": {"sold_at": datetime.now() - timedelta(minutes=minutes)}},
+    )
+
+
+def test_the_guard_refuses_a_never_stocked_line_directly(till):
+    from fastapi import HTTPException
+
+    from api.routers.orders import stock as guard
+
+    with pytest.raises(HTTPException) as exc:
+        guard._assert_serialized_stock_available(
+            [_line(NEW_PID, name="Carrera CA 2 Black 52")], STORE
+        )
+    assert exc.value.status_code == 409
+
+
+def test_a_bill_saved_before_the_error_keeps_its_unit(client, till, monkeypatch):
+    real = till["orders"].create_unique
+
+    def saved_then_raised(*a, **k):
+        real(*a, **k)
+        raise RuntimeError("socket closed after the write")
+
+    monkeypatch.setattr(till["orders"], "create_unique", saved_then_raised)
+    r = _sell(client, [_line()])
+
+    assert r.status_code == 500, r.text
+    saved = _orders(till)
+    assert len(saved) == 1
+    unit = _unit(till)
+    assert unit["status"] == "SOLD" and unit["order_id"] == saved[0]["order_id"], unit
+
+
+def test_a_bill_saved_but_reported_unsaved_keeps_its_unit(client, till, monkeypatch):
+    real = till["orders"].create_unique
+
+    def saved_returned_none(*a, **k):
+        real(*a, **k)
+        return None
+
+    monkeypatch.setattr(till["orders"], "create_unique", saved_returned_none)
+    r = _sell(client, [_line()])
+
+    assert r.status_code == 500, r.text
+    saved = _orders(till)
+    assert len(saved) == 1
+    assert _unit(till)["order_id"] == saved[0]["order_id"]
+
+
+def test_a_line_saved_before_the_error_keeps_its_unit(client, till, monkeypatch):
+    order_id = _draft(client, till)
+    real = till["orders"].update
+
+    def saved_then_raised(*a, **k):
+        real(*a, **k)
+        raise RuntimeError("socket closed after the write")
+
+    monkeypatch.setattr(till["orders"], "update", saved_then_raised)
+    r = _add(client, order_id, _line())
+
+    assert r.status_code >= 400, r.text
+    unit = _unit(till)
+    assert unit["status"] == "SOLD" and unit["order_id"] == order_id, unit
+
+
+def test_the_add_line_door_takes_a_product_named_by_its_sku(client, till):
+    till["stock"].create(
+        {"stock_id": "SU-SKU", "barcode": "BVL00000009", "product_id": SKU_PID,
+         "store_id": STORE, "status": "AVAILABLE", "quantity": 1, "cost_price": 4000.0}
+    )
+    order_id = _draft(client, till)
+
+    r = _add(client, order_id, _line(SKU, name="Carrera CA 3 Blue 50"))
+
+    assert r.status_code in (200, 201), r.text
+    unit = till["db"].get_collection("stock_units").find_one({"stock_id": "SU-SKU"})
+    assert unit["status"] == "SOLD" and unit["order_id"] == order_id, unit
+    lines = till["orders"].find_by_id(order_id)["items"]
+    assert lines[-1]["product_id"] == SKU_PID  # the canonical id, as create stamps
+
+
+def test_the_add_line_door_loses_the_last_unit_race_cleanly(client, till, monkeypatch):
+    order_id = _draft(client, till)
+    till["db"].get_collection("stock_units").update_one(
+        {"stock_id": "SU-LAST"}, {"$set": {"status": "SOLD", "order_id": "OTHER-BILL"}}
+    )
+    monkeypatch.setattr(till["stock"], "find_available", lambda *a, **k: 1)
+    before = till["orders"].find_by_id(order_id)["items"]
+
+    r = _add(client, order_id, _line())
+
+    assert r.status_code == 409, r.text
+    assert till["orders"].find_by_id(order_id)["items"] == before
+    assert _unit(till)["order_id"] == "OTHER-BILL"
+
+
+def test_the_refusal_counts_the_whole_bill(client, till, monkeypatch):
+    # Two lines of the one product, one unit on the shelf, the gate fooled.
+    monkeypatch.setattr(till["stock"], "find_available", lambda *a, **k: 2)
+
+    r = _sell(client, [_line(), _line()])
+
+    assert r.status_code == 409, r.text
+    assert "1 available at this shop, 2 on this bill" in r.json()["detail"], r.text
+    assert _unit(till)["status"] == "AVAILABLE"
+
+
+def test_a_stock_backend_error_during_the_claim_is_not_out_of_stock(client, till, monkeypatch):
+    def down(*a, **k):
+        raise RuntimeError("mongo unreachable")
+
+    monkeypatch.setattr(till["stock"], "claim_one_available", down)
+    r = _sell(client, [_line()])
+
+    assert r.status_code == 503, r.text
+    assert "could not be checked" in r.json()["detail"]
+    assert _orders(till) == []
+
+
+def test_the_real_claim_raises_a_backend_error(till, monkeypatch):
+    def down(*a, **k):
+        raise RuntimeError("mongo unreachable")
+
+    monkeypatch.setattr(till["stock"].collection, "find_one_and_update", down)
+    with pytest.raises(RuntimeError):
+        till["stock"].claim_one_available(PID, STORE, "ORD-X")
+
+
+def test_the_sweep_gives_back_a_unit_claimed_for_a_bill_never_saved(till):
+    from api.routers.orders import stock as guard
+
+    guard._claim_units("ORD-GHOST", [_line()], STORE)
+    assert _unit(till)["status"] == "SOLD"
+    _claimed_minutes_ago(till, "ORD-GHOST", 20)
+
+    freed = guard.sweep_unsaved_claims()
+
+    assert freed == ["SU-LAST"]
+    assert _unit(till)["status"] == "AVAILABLE"
+    assert guard.sweep_unsaved_claims() == []  # idempotent
+
+
+def test_the_sweep_leaves_a_fresh_claim_and_a_saved_bill_alone(client, till):
+    from api.routers.orders import stock as guard
+
+    r = _sell(client, [_line()])
+    assert r.status_code in (200, 201), r.text
+    till["stock"].create(
+        {"stock_id": "SU-FRESH", "barcode": "BVL00000003", "product_id": PID,
+         "store_id": STORE, "status": "AVAILABLE", "quantity": 1, "cost_price": 4000.0}
+    )
+    guard._claim_units("ORD-IN-FLIGHT", [_line()], STORE)
+    _claimed_minutes_ago(till, _order_id(r), 20)  # the saved bill's, aged too
+
+    assert guard.sweep_unsaved_claims() == []  # a claim under 15 minutes waits
+    _claimed_minutes_ago(till, "ORD-IN-FLIGHT", 20)
+    assert guard.sweep_unsaved_claims() == ["SU-FRESH"]
+    assert _unit(till)["order_id"] == _order_id(r)  # the saved bill's unit stays
+
+
+def test_a_crashed_sale_retried_after_the_sweep_sells_once(client, till):
+    from api.routers.orders import stock as guard
+
+    # The till's first press claimed the last unit and the server died before
+    # the bill was written (no compensating release ran).
+    guard._claim_units("ORD-CRASHED", [_line()], STORE)
+    _claimed_minutes_ago(till, "ORD-CRASHED", 20)
+    guard.sweep_unsaved_claims()
+
+    r = client.post(
+        "/api/v1/orders",
+        json={"customer_id": "cust-till", "items": [_line()]},
+        headers={**_token(), "Idempotency-Key": "press-1"},
+    )
+
+    assert r.status_code in (200, 201), r.text
+    sold = _sold(till)
+    assert len(sold) == 1 and sold[0]["order_id"] == _order_id(r), sold
+

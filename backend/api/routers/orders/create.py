@@ -1076,7 +1076,8 @@ async def create_order(
                 len(lens_reservations),
                 precomputed_order_id,
             )
-            _release_claimed_units(precomputed_order_id, claimed_units)
+            # Never under a bill that exists: the write may have landed first.
+            _release_claimed_units(precomputed_order_id, claimed_units, _order_was_saved)
             if approval_spent:
                 # Give the approval back -- only once it is confirmed that no
                 # order was written (an approval never re-arms under a sale).
@@ -1216,7 +1217,7 @@ async def create_order(
             # retried request is indistinguishable from the original create.
             return _order_create_response(created)
 
-        _release_claimed_units(precomputed_order_id, claimed_units)
+        _release_claimed_units(precomputed_order_id, claimed_units, _order_was_saved)
         discount_approval.give_back(discount_approver, current_user, _order_was_saved)
         raise HTTPException(status_code=500, detail="Failed to create order")
 

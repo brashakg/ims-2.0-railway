@@ -32,6 +32,13 @@ class _FakeStock:
     def mark_sold(self, sid, oid):
         return True
 
+    def claim_one_available(self, pid, store_id, order_id, exclude_ids=None):
+        # The claim fails CLOSED on a missing method now, so the fake hands out
+        # its available units like the real atomic claim.
+        free = [u["stock_id"] for u in self.find_by_product_store(pid, store_id)
+                if u["stock_id"] not in (exclude_ids or ())]
+        return free[0] if free else None
+
 
 @pytest.fixture
 def oversell(monkeypatch):
