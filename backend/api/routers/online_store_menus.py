@@ -334,6 +334,7 @@ async def get_generated_menus(
     out = []
     if docs:
         collections = collection_membership.live_collections(db)
+        unreadable = None
         try:
             facts = collection_membership.online_facts(db, strict=True)
             counts = collection_membership.counts_by_handle(db, facts, collections)
