@@ -26,7 +26,7 @@ from ._shared import (
     logger,
     product_push_refusal,
 )
-from .transport import _graphql, _now, _user_errors
+from .transport import ShopifyRequestRefused, ShopifyThrottled, _graphql, _now, _user_errors
 from .queries import (
     _FILE_UPDATE_ALT,
     _MEDIA_LIMIT,
@@ -131,6 +131,13 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _no_answer(exc: BaseException) -> bool:
+    """A photo call that raised is worth waiting for (``no_answer``) only when
+    Shopify did not answer or was busy (429). A 4xx refusal or missing
+    credentials is definite: red on the first press (review of #1277)."""
+    return isinstance(exc, ShopifyThrottled) or not isinstance(exc, ShopifyRequestRefused)
+
+
 async def _attach_product_photos(
     db, product_gid: str, urls: List[str], alt: str = "", alts: Optional[Dict[str, str]] = None
 ) -> Dict[str, Any]:
@@ -155,7 +162,7 @@ async def _attach_product_photos(
         )
     except Exception as e:  # noqa: BLE001 -- fail-soft side channel
         # No answer: the photo may or may not have landed.
-        return {"attached": 0, "error": str(e), "no_answer": True}
+        return {"attached": 0, "error": str(e), "no_answer": _no_answer(e)}
     err = _user_errors_media(body)
     if err:
         return {"attached": 0, "error": err}
@@ -501,7 +508,7 @@ async def _delete_media(
         )
     except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
         if summary is not None:
-            summary["no_answer"] = True
+            summary["no_answer"] = _no_answer(exc)
         return str(exc)
     return _user_errors_media(body, "productDeleteMedia")
 
@@ -648,7 +655,7 @@ async def sync_product_media(
             err = _user_errors_media(body, "productReorderMedia")
         except Exception as exc:  # noqa: BLE001
             err = str(exc)
-            summary["no_answer"] = True  # transport: not a refusal
+            summary["no_answer"] = _no_answer(exc)
         if err:
             summary["error"] = err
             return summary
@@ -736,7 +743,7 @@ async def sync_variant_media(
             not_ready = any(str(e.get("code") or "") == "NON_READY_MEDIA" for e in errors)
         except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
             err, not_ready = str(exc), False
-            summary["no_answer"] = True  # transport: not a refusal
+            summary["no_answer"] = _no_answer(exc)
         if err:
             summary["code"] = VARIANT_PHOTOS_PENDING if not_ready else None
             summary["error"] = (

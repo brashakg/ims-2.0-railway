@@ -107,6 +107,7 @@ class FakeShopify:
         self.deleted_variants = []
         self.media_ready = True
         self.variant_refusal = None
+        self.raise_on = {}  # op name -> exception the call raises
         self._n = 1000
 
     # -- bookkeeping --------------------------------------------------------
@@ -176,6 +177,8 @@ class FakeShopify:
     async def __call__(self, db, query, variables):  # noqa: ARG002
         name = _op(query)
         self.calls.append((name, copy.deepcopy(variables)))
+        if name in self.raise_on:
+            raise self.raise_on[name]
         handler = getattr(self, "_h_" + name, None)
         return handler(variables or {}) if handler else {"data": {}}
 
@@ -1395,6 +1398,56 @@ def test_a_colour_photo_shopify_refuses_is_red_at_once_with_shopifys_reason(monk
     assert res.ok and res.code == "PHOTOS_SYNC_FAILED", (res.error, res.code)
     assert res.photos["sync_state"] == "failed"
     assert "ZZZ-REASON" in res.error and "still attaching" not in res.error
+
+
+def _refused(text="status 422: Media is invalid ZZZ-REASON"):
+    from api.services.shopify_push.transport import ShopifyRequestRefused
+
+    return ShopifyRequestRefused(text)
+
+
+@pytest.mark.parametrize("exc, state", [
+    (RuntimeError("connection reset"), "pending"),
+    (None, "failed"),  # a 4xx refusal (ShopifyRequestRefused)
+    ("429", "pending"),  # every attempt throttled: busy, not a refusal
+])
+def test_a_colour_photo_call_that_raises_is_amber_only_without_an_answer(monkeypatch, exc, state):
+    # Review of #1277: only a transport fault is "still attaching"; a
+    # definite 4xx refusal is red on the first press.
+    db = _world()
+    pids = _family(db, [("Gold", "001"), ("Black", "002/58")])
+    fake = FakeShopify()
+    if exc == "429":
+        from api.services.shopify_push.transport import ShopifyThrottled
+
+        exc = ShopifyThrottled("shopify request failed after 4 attempts (status 429: busy)")
+    fake.raise_on["imsVariantAppendMedia"] = exc or _refused()
+    _live(monkeypatch, fake)
+    _photo_clock(monkeypatch)
+    res = _push(db, pids[0])
+    assert res.photos["sync_state"] == state, (res.error, res.photos)
+    assert res.code == ("PHOTOS_NOT_SYNCED" if state == "pending" else "PHOTOS_SYNC_FAILED"), res.error
+
+
+@pytest.mark.parametrize("exc, state", [
+    (RuntimeError("connection reset"), "pending"),
+    (None, "failed"),
+])
+def test_a_new_photo_attach_that_raises_is_amber_only_without_an_answer(monkeypatch, exc, state):
+    db = _world()
+    pids = _family(db, [("Gold", "001"), ("Black", "002/58")])
+    fake = FakeShopify()
+    _live(monkeypatch, fake)
+    _photo_clock(monkeypatch)
+    assert _push(db, pids[0]).code is None
+    twin = _twin(db, pids[0])
+    db["catalog_products"].update_one(
+        {"id": twin["id"]},
+        {"$set": {"images": list(twin["images"]) + ["https://cdn.example.com/new-3.jpg"], "ecom.locally_modified": True}},
+    )
+    fake.raise_on["imsProductCreateMedia"] = exc or _refused()
+    res = _push(db, pids[0])
+    assert res.photos["sync_state"] == state, (res.error, res.photos)
 
 
 def test_photo_retries_stop_after_six_runs(monkeypatch):
