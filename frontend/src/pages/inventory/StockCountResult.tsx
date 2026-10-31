@@ -414,6 +414,13 @@ export function StockCountResult() {
             Written off: {doc.units_voided || 0} piece{(doc.units_voided || 0) === 1 ? '' : 's'} · {money(doc.shrinkage_value_written_off)}
             {(doc.units_not_voided || 0) > 0 ? ` · ${doc.units_not_voided} left alone (moved since the count)` : ''}
             {doc.reconciled_at ? ` · ${formatDateTimeIST(doc.reconciled_at)}` : ''}
+            {/* Section 17(5)(h): the input credit claimed on these pieces,
+                taken back in this month's GSTR-3B. Sent to the cost roles only. */}
+            {(doc.itc_reversed?.total || 0) > 0 && (
+              <span data-testid="count-itc-reversed">
+                {' · '}GST input credit reversed: {money(doc.itc_reversed.total)} (GSTR-3B 4(B)(1))
+              </span>
+            )}
           </p>
         )}
         <Link to="/inventory/audit" className="btn">Count history</Link>

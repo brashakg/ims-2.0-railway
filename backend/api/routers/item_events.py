@@ -245,6 +245,11 @@ async def quarantine_release(
         from .inventory._shared import refuse_write_off_unless_admin
 
         refuse_write_off_unless_admin(current_user, "write off a damaged piece")
+        if ie.canonical_state(unit.get("status")) == ie.StockState.DAMAGED:
+            # Already written off (a retry after the reversal below was cut
+            # off): finish its GST reversal -- once per piece -- and stop.
+            return {"message": "Already written off as damaged",
+                    "itc_reversed": _reverse_damaged(db, unit, current_user)}
     target = {
         "RESTOCK": ie.StockState.AVAILABLE,
         "DAMAGE": ie.StockState.DAMAGED,
@@ -269,7 +274,22 @@ async def quarantine_release(
                     "message": "Unit is not quarantined (or the disposition is illegal)."},
         )
     _clear_stale_claim_link(db, unit)
-    return {"event": ev, "message": f"Quarantine released ({disp})"}
+    out = {"event": ev, "message": f"Quarantine released ({disp})"}
+    if disp == "DAMAGE":
+        out["itc_reversed"] = _reverse_damaged(db, unit, current_user)
+    return out
+
+
+def _reverse_damaged(db, unit, current_user) -> dict:
+    """Section 17(5)(h): the input credit claimed on a piece written off as
+    damaged is reversed in this month's GSTR-3B (services/writeoff_itc).
+    Admin-only door, so the figure is the admin's to see."""
+    from ..services.writeoff_itc import record_writeoff
+
+    return record_writeoff(
+        db, [unit], source_type="QUARANTINE_DAMAGE", source_id=str(unit.get("stock_id")),
+        when=datetime.utcnow(), actor_id=current_user.get("user_id", ""),
+    )
 
 
 def _clear_stale_claim_link(db, unit) -> None:

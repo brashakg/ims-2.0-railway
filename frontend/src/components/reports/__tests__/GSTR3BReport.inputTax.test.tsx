@@ -136,6 +136,17 @@ describe('GSTR-3B screen - input tax follows the accounts rule (R5)', () => {
     expect(screen.getAllByText(/18\.50/).length).toBeGreaterThan(0);
   });
 
+  it('ACCOUNTANT: credit reversed on written-off stock is its own Table 4(B)(1) row', async () => {
+    await renderAs('ACCOUNTANT', { ...OUTPUT_SIDE, ...INPUT_SIDE, itcWriteOffReversed: heads(0, 77.5, 77.5) });
+    expect(screen.getByText(/Reversed on stock written off, section 17\(5\)\(h\)/)).toBeInTheDocument();
+    expect(screen.getAllByText(/155\.00/).length).toBeGreaterThan(0);
+  });
+
+  it('STORE_MANAGER: the written-off reversal is input tax too, never drawn', async () => {
+    await renderAs('STORE_MANAGER', { ...OUTPUT_SIDE, ...INPUT_SIDE, itcWriteOffReversed: heads(0, 77.5, 77.5) });
+    expect(screen.queryByText(/17\(5\)\(h\)/)).toBeNull();
+  });
+
   it('STORE_MANAGER: the blocked-credit row is input tax too, never drawn', async () => {
     await renderAs('STORE_MANAGER', { ...OUTPUT_SIDE, ...INPUT_SIDE, itcBlocked: heads(0, 9.25, 9.25) });
     expect(screen.queryByText(/section 17\(5\)/)).toBeNull();
