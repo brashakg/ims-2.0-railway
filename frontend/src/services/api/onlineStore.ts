@@ -1645,6 +1645,9 @@ export interface PushSweepResult {
           price_not_synced?: number;
           /** Incomplete sibling options omitted while complete family members went live. */
           variants_held?: number;
+          /** Live, with a colour/size held back for a catalogue reason (no
+           *  price, looks the same as another); never a stock line. */
+          catalogue_held?: number;
           /** Products that are live but whose photos did not all reach
            *  Shopify in IMS order (PHOTOS_NOT_SYNCED). Counted in `pushed`
            *  too; they stay queued for the retry. */

@@ -201,6 +201,9 @@ function sweepToast(
   const archivedLeft = n('archived_skipped');
   const oldPrice = n('price_not_synced');
   const variantsHeld = n('variants_held');
+  // LIVE, BUT A COLOUR/SIZE HELD FOR A CATALOGUE REASON (no price, looks the
+  // same as another): its own line, never "NO stock written" (review of #1276).
+  const catalogueHeld = n('catalogue_held');
   // LIVE, BUT ITS PHOTOS ARE NOT IMS's (a photo step failed): still queued,
   // and the website's photo 1 may not be the main photo IMS shows.
   const oldPhotos = n('photos_not_synced');
@@ -252,6 +255,7 @@ function sweepToast(
     (archived ? ` · ${archived} archived (not listed)` : '') +
     (archivedLeft ? ` · ${archivedLeft} archived (left the queue)` : '') +
     (variantsHeld ? ` · ${variantsHeld} colours/sizes left off (incomplete options)` : '') +
+    (catalogueHeld ? ` · ${catalogueHeld} live with a colour/size held back (fix it in the catalogue)` : '') +
     (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
     (oldPhotos ? ` · ${oldPhotos} photos still attaching — will finish on the next sync` : '') +
     (photosFailed ? ` · ${photosFailed} live with photos FAILED (check the photographs)` : '') +
@@ -261,7 +265,7 @@ function sweepToast(
     why +
     stockPassLine;
   const bad =
-    refused || withheld || variantsHeld || oldPhotos || photosFailed || noStock || stockWarn || stockPassBad || failed;
+    refused || withheld || variantsHeld || catalogueHeld || oldPhotos || photosFailed || noStock || stockWarn || stockPassBad || failed;
   return { level: bad ? 'warning' : 'success', msg };
 }
 
@@ -365,6 +369,10 @@ export default function OnlineShopifySyncPage() {
     // Load once on mount; loadHistory re-fires on filter clicks explicitly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loadStatus, loadDiagnostics]);
+
+  // Every read Refresh starts, the slow Shopify drift read included: a press
+  // while one still runs would start a second one (review of #1275).
+  const refreshBusy = loading || diagLoading.health || diagLoading.parity || diagLoading.drift;
 
   const refreshAll = () => {
     loadStatus();
@@ -487,8 +495,7 @@ export default function OnlineShopifySyncPage() {
     if (!isLive || !canGoLive) return;
     const ok = window.confirm(
       'LIVE Shopify push — this writes products (with their photos), collections and menus to the ' +
-        'live storefront (bettervision.in). This is final and owner-armed at the ' +
-        'storefront cutover. Continue?',
+        'live storefront (bettervision.in) now. Continue?',
     );
     if (!ok) return;
     setGoingLive(true);
@@ -660,16 +667,17 @@ export default function OnlineShopifySyncPage() {
         <button
           type="button"
           onClick={refreshAll}
-          disabled={loading || diagLoading.health || diagLoading.parity}
+          disabled={refreshBusy}
           className="inline-flex items-center gap-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg px-3 py-1.5 disabled:opacity-60"
         >
-          <RefreshCw className={'w-4 h-4 ' + (loading || diagLoading.health || diagLoading.parity ? 'animate-spin' : '')} /> Refresh
+          <RefreshCw className={'w-4 h-4 ' + (refreshBusy ? 'animate-spin' : '')} /> Refresh
         </button>
       </div>
       <p className="text-sm text-gray-500 mb-4 max-w-3xl">
-        The single-writer push of products (with their photos), collections and menus to Shopify. Every action here is a
-        SIMULATED dry-run unless the owner has armed the live gates at the storefront cutover — nothing reaches
-        the live storefront (bettervision.in) until then.
+        IMS is the only writer of products (with their photos), collections and menus to the website
+        (bettervision.in). An automatic sync runs on a schedule (unless switched off in IMS settings); the buttons
+        here send now. If website writes are switched off on the server, every action is a preview and nothing
+        is sent — the banner below says which.
       </p>
 
       {/* Prominent DARK / LIVE banner (shared component). */}
@@ -977,7 +985,7 @@ export default function OnlineShopifySyncPage() {
                 ? 'Only an Admin or Superadmin can run the sync'
                 : isLive
                   ? 'Re-push every edited product already on the live storefront'
-                  : 'Gates not armed — runs as a SIMULATED dry-run'
+                  : 'Website writes are switched off on the server — runs as a preview, nothing is sent'
             }
             className="btn-primary text-sm"
           >
@@ -1090,9 +1098,9 @@ export default function OnlineShopifySyncPage() {
       {/* ---- Per-entity counts + DRY-RUN buttons --------------------------- */}
       <section className="mb-6">
         <h2 className="text-sm font-semibold text-gray-900 mb-3 flex items-center gap-2">
-          <Play className="w-4 h-4" /> Per-entity dry-run
+          <Play className="w-4 h-4" /> Send each part
           <span className="text-[11px] font-normal text-gray-400">
-            (simulated preview — safe; runs the real engine only when the gates are armed)
+            {isLive ? '(sends to bettervision.in now)' : '(preview only — website writes are switched off on the server)'}
           </span>
         </h2>
         <div className="grid gap-4 sm:grid-cols-2">
@@ -1222,6 +1230,18 @@ export default function OnlineShopifySyncPage() {
                           <span className="inline-flex items-center gap-1 text-amber-700">
                             <AlertTriangle className="w-3 h-3" /> {fmt(variantsHeld)} colours/sizes left
                             off (incomplete options)
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const catalogueHeld = Number(sweep.summary?.[ent.token]?.catalogue_held ?? 0);
+                        return catalogueHeld > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-amber-700"
+                            title="Live on the website, but a colour or size was held back for a catalogue reason (no price, looks the same as another). The product line names it; fix it in the catalogue and press again."
+                          >
+                            <AlertTriangle className="w-3 h-3" /> {fmt(catalogueHeld)} with a colour/size held
+                            back
                           </span>
                         ) : null;
                       })()}
@@ -1669,12 +1689,12 @@ export default function OnlineShopifySyncPage() {
         <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 mb-3">
           <p className="text-xs text-amber-900 font-medium flex items-center gap-1.5">
             <ShieldAlert className="w-3.5 h-3.5" />
-            Live push is final and owner-armed at the storefront cutover.
+            This sends everything waiting to the live website at once.
           </p>
           <p className="mt-1 text-[11px] text-amber-800">
-            This button can only push live when the owner has armed all three gates on the server
-            (IMS_SHOPIFY_WRITES=1, DISPATCH_MODE=live, Shopify credentials set). It never arms them from here —
-            the server gate is the real control. Until then this is disabled.
+            It works only while website writes are switched on on the server (IMS_SHOPIFY_WRITES=1,
+            DISPATCH_MODE=live, Shopify credentials set); it never switches them on from here. While they are
+            off this button is disabled.
           </p>
         </div>
         <button
@@ -1691,12 +1711,12 @@ export default function OnlineShopifySyncPage() {
             !canGoLive
               ? 'Requires ADMIN or SUPERADMIN'
               : !isLive
-                ? 'Disabled — the live gates are not armed on the server'
+                ? 'Disabled — website writes are switched off on the server'
                 : 'Push all pending objects to the live storefront'
           }
         >
           {goingLive ? <Loader2 className="w-4 h-4 animate-spin" /> : <Rocket className="w-4 h-4" />}
-          {isLive ? 'Push all pending to live storefront' : 'Go live (gates not armed)'}
+          {isLive ? 'Push all pending to live storefront' : 'Push all pending (website writes are off)'}
         </button>
         {!canGoLive && (
           <p className="mt-2 text-[11px] text-gray-500">

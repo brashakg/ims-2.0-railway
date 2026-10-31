@@ -192,6 +192,8 @@ async def _last_sync(db) -> Tuple[str, str]:
     first_word = "would be published for the first time" if preview else "published for the first time"
     line = f"{off}{when}: {int(run.get('pushed_ok') or 0)} updated, "
     line += f"{int(run.get('first_published') or 0)} {first_word}, {failed} failed"
+    photos_failed = int(run.get("photos_failed") or 0)
+    line += f", {photos_failed} with photos FAILED" if photos_failed else ""
     line += "" if stock_ok else ", stock update failed"
     line += f"; {int(run.get('awaiting_first_publish') or 0)} awaiting their first publish"
     unchecked = int(run.get("first_publish_not_checked") or 0)
@@ -200,7 +202,7 @@ async def _last_sync(db) -> Tuple[str, str]:
         line += " It was a preview run, so nothing was sent."
     if failed or not stock_ok:
         return "bad", line
-    return ("warn" if preview or not enabled else "ok"), line
+    return ("warn" if preview or not enabled or photos_failed else "ok"), line
 
 
 async def _notifications(db, live: Optional[bool], host: str) -> Tuple[str, str]:

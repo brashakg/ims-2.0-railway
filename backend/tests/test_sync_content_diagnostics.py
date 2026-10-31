@@ -419,3 +419,48 @@ def test_drift_never_raises_on_a_broken_gate(monkeypatch):
     monkeypatch.setattr(shopify_push, "_has_shopify_creds", boom)
     result = asyncio.run(health.detect_drift(catalog()))
     assert result["checked"] is False and "creds store offline" in result["reason"]
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_live_listing_the_push_refuses_unpriced_is_never_called_queued(monkeypatch):
+    """Review of #1275: the unpriced check was skipped for live listings, but
+    push_product still refuses a press that seeds an unpriced size (here a
+    live page whose size row was never seeded). The diagnostics and the push
+    must give the SAME answer (one rule)."""
+    from test_shopify_model_listings import _world, _item, _twin, _push, _live, FakeShopify
+    db = _world()
+    first = _item(db, 1, "Gold", "001", mrp=0.0)
+    db["catalog_products"].update_one({"id": _twin(db, first)["id"]}, {"$set": {
+        "ecom.shopify_product_id": "gid://shopify/Product/77", "ecom.status": "PUBLISHED"}})
+    (row,) = _missing(db).values()
+    _live(monkeypatch, FakeShopify())
+    res = _push(db, first)
+    assert not res.ok and res.code == "UNPRICED_SIZE", (res.code, res.error)
+    assert row["code"] == "UNPRICED_SIZE", row
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_listing_whose_spine_is_a_colour_of_another_says_push_the_model():
+    """Review of #1275: push_product refuses a plan variant_of; the verdict did not."""
+    from api.services import online_content_diagnostics as diag
+    from test_shopify_model_listings import _world, _item, _twin
+    db = _world()
+    first = _item(db, 1, "Gold", "001")
+    db["products"].update_one({"product_id": first}, {"$set": {"variant_of": "sp-99"}})
+    code, reason, _plan = diag._press_verdict(db, _twin(db, first))
+    assert code == "variant_of", (code, reason)
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_lead_twin_that_is_itself_a_size_of_another_says_push_the_model():
+    """Review of #1295: the lead's OWN ecom.variant_of (a chain left by a
+    re-link) is push_product's variant_of refusal too."""
+    from api.services import online_content_diagnostics as diag
+    from test_shopify_model_listings import _world, _item, _twin
+    db = _world()
+    first = _item(db, 1, "Gold", "001")
+    twin = _twin(db, first)
+    db["catalog_products"].update_one(
+        {"id": twin["id"]}, {"$set": {"ecom.variant_of": {"product_id": "sp-99", "twin_id": "tw-99", "sku": "OTHER"}}})
+    code, reason, _plan = diag._press_verdict(db, _twin(db, first))
+    assert code == "variant_of", (code, reason)

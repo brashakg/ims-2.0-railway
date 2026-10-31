@@ -20,6 +20,15 @@ from .base_repository import BaseRepository
 
 logger = logging.getLogger(__name__)
 
+
+def _stored_forms(barcode) -> List:
+    """Every spelling of one GTIN plus its number form: a barcode saved as a
+    number (036000291452 -> the int 36000291452, bson Int64 on a real
+    MongoDB) is the same code, and an $in of strings never matches it."""
+    spellings = gtin_spellings(barcode)
+    numbers = {int(s) for s in spellings if s.isdigit()}
+    return spellings + sorted(numbers)
+
 # Sentinel for "caller did not pass is_active" so the legacy active_only
 # behaviour of find_by_category is preserved byte-for-byte while new callers
 # (the Catalog Manager list) can request an explicit tri-state filter
@@ -220,7 +229,7 @@ class ProductRepository(BaseRepository):
         `live_only`: archived rows (deleted_at set) are no holder, filtered IN
         the query (Restore). `strict`: a read error raises instead of reading
         as "no holder"."""
-        spellings = gtin_spellings(barcode)
+        spellings = _stored_forms(barcode)
         if not spellings:
             return None
         query: Dict = {
@@ -254,7 +263,7 @@ class ProductRepository(BaseRepository):
         one that merely shares its sku (an unrelated review-queue twin can).
         `live_only`: an archived twin is no holder (filtered IN the query). A
         read error raises (the raw collection)."""
-        spellings = gtin_spellings(barcode)
+        spellings = _stored_forms(barcode)
         db = getattr(self.collection, "database", None)
         if not spellings or db is None:
             return None
