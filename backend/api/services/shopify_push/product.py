@@ -1784,9 +1784,9 @@ def _queue_model(db, lead_id: Optional[str]) -> None:
     if not lead_id:
         return
     try:
-        from ..catalog_ecom import dirty_marks
+        from ..catalog_ecom import queue_in
 
-        update_ecom(db, lead_id, lambda e: {**e, **dirty_marks()})
+        queue_in(db["catalog_products"], lead_id)
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_PUSH] could not queue model %s after a photo prune", lead_id, exc_info=True)
 

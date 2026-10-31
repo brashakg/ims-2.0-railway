@@ -331,3 +331,110 @@ def test_unlinking_an_archived_colour_does_not_queue_it(db):
     assert "variant_of" not in _twin(db, "C")["ecom"]
     assert not _queued(db, "C")
     assert _queued(db, "L"), "the model's listing still drops the colour"
+
+
+# ===========================================================================
+# Review of #1301: the website copy result, sizes, the remaining doors
+# ===========================================================================
+
+
+def test_a_failed_website_copy_is_reported_per_row_and_in_the_summary(db, monkeypatch):
+    """The billing price saved but the website copy did not: the operator is
+    told which row, so it can be saved again (the price change is not lost
+    in a green 'applied')."""
+    _seed(db)
+    _seed(db, "P2")
+    monkeypatch.setattr(
+        pm, "mirror_update_to_catalog_twin", lambda **kw: kw["product_id"] != "P2"
+    )
+    out = _run(
+        products_mod.bulk_price_update(
+            products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True), ADMIN
+        )
+    )
+    by_pid = {r["product_id"]: r for r in out["rows"]}
+    assert by_pid["P1"]["applied"] is True and by_pid["P1"]["website_synced"] is True
+    assert by_pid["P2"]["applied"] is True and by_pid["P2"]["website_synced"] is False
+    assert out["summary"]["website_failed"] == 1
+    off = _run(products_mod.bulk_offer_update(products_mod.BulkOfferRequest(action="CLEAR", apply=True), ADMIN))
+    assert off["summary"]["website_failed"] == 1
+    assert {r["product_id"]: r["website_synced"] for r in off["rows"]} == {"P1": True, "P2": False}
+
+
+def _size_family(db, *, lead_archived):
+    """Lead L and a LIVE size C of one model; C's price lives on its
+    catalog_variants row, which rides L's listing."""
+    _family(db, lead_archived=lead_archived)
+    # Only the size is in the bulk run (the archived lead is out of scope anyway).
+    db["products"].update_one({"product_id": "C"}, {"$set": {"brand": "Ray-Ban", "category": "FRAME"}})
+
+
+def test_a_bulk_mrp_change_on_a_size_moves_its_row_and_queues_a_live_lead(db):
+    _size_family(db, lead_archived=False)
+    _run(
+        products_mod.bulk_price_update(
+            products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True, brand="Ray-Ban"),
+            ADMIN,
+        )
+    )
+    row = db["catalog_variants"].find_one({"sku": "FR-RB-C"})
+    assert row["mrp"] == 5500.0
+    assert _queued(db, "L")
+
+
+def test_a_bulk_mrp_change_on_a_size_never_queues_an_archived_lead(db):
+    _size_family(db, lead_archived=True)
+    _run(
+        products_mod.bulk_price_update(
+            products_mod.BulkPriceRequest(target="BOTH", mode="PERCENT", amount=10, apply=True, brand="Ray-Ban"),
+            ADMIN,
+        )
+    )
+    row = db["catalog_variants"].find_one({"sku": "FR-RB-C"})
+    assert row["mrp"] == 5500.0, "the size's own price still moves"
+    assert not _queued(db, "L"), "an archived lead's listing never enters the website queue"
+
+
+def test_the_price_push_refuses_an_archived_listing(db):
+    _, twin = _seed(db, archived=True)
+    out = _run(shopify_push.push_variant_prices(db, twin))
+    assert out.ok is False and out.mode == shopify_push.MODE_BLOCKED and "archived" in out.error
+
+
+def test_the_photo_push_refuses_an_archived_listing(db):
+    _seed(db, archived=True)
+    out = _run(shopify_push.push_image(db, {"image_id": "I1", "product_id": "twin-P1", "status": "APPROVED"}))
+    assert out.ok is False and out.mode == shopify_push.MODE_BLOCKED and "archived" in out.error
+
+
+def test_a_listed_copy_whose_billing_product_is_archived_is_refused(db):
+    _, twin = _seed(db)
+    db["products"].update_one({"product_id": "P1"}, {"$set": {"deleted_at": ARCHIVED_AT}})
+    assert "archived" in (shopify_push.product_push_refusal(db, twin) or "")
+
+
+def test_a_listed_copy_is_refused_when_its_billing_product_cannot_be_read(db, monkeypatch):
+    _, twin = _seed(db)
+    from api.services.shopify_push import listing
+
+    def _dead(db, product):
+        raise RuntimeError("read failed")
+
+    monkeypatch.setattr(listing, "lead_spine", _dead)
+    assert "could not be read" in (shopify_push.product_push_refusal(db, twin) or "")
+
+
+def test_archiving_a_listed_product_takes_it_off_the_queue(db, monkeypatch):
+    """A queued listing that is archived: every later sync would only count it
+    as skipped. The archive door clears its flag (the edit_rev rule)."""
+    _seed(db, ecom={"locally_modified": True, "edit_rev": "r1"})
+
+    async def _no_takedown(*a, **kw):
+        return {"ok": True}
+
+    monkeypatch.setattr(catalog_mod._delist, "delist_if_live", _no_takedown)
+    monkeypatch.setattr(catalog_mod, "_catalog_coll", lambda: db["catalog_products"])
+    monkeypatch.setattr(catalog_mod, "invalidate_product_lists", lambda: None)
+    _run(catalog_mod._archive_product(_twin(db), ADMIN, spine_id="P1"))
+    assert _twin(db).get("deleted_at")
+    assert not _queued(db)

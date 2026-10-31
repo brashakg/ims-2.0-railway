@@ -1431,17 +1431,28 @@ def _audit_bulk(
         logger.warning("[BULK-PRICING] audit log skipped: %s", exc)
 
 
-def _price_reaches_website(pid: str, product: dict, price_patch: dict) -> None:
+def _price_reaches_website(row: dict, pid: str, product: dict, price_patch: dict) -> bool:
     """A committed bulk price takes THE spine -> website-twin rule a single
     product edit takes (product_master.mirror_update_to_catalog_twin): the
     twin's price moves, the twin is queued with a fresh edit revision, a size's
     row and its model's listing follow, and a moved MRP re-derives the
-    discount rule's online price. Fail-soft (the mirror never raises)."""
-    from ..dependencies import get_db as _bulk_db
+    discount rule's online price. Stamps row['website_synced']: False tells
+    the operator the billing price saved but the website copy did not (save
+    that product again). Never raises.
 
-    _pm.mirror_update_to_catalog_twin(
-        product_id=pid, current=product, patch=price_patch, db=_bulk_db()
-    )
+    ponytail: the discount engine loads the rules once PER ROW; load them once
+    per bulk call if the catalogue grows past a few thousand rows."""
+    try:
+        from ..dependencies import get_db as _bulk_db
+
+        ok = _pm.mirror_update_to_catalog_twin(
+            product_id=pid, current=product, patch=price_patch, db=_bulk_db()
+        ) is True
+    except Exception as exc:  # noqa: BLE001 -- the billing price stands
+        logger.warning("[BULK-PRICING] website copy failed for %s: %s", pid, exc)
+        ok = False
+    row["website_synced"] = ok
+    return ok
 
 
 class CloneVaryRequest(BaseModel):
@@ -1515,6 +1526,7 @@ async def bulk_price_update(
 
     rows: List[dict] = []
     committed: List[dict] = []
+    website_failed = 0
     counts = {"total": len(products), "valid": 0, "violations": 0, "unchanged": 0}
 
     repo = get_product_repository()
@@ -1597,7 +1609,6 @@ async def bulk_price_update(
                 )
                 row["applied"] = bool(ok)
                 if ok:
-                    _price_reaches_website(pid, p, price_patch)
                     committed.append(
                         {
                             "product_id": pid,
@@ -1609,6 +1620,8 @@ async def bulk_price_update(
                             ],
                         }
                     )
+                    if not _price_reaches_website(row, pid, p, price_patch):
+                        website_failed += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[BULK-PRICING] update failed for %s: %s", pid, exc)
                 row["applied"] = False
@@ -1626,6 +1639,9 @@ async def bulk_price_update(
         "applied": body.apply,
         "counts": counts,
         "committed": len(committed),
+        # Saved for billing, but the website copy was not updated: those
+        # rows carry website_synced False -- save them again one by one.
+        "website_failed": website_failed,
     }
 
     if body.apply and committed:
@@ -1666,6 +1682,7 @@ async def bulk_offer_update(
 
     rows: List[dict] = []
     committed: List[dict] = []
+    website_failed = 0
     counts = {"total": len(products), "valid": 0, "violations": 0, "unchanged": 0}
 
     repo = get_product_repository()
@@ -1740,7 +1757,6 @@ async def bulk_offer_update(
                 )
                 row["applied"] = bool(ok)
                 if ok:
-                    _price_reaches_website(pid, p, price_patch)
                     committed.append(
                         {
                             "product_id": pid,
@@ -1751,6 +1767,8 @@ async def bulk_offer_update(
                             ],
                         }
                     )
+                    if not _price_reaches_website(row, pid, p, price_patch):
+                        website_failed += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[BULK-OFFER] update failed for %s: %s", pid, exc)
                 row["applied"] = False
@@ -1768,6 +1786,9 @@ async def bulk_offer_update(
         "applied": body.apply,
         "counts": counts,
         "committed": len(committed),
+        # Saved for billing, but the website copy was not updated: those
+        # rows carry website_synced False -- save them again one by one.
+        "website_failed": website_failed,
     }
 
     if body.apply and committed:

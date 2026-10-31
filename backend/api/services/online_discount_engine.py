@@ -76,7 +76,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
 from .pricing_caps import evaluate_offer_price
-from .catalog_ecom import dirty_marks, update_ecom
+from .catalog_ecom import queue_marks, update_ecom
 
 try:  # resolve_category makes rule<->product category matching alias-proof.
     from .product_master import resolve_category
@@ -680,13 +680,10 @@ def recompute_online_price(
         # ever carries ("0 pending" while prices are stranded locally). Only an
         # ACTUAL change marks dirty: an idempotent re-run re-stamps the same
         # numbers and adds nothing to the queue.
-        from .product_master import _is_archived
-
-        # Never an ARCHIVED product (Website 2): its price is stored, but a
-        # push would put it back on sale.
-        if price_changed and not _is_archived(product):
-            # Flag + a fresh edit revision (SF-04, catalog_ecom.dirty_marks).
-            marks = dirty_marks()
+        # Flag + a fresh edit revision (SF-04); never an ARCHIVED product
+        # (catalog_ecom.queue_marks, Website 2): its price is stored only.
+        marks = queue_marks(product) if price_changed else {}
+        if marks:
             ecom_now = product.get("ecom")
             if isinstance(ecom_now, dict):
                 ecom_now.update(marks)

@@ -598,11 +598,13 @@ def skus_on_shopify(db, skus: List[str]) -> Set[str]:
 def is_archived_row(*docs: Any) -> bool:
     """THE archived test the online diagnostics share (sync parity, Store
     Health): any of the given docs -- a catalog twin, its spine, its ecom
-    sub-doc -- soft-deleted (``deleted_at``, product_master's archive mark),
+    sub-doc -- soft-deleted (THE archived rule, catalog_ecom.is_archived),
     flagged ``is_archived`` or carrying status ARCHIVED."""
+    from .catalog_ecom import is_archived
+
     return any(
         isinstance(d, dict) and (
-            d.get("deleted_at") or d.get("is_archived") or str(d.get("status") or "").upper() == "ARCHIVED"
+            is_archived(d) or d.get("is_archived") or str(d.get("status") or "").upper() == "ARCHIVED"
         )
         for d in docs
     )

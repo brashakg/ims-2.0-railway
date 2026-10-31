@@ -68,7 +68,7 @@ from .gtin import (
     sanitise_gtin,
 )
 from .pricing_caps import evaluate_offer_price, offer_terms_changed, offer_write_problem
-from .catalog_ecom import dirty_marks
+from .catalog_ecom import dirty_marks, is_archived as _is_archived, queue_marks
 from .web_page_type import clean_page_type
 from .product_naming import (
     build_handle,
@@ -4078,10 +4078,6 @@ def lead_order(doc: Dict[str, Any]) -> Tuple[float, str]:
     return (_created_sort_value(doc.get("created_at")), str(doc.get("sku") or ""))
 
 
-def _is_archived(doc: Dict[str, Any]) -> bool:
-    return bool((doc or {}).get("deleted_at"))
-
-
 def lead_of(members: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The lead among one model's rows: the product the linked variants point
     at, else the first catalogued (lead_order) that is not archived, not a
@@ -4298,11 +4294,11 @@ def queue_model_listing(db, lead: Optional[Dict[str, Any]]) -> None:
         cat = db.get_collection("catalog_products")
         twin_id = _twin_id(lead)
         twin = cat.find_one({"id": twin_id}) if twin_id else None
-        # An archived lead's listing is never queued (Website 2): a push
-        # would put it back on sale.
-        if twin is None or (twin.get("ecom") or {}).get("variant_of") or _is_archived(twin):
+        # An archived lead's listing is never queued (queue_marks, Website 2).
+        marks = queue_marks(twin)
+        if twin is None or (twin.get("ecom") or {}).get("variant_of") or not marks:
             return
-        patch = {f"ecom.{k}": v for k, v in dirty_marks().items()}
+        patch = {f"ecom.{k}": v for k, v in marks.items()}
         if not (twin.get("ecom") or {}).get("status"):
             patch["ecom.status"] = "DRAFT"
         cat.update_one({"id": twin_id}, {"$set": patch})
@@ -4367,11 +4363,12 @@ def _set_twin_link(db, spine: Dict[str, Any], parent: Optional[Dict[str, Any]]) 
         )
     else:
         update: Dict[str, Any] = {"$unset": {"ecom.variant_of": ""}}
-        if not _is_archived(spine):
+        marks = queue_marks(spine)
+        if marks:
             # Queued like any edit: flag + a fresh edit_rev (SF-04), so a
             # revert keyed on an older revision cannot un-queue it. Never an
-            # archived one (Website 2).
-            update["$set"] = {f"ecom.{k}": v for k, v in dirty_marks().items()}
+            # archived one (queue_marks, Website 2).
+            update["$set"] = {f"ecom.{k}": v for k, v in marks.items()}
         cat.update_one({"id": _twin_id(spine)}, update)
 
 
@@ -4778,10 +4775,10 @@ def _mirror_variant_row_update(
         return True
     if "mrp" in row_patch:
         _recompute_online_price(db, parent_twin)
-    cat.update_one(
-        {"id": parent_twin_id},
-        {"$set": {f"ecom.{k}": v for k, v in dirty_marks().items()}},
-    )
+    # Never an archived lead's listing (queue_marks, Website 2).
+    marks = queue_marks(parent_twin)
+    if marks:
+        cat.update_one({"id": parent_twin_id}, {"$set": {f"ecom.{k}": v for k, v in marks.items()}})
     return True
 
 
@@ -4938,16 +4935,16 @@ def mirror_update_to_catalog_twin(
         # screens through catalog._stamp_spine_weight). It still QUEUES: the
         # shipping weight is on the Shopify variant.
         # An ARCHIVED product's fields still mirror, but it never enters the
-        # website queue (Website 2): a push would put it back on sale.
-        queue_twin = mark_dirty and not _is_archived(current)
-        if queue_twin and any(
+        # website queue (queue_marks, Website 2).
+        marks = {f"ecom.{k}": v for k, v in (queue_marks(current) if mark_dirty else {}).items()}
+        if any(
             k in patch
             for k in (
                 "mrp", "offer_price", "description", "images",
                 "brand", "category", "attributes", "tags", "weight",
             )
         ):
-            cat_patch.update({f"ecom.{k}": v for k, v in dirty_marks().items()})
+            cat_patch.update(marks)
         twin_id = current.get("pim_product_id") or product_id
         # THE NAME (sync audit gap #3, owner 2026-09-06: "renaming updates
         # Shopify"). The twin's name/title is what build_product_input sends
@@ -4966,8 +4963,7 @@ def mirror_update_to_catalog_twin(
             if new_name and new_name != (twin.get("title") or twin.get("name")):
                 cat_patch["name"] = new_name
                 cat_patch["title"] = new_name
-                if queue_twin:
-                    cat_patch.update({f"ecom.{k}": v for k, v in dirty_marks().items()})
+                cat_patch.update(marks)
         row_ok = True
         if current.get("variant_of"):
             # A SIZE VARIANT owns no listing: its twin is NEVER queued (a

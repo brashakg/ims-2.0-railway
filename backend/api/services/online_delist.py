@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Optional
 
 from . import shopify_push
 from .shopify_live_sync import write_push_audit
-from .catalog_ecom import dirty_marks
+from .catalog_ecom import queue_marks
 
 logger = logging.getLogger(__name__)
 
@@ -291,14 +291,16 @@ def mark_for_republish(db, product: Dict[str, Any]) -> bool:
             return True
         if not ((twin or {}).get("ecom") or {}).get("shopify_product_id"):
             return False
+        # Never an archived one (queue_marks, Website 2).
+        marks = queue_marks(twin)
         _stamp(
             db,
             twin.get("id") or twin.get("product_id"),
-            **dirty_marks(),
+            **marks,
             taken_down_at=None,
             **{k: None for k in DELIST_KEYS},
         )
-        return True
+        return bool(marks)
     except Exception:  # noqa: BLE001
         logger.warning("[DELIST] republish mark failed", exc_info=True)
         return False
