@@ -1724,3 +1724,89 @@ def test_final_4_the_restore_script_never_overwrites_a_newer_stock_baseline(env)
     db.catalog_products.update_one({"id": "T-P4"}, {"$set": {"ecom.online_stock.quantities.SKU-P2": {"S1": 7}}})
     assert script.restore(db, backup_id, commit=True).get("committed")
     assert db.catalog_products.find_one({"id": "T-P4"})["ecom"]["online_stock"]["quantities"]["SKU-P2"] == {"S1": 7}
+
+
+# ---------------------------------------------------------------------------
+# Follow-up to #1273: the revive writes the spine first; a twin write that
+# fails must not leave a revived spine behind a deleted twin
+# ---------------------------------------------------------------------------
+
+
+class _TwinWriteFails:
+    """A db whose catalog_products.update_one raises `times` times."""
+
+    def __init__(self, db, times=1):
+        self._db, self.left = db, times
+
+    def get_collection(self, name):
+        coll = self._db[name]
+        if name != "catalog_products":
+            return coll
+        outer = self
+
+        class _Coll:
+            def __getattr__(self, attr):
+                if attr == "update_one" and outer.left > 0:
+                    def _boom(*a, **k):
+                        outer.left -= 1
+                        raise RuntimeError("connection reset")
+                    return _boom
+                return getattr(coll, attr)
+
+        return _Coll()
+
+    def __getitem__(self, name):
+        return self.get_collection(name)
+
+
+def _discarded_draft(db):
+    db.products.update_one({"product_id": "P1"}, {"$set": {
+        "discarded_draft": True, "catalog_status": "DRAFT", "is_active": False, "provisional": False,
+        "mrp": 5000}})
+
+
+def test_followup_a_failed_twin_write_puts_the_spine_back_so_the_next_order_repairs_it(env):
+    from api.services import product_master
+
+    db = env["db"]
+    _discarded_draft(db)
+    repo = ProductRepository(db.products)
+    with pytest.raises(RuntimeError):
+        product_master.revive_discarded_draft("P1", repo, db=_TwinWriteFails(db), mrp=6000)
+    spine = db.products.find_one({"product_id": "P1"})
+    # Back exactly as it was: still a discarded draft, so it can be revived.
+    assert spine["discarded_draft"] is True and spine["deleted_at"] == GONE
+    assert spine["provisional"] is False and spine["mrp"] == 5000
+    assert not spine.get("revived_at") and not spine.get("revived_by")
+    assert product_master.revivable_discarded_draft(spine)
+    assert db.catalog_products.find_one({"id": "T-P1"})["deleted_at"] == GONE
+    # The next order revives it, twin and all.
+    assert product_master.revive_discarded_draft("P1", repo, db=db, mrp=6000) is True
+    spine = db.products.find_one({"product_id": "P1"})
+    twin = db.catalog_products.find_one({"id": "T-P1"})
+    assert spine["discarded_draft"] is False and spine["provisional"] is True and spine["mrp"] == 6000
+    assert twin["needs_review"] is True and "deleted_at" not in twin
+
+
+def test_followup_the_undo_never_overwrites_a_later_write(env):
+    # Something else wrote the spine after the revive (say another revive):
+    # the undo is fenced on this revive's own stamp and leaves it alone.
+    from api.services import product_master
+
+    db = env["db"]
+    _discarded_draft(db)
+    real = ProductRepository(db.products)
+
+    class _Repo:
+        def __getattr__(self, attr):
+            return getattr(real, attr)
+
+        def update(self, pid, data, expected=None):
+            ok = real.update(pid, data, expected=expected)
+            if data.get("revived_at"):
+                db.products.update_one({"product_id": pid}, {"$set": {"revived_at": "LATER"}})
+            return ok
+
+    with pytest.raises(RuntimeError):
+        product_master.revive_discarded_draft("P1", _Repo(), db=_TwinWriteFails(db))
+    assert db.products.find_one({"product_id": "P1"})["revived_at"] == "LATER"
