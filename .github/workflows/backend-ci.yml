@@ -37,6 +37,7 @@ jobs:
           - 27017:27017
 
     strategy:
+      fail-fast: false
       # One Python (3.11 — prod runs newer; version drift is caught by the
       # Docker build), THREE balanced shards via pytest-split: wall time drops
       # from ~45 min x2 duplicated runs to ~15 min once.
