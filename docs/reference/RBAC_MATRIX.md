@@ -69,9 +69,9 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 864 |
-| **Total `/api/v1` (method x path)** | **1304** |
-| ...of which `store_scoped` | 235 |
+| Role-gated (one or more roles) | 865 |
+| **Total `/api/v1` (method x path)** | **1305** |
+| ...of which `store_scoped` | 236 |
 | ...of which `self_enforced` | 47 |
 
 ## Full matrix (method x path -> policy entry)
@@ -806,6 +806,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/inventory/stock/quarantined` | ADMIN, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT | S |  |
 | `PATCH` | `/api/v1/inventory/stock/{stock_id}/lift-quarantine` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `PATCH` | `/api/v1/inventory/stock/{stock_id}/quarantine` | ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
+| `GET` | `/api/v1/inventory/today` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `GET` | `/api/v1/inventory/transfer-recommendations` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
 | `GET` | `/api/v1/inventory/units` | AUTH | S |  |
 | `POST` | `/api/v1/inventory/units/barcode-printed` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF | S |  |

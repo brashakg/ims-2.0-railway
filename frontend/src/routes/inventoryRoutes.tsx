@@ -33,6 +33,7 @@ import {
   INVENTORY_MANAGE_ROLES,
   POWER_GRID_ROLES,
   STOCK_LOOKUP_ROLES,
+  STOCK_TODAY_ROLES,
 } from '../pages/inventory/inventoryRoles';
 
 const InventoryLayout = lazy(() => import('../pages/inventory/InventoryLayout').then(m => ({ default: m.InventoryLayout })));
@@ -56,6 +57,7 @@ const InventoryQuarantinePage = lazy(() => import('../pages/inventory/InventoryS
 const PowerGridPage = lazy(() => import('../pages/inventory/PowerGridPage'));
 const OnlineStockPage = lazy(() => import('../pages/inventory/OnlineStockPage'));
 const StockLookupPage = lazy(() => import('../pages/inventory/StockLookupPage'));
+const StockTodayPage = lazy(() => import('../pages/inventory/StockTodayPage'));
 const StockReplenishment = lazy(() => import('../pages/inventory/StockReplenishment').then(m => ({ default: m.StockReplenishment })));
 const StockAudit = lazy(() => import('../pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const StockCountResult = lazy(() => import('../pages/inventory/StockCountResult').then(m => ({ default: m.StockCountResult })));
@@ -117,6 +119,17 @@ export const inventoryRoutes = (
     {/* Standalone full pages - paths and gates unchanged from before the
         split; the role lists now come from inventoryRoles.ts instead of
         being re-typed per route. */}
+
+    {/* S7: Stock today - one shop's stock jobs, the Stock & supply landing
+        page (first link in its menu). Read-only. */}
+    <Route
+      path="inventory/today"
+      element={
+        <ProtectedRoute allowedRoles={STOCK_TODAY_ROLES}>
+          <StockTodayPage />
+        </ProtectedRoute>
+      }
+    />
 
     {/* Phase 4: Stock Replenishment */}
     <Route
