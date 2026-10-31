@@ -153,6 +153,7 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string; scrollTo?: st
   { path: '/inventory/overstock' },
   { path: '/inventory/brand-insights' },
   { path: '/inventory/collection-insights' },
+  { path: '/inventory/today' },
   { path: '/inventory/replenishment' },
   { path: '/inventory/audit' },
   { path: '/inventory/opening-stock' },

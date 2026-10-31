@@ -47,6 +47,13 @@ export const inventoryApi = {
     return response.data;
   },
 
+  // S7 Stock today: one shop's stock jobs (GET /inventory/today, read-only).
+  // No storeId = the server's own shop rule (an admin with no shop: every shop).
+  getStockToday: async (storeId?: string): Promise<StockToday> => {
+    const response = await api.get('/inventory/today', { params: storeId ? { store_id: storeId } : {} });
+    return response.data;
+  },
+
   getLowStock: async (storeId: string) => {
     const response = await api.get('/inventory/low-stock', { params: { store_id: storeId } });
     return response.data;
@@ -1185,3 +1192,20 @@ export const reorderApi = {
     return response.data;
   },
 };
+
+/** GET /inventory/today (backend routers/inventory/today.py). */
+export interface StockToday {
+  store_id: string | null;
+  store_name: string | null;
+  incoming: Array<{ transfer_id: string; transfer_number?: string; from_store_name?: string; pieces: number; shipped_at?: string | null }>;
+  requests: Array<{ transfer_id: string; transfer_number?: string; to_store_name?: string; status: string; pieces: number; lines: Array<{ product_name: string; quantity: number }> }>;
+  count: { in_progress: Array<{ count_id: string; audit_number?: string; zone?: string | null; category?: string | null; started_at?: string }>; counted_today: number };
+  quarantine: { pieces: number; unlabeled: number };
+  deliveries: Array<{ po_id: string; po_number?: string; vendor_id?: string; vendor_name?: string; pieces_due: number; expected_date?: string | null }>;
+  /** Accounts roles only (server-side); null for everyone else. */
+  stock_value: { total: number; uncosted_pieces: number } | null;
+  running_low: Array<{ product_id: string; sku?: string; name?: string; store_id: string; store_name?: string; here: number; other_shops: number; sold_30d: number; reorder_level?: number | null }>;
+  running_low_total: number;
+  /** Sections the server could not read this time (never shown as "nothing to do"). */
+  unavailable?: string[];
+}

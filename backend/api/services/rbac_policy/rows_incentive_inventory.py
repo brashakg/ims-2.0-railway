@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ._core import PURCHASE
+
 ROWS: List[Dict[str, object]] = [
     # --- /api/v1/incentive ---
     {
@@ -213,6 +215,16 @@ ROWS: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/inventory/low-stock",
         "allowed": "AUTHENTICATED",
+        "store_scoped": True,
+    },
+    # S7 Stock today (owner approved 2026-10-23): one shop's stock jobs on one
+    # read-only page. The purchase roles (managers + accountant) -- the page's
+    # route gate; the stock value inside it goes to the accounts roles only
+    # (stock_value.COST_CONTEXT). store_scoped: a manager reads its own shop.
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/today",
+        "allowed": PURCHASE,
         "store_scoped": True,
     },
     # One shop's reorder level (owner ruling D12): store / area managers

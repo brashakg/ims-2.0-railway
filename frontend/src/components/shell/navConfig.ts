@@ -11,6 +11,7 @@ import { moduleForPath } from '../../context/ModuleContext';
 import { TASK_MODULE_ROLES } from '../../pages/tasks/taskRoles';
 import {
   STOCK_LOOKUP_ROLES,
+  STOCK_TODAY_ROLES,
   INVENTORY_MODULE_ROLES,
   INVENTORY_MANAGE_ROLES,
   POWER_GRID_ROLES,
@@ -105,6 +106,8 @@ export const NAV_GROUPS: NavGroup[] = [
       // no menu entry and no in-app link, so the only way in was to type the
       // address. The module's seventeen sections live behind the Inventory
       // entry, which now lands on the stock ledger.
+      // S7: the landing page of this menu - what needs the shop today.
+      { id: 'stock-today', label: 'Stock today', to: '/inventory/today', icon: 'clipboard', requireRoles: STOCK_TODAY_ROLES },
       { id: 'inventory', label: 'Inventory', to: '/inventory/stock', icon: 'box', requireRoles: INVENTORY_MODULE_ROLES },
       // D7b: the counter's read-only stock lookup (this shop, other shops, in transit).
       { id: 'stock-lookup', label: 'Stock Lookup', to: '/inventory/lookup', icon: 'box', requireRoles: STOCK_LOOKUP_ROLES },
