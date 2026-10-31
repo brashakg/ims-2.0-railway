@@ -142,6 +142,13 @@ describe('GSTR-3B screen - input tax follows the accounts rule (R5)', () => {
     expect(screen.getAllByText(/155\.00/).length).toBeGreaterThan(0);
   });
 
+  it('ACCOUNTANT: a write-off reversal with no GSTIN is flagged, never counted', async () => {
+    await renderAs('ACCOUNTANT', { ...OUTPUT_SIDE, ...INPUT_SIDE,
+      unallocatedWriteOffs: { count: 1, tax: 155, bill_numbers: ['MB-TRF-11'] } });
+    expect(screen.getByText(/Written-off stock needs its bill's GSTIN/)).toBeInTheDocument();
+    expect(screen.getByText('MB-TRF-11')).toBeInTheDocument();
+  });
+
   it('STORE_MANAGER: the written-off reversal is input tax too, never drawn', async () => {
     await renderAs('STORE_MANAGER', { ...OUTPUT_SIDE, ...INPUT_SIDE, itcWriteOffReversed: heads(0, 77.5, 77.5) });
     expect(screen.queryByText(/17\(5\)\(h\)/)).toBeNull();

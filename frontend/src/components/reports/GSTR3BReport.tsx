@@ -37,6 +37,9 @@ interface GSTR3BITCAvailable {
 
 interface GSTR3BData {
   unallocatedLegacyBills?: { count: number; tax: number; bill_numbers: string[]; failed?: boolean };
+  // Section 17(5)(h) write-off reversals whose bill no GSTIN's return places
+  // yet: held off every return until the bill's GSTIN is settled.
+  unallocatedWriteOffs?: { count: number; tax: number; bill_numbers: string[]; failed?: boolean };
   period: string;
   gstin: string;
   legalName: string;
@@ -281,6 +284,15 @@ export function GSTR3BReport() {
               <p className="font-semibold">Purchase bills need a receiving GSTIN</p>
               <p className="text-sm">These legacy bills are excluded from this return until their GSTIN is confirmed. GSTN JSON download is blocked to prevent an incorrect filing.</p>
               <p className="text-sm">{reportData.unallocatedLegacyBills.bill_numbers.join(', ') || 'Bill allocation could not be verified. Retry or open the GST cross-check.'}</p>
+            </div>
+          ) : null}
+          {(reportData.unallocatedWriteOffs?.count || reportData.unallocatedWriteOffs?.failed) ? (
+            <div className="card border border-amber-300 bg-amber-50 text-amber-900" role="alert">
+              <p className="font-semibold">Written-off stock needs its bill's GSTIN</p>
+              <p className="text-sm">
+                GST input credit to reverse on {reportData.unallocatedWriteOffs.count} written-off piece{reportData.unallocatedWriteOffs.count === 1 ? '' : 's'} (₹{reportData.unallocatedWriteOffs.tax.toLocaleString('en-IN')}) is held off every return: no GSTIN's return carries the purchase bill yet. Settle the bill's GSTIN and the reversal follows.
+              </p>
+              <p className="text-sm">{reportData.unallocatedWriteOffs.bill_numbers.join(', ') || 'Write-off reversals could not be read. Retry.'}</p>
             </div>
           ) : null}
           {/* Summary Cards */}

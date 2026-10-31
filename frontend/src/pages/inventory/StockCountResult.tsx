@@ -421,6 +421,11 @@ export function StockCountResult() {
                 {' · '}GST input credit reversed: {money(doc.itc_reversed.total)} (GSTR-3B 4(B)(1))
               </span>
             )}
+            {(doc.itc_reversed?.unallocated_total || 0) > 0 && (
+              <span data-testid="count-itc-held">
+                {' · '}GST input credit held: {money(doc.itc_reversed.unallocated_total)} (its purchase bill is on no GSTIN's return yet)
+              </span>
+            )}
           </p>
         )}
         <Link to="/inventory/audit" className="btn">Count history</Link>
