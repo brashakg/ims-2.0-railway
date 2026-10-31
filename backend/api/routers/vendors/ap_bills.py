@@ -666,6 +666,12 @@ async def create_vendor_bill(
     walk_in = (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
     if db is not None and linked and (walk_in or doc["itc_eligible"] is False):
         _true_up_header_bill(db, {**doc, "invoice_id": bill_id}, linked)
+    if db is not None:
+        # Pieces of this receipt written off before the bill came reverse the
+        # credit it just claimed on them (services/writeoff_itc).
+        from ...services.writeoff_itc import after_bill_booked
+
+        after_bill_booked(db, doc, current_user.get("user_id", ""))
     return _clean(doc)
 
 

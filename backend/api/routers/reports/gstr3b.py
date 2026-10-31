@@ -570,9 +570,15 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
         return round(v, 2)
 
     unallocated = _unallocated_legacy_bills(db, entity_id, year, mon, last_day)
+    from ...services.writeoff_itc import unallocated_writeoffs
+
     return {
         "period": month,
         "unallocatedLegacyBills": unallocated,
+        # Write-off reversals (17(5)(h)) whose bill no GSTIN's return places
+        # yet: held off every return, shown so the accountant settles the bill.
+        "unallocatedWriteOffs": unallocated_writeoffs(db, entity_id, month) if db is not None else {
+            "count": 0, "tax": 0.0, "bill_numbers": []},
         # The shops this return files for (H2): every shop on the GSTIN.
         "shops": filing,
         "gstin": store_gstin,
