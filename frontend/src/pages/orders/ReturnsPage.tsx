@@ -205,6 +205,8 @@ export default function ReturnsPage() {
     requiredTier?: string;
     priorRefunds?: number;
   } | null>(null);
+  // An approval a failed resubmit gave back: reused by the next press.
+  const [keptApproval, setKeptApproval] = useState<{ requestId: string; approvalToken?: string } | null>(null);
 
   const searchOrders = async () => {
     if (!searchQuery.trim()) return;
@@ -332,8 +334,7 @@ export default function ReturnsPage() {
       } catch (e: any) {
         if (!cancelled) {
           setQuote(null);
-          const d = e?.response?.data?.detail;
-          setQuoteError(typeof d === 'string' ? d : 'Could not price this return. Check the selected items.');
+          setQuoteError(getErrorMessage(e, 'Could not price this return. Check the selected items.'));
         }
       } finally {
         if (!cancelled) setQuoteLoading(false);
@@ -562,7 +563,8 @@ export default function ReturnsPage() {
     setError(null);
     setIsSubmitting(true);
     try {
-      await submitReturn();
+      await submitReturn(keptApproval || undefined);
+      setKeptApproval(null);
     } catch (e: any) {
       // F27: the server gates a tiered refund with 403 reason=REFUND_APPROVAL_REQUIRED.
       // Open the request+poll modal instead of surfacing a raw error.
@@ -586,16 +588,29 @@ export default function ReturnsPage() {
   };
 
   // After a manager approves the gated refund, re-submit with the token.
+  // A failed resubmit gives the approval back (server side), so the page keeps
+  // it and the next press reuses it while it has not expired.
   const onRefundApproved = async (approval: { requestId: string; approvalToken?: string }) => {
     setApprovalGate(null);
     setIsSubmitting(true);
     setError(null);
     try {
       await submitReturn(approval);
-    } catch (e: any) {
-      const detail = e?.response?.data?.detail;
-      const msg = typeof detail === 'string' ? detail : detail?.message;
-      setError(msg || 'The refund could not be finalised after approval. Please retry.');
+      setKeptApproval(null);
+    } catch (e: unknown) {
+      setKeptApproval(approval);
+      const detail = getErrorDetail(e) as any;
+      if (getErrorStatus(e) === 403 && detail?.reason === 'REFUND_APPROVAL_REQUIRED') {
+        setKeptApproval(null);
+        setApprovalGate({
+          amount: Number(detail?.this_refund) || netRefund,
+          reason: dominantMatrixReason(),
+          requiredTier: detail?.required_tier,
+          priorRefunds: Number(detail?.prior_refunds) || 0,
+        });
+        return;
+      }
+      setError(getErrorMessage(e, 'The refund could not be finalised after approval. Please retry.'));
     } finally {
       setIsSubmitting(false);
     }

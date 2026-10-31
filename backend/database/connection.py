@@ -206,6 +206,10 @@ class DatabaseConnection:
         _idx("orders", "order_id", unique=True, background=True)
         _idx("orders", "store_id", background=True)
         _idx("orders", "customer_id", background=True)
+        # The store-credit reconciler's scan (customers.reconcile_pending_credits) and
+        # each customer's ledger read (PR #1264).
+        _idx("credit_note_ledger", [("type", 1), ("pending_at", 1)], background=True)
+        _idx("credit_note_ledger", "customer_id", background=True)
         _idx("orders", "salesperson_id", background=True)
         _idx("orders", [("store_id", 1), ("status", 1)], background=True)
         _idx("orders", [("store_id", 1), ("created_at", -1)], background=True)

@@ -767,6 +767,9 @@ async def redeem_referral(
                     "status": "REWARD_CREDITED",
                     "reward_credited_at": utc_now_iso(),
                     "reward_credited_by": current_user.get("user_id"),
+                    # Names its ledger row: a press that died before the
+                    # credit is resumed by the next one (and only such a one).
+                    "reward_ledger_entry": f"REFERRAL:{referral_id}",
                 }
             },
             return_document=ReturnDocument.AFTER,
@@ -781,13 +784,35 @@ async def redeem_referral(
                     "status": "REWARD_CREDITED",
                     "reward_credited_at": utc_now_iso(),
                     "reward_credited_by": current_user.get("user_id"),
+                    # Names its ledger row: a press that died before the
+                    # credit is resumed by the next one (and only such a one).
+                    "reward_ledger_entry": f"REFERRAL:{referral_id}",
                 }
             },
         )
         claimed = referral if getattr(res, "modified_count", 0) else None
 
     if not claimed:
-        # Someone (or an earlier call) already credited this referral.
+        # Someone (or an earlier call) already credited this referral -- unless
+        # its press died between the claim and the credit: its fixed-id row is
+        # then missing / unfinished / voided, and THE posting door resumes it
+        # (applied at most once by its guard).
+        from .customers import POSTED as _POSTED, _ledger_coll as _lc
+
+        _row = (_lc().find_one({"entry_id": f"REFERRAL:{referral_id}"}) or {}) if _lc() is not None else {"applied": True}
+        if not _row.get("applied") and referral.get("reward_ledger_entry") == f"REFERRAL:{referral_id}":
+            from .customers import _current_credit_balance as _ccb
+
+            _entry = scl.make_entry(
+                customer_id=referrer_id, entry_type=scl.ADJUSTED, amount=float(reward),
+                current_balance=_ccb(referrer_id, cust_repo.find_by_id(referrer_id)),
+                reason=f"Referral reward {referral_id}", ref=referral_id,
+                store_id=referral.get("store_id") or current_user.get("active_store_id"),
+                user_id=current_user.get("user_id"))
+            _entry.update(source="REFERRAL_REWARD", entry_id=f"REFERRAL:{referral_id}")
+            if post_ledger_credit(cust_repo, _entry) != _POSTED:
+                raise HTTPException(status_code=503, detail="The reward could not be credited just now - try again.")
+            return {"message": "Referral reward credited", "referral_id": referral_id, "resumed": True}
         return {
             "message": "Referral already credited",
             "referral_id": referral_id,

@@ -746,11 +746,13 @@ def test_part_voucher_refund_completes_via_store_credit(ctx):
     issued = [d for d in c["ledger"].docs if d.get("type") == "ISSUED"]
     assert len(issued) == 1, c["ledger"].docs
     row = issued[0]
-    assert row["amount"] == 2900.00
+    # Round 10 of #1264: ONE credit note per return -- the note reverses the
+    # WHOLE refund's tax (the cash leg's too: the GST returns file this row
+    # and skip the return doc), while the balance moves by the credit leg only.
+    assert row["amount"] == 5900.00 and row["delta"] == 2900.00
     assert row["ref"] == body["return_id"]
     assert row.get("taxable") is not None and row.get("tax") is not None
-    # GST is pro-rated to the credited portion, not the whole refund.
-    assert round(row["taxable"] + row["tax"], 2) == 2900.00
+    assert round(row["taxable"] + row["tax"], 2) == 5900.00
     assert row.get("gst_rate") == 18.0
 
     # The response surfaces what was issued.
@@ -915,14 +917,16 @@ def test_store_credit_gst_split_is_honest_at_every_restocking_fee(ctx, fee):
     )
     assert r.status_code in (200, 201), r.text
     row = [d for d in c["ledger"].docs if d.get("type") == "ISSUED"][0]
-    # INDEPENDENT recomputation: back 18% out of the CREDITED amount.
-    expect_taxable = round(credit_leg / 1.18, 2)
-    expect_tax = round(credit_leg - expect_taxable, 2)
+    # INDEPENDENT recomputation: back 18% out of the WHOLE refund (round 10 of
+    # #1264: one credit note per return); the balance moves by the credit leg.
+    expect_taxable = round(net / 1.18, 2)
+    expect_tax = round(net - expect_taxable, 2)
     assert row["taxable"] == expect_taxable, (fee, row)
     assert row["tax"] == expect_tax, (fee, row)
+    assert row["delta"] == credit_leg, (fee, row)
     # Arithmetic sanity the tautology could never catch.
     assert row["tax"] > 0, (fee, row)
-    assert row["taxable"] <= credit_leg, (fee, row)
+    assert row["taxable"] <= net, (fee, row)
 
 
 # --- MUST-FIX 4: fail-loud reached 1 of 3 credit-issuing branches ---

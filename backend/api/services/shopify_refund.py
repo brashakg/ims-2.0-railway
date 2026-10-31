@@ -108,6 +108,28 @@ def _unfinished_claim(db, refund_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _raise_s34_task(order: Dict[str, Any], return_id: Optional[str], refund_id: Any, why: str) -> None:
+    """The CA's task for a Shopify refund past the credit-note window. Fail-soft."""
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import create_system_task
+
+        ref = order.get("order_number") or order.get("order_id")
+        create_system_task(
+            get_task_repository(),
+            title=f"Shopify refund on order {ref}: past the credit-note deadline - for the CA",
+            description=(f"{why} The refund was recorded with NO credit note (any store credit is "
+                         f"booked as a plain adjustment). Return {return_id}, Shopify refund {refund_id}."),
+            priority="P2",
+            category="Accounts",
+            store_id=order.get("store_id"),
+            dedupe_ref=f"shopify_refund_s34:{refund_id}",
+            extra={"payload": {"order_id": order.get("order_id"), "return_id": return_id}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[SHOPIFY_REFUND] section 34 task not raised for %s: %s", refund_id, exc)
+
+
 def _posted_credit(db, return_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """The credit-note ledger row an earlier attempt of this return already
     wrote (its ref is the return id), so a re-drive never posts it twice.
@@ -921,6 +943,10 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
                if customer_id else {"order_id": order_id})
         for row in db.get_collection("credit_note_ledger").find(flt):
             kind = _norm(row.get("type")).upper()
+            if kind == "ISSUING":
+                # In flight: its balance may already have moved -- counted as
+                # given (fail safe) under the type it becomes.
+                kind = _norm(row.get("final_type")).upper()
             delta = _f(row.get("delta"))
             ref = _norm(row.get("ref")).upper()
             tied = (row.get("order_id") == order_id
@@ -1719,8 +1745,16 @@ def _post_locked(
     money_back = credit_note.get("money_back")
     store_credit, credit_why, settlement, _ = allowance
     try:
-        from ..routers.returns import _issue_store_credit
+        from ..routers.returns import _credit_note_window_closed, _issue_store_credit
 
+        # Section 34 (THE rule, every credit-note door): past the window the
+        # money Shopify sent back is recorded with NO credit note -- store
+        # credit, if any, as ADJUSTED -- and the CA gets a task.
+        s34_closed = _credit_note_window_closed(order) if credit_entry is None else None
+        if s34_closed:
+            _raise_s34_task(order, return_id, refund_id, s34_closed)
+            # The return doc files no tax reversal either (GSTR reads its breakup).
+            gst_view = {**gst_view, "taxable": 0.0, "tax": 0.0, "by_rate": {}, "section34_closed": True}
         if credit_entry is None and customer_id and gross_refund > 0 and store_credit is not None:
             credit_entry = _issue_store_credit(
                 customer_id,
@@ -1746,6 +1780,7 @@ def _post_locked(
                     if isinstance(order.get("interstate"), bool)
                     else None
                 ),
+                credit_note=not s34_closed,
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] credit note post failed: %s", exc)
@@ -1921,6 +1956,8 @@ def _post_locked(
         "status": final_status,
         "credit_amount": gross_refund if credit_ok else None,
         "credit_entry": credit_entry,
+        # Zeroed past the section 34 window: the doc files no tax reversal.
+        "gst_breakup": gst_view,
         "credit_note_issued": credit_ok,
         "settled_externally": bool(settled_externally),
         "money_back": money_back,

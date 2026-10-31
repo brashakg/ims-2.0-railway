@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Loader2, X, ShieldCheck, Clock, AlertTriangle } from 'lucide-react';
 import { approvalsApi } from '../../services/api/approvals';
 import type { ApprovalRequest } from '../../services/api/approvals';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const POLL_MS = 4000;
 
@@ -104,8 +105,15 @@ export function RefundApprovalModal({
       setTier(res.required_tier || requiredTier);
       setExpiresAt(res.expires_at || null);
       setPhase('waiting');
-    } catch {
-      setErrorMsg('Could not raise the approval request. Please try again.');
+    } catch (e) {
+      const raw = getErrorMessage(e, 'Could not raise the approval request. Please try again.');
+      setErrorMsg(
+        raw === 'amount_and_order_required'
+          ? 'This refund approval needs the bill and the amount - reload the return and try again.'
+          : raw === 'order_not_found'
+            ? 'The bill for this refund could not be found - reload the return and try again.'
+            : raw,
+      );
       setPhase('error');
     }
   }, [amount, storeId, orderId, orderNumber, customerName, reason, requestedByName, requiredTier]);

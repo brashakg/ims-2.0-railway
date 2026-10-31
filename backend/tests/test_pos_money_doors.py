@@ -1502,8 +1502,8 @@ def test_a_crash_after_the_balance_moved_never_moves_it_twice(till):
     till["db"].get_collection("customers").insert_one(
         {"customer_id": "CUST-1", "store_credit": 1050.0, "store_credit_refs": ["RET-Z:credit"]})
     _ledger(till).insert_one({"_id": "RET-Z:credit", "entry_id": "RET-Z:credit", "customer_id": "CUST-1",
-                              "type": "ADJUSTED", "amount": 1000.0, "delta": 1000.0, "ref": "RET-Z",
-                              "applied": False})
+                              "type": "ISSUING", "final_type": "ADJUSTED", "amount": 1000.0, "delta": 1000.0,
+                              "ref": "RET-Z", "applied": False})
     till["db"].get_collection("orders").insert_one(_order(advance_refund_id="RET-Z"))
     out = returns_router._credit_back_advance(_order(), 1000.0, "RET-Z", _user("ACCOUNTANT"))
     assert out is not None and out["applied"] is True

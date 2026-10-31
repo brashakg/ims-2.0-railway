@@ -26,6 +26,8 @@ import {
 import { useToast } from '../../context/ToastContext';
 import { policiesApi } from '../../services/api';
 import { ApprovalPinSection } from '../../components/settings/ApprovalPinSection';
+import { useAuth } from '../../context/AuthContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // The two policy keys this page edits.
 const K_MATRIX = 'refund.matrix_enabled';
@@ -43,6 +45,9 @@ const DEFAULTS: FormState = {
 
 export function RefundPolicySection() {
   const toast = useToast();
+  const { user } = useAuth();
+  // The saved-matrix switch is the owner's: the server refuses anyone else.
+  const isSuperadmin = (user?.roles || []).includes('SUPERADMIN');
   const [form, setForm] = useState<FormState>(DEFAULTS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -94,8 +99,7 @@ export function RefundPolicySection() {
       toast.success('Refund policy saved.');
       await load();
     } catch (e) {
-      const msg = (e instanceof Error && e.message) || 'Failed to save refund policy';
-      toast.error(msg);
+      toast.error(getErrorMessage(e, 'Failed to save refund policy'));
     } finally {
       setSaving(false);
     }
@@ -132,9 +136,14 @@ export function RefundPolicySection() {
         <div className="space-y-3">
           <ToggleRow
             icon={<ShieldCheck className="w-5 h-5 text-gray-500" />}
-            title="Refund approval matrix enabled"
-            desc="ON (the owner's rule): refunds over ₹2,000 per bill by cashier or sales staff need a manager's PIN approval. Only a Superadmin can switch it off."
+            title="Apply the saved stricter refund matrix"
+            desc={
+              isSuperadmin
+                ? "ON: a saved, stricter refund matrix applies on top of the owner's ₹2,000 rule. OFF never loosens the owner's rule."
+                : "Only a Superadmin can change this. The owner's ₹2,000 rule applies either way."
+            }
             checked={form.matrixEnabled}
+            disabled={!isSuperadmin}
             onChange={(v) => setForm((f) => ({ ...f, matrixEnabled: v }))}
           />
           <ToggleRow
@@ -149,7 +158,7 @@ export function RefundPolicySection() {
         {!form.matrixEnabled && (
           <p className="mt-3 text-xs text-gray-500 flex items-center gap-1">
             <Info className="w-3.5 h-3.5" />
-            The refund approval rule is OFF — refunds of any size go through without a manager.
+            No saved stricter matrix applies — the owner&apos;s ₹2,000 rule still does.
             The original-tender lock applies independently of this switch.
           </p>
         )}
@@ -177,12 +186,14 @@ function ToggleRow({
   desc,
   checked,
   onChange,
+  disabled = false,
 }: {
   icon: React.ReactNode;
   title: string;
   desc: string;
   checked: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-start justify-between gap-4 p-3 bg-gray-50 rounded-lg">
@@ -198,8 +209,9 @@ function ToggleRow({
         role="switch"
         aria-checked={checked}
         aria-label={title}
+        disabled={disabled}
         onClick={() => onChange(!checked)}
-        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
           checked ? 'bg-blue-600' : 'bg-gray-300'
         }`}
       >

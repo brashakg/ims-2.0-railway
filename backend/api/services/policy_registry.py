@@ -162,10 +162,10 @@ _REGISTRY_LIST: List[PolicySpec] = [
         # make the matrix STRICTER -- refund.approval_matrix, max'd with it).
         write_roles=("SUPERADMIN",),
         group="Refunds & Returns",
-        label="Refund approval matrix enabled",
-        help="Require a tiered approval (per the refund approval matrix) before "
-        "a refund is recorded. ON (default): a refund above Rs 2,000 by sales "
-        "or cashier staff needs a store manager's approval.",
+        label="Apply the saved stricter refund matrix",
+        help="The owner's rule always applies: a bill's refunds above Rs 2,000 by "
+        "sales or cashier staff need a store manager's approval. ON (default) also "
+        "applies a saved, stricter refund matrix; OFF never loosens the owner's rule.",
     ),
     _spec(
         key="refund.approval_matrix",

@@ -107,10 +107,13 @@ def test_int_to_e4_tier_mapping():
 # --------------------------------------------------------------------------- #
 # required_tier_for_refund (DB-side resolver) -- DARK by default
 # --------------------------------------------------------------------------- #
-def test_resolver_dark_when_flag_off(monkeypatch):
+def test_flag_off_never_loosens_the_owner_rule(monkeypatch):
+    # PR #1264 round 10: the owner's Rs 2,000 rule always applies -- the flag
+    # only decides whether a saved, stricter matrix applies on top of it.
     monkeypatch.setattr(ram, "matrix_enabled", lambda scope=None: False)
-    # even a huge cashier goodwill refund -> None (no gate) while dark
     assert ram.required_tier_for_refund(9999999, "GOODWILL", "SALES_CASHIER",
+                                        store_id="BV-01") == ram.int_to_e4_tier(1)
+    assert ram.required_tier_for_refund(150000, "GOODWILL", "SALES_CASHIER",
                                         store_id="BV-01") is None
 
 

@@ -168,7 +168,8 @@ describe('POS loyalty tender leg', () => {
 
   it('a FAILED burn posts NO loyalty leg and warns loudly — points untouched, balance honestly due', async () => {
     seedStore(300);
-    mockedRedeem.mockRejectedValueOnce(new Error('409 insufficient balance'));
+    // The shared client's ApiError: the server REFUSED the burn (a 4xx).
+    mockedRedeem.mockRejectedValueOnce({ status: 409, detail: 'insufficient balance' });
 
     const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-4');
     // Order still exists (fail-soft), but never silently.
@@ -216,7 +217,11 @@ describe('POS loyalty tender leg', () => {
     seedStore(300);
     mockedRedeem.mockRejectedValueOnce(new Error('network'));
     const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-8');
-    expect(res.warning).toMatch(/NOT debited/);
+    // Round 10: no refusal came back, so the burn may have landed -- never
+    // claim "NOT debited"; tell staff to check the points first.
+    expect(res.warning).not.toMatch(/NOT debited/);
+    expect(res.warning).toMatch(/could not be confirmed/);
+    expect(res.warning).toMatch(/check the customer's points/);
     expect(res.warning).not.toMatch(/re-apply the points/);
   });
 

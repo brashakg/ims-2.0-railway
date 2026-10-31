@@ -286,10 +286,11 @@ def required_tier_for_refund(
         scope["store_id"] = store_id
     if entity_id:
         scope["entity_id"] = entity_id
-    if not matrix_enabled(scope or None):
-        return None  # DARK -- behaves exactly as today
-    matrix = resolve_matrix(scope or None)
-    # A saved matrix may be STRICTER than the owner rule, never looser.
+    # The owner rule (DEFAULT_MATRIX: above Rs 2,000 needs a manager) always
+    # applies -- stricter-only covers stored values too, so an old saved
+    # refund.matrix_enabled=false can never switch it off. The switch only
+    # decides whether a saved (stricter) matrix applies on top.
+    matrix = resolve_matrix(scope or None) if matrix_enabled(scope or None) else DEFAULT_MATRIX
     return int_to_e4_tier(max(
         required_tier(amount_paise, reason, role, DEFAULT_MATRIX),
         required_tier(amount_paise, reason, role, matrix),

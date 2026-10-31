@@ -608,6 +608,7 @@ async def superadmin_invoice_change(
         )
 
     from ..returns import (
+        CreditNotConfirmed,
         _credit_note_window_closed,
         _issue_store_credit,
         _number_on_a_ledger_row,
@@ -705,6 +706,16 @@ async def superadmin_invoice_change(
                 # No returns doc behind this note: the row names its parent.
                 order_id=order.get("order_id"),
                 note_number=note_doc["note_number"],
+            )
+        except CreditNotConfirmed:
+            # It may already be on the balance: the order stays claimed (its
+            # marker heals once the line settles), the number stays with the
+            # line, and the reconciler settles it. Never 'nothing given'.
+            raise HTTPException(
+                status_code=503,
+                detail=("The credit note could not be confirmed just now - the credit may already be on "
+                        "the customer's balance. Do NOT issue it again: it settles by itself within 10 "
+                        "minutes. Check the customer's store-credit balance then."),
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[ORDERS] credit note %s not posted: %s", note_doc["note_number"], exc)

@@ -145,7 +145,14 @@ def test_a_failed_balance_move_files_no_credit_note_and_a_retry_files_one(till, 
     custs.insert_one({"customer_id": "CUST-1", "store_credit": 0.0})
     _crash_once(monkeypatch, custs, "update_one", lambda flt, upd, *a, **k: "$inc" in upd)
     kw = dict(reason="return", current_user=_user("ADMIN"), store_id=STORE, order_id="ORD-1")
-    assert returns_router._issue_store_credit("CUST-1", 200.0, ref="RET-A", **kw) is None
+    # Round 10: a raised write with no landed guard may still be in flight --
+    # never voided on the spot; the reconciler voids it once it has resolved.
+    with pytest.raises(returns_router.CreditNotConfirmed):
+        returns_router._issue_store_credit("CUST-1", 200.0, ref="RET-A", **kw)
+    from api.routers import customers as cust_router
+    from database.repositories.customer_repository import CustomerRepository
+
+    cust_router.reconcile_pending_credits(CustomerRepository(custs), ledger=_ledger(till), older_than_s=0)
     assert returns_router._issue_store_credit("CUST-1", 200.0, ref="RET-B", **kw) is not None
     issued = list(_ledger(till).find({"customer_id": "CUST-1", "type": "ISSUED"}))
     assert [r["ref"] for r in issued] == ["RET-B"] and issued[0]["applied"] is True

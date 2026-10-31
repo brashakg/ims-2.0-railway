@@ -279,5 +279,8 @@ def test_legacy_add_door_now_writes_a_ledger_row(monkeypatch):
     out = asyncio.run(customers.add_store_credit("C1", 60.0, _admin()))
     assert out["new_total"] == 100.0
     assert coll.docs[0]["store_credit"] == 100.0
-    issued = [e for e in ledger.docs if e["type"] == "ISSUED"]
+    # A manual / goodwill credit is money given, not a credit note: ADJUSTED,
+    # which the GST returns never file (round 10 of #1264).
+    issued = [e for e in ledger.docs if e["type"] == "ADJUSTED"]
     assert len(issued) == 1 and issued[0]["delta"] == 60.0
+    assert not [e for e in ledger.docs if e["type"] == "ISSUED"]

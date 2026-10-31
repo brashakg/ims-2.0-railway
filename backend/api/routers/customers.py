@@ -1901,30 +1901,87 @@ def _guard_landed(repo, customer_id: str, entry_id: str) -> Optional[bool]:
         return None
 
 
-def _finish_credit_row(ledger, row: Dict[str, Any]) -> None:
+def _month_of(value: Any) -> str:
+    from ..utils.ist import ist_date_str_from_stored
+
+    return (ist_date_str_from_stored(value) or "")[:7] if value else ""
+
+
+def _finish_credit_row(ledger, row: Dict[str, Any], *, redate: bool = False) -> None:
+    """ISSUING -> final type, applied: matches only an ISSUING row, never a
+    VOID one (that is a deliberate heal in _void_credit_row only). ``redate`` (the reconciler): a
+    credit note finished after its month closed is dated the day it was
+    finished -- never filed back into a month already reported."""
+    sets: Dict[str, Any] = {"type": row.get("final_type") or "ISSUED", "applied": True}
+    if redate:
+        now = utc_now_iso()
+        if _month_of(row.get("created_at")) != _month_of(now):
+            sets.update(created_at=now, redated_from=row.get("created_at"))
+            logger.warning("[CUSTOMERS] credit row %s finished in a later month: dated %s (for the CA)",
+                           row.get("entry_id"), now)
     for _ in range(2):  # left ISSUING if both fail: the reconciler finishes it
         try:
-            ledger.update_one({"entry_id": row["entry_id"], "applied": False},
-                              {"$set": {"type": row.get("final_type") or "ISSUED", "applied": True}})
-            return
+            ledger.update_one({"entry_id": row["entry_id"], "type": PENDING}, {"$set": sets})
+            break
         except Exception as exc:  # noqa: BLE001
             logger.error("[CUSTOMERS] credit row %s not finished: %s", row.get("entry_id"), exc)
+    if row.get("undo_on_void") and redate:
+        # The reconciler finished a counter return's credit whose return was
+        # never recorded (its press could not confirm the credit): the credit
+        # stands; the return record is the admin's to complete.
+        _audit_credit_event("RETURN_CREDIT_SETTLED_WITHOUT_RECORD", row)
 
 
-def _void_credit_row(ledger, row: Dict[str, Any], why: str) -> None:
-    """VOID a row whose balance never moved; its credit-note number (if it
-    took one) is written off -- the row owns its number once inserted."""
+def _audit_credit_event(action: str, row: Dict[str, Any]) -> None:
+    logger.error("[CUSTOMERS] %s: %s (order %s)", action, row.get("entry_id"), row.get("order_id"))
     try:
-        res = ledger.update_one({"entry_id": row["entry_id"], "applied": False},
-                                {"$set": {"type": VOID, "void_reason": why}})
+        from ..dependencies import get_audit_repository
+
+        audit = get_audit_repository()
+        if audit is not None:
+            audit.create({"action": action, "entity_type": "store_credit", "entity_id": row.get("entry_id"),
+                          "store_id": row.get("store_id"), "user_id": "system",
+                          "details": {"order_id": row.get("order_id"), "ref": row.get("ref"),
+                                      "note_number": row.get("note_number"), "delta": row.get("delta")},
+                          "created_at": utc_now_iso()})
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] %s not audited: %s", action, exc)
+
+
+def _void_credit_row(repo, ledger, row: Dict[str, Any], why: str) -> bool:
+    """VOID a row whose balance never moved -- compare-and-set on exactly the
+    pending row that was read, so a second pass (or a press finishing it)
+    can never void it twice. Its delta is zeroed (kept in void_delta: an
+    older build summing every delta never counts it). Then the guard is read
+    once more: a balance move that landed after all heals the row instead.
+    Only a void that stands writes the number off and undoes the return's
+    claims. True when the row is now VOID."""
+    eid = row["entry_id"]
+    try:
+        res = ledger.update_one(
+            {"entry_id": eid, "type": PENDING, "applied": False, "pending_at": row.get("pending_at")},
+            {"$set": {"type": VOID, "void_reason": why, "delta": 0.0, "void_delta": row.get("delta")}})
     except Exception as exc:  # noqa: BLE001 -- applied False: still never counted
-        logger.error("[CUSTOMERS] credit row %s not voided: %s", row.get("entry_id"), exc)
-        return
-    if row.get("note_number") and getattr(res, "matched_count", getattr(res, "modified_count", 1)):
+        logger.error("[CUSTOMERS] credit row %s not voided: %s", eid, exc)
+        return False
+    if int(getattr(res, "modified_count", getattr(res, "matched_count", 0)) or 0) != 1:
+        return False  # another pass or the press settled it first
+    if _guard_landed(repo, row.get("customer_id"), eid):
+        ledger.update_one({"entry_id": eid, "type": VOID},
+                          {"$set": {"type": row.get("final_type") or "ISSUED", "applied": True,
+                                    "delta": row.get("delta"), "healed_from_void": True}})
+        logger.warning("[CUSTOMERS] credit row %s healed: its balance move landed after all", eid)
+        return False
+    if row.get("note_number"):
         from .returns import _record_unused_credit_note
 
         _record_unused_credit_note(row["note_number"], {"order_id": row.get("order_id"), "store_id": row.get("store_id")},
-                                   row.get("ref") or row["entry_id"], {"user_id": "system"}, why)
+                                   row.get("ref") or eid, {"user_id": "system"}, why)
+    if row.get("undo_on_void"):
+        from .returns import _undo_return_claims
+
+        _undo_return_claims(row["undo_on_void"])
+    return True
 
 
 def _settle_credit_row(repo, ledger, row: Dict[str, Any]) -> str:
@@ -1933,15 +1990,17 @@ def _settle_credit_row(repo, ledger, row: Dict[str, Any]) -> str:
         moved: Optional[bool] = apply_store_credit_delta(
             repo, cid, float(row.get("delta") or 0), guard_ref=eid,
             balance_after=row.get("balance_after"), entry_id=eid)
-    except Exception as exc:  # noqa: BLE001 -- unclear: the guard says whether it landed
+    except Exception as exc:  # noqa: BLE001 -- unclear: only a landed guard decides here
         logger.error("[CUSTOMERS] balance move for %s raised: %s", eid, exc)
-        moved = _guard_landed(repo, cid, eid)
+        # A raised write with no guard yet may still be in flight: never
+        # void now -- the reconciler reads the guard once it has resolved.
+        moved = True if _guard_landed(repo, cid, eid) else None
     if moved is None:
         return UNCLEAR
     if moved:
         _finish_credit_row(ledger, row)
         return POSTED
-    _void_credit_row(ledger, row, "balance not moved")
+    _void_credit_row(repo, ledger, row, "balance not moved")
     return REFUSED
 
 
@@ -1951,7 +2010,9 @@ def post_ledger_credit(repo, entry: Dict[str, Any], *, ledger=None) -> str:
     Shopify refund re-drive, referral rewards). Resumable and idempotent on
     entry_id: pressing it again for the same row finishes it, never posts
     twice. Returns POSTED (the balance carries it), REFUSED (it never moved;
-    the row is VOID) or UNCLEAR (unreadable; the reconciler settles it)."""
+    the row is VOID) or UNCLEAR (it may have moved: the row stays ISSUING and
+    the reconciler settles it -- callers must never report UNCLEAR as
+    'nothing recorded')."""
     ledger = ledger if ledger is not None else _ledger_coll()
     if ledger is None:
         return REFUSED
@@ -1974,8 +2035,11 @@ def post_ledger_credit(repo, entry: Dict[str, Any], *, ledger=None) -> str:
     if row.get("type") == VOID:
         if row.get("note_number"):
             return REFUSED  # its number was written off: a new note takes a new one
-        ledger.update_one({"entry_id": eid, "type": VOID}, {"$set": {"type": PENDING, "pending_at": utc_now_iso()}})
-        row["type"] = PENDING
+        delta = row.get("void_delta") if row.get("void_delta") is not None else row.get("delta")
+        pending_at = utc_now_iso()
+        ledger.update_one({"entry_id": eid, "type": VOID},
+                          {"$set": {"type": PENDING, "pending_at": pending_at, "delta": delta}})
+        row.update(type=PENDING, pending_at=pending_at, delta=delta)
     return _settle_credit_row(repo, ledger, row)
 
 
@@ -1984,7 +2048,7 @@ def reconcile_pending_credits(repo=None, *, customer_id: Optional[str] = None, l
     """Finish (guard landed) or void (it never did) every row left ISSUING
     longer than any press runs. Never touches a younger row: that press may
     still be writing. Fail-soft: an unreadable guard leaves the row for the
-    next pass."""
+    next pass. ponytail: an index on {type, pending_at} if the ledger grows."""
     from datetime import timedelta, timezone as _tz
 
     out = {"finished": 0, "voided": 0}
@@ -2006,10 +2070,9 @@ def reconcile_pending_credits(repo=None, *, customer_id: Optional[str] = None, l
         if landed is None:
             continue
         if landed:
-            _finish_credit_row(ledger, row)
+            _finish_credit_row(ledger, row, redate=True)
             out["finished"] += 1
-        else:
-            _void_credit_row(ledger, row, "never applied (stale)")
+        elif _void_credit_row(repo, ledger, row, "never applied (stale)"):
             out["voided"] += 1
     if out["finished"] or out["voided"]:
         logger.warning("[CUSTOMERS] pending credits settled: %s", out)
@@ -2017,8 +2080,10 @@ def reconcile_pending_credits(repo=None, *, customer_id: Optional[str] = None, l
 
 
 async def scheduled_credit_reconcile() -> None:
-    """Scheduler tick (agents/scheduler)."""
-    reconcile_pending_credits()
+    """Scheduler tick (agents/scheduler): blocking pymongo off the event loop."""
+    import asyncio
+
+    await asyncio.to_thread(reconcile_pending_credits)
 
 
 def apply_store_credit_delta(
@@ -2104,10 +2169,15 @@ def _post_credit_entry(
             detail="This customer's store-credit balance has not been set up yet - nothing was recorded. Ask an admin.",
         )
     balance = _current_credit_balance(customer_id, existing)
+    if et == scl.ISSUED and not (body.amount > 0):
+        raise HTTPException(status_code=400, detail="amount must be greater than 0")
     try:
         entry = scl.make_entry(
             customer_id=customer_id,
-            entry_type=entry_type,
+            # A goodwill / manual credit is money given, not a supply
+            # reversed: ADJUSTED, which the GST returns never file (only a
+            # return or a superadmin credit note issues a credit note).
+            entry_type=scl.ADJUSTED if et == scl.ISSUED else entry_type,
             amount=body.amount,
             current_balance=balance,
             reason=body.reason or "",
@@ -2117,6 +2187,7 @@ def _post_credit_entry(
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    entry["source"] = "MANUAL_CREDIT"
 
     status = post_ledger_credit(repo, entry)
     if status != POSTED:

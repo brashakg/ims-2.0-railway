@@ -803,7 +803,7 @@ class TestStoreCreditRedeemEndpoint:
         # snapshot path and bumps the balance.
         body = customers_module.StoreCreditEntryRequest(amount=250.0, reason="note")
         out = customers_module._post_credit_entry("CUST-1", "ISSUED", body, _admin())
-        assert out["entry"]["type"] == "ISSUED"
+        assert out["entry"]["type"] == "ADJUSTED"  # money given, never a GST credit note (#1264 r10)
         assert out["entry"]["delta"] == 250.0
         assert out["balance"] == 750.0
 

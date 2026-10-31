@@ -1516,6 +1516,35 @@ def _gate_refund_tenders_against_order(
     return refund_tenders, True
 
 
+class CreditNotConfirmed(Exception):
+    """The store credit may already be on the customer's balance (the write
+    landed but could not be confirmed): its ledger line stays ISSUING and the
+    reconciler settles it. Never reported as 'nothing was recorded'."""
+
+    def __init__(self, entry_id: str):
+        super().__init__(entry_id)
+        self.entry_id = entry_id
+
+
+CREDIT_UNCONFIRMED_MESSAGE = (
+    "The store credit could not be confirmed just now - it may already be on the customer's "
+    "balance. Do NOT redo this return: it settles by itself within 10 minutes. Check the "
+    "customer's store-credit balance then; if the credit is not there, ask an admin."
+)
+
+
+def _undo_return_claims(spec: Dict[str, Any]) -> None:
+    """A counter return whose credit was unconfirmed kept its unit claims and
+    its refund hold (so it could not be redone); its credit line was then
+    voided by the reconciler (it never landed): give both back."""
+    order_id = spec.get("order_id")
+    for line in spec.get("lines") or []:
+        _release_returnable_qty(order_id, {"item_id": line.get("item_id"), "product_id": line.get("product_id")},
+                                float(line.get("qty") or 0))
+    if spec.get("return_id"):
+        _release_order_refund(order_id, spec["return_id"])
+
+
 def _issue_store_credit(
     customer_id: str,
     amount: float,
@@ -1534,6 +1563,9 @@ def _issue_store_credit(
     note_number: Optional[str] = None,
     balance_delta: Optional[float] = None,
     settlement: Optional[str] = None,
+    entry_id: Optional[str] = None,
+    undo_on_void: Optional[Dict[str, Any]] = None,
+    credit_note: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Append an ISSUED credit-note ledger entry (the GSTR-1 CDNR source) and,
     by default, bump the customer's running store-credit balance.
@@ -1582,6 +1614,13 @@ def _issue_store_credit(
     ``settlement`` labels why (EXTERNAL / NOT_COLLECTED / ALREADY_RETURNED /
     PARTIAL); default EXTERNAL at zero, PARTIAL above.
 
+    ``entry_id``: a fixed id for the line (a counter return's
+    '<return id>:credit'), so a re-press resumes it. ``undo_on_void``: the
+    return's unit claims and hold, given back if the reconciler voids an
+    unconfirmed line. ``credit_note=False`` (a credit past the section 34
+    window): money given back as ADJUSTED store credit, no credit note, no
+    number. Raises CreditNotConfirmed when the balance move is UNCLEAR.
+
     Fail-LOUD on persistence: returns None (never raises) when the DB is absent
     OR the ledger insert fails, so `credit_note_issued` can never read True
     without a real credit_note_ledger row behind it (BUG: a swallowed insert
@@ -1600,13 +1639,20 @@ def _issue_store_credit(
 
     # THE balance rule (customers._current_credit_balance: the customer's
     # store_credit field is authoritative), not a second, ledger-first copy.
-    from .customers import PENDING, POSTED, _current_credit_balance, post_ledger_credit, store_credit_balance_unready
+    from .customers import (
+        PENDING,
+        POSTED,
+        UNCLEAR,
+        _current_credit_balance,
+        post_ledger_credit,
+        store_credit_balance_unready,
+    )
 
     balance = _current_credit_balance(customer_id, customer_doc)
     try:
         entry = scl.make_entry(
             customer_id=customer_id,
-            entry_type=scl.ISSUED,
+            entry_type=scl.ISSUED if credit_note else scl.ADJUSTED,
             amount=amount,
             current_balance=balance,
             reason=reason,
@@ -1617,6 +1663,10 @@ def _issue_store_credit(
     except ValueError as exc:
         logger.warning("[RETURNS] credit entry rejected: %s", exc)
         return None
+    if entry_id:
+        entry["entry_id"] = entry_id
+    if undo_on_void:
+        entry["undo_on_void"] = undo_on_void
 
     # Stamp the gross / fee / net trail onto the ledger row for the credit note.
     if gross is not None:
@@ -1671,27 +1721,38 @@ def _issue_store_credit(
     # The same credit pressed again (the Shopify re-drive of one return keeps
     # its ref): finish the row an earlier attempt wrote, never a second one.
     if ref:
-        prior = coll.find_one({"ref": ref, "customer_id": customer_id, "type": {"$in": [PENDING, scl.ISSUED]}})
+        prior = coll.find_one({"ref": ref, "customer_id": customer_id,
+                               "type": {"$in": [PENDING, entry["type"]]}})
         if prior is not None:
             prior = dict(prior)
             prior.pop("_id", None)
-            if prior.get("type") == scl.ISSUED:
+            if prior.get("type") == entry["type"]:
                 return prior
-            return {**prior, "type": scl.ISSUED, "applied": True} if (
-                post_ledger_credit(repo, prior, ledger=coll) == POSTED) else None
-    if not note_number:
+            status = post_ledger_credit(repo, prior, ledger=coll)
+            if status == UNCLEAR:
+                raise CreditNotConfirmed(prior["entry_id"])
+            return {**prior, "type": entry["type"], "applied": True} if status == POSTED else None
+    if not credit_note:
+        note_number = None
+        for k in ("taxable", "tax", "gst_rate", "interstate"):
+            entry.pop(k, None)
+    elif not note_number:
         try:
             note_number = next_document_number(_get_db(), entry.get("store_id"), "C")
         except InvoiceNumberError as exc:
             logger.warning("[RETURNS] credit note not numbered, not issued: %s", exc)
             return None
-    entry["note_number"] = note_number
+    if note_number:
+        entry["note_number"] = note_number
     if moves:
         # THE posting door (customers.post_ledger_credit): ISSUING until the
         # balance carries it -- GSTR files only ISSUED -- then ISSUED; a refused
         # move VOIDs the row and writes its number off; an unclear one is left
         # for the reconciler. Fail LOUD: the caller refuses the return.
-        if post_ledger_credit(repo, entry, ledger=coll) != POSTED:
+        status = post_ledger_credit(repo, entry, ledger=coll)
+        if status == UNCLEAR:
+            raise CreditNotConfirmed(entry["entry_id"])
+        if status != POSTED:
             logger.error("[RETURNS] credit row %s: the balance did not move; not issued", entry.get("entry_id"))
             return None
         entry["applied"] = True
@@ -3491,6 +3552,8 @@ async def create_return(
     try:
         return await _create_return(body, current_user, idempotency_key, held)
     except BaseException:
+        if held.get("unclear"):
+            raise  # the credit may have landed: the hold and the approval stay spent
         if held.get("return_id"):
             _release_order_refund(held["order_id"], held["return_id"])
         if held.get("approval_request_id"):
@@ -3929,7 +3992,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # return under this number). Refused -> nothing recorded, retryable.
     credit_note_number: Optional[str] = None
     if float(gst_view.get("tax") or 0) > 0 or float(gst_view.get("taxable") or 0) > 0:
-        _closed = _credit_note_window_closed(order or {}) if (order or {}).get("invoice_number") else None
+        _closed = _credit_note_window_closed(order or {})
         # A store-credit leg needs a customer record to carry it: refused
         # BEFORE a number is taken (no number written off for nothing).
         _gives_credit = body.return_type == "CREDIT_NOTE" or any(
@@ -3976,6 +4039,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         reason: str,
         gross: Optional[float] = None,
         fee: Optional[float] = None,
+        note_amount: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Issue store credit and FAIL LOUD if no ledger row lands.
 
@@ -3995,6 +4059,10 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         that made the stamped tax vanish at fee 900 and go negative at fee
         1500 (reports.py SUBTRACTS the CDNR from hsn_by_rate, so a negative
         tax ADDS to the bucket)."""
+        # ONE credit note per return: a mixed-tender RETURN's note reverses
+        # the WHOLE return's tax (note_amount), its balance moves by the
+        # store-credit leg only (balance_delta).
+        _note = round(float(note_amount), 2) if note_amount is not None else round(amount, 2)
         rate = float(gst_view.get("gst_rate") or 0)
         # What was PAID for the returned goods = the lines' gross plus the
         # bill's round off this return carries. The credited share of it takes
@@ -4003,37 +4071,56 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # exactly the old split.
         _view_gross = float(gst_view.get("gross") or 0.0) + refund_round_off
         _view_tax = float(gst_view.get("tax") or 0.0)
-        tax = round(_view_tax * (amount / _view_gross), 2) if _view_gross > 0 else 0.0
+        tax = round(_view_tax * (_note / _view_gross), 2) if _view_gross > 0 else 0.0
         _ro_share = (
-            round(refund_round_off * (amount / _view_gross), 2)
+            round(refund_round_off * (_note / _view_gross), 2)
             if _view_gross > 0
             else 0.0
         )
-        taxable = round(amount - tax - _ro_share, 2)
-        entry = _issue_store_credit(
-            customer_id,
-            amount,
-            reason=reason,
-            ref=return_id,
-            current_user=current_user,
-            gross=gross if gross is not None else round(amount, 2),
-            restocking_fee=fee,
-            taxable=taxable,
-            tax=tax,
-            gst_rate=rate or None,
-            interstate=(
-                order.get("interstate")
-                if isinstance(order.get("interstate"), bool)
-                else None
-            ),
-            # The ORDER's store: the credit note reverses under the GSTIN the
-            # sale was filed under, not the counter it was processed at.
-            store_id=store_id,
-            note_number=credit_note_number,
-            # Ties the credit to its order before this return's doc lands
-            # (shopify_refund._given_back_elsewhere reads it).
-            order_id=resolved_order_id,
-        )
+        taxable = round(_note - tax - _ro_share, 2)
+        try:
+            entry = _issue_store_credit(
+                customer_id,
+                _note,
+                reason=reason,
+                ref=return_id,
+                current_user=current_user,
+                gross=gross if gross is not None else _note,
+                restocking_fee=fee,
+                taxable=taxable,
+                tax=tax,
+                gst_rate=rate or None,
+                interstate=(
+                    order.get("interstate")
+                    if isinstance(order.get("interstate"), bool)
+                    else None
+                ),
+                # The ORDER's store: the credit note reverses under the GSTIN the
+                # sale was filed under, not the counter it was processed at.
+                store_id=store_id,
+                note_number=credit_note_number,
+                # Ties the credit to its order before this return's doc lands
+                # (shopify_refund._given_back_elsewhere reads it).
+                order_id=resolved_order_id,
+                balance_delta=round(amount, 2) if note_amount is not None else None,
+                settlement="PARTIAL" if note_amount is not None and round(amount, 2) < _note else None,
+                entry_id=f"{return_id}:credit",
+                undo_on_void={
+                    "order_id": resolved_order_id,
+                    "return_id": held.get("return_id"),
+                    "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
+                               "product_id": d["orig_line"].get("product_id"),
+                               "qty": float(d["ret_line"].return_qty)} for d in claimed],
+                },
+            )
+        except CreditNotConfirmed:
+            # It may already be on the balance: keep the unit claims and the
+            # refund hold (a redo is refused), keep the number (the line owns
+            # it), and the reconciler settles the line -- undoing the claims
+            # if it never landed. Never 'nothing was recorded'.
+            held["unclear"] = True
+            _keep_order_refund_hold(resolved_order_id, held.get("return_id"))
+            raise HTTPException(status_code=503, detail=CREDIT_UNCONFIRMED_MESSAGE)
         if entry is None:
             # Release the qty claim so the return stays retryable, then say so.
             for done in claimed:
@@ -4087,6 +4174,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             credit_entry = _issue_credit_or_fail(
                 _non_drawer_total,
                 reason=f"Refund {return_id} - non-drawer tender portion",
+                note_amount=net_amount,
             )
             credit_amount = _non_drawer_total
 
@@ -4953,8 +5041,11 @@ def _credit_note_window_closed(order: Dict[str, Any]) -> Optional[str]:
 
     from ..utils.ist import ist_date_str_from_stored, ist_today
 
-    for value in (order.get("invoice_date"), order.get("created_at")):
-        day = ist_date_str_from_stored(value) if value else ""
+    values = [v for v in (order.get("invoice_date"), order.get("created_at")) if v]
+    if not values:
+        return None  # no date on the order at all (never a stored IMS order): nothing to check
+    for value in values:
+        day = ist_date_str_from_stored(value)
         try:
             y, m = int(day[:4]), int(day[5:7])
             _date(y, m, 1)

@@ -10,6 +10,8 @@ vi.mock('../../../services/api', () => ({
   policiesApi: { getAll: vi.fn(), set: vi.fn() },
 }));
 vi.mock('../../../components/settings/ApprovalPinSection', () => ({ ApprovalPinSection: () => null }));
+const auth = { user: { roles: ['SUPERADMIN'] } as { roles: string[] } };
+vi.mock('../../../context/AuthContext', () => ({ useAuth: () => auth }));
 
 import { policiesApi } from '../../../services/api';
 import { RefundPolicySection } from '../RefundPolicyPage';
@@ -40,6 +42,15 @@ describe('Refund policy save', () => {
     // Round 9: the switch is the owner's (Superadmin-only) -- an unchanged
     // switch is never written, so an Admin's save can never touch it.
     expect(set.mock.calls.find((c) => c[0] === 'refund.matrix_enabled')).toBeUndefined();
+  });
+
+  it('lets only a Superadmin touch the saved-matrix switch', async () => {
+    getAll.mockResolvedValue({ policies: {} } as any);
+    auth.user = { roles: ['ADMIN'] };
+    render(<RefundPolicySection />);
+    const sw = await screen.findByRole('switch', { name: /saved stricter refund matrix/ });
+    expect((sw as HTMLButtonElement).disabled).toBe(true);
+    auth.user = { roles: ['SUPERADMIN'] };
   });
 
   it('shows the real rule: Rs 2,000 per bill, ON, no dead amount bands', async () => {

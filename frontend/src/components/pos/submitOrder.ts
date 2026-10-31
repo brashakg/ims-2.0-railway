@@ -16,7 +16,7 @@ import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
 import { orderLinesOf, refreshBillQuote } from './billQuote';
 import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
-import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
+import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 
 // The order-line vocabulary lives with the line builder the quote shares.
 export { mapCategory } from './billQuote';
@@ -249,10 +249,16 @@ export async function submitPosOrder(
         }
       } catch (e) {
         const why = serverReason(e);
-        loyaltyWarning =
-          `Loyalty redeem failed${why ? ` (${why})` : ''} — points were NOT debited, and ` +
-          `₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} is still due on the order. ` +
-          `Collect it another way.`;
+        const status = getErrorStatus(e);
+        const refused = status !== undefined && status >= 400 && status < 500;
+        loyaltyWarning = refused
+          ? `Loyalty redeem failed${why ? ` (${why})` : ''} — points were NOT debited, and ` +
+            `₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} is still due on the order. ` +
+            `Collect it another way.`
+          // No refusal came back: the burn may have landed. Never claim it did not.
+          : `The loyalty redeem could not be confirmed — check the customer's points before collecting ` +
+            `₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} another way. If the points ` +
+            `were taken, ask an admin to record the loyalty payment on this order.`;
       }
       store.clearPendingLoyaltyRedeem();
     }

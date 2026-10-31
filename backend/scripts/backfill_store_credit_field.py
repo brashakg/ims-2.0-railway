@@ -49,7 +49,10 @@ def plan(db) -> dict:
     "negative": [(customer_id, total)], "non_numeric": [(customer_id, value)]}
     -- reads only. ``non_numeric``: a store_credit that is not a number (a
     string, say) -- the $inc refuses it, so it is a stop before deploy."""
-    sets, unapplied, negative = [], [], []
+    sets, unapplied, negative, bad_delta = [], [], [], []
+    void_numbered = []
+    scanned = {"customers": db["customers"].count_documents({}),
+               "ledger_rows": db["credit_note_ledger"].count_documents({})}
     non_numeric = [
         (c.get("customer_id"), c.get("store_credit"))
         for c in db["customers"].find({})  # ponytail: one pass; fine at shop scale
@@ -62,18 +65,29 @@ def plan(db) -> dict:
             continue
         refs = set(cust.get("store_credit_refs") or [])
         balance = 0.0
+        broken = False
         for r in db["credit_note_ledger"].find({"customer_id": cid}):
             if r.get("applied") is False and r.get("entry_id") not in refs:
-                unapplied.append(cid)  # its own door applies it later, once
+                if r.get("type") == "VOID" and r.get("note_number"):
+                    void_numbered.append(cid)  # never finishes: a new return is needed
+                else:
+                    unapplied.append(cid)  # ISSUING / numberless: its door finishes it, once
                 continue
-            balance += float(r.get("delta") or 0)
+            try:
+                balance += float(r.get("delta") or 0)
+            except (TypeError, ValueError):
+                bad_delta.append((cid, r.get("entry_id"), r.get("delta")))
+                broken = True
+        if broken:
+            continue
         balance = round(balance, 2)
         if balance < 0:
             negative.append((cid, balance))
             continue
         sets.append((cid, balance))
     return {"sets": sets, "unapplied_left": sorted(set(unapplied)), "negative": negative,
-            "non_numeric": non_numeric}
+            "non_numeric": non_numeric, "non_numeric_delta": bad_delta,
+            "void_numbered": sorted(set(void_numbered)), "scanned": scanned}
 
 
 def apply(db, sets, backup_path: str) -> int:
@@ -103,6 +117,8 @@ def revert(db, backup_path: str) -> int:
             {"customer_id": cust["customer_id"], "store_credit": cust.get("store_credit_backfill_value")},
             {"$unset": {"store_credit": "", "store_credit_backfill_value": "", "store_credit_backfilled_at": ""}})
         done += int(getattr(res, "modified_count", 0) or 0)
+    if done < len(ids):
+        print(f"[SKIPPED] {len(ids) - done} (balance moved since the backfill, or never set by it - fix forward)")
     return done
 
 
@@ -130,22 +146,35 @@ def main() -> int:
         print(f"[REVERTED] {revert(db, args.revert)} customers")
         return 0
     out = plan(db)
+    print(f"[SCANNED] customers: {out['scanned']['customers']}; credit ledger rows: "
+          f"{out['scanned']['ledger_rows']} (0 and 0 means the wrong or an empty database)")
     nonzero = [(c, b) for c, b in out["sets"] if b]
     print(f"[PLAN] customers without a store_credit field: {len(out['sets'])} ({len(nonzero)} with a ledger balance)")
     for cid, bal in nonzero:
         print(f"  {cid}: Rs {bal:.2f}")
     if out["unapplied_left"]:
-        print(f"[UNAPPLIED] {len(out['unapplied_left'])} customer(s) hold a credit row left out of the sum "
-              "(unfinished or voided - its own door finishes it, once): " + ", ".join(out["unapplied_left"]))
+        print(f"[UNAPPLIED] {len(out['unapplied_left'])} customer(s) hold an unfinished credit row left out of "
+              "the sum (its own door finishes it on the next press, once): " + ", ".join(out["unapplied_left"]))
+    if out["void_numbered"]:
+        print(f"[VOIDED] {len(out['void_numbered'])} customer(s) hold a voided credit note that never moved "
+              "money (a new return is needed if credit is owed): " + ", ".join(out["void_numbered"]))
+    if out["non_numeric_delta"]:
+        print(f"[BAD-DELTA] {len(out['non_numeric_delta'])} ledger row(s) with a non-numeric delta - those "
+              "customers were left out; fix by hand: "
+              + ", ".join(f"{c} row {e} ({d!r})" for c, e, d in out["non_numeric_delta"]))
     if out["non_numeric"]:
         print(f"[NON-NUMERIC] {len(out['non_numeric'])} customer(s) whose store_credit is not a number - STOP, "
               "fix each by hand before the deploy: " + ", ".join(f"{c} ({v!r})" for c, v in out["non_numeric"]))
     if out["negative"]:
         print(f"[REFUSED] {len(out['negative'])} customer(s) with a NEGATIVE ledger total, not set - check by hand: "
               + ", ".join(f"{c} (Rs {b:.2f})" for c, b in out["negative"]))
+    stop = bool(out["non_numeric"] or out["negative"] or out["non_numeric_delta"])
     if not args.apply:
         print("[DRY RUN] nothing written. Re-run with --apply.")
-        return 0
+        return 2 if stop else 0
+    if stop:
+        print("[STOPPED] fix the customers listed above first - nothing was written. (exit 2)")
+        return 2
     n = apply(db, out["sets"], args.backup)
     print(f"[APPLIED] set {n} customers; backup of the rows before: {args.backup}")
     if n < len(out["sets"]):

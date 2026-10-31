@@ -43,6 +43,7 @@ def plan(db) -> dict:
     "no_order": n} -- reads only. ``unbacked``: LOYALTY payments no burn
     backs (no linked row, and none still claimable)."""
     links, unmatched, used = [], 0, set()
+    unmatched_rows, legacy = [], []
     txns = db["loyalty_transactions"]
     unclaimed = {"type": "REDEEM", "order_id": {"$nin": [None, ""]}, "tender_payment_id": None}
     for row in txns.find(unclaimed):
@@ -60,6 +61,10 @@ def plan(db) -> dict:
             links.append((row["txn_id"], hit))
         else:
             unmatched += 1
+            due = order.get("balance_due")
+            unmatched_rows.append((row["txn_id"], row.get("order_id"), due))
+            if due is not None and float(due or 0) <= 0.01:
+                legacy.append(row["txn_id"])  # a settled bill: never claimable again
     claimed = {r.get("tender_payment_id") for r in txns.find({"type": "REDEEM", "tender_payment_id": {"$ne": None}})}
     unbacked = []
     for order in db["orders"].find({}):  # ponytail: one pass over all orders; fine at shop scale
@@ -67,11 +72,21 @@ def plan(db) -> dict:
             if str(p.get("method") or "").upper() == "LOYALTY" and p.get("payment_id") not in used | claimed:
                 unbacked.append((order.get("order_id"), p.get("payment_id"), p.get("amount"), p.get("reference")))
     no_order = txns.count_documents({"type": "REDEEM", "order_id": {"$in": [None, ""]}})
-    return {"links": links, "unmatched": unmatched, "unbacked": unbacked, "no_order": no_order}
+    scanned = {"redeem_rows": txns.count_documents({"type": "REDEEM"}),
+               "orders": db["orders"].count_documents({})}
+    return {"links": links, "unmatched": unmatched, "unbacked": unbacked, "no_order": no_order,
+            "unmatched_rows": unmatched_rows, "legacy": legacy, "scanned": scanned}
 
 
-def apply(db, links, backup_path: str) -> int:
+LEGACY_CLAIM = "LEGACY-PRE-1088"
+
+
+def apply(db, links, backup_path: str, legacy=()) -> int:
+    """Link each burn to its payment; stamp an unmatched burn on a SETTLED
+    bill (balance_due 0) LEGACY-PRE-1088 so no later tender can claim it.
+    Both carry tender_backfilled_at, so --revert undoes them exactly."""
     txns = db["loyalty_transactions"]
+    links = list(links) + [(t, LEGACY_CLAIM) for t in legacy]
     ids = [t for t, _ in links]
     rows = list(txns.find({"txn_id": {"$in": ids}}, {"_id": 0}))
     os.makedirs(os.path.dirname(backup_path) or ".", exist_ok=True)
@@ -124,16 +139,21 @@ def main() -> int:
         return 0
     out = plan(db)
     print(f"[PLAN] redemptions to link: {len(out['links'])}; with no matching payment (left alone): {out['unmatched']}")
+    print(f"[SCANNED] REDEEM rows: {out['scanned']['redeem_rows']}; orders: {out['scanned']['orders']} "
+          "(0 and 0 means the wrong or an empty database)")
     print(f"[PLAN] redemptions with no order (inert, never claimable): {out['no_order']}")
+    for txn_id, oid, due in out["unmatched_rows"]:
+        print(f"  [UNMATCHED] burn {txn_id} on order {oid}, balance due {due}"
+              + (" -> stamped LEGACY-PRE-1088 on --apply (settled bill)" if txn_id in out["legacy"] else ""))
     for oid, pid, amt, ref in out["unbacked"]:
         print(f"  [UNBACKED] order {oid} payment {pid} Rs {amt} ref {ref!r}")
     if not args.apply:
         print("[DRY RUN] nothing written. Re-run with --apply.")
         return 0
-    n = apply(db, out["links"], args.backup)
+    n = apply(db, out["links"], args.backup, out["legacy"])
     print(f"[APPLIED] linked {n} redemptions; backup of the rows before: {args.backup}")
-    if n < len(out["links"]):
-        print(f"[SKIPPED] {len(out['links']) - n} (claimed by a live payment between plan and apply - "
+    if n < len(out["links"]) + len(out["legacy"]):
+        print(f"[SKIPPED] {len(out['links']) + len(out['legacy']) - n} (claimed by a live payment between plan and apply - "
               "re-run the dry run: it must show 0 to link)")
     return 0
 

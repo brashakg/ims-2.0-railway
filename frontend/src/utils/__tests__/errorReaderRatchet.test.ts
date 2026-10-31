@@ -24,7 +24,6 @@ const KNOWN_READERS: Record<string, number> = {
   'components/orders/SuperadminOrderEditModal.tsx': 1,
   'components/pos/LoyaltyRedeemControl.tsx': 2,
   'pages/finance/expenses/DaySettlementSection.tsx': 1,
-  'pages/orders/ReturnsPage.tsx': 2,
   'pages/pos/next/BillingSurface.tsx': 1,
   'pages/pos/next/CustomerPanel.tsx': 1,
   'pages/pos/next/DeliverySurface.tsx': 1,
