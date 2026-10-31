@@ -10,8 +10,9 @@ import { useAuth } from '../../../context/AuthContext';
 import { useToast } from '../../../context/ToastContext';
 import { expensesApi, type PettyCashBalance } from '../../../services/api/expenses';
 import { formatDateIST } from '../../../utils/datetime';
-import { fc, useExpensesContext, type ApiError } from './expenseShared';
+import { fc, useExpensesContext } from './expenseShared';
 import { Labeled } from './expenseWidgets';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 export function PettyCashFloatSection() {
   const { user } = useAuth();
@@ -61,9 +62,7 @@ export function PettyCashFloatSection() {
       setShowFloatModal(null); setFloatAmount(''); setFloatReason('');
       await loadFloat();
     } catch (err) {
-      const e = err as ApiError;
-      const d = e?.response?.data?.detail;
-      toast.error(typeof d === 'string' ? d : 'Float update failed');
+      toast.error(getErrorMessage(err, 'Float update failed'));
     } finally {
       setSaving(false);
     }

@@ -19,7 +19,8 @@ import {
 import { useToast } from '../../../context/ToastContext';
 import { useAuth } from '../../../context/AuthContext';
 import { byPerson } from '../purchaseTypes';
-import { inr, errMsg, APPROVE_ROLES, rcmNote } from './shared';
+import { inr, APPROVE_ROLES, rcmNote } from './shared';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 // ============================================================================
 // Phase 2 - 3-way match: badge + valuation/tolerance note + detail drawer
@@ -254,7 +255,7 @@ export function InvoiceDetailDrawer({
       onChanged({ purchase_invoice_id: id, match_status: newStatus, exception_override: res.exception_override });
       toast.success('Exception approved - invoice released for payment');
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to approve the exception'));
+      toast.error(getErrorMessage(e, 'Failed to approve the exception'));
     } finally {
       setApproving(false);
     }

@@ -24,6 +24,7 @@ import { COST_ROLES } from '../../components/common/CostCell';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { istDayString } from '../../utils/datetime';
+import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
 import { AttachmentZone } from './AttachmentZone';
 import { SupplierFormModal } from './SupplierFormModal';
 import { heldLinesSummary, reportGrnAccept } from './grnAcceptToast';
@@ -56,8 +57,7 @@ const istToday = () => istDayString(new Date()) ?? '';
 
 /** The FastAPI detail off the error the api client delivers (an ApiError). */
 function apiDetail(err: unknown): unknown {
-  if (err instanceof ApiError) return err.detail ?? err.message;
-  return err instanceof Error ? err.message : undefined;
+  return getErrorDetail(err) ?? (getErrorMessage(err, '') || undefined);
 }
 
 interface Success {
@@ -307,9 +307,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
             ? detail
             : is409
               ? 'Refused - this receipt may already exist. Check "Receipts still waiting"; do not submit it again.'
-              : err instanceof Error && err.message
-                ? err.message
-                : 'Could not save the receipt - try again.'),
+              : getErrorMessage(err, 'Could not save the receipt - try again.')),
         12000,
       );
     }

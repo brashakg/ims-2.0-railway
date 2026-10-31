@@ -12,6 +12,7 @@ import { hrApi } from '../../services/api';
 import type { Shift } from '../../services/api/hr';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Python weekday() convention: Monday=0 .. Sunday=6.
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
@@ -86,7 +87,7 @@ export function ShiftSetup() {
       setName('');
       await loadShifts();
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Failed to create shift');
+      toast.error(getErrorMessage(err, 'Failed to create shift'));
     } finally {
       setSaving(false);
     }
@@ -103,7 +104,7 @@ export function ShiftSetup() {
       toast.success('Shift assigned to employee');
       setAssignEmployeeId('');
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Failed to assign shift');
+      toast.error(getErrorMessage(err, 'Failed to assign shift'));
     } finally {
       setAssigningFor(null);
     }

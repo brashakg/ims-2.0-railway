@@ -22,6 +22,7 @@ import { tasksApi } from '../../services/api';
 import { adminStoreApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type PCode = 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
 
@@ -260,8 +261,7 @@ export function NewTaskModal({
       onClose();
       onCreated();
     } catch (e) {
-      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-      toast.error(typeof msg === 'string' ? msg : 'Failed to create task');
+      toast.error(getErrorMessage(e, 'Failed to create task'));
     } finally {
       setSubmitting(false);
     }

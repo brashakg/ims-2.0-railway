@@ -18,6 +18,7 @@ import {
   type Segment,
   type ScheduleKind,
 } from '../../services/api/marketing';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Templates the backend sender knows how to populate (notification_service.TEMPLATES).
 const TEMPLATE_OPTIONS: { id: string; label: string }[] = [
@@ -714,13 +715,6 @@ function ActionButton({
   );
 }
 
-function extractErr(e: unknown): string | null {
-  if (typeof e === 'object' && e !== null) {
-    const anyE = e as { response?: { data?: { detail?: unknown } } };
-    const detail = anyE.response?.data?.detail;
-    if (typeof detail === 'string') return detail;
-  }
-  return null;
-}
+const extractErr = (e: unknown): string | null => getErrorMessage(e, '') || null;
 
 export default CampaignManager;

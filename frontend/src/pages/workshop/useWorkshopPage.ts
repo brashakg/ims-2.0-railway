@@ -18,9 +18,10 @@ import type { LabelModalSpec } from '../../components/labels/LabelPreviewModal';
 import { printJobLabel } from '../../components/labels/printLabel';
 import { resolveStoreIdentity } from '../../components/print/storeIdentity';
 import type { LensFittingFormValue } from '../../components/pos/LensFittingFormModal';
-import { resolveItemPrescriptionId, backendMessage } from './qcHandover';
+import { resolveItemPrescriptionId, dcHardlockMessage } from './qcHandover';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import type { Job, LensStatus } from './shared';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 export function useWorkshopPage() {
   const { user } = useAuth();
@@ -82,7 +83,7 @@ export function useWorkshopPage() {
       setSelectedJob(null);
       await loadJobs();
     } catch (err) {
-      toast.error(backendMessage(err, 'Failed to save fitting details'));
+      toast.error(getErrorMessage(err, 'Failed to save fitting details'));
     } finally {
       setFittingSaving(false);
     }
@@ -269,19 +270,15 @@ const loadJobs = async () => {
       }
     } catch (err: any) {
       // F9 — surface the DC hardlock as an actionable banner inside the modal.
-      const detail = err?.response?.data?.detail;
-      const code = typeof detail === 'object' ? detail?.code : undefined;
-      if (code === 'DC_HARDLOCK' || code === 'DC_HARDLOCK_OVERRIDE_FORBIDDEN') {
-        setDcHardlock(
-          (typeof detail === 'object' && detail?.message) ||
-            'No Delivery Challan logged for this lens.',
-        );
+      const hardlock = dcHardlockMessage(err);
+      if (hardlock) {
+        setDcHardlock(hardlock);
       } else {
         // The create-time Rx 422s (unknown / WRONG-PATIENT / expired) return a
         // plain-string detail. The wrong-patient sentence and the "a Store
         // Manager must approve" instruction are the most important strings this
         // screen can show — a generic toast hid both and left staff retrying.
-        toast.error(typeof detail === 'string' ? detail : 'Failed to create workshop job');
+        toast.error(getErrorMessage(err, 'Failed to create workshop job'));
       }
     } finally {
       setCreateLoading(false);
@@ -324,7 +321,7 @@ const loadJobs = async () => {
       // only true if we actually render it. A bare catch turned every refusal
       // into "Failed to update job status", which reads like a server fault and
       // sends staff hunting for a manager instead of running QC.
-      toast.error(backendMessage(err, 'Failed to update job status'));
+      toast.error(getErrorMessage(err, 'Failed to update job status'));
     }
   };
 
@@ -401,8 +398,7 @@ const loadJobs = async () => {
         }
       }
     } catch (err) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        ?? 'Failed to record QC';
+      const msg = getErrorMessage(err, 'Failed to record QC');
       toast.error(msg);
     } finally {
       setQcBusy(false);
@@ -453,8 +449,7 @@ const loadJobs = async () => {
       setSelectedJob(null);
       await loadJobs();
     } catch (err) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        ?? 'Failed to send job for rework';
+      const msg = getErrorMessage(err, 'Failed to send job for rework');
       toast.error(msg);
     } finally {
       setQcBusy(false);
@@ -471,8 +466,7 @@ const loadJobs = async () => {
       setSelectedJob(null);
       await loadJobs();
     } catch (err) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
-        ?? 'Failed to update lens status';
+      const msg = getErrorMessage(err, 'Failed to update lens status');
       toast.error(msg);
     } finally {
       setLensBusy(false);

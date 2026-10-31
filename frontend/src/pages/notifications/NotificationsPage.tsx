@@ -10,6 +10,7 @@ import { useToast } from '../../context/ToastContext';
 import { notificationsApi, MAX_SNOOZE, type AppNotification } from '../../services/api/notifications';
 import { formatDateTimeIST, toDate } from '../../utils/datetime';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type Filter = 'all' | 'unread';
 
@@ -75,7 +76,7 @@ export function NotificationsPage() {
       setSnoozeFor(null); setCustomTime('');
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Failed to snooze');
+      toast.error(getErrorMessage(e, 'Failed to snooze'));
     }
   };
 

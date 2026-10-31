@@ -13,6 +13,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { policiesApi } from '../../services/api';
 import type { PolicySpecPublic, PolicyEffective } from '../../services/api';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const SOURCE_TINT: Record<string, string> = {
   store: 'bg-blue-50 text-blue-700',
@@ -113,7 +114,7 @@ export function PolicySchemaForm({ storeId }: { storeId?: string }) {
       setEffective((prev) => ({ ...prev, [spec.key]: res }));
       toast.success(`${spec.label} saved (${res.source})`);
     } catch (err: any) {
-      const msg = err?.response?.data?.detail || (err instanceof SyntaxError ? 'Invalid JSON' : 'Save failed');
+      const msg = getErrorMessage(err, err instanceof SyntaxError ? 'Invalid JSON' : 'Save failed');
       toast.error(msg);
     } finally {
       setSavingKey(null);
@@ -128,7 +129,7 @@ export function PolicySchemaForm({ storeId }: { storeId?: string }) {
       setEdits((prev) => ({ ...prev, [spec.key]: spec.secret ? '' : toDisplay(spec, res.value) }));
       toast.success(`${spec.label} override cleared`);
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Clear failed');
+      toast.error(getErrorMessage(err, 'Clear failed'));
     } finally {
       setSavingKey(null);
     }

@@ -9,6 +9,7 @@ import { useEffect, useState } from 'react';
 import { AlertTriangle, Download, Loader2, Wrench } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
 import { exportToCSV } from '../../../utils/exportUtils';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getWorkshopProductivity>>;
 
@@ -41,7 +42,7 @@ export function WorkshopProductivityCard({ storeId }: { storeId?: string }) {
     reportsApi
       .getWorkshopProductivity(storeId, fromDate, toDate)
       .then(setData)
-      .catch((e) => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch((e) => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   };
 

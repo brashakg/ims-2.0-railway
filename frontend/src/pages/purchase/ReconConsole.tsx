@@ -44,6 +44,7 @@ import { PurchaseShopPicker, usePurchaseShop } from './purchaseShop';
 import { useToast } from '../../context/ToastContext';
 import type { UserRole } from '../../types';
 import { COST_ROLES } from '../../components/common/CostCell';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -319,11 +320,7 @@ function ApproveExceptionModal({
       });
       toast.success('Exception approved — invoice released for payment');
     } catch (e) {
-      const msg =
-        e && typeof e === 'object' && 'response' in e
-          ? ((e as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? '')
-          : e instanceof Error ? e.message : '';
-      toast.error(msg || 'Failed to approve the exception');
+      toast.error(getErrorMessage(e, 'Failed to approve the exception'));
     } finally {
       setSaving(false);
     }
@@ -1142,10 +1139,7 @@ export default function ReconConsole() {
           return next;
         });
       } catch (err) {
-        failures[id] =
-          err && typeof err === 'object' && 'response' in err
-            ? String((err as { response?: { data?: { detail?: string } } }).response?.data?.detail ?? 'Failed')
-            : err instanceof Error ? err.message : 'Failed';
+        failures[id] = getErrorMessage(err, 'Failed');
         console.error(err);
       } finally {
         setSavingIds((prev) => {

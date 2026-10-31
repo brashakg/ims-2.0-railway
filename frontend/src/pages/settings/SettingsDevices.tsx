@@ -24,6 +24,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { devicesApi } from '../../services/api/devices';
 import type { LoginDevice } from '../../services/api/devices';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 const MODE_COPY: Record<string, { label: string; tone: string; blurb: string }> = {
   off: {
@@ -82,7 +83,7 @@ export default function SettingsDevices() {
       setDevices(data.devices);
     } catch (e: any) {
       setError(
-        e?.response?.status === 403
+        getErrorStatus(e) === 403
           ? 'Only the Superadmin can view and approve login devices.'
           : 'Could not load devices. Pull to refresh or tap Retry.'
       );

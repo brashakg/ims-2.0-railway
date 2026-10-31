@@ -21,22 +21,11 @@ import { useToast } from '../../context/ToastContext';
 import { PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
 import { PurchaseShopField, usePurchaseShopNamer } from '../purchase/invoices/InvoiceFormDrawer';
 import { istDayString } from '../../utils/datetime';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const inr = (n?: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
 const AP_BUCKETS = ['current', '1_30', '31_60', '61_90', '90_plus'];
 const AP_LABELS: Record<string, string> = { current: 'Current', '1_30': '1-30d', '31_60': '31-60d', '61_90': '61-90d', '90_plus': '90+ d' };
-
-function errMsg(e: unknown, fb: string) {
-  if (e && typeof e === 'object' && 'response' in e) {
-    const r = (e as { response?: { data?: { detail?: string | { message?: string } } } }).response;
-    const d = r?.data?.detail;
-    // Structured refusals ({code, message}) carry their text in .message —
-    // rendering the raw object printed "[object Object]" in the toast.
-    if (typeof d === 'string') return d;
-    if (d && typeof d === 'object' && d.message) return d.message;
-  }
-  return e instanceof Error ? e.message : fb;
-}
 
 type Tab = 'overview' | 'forecast' | 'aging';
 
@@ -63,7 +52,7 @@ export default function CashFlowPage() {
       ]);
       setDash(d); setForecast(f); setAging(a);
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to load cash-flow'));
+      toast.error(getErrorMessage(e, 'Failed to load cash-flow'));
     } finally { setLoading(false); }
   }, [toast, openingCash]);
 
@@ -353,7 +342,7 @@ function VendorLedgerDrawer({ vendorId, vendorName, onClose, onChanged }: { vend
   const load = useCallback(async () => {
     setLoading(true);
     try { setLedger(await vendorApApi.ledger(vendorId)); }
-    catch (e) { toast.error(errMsg(e, 'Failed to load ledger')); }
+    catch (e) { toast.error(getErrorMessage(e, 'Failed to load ledger')); }
     finally { setLoading(false); }
   }, [vendorId, toast]);
   useEffect(() => { load(); }, [load]);
@@ -637,7 +626,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
         toast.success(bookedTo('Debit note', saved, shopName));
       }
       onSaved();
-    } catch (e) { toast.error(errMsg(e, 'Failed to record')); }
+    } catch (e) { toast.error(getErrorMessage(e, 'Failed to record')); }
     finally { setSaving(false); }
   };
 
@@ -812,7 +801,7 @@ function ServicesBillsCredit({ vendorId, refreshKey }: { vendorId: string; refre
       const saved = await vendorApApi.setItcBlocked(vendorId, bill.bill_id, blocked);
       setBills((rows) => rows.map((b) => (b.bill_id === bill.bill_id ? { ...b, ...saved } : b)));
       toast.success(blocked ? `Bill ${bill.bill_number}: GST credit not claimed (17(5))` : `Bill ${bill.bill_number}: GST credit claimable again`);
-    } catch (e) { toast.error(errMsg(e, 'Could not change the bill')); }
+    } catch (e) { toast.error(getErrorMessage(e, 'Could not change the bill')); }
     finally { setBusy(''); }
   };
   return (

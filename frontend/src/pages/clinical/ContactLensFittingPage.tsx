@@ -27,6 +27,7 @@ import { customerApi, prescriptionApi } from '../../services/api';
 import { RxPowerInput, type RxPowerKind } from '../../components/clinical/RxPowerInput';
 import { formatPowerOrDash } from '../../utils/rxPowerValue';
 import { validateEyeDetailed } from '../../constants/rxLimits';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Kept in sync with backend prescriptions.CL_MODALITIES.
 const MODALITIES = ['DAILY', 'FORTNIGHTLY', 'MONTHLY', 'QUARTERLY', 'YEARLY', 'COLOR'] as const;
@@ -197,8 +198,7 @@ export function ContactLensFittingPage() {
       resetForm();
       loadFittings(selected.id);
     } catch (err: any) {
-      const detail = err?.response?.data?.detail;
-      toast.error(typeof detail === 'string' ? detail : 'Could not save the fitting');
+      toast.error(getErrorMessage(err, 'Could not save the fitting'));
     } finally {
       setSubmitting(false);
     }

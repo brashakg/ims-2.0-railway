@@ -20,6 +20,7 @@ import { Link } from 'react-router-dom';
 import { RefreshCw, Save, Loader2, Plus, X, Info, ExternalLink } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { policiesApi } from '../../services/api/settings';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const K_ENABLED = 'shopify.live_sync.enabled';
 const K_SLOTS = 'shopify.live_sync.slots';
@@ -120,7 +121,7 @@ export function ShopifyLiveSyncSection() {
       toast.success('Shopify live sync settings saved. The scheduler reads them on its next tick.');
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Failed to save live sync settings');
+      toast.error(getErrorMessage(e, 'Failed to save live sync settings'));
     } finally {
       setSaving(false);
     }

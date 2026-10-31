@@ -17,14 +17,7 @@ import { vendorsApi, type VarianceLine } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { usePurchaseShop } from './purchaseShop';
-
-function errMsg(e: unknown, fb: string): string {
-  if (e && typeof e === 'object' && 'response' in e) {
-    const r = (e as { response?: { data?: { detail?: string } } }).response;
-    if (r?.data?.detail) return String(r.data.detail);
-  }
-  return e instanceof Error ? e.message : fb;
-}
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const inr = (n?: number | null) =>
   n == null ? '-' : `₹${(Math.round(n * 100) / 100).toLocaleString('en-IN')}`;
@@ -61,7 +54,7 @@ export function PurchaseVarianceTab() {
       const res = await vendorsApi.getVarianceReport(storeId ? { store_id: storeId } : {});
       setRows(res?.lines ?? []);
     } catch (e) {
-      setError(errMsg(e, 'Failed to load the variance report'));
+      setError(getErrorMessage(e, 'Failed to load the variance report'));
       setRows([]);
     } finally {
       setLoading(false);
@@ -221,7 +214,7 @@ function DismissModal({
         onDismissed();
       }
     } catch (e) {
-      toast.error(errMsg(e, 'Failed to dismiss the variance'));
+      toast.error(getErrorMessage(e, 'Failed to dismiss the variance'));
     } finally {
       setSaving(false);
     }

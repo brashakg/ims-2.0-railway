@@ -55,6 +55,7 @@ import OnlineStoreSyncBanner, {
 import { Pagination } from '../../components/common/Pagination';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const PAGE_SIZE = 50;
 
@@ -299,7 +300,7 @@ export default function OnlineProductsPage() {
       bannerRef.current?.refresh();
     } catch (e: any) {
       toast.error(
-        `${row.title}: push failed — ${e?.response?.data?.detail || e?.message || 'error'}`,
+        `${row.title}: push failed — ${getErrorMessage(e, 'error')}`,
       );
     } finally {
       setPushingId(null);
@@ -327,7 +328,7 @@ export default function OnlineProductsPage() {
       bannerRef.current?.refresh();
     } catch (e: any) {
       toast.error(
-        `${row.title}: take-down failed — ${e?.response?.data?.detail || e?.message || 'error'}`,
+        `${row.title}: take-down failed — ${getErrorMessage(e, 'error')}`,
       );
     } finally {
       setPushingId(null);

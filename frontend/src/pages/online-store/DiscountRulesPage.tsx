@@ -21,6 +21,7 @@ import {
   type RuleCreatePayload,
   type RecomputeResult,
 } from '../../services/api/onlineDiscountRules';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // The IMS canonical product categories a rule may target (mirrors
 // product_master._CATEGORY_SPECS; the backend validates + 400s an unknown one).
@@ -106,7 +107,7 @@ export default function DiscountRulesPage() {
       const res = await onlineDiscountRulesApi.list();
       setRules(res.rules);
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Could not load rules');
+      toast.error(getErrorMessage(e, 'Could not load rules'));
     } finally {
       setLoading(false);
     }
@@ -164,7 +165,7 @@ export default function DiscountRulesPage() {
       setModalOpen(false);
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Could not save rule');
+      toast.error(getErrorMessage(e, 'Could not save rule'));
     } finally {
       setSaving(false);
     }
@@ -184,7 +185,7 @@ export default function DiscountRulesPage() {
       else toast.success(msg);
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Could not delete rule');
+      toast.error(getErrorMessage(e, 'Could not delete rule'));
     }
   };
 
@@ -201,7 +202,7 @@ export default function DiscountRulesPage() {
       if (recomputeTouchedNothing(res.recompute)) toast.warning(msg);
       else toast.success(msg);
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Recompute failed');
+      toast.error(getErrorMessage(e, 'Recompute failed'));
     } finally {
       setRecomputing(false);
     }

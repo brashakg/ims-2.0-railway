@@ -19,6 +19,7 @@ import { inventoryApi } from '../../services/api';
 // Shop time: naive backend stamps are UTC (audit F53).
 import { formatDateIST, formatDateTimeIST } from '../../utils/datetime';
 import { StockCountScanningInterface } from '../../components/inventory/StockCountScanningInterface';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface StockAudit {
   count_id: string;
@@ -211,7 +212,7 @@ export function StockAudit() {
       // The server refuses a count with nothing counted ("nothing has been
       // counted"). Swallowing that into a generic failure hid the one message
       // the counter actually needs.
-      toast.error(err?.response?.data?.detail || 'Failed to finish the stock count');
+      toast.error(getErrorMessage(err, 'Failed to finish the stock count'));
     }
   };
 

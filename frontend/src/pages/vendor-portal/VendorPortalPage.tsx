@@ -22,6 +22,7 @@ import {
   type VendorPortalListResponse,
   type VendorPortalStatus,
 } from '../../services/api/vendorPortal';
+import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 
 // ----------------------------------------------------------------------------
 // Status taxonomy — mirrors the backend PORTAL_STATUSES set
@@ -76,9 +77,8 @@ export default function VendorPortalPage() {
       setData(resp);
     } catch (e: unknown) {
       const msg =
-        (e as { response?: { status?: number; data?: { detail?: string } } })?.response?.data?.detail ??
-        'Unable to load jobs. Token may be invalid, expired, or revoked.';
-      const status = (e as { response?: { status?: number } })?.response?.status;
+        getErrorMessage(e, 'Unable to load jobs. Token may be invalid, expired, or revoked.');
+      const status = getErrorStatus(e);
       setError(status === 401 || status === 404 ? msg : 'Network error — try again.');
       setData(null);
     } finally {
@@ -340,8 +340,7 @@ function UpdateModal({
       onSaved();
     } catch (e: unknown) {
       const detail =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Failed to save. Try again.';
+        getErrorMessage(e, 'Failed to save. Try again.');
       setErrMsg(detail);
     } finally {
       setSubmitting(false);

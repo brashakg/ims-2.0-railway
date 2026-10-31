@@ -38,6 +38,7 @@ import {
   hasCount,
   type DenomRow,
 } from '../../utils/denominations';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
@@ -126,7 +127,7 @@ export default function CashRegisterPage() {
       await load();
     } catch (e: unknown) {
       const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Could not open session');
       toast.error(msg);
     } finally {
@@ -173,7 +174,7 @@ export default function CashRegisterPage() {
       await load();
     } catch (e: unknown) {
       const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Could not close session');
       toast.error(msg);
     } finally {

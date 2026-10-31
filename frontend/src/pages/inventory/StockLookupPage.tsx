@@ -18,7 +18,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Link } from 'react-router-dom';
 import { Search, Loader2 } from 'lucide-react';
 import api from '../../services/api/client';
-import { apiDetailMessage } from '../../utils/errorHandler';
+import { getErrorMessage } from '../../utils/errorHandler';
 import { posPriceGuard } from '../../components/pos/productIntake';
 import { mapCategory } from '../../components/pos/submitOrder';
 import { useAuth } from '../../context/AuthContext';
@@ -108,7 +108,7 @@ export default function StockLookupPage() {
       </form>
 
       {error ? (
-        <p className="text-sm text-red-700">{apiDetailMessage(error, 'Could not look up stock. Try again.')}</p>
+        <p className="text-sm text-red-700">{getErrorMessage(error, 'Could not look up stock. Try again.')}</p>
       ) : q && data && items.length === 0 ? (
         <p className="text-sm text-gray-600">No product matches "{q}".</p>
       ) : items.length > 0 ? (

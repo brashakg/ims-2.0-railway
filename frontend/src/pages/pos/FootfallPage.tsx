@@ -31,6 +31,7 @@ import type {
   PerStaffCard,
   FootfallEntryStatus,
 } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const EDIT_ROLES = new Set([
   'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER',
@@ -154,7 +155,7 @@ export function FootfallPage() {
         built.map(r => [r.staff_id, r.walk_ins === null ? '' : String(r.walk_ins)]),
       ));
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load footfall';
+      const msg = getErrorMessage(e, 'Failed to load footfall');
       setError(typeof msg === 'string' ? msg : 'Failed to load footfall');
     } finally {
       setLoading(false);
@@ -183,7 +184,7 @@ export function FootfallPage() {
       toast.success('Walk-in count saved');
       await refresh();
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Save failed';
+      const msg = getErrorMessage(e, 'Save failed');
       setRowErrors(p => ({
         ...p, [staffId]: typeof msg === 'string' ? msg : 'Save failed',
       }));
@@ -208,7 +209,7 @@ export function FootfallPage() {
       setTopupReason('');
       await refresh();
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Topup failed';
+      const msg = getErrorMessage(e, 'Topup failed');
       toast.error(typeof msg === 'string' ? msg : 'Topup failed');
     } finally {
       setTopupBusy(false);

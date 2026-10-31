@@ -58,6 +58,7 @@ import OnlineStoreSyncBanner, {
   formatPhotoPublish,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Status presentation (label + on-brand light-theme colours + the legal next
@@ -313,7 +314,7 @@ export default function DesignQueuePage() {
         bannerRef.current?.refresh();
       }
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Could not publish image');
+      toast.error(getErrorMessage(e, 'Could not publish image'));
     } finally {
       setPublishingId(null);
     }

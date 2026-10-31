@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import api from '../../services/api/client';
 import { useAuth } from '../../context/AuthContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface TagSuggestion {
   suggestion_id: string;
@@ -65,7 +66,7 @@ export function CustomerTagsPanel({
       setMsg('Suggested. A manager will review it.');
       await loadSuggestions();
     } catch (e: any) {
-      setMsg(e?.response?.data?.detail || 'Could not suggest tag.');
+      setMsg(getErrorMessage(e, 'Could not suggest tag.'));
     } finally {
       setBusy(false);
     }

@@ -13,6 +13,7 @@ import { inventoryApi, vendorsApi, reportsApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { COST_ROLES } from '../../components/common/CostCell';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface ReplenishmentItem {
   product_id: string;
@@ -574,7 +575,7 @@ function CreatePOModal({
       );
       onCreated();
     } catch (err: unknown) {
-      const msg = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail
+      const msg = getErrorMessage(err, '')
         || (err instanceof Error ? err.message : 'Failed to create purchase order');
       toast.error(msg);
     } finally {

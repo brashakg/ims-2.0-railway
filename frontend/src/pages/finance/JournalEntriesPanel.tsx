@@ -14,6 +14,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { financeApi } from '../../services/api/finance';
 import type { JournalEntry, JeStatus, ChartAccount } from './financeTypes';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const STATUS_STYLE: Record<JeStatus, string> = {
   DRAFT: 'bg-gray-100 text-gray-700',
@@ -136,7 +137,7 @@ export default function JournalEntriesPanel() {
       resetDraft();
       load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail?.error || e?.response?.data?.detail || 'Could not save journal entry');
+      toast.error(getErrorMessage(e, 'Could not save journal entry'));
     } finally {
       setSaving(false);
     }
@@ -150,7 +151,7 @@ export default function JournalEntriesPanel() {
       setSelected(null);
       load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail?.error || 'Submit failed');
+      toast.error(getErrorMessage(e, 'Submit failed'));
     } finally {
       setActing(false);
     }
@@ -166,7 +167,7 @@ export default function JournalEntriesPanel() {
       setSelected(null);
       load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail?.error || 'Approve failed');
+      toast.error(getErrorMessage(e, 'Approve failed'));
     } finally {
       setActing(false);
     }
@@ -184,7 +185,7 @@ export default function JournalEntriesPanel() {
       setSelected(null);
       load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail?.error || 'Reject failed');
+      toast.error(getErrorMessage(e, 'Reject failed'));
     } finally {
       setActing(false);
     }
@@ -198,7 +199,7 @@ export default function JournalEntriesPanel() {
       setSelected(null);
       load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail?.error || 'Post failed');
+      toast.error(getErrorMessage(e, 'Post failed'));
     } finally {
       setActing(false);
     }
@@ -212,7 +213,7 @@ export default function JournalEntriesPanel() {
       setSelected(null);
       load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail?.error || 'Reverse failed');
+      toast.error(getErrorMessage(e, 'Reverse failed'));
     } finally {
       setActing(false);
     }

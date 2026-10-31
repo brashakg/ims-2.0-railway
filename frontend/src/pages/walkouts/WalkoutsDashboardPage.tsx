@@ -19,6 +19,7 @@ import type {
   FUStatusResponse,
   WalkinTodayResponse,
 } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const REATTRIBUTE_ROLES = new Set([
   'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT',
@@ -74,7 +75,7 @@ export function WalkoutsDashboardPage() {
       setFuStatus(fu);
       setToday(td);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load dashboard';
+      const msg = getErrorMessage(e, 'Failed to load dashboard');
       setError(typeof msg === 'string' ? msg : 'Failed to load dashboard');
     } finally {
       setLoading(false);
@@ -99,7 +100,7 @@ export function WalkoutsDashboardPage() {
       setTopupDelta(1);
       setTopupReason('');
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Topup failed';
+      const msg = getErrorMessage(e, 'Topup failed');
       toast.error(typeof msg === 'string' ? msg : 'Topup failed');
     } finally {
       setTopupBusy(false);

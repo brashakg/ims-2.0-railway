@@ -39,6 +39,7 @@ import { OrderStatusTimeline } from '../../components/orders/OrderStatusTimeline
 import { OrderShippingCard } from '../../components/orders/OrderShippingCard';
 import { OrderTrackingQR } from '../../components/orders/OrderTrackingQR';
 import { SuperadminOrderEditModal } from '../../components/orders/SuperadminOrderEditModal';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Status configurations
 const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bgColor: string; icon: typeof Clock }> = {
@@ -384,7 +385,7 @@ export function OrdersPage() {
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('[Orders] addPayment failed:', e);
-      const msg = (e as any)?.response?.data?.detail || (e as Error)?.message || 'Failed to process payment';
+      const msg = getErrorMessage(e, 'Failed to process payment');
       toast.error(typeof msg === 'string' ? msg : 'Failed to process payment');
     } finally {
       setIsProcessingPayment(false);
@@ -414,7 +415,7 @@ export function OrdersPage() {
       setSelectedOrder(null);
       await loadOrders();
     } catch (error: any) {
-      toast.error(error?.response?.data?.detail || 'Failed to mark order as delivered');
+      toast.error(getErrorMessage(error, 'Failed to mark order as delivered'));
     } finally {
       setIsDeliveringOrder(false);
     }
@@ -785,7 +786,7 @@ export function OrdersPage() {
                       });
                       toast.success(`${channel} notification queued for ${selectedOrder.customerName}`);
                     } catch (err: any) {
-                      toast.error(err?.response?.data?.detail || 'Failed to queue notification');
+                      toast.error(getErrorMessage(err, 'Failed to queue notification'));
                     }
                   }}
                 />
@@ -798,7 +799,7 @@ export function OrdersPage() {
                       await marketingApi.sendReviewRequest(selectedOrder.id);
                       toast.success('Thank-you + review link queued on WhatsApp');
                     } catch (err: any) {
-                      toast.error(err?.response?.data?.detail || 'Failed to send review request');
+                      toast.error(getErrorMessage(err, 'Failed to send review request'));
                     }
                   }}
                   className="w-full inline-flex items-center justify-center gap-2 text-sm font-medium text-green-700 bg-green-50 hover:bg-green-100 border border-green-200 rounded-lg px-3 py-2 transition-colors"

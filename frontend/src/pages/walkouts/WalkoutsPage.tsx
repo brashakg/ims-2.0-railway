@@ -19,6 +19,7 @@ import {
 } from '../../types';
 import { WalkoutIntakeModal } from './WalkoutIntakeModal';
 import { WalkoutResultBadge } from './ResultPanel';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const RESULT_OPTIONS = ['DUE', 'NEGATIVE', 'CONVERTED', 'none'] as const;
 type ResultOption = typeof RESULT_OPTIONS[number];
@@ -57,7 +58,7 @@ export function WalkoutsPage() {
       setItems(resp.items || []);
       setTotal(resp.total || 0);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Could not load walkouts';
+      const msg = getErrorMessage(e, 'Could not load walkouts');
       toast.error(typeof msg === 'string' ? msg : 'Could not load walkouts');
       setItems([]);
       setTotal(0);

@@ -18,6 +18,7 @@ import { inventoryApi } from '../../services/api';
 import type {
   OpeningStockInputRow, OpeningStockResultRow, OpeningStockResponse,
 } from '../../services/api/inventory';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const SAMPLE = `sku,quantity,unit_cost,location_code
 RB3025-001,12,3450,Counter-A
@@ -116,7 +117,7 @@ export function OpeningStockImport() {
       const res = await inventoryApi.previewOpeningStock(rows, skipIfExisting);
       setPreview(res);
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Preview failed');
+      toast.error(getErrorMessage(e, 'Preview failed'));
     } finally {
       setBusy(false);
     }
@@ -132,7 +133,7 @@ export function OpeningStockImport() {
       setPreview(null);
       toast.success(`Added ${res.summary.units_added ?? 0} unit(s).`);
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Import failed');
+      toast.error(getErrorMessage(e, 'Import failed'));
     } finally {
       setBusy(false);
     }

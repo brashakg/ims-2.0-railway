@@ -22,6 +22,7 @@ import {
   getHighestRoleLevel,
   CATEGORY_DEFINITIONS,
 } from './settingsTypes';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 // ============================================================================
 // Transform helpers
@@ -201,7 +202,7 @@ export function UserManagementSection() {
         toast.success(`Password reset for ${name}. They must change it at next login.`);
       }
     } catch (err) {
-      const status = (err as { response?: { status?: number } })?.response?.status;
+      const status = getErrorStatus(err);
       if (status === 403) {
         toast.error("You can't reset the password of a user with a higher role than yours.");
       } else {

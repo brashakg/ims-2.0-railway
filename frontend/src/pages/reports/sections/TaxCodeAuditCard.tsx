@@ -9,6 +9,7 @@
 import { useEffect, useState } from 'react';
 import { AlertTriangle, Loader2, ShieldCheck, Download } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getTaxCodeAudit>>;
 
@@ -46,7 +47,7 @@ export function TaxCodeAuditCard({ storeId, canExport = true }: { storeId?: stri
     setError(null);
     reportsApi.getTaxCodeAudit(storeId)
       .then(setData)
-      .catch(e => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch(e => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   }, [storeId]);
 

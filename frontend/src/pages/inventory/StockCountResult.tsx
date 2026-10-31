@@ -19,6 +19,7 @@ import { COST_ROLES } from '../../components/common/CostCell';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
 import { formatDateIST, formatDateTimeIST } from '../../utils/datetime';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface MissingPiece {
   unit_id: string;
@@ -160,7 +161,7 @@ export function StockCountResult() {
       );
       load();
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Could not write off');
+      toast.error(getErrorMessage(err, 'Could not write off'));
     } finally {
       setBusy(false);
     }
@@ -173,7 +174,7 @@ export function StockCountResult() {
       toast.success(`Finished: ${r.units_voided || 0} piece(s) had already been written off. Nothing more was touched.`);
       load();
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Could not finish the stuck write-off');
+      toast.error(getErrorMessage(err, 'Could not finish the stuck write-off'));
     } finally {
       setBusy(false);
     }
@@ -186,7 +187,7 @@ export function StockCountResult() {
       toast.success('Sent to the admin for write-off.');
       load();
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Could not send for write-off');
+      toast.error(getErrorMessage(err, 'Could not send for write-off'));
     } finally {
       setBusy(false);
     }

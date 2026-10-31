@@ -70,6 +70,7 @@ import {
 } from './productAddShared';
 import { writeReviewQueue } from './reviewQueue';
 import { ModelFamilyPanel } from './ModelFamilyPanel';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Shared item shape with CatalogManagerPage.
@@ -297,7 +298,7 @@ export function CatalogProductDrawer({
       }
     } catch (e: any) {
       toast.error(
-        `${name}: push failed — ${e?.response?.data?.detail || e?.message || 'error'}`,
+        `${name}: push failed — ${getErrorMessage(e, 'error')}`,
       );
     } finally {
       setPushingEcom(false);

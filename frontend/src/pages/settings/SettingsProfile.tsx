@@ -11,6 +11,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api';
 import { authApi } from '../../services/api/auth';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ============================================================================
 // Profile Tab
@@ -387,7 +388,7 @@ export function BusinessSection() {
       }
       toast.success('Logo uploaded');
     } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      const detail = getErrorMessage(err, '');
       toast.error(detail || 'Failed to upload logo');
     } finally {
       setUploadingLogo(false);

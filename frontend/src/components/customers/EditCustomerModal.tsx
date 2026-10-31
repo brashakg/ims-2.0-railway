@@ -21,6 +21,7 @@ import { X, Loader2, AlertTriangle } from 'lucide-react';
 import { customerApi } from '../../services/api/customers';
 import type { UserRole } from '../../types';
 import { useAuth } from '../../context/AuthContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 /** Who may open the customer-edit door. Owner ruling 2026-09-03 added
  *  CASHIER + SALES_STAFF to the manager tier. */
@@ -116,7 +117,7 @@ export function EditCustomerModal({
     } catch (e: any) {
       // The server owns every real rule here (duplicate mobile 409,
       // B2B-requires-GSTIN, formats) -- surface its refusal VERBATIM.
-      const detail = e?.response?.data?.detail || e?.message || 'Failed to update customer';
+      const detail = getErrorMessage(e, 'Failed to update customer');
       setError(typeof detail === 'string' ? detail : 'Failed to update customer');
     } finally {
       setSaving(false);

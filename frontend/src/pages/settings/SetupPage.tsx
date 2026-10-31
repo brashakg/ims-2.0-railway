@@ -46,6 +46,7 @@ import {
   FileText, Upload, Trash2, Loader2, CreditCard, Eye,
 } from 'lucide-react';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Store shape (read-only) — used only for the onboarding store-assignment picker.
@@ -499,7 +500,7 @@ function OnboardingWizard({
           d.key === doc.key ? { ...d, status: 'done' } : d));
       } catch (e: any) {
         failed += 1;
-        const detail = e?.response?.data?.detail || e?.message || 'Upload failed.';
+        const detail = getErrorMessage(e, 'Upload failed.');
         setStagedDocs((prev) => prev.map((d) =>
           d.key === doc.key
             ? { ...d, status: 'error', error: typeof detail === 'string' ? detail : 'Upload failed.' }
@@ -592,7 +593,7 @@ function OnboardingWizard({
     } catch (e: any) {
       // Surface the backend reason cleanly -- notably the escalation 403
       // ("You cannot assign a role above your own level: <ROLE>").
-      const detail = e?.response?.data?.detail || e?.message || 'Failed to onboard employee.';
+      const detail = getErrorMessage(e, 'Failed to onboard employee.');
       setSubmitError(typeof detail === 'string' ? detail : 'Failed to onboard employee.');
       onError(typeof detail === 'string' ? detail : 'Failed to onboard employee.');
     } finally {

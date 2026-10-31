@@ -7,6 +7,7 @@
 import { Fragment, useEffect, useState } from 'react';
 import { AlertTriangle, ArrowDownRight, ArrowUpRight, BarChart3, Loader2 } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getPriceBands>>;
 
@@ -31,7 +32,7 @@ export function PriceBandCard({ storeId }: { storeId?: string }) {
     setError(null);
     reportsApi.getPriceBands(storeId, 3, 4)
       .then(setData)
-      .catch(e => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch(e => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   }, [storeId]);
 

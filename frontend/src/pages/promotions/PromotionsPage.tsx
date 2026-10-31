@@ -19,6 +19,7 @@ import {
   type PromoRuleCreate,
   type PromoType,
 } from '../../services/api/promotions';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const PROMO_TYPES: { id: PromoType; label: string; hint: string }[] = [
   { id: 'THRESHOLD', label: 'Threshold spend', hint: 'Spend >= X, get % off' },
@@ -111,7 +112,7 @@ export default function PromotionsPage() {
       setForm(emptyForm);
       load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Could not create rule');
+      toast.error(getErrorMessage(e, 'Could not create rule'));
     } finally {
       setSaving(false);
     }

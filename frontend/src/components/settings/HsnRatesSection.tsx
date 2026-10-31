@@ -12,6 +12,7 @@ import { useToast } from '../../context/ToastContext';
 // Direct import (barrel re-export gotcha for newly-added services).
 import { hsnApi, type HsnRate } from '../../services/api/hsn';
 import { categoryHintOptions, loadHsnRates } from '../../constants/gstRuntime';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 // The Category selects offer the backend's REPORTING-HINT vocabulary
 // (gst_rates.py _CATEGORY_HINT distinct values), SERVER-FED via
@@ -120,7 +121,7 @@ export function HsnRatesSection() {
       await load();
       await loadHsnRates();
     } catch (err: any) {
-      const msg = err?.response?.status === 409 ? 'That HSN code already exists' : 'Failed to add HSN rate';
+      const msg = getErrorStatus(err) === 409 ? 'That HSN code already exists' : 'Failed to add HSN rate';
       toast.error(msg);
     } finally {
       setSaving(false);

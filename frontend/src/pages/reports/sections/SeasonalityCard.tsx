@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import { AlertTriangle, CalendarDays, Loader2 } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getSeasonality>>;
 
@@ -47,7 +48,7 @@ export function SeasonalityCard({ storeId }: { storeId?: string }) {
     setError(null);
     reportsApi.getSeasonality(storeId, 2)
       .then(setData)
-      .catch(e => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch(e => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   }, [storeId]);
 

@@ -81,9 +81,12 @@ def _reset_churn_collections():
     the first call. No-op (fail-soft) when no DB is connected."""
     global _PRESERVE_BASELINE
     try:
-        from database.connection import get_db
+        from database.connection import get_seeded_db
 
-        db = get_db()
+        # HTTP dependencies use this same connection: real Mongo on CI, the
+        # seeded fallback off-line. Resetting get_db() alone skipped the local
+        # fallback and leaked products (duplicate 409s) into the next test.
+        db = get_seeded_db()
         if not (db and getattr(db, "is_connected", False)):
             return
         mongo = getattr(db, "db", None)

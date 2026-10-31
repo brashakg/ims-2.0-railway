@@ -36,6 +36,7 @@ import {
 } from '../../types';
 import { FollowUpPanel } from './FollowUpPanel';
 import { ResultPanel, WalkoutResultBadge } from './ResultPanel';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const REATTRIBUTE_ROLES = new Set([
   'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT',
@@ -93,7 +94,7 @@ export function WalkoutDetailPage() {
       setWalkout(w);
       setDraft({});
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load';
+      const msg = getErrorMessage(e, 'Failed to load');
       setError(typeof msg === 'string' ? msg : 'Failed to load');
     } finally {
       setIsLoading(false);
@@ -155,7 +156,7 @@ export function WalkoutDetailPage() {
       setDraft({});
       toast.success('Walkout updated');
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Save failed';
+      const msg = getErrorMessage(e, 'Save failed');
       toast.error(typeof msg === 'string' ? msg : 'Save failed');
     } finally {
       setIsSaving(false);
@@ -173,7 +174,7 @@ export function WalkoutDetailPage() {
       toast.success('Walkout deleted');
       navigate('/walkouts');
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Delete failed';
+      const msg = getErrorMessage(e, 'Delete failed');
       toast.error(typeof msg === 'string' ? msg : 'Delete failed');
     } finally {
       setIsDeleting(false);

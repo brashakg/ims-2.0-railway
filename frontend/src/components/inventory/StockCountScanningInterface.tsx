@@ -17,6 +17,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Barcode, AlertCircle, Loader2, Search } from 'lucide-react';
 import { inventoryApi, productApi } from '../../services/api';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface Props {
   /** The in-progress count session every scan is written onto. */
@@ -108,7 +109,7 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
       onRecorded?.(res.items_counted ?? 0);
       load();
     } catch (err: any) {
-      setError(err?.response?.data?.detail || `Barcode ${code} not found`);
+      setError(getErrorMessage(err, `Barcode ${code} not found`));
     }
   };
 
@@ -182,7 +183,7 @@ export function StockCountScanningInterface({ countId, onRecorded }: Props) {
       onRecorded?.(res?.items_counted ?? 0);
       load();
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Could not save that quantity');
+      setError(getErrorMessage(err, 'Could not save that quantity'));
     } finally {
       setSaving(null);
     }

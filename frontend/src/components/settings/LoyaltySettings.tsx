@@ -11,6 +11,7 @@ import { Loader2, Save, RotateCcw, Plus, Trash2 } from 'lucide-react';
 import { loyaltyApi, type LoyaltySettings } from '../../services/api/loyalty';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Tier thresholds + multipliers share the same key set in practice but
 // are stored separately on the doc; we render them side-by-side.
@@ -95,8 +96,7 @@ export function LoyaltySettingsSection() {
       toast.success('Loyalty settings updated');
     } catch (err) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Save failed';
+        getErrorMessage(err, 'Save failed');
       toast.error(msg);
     } finally {
       setSaving(false);

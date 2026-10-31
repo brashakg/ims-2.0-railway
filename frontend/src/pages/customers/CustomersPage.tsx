@@ -56,6 +56,7 @@ import { buildCustomerSearchHits, type CustomerSearchHit } from '../../utils/cus
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
 import { calculateRFMScore, type CustomerRFMData } from '../../utils/rfmSegmentation';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type ViewMode = 'list' | 'detail';
 
@@ -347,7 +348,7 @@ export function CustomersPage() {
       loadCustomers();
       setShowAddCustomerModal(false);
     } catch (e: any) {
-      const detail = e?.response?.data?.detail || e?.message || 'Failed to create customer';
+      const detail = getErrorMessage(e, 'Failed to create customer');
       toast.error(typeof detail === 'string' ? detail : 'Failed to create customer');
       // Rethrow so the MODAL sees the refusal: on a 409 whose number belongs to
       // a family member on another account it offers promote / open-existing.
@@ -1251,7 +1252,7 @@ export function CustomersPage() {
             } catch (e) {
               // eslint-disable-next-line no-console
               console.error('[Customers] createPrescription failed:', e);
-              const msg = (e as any)?.response?.data?.detail || (e as Error)?.message || 'Could not save prescription';
+              const msg = getErrorMessage(e, 'Could not save prescription');
               toast.error(typeof msg === 'string' ? msg : 'Could not save prescription');
             } finally {
               setIsSavingRx(false);

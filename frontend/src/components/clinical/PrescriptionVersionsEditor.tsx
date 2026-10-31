@@ -22,6 +22,7 @@ import { useToast } from '../../context/ToastContext';
 import { validateEyePair, validateRxField } from '../../constants/rxLimits';
 import { RxPowerInput } from './RxPowerInput';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type VersionName = 'before_testing' | 'after_testing' | 'manual' | 'final';
 
@@ -192,8 +193,7 @@ export function PrescriptionVersionsEditor({
       toast.success(`Saved ${activeTab.replace('_', ' ')}`);
     } catch (err) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Save failed';
+        getErrorMessage(err, 'Save failed');
       toast.error(msg);
     } finally {
       setSaving(false);
@@ -215,8 +215,7 @@ export function PrescriptionVersionsEditor({
       if (onFinalized) onFinalized();
     } catch (err) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Finalize failed';
+        getErrorMessage(err, 'Finalize failed');
       toast.error(msg);
     } finally {
       setFinalizing(false);

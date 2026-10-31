@@ -12,6 +12,7 @@ import { useState } from 'react';
 import { X, Plus } from 'lucide-react';
 import { clinicalApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 const CATEGORY_OPTIONS = [
   'Progressive',
@@ -84,7 +85,7 @@ export function SendToFloorDrawer({ testId, patientName, onClose, onSent }: Send
       }
       onSent?.();
     } catch (err: unknown) {
-      const status = (err as { response?: { status?: number } })?.response?.status;
+      const status = getErrorStatus(err);
       if (status === 403) {
         toast.error('Clinical handover is not enabled for this store.');
       } else if (status === 422) {

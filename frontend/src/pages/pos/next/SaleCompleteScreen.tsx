@@ -62,6 +62,7 @@ import { inr } from '../../../components/print/legalPrimitives';
 import { istDayString } from '../../../utils/datetime';
 import { useAuth } from '../../../context/AuthContext';
 import type { MTDStaffEntry, PerStaffCard, PointsLog } from '../../../types';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Server shapes (GET /orders/{id} is camelCase via order_to_frontend; the axios
@@ -545,7 +546,7 @@ export function CompletionScreen({
       setSends((s) => ({ ...s, [key]: 'failed' }));
       // The server owns every refusal here (role gate, marketing opt-out,
       // DLT quiet hours, rate limit) -- surface it verbatim.
-      setErrorMsg(err?.response?.data?.detail || 'Could not send that message.');
+      setErrorMsg(getErrorMessage(err, 'Could not send that message.'));
     }
   };
 
@@ -773,8 +774,7 @@ export function CompletionScreen({
               // Keep the modal open so the dispenser can retry; the order and
               // the job already exist, so nothing is at risk but the details.
               setErrorMsg(
-                err?.response?.data?.detail ||
-                  'Could not save the fitting details. Try again, or confirm them from the Workshop job.',
+                getErrorMessage(err, 'Could not save the fitting details. Try again, or confirm them from the Workshop job.'),
               );
             } finally {
               setFittingSaving(false);

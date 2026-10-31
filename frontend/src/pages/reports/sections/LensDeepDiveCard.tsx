@@ -7,6 +7,7 @@
 import { useEffect, useState } from 'react';
 import { AlertTriangle, Eye, Info, Loader2 } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getLensDeepDive>>;
 
@@ -59,7 +60,7 @@ export function LensDeepDiveCard({ storeId }: { storeId?: string }) {
     setError(null);
     reportsApi.getLensDeepDive(storeId, 12)
       .then(setData)
-      .catch(e => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch(e => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   }, [storeId]);
 

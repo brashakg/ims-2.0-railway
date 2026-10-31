@@ -29,6 +29,7 @@ import { vendorsApi } from '../../services/api';
 import { useGstStateCodes } from '../../hooks/useGstStateCodes';
 import { gstinStateCode, validateGSTNumber } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface SupplierFormModalProps {
   onClose: () => void;
@@ -203,17 +204,7 @@ export function SupplierFormModal({
     } catch (error: unknown) {
       // Prefer the server's own words - it names which part of the GSTIN is
       // wrong, or that another vendor already holds it.
-      const detail = (error as { response?: { data?: { detail?: unknown } } })?.response
-        ?.data?.detail;
-      const msg =
-        typeof detail === 'string'
-          ? detail
-          : Array.isArray(detail) && detail[0] !== undefined
-            ? String((detail[0] as { msg?: string })?.msg ?? 'Could not save supplier')
-            : error instanceof Error
-              ? error.message
-              : 'Could not save supplier';
-      toast.error(msg);
+      toast.error(getErrorMessage(error, 'Could not save supplier'));
     } finally {
       setIsSaving(false);
     }

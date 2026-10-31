@@ -38,6 +38,7 @@ import * as gates from './transferPermissions';
 import { cancelWithFreshCheck } from './transferCancelGuard';
 // Shop time: naive backend stamps are UTC (audit F53).
 import { formatDateIST, formatDateTimeIST } from '../../utils/datetime';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type TransferDirection = 'outgoing' | 'incoming' | 'all';
 // Which sub-flow the details modal is showing.
@@ -88,11 +89,7 @@ interface Transfer {
   tax_invoice_number?: string;
 }
 
-const errMsg = (e: any): string =>
-  e?.response?.data?.detail?.message ||
-  (typeof e?.response?.data?.detail === 'string' ? e.response.data.detail : '') ||
-  e?.message ||
-  'Action failed';
+const errMsg = (e: unknown): string => getErrorMessage(e, 'Action failed');
 
 // quantity_shipped is authoritative once a transfer ships — including a
 // legitimate 0 (source had no AVAILABLE stock). Use ?? (not ||) so an explicit

@@ -11,6 +11,7 @@ import { hrApi } from '../../services/api';
 import type { WeekOffSwap as WeekOffSwapRow, WeekOffSwapStatus } from '../../services/api/hr';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const STATUS_BADGE: Record<WeekOffSwapStatus, string> = {
   PENDING: 'badge-warning',
@@ -81,7 +82,7 @@ export function WeekOffSwap() {
       setReason('');
       await loadSwaps();
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Failed to submit request');
+      toast.error(getErrorMessage(err, 'Failed to submit request'));
     } finally {
       setSubmitting(false);
     }
@@ -94,7 +95,7 @@ export function WeekOffSwap() {
       toast.success('Swap approved');
       await loadSwaps();
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Failed to approve');
+      toast.error(getErrorMessage(err, 'Failed to approve'));
     } finally {
       setActionId(null);
     }
@@ -107,7 +108,7 @@ export function WeekOffSwap() {
       toast.success('Swap rejected');
       await loadSwaps();
     } catch (err: any) {
-      toast.error(err?.response?.data?.detail || 'Failed to reject');
+      toast.error(getErrorMessage(err, 'Failed to reject'));
     } finally {
       setActionId(null);
     }

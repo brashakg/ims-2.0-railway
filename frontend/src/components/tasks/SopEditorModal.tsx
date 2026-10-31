@@ -17,6 +17,7 @@ import { tasksApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { useStoreStaff } from '../../pages/tasks/tasksQueries';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 export interface SopStep {
   step_number: number;
@@ -175,7 +176,7 @@ export function SopEditorModal({ isOpen, onClose, initial, onSaved }: SopEditorM
     } catch (e) {
       // eslint-disable-next-line no-console
       console.error('[SOP] save failed:', e);
-      const msg = (e as any)?.response?.data?.detail || (e as Error)?.message || 'Could not save SOP';
+      const msg = getErrorMessage(e, 'Could not save SOP');
       toast.error(typeof msg === 'string' ? msg : 'Could not save SOP');
     } finally {
       setIsSaving(false);

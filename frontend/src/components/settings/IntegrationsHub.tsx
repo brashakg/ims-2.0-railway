@@ -39,6 +39,7 @@ import {
   type IntegrationStatusReport,
   type AnthropicModel,
 } from '../../services/api/integrations';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -202,8 +203,7 @@ export function IntegrationsHub() {
       }
     } catch (err: unknown) {
       const message =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        `Failed to test ${name} connection`;
+        getErrorMessage(err, `Failed to test ${name} connection`);
       toast.error(message);
     } finally {
       setTestingType(null);
@@ -516,10 +516,8 @@ function ConfigureModal({
       toast.success(`${entry.name} saved`);
       await onSaved();
     } catch (err: unknown) {
-      const detail =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       // Never log form contents (may contain a new secret)
-      toast.error(typeof detail === 'string' ? detail : `Failed to save ${entry.name}`);
+      toast.error(getErrorMessage(err, `Failed to save ${entry.name}`));
     } finally {
       setIsSaving(false);
     }

@@ -33,6 +33,7 @@ import type {
   PurchasePlan,
   CreateWalkoutRequest,
 } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface WalkoutIntakeModalProps {
   isOpen: boolean;
@@ -192,9 +193,7 @@ export function WalkoutIntakeModal({ isOpen, onClose, onSaved }: WalkoutIntakeMo
       onClose();
     } catch (e: any) {
       const msg =
-        e?.response?.data?.detail ||
-        e?.message ||
-        'Could not log walkout';
+        getErrorMessage(e, 'Could not log walkout');
       toast.error(typeof msg === 'string' ? msg : 'Could not log walkout');
     } finally {
       setIsSaving(false);

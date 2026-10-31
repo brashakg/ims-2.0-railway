@@ -62,6 +62,7 @@ import {
   type OnlineStoreLoadFailure,
 } from '../../services/api/onlineStore';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Row model + fetch (page-local; the backend list is server-projected truth).
@@ -461,9 +462,7 @@ export default function OnlineOrdersPage() {
         await load();
       } catch (e) {
         const msg =
-          (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-          (e as Error)?.message ||
-          'Re-map failed';
+          getErrorMessage(e, 'Re-map failed');
         toast.error(typeof msg === 'string' ? msg : 'Re-map failed');
       } finally {
         setRemappingId(null);
@@ -499,9 +498,7 @@ export default function OnlineOrdersPage() {
         await load();
       } catch (e) {
         const msg =
-          (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-          (e as Error)?.message ||
-          'Could not clear the hold';
+          getErrorMessage(e, 'Could not clear the hold');
         toast.error(typeof msg === 'string' ? msg : 'Could not clear the hold');
       } finally {
         setClearingId(null);

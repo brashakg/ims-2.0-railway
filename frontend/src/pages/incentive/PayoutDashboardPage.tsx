@@ -29,6 +29,7 @@ import { payoutApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import type { PayoutEnvelope, PayoutSnapshot } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 function inr(n: number | null | undefined): string {
   if (n == null) return '—';
@@ -90,7 +91,7 @@ export function PayoutDashboardPage() {
       if (!avgDisc) setAvgDisc(String((env.inputs.avg_discount_pct * 100).toFixed(2)));
       if (!visufit) setVisufit(String((env.inputs.visufit_usage_pct * 100).toFixed(1)));
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load payout';
+      const msg = getErrorMessage(e, 'Failed to load payout');
       setError(typeof msg === 'string' ? msg : 'Failed to load payout');
       setEnvelope(null);
     } finally {
@@ -120,7 +121,7 @@ export function PayoutDashboardPage() {
       setSnapshot(saved);
       toast.success(`Locked: ${saved.snapshot_id}`);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Lock failed';
+      const msg = getErrorMessage(e, 'Lock failed');
       toast.error(typeof msg === 'string' ? msg : 'Lock failed');
     } finally {
       setBusy(false);
@@ -136,7 +137,7 @@ export function PayoutDashboardPage() {
       setSnapshot(updated);
       toast.success('Marked as paid');
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Mark-paid failed';
+      const msg = getErrorMessage(e, 'Mark-paid failed');
       toast.error(typeof msg === 'string' ? msg : 'Mark-paid failed');
     } finally {
       setBusy(false);

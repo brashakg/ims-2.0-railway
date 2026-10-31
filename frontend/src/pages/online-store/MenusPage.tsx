@@ -65,6 +65,7 @@ import OnlineStoreSyncBanner, {
   formatPushResult,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Item-type vocabulary (mirrors the Shopify MenuItemType enum / BVI MenuItem).
@@ -393,7 +394,7 @@ export default function MenusPage() {
         bannerRef.current?.refresh();
       }
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || e?.message || 'Could not publish menu');
+      toast.error(getErrorMessage(e, 'Could not publish menu'));
     } finally {
       setPublishing(false);
     }

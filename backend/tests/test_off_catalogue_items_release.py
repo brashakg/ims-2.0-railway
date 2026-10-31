@@ -5083,7 +5083,7 @@ def test_r8_a_claim_that_is_not_this_orders_item_never_holds_the_release(world, 
     # it is the same order AND the same item. A claim on another order's
     # receipt, on a receipt of this order for another item, or a claim gone
     # stale, never holds the finished item's units.
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     from api.routers.vendors.grn_accept_lock import _GRN_ACCEPT_LOCK_STALE_SECONDS
 
@@ -5098,7 +5098,9 @@ def test_r8_a_claim_that_is_not_this_orders_item_never_holds_the_release(world, 
     boss = po["items"][0]["product_id"]
     held, _ = _receive_some(world, po, {boss: 2}, "JOT/26-27/0871")
     assert world.grn(held["grn_id"])["status"] == "PARTIALLY_ACCEPTED"
-    when = datetime.now()
+    # Claim timestamps are UTC instants; naive local now() becomes a future
+    # UTC claim on an IST workstation, even after subtracting the stale age.
+    when = datetime.now(timezone.utc)
     if claim == "another_order":
         draft = world.product(boss)
         po2 = world.raise_po(

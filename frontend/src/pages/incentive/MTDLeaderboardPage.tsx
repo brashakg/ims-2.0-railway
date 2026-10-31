@@ -27,6 +27,7 @@ import { incentiveApi } from '../../services/api';
 import type { MTDStaffEntry, LeaderboardScope, LeaderboardTier } from '../../types';
 import { useAuth } from '../../context/AuthContext';
 import { EligibilityChip } from './DailyScorecardPage';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const CATEGORY_KEYS = [
   'attendance', 'conversion', 'task', 'visufit', 'punctuality',
@@ -93,7 +94,7 @@ export function MTDLeaderboardPage() {
       setVisibility(resp.visibility === 'self' ? 'self' : 'all');
       setTotalParticipants(resp.total_participants ?? (resp.items || []).length);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load';
+      const msg = getErrorMessage(e, 'Failed to load');
       setError(typeof msg === 'string' ? msg : 'Failed to load');
     } finally {
       setLoading(false);

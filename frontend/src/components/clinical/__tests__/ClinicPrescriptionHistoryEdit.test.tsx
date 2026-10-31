@@ -15,6 +15,7 @@
 
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { buildApiError } from '../../../services/api/client';
 
 const getFamilyRx = vi.fn();
 const updatePrescription = vi.fn();
@@ -85,6 +86,16 @@ async function openEditor() {
 }
 
 describe('editing a stored prescription', () => {
+  it('shows the validation field from the real ApiError delivered to this screen', async () => {
+    updatePrescription.mockRejectedValueOnce(buildApiError({
+      message: 'Request failed with status code 422',
+      response: { status: 422, data: { detail: [{ loc: ['body', 'axis_od'], msg: 'Must be between 1 and 180' }] } },
+    } as Parameters<typeof buildApiError>[0]));
+    await openEditor();
+    fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+    expect(await screen.findByText('axis_od: Must be between 1 and 180')).toBeVisible();
+  });
+
   it('shows the stored unsigned "4" as +4.00 in the box', async () => {
     await openEditor();
     expect((screen.getByLabelText('Right eye sphere') as HTMLInputElement).value).toBe('+4.00');

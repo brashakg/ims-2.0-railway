@@ -32,6 +32,7 @@ import {
 } from '../../utils/customerPayload';
 import { validateEyePair, VA_OPTIONS } from '../../constants/rxLimits';
 import { RxPowerInput } from './RxPowerInput';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Per-eye refraction values (strings while editing; parsed on submit).
 interface EyeRx {
@@ -265,7 +266,7 @@ export function PatientIntakeModal({
         } catch (err: any) {
           // Surface the backend's range message, but don't lose the patient —
           // they're still created and queued; the Rx can be added in the exam.
-          const detail = err?.response?.data?.detail || err?.message || 'Could not save prescription';
+          const detail = getErrorMessage(err, 'Could not save prescription');
           toast.warning(`Patient saved, but Rx not stored: ${detail}`);
         }
       }
@@ -289,7 +290,7 @@ export function PatientIntakeModal({
       onComplete?.({ customerId, patientName, prescriptionId });
       onClose();
     } catch (err: any) {
-      const detail = err?.response?.data?.detail || err?.message || 'Failed to add patient';
+      const detail = getErrorMessage(err, 'Failed to add patient');
       toast.error(detail);
     } finally {
       setSaving(false);

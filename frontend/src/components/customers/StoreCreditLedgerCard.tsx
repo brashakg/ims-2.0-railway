@@ -12,6 +12,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { formatDateTimeIST } from '../../utils/datetime';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface Entry {
   entry_id: string; type: string; amount: number; delta: number;
@@ -60,7 +61,7 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
       setMode(null); setAmount(''); setReason('');
       await load();
     } catch (e: any) {
-      toast.error(e?.response?.data?.detail || 'Action failed');
+      toast.error(getErrorMessage(e, 'Action failed'));
     } finally {
       setSaving(false);
     }

@@ -40,6 +40,7 @@ import {
   type ReconStatus,
 } from '../../services/api/cashReconciliation';
 import { OFF_TILL_EXPENSE_NOTICE } from './offTillExpenseCopy';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
@@ -144,7 +145,7 @@ export default function CashReconciliationPage() {
       setData(res);
     } catch (e: unknown) {
       const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Failed to load reconciliation');
       toast.error(msg);
       setData(null);
@@ -181,7 +182,7 @@ export default function CashReconciliationPage() {
       await load();
     } catch (e: unknown) {
       const msg =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+        getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Could not record sign-off');
       toast.error(msg);
     } finally {

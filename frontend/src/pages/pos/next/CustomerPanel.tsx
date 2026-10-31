@@ -51,6 +51,7 @@ import { clinicalApi } from '../../../services/api/clinical';
 import { marketingApi } from '../../../services/api/marketing';
 import { promotionsApi, type PromoRule } from '../../../services/api/promotions';
 import { incentiveApi } from '../../../services/api/incentive';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 export type PanelSection = 'family' | 'dues' | 'offers' | 'myday';
 
@@ -103,8 +104,6 @@ const ageOf = (dob: string | null | undefined): number | null => {
   return years >= 0 && years < 130 ? years : null;
 };
 const firstName = (name: string | null | undefined) => (name || 'member').split(/\s+/)[0];
-const serverDetail = (e: any, fallback: string) =>
-  e?.response?.data?.detail || e?.message || fallback;
 
 /** <=767px is the phone sheet; the app's `tablet` breakpoint starts at 768.
  *  FOLLOWS THE VIEWPORT (resize-subscribed), never a mount-time read: the e2e
@@ -179,7 +178,7 @@ function FamilySection({
 
   if (!customer) return <Muted>Pick a customer on the bill to see the household&rsquo;s prescriptions.</Muted>;
   if (family.isLoading) return <Muted>Loading prescriptions…</Muted>;
-  if (family.error) return <Muted>{serverDetail(family.error, 'Could not load prescriptions')}</Muted>;
+  if (family.error) return <Muted>{getErrorMessage(family.error, 'Could not load prescriptions')}</Muted>;
 
   // Decision 1: the SAME setters the customer search uses. setPatient changes
   // the billed member (the cart is untouched); setPrescription loads the
@@ -237,7 +236,7 @@ function FamilySection({
       });
       toast.success(`${m.name || 'Member'} added to today's eye-test queue`);
     } catch (e: any) {
-      toast.error(serverDetail(e, 'Could not book the eye test'));
+      toast.error(getErrorMessage(e, 'Could not book the eye test'));
     } finally {
       setBusy(null);
     }
@@ -252,7 +251,7 @@ function FamilySection({
       toast.success(`Reminder queued for ${customer.name} on WhatsApp`);
     } catch (e: any) {
       if (e?.response?.status === 429) toast.info('A reminder already went to this customer in the last 24 hours');
-      else toast.error(serverDetail(e, 'Could not queue the reminder'));
+      else toast.error(getErrorMessage(e, 'Could not queue the reminder'));
     } finally {
       setBusy(null);
     }
@@ -402,7 +401,7 @@ function DuesSection({ customer }: { customer: PanelCustomer | null }) {
   const dues = useCustomerDues(customer?.id);
   if (!customer) return <Muted>Pick a customer on the bill to see their dues.</Muted>;
   if (dues.isLoading) return <Muted>Loading dues…</Muted>;
-  if (dues.error) return <Muted>{serverDetail(dues.error, 'Could not load dues')}</Muted>;
+  if (dues.error) return <Muted>{getErrorMessage(dues.error, 'Could not load dues')}</Muted>;
   const credit = dues.data?.credit;
   const rows = dues.data?.dueOrders || [];
   const outstanding = credit?.ar_outstanding ?? rows.reduce((s, r) => s + r.balanceDue, 0);
@@ -484,7 +483,7 @@ function OffersSection({ customer }: { customer: PanelCustomer | null }) {
         {promos.isLoading ? (
           <Muted>Loading offers…</Muted>
         ) : promos.error ? (
-          <p className="text-sm text-gray-500 py-2">{serverDetail(promos.error, 'Could not load offers')}</p>
+          <p className="text-sm text-gray-500 py-2">{getErrorMessage(promos.error, 'Could not load offers')}</p>
         ) : applicable.length === 0 ? (
           <p className="text-sm text-gray-500 py-2">No store offer is running for this customer today.</p>
         ) : (
@@ -513,7 +512,7 @@ function OffersSection({ customer }: { customer: PanelCustomer | null }) {
         ) : loyalty.isLoading ? (
           <Muted>Loading points…</Muted>
         ) : loyalty.error ? (
-          <p className="text-sm text-gray-500 py-2">{serverDetail(loyalty.error, 'Could not load loyalty')}</p>
+          <p className="text-sm text-gray-500 py-2">{getErrorMessage(loyalty.error, 'Could not load loyalty')}</p>
         ) : (
           <>
             <div className="flex items-baseline gap-2 mt-1">
@@ -570,7 +569,7 @@ function MyDaySection() {
       {myDay.isLoading ? (
         <Muted>Loading your figures…</Muted>
       ) : myDay.error ? (
-        <Muted>{serverDetail(myDay.error, 'Could not load your day')}</Muted>
+        <Muted>{getErrorMessage(myDay.error, 'Could not load your day')}</Muted>
       ) : myDay.data ? (
         <div className="grid grid-cols-2 gap-2.5 mt-2">
           <Stat label="Sales today" value={money(myDay.data.sales_today)} />

@@ -18,24 +18,6 @@ export const GST_RATES = [0, 5, 12, 18, 28];
 export const rcmNote = (tax?: number, owed?: number) =>
   `You pay this GST (${inr(tax)}) to the government; the supplier is owed ${inr(owed)}`;
 
-// The server's `detail` is a string on some routes and a structured object
-// ({code, message, lines}) on others -- the purchase-invoice gates are the
-// latter. String()-ing an object rendered "[object Object]" at the user, which
-// is how a precise refusal ("...is still missing Selling Price") became
-// unreadable. Prefer the object's own message.
-export function errMsg(e: unknown, fb: string) {
-  if (e && typeof e === 'object' && 'response' in e) {
-    const r = (e as { response?: { data?: { detail?: unknown } } }).response;
-    const d = r?.data?.detail;
-    if (typeof d === 'string' && d) return d;
-    if (d && typeof d === 'object') {
-      const m = (d as { message?: string }).message;
-      if (m) return m;
-    }
-  }
-  return e instanceof Error ? e.message : fb;
-}
-
 // The accounts roles: they approve a 3-way-match exception (release an ON_HOLD
 // invoice for payment despite a variance) and alone see the bill form's
 // Reverse charge option. Mirrors the _AP_ROLES backend gate.

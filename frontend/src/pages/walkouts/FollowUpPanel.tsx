@@ -38,6 +38,7 @@ import {
   type FollowUpStatus,
   type FollowUpApprovalDecision,
 } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 type RoundNum = 1 | 2 | 3;
 
@@ -119,7 +120,7 @@ export function FollowUpPanel({ walkout, canEdit, onChanged, storeId }: FollowUp
       toast.success(`Round ${payload.round} scheduled`);
       setScheduling(null);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Schedule failed';
+      const msg = getErrorMessage(e, 'Schedule failed');
       toast.error(typeof msg === 'string' ? msg : 'Schedule failed');
     } finally {
       setBusy(false);
@@ -133,7 +134,7 @@ export function FollowUpPanel({ walkout, canEdit, onChanged, storeId }: FollowUp
       onChanged(updated);
       toast.success(`Round ${round} -> ${status}`);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Update failed';
+      const msg = getErrorMessage(e, 'Update failed');
       toast.error(typeof msg === 'string' ? msg : 'Update failed');
     } finally {
       setBusy(false);
@@ -158,7 +159,7 @@ export function FollowUpPanel({ walkout, canEdit, onChanged, storeId }: FollowUp
           : `Round ${round} rejected`,
       );
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Approval failed';
+      const msg = getErrorMessage(e, 'Approval failed');
       toast.error(typeof msg === 'string' ? msg : 'Approval failed');
     } finally {
       setBusy(false);

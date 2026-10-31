@@ -13,6 +13,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { crmApi } from '../../services/api/crm';
 import type { CLRefillRow } from '../../services/api/crm';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 function prettyDate(iso?: string | null): string {
   if (!iso) return '—';
@@ -70,8 +71,7 @@ export function CLRefillWorklistPage() {
         );
       }
     } catch (e: unknown) {
-      const detail = (e as { response?: { data?: { detail?: string } } })?.response
-        ?.data?.detail;
+      const detail = getErrorMessage(e, '');
       toastError(detail ? `Could not create reminders: ${detail}` : 'Could not create reminders.');
     } finally {
       setCreating(false);

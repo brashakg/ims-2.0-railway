@@ -25,6 +25,7 @@ import { useGstStateCodes } from '../../hooks/useGstStateCodes';
 import { gstinStateCode } from '../../constants/gst';
 import type { Supplier } from './purchaseTypes';
 import { owedText, rupees } from './PurchasesThisMonthSection';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // How a purchase from this vendor is taxed: the SERVER's verdict
 // (GET /vendors/po-gst-heads -> usePoGstHeads: org_validation.shop_gstin +
@@ -249,8 +250,7 @@ function PortalTokenModal({
       toast.success(`Portal link generated for ${vendorName}`);
     } catch (err: unknown) {
       const msg =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Failed to generate token';
+        getErrorMessage(err, 'Failed to generate token');
       toast.error(msg);
     } finally {
       setGenerating(false);

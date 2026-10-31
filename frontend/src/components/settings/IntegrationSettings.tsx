@@ -23,6 +23,7 @@ import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
 import { adminIntegrationApi } from '../../services/api/settings';
 import { IntegrationStatusCard } from '../integrations/IntegrationStatusCard';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 export function IntegrationSettings() {
   return (
@@ -90,8 +91,7 @@ function TallyExportsPanel() {
       toast.success(`Downloaded voucher XML for ${storeCode}`);
     } catch (err: unknown) {
       const message =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        `Failed to download voucher for ${storeCode}`;
+        getErrorMessage(err, `Failed to download voucher for ${storeCode}`);
       toast.error(message);
     } finally {
       setDownloadingId(null);
@@ -111,8 +111,7 @@ function TallyExportsPanel() {
       }
     } catch (err: unknown) {
       const message =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        'Failed to regenerate';
+        getErrorMessage(err, 'Failed to regenerate');
       toast.error(message);
     } finally {
       setRegenAll(false);

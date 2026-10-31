@@ -11,6 +11,7 @@ import { ArrowLeft, RefreshCw, Loader2, Download, Lock, Check } from 'lucide-rea
 import { payoutApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import type { PayoutSnapshot } from '../../types';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 function inr(n: number | null | undefined): string {
   if (n == null) return '—';
@@ -29,7 +30,7 @@ export function PayoutSnapshotsPage() {
       const r = await payoutApi.list(year);
       setItems(r.items || []);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load';
+      const msg = getErrorMessage(e, 'Failed to load');
       toast.error(typeof msg === 'string' ? msg : 'Failed to load');
     } finally {
       setLoading(false);

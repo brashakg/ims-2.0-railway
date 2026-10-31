@@ -9,7 +9,7 @@ import {
   type SupplierCreditPreview,
   type SupplierCreditResult,
 } from '../../services/api/supplierCredits';
-import { errMsg } from './invoices/shared';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const HEADS = ['taxable', 'cgst', 'sgst', 'igst'] as const;
 type Head = typeof HEADS[number];
@@ -90,7 +90,7 @@ function SupplierCreditForm({ returnId, canRecord, onClose, onSaved }: SupplierC
     supplierCreditsApi.preview(returnId).then(next => {
       if (version === requestVersion.current) applyPreview(next, true);
     }).catch(cause => {
-      if (version === requestVersion.current) setError(errMsg(cause, 'Could not verify the original bills. Please retry.'));
+      if (version === requestVersion.current) setError(getErrorMessage(cause, 'Could not verify the original bills. Please retry.'));
     }).finally(() => {
       if (version === requestVersion.current) setLoading(false);
     });
@@ -115,7 +115,7 @@ function SupplierCreditForm({ returnId, canRecord, onClose, onSaved }: SupplierC
     } catch (cause) {
       if (version === requestVersion.current) {
         setVerificationFailed(true);
-        setError(errMsg(cause, 'Could not verify the selected original bills.'));
+        setError(getErrorMessage(cause, 'Could not verify the selected original bills.'));
       }
     } finally {
       if (version === requestVersion.current) setLoading(false);
@@ -187,7 +187,7 @@ function SupplierCreditForm({ returnId, canRecord, onClose, onSaved }: SupplierC
       // the server confirms its outcome; never make a second note on retry.
       setUncertain(wasUncertain => wasUncertain || !status || status >= 500);
       if (status === 409) setVerificationFailed(true);
-      setError(errMsg(cause, 'Could not confirm the result. Retry this same note to check its status.'));
+      setError(getErrorMessage(cause, 'Could not confirm the result. Retry this same note to check its status.'));
     } finally {
       submitBusy.current = false;
       setSaving(false);

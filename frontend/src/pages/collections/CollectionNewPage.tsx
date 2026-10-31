@@ -40,6 +40,7 @@ import {
   type CollectionPreview,
 } from '../../services/api/collectionsInsights';
 import { rupee, fmtInt } from './collectionsShared';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Fields whose vocabulary is owned by a dedicated chip group (or that make no
 // sense as attribute chips) — excluded from the generic attribute groups.
@@ -51,12 +52,7 @@ interface BrandOption {
   tier?: string;
 }
 
-function errMessage(e: unknown): string {
-  const detail = (e as { response?: { data?: { detail?: unknown } } } | undefined)?.response
-    ?.data?.detail;
-  if (typeof detail === 'string' && detail) return detail;
-  return e instanceof Error && e.message ? e.message : 'Request failed';
-}
+const errMessage = (e: unknown): string => getErrorMessage(e, 'Request failed');
 
 /** Toggleable governed chip. */
 function Chip({

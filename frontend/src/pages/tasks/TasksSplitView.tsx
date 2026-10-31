@@ -38,6 +38,7 @@ import {
   type TaskStatus,
 } from './tasksQueries';
 import { canSeeTeamTasks } from './taskRoles';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const PRI_VAR: Record<PCode, string> = {
   P0: 'var(--p0)',
@@ -370,11 +371,6 @@ function TaskDetailPanel({
   // refuses it for everyone else, so nobody else is offered the button.
   const canReassign = canSeeTeamTasks(user?.roles);
 
-  const _errMsg = (e: unknown, fallback: string): string => {
-    const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
-    return typeof msg === 'string' ? msg : fallback;
-  };
-
   const handleComplete = async () => {
     const notes = window.prompt('Completion notes (required, min 3 characters):', '');
     if (notes === null) return;
@@ -388,7 +384,7 @@ function TaskDetailPanel({
       onChanged();
       onClose();
     } catch (e) {
-      toast.error(_errMsg(e, 'Failed to complete task'));
+      toast.error(getErrorMessage(e, 'Failed to complete task'));
     }
   };
 
@@ -400,7 +396,7 @@ function TaskDetailPanel({
       toast.success('Note added');
       onChanged();
     } catch (e) {
-      toast.error(_errMsg(e, 'Failed to add note'));
+      toast.error(getErrorMessage(e, 'Failed to add note'));
     }
   };
 
@@ -411,7 +407,7 @@ function TaskDetailPanel({
       onChanged();
       onClose();
     } catch (e) {
-      toast.error(_errMsg(e, 'Failed to update task'));
+      toast.error(getErrorMessage(e, 'Failed to update task'));
     }
   };
 
@@ -425,7 +421,7 @@ function TaskDetailPanel({
       onChanged();
       onClose();
     } catch (e) {
-      toast.error(_errMsg(e, 'Failed to reassign task'));
+      toast.error(getErrorMessage(e, 'Failed to reassign task'));
     }
   };
 
@@ -436,7 +432,7 @@ function TaskDetailPanel({
       window.open(url, '_blank', 'noopener,noreferrer');
       window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000);
     } catch (e) {
-      toast.error(_errMsg(e, 'Could not download the file'));
+      toast.error(getErrorMessage(e, 'Could not download the file'));
     }
   };
 

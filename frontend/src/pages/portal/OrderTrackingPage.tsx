@@ -13,6 +13,7 @@ import {
   AlertTriangle, RefreshCw,
 } from 'lucide-react';
 import { portalApi, type OrderTracking } from '../../services/api/portal';
+import { getErrorStatus } from '../../utils/errorHandler';
 
 // Canonical order lifecycle, in display order. We render every step and mark
 // the ones that have happened (present in status_history) as complete, with
@@ -64,7 +65,7 @@ export default function OrderTrackingPage() {
       const resp = await portalApi.trackOrder(token);
       setData(resp);
     } catch (e: unknown) {
-      const status = (e as { response?: { status?: number } })?.response?.status;
+      const status = getErrorStatus(e);
       setError(
         status === 404
           ? 'We could not find an order for this link. Please check the link or contact your store.'

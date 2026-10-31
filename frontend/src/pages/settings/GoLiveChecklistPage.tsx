@@ -13,6 +13,7 @@ import {
 } from 'lucide-react';
 import { storeApi } from '../../services/api';
 import type { GoLiveChecklist, GoLiveCheck } from '../../services/api/stores';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const ICON: Record<GoLiveCheck['status'], ReactElement> = {
   PASS: <CheckCircle2 className="w-5 h-5 text-emerald-600" />,
@@ -37,7 +38,7 @@ export function GoLiveChecklistPage() {
     setError(null);
     storeApi.getGoLiveChecklist()
       .then(setData)
-      .catch((e) => setError(e?.response?.data?.detail || e?.message || 'Failed to load'))
+      .catch((e) => setError(getErrorMessage(e, 'Failed to load')))
       .finally(() => setLoading(false));
   };
 

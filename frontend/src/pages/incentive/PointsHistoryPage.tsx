@@ -10,6 +10,7 @@ import { incentiveApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
 import type { PointsLog } from '../../types';
 import { EligibilityChip } from './DailyScorecardPage';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 const CATEGORY_KEYS = [
   'attendance', 'conversion', 'task', 'visufit', 'punctuality',
@@ -37,7 +38,7 @@ export function PointsHistoryPage() {
       setItems(r.items);
       if (r.items.length > 0) setStaffName(r.items[0].staff_name || null);
     } catch (e: any) {
-      const msg = e?.response?.data?.detail || e?.message || 'Failed to load';
+      const msg = getErrorMessage(e, 'Failed to load');
       toast.error(typeof msg === 'string' ? msg : 'Failed to load');
     } finally {
       setLoading(false);

@@ -37,6 +37,7 @@ import {
   type RefundReview,
 } from '../../services/api/onlineStore';
 import { formatDateIST } from '../../utils/datetime';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // Status presentation. PENDING/DISCREPANCY/CREDIT_FAILED/NO_CUSTOMER are open;
 // POSTED/REJECTED are resolved; UNMATCHED is awaiting its order; MONEY_ONLY is
@@ -255,9 +256,7 @@ export default function RefundReviewsPage() {
         await load();
       } catch (e) {
         const msg =
-          (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-          (e as Error)?.message ||
-          'Action failed';
+          getErrorMessage(e, 'Action failed');
         toast.error(typeof msg === 'string' ? msg : 'Action failed');
       } finally {
         setActingId(null);

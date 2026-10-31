@@ -62,6 +62,7 @@ import OnlineStoreSyncBanner, {
 } from '../../components/online-store/OnlineStoreSyncBanner';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ----------------------------------------------------------------------------
 // Per-entity descriptor: which status-count block + all-pending filter it uses.
@@ -470,7 +471,7 @@ export default function OnlineShopifySyncPage() {
       loadHistory();
       bannerRef.current?.refresh();
     } catch (e: any) {
-      toast.error(`${ent.label}: push failed — ${e?.response?.data?.detail || e?.message || 'error'}`);
+      toast.error(`${ent.label}: push failed — ${getErrorMessage(e, 'error')}`);
     } finally {
       setRunning(null);
       setResyncProgress(null);
@@ -523,7 +524,7 @@ export default function OnlineShopifySyncPage() {
       loadHistory();
       bannerRef.current?.refresh();
     } catch (e: any) {
-      toast.error(`Cutover push failed — ${e?.response?.data?.detail || e?.message || 'error'}`);
+      toast.error(`Cutover push failed — ${getErrorMessage(e, 'error')}`);
     } finally {
       setGoingLive(false);
     }
@@ -575,7 +576,7 @@ export default function OnlineShopifySyncPage() {
       loadHistory();
       bannerRef.current?.refresh();
     } catch (e: any) {
-      toast.error(`Live sync failed — ${e?.response?.data?.detail || e?.message || 'error'}`);
+      toast.error(`Live sync failed — ${getErrorMessage(e, 'error')}`);
     } finally {
       setSyncingLive(false);
     }
@@ -608,7 +609,7 @@ export default function OnlineShopifySyncPage() {
       }
       refreshAll();
     } catch (e: any) {
-      toast.error(`Stock push failed — ${e?.response?.data?.detail || e?.message || 'error'}`);
+      toast.error(`Stock push failed — ${getErrorMessage(e, 'error')}`);
     } finally {
       setPushingStock(false);
     }

@@ -62,6 +62,7 @@ import OnlineStoreSyncBanner, {
   formatPushResult,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 // ---------------------------------------------------------------------------
 // Smart-rule vocabulary (kept small + storefront-meaningful — Shopify-like).
@@ -286,7 +287,7 @@ export default function CollectionsPage() {
       }
     } catch (e: any) {
       toast.error(
-        e?.response?.data?.detail || e?.message || 'Could not publish collection',
+        getErrorMessage(e, 'Could not publish collection'),
       );
     } finally {
       setPublishingId(null);
@@ -352,7 +353,7 @@ export default function CollectionsPage() {
       await load();
     } catch (e: any) {
       toast.error(
-        e?.response?.data?.detail || e?.message || 'Could not update the online-block',
+        getErrorMessage(e, 'Could not update the online-block'),
       );
     } finally {
       setBlockingId(null);

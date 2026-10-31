@@ -4,6 +4,8 @@
  * only steer the UI toward the right next action, they never authorise anything.
  */
 
+import { getErrorDetail } from '../../utils/errorHandler';
+
 /** Minimal shape these helpers need. The real Job type is a superset. */
 export interface QcJobLike {
   status: string;
@@ -101,18 +103,16 @@ export const resolveItemPrescriptionId = (item: unknown): string => {
 };
 
 /**
- * Pull the backend's own sentence out of an Axios-shaped error. Workshop gates
- * return either a plain string detail (the QC / Rx gates) or an object with a
- * `message` (the DC hardlock), so both are handled. The QC handover gate
- * deliberately leaves destructive buttons enabled on the reasoning that the
- * server returns a plain-English refusal naming the remedy — that reasoning only
- * holds if the UI actually renders it.
+ * F9: the create-job DC hardlock, read off the shared client's ApiError
+ * (`.detail` -- the error never carries an axios `.response`, so the old
+ * `err.response.data.detail` reader never opened the banner or the ADMIN
+ * override input). The banner text when it is the hardlock, else null.
  */
-export const backendMessage = (err: unknown, fallback: string): string => {
-  const detail = (err as { response?: { data?: { detail?: unknown } } })?.response?.data
-    ?.detail;
-  if (typeof detail === 'string' && detail.trim()) return detail;
-  const message = (detail as { message?: unknown } | undefined)?.message;
-  if (typeof message === 'string' && message.trim()) return message;
-  return fallback;
-};
+export function dcHardlockMessage(error: unknown): string | null {
+  const detail = getErrorDetail(error) as { code?: unknown; message?: unknown } | undefined;
+  if (!detail || typeof detail !== 'object') return null;
+  if (detail.code !== 'DC_HARDLOCK' && detail.code !== 'DC_HARDLOCK_OVERRIDE_FORBIDDEN') return null;
+  return typeof detail.message === 'string' && detail.message
+    ? detail.message
+    : 'No Delivery Challan logged for this lens.';
+}
