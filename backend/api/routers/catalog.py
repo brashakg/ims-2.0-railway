@@ -3841,6 +3841,12 @@ def _restore_barcode_refusal(repo, spine: Optional[Dict], twin: Optional[Dict]) 
         for doc in (spine or {}, twin or {}):
             attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
             for value in (doc.get("barcode"), attrs.get("gtin"), doc.get("gtin")):
+                # An INT that lost a UPC/EAN's leading zero(s) (036000291452
+                # -> 36000291452, 9-11 digits) is read zero-padded. Ints
+                # only, never 8 digits: a padded GTIN-8 in 20-29 would pass
+                # as a public code (review of #1284).
+                if type(value) is int and 9 <= len(str(value)) <= 11:
+                    value = str(value).zfill(12)
                 code = sanitise_gtin(value)
                 if code and code not in codes:
                     codes.append(code)
