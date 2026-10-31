@@ -986,7 +986,8 @@ class StockRepository(BaseRepository):
         exclude_ids=None,
     ) -> Optional[str]:
         """Atomically claim one AVAILABLE unit for product+store and flip it
-        SOLD; return its stock_id, or None when none is available.
+        SOLD; return its stock_id, or None when none is available. A stock
+        backend error raises (fails closed) rather than reading as None.
 
         Concurrency-safe: a single find_one_and_update with a status="AVAILABLE"
         filter means two racing sales can NEVER claim the same physical unit (the
@@ -1068,10 +1069,9 @@ class StockRepository(BaseRepository):
             # on rather than hide).
             undated_flt = dict(flt)
             undated_flt["$or"] = self._not_expired_or()
-            try:
-                doc = self.collection.find_one_and_update(undated_flt, update)
-            except Exception:
-                return None
+            # A backend error here RAISES (POS 4): None means "none on the
+            # shelf", and the till must never tell a cashier that for an outage.
+            doc = self.collection.find_one_and_update(undated_flt, update)
         if not doc:
             return None
         # TRACEABILITY for the fail-open path: a FIFO sale never touches the

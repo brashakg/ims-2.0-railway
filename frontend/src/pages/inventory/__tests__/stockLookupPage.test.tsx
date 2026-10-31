@@ -7,9 +7,10 @@
 // Round 7: the till REFUSES an offer above MRP and a zero or NaN price
 // (posPriceGuard), so those rows read '-'; a re-typed offer||mrp chain would
 // show Rs 15,990 / Rs 0 / Rs NaN, a price the till never charges.
-// Round 5: a shop the till does not count reads 'Not stocked here' (owner
-// ruling 2026-10-08; it read 'not tracked here'), a lens
-// 'see Power Grid' - never a 0 the till would not keep.
+// Round 5: a line the till does not count (a service) reads 'Not stocked
+// here' (owner ruling 2026-10-08; it read 'not tracked here'), a lens
+// 'see Power Grid' - never a 0 the till would not keep. POS 4: a counted line
+// at a shop holding none reads 0 - the till refuses it there.
 // Round 6: the line type is the till's own mapCategory (imported, never
 // re-typed: 'LENSES' and 'SVC' are its spellings too), checked against the
 // guard's lists the server sends; only a role the Power Grid's route gate
@@ -44,7 +45,7 @@ const GUARD_LISTS = {
 
 const item = (product_id: string, mrp: number, offer_price: number | null) => ({
   product_id, sku: product_id, name: `Frame ${product_id}`, mrp, offer_price,
-  stores: [{ store_id: 'S1', store_name: 'Dhanbad', available: 1, in_transit: 0, tracked: true }],
+  stores: [{ store_id: 'S1', store_name: 'Dhanbad', available: 1, in_transit: 0 }],
 });
 
 function renderPage() {
@@ -139,14 +140,14 @@ describe('Stock lookup screen', () => {
   };
   const shopCells = (name: string) =>
     within(screen.getByText(name).closest('tr')!).getAllByRole('cell').slice(5).map((c) => c.textContent);
-  const bokaro = { store_id: 'S2', store_name: 'Bokaro', available: 0, in_transit: 0, tracked: false };
+  const bokaro = { store_id: 'S2', store_name: 'Bokaro', available: 0, in_transit: 0 };
   const product = (id: string, category: string) => ({
     ...item(id, 3000, 3000), category, stores: [...item(id, 0, 0).stores, bokaro],
   });
 
   // Every spelling below is one the till's mapCategory takes; the expected
   // cells are what the till does with it (GET /inventory/sellable).
-  const COUNTED = ['1', 'Not stocked here'];
+  const COUNTED = ['1', '0'];
   const NOT_COUNTED = ['Not stocked here', 'Not stocked here'];
   const LENS_POINTER = ['counted by power - ask the optometrist or a manager'];
   it.each([

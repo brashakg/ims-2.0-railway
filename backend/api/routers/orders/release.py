@@ -27,11 +27,11 @@ from .stock import (
 def _is_unit_tracked(stock_repo, product_id: str, store_id: Optional[str]) -> bool:
     """Does this product have ANY serialized stock_units row at this store?
 
-    Same question the availability assert asks before it will block a sale
-    (`if not tracked: continue`). A product that is not unit-tracked can never
-    strand a unit, so it must never raise the restock-failure signal.
-    Fail-soft TRUE-ish only when we genuinely cannot tell: a lookup error
-    returns False so we do not invent an alarm.
+    Kept (2026-11-01) ONLY so a line billed before POS 4 -- when the sale gate
+    still let a product with no unit here sell from an empty shelf -- does not
+    raise a false restock alarm on removal. The sale gate no longer exempts
+    such products: _takes_serialized_stock is the single rule for which lines
+    take a unit. A lookup error returns False so we do not invent an alarm.
     """
     if not product_id or not store_id or stock_repo is None:
         return False
@@ -122,12 +122,10 @@ def _release_line_units(
         # fewer units back than the line consumed means something is still SOLD
         # against a line that no longer exists.
         #
-        # ...but ONLY for a product that is actually unit-tracked at this store.
-        # A plain ACCESSORY has no stock_units rows at all, so it releases
-        # nothing and is not a failure -- and the availability gate 3,000 lines
-        # earlier exempts exactly these products (`if not tracked: continue`).
-        # Without this the door cried wolf on every non-tracked line and
-        # poisoned the very signal it was built to raise.
+        # ...but ONLY for a product with a unit at this store. Since POS 4 a
+        # line that takes stock (_takes_serialized_stock) always claimed its
+        # units; a legacy draft line billed before that may hold none, and
+        # must not cry wolf and poison the very signal this raises.
         if len(freed) < qty and _is_unit_tracked(stock_repo, pid, store_id):
             incomplete = True
         if incomplete:

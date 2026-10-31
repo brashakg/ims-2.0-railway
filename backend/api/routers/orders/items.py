@@ -31,7 +31,8 @@ from ...services import discount_approval
 from .rx import _validate_order_line_rx
 from .stock import (
     _assert_serialized_stock_available,
-    _claim_scanned_units,
+    _canonical_pid,
+    _claim_units,
     _lens_reservation_key,
     _mark_units_sold,
     _release_claimed_units,
@@ -105,6 +106,10 @@ async def add_order_item(
                 # Letting the exception escape instead turned a flaky product
                 # read into a 500 on the till -- and skipped the cap entirely.
                 product = None
+        if product is not None:
+            # One id rule with create (_canonical_pid): a product named by SKU
+            # or _id is gated, claimed and stored under its product_id.
+            _pid = _canonical_pid(_pr, _pid)
 
         # BUG-005 / BUG-006 (patient-safety): same Rx-power validation +
         # Rx-required check the create path runs, for a line appended to a DRAFT
@@ -162,7 +167,7 @@ async def add_order_item(
         item_data = {
             "item_id": str(uuid.uuid4()),
             "item_type": item.item_type,
-            "product_id": item.product_id,
+            "product_id": _pid,
             # Parity with create_order's line shape (chair P1): the name makes
             # the floor 400 actionable; cost_at_sale freezes COGS exactly like
             # create does (None when unknown -> floor fails open on this line).
@@ -260,7 +265,7 @@ async def add_order_item(
             store_id=order.get("store_id"),
             lines=[
                 {
-                    "product_id": item.product_id,
+                    "product_id": _pid,
                     "product_name": (product or {}).get("name") or item.product_name,
                     "name_from_till": product is None,
                     "quantity": item.quantity,
@@ -345,9 +350,10 @@ async def add_order_item(
                 exc,
             )
 
-        # A scanned unit is claimed before the save, as at create (a 409 here
-        # leaves the order untouched; a scanned line reserves no lens cell).
-        claimed = _claim_scanned_units(order_id, [item_data], _store_id)
+        # Every unit the line takes is claimed before the save, as at create
+        # (a 409 here leaves the order untouched; a scanned line reserves no
+        # lens cell).
+        claimed = _claim_units(order_id, [item_data], _store_id)
         try:
             # Spend the manager's approval (if one lifted the limit) last thing
             # before the save -- atomic, single use, as at create. ANY failure
@@ -398,16 +404,16 @@ async def add_order_item(
         if not persisted:
             # The line never landed on the order -> give the lens cell back so
             # the reservation cannot leak against a line that does not exist.
-            _release_claimed_units(order_id, claimed)
-            # Only once it is confirmed the line did NOT land on the order.
-            discount_approval.give_back(
-                _approver,
-                current_user,
-                lambda: any(
+            # The units and the approval go back only once it is confirmed the
+            # line did NOT land (the write may have landed before the error).
+            def _line_was_saved() -> bool:
+                return any(
                     ln.get("item_id") == item_data["item_id"]
                     for ln in (repo.find_by_id(order_id) or {}).get("items", [])
-                ),
-            )
+                )
+
+            _release_claimed_units(order_id, claimed, _line_was_saved)
+            discount_approval.give_back(_approver, current_user, _line_was_saved)
             try:
                 await release_for_cancel(
                     order_item=item_data,

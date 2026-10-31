@@ -391,11 +391,15 @@ def test_added_line_is_blocked_when_every_unit_is_expired(wired):
     assert "quarantine" in detail.lower()
 
 
-def test_untracked_product_is_never_false_blocked(wired):
-    # No stock_units rows at all -> not serialized-tracked -> the sale proceeds.
-    res = _add(_item())
-    assert res["item_id"]
-    assert len(wired["orders"].orders["ORD-1"]["items"]) == 1
+def test_a_never_stocked_product_is_refused(wired):
+    # POS 4 (owner ruling 2026-08-25, oversell BLOCKS): no stock_units row at
+    # all used to read "not tracked here" and sold from an empty shelf.
+    with pytest.raises(HTTPException) as exc:
+        _add(_item())
+
+    assert exc.value.status_code == 409
+    assert "insufficient stock for 'frame'" in str(exc.value.detail).lower()
+    assert wired["orders"].orders["ORD-1"]["items"] == []
 
 
 def test_added_lens_line_reserves_its_power_grid_cell(wired):
@@ -1441,11 +1445,16 @@ def test_deliver_is_not_replayable(wired):
 
 def test_removing_an_untracked_product_line_is_not_a_restock_failure(wired):
     """No stock_units rows for this product at all -> nothing to release and
-    nothing wrong. The cancel door already reports incomplete=False here."""
-    res_add = _add(_item(product_id="P-UNTRACKED", product_name="Cloth"))
+    nothing wrong. The cancel door already reports incomplete=False here.
+    POS 4 refuses such a line now, so it is one billed before that change."""
+    wired["orders"].orders["ORD-1"]["items"].append(
+        {"item_id": "L-OLD", "item_type": "FRAME", "product_id": "P-UNTRACKED",
+         "product_name": "Cloth", "quantity": 1, "unit_price": 5000.0,
+         "discount_percent": 0, "line_index": 0}
+    )
     assert wired["units"] == []                       # genuinely untracked
 
-    res = _remove(res_add["item_id"])
+    res = _remove("L-OLD")
 
     assert res["stock_units_released"] == 0
     assert res["stock_release_failed"] is False        # NOT a false alarm

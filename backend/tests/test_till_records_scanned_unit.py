@@ -299,12 +299,12 @@ def test_typed_line_before_a_scanned_line_sells_both_units(client, till, caplog)
     assert _unit(till, "SU-B")["status"] == "SOLD" and _unit(till, "SU-B")["order_id"] == order_id
 
 
-def test_typed_line_with_no_units_before_a_scanned_line_raises_no_alarm(
+def test_typed_line_with_no_units_before_a_scanned_line_is_refused_whole(
     client, till, caplog
 ):
-    """A typed accessory with no units on the shelf finds nothing to take;
-    the scanned frame after it is still this order's, with no false
-    'reconcile manually' alarm."""
+    """A typed accessory with no units on the shelf finds nothing to take, so
+    the bill is refused (POS 4: oversell blocks) and the scanned frame after it
+    stays on the shelf -- no half-sold bill, no 'reconcile manually' alarm."""
     from api.routers import orders as om
 
     om.get_product_repository().create(
@@ -324,10 +324,10 @@ def test_typed_line_with_no_units_before_a_scanned_line_raises_no_alarm(
         sku="ACC-CASE-1", category="ACCESSORY", unit_price=500.0,
     )
     r = _sell(client, [case, _line(stock_id=UNIT_B["stock_id"])])
-    assert r.status_code in (200, 201), r.text
+    assert r.status_code == 409, r.text
+    assert "Hard case" in r.text, r.text
     assert "NOT SELLABLE" not in caplog.text
-    b = _unit(till, "SU-B")
-    assert b["status"] == "SOLD" and b["order_id"] == _order_id(r), b
+    assert _unit(till, "SU-B")["status"] == "AVAILABLE"
     assert _unit(till, "SU-A")["status"] == "AVAILABLE"
 
 
