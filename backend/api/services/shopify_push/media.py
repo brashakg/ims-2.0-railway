@@ -26,7 +26,14 @@ from ._shared import (
     logger,
     product_push_refusal,
 )
-from .transport import ShopifyRequestRefused, ShopifyThrottled, _graphql, _now, _user_errors
+from .transport import (
+    ShopifyRequestRefused,
+    ShopifyThrottled,
+    _graphql,
+    _is_throttled_body,
+    _now,
+    _user_errors,
+)
 from .queries import (
     _FILE_UPDATE_ALT,
     _MEDIA_LIMIT,
@@ -134,7 +141,9 @@ def product_photo_urls(product: Dict[str, Any]) -> List[str]:
 def _no_answer(exc: BaseException) -> bool:
     """A photo call that raised is worth waiting for (``no_answer``) only when
     Shopify did not answer or was busy (429). A 4xx refusal or missing
-    credentials is definite: red on the first press (review of #1277)."""
+    credentials is definite: red on the first press (review of #1277). The
+    other busy -- a GraphQL THROTTLED 200 after every retry -- comes back as
+    a body, not a raise: each photo call checks _is_throttled_body (#1295)."""
     return isinstance(exc, ShopifyThrottled) or not isinstance(exc, ShopifyRequestRefused)
 
 
@@ -165,7 +174,10 @@ async def _attach_product_photos(
         return {"attached": 0, "error": str(e), "no_answer": _no_answer(e)}
     err = _user_errors_media(body)
     if err:
-        return {"attached": 0, "error": err}
+        out: Dict[str, Any] = {"attached": 0, "error": err}
+        if _is_throttled_body(body):
+            out["no_answer"] = True
+        return out
     nodes = ((body.get("data") or {}).get("productCreateMedia") or {}).get("media") or []
     # AN ID IS NOT A PHOTOGRAPH. Shopify mints the MediaImage id BEFORE it
     # fetches the bytes off the url, so counting ids would call a 404 image a
@@ -510,6 +522,8 @@ async def _delete_media(
         if summary is not None:
             summary["no_answer"] = _no_answer(exc)
         return str(exc)
+    if summary is not None and _is_throttled_body(body):
+        summary["no_answer"] = True
     return _user_errors_media(body, "productDeleteMedia")
 
 
@@ -653,6 +667,8 @@ async def sync_product_media(
                 },
             )
             err = _user_errors_media(body, "productReorderMedia")
+            if _is_throttled_body(body):
+                summary["no_answer"] = True
         except Exception as exc:  # noqa: BLE001
             err = str(exc)
             summary["no_answer"] = _no_answer(exc)
@@ -741,6 +757,8 @@ async def sync_variant_media(
                 else "; ".join(str(e.get("message") or e.get("code")) for e in errors)
             )
             not_ready = any(str(e.get("code") or "") == "NON_READY_MEDIA" for e in errors)
+            if _is_throttled_body(body):
+                summary["no_answer"] = True
         except Exception as exc:  # noqa: BLE001 -- fail-soft side channel
             err, not_ready = str(exc), False
             summary["no_answer"] = _no_answer(exc)

@@ -107,7 +107,7 @@ class FakeShopify:
         self.deleted_variants = []
         self.media_ready = True
         self.variant_refusal = None
-        self.raise_on = {}  # op name -> exception the call raises
+        self.raise_on = {}  # op name -> exception the call raises, or the body it answers
         self._n = 1000
 
     # -- bookkeeping --------------------------------------------------------
@@ -178,7 +178,10 @@ class FakeShopify:
         name = _op(query)
         self.calls.append((name, copy.deepcopy(variables)))
         if name in self.raise_on:
-            raise self.raise_on[name]
+            hit = self.raise_on[name]
+            if isinstance(hit, dict):
+                return hit  # a canned answer, e.g. an exhausted THROTTLED 200
+            raise hit
         handler = getattr(self, "_h_" + name, None)
         return handler(variables or {}) if handler else {"data": {}}
 
@@ -1401,6 +1404,10 @@ def test_a_colour_photo_shopify_refuses_is_red_at_once_with_shopifys_reason(monk
     assert "ZZZ-REASON" in res.error and "still attaching" not in res.error
 
 
+# What _graphql hands back when every attempt was GraphQL-THROTTLED.
+_THROTTLED = {"errors": [{"message": "Throttled", "extensions": {"code": "THROTTLED"}}]}
+
+
 def _refused(text="status 422: Media is invalid ZZZ-REASON"):
     from api.services.shopify_push.transport import ShopifyRequestRefused
 
@@ -1411,6 +1418,7 @@ def _refused(text="status 422: Media is invalid ZZZ-REASON"):
     (RuntimeError("connection reset"), "pending"),
     (None, "failed"),  # a 4xx refusal (ShopifyRequestRefused)
     ("429", "pending"),  # every attempt throttled: busy, not a refusal
+    ("THROTTLED", "pending"),  # GraphQL THROTTLED 200 after every retry: the same busy
 ])
 def test_a_colour_photo_call_that_raises_is_amber_only_without_an_answer(monkeypatch, exc, state):
     # Review of #1277: only a transport fault is "still attaching"; a
@@ -1422,6 +1430,8 @@ def test_a_colour_photo_call_that_raises_is_amber_only_without_an_answer(monkeyp
         from api.services.shopify_push.transport import ShopifyThrottled
 
         exc = ShopifyThrottled("shopify request failed after 4 attempts (status 429: busy)")
+    if exc == "THROTTLED":
+        exc = _THROTTLED
     fake.raise_on["imsVariantAppendMedia"] = exc or _refused()
     _live(monkeypatch, fake)
     _photo_clock(monkeypatch)
@@ -1433,6 +1443,7 @@ def test_a_colour_photo_call_that_raises_is_amber_only_without_an_answer(monkeyp
 @pytest.mark.parametrize("exc, state", [
     (RuntimeError("connection reset"), "pending"),
     (None, "failed"),
+    (_THROTTLED, "pending"),
 ])
 def test_a_new_photo_attach_that_raises_is_amber_only_without_an_answer(monkeypatch, exc, state):
     db = _world()
@@ -1448,6 +1459,36 @@ def test_a_new_photo_attach_that_raises_is_amber_only_without_an_answer(monkeypa
     )
     fake.raise_on["imsProductCreateMedia"] = exc or _refused()
     res = _push(db, pids[0])
+    assert res.photos["sync_state"] == state, (res.error, res.photos)
+
+
+@pytest.mark.parametrize("op, edit", [
+    ("imsProductReorderMedia", lambda imgs: imgs[::-1]),  # IMS reorders its photos
+    ("imsProductDeleteMedia", lambda imgs: imgs[:-1]),  # IMS drops a photo
+])
+@pytest.mark.parametrize("answer, state", [
+    (RuntimeError("connection reset"), "pending"),
+    (None, "failed"),  # a 4xx refusal (ShopifyRequestRefused)
+    (_THROTTLED, "pending"),  # busy after every retry, not a refusal
+])
+def test_a_photo_reorder_or_delete_is_amber_only_without_an_answer(monkeypatch, op, edit, answer, state):
+    # Review of #1295: the reorder and delete calls split no answer / busy
+    # (amber) from a definite refusal (red) the same as attach and append.
+    db = _world()
+    pids = _family(db, [("Gold", "001"), ("Black", "002/58")])
+    fake = FakeShopify()
+    _live(monkeypatch, fake)
+    _photo_clock(monkeypatch)
+    assert _push(db, pids[0]).code is None
+    twin = _twin(db, pids[0])
+    db["catalog_products"].update_one(
+        {"id": twin["id"]},
+        {"$set": {"images": edit(list(twin["images"])), "ecom.locally_modified": True}},
+    )
+    fake.raise_on[op] = answer if answer is not None else _refused()
+    fake.calls.clear()
+    res = _push(db, pids[0])
+    assert op in [c[0] for c in fake.calls], "the press never reached the photo call"
     assert res.photos["sync_state"] == state, (res.error, res.photos)
 
 
