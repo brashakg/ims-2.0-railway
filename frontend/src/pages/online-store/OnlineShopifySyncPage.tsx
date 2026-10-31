@@ -32,7 +32,6 @@ import {
   Package,
   Layers,
   Menu as MenuIcon,
-  Image as ImageIcon,
   Tag,
   Play,
   Rocket,
@@ -67,7 +66,7 @@ import { getErrorMessage } from '../../utils/errorHandler';
 // ----------------------------------------------------------------------------
 // Per-entity descriptor: which status-count block + all-pending filter it uses.
 // ----------------------------------------------------------------------------
-type EntityKey = 'products' | 'collections' | 'menus' | 'images' | 'variant-prices';
+type EntityKey = 'products' | 'collections' | 'menus' | 'variant-prices';
 
 interface EntityDef {
   key: EntityKey;
@@ -90,7 +89,6 @@ const ENTITIES: EntityDef[] = [
   { key: 'products', token: 'products', label: 'Products', icon: Package, pushedLabel: 'pushed', pendingLabel: 'pending' },
   { key: 'collections', token: 'collections', label: 'Collections', icon: Layers, pushedLabel: 'pushed', pendingLabel: 'pending' },
   { key: 'menus', token: 'menus', label: 'Menus', icon: MenuIcon, pushedLabel: 'pushed', pendingLabel: 'pending' },
-  { key: 'images', token: 'images', label: 'Images', icon: ImageIcon, pushedLabel: 'pushed', pendingLabel: 'pending' },
   {
     // Opt-in bulk price/compare-at/barcode resync over every product already on
     // Shopify (the "MRP revision" resync). NOT in the default sweep -- a normal
@@ -127,7 +125,7 @@ function fmt(n: number | null | undefined): string {
 }
 
 /** Read a per-entity count block from the status payload (shapes differ slightly
- *  per entity — products/images use staged/approved, all carry pushed/pending). */
+ *  per entity — products use staged, all carry pushed/pending). */
 function countsFor(
   status: PushStatus | null,
   key: EntityKey,
@@ -136,9 +134,9 @@ function countsFor(
   const block = (c[key] ?? {}) as Record<string, number | null | undefined>;
   const pushed = Number(block.pushed ?? 0);
   const pending = Number(block.pending ?? 0);
-  // Products -> staged; collections/menus -> total; images -> approved.
-  const total = Number(block.staged ?? block.total ?? block.approved ?? 0);
-  const totalLabel = key === 'products' ? 'staged' : key === 'images' ? 'approved' : 'total';
+  // Products -> staged; collections/menus -> total.
+  const total = Number(block.staged ?? block.total ?? 0);
+  const totalLabel = key === 'products' ? 'staged' : 'total';
   return { pushed, pending, total, totalLabel };
 }
 
@@ -199,6 +197,8 @@ function sweepToast(
   const withheld = n('publish_withheld');
   const heldDown = n('taken_down_skipped');
   const archived = n('archived_not_listed');
+  // Archived and never published: out of the queue on purpose, not a refusal.
+  const archivedLeft = n('archived_skipped');
   const oldPrice = n('price_not_synced');
   const variantsHeld = n('variants_held');
   // LIVE, BUT ITS PHOTOS ARE NOT IMS's (a photo step failed): still queued,
@@ -250,6 +250,7 @@ function sweepToast(
     (withheld ? ` · ${withheld} NOT made visible` : '') +
     (heldDown ? ` · ${heldDown} skipped (taken down)` : '') +
     (archived ? ` · ${archived} archived (not listed)` : '') +
+    (archivedLeft ? ` · ${archivedLeft} archived (left the queue)` : '') +
     (variantsHeld ? ` · ${variantsHeld} colours/sizes left off (incomplete options)` : '') +
     (oldPrice ? ` · ${oldPrice} at the OLD price (price not synced)` : '') +
     (oldPhotos ? ` · ${oldPhotos} photos still attaching — will finish on the next sync` : '') +
@@ -485,7 +486,7 @@ export default function OnlineShopifySyncPage() {
   const goLive = async () => {
     if (!isLive || !canGoLive) return;
     const ok = window.confirm(
-      'LIVE Shopify push — this writes products, collections, menus and images to the ' +
+      'LIVE Shopify push — this writes products (with their photos), collections and menus to the ' +
         'live storefront (bettervision.in). This is final and owner-armed at the ' +
         'storefront cutover. Continue?',
     );
@@ -666,7 +667,7 @@ export default function OnlineShopifySyncPage() {
         </button>
       </div>
       <p className="text-sm text-gray-500 mb-4 max-w-3xl">
-        The single-writer push of products, collections, menus and images to Shopify. Every action here is a
+        The single-writer push of products (with their photos), collections and menus to Shopify. Every action here is a
         SIMULATED dry-run unless the owner has armed the live gates at the storefront cutover — nothing reaches
         the live storefront (bettervision.in) until then.
       </p>
@@ -1314,6 +1315,19 @@ export default function OnlineShopifySyncPage() {
                             title="Retired products: the update reached Shopify, but an archived product is not on the storefront — nobody can find it."
                           >
                             · {fmt(archived)} archived (not listed)
+                          </span>
+                        ) : null;
+                      })()}
+                      {(() => {
+                        const left = Number(
+                          (sweep.summary?.[ent.token]?.archived_skipped ?? 0) as number,
+                        );
+                        return left > 0 ? (
+                          <span
+                            className="inline-flex items-center gap-1 text-gray-500"
+                            title="Archived and never on the website: a sweep leaves them out. Restore one and edit it (or press Send to website) to list it."
+                          >
+                            · {fmt(left)} archived (left the queue)
                           </span>
                         ) : null;
                       })()}

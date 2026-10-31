@@ -345,7 +345,7 @@ export function InventoryLayout() {
           </div>
 
           {/* ONLINE stat strip - website-meaningful counts. */}
-          <div className="stat-strip">
+          <div className="stat-strip stat-strip-4">
             <div>
               <div className="l">Synced to website</div>
               {renderOnlineValue(onlineCounts.products)}
@@ -365,11 +365,6 @@ export function InventoryLayout() {
               <div className="l">Online customers</div>
               {renderOnlineValue(onlineCounts.customers)}
               <div className="d">joined from Shopify</div>
-            </div>
-            <div>
-              <div className="l">Images pending</div>
-              {renderOnlineValue(onlineCounts.images_pending_design)}
-              <div className="d">awaiting design work</div>
             </div>
           </div>
         </>

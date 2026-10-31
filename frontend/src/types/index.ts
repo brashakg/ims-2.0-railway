@@ -13,7 +13,7 @@ export type UserRole =
   | 'STORE_MANAGER'
   | 'ACCOUNTANT'
   | 'CATALOG_MANAGER'
-  | 'DESIGN_MANAGER'  // 13th role (BVI merge): e-commerce image/design queue
+  | 'DESIGN_MANAGER'  // 13th role (BVI merge): e-commerce image/design queue (queue retired 2026-10-29)
                       // owner. Forward-declared here for the Online Store
                       // module; backend RBAC matrix gains it in a later phase.
   | 'OPTOMETRIST'

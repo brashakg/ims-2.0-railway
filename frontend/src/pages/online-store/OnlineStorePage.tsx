@@ -18,7 +18,6 @@ import {
   Package,
   Layers,
   Menu as MenuIcon,
-  Image as ImageIcon,
   Users,
   ShoppingBag,
   Boxes,
@@ -42,7 +41,6 @@ type CountKey =
   | 'variants'
   | 'collections'
   | 'menus'
-  | 'images_pending_design'
   | 'customers'
   | 'orders';
 
@@ -120,18 +118,6 @@ const SECTIONS: Section[] = [
     countLabel: 'menus',
     // Phase 3 shipped: the Mega-menu editor is live in-app.
     href: '/online-store/menus',
-  },
-  {
-    key: 'images',
-    title: 'Image design queue',
-    blurb:
-      'The design team workflow: raw photo to edited hero image, role-gated, with per-image design status — entirely inside IMS.',
-    icon: ImageIcon,
-    phase: 'Phase 4',
-    countKey: 'images_pending_design',
-    countLabel: 'awaiting design',
-    // Phase 4 shipped: the image design queue is live in-app.
-    href: '/online-store/images',
   },
   {
     key: 'customers',

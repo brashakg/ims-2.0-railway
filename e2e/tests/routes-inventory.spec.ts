@@ -72,12 +72,13 @@ test('coverage has not silently shrunk', () => {
     { probedAtLeast: ROUTES.length >= 134, exclusions: EXCLUSIONS.length },
     'The layout gate covered 134 screens with 15 exclusions (14 when armed, ' +
       '+1 for /reports and +4 for the HR redirects, once their sections '+
-      'became real pages; +9 redirect-only legacy addresses kept alive for ' +
+      'became real pages; +10 redirect-only legacy addresses kept alive for ' +
       'bookmarks and deep-links -- /pos -> /pos/new when the wizard till was ' +
       'retired, plus /hr/attendance, /clinical/test, /prescriptions, ' +
       '/tasks/dashboard, /catalog/autopilot, /purchase/vendors, ' +
       '/purchase/invoices/book and /purchase/grn (the classic goods-receipt ' +
-      'form, retired into /purchase/receive) -- every one a Navigate, none a screen; +2 for ' +
+      'form, retired into /purchase/receive) and /online-store/images (the Image ' +
+      'design queue, retired into /catalog) -- every one a Navigate, none a screen; +2 for ' +
       'the parameterised eye-examination page /clinical/test/:entryId and its ' +
       'amend form, which need a seeded queue entry and a seeded eye_test that ' +
       'seed_e2e.py does not create; +1 for the redirect-only forecast catch-all ' +
@@ -86,5 +87,5 @@ test('coverage has not silently shrunk', () => {
       'parameterised screen cannot be probed without a seeded id AND a url field). ' +
       'If an exclusion is genuinely new and justified, raise the ceiling here in the ' +
       'same commit that adds it -- deliberately, not by accident.',
-  ).toEqual({ probedAtLeast: true, exclusions: 32 });
+  ).toEqual({ probedAtLeast: true, exclusions: 33 });
 });

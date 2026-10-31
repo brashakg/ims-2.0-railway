@@ -2,8 +2,9 @@
 // from App.tsx (route-registry split); paths, elements and role gates are
 // unchanged.
 import { lazy } from 'react';
-import { Route } from 'react-router-dom';
+import { Navigate, Route } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
+import { useAuth } from '../context/AuthContext';
 
 const OnlineStorePage = lazy(() => import('../pages/online-store/OnlineStorePage'));
 const OnlineProductsPage = lazy(() => import('../pages/online-store/OnlineProductsPage'));
@@ -16,13 +17,26 @@ const CollectionNewPage = lazy(() => import('../pages/collections/CollectionNewP
 const CollectionDetailPage = lazy(() => import('../pages/collections/CollectionDetailPage'));
 const MenusPage = lazy(() => import('../pages/online-store/MenusPage'));
 const DiscountRulesPage = lazy(() => import('../pages/online-store/DiscountRulesPage'));
-const DesignQueuePage = lazy(() => import('../pages/online-store/DesignQueuePage'));
 const OnlineOrdersPage = lazy(() => import('../pages/online-store/OnlineOrdersPage'));
 const RefundReviewsPage = lazy(() => import('../pages/online-store/RefundReviewsPage'));
 const OnlineStockTallyPage = lazy(() => import('../pages/online-store/OnlineStockPage'));
 const OnlineStoreHealthPage = lazy(() => import('../pages/online-store/OnlineStoreHealthPage'));
 const OndcSellerPage = lazy(() => import('../pages/online-store/OndcSellerPage'));
 const OnlineShopifySyncPage = lazy(() => import('../pages/online-store/OnlineShopifySyncPage'));
+
+/** /catalog for the catalogue roles; a DESIGN_MANAGER-only user (whom the
+ *  /catalog gate refuses) lands on the Online Store home instead of a denial.
+ *  The role list is the /catalog gate's minus STORE_MANAGER, which never had
+ *  this page. */
+function RetiredImagesRedirect() {
+  const { hasRole } = useAuth();
+  return (
+    <Navigate
+      to={hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']) ? '/catalog' : '/online-store'}
+      replace
+    />
+  );
+}
 
 export const onlineStoreRoutes = (
   <>
@@ -109,16 +123,17 @@ export const onlineStoreRoutes = (
       }
     />
 
-    {/* Online Store — Image design queue (BVI Phase 4). Same
-        catalog/design role gate as the module shell; in-page
-        Approve/Reject is further gated to ADMIN/DESIGN_MANAGER. */}
+    {/* The Image design queue was retired (owner 2026-10-29): the editor
+        and the cataloguer both work from the Catalog page, and a product's
+        photos reach the website with its own push. Old links forward; the
+        old gate stays so a signed-out or unknown user is handled as before. */}
     <Route
       path="online-store/images"
       element={
         <ProtectedRoute
           allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
         >
-          <DesignQueuePage />
+          <RetiredImagesRedirect />
         </ProtectedRoute>
       }
     />

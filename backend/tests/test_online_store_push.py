@@ -734,7 +734,9 @@ def _seed_pending(conn):
 
 def test_push_all_pending_dark_sweeps_every_dirty_doc(client, auth_headers, patched_db, monkeypatch):
     """The batch sweep pushes exactly the pending docs (dirty product/collection/
-    menu + APPROVED-unpushed image), all SIMULATED, one audit row each."""
+    menu), all SIMULATED, one audit row each. An APPROVED-unpushed image is NOT
+    in the default sweep (owner 2026-10-29: the Image design queue was retired,
+    so no screen can show or approve one any more); see the next test."""
     conn, audit_repo = patched_db
     _force_dark(monkeypatch, "writes_off")  # boom-spy: a network call fails the test
     _seed_pending(conn)
@@ -744,19 +746,36 @@ def test_push_all_pending_dark_sweeps_every_dirty_doc(client, auth_headers, patc
     body = r.json()
     assert body["mode"]["mode"] == "SIMULATED"
     assert body["db_connected"] is True
-    # P1 + C1 + M1 + I1 = 4 (P2 clean, I2 already pushed -> skipped).
-    assert body["pushed_count"] == 4, body
+    # P1 + C1 + M1 = 3 (P2 clean; images are opt-in, never swept by default).
+    assert body["pushed_count"] == 3, body
     assert body["summary"]["products"]["pushed"] == 1
     assert body["summary"]["collections"]["pushed"] == 1
     assert body["summary"]["menus"]["pushed"] == 1
-    assert body["summary"]["images"]["pushed"] == 1
+    assert "images" not in body["summary"]
     # Every push is a dry-run + every push wrote an audit row. The STOCK pass
     # that rides every products press (2026-09-07) writes its own row under
     # entity_type "stock" and reports on its own key, never in `results`.
     assert all(res["mode"] == "SIMULATED" for res in body["results"])
     rows = audit_repo.find_many({"action": "ONLINE_STORE_PUSH"})
-    assert len([r for r in rows if r.get("entity_type") != "stock"]) == 4
+    assert len([r for r in rows if r.get("entity_type") != "stock"]) == 3
     assert body["stock"]["mode"] == "SIMULATED" and body["stock"]["entity"] == "stock"
+
+
+def test_push_all_pending_images_only_when_named(client, auth_headers, patched_db, monkeypatch):
+    """The images pass is OPT-IN: ?entities=images still pushes an APPROVED,
+    unpushed image (and skips one already on Shopify)."""
+    conn, _ = patched_db
+    _force_dark(monkeypatch, "writes_off")
+    _seed_pending(conn)
+
+    r = client.post(
+        "/api/v1/online-store/push/all-pending?entities=images", headers=auth_headers
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["pushed_count"] == 1, body
+    assert body["summary"]["images"]["pushed"] == 1
+    assert "products" not in body["summary"]
 
 
 def test_push_all_pending_entities_filter(client, auth_headers, patched_db, monkeypatch):

@@ -578,12 +578,14 @@ async def push_all_pending(
     """Sweep EVERY pending/dirty ecom doc and push it via the same per-entity
     engine -- the queue-drain that the Phase-6 cutover actually runs (today only
     per-entity single pushes exist). Pending = a `locally_modified` product /
-    collection / menu, or an APPROVED product image with no Shopify id yet.
+    collection / menu; an APPROVED product image with no Shopify id yet only
+    when `images` is named (opt-in since the Image design queue was retired).
 
     `entities` is an optional CSV filter (products,collections,menus,images;
-    default all). `limit` caps the total number of pushes in one sweep (a safety
-    valve against a runaway batch); when the cap is hit `limit_reached` is True
-    and the caller should run again to continue (OS-046 -- the FE surfaces it).
+    default products,collections,menus). `limit` caps the total number of
+    pushes in one sweep (a safety valve against a runaway batch); when the cap
+    is hit `limit_reached` is True and the caller should run again to continue
+    (OS-046 -- the FE surfaces it).
     `offset` pages the variant-prices resync ONLY (see below); it is REJECTED
     (400) whenever more than one entity is selected alongside it -- see the
     guard below for why.
@@ -614,7 +616,10 @@ async def push_all_pending(
         for e in (
             entities.split(",")
             if entities
-            else ["products", "collections", "menus", "images"]
+            # "images" is OPT-IN (owner 2026-10-29): the Image design queue
+            # was retired, so no screen shows or approves a product_images row
+            # any more; a product's photos ride its own push. Name it to run it.
+            else ["products", "collections", "menus"]
         )
         if e.strip()
     }
@@ -746,7 +751,7 @@ async def push_all_pending(
         # (services/shopify_live_sync): dirty minus taken-down, the block
         # classification hoisted once per batch (findings #17/#18/#20), one
         # audit row per push. Only the ORDER and the CAPS are this door's:
-        dirty_products, taken_down_skipped = live_sync.select_dirty_products(db)
+        dirty_products, taken_down_skipped, archived_skipped = live_sync.select_dirty_products(db)
         # THE QUEUE MUST DRAIN. See _queue_order: without this the same first 25
         # stuck rows are retried on every press and nothing behind them ever
         # reaches bettervision.in.
@@ -773,6 +778,10 @@ async def push_all_pending(
             summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
                 "taken_down_skipped"
             ] = taken_down_skipped
+        if archived_skipped:
+            summary.setdefault("products", {"pushed": 0, "failed": 0, "noop": 0})[
+                "archived_skipped"
+            ] = archived_skipped
         # A press also pushes STOCK (owner ruling 2026-09-07): every listing
         # whose PER-SHOP quantities changed since they were last sent, in one pass,
         # AFTER the product pushes so a product this press just created is

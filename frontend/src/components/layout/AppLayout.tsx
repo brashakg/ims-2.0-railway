@@ -72,7 +72,6 @@ const SEGMENT_LABELS: Record<string, string> = {
   browse: 'Browse',
   'discount-rules': 'Discount Rules',
   menus: 'Menus',
-  images: 'Image Design Queue',
   'refund-reviews': 'Refund Reviews',
   'stock-tally': 'Stock Tally',
   'store-health': 'Store Health',

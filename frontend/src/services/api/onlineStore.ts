@@ -1569,6 +1569,8 @@ export interface LiveSyncRun {
   /** Dirty products with NO Shopify id still waiting after this run (refused, failed, or past the batch cap). */
   awaiting_first_publish?: number | null;
   taken_down_skipped?: number | null;
+  /** Archived, never published: left out of the queue (not a refusal). */
+  archived_skipped?: number | null;
   blocked_skipped?: number | null;
   limit?: number | null;
   limit_reached?: boolean | null;
@@ -1666,6 +1668,9 @@ export interface PushSweepResult {
            *  product is not on the storefront, so it is never counted as
            *  pushed -- `pushed` must always mean "a shopper can find it". */
           archived_not_listed?: number;
+          /** Archived and never published: the sweep leaves them out of the
+           *  queue quietly (not a refusal, not a push). */
+          archived_skipped?: number;
         } | null
       >
     | null;
