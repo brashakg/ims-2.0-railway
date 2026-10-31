@@ -189,9 +189,25 @@ def _live_shipment_for_order(order_id: str) -> Optional[Dict[str, Any]]:
 
 
 def _merge_address(req: ShipAddress, order: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Build the ship-to address dict: request fields win, then the customer doc,
-    then the order. Always returns a dict (never raises)."""
+    """Build the ship-to address dict: request fields win, then the order's own
+    delivery address (an online order's checkout address), then the customer
+    doc, then the order's name/phone. Always returns a dict (never raises)."""
     data: Dict[str, Any] = req.model_dump(exclude_none=True)
+
+    ship = (order or {}).get("shipping_address")
+    if isinstance(ship, dict):
+        from ..services.invoice_pdf import address_line
+
+        for key, value in (
+            ("name", ship.get("name")),
+            ("phone", ship.get("phone")),
+            ("address", address_line(ship)),
+            ("city", ship.get("city")),
+            ("state", ship.get("province")),
+            ("pincode", ship.get("zip")),
+        ):
+            if value:
+                data.setdefault(key, value)
 
     customer_doc: Optional[Dict[str, Any]] = None
     cust_id = (order or {}).get("customer_id")
@@ -276,8 +292,11 @@ async def _maybe_push_online_fulfillment(
             return
         if str(order.get("source") or "").lower() != "shopify":
             return
-        # A failed booking never really dispatched -- do not tell Shopify it did.
-        if getattr(ship_result, "status", None) == "FAILED":
+        # Only a REAL booking dispatched anything. A FAILED one did not, and a
+        # SIMULATED one (DISPATCH_MODE off / no courier creds) carries a fake
+        # AWB: telling Shopify would mail the buyer a dead tracking number and
+        # come back as SHIPPED. Simulated bookings change nothing.
+        if getattr(ship_result, "status", None) != "BOOKED":
             return
         from ..services.shopify_fulfillment_push import push_fulfillment
 

@@ -37,6 +37,7 @@ import clsx from 'clsx';
 import { OrderNotificationTracker } from '../../components/orders/OrderNotificationTracker';
 import { OrderStatusTimeline } from '../../components/orders/OrderStatusTimeline';
 import { OrderShippingCard } from '../../components/orders/OrderShippingCard';
+import { OnlineOrderFacts } from '../../components/orders/OnlineOrderFacts';
 import { OrderTrackingQR } from '../../components/orders/OrderTrackingQR';
 import { SuperadminOrderEditModal } from '../../components/orders/SuperadminOrderEditModal';
 import { getErrorMessage } from '../../utils/errorHandler';
@@ -704,6 +705,11 @@ export function OrdersPage() {
                     <p className="text-sm text-gray-500">{PAYMENT_STATUS_CONFIG[selectedOrder.paymentStatus]?.label}</p>
                   </div>
                 </div>
+
+                <OnlineOrderFacts
+                  shippingAddress={selectedOrder.shippingAddress}
+                  totalsCheck={selectedOrder.shopifyTotalsCheck}
+                />
 
                 <div>
                   <p className="text-sm text-gray-500 mb-2">Items</p>

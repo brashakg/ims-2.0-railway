@@ -343,3 +343,26 @@ def test_transfer_challan_denied_for_non_pos_roles(transfer_env):
             )
         )
     assert ei.value.status_code == 403
+
+
+def test_order_challan_ships_to_the_orders_address_and_lists_only_goods(order_env):
+    """Website 1: an online order's challan travels to the buyer's checkout
+    address (the order's shipping_address), and shipping is not a goods row."""
+    order = order_env._order
+    order["shipping_address"] = {
+        "name": "Ravi Kumar", "address1": "12 MG Road", "address2": "Flat 3",
+        "city": "Pune", "province": "Maharashtra", "zip": "411001",
+    }
+    order["items"].append({
+        "item_type": "SHIPPING", "product_name": "Shipping charges (Standard)",
+        "hsn_code": "900311", "quantity": 1,
+    })
+    resp = asyncio.run(
+        print_documents.delivery_challan_for_order(
+            "ORD-1", "ORIGINAL", False, _user("SALES_STAFF")
+        )
+    )
+    body = resp.body.decode("utf-8")
+    assert "12 MG Road" in body
+    assert "411001" in body
+    assert "Shipping charges" not in body

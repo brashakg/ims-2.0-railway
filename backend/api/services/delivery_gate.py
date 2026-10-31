@@ -226,7 +226,9 @@ def cod_collectable(order: dict) -> float:
         book it Prepaid. Silently flipping the method would change what the
         customer was told at the counter and what the courier charges the
         shop, so the caller is told to choose.
-      * COD_BALANCE_EXCEEDS_BILL - a corrupt order nobody should ship on."""
+      * COD_BALANCE_EXCEEDS_BILL - a corrupt order nobody should ship on.
+      * COD_ABOVE_SHOPIFY_TOTAL  - an online order flagged MISMATCH whose
+        balance is above what the buyer owes on Shopify's total."""
     balance_due = order_balance_due(order)
     if balance_due is None:
         raise HTTPException(
@@ -264,4 +266,23 @@ def cod_collectable(order: dict) -> float:
                 ),
             },
         )
+    # An online order whose IMS bill differs from what Shopify charged
+    # (shopify_ingest._totals_check; an admin task is raised): the courier
+    # never collects more than the buyer still owes on Shopify's own total.
+    check = order.get("shopify_totals_check") or {}
+    if check.get("status") == "MISMATCH":
+        paid = _as_amount(order.get("amount_paid") or 0.0, "amount_paid")
+        owed = round(_as_amount(check.get("shopify_total"), "shopify_total") - paid, 2)
+        if balance_due > owed + 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "COD_ABOVE_SHOPIFY_TOTAL",
+                    "message": (
+                        f"The IMS balance Rs {balance_due:,.2f} is more than the "
+                        f"buyer owes on Shopify (Rs {owed:,.2f}). An admin must "
+                        f"correct this order's total before it ships COD."
+                    ),
+                },
+            )
     return round(balance_due, 2)
