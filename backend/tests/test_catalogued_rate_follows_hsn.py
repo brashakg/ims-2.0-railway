@@ -198,7 +198,7 @@ class _FakeRepo:
         self.docs[pid].update(data)
         return True
 
-    def find_by_barcode(self, barcode, exclude_product_id=None):
+    def find_by_barcode(self, barcode, exclude_product_id=None, **_kw):
         return None
 
 

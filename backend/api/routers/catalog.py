@@ -3760,28 +3760,35 @@ def _live_skus(skus: List[str]) -> Optional[set]:
         return None
 
 
-def _restore_refusal(repo, spine: Optional[Dict]) -> Optional[str]:
-    """Why an archived product may not come back: THE create door's "we
-    already have this" rule (product_master.identity_conflict, over the key
-    the create rule gives the row -- never its stored key, which an archived
-    twin may have given up) names ANOTHER row, live or archived. A live one
-    would be a duplicate on sale; an archived one holds the key, so this row
-    would come back without one, invisible to the duplicate guard -- restore
-    that one instead. An eye-size item with no eye size whose frame is
-    catalogued by eye size is refused the same way (EYE_SIZE_NEEDED). Asked
-    per row, so a bulk restore sees each earlier restore. None when it may
-    come back; a read failure refuses (never a guess)."""
-    if not spine:
-        return None
+def _restore_refusal(repo, spine: Optional[Dict], twin: Optional[Dict] = None) -> Optional[str]:
+    """Why an archived product may not come back (None: it may), asked per
+    row so a bulk restore sees each earlier restore.
+
+      * THE create door's "we already have this" rule
+        (product_master.identity_conflict, over the key the create rule gives
+        the row -- never its stored key, which an archived twin may have given
+        up) names ANOTHER row, live or archived. A live one would be a
+        duplicate on sale; an archived one holds the key, so this row would
+        come back without one -- restore that one instead. An eye-size item
+        with no eye size whose frame is catalogued by eye size: EYE_SIZE_NEEDED.
+      * Its barcode (_restore_barcode_refusal), for every row -- keyless,
+        unreadable or a spineless catalogue twin too."""
+    if spine:
+        why = _restore_identity_refusal(repo, spine)
+        if why:
+            return why
+    return _restore_barcode_refusal(repo, spine, twin)
+
+
+def _restore_identity_refusal(repo, spine: Dict) -> Optional[str]:
     try:
         probe = _pm.identity_spine(spine)
     except _pm.ProductMasterError:
         return None  # a stored value that is not a number: keyless as before
     if not probe.get("identity_key"):
         return None
-    # The create door's inputs in full: its SKU (never its own twin: self_id)
-    # and its barcode are asked too.
-    probe.update(sku=spine.get("sku"), barcode=spine.get("barcode"))
+    # The create door's SKU check too (never its own twin: self_id).
+    probe["sku"] = spine.get("sku")
     err = _pm.identity_conflict(probe, repo, self_id=spine.get("product_id"))
     code = getattr(err, "code", None)
     if code == "DUPLICATE_PRODUCT":
@@ -3801,6 +3808,37 @@ def _restore_refusal(repo, spine: Optional[Dict]) -> Optional[str]:
         )
     if err is not None:
         return f"Not restored: {err.message}"
+    return None
+
+
+def _restore_barcode_refusal(repo, spine: Optional[Dict], twin: Optional[Dict]) -> Optional[str]:
+    """Add product's own barcode rule (assert_gtin_free) over EVERY barcode
+    the row and its catalogue twin carry (barcode, gtin, attributes.gtin on
+    either), each distinct value -- only a code the website would publish
+    (gtin.sanitise_gtin, the push's own rule: a junk stub, all zeros or a
+    restricted in-store GS1 20-29 code is no public barcode, never a clash).
+    Only a LIVE product or twin holds a code (live_only), so two
+    archived copies sharing an EAN never block each other: once one is back,
+    the other is refused here. A read failure is a plain refusal, never a
+    guess."""
+    own = (spine or {}).get("product_id") or (twin or {}).get("id")
+    from ..services.gtin import sanitise_gtin
+
+    try:
+        codes: List[str] = []
+        for doc in (spine or {}, twin or {}):
+            attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
+            for value in (doc.get("barcode"), attrs.get("gtin"), doc.get("gtin")):
+                code = sanitise_gtin(value)
+                if code and code not in codes:
+                    codes.append(code)
+        for code in codes:
+            _pm.assert_gtin_free(code, repo, own, live_only=True)
+    except _pm.ProductMasterError as clash:
+        return f"Not restored: {clash.message}"
+    except Exception:  # noqa: BLE001 - unread is never "free"
+        logger.warning("[CATALOG] restore barcode check could not read", exc_info=True)
+        return "Not restored: could not check the barcode right now, try again."
     return None
 
 
@@ -4030,10 +4068,11 @@ async def bulk_restore_products(
         raise HTTPException(
             status_code=503, detail="Could not read the catalogue right now. Try again in a minute."
         ) from None
-    if body.apply:  # a spine id: its twin by the same rule the drawer's twin id took
-        bare = [p for p in ids if pairs[p][0] is not None and pairs[p][1] is None]
-        for p, twin in zip(bare, _twins_or_503(repo, [pairs[p][0] for p in bare])):
-            pairs[p] = (pairs[p][0], twin)
+    # A spine id: its twin by the same rule the drawer's twin id took -- in the
+    # dry run too, so the confirm dialog's answer is the one Restore gives.
+    bare = [p for p in ids if pairs[p][0] is not None and pairs[p][1] is None]
+    for p, twin in zip(bare, _twins_or_503(repo, [pairs[p][0] for p in bare])):
+        pairs[p] = (pairs[p][0], twin)
     live_skus = (
         _live_skus([(s or t).get("sku") for s, t in pairs.values() if s or t])
         if body.apply
@@ -4047,7 +4086,7 @@ async def bulk_restore_products(
             results.append({"product_id": pid, "status": "refused", "reason": "Product not found"})
         elif not doc.get("deleted_at"):
             results.append({"product_id": pid, "status": "refused", "reason": "Not archived"})
-        elif why := _restore_refusal(repo, spine):
+        elif why := _restore_refusal(repo, spine, twin):
             results.append({"product_id": pid, "status": "refused", "reason": why})
         elif not body.apply:
             results.append({"product_id": pid, "status": "ready"})

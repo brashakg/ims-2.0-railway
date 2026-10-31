@@ -2148,7 +2148,9 @@ def undo_catalogue_barcode_write(
     collection.update_one({**key, "_gtin_write_token": token}, patch)
 
 
-def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) -> None:
+def assert_gtin_free(
+    code: Any, product_repo, this_product_id: Optional[str], *, live_only: bool = False
+) -> None:
     """409 when ANOTHER product already holds this manufacturer barcode.
 
     THE uniqueness rule for both manufacturer-barcode fields (products.barcode
@@ -2158,13 +2160,16 @@ def assert_gtin_free(code: Any, product_repo, this_product_id: Optional[str]) ->
     maker's item: two products holding it would go to Shopify/Google as the
     same thing. `this_product_id` None (a create) clashes with any holder.
     Catalogue twins count too (find_twin_by_barcode): the bulk import writes
-    only a twin, and the push sends a twin's gtin."""
+    only a twin, and the push sends a twin's gtin. `live_only` (Restore): only
+    a product or twin that is not archived holds the code, and a read error
+    RAISES -- never "no holder"."""
     if not normalise_candidate(code) or not hasattr(product_repo, "find_by_barcode"):
         return
-    clash = product_repo.find_by_barcode(code, exclude_product_id=this_product_id)
+    live = {"live_only": True, "strict": True} if live_only else {}
+    clash = product_repo.find_by_barcode(code, exclude_product_id=this_product_id, **live)
     if clash is None and hasattr(product_repo, "find_twin_by_barcode"):
         clash = product_repo.find_twin_by_barcode(
-            code, exclude_product_id=this_product_id
+            code, exclude_product_id=this_product_id, **({"live_only": True} if live_only else {})
         )
     if clash is not None:
         holder = clash.get("sku") or clash.get("product_id") or clash.get("id")
