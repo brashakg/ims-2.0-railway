@@ -1095,6 +1095,97 @@ export const menusApi = {
 };
 
 // ============================================================================
+// THE GENERATED WEBSITE MENU (owner 2026-10-29) -- backend
+// services/generated_menu.py. The main menu builds itself from the IMS
+// collections that have products on the website; only its TEMPLATE is edited.
+// ============================================================================
+
+export type MenuGroupSource = 'gender' | 'shape' | 'price' | 'top_brands' | 'brands_az';
+
+export interface MenuLink {
+  title: string;
+  url: string;
+}
+
+export interface MenuGroup {
+  title: string;
+  source: MenuGroupSource;
+  category?: string;
+  limit?: number;
+  links?: MenuLink[];
+}
+
+export type MenuSection =
+  | { kind: 'collection'; title: string; handle: string }
+  | { kind: 'links'; title: string; url?: string; links: MenuLink[] }
+  | { kind: 'panel'; title: string; handle?: string; url?: string; groups: MenuGroup[] };
+
+export interface MenuTemplate {
+  sections: MenuSection[];
+}
+
+/** One node of the generated tree (count = products on the website). */
+export interface GeneratedMenuItem {
+  title: string;
+  item_type: string;
+  url?: string | null;
+  handle?: string | null;
+  count?: number | null;
+  children?: GeneratedMenuItem[] | null;
+}
+
+export interface HiddenMenuItem {
+  section: string;
+  title: string;
+  handle?: string | null;
+  reason: string;
+}
+
+export interface GeneratedMenuLastPush {
+  at?: string | null;
+  mode?: string | null;
+  ok?: boolean | null;
+  action?: string | null;
+  error?: string | null;
+  reason?: string | null;
+}
+
+export interface GeneratedMenu {
+  menu_id: string;
+  handle: string;
+  title: string;
+  template: MenuTemplate;
+  items: GeneratedMenuItem[];
+  hidden: HiddenMenuItem[];
+  shopify_menu_id?: string | null;
+  last_generated_at?: string | null;
+  last_pushed_at?: string | null;
+  last_push?: GeneratedMenuLastPush | null;
+  in_sync?: boolean;
+  backup_taken_at?: string | null;
+  preview?: { items: GeneratedMenuItem[]; hidden: HiddenMenuItem[]; changed_since_push: boolean } | null;
+}
+
+export const generatedMenusApi = {
+  /** Every generated menu with a live preview. Fail-soft -> null (unknown). */
+  list: async (): Promise<GeneratedMenu[] | null> => {
+    try {
+      const res = await api.get(`${MENUS_BASE}/generated`);
+      const rows = res?.data?.menus;
+      return Array.isArray(rows) ? (rows as GeneratedMenu[]) : [];
+    } catch {
+      return null;
+    }
+  },
+
+  /** Replace a generated menu's template (ADMIN). Throws (400 names the problem). */
+  saveTemplate: async (menuId: string, template: MenuTemplate): Promise<GeneratedMenu> => {
+    const res = await api.put(`${MENUS_BASE}/generated/${encodeURIComponent(menuId)}/template`, { template });
+    return res?.data?.menu as GeneratedMenu;
+  },
+};
+
+// ============================================================================
 // IMAGES sub-api  (BVI Phase 4 — Image Design Workflow, "push-dark")
 // ----------------------------------------------------------------------------
 // FLAGSHIP #3 of the BVI merge: the product-image DESIGN QUEUE — the design
@@ -1520,6 +1611,21 @@ export interface PushStatus {
   /** The scheduled live-product sync (owner ruling 2026-09-06): settings,
    *  last run, next IST slot. Null on a stale deploy / failed read. */
   live_sync?: LiveSyncStatus | null;
+  /** The self-maintaining website menu(s) (owner 2026-10-29). */
+  generated_menus?: GeneratedMenuStatus[] | null;
+}
+
+/** One generated menu on the Sync page's Menus card. */
+export interface GeneratedMenuStatus {
+  menu_id: string;
+  handle: string;
+  title: string;
+  last_generated_at?: string | null;
+  last_pushed_at?: string | null;
+  last_push?: GeneratedMenuLastPush | null;
+  in_sync?: boolean;
+  item_count?: number;
+  hidden_count?: number;
 }
 
 /** One product the live sync could not update (from online_sync_runs). */
@@ -1841,6 +1947,9 @@ export const pushApi = {
         counts: (data.counts ?? {}) as PushCounts,
         status_reason: null,
         live_sync: (data.live_sync as LiveSyncStatus | undefined) ?? null,
+        generated_menus: Array.isArray(data.generated_menus)
+          ? (data.generated_menus as GeneratedMenuStatus[])
+          : null,
       };
     } catch (err) {
       // RC-E/OS-018: label the failed read. A 403 (catalog/design manager)

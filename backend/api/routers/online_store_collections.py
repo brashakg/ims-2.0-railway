@@ -97,22 +97,6 @@ def _repo():
         return None
 
 
-def _catalog_products() -> List[Dict]:
-    """All catalog_products (for the SMART resolver). Fail-soft -> []. Strips the
-    Mongo _id in Python (MockCollection.find takes only a filter)."""
-    db = _get_db()
-    if db is None:
-        return []
-    try:
-        coll = db["catalog_products"]
-        docs = list(coll.find({}))
-        for d in docs:
-            d.pop("_id", None)
-        return docs
-    except Exception:  # noqa: BLE001
-        return []
-
-
 def _products_by_sku(skus: List[str]) -> Dict[str, Dict]:
     """Map sku -> product detail doc, looking in the `products` spine FIRST,
     then catalog_products (SPINE WINS on an SKU clash -- the convention shared
@@ -438,6 +422,11 @@ async def update_collection(
             )
         data["handle"] = new_handle
 
+    if existing.get("online_sync_blocked"):
+        # A blocked collection's rules must stay readable as the website
+        # reads them: a block IMS cannot evaluate is a block it cannot keep.
+        _refuse_unreadable_block({**existing, **data})
+
     if not data:
         # Nothing to change -> return the unchanged doc (idempotent no-op).
         return {"collection": _with_id(_with_normalized_rules(existing)), "updated": False}
@@ -620,14 +609,16 @@ async def resolved_products(
             "source": "manual",
         }
 
-    # Normalize-on-read: migrated Shopify-shape rules ({column, relation,
-    # condition}) evaluate + echo in the IMS shape; stored doc is untouched.
+    # THE website membership rule (services/collection_membership): the
+    # listings on the website these rules hold, read as Shopify reads them.
+    from ..services import collection_membership
+
     rules = ecom_smart_rules.normalize_rules(doc.get("rules") or [])
     disjunctive = bool(doc.get("disjunctive", False))
-    products = _catalog_products()
-    skus = ecom_smart_rules.resolve_skus(
-        products, rules, disjunctive=disjunctive, limit=limit
-    )
+    db = _get_db()
+    facts = collection_membership.online_facts(db) if db is not None else []
+    found, why = collection_membership.members(db, doc, facts)
+    skus = [str(f["sku"]) for f in found if f.get("sku")][:limit]
     return {
         "collection_id": collection_id,
         "collection_type": "SMART",
@@ -635,8 +626,9 @@ async def resolved_products(
         "rules": rules,
         "skus": skus,
         "count": len(skus),
-        "scanned": len(products),
-        "source": "smart_rules",
+        "scanned": len(facts),
+        "source": "website_rule",
+        "not_evaluable": why,
     }
 
 
@@ -652,6 +644,25 @@ async def resolved_products(
 # is deliberately NOT admitted). Catalogued in rbac_policy.POLICY as SUPERADMIN.
 
 
+def _refuse_unreadable_block(doc: Dict) -> None:
+    """400 when a (to-be) blocked SMART collection carries a rule IMS cannot
+    read the way the website does (services/collection_membership): such a
+    block could not be enforced with certainty, and every push its products
+    could be about would stall on it."""
+    from ..services import collection_membership
+
+    lost = collection_membership.not_evaluable(doc)
+    if lost:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "A blocked collection needs rules IMS can read the way the website does "
+                "(tag, product type, vendor, price). Not readable: " + "; ".join(lost)
+                + ". Rewrite those rules (one value per rule, e.g. a brand_ tag) and try again."
+            ),
+        )
+
+
 def _resolve_member_skus(doc: Dict) -> List[str]:
     """The effective member SKUs of a collection: CUSTOM -> its manual list (in
     position order); SMART -> the rule set resolved over the catalog. Mirrors
@@ -663,11 +674,19 @@ def _resolve_member_skus(doc: Dict) -> List[str]:
             key=lambda p: int((p or {}).get("position", 0) or 0),
         )
         return [p.get("sku") for p in members if isinstance(p, dict) and p.get("sku")]
-    rules = ecom_smart_rules.normalize_rules(doc.get("rules") or [])
-    products = _catalog_products()
-    return ecom_smart_rules.resolve_skus(
-        products, rules, disjunctive=bool(doc.get("disjunctive", False)), limit=_RESOLVE_MAX
-    )
+    return _rule_members(doc)[:_RESOLVE_MAX]
+
+
+def _rule_members(doc: Dict) -> List[str]:
+    """A SMART collection's listing SKUs over EVERY listing IMS holds (on the
+    website or delisted), by THE website membership rule -- a block must
+    reach the live ones, an unblock the ones a block took down."""
+    from ..services import collection_membership
+
+    db = _get_db()
+    if db is None:
+        return []
+    return collection_membership.member_skus(db, doc, collection_membership.catalogue_facts(db))
 
 
 def _resolve_block_members(doc: Dict) -> Tuple[List[str], bool]:
@@ -681,14 +700,7 @@ def _resolve_block_members(doc: Dict) -> Tuple[List[str], bool]:
     ctype = (doc.get("collection_type") or "CUSTOM").upper()
     if ctype == "CUSTOM":
         return _resolve_member_skus(doc), False
-    rules = ecom_smart_rules.normalize_rules(doc.get("rules") or [])
-    products = _catalog_products()
-    skus = ecom_smart_rules.resolve_skus(
-        products,
-        rules,
-        disjunctive=bool(doc.get("disjunctive", False)),
-        limit=_BLOCK_RESOLVE_MAX + 1,
-    )
+    skus = _rule_members(doc)
     truncated = len(skus) > _BLOCK_RESOLVE_MAX
     if truncated:
         skus = skus[:_BLOCK_RESOLVE_MAX]
@@ -784,6 +796,7 @@ async def block_collection(
     doc = repo.get_by_id(collection_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Collection not found")
+    _refuse_unreadable_block(doc)
 
     updated = repo.set_block(collection_id, True, current_user.get("user_id"))
     if updated is None:

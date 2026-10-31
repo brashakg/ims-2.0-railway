@@ -54,6 +54,13 @@ def _FakeDb(colls=None):
     return db
 
 
+# A registry-style SMART collection: the rule reads the tag the push sends.
+_RAYBAN = {
+    "collection_id": "c-rb", "handle": "ray-ban", "title": "Ray-Ban", "collection_type": "SMART",
+    "rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_rayban"}],
+}
+
+
 def _eligible_product(**overrides):
     """A fully-ready online-eligible catalog_products row (has an ecom sub-doc)."""
     doc = {
@@ -112,7 +119,8 @@ def test_all_ready_product_scores_100():
     db = _FakeDb(
         {
             "catalog_products": _FakeColl([_eligible_product()]),
-            "collection_products": _FakeColl([{"handle": "sun", "sku": "SKU-1"}]),
+            # THE website membership rule: a Ray-Ban collection holds the live listing.
+            "ecom_collections": _FakeColl([_RAYBAN]),
         }
     )
     out = sh.readiness_score(db)
@@ -189,7 +197,8 @@ def test_orphan_reasons_classified():
                     _eligible_product(product_id="P3", sku=""),
                 ]
             ),
-            "collection_products": _FakeColl([{"handle": "sun", "sku": "SKU-1"}]),
+            # THE website membership rule: a Ray-Ban collection holds the live listing.
+            "ecom_collections": _FakeColl([_RAYBAN]),
         }
     )
     orph = sh.orphan_skus(db)
@@ -197,7 +206,7 @@ def test_orphan_reasons_classified():
     assert orph["orphan_count"] == 2  # P2 + P3 (P1 is fully ready)
     assert orph["no_mapping"] == 1  # only P2 has an empty ecom (P3 keeps its gid)
     assert orph["missing_spine"] == 1  # P3 has no sku
-    # P2 has a sku not in the collection view -> not_in_collection; P1 is in it.
+    # P2 is not on the website -> in no collection; P1 (live Ray-Ban) is.
     # P3 has no sku so it is not double-counted as not_in_collection.
     assert orph["not_in_collection"] == 1
 

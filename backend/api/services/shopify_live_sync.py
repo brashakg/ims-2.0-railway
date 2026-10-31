@@ -832,6 +832,26 @@ async def sync_live_products(
         logger.warning("[LIVE-SYNC] collections pass failed: %s", e)
         collections = {"error": str(e)}
 
+    # THE MEMBERSHIP VIEW, then THE WEBSITE MENU (owner 2026-10-29): the
+    # collection_products cache is refreshed from the one membership rule,
+    # and the generated main menu is rebuilt from the collections that now
+    # have products and pushed only when it changed. Fail-soft, like stock.
+    try:
+        from . import collection_materializer, collection_membership, generated_menu
+
+        # ONE strict read of the listings for both: an unreadable catalogue
+        # skips the view refresh AND the menu (the last view and the last
+        # pushed menu stand) instead of reading as "no products".
+        facts = collection_membership.online_facts(db, strict=True)
+        try:
+            collection_materializer.materialize_all(db, facts=facts)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[LIVE-SYNC] membership view refresh failed: %s", e)
+        menus = await generated_menu.sync_generated_menus(db, {"user_id": actor}, facts=facts)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[LIVE-SYNC] menu pass skipped: %s", e)
+        menus = {"menus": [], "error": f"listings unreadable, the last view and pushed menu stand: {e}"}
+
     summary = {
         "finished_at": _utc_now(),
         "status": "done",
@@ -870,6 +890,7 @@ async def sync_live_products(
         or (first["cap_reached"] and room < first_publish_cap),
         "failures": failures,
         "collections": collections,
+        "menus": menus,
         "stock": {
             "ok": bool(stock.get("ok")),
             # A pass that counted nothing (an unread catalogue) has no

@@ -644,7 +644,12 @@ def test_store_breakdown_rows_names_and_metrics():
 # ===========================================================================
 
 
+_LIVE = {"shopify_product_id": "gid://shopify/Product/1"}
+
+
 def _preview_db():
+    """Listings ON the website (catalog_products with a Shopify id): THE
+    website membership rule reads the rules over what the push sends."""
     db = _FakeDB(
         {
             "stock_units": _CannedAggColl(
@@ -652,8 +657,9 @@ def _preview_db():
             )
         }
     )
-    db["products"].insert_one(
+    db["catalog_products"].insert_one(
         {
+            "id": "RB1",
             "product_id": "RB1",
             "sku": "RB-0001",
             "brand": "Ray-Ban",
@@ -661,25 +667,38 @@ def _preview_db():
             "mrp": 8000.0,
             "images": ["https://img/rb1.jpg", "https://img/rb1b.jpg"],
             "category": "SUNGLASS",
+            "ecom": dict(_LIVE),
         }
     )
-    db["products"].insert_one(
+    db["catalog_products"].insert_one(
         {
+            "id": "GZ1",
             "product_id": "GZ1",
             "sku": "GZ-0001",
             "brand": "Gucci",
             "model": "GG0001",
             "mrp": 20000.0,
             "category": "FRAME",
+            "ecom": dict(_LIVE),
         }
     )
-    # catalog-only row (no spine doc, no product_id) that also matches.
+    # catalogue row with no product_id, no images and the model / MRP only in
+    # attributes / pricing (the sample row's fallbacks). Its vendor is its own
+    # brand field -- what the push sends (product_input: vendor = brand).
     db["catalog_products"].insert_one(
         {
+            "id": "RBCAT",
             "sku": "RB-CAT-1",
-            "attributes": {"brand": "Ray-Ban", "model_no": "RBX"},
+            "brand": "Ray-Ban",
+            "category": "SUNGLASS",
+            "attributes": {"brand_name": "Ray-Ban", "model_no": "RBX"},
             "pricing": {"mrp": 6000.0},
+            "ecom": dict(_LIVE),
         }
+    )
+    # the same brand, NOT on the website: never counted.
+    db["catalog_products"].insert_one(
+        {"id": "RBOFF", "sku": "RB-OFF", "brand": "Ray-Ban", "category": "SUNGLASS", "mrp": 5000.0, "ecom": {}}
     )
     return db
 
@@ -690,7 +709,7 @@ def test_preview_matches_samples_and_counts_stock():
         db, [{"field": "brand", "relation": "EQUALS", "value": "ray-ban"}],
         disjunctive=False,
     )
-    assert res["match_count"] == 2                 # RB1 + the catalog-only row
+    assert res["match_count"] == 2                 # RB1 + the catalog-only row (not RB-OFF)
     assert res["units_on_hand"] == 4               # canned stock for RB1
     assert len(res["sample"]) == 2
     by_sku = {r["sku"]: r for r in res["sample"]}
@@ -716,8 +735,9 @@ def test_preview_accepts_shopify_shape_rules():
 def test_preview_sample_capped_at_12():
     db = _FakeDB({"stock_units": _CannedAggColl("stock_units", [])})
     for i in range(20):
-        db["products"].insert_one(
-            {"product_id": f"P{i}", "sku": f"SKU-{i}", "brand": "Lenskart", "mrp": 100}
+        db["catalog_products"].insert_one(
+            {"id": f"P{i}", "product_id": f"P{i}", "sku": f"SKU-{i}", "brand": "Lenskart", "mrp": 100,
+             "category": "SUNGLASS", "ecom": dict(_LIVE)}
         )
     res = ci.preview(
         db, [{"field": "brand", "relation": "EQUALS", "value": "lenskart"}]
@@ -894,3 +914,32 @@ class TestSmartRulePayload:
     def test_plain_string_untouched(self):
         r = self._rule(field="brand", relation="EQUALS", value="Ray-Ban")
         assert r.value == "Ray-Ban"
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_preview_and_view_count_every_colour_and_size_of_a_model(monkeypatch):
+    """A model listing (lead + a colour + a size) is ONE website product,
+    but its stock is every SKU it carries: the preview's units and the
+    collection_products view count the colour and the size too."""
+    from api.services import collection_materializer as mat
+    from tests import test_shopify_model_listings as ml
+
+    db = ml._world()
+    pids = ml._family(db, [("Gold", "001", "58", {"units": (1, 0)}),
+                           ("Black", "002/58", "58", {"units": (2, 0)}),
+                           ("Gold", "001", "62", {"units": (3, 0)})])
+    lead_sku = db["products"].find_one({"product_id": pids[0]})["sku"]
+    db["catalog_products"].update_one({"sku": lead_sku}, {"$set": {
+        "ecom.shopify_product_id": "gid://shopify/Product/5", "ecom.status": "ACTIVE"}})
+    rules = [{"column": "TYPE", "relation": "EQUALS", "condition": "Sunglass"}]
+    units = {"sp-1": 1, "sp-2": 2, "sp-3": 3}  # StrictDB has no composite $group: the rollup is the seam
+    monkeypatch.setattr(ci, "_stock_rollup", lambda db, pids, store_id=None: {p: units.get(p, 0) for p in pids})
+    res = ci.preview(db, rules)
+    assert res["match_count"] == 1          # one listing on the website
+    assert res["units_on_hand"] == 6        # 1 + 2 + 3: every colour and size
+    db.seed("ecom_collections", [{"collection_id": "sun", "handle": "sunglasses", "collection_type": "SMART",
+                                  "rules": rules}])
+    mat.materialize_all(db)
+    view = sorted(db["collection_products"].find({"collection_id": "sun"}), key=lambda r: r["position"])
+    every = [db["products"].find_one({"product_id": p})["sku"] for p in pids]
+    assert [r["sku"] for r in view][0] == lead_sku and sorted(r["sku"] for r in view) == sorted(every)

@@ -1041,6 +1041,8 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/online-store/images/{image_id}/status` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `GET` | `/api/v1/online-store/menus` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/online-store/menus` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/menus/generated` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/online-store/menus/generated/{menu_id}/template` | ADMIN, SUPERADMIN |  |  |
 | `DELETE` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `GET` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `PUT` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
