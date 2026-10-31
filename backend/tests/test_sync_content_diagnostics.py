@@ -449,3 +449,18 @@ def test_a_listing_whose_spine_is_a_colour_of_another_says_push_the_model():
     db["products"].update_one({"product_id": first}, {"$set": {"variant_of": "sp-99"}})
     code, reason, _plan = diag._press_verdict(db, _twin(db, first))
     assert code == "variant_of", (code, reason)
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_lead_twin_that_is_itself_a_size_of_another_says_push_the_model():
+    """Review of #1295: the lead's OWN ecom.variant_of (a chain left by a
+    re-link) is push_product's variant_of refusal too."""
+    from api.services import online_content_diagnostics as diag
+    from test_shopify_model_listings import _world, _item, _twin
+    db = _world()
+    first = _item(db, 1, "Gold", "001")
+    twin = _twin(db, first)
+    db["catalog_products"].update_one(
+        {"id": twin["id"]}, {"$set": {"ecom.variant_of": {"product_id": "sp-99", "twin_id": "tw-99", "sku": "OTHER"}}})
+    code, reason, _plan = diag._press_verdict(db, _twin(db, first))
+    assert code == "variant_of", (code, reason)
