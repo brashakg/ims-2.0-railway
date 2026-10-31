@@ -139,46 +139,6 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
             },
         )
 
-    # BUG-010: the presence check above only proves a NON-EMPTY id was sent -- a
-    # forged / stale id would pass the gate and persist, only 404'ing later at
-    # download time, defeating the mandatory-attachment guarantee. Verify the
-    # file actually exists in the store BEFORE persisting.
-    # Storage-down vs forged-id: get_file_store() returning None means storage
-    # itself is unavailable -> 503 (do NOT mask the existing fail-loud behavior
-    # by 400'ing). A live store whose get() finds nothing == a forged/stale id
-    # -> 400 ATTACHMENT_INVALID.
-    #
-    # P0 (security panel round 6): this gate used to run under `if not is_dc`,
-    # while the persistence below wrote attachment_file_id UNCONDITIONALLY -- so
-    # adding one JSON field, grn_subtype="DELIVERY_CHALLAN", skipped BOTH the
-    # kind check and the store bind and re-opened the round-5 theft verbatim.
-    # The gate runs whenever an attachment id is PRESENT, whatever the subtype.
-    _attachment_meta = _receipt_photo_meta(grn.attachment_file_id, current_user)
-    # S2b: a damaged piece's photo passes the same gate, line by line; a bad
-    # one is named by its line, so the screen marks that line's photo.
-    for index, item in enumerate(grn.items):
-        item.rejection_photo_file_id = (
-            str(item.rejection_photo_file_id or "").strip() or None
-            if item.rejected_qty > 0
-            else None
-        )
-        try:
-            _receipt_photo_meta(item.rejection_photo_file_id, current_user)
-        except HTTPException as exc:
-            if exc.status_code != 400:
-                raise
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "DAMAGE_PHOTO_INVALID",
-                    "line": index,
-                    "message": (
-                        f"The damage photo on line {index + 1} is no longer "
-                        "available. Take it again."
-                    ),
-                },
-            ) from exc
-
     # Validate PO exists. For a DC, the PO is optional (lens top-ups arrive with
     # no pre-logged PO) -- only validate when one was supplied.
     po = None
@@ -223,6 +183,48 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                         status_code=404, detail="Purchase order not found"
                     )
                 store_id = po_store
+
+    # BUG-010: the presence check above only proves a NON-EMPTY id was sent -- a
+    # forged / stale id would pass the gate and persist, only 404'ing later at
+    # download time, defeating the mandatory-attachment guarantee. Verify the
+    # file actually exists in the store BEFORE persisting.
+    # Storage-down vs forged-id: get_file_store() returning None means storage
+    # itself is unavailable -> 503 (do NOT mask the existing fail-loud behavior
+    # by 400'ing). A live store whose get() finds nothing == a forged/stale id
+    # -> 400 ATTACHMENT_INVALID.
+    #
+    # P0 (security panel round 6): this gate used to run under `if not is_dc`,
+    # while the persistence below wrote attachment_file_id UNCONDITIONALLY -- so
+    # adding one JSON field, grn_subtype="DELIVERY_CHALLAN", skipped BOTH the
+    # kind check and the store bind and re-opened the round-5 theft verbatim.
+    # The gate runs whenever an attachment id is PRESENT, whatever the subtype,
+    # once the PO boundary has spoken: another shop's order answers 404 before
+    # a photo is judged (test_po_store_boundary).
+    _attachment_meta = _receipt_photo_meta(grn.attachment_file_id, current_user)
+    # S2b: a damaged piece's photo passes the same gate, line by line; a bad
+    # one is named by its line, so the screen marks that line's photo.
+    for index, item in enumerate(grn.items):
+        item.rejection_photo_file_id = (
+            str(item.rejection_photo_file_id or "").strip() or None
+            if item.rejected_qty > 0
+            else None
+        )
+        try:
+            _receipt_photo_meta(item.rejection_photo_file_id, current_user)
+        except HTTPException as exc:
+            if exc.status_code != 400:
+                raise
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "DAMAGE_PHOTO_INVALID",
+                    "line": index,
+                    "message": (
+                        f"The damage photo on line {index + 1} is no longer "
+                        "available. Take it again."
+                    ),
+                },
+            ) from exc
 
     # W1.4 / OS-006: the receiving store is now FINAL (PO re-point applied).
     # An ONLINE store owns no stock -- accepting goods there would mint real
