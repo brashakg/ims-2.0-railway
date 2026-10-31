@@ -5,7 +5,7 @@
 // pages so the three screens can never drift on how money, percentages and
 // the stock-value basis are rendered.
 
-import type { ValueBasis } from '../../services/api/collectionsInsights';
+import type { InsightRule, ValueBasis } from '../../services/api/collectionsInsights';
 
 /** Indian-locale rupees, no paise. null/undefined/NaN -> em dash. */
 export function rupee(n?: number | null): string {
@@ -42,4 +42,35 @@ export function daysOfCover(n?: number | null): string {
   const v = Number(n);
   if (v > 180) return '180+';
   return v.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+}
+
+/** The chip builder's rules (Track 2 contract): each chip group is ONE
+ *  EQUALS rule; groups AND together; price bounds are GREATER_THAN /
+ *  LESS_THAN on 'price'. Several values on the SAME field cannot be one rule
+ *  the website reads (Shopify has no "any of"; IMS counts such a collection
+ *  as 0 products) -- those fields are returned in ``multi`` and the page
+ *  refuses to create until one value per field is picked. Pure. */
+export function compileBuilderRules(input: {
+  category: string;
+  brands: string[];
+  attrs: { name: string; label: string; values: string[] }[];
+  tags: string[];
+  priceMin: string;
+  priceMax: string;
+}): { rules: InsightRule[]; multi: string[] } {
+  const rules: InsightRule[] = [];
+  const multi: string[] = [];
+  const one = (field: string, label: string, values: string[]) => {
+    if (values.length === 1) rules.push({ field, relation: 'EQUALS', value: values[0] });
+    else if (values.length > 1) multi.push(label);
+  };
+  if (input.category) rules.push({ field: 'category', relation: 'EQUALS', value: input.category });
+  one('brand', 'Brand', input.brands);
+  for (const a of input.attrs) one(a.name, a.label, a.values);
+  one('tag', 'Tags', input.tags);
+  const min = Number(input.priceMin);
+  const max = Number(input.priceMax);
+  if (input.priceMin.trim() !== '' && Number.isFinite(min)) rules.push({ field: 'price', relation: 'GREATER_THAN', value: min });
+  if (input.priceMax.trim() !== '' && Number.isFinite(max)) rules.push({ field: 'price', relation: 'LESS_THAN', value: max });
+  return { rules, multi };
 }

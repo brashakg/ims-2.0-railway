@@ -251,6 +251,16 @@ def seed(db) -> dict:
         stock.replace_one({"_id": doc["_id"]}, doc, upsert=True)
     results["stock_units_e2e"] = "UPSERTED (%d)" % len(E2E_STOCK)
 
+    # 4) The self-maintaining website menu (the approved template), so the
+    #    layout gate renders /online-store/menus' template editor, its live
+    #    preview and the hidden list -- not the "not set up yet" card.
+    from api.services import generated_menu
+
+    menus = db.get_collection(generated_menu.MENUS)
+    if menus.find_one({"handle": generated_menu.MAIN_MENU}) is None:
+        menus.insert_one(generated_menu.make_template_doc())
+    results["generated_menu_e2e"] = "PRESENT"
+
     return results
 
 

@@ -143,8 +143,6 @@ def test_normalizer_unknown_column_passes_through_marked():
     assert out["value"] == "32"
     assert out["passthrough"] is True
     assert out["column"] == "VARIANT_WEIGHT"
-    # BOSS-1 carries attributes.variant_weight = "32" -> the rule still works.
-    assert smart.resolve_skus(CATALOG, [out]) == ["BOSS-1"]
 
 
 def test_normalizer_never_crashes_on_garbage():
@@ -158,87 +156,11 @@ def test_normalizer_never_crashes_on_garbage():
     # Shopify rule without a condition -> empty value -> evaluator skips it.
     out = smart.normalize_rule({"column": "VENDOR", "relation": "EQUALS"})
     assert out["value"] == ""
-    assert smart.resolve_skus(CATALOG, [out]) == []
 
 
 # ===========================================================================
 # Layer 2 -- engine resolution with migrated-shape rules
 # ===========================================================================
-
-def test_migrated_vendor_rule_now_resolves_products():
-    """THE headline revive: a VENDOR rule exactly as migrated (Shopify shape)
-    resolves products. Before this fix the engine saw no `field`/`value`,
-    skipped the rule as malformed, and returned [] for every migrated row."""
-    rules = [_shopify_rule("VENDOR", "EQUALS", "Ray-Ban")]
-    assert sorted(smart.resolve_skus(CATALOG, rules)) == ["RB-CHEAP", "RB-EXP"]
-
-
-def test_migrated_vendor_AND_variant_price_resolves():
-    """The audit's exact repro shape: VENDOR equals X AND VARIANT_PRICE
-    greater-than N -> only the expensive Ray-Ban matches."""
-    rules = [
-        _shopify_rule("VENDOR", "EQUALS", "Ray-Ban"),
-        _shopify_rule("VARIANT_PRICE", "GREATER_THAN", "5000"),
-    ]
-    assert smart.resolve_skus(CATALOG, rules, disjunctive=False) == ["RB-EXP"]
-
-
-def test_migrated_variant_price_less_than():
-    rules = [_shopify_rule("VARIANT_PRICE", "LESS_THAN", "3000")]
-    assert smart.resolve_skus(CATALOG, rules) == ["VOGUE-1"]
-
-
-def test_price_rule_non_numeric_bound_fails_soft():
-    """A non-numeric price bound never raises and never matches."""
-    rules = [_shopify_rule("VARIANT_PRICE", "GREATER_THAN", "abc")]
-    assert smart.resolve_skus(CATALOG, rules) == []
-
-
-def test_brand_matched_via_attributes_brand_name():
-    """Catalog docs that store the brand under attributes.brand_name (the BVI
-    migration shape) now match -- in BOTH rule shapes."""
-    native = [{"field": "brand", "relation": "EQUALS", "value": "Vogue"}]
-    assert smart.resolve_skus(CATALOG, native) == ["VOGUE-1"]
-    migrated = [_shopify_rule("VENDOR", "EQUALS", "Vogue")]
-    assert smart.resolve_skus(CATALOG, migrated) == ["VOGUE-1"]
-
-
-def test_attributes_brand_still_wins_over_brand_name():
-    """Path order: attributes.brand is authoritative when both keys exist."""
-    p = _cat("X1", brand="Primary", brand_name="Secondary")
-    assert smart.matches_product(
-        p, [{"field": "brand", "relation": "EQUALS", "value": "Primary"}]
-    ) is True
-    assert smart.matches_product(
-        p, [{"field": "brand", "relation": "EQUALS", "value": "Secondary"}]
-    ) is False
-
-
-def test_not_relations_are_vacuously_true_on_absent_field():
-    """Shopify semantics: a product with no tags does NOT have tag X."""
-    bare = {"sku": "NOTAG"}
-    rule = [{"field": "tag", "relation": "NOT_EQUALS", "value": "sale"}]
-    assert smart.matches_product(bare, rule) is True
-    tagged = _cat("T1", tags=["sale"])
-    assert smart.matches_product(tagged, rule) is False
-
-
-def test_native_rules_regression_unchanged():
-    """The pre-existing IMS-shape contract is untouched (regression lock vs
-    the test_ecom_collections resolver suite)."""
-    rules = [
-        {"field": "brand", "relation": "EQUALS", "value": "Ray-Ban"},
-        {"field": "category", "relation": "EQUALS", "value": "SUNGLASS"},
-    ]
-    assert sorted(smart.resolve_skus(CATALOG, rules)) == ["RB-CHEAP", "RB-EXP"]
-    # CONTAINS on the ecom.seo.tags list field still works.
-    assert smart.resolve_skus(
-        CATALOG, [{"field": "tag", "relation": "CONTAINS", "value": "ew"}]
-    ) == ["BOSS-1"]
-    # Empty / malformed rule sets still match NOTHING (never a match-all).
-    assert smart.resolve_skus(CATALOG, []) == []
-    assert smart.matches_product(CATALOG[0], [{"field": "brand"}]) is False
-
 
 # ===========================================================================
 # Layer 3 -- live router: editor GET + resolved-products (monkeypatched DB)
@@ -267,9 +189,16 @@ def seeded(monkeypatch):
         }
     )
     monkeypatch.setattr(osc, "_repo", lambda: repo)
-    monkeypatch.setattr(
-        osc, "_catalog_products", lambda: [dict(p) for p in CATALOG]
-    )
+    # THE website membership rule over the listings on the website (the facts
+    # the push sends: vendor, variant prices).
+    from api.services import collection_membership as cm
+
+    facts = [{"sku": p["sku"], "brand": (p.get("attributes") or {}).get("brand") or p.get("brand") or "",
+              "tags": set(), "type": "Sunglass",
+              "prices": [float((p.get("pricing") or {}).get("offer_price") or p.get("offer_price") or 0)]}
+             for p in CATALOG]
+    monkeypatch.setattr(osc, "_get_db", lambda: object())
+    monkeypatch.setattr(cm, "online_facts", lambda db: facts)
     return {"mock": mock, "repo": repo, "cid": created["collection_id"]}
 
 
@@ -324,9 +253,27 @@ def test_resolved_products_resolves_migrated_collection(
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["collection_type"] == "SMART"
-    assert body["source"] == "smart_rules"
+    assert body["source"] == "website_rule"
     assert body["skus"] == ["RB-EXP"]
     assert body["count"] == 1
     assert body["rules"][0] == {
         "field": "brand", "relation": "EQUALS", "value": "Ray-Ban"
     }
+
+
+def test_resolved_products_counts_a_custom_collection_by_the_one_rule(client, auth_headers, seeded):
+    """A CUSTOM collection: ``skus`` / ``count`` are the listings ON THE
+    WEBSITE (the menu's number); the hand-picked list rides, labelled, as
+    ``manual_skus`` -- "count" means one thing for both types."""
+    custom = seeded["repo"].create({
+        "title": "Picks", "handle": "picks", "collection_type": "CUSTOM",
+        "products": [{"sku": "GONE-1", "position": 0}, {"sku": "BOSS-1", "position": 1}],
+    })
+    r = client.get(
+        f"/api/v1/online-store/collections/{custom['collection_id']}/resolved-products",
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["skus"] == ["BOSS-1"] and body["count"] == 1 and body["source"] == "website_rule"
+    assert body["manual_skus"] == ["GONE-1", "BOSS-1"]

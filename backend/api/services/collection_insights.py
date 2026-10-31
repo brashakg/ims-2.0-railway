@@ -49,7 +49,6 @@ import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from . import ecom_smart_rules
 from .margin_basis import LINE_REVENUE_EX_GST_GROUP, group_revenue_ex_gst
 
 logger = logging.getLogger(__name__)
@@ -843,10 +842,10 @@ def preview(
     disjunctive: bool = False,
     store_id: Optional[str] = None,
 ) -> Dict:
-    """Evaluate UNSAVED rules over the live catalogue -- the same haystack the
-    materializer resolves against (products spine + catalog_products union,
-    spine-wins, scan capped at 5000 by collection_materializer._SCAN_MAX) --
-    via ecom_smart_rules.matches_product. Nothing is persisted.
+    """Evaluate UNSAVED rules with THE website membership rule
+    (collection_membership) over the listings on the website. Nothing is
+    persisted. Rules IMS cannot evaluate as Shopify does match nothing and
+    the reason rides ``not_evaluable``.
 
     Returns {"match_count": int, "units_on_hand": int,
              "sample": [up to 12 {sku, brand, model, title, mrp, image}],
@@ -860,26 +859,36 @@ def preview(
     }
     if db is None:
         return out
-    norm_rules = ecom_smart_rules.normalize_rules(rules or [])
+    # THE website membership rule (services/collection_membership): the
+    # listings on the website the unsaved rules would hold, read exactly as
+    # Shopify will read them once pushed.
     try:
-        from . import collection_materializer as _mat
+        from . import collection_membership
 
-        products = _mat._all_products(db)  # capped at _SCAN_MAX (5000)
-        scan_cap = getattr(_mat, "_SCAN_MAX", 5000)
+        facts = collection_membership.online_facts(db)
+        found, why = collection_membership.members(
+            db, {"collection_type": "SMART", "rules": list(rules or []), "disjunctive": bool(disjunctive)}, facts
+        )
     except Exception:  # noqa: BLE001
         return out
-
-    matched: List[Dict] = []
-    seen: set = set()
-    for p in products:
-        if not isinstance(p, dict):
+    if why:
+        out["not_evaluable"] = why
+    # Every SKU each matched listing carries (lead first, then its colours /
+    # sizes) -- the same set the collection_products view holds, so stock
+    # counts every colour and size of a model.
+    lead_skus = [str(f["sku"]) for f in found if f.get("sku")]
+    all_skus = [str(s) for f in found for s in (f.get("skus") or [f.get("sku")]) if s]
+    by_sku: Dict[str, Dict] = {}
+    for coll_name in ("catalog_products", "products"):
+        try:
+            for d in db[coll_name].find({"sku": {"$in": all_skus}}):
+                by_sku.setdefault(d.get("sku"), {k: v for k, v in d.items() if k != "_id"})
+        except Exception:  # noqa: BLE001
             continue
-        sku = p.get("sku")
-        if not sku or sku in seen:
-            continue
-        if ecom_smart_rules.matches_product(p, norm_rules, disjunctive=bool(disjunctive)):
-            matched.append(p)
-            seen.add(sku)
+    matched: List[Dict] = [by_sku.get(s) or {"sku": s} for s in dict.fromkeys(all_skus)]
+    leads: List[Dict] = [by_sku.get(s) or {"sku": s} for s in lead_skus]
+    products = facts
+    scan_cap = len(facts) + 1  # every listing is read; nothing is capped
 
     # product_ids for the stock rollup: straight off the doc, sku-fallback for
     # catalogue rows that lack one.
@@ -904,9 +913,9 @@ def preview(
                 seen_pid.add(pid)
 
     on_hand = _stock_rollup(db, pids, store_id=store_id)
-    out["match_count"] = len(matched)
+    out["match_count"] = len(leads)  # listings, as the website counts them
     out["units_on_hand"] = int(sum(q for q in on_hand.values() if q > 0))
-    out["sample"] = [_preview_row(p) for p in matched[:_SAMPLE_MAX]]
+    out["sample"] = [_preview_row(p) for p in leads[:_SAMPLE_MAX]]
     out["scanned"] = len(products)
     out["scan_capped"] = len(products) >= scan_cap
     return out

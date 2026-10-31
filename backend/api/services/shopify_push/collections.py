@@ -161,6 +161,19 @@ _SHOPIFY_RELATIONS = frozenset(
 )
 
 
+def _attribute_tag(attr: str, value: Any) -> Optional[str]:
+    """The ONE `<prefix>_<value>` tag the product push generates for
+    attribute ``attr`` = ``value`` (shopify_tag_gen, the push's own
+    generator, asked for every category), or None when the attribute makes
+    no tag or different categories would tag it differently. Pure."""
+    from ..shopify_tag_gen import _CATEGORY_TAG_MAP, generate_attribute_tags
+
+    if isinstance(value, (list, tuple, dict)) or not str(value or "").strip():
+        return None
+    tags = {t for cat in _CATEGORY_TAG_MAP for t in generate_attribute_tags(cat, {attr: value})}
+    return tags.pop() if len(tags) == 1 else None
+
+
 def convert_rule_set(rules: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]:
     """IMS smart rules (either stored shape) -> Shopify CollectionRuleInput
     list, plus the rules that could NOT be carried faithfully (unknown column
@@ -181,6 +194,17 @@ def convert_rule_set(rules: List[Any]) -> Tuple[List[Dict[str, Any]], List[str]]
         )
         rel = str(r.get("relation") or "EQUALS").strip().upper()
         value = r.get("value")
+        if field.lower() == "category" and isinstance(value, str) and value.strip():
+            # An IMS category (SUNGLASS, FRAME) is the productType the push SENDS.
+            from ..ecom_category_map import ims_to_shopify_type
+
+            value = ims_to_shopify_type(value)
+        elif col is None and rel in ("EQUALS", "NOT_EQUALS"):
+            # A product attribute (shape, gender, polarization ...) is on the
+            # website only as the filter tag the push generates for it.
+            tag = _attribute_tag(field, value)
+            if tag:
+                col, value = "TAG", tag
         if not col or rel not in _SHOPIFY_RELATIONS or isinstance(value, (list, tuple, dict)):
             lost.append(f"{field or '?'} {rel} {value}")
             continue

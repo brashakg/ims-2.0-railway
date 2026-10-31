@@ -39,12 +39,15 @@ Everything is FAIL-SOFT: no DB -> reads return empty / writes 503; never 500.
 
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from .auth import require_roles
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -298,6 +301,106 @@ async def create_menu(
     return {"menu": _with_id(created)}
 
 
+# ---------------------------------------------------------------------------
+# THE GENERATED WEBSITE MENU (owner 2026-10-29) -- services/generated_menu.
+# Its items are built from the collections that have products; only its
+# TEMPLATE is edited (ADMIN / SUPERADMIN). Pushing it is the push router's
+# POST /online-store/push/menu/{menu_id} (rebuild + push, push roles).
+# Declared BEFORE /{menu_id} so "generated" is never read as a menu id.
+# ---------------------------------------------------------------------------
+
+
+class TemplateIn(BaseModel):
+    template: Dict
+
+
+@router.get("/generated")
+async def get_generated_menus(
+    current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
+) -> Dict:
+    """Every generated menu: its template, a LIVE preview built now from the
+    collections with products on the website (item counts, the hidden
+    list -- with what the last LIVE read found empty on Shopify kept out),
+    and the last generate / push. ``changed_since_push`` is the stored
+    generated vs pushed hash (status().in_sync's rule). The listings are
+    read STRICTLY: an unreadable catalogue is reported as such, never as an
+    empty menu. Read-only (nothing is saved)."""
+    db = _get_db()
+    if db is None:
+        return {"menus": [], "db_connected": False}
+    from ..services import collection_membership, generated_menu
+
+    docs = generated_menu.generated_menus(db)
+    out = []
+    if docs:
+        collections = collection_membership.live_collections(db)
+        try:
+            facts = collection_membership.online_facts(db, strict=True)
+            counts = collection_membership.counts_by_handle(db, facts, collections)
+        except Exception as exc:  # noqa: BLE001 -- shown, never read as "no products"
+            logger.warning("[MENUS] preview: listings unreadable: %s", exc)
+            counts = None
+            unreadable = f"The website listings could not be read just now ({exc}); try again shortly."
+        for doc in docs:
+            st = generated_menu.status(doc)
+            if counts is None:
+                st["preview"] = {"items": [], "hidden": [], "unreadable": unreadable,
+                                 "changed_since_push": not st["in_sync"]}
+            else:
+                items, hidden = generated_menu.generate(
+                    doc.get("template") or {}, collections, counts, None, generated_menu.shop_hidden_of(doc))
+                st["preview"] = {"items": items, "hidden": hidden, "changed_since_push": not st["in_sync"]}
+            out.append(st)
+    return {"menus": out, "db_connected": True}
+
+
+@router.put("/generated/{menu_id}/template")
+async def put_generated_template(
+    menu_id: str,
+    payload: TemplateIn,
+    current_user: dict = Depends(require_roles("ADMIN")),
+) -> Dict:
+    """Replace a generated menu's TEMPLATE (section titles, order, groups,
+    N, static links) and rebuild its items. Not pushed here -- the next sync
+    or the "Regenerate & push now" press sends it. 400 on a bad template."""
+    repo = _require_repo()
+    doc = repo.get_by_id(menu_id)
+    if doc is None or not doc.get("generated"):
+        raise HTTPException(status_code=404, detail="Generated menu not found")
+    from ..services import generated_menu
+
+    errs = generated_menu.validate_template(payload.template)
+    if errs:
+        raise HTTPException(status_code=400, detail="; ".join(errs))
+    db = _get_db()
+    db["ecom_menus"].update_one({"menu_id": menu_id}, {"$set": {
+        "template": payload.template, "template_updated_by": current_user.get("user_id"),
+    }})
+    doc = db["ecom_menus"].find_one({"menu_id": menu_id})
+    doc.pop("_id", None)
+    from ..services import collection_membership
+
+    try:  # a STRICT read: an unreadable catalogue never rebuilds an empty menu
+        generated_menu.regenerate(db, doc, collection_membership.online_facts(db, strict=True))
+    except Exception:  # noqa: BLE001 -- the template is saved; the next sync rebuilds
+        logger.warning("[MENUS] template saved, rebuild deferred to the next sync", exc_info=True)
+    return {"menu": generated_menu.status(doc)}
+
+
+def _not_generated(repo, menu_id: str) -> Dict:
+    """The menu doc, 404 when unknown, 409 when it is the generated menu:
+    its items are built from the collections and never hand-edited."""
+    doc = repo.get_by_id(menu_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Menu not found")
+    if doc.get("generated"):
+        raise HTTPException(
+            status_code=409,
+            detail="This menu builds itself from the collections that have products -- edit its template instead.",
+        )
+    return doc
+
+
 @router.get("/{menu_id}")
 async def get_menu(
     menu_id: str,
@@ -320,9 +423,7 @@ async def update_menu(
     Supplying `items` replaces the whole tree. The row is marked locally_modified
     for the Phase-5 push queue."""
     repo = _require_repo()
-    existing = repo.get_by_id(menu_id)
-    if existing is None:
-        raise HTTPException(status_code=404, detail="Menu not found")
+    existing = _not_generated(repo, menu_id)
 
     data = payload.model_dump(exclude_none=True, exclude={"items"})
     # A handle change must not collide with another menu's slug.
@@ -353,8 +454,7 @@ async def delete_menu(
     current_user: dict = Depends(require_roles(*_ECOM_ROLES)),
 ) -> Dict:
     repo = _require_repo()
-    if repo.get_by_id(menu_id) is None:
-        raise HTTPException(status_code=404, detail="Menu not found")
+    _not_generated(repo, menu_id)
     ok = repo.delete(menu_id)
     if not ok:
         raise HTTPException(status_code=500, detail="Failed to delete menu")
@@ -375,8 +475,7 @@ async def add_menu_item(
     """Add a node under `parent_id` (None = top level) at `position` (None =
     append). The server mints the node id. An unknown parent_id is a 404."""
     repo = _require_repo()
-    if repo.get_by_id(menu_id) is None:
-        raise HTTPException(status_code=404, detail="Menu not found")
+    _not_generated(repo, menu_id)
     item = _item_to_dict(payload.item)
     updated = repo.add_item(
         menu_id, item, parent_id=payload.parent_id, position=payload.position
@@ -398,8 +497,7 @@ async def reorder_menu_items(
     """Replace the whole items tree (the editor's drag-reorder result). The tree
     is normalized + renumbered by the repository."""
     repo = _require_repo()
-    if repo.get_by_id(menu_id) is None:
-        raise HTTPException(status_code=404, detail="Menu not found")
+    _not_generated(repo, menu_id)
     items = [_item_to_dict(i) for i in (payload.items or [])]
     ok = repo.update(menu_id, {"items": items})
     return {"menu": _with_id(repo.get_by_id(menu_id)), "updated": bool(ok)}
@@ -415,8 +513,7 @@ async def move_menu_item(
     """Move a node to a new parent (None = top level) + position. Moving a node
     under itself or a descendant (a cycle) or to an unknown parent is a 400."""
     repo = _require_repo()
-    if repo.get_by_id(menu_id) is None:
-        raise HTTPException(status_code=404, detail="Menu not found")
+    _not_generated(repo, menu_id)
     updated = repo.move_item(
         menu_id, item_id, new_parent_id=payload.new_parent_id, position=payload.position
     )
@@ -439,8 +536,7 @@ async def update_menu_item(
     url / badges / icon / pinned_to_top / ...). Re-parenting is the move route.
     An unknown node is a 404."""
     repo = _require_repo()
-    if repo.get_by_id(menu_id) is None:
-        raise HTTPException(status_code=404, detail="Menu not found")
+    _not_generated(repo, menu_id)
     fields = payload.model_dump(exclude_none=True)
     if "item_type" in fields:
         fields["item_type"] = _validate_item_type(fields["item_type"])
@@ -460,8 +556,7 @@ async def remove_menu_item(
 ) -> Dict:
     """Remove a node (and its whole subtree) from the menu (idempotent)."""
     repo = _require_repo()
-    if repo.get_by_id(menu_id) is None:
-        raise HTTPException(status_code=404, detail="Menu not found")
+    _not_generated(repo, menu_id)
     updated = repo.remove_item(menu_id, item_id)
     if updated is None:
         raise HTTPException(status_code=500, detail="Failed to remove item")

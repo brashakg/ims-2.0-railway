@@ -14,8 +14,14 @@ THE MULTI-COLLECTION RULE (a HARD block):
 
 MEMBERSHIP RESOLUTION (covers BOTH kinds of collection):
   * CUSTOM -> the embedded manual ``products[].sku`` list.
-  * SMART  -> the rule set, evaluated with the shared ``ecom_smart_rules``
-    engine (the same one the storefront browse uses).
+  * SMART  -> THE website membership rule (``collection_membership``): the
+    rules read exactly as Shopify reads them, over what the push would send
+    for the product (its generated tags, productType, vendor, prices). A
+    blocked collection whose rules IMS cannot evaluate that way is UNKNOWN for
+    the products only such a rule could be about -- fail CLOSED on the strict
+    push path and the sweep, never a silent pass. Such a collection cannot be
+    blocked (POST /block, a rule save on a blocked one) and Store Health lists
+    any that already are.
   The fast path also consults the materialised ``collection_products`` view
   (which already holds CUSTOM + SMART membership); the direct manual / rule
   checks are the fallback so a stale-or-unmaterialised view never mis-classifies.
@@ -31,7 +37,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from . import ecom_smart_rules
+from . import collection_membership
 
 logger = logging.getLogger(__name__)
 
@@ -67,18 +73,76 @@ def _product_in_custom(collection: Dict[str, Any], sku: Optional[str]) -> bool:
     return False
 
 
-def _product_in_smart(collection: Dict[str, Any], product: Dict[str, Any]) -> bool:
-    """True if `product` satisfies a SMART collection's rules (shared engine)."""
-    rules = ecom_smart_rules.normalize_rules(collection.get("rules") or [])
-    if not rules:
+def _catalog_doc(db, product: Dict[str, Any]) -> Dict[str, Any]:
+    """The catalog_products doc the push reads for ``product`` (a spine doc
+    resolves to its catalogue twin by sku); the doc itself otherwise."""
+    if db is not None and product.get("sku") and "ecom" not in product:
+        twin = db["catalog_products"].find_one({"sku": product["sku"]})
+        if twin is not None:
+            return twin
+    return product
+
+
+def _smart_verdict(collection: Dict[str, Any], product: Dict[str, Any], db=None) -> Optional[bool]:
+    """Is ``product`` in this SMART collection? True / False when the rules
+    IMS can read decide it; None (UNKNOWN) when only a rule IMS cannot read
+    (an IN list, shape, gender ... -- collection_membership.rule_set) could.
+
+    Decided per product, never guessed: an all-AND set whose readable rule
+    fails is a definite NO (the unreadable rule cannot rescue it), an ANY set
+    whose readable rule holds is a definite YES -- so a blocked collection
+    with one unreadable rule only ever stalls the products it may be about."""
+    rules, lost = collection_membership.rule_set(collection)
+    if not rules and not lost:
         return False
-    return ecom_smart_rules.matches_product(
-        product, rules, disjunctive=bool(collection.get("disjunctive", False))
-    )
+    dj = bool(collection.get("disjunctive", False))
+    hits = []
+    if rules:
+        fact = collection_membership.facts_for(db, _catalog_doc(db, product))
+        hits = [collection_membership.matches(fact, [r]) for r in rules]
+    if dj and any(hits):
+        return True
+    if not dj and not all(hits):
+        return False
+    if lost:
+        return None
+    return not dj  # AND: every rule held; ANY: none did
+
+
+def _product_in_smart(
+    collection: Dict[str, Any], product: Dict[str, Any], db=None, strict: bool = False
+) -> bool:
+    """True if `product` satisfies a SMART collection's rules, read by THE
+    website membership rule. UNKNOWN (a rule IMS cannot read decides it):
+    strict -> raises (fail closed); otherwise False, logged."""
+    verdict = _smart_verdict(collection, product, db)
+    if verdict is None:
+        logger.warning(
+            "online-block: blocked collection %s has rules IMS cannot evaluate: %s",
+            collection.get("handle") or collection.get("collection_id"),
+            "; ".join(collection_membership.not_evaluable(collection)),
+        )
+        if strict:
+            raise RuntimeError("blocked collection rules not evaluable")
+        return False
+    return verdict
+
+
+def unverifiable_blocks(db) -> List[Dict[str, Any]]:
+    """Every blocked SMART collection with a rule IMS cannot read as the
+    website does -- a block that cannot be enforced with certainty (Store
+    Health lists them; scripts/check_blocked_collection_rules.py reads them
+    on prod). Raises on a read error (the caller reports it)."""
+    return [
+        {"collection_id": c.get("collection_id"), "handle": c.get("handle"), "title": c.get("title"),
+         "rules": collection_membership.not_evaluable(c)}
+        for c in _blocked_collections(db, strict=True)
+        if collection_membership.not_evaluable(c)
+    ]
 
 
 def _membership_hit(
-    product: Dict[str, Any], db, blocked: List[Dict[str, Any]]
+    product: Dict[str, Any], db, blocked: List[Dict[str, Any]], strict: bool = False
 ) -> bool:
     """True iff `product` is a member of ANY collection in `blocked` (assumed
     already loaded + non-empty). Uses the materialised membership view fast path,
@@ -106,7 +170,7 @@ def _membership_hit(
     for c in blocked:
         ctype = str(c.get("collection_type") or "CUSTOM").upper()
         if ctype == "SMART":
-            if _product_in_smart(c, product):
+            if _product_in_smart(c, product, db, strict):
                 return True
         else:
             if _product_in_custom(c, sku):
@@ -165,7 +229,7 @@ def is_blocked_from_online_strict(product: Dict[str, Any], db) -> Optional[bool]
     if not blocked:
         return False
     try:
-        return _membership_hit(product, db, blocked)
+        return _membership_hit(product, db, blocked, strict=True)
     except Exception as exc:  # noqa: BLE001 -- resolution error -> UNKNOWN (fail closed)
         logger.warning(
             "online-block: strict membership resolution failed -> UNKNOWN "
@@ -179,8 +243,9 @@ def classify_blocked_skus(db, skus: List[str]) -> Tuple[Set[str], bool]:
     """Batch classifier for the /all-pending push sweep (findings #17 + #20).
 
     Returns ``(blocked_set, verifiable)``:
-      * ``verifiable=False`` -- the block CONFIG could not be read, so the caller
-        MUST fail CLOSED (treat every product as unverifiable and skip the push)
+      * ``verifiable=False`` -- the block CONFIG or a membership read failed, or
+        a product's membership in a blocked collection rests on a rule IMS
+        cannot read (an IN list, shape ...), so the caller MUST fail CLOSED (treat every product as unverifiable and skip the push)
         rather than push possibly-banned products (finding #18).
       * ``verifiable=True`` -- ``blocked_set`` is the subset of ``skus`` that is
         blocked, resolved ONCE for the whole sweep so ``push_product`` never has
@@ -192,11 +257,13 @@ def classify_blocked_skus(db, skus: List[str]) -> Tuple[Set[str], bool]:
     if db is None:
         return set(), True
     try:
-        _blocked_collections(db, strict=True)
-    except Exception:  # noqa: BLE001 -- config unreadable -> not verifiable
-        logger.warning("online-block: sweep block config unreadable -> fail closed")
+        # STRICT: a read error, or a product only an unreadable rule of a
+        # blocked collection could be about, is UNKNOWN -> the sweep fails
+        # CLOSED (never pushes a possibly-banned product).
+        return blocked_skus(db, clean, strict=True), True
+    except Exception as exc:  # noqa: BLE001 -- not verifiable
+        logger.warning("online-block: sweep block membership not verifiable -> fail closed: %s", exc)
         return set(), False
-    return blocked_skus(db, clean), True
 
 
 def blocked_skus(db, skus: List[str], *, strict: bool = False) -> Set[str]:
@@ -256,15 +323,15 @@ def blocked_skus(db, skus: List[str], *, strict: bool = False) -> Set[str]:
         if remaining and smart:
             prod_by_sku = _load_products_by_sku(db, list(remaining), strict=strict)
             for c in smart:
-                rules = ecom_smart_rules.normalize_rules(c.get("rules") or [])
-                if not rules:
-                    continue
-                disj = bool(c.get("disjunctive", False))
                 for s in list(remaining):
                     doc = prod_by_sku.get(s)
-                    if doc and ecom_smart_rules.matches_product(
-                        doc, rules, disjunctive=disj
-                    ):
+                    try:
+                        hit = bool(doc) and _product_in_smart(c, doc, db, strict)
+                    except Exception:  # noqa: BLE001
+                        if strict:
+                            raise
+                        hit = False
+                    if hit:
                         out.add(s)
                         remaining.discard(s)
         return out
@@ -277,13 +344,14 @@ def blocked_skus(db, skus: List[str], *, strict: bool = False) -> Set[str]:
 def _load_products_by_sku(
     db, skus: List[str], *, strict: bool = False
 ) -> Dict[str, Dict[str, Any]]:
-    """sku -> a product doc (spine `products` then `catalog_products`), for SMART
+    """sku -> a product doc (`catalog_products` then the spine), for SMART
     rule evaluation. Fail-soft -> {}; ``strict=True`` re-raises (see
     ``blocked_skus``)."""
     out: Dict[str, Dict[str, Any]] = {}
     if db is None or not skus:
         return out
-    for coll_name in ("products", "catalog_products"):
+    # The catalogue doc first: it is what the push reads (and sends).
+    for coll_name in ("catalog_products", "products"):
         try:
             for d in db[coll_name].find({"sku": {"$in": list(skus)}}):
                 s = d.get("sku")

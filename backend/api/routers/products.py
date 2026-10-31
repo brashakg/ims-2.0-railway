@@ -370,22 +370,6 @@ from ..services.gtin import MANUFACTURER_BARCODE_ATTRIBUTES
 _FORM_EXTRA_FIELDS = ("variant",) + _OPTIONAL_PRODUCT_FIELDS
 
 
-def _refresh_collections_after_product(created_or_updated) -> None:
-    """Recompute SMART collection membership after a product create/update
-    (step-13). The new/edited product's tags/category/brand may change which
-    SMART collections it belongs to. FULLY fail-soft: never raises into the
-    create/update path; a no-op when there is no live DB."""
-    try:
-        from ..dependencies import get_db as _get_db_dep
-        from ..services import collection_materializer as _mat
-
-        conn = _get_db_dep()
-        if conn is not None and getattr(conn, "is_connected", False):
-            _mat.refresh_for_product(conn.db, created_or_updated)
-    except Exception:  # noqa: BLE001 - membership refresh must never block a write
-        pass
-
-
 def _canonical_door_payload(
     product: "ProductCreate", *, as_draft: bool = False
 ) -> dict:
@@ -1286,8 +1270,6 @@ async def create_product(
             from ..services.cache import invalidate_product_lists
 
             invalidate_product_lists()
-            # Step-13: recompute SMART collections (fail-soft, never blocks).
-            _refresh_collections_after_product(created)
             return {
                 "product_id": created["product_id"],
                 "sku": created["sku"],
@@ -3756,10 +3738,6 @@ async def update_product(
                     now_active=update_data["is_active"],
                     actor=current_user,
                 )
-            # Step-13: recompute SMART collections (fail-soft). Use the merged doc
-            # so the resolver sees the post-update tags/category/brand + status.
-            merged = {**existing, **update_data, **status_fields}
-            _refresh_collections_after_product(merged)
             # Manage Barcode: spine and twin hold ONE code (the twin's is the
             # one the push sends). A twin that kept the old one is a failed
             # save, never a success -- LAST, so the take-down above still ran.

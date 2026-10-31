@@ -1,525 +1,553 @@
 // ============================================================================
-// IMS 2.0 - Online Store - Menus / Mega-Menu editor  (BVI Phase 3, "push-dark")
+// IMS 2.0 - Online Store - Website menu (self-maintaining, owner 2026-10-29)
 // ============================================================================
-// FLAGSHIP #2 of the e-commerce (BVI) merge: edit the storefront navigation
-// tree (the mega-menu) entirely inside IMS. See docs/reference/BVI_MERGE_PLAN.md
-// section B / Phase 3 ("Menus + Mega-Menu editor ... thumbnails, badges,
-// pin-to-top").
+// "A self-maintaining menu system -- something in IMS that generates menus
+// directly from collections that have products, rather than static pushes."
 //
-// SCOPE (Phase 3): store + edit menus in IMS Mongo (`ecom_menus`, items embedded
-// as a tree). There is NO Shopify network write here — the single-writer
-// `menuUpdate` push is Phase 5/6. So this screen is a pure nav-tree editor over
-// /api/v1/online-store/menus:
-//   - MENUS list (left): handle, title, active toggle, item count; create /
-//     select / delete.
-//   - TREE editor (right) for the selected menu: nested items with indent,
-//     expand/collapse, add child / add sibling, edit (title, item-type picker,
-//     url or resource_id, tags_filter) + mega-menu fields (icon_url, banner_url,
-//     badge_text + badge_color, pinned_to_top), delete, and up/down reorder.
-//   - SAVE persists the whole edited tree via PUT {id} (saveTree). Per-node
-//     operations are applied to a LOCAL tree first so the editor stays fully
-//     usable even before the Phase-3 backend is deployed; "Save changes" writes
-//     the tree back.
+// The website's main menu is BUILT by IMS (backend services/generated_menu.py)
+// from a TEMPLATE of ordered sections and the IMS collections that have
+// products ON THE WEBSITE. It is rebuilt after every sync (01:00 / 09:00 IST
+// and every "Sync now") and pushed only when it changed. A collection with no
+// products is left out and comes back by itself when it gets one.
 //
-// FAIL-SOFT: the Phase-3 backend menus router ships separately and may be absent
-// in a stale deploy. Reads degrade to an empty menu list (a friendly "backend
-// not yet available" note) and the local editor still works; the save toasts the
-// backend error. Gated SUPERADMIN / ADMIN / CATALOG_MANAGER / DESIGN_MANAGER at
-// the route (App.tsx). Light theme only — no non-ASCII.
+// This screen:
+//   - TEMPLATE (left): section titles, order, which groups, Top-N, static
+//     links. ADMIN / SUPERADMIN save it; generated items are never hand-edited.
+//   - LIVE PREVIEW (right): the menu IMS would build right now, with product
+//     counts per item, and the "hidden because empty" list.
+//   - STATUS: last generated / last pushed + result; "Regenerate & push now"
+//     (the push roles: ADMIN / SUPERADMIN, same as every other push).
+//   - OTHER MENUS: read-only (footer menus etc. are not touched by IMS).
+// Light theme only -- no non-ASCII in copy.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Menu as MenuIcon,
   Plus,
-  X,
   Save,
   Loader2,
   Trash2,
-  Pencil,
   ArrowLeft,
   ArrowUp,
   ArrowDown,
-  ChevronRight,
-  ChevronDown,
-  CornerDownRight,
-  Pin,
   RefreshCw,
   Info,
-  Image as ImageIcon,
-  Tag,
-  Link2,
   UploadCloud,
+  EyeOff,
+  ChevronRight,
+  ChevronDown,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import {
   menusApi,
   pushApi,
+  generatedMenusApi,
   type EcomMenu,
-  type MenuItem,
-  type MenuItemType,
+  type GeneratedMenu,
+  type GeneratedMenuItem,
+  type MenuGroup,
+  type MenuGroupSource,
+  type MenuLink,
+  type MenuSection,
+  type MenuTemplate,
 } from '../../services/api/onlineStore';
 import OnlineStoreSyncBanner, {
-  SyncChip,
   formatPushResult,
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 
-// ---------------------------------------------------------------------------
-// Item-type vocabulary (mirrors the Shopify MenuItemType enum / BVI MenuItem).
-// Split into "resource" types (need a resource_id) vs URL/derived so the editor
-// can hint the right field. Kept storefront-meaningful + small.
-// ---------------------------------------------------------------------------
-const ITEM_TYPES: Array<{ value: MenuItemType; label: string }> = [
-  { value: 'COLLECTION', label: 'Collection' },
-  { value: 'COLLECTIONS', label: 'All collections' },
-  { value: 'PRODUCT', label: 'Product' },
-  { value: 'PAGE', label: 'Page' },
-  { value: 'BLOG', label: 'Blog' },
-  { value: 'ARTICLE', label: 'Article' },
-  { value: 'FRONTPAGE', label: 'Home' },
-  { value: 'CATALOG', label: 'Catalog' },
-  { value: 'SEARCH', label: 'Search' },
-  { value: 'HTTP', label: 'Link (URL)' },
-  { value: 'SHOP_POLICY', label: 'Shop policy' },
-  { value: 'METAOBJECT', label: 'Metaobject' },
-];
+const SOURCE_LABELS: Record<MenuGroupSource, string> = {
+  gender: "By gender (Men's, Women's, Unisex, Kids, Polarized)",
+  shape: 'By shape (most products first)',
+  price: 'By price (lowest first)',
+  top_brands: 'Top brands (most products first)',
+  brands_az: 'All brands A-Z',
+};
 
-// Types that resolve via a Shopify resource id (gid) rather than a raw URL.
-const RESOURCE_TYPES = new Set<MenuItemType>([
-  'COLLECTION',
-  'PRODUCT',
-  'PAGE',
-  'BLOG',
-  'ARTICLE',
-  'METAOBJECT',
-  'SHOP_POLICY',
-]);
+const KIND_LABELS: Record<MenuSection['kind'], string> = {
+  collection: 'One collection',
+  links: 'Fixed links',
+  panel: 'Mega-menu panel',
+};
 
-// A small palette for badge colors (mega-menu chips). value is a hex; the editor
-// also allows a free hex via the color input.
-const BADGE_PRESETS: Array<{ label: string; color: string }> = [
-  { label: 'Red', color: '#e11d48' },
-  { label: 'Green', color: '#16a34a' },
-  { label: 'Blue', color: '#2563eb' },
-  { label: 'Amber', color: '#d97706' },
-  { label: 'Purple', color: '#7c3aed' },
-  { label: 'Slate', color: '#475569' },
-];
-
-// Auto a handle from a title: lowercase, spaces/punct -> single hyphen.
-function slugify(s: string): string {
-  return (s || '')
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 120);
+function fmtIST(iso?: string | null): string {
+  if (!iso) return 'never';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) + ' IST';
 }
 
-// Stable-ish client id for locally-created items (before the backend mints one).
-let _tmpSeq = 0;
-function tmpId(): string {
-  _tmpSeq += 1;
-  return `tmp_${Date.now().toString(36)}_${_tmpSeq}`;
-}
-
-// ---------------------------------------------------------------------------
-// Local tree helpers (pure). The editor operates on a normalised MenuItem[]
-// (children embedded), then PUTs it back. Keeping these pure makes the editor
-// deterministic and testable, and means it works with or without the backend.
-// ---------------------------------------------------------------------------
-
-/** Deep-clone + ensure every node has an id, an item_type, and a children[]. */
-function normaliseTree(items: MenuItem[] | null | undefined): MenuItem[] {
-  const walk = (nodes: MenuItem[] | null | undefined): MenuItem[] =>
-    (nodes ?? []).map((n, i) => ({
-      ...n,
-      id: n.id || tmpId(),
-      title: n.title ?? '',
-      item_type: (n.item_type ?? 'HTTP') as MenuItemType,
-      position: typeof n.position === 'number' ? n.position : i,
-      children: walk(n.children),
-    }));
-  return walk(items);
-}
-
-/** Re-number `position` to match array order at every level (0-based). */
-function resequence(items: MenuItem[]): MenuItem[] {
-  return items.map((n, i) => ({
-    ...n,
-    position: i,
-    children: n.children && n.children.length ? resequence(n.children) : (n.children ?? []),
-  }));
-}
-
-/** Return a new tree with `fn` applied to the node with `id` (identity else). */
-function updateNode(
-  items: MenuItem[],
-  id: string,
-  fn: (n: MenuItem) => MenuItem,
-): MenuItem[] {
-  return items.map((n) => {
-    if (n.id === id) return fn(n);
-    if (n.children && n.children.length) {
-      return { ...n, children: updateNode(n.children, id, fn) };
-    }
-    return n;
-  });
-}
-
-/** Remove the node with `id` (and its subtree) anywhere in the tree. */
-function removeNode(items: MenuItem[], id: string): MenuItem[] {
-  const out: MenuItem[] = [];
-  for (const n of items) {
-    if (n.id === id) continue;
-    out.push(
-      n.children && n.children.length ? { ...n, children: removeNode(n.children, id) } : n,
-    );
-  }
-  return out;
-}
-
-/** Insert `node` as a child of `parentId` (append). parentId null = top level. */
-function insertChild(items: MenuItem[], parentId: string | null, node: MenuItem): MenuItem[] {
-  if (parentId === null) return [...items, node];
-  return items.map((n) => {
-    if (n.id === parentId) {
-      return { ...n, children: [...(n.children ?? []), node] };
-    }
-    if (n.children && n.children.length) {
-      return { ...n, children: insertChild(n.children, parentId, node) };
-    }
-    return n;
-  });
-}
-
-/** Insert `node` immediately after the sibling with id `afterId`, at whatever
- *  level that sibling lives (used for "add sibling"). */
-function insertAfter(items: MenuItem[], afterId: string, node: MenuItem): MenuItem[] {
-  const idx = items.findIndex((n) => n.id === afterId);
-  if (idx >= 0) {
-    const next = items.slice();
-    next.splice(idx + 1, 0, node);
-    return next;
-  }
-  return items.map((n) =>
-    n.children && n.children.length
-      ? { ...n, children: insertAfter(n.children, afterId, node) }
-      : n,
+/** Collection links in a generated tree, every depth (the backend's
+ *  generated_menu.collection_nodes). */
+function collectionLinks(items: GeneratedMenuItem[] | null | undefined): number {
+  return (items ?? []).reduce(
+    (n, it) => n + (it.item_type === 'COLLECTION' ? 1 : 0) + collectionLinks(it.children),
+    0,
   );
 }
 
-/** Move the node with `id` up (-1) or down (+1) among its OWN siblings. */
-function moveSibling(items: MenuItem[], id: string, dir: -1 | 1): MenuItem[] {
-  const idx = items.findIndex((n) => n.id === id);
-  if (idx >= 0) {
-    const target = idx + dir;
-    if (target < 0 || target >= items.length) return items;
-    const next = items.slice();
-    const [it] = next.splice(idx, 1);
-    next.splice(target, 0, it);
-    return next;
-  }
-  return items.map((n) =>
-    n.children && n.children.length ? { ...n, children: moveSibling(n.children, id, dir) } : n,
+function move<T>(arr: T[], i: number, dir: -1 | 1): T[] {
+  const j = i + dir;
+  if (j < 0 || j >= arr.length) return arr;
+  const next = arr.slice();
+  [next[i], next[j]] = [next[j], next[i]];
+  return next;
+}
+
+function newSection(kind: MenuSection['kind']): MenuSection {
+  if (kind === 'collection') return { kind, title: 'New section', handle: '' };
+  if (kind === 'links') return { kind, title: 'New section', url: '#', links: [{ title: 'Link', url: '/' }] };
+  return { kind, title: 'New panel', url: '#', groups: [{ title: 'Brands', source: 'brands_az' }] };
+}
+
+// ---------------------------------------------------------------------------
+// Links editor (static links: About Us, Shop all)
+// ---------------------------------------------------------------------------
+function LinksEditor({
+  links,
+  onChange,
+  disabled,
+}: {
+  links: MenuLink[];
+  onChange: (next: MenuLink[]) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div className="space-y-1.5">
+      {links.map((l, i) => (
+        <div key={i} className="flex flex-wrap items-center gap-1.5">
+          <input
+            className="input-field text-xs flex-1 min-w-[120px]"
+            value={l.title}
+            disabled={disabled}
+            aria-label="Link title"
+            onChange={(e) => onChange(links.map((x, k) => (k === i ? { ...x, title: e.target.value } : x)))}
+          />
+          <input
+            className="input-field text-xs font-mono flex-[2] min-w-[160px]"
+            value={l.url}
+            disabled={disabled}
+            aria-label="Link address"
+            onChange={(e) => onChange(links.map((x, k) => (k === i ? { ...x, url: e.target.value } : x)))}
+          />
+          {!disabled && (
+            <button
+              type="button"
+              className="p-1 rounded hover:bg-gray-100 text-gray-500"
+              title="Remove link"
+              onClick={() => onChange(links.filter((_, k) => k !== i))}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
+        </div>
+      ))}
+      {!disabled && (
+        <button
+          type="button"
+          className="text-xs text-bv-red-600 hover:underline inline-flex items-center gap-1"
+          onClick={() => onChange([...links, { title: 'Link', url: '/' }])}
+        >
+          <Plus className="w-3 h-3" /> Add link
+        </button>
+      )}
+    </div>
   );
 }
 
-/** Find a node by id (depth-first). */
-function findNode(items: MenuItem[], id: string): MenuItem | null {
-  for (const n of items) {
-    if (n.id === id) return n;
-    if (n.children && n.children.length) {
-      const f = findNode(n.children, id);
-      if (f) return f;
-    }
-  }
-  return null;
+// The Top-N input: the raw text is kept while typing (clearing it to type
+// "15" must not snap to 10 and produce "105"); a whole number 1-100 is taken
+// as it is typed, anything else is clamped on blur (empty -> the default 10).
+function TopNInput({ value, disabled, onChange }: { value?: number; disabled: boolean; onChange: (n: number) => void }) {
+  const [raw, setRaw] = useState(String(value ?? 10));
+  useEffect(() => setRaw(String(value ?? 10)), [value]);
+  const commit = () => {
+    const n = Math.round(Number(raw));
+    const next = raw.trim() === '' || !Number.isFinite(n) ? 10 : Math.min(100, Math.max(1, n));
+    setRaw(String(next));
+    if (next !== (value ?? 10)) onChange(next);
+  };
+  return (
+    <input
+      type="number"
+      min={1}
+      max={100}
+      className="input-field text-xs w-16"
+      value={raw}
+      disabled={disabled}
+      aria-label="How many brands"
+      onChange={(e) => {
+        setRaw(e.target.value);
+        const n = Number(e.target.value);
+        if (e.target.value.trim() !== '' && Number.isInteger(n) && n >= 1 && n <= 100) onChange(n);
+      }}
+      onBlur={commit}
+    />
+  );
 }
 
-/** Count items at any depth. */
-function countNodes(items: MenuItem[] | null | undefined): number {
-  let c = 0;
-  for (const n of items ?? []) {
-    c += 1 + countNodes(n.children);
-  }
-  return c;
+// A heading's own link: the URL it opens when its collection is not shown
+// (links / panel sections), and for a panel the collection it links to.
+function HeadingFields({ section, ro, onChange }: { section: MenuSection; ro: boolean; onChange: (s: MenuSection) => void }) {
+  if (section.kind === 'collection') return null;
+  return (
+    <div className="pl-8 mb-2 flex flex-wrap gap-2">
+      {section.kind === 'panel' && (
+        <label className="flex flex-wrap items-center gap-1.5 text-xs text-gray-600 flex-1 min-w-[180px]">
+          Heading collection
+          <input
+            className="input-field text-xs font-mono flex-1 min-w-0"
+            value={section.handle ?? ''}
+            disabled={ro}
+            placeholder="none"
+            aria-label="Heading collection handle"
+            onChange={(e) => onChange({ ...section, handle: e.target.value || undefined })}
+          />
+        </label>
+      )}
+      <label className="flex flex-wrap items-center gap-1.5 text-xs text-gray-600 flex-1 min-w-[180px]">
+        Heading link
+        <input
+          className="input-field text-xs font-mono flex-1 min-w-0"
+          value={section.url ?? ''}
+          disabled={ro}
+          placeholder="#"
+          aria-label="Heading URL"
+          onChange={(e) => onChange({ ...section, url: e.target.value })}
+        />
+      </label>
+    </div>
+  );
 }
 
-// ===========================================================================
-// Page
-// ===========================================================================
+// ---------------------------------------------------------------------------
+// Template editor (one card per section)
+// ---------------------------------------------------------------------------
+function SectionCard({
+  section,
+  index,
+  total,
+  canEdit,
+  onChange,
+  onMove,
+  onRemove,
+}: {
+  section: MenuSection;
+  index: number;
+  total: number;
+  canEdit: boolean;
+  onChange: (s: MenuSection) => void;
+  onMove: (dir: -1 | 1) => void;
+  onRemove: () => void;
+}) {
+  const ro = !canEdit;
+  const setGroups = (groups: MenuGroup[]) => onChange({ ...(section as any), groups });
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-3" data-testid="template-section">
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <span className="text-[11px] uppercase tracking-wide text-gray-400 w-6">{index + 1}</span>
+        <input
+          className="input-field text-sm font-medium flex-1 min-w-0"
+          value={section.title}
+          disabled={ro}
+          aria-label="Section title"
+          onChange={(e) => onChange({ ...section, title: e.target.value } as MenuSection)}
+        />
+        <span className="text-[11px] text-gray-500 whitespace-nowrap">{KIND_LABELS[section.kind]}</span>
+        {canEdit && (
+          <div className="flex items-center">
+            <button type="button" className="p-1 rounded hover:bg-gray-100 text-gray-500 disabled:opacity-30"
+              disabled={index === 0} onClick={() => onMove(-1)} title="Move up">
+              <ArrowUp className="w-3.5 h-3.5" />
+            </button>
+            <button type="button" className="p-1 rounded hover:bg-gray-100 text-gray-500 disabled:opacity-30"
+              disabled={index === total - 1} onClick={() => onMove(1)} title="Move down">
+              <ArrowDown className="w-3.5 h-3.5" />
+            </button>
+            <button type="button" className="p-1 rounded hover:bg-gray-100 text-gray-500" onClick={onRemove}
+              title="Remove section">
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+      </div>
+
+      <HeadingFields section={section} ro={ro} onChange={onChange} />
+
+      {section.kind === 'collection' && (
+        <label className="flex flex-wrap items-center gap-2 text-xs text-gray-600 pl-8">
+          Collection handle
+          <input
+            className="input-field text-xs font-mono flex-1 min-w-0"
+            value={section.handle}
+            disabled={ro}
+            onChange={(e) => onChange({ ...section, handle: e.target.value })}
+          />
+        </label>
+      )}
+
+      {section.kind === 'links' && (
+        <div className="pl-8">
+          <LinksEditor links={section.links} disabled={ro} onChange={(links) => onChange({ ...section, links })} />
+        </div>
+      )}
+
+      {section.kind === 'panel' && (
+        <div className="pl-8 space-y-2">
+          {section.groups.map((g, gi) => (
+            <div key={gi} className="rounded-md border border-gray-100 bg-gray-50 p-2 space-y-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <input
+                  className="input-field text-xs flex-1 min-w-[110px]"
+                  value={g.title}
+                  disabled={ro}
+                  aria-label="Group title"
+                  onChange={(e) => setGroups(section.groups.map((x, k) => (k === gi ? { ...x, title: e.target.value } : x)))}
+                />
+                <select
+                  className="input-field text-xs flex-[2] min-w-[160px]"
+                  value={g.source}
+                  disabled={ro}
+                  aria-label="Group source"
+                  onChange={(e) =>
+                    setGroups(section.groups.map((x, k) => (k === gi ? { ...x, source: e.target.value as MenuGroupSource } : x)))
+                  }
+                >
+                  {(Object.keys(SOURCE_LABELS) as MenuGroupSource[]).map((src) => (
+                    <option key={src} value={src}>
+                      {SOURCE_LABELS[src]}
+                    </option>
+                  ))}
+                </select>
+                {(g.source === 'gender' || g.source === 'shape') && (
+                  <select
+                    className="input-field text-xs w-32"
+                    value={g.category ?? 'sunglasses'}
+                    disabled={ro}
+                    aria-label="Group category"
+                    onChange={(e) =>
+                      setGroups(section.groups.map((x, k) => (k === gi ? { ...x, category: e.target.value } : x)))
+                    }
+                  >
+                    <option value="sunglasses">Sunglasses</option>
+                    <option value="eyeglasses">Eyeglasses</option>
+                  </select>
+                )}
+                {g.source === 'top_brands' && (
+                  <label className="text-xs text-gray-600 inline-flex items-center gap-1">
+                    N
+                    <TopNInput
+                      value={g.limit}
+                      disabled={ro}
+                      onChange={(n) => setGroups(section.groups.map((x, k) => (k === gi ? { ...x, limit: n } : x)))}
+                    />
+                  </label>
+                )}
+                {canEdit && (
+                  <span className="flex items-center">
+                    <button type="button" className="p-1 rounded hover:bg-gray-200 text-gray-500 disabled:opacity-30"
+                      disabled={gi === 0} onClick={() => setGroups(move(section.groups, gi, -1))} title="Move group up">
+                      <ArrowUp className="w-3 h-3" />
+                    </button>
+                    <button type="button" className="p-1 rounded hover:bg-gray-200 text-gray-500 disabled:opacity-30"
+                      disabled={gi === section.groups.length - 1} onClick={() => setGroups(move(section.groups, gi, 1))}
+                      title="Move group down">
+                      <ArrowDown className="w-3 h-3" />
+                    </button>
+                    <button type="button" className="p-1 rounded hover:bg-gray-200 text-gray-500"
+                      onClick={() => setGroups(section.groups.filter((_, k) => k !== gi))} title="Remove group">
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </span>
+                )}
+              </div>
+              {((g.links?.length ?? 0) > 0 || canEdit) && (
+                <div>
+                  <p className="text-[11px] text-gray-500 mb-1">Fixed links after the collections</p>
+                  <LinksEditor
+                    links={g.links ?? []}
+                    disabled={ro}
+                    onChange={(links) => setGroups(section.groups.map((x, k) => (k === gi ? { ...x, links } : x)))}
+                  />
+                </div>
+              )}
+            </div>
+          ))}
+          {canEdit && (
+            <button
+              type="button"
+              className="text-xs text-bv-red-600 hover:underline inline-flex items-center gap-1"
+              onClick={() => setGroups([...section.groups, { title: 'New group', source: 'shape', category: 'sunglasses' }])}
+            >
+              <Plus className="w-3 h-3" /> Add group
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Preview tree (read-only) with product counts
+// ---------------------------------------------------------------------------
+function PreviewTree({ items, depth = 0 }: { items: GeneratedMenuItem[]; depth?: number }) {
+  return (
+    <ul className={depth === 0 ? 'space-y-1' : 'mt-1 space-y-0.5 border-l border-gray-200 ml-2 pl-3'}>
+      {items.map((it, i) => (
+        <li key={`${it.title}-${i}`} data-testid={depth === 0 ? 'preview-top' : undefined}>
+          <div className="flex items-center gap-2 text-sm">
+            <span className={depth === 0 ? 'font-semibold text-gray-900' : 'text-gray-800'}>{it.title}</span>
+            {typeof it.count === 'number' && (
+              <span className="text-[11px] rounded-full bg-gray-100 px-1.5 py-0.5 text-gray-600">
+                {it.count} products
+              </span>
+            )}
+            <span className="text-[11px] font-mono text-gray-400 truncate">
+              {it.handle ? `/collections/${it.handle}` : it.url && it.url !== '#' ? it.url : ''}
+            </span>
+          </div>
+          {it.children && it.children.length > 0 && <PreviewTree items={it.children} depth={depth + 1} />}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ReadOnlyTree({ items }: { items: EcomMenu['items'] }) {
+  if (!items || items.length === 0) return <p className="text-xs text-gray-500">No items.</p>;
+  return (
+    <ul className="space-y-0.5 text-xs">
+      {items.map((it) => (
+        <li key={it.id}>
+          <span className="text-gray-800">{it.title}</span>
+          <span className="ml-2 font-mono text-gray-400">{it.url ?? ''}</span>
+          {it.children && it.children.length > 0 && (
+            <div className="ml-3 border-l border-gray-200 pl-3">
+              <ReadOnlyTree items={it.children} />
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 export default function MenusPage() {
   const toast = useToast();
   const { hasRole } = useAuth();
-  // Publishing the live nav is integration-critical -> SUPERADMIN / ADMIN only
-  // (matches the backend push router gate; backend is the real enforcement).
+  // Template + push: ADMIN / SUPERADMIN (backend is the real gate).
+  const canEdit = hasRole(['SUPERADMIN', 'ADMIN']);
   const canPublish = hasRole(['SUPERADMIN', 'ADMIN']);
   const bannerRef = useRef<OnlineStoreSyncBannerHandle>(null);
-  const [publishing, setPublishing] = useState(false);
 
-  const [menus, setMenus] = useState<EcomMenu[]>([]);
-  const [loadingMenus, setLoadingMenus] = useState(true);
-
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [menuMeta, setMenuMeta] = useState<EcomMenu | null>(null);
-  const [tree, setTree] = useState<MenuItem[]>([]);
-  const [loadingTree, setLoadingTree] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [generated, setGenerated] = useState<GeneratedMenu[] | null>(null);
+  const [others, setOthers] = useState<EcomMenu[]>([]);
+  const [draft, setDraft] = useState<MenuTemplate | null>(null);
   const [dirty, setDirty] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [pushing, setPushing] = useState(false);
+  const [openOther, setOpenOther] = useState<string | null>(null);
+  const [otherTree, setOtherTree] = useState<EcomMenu | null>(null);
+  const [otherState, setOtherState] = useState<'loading' | 'ready' | 'failed'>('loading');
 
-  // Which subtrees are expanded (by node id). Default: everything expanded.
-  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const menu = generated && generated.length > 0 ? generated[0] : null;
+  // load() (Refresh, after a push) never throws an unsaved template away:
+  // while dirty it refreshes the status / preview / other menus only.
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
+  useUnsavedGuard(dirty);
 
-  // Item editor drawer.
-  const [editorOpen, setEditorOpen] = useState(false);
-  const [editorItemId, setEditorItemId] = useState<string | null>(null);
-
-  // New-menu inline form.
-  const [creatingMenu, setCreatingMenu] = useState(false);
-  const [newMenuTitle, setNewMenuTitle] = useState('');
-  const [newMenuHandle, setNewMenuHandle] = useState('');
-
-  const loadMenus = useCallback(async () => {
-    setLoadingMenus(true);
+  const load = useCallback(async () => {
+    setLoading(true);
     try {
-      const rows = await menusApi.list();
-      setMenus(rows);
-      // Auto-select the first menu (prefer the default) if none selected.
-      setSelectedId((cur) => {
-        if (cur && rows.some((m) => m.id === cur)) return cur;
-        const def = rows.find((m) => m.is_default) ?? rows[0];
-        return def ? def.id : null;
-      });
+      const [gen, all] = await Promise.all([generatedMenusApi.list(), menusApi.list()]);
+      setGenerated(gen);
+      setOthers(all.filter((m) => !(gen ?? []).some((g) => g.menu_id === m.id)));
+      if (!dirtyRef.current) setDraft(gen && gen.length > 0 ? gen[0].template : null);
     } finally {
-      setLoadingMenus(false);
+      setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    loadMenus();
-  }, [loadMenus]);
+    load();
+  }, [load]);
 
-  // Load the selected menu's full tree whenever the selection changes.
-  const loadTree = useCallback(async (id: string) => {
-    setLoadingTree(true);
-    try {
-      const full = await menusApi.get(id);
-      setMenuMeta(full);
-      setTree(normaliseTree(full?.items ?? []));
-      setCollapsed(new Set());
-      setDirty(false);
-    } finally {
-      setLoadingTree(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (selectedId) {
-      loadTree(selectedId);
-    } else {
-      setMenuMeta(null);
-      setTree([]);
-      setDirty(false);
-    }
-  }, [selectedId, loadTree]);
-
-  const selectMenu = (id: string) => {
-    if (dirty && !window.confirm('Discard unsaved changes to this menu?')) return;
-    setSelectedId(id);
-  };
-
-  // ---- Menu-level ops ------------------------------------------------------
-
-  const createMenu = async () => {
-    const title = newMenuTitle.trim();
-    if (!title) {
-      toast.error('Menu title is required');
-      return;
-    }
-    const handle = (newMenuHandle || slugify(title)).trim();
-    setCreatingMenu(true);
-    try {
-      const created = await menusApi.create({ title, handle, active: true });
-      toast.success('Menu created');
-      setNewMenuTitle('');
-      setNewMenuHandle('');
-      await loadMenus();
-      setSelectedId(created.id);
-    } catch (e: any) {
-      toast.error(
-        e?.message || 'Could not create menu — is the Online Store backend deployed?',
-      );
-    } finally {
-      setCreatingMenu(false);
-    }
-  };
-
-  const toggleActive = async (m: EcomMenu) => {
-    const next = !(m.active ?? true);
-    setMenus((prev) => prev.map((x) => (x.id === m.id ? { ...x, active: next } : x)));
-    try {
-      await menusApi.setActive(m.id, next);
-      toast.success(next ? 'Menu enabled' : 'Menu hidden');
-    } catch (e: any) {
-      setMenus((prev) => prev.map((x) => (x.id === m.id ? { ...x, active: !next } : x)));
-      toast.error(e?.message || 'Could not update menu');
-    }
-  };
-
-  // Publish (push) a menu to Shopify. DARK by default -> a SIMULATED dry-run; the
-  // returned mode (SIMULATED vs LIVE) is surfaced in the toast so a dry-run is
-  // never mistaken for a live write. We block a publish while the tree has
-  // unsaved edits (you'd push the last-saved tree, not what's on screen). On a
-  // LIVE push refresh the menu + banner so the Synced chip + counts update.
-  const publishMenu = async (m: EcomMenu) => {
-    if (m.id === selectedId && dirty) {
-      toast.warning('Save your menu changes before publishing.');
-      return;
-    }
-    setPublishing(true);
-    try {
-      const result = await pushApi.pushMenu(m.id);
-      if (result.ok) {
-        toast.success(formatPushResult(`Menu "${m.title || m.handle}"`, result));
-      } else {
-        toast.warning(formatPushResult(`Menu "${m.title || m.handle}"`, result));
-      }
-      if (result.ok && result.mode === 'LIVE') {
-        await loadMenus();
-        if (m.id === selectedId) await loadTree(m.id);
-        bannerRef.current?.refresh();
-      }
-    } catch (e: any) {
-      toast.error(getErrorMessage(e, 'Could not publish menu'));
-    } finally {
-      setPublishing(false);
-    }
-  };
-
-  const deleteMenu = async (m: EcomMenu) => {
-    if (!window.confirm(`Delete menu "${m.title}" and all its items? This cannot be undone.`))
-      return;
-    try {
-      await menusApi.remove(m.id);
-      toast.success('Menu deleted');
-      if (selectedId === m.id) setSelectedId(null);
-      await loadMenus();
-    } catch (e: any) {
-      toast.error(e?.message || 'Could not delete menu');
-    }
-  };
-
-  // ---- Tree (item) ops — operate on the LOCAL tree, mark dirty -------------
-
-  const blankItem = (): MenuItem => ({
-    id: tmpId(),
-    title: 'New item',
-    item_type: 'HTTP',
-    url: '',
-    children: [],
-  });
-
-  const addTopLevel = () => {
-    const node = blankItem();
-    setTree((t) => resequence([...t, node]));
-    setDirty(true);
-    openEditor(node.id);
-  };
-
-  const addChild = (parentId: string) => {
-    const node = blankItem();
-    setTree((t) => resequence(insertChild(t, parentId, node)));
-    // ensure parent is expanded so the new child is visible
-    setCollapsed((c) => {
-      const next = new Set(c);
-      next.delete(parentId);
-      return next;
-    });
-    setDirty(true);
-    openEditor(node.id);
-  };
-
-  const addSibling = (afterId: string) => {
-    const node = blankItem();
-    setTree((t) => resequence(insertAfter(t, afterId, node)));
-    setDirty(true);
-    openEditor(node.id);
-  };
-
-  const deleteItem = (id: string) => {
-    const node = findNode(tree, id);
-    const childCount = countNodes(node?.children);
-    const msg = childCount
-      ? `Delete "${node?.title || 'item'}" and its ${childCount} sub-item${childCount === 1 ? '' : 's'}?`
-      : `Delete "${node?.title || 'item'}"?`;
-    if (!window.confirm(msg)) return;
-    setTree((t) => resequence(removeNode(t, id)));
-    setDirty(true);
-    if (editorItemId === id) closeEditor();
-  };
-
-  const move = (id: string, dir: -1 | 1) => {
-    setTree((t) => resequence(moveSibling(t, id, dir)));
+  const sections = useMemo(() => draft?.sections ?? [], [draft]);
+  const setSections = (next: MenuSection[]) => {
+    setDraft({ sections: next });
     setDirty(true);
   };
 
-  const patchItem = (id: string, patch: Partial<MenuItem>) => {
-    setTree((t) => updateNode(t, id, (n) => ({ ...n, ...patch })));
-    setDirty(true);
-  };
-
-  const toggleCollapse = (id: string) =>
-    setCollapsed((c) => {
-      const next = new Set(c);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-
-  const openEditor = (id: string) => {
-    setEditorItemId(id);
-    setEditorOpen(true);
-  };
-  const closeEditor = () => {
-    setEditorOpen(false);
-    setEditorItemId(null);
-  };
-
-  // ---- Save the whole tree -------------------------------------------------
-
-  const saveTree = async () => {
-    if (!selectedId) return;
+  const saveTemplate = async () => {
+    if (!menu || !draft) return;
     setSaving(true);
     try {
-      // Strip temp ids so the backend mints stable ones; keep real ids.
-      const clean = (nodes: MenuItem[]): MenuItem[] =>
-        resequence(nodes).map((n) => ({
-          ...n,
-          id: n.id.startsWith('tmp_') ? '' : n.id,
-          children: n.children && n.children.length ? clean(n.children) : [],
-        }));
-      const saved = await menusApi.saveTree(selectedId, clean(tree));
-      toast.success('Menu saved');
-      setMenuMeta(saved);
-      setTree(normaliseTree(saved.items ?? tree));
+      await generatedMenusApi.saveTemplate(menu.menu_id, draft);
+      toast.success('Template saved - the preview below is rebuilt from it.');
+      dirtyRef.current = false;
       setDirty(false);
-      // refresh the list (item counts may have changed)
-      loadMenus();
+      await load();
     } catch (e: any) {
-      toast.error(
-        e?.message || 'Could not save the menu — is the Online Store backend deployed?',
-      );
+      toast.error(getErrorMessage(e, 'Could not save the template'));
     } finally {
       setSaving(false);
     }
   };
 
-  const editorItem = editorItemId ? findNode(tree, editorItemId) : null;
-  const totalItems = useMemo(() => countNodes(tree), [tree]);
+  const pushNow = async () => {
+    if (!menu) return;
+    if (dirty && !window.confirm('The template has unsaved changes. Push the SAVED template anyway?')) return;
+    const was = menu.pushed_collection_nodes;
+    if (
+      !window.confirm(
+        `This overwrites the LIVE website menu: ${collectionLinks(menu.preview?.items)} collection links ` +
+          (typeof was === 'number' ? `(was ${was} at the last push).` : '(IMS has not pushed this menu before).'),
+      )
+    )
+      return;
+    setPushing(true);
+    try {
+      const r = await pushApi.pushMenu(menu.menu_id);
+      const msg = formatPushResult(`Menu ${menu.handle}`, r);
+      if (r.ok) toast.success(msg);
+      else toast.error(msg);
+      bannerRef.current?.refresh?.();
+      await load();
+    } catch (e: any) {
+      toast.error(getErrorMessage(e, 'Push failed'));
+    } finally {
+      setPushing(false);
+    }
+  };
+
+  const toggleOther = async (id: string) => {
+    if (openOther === id) {
+      setOpenOther(null);
+      setOtherTree(null);
+      return;
+    }
+    setOpenOther(id);
+    setOtherTree(null);
+    setOtherState('loading');
+    let tree: EcomMenu | null = null;
+    try {
+      tree = await menusApi.get(id);
+    } catch {
+      tree = null;
+    }
+    setOtherTree(tree);
+    setOtherState(tree ? 'ready' : 'failed');
+  };
+
+  const preview = menu?.preview ?? null;
+  const lp = menu?.last_push ?? null;
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -531,756 +559,206 @@ export default function MenusPage() {
               <ArrowLeft className="w-3.5 h-3.5" /> Online Store
             </Link>
             <span>/</span>
-            <span className="text-gray-700">Mega-menu</span>
+            <span className="text-gray-700">Menus</span>
           </div>
           <h1 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
-            <MenuIcon className="w-5 h-5" /> Mega-menu editor
+            <MenuIcon className="w-5 h-5" /> Website menu
           </h1>
         </div>
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={loadMenus}
-            className="btn-outline inline-flex items-center gap-1.5 text-sm"
-            title="Reload menus"
-          >
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" onClick={load} className="btn-outline inline-flex items-center gap-1.5 text-sm"
+            title="Reload">
             <RefreshCw className="w-4 h-4" /> Refresh
           </button>
-          <button
-            type="button"
-            onClick={saveTree}
-            disabled={!selectedId || saving || !dirty}
-            className="btn-primary inline-flex items-center gap-1.5 text-sm"
-            title={dirty ? 'Save changes to this menu' : 'No unsaved changes'}
-          >
-            {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
-            Save changes
-          </button>
+          {canEdit && menu && (
+            <button type="button" onClick={saveTemplate} disabled={saving || !dirty}
+              className="btn-outline inline-flex items-center gap-1.5 text-sm"
+              title={dirty ? 'Save the template' : 'No unsaved changes'}>
+              {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+              Save template
+            </button>
+          )}
+          {canPublish && menu && (
+            <button type="button" onClick={pushNow} disabled={pushing}
+              className="btn-primary inline-flex items-center gap-1.5 text-sm"
+              title="Rebuild the menu from the collections with products now and push it">
+              {pushing ? <Loader2 className="w-4 h-4 animate-spin" /> : <UploadCloud className="w-4 h-4" />}
+              Regenerate &amp; push now
+            </button>
+          )}
         </div>
       </div>
-      <p className="text-sm text-gray-500 mb-4 max-w-3xl">
-        Build the storefront navigation tree — nested items with thumbnails, badges and pin-to-top.
-        Edits are saved inside IMS. Pushing the menu live to the storefront is a later, owner-approved
-        step, so nothing here changes the live site yet.
+      <p className="text-sm text-gray-500 mb-4 max-w-3xl" data-testid="self-maintaining-note">
+        This menu builds itself from the collections that have products on the website. It updates itself after
+        every sync (01:00 and 09:00 IST, and every Sync now) and is pushed only when it changed. A collection with
+        no products is left out and comes back by itself when it gets one - nobody edits the items by hand.
       </p>
 
-      {/* Shopify publish (DARK / LIVE) banner */}
       <OnlineStoreSyncBanner ref={bannerRef} className="mb-4" />
 
-      <div className="grid gap-4 lg:grid-cols-[280px_1fr]">
-        {/* ---- Menus list (left) ---- */}
-        <aside className="rounded-xl border border-gray-200 bg-white overflow-hidden h-fit">
-          <div className="px-3 py-2 border-b border-gray-200 bg-gray-50 flex items-center justify-between">
-            <span className="text-xs font-medium text-gray-600">Menus</span>
-            <button
-              type="button"
-              onClick={() => setCreatingMenu((v) => !v)}
-              className="p-1 rounded hover:bg-gray-200 text-gray-500"
-              title="New menu"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
-          </div>
-
-          {creatingMenu && (
-            <div className="p-3 border-b border-gray-100 space-y-2 bg-gray-50/50">
-              <input
-                type="text"
-                value={newMenuTitle}
-                onChange={(e) => {
-                  setNewMenuTitle(e.target.value);
-                  setNewMenuHandle((h) => (h ? h : slugify(e.target.value)));
-                }}
-                placeholder="Menu title (e.g. Main menu)"
-                className="input-field w-full text-sm"
-              />
-              <input
-                type="text"
-                value={newMenuHandle}
-                onChange={(e) => setNewMenuHandle(slugify(e.target.value))}
-                placeholder="handle (e.g. main-menu)"
-                className="input-field w-full text-xs font-mono"
-              />
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={createMenu}
-                  disabled={creatingMenu && !newMenuTitle.trim()}
-                  className="btn-primary text-xs inline-flex items-center gap-1 flex-1 justify-center"
-                >
-                  <Plus className="w-3.5 h-3.5" /> Create
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCreatingMenu(false);
-                    setNewMenuTitle('');
-                    setNewMenuHandle('');
-                  }}
-                  className="btn-outline text-xs"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-
-          {loadingMenus ? (
-            <div className="flex items-center gap-2 text-sm text-gray-500 p-4">
-              <Loader2 className="w-4 h-4 animate-spin" /> Loading menus…
-            </div>
-          ) : menus.length === 0 ? (
-            <div className="p-4 text-center">
-              <MenuIcon className="w-7 h-7 text-gray-300 mx-auto mb-2" />
-              <p className="text-xs font-medium text-gray-700">No menus yet.</p>
-              <p className="text-[11px] text-gray-500 mt-1">
-                Create one with the + above. If you expected existing menus, the Online Store backend
-                may not be deployed yet — this screen is fail-soft and fills in once it is.
-              </p>
-            </div>
-          ) : (
-            <ul className="divide-y divide-gray-100">
-              {menus.map((m) => {
-                const active = m.active ?? true;
-                const isSel = m.id === selectedId;
-                const count =
-                  isSel ? totalItems : typeof m.items_count === 'number' ? m.items_count : countNodes(m.items);
-                return (
-                  <li
-                    key={m.id}
-                    className={
-                      'px-3 py-2.5 cursor-pointer ' +
-                      (isSel ? 'bg-bv-red-50/60 border-l-2 border-bv-red-500' : 'hover:bg-gray-50 border-l-2 border-transparent')
-                    }
-                    onClick={() => selectMenu(m.id)}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="text-sm font-medium text-gray-900 truncate flex items-center gap-1.5">
-                          {m.title || '(untitled)'}
-                          {m.is_default ? (
-                            <span className="inline-flex items-center rounded bg-gray-100 text-gray-500 border border-gray-200 px-1 py-0 text-[10px]">
-                              default
-                            </span>
-                          ) : null}
-                        </div>
-                        <div className="text-[11px] text-gray-400 font-mono truncate">/{m.handle}</div>
-                      </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          type="button"
-                          role="switch"
-                          aria-checked={active ? "true" : "false"}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            toggleActive(m);
-                          }}
-                          className={
-                            'relative inline-flex h-4 w-7 items-center rounded-full transition-colors ' +
-                            (active ? 'bg-green-500' : 'bg-gray-300')
-                          }
-                          title={active ? 'Enabled — click to hide' : 'Hidden — click to enable'}
-                        >
-                          <span
-                            className={
-                              'inline-block h-3 w-3 transform rounded-full bg-white transition-transform ' +
-                              (active ? 'translate-x-3.5' : 'translate-x-0.5')
-                            }
-                          />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            deleteMenu(m);
-                          }}
-                          className="p-1 rounded hover:bg-red-50 text-gray-300 hover:text-red-600"
-                          title="Delete menu"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                    <div className="text-[11px] text-gray-400 mt-0.5">
-                      {count} item{count === 1 ? '' : 's'}
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </aside>
-
-        {/* ---- Tree editor (right) ---- */}
-        <section className="rounded-xl border border-gray-200 bg-white overflow-hidden min-h-[320px] flex flex-col">
-          {!selectedId ? (
-            <div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
-              <MenuIcon className="w-8 h-8 text-gray-300 mb-2" />
-              <p className="text-sm font-medium text-gray-700">Select a menu to edit its tree.</p>
-              <p className="text-xs text-gray-500 mt-1 max-w-sm">
-                Pick a menu on the left, or create one. Then add nested items, set badges and
-                thumbnails, and pin top categories.
-              </p>
-            </div>
-          ) : (
-            <>
-              {/* tree toolbar */}
-              <div className="px-4 py-2.5 border-b border-gray-200 bg-gray-50 flex flex-wrap items-center justify-between gap-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <span className="text-sm font-semibold text-gray-900 truncate">
-                    {menuMeta?.title || 'Menu'}
-                  </span>
-                  <span className="text-xs text-gray-400 font-mono truncate">/{menuMeta?.handle}</span>
-                  {dirty && (
-                    <span className="inline-flex items-center rounded-full bg-amber-100 text-amber-800 border border-amber-200 px-2 py-0.5 text-[11px] font-medium">
-                      Unsaved
-                    </span>
-                  )}
-                  <SyncChip
-                    synced={!!menuMeta?.shopify_menu_id}
-                    pending={!!menuMeta?.locally_modified}
-                  />
-                </div>
-                <div className="flex items-center gap-2">
-                  {canPublish && menuMeta && (
-                    <button
-                      type="button"
-                      onClick={() => publishMenu(menuMeta)}
-                      disabled={publishing || dirty}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                      title={
-                        dirty
-                          ? 'Save changes before publishing'
-                          : 'Push this menu to Shopify (dry-run unless live writes are armed)'
-                      }
-                    >
-                      {publishing ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <UploadCloud className="w-3.5 h-3.5" />
-                      )}
-                      Publish
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={addTopLevel}
-                    className="btn-outline inline-flex items-center gap-1.5 text-xs"
-                    title="Add a top-level menu item"
-                  >
-                    <Plus className="w-3.5 h-3.5" /> Add item
-                  </button>
-                </div>
-              </div>
-
-              {/* tree body */}
-              <div className="flex-1 overflow-y-auto p-3">
-                {loadingTree ? (
-                  <div className="flex items-center gap-2 text-sm text-gray-500 p-4">
-                    <Loader2 className="w-4 h-4 animate-spin" /> Loading menu…
-                  </div>
-                ) : tree.length === 0 ? (
-                  <div className="p-6 text-center">
-                    <CornerDownRight className="w-7 h-7 text-gray-300 mx-auto mb-2" />
-                    <p className="text-sm font-medium text-gray-700">This menu has no items yet.</p>
-                    <button
-                      type="button"
-                      onClick={addTopLevel}
-                      className="btn-primary inline-flex items-center gap-1.5 text-sm mt-3"
-                    >
-                      <Plus className="w-4 h-4" /> Add first item
-                    </button>
-                  </div>
-                ) : (
-                  <ul className="space-y-1">
-                    {tree.map((node, idx) => (
-                      <TreeRow
-                        key={node.id}
-                        node={node}
-                        depth={0}
-                        index={idx}
-                        siblingCount={tree.length}
-                        collapsed={collapsed}
-                        selectedItemId={editorItemId}
-                        onToggleCollapse={toggleCollapse}
-                        onEdit={openEditor}
-                        onAddChild={addChild}
-                        onAddSibling={addSibling}
-                        onDelete={deleteItem}
-                        onMove={move}
-                      />
-                    ))}
-                  </ul>
-                )}
-              </div>
-            </>
-          )}
-        </section>
-      </div>
-
-      <p className="mt-4 text-xs text-gray-400">
-        Online Store · Mega-menu · Phase 3 (stored in IMS; storefront push is a later phase).
-      </p>
-
-      {/* Item editor drawer */}
-      {editorOpen && editorItem && (
-        <ItemEditorDrawer
-          key={editorItem.id}
-          item={editorItem}
-          onClose={closeEditor}
-          onChange={(patch) => patchItem(editorItem.id, patch)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ===========================================================================
-// One tree row (recursive). Renders indent, expand/collapse, the item summary,
-// and per-node action buttons. Children render recursively below.
-// ===========================================================================
-function TreeRow({
-  node,
-  depth,
-  index,
-  siblingCount,
-  collapsed,
-  selectedItemId,
-  onToggleCollapse,
-  onEdit,
-  onAddChild,
-  onAddSibling,
-  onDelete,
-  onMove,
-}: {
-  node: MenuItem;
-  depth: number;
-  index: number;
-  siblingCount: number;
-  collapsed: Set<string>;
-  selectedItemId: string | null;
-  onToggleCollapse: (id: string) => void;
-  onEdit: (id: string) => void;
-  onAddChild: (parentId: string) => void;
-  onAddSibling: (afterId: string) => void;
-  onDelete: (id: string) => void;
-  onMove: (id: string, dir: -1 | 1) => void;
-}) {
-  const hasChildren = !!(node.children && node.children.length);
-  const isCollapsed = collapsed.has(node.id);
-  const isSelected = selectedItemId === node.id;
-  const typeLabel = ITEM_TYPES.find((t) => t.value === node.item_type)?.label || node.item_type;
-
-  return (
-    <li>
-      <div
-        className={
-          'group flex items-center gap-1.5 rounded-lg border px-2 py-1.5 ' +
-          (isSelected ? 'border-bv-red-300 bg-bv-red-50/50' : 'border-gray-200 bg-white hover:bg-gray-50')
-        }
-        style={{ marginLeft: depth * 20 }}
-      >
-        {/* expand/collapse */}
-        {hasChildren ? (
-          <button
-            type="button"
-            onClick={() => onToggleCollapse(node.id)}
-            className="p-0.5 rounded hover:bg-gray-200 text-gray-500 shrink-0"
-            title={isCollapsed ? 'Expand' : 'Collapse'}
-          >
-            {isCollapsed ? <ChevronRight className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
-          </button>
-        ) : (
-          <span className="w-5 shrink-0" />
-        )}
-
-        {/* icon thumbnail (mega-menu) */}
-        {node.icon_url ? (
-
-          <img
-            src={node.icon_url}
-            alt=""
-            className="w-6 h-6 rounded object-cover border border-gray-200 shrink-0"
-            onError={(e) => {
-              (e.currentTarget as HTMLImageElement).style.display = 'none';
-            }}
-          />
-        ) : null}
-
-        {/* title + meta */}
-        <button
-          type="button"
-          onClick={() => onEdit(node.id)}
-          className="flex-1 min-w-0 text-left"
-          title="Edit this item"
-        >
-          <span className="text-sm font-medium text-gray-900 truncate inline-flex items-center gap-1.5">
-            {node.title || '(untitled)'}
-            {node.pinned_to_top ? (
-              <Pin className="w-3 h-3 text-bv-red-500" />
-            ) : null}
-            {node.badge_text ? (
-              <span
-                className="inline-flex items-center rounded-full px-1.5 py-0 text-[10px] font-semibold text-white"
-                style={{ backgroundColor: node.badge_color || '#475569' }}
-              >
-                {node.badge_text}
-              </span>
-            ) : null}
-          </span>
-          <span className="block text-[11px] text-gray-400 truncate">
-            {typeLabel}
-            {node.resource_id ? ` · ${node.resource_id}` : node.url ? ` · ${node.url}` : ''}
-            {node.tags_filter ? ` · tags: ${node.tags_filter}` : ''}
-          </span>
-        </button>
-
-        {/* actions */}
-        <div className="flex items-center gap-0.5 shrink-0 opacity-70 group-hover:opacity-100">
-          <button
-            type="button"
-            onClick={() => onMove(node.id, -1)}
-            disabled={index === 0}
-            className="p-1 rounded hover:bg-gray-100 text-gray-400 disabled:opacity-30"
-            title="Move up"
-          >
-            <ArrowUp className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => onMove(node.id, 1)}
-            disabled={index === siblingCount - 1}
-            className="p-1 rounded hover:bg-gray-100 text-gray-400 disabled:opacity-30"
-            title="Move down"
-          >
-            <ArrowDown className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => onAddChild(node.id)}
-            className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-bv-red-600"
-            title="Add a sub-item under this"
-          >
-            <CornerDownRight className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => onAddSibling(node.id)}
-            className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-bv-red-600"
-            title="Add an item after this (same level)"
-          >
-            <Plus className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => onEdit(node.id)}
-            className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-700"
-            title="Edit"
-          >
-            <Pencil className="w-3.5 h-3.5" />
-          </button>
-          <button
-            type="button"
-            onClick={() => onDelete(node.id)}
-            className="p-1 rounded hover:bg-red-50 text-gray-400 hover:text-red-600"
-            title="Delete"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+      {loading ? (
+        <div className="flex items-center gap-2 text-sm text-gray-500 p-4">
+          <Loader2 className="w-4 h-4 animate-spin" /> Loading the menu...
         </div>
-      </div>
-
-      {/* children */}
-      {hasChildren && !isCollapsed && (
-        <ul className="mt-1 space-y-1">
-          {node.children!.map((child, i) => (
-            <TreeRow
-              key={child.id}
-              node={child}
-              depth={depth + 1}
-              index={i}
-              siblingCount={node.children!.length}
-              collapsed={collapsed}
-              selectedItemId={selectedItemId}
-              onToggleCollapse={onToggleCollapse}
-              onEdit={onEdit}
-              onAddChild={onAddChild}
-              onAddSibling={onAddSibling}
-              onDelete={onDelete}
-              onMove={onMove}
-            />
-          ))}
-        </ul>
-      )}
-    </li>
-  );
-}
-
-// ===========================================================================
-// Item editor drawer (slide-over). Edits the selected item's fields, incl. the
-// mega-menu presentation fields. Changes flow up via onChange and are applied
-// to the local tree immediately (the drawer is a controlled view of the node).
-// ===========================================================================
-function ItemEditorDrawer({
-  item,
-  onClose,
-  onChange,
-}: {
-  item: MenuItem;
-  onClose: () => void;
-  onChange: (patch: Partial<MenuItem>) => void;
-}) {
-  const isResource = RESOURCE_TYPES.has(item.item_type);
-
-  return (
-    <div className="fixed inset-0 z-50 flex justify-end">
-      {/* backdrop */}
-      <div className="absolute inset-0 bg-black bg-opacity-40" onClick={onClose} aria-hidden="true" />
-      {/* panel */}
-      <div className="relative h-full w-full max-w-md bg-white shadow-xl flex flex-col">
-        {/* header */}
-        <div className="sticky top-0 z-10 flex items-center justify-between p-4 border-b border-gray-200 bg-white">
-          <div className="flex items-center gap-2 min-w-0">
-            <Pencil className="w-5 h-5 text-bv-red-600 shrink-0" />
-            <div className="min-w-0">
-              <h2 className="text-base font-semibold text-gray-900 truncate">Edit menu item</h2>
-              <p className="text-xs text-gray-500 truncate">{item.title || '(untitled)'}</p>
-            </div>
-          </div>
-          <button type="button" onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg" title="Close" aria-label="Close">
-            <X className="w-5 h-5 text-gray-500" />
-          </button>
+      ) : generated === null ? (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          The menu could not be read from the server. Refresh to try again.
         </div>
-
-        {/* body */}
-        <div className="flex-1 overflow-y-auto p-4 space-y-5">
-          {/* Basics */}
-          <div className="space-y-4">
+      ) : !menu ? (
+        <div className="rounded-xl border border-gray-200 bg-white p-6 text-center" data-testid="no-generated-menu">
+          <MenuIcon className="w-7 h-7 text-gray-300 mx-auto mb-2" />
+          <p className="text-sm font-medium text-gray-700">The self-maintaining menu is not set up yet.</p>
+          <p className="text-xs text-gray-500 mt-1">
+            It is created once by the IMS team (the approved Sunglasses / Shop by Brand / About Us design); the
+            website keeps its hand-made menu until then.
+          </p>
+        </div>
+      ) : (
+        <>
+          {/* Status */}
+          <div className="rounded-xl border border-gray-200 bg-white p-4 mb-4 grid grid-cols-1 gap-3 sm:grid-cols-4 text-xs"
+            data-testid="menu-status">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Title *</label>
-              <input
-                type="text"
-                value={item.title}
-                onChange={(e) => onChange({ title: e.target.value })}
-                placeholder="e.g. Sunglasses"
-                className="input-field w-full"
-              />
+              <div className="text-gray-500">Menu</div>
+              <div className="font-mono text-gray-900">{menu.handle}</div>
+              <div className="text-gray-500">{menu.title}</div>
             </div>
-
             <div>
-              <label htmlFor="item-type-select" className="block text-sm font-medium text-gray-700 mb-1">Links to</label>
-              <select
-                id="item-type-select"
-                value={item.item_type}
-                onChange={(e) => onChange({ item_type: e.target.value as MenuItemType })}
-                className="input-field w-full"
-                title="Link type select"
-              >
-                {ITEM_TYPES.map((t) => (
-                  <option key={t.value} value={t.value}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
+              <div className="text-gray-500">Last generated</div>
+              <div className="text-gray-900">{fmtIST(menu.last_generated_at)}</div>
             </div>
-
-            {isResource ? (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1 inline-flex items-center gap-1.5">
-                  <Link2 className="w-3.5 h-3.5" /> Resource ID
-                </label>
-                <input
-                  type="text"
-                  value={item.resource_id ?? ''}
-                  onChange={(e) => onChange({ resource_id: e.target.value })}
-                  placeholder="gid://shopify/Collection/123"
-                  className="input-field w-full font-mono text-xs"
-                />
-                <p className="text-xs text-gray-400 mt-1">
-                  The Shopify resource this item points at (collection, page, product …).
-                </p>
-              </div>
-            ) : (
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1 inline-flex items-center gap-1.5">
-                  <Link2 className="w-3.5 h-3.5" /> URL
-                </label>
-                <input
-                  type="text"
-                  value={item.url ?? ''}
-                  onChange={(e) => onChange({ url: e.target.value })}
-                  placeholder="https://… or /pages/about"
-                  className="input-field w-full"
-                />
-              </div>
-            )}
-
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1 inline-flex items-center gap-1.5">
-                <Tag className="w-3.5 h-3.5" /> Tags filter
-              </label>
-              <input
-                type="text"
-                value={item.tags_filter ?? ''}
-                onChange={(e) => onChange({ tags_filter: e.target.value })}
-                placeholder="comma,separated,tags"
-                className="input-field w-full"
-              />
-              <p className="text-xs text-gray-400 mt-1">
-                Optional — show only products matching these tags within the linked collection.
-              </p>
-            </div>
-          </div>
-
-          {/* Mega-menu presentation */}
-          <details className="rounded-lg border border-gray-200" open>
-            <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-gray-700 inline-flex items-center gap-1.5">
-              <ImageIcon className="w-4 h-4" /> Mega-menu look
-            </summary>
-            <div className="p-3 pt-0 space-y-4">
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Thumbnail (icon) URL</label>
-                <input
-                  type="text"
-                  value={item.icon_url ?? ''}
-                  onChange={(e) => onChange({ icon_url: e.target.value })}
-                  placeholder="https://… small image shown next to the item"
-                  className="input-field w-full text-xs"
-                />
-                {item.icon_url ? (
-                  <div className="mt-2">
-
-                    <img
-                      src={item.icon_url}
-                      alt="Thumbnail preview"
-                      className="h-12 w-12 object-cover rounded border border-gray-200"
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).style.display = 'none';
-                      }}
-                    />
-                  </div>
-                ) : null}
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">Banner URL</label>
-                <input
-                  type="text"
-                  value={item.banner_url ?? ''}
-                  onChange={(e) => onChange({ banner_url: e.target.value })}
-                  placeholder="https://… wide banner for the mega-menu card"
-                  className="input-field w-full text-xs"
-                />
-                {item.banner_url ? (
-                  <div className="mt-2">
-
-                    <img
-                      src={item.banner_url}
-                      alt="Banner preview"
-                      className="h-16 w-full object-cover rounded border border-gray-200"
-                      onError={(e) => {
-                        (e.currentTarget as HTMLImageElement).style.display = 'none';
-                      }}
-                    />
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Badge text</label>
-                  <input
-                    type="text"
-                    value={item.badge_text ?? ''}
-                    onChange={(e) => onChange({ badge_text: e.target.value })}
-                    maxLength={16}
-                    placeholder="NEW / SALE"
-                    className="input-field w-full text-xs"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-gray-600 mb-1">Badge color</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="color"
-                      value={item.badge_color || '#475569'}
-                      onChange={(e) => onChange({ badge_color: e.target.value })}
-                      className="h-9 w-10 rounded border border-gray-200 p-0.5 cursor-pointer"
-                      title="Pick a badge color"
-                    />
-                    <input
-                      type="text"
-                      value={item.badge_color ?? ''}
-                      onChange={(e) => onChange({ badge_color: e.target.value })}
-                      placeholder="#hex"
-                      className="input-field flex-1 text-xs font-mono"
-                    />
-                  </div>
-                </div>
-              </div>
-
-              {/* badge presets */}
-              <div className="flex flex-wrap gap-1.5">
-                {BADGE_PRESETS.map((p) => (
-                  <button
-                    key={p.color}
-                    type="button"
-                    onClick={() => onChange({ badge_color: p.color })}
-                    className="inline-flex items-center gap-1 rounded-full border border-gray-200 px-2 py-0.5 text-[11px] hover:bg-gray-50"
-                    title={`Use ${p.label}`}
-                  >
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: p.color }} />
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-
-              {/* badge preview */}
-              {item.badge_text ? (
-                <div className="text-xs text-gray-500 flex items-center gap-2">
-                  Preview:
-                  <span
-                    className="inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-semibold text-white"
-                    style={{ backgroundColor: item.badge_color || '#475569' }}
-                  >
-                    {item.badge_text}
-                  </span>
+              <div className="text-gray-500">Last pushed to the website</div>
+              <div className="text-gray-900">{fmtIST(menu.last_pushed_at)}</div>
+              {preview && !menu.pushed_live && lp?.mode !== 'LIVE' ? (
+                <div className="text-gray-600" data-testid="dry-run-note">dry-run mode - not sent to the website</div>
+              ) : preview && !menu.pushed_live ? (
+                <div className="text-amber-700">Waiting for the first push by a person (Regenerate &amp; push now)</div>
+              ) : preview ? (
+                <div className={preview.changed_since_push ? 'text-amber-700' : 'text-green-700'}>
+                  {preview.changed_since_push ? 'Changes waiting for the next push' : 'Website is up to date'}
                 </div>
               ) : null}
-
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={!!item.pinned_to_top}
-                  onChange={(e) => onChange({ pinned_to_top: e.target.checked })}
-                  className="w-4 h-4 rounded"
-                />
-                <span className="text-sm text-gray-700 inline-flex items-center gap-1.5">
-                  <Pin className="w-3.5 h-3.5" /> Pin to top
-                </span>
-              </label>
-              <p className="text-[11px] text-gray-400 -mt-2">
-                Pinned items show first (top categories up top, niche ones in the submenu).
-              </p>
             </div>
-          </details>
-
-          <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600 flex items-start gap-1.5">
-            <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-            <span>
-              Changes apply to the tree as you type. Use <strong>Save changes</strong> at the top to
-              store the whole menu in IMS. Nothing is pushed to the live storefront yet.
-            </span>
+            <div data-testid="last-push">
+              <div className="text-gray-500">Last push attempt</div>
+              {lp?.waiting ? (
+                <div className="text-amber-700">
+                  Not sent - {lp.reason}. The sync never overwrites the hand-made menu by itself the first time.
+                </div>
+              ) : lp ? (
+                <div className={lp.ok ? 'text-gray-900' : 'text-red-700'}>
+                  {lp.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)'} - {lp.ok ? 'ok' : 'FAILED'} - {fmtIST(lp.at)}
+                  {!lp.ok && (lp.error || lp.reason) ? <div>{lp.error || lp.reason}</div> : null}
+                  {!lp.ok ? <div className="text-gray-500">Retried at the next sync.</div> : null}
+                </div>
+              ) : (
+                <div className="text-gray-900">not pushed yet</div>
+              )}
+            </div>
           </div>
-        </div>
 
-        {/* footer */}
-        <div className="sticky bottom-0 flex items-center justify-end p-4 border-t border-gray-200 bg-gray-50">
-          <button type="button" onClick={onClose} className="btn-primary inline-flex items-center gap-2">
-            <Save className="w-4 h-4" /> Done
-          </button>
-        </div>
-      </div>
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {/* Template */}
+            <section className="rounded-xl border border-gray-200 bg-gray-50 p-3 space-y-2 h-fit min-w-0">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold text-gray-900">Template</h2>
+                {!canEdit && <span className="text-[11px] text-gray-500">read-only for your role</span>}
+              </div>
+              {sections.map((s, i) => (
+                <SectionCard
+                  key={i}
+                  section={s}
+                  index={i}
+                  total={sections.length}
+                  canEdit={canEdit}
+                  onChange={(next) => setSections(sections.map((x, k) => (k === i ? next : x)))}
+                  onMove={(dir) => setSections(move(sections, i, dir))}
+                  onRemove={() => setSections(sections.filter((_, k) => k !== i))}
+                />
+              ))}
+              {canEdit && (
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <span className="text-xs text-gray-500">Add a section:</span>
+                  {(Object.keys(KIND_LABELS) as MenuSection['kind'][]).map((k) => (
+                    <button key={k} type="button" className="btn-outline text-xs inline-flex items-center gap-1"
+                      onClick={() => setSections([...sections, newSection(k)])}>
+                      <Plus className="w-3 h-3" /> {KIND_LABELS[k]}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {/* Preview */}
+            <section className="space-y-4 min-w-0">
+              <div className="rounded-xl border border-gray-200 bg-white p-4" data-testid="menu-preview">
+                <h2 className="text-sm font-semibold text-gray-900 mb-1">Live preview</h2>
+                <p className="text-[11px] text-gray-500 mb-3 flex items-start gap-1">
+                  <Info className="w-3 h-3 mt-0.5 shrink-0" /> What the website menu is built as right now from the
+                  SAVED template, with the products each collection shows on the website.
+                </p>
+                {preview?.unreadable ? (
+                  <p className="text-xs text-amber-800" data-testid="preview-unreadable">{preview.unreadable}</p>
+                ) : preview && preview.items.length > 0 ? (
+                  <PreviewTree items={preview.items} />
+                ) : (
+                  <p className="text-xs text-gray-500">No collection has products on the website yet.</p>
+                )}
+              </div>
+              <div className="rounded-xl border border-gray-200 bg-white p-4" data-testid="hidden-list">
+                <h2 className="text-sm font-semibold text-gray-900 mb-1 flex items-center gap-1.5">
+                  <EyeOff className="w-4 h-4 text-gray-400" /> Hidden because empty ({preview?.hidden.length ?? 0})
+                </h2>
+                <p className="text-[11px] text-gray-500 mb-2">Each one appears by itself once it has products.</p>
+                {preview && preview.hidden.length > 0 ? (
+                  <ul className="space-y-0.5 text-xs">
+                    {preview.hidden.map((h, i) => (
+                      <li key={i} className="text-gray-700">
+                        <span className="text-gray-500">{h.section}:</span> {h.title}{' '}
+                        <span className="text-gray-400">- {h.reason}</span>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-xs text-gray-500">Nothing hidden.</p>
+                )}
+              </div>
+            </section>
+          </div>
+        </>
+      )}
+
+      {/* Other menus: read-only */}
+      {others.length > 0 && (
+        <section className="mt-6 rounded-xl border border-gray-200 bg-white overflow-hidden" data-testid="other-menus">
+          <div className="px-4 py-2 border-b border-gray-200 bg-gray-50">
+            <span className="text-xs font-medium text-gray-600">Other menus (read-only - IMS does not change them)</span>
+          </div>
+          <ul className="divide-y divide-gray-100">
+            {others.map((m) => (
+              <li key={m.id} className="px-4 py-2">
+                <button type="button" className="flex items-center gap-1.5 text-sm text-gray-800"
+                  onClick={() => toggleOther(m.id)}>
+                  {openOther === m.id ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+                  {m.title} <span className="font-mono text-xs text-gray-400">{m.handle}</span>
+                </button>
+                {openOther === m.id && (
+                  <div className="mt-2 pl-6">
+                    {otherState === 'ready' && otherTree ? (
+                      <ReadOnlyTree items={otherTree.items} />
+                    ) : otherState === 'failed' ? (
+                      <p className="text-xs text-red-700">Could not load this menu.</p>
+                    ) : (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    )}
+                  </div>
+                )}
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </div>
   );
 }

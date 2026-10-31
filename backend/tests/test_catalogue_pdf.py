@@ -135,23 +135,25 @@ def test_validity_days_clamped_to_max_7():
     assert _clamp_validity_days(None) == 7
 
 
-def test_product_union_scan_capped_without_starving_spine(monkeypatch):
-    """_product_union's scan must be bounded (it was fully unbounded) with a
-    PER-SOURCE budget: a catalog_products bigger than _SCAN_MAX must not stop
-    the `products` spine from contributing (spine carries the governed tags
-    the smart resolver matches on)."""
+def test_a_hand_picked_set_renders_exactly_as_picked():
+    """A temporary (Quick Share) CUSTOM set holding an in-store-only SKU and
+    a NON-LEAD colour SKU renders BOTH, in the picked order -- the website
+    membership rule is for SMART collections only (review round 2, BLOCK)."""
     from database.connection import MockDatabase
 
-    monkeypatch.setattr(pdf, "_SCAN_MAX", 5)
     db = MockDatabase()
-    for i in range(10):  # catalog alone exceeds the (patched) cap
-        db["catalog_products"].insert_one({"sku": f"CAT-{i}", "category": "FRAME"})
-    db["products"].insert_one({"sku": "SP-1", "product_id": "SP-1", "tags": ["a"]})
-    db["products"].insert_one({"sku": "SP-2", "product_id": "SP-2", "tags": ["b"]})
-
-    skus = {d["sku"] for d in pdf._product_union(db)}
-    assert "SP-1" in skus and "SP-2" in skus  # spine not starved
-    assert sum(1 for s in skus if s.startswith("CAT-")) == 5  # scan bounded
+    db["catalog_products"].insert_one({"id": "L1", "sku": "RB-LEAD", "brand": "Ray-Ban", "category": "SUNGLASS",
+                                       "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
+    db["catalog_products"].insert_one({"id": "C2", "sku": "RB-BLUE", "brand": "Ray-Ban", "category": "SUNGLASS",
+                                       "parent_sku": "RB-LEAD", "colour": "Blue"})
+    db["catalog_products"].insert_one({"id": "S3", "sku": "STORE-ONLY", "brand": "Idee", "category": "SUNGLASS"})
+    db["ecom_collections"].insert_one({
+        "collection_id": "tmp-1", "title": "For Mrs Rao", "handle": "tmp-1", "collection_type": "CUSTOM",
+        "is_temporary": True,
+        "products": [{"sku": "STORE-ONLY", "position": 0}, {"sku": "RB-BLUE", "position": 1}],
+    })
+    got = pdf.resolve_collection_products(db, "tmp-1")
+    assert [d["sku"] for d in got] == ["STORE-ONLY", "RB-BLUE"]
 
 
 # ===========================================================================

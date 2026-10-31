@@ -165,45 +165,20 @@ def _attr_present(doc: Dict[str, Any], attr: str) -> bool:
     return False
 
 
-def _skus_in_any_collection(db, limit: int = _SCAN_LIMIT) -> set:
-    # TODO(feat/self-maintaining-menus): collection membership is being rebuilt
-    # as ONE rule in that PR; this reader is left as it is until it lands.
-    """The set of SKUs that belong to at least one collection. Reads the
-    materialised `collection_products` membership view (keyed on sku), falling
-    back to the `ecom_collections` member arrays. Fail-soft -> empty set."""
-    out: set = set()
+def _skus_in_any_collection(db) -> set:
+    """The set of SKUs some live collection holds -- or WILL hold once the
+    product is on the website -- by THE website membership rule
+    (services/collection_membership) over every listing IMS holds
+    (catalogue_facts), so the eligible products orphan_skus scans, online
+    or not yet, are all judged by the same rule. A listing's own SKU and
+    every colour / size SKU it carries. A read failure RAISES (the
+    envelope's degraded flag), never an empty set that reads as "every
+    product is in no collection"."""
     if db is None:
-        return out
-    # Materialised membership view (unification step-13): one row per (handle, sku).
-    try:
-        cp = _coll(db, "collection_products")
-        if cp is not None:
-            for row in cp.find({}, {"_id": 0, "sku": 1}).limit(limit):
-                sku = row.get("sku")
-                if sku:
-                    out.add(str(sku))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[STORE_HEALTH] collection_products scan failed: %s", exc)
-    if out:
-        return out
-    # Fallback: embedded member arrays on ecom_collections.
-    try:
-        ec = _coll(db, "ecom_collections")
-        if ec is not None:
-            for col in ec.find(
-                {}, {"_id": 0, "product_skus": 1, "products": 1}
-            ).limit(limit):
-                for key in ("product_skus", "products"):
-                    members = col.get(key)
-                    if isinstance(members, (list, tuple)):
-                        for m in members:
-                            if isinstance(m, str):
-                                out.add(m)
-                            elif isinstance(m, dict) and m.get("sku"):
-                                out.add(str(m["sku"]))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[STORE_HEALTH] ecom_collections scan failed: %s", exc)
-    return out
+        return set()
+    from . import collection_membership
+
+    return collection_membership.skus_in_any_collection(db, collection_membership.catalogue_facts(db))
 
 
 # ===========================================================================
@@ -241,7 +216,7 @@ def orphan_skus(db, limit: int = 50) -> Dict[str, Any]:
     if not products:
         return base
 
-    in_collection = _skus_in_any_collection(db)
+    in_collection = _skus_in_any_collection(db)  # raises -> degraded
     mapped = skus_on_shopify(db, [p.get("sku") for p in products])  # raises -> degraded
     no_mapping = 0
     not_in_collection = 0
@@ -381,6 +356,17 @@ def barcode_match_rate(db) -> Dict[str, Any]:
     }
 
 
+def _unverifiable_blocks(db) -> List[Dict[str, Any]]:
+    """online_block.unverifiable_blocks, fail-soft -> []."""
+    try:
+        from .online_block import unverifiable_blocks
+
+        return unverifiable_blocks(db) if db is not None else []
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STORE_HEALTH] blocked collections unreadable: %s", exc)
+        return []
+
+
 def _parity(db) -> Dict[str, Any]:
     """Thin wrapper over the existing parity oracle so store-health surfaces the
     same IMS-vs-Shopify pushed/missing counts without re-deriving them. Fail-soft."""
@@ -475,8 +461,19 @@ def readiness_score(db) -> Dict[str, Any]:
         )
 
     fixes.sort(key=lambda f: f["count"], reverse=True)
+    # A contract brand ban IMS cannot enforce with certainty goes FIRST: a
+    # blocked collection whose rules IMS cannot read as the website does
+    # stalls the pushes of every product it may be about.
+    unverifiable = _unverifiable_blocks(db)
+    if unverifiable:
+        fixes.insert(0, {
+            "issue": "blocked collection with rules IMS cannot read (rewrite them): "
+            + ", ".join(str(b.get("handle") or b.get("collection_id")) for b in unverifiable),
+            "count": len(unverifiable), "check": "unverifiable_block",
+        })
 
     return {
+        "unverifiable_blocks": unverifiable,
         "readiness_pct": readiness_pct,
         "total_products": total,
         "orphans": orphans,

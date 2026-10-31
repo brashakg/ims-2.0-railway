@@ -8,10 +8,11 @@
 // units and sample products while you compose. Target: "Ray-Ban Black
 // Polarized Women" in ~30 seconds.
 //
-// Rule compilation contract (Track 2): each chip group = ONE rule; multiple
-// values on the same field -> {relation:'IN', value:[...]}; a single value ->
-// EQUALS; groups AND together (disjunctive:false). Price bounds compile to
-// GREATER_THAN / LESS_THAN on the ecom rule field 'price'.
+// Rule compilation contract (Track 2, collectionsShared.compileBuilderRules):
+// each chip group = ONE EQUALS rule; groups AND together (disjunctive:false).
+// Several values on the same field are REFUSED with a message -- the website
+// cannot read an "any of" rule, so such a collection would show 0 products.
+// Price bounds compile to GREATER_THAN / LESS_THAN on the ecom rule field 'price'.
 //
 // Save goes through the EXISTING admin CRUD (POST /online-store/collections)
 // as SMART + published:false ALWAYS — publishing online stays in the
@@ -39,7 +40,7 @@ import {
   type InsightRule,
   type CollectionPreview,
 } from '../../services/api/collectionsInsights';
-import { rupee, fmtInt } from './collectionsShared';
+import { rupee, fmtInt, compileBuilderRules } from './collectionsShared';
 import { getErrorMessage } from '../../utils/errorHandler';
 
 // Fields whose vocabulary is owned by a dedicated chip group (or that make no
@@ -229,30 +230,19 @@ export default function CollectionNewPage() {
     setTagInput('');
   };
 
-  // ---- Rule compilation (the Track 2 contract) ------------------------------
-  const rules = useMemo<InsightRule[]>(() => {
-    const out: InsightRule[] = [];
-    const one = (field: string, values: string[]) => {
-      if (values.length === 1) out.push({ field, relation: 'EQUALS', value: values[0] });
-      else if (values.length > 1) out.push({ field, relation: 'IN', value: [...values] });
-    };
-    if (category) out.push({ field: 'category', relation: 'EQUALS', value: category });
-    one('brand', selectedBrands);
-    for (const f of attrFields) {
-      const vals = attrSelections[f.name];
-      if (vals?.length) one(f.name, vals);
-    }
-    one('tag', tags);
-    const min = Number(priceMin);
-    const max = Number(priceMax);
-    if (priceMin.trim() !== '' && Number.isFinite(min)) {
-      out.push({ field: 'price', relation: 'GREATER_THAN', value: min });
-    }
-    if (priceMax.trim() !== '' && Number.isFinite(max)) {
-      out.push({ field: 'price', relation: 'LESS_THAN', value: max });
-    }
-    return out;
-  }, [category, selectedBrands, attrFields, attrSelections, tags, priceMin, priceMax]);
+  // ---- Rule compilation (the Track 2 contract, collectionsShared) -----------
+  const { rules, multi } = useMemo(
+    () =>
+      compileBuilderRules({
+        category,
+        brands: selectedBrands,
+        attrs: attrFields.map((f) => ({ name: f.name, label: f.label, values: attrSelections[f.name] || [] })),
+        tags,
+        priceMin,
+        priceMax,
+      }),
+    [category, selectedBrands, attrFields, attrSelections, tags, priceMin, priceMax],
+  );
 
   // ---- Auto-composed title ("Ray-Ban Black Polarized Women") ----------------
   const autoTitle = useMemo(() => {
@@ -296,6 +286,10 @@ export default function CollectionNewPage() {
     });
   }, [rulesKey]);
 
+  // Rules the website cannot read (the collection would show 0 products
+  // there): shown, and Create stays off until they change.
+  const notEvaluable = previewState === 'ready' ? preview?.not_evaluable ?? null : null;
+
   // ---- Save -------------------------------------------------------------------
   const onSave = useCallback(async () => {
     const t = title.trim();
@@ -305,6 +299,14 @@ export default function CollectionNewPage() {
     }
     if (rules.length === 0) {
       toast.error('Pick at least one chip — the collection needs a rule');
+      return;
+    }
+    if (multi.length > 0) {
+      toast.error(`Pick one value for: ${multi.join(', ')}`);
+      return;
+    }
+    if (notEvaluable) {
+      toast.error(`The website cannot read these rules: ${notEvaluable}`);
       return;
     }
     setSaving(true);
@@ -321,7 +323,7 @@ export default function CollectionNewPage() {
     } finally {
       setSaving(false);
     }
-  }, [title, rules, toast, navigate]);
+  }, [title, rules, multi, notEvaluable, toast, navigate]);
 
   const sample = (preview?.sample ?? []).slice(0, 12);
 
@@ -534,12 +536,24 @@ export default function CollectionNewPage() {
             <button
               type="button"
               onClick={onSave}
-              disabled={saving || rules.length === 0 || !title.trim()}
+              disabled={saving || rules.length === 0 || multi.length > 0 || !!notEvaluable || !title.trim()}
               className="btn-primary w-full inline-flex items-center justify-center gap-2 disabled:opacity-50"
             >
               {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
               Create collection
             </button>
+            {multi.length > 0 && (
+              <p className="text-xs text-amber-700 mt-2" data-testid="multi-value-warning">
+                One value per field: the website cannot read &quot;any of&quot; ({multi.join(', ')}). Make one
+                collection per value instead.
+              </p>
+            )}
+            {notEvaluable && (
+              <p className="text-xs text-amber-700 mt-2" data-testid="not-evaluable-warning">
+                The website cannot read these rules, so the collection would show no products there:{' '}
+                {notEvaluable}. Change the chips to ones the website can read.
+              </p>
+            )}
             <p className="text-[11px] text-gray-400 mt-2">
               Created as <span className="font-medium">Internal</span> (not published online).
               Rules: {rules.length} · all conditions must match.

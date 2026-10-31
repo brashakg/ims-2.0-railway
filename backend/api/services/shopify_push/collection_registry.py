@@ -118,33 +118,48 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     """What the product push sends for this listing: productType, tags, prices."""
     from ..ecom_category_map import ims_to_shopify_type
     from ..online_catalog import variant_rows_for_product
-    from ._shared import _product_brand
     from .listing import listing_view, model_listing
     from .product_input import _resolve_variant_pricing, ims_product_tags
 
     raw = variant_rows_for_product(db, doc) or []
-    rows = raw or [{}]
-    # The tags the push SENDS: a model's listing tags (every colour,
-    # shopify_tag_gen.listing_tags), so a count never differs from who is in.
-    tags = None
+    # The tags, prices and vendor the push SENDS: a model's listing view and
+    # its rows (product.push_product prices every listing row with
+    # _resolve_variant_pricing over listing_view), so a count never differs
+    # from who is in on the website.
+    view, lst = doc, None
     try:
         lst = model_listing(db, doc, raw)
         if lst is not None and not lst.get("variant_of") and not lst.get("refusal"):
-            tags = ims_product_tags(listing_view(doc, lst))
+            view = listing_view(doc, lst)
+        else:
+            lst = None
     except Exception as exc:  # noqa: BLE001 -- a count, never a write
         logger.warning("[COLLECTIONS] model of %s unreadable, counted by its own tags: %s", doc.get("sku"), exc)
-    if tags is None:
-        tags = ims_product_tags(doc)
-    # ponytail: the lead's price rule per variant row, not listing.model_listing's
-    # per-colour prices -- close enough to decide whether a price band is empty.
-    prices = [p for p in (_resolve_variant_pricing(doc, r)[0] for r in rows) if p]
+        lst = None
+    tags = ims_product_tags(view)
+    rows = (lst or {}).get("rows") or raw or [{}]
+    # (row sku, price) per listing row: a count that cuts the colours not on
+    # the website (collection_membership.online_facts) cuts their prices too.
+    priced = [(str(r.get("sku") or "") if isinstance(r, dict) else "", _resolve_variant_pricing(view, r)[0])
+              for r in rows]
+    priced = [(s, p) for s, p in priced if p]
+    prices = [p for _s, p in priced]
+    # Every SKU the listing carries, lead first then in listing order: "is
+    # SKU X in a collection" is answered by the listing it sells on.
+    skus = [str(doc["sku"])] if doc.get("sku") else []
+    for r in list((lst or {}).get("rows") or []) + list(raw):
+        if isinstance(r, dict) and r.get("sku") and str(r["sku"]) not in skus:
+            skus.append(str(r["sku"]))
     return {
         "id": doc.get("id"),
         "sku": doc.get("sku"),
         "type": ims_to_shopify_type(doc["category"]) if doc.get("category") else "",
         "tags": set(tags),
         "prices": prices,
-        "brand": str(_product_brand(doc) or "").strip(),
+        "priced": priced,
+        # product_input sends vendor = the listing view's own brand field.
+        "brand": str(view.get("brand") or "").strip(),
+        "skus": skus,
     }
 
 
@@ -186,22 +201,11 @@ def brand_names(db) -> Dict[str, str]:
 
 
 def _matches(fact: Dict[str, Any], rules: List[Dict[str, str]], disjunctive: bool = False) -> bool:
-    """Shopify's reading of a rule set (all-AND, or ANY when
-    ``disjunctive``), over what the push sends."""
-    if disjunctive:
-        return any(_matches(fact, [r]) for r in rules)
-    for r in rules:
-        field, rel, value = r["field"], r["relation"], r["value"]
-        if field == "tag":
-            ok = value.lower() in fact["tags"]
-        elif field == "product_type":
-            ok = fact["type"].lower() == value.lower()
-        else:  # variant_price: any variant
-            v = float(value)
-            ok = any(p > v if rel == "GREATER_THAN" else p < v for p in fact["prices"])
-        if not ok:
-            return False
-    return True
+    """Shopify's reading of a rule set over what the push sends -- THE one
+    membership rule (services/collection_membership.matches)."""
+    from ..collection_membership import matches
+
+    return matches(fact, rules, disjunctive)
 
 
 def _values(facts: Iterable[Dict[str, Any]], prefix: str) -> List[str]:
@@ -383,7 +387,8 @@ async def shop_collections(db) -> List[Dict[str, Any]]:
     while True:
         body = await _graphql(db, _COLLECTIONS_READ, {"after": after})
         page = ((body or {}).get("data") or {}).get("collections")
-        if page is None:
+        if page is None or (body or {}).get("errors"):
+            # A partial read (data AND errors) silently drops counts / rows.
             raise RuntimeError(f"collections read failed: {(body or {}).get('errors')}")
         for c in page.get("nodes") or []:
             out.append({
