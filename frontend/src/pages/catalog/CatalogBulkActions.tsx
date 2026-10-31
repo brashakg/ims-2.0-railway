@@ -1,7 +1,8 @@
 // ============================================================================
 // IMS 2.0 - Catalog page: the selection bar, Flag dialog, Delete (archive)
 // ============================================================================
-// Owner 2026-10-12, mockup artboards Main + FlagDialog. A LIGHT GREY bar
+// Owner 2026-10-12, mockup artboards Main + FlagDialog. Delete permanently
+// (owner 2026-10-24): an ARCHIVED product, SUPERADMIN only (PurgeDialog). A LIGHT GREY bar
 // (owner comment: grey, dark text; dark Flag button, red-outline Delete)
 // shows when products are ticked. Flags go to the server's one door
 // (POST /catalog/flags: one task per person who added the products);
@@ -17,6 +18,7 @@ import {
   type FlagTaskTarget,
 } from '../../services/api/catalog';
 import { FLAG_TYPES, type FlagType } from './catalogListState';
+import { PURGE_TIMEOUT_MESSAGE } from '../../services/api/client';
 
 function useEscape(onClose: () => void) {
   useEffect(() => {
@@ -334,18 +336,202 @@ export function ArchiveDialog({
   );
 }
 
+/** Delete ARCHIVED products permanently (SUPERADMIN only, owner 2026-10-24).
+ *  The server's dry run first: which SKUs would go, and which stay archived
+ *  and why (sales / stock / purchase history, a website listing, a model
+ *  they lead). Nothing is deleted until the button is pressed. */
+export const CHECK_TIMEOUT_MESSAGE = 'Checking took too long. Close and try again.';
+
+export function PurgeDialog({
+  ids,
+  onClose,
+  onDone,
+}: {
+  ids: string[];
+  onClose: () => void;
+  onDone: (message: string, ok: boolean) => void;
+}) {
+  const [preview, setPreview] = useState<BulkRowResult[] | null>(null);
+  const [results, setResults] = useState<BulkRowResult[] | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  // The request timed out while the server kept deleting: never offer the
+  // button again (a second press would start a second run).
+  const [stillRunning, setStillRunning] = useState(false);
+
+  const idsKey = ids.join(',');
+  useEffect(() => {
+    let alive = true;
+    catalogBulkApi
+      .purge(idsKey.split(','), false)
+      .then((r) => {
+        if (alive) setPreview(r.results);
+      })
+      .catch((e: unknown) => {
+        if (!alive) return;
+        const message = e instanceof Error ? e.message : 'Could not check the products.';
+        // A slow CHECK is not a delete still running: nothing was changed.
+        setError(message === PURGE_TIMEOUT_MESSAGE ? CHECK_TIMEOUT_MESSAGE : message);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [idsKey]);
+
+  const label = (r: BulkRowResult) => r.sku || r.name || r.product_id;
+  const ready = (preview || []).filter((r) => r.status === 'ready');
+  const refused = (preview || []).filter((r) => r.status === 'refused');
+  const onWebsite = ready.filter((r) => r.website);
+  const done = (results || []).filter((r) => r.status === 'done');
+  const kept = (results || []).filter((r) => r.status !== 'done');
+
+  const apply = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await catalogBulkApi.purge(
+        ready.map((r) => r.product_id),
+        true
+      );
+      setResults(res.results);
+    } catch (e: unknown) {
+      const message = e instanceof Error ? e.message : 'Could not delete the products.';
+      setError(message);
+      if (message === PURGE_TIMEOUT_MESSAGE) setStillRunning(true);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Closing after an apply (or a timed-out one) reloads the list. While the
+  // delete runs nothing closes the dialog (Escape, the backdrop, Cancel):
+  // its results and the list reload must not be lost.
+  const close = () => {
+    if (busy) return;
+    if (results) {
+      onDone(
+        `${plural(done.length, 'item')} deleted permanently` +
+          (kept.length ? ` - ${plural(kept.length, 'item')} not deleted (see the list)` : ''),
+        kept.length === 0
+      );
+    } else if (stillRunning) {
+      onDone(PURGE_TIMEOUT_MESSAGE, false);
+    } else {
+      onClose();
+    }
+  };
+
+  return (
+    <Dialog
+      title={results ? 'Permanent delete: results' : `Delete ${plural(ids.length, 'item')} permanently?`}
+      onClose={close}
+    >
+      {!preview && !error && (
+        <p className="flex items-center gap-2 text-sm text-gray-600">
+          <Loader2 className="h-4 w-4 animate-spin" /> Checking sales, stock and purchase history...
+        </p>
+      )}
+      {results ? (
+        <div className="space-y-2 text-sm text-gray-700" data-testid="purge-results">
+          {done.length > 0 && (
+            <p className="rounded-lg bg-green-50 px-3 py-2 text-green-900">
+              Deleted permanently:{' '}
+              <span className="font-mono font-semibold">{done.map(label).join(', ')}</span>.
+            </p>
+          )}
+          {kept.length > 0 && (
+            <div className="rounded-lg bg-amber-50 px-3 py-2 text-amber-900">
+              <p className="font-semibold">Not deleted:</p>
+              <ul className="mt-1 list-disc space-y-1 pl-5">
+                {kept.map((r) => (
+                  <li key={r.product_id}>
+                    <span className="font-mono">{label(r)}</span> - {r.reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      ) : (
+        preview && (
+          <div className="space-y-2 text-sm text-gray-700">
+            {ready.length > 0 ? (
+              <>
+                <p className="rounded-lg bg-red-50 px-3 py-2 text-red-900">
+                  This cannot be undone from the screen. These go for good:{' '}
+                  <span className="font-mono font-semibold">{ready.map(label).join(', ')}</span>.
+                </p>
+                {onWebsite.length > 0 && (
+                  <p className="rounded-lg bg-red-50 px-3 py-2 text-red-900" data-testid="purge-website">
+                    These will also be REMOVED FROM THE WEBSITE:{' '}
+                    <span className="font-mono font-semibold">{onWebsite.map(label).join(', ')}</span>.
+                  </p>
+                )}
+                <p>Their names, sizes and colours become free to add again.</p>
+              </>
+            ) : (
+              <p>None of them can be deleted permanently.</p>
+            )}
+            {refused.length > 0 && (
+              <div className="rounded-lg bg-gray-50 px-3 py-2" data-testid="purge-refused">
+                <p className="font-semibold text-gray-900">Staying archived:</p>
+                <ul className="mt-1 list-disc space-y-1 pl-5">
+                  {refused.map((r) => (
+                    <li key={r.product_id}>
+                      <span className="font-mono">{label(r)}</span> - {r.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )
+      )}
+      {error && (
+        <p className="text-sm text-red-700" role="alert">
+          {error}
+        </p>
+      )}
+      <div className="flex justify-end gap-2">
+        {results || stillRunning ? (
+          <button type="button" onClick={close} className="btn-secondary">
+            Close
+          </button>
+        ) : (
+          <>
+            <button type="button" onClick={close} className="btn-secondary" disabled={busy}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => void apply()}
+              disabled={busy || !preview || ready.length === 0}
+              className="inline-flex h-10 items-center gap-1.5 rounded-lg bg-red-700 px-4 text-sm font-semibold text-white hover:bg-red-800 disabled:opacity-60"
+            >
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+              Delete {plural(ready.length, 'item')} permanently
+            </button>
+          </>
+        )}
+      </div>
+    </Dialog>
+  );
+}
+
 /** The light grey bar shown while products are ticked. */
 export function SelectionBar({
   count,
   cap,
   canFlag,
   canArchive,
+  canPurge = false,
   archivedView,
   flagType,
   onFlagType,
   onFlag,
   onArchive,
   onRestore,
+  onPurge,
   onClear,
   busy,
 }: {
@@ -353,12 +539,14 @@ export function SelectionBar({
   cap: number;
   canFlag: boolean;
   canArchive: boolean;
+  canPurge?: boolean;
   archivedView: boolean;
   flagType: FlagType;
   onFlagType: (t: FlagType) => void;
   onFlag: () => void;
   onArchive: () => void;
   onRestore: () => void;
+  onPurge?: () => void;
   onClear: () => void;
   busy: boolean;
 }) {
@@ -402,15 +590,27 @@ export function SelectionBar({
         <>
           <span className="h-5 w-px bg-gray-300" aria-hidden="true" />
           {archivedView ? (
-            <button
-              type="button"
-              onClick={onRestore}
-              disabled={busy}
-              className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-400 bg-white px-3 text-sm font-medium text-gray-900 hover:bg-gray-50 disabled:opacity-60"
-            >
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
-              Restore
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={onRestore}
+                disabled={busy}
+                className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-gray-400 bg-white px-3 text-sm font-medium text-gray-900 hover:bg-gray-50 disabled:opacity-60"
+              >
+                {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <RotateCcw className="h-4 w-4" />}
+                Restore
+              </button>
+              {canPurge && onPurge && (
+                <button
+                  type="button"
+                  onClick={onPurge}
+                  disabled={busy}
+                  className="inline-flex h-9 items-center gap-1.5 rounded-lg border border-red-600 bg-white px-3 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-60"
+                >
+                  <Trash2 className="h-4 w-4" /> Delete permanently
+                </button>
+              )}
+            </>
           ) : (
             <button
               type="button"

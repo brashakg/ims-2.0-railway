@@ -3854,6 +3854,10 @@ def _restore_barcode_refusal(repo, spine: Optional[Dict], twin: Optional[Dict]) 
     return None
 
 
+class RestoreRaced(Exception):
+    """A permanent delete claimed the product while Restore was on its way."""
+
+
 def _restore_product(
     product: Optional[Dict],
     spine: Optional[Dict],
@@ -3880,14 +3884,8 @@ def _restore_product(
     # Archived before this was remembered: switched on, as restore did then.
     was_active = (spine or product or {}).get(ACTIVE_BEFORE_ARCHIVE) is not False
     active = was_active and on_website is False
-    if product is not None:
-        product.pop("_id", None)
-        product["is_active"] = active
-        product["deleted_at"] = None
-        product["deleted_by"] = None
-        product[ACTIVE_BEFORE_ARCHIVE] = None
-        _save_catalog_product(product, mark_dirty=False)
     from ..dependencies import get_audit_repository, get_db, get_product_repository
+    from ..services import product_purge
     from ..services.name_resolver import actor_name
 
     _pr = get_product_repository()
@@ -3897,6 +3895,8 @@ def _restore_product(
             "deleted_at": None,
             "deleted_by": None,
             ACTIVE_BEFORE_ARCHIVE: None,
+            "purge_run": None,
+            "purge_run_at": None,
         }
         # Keyed again by the create rule when its key is free (an archived
         # twin may have given its key up): a restored row is never keyless.
@@ -3906,7 +3906,27 @@ def _restore_product(
                 back["identity_key"] = key
         except _pm.ProductMasterError:
             pass
-        _pr.update(spine_id, back)
+        # The SPINE first, and only while no permanent delete holds it (the
+        # purge claim, product_purge._claim): one of the two wins, never both.
+        if not _pr.update(spine_id, back, expected=product_purge._free_claim()):
+            raise RestoreRaced()
+    if product is not None:
+        product.pop("_id", None)
+        # A dead permanent-delete claim (#1273): its marks go, and the twin
+        # gets back the queue flag it had before the claim took it off.
+        prior_queue = product.pop("purge_prior_queue", None)
+        claimed = any(product.pop(k, None) is not None for k in ("purge_run", "purge_run_at"))
+        product["is_active"] = active
+        product["deleted_at"] = None
+        product["deleted_by"] = None
+        product[ACTIVE_BEFORE_ARCHIVE] = None
+        _save_catalog_product(product, mark_dirty=False)
+        coll = _catalog_coll()
+        if coll is not None and (claimed or prior_queue is not None):
+            patch: Dict[str, Any] = {"$unset": {"purge_run": "", "purge_run_at": "", "purge_prior_queue": ""}}
+            if prior_queue is not None and isinstance(product.get("ecom"), dict):
+                patch["$set"] = {"ecom.locally_modified": prior_queue}
+            coll.update_one({"id": product["id"]}, patch)
     try:
         audit_repo = get_audit_repository()
         if audit_repo is not None:
@@ -4100,15 +4120,24 @@ async def bulk_restore_products(
             results.append({"product_id": pid, "status": "refused", "reason": "Not archived"})
         elif why := _restore_refusal(repo, spine, twin):
             results.append({"product_id": pid, "status": "refused", "reason": why})
+        elif purge_why := _purge_open(spine):
+            # A permanent delete under way or stopped part-way: restoring it
+            # would bring back a product missing some of its rows.
+            results.append({"product_id": pid, "status": "refused", "reason": purge_why})
         elif not body.apply:
             results.append({"product_id": pid, "status": "ready"})
         else:
-            note = _restore_product(
-                twin,
-                spine,
-                current_user,
-                on_website=None if live_skus is None else doc.get("sku") in live_skus,
-            )
+            try:
+                note = _restore_product(
+                    twin,
+                    spine,
+                    current_user,
+                    on_website=None if live_skus is None else doc.get("sku") in live_skus,
+                )
+            except RestoreRaced:
+                results.append({"product_id": pid, "status": "refused",
+                                "reason": "A permanent delete of it is running, so it cannot be restored."})
+                continue
             row: Dict[str, Any] = {
                 "product_id": pid,
                 "status": "done",
@@ -4118,6 +4147,125 @@ async def bulk_restore_products(
                 row["note"] = note
             results.append(row)
     return {"applied": body.apply, "results": results}
+
+
+def _purge_open(spine: Optional[Dict]) -> Optional[str]:
+    """Why Restore refuses: a permanent delete of it holds the claim or
+    stopped part-way (product_purge.restore_refusal). A read error refuses."""
+    from ..services import product_purge
+
+    try:
+        return product_purge.restore_refusal(_get_db(), spine)
+    except Exception:  # noqa: BLE001 -- unread is never "no delete under way"
+        logger.warning("[CATALOG] purge-state read for restore failed", exc_info=True)
+        return "Could not check whether it is being deleted permanently, so it was not restored. Try again."
+
+
+def _purge_order(spines: List[Optional[Dict]]) -> List[int]:
+    """A model's colours/sizes before the lead they point at, so a family
+    row's delete takes the lead last (its 'other colours linked' check then
+    finds them gone). Otherwise the order sent."""
+    leads = {(s or {}).get("variant_of") for s in spines if s}
+    return sorted(
+        range(len(spines)),
+        key=lambda i: ((spines[i] or {}).get("product_id") in leads, i),
+    )
+
+
+async def _purge_rows(ids: List[str], actor: Dict, apply: bool) -> List[Dict[str, Any]]:
+    """THE permanent-delete door body (services/product_purge), for the
+    single door and the Catalog page's bulk door. One product at a time,
+    colours before their model's lead: a failure never stops or undoes the
+    others. Per spine id: ready / done / refused with the reason and its HTTP
+    code; `website` True when it is (or was) on Shopify and comes off it
+    first. Mongo work runs off the event loop (asyncio.to_thread)."""
+    import asyncio
+
+    from ..dependencies import get_audit_repository, get_product_repository
+    from ..services import product_purge
+
+    repo = get_product_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="The catalogue is not reachable")
+
+    def _read():
+        spines = [repo.find_by_id(p) for p in ids]
+        return spines, _twins_or_503(repo, spines)
+
+    spines, twins = await asyncio.to_thread(_read)
+    db = _get_db()
+    run_id = f"PURGE-{uuid.uuid4().hex[:12].upper()}"
+    out: Dict[int, Dict[str, Any]] = {}
+    ready: set = set()
+    for i in _purge_order(spines):
+        pid, spine, twin = ids[i], spines[i], twins[i]
+        row: Dict[str, Any] = {"product_id": pid}
+        if spine is not None:
+            row["sku"] = spine.get("sku")
+            row["name"] = spine.get("name") or spine.get("model") or spine.get("sku")
+        if spine is None:
+            row.update(status="refused", code=404, reason="Product not found", website=False)
+        elif not apply:
+            refused, plan = await asyncio.to_thread(
+                product_purge.purge_check, db, spine, twin, batch=frozenset(ready)
+            )
+            row["website"] = plan is not None
+            if refused is not None:
+                row.update(status="refused", code=refused[0], reason=refused[1])
+            else:
+                row["status"] = "ready"
+                ready.add(pid)
+                members, _ = await asyncio.to_thread(
+                    product_purge.linked_members, db, pid, (twin or {}).get("id")
+                )
+                if members:
+                    row["note"] = product_purge.LEAD_AFTER_COLOURS
+        else:
+            try:
+                row.update(
+                    await product_purge.purge(
+                        db, pid, (twin or {}).get("id"), actor, run_id=run_id,
+                        audit_repo=get_audit_repository(),
+                    )
+                )
+            except Exception:  # noqa: BLE001 -- purge never raises; belt and braces
+                logger.error("[CATALOG] permanent delete failed for %s", pid, exc_info=True)
+                row.update(status="refused", code=503, reason=product_purge.PART_DELETED)
+        out[i] = row
+    rows = [out[i] for i in range(len(ids))]
+    if apply and any(r["status"] == "done" for r in rows):
+        invalidate_product_lists()
+    return rows
+
+
+@router.delete("/products/{product_id}/permanent")
+async def purge_catalog_product(
+    product_id: str,
+    current_user: dict = Depends(require_roles("SUPERADMIN")),
+):
+    """Delete an ARCHIVED product for good (owner 2026-10-24), SUPERADMIN only.
+    Refused 409 (not archived / leads a model / any history / on Shopify
+    while website writes are off), 502 (Shopify did not remove its listing)
+    or 503 (a check could not read) -- nothing deleted in IMS. On Shopify:
+    its listing (or, for a colour/size, its variant) is deleted there first.
+    Backed up first."""
+    (row,) = await _purge_rows([product_id], current_user, apply=True)
+    if row["status"] != "done":
+        raise HTTPException(status_code=row["code"], detail=row["reason"])
+    return {"message": "Product deleted permanently", **row}
+
+
+@router.post("/products/bulk-purge")
+async def bulk_purge_products(
+    body: BulkProductIds,
+    current_user: dict = Depends(require_roles("SUPERADMIN")),
+):
+    """The Catalog page's 'Delete permanently' (Flags: Archived), SUPERADMIN
+    only: the same rule as the single door, up to 200 spine ids, one at a
+    time. The dry run (apply=false) tells the confirm dialog which would be
+    refused and why, and which also come off the website (`website`)."""
+    ids = list(dict.fromkeys(p for p in body.product_ids if p))
+    return {"applied": body.apply, "results": await _purge_rows(ids, current_user, body.apply)}
 
 
 # ============================================================================

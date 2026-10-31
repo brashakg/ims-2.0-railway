@@ -58,6 +58,7 @@ import {
   Flag,
   ChevronDown,
   ChevronRight,
+  Trash2,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useToast } from '../../context/ToastContext';
@@ -94,7 +95,7 @@ import {
 } from './CatalogProductDrawer';
 import { EDIT_QUEUE_KEY, clearReviewQueue, writeReviewQueue } from './reviewQueue';
 import { CatalogFiltersBar } from './CatalogFiltersBar';
-import { ArchiveDialog, FlagDialog, SelectionBar } from './CatalogBulkActions';
+import { ArchiveDialog, FlagDialog, PurgeDialog, SelectionBar } from './CatalogBulkActions';
 import {
   PAGE_SIZES,
   PAGE_SIZE_STORAGE_KEY,
@@ -259,6 +260,9 @@ export function CatalogManagerPage({
   const canEdit = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
   const canFlag = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
   const isAdmin = hasRole(['SUPERADMIN', 'ADMIN']);
+  // Delete permanently (an archived product): SUPERADMIN only, as the server.
+  // NOT hasRole: it answers true for every ADMIN (AuthContext.hasRole).
+  const isSuperAdmin = (user?.roles || []).includes('SUPERADMIN');
   const isCataloguer = (user?.roles || []).includes('CATALOG_MANAGER');
 
   // Page lives in the URL (not useState) so the full-page review editor's
@@ -334,6 +338,8 @@ export function CatalogManagerPage({
   const [bulkRunning, setBulkRunning] = useState(false);
   const [flagType, setFlagType] = useState<FlagType>('needs_revision');
   const [dialog, setDialog] = useState<'flag' | 'archive' | null>(null);
+  // The ids the Delete permanently dialog asks about (a row's, or the ticks).
+  const [purgeIds, setPurgeIds] = useState<string[] | null>(null);
 
   // Drawer: an index into `items` (list navigation), or a standalone item
   // (?focus= deep link to a product not on the current page).
@@ -717,6 +723,7 @@ export function CatalogManagerPage({
   const afterBulk = useCallback(
     (message: string, ok: boolean) => {
       setDialog(null);
+      setPurgeIds(null);
       toast[ok ? 'success' : 'warning'](message);
       clearSelection();
       void load();
@@ -1260,6 +1267,16 @@ export function CatalogManagerPage({
                         <div className="text-gray-500">{added.edited}</div>
                       </td>
                       <td className="px-3 py-2 align-middle text-right">
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                        {archivedView && isSuperAdmin && Boolean(doc.deleted_at) && (
+                          <button
+                            type="button"
+                            onClick={() => setPurgeIds(ids)}
+                            className="inline-flex h-8 items-center gap-1 rounded-lg border border-red-600 bg-white px-2.5 text-xs font-medium text-red-700 hover:bg-red-50"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" /> Delete permanently
+                          </button>
+                        )}
                         {!canEdit ? null : hasPhoto === false ? (
                           <button
                             type="button"
@@ -1277,6 +1294,7 @@ export function CatalogManagerPage({
                             <Pencil className="h-3.5 w-3.5" /> Edit
                           </button>
                         )}
+                        </div>
                       </td>
                     </tr>
                     {isOpen &&
@@ -1387,6 +1405,8 @@ export function CatalogManagerPage({
           onFlag={() => setDialog('flag')}
           onArchive={() => setDialog('archive')}
           onRestore={() => void handleRestore()}
+          canPurge={isSuperAdmin}
+          onPurge={() => setPurgeIds(Array.from(selected))}
           onClear={clearSelection}
           busy={bulkRunning}
         />
@@ -1439,6 +1459,9 @@ export function CatalogManagerPage({
           onClose={() => setDialog(null)}
           onDone={afterBulk}
         />
+      )}
+      {purgeIds && (
+        <PurgeDialog ids={purgeIds} onClose={() => setPurgeIds(null)} onDone={afterBulk} />
       )}
 
       {/* Drawer */}

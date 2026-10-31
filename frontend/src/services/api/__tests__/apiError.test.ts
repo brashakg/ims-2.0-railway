@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import type { AxiosError } from 'axios';
-import { ApiError, buildApiError, PUSH_TIMEOUT_MESSAGE } from '../client';
+import { ApiError, buildApiError, PUSH_TIMEOUT_MESSAGE, PURGE_TIMEOUT_MESSAGE } from '../client';
 
 type Data = { message?: string; detail?: string | Array<Record<string, unknown>> };
 
@@ -124,6 +124,11 @@ describe('buildApiError -- a timed-out push says the truth', () => {
 
   it('a single-entity push timeout gets the same honest message', () => {
     expect(buildApiError(timeout('/online-store/push/product/P1')).message).toBe(PUSH_TIMEOUT_MESSAGE);
+  });
+
+  it('a timed-out permanent delete says it is still running (review of #1273)', () => {
+    expect(buildApiError(timeout('/catalog/products/bulk-purge')).message).toBe(PURGE_TIMEOUT_MESSAGE);
+    expect(PURGE_TIMEOUT_MESSAGE).toMatch(/do not press again/);
   });
 
   it('a timeout on any OTHER endpoint keeps the generic connection message', () => {

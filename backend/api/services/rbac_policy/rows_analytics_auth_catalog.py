@@ -256,6 +256,18 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/catalog/products/bulk-restore",
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
+    # Permanent delete of an ARCHIVED product (owner 2026-10-24): SUPERADMIN
+    # only (services/product_purge; refused while any history points at it).
+    {
+        "method": "DELETE",
+        "path": "/api/v1/catalog/products/{product_id}/permanent",
+        "allowed": ["SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/catalog/products/bulk-purge",
+        "allowed": ["SUPERADMIN"],
+    },
     # Catalogue flags ("needs work"). Raising one is its OWN capability
     # (catalog:flag, see capabilities.capability_for): STORE_MANAGER may flag
     # but must never gain the catalog write grant. Marking fixed is the

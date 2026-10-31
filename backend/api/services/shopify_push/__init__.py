@@ -183,6 +183,9 @@ from .transport import (  # noqa: F401
     _now,
 )
 from .queries import (  # noqa: F401
+    _PRODUCT_DELETE,
+    _VARIANTS_BULK_DELETE,
+    _NODE_EXISTS,
     _PRODUCT_CREATE,
     _PRODUCT_UPDATE,
     _COLLECTION_CREATE,
@@ -367,6 +370,10 @@ from .product import (  # noqa: F401
     push_product,
     push_product_delist,
     _delist_variant_row,
+    RemovalUnclear,
+    removal_plan,
+    push_product_remove,
+    shopify_removal_truth,
 )
 from .webhooks import (  # noqa: F401
     _WEBHOOK_SUBSCRIPTIONS_QUERY,
