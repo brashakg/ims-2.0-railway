@@ -196,11 +196,12 @@ def _merge_address(req: ShipAddress, order: Optional[Dict[str, Any]]) -> Dict[st
 
     ship = (order or {}).get("shipping_address")
     if isinstance(ship, dict):
-        line = ", ".join(str(ship[k]) for k in ("address1", "address2") if ship.get(k))
+        from ..services.invoice_pdf import address_line
+
         for key, value in (
             ("name", ship.get("name")),
             ("phone", ship.get("phone")),
-            ("address", line),
+            ("address", address_line(ship)),
             ("city", ship.get("city")),
             ("state", ship.get("province")),
             ("pincode", ship.get("zip")),

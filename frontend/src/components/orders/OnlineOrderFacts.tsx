@@ -4,17 +4,17 @@
 // Two things an online (Shopify) order carries that an in-store one does not:
 // the delivery address typed at checkout, and the check that the IMS invoice
 // total is what Shopify charged. A MISMATCH is flagged here (and tasked to an
-// admin server-side) - never silently accepted. Renders nothing otherwise.
+// admin server-side when it is booked live) - never silently accepted.
+// Renders nothing otherwise.
 
 import { AlertCircle } from 'lucide-react';
 import type { ShippingAddress, ShopifyTotalsCheck } from '../../types';
+import { formatCurrency } from '../../pages/finance/financeUtils';
 
 interface OnlineOrderFactsProps {
   shippingAddress?: ShippingAddress | null;
   totalsCheck?: ShopifyTotalsCheck;
 }
-
-const rs = (n?: number) => `Rs ${(n ?? 0).toFixed(2)}`;
 
 const join = (parts: (string | undefined)[], sep = ', ') =>
   parts.filter((p) => p && p.trim()).join(sep);
@@ -33,8 +33,9 @@ export function OnlineOrderFacts({ shippingAddress: a, totalsCheck }: OnlineOrde
           <AlertCircle className="w-4 h-4 text-red-700 mt-0.5 flex-shrink-0" />
           <p className="text-sm text-red-800">
             <span className="font-medium">Total differs from Shopify.</span> Shopify charged{' '}
-            {rs(totalsCheck?.shopifyTotal)}; this invoice is {rs(totalsCheck?.imsTotal)}{' '}
-            (difference {rs(totalsCheck?.difference)}). An admin has been asked to check it
+            {formatCurrency(totalsCheck?.shopifyTotal ?? 0)}; this invoice is{' '}
+            {formatCurrency(totalsCheck?.imsTotal ?? 0)} (difference{' '}
+            {formatCurrency(totalsCheck?.difference ?? 0)}). Flagged for an admin to check
             before it ships or is filed.
           </p>
         </div>

@@ -212,7 +212,11 @@ def _slim_list_row(doc: Dict[str, Any]) -> Dict[str, Any]:
     DBs that ignore the find() projection), map_status stamped explicitly."""
     doc = _clean(doc)
     items = doc.get("items")
-    doc["items_count"] = len(items) if isinstance(items, list) else 0
+    # Goods lines only: the shipping line is not an item the buyer ordered.
+    doc["items_count"] = (
+        sum(1 for i in items if not (isinstance(i, dict) and i.get("item_type") == "SHIPPING"))
+        if isinstance(items, list) else 0
+    )
     for f in _LIST_STRIP_FIELDS:
         doc.pop(f, None)
     # A doc in the orders collection IS in the books -- say so explicitly rather

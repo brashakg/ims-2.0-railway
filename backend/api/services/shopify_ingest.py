@@ -275,15 +275,18 @@ def _added_tax_paise(payload: Dict[str, Any], line: Dict[str, Any]) -> int:
 
 def _shipping_line(
     payload: Dict[str, Any], goods: List[Dict[str, Any]]
-) -> Tuple[Optional[Dict[str, Any]], float]:
-    """The shipping Shopify charged, as ONE invoice line, plus the shipping
-    discount (a free-shipping code). Returns (line or None, discount rupees).
+) -> Optional[Dict[str, Any]]:
+    """The shipping Shopify charged, as ONE invoice line (None when nothing
+    is charged -- no shipping, or a free-shipping code took it all). The line
+    carries its own discount (discount_amount).
 
     Shipping the seller charges with the goods is part of the value of that
     supply (CGST s.15) and a composite supply is taxed at the PRINCIPAL
     supply's rate (s.8(a)), so the line takes the HSN + GST rate of the
     biggest goods line. ponytail: principal = highest-value line; if the CA
-    rules otherwise for a mixed 5%/18% basket, change it here only."""
+    rules otherwise for a mixed 5%/18% basket, change it here only. Only its
+    HSN + rate are taken: the line's category is SHIPPING, so it is never
+    Rx-held as a lens or counted as frame/lens revenue."""
     disc_p = gross_p = 0
     titles: List[str] = []
     for sl in payload.get("shipping_lines") or []:
@@ -295,46 +298,43 @@ def _shipping_line(
         if sl.get("title"):
             titles.append(str(sl["title"]))
     if gross_p <= 0 or not goods:
-        return None, disc_p / 100
+        return None
     principal = max(goods, key=lambda i: _f(i.get("item_total")))
     rate = principal.get("gst_rate") or 0.0
     gross = gross_p / 100
     taxable = round(gross / (1.0 + rate / 100.0), 2)
-    return (
-        {
-            "item_id": str(uuid.uuid4()),
-            "item_type": "SHIPPING",
-            "product_id": None,
-            "product_name": "Shipping charges"
-            + (f" ({', '.join(titles)})" if titles else ""),
-            "sku": "",
-            "quantity": 1,
-            "unit_price": round(gross + disc_p / 100, 2),
-            "discount_percent": 0.0,
-            "discount_amount": disc_p / 100,
-            "item_total": gross,
-            "category": principal.get("category") or "",
-            "hsn_code": principal.get("hsn_code"),
-            "gst_rate": rate,
-            "taxable_value": taxable,
-            "tax_amount": round(gross - taxable, 2),
-            # No IMS product: nothing is claimed from stock, routed or Rx-held.
-            "ims_product_id": None,
-        },
-        disc_p / 100,
-    )
+    return {
+        "item_id": str(uuid.uuid4()),
+        "item_type": "SHIPPING",
+        "product_id": None,
+        "product_name": "Shipping charges"
+        + (f" ({', '.join(titles)})" if titles else ""),
+        "sku": "",
+        "quantity": 1,
+        "unit_price": round(gross + disc_p / 100, 2),
+        "discount_percent": 0.0,
+        "discount_amount": disc_p / 100,
+        "item_total": gross,
+        "category": "SHIPPING",
+        "hsn_code": principal.get("hsn_code"),
+        "gst_rate": rate,
+        "taxable_value": taxable,
+        "tax_amount": round(gross - taxable, 2),
+        # No IMS product: nothing is claimed from stock, routed or Rx-held.
+        "ims_product_id": None,
+    }
 
 
 def _with_shipping(
     payload: Dict[str, Any], items: List[Dict[str, Any]]
 ) -> Tuple[List[Dict[str, Any]], float]:
     """THE order lines IMS bills for a Shopify order: the mapped goods lines
-    plus the shipping line, and the order's total discount (goods + shipping
-    discounts). One rule for the booking and the history import's dry run
-    (scripts/import_shopify_order_history.py)."""
-    shipping, shipping_discount = _shipping_line(payload, items)
-    discount = sum(_f(i.get("discount_amount")) for i in items) + shipping_discount
-    return items + ([shipping] if shipping else []), round(discount, 2)
+    plus the shipping line, and the order's total discount -- the discounts
+    the invoice LINES carry, so the two always agree (a free-shipping code
+    leaves no line, so no discount). One rule for the booking and the history
+    import's dry run (scripts/import_shopify_order_history.py)."""
+    lines = items + [s for s in [_shipping_line(payload, items)] if s]
+    return lines, round(sum(_f(i.get("discount_amount")) for i in lines), 2)
 
 
 _ADDRESS_FIELDS = (
@@ -384,18 +384,29 @@ def _totals_check(payload: Dict[str, Any], grand_total: float) -> Dict[str, Any]
     }
 
 
-def _raise_total_mismatch_task(
-    order_id: str, order_ref: str, store_id: Any, check: Dict[str, Any]
-) -> None:
+def _raise_total_mismatch_task(db, order: Dict[str, Any]) -> None:
     """ONE admin task per order whose IMS total differs from what Shopify
     charged (dedupe_ref). The invoice stands as booked; an admin decides.
-    Fail-soft: the paid order is already booked."""
+
+    The order insert and this task are two writes (no transactions on prod),
+    so the order is stamped task_raised once the task exists: a replay of an
+    order whose creator stopped in between raises it then (_booking_unsettled),
+    and never again after an admin has closed it. Assigned to an admin (any
+    shop: the online store has none of its own). Fail-soft: the paid order is
+    already booked."""
+    check = order.get("shopify_totals_check") or {}
+    if check.get("status") != "MISMATCH" or check.get("task_raised"):
+        return
+    order_id = order.get("order_id")
+    order_ref = order.get("order_number") or order.get("shopify_order_id")
     try:
         from ..dependencies import get_task_repository
-        from .task_triggers import create_system_task
+        from .task_triggers import _person_holding, active_tasks, create_system_task
 
-        create_system_task(
-            get_task_repository(),
+        repo = get_task_repository()
+        ref = f"online_total_mismatch:{order_id}"
+        created = create_system_task(
+            repo,
             title=f"Online order {order_ref}: IMS total differs from what Shopify charged",
             description=(
                 f"Shopify charged Rs {check['shopify_total']:.2f}; the IMS invoice is "
@@ -407,11 +418,15 @@ def _raise_total_mismatch_task(
             ),
             priority="P1",
             category="ONLINE_ORDER",
-            store_id=store_id,
-            dedupe_ref=f"online_total_mismatch:{order_id}",
-            assigned_to="ADMIN",
+            store_id=order.get("store_id"),
+            dedupe_ref=ref,
+            assigned_to=_person_holding("ADMIN", None, any_store=True),
             extra={"link": "/online-store/orders", "payload": {"order_id": order_id}},
         )
+        if created or active_tasks(repo, ref):
+            db.get_collection("orders").update_one(
+                {"order_id": order_id}, {"$set": {"shopify_totals_check.task_raised": True}}
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "[SHOPIFY_INGEST] total-mismatch task skipped for %s: %s", order_id, exc
@@ -1211,6 +1226,9 @@ def _booking_unsettled(db, existing: Dict[str, Any], historical: bool) -> Dict[s
     webhook drain reads the flag as NOT DONE, so the inbox retries it."""
     if historical:
         return {}
+    # A creator that stopped between the order insert and its total-mismatch
+    # task: raise it now (a no-op once the order is stamped task_raised).
+    _raise_total_mismatch_task(db, existing)
     from .online_fulfillment_route import finish_crashed_booking
 
     unstamped = "fulfillment_breakdown" not in existing and bool(existing.get("fulfillment_route"))
@@ -1772,9 +1790,9 @@ def _book_historical_refund_credit_notes(
                 return "unmapped"
             if actual > gross:
                 # CLAMP AT BILLED GROSS: a credit note can never exceed the
-                # original invoice value. Shopify's refunded total INCLUDES
-                # shipping/goodwill amounts the import never booked as sale
-                # revenue (line items only), so scaling UP would reverse output
+                # original invoice value. Shopify refunded more than the lines
+                # this refund maps to (a goodwill amount; shipping is billed and
+                # mapped to its own line), so scaling UP would reverse output
                 # tax that was never output. Post the FULL billed reversal and
                 # surface the excess as an unreconciled residual for the
                 # operator/accountant.
@@ -1784,8 +1802,8 @@ def _book_historical_refund_credit_notes(
                 logger.warning(
                     "[SHOPIFY_INGEST] historical refund %s on order %s: Shopify "
                     "refunded Rs %.2f > billed Rs %.2f -- credit note CLAMPED at "
-                    "the billed gross; excess Rs %.2f (shipping/goodwill never "
-                    "booked as sale) left un-reversed",
+                    "the billed gross; excess Rs %.2f (no billed line to "
+                    "reverse) left un-reversed",
                     refund_id, order_doc.get("order_id"), actual, gross, excess,
                 )
             else:
@@ -1855,9 +1873,9 @@ def _book_historical_refund_credit_notes(
                 "CLAMPED_AT_BILLED_GROSS" if clamped else "SCALED_TO_SHOPIFY_REFUNDED"
             )
             if clamped:
-                # The shipping/goodwill amount Shopify refunded ON TOP of the
-                # booked sale -- deliberately NOT reversed (never booked as
-                # output tax); recorded for accountant reconciliation.
+                # The amount Shopify refunded ON TOP of the refund's billed
+                # lines -- deliberately NOT reversed (no output tax to reverse);
+                # recorded for accountant reconciliation.
                 entry["unreconciled_excess"] = excess
         try:
             ledger.insert_one(dict(entry))
@@ -2496,13 +2514,7 @@ def ingest_shopify_order(
             "refund_credit_notes": refund_cn,
         }
 
-    if order_doc["shopify_totals_check"]["status"] == "MISMATCH":
-        _raise_total_mismatch_task(
-            order_id,
-            order_doc.get("order_number") or shopify_order_id,
-            store_id,
-            order_doc["shopify_totals_check"],
-        )
+    _raise_total_mismatch_task(db, order_doc)
 
     # CLINICAL FLAG & HOLD follow-up task. Raised ONLY on a fresh create (the
     # duplicate / replay guards above return before this point), so re-ingesting

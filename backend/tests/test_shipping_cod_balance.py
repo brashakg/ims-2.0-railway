@@ -335,3 +335,43 @@ def test_book_prepaid_records_zero_cod_amount(monkeypatch):
     assert resp.status_code == 201, resp.text
     assert resp.json()["payment_method"] == "Prepaid"
     assert coll.docs[0]["cod_amount"] == 0.0
+
+
+def test_book_cod_refused_above_what_shopify_charged(monkeypatch):
+    """Website 1: an online order whose IMS total differs from Shopify's
+    (MISMATCH) must never send the courier to collect more than the buyer
+    was charged on Shopify."""
+    client, coll = _ship_client(
+        monkeypatch,
+        _order(order_id="ORD-C1", payment_status="UNPAID", grand_total=999.0,
+               balance_due=999.0,
+               shopify_totals_check={"status": "MISMATCH", "shopify_total": 950.0,
+                                     "ims_total": 999.0, "difference": -49.0}),
+    )
+    resp = client.post(
+        "/api/v1/shipping/shipments",
+        json=_cod_body(),
+        headers={"Authorization": f"Bearer {_ship_token(['STORE_MANAGER'])}"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"]["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
+    assert coll.docs == []
+
+
+def test_book_cod_mismatch_below_shopify_still_books_the_balance(monkeypatch):
+    """IMS below Shopify: the courier collects the invoice balance (never more
+    than the buyer was charged); the admin task covers the difference."""
+    client, coll = _ship_client(
+        monkeypatch,
+        _order(order_id="ORD-C1", payment_status="UNPAID", grand_total=950.0,
+               balance_due=950.0,
+               shopify_totals_check={"status": "MISMATCH", "shopify_total": 999.0,
+                                     "ims_total": 950.0, "difference": 49.0}),
+    )
+    resp = client.post(
+        "/api/v1/shipping/shipments",
+        json=_cod_body(),
+        headers={"Authorization": f"Bearer {_ship_token(['STORE_MANAGER'])}"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert coll.docs[0]["cod_amount"] == 950.0

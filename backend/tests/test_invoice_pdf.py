@@ -271,3 +271,19 @@ def test_pdf_renders_with_a_ship_to_block(wired):
     r = client.get("/orders/ORD-PDF-1/invoice.pdf")
     assert r.status_code == 200, r.text
     assert r.content[:5] == b"%PDF-"
+
+
+def test_hsn_summary_counts_shipping_value_not_a_unit():
+    """Shipping rides under the goods' HSN as value + tax, never one more unit."""
+    from api.services.invoice_pdf import build_hsn_summary_rows
+
+    order = {"items": [
+        {"hsn_code": "9004", "gst_rate": 5.0, "quantity": 1,
+         "taxable_value": 1000.0, "tax_amount": 50.0},
+        {"item_type": "SHIPPING", "hsn_code": "9004", "gst_rate": 5.0,
+         "quantity": 1, "taxable_value": 94.29, "tax_amount": 4.71},
+    ]}
+    (row,) = build_hsn_summary_rows(order, interstate=False)
+    assert row["qty"] == 1.0
+    assert row["taxable"] == 1094.29
+    assert row["tax"] == 54.71

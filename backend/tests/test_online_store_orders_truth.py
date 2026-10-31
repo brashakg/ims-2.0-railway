@@ -785,3 +785,9 @@ def test_list_rows_carry_the_shopify_totals_check(ctx):
     _seed_booked(ctx, "1001", shopify_totals_check={"status": "MISMATCH", "difference": -49.0})
     row = ctx["client"].get(BASE, headers=_hdr(["ADMIN"])).json()["orders"][0]
     assert row["shopify_totals_check"]["status"] == "MISMATCH"
+
+
+def test_list_item_count_skips_the_shipping_line(ctx):
+    _seed_booked(ctx, "1001", items=[{"sku": "A"}, {"item_type": "SHIPPING"}])
+    row = ctx["client"].get(BASE, headers=_hdr(["ADMIN"])).json()["orders"][0]
+    assert row["items_count"] == 1

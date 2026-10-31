@@ -32,13 +32,16 @@ describe('OnlineOrderFacts', () => {
   it('flags a total that differs from what Shopify charged', () => {
     render(
       <OnlineOrderFacts
-        totalsCheck={{ status: 'MISMATCH', shopifyTotal: 950, imsTotal: 999, difference: -49 }}
+        totalsCheck={{ status: 'MISMATCH', shopifyTotal: 950, imsTotal: 999.5, difference: -49.5 }}
       />,
     );
     const alert = screen.getByRole('alert');
     expect(alert.textContent).toMatch(/Shopify charged/);
-    expect(alert.textContent).toMatch(/950\.00/);
-    expect(alert.textContent).toMatch(/999\.00/);
+    expect(alert.textContent).toMatch(/950/);
+    expect(alert.textContent).toMatch(/999/);
+    expect(alert.textContent).toMatch(/49\.5/);
+    // No admin may have been asked (a historical import raises no task).
+    expect(alert.textContent).toMatch(/Flagged for an admin to check/);
   });
 
   it('renders nothing for a matching in-store order', () => {

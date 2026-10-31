@@ -113,7 +113,11 @@ class FakeCollection:
         for d in self.docs:
             if _match(d, filter_):
                 for k, v in (update.get("$set") or {}).items():
-                    d[k] = v
+                    *path, leaf = k.split(".")
+                    tgt = d
+                    for part in path:
+                        tgt = tgt.setdefault(part, {})
+                    tgt[leaf] = v
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         return type("R", (), {"modified_count": 0, "matched_count": 0})()
 
@@ -1238,6 +1242,76 @@ def test_free_shipping_code_bills_no_shipping(wired):
     assert not [i for i in order["items"] if i["item_type"] == "SHIPPING"]
     assert order["shipping_charge"] == 0.0
     assert order["shopify_totals_check"]["status"] == "MATCH"
+    # No invoice line carries the free-shipping discount, so it is not part of
+    # the invoice's discount either (the lines and the total must agree).
+    assert order["total_discount"] == 0.0
+
+
+def test_part_discounted_shipping_bills_what_was_left(wired):
+    """Rs 99 shipping with a Rs 50 shipping discount: a Rs 49 shipping line
+    carrying the Rs 50 discount, and the total matches what Shopify charged."""
+    order = _book(wired, _charged(
+        7109, total="1048.00",
+        shipping=[{"title": "Standard", "price": "99.00",
+                   "discount_allocations": [{"amount": "50.00"}]}],
+    ))
+    ship = [i for i in order["items"] if i["item_type"] == "SHIPPING"]
+    assert len(ship) == 1
+    assert ship[0]["item_total"] == 49.0
+    assert ship[0]["discount_amount"] == 50.0
+    assert order["grand_total"] == 1048.0
+    assert order["total_discount"] == 50.0
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+
+
+def _shipped_lens_order(order_id, *, with_rx=None):
+    payload = _lens_order(order_id, with_rx=with_rx)
+    payload["shipping_lines"] = [{"title": "Standard", "price": "99.00"}]
+    payload["total_price"] = "1599.00"
+    return payload
+
+
+def test_shipping_on_a_lens_order_is_not_a_lens(wired, monkeypatch):
+    """The shipping line is never a spectacle lens: a lens order with paid
+    shipping and a valid explicit Rx is not held, and shipping is not counted
+    as frame/lens revenue (its own category)."""
+    import api.dependencies as deps
+
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
+    repo = _RxRepo(by_id={"RX-1": _valid_rx("RX-1", "555")})
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: repo)
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _shipped_lens_order(8020, with_rx="RX-1"), topic="orders/create"
+    )
+    assert res["rx_pending"] is False
+    order = wired["orders"].find_one({"shopify_order_id": "8020"})
+    assert order["fulfillment_hold"] is False
+    ship = [i for i in order["items"] if i["item_type"] == "SHIPPING"][0]
+    assert ship["category"] == "SHIPPING"
+    assert ship["gst_rate"] == order["items"][0]["gst_rate"]
+
+
+def test_rx_hold_on_a_shipped_lens_order_names_only_the_lens(wired, monkeypatch):
+    import api.dependencies as deps
+    import api.services.online_rx_hold as rx_mod
+
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: _RxRepo())
+    seen = {}
+    real = rx_mod.evaluate_rx_hold
+
+    def _spy(db, items, customer_id):
+        seen["eval"] = real(db, items, customer_id)
+        return seen["eval"]
+
+    monkeypatch.setattr(rx_mod, "evaluate_rx_hold", _spy)
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _shipped_lens_order(8021), topic="orders/create"
+    )
+    assert res["rx_pending"] is True
+    labels = [ln["label"] for ln in seen["eval"]["lines"]]
+    assert len(labels) == 1
+    assert not [lb for lb in labels if "Shipping charges" in lb]
 
 
 def test_tax_shopify_added_on_top_is_part_of_what_was_paid(wired):
@@ -1294,3 +1368,28 @@ def test_shipping_address_is_stored_on_the_order(wired):
     assert addr["zip"] == "827001"
     assert addr["phone"] == "+919800000000"
     assert addr["name"] == "Ravi Kumar"
+
+
+def test_mismatch_task_raised_again_when_the_first_attempt_was_lost(wired, monkeypatch):
+    """The order insert and the admin task are two writes: a crash between
+    them must not lose the task -- a replay of the booked order raises it
+    (create_system_task dedupes on the same ref, so never twice)."""
+    import api.dependencies as deps
+
+    payload = _charged(7110, total="950.00")
+    real_raise = shopify_ingest._raise_total_mismatch_task
+    monkeypatch.setattr(shopify_ingest, "_raise_total_mismatch_task", lambda *a, **k: None)
+    order = _book(wired, payload)  # "crashed" before the task
+    monkeypatch.setattr(shopify_ingest, "_raise_total_mismatch_task", real_raise)
+
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    res = shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    assert res["status"] == "duplicate"
+    tasks = [t for t in task_repo.created
+             if t["source_ref"] == f"online_total_mismatch:{order['order_id']}"]
+    assert len(tasks) == 1
+    # Raised once: an admin closing it does not bring it back on the next
+    # replay (the fake repo reports no active task, as after a close).
+    shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    assert len(task_repo.created) == 1

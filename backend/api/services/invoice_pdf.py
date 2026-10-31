@@ -86,21 +86,31 @@ def build_invoice_lines(order: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
+def _join(a: Dict[str, Any], *keys: str, sep: str = ", ") -> str:
+    return sep.join(str(a[k]).strip() for k in keys if str(a.get(k) or "").strip())
+
+
+def address_line(a: Dict[str, Any]) -> str:
+    """The street line of a Shopify-shaped address: address1, address2."""
+    return _join(a, "address1", "address2")
+
+
 def ship_to_lines(order: Dict[str, Any]) -> List[str]:
     """The Ship To block: the order's own delivery address (an online order's
-    checkout address). [] when the order has none. Pure."""
+    checkout address). [] when the order has none. THE formatter for the
+    invoice, the delivery challan and (its street line) the courier. Pure."""
     a = order.get("shipping_address")
     if not isinstance(a, dict):
         return []
 
     def join(*keys: str, sep: str = ", ") -> str:
-        return sep.join(str(a[k]).strip() for k in keys if str(a.get(k) or "").strip())
+        return _join(a, *keys, sep=sep)
 
     place = " ".join(p for p in (join("city", "province"), join("zip")) if p)
     lines = [
         join("name") or join("first_name", "last_name", sep=" "),
         join("company"),
-        join("address1", "address2"),
+        address_line(a),
         place,
         join("country"),
     ]
@@ -136,7 +146,9 @@ def build_hsn_summary_rows(
             {"hsn": hsn, "rate": round(rate, 2), "qty": 0.0,
              "taxable": 0.0, "tax": 0.0},
         )
-        row["qty"] += _f(it.get("quantity"), 1.0)
+        # Shipping is value + tax under the goods' HSN, never one more unit.
+        if it.get("item_type") != "SHIPPING":
+            row["qty"] += _f(it.get("quantity"), 1.0)
         row["taxable"] = round(row["taxable"] + _f(it.get("taxable_value")), 2)
         row["tax"] = round(row["tax"] + _f(it.get("tax_amount")), 2)
 
