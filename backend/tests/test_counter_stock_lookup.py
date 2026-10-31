@@ -18,8 +18,7 @@ they carry money):
             "items": [{"product_id", "sku", "name", "brand", "model",
                        "category", "colour_code", "size", "power", "mrp", "offer_price",
                        "stores": [{"store_id", "store_name",
-                                   "available", "in_transit",
-                                   "tracked"}, ...]}],
+                                   "available", "in_transit"}, ...]}],
             "not_counted_item_types": [...], "lens_grid_item_types": [...]}
 
     `stores` lists EVERY physical shop (stores_util.physical_stores), zeros
@@ -29,16 +28,15 @@ they carry money):
     this shop's figure is the till tile's (GET /inventory/sellable, #1173);
     `in_transit` counts TRANSFERRED units heading TO that shop
     (claim_for_transfer stamps transfer_to_store_id), one unit per row too.
-    `tracked` is the sale guard's own `tracked` count: the shop holds a
-    stock_units row of it, any status. The guard counts a line only there AND
-    when the line's item_type is not in `not_counted_item_types` (its own
+    The sale guard counts a line at EVERY shop (POS 4: a shop holding none of
+    it refuses it) when the line's item_type is not in `not_counted_item_types` (its own
     _takes_serialized_stock sets: a LENS line is the lens grid's,
     `lens_grid_item_types`; a SERVICE / eye-test line has no stock). The
     item_type is the TILL's -- POS mapCategory, TypeScript -- so the screen
     puts it on each product's `category` (importing mapCategory) and this
-    server never maps a category. tracked AND not in the list is exactly
-    where GET /inventory/sellable answers a number; the screen never shows a
-    0 anywhere else.
+    server never maps a category. Not in the list is exactly where GET
+    /inventory/sellable answers a number; the screen never shows a 0 anywhere
+    else.
     The search IS ProductRepository.search_products (active only, the same
     answer as GET /products?search=) plus an exact SKU, product barcode,
     manufacturer GTIN (attributes.gtin) or IMS unit barcode, active only and
@@ -830,8 +828,9 @@ def test_d7b3_in_transit_is_a_transferred_unit_on_its_way(call, mongo_db, label,
 
 
 # Round 5: where the till's sale guard does not count a product it sells any
-# quantity (orders/stock: tracked == 0 -> no check; a LENS line is the lens
-# grid's; a SERVICE line has no stock), and GET /inventory/sellable says None.
+# quantity (a LENS line is the lens grid's; a SERVICE line has no stock), and
+# GET /inventory/sellable says None. POS 4: a shop holding no unit of a counted
+# line is no longer skipped -- the till refuses it there, and the screen says 0.
 # A 0 there is no limit, so the screen reads 'Not stocked here', or the lens
 # pointer -- never 0.
 # Round 6: the item_type is the till's own (POS mapCategory, TypeScript; its
@@ -847,7 +846,7 @@ _TILL_ITEM_TYPES = [
 
 
 @pytest.mark.parametrize("item_type", _TILL_ITEM_TYPES, ids=[t or "blank" for t in _TILL_ITEM_TYPES])
-def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monkeypatch, item_type):
+def test_d7b3_the_screen_counts_where_the_till_does(call, mongo_db, monkeypatch, item_type):
     from api.routers import orders as om
     from database.repositories.product_repository import StockRepository
 
@@ -859,13 +858,11 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
         {"_id": pid, "product_id": pid, "sku": "SKU-TRACK-1", "brand": "Zeiss", "model": "TRK1",
          "category": "ANY", "mrp": 3000.0, "offer_price": 3000.0, "is_active": True}
     )
-    # Round 7/8: the guard's `tracked` is ANY row, whatever its status, so a
-    # shop whose ONLY row of it is sold, reserved, shipped away, quarantined,
-    # void, damaged, returned to the vendor or a legacy spelling is tracked
-    # (the till refuses, /sellable says 0). One shop per lifecycle state and
-    # per stored shape, each as that shop's SOLE row: a lookup that dropped
-    # any status from its tracked match would read 'Not stocked here' there. Each
-    # carries a ship-to stamp, as a received unit can keep one.
+    # Round 7/8: a shop whose ONLY row of it is sold, reserved, shipped away,
+    # quarantined, void, damaged, returned to the vendor or a legacy spelling
+    # sells 0 (the till refuses, /sellable says 0). One shop per lifecycle
+    # state and per stored shape, each as that shop's SOLE row. Each carries a
+    # ship-to stamp, as a received unit can keep one.
     sole = {s.value: {"status": s.value} for s in StockState}
     sole.update({label: shape for label, shape, _sell, _phys in _SHAPES})
     sole_shops = {f"SX-{i:02d}": label for i, label in enumerate(sole)}
@@ -874,8 +871,8 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
          for s, label in sole_shops.items()]
     )
     # Dhanbad: 2 boxes in date plus a sold, a reserved, an expired and a
-    # shipped-away row; Bokaro: only an expired box (tracked, sells 0); Pune:
-    # no unit at all.
+    # shipped-away row; Bokaro: only an expired box (sells 0); Pune: no unit
+    # at all (sells 0 -- POS 4).
     mongo_db["stock_units"].insert_many(
         [
             _unit(pid, S1, expiry_date="2099-12-31"), _unit(pid, S1, expiry_date="2099-12-31"),
@@ -898,7 +895,7 @@ def test_d7b3_a_shop_the_till_does_not_count_is_not_tracked(call, mongo_db, monk
                         product_ids=pid, item_types=item_type))["sellable"][pid]
         # The screen's rule: a count only where the shop holds a unit AND the
         # till's line type is one the guard counts.
-        counted = bool(cell.get("tracked")) and item_type not in not_counted
+        counted = item_type not in not_counted
         assert counted is (till is not None), (
             f"a {item_type or 'blank'} line at {shop} ({sole_shops.get(shop, 'seeded above')}): the till "
             f"{'limits it to ' + str(till) if till is not None else 'does not count it'}, "

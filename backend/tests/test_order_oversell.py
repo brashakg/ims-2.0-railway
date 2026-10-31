@@ -97,11 +97,12 @@ def test_oversell_blocked_when_qty_exceeds_available(client, auth_headers, overs
     assert r.status_code == 409, r.text
 
 
-def test_untracked_product_not_blocked(client, auth_headers, oversell):
-    # FR-1 has NO stock_units rows (count 0) -> not serialized-tracked -> allowed.
+def test_never_stocked_product_is_blocked(client, auth_headers, oversell):
+    # POS 4 (owner ruling 2026-08-25, oversell BLOCKS): FR-1 has NO stock_units
+    # rows at all. That used to read "not tracked" and sell from an empty shelf.
     oversell["set_stock"]({"FR-1": {"total": 0, "available": 0}})
     r = _post(client, auth_headers, [_frame(1)])
-    assert r.status_code in (200, 201), r.text
+    assert r.status_code == 409, r.text
 
 
 def test_virtual_item_not_blocked(client, auth_headers, oversell):

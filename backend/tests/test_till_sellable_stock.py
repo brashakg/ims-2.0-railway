@@ -133,7 +133,7 @@ def test_endpoint_reports_this_shops_count_per_tile(client, staff_headers, till)
     assert body["sellable"] == {
         "FR-HAVANA": 0,
         "FR-BLACK": 8,
-        "FR-NEW": None,  # untracked: the guard never blocks it
+        "FR-NEW": 0,  # never stocked here: the guard refuses it (POS 4)
         "FRCARRERA8895BLK": 8,  # a SKU resolves like order-create resolves it
     }
     # The id the guard sums the line under, so the cart can add up a SKU line

@@ -31,7 +31,7 @@ from ...services import discount_approval
 from .rx import _validate_order_line_rx
 from .stock import (
     _assert_serialized_stock_available,
-    _claim_scanned_units,
+    _claim_units,
     _lens_reservation_key,
     _mark_units_sold,
     _release_claimed_units,
@@ -345,9 +345,10 @@ async def add_order_item(
                 exc,
             )
 
-        # A scanned unit is claimed before the save, as at create (a 409 here
-        # leaves the order untouched; a scanned line reserves no lens cell).
-        claimed = _claim_scanned_units(order_id, [item_data], _store_id)
+        # Every unit the line takes is claimed before the save, as at create
+        # (a 409 here leaves the order untouched; a scanned line reserves no
+        # lens cell).
+        claimed = _claim_units(order_id, [item_data], _store_id)
         try:
             # Spend the manager's approval (if one lifted the limit) last thing
             # before the save -- atomic, single use, as at create. ANY failure
