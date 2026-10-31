@@ -4123,6 +4123,11 @@ def variant_option_values(spine: Dict[str, Any]) -> Dict[str, str]:
     return {"option_color": colour, "option_size": str(size or "").strip()}
 
 
+def is_polarized(attrs: Optional[Dict[str, Any]]) -> bool:
+    """THE 'is this lens polarized' rule, from the polarization attribute."""
+    return str((attrs or {}).get("polarization") or "").strip().lower() in ("yes", "true", "polarized", "polarised")
+
+
 def _lens_label(spine: Dict[str, Any]) -> str:
     """What tells two variants of one frame colour apart: lens colour, tint,
     polarized (owner 2026-10-18: 'Gold / Green Polarized')."""
@@ -4132,8 +4137,7 @@ def _lens_label(spine: Dict[str, Any]) -> str:
         v = str(attrs.get(k) or "").strip()
         if v and v.lower() not in (b.lower() for b in bits):
             bits.append(v)
-    pol = str(attrs.get("polarization") or "").strip().lower()
-    if pol in ("yes", "true", "polarized", "polarised"):
+    if is_polarized(attrs):
         bits.append("Polarized")
     return " ".join(bits)
 

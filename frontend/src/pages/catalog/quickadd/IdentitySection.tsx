@@ -29,7 +29,7 @@ import {
   type CategoryField,
 } from '../productAddShared';
 import { SimilarProductsHint } from '../SimilarProductsHint';
-import { COLOUR_NAME_CATEGORIES, ColourNameSuggest } from './ColourNameSuggest';
+import { ColourNameSuggest, hasColourNameSuggest } from './ColourNameSuggest';
 import { ConfirmChip, LockChip, Section } from './parts';
 import { specKey } from './formHelpers';
 import type { QuickAddForm } from './useQuickAddForm';
@@ -86,6 +86,20 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
         : null;
 
   // -------- small presentational helpers -----------------------------------
+  // CAPS while typing, on the fields the SERVER re-cases on save. This is a
+  // CSS transform only: e.target.value still carries exactly what was typed,
+  // so there is no controlled-input fight, no caret jump, no IME or paste
+  // breakage - and the server stays the sole authority on the stored case.
+  // Never applied to a select (the option match is exact, so an uppercased
+  // VALUE would render the dropdown blank while the form still saved).
+  const inputClass = (name: string, type: CategoryField['type'], isFlagged: boolean, isLocked: boolean) =>
+    clsx(
+      'input-field w-full',
+      type === 'text' && CAPS_ENTRY_FIELDS.has(name) && 'uppercase placeholder:normal-case',
+      isFlagged && 'ring-1 ring-amber-400 bg-amber-50/60',
+      isLocked && 'bg-gray-50 text-gray-500 cursor-not-allowed'
+    );
+
   const renderField = (field: CategoryField, autoFocus = false) => {
     // Variant mode: brand/model are LOCKED (the variant shares them); copied
     // sizes stay amber-flagged until the operator confirms (touches) them.
@@ -97,19 +111,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
       modelLevelFields(selectedCategory).includes(field.name);
     const isLocked = Boolean(variantCtx?.locked.has(field.name)) || onModel;
     const isFlagged = !isLocked && flaggedFields.has(field.name);
-    // CAPS while typing, on the fields the SERVER re-cases on save. This is a
-    // CSS transform only: e.target.value still carries exactly what was typed,
-    // so there is no controlled-input fight, no caret jump, no IME or paste
-    // breakage - and the server stays the sole authority on the stored case.
-    // Never applied to a select (the option match is exact, so an uppercased
-    // VALUE would render the dropdown blank while the form still saved).
-    const capsEntry = field.type === 'text' && CAPS_ENTRY_FIELDS.has(field.name);
-    const fieldClass = clsx(
-      'input-field w-full',
-      capsEntry && 'uppercase placeholder:normal-case',
-      isFlagged && 'ring-1 ring-amber-400 bg-amber-50/60',
-      isLocked && 'bg-gray-50 text-gray-500 cursor-not-allowed'
-    );
+    const fieldClass = inputClass(field.name, field.type, isFlagged, isLocked);
     const fieldId = `qa-field-${field.name}`;
     // The stored value of this select when today's list does not hold it.
     const storedOffList = (f: CategoryField): string => {
@@ -499,14 +501,16 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
 
           {/* Colour name + Suggest from photo 1 (owner 2026-10-23). Outside
               the owner-locked grid; saved as attributes.colour_name. */}
-          {COLOUR_NAME_CATEGORIES.has(selectedCategory) && (
+          {hasColourNameSuggest(selectedCategory) && (
             <ColourNameSuggest
               category={selectedCategory}
               attributes={attributes}
               value={attributes.colour_name || ''}
               onChange={(v) => setAttr('colour_name', v)}
               productId={editMode?.kind === 'spine' ? editMode.id : null}
+              catalogId={editMode?.kind === 'catalog' ? editMode.id : null}
               photo={images[0] || null}
+              inputClassName={inputClass('colour_name', 'text', flaggedFields.has('colour_name'), false)}
             />
           )}
 

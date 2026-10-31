@@ -36,14 +36,12 @@ This router has NO auth dependency -- requests carry their own token/OTP.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 import hashlib
 import logging
 import os
 import secrets
-import time
 
 import jwt
 from fastapi import APIRouter, HTTPException, Path, Request
@@ -102,18 +100,15 @@ def _jwt_secret() -> str:
 
 
 # ============================================================================
-# RATE LIMITS -- in-memory sliding windows (fail-soft, single-worker scope)
+# RATE LIMITS -- THE shared sliding window (api/utils/rate_limit, fail-open)
 # ============================================================================
 # These are best-effort throttles, not a security boundary. They cap a rogue
-# script without punishing a human refreshing. Keyed in memory; on a
-# multi-worker deploy each worker has its own bucket (acceptable -- the OTP
-# attempt lockout in Mongo is the real brute-force guard).
+# script without punishing a human refreshing (the OTP attempt lockout in
+# Mongo is the real brute-force guard).
 
 _TRACK_RATE_LIMIT = int(os.getenv("PORTAL_TRACK_RATE_PER_MIN", "30"))
 _OTP_REQ_RATE_LIMIT = int(os.getenv("PORTAL_OTP_RATE_PER_MIN", "5"))
 _RATE_WINDOW = 60.0
-_track_log: dict = defaultdict(list)
-_otp_req_log: dict = defaultdict(list)
 
 
 def _client_ip(request: Optional[Request]) -> str:
@@ -125,24 +120,15 @@ def _client_ip(request: Optional[Request]) -> str:
     return request.client.host if request.client else "unknown"
 
 
-def _check_rate(bucket: dict, key: str, limit: int, label: str) -> None:
-    """Sliding-window rate check. Raises 429 when `key` is over budget.
-    Fail-soft: any internal error here must not block the request."""
-    try:
-        now = time.time()
-        cutoff = now - _RATE_WINDOW
-        recent = [t for t in bucket[key] if t > cutoff]
-        if len(recent) >= limit:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Too many {label} requests. Please wait a minute and try again.",
-            )
-        recent.append(now)
-        bucket[key] = recent
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[PORTAL] rate-check error (%s): %s", label, exc)
+def _check_rate(kind: str, key: str, limit: int, label: str) -> None:
+    """Raise 429 when `key` is over its per-minute budget for `kind`."""
+    from ..utils.rate_limit import allow
+
+    if not allow(f"portal_{kind}:{key}", limit, _RATE_WINDOW):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many {label} requests. Please wait a minute and try again.",
+        )
 
 
 # ============================================================================
@@ -320,7 +306,7 @@ async def track_order(
     """PUBLIC. Look up an order by its tracking token and return a safe
     subset. 404 on any unknown / malformed token (same response either way
     blocks enumeration)."""
-    _check_rate(_track_log, _client_ip(request), _TRACK_RATE_LIMIT, "tracking")
+    _check_rate("track", _client_ip(request), _TRACK_RATE_LIMIT, "tracking")
 
     try:
         from ..dependencies import get_order_repository
@@ -481,7 +467,7 @@ async def request_rx_otp(payload: RxOtpRequest, request: Request):
         # Don't even reveal "bad phone" beyond the generic message.
         return generic
 
-    _check_rate(_otp_req_log, phone_norm, _OTP_REQ_RATE_LIMIT, "verification code")
+    _check_rate("otp", phone_norm, _OTP_REQ_RATE_LIMIT, "verification code")
 
     try:
         db = _get_db()

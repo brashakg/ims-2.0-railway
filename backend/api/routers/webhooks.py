@@ -95,7 +95,6 @@ import hmac
 import json
 import logging
 import os
-import time
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
@@ -211,29 +210,16 @@ def _client_ip(request: Request) -> str:
 
 
 def _check_webhook_rate_limit(vendor: str, client_ip: str) -> bool:
-    """Sliding-window limiter keyed per vendor+IP via the shared cache seam.
-    Returns True when the request is allowed. Fail-open on any cache error —
-    a broken cache must never take the receivers down (main.py's global
-    limiter still applies as outer cover). The stamp list is bounded by the
-    limit itself (we stop appending once over), and the key TTL equals the
-    window so idle buckets expire on their own."""
-    try:
-        from api.services.cache import cache
+    """Per vendor+IP sliding window through THE shared limiter (cache seam,
+    fail-open; main.py's global limiter stays the outer cover). True when
+    the request is allowed."""
+    from api.utils.rate_limit import allow
 
-        key = f"webhook_rl:{vendor}:{client_ip}"
-        now = time.time()
-        cutoff = now - _WEBHOOK_RATE_WINDOW_SECONDS
-        stamps = cache.get(key)
-        if not isinstance(stamps, list):
-            stamps = []
-        stamps = [t for t in stamps if isinstance(t, (int, float)) and t > cutoff]
-        if len(stamps) >= _webhook_rate_limit_per_min():
-            return False
-        stamps.append(now)
-        cache.set(key, stamps, ttl=_WEBHOOK_RATE_WINDOW_SECONDS)
-        return True
-    except Exception:  # noqa: BLE001
-        return True
+    return allow(
+        f"webhook:{vendor}:{client_ip}",
+        _webhook_rate_limit_per_min(),
+        _WEBHOOK_RATE_WINDOW_SECONDS,
+    )
 
 
 def _enforce_webhook_rate_limit(request: Request, vendor: str) -> None:

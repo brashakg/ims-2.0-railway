@@ -80,7 +80,7 @@ def photo(monkeypatch):
     return seen
 
 
-def _fake_claude(monkeypatch, text="Gold / Green Polarized", usage=None):
+def _fake_claude(monkeypatch, text="Gold / Green Polarized", usage=None, stop_reason="end_turn"):
     calls = []
 
     async def fake(system, prompt, image_b64, **kw):
@@ -88,7 +88,7 @@ def _fake_claude(monkeypatch, text="Gold / Green Polarized", usage=None):
         if text is None:
             return None
         return {"text": text, "usage": usage or {"input_tokens": 1000, "output_tokens": 10},
-                "model": kw.get("model")}
+                "model": kw.get("model"), "stop_reason": stop_reason}
 
     monkeypatch.setattr(llm_provider, "complete_image", fake)
     return calls
@@ -100,9 +100,11 @@ def _user(roles=("CATALOG_MANAGER",), uid="u1"):
 
 @pytest.fixture(autouse=True)
 def _fresh_rate_bucket():
-    products_mod._colour_suggest_hits.clear()
+    from api.services.cache import cache
+
+    cache.delete_pattern("rl:*")
     yield
-    products_mod._colour_suggest_hits.clear()
+    cache.delete_pattern("rl:*")
 
 
 def _run(body, db, monkeypatch, user=None):
@@ -126,6 +128,7 @@ def test_complete_image_sends_base64_bytes_and_reads_the_text_block(monkeypatch,
             "model": "claude-sonnet-5-5",
             "content": [{"type": "thinking", "thinking": ""}, {"type": "text", "text": "Gold / Green"}],
             "usage": {"input_tokens": 812, "output_tokens": 7},
+            "stop_reason": "end_turn",
         })
 
     real = httpx.AsyncClient
@@ -134,7 +137,8 @@ def test_complete_image_sends_base64_bytes_and_reads_the_text_block(monkeypatch,
     out = asyncio.run(llm_provider.complete_image("sys", "name it", "QUJD", model="claude-sonnet-5-5"))
 
     assert out == {"text": "Gold / Green", "usage": {"input_tokens": 812, "output_tokens": 7},
-                   "model": "claude-sonnet-5-5"}
+                   "model": "claude-sonnet-5-5", "stop_reason": "end_turn"}
+    assert "output_config" not in sent["body"]  # effort only when asked for
     block = sent["body"]["messages"][0]["content"][0]
     assert block == {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": "QUJD"}}
     assert "url" not in json.dumps(sent["body"])
@@ -259,7 +263,7 @@ def test_per_user_rate_limit(monkeypatch, keyed, photo):
     _fake_claude(monkeypatch)
     db = _DB([dict(_SG)])
     body = products_mod.ColourSuggestRequest(product_id="p1")
-    for _ in range(products_mod._COLOUR_SUGGEST_LIMIT):
+    for _ in range(colour_suggest.RATE_LIMIT):
         assert _run(body, db, monkeypatch)["status"] == "SUGGESTED"
     with pytest.raises(HTTPException) as e:
         _run(body, db, monkeypatch)
@@ -269,17 +273,111 @@ def test_per_user_rate_limit(monkeypatch, keyed, photo):
 
 
 def test_rate_limit_window_slides():
-    bucket = {}
-    assert allow(bucket, "k", 2, 60, now=0) and allow(bucket, "k", 2, 60, now=1)
-    assert not allow(bucket, "k", 2, 60, now=2)
-    assert allow(bucket, "k", 2, 60, now=61)
+    assert allow("t:k", 2, 60, now=0) and allow("t:k", 2, 60, now=1)
+    assert not allow("t:k", 2, 60, now=2)
+    assert allow("t:k", 2, 60, now=61)
+
+
+def test_rate_limit_window_lives_in_the_shared_cache():
+    """The window is in the cache seam (Redis on prod), not process memory,
+    so every worker counts against the same cap."""
+    from api.services.cache import cache
+
+    assert allow("t:shared", 5, 60, now=100)
+    assert cache.get("rl:t:shared") == [100]
+    cache.set("rl:t:shared", [100, 101], ttl=60)  # another worker's hits
+    assert not allow("t:shared", 2, 60, now=102)
+
+
+def test_rate_limit_fails_open_when_the_cache_breaks(monkeypatch):
+    from api.services import cache as cache_mod
+
+    def boom(*a, **k):
+        raise RuntimeError("cache down")
+
+    monkeypatch.setattr(cache_mod.cache, "set", boom)
+    assert allow("t:broken", 1, 60) and allow("t:broken", 1, 60)
+
+
+def test_cheap_rejections_do_not_spend_the_paid_call_quota(monkeypatch, photo):
+    """No key / no photo never reaches Anthropic, so it is not charged."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    _fake_claude(monkeypatch)
+    db = _DB([dict(_SG)])
+    body = products_mod.ColourSuggestRequest(product_id="p1")
+    for _ in range(colour_suggest.RATE_LIMIT + 2):
+        assert _run(body, db, monkeypatch)["status"] == "FAILED_NO_KEY"
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    for _ in range(colour_suggest.RATE_LIMIT + 2):
+        assert _run(body, _DB([dict(_SG, images=[])]), monkeypatch)["status"] == "NO_PHOTO"
+    assert _run(body, db, monkeypatch)["status"] == "SUGGESTED"
+
+
+def test_truncated_reply_is_not_a_suggestion_but_its_cost_is_logged(monkeypatch, keyed, photo):
+    _fake_claude(monkeypatch, text="Gold / Gr", stop_reason="max_tokens")
+    db = _DB([dict(_SG)])
+    out = _run(products_mod.ColourSuggestRequest(product_id="p1"), db, monkeypatch)
+    assert out["status"] == "FAILED_GENERATION" and out["suggestion"] == ""
+    rows = list(db.cols["ai_usage_log"].find({}))
+    assert len(rows) == 1 and rows[0]["stop_reason"] == "max_tokens"
+
+
+def test_refused_reply_is_not_a_suggestion(monkeypatch, keyed, photo):
+    _fake_claude(monkeypatch, text="Sorry, no", stop_reason="refusal")
+    out = _run(products_mod.ColourSuggestRequest(product_id="p1"), _DB([dict(_SG)]), monkeypatch)
+    assert out["status"] == "FAILED_GENERATION"
+
+
+def test_over_long_reply_is_not_cut_mid_word(monkeypatch, keyed, photo):
+    _fake_claude(monkeypatch, text="Matte Transparent Crystal Grey / Smoke Gradient Mirror")
+    out = _run(products_mod.ColourSuggestRequest(product_id="p1"), _DB([dict(_SG)]), monkeypatch)
+    assert out["status"] == "FAILED_GENERATION"
+
+
+def test_effort_is_sent_only_for_known_models(monkeypatch, keyed, photo):
+    calls = _fake_claude(monkeypatch)
+    _run(products_mod.ColourSuggestRequest(product_id="p1"), _DB([dict(_SG)]), monkeypatch)
+    monkeypatch.setenv("CATALOG_VISION_MODEL", "claude-old-model")
+    _run(products_mod.ColourSuggestRequest(product_id="p1"), _DB([dict(_SG)]), monkeypatch)
+    assert calls[0]["effort"] == "low"
+    assert calls[1]["effort"] is None
+
+
+def test_any_photo_the_product_holds_is_read_as_stored(monkeypatch, keyed, photo):
+    """The form reordered photos (photo 2 is now first, not yet saved): a
+    URL the product already holds is read like any stored photo."""
+    _fake_claude(monkeypatch)
+    stored = dict(_SG, images=["/api/v1/products/image/first", "https://cdn.example/rehosted/abc123"])
+    body = products_mod.ColourSuggestRequest(product_id="p1", image_url="https://cdn.example/rehosted/abc123")
+    out = _run(body, _DB([stored]), monkeypatch)
+    assert out["status"] == "SUGGESTED"
+    assert photo == [("fetch", "https://cdn.example/rehosted/abc123")]
+
+
+def test_review_screen_reads_the_catalog_drafts_photo_as_stored(monkeypatch, keyed, photo):
+    _fake_claude(monkeypatch)
+    from api.routers import catalog as catalog_mod
+
+    draft = {"id": "cat-9", "category": "SUNGLASS", "attributes": {"brand_name": "Ray-Ban"},
+             "images": ["https://cdn.shopify.example/abc123"]}
+    monkeypatch.setattr(catalog_mod, "_get_catalog_product", lambda cid: draft if cid == "cat-9" else None)
+    body = products_mod.ColourSuggestRequest(catalog_id="cat-9", image_url="https://cdn.shopify.example/abc123")
+    db = _DB()
+    out = _run(body, db, monkeypatch)
+    assert out["status"] == "SUGGESTED"
+    assert photo == [("fetch", "https://cdn.shopify.example/abc123")]
+    assert list(db.cols["ai_usage_log"].find({}))[0]["product_id"] == "cat-9"
+    with pytest.raises(HTTPException) as e:
+        _run(products_mod.ColourSuggestRequest(catalog_id="nope"), db, monkeypatch)
+    assert e.value.status_code == 404
 
 
 def test_clean_name():
     assert colour_suggest.clean_name("Colour name: Havana / Brown Gradient.") == "Havana / Brown Gradient"
     assert colour_suggest.clean_name("  \n'Black / Grey'\nmore") == "Black / Grey"
     assert colour_suggest.clean_name("") == ""
-    assert len(colour_suggest.clean_name("x" * 99)) == colour_suggest.MAX_LEN
+    assert colour_suggest.clean_name("x" * 99) == ""
+    assert colour_suggest.clean_name("x" * colour_suggest.MAX_LEN) == "x" * colour_suggest.MAX_LEN
 
 
 def test_rbac_row_catalogued():
@@ -315,6 +413,13 @@ def test_eyewear_colour_name_is_not_labelled_lens_colour():
 def test_contact_lens_colour_name_keeps_its_lens_colour_row():
     html = pd.build_shopify_description_html(
         "Colour Contact Lens", {"brand_name": "Bausch", "model_name": "Lacelle", "colour_name": "Hazel"}, "p")
+    assert "<td>Lens Colour</td>\n<td>Hazel</td>" in html
+
+
+def test_contact_lens_is_decided_by_the_category_rule_not_the_label_text():
+    """The canonical key (no 'contact lens' words in it) still keeps the row."""
+    html = pd.build_shopify_description_html(
+        "COLORED_CONTACT_LENS", {"brand_name": "Bausch", "model_name": "Lacelle", "colour_name": "Hazel"}, "p")
     assert "<td>Lens Colour</td>\n<td>Hazel</td>" in html
 
 

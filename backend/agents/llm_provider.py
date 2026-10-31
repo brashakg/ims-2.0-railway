@@ -359,12 +359,14 @@ async def complete_image(
     media_type: str = "image/jpeg",
     max_tokens: int = 1024,
     timeout: float = 60.0,
+    effort: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """One Claude call over ONE image sent as base64 bytes (never a URL --
     the IMS image URL is closed to outside fetchers). Uses the configured
     Anthropic key (Settings -> Integrations, then ANTHROPIC_API_KEY) with the
-    caller's ``model``. Returns {"text", "usage", "model"} or None on no key
-    / any failure (logged, never raised)."""
+    caller's ``model``. ``effort`` is sent only when given (older models
+    reject it). Returns {"text", "usage", "model", "stop_reason"} or None on
+    no key / any failure (logged, never raised)."""
     m = _registry().get("claude")
     if not m:
         return None
@@ -372,8 +374,6 @@ async def complete_image(
         "model": model,
         "max_tokens": max_tokens,
         "system": system,
-        # A short naming job: little thinking needed.
-        "output_config": {"effort": "low"},
         "messages": [
             {
                 "role": "user",
@@ -384,6 +384,8 @@ async def complete_image(
             }
         ],
     }
+    if effort:
+        payload["output_config"] = {"effort": effort}
     try:
         body = await _post_anthropic(m, payload, timeout)
     except httpx.HTTPError as e:
@@ -396,7 +398,8 @@ async def complete_image(
         (b.get("text") for b in body.get("content") or [] if isinstance(b, dict) and b.get("type") == "text"),
         None,
     )
-    return {"text": text, "usage": body.get("usage") or {}, "model": body.get("model") or model}
+    return {"text": text, "usage": body.get("usage") or {}, "model": body.get("model") or model,
+            "stop_reason": body.get("stop_reason")}
 
 
 async def _call_openai_compat(system, user, m, history, max_tokens, timeout) -> Optional[str]:

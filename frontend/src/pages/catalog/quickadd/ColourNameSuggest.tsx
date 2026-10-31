@@ -5,47 +5,74 @@
 // the normal Save stores it as attributes.colour_name - the name the website
 // colour option is built from. Nothing is written by Suggest itself.
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Loader2, Sparkles } from 'lucide-react';
 import { useToast } from '../../../context/ToastContext';
+import { FE_CODE_TO_CANONICAL } from '../../../domain/catalog/productAdd/categoryFields';
 import { productApi } from '../../../services/api/products';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
-/** Eyewear-like categories that carry a frame / lens colour name. Contact
- *  lenses already have their own Colour Name field. */
-export const COLOUR_NAME_CATEGORIES = new Set(['SG', 'FR', 'RG', 'SMTFR']);
+/** Registry categories whose colour name is the frame / lens retail name.
+ *  Not a grid field on these (the grid order is owner-locked); contact
+ *  lenses keep their own Colour Name field in the grid. */
+export const COLOUR_NAME_CANONICALS: ReadonlySet<string> = new Set([
+  'FRAME', 'SUNGLASS', 'READING_GLASSES', 'SMARTGLASSES',
+]);
+
+export const hasColourNameSuggest = (code: string): boolean =>
+  COLOUR_NAME_CANONICALS.has(FE_CODE_TO_CANONICAL[code] ?? '');
+
+const FALLBACK = 'Could not suggest a colour name - please try again.';
 
 interface Props {
   category: string;
   attributes: Record<string, string>;
   value: string;
   onChange: (value: string) => void;
-  /** The saved product when editing; null on Add product. */
+  /** The saved product when editing; null otherwise. */
   productId: string | null;
+  /** The catalog draft being reviewed; null otherwise. */
+  catalogId?: string | null;
   /** The form's photo 1 (may be unsaved). */
   photo: string | null;
+  /** The grid's input classes (caps entry, amber flag). */
+  inputClassName: string;
 }
 
-export function ColourNameSuggest({ category, attributes, value, onChange, productId, photo }: Props) {
+export function ColourNameSuggest({
+  category, attributes, value, onChange, productId, catalogId = null, photo, inputClassName,
+}: Props) {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
-  const [suggestion, setSuggestion] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
+  // A suggestion belongs to the product + photo it was read from. One for
+  // anything else (the form moved on while the call was out) is never shown.
+  const subject = `${productId ?? ''}|${catalogId ?? ''}|${photo ?? ''}`;
+  const [result, setResult] = useState<{ subject: string; name: string } | null>(null);
+  const suggestion = result?.subject === subject ? result.name : '';
+  const subjectRef = useRef(subject);
+  useEffect(() => {
+    subjectRef.current = subject;
+  }, [subject]);
 
   const suggest = async () => {
     if (busy || !photo) return;
+    const asked = subject;
     setBusy(true);
-    setSuggestion('');
+    setResult(null);
     try {
       const res = await productApi.suggestColourName({
         ...(productId ? { product_id: productId } : {}),
+        ...(catalogId ? { catalog_id: catalogId } : {}),
         image_url: photo,
         category,
         attributes,
       });
-      if (res?.status === 'SUGGESTED' && res.suggestion) setSuggestion(res.suggestion);
-      else toast.error(res?.message || 'Could not suggest a colour name - please try again.');
+      if (subjectRef.current !== asked) return;
+      if (res?.status === 'SUGGESTED' && res.suggestion) setResult({ subject: asked, name: res.suggestion });
+      else toast.error(res?.message || FALLBACK);
     } catch (err) {
-      toast.error(err instanceof Error && err.message ? err.message : 'Could not suggest a colour name - please try again.');
+      if (subjectRef.current === asked) toast.error(getErrorMessage(err, FALLBACK));
     } finally {
       setBusy(false);
     }
@@ -53,7 +80,7 @@ export function ColourNameSuggest({ category, attributes, value, onChange, produ
 
   const take = (edit: boolean) => {
     onChange(suggestion);
-    setSuggestion('');
+    setResult(null);
     if (edit) inputRef.current?.focus();
   };
 
@@ -82,7 +109,7 @@ export function ColourNameSuggest({ category, attributes, value, onChange, produ
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder="e.g. Gold / Green"
-        className="input-field w-full"
+        className={inputClassName}
       />
       {suggestion && (
         <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-700" data-testid="qa-colour-suggestion">

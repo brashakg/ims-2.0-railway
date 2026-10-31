@@ -20,14 +20,12 @@ from datetime import datetime, date, timedelta
 import re
 import uuid
 import logging
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
 
 # Simple per-user notification rate limiter: max 20 sends per 10 minutes
-_notification_rate: dict = defaultdict(list)
 _NOTIFICATION_LIMIT = 20
 _NOTIFICATION_WINDOW = 600  # 10 minutes
 
@@ -36,7 +34,7 @@ def _check_notification_rate(user_id: str) -> Optional[str]:
     """Returns error message if rate-limited, None if OK."""
     from ..utils.rate_limit import allow
 
-    if not allow(_notification_rate, user_id, _NOTIFICATION_LIMIT, _NOTIFICATION_WINDOW):
+    if not allow(f"notify:{user_id}", _NOTIFICATION_LIMIT, _NOTIFICATION_WINDOW):
         return f"Rate limit exceeded: max {_NOTIFICATION_LIMIT} notifications per {_NOTIFICATION_WINDOW // 60} minutes."
     return None
 

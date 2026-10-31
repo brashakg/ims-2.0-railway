@@ -668,14 +668,16 @@ export const productApi = {
   },
 
   // Suggested colour name from photo 1 (never writes; Accept saves it through
-  // the normal product save). A vision round-trip can exceed the 10s default.
+  // the normal product save). A vision round-trip can exceed the 10s default;
+  // the browser waits longer than the server's 60s model timeout.
   suggestColourName: async (payload: {
     product_id?: string;
+    catalog_id?: string;
     image_url?: string;
     category?: string;
     attributes?: Record<string, string>;
   }): Promise<SuggestColourNameResponse> => {
-    const response = await api.post('/products/suggest-colour-name', payload, { timeout: 60000 });
+    const response = await api.post('/products/suggest-colour-name', payload, { timeout: 90000 });
     return response.data as SuggestColourNameResponse;
   },
 
@@ -735,15 +737,16 @@ export const productApi = {
 
 };
 
-// Response of POST /products/generate-description. `description` is present
-// when status === 'GENERATED'; `message` (when present) is an operator-facing
-// explanation for non-generated statuses.
+// Response of POST /products/suggest-colour-name (`message` explains a non-SUGGESTED status).
 export interface SuggestColourNameResponse {
   status: 'SUGGESTED' | 'NO_PHOTO' | 'FAILED_NO_KEY' | 'FAILED_GENERATION';
   suggestion: string;
   message?: string;
 }
 
+// Response of POST /products/generate-description. `description` is present
+// when status === 'GENERATED'; `message` (when present) is an operator-facing
+// explanation for non-generated statuses.
 export interface GenerateDescriptionResponse {
   description?: string;
   status: string;
