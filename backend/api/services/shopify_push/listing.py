@@ -483,21 +483,22 @@ def first_publish_not_ready(db, product: Dict[str, Any]) -> Optional[str]:
     """Why this listing (a model's lead or a single product) may not go on the
     website for the FIRST time, or None -- the SAME rule a colour joining a
     listing is held to (_not_ready). A listing already on Shopify keeps
-    syncing whatever its state (it is taken down by its own door). Raises on
-    a read failure."""
+    syncing whatever its state (it is taken down by its own door) -- except
+    an ARCHIVED one, which its caller product_push_refusal refuses first,
+    listed or not (Website 2). Raises on a read failure."""
     if (product.get("ecom") or {}).get("shopify_product_id"):
         return None
     from .. import product_master as pm
 
-    if pm._is_archived(product):
-        return "archived"
+    # (An archived product itself never gets here: product_push_refusal
+    # refuses it first, listed or not.)
     # A caller holding the product row itself (product_id, no twin id) asks
     # about it directly; a catalogue twin reads its product.
     is_spine = bool(product.get("product_id")) and not product.get("id")
     spine = product if is_spine else lead_spine(db, product)
     if spine is None:
         # No product row (none on prod, 2026-10-19): the twin is judged as
-        # before this gate -- its archived check above.
+        # before this gate -- the archived check in product_push_refusal.
         return None
     return _not_ready(pm, spine, None if is_spine else product)
 

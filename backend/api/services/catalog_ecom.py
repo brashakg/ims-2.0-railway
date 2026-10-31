@@ -41,6 +41,31 @@ def dirty_marks() -> Dict[str, Any]:
     return {"locally_modified": True, EDIT_REV: new_edit_rev()}
 
 
+def is_archived(doc: Optional[Dict[str, Any]]) -> bool:
+    """THE archived rule (product_master._is_archived is this): soft-deleted,
+    ``deleted_at`` set by the archive door."""
+    return bool((doc or {}).get("deleted_at"))
+
+
+def queue_marks(doc: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """dirty_marks() for a row that may enter the push queue; {} for an
+    ARCHIVED one (Website 2): a push sends every status but ARCHIVED as
+    ACTIVE, so queuing it would put it back on sale. Every door that queues
+    an existing row asks this; the product gate (product_push_refusal) and
+    the sweep selector stay as the backstop."""
+    return {} if is_archived(doc) else dirty_marks()
+
+
+def queue_in(coll, product_id: str) -> bool:
+    """Put an existing row on the push queue (compare-and-set, queue_marks):
+    never an archived one. True when queued. Raises only what the database
+    raises."""
+    doc = coll.find_one({"id": product_id}) if product_id else None
+    if not queue_marks(doc):
+        return False
+    return update_ecom_in(coll, product_id, lambda ecom: {**ecom, **dirty_marks()}) is not None
+
+
 def update_ecom(
     db,
     product_id: str,

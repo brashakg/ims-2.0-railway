@@ -1360,7 +1360,14 @@ def _mark_online_dirty(product: Dict) -> None:
     would stay blind. Queuing is not yet publishing: the next press or the
     scheduled sync sends it (a FIRST publish too, owner ruling 2026-10-20),
     through the product gate, and only a SUCCESSFUL Shopify write clears the
-    flag again (shopify_push._writeback_product)."""
+    flag again (shopify_push._writeback_product).
+
+    Never an ARCHIVED product (catalog_ecom.queue_marks, Website 2)."""
+    from api.services.catalog_ecom import queue_marks
+
+    marks = queue_marks(product)
+    if not marks:
+        return
     ecom = product.get("ecom")
     if not isinstance(ecom, dict):
         ecom = {}
@@ -1374,9 +1381,7 @@ def _mark_online_dirty(product: Dict) -> None:
     ecom.setdefault("status", "DRAFT")
     # Flag + a fresh edit revision (SF-04): a push already holding the older
     # payload can then never take this edit off the queue.
-    from api.services.catalog_ecom import dirty_marks
-
-    ecom.update(dirty_marks())
+    ecom.update(marks)
 
 
 # The ecom keys a catalogue edit OWNS (review of PR #1227). Everything else
@@ -3631,15 +3636,14 @@ async def _archive_product(
         # on the storefront. Removing a live listing has its own path
         # (shopify_push.push_product_delist).
         _save_catalog_product(product, mark_dirty=False)
-        # NEVER PUBLISHED -> OUT OF THE WEBSITE QUEUE (owner 2026-10-29): an
-        # archived product is never first-published (listing.
-        # first_publish_not_ready), so a queued one only printed a red
-        # "archived -- stays queued" line on every sync. The edit_rev rule
-        # (catalog_ecom.unqueue_in). A listing on the website is left to the
-        # take-down below, whose write-back owns its flag.
+        # OUT OF THE WEBSITE QUEUE (owner 2026-10-29; Website 2 for a listing
+        # on the website): an archived product is never pushed (shopify_push.
+        # product_push_refusal), so a queued one was only counted as skipped
+        # on every sync. The edit_rev rule (catalog_ecom.unqueue_in). Taking a
+        # listing down is the take-down below, which needs no flag.
         ecom = product.get("ecom") or {}
         coll = _catalog_coll()
-        if coll is not None and ecom.get("locally_modified") and not ecom.get("shopify_product_id"):
+        if coll is not None and ecom.get("locally_modified"):
             from api.services.catalog_ecom import EDIT_REV, unqueue_in
 
             unqueue_in(coll, product["id"], ecom.get(EDIT_REV))
