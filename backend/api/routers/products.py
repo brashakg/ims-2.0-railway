@@ -2183,6 +2183,64 @@ async def generate_product_description(
     }
 
 
+class ColourSuggestRequest(BaseModel):
+    """Edit screen: the saved product (`product_id`). Add product (nothing
+    saved yet): the form's photo 1 (`image_url`, an IMS-uploaded photo).
+    Both send the form's photo 1, so a photo changed but not yet saved is
+    the one read."""
+
+    product_id: Optional[str] = None
+    image_url: Optional[str] = None
+    # Add product only: what is typed so far (brand, model, polarization).
+    category: Optional[str] = None
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+
+
+# Per-user cap on the paid photo read (each call is an Anthropic API call).
+_COLOUR_SUGGEST_LIMIT = 30
+_COLOUR_SUGGEST_WINDOW_S = 600
+_colour_suggest_hits: Dict[str, List[float]] = {}
+
+
+@router.post("/suggest-colour-name")
+async def suggest_colour_name(
+    body: ColourSuggestRequest,
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+):
+    """Suggest a colour name from the product's OWN photo 1 (owner
+    2026-10-23). Returns the suggestion only -- never writes; Accept on the
+    form saves it through the normal product save. 200 with a `status`
+    (SUGGESTED / NO_PHOTO / FAILED_NO_KEY / FAILED_GENERATION) and a plain
+    `message`; 404 unknown product; 429 over the per-user cap."""
+    from ..services.colour_suggest import suggest_colour_name as _suggest
+    from ..utils.rate_limit import allow
+
+    if not body.product_id and not (body.image_url or "").strip():
+        raise HTTPException(status_code=422, detail="Send the product or its photo.")
+    uid = str(current_user.get("user_id") or current_user.get("username") or "unknown")
+    if not allow(_colour_suggest_hits, uid, _COLOUR_SUGGEST_LIMIT, _COLOUR_SUGGEST_WINDOW_S):
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many colour suggestions - at most {_COLOUR_SUGGEST_LIMIT} every "
+            f"{_COLOUR_SUGGEST_WINDOW_S // 60} minutes. Try again shortly.",
+        )
+    product = None
+    conn = None
+    if body.product_id:
+        conn = _family_db_or_503()
+        product = conn.get_collection("products").find_one({"product_id": body.product_id})
+        if product is None:
+            raise HTTPException(status_code=404, detail="Product not found")
+        image_url = body.image_url
+    else:
+        from ..dependencies import get_db as _gdb
+
+        conn = _gdb()
+        product = {"category": body.category, "attributes": body.attributes or {}}
+        image_url = body.image_url
+    return await _suggest(product=product, image_url=image_url, user_id=uid, db=conn)
+
+
 @router.get("/categories/list")
 async def list_categories(current_user: dict = Depends(get_current_user)):
     """List all product categories"""

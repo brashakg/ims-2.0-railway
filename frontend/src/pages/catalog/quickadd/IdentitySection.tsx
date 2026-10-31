@@ -29,6 +29,7 @@ import {
   type CategoryField,
 } from '../productAddShared';
 import { SimilarProductsHint } from '../SimilarProductsHint';
+import { COLOUR_NAME_CATEGORIES, ColourNameSuggest } from './ColourNameSuggest';
 import { ConfirmChip, LockChip, Section } from './parts';
 import { specKey } from './formHelpers';
 import type { QuickAddForm } from './useQuickAddForm';
@@ -43,7 +44,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
     setShowAdvanced, openSections, toggleSection, liveErrors, sectionIssues,
     firstFieldRef, editMode, isReviewMode, variantCtx, flaggedFields, clearFlag,
     reviewSnapshot, handleSimilarPick, handleSimilarOpen, handleFamilyFound, setHintBrandInModel,
-    copyFromLastFields, copyFromLast, lastSaved,
+    copyFromLastFields, copyFromLast, lastSaved, images,
   } = form;
   // "Auto-fill with AI" (description) round-trip in flight.
   const [generatingDesc, setGeneratingDesc] = useState(false);
@@ -495,6 +496,19 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
                 still get the inline Weight input at the end. */}
             {isEyewear && !visibleFields.some((f) => f.name === 'warranty') && renderWeightInput()}
           </div>
+
+          {/* Colour name + Suggest from photo 1 (owner 2026-10-23). Outside
+              the owner-locked grid; saved as attributes.colour_name. */}
+          {COLOUR_NAME_CATEGORIES.has(selectedCategory) && (
+            <ColourNameSuggest
+              category={selectedCategory}
+              attributes={attributes}
+              value={attributes.colour_name || ''}
+              onChange={(v) => setAttr('colour_name', v)}
+              productId={editMode?.kind === 'spine' ? editMode.id : null}
+              photo={images[0] || null}
+            />
+          )}
 
           {/* Lenses: route power entry to the Power Grid */}
           {isLens && (

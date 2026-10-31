@@ -492,9 +492,9 @@ async def fetch_images(rows: List[Dict]) -> Dict[int, bytes]:
     return out
 
 
-def _prepare_image(raw: bytes) -> Optional[Tuple[io.BytesIO, int, int]]:
+def _prepare_image(raw: bytes, max_edge: int = _IMG_MAX_EDGE) -> Optional[Tuple[io.BytesIO, int, int]]:
     """Normalise raw image bytes -> (JPEG BytesIO, width, height) via Pillow:
-    any format decoded, RGBA/P flattened on white, downscaled to _IMG_MAX_EDGE.
+    any format decoded, RGBA/P flattened on white, downscaled to ``max_edge``.
     Fail-soft -> None (renderer draws a placeholder)."""
     try:
         from PIL import Image as PILImage
@@ -508,7 +508,7 @@ def _prepare_image(raw: bytes) -> Optional[Tuple[io.BytesIO, int, int]]:
             im = bg
         else:
             im = im.convert("RGB")
-        im.thumbnail((_IMG_MAX_EDGE, _IMG_MAX_EDGE))
+        im.thumbnail((max_edge, max_edge))
         buf = io.BytesIO()
         im.save(buf, format="JPEG", quality=82)
         buf.seek(0)

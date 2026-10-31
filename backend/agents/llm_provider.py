@@ -325,6 +325,18 @@ async def _call_anthropic(system, user, m, history, max_tokens, timeout) -> Opti
         messages.extend(history[-8:])
     messages.append({"role": "user", "content": user})
     payload = {"model": m["model"], "max_tokens": max_tokens, "system": system, "messages": messages}
+    body = await _post_anthropic(m, payload, timeout)
+    if body is None:
+        return None
+    content = (body.get("content") or [])
+    if content and isinstance(content, list) and isinstance(content[0], dict):
+        return content[0].get("text")
+    return None
+
+
+async def _post_anthropic(m, payload, timeout) -> Optional[Dict[str, Any]]:
+    """THE one POST to the Anthropic Messages API: the parsed body, or None
+    on a non-200 (logged). Network errors propagate to the caller."""
     headers = {
         "x-api-key": m["api_key"],
         "anthropic-version": "2023-06-01",
@@ -335,10 +347,56 @@ async def _call_anthropic(system, user, m, history, max_tokens, timeout) -> Opti
     if resp.status_code != 200:
         logger.warning("[LLM] anthropic %s: %s", resp.status_code, resp.text[:300])
         return None
-    content = (resp.json().get("content") or [])
-    if content and isinstance(content, list) and isinstance(content[0], dict):
-        return content[0].get("text")
-    return None
+    return resp.json()
+
+
+async def complete_image(
+    system: str,
+    prompt: str,
+    image_b64: str,
+    *,
+    model: str,
+    media_type: str = "image/jpeg",
+    max_tokens: int = 1024,
+    timeout: float = 60.0,
+) -> Optional[Dict[str, Any]]:
+    """One Claude call over ONE image sent as base64 bytes (never a URL --
+    the IMS image URL is closed to outside fetchers). Uses the configured
+    Anthropic key (Settings -> Integrations, then ANTHROPIC_API_KEY) with the
+    caller's ``model``. Returns {"text", "usage", "model"} or None on no key
+    / any failure (logged, never raised)."""
+    m = _registry().get("claude")
+    if not m:
+        return None
+    payload = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "system": system,
+        # A short naming job: little thinking needed.
+        "output_config": {"effort": "low"},
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": image_b64}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ],
+    }
+    try:
+        body = await _post_anthropic(m, payload, timeout)
+    except httpx.HTTPError as e:
+        logger.warning("[LLM] anthropic image call failed: %s", e)
+        return None
+    if not body:
+        return None
+    # Thinking blocks may come first: take the first TEXT block.
+    text = next(
+        (b.get("text") for b in body.get("content") or [] if isinstance(b, dict) and b.get("type") == "text"),
+        None,
+    )
+    return {"text": text, "usage": body.get("usage") or {}, "model": body.get("model") or model}
 
 
 async def _call_openai_compat(system, user, m, history, max_tokens, timeout) -> Optional[str]:

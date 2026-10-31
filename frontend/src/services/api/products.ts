@@ -667,6 +667,18 @@ export const productApi = {
     return response.data as GenerateDescriptionResponse;
   },
 
+  // Suggested colour name from photo 1 (never writes; Accept saves it through
+  // the normal product save). A vision round-trip can exceed the 10s default.
+  suggestColourName: async (payload: {
+    product_id?: string;
+    image_url?: string;
+    category?: string;
+    attributes?: Record<string, string>;
+  }): Promise<SuggestColourNameResponse> => {
+    const response = await api.post('/products/suggest-colour-name', payload, { timeout: 60000 });
+    return response.data as SuggestColourNameResponse;
+  },
+
   // Upload a single product image (multipart). Persists the bytes durably on the
   // backend (GridFS) and returns a stable, self-hosted URL to embed in the
   // product `images` array. Import this DIRECTLY from this module (not the api
@@ -726,6 +738,12 @@ export const productApi = {
 // Response of POST /products/generate-description. `description` is present
 // when status === 'GENERATED'; `message` (when present) is an operator-facing
 // explanation for non-generated statuses.
+export interface SuggestColourNameResponse {
+  status: 'SUGGESTED' | 'NO_PHOTO' | 'FAILED_NO_KEY' | 'FAILED_GENERATION';
+  suggestion: string;
+  message?: string;
+}
+
 export interface GenerateDescriptionResponse {
   description?: string;
   status: string;

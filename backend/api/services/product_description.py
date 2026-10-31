@@ -135,6 +135,10 @@ def _rows_for(
     rows: List[Tuple[str, str]] = []
     seen_labels = set()
     for key, label in spec_map:
+        # colour_name is the LENS colour only on a contact lens; on eyewear it
+        # is the whole retail name ('Gold / Green'), never a spec row.
+        if key == "colour_name" and "contact lens" not in str(category_name).lower():
+            continue
         value = category_name if key == "_category" else attrs.get(key)
         if key == "model_no" and value:
             value = model_number_line({"attributes": attrs}) or value
