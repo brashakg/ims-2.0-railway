@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 864 |
-| **Total `/api/v1` (method x path)** | **1304** |
+| Role-gated (one or more roles) | 866 |
+| **Total `/api/v1` (method x path)** | **1306** |
 | ...of which `store_scoped` | 235 |
 | ...of which `self_enforced` | 47 |
 
