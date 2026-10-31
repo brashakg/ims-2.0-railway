@@ -45,6 +45,11 @@ class ShopifyRequestRefused(ValueError):
     read-back and the fence an UNCERTAIN failure needs (audit SF01)."""
 
 
+class ShopifyThrottled(ShopifyRequestRefused):
+    """Every attempt got 429: not applied, but Shopify was only busy -- the
+    next run can succeed, unlike a 4xx refusal (review of #1277)."""
+
+
 class ShopifyOutcomeUnknown(ValueError):
     """A CREATE mutation was sent and Shopify's answer never arrived (a read
     timeout, a 5xx, a dropped connection): it may or may not have made the
@@ -230,7 +235,7 @@ async def _graphql(db, query: str, variables: Dict[str, Any]) -> Dict[str, Any]:
             last_error = f"status {status}: {resp.text[:200]}"
             uncertain = uncertain or status >= 500
             if attempt >= _MAX_RETRIES:
-                raise (ValueError if uncertain else ShopifyRequestRefused)(
+                raise (ValueError if uncertain else ShopifyThrottled)(
                     f"shopify request failed after {attempt} attempts ({last_error})"
                 )
             logger.warning(

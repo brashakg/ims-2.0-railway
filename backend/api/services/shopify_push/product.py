@@ -148,8 +148,8 @@ async def push_product(
             target_id=pid,
             ok=False,
             error=(
-                f"size variant of {parent}: its price, barcode and stock ride "
-                "the parent's listing -- push the parent"
+                f"This is a size of {parent}: it is sold on {parent}'s website page, "
+                f"not a page of its own. Send {parent} to the website instead."
             ),
             reason="variant_of",
         )
@@ -227,8 +227,8 @@ async def push_product(
             target_id=pid,
             ok=False,
             error=(
-                f"variant of {listing['variant_of']}: its price, barcode and stock ride "
-                "its model's listing -- push the model"
+                "This is a colour/size of another model: it is sold on that model's "
+                "website page, not a page of its own. Send the model to the website instead."
             ),
             reason="variant_of",
         )
@@ -298,8 +298,7 @@ async def push_product(
     # _needs_repair is ROW-aware so a partially-harvested product keeps
     # getting a chance to finish, and build_repair_seed_rows/repair_only=True
     # keep an already-seeded row from ever being re-touched by the repair).
-    full_reseed = action == "create" or price_on_update_enabled()
-    repair_only = (not full_reseed) and _needs_repair(product, variants)
+    full_reseed, repair_only = seed_scope(product, variants)
     # The rows already on Shopify as the press starts (a repair press re-sends
     # only THEIR price -- see the price step).
     pre_seeded = {id(v) for v in variants if _row_has_gid(v, ecom)}
@@ -315,13 +314,7 @@ async def push_product(
     # A LIVE model listing: a colour at fault was already held back by
     # model_listing (review of #1233 -- one bad colour never freezes a live
     # listing), so only the variants this press SEEDS are asked here.
-    seed_targets = variants
-    if listing is not None and existing_gid:
-        seed_targets = [
-            v for v in variants
-            if not v.get(HELD) and (full_reseed or not _row_has_gid(v, ecom))
-        ]
-    unpriced = unpriced_size_names(product, seed_targets) if (full_reseed or repair_only) else []
+    unpriced = press_unpriced_sizes(product, variants, listing)
     if unpriced:
         return PushResult(
             mode=MODE_BLOCKED,
@@ -1058,6 +1051,32 @@ async def push_product(
         )
 
 
+def seed_scope(product: Dict[str, Any], variants: List[Dict[str, Any]]) -> tuple:
+    """(full_reseed, repair_only) for a press of this listing view: a create
+    or an opted-in update touches EVERY row; otherwise only a never-seeded
+    row is repaired."""
+    full = not (product.get("ecom") or {}).get("shopify_product_id") or price_on_update_enabled()
+    return full, (not full) and _needs_repair(product, variants)
+
+
+def press_unpriced_sizes(
+    product: Dict[str, Any], variants: List[Dict[str, Any]], listing: Optional[Dict[str, Any]]
+) -> List[str]:
+    """THE seeding price gate (audit SF-05): the sizes a press of this listing
+    view would seed with no selling price. push_product refuses on it and the
+    sync screen's diagnostics ask it -- one rule (review of #1275). A LIVE
+    model listing asks only the variants this press seeds (a colour at fault
+    was already held back by model_listing)."""
+    full, repair = seed_scope(product, variants)
+    if not (full or repair):
+        return []
+    ecom = product.get("ecom") or {}
+    targets = variants
+    if listing is not None and ecom.get("shopify_product_id"):
+        targets = [v for v in variants if not v.get(HELD) and (full or not _row_has_gid(v, ecom))]
+    return unpriced_size_names(product, targets)
+
+
 def _photo_error_is_transient(summary: Dict[str, Any]) -> bool:
     """A photo error worth waiting for: Shopify still processing the photo
     (VARIANT_PHOTOS_PENDING / NON_READY_MEDIA) or no answer at all."""
@@ -1185,8 +1204,8 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
             ok=True,
             reason="variant_of",
             error=(
-                "size variant rides the parent's listing -- deactivate the "
-                "product to stop selling this size, or take down the parent"
+                "This size is sold on its parent's website page: deactivate this product "
+                "to stop selling the size, or take the parent off the website."
             ),
         )
     if not existing_gid:

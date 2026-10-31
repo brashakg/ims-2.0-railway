@@ -154,6 +154,9 @@ describe('sync diagnostics use matching units and real fields', () => {
     } });
     render(<OnlineShopifySyncPage />);
     expect(await screen.findByText(/5 of 5 colours.sizes online/)).toBeTruthy();
+    // ...but Refresh stays disabled: a second press would start another slow
+    // Shopify read over the one still running (review of #1275).
+    expect((screen.getByRole('button', { name: /Refresh/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('keeps the raw counts, the denominator and why a page was not compared', async () => {

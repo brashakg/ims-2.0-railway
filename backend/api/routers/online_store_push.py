@@ -708,6 +708,11 @@ async def push_all_pending(
             omitted = shopify_push.missing_option_holds(data.get("listing"))
             if omitted:
                 bucket["variants_held"] = bucket.get("variants_held", 0) + len(omitted)
+            # A colour/size held for a catalogue reason (no price, looks the
+            # same as another, options unknown): its own line, whatever code
+            # wins the press (reviews of #1276 and #1295).
+            if shopify_push.catalogue_holds(data):
+                bucket["catalogue_held"] = bucket.get("catalogue_held", 0) + 1
             if shopify_push.only_missing_options(data):
                 pass
             elif data.get("code") == shopify_push.PRICE_NOT_SYNCED:
@@ -717,6 +722,8 @@ async def push_all_pending(
                 bucket["price_not_synced"] = bucket.get("price_not_synced", 0) + 1
             elif data.get("code") in (shopify_push.PHOTOS_NOT_SYNCED, shopify_push.PHOTOS_SYNC_FAILED):
                 pass  # Counted above, including when another code takes priority.
+            elif shopify_push.held_for_catalogue(data):
+                pass  # Counted above; a held code is never "NO stock written".
             elif data.get("code"):
                 # ANY OTHER code on an ok push is the STOCK pass not being
                 # clean (STORE_UNMAPPED, SHOPIFY_LOCATION_*, STOCK_*). Without

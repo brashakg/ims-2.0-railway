@@ -281,6 +281,18 @@ def test_a_preview_run_says_would_be_published_and_names_the_unchecked(happy, mo
     assert "It was a preview run" in line
 
 
+def test_a_run_with_failed_photos_says_so_and_is_amber(happy, monkeypatch):
+    """Review of #1277: photos that failed were missing from the card."""
+    monkeypatch.setattr(live_sync, "last_run", lambda db, trigger=None: {
+        "status": "done", "mode": "LIVE", "finished_at": "2026-10-18T03:30:00+00:00",
+        "pushed_ok": 4, "first_published": 0, "failed": 0, "photos_failed": 3,
+        "awaiting_first_publish": 0, "stock": {"ok": True},
+    })
+    level, line = _items(happy)["Last scheduled sync"]
+    assert "0 failed, 3 with photos FAILED;" in line, line
+    assert level == "warn"
+
+
 def test_the_sync_line_reads_the_scheduled_runs(happy, monkeypatch):
     seen = []
     monkeypatch.setattr(live_sync, "last_run", lambda db, trigger=None: seen.append(trigger))

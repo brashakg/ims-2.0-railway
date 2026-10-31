@@ -223,7 +223,7 @@ const OnlineStoreSyncBanner = forwardRef<OnlineStoreSyncBannerHandle, Props>(
             <ShieldAlert className="w-3.5 h-3.5" /> Shopify writes OFF — preview / dry-run only
           </span>
           <span className="text-sm text-amber-900">
-            Publishing here returns a dry-run plan. Nothing reaches the live storefront yet.
+            Website writes are switched off on the server; a press is only a preview. Nothing reaches the website.
           </span>
           <button
             type="button"
@@ -237,7 +237,7 @@ const OnlineStoreSyncBanner = forwardRef<OnlineStoreSyncBannerHandle, Props>(
         </div>
         {reasons.length > 0 && (
           <p className="mt-1.5 text-xs text-amber-800/90">
-            Off because: {reasons.join('; ')}. The owner arms live pushes at the storefront cutover.
+            Off because: {reasons.join('; ')}.
           </p>
         )}
       </div>

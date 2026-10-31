@@ -345,8 +345,8 @@ export default function CollectionsPage() {
           );
         } else {
           toast.warning(
-            `Blocked — but Shopify writes are DARK, so ${fmtCount(res.planned)} delist(s) are PLANNED, ` +
-              `not done. The product(s) stay live on the storefront until go-live.`,
+            `Blocked — but website writes are switched off on the server, so ${fmtCount(res.planned)} ` +
+              `take-down(s) are only PLANNED, not done. The product(s) stay on the website until those writes are switched back on.`,
           );
         }
       }
@@ -632,7 +632,7 @@ export default function CollectionsPage() {
                           onClick={() => publishCollection(c)}
                           disabled={publishingId === c.id}
                           className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                          title="Push this collection to Shopify (dry-run unless live writes are armed)"
+                          title="Send this collection to the website (bettervision.in)"
                         >
                           {publishingId === c.id ? (
                             <Loader2 className="w-3.5 h-3.5 animate-spin" />

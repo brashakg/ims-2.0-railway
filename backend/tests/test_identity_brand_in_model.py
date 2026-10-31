@@ -849,3 +849,51 @@ def test_restore_never_refuses_on_a_code_the_website_would_not_publish(door):
         _arch(door, pid, "SG" + code, "6" + code[:3], barcode=code)
         twin = {"id": pid, "sku": "SG" + code, "deleted_at": "x", "attributes": {"gtin": code}}
         assert cat._restore_refusal(door.repo, door.repo.find_by_id(pid), twin) is None, code
+
+
+def test_restore_reads_an_int_upc_that_lost_its_leading_zero(door):
+    """Follow-up of #1284: 036000291452 stored as the INT 36000291452 is the
+    same UPC; it is zero-padded (ints only) before the push's rule reads it.
+    Stored as bson Int64 -- the type a real MongoDB hands back for it."""
+    from bson.int64 import Int64
+
+    from api.routers import catalog as cat
+
+    live = door("3001/S")
+    door.repo.collection.update_one({"product_id": live["product_id"]}, {"$set": {"barcode": "036000291452"}})
+    _arch(door, "P-INT", "SGINT", "5006", barcode=Int64(36000291452))
+    why = cat._restore_refusal(door.repo, door.repo.find_by_id("P-INT"))
+    assert why and live["sku"] in why
+
+
+def test_restore_never_pads_a_restricted_gtin8_into_a_public_code(door):
+    """A GTIN-8 in 20-29 is in-store only however it is stored: padding it to
+    12 digits would launder it into a 'valid' 000020000004."""
+    from bson.int64 import Int64
+
+    from api.routers import catalog as cat
+    from api.services.gtin import sanitise_gtin
+
+    assert sanitise_gtin("000020000004") == "000020000004"  # the laundered spelling IS valid
+    live = door("3001/S")
+    door.repo.collection.update_one({"product_id": live["product_id"]}, {"$set": {"barcode": "000020000004"}})
+    _arch(door, "P-G8", "SGG8", "5007", barcode=Int64(20000004))
+    assert cat._restore_refusal(door.repo, door.repo.find_by_id("P-G8")) is None
+
+
+def test_restore_refuses_while_a_live_holder_keeps_the_code_as_a_number(door):
+    """Review of #1295: the OTHER side -- the live holder's barcode stored as
+    the number Int64(36000291452) (spine) or a twin's gtin as one -- is the
+    same UPC as the archived row's '036000291452'."""
+    from bson.int64 import Int64
+
+    from api.routers import catalog as cat
+
+    arch = _arch(door, "P-STR", "SGSTR", "5008", barcode="036000291452")
+    _with_twins(door, [{"id": "T-NUM", "sku": "SGNUM", "attributes": {"gtin": Int64(36000291452)}}])
+    assert "SGNUM" in (cat._restore_refusal(door.repo, arch) or "")
+    _with_twins(door, [])
+    live = door("3001/S")
+    door.repo.collection.update_one({"product_id": live["product_id"]}, {"$set": {"barcode": Int64(36000291452)}})
+    why = cat._restore_refusal(door.repo, arch)
+    assert why and live["sku"] in why
