@@ -365,6 +365,26 @@ def test_hook_never_fires_for_non_online_or_failed(monkeypatch):
     assert calls == []
 
 
+def test_hook_never_fires_for_a_simulated_booking(monkeypatch):
+    """A dry-run Shiprocket booking (DISPATCH_MODE off / no creds) has a FAKE
+    AWB and nothing left the shop: Shopify must not be told it shipped (that
+    fulfilment would mail the buyer and come back as SHIPPED)."""
+    from api.routers import shipping
+
+    calls = []
+
+    async def _spy(db, order, *, tracking=None, notify_customer=True):  # pragma: no cover
+        calls.append(order)
+        return sfp.FulfillmentPushResult(mode="SIMULATED", action="create", ok=True)
+
+    monkeypatch.setattr(sfp, "push_fulfillment", _spy)
+    _run(shipping._maybe_push_online_fulfillment(
+        None, _online_order(), _ShipResult(status="SIMULATED", awb="SIMSR1",
+                                           courier="SIMULATED"), {"user_id": "u1"}
+    ))
+    assert calls == []
+
+
 def test_hook_swallows_push_error_never_blocks(monkeypatch):
     from api.routers import shipping
 

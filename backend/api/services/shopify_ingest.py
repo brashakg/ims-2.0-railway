@@ -40,6 +40,7 @@ import logging
 import math
 import uuid
 from datetime import datetime, timezone
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -234,6 +235,204 @@ def _f(value, default: float = 0.0) -> float:
         return default
 
 
+def _paise(value: Any) -> int:
+    """Rupees (Shopify sends money as strings) -> integer paise, exact
+    (Decimal, half-up), so totals compare to the paisa. Unreadable or
+    non-finite -> 0."""
+    try:
+        d = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError):
+        return 0
+    if not d.is_finite():
+        return 0
+    return int((d * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def _sum_paise(rows: Any, key: str = "amount") -> int:
+    return sum(_paise(r.get(key)) for r in rows or [] if isinstance(r, dict))
+
+
+def _discount_paise(line: Dict[str, Any]) -> int:
+    """A line's (or shipping line's) discount: its discount_allocations --
+    where Shopify puts discount codes and automatic discounts -- else the
+    legacy total_discount. Never both: when allocations exist total_discount
+    is either 0.00 or the same money again."""
+    allocs = line.get("discount_allocations")
+    if allocs:
+        return _sum_paise(allocs)
+    return _paise(line.get("total_discount"))
+
+
+def _added_tax_paise(payload: Dict[str, Any], line: Dict[str, Any]) -> int:
+    """Tax Shopify charged ON TOP of a line's price -- only when the store is
+    explicitly NOT 'prices include tax'. It is money the buyer paid, so it is
+    part of the GST-inclusive amount IMS bills (IMS then extracts its OWN GST
+    from it by HSN, as for every online line)."""
+    if payload.get("taxes_included") is False:
+        return _sum_paise(line.get("tax_lines"), "price")
+    return 0
+
+
+def _shipping_line(
+    payload: Dict[str, Any], goods: List[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    """The shipping Shopify charged, as ONE invoice line (None when nothing
+    is charged -- no shipping, or a free-shipping code took it all). The line
+    carries its own discount (discount_amount).
+
+    Shipping the seller charges with the goods is part of the value of that
+    supply (CGST s.15) and a composite supply is taxed at the PRINCIPAL
+    supply's rate (s.8(a)), so the line takes the HSN + GST rate of the
+    biggest goods line. ponytail: principal = highest-value line; if the CA
+    rules otherwise for a mixed 5%/18% basket, change it here only. Only its
+    HSN + rate are taken: the line's category is SHIPPING, so it is never
+    Rx-held as a lens or counted as frame/lens revenue."""
+    disc_p = gross_p = 0
+    titles: List[str] = []
+    for sl in payload.get("shipping_lines") or []:
+        if not isinstance(sl, dict):
+            continue
+        d = _discount_paise(sl)
+        disc_p += d
+        gross_p += max(_paise(sl.get("price")) - d, 0) + _added_tax_paise(payload, sl)
+        if sl.get("title"):
+            titles.append(str(sl["title"]))
+    if gross_p <= 0 or not goods:
+        return None
+    principal = max(goods, key=lambda i: _f(i.get("item_total")))
+    rate = principal.get("gst_rate") or 0.0
+    gross = gross_p / 100
+    taxable = round(gross / (1.0 + rate / 100.0), 2)
+    return {
+        "item_id": str(uuid.uuid4()),
+        "item_type": "SHIPPING",
+        "product_id": None,
+        "product_name": "Shipping charges"
+        + (f" ({', '.join(titles)})" if titles else ""),
+        "sku": "",
+        "quantity": 1,
+        "unit_price": round(gross + disc_p / 100, 2),
+        "discount_percent": 0.0,
+        "discount_amount": disc_p / 100,
+        "item_total": gross,
+        "category": "SHIPPING",
+        "hsn_code": principal.get("hsn_code"),
+        "gst_rate": rate,
+        "taxable_value": taxable,
+        "tax_amount": round(gross - taxable, 2),
+        # No IMS product: nothing is claimed from stock, routed or Rx-held.
+        "ims_product_id": None,
+    }
+
+
+def _with_shipping(
+    payload: Dict[str, Any], items: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], float]:
+    """THE order lines IMS bills for a Shopify order: the mapped goods lines
+    plus the shipping line, and the order's total discount -- the discounts
+    the invoice LINES carry, so the two always agree (a free-shipping code
+    leaves no line, so no discount). One rule for the booking and the history
+    import's dry run (scripts/import_shopify_order_history.py)."""
+    lines = items + [s for s in [_shipping_line(payload, items)] if s]
+    return lines, round(sum(_f(i.get("discount_amount")) for i in lines), 2)
+
+
+_ADDRESS_FIELDS = (
+    "name", "first_name", "last_name", "company", "address1", "address2",
+    "city", "province", "province_code", "zip", "country", "country_code", "phone",
+)
+
+
+def _shipping_address(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The delivery address the buyer typed at checkout, kept on the order
+    (shown, printed on the invoice, handed to the courier). None when
+    Shopify sent none (a pickup / digital order)."""
+    addr = payload.get("shipping_address")
+    if not isinstance(addr, dict):
+        return None
+    out = {
+        k: str(addr[k]).strip() for k in _ADDRESS_FIELDS if addr.get(k) not in (None, "")
+    }
+    return out or None
+
+
+def _totals_check(payload: Dict[str, Any], grand_total: float) -> Dict[str, Any]:
+    """THE check that the IMS invoice is what Shopify charged: its total_price
+    against the booked grand_total, to the paisa. MISMATCH is flagged on the
+    order and tasked to an admin (never silently accepted); a body with no
+    total_price (never a real order) is UNCHECKED. Shopify's own discount /
+    shipping / tax figures ride along so the admin sees where it differs."""
+    raw = payload.get("total_price")
+    if raw is None or str(raw).strip() == "":
+        return {"status": "UNCHECKED"}
+    shopify_p = _paise(raw)
+    ims_p = _paise(grand_total)
+    ship_set = (payload.get("total_shipping_price_set") or {}).get("shop_money") or {}
+    return {
+        "status": "MATCH" if shopify_p == ims_p else "MISMATCH",
+        "shopify_total": shopify_p / 100,
+        "ims_total": ims_p / 100,
+        "difference": (shopify_p - ims_p) / 100,
+        "shopify_discounts": _paise(payload.get("total_discounts")) / 100,
+        "shopify_shipping": (
+            _paise(ship_set.get("amount"))
+            if ship_set.get("amount") is not None
+            else _sum_paise(payload.get("shipping_lines"), "price")
+        ) / 100,
+        "shopify_tax": _paise(payload.get("total_tax")) / 100,
+        "taxes_included": payload.get("taxes_included"),
+    }
+
+
+def _raise_total_mismatch_task(db, order: Dict[str, Any]) -> None:
+    """ONE admin task per order whose IMS total differs from what Shopify
+    charged (dedupe_ref). The invoice stands as booked; an admin decides.
+
+    The order insert and this task are two writes (no transactions on prod),
+    so the order is stamped task_raised once the task exists: a replay of an
+    order whose creator stopped in between raises it then (_booking_unsettled),
+    and never again after an admin has closed it. Assigned to an admin (any
+    shop: the online store has none of its own). Fail-soft: the paid order is
+    already booked."""
+    check = order.get("shopify_totals_check") or {}
+    if check.get("status") != "MISMATCH" or check.get("task_raised"):
+        return
+    order_id = order.get("order_id")
+    order_ref = order.get("order_number") or order.get("shopify_order_id")
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import _person_holding, active_tasks, create_system_task
+
+        repo = get_task_repository()
+        ref = f"online_total_mismatch:{order_id}"
+        created = create_system_task(
+            repo,
+            title=f"Online order {order_ref}: IMS total differs from what Shopify charged",
+            description=(
+                f"Shopify charged Rs {check['shopify_total']:.2f}; the IMS invoice is "
+                f"Rs {check['ims_total']:.2f} (difference Rs {check['difference']:.2f}). "
+                f"Shopify reports discounts Rs {check['shopify_discounts']:.2f}, "
+                f"shipping Rs {check['shopify_shipping']:.2f}, tax "
+                f"Rs {check['shopify_tax']:.2f}. Check the order before it ships "
+                "or is filed."
+            ),
+            priority="P1",
+            category="ONLINE_ORDER",
+            store_id=order.get("store_id"),
+            dedupe_ref=ref,
+            assigned_to=_person_holding("ADMIN", None, any_store=True),
+            extra={"link": "/online-store/orders", "payload": {"order_id": order_id}},
+        )
+        if created or active_tasks(repo, ref):
+            db.get_collection("orders").update_one(
+                {"order_id": order_id}, {"$set": {"shopify_totals_check.task_raised": True}}
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[SHOPIFY_INGEST] total-mismatch task skipped for %s: %s", order_id, exc
+        )
+
+
 def _delivery_state(payload: Dict[str, Any]) -> str:
     """The buyer's place-of-supply state for an online order: the SHIPPING
     address province/code (delivery), falling back to billing. Returns the raw
@@ -262,11 +461,16 @@ def _map_line_items(payload: Dict[str, Any], product_repo) -> List[Dict[str, Any
             continue
         qty = _f(line.get("quantity"), 1.0) or 1.0
         unit_price = _f(line.get("price"))
-        # Shopify line-level discount (total_discount applies to the whole line).
-        line_discount = _f(line.get("total_discount"))
-        line_gross = round(unit_price * qty - line_discount, 2)
-        if line_gross < 0:
-            line_gross = 0.0
+        # What the buyer PAID for this line, in exact paise (Website 1): the
+        # list price less its discount -- a discount CODE reaches the line as
+        # discount_allocations while total_discount stays 0.00, so reading
+        # total_discount alone billed the full list price -- plus any tax
+        # Shopify added ON TOP (a store not set to "prices include tax").
+        disc_p = _discount_paise(line)
+        gross_p = max(int(round(_paise(line.get("price")) * qty)) - disc_p, 0)
+        gross_p += _added_tax_paise(payload, line)
+        line_discount = disc_p / 100
+        line_gross = gross_p / 100
 
         basis = _resolve_line_tax_basis(line, product_repo)
         rate = basis["gst_rate"]
@@ -1022,6 +1226,9 @@ def _booking_unsettled(db, existing: Dict[str, Any], historical: bool) -> Dict[s
     webhook drain reads the flag as NOT DONE, so the inbox retries it."""
     if historical:
         return {}
+    # A creator that stopped between the order insert and its total-mismatch
+    # task: raise it now (a no-op once the order is stamped task_raised).
+    _raise_total_mismatch_task(db, existing)
     from .online_fulfillment_route import finish_crashed_booking
 
     unstamped = "fulfillment_breakdown" not in existing and bool(existing.get("fulfillment_route"))
@@ -1583,9 +1790,9 @@ def _book_historical_refund_credit_notes(
                 return "unmapped"
             if actual > gross:
                 # CLAMP AT BILLED GROSS: a credit note can never exceed the
-                # original invoice value. Shopify's refunded total INCLUDES
-                # shipping/goodwill amounts the import never booked as sale
-                # revenue (line items only), so scaling UP would reverse output
+                # original invoice value. Shopify refunded more than the lines
+                # this refund maps to (a goodwill amount; shipping is billed and
+                # mapped to its own line), so scaling UP would reverse output
                 # tax that was never output. Post the FULL billed reversal and
                 # surface the excess as an unreconciled residual for the
                 # operator/accountant.
@@ -1595,8 +1802,8 @@ def _book_historical_refund_credit_notes(
                 logger.warning(
                     "[SHOPIFY_INGEST] historical refund %s on order %s: Shopify "
                     "refunded Rs %.2f > billed Rs %.2f -- credit note CLAMPED at "
-                    "the billed gross; excess Rs %.2f (shipping/goodwill never "
-                    "booked as sale) left un-reversed",
+                    "the billed gross; excess Rs %.2f (no billed line to "
+                    "reverse) left un-reversed",
                     refund_id, order_doc.get("order_id"), actual, gross, excess,
                 )
             else:
@@ -1666,9 +1873,9 @@ def _book_historical_refund_credit_notes(
                 "CLAMPED_AT_BILLED_GROSS" if clamped else "SCALED_TO_SHOPIFY_REFUNDED"
             )
             if clamped:
-                # The shipping/goodwill amount Shopify refunded ON TOP of the
-                # booked sale -- deliberately NOT reversed (never booked as
-                # output tax); recorded for accountant reconciliation.
+                # The amount Shopify refunded ON TOP of the refund's billed
+                # lines -- deliberately NOT reversed (no output tax to reverse);
+                # recorded for accountant reconciliation.
                 entry["unreconciled_excess"] = excess
         try:
             ledger.insert_one(dict(entry))
@@ -1970,6 +2177,7 @@ def ingest_shopify_order(
     items = _map_line_items(payload, product_repo)
     if not items:
         return {"status": "ignored", "reason": "no_mappable_line_items"}
+    items, total_discount = _with_shipping(payload, items)
 
     taxable = round(sum(_f(i.get("taxable_value")) for i in items), 2)
     tax = round(sum(_f(i.get("tax_amount")) for i in items), 2)
@@ -2164,8 +2372,15 @@ def ingest_shopify_order(
         "subtotal": subtotal,
         "tax_rate": (max((i.get("gst_rate") or 0.0) for i in items) if items else 0.0),
         "tax_amount": tax,
-        "total_discount": round(sum(_f(i.get("discount_amount")) for i in items), 2),
+        "total_discount": total_discount,
         "grand_total": grand_total,
+        "shipping_charge": round(
+            sum(_f(i.get("item_total")) for i in items if i.get("item_type") == "SHIPPING"), 2
+        ),
+        # Website 1: the delivery address from checkout, and THE check that
+        # this invoice is what Shopify charged (MISMATCH -> admin task below).
+        "shipping_address": _shipping_address(payload),
+        "shopify_totals_check": _totals_check(payload, grand_total),
         # Online prices are GST-inclusive (Shopify shows the all-in price paid).
         "pricing_model": "inclusive",
         # Shopify confirmation is the RECEIPT; the IMS invoice is the tax doc.
@@ -2298,6 +2513,8 @@ def ingest_shopify_order(
             "historical": True,
             "refund_credit_notes": refund_cn,
         }
+
+    _raise_total_mismatch_task(db, order_doc)
 
     # CLINICAL FLAG & HOLD follow-up task. Raised ONLY on a fresh create (the
     # duplicate / replay guards above return before this point), so re-ingesting
