@@ -264,9 +264,12 @@ def _detail_by_sku(db, skus: List[str]) -> Dict[str, Dict]:
 def resolve_collection_products(db, collection_id: str) -> Optional[List[Dict]]:
     """Resolve a collection's effective, ordered product docs.
 
-    CUSTOM or SMART -> THE website membership rule
-    (services/collection_membership): the listings the collection shows on
-    the website, in its order. Returns None ONLY when the collection does not exist (so the caller 404s);
+    CUSTOM / temporary (Quick Share) -> its manual SKU list in position
+                 order, exactly as picked (in-store products and the
+                 picked colour included -- it is a hand-picked set).
+    SMART  -> THE website membership rule (services/collection_membership):
+              the listings the collection shows on the website, in order.
+    Returns None ONLY when the collection does not exist (so the caller 404s);
     a real-but-empty collection returns []. Fail-soft -> [] on any read error."""
     if db is None or not collection_id:
         return None
@@ -281,11 +284,16 @@ def resolve_collection_products(db, collection_id: str) -> Optional[List[Dict]]:
         return None
 
     try:
-        # THE website membership rule (CUSTOM and SMART alike): the listings
-        # the collection shows on the website, in its order.
-        from . import collection_membership
+        if str(doc.get("collection_type") or "CUSTOM").upper() == "SMART":
+            from . import collection_membership
 
-        skus = collection_membership.member_skus(db, doc)[:MAX_PRODUCTS]
+            skus = collection_membership.member_skus(db, doc)[:MAX_PRODUCTS]
+        else:
+            members = sorted(
+                (doc.get("products") or []),
+                key=lambda p: int((p or {}).get("position", 0) or 0),
+            )
+            skus = [m.get("sku") for m in members if m.get("sku")][:MAX_PRODUCTS]
     except Exception:  # noqa: BLE001
         return []
 

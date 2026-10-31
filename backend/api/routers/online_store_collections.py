@@ -585,14 +585,18 @@ async def resolved_products(
     """Evaluate a SMART collection's rules against the catalog and return the
     matching SKUs (Phase-2 preview; nothing is pushed).
 
-    For a CUSTOM collection this returns its stored manual membership SKUs
-    (in position order) so the endpoint gives the effective product set for
-    either type. Fail-soft: no rules / no DB -> empty set.
+    For either type ``skus`` / ``count`` are THE website membership rule
+    (services/collection_membership): the listings on the website the
+    collection holds -- the number the menu and the website show. A CUSTOM
+    collection also returns ``manual_skus``: its hand-picked list in
+    position order, labelled as such. Fail-soft: no rules / no DB -> empty.
     """
     repo = _require_repo()
     doc = repo.get_by_id(collection_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Collection not found")
+
+    from ..services import collection_membership
 
     ctype = (doc.get("collection_type") or "CUSTOM").upper()
     if ctype == "CUSTOM":
@@ -600,19 +604,19 @@ async def resolved_products(
             (doc.get("products") or []),
             key=lambda p: int(p.get("position", 0)),
         )
-        skus = [p.get("sku") for p in members if p.get("sku")][:limit]
+        db = _get_db()
+        on_site = collection_membership.member_skus(db, doc)[:limit] if db is not None else []
         return {
             "collection_id": collection_id,
             "collection_type": "CUSTOM",
-            "skus": skus,
-            "count": len(skus),
-            "source": "manual",
+            "skus": on_site,
+            "count": len(on_site),
+            "source": "website_rule",
+            "manual_skus": [p.get("sku") for p in members if p.get("sku")][:limit],
         }
 
     # THE website membership rule (services/collection_membership): the
     # listings on the website these rules hold, read as Shopify reads them.
-    from ..services import collection_membership
-
     rules = ecom_smart_rules.normalize_rules(doc.get("rules") or [])
     disjunctive = bool(doc.get("disjunctive", False))
     db = _get_db()

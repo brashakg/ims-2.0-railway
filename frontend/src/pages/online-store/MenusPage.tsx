@@ -58,6 +58,7 @@ import OnlineStoreSyncBanner, {
   type OnlineStoreSyncBannerHandle,
 } from '../../components/online-store/OnlineStoreSyncBanner';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { useUnsavedGuard } from '../../hooks/useUnsavedGuard';
 
 const SOURCE_LABELS: Record<MenuGroupSource, string> = {
   gender: "By gender (Men's, Women's, Unisex, Kids, Polarized)",
@@ -78,6 +79,15 @@ function fmtIST(iso?: string | null): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium', timeStyle: 'short' }) + ' IST';
+}
+
+/** Collection links in a generated tree, every depth (the backend's
+ *  generated_menu.collection_nodes). */
+function collectionLinks(items: GeneratedMenuItem[] | null | undefined): number {
+  return (items ?? []).reduce(
+    (n, it) => n + (it.item_type === 'COLLECTION' ? 1 : 0) + collectionLinks(it.children),
+    0,
+  );
 }
 
 function move<T>(arr: T[], i: number, dir: -1 | 1): T[] {
@@ -447,6 +457,11 @@ export default function MenusPage() {
   const [otherState, setOtherState] = useState<'loading' | 'ready' | 'failed'>('loading');
 
   const menu = generated && generated.length > 0 ? generated[0] : null;
+  // load() (Refresh, after a push) never throws an unsaved template away:
+  // while dirty it refreshes the status / preview / other menus only.
+  const dirtyRef = useRef(false);
+  dirtyRef.current = dirty;
+  useUnsavedGuard(dirty);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -454,8 +469,7 @@ export default function MenusPage() {
       const [gen, all] = await Promise.all([generatedMenusApi.list(), menusApi.list()]);
       setGenerated(gen);
       setOthers(all.filter((m) => !(gen ?? []).some((g) => g.menu_id === m.id)));
-      setDraft(gen && gen.length > 0 ? gen[0].template : null);
-      setDirty(false);
+      if (!dirtyRef.current) setDraft(gen && gen.length > 0 ? gen[0].template : null);
     } finally {
       setLoading(false);
     }
@@ -477,6 +491,8 @@ export default function MenusPage() {
     try {
       await generatedMenusApi.saveTemplate(menu.menu_id, draft);
       toast.success('Template saved - the preview below is rebuilt from it.');
+      dirtyRef.current = false;
+      setDirty(false);
       await load();
     } catch (e: any) {
       toast.error(getErrorMessage(e, 'Could not save the template'));
@@ -488,6 +504,14 @@ export default function MenusPage() {
   const pushNow = async () => {
     if (!menu) return;
     if (dirty && !window.confirm('The template has unsaved changes. Push the SAVED template anyway?')) return;
+    const was = menu.pushed_collection_nodes;
+    if (
+      !window.confirm(
+        `This overwrites the LIVE website menu: ${collectionLinks(menu.preview?.items)} collection links ` +
+          (typeof was === 'number' ? `(was ${was} at the last push).` : '(IMS has not pushed this menu before).'),
+      )
+    )
+      return;
     setPushing(true);
     try {
       const r = await pushApi.pushMenu(menu.menu_id);
@@ -606,15 +630,23 @@ export default function MenusPage() {
             <div>
               <div className="text-gray-500">Last pushed to the website</div>
               <div className="text-gray-900">{fmtIST(menu.last_pushed_at)}</div>
-              {preview && (
+              {preview && !menu.pushed_live && lp?.mode !== 'LIVE' ? (
+                <div className="text-gray-600" data-testid="dry-run-note">dry-run mode - not sent to the website</div>
+              ) : preview && !menu.pushed_live ? (
+                <div className="text-amber-700">Waiting for the first push by a person (Regenerate &amp; push now)</div>
+              ) : preview ? (
                 <div className={preview.changed_since_push ? 'text-amber-700' : 'text-green-700'}>
                   {preview.changed_since_push ? 'Changes waiting for the next push' : 'Website is up to date'}
                 </div>
-              )}
+              ) : null}
             </div>
             <div data-testid="last-push">
               <div className="text-gray-500">Last push attempt</div>
-              {lp ? (
+              {lp?.waiting ? (
+                <div className="text-amber-700">
+                  Not sent - {lp.reason}. The sync never overwrites the hand-made menu by itself the first time.
+                </div>
+              ) : lp ? (
                 <div className={lp.ok ? 'text-gray-900' : 'text-red-700'}>
                   {lp.mode === 'LIVE' ? 'LIVE' : 'dry-run (SIMULATED)'} - {lp.ok ? 'ok' : 'FAILED'} - {fmtIST(lp.at)}
                   {!lp.ok && (lp.error || lp.reason) ? <div>{lp.error || lp.reason}</div> : null}
@@ -666,7 +698,9 @@ export default function MenusPage() {
                   <Info className="w-3 h-3 mt-0.5 shrink-0" /> What the website menu is built as right now from the
                   SAVED template, with the products each collection shows on the website.
                 </p>
-                {preview && preview.items.length > 0 ? (
+                {preview?.unreadable ? (
+                  <p className="text-xs text-amber-800" data-testid="preview-unreadable">{preview.unreadable}</p>
+                ) : preview && preview.items.length > 0 ? (
                   <PreviewTree items={preview.items} />
                 ) : (
                   <p className="text-xs text-gray-500">No collection has products on the website yet.</p>

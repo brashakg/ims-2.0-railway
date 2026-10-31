@@ -165,20 +165,20 @@ def _attr_present(doc: Dict[str, Any], attr: str) -> bool:
     return False
 
 
-def _skus_in_any_collection(db, limit: int = _SCAN_LIMIT) -> set:
-    """The set of SKUs that are on the website inside at least one collection,
-    by THE website membership rule (services/collection_membership): a
-    listing's own SKU and every colour / size SKU it carries, for each
-    listing a live collection holds. Fail-soft -> empty set."""
+def _skus_in_any_collection(db) -> set:
+    """The set of SKUs some live collection holds -- or WILL hold once the
+    product is on the website -- by THE website membership rule
+    (services/collection_membership) over every listing IMS holds
+    (catalogue_facts), so the eligible products orphan_skus scans, online
+    or not yet, are all judged by the same rule. A listing's own SKU and
+    every colour / size SKU it carries. A read failure RAISES (the
+    envelope's degraded flag), never an empty set that reads as "every
+    product is in no collection"."""
     if db is None:
         return set()
-    try:
-        from . import collection_membership
+    from . import collection_membership
 
-        return collection_membership.skus_in_any_collection(db)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[STORE_HEALTH] collection membership unreadable: %s", exc)
-        return set()
+    return collection_membership.skus_in_any_collection(db, collection_membership.catalogue_facts(db))
 
 
 # ===========================================================================
@@ -216,7 +216,7 @@ def orphan_skus(db, limit: int = 50) -> Dict[str, Any]:
     if not products:
         return base
 
-    in_collection = _skus_in_any_collection(db)
+    in_collection = _skus_in_any_collection(db)  # raises -> degraded
     mapped = skus_on_shopify(db, [p.get("sku") for p in products])  # raises -> degraded
     no_mapping = 0
     not_in_collection = 0

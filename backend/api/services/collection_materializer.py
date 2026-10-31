@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 logger = logging.getLogger(__name__)
@@ -50,21 +50,30 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _member_skus(db, collection: Dict, facts: Optional[List[Dict]] = None) -> List[str]:
-    """The ordered member SKUs of a collection, CUSTOM or SMART, from THE
-    website membership rule (services/collection_membership): every SKU each
-    member listing on the website carries (lead first, then its colours /
-    sizes), listings in the collection's order. ``facts`` lets
-    materialize_all read the listings once for every collection; without it
-    the read is STRICT (an unreadable catalogue raises -- the caller keeps
-    the last view instead of writing an empty one)."""
+def _member_rows(db, collection: Dict, facts: Optional[List[Dict]] = None) -> List[Tuple[str, bool]]:
+    """(sku, is_lead) for every member of a collection, CUSTOM or SMART, from
+    THE website membership rule (services/collection_membership): every SKU
+    each member listing on the website carries (its lead first -- the one
+    flagged, so a COUNT is of listings, the number the menu shows -- then
+    its colours / sizes, kept for the insights' stock joins), listings in
+    the collection's order. ``facts`` lets materialize_all read the listings
+    once for every collection; without it the read is STRICT (an unreadable
+    catalogue raises -- the caller keeps the last view instead of writing an
+    empty one)."""
     if not isinstance(collection, dict):
         return []
     from . import collection_membership
 
     if facts is None:
         facts = collection_membership.online_facts(db, strict=True)
-    return collection_membership.member_skus(db, collection, facts, every_sku=True)[:_MEMBER_MAX]
+    out: List[Tuple[str, bool]] = []
+    seen = set()
+    for f in collection_membership.members(db, collection, facts)[0]:
+        for s in f.get("skus") or [f.get("sku")]:
+            if s and str(s) not in seen:
+                seen.add(str(s))
+                out.append((str(s), str(s) == str(f.get("sku"))))
+    return out[:_MEMBER_MAX]
 
 
 def _product_ids_by_sku(db, skus: List[str]) -> Dict[str, Any]:
@@ -98,11 +107,12 @@ def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = N
     """Recompute + persist a collection's membership into `collection_products`.
 
     Replaces ALL prior rows for the collection with one row per member SKU:
-        {collection_id, handle, sku, product_id, position, computed_at}
+        {collection_id, handle, sku, lead, product_id, position, computed_at}
     `product_id` is denormalised from the `products` spine (batched, fail-soft
-    -> None when the sku has no spine doc). Also writes back `products_count` +
-    `materialized_at` onto the collection doc (best-effort). Returns the member
-    count. Fail-soft -> 0."""
+    -> None when the sku has no spine doc). Also writes back `products_count`
+    (LISTINGS -- the website's number, the menu's) + `materialized_at` onto
+    the collection doc (best-effort). Returns the listing count. Fail-soft
+    -> 0."""
     if db is None or not isinstance(collection, dict):
         return 0
     collection_id = collection.get("collection_id") or collection.get("id")
@@ -110,7 +120,7 @@ def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = N
         return 0
     handle = collection.get("handle")
     try:
-        skus = _member_skus(db, collection, facts)
+        members = _member_rows(db, collection, facts)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[COLL-MAT] resolve failed for %s: %s", collection_id, exc)
         return 0
@@ -126,18 +136,19 @@ def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = N
         # and a full replace keeps the view exactly in step with the rules (no
         # orphaned members after a rule narrows). Standalone Mongo, no txn.
         view.delete_many({"collection_id": collection_id})
-        if skus:
-            product_ids = _product_ids_by_sku(db, skus)
+        if members:
+            product_ids = _product_ids_by_sku(db, [sku for sku, _lead in members])
             rows = [
                 {
                     "collection_id": collection_id,
                     "handle": handle,
                     "sku": sku,
+                    "lead": lead,
                     "product_id": product_ids.get(sku),
                     "position": idx,
                     "computed_at": computed_at,
                 }
-                for idx, sku in enumerate(skus)
+                for idx, (sku, lead) in enumerate(members)
             ]
             view.insert_many(rows)
     except Exception as exc:  # noqa: BLE001
@@ -146,14 +157,15 @@ def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = N
 
     # Best-effort: stamp the count back on the collection so list views can show
     # it without re-counting the view. Never fatal.
+    listings = sum(1 for _sku, lead in members if lead)
     try:
         db["ecom_collections"].update_one(
             {"collection_id": collection_id},
-            {"$set": {"products_count": len(skus), "materialized_at": computed_at}},
+            {"$set": {"products_count": listings, "materialized_at": computed_at}},
         )
     except Exception:  # noqa: BLE001
         pass
-    return len(skus)
+    return listings
 
 
 def materialize_all(db, only_smart: bool = False, facts: Optional[List[Dict]] = None) -> Dict[str, int]:
@@ -238,7 +250,9 @@ def _detail_row(sku: str, d: Dict) -> Dict:
 
 
 def browse(db, collection: Dict, skip: int = 0, limit: int = 24) -> Dict[str, Any]:
-    """Page a collection's MATERIALISED membership into rich rows.
+    """Page a collection's MATERIALISED membership into rich rows -- one
+    row per LISTING (the lead rows), so ``total`` is the products_count the
+    menu and the website show.
 
     Reads `collection_products` (sorted by position), joins product detail, and
     returns {products, total, skip, limit}. If the view has no rows yet (never
@@ -252,14 +266,15 @@ def browse(db, collection: Dict, skip: int = 0, limit: int = 24) -> Dict[str, An
         return empty
     try:
         view = db[_VIEW]
-        total = view.count_documents({"collection_id": collection_id})
+        leads = {"collection_id": collection_id, "lead": True}
+        total = view.count_documents(leads)
         if total == 0:
             # Lazy first-materialise so a freshly-created collection browses
             # without an explicit refresh call.
             materialize_collection(db, collection)
-            total = view.count_documents({"collection_id": collection_id})
+            total = view.count_documents(leads)
         rows = list(
-            view.find({"collection_id": collection_id})
+            view.find(leads)
             .sort("position", 1)
             .skip(int(skip))
             .limit(int(limit))

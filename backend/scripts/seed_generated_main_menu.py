@@ -16,10 +16,12 @@ counts and every collection left out (and why). Nothing is written.
 
 --apply: inserts the doc (refused when a main-menu doc already exists --
 edit its template on the Menus page instead) and saves the generated
-items. NOTHING is pushed to Shopify here: the next live sync (or the Menus
-page's "Regenerate & push now") adopts the existing Shopify main-menu by
-its handle (taking over its gid, name and heading URLs), backs its current
-tree up into ecom_menu_backups, and only then overwrites it.
+items. NOTHING is pushed to Shopify here, and no scheduled sync overwrites
+the hand-made website menu either: the FIRST push is a person pressing
+"Regenerate & push now" on the Menus page, which adopts the existing
+Shopify main-menu by its handle (taking over its gid, name and heading
+URLs), backs its current tree up into ecom_menu_backups, and only then
+overwrites it. After that the menu updates itself after each sync.
 
 USAGE
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" backend/scripts/seed_generated_main_menu.py
@@ -74,7 +76,9 @@ def run(db, apply: bool) -> dict:
     db[generated_menu.MENUS].insert_one(dict(doc))
     doc.pop("_id", None)
     generated_menu.regenerate(db, doc, facts)
-    print(f"\nCREATED menu_id={doc['menu_id']}. Nothing pushed: the next live sync adopts, backs up and pushes it.")
+    print(f"\nCREATED menu_id={doc['menu_id']}. Nothing pushed. The first push is a person's "
+          "'Regenerate & push now' on the Menus page (it adopts and backs up the live menu); "
+          "after that it updates itself after each sync.")
     return {"created": True, "menu_id": doc["menu_id"]}
 
 

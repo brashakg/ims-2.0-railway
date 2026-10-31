@@ -159,7 +159,9 @@ def online_facts(db, strict: bool = False) -> List[Dict[str, Any]]:
 def _online(db) -> List[Dict[str, Any]]:
     """listing_facts, each listing's colour / size SKUs cut to the ones on
     the website by #1275's THE colour/size online rule
-    (online_catalog.skus_on_shopify; the lead stands for its live page).
+    (online_catalog.skus_on_shopify; the lead stands for its live page),
+    and the price-band prices cut to the rows still in (a colour not on the
+    website has no variant there, so no price for Shopify to match).
     Raises on a read failure."""
     from .online_catalog import skus_on_shopify
     from .shopify_push.collection_registry import listing_facts
@@ -170,6 +172,10 @@ def _online(db) -> List[Dict[str, Any]]:
     for f in facts:
         skus = f.get("skus") or []
         f["skus"] = skus[:1] + [s for s in skus[1:] if s in mapped]
+        if f.get("priced"):
+            keep = set(f["skus"])
+            # A live listing always has a price on the website: never cut to none.
+            f["prices"] = [p for s, p in f["priced"] if not s or s in keep] or f.get("prices") or []
     return facts
 
 

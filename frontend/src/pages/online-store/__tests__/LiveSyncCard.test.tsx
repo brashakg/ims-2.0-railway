@@ -134,6 +134,20 @@ describe('Live sync card', () => {
     expect(screen.queryByRole('list', { name: 'Live sync failures' })).not.toBeInTheDocument();
   });
 
+  it('the Menus card names the self-maintaining menu from the real status payload', async () => {
+    vi.mocked(pushApi.getStatus).mockResolvedValue({
+      ...status(SCHEDULE_ON),
+      generated_menus: [{ menu_id: 'm1', handle: 'main-menu', title: 'Main', last_pushed_at: null, item_count: 4,
+        hidden_count: 1, last_push: { mode: 'LIVE', ok: false, waiting: true,
+          reason: 'waiting for the first push by a person (Regenerate & push now)' } }],
+    } as any);
+    render(<OnlineShopifySyncPage />);
+    const line = await screen.findByTestId('generated-menu-line');
+    expect(line).toHaveTextContent(/1 generated menu/);
+    expect(line).toHaveTextContent(/waiting for the first push by a person/);
+    expect(line).not.toHaveTextContent(/FAILED/);
+  });
+
   it('shows the last run, every failure with its code, and the next IST slot', async () => {
     vi.mocked(pushApi.getStatus).mockResolvedValue(status(SCHEDULE_ON) as any);
     render(<OnlineShopifySyncPage />);

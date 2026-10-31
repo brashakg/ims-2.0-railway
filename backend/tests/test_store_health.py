@@ -191,8 +191,8 @@ def test_orphan_reasons_classified():
                 [
                     # mapped + in collection -> ready
                     _eligible_product(product_id="P1", sku="SKU-1"),
-                    # no ecom mapping + not in collection -> orphan (2 reasons)
-                    _eligible_product(product_id="P2", sku="SKU-2", ecom={}),
+                    # no ecom mapping + a brand no collection holds -> orphan (2 reasons)
+                    _eligible_product(product_id="P2", sku="SKU-2", brand="Idee", ecom={}),
                     # no sku -> missing_spine orphan
                     _eligible_product(product_id="P3", sku=""),
                 ]
@@ -206,7 +206,7 @@ def test_orphan_reasons_classified():
     assert orph["orphan_count"] == 2  # P2 + P3 (P1 is fully ready)
     assert orph["no_mapping"] == 1  # only P2 has an empty ecom (P3 keeps its gid)
     assert orph["missing_spine"] == 1  # P3 has no sku
-    # P2 is not on the website -> in no collection; P1 (live Ray-Ban) is.
+    # P2 (Idee) is in no collection by the rule; P1 (Ray-Ban) is.
     # P3 has no sku so it is not double-counted as not_in_collection.
     assert orph["not_in_collection"] == 1
 
@@ -299,6 +299,32 @@ def test_an_unreadable_mapping_is_degraded_never_all_unmapped():
     def dead(*_a, **_k):
         raise RuntimeError("blip")
     db["catalog_variants"].find = dead
+    assert sh.store_health_envelope(db)["degraded"] is True
+
+
+def test_not_in_collection_judges_online_and_offline_by_the_same_rule():
+    """The eligible set holds products not on the website yet: an offline
+    Ray-Ban the Ray-Ban collection WILL hold is not "in no collection"; an
+    offline Idee (no Idee collection) is (review round 2)."""
+    db = _FakeDb({
+        "catalog_products": _FakeColl([
+            _eligible_product(product_id="P2", sku="SKU-2", ecom={}),
+            _eligible_product(product_id="P4", sku="SKU-4", brand="Idee", ecom={}),
+        ]),
+        "ecom_collections": _FakeColl([_RAYBAN]),
+    })
+    orph = sh.orphan_skus(db)
+    assert [o["sku"] for o in orph["orphans"] if "not_in_collection" in o["reasons"]] == ["SKU-4"]
+
+
+def test_an_unreadable_membership_is_degraded_never_all_orphans(monkeypatch):
+    from api.services import collection_membership as cm
+
+    db = _FakeDb({"catalog_products": _FakeColl([_eligible_product()]), "ecom_collections": _FakeColl([_RAYBAN])})
+
+    def dead(*_a, **_k):
+        raise RuntimeError("blip")
+    monkeypatch.setattr(cm, "skus_in_any_collection", dead)
     assert sh.store_health_envelope(db)["degraded"] is True
 
 

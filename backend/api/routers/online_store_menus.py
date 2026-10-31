@@ -320,7 +320,11 @@ async def get_generated_menus(
 ) -> Dict:
     """Every generated menu: its template, a LIVE preview built now from the
     collections with products on the website (item counts, the hidden
-    list), and the last generate / push. Read-only (nothing is saved)."""
+    list -- with what the last LIVE read found empty on Shopify kept out),
+    and the last generate / push. ``changed_since_push`` is the stored
+    generated vs pushed hash (status().in_sync's rule). The listings are
+    read STRICTLY: an unreadable catalogue is reported as such, never as an
+    empty menu. Read-only (nothing is saved)."""
     db = _get_db()
     if db is None:
         return {"menus": [], "db_connected": False}
@@ -330,14 +334,22 @@ async def get_generated_menus(
     out = []
     if docs:
         collections = collection_membership.live_collections(db)
-        counts = collection_membership.counts_by_handle(db, None, collections)
+        try:
+            facts = collection_membership.online_facts(db, strict=True)
+            counts = collection_membership.counts_by_handle(db, facts, collections)
+        except Exception as exc:  # noqa: BLE001 -- shown, never read as "no products"
+            logger.warning("[MENUS] preview: listings unreadable: %s", exc)
+            counts = None
+            unreadable = f"The website listings could not be read just now ({exc}); try again shortly."
         for doc in docs:
-            items, hidden = generated_menu.generate(doc.get("template") or {}, collections, counts)
             st = generated_menu.status(doc)
-            title = doc.get("title") or doc.get("handle") or ""
-            preview_hash = generated_menu.menu_hash(title, doc.get("handle") or "", items)
-            st["preview"] = {"items": items, "hidden": hidden,
-                             "changed_since_push": preview_hash != doc.get("pushed_hash")}
+            if counts is None:
+                st["preview"] = {"items": [], "hidden": [], "unreadable": unreadable,
+                                 "changed_since_push": not st["in_sync"]}
+            else:
+                items, hidden = generated_menu.generate(
+                    doc.get("template") or {}, collections, counts, None, generated_menu.shop_hidden_of(doc))
+                st["preview"] = {"items": items, "hidden": hidden, "changed_since_push": not st["in_sync"]}
             out.append(st)
     return {"menus": out, "db_connected": True}
 

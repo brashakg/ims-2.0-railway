@@ -135,6 +135,27 @@ def test_validity_days_clamped_to_max_7():
     assert _clamp_validity_days(None) == 7
 
 
+def test_a_hand_picked_set_renders_exactly_as_picked():
+    """A temporary (Quick Share) CUSTOM set holding an in-store-only SKU and
+    a NON-LEAD colour SKU renders BOTH, in the picked order -- the website
+    membership rule is for SMART collections only (review round 2, BLOCK)."""
+    from database.connection import MockDatabase
+
+    db = MockDatabase()
+    db["catalog_products"].insert_one({"id": "L1", "sku": "RB-LEAD", "brand": "Ray-Ban", "category": "SUNGLASS",
+                                       "ecom": {"shopify_product_id": "gid://shopify/Product/1"}})
+    db["catalog_products"].insert_one({"id": "C2", "sku": "RB-BLUE", "brand": "Ray-Ban", "category": "SUNGLASS",
+                                       "parent_sku": "RB-LEAD", "colour": "Blue"})
+    db["catalog_products"].insert_one({"id": "S3", "sku": "STORE-ONLY", "brand": "Idee", "category": "SUNGLASS"})
+    db["ecom_collections"].insert_one({
+        "collection_id": "tmp-1", "title": "For Mrs Rao", "handle": "tmp-1", "collection_type": "CUSTOM",
+        "is_temporary": True,
+        "products": [{"sku": "STORE-ONLY", "position": 0}, {"sku": "RB-BLUE", "position": 1}],
+    })
+    got = pdf.resolve_collection_products(db, "tmp-1")
+    assert [d["sku"] for d in got] == ["STORE-ONLY", "RB-BLUE"]
+
+
 # ===========================================================================
 # Layer 2 -- router wiring (works WITHOUT a DB)
 # ===========================================================================

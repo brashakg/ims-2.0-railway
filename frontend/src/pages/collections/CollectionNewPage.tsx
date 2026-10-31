@@ -286,6 +286,10 @@ export default function CollectionNewPage() {
     });
   }, [rulesKey]);
 
+  // Rules the website cannot read (the collection would show 0 products
+  // there): shown, and Create stays off until they change.
+  const notEvaluable = previewState === 'ready' ? preview?.not_evaluable ?? null : null;
+
   // ---- Save -------------------------------------------------------------------
   const onSave = useCallback(async () => {
     const t = title.trim();
@@ -299,6 +303,10 @@ export default function CollectionNewPage() {
     }
     if (multi.length > 0) {
       toast.error(`Pick one value for: ${multi.join(', ')}`);
+      return;
+    }
+    if (notEvaluable) {
+      toast.error(`The website cannot read these rules: ${notEvaluable}`);
       return;
     }
     setSaving(true);
@@ -315,7 +323,7 @@ export default function CollectionNewPage() {
     } finally {
       setSaving(false);
     }
-  }, [title, rules, multi, toast, navigate]);
+  }, [title, rules, multi, notEvaluable, toast, navigate]);
 
   const sample = (preview?.sample ?? []).slice(0, 12);
 
@@ -528,7 +536,7 @@ export default function CollectionNewPage() {
             <button
               type="button"
               onClick={onSave}
-              disabled={saving || rules.length === 0 || multi.length > 0 || !title.trim()}
+              disabled={saving || rules.length === 0 || multi.length > 0 || !!notEvaluable || !title.trim()}
               className="btn-primary w-full inline-flex items-center justify-center gap-2 disabled:opacity-50"
             >
               {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
@@ -538,6 +546,12 @@ export default function CollectionNewPage() {
               <p className="text-xs text-amber-700 mt-2" data-testid="multi-value-warning">
                 One value per field: the website cannot read &quot;any of&quot; ({multi.join(', ')}). Make one
                 collection per value instead.
+              </p>
+            )}
+            {notEvaluable && (
+              <p className="text-xs text-amber-700 mt-2" data-testid="not-evaluable-warning">
+                The website cannot read these rules, so the collection would show no products there:{' '}
+                {notEvaluable}. Change the chips to ones the website can read.
               </p>
             )}
             <p className="text-[11px] text-gray-400 mt-2">
