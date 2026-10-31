@@ -93,7 +93,7 @@ def colour_size_parity(db):
             "website_pages": len(pages), "missing": len(missing), "missing_items": missing}
 
 
-_PUSH_THE_MODEL = "a colour/size of another model - it goes on the website with its model's page"
+PUSH_THE_MODEL = "a colour/size of another model - it goes on the website with its model's page"
 
 
 def _press_verdict(db, lead):
@@ -107,7 +107,7 @@ def _press_verdict(db, lead):
     if refusal:
         return "NOT_FOR_WEBSITE", "not for the website - " + refusal, None
     if is_variant_of(lead):
-        return "variant_of", _PUSH_THE_MODEL, None
+        return "variant_of", PUSH_THE_MODEL, None
     blocked = online_block.is_blocked_from_online_strict(lead, db)
     if blocked is None:
         return "block_status_unverifiable", "block status could not be read - the push skips it", None
@@ -115,7 +115,7 @@ def _press_verdict(db, lead):
         return "online_sync_blocked", "blocked from online - in an online_sync_blocked collection", None
     rows, plan = listing_plan(db, lead)
     if plan and plan.get("variant_of"):
-        return "variant_of", _PUSH_THE_MODEL, None
+        return "variant_of", PUSH_THE_MODEL, None
     if plan and plan.get("refusal"):
         return plan["refusal"][0], "family push refused - " + plan["refusal"][0], plan
     view = listing_view(lead, plan) if plan else lead
