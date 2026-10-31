@@ -469,8 +469,8 @@ def test_goods_bought_without_a_po_may_carry_the_tick_a_po_stock_bill_may_not(wo
     """LOW 13: a walk-in goods bill ticked when booked claims no credit, its
     GST in 4(B)(1) and in the goods' cost; a PO receipt's stock bill keeps its
     credit switch. Round 2: the booked tick may be UNticked -- the GST leaves
-    the units' and the product's cost and is credit again; it is never
-    ticked after booking."""
+    the product's one average cost (S4: every piece carries it) and is
+    credit again; it is never ticked after booking."""
     db = world["db"]
     from tests.test_receipt_without_po import _on_the_shelf
 
@@ -482,13 +482,14 @@ def test_goods_bought_without_a_po_may_carry_the_tick_a_po_stock_bill_may_not(wo
     ret = r3b._compute_gstr3b(MONTH, STORE)
     assert (_heads(ret["itcAvailable"]), _heads(ret["itcBlocked"])) == (0.0, 373.0)
     assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3255.0
-    assert {u["landed_cost"] for u in db.stock_units.find({"product_id": FRAME, "grn_id": walk_in})} == {3255.0}
+    pieces = db.stock_units.count_documents({"product_id": FRAME, "store_id": STORE, "status": "AVAILABLE"})
+    assert _shelf_value(db) == round(pieces * 3255.0, 2)
 
     assert _tick(booked, False)["itc_eligible"] is True
     ret = r3b._compute_gstr3b(MONTH, STORE)
     assert (_heads(ret["itcAvailable"]), _heads(ret["itcBlocked"])) == (373.0, 0.0)
     assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
-    assert {u["landed_cost"] for u in db.stock_units.find({"product_id": FRAME, "grn_id": walk_in})} == {3100.0}
+    assert _shelf_value(db) == round(pieces * 3100.0, 2)
     with pytest.raises(HTTPException) as refused:  # never ticked after booking
         _tick(booked, True)
     assert refused.value.status_code == 422
@@ -503,7 +504,8 @@ def test_goods_bought_without_a_po_may_carry_the_tick_a_po_stock_bill_may_not(wo
 
 
 # ---------------------------------------------------------------------------
-# F04: a bill booked without input credit adds its GST to the units' cost
+# F04: a bill booked without input credit adds its GST to the goods' cost --
+# the product's ONE average cost every piece carries (S4, owner 2026-10-23)
 # ---------------------------------------------------------------------------
 
 
@@ -513,67 +515,87 @@ def _po_receipt(db, grn_id, vendor=DEALER, cost=3100.0, subtype="STANDARD", **ex
     _minted(db, grn_id, cost)
 
 
-def _units(db, grn_id):
-    return [(u.get("unit_cost"), u.get("landed_cost"), stock_value._own_cost(u))
-            for u in db.stock_units.find({"grn_id": grn_id}).sort("stock_id", 1)]
-
-
 def _shelf_value(db):
     return stock_value.by_product(stock_value.shelf_units(
         StockRepository(db.stock_units), ProductRepository(db.products), STORE))[FRAME]["cost"]
 
 
-def test_a_po_bill_booked_without_credit_puts_its_gst_into_the_units_cost(world):
+def _cost(db):
+    return db.products.find_one({"product_id": FRAME})["cost_price"]
+
+
+def _accepted(bill):
+    """These bills are 3100 on an order at 3000 -- outside the match
+    tolerance, so they book ON HOLD and (S4) move no cost until approved."""
+    assert bill["match_status"] == "ON_HOLD_EXCEPTION"
+    assert _cost_now(bill) == 3000.0
+    _run(pi.approve_invoice_exception(bill["invoice_id"], pi.ExceptionOverride(reason="price agreed"),
+                                      current_user=ACCOUNTANT))
+
+
+def _cost_now(_bill):
+    from api.dependencies import get_db
+
+    return get_db().db.products.find_one({"product_id": FRAME})["cost_price"]
+
+
+def test_a_po_bill_booked_without_credit_puts_its_gst_into_the_cost(world):
     db = world["db"]
     _po_receipt(db, "GRN-STD-0401")
-    # A unit of the receipt sold before the bill: it keeps its receipt cost
-    # (its GST reaches later units through the moving average, LOW 10).
+    # A piece of the receipt sold before the bill; the other held under the
+    # legacy token (on hand by THE rule, item_events.is_on_hand).
     db.stock_units.update_one({"stock_id": "SU-GRN-STD-0401-1"}, {"$set": {"status": "SOLD"}})
-    # A held unit stored under the legacy token: on hand by THE rule
-    # (item_events.is_on_hand), so it takes the GST too.
     db.stock_units.update_one({"stock_id": "SU-GRN-STD-0401-0"}, {"$set": {"status": "IN_STOCK"}})
     off = _invoice_body("GRN-STD-0401", "TAX-401")
     off.itc_eligible = False
-    _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
-    # The supplier's price stays the unit's price (the last-paid quote); the
-    # stock is worth price + the 5% GST that cannot be claimed back.
-    assert _units(db, "GRN-STD-0401") == [(3100.0, 3255.0, 3255.0), (3100.0, None, 3100.0)]
+    _accepted(_run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT)))
+    # The stock is worth the price + the 5% GST that cannot be claimed back.
+    assert _cost(db) == 3255.0
     assert _shelf_value(db) == 3255.0
-    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3255.0
-    # The same bill again adds nothing -- even if the unit's cost source were
-    # reset (the guard is the bill's own mark, LOW 12).
-    db.stock_units.update_one({"stock_id": "SU-GRN-STD-0401-0"}, {"$set": {"cost_source": "GRN_PO"}})
+    # The same bill again adds nothing (exactly once per product and bill).
     stored = db.vendor_bills.find_one({"grn_id": "GRN-STD-0401"})
-    pi._add_unclaimed_gst_to_units(db, [db.grns.find_one({"grn_id": "GRN-STD-0401"})], stored,
-                                   stored["lines"])
-    assert _units(db, "GRN-STD-0401")[0][:2] == (3100.0, 3255.0)
+    pi._apply_valuation_trueup(db, stored, {"lines": stored["lines"]})
+    assert _cost(db) == 3255.0
+    assert len(db.products.find_one({"product_id": FRAME})["cost_history"]) == 1
 
 
 def test_a_po_bill_claiming_credit_leaves_the_cost_before_gst(world):
     db = world["db"]
     _po_receipt(db, "GRN-STD-0402")
-    _run(pi.create_purchase_invoice(_invoice_body("GRN-STD-0402", "TAX-402"), current_user=ACCOUNTANT))
-    assert _units(db, "GRN-STD-0402") == [(3100.0, None, 3100.0)] * 2
+    _accepted(_run(pi.create_purchase_invoice(_invoice_body("GRN-STD-0402", "TAX-402"), current_user=ACCOUNTANT)))
     assert _shelf_value(db) == 6200.0
-    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
+    assert _cost(db) == 3100.0
 
 
 def test_the_cash_flow_door_costs_a_po_receipt_at_the_bills_own_price(world):
     """LOW 17: Sharma (no GSTIN) bills the two frames at Rs 3000, not the
-    order's 3100: the product costs the bill's price + 5%; each unit its
-    receipt price + the GST on the bill's price."""
+    order's 3100: the product -- and so every piece -- costs the bill's
+    price + 5%."""
     db = world["db"]
     _po_receipt(db, "GRN-STD-0403", vendor=SHARMA)
     bill = vd.VendorBillCreate(bill_number="SH-403", bill_date="2026-09-14", taxable_amount=6000.0,
                                tax_amount=300.0, total_amount=6300.0, grn_id="GRN-STD-0403")
     assert _run(vd.create_vendor_bill(SHARMA, bill, current_user=ACCOUNTANT))["itc_eligible"] is False
-    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3150.0
-    assert _units(db, "GRN-STD-0403") == [(3100.0, 3250.0, 3250.0)] * 2
+    assert _cost(db) == 3150.0
+    assert _shelf_value(db) == 6300.0
 
 
-def test_a_delivery_challan_bill_costs_the_challans_units_too(world):
-    """M5: a consolidated bill names its challans (linked_dc_ids), no goods
-    receipt; its unclaimed GST still lands on the challans' units."""
+def test_s4_the_cash_flow_door_re_averages_a_po_bill_that_claims_credit_too(world):
+    """S4: every accepted bill moves the average -- on this door a PO bill
+    claiming credit used to leave the cost as received (the PO rate)."""
+    db = world["db"]
+    _po_receipt(db, "GRN-STD-0404")
+    bill = vd.VendorBillCreate(bill_number="PO-404", bill_date="2026-09-14", taxable_amount=6000.0,
+                               tax_amount=300.0, total_amount=6300.0, grn_id="GRN-STD-0404")
+    assert _run(vd.create_vendor_bill(DEALER, bill, current_user=ACCOUNTANT))["itc_eligible"] is True
+    assert _cost(db) == 3000.0
+    assert db.vendor_bills.find_one({"bill_number": "PO-404"})["cost_state"] == "APPLIED"
+
+
+def test_a_delivery_challan_bill_costs_the_challans_pieces_once(world):
+    """M5 / S4: a consolidated bill names its challans (linked_dc_ids), no
+    goods receipt; the challans' pieces are its billed pieces -- never also
+    old stock -- and its unclaimed GST is in the cost."""
     db = world["db"]
     for dc in ("DC-0001", "DC-0002"):
         _po_receipt(db, dc, subtype="DELIVERY_CHALLAN", po_id=None,
@@ -583,64 +605,40 @@ def test_a_delivery_challan_bill_costs_the_challans_units_too(world):
     doc = {"bill_id": "DC-BILL", "invoice_id": "DC-BILL", "itc_eligible": False,
            "linked_dc_ids": ["DC-0001", "DC-0002"]}
     pi._apply_valuation_trueup(db, doc, {"lines": [
-        {"product_id": FRAME, "qty": 2, "unit_price": 3100.0, "gst_rate": 5.0}]}, {})
-    assert [u[1] for u in _units(db, "DC-0001") + _units(db, "DC-0002")] == [3255.0, 3255.0]
+        {"product_id": FRAME, "qty": 2, "unit_price": 3100.0, "gst_rate": 5.0}]})
+    assert _cost(db) == 3255.0
+    assert _shelf_value(db) == 6510.0
 
 
-def test_a_multi_piece_unit_billed_in_parts_takes_each_parts_share(world):
-    """LOW 8: one stock row of 10 boxes, billed 4 + 6 without credit at
-    Rs 100 + 5%: 4/10 of the GST, then all of it; a unit of another receipt
-    listed first is passed over, never a reason to stop."""
+def test_a_receipt_billed_in_parts_averages_each_part_once(world):
+    """LOW 8 on the one average: 50 boxes at 90 already costed; a 10-box
+    receipt billed 4 + 6 without credit at Rs 100 + 5%. The receipt's
+    unbilled boxes never weigh in, so the parts land on the true average
+    (50 x 90 + 10 x 105) / 60 = 92.50."""
     db = world["db"]
+    db.products.update_one({"product_id": FRAME}, {"$set": {"cost_price": 90.0}})
     _seed_receipt(db, grn_id="GRN-STD-0808", subtype="STANDARD", po_id="PO-0808",
                   items=[{"product_id": FRAME, "received_qty": 10, "accepted_qty": 10,
                           "rejected_qty": 0, "unit_price": 100.0}])
     db.stock_units.insert_many([
         {"stock_id": "A-OTHER", "product_id": FRAME, "store_id": STORE, "status": "AVAILABLE",
-         "quantity": 50, "unit_cost": 90.0, "grn_id": "GRN-ELSE"},
+         "quantity": 50, "unit_cost": 90.0},
         {"stock_id": "B-BOXES", "product_id": FRAME, "store_id": STORE, "status": "AVAILABLE",
          "quantity": 10, "unit_cost": 100.0, "grn_id": "GRN-STD-0808"},
     ])
-    grn = db.grns.find_one({"grn_id": "GRN-STD-0808"})
-
-    def part(bill_id, qty):
-        pi._add_unclaimed_gst_to_units(db, [grn], {"bill_id": bill_id, "itc_eligible": False},
-                                       [{"product_id": FRAME, "qty": qty, "unit_price": 100.0, "gst_rate": 5.0}])
-        return db.stock_units.find_one({"stock_id": "B-BOXES"})
-
-    assert part("P1", 4)["landed_cost"] == 102.0
-    assert part("P1", 4)["landed_cost"] == 102.0  # the same part again: nothing
-    boxes = part("P2", 6)
-    assert (boxes["landed_cost"], boxes["unclaimed_gst"]["pieces"]) == (105.0, 10)
-    assert part("P2", 6)["landed_cost"] == 105.0  # the same bill again: nothing
-    assert "landed_cost" not in db.stock_units.find_one({"stock_id": "A-OTHER"})
-
-
-def test_unticking_one_of_two_bills_takes_back_only_its_share(world):
-    """Round 3: a 10-box unit carries GST from two bills (4 + 6 boxes);
-    taking back the first leaves exactly the second's share."""
-    db = world["db"]
-    _seed_receipt(db, grn_id="GRN-STD-0810", subtype="STANDARD", po_id="PO-0810",
-                  items=[{"product_id": FRAME, "received_qty": 10, "accepted_qty": 10,
-                          "rejected_qty": 0, "unit_price": 100.0}])
-    db.stock_units.insert_one({"stock_id": "BOXES", "product_id": FRAME, "store_id": STORE,
-                               "status": "AVAILABLE", "quantity": 10, "unit_cost": 100.0,
-                               "grn_id": "GRN-STD-0810"})
-    grn = db.grns.find_one({"grn_id": "GRN-STD-0810"})
-    for bill_id, qty in (("A", 4), ("B", 6)):
-        pi._add_unclaimed_gst_to_units(db, [grn], {"bill_id": bill_id, "itc_eligible": False},
-                                       [{"product_id": FRAME, "qty": qty, "unit_price": 100.0, "gst_rate": 5.0}])
-    assert db.stock_units.find_one({"stock_id": "BOXES"})["landed_cost"] == 105.0
-    pi._remove_unclaimed_gst(db, "A")
-    boxes = db.stock_units.find_one({"stock_id": "BOXES"})
-    assert (boxes["landed_cost"], boxes["unclaimed_gst"]["pieces"], boxes["unclaimed_gst"]["bills"]) == (
-        103.0, 6, ["B"])
+    for bill_id, qty in (("P1", 4), ("P2", 6)):
+        bill = {"bill_id": bill_id, "invoice_id": bill_id, "grn_id": "GRN-STD-0808",
+                "status": "OUTSTANDING", "cost_state": "PENDING", "itc_eligible": False,
+                "lines": [{"product_id": FRAME, "qty": qty, "unit_price": 100.0,
+                           "taxable": qty * 100.0, "gst_rate": 5.0}]}
+        db.vendor_bills.insert_one(dict(bill))
+        pi._apply_accepted_bill(db, bill)
+    assert _cost(db) == 92.5
 
 
 def test_unticking_an_unregistered_suppliers_goods_bill_keeps_the_gst_in_cost(world):
     """Round 3: Sharma has no GSTIN, so unticking 17(5) gives no credit back --
-    the GST stays in the units' and the product's cost (it used to leave the
-    units only: 3255 -> 3100 while the product stayed 3255)."""
+    the GST stays in the product's cost (and so in every piece's)."""
     db = world["db"]
     from tests.test_receipt_without_po import _on_the_shelf
 
@@ -649,24 +647,7 @@ def test_unticking_an_unregistered_suppliers_goods_bill_keeps_the_gst_in_cost(wo
                                tax_amount=373.0, total_amount=7833.0, grn_id=walk_in, itc_blocked=True)
     booked = _run(vd.create_vendor_bill(SHARMA, gift, current_user=ACCOUNTANT))
     assert _tick(booked, False)["itc_eligible"] is False
-    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3255.0
-    assert {u["landed_cost"] for u in db.stock_units.find({"product_id": FRAME, "grn_id": walk_in})} == {3255.0}
-
-
-def test_an_unpriced_receipt_billed_in_two_parts_prices_every_unit(world):
-    """LOW 9: one part with credit, one without, at one price: each part
-    prices its own pieces (3100, and 3100 + 5%) -- none left pending."""
-    db = world["db"]
-    grn = _seed_receipt(db, grn_id="GRN-STD-0909", subtype="STANDARD", po_id="PO-0909")
-    _minted(db, "GRN-STD-0909", 0)
-    for n, credit in ((1, True), (2, False)):
-        db.vendor_bills.insert_one({
-            "bill_id": f"PART-{n}", "grn_id": "GRN-STD-0909", "doc_type": "PURCHASE_INVOICE",
-            "status": "OUTSTANDING", "vendor_id": DEALER, "itc_eligible": credit,
-            "created_at": f"2026-09-1{n}T10:00:00",
-            "lines": [{"product_id": FRAME, "qty": 1, "unit_price": 3100.0, "gst_rate": 5.0}]})
-    pi._resolve_billed_receipt_costs(db, grn)
-    assert sorted(u[1] for u in _units(db, "GRN-STD-0909")) == [3100.0, 3255.0]
+    assert _cost(db) == 3255.0
 
 
 @pytest.mark.parametrize("credit, landed", [(False, 330500), (True, 315000)])

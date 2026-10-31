@@ -23,6 +23,7 @@ from ._shared import (
     uuid,
 )
 from ...services.cost_mask import mask_cost, refuse_cost_write
+from ...services import product_cost
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
@@ -320,6 +321,17 @@ async def opening_stock_commit(
         units_added += created_count
         if cost_fields:
             total_value += cost_fields["unit_cost"] * created_count
+            # S4: the pieces carry the product's ONE average cost; opening
+            # stock gives a product that has none its first (a cost-history
+            # row). A product that already has an average keeps it.
+            if created_count and _db is not None:
+                try:
+                    product_cost.seed(
+                        _db, pid, cost_fields["unit_cost"], key=f"opening:{uuid.uuid4().hex}",
+                        kind="OPENING_STOCK", actor=current_user.get("user_id"),
+                    )
+                except Exception:  # noqa: BLE001 - the minted stock stands
+                    logger.warning("[INVENTORY] opening-stock cost for %s not set", pid, exc_info=True)
         if created_count > 0:
             batch_lines.append(
                 {

@@ -593,6 +593,10 @@ async def create_vendor_bill(
         "bill_kind": ap_engine.BILL_KIND_GOODS if bill.grn_id else bill.bill_kind,
         "notes": bill.notes,
         "status": "OUTSTANDING",
+        # S4: a receipt's bill is accepted when booked (this door has no
+        # match, so no hold) -- its cost goes into the products' average
+        # below; finish_accepted_bills finishes it after a crash.
+        **({"cost_state": "PENDING"} if bill.grn_id else {}),
         "created_by": current_user.get("user_id"),
         "created_at": utc_now_iso(),
     }
@@ -653,19 +657,17 @@ async def create_vendor_bill(
                     ),
                 ) from exc
             raise HTTPException(status_code=500, detail="Failed to save bill") from exc
-    # G1 on this door too: a walk-in receipt's bill costs its goods by THE
-    # true-up the line-detail door runs (purchase_invoices.
-    # _apply_valuation_trueup: the price paid, plus the bill's GST when it
-    # claims no credit). This form names no lines, so each receipt line
-    # carries the bill's tax share as its rate.
-    # ponytail: one share for every line; a mixed-rate walk-in bill wants the
+    # S4 on this door too: the accepted bill re-averages its receipt's
+    # products by THE rule the line-detail door runs (purchase_invoices.
+    # _apply_valuation_trueup: the bill's price -- a walk-in buy's latest
+    # price paid -- plus its GST when it claims no credit, G1 / F04). This
+    # form names no lines, so each receipt line carries the bill's tax share
+    # as its rate.
+    # ponytail: one share for every line; a mixed-rate bill wants the
     # line-detail door (Purchase -> Invoices -> Create from GRN).
-    # F04 (owner + CA 2026-10-18): a PO receipt's bill claiming no credit (an
-    # unregistered supplier's, on this door) trues up the same way, priced
-    # from its order; one claiming credit leaves the cost as received.
-    walk_in = (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
-    if db is not None and linked and (walk_in or doc["itc_eligible"] is False):
-        _true_up_header_bill(db, {**doc, "invoice_id": bill_id}, linked)
+    if db is not None and linked:
+        _true_up_header_bill(db, {**doc, "invoice_id": bill_id}, linked,
+                             actor=current_user.get("user_id"))
     if db is not None:
         # Pieces of this receipt written off before the bill came reverse the
         # credit it just claimed on them (services/writeoff_itc).
@@ -675,13 +677,13 @@ async def create_vendor_bill(
     return _clean(doc)
 
 
-def _true_up_header_bill(db, doc: dict, linked: dict) -> None:
+def _true_up_header_bill(db, doc: dict, linked: dict, *, key=None, actor=None) -> None:
     """The cost true-up of a header-only bill on its receipt (G1 / F04): the
     receipt's lines carry the bill's tax share as their rate. A walk-in buy
     costs at the price paid; a PO receipt at the BILL's price -- its taxable
     value spread over the receipt's lines in their order-price proportion
     (evenly per piece when the order names no prices; LOW 17)."""
-    from ..purchase_invoices import _apply_valuation_trueup, _resolved_purchase_config
+    from ..purchase_invoices import _apply_valuation_trueup
     from ...services.purchase_invoice_engine import lines_from_grn
 
     walk_in = linked.get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
@@ -700,8 +702,16 @@ def _true_up_header_bill(db, doc: dict, linked: dict) -> None:
         elif pieces > 0:
             lines = [{**ln, "unit_price": round(taxable / pieces, 2)} for ln in lines]
     _apply_valuation_trueup(
-        db, doc, {"lines": [{**ln, "gst_rate": share} for ln in lines]}, _resolved_purchase_config(db),
+        db, doc, {"lines": [{**ln, "gst_rate": share} for ln in lines]}, key=key, actor=actor,
     )
+    if key is None:
+        try:
+            db.get_collection("vendor_bills").update_one(
+                {"bill_id": doc.get("invoice_id") or doc.get("bill_id"), "cost_state": "PENDING"},
+                {"$set": {"cost_state": "APPLIED", "cost_applied_at": utc_now_iso()}},
+            )
+        except Exception:  # noqa: BLE001 - the sweeper re-runs it safely
+            logger.warning("[AP] marking a header bill's cost applied failed", exc_info=True)
 
 
 @router.get("/{vendor_id}/bills")
@@ -787,8 +797,8 @@ async def set_vendor_bill_itc_blocked(
     if bill is None or not can_access_store_scoped(bill.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Bill not found")
     # A goods bill bought without a PO, ticked when booked, may be UNTICKED
-    # (review round 2): its unclaimed GST then leaves its units' cost and,
-    # for a walk-in buy, the product's. It is never ticked after booking.
+    # (review round 2): for a walk-in buy its unclaimed GST then leaves the
+    # product's cost. It is never ticked after booking.
     goods_untick = bool(
         bill.get("grn_id") and bill.get("itc_blocked") and not body.itc_blocked
         and not bill.get("source_transfer_id")
@@ -837,16 +847,15 @@ async def set_vendor_bill_itc_blocked(
     # Only when the untick really gives the credit back (round 3): an
     # unregistered supplier's GST stays no credit, so it stays in the cost.
     if goods_untick and update["itc_eligible"]:
-        from ..purchase_invoices import _remove_unclaimed_gst
-
-        _remove_unclaimed_gst(db, bill_id)
         linked = db.get_collection("grns").find_one({"grn_id": bill["grn_id"]}, {"_id": 0})
         if (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO:
             # The walk-in cost is the latest price paid (re-settable): the
-            # product's cost goes back to the price without the GST.
-            # ponytail: a challan bill's moving average keeps the GST until
-            # its next bill (logged by the review: DC moving-average blend).
-            _true_up_header_bill(db, {**bill, **update, "invoice_id": bill_id}, linked)
+            # product's cost goes back to the price without the GST -- its own
+            # cost-history row (a bill is never re-applied under its own key).
+            # ponytail: an average blended from the bill keeps the GST until
+            # an accounts correction (one untick per bill: never re-ticked).
+            _true_up_header_bill(db, {**bill, **update, "invoice_id": bill_id}, linked,
+                                 key=f"{bill_id}:credit-claimed", actor=current_user.get("user_id"))
         # The bill now claims credit on pieces written off while it was
         # ticked (they reversed nothing then): reverse them, in the bill's
         # month -- the month the credit lands. Once per piece, so repeat-safe.

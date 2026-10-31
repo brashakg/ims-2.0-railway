@@ -38,6 +38,7 @@ import {
   INVENTORY_MANAGE_ROLES,
   POWER_GRID_ROLES,
   REORDER_LIST_ROLES,
+  PRODUCT_STOCK_ROLES,
   STOCK_LOOKUP_ROLES,
 } from '../pages/inventory/inventoryRoles';
 
@@ -63,6 +64,7 @@ const StockLookupPage = lazy(() => import('../pages/inventory/StockLookupPage'))
 const ReorderListPage = lazy(() => import('../pages/inventory/ReorderListPage').then(m => ({ default: m.ReorderListPage })));
 const StockAudit = lazy(() => import('../pages/inventory/StockAudit').then(m => ({ default: m.StockAudit })));
 const StockCountResult = lazy(() => import('../pages/inventory/StockCountResult').then(m => ({ default: m.StockCountResult })));
+const ProductStockPage = lazy(() => import('../pages/inventory/ProductStockPage').then(m => ({ default: m.ProductStockPage })));
 const OpeningStockImport = lazy(() => import('../pages/inventory/OpeningStockImport').then(m => ({ default: m.OpeningStockImport })));
 
 // Legacy ?tab= mapper - logic in pages/inventory/legacyTabRedirect.ts so it
@@ -152,6 +154,18 @@ export const inventoryRoutes = (
       element={
         <ProtectedRoute allowedRoles={INVENTORY_MANAGE_ROLES}>
           <StockCountResult />
+        </ProtectedRoute>
+      }
+    />
+
+    {/* S4: one product's stock and its ONE average cost + cost history
+        (its own address). Outside the module layout: the accountant, who
+        accepts bills and corrects the average, is not a module member. */}
+    <Route
+      path="inventory/stock/:productId"
+      element={
+        <ProtectedRoute allowedRoles={PRODUCT_STOCK_ROLES}>
+          <ProductStockPage />
         </ProtectedRoute>
       }
     />

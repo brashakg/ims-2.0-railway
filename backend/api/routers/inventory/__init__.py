@@ -37,6 +37,7 @@ from . import reorders
 from . import serials
 from . import quarantine
 from . import lookup
+from . import cost_card
 from ._shared import router
 
 
@@ -64,6 +65,7 @@ _SUBMODULES = (
     serials,
     quarantine,
     lookup,
+    cost_card,
 )
 
 # The flat module was ONE namespace: `from api.routers.inventory import X` and

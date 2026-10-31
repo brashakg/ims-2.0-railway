@@ -173,6 +173,13 @@ def capability_for(method: str, path: str) -> Optional[str]:
     if tmpl in ("/api/v1/vendor-rma/{rma_id}/credit-preview",
                 "/api/v1/vendor-rma/{rma_id}/credit-note"):
         return "vendor-rma:confirm-credit"
+    # Curated finer capability: an accounts correction of a product's average
+    # cost (S4). Its roles are the accounts roles (ACCOUNTANT among them); on
+    # the generic inventory:write key the accountant would join the union the
+    # grant guard reasons from and could hand out stock editing. A deny or
+    # grant stored on inventory:write still answers it: PARENT_CAPABILITY.
+    if tmpl == "/api/v1/inventory/products/{product_id}/cost-correction":
+        return "inventory:cost-correction"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
 
@@ -190,6 +197,7 @@ PARENT_CAPABILITY: Dict[str, str] = {
     # A parent GRANT never lifts it: the resolver refuses any grant of an
     # ungrantable key, and users:set-password is SUPERADMIN-only.
     "users:set-password": "users:write",
+    "inventory:cost-correction": "inventory:write",
 }
 
 

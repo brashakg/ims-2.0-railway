@@ -14,14 +14,13 @@ PHASE 2 adds the procure-to-pay CONTROL on top of Phase 1:
     ON_HOLD_EXCEPTION + per-line reasons) is stored on the invoice doc.
     GET /{id}/match returns the detail; POST /{id}/approve-exception lets an
     ADMIN/ACCOUNTANT override a hold to MATCHED_OVERRIDE (audited).
-  * INVENTORY VALUATION TRUE-UP -- on booking, the invoice's per-unit landed
-    price trues up the product's moving-average cost (services/purchase_match.
-    valuation_trueup_for_invoice). Fail-soft: a valuation write NEVER blocks the
-    booking. (GRN acceptance in vendors.py provisionally stamps the PO price as
-    unit_cost on each minted stock_unit; the invoice is the authoritative cost.)
-  * CONFIG -- GET/PUT /config exposes valuation_method (MOVING_AVERAGE default,
-    alt FIFO) + match_tolerance_pct (default 5), stored in a single
-    ``purchase_settings`` doc with safe defaults when unset.
+  * ONE AVERAGE COST (S4) -- when a bill is ACCEPTED (booked off hold, or its
+    hold approved) its goods re-average each product's one cost
+    (services/product_cost) and its MRP goes on the product; a bill on hold
+    changes neither. Fail-soft: a cost write NEVER blocks the booking. (The PO
+    rate is only the provisional cost until then.)
+  * CONFIG -- GET/PUT /config exposes match_tolerance_pct (default 5), stored
+    in a single ``purchase_settings`` doc with safe defaults when unset.
 
 Mounted at ``/api/v1/vendors/purchase-invoices`` and registered BEFORE the
 vendors router in main.py so its concrete paths win over the vendors
@@ -87,8 +86,7 @@ from ..services import org_validation as ov
 from ..services import landed_cost as lc
 from ..services import purchase_invoice_engine as pinv
 from ..services import purchase_match as pmatch
-from ..services import stock_value
-from ..services.item_events import is_on_hand
+from ..services import product_cost
 from ..services import product_master as _pm
 from ..services.cost_mask import AP_ROLES
 
@@ -263,7 +261,7 @@ def _billed_by_text(named: list, total: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 config (valuation_method + match_tolerance_pct) -- single settings doc
+# Phase 2 config (match_tolerance_pct) -- single settings doc
 # ---------------------------------------------------------------------------
 
 # All Phase-2 purchase config lives in ONE doc so the resolver is a single read.
@@ -286,7 +284,7 @@ def _read_purchase_settings(db) -> Optional[dict]:
 
 
 def _resolved_purchase_config(db) -> dict:
-    """Effective {valuation_method, match_tolerance_pct} with safe defaults."""
+    """Effective {match_tolerance_pct} with safe defaults."""
     return pmatch.resolve_config(_read_purchase_settings(db))
 
 
@@ -941,12 +939,11 @@ def _stamp_dcs_matched(db, dc_ids, invoice_id):
 
 
 class PurchaseConfigUpdate(BaseModel):
-    valuation_method: Optional[str] = None  # MOVING_AVERAGE | FIFO
     match_tolerance_pct: Optional[float] = Field(default=None, ge=0, le=100)
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 match-on-book + valuation true-up (fail-soft; never block the booking)
+# Phase 2 match-on-book + S4 cost on acceptance (fail-soft; never block the booking)
 # ---------------------------------------------------------------------------
 
 
@@ -1001,96 +998,6 @@ def _run_match_for_invoice(
         return None
 
 
-def _product_state_for_valuation(
-    db, product_ids, store_id=None, exclude_grn_id=None
-) -> dict:
-    """Prior available layers, preserving unknown cost instead of assuming zero.
-
-    Use the stock-value reader's own-cost / legacy master fallback rule. The
-    current receipt is excluded by immutable origin (also after transfer).
-    Read failures propagate to the fail-soft booking wrapper; an unreadable
-    inventory must not be mistaken for an empty first receipt.
-    """
-    state: dict = {}
-    if db is None or not product_ids:
-        return state
-    pids = [p for p in product_ids if p]
-    masters = {p["product_id"]: p for p in db.get_collection("products").find(
-        {"product_id": {"$in": pids}},
-        {"_id": 0, "product_id": 1, "cost_price": 1, "cost_price_is_catalogue_only": 1})}
-    receipt = db.get_collection("grns").find_one({"grn_id": exclude_grn_id}) if exclude_grn_id else None
-    receipt = receipt or {"grn_id": exclude_grn_id}
-    unique_number = _valuation_unique_number(db, receipt)
-    for pid in pids:
-        master_cost = stock_value.master_fallback_cost(masters.get(pid))
-        flt = {"product_id": pid, "status": "AVAILABLE"}
-        if store_id:
-            flt["store_id"] = store_id
-        qty = known_qty = value = receipt_uncosted = 0.0
-        for unit in db.get_collection("stock_units").find(flt):
-            pieces = stock_value._pieces(unit)
-            cost = stock_value.resolved_cost(unit, master_cost)
-            if exclude_grn_id and _valuation_receipt_unit(unit, receipt, unique_number):
-                if cost <= 0:
-                    receipt_uncosted += pieces
-                continue
-            qty += pieces
-            if cost > 0:
-                known_qty += pieces
-                value += pieces * cost
-        # The master carries earlier invoice true-ups, while already priced
-        # physical units may still retain their original receipt price. Do not
-        # erase that established average by recomputing it from those units.
-        prior_cost = master_cost or None
-        if not prior_cost and known_qty:
-            prior_cost = round(value / known_qty, 2)
-        state[pid] = {"on_hand_qty": qty, "uncosted_qty": qty - known_qty,
-                      "receipt_uncosted_qty": receipt_uncosted,
-                      "cost_price": prior_cost}
-    return state
-
-
-def _valuation_unique_number(db, grn):
-    number = (grn or {}).get("grn_number")
-    return bool(number and db.get_collection("grns").count_documents({"grn_number": number}) == 1)
-
-
-def _valuation_receipt_unit(unit, grn, unique_number):
-    """Same disjoint immutable-id / legacy-source rule as GRN origin counts."""
-    grn_id = (grn or {}).get("grn_id")
-    if not grn_id:
-        return False
-    if unit.get("grn_id") is not None:
-        return unit.get("grn_id") == grn_id
-    return ((unit.get("source_type") == "GRN" and unit.get("source_id") == grn_id)
-            or (unique_number and unit.get("grn_number") == grn.get("grn_number")))
-
-
-def _preserve_unpriced_layers(db, product_ids):
-    """Persist unknown layers BEFORE any new master price could mask them.
-
-    Cover every shop/status: a transfer, reservation or later return must not
-    change whether a unit's original cost was known. Known own costs remain.
-    A failed marker write stops valuation, while the booked payable stands.
-    """
-    products = db.get_collection("products")
-    stock = db.get_collection("stock_units")
-    for pid in set(product_ids):
-        master = products.find_one({"product_id": pid}) or {}
-        for unit in stock.find({"product_id": pid}):
-            if stock_value.resolved_cost(unit, stock_value.master_fallback_cost(master)) > 0:
-                continue
-            if unit.get("valuation_cost_pending"):
-                continue
-            identity = {"stock_id": unit["stock_id"]} if unit.get("stock_id") else {"_id": unit["_id"]}
-            expected = {**identity, "unit_cost": unit.get("unit_cost"), "cost_price": unit.get("cost_price")}
-            result = stock.update_one(expected, {"$set": {"valuation_cost_pending": True}})
-            if result.matched_count != 1:
-                current = stock.find_one(identity)
-                if not current or not (current.get("valuation_cost_pending") or stock_value._own_cost(current)):
-                    raise RuntimeError("Could not preserve an unpriced stock layer")
-
-
 def _cost_lines(bill: dict, lines: list) -> list:
     """THE unclaimed-GST cost rule (G1, owner 2026-10-13, for walk-in bills;
     F04, owner + CA 2026-10-18, for every bill): a bill that claims no input
@@ -1098,9 +1005,11 @@ def _cost_lines(bill: dict, lines: list) -> list:
     tick -- costs its goods at the price PLUS each line's GST, since tax that
     cannot be claimed back is part of what the goods cost. A bill claiming
     credit costs them at the price (unchanged). Every cost a bill writes reads
-    it: the product's cost (_apply_valuation_trueup), each received unit's
-    (_resolve_billed_receipt_costs, _add_unclaimed_gst_to_units) and the
-    landed-cost allocation. An unknown price stays unknown."""
+    it: the product's average (_apply_valuation_trueup) and the landed-cost
+    allocation. A line's value takes the very GST the bill charged on it
+    (its cgst + sgst + igst), so the cost is the bill's to the paisa; a line
+    carrying only a rate (a header bill's) adds it at that rate. An unknown
+    price stays unknown."""
     if (bill or {}).get("itc_eligible") is not False:
         return lines
 
@@ -1112,177 +1021,13 @@ def _cost_lines(bill: dict, lines: list) -> list:
         rate = float(ln.get("gst_rate") or 0)
         costed = {**ln, "unit_price": gross(ln.get("unit_price"), rate)}
         if ln.get("taxable") is not None:
-            costed["taxable"] = gross(ln.get("taxable"), rate)
+            charged = [ln.get(k) for k in ("cgst", "sgst", "igst") if ln.get(k) is not None]
+            costed["taxable"] = (
+                round(float(ln["taxable"]) + sum(float(v) for v in charged), 2)
+                if charged else gross(ln.get("taxable"), rate)
+            )
         out.append(costed)
     return out
-
-
-def _add_unclaimed_gst_to_units(db, receipts, bill, lines) -> None:
-    """F04 on the units: a bill claiming no input credit adds each line's GST
-    to the units of its receipts -- the goods receipt, or every Delivery
-    Challan a consolidated bill names (M5) -- that were costed when received.
-    The unit keeps unit_cost (the supplier's price, which the last-paid quote
-    reads); landed_cost carries price + GST and is what stock is valued at
-    (stock_value._own_cost). Units received unpriced are priced by
-    _resolve_billed_receipt_costs through the same rule.
-
-    Up to the billed quantity per product. `unclaimed_gst` on the unit
-    records the GST added per piece, how many of its pieces carry it and the
-    bills that added it: a bill never adds twice, and a multi-piece unit
-    billed in parts takes each part's share of its pieces (LOW 8).
-    ponytail: units SOLD before the bill is booked keep their receipt cost
-    (the sale's cost was taken then); their GST reaches future units through
-    the product's moving average, which _apply_valuation_trueup blends at
-    price + GST over the whole billed quantity (LOW 10). Which held pieces a
-    part bill's GST lands on is arbitrary; the total is exact."""
-    receipts = [g for g in receipts or [] if g and g.get("grn_id")]
-    if not receipts or (bill or {}).get("itc_eligible") is not False:
-        return
-    bill_id = bill.get("invoice_id") or bill.get("bill_id")
-    stock = db.get_collection("stock_units")
-    numbered = [(g, _valuation_unique_number(db, g)) for g in receipts]
-    for line in lines or []:
-        pid = line.get("product_id")
-        price = pmatch._valuation_cost(line.get("unit_price"))
-        left = pmatch._valuation_cost(line.get("qty")) or 0
-        gst = round((price or 0) * float(line.get("gst_rate") or 0) / 100, 2)
-        if not pid or gst <= 0 or left <= 0:
-            continue
-        # This receipt's own held units FIRST, then the piece count (LOW 8).
-        units = sorted(
-            (u for u in stock.find({"product_id": pid})
-             if any(_valuation_receipt_unit(u, g, n) for g, n in numbered)
-             and u.get("receipt_disposition") != "REJECTED"
-             # Still held: THE on-hand rule (item_events), reserved included.
-             and is_on_hand(u.get("status"), include_reserved=True)),
-            key=lambda u: str(u.get("stock_id") or u.get("_id")),
-        )
-        for unit in units:
-            if left <= 0:
-                break
-            mark = unit.get("unclaimed_gst")
-            pieces = stock_value._pieces(unit)
-            covered = float((mark or {}).get("pieces") or 0)
-            base = stock_value._price(unit.get("unit_cost")) or stock_value._price(unit.get("cost_price"))
-            if (
-                not base
-                or bill_id in ((mark or {}).get("bills") or [])
-                or covered >= pieces
-                # Priced by a bill already, its GST in landed_cost (pending
-                # units, _resolve_billed_receipt_costs).
-                or (unit.get("cost_source") == "PURCHASE_INVOICE" and mark is None)
-            ):
-                continue
-            take = min(left, pieces - covered)
-            per_piece = round(float((mark or {}).get("per_piece") or 0) + gst * take / pieces, 2)
-            identity = {"stock_id": unit["stock_id"]} if unit.get("stock_id") else {"_id": unit["_id"]}
-            done = stock.update_one(
-                {**identity, "unclaimed_gst": mark if mark is not None else {"$exists": False}},
-                {"$set": {
-                    "landed_cost": round(base + per_piece, 2),
-                    "unclaimed_gst": {"per_piece": per_piece, "pieces": covered + take,
-                                      "bills": [*((mark or {}).get("bills") or []), bill_id],
-                                      # each bill's own part, so an untick takes back only it
-                                      "shares": {**((mark or {}).get("shares") or {}),
-                                                 bill_id: [round(gst * take / pieces, 2), take]}},
-                    "cost_source": "PURCHASE_INVOICE", "cost_source_id": bill_id,
-                }},
-            )
-            if done.modified_count:
-                left -= take
-
-
-def _remove_unclaimed_gst(db, bill_id) -> None:
-    """Take back the unclaimed GST one bill added to its units (its 17(5)
-    tick undone): each unit's landed_cost loses that bill's share only."""
-    stock = db.get_collection("stock_units")
-    for unit in stock.find({"unclaimed_gst.bills": bill_id}):
-        mark = unit["unclaimed_gst"]
-        share, take = (mark.get("shares") or {}).get(bill_id, [0.0, 0])
-        per_piece = round(float(mark.get("per_piece") or 0) - float(share), 2)
-        base = stock_value._price(unit.get("unit_cost")) or stock_value._price(unit.get("cost_price"))
-        identity = {"stock_id": unit["stock_id"]} if unit.get("stock_id") else {"_id": unit["_id"]}
-        stock.update_one({**identity, "unclaimed_gst": mark}, {"$set": {
-            "landed_cost": round(base + per_piece, 2),
-            "unclaimed_gst": {
-                "per_piece": per_piece, "pieces": float(mark.get("pieces") or 0) - take,
-                "bills": [b for b in mark.get("bills") or [] if b != bill_id],
-                "shares": {k: v for k, v in (mark.get("shares") or {}).items() if k != bill_id},
-            },
-        }})
-
-
-def _resolve_billed_receipt_costs(db, grn):
-    """Price missing accepted units only with complete, unambiguous bill evidence.
-
-    A partial bill or two prices does not identify which serialized pieces it
-    bought. Leave those layers pending instead of assigning arbitrary costs.
-    """
-    from .vendors.grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
-
-    if not grn or not grn.get("grn_id") or grn.get("status") not in _GRN_TERMINAL_ACCEPT_STATUSES:
-        return
-    import math
-
-    stock = db.get_collection("stock_units")
-    unique_number = _valuation_unique_number(db, grn)
-    accepted = pmatch._grn_accepted_by_product(grn)
-    bills = list(db.get_collection("vendor_bills").find({
-        "grn_id": grn["grn_id"], "doc_type": "PURCHASE_INVOICE"}))
-    for pid, qty in accepted.items():
-        if qty <= 0:
-            continue
-        units = [u for u in stock.find({"product_id": pid})
-                 if _valuation_receipt_unit(u, grn, unique_number)
-                 and u.get("receipt_disposition") != "REJECTED"]
-        if not math.isclose(sum(stock_value._pieces(u) for u in units), qty, abs_tol=0.001):
-            continue
-        parts = []  # [landed price, pieces] per billed line, in booking order
-        bases = set()
-        billed_qty = 0.0
-        invalid = False
-        for bill in sorted(bills, key=lambda b: (str(b.get("created_at") or ""), str(b.get("bill_id") or ""))):
-            if str(bill.get("status") or "").upper() not in {"OUTSTANDING", "PARTIAL", "PAID"}:
-                continue
-            if grn.get("vendor_id") and bill.get("vendor_id") != grn["vendor_id"]:
-                continue
-            lines = bill.get("lines") or []
-            for line, costed in zip(lines, _cost_lines(bill, lines)):
-                if line.get("product_id") != pid:
-                    continue
-                base_price = pmatch._valuation_cost(line.get("unit_price"))
-                count = pmatch._valuation_cost(line.get("qty"))
-                if base_price is None or base_price <= 0 or count is None or count <= 0:
-                    invalid = True
-                    continue
-                # A bill claiming no credit must say each line's rate: its GST
-                # is part of the cost (_cost_lines).
-                if bill.get("itc_eligible") is False and pmatch._valuation_cost(line.get("gst_rate")) is None:
-                    invalid = True
-                    continue
-                bases.add(round(base_price, 2))
-                parts.append([round(costed["unit_price"], 2), count])
-                billed_qty += count
-        # One price, every piece billed. Parts that differ only by the GST one
-        # of them cannot claim (one with credit, one without) each price their
-        # own pieces (LOW 9); two different prices still leave them pending.
-        if invalid or len(bases) != 1 or not math.isclose(billed_qty, qty, abs_tol=0.001):
-            continue
-        base_price = bases.pop()
-        for unit in units:
-            if stock_value._own_cost(unit):
-                continue
-            while len(parts) > 1 and parts[0][1] <= 0:
-                parts.pop(0)
-            landed_price = parts[0][0]
-            parts[0][1] -= stock_value._pieces(unit)
-            identity = {"stock_id": unit["stock_id"]} if unit.get("stock_id") else {"_id": unit["_id"]}
-            stock.update_one(
-                {**identity, "unit_cost": unit.get("unit_cost"), "cost_price": unit.get("cost_price")},
-                {"$set": {"unit_cost": base_price, "cost_price": base_price,
-                          "landed_cost": landed_price,
-                          "cost_source": "PURCHASE_INVOICE", "valuation_cost_pending": False}},
-            )
 
 
 def _bought_since(db, product_id, accepted_at) -> bool:
@@ -1312,142 +1057,109 @@ def _bought_since(db, product_id, accepted_at) -> bool:
     )
 
 
-def _apply_valuation_trueup(db, invoice_doc, computed, config) -> Optional[list]:
-    """Update each invoiced product's moving-average cost from the invoice's
-    per-unit landed price. Returns the list of applied updates (for the audit
-    detail), or None when nothing was done. STRICTLY fail-soft -- any error is
-    swallowed; a valuation update must NEVER roll back or block the booking."""
+def _apply_valuation_trueup(db, invoice_doc, computed, *, key=None, actor=None) -> Optional[list]:
+    """S4: an ACCEPTED bill re-averages the one cost of each product it bills
+    (services/product_cost.apply_bill -- the module doc has the rule). Called
+    only for an accepted bill: at booking when it is not on hold, at
+    approve-exception, from the header-bill door, and by
+    finish_accepted_bills. A walk-in buy keeps the latest price paid (owner
+    2026-10-12), dated by its receipt's acceptance (_bought_since). Every
+    bill adds the GST it cannot claim back (_cost_lines). Exactly once per
+    (product, `key`, default the bill id). Returns the history rows written,
+    or None. STRICTLY fail-soft: a cost update never rolls back or blocks a
+    booking (a crash is finished by finish_accepted_bills)."""
     try:
-        lines = computed.get("lines") or []
-        pids = [ln.get("product_id") for ln in lines if ln.get("product_id")]
-        if db is None or not pids:
+        lines = [ln for ln in computed.get("lines") or [] if ln.get("product_id")]
+        if db is None or not lines:
             return None
-        store_id = None
-        grn = None
-        # Prefer the receiving store from the linked GRN for the on-hand scope.
-        grn_id = invoice_doc.get("grn_id")
-        if grn_id:
-            try:
-                grn = db.get_collection("grns").find_one(
-                    {"grn_id": grn_id},
-                    {"_id": 0},
-                )
-                store_id = (grn or {}).get("store_id")
-            except Exception:
-                store_id = None
-        # A walk-in buy's cost is ONE rule at receiving and at booking: the
-        # LATEST PRICE PAID (owner 2026-10-12), never the configured blend.
-        # Every bill -- walk-in (G1) or PO (F04, owner + CA 2026-10-18) --
-        # then adds the GST it charged when it claims no input credit
-        # (_cost_lines), to the product's cost here and to its receipt's units
-        # below; both bill doors true up through here (a 0% cash memo leaves
-        # the price paid).
+        grns = db.get_collection("grns")
+        grn = grns.find_one({"grn_id": invoice_doc["grn_id"]}, {"_id": 0}) if invoice_doc.get("grn_id") else None
+        receipts = [grn] if grn else list(grns.find(
+            {"grn_id": {"$in": list(invoice_doc.get("linked_dc_ids") or [])}}, {"_id": 0}))
         walk_in = (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
         if walk_in:
             # The latest price paid is the newest ACCEPTED receipt's, dated by
             # its acceptance (as /vendors/last-cost dates it), never the newest
             # booking: a walk-in bill booked late puts no older price back
             # over a product a later receipt has bought.
-            lines = [
-                ln
-                for ln in lines
-                if not _bought_since(db, ln.get("product_id"), grn.get("accepted_at"))
-            ]
-        lines = _cost_lines(invoice_doc, lines)
-        method = pmatch.VALUATION_LATEST_PRICE if walk_in else pmatch.normalize_valuation_method(config.get("valuation_method"))
-        # Every method may update the master price. Preserve unknown layers
-        # first without changing FIFO or walk-in latest-price arithmetic.
-        _preserve_unpriced_layers(db, pids)
-        _resolve_billed_receipt_costs(db, grn)
-        try:
-            receipts = [grn] if grn else list(db.get_collection("grns").find(
-                {"grn_id": {"$in": list(invoice_doc.get("linked_dc_ids") or [])}}, {"_id": 0}))
-            _add_unclaimed_gst_to_units(db, receipts, invoice_doc, computed.get("lines"))
-        except Exception:  # noqa: BLE001 - fail-soft like the true-up, but said
-            logger.warning(
-                "[PI] adding the unclaimed GST of %s to its units failed",
-                invoice_doc.get("invoice_id") or invoice_doc.get("bill_id"),
-                exc_info=True,
-            )
-        product_state = _product_state_for_valuation(
-            db, pids, store_id, exclude_grn_id=grn_id
+            lines = [ln for ln in lines if not _bought_since(db, ln.get("product_id"), grn.get("accepted_at"))]
+        rows = product_cost.apply_bill(
+            db, invoice_doc, _cost_lines(invoice_doc, lines),
+            key=key or invoice_doc.get("invoice_id") or invoice_doc.get("bill_id"),
+            actor=actor or invoice_doc.get("created_by"),
+            latest_price=walk_in, receipts=receipts or None,
         )
-        updates = pmatch.valuation_trueup_for_invoice(
-            lines,
-            product_state,
-            method,
-        )
-        if not updates:
-            return None
-        products = db.get_collection("products")
-        catalog_products = db.get_collection("catalog_products")
-        applied = []
-        for u in updates:
-            pid = u.get("product_id")
-            new_cost = u.get("new_cost")
-            if pid is None:
-                continue
-            try:
-                current = products.find_one({"product_id": pid})
-            except Exception:  # noqa: BLE001 - the pre-image never blocks the cost
-                current = None
-            pending = new_cost is None
-            fields = {"moving_avg_cost": new_cost, "cost_valuation_pending": pending,
-                      "valuation_method": u.get("method")}
-            if pending:
-                # Preserve a valid prior master. If the bill supplies the
-                # catalogue's last missing price, retain that existing finish
-                # path without presenting the price as a complete average.
-                incoming = pmatch._valuation_cost(u.get("receipt_unit_cost"))
-                if current is not None and not stock_value._price(current.get("cost_price")) and incoming:
-                    new_cost = incoming
-                    fields["cost_price_is_catalogue_only"] = True
-            else:
-                fields["cost_price_is_catalogue_only"] = False
-            if new_cost is not None:
-                fields.update({
-                    "cost_price": new_cost, "cost_updated_at": utc_now_iso(),
-                    "cost_source": "PURCHASE_INVOICE", "cost_source_id": invoice_doc.get("invoice_id"),
-                })
-            try:
-                products.update_one({"product_id": pid}, {"$set": fields})
-                applied.append(u)
-            except Exception:
-                continue
-            if new_cost is None:
-                continue
-            # Fail-soft companion write to catalog_products so catalog-only
-            # products (not yet in the products spine) also get a fresh cost.
-            try:
-                catalog_products.update_one(
-                    {"id": pid},
-                    {
-                        "$set": {
-                            "pricing.cost_price": new_cost,
-                            "pricing.cost_updated_at": utc_now_iso(),
-                            "pricing.cost_source": "PURCHASE_INVOICE",
-                        }
-                    },
-                )
-            except Exception:
-                pass  # never roll back the products write on a catalog miss
-            # Rulings 11/12: the bill brings the cost, so it may be a draft's
-            # last gap. It finishes the product through the editor's own path
-            # (restamp, mirror, close the asks, release the held units) -- no
-            # second finish path. Fail-soft: the booking stands.
-            if current:
-                try:
-                    from .vendors.grn_accept import catalogue_write_done
+        # Rulings 11/12: the bill brings the cost, so it may be a draft's
+        # last gap. It finishes the product through the editor's own path
+        # (restamp, mirror, close the asks, release the held units) -- no
+        # second finish path. Fail-soft: the booking stands.
+        # ponytail: a crash between the average and this finish leaves the
+        # draft for its next edit; finish here on resume if that ever bites.
+        from .vendors.grn_accept import catalogue_write_done
 
+        for row in rows:
+            try:
+                current = db.get_collection("products").find_one({"product_id": row["product_id"]})
+                if current:
                     catalogue_write_done(
-                        pid, current, {"cost_price": new_cost},
+                        row["product_id"], current, {"cost_price": row["new_cost"]},
                         product_repo=get_product_repository(),
                     )
-                except Exception:  # noqa: BLE001
-                    logger.warning("[PI] finishing %s after the bill's cost failed", pid, exc_info=True)
-        return applied or None
-    except Exception:
+            except Exception:  # noqa: BLE001
+                logger.warning("[PI] finishing %s after the bill's cost failed", row["product_id"], exc_info=True)
+        return rows or None
+    except Exception:  # noqa: BLE001
+        logger.warning("[PI] cost of bill %s not applied", invoice_doc.get("invoice_id") or invoice_doc.get("bill_id"),
+                       exc_info=True)
         return None
+
+
+def _apply_accepted_bill(db, bill: dict, actor=None) -> Tuple[Optional[list], Optional[list]]:
+    """THE acceptance of a vendor bill's goods side (S4): its cost into each
+    product's average and its MRP onto the product (ruling 12), then the bill
+    marked APPLIED. Both steps are safe to repeat, so a crash anywhere is
+    finished by running this again (finish_accepted_bills). A bill on hold
+    never gets here: neither its cost nor its MRP touches a product."""
+    if db is None:
+        return None, None
+    bill_id = bill.get("invoice_id") or bill.get("bill_id")
+    costs = _apply_valuation_trueup(db, bill, {"lines": bill.get("lines") or []}, actor=actor)
+    mrps = _apply_invoice_mrp(db, bill.get("invoice_mrp") or [], bill_id)
+    try:
+        db.get_collection("vendor_bills").update_one(
+            {"bill_id": bill_id, "cost_state": product_cost.PENDING},
+            {"$set": {"cost_state": product_cost.APPLIED, "cost_applied_at": utc_now_iso()}},
+        )
+    except Exception:  # noqa: BLE001 - the sweeper re-runs it; both steps repeat safely
+        logger.warning("[PI] marking bill %s's cost applied failed", bill_id, exc_info=True)
+    return costs, mrps
+
+
+def finish_accepted_bills(db) -> int:
+    """The sweeper: every accepted bill whose cost a crash left half-applied
+    (cost_state PENDING for over 5 minutes) is applied again -- exactly once
+    per product, so nothing doubles. Returns how many."""
+    from datetime import timedelta
+
+    from api.utils.event_time import utc_now
+    from .vendors.ap_bills import _true_up_header_bill
+
+    before = (utc_now() - timedelta(minutes=5)).isoformat()
+    done = 0
+    for bill in db.get_collection("vendor_bills").find(
+        {"cost_state": product_cost.PENDING, "created_at": {"$lt": before}}, {"_id": 0},
+    ):
+        if not product_cost.bill_accepted(bill):
+            continue
+        if bill.get("lines"):
+            _apply_accepted_bill(db, bill, actor="system")
+        else:  # a header-only bill: priced off its receipt
+            linked = db.get_collection("grns").find_one({"grn_id": bill.get("grn_id")}, {"_id": 0})
+            if not linked:
+                continue
+            _true_up_header_bill(db, {**bill, "invoice_id": bill.get("bill_id")}, linked, actor="system")
+        done += 1
+    return done
 
 
 # ---------------------------------------------------------------------------
@@ -2732,6 +2444,19 @@ async def create_purchase_invoice(
         "outstanding": total,
         "status": "OUTSTANDING",
         "notes": body.notes,
+        # S4: the MRP each line carries, put on the product when the bill is
+        # accepted (ruling 12) -- kept here so a bill on hold applies it at
+        # its approval, not at booking.
+        "invoice_mrp": [
+            {"product_id": ln.product_id, "mrp": ln.mrp}
+            for ln in body.lines
+            if ln.product_id and ln.mrp is not None
+        ],
+        "cost_state": (
+            product_cost.HELD
+            if match_status == pmatch.MATCH_ON_HOLD
+            else product_cost.PENDING
+        ),
         "created_by": current_user.get("user_id"),
         "created_at": utc_now_iso(),
     }
@@ -2885,18 +2610,16 @@ async def create_purchase_invoice(
                 },
             )
 
-    # Phase 2 -- INVENTORY VALUATION TRUE-UP. The invoice's per-unit landed price
-    # is the authoritative cost; blend it into each product's moving-average cost
-    # (or record the latest layer under FIFO). STRICTLY fail-soft: the helper
-    # swallows all errors and is called AFTER the booking insert so a valuation
-    # write can never roll back or block the recorded payable.
-    valuation_updates = _apply_valuation_trueup(db, doc, computed, config)
-
-    # Ruling 12 -- the MRP on the bill is the actual retail price. Same
-    # fail-soft discipline as the cost true-up, and audited below.
-    mrp_updates = _apply_invoice_mrp(
-        db, [ln.model_dump() for ln in body.lines], invoice_id
-    )
+    # S4 (owner 2026-09-28 / 2026-10-23): an ACCEPTED bill re-averages each
+    # product's one cost and puts its MRP on the product (ruling 12). A bill
+    # booked ON HOLD changes neither until approve-exception releases it.
+    # After the insert, fail-soft: a cost write never blocks the payable, and
+    # a crash between the steps is finished by finish_accepted_bills.
+    valuation_updates = mrp_updates = None
+    if doc["cost_state"] == product_cost.PENDING:
+        valuation_updates, mrp_updates = _apply_accepted_bill(
+            db, doc, actor=current_user.get("user_id")
+        )
 
     # Audit the booking (fail-soft -- never blocks the save).
     try:
@@ -2922,7 +2645,7 @@ async def create_purchase_invoice(
                         "total": total,
                         "match_status": match_status,
                         "match_exceptions": (match or {}).get("exceptions"),
-                        "valuation_method": config.get("valuation_method"),
+                        "cost_state": doc["cost_state"],
                         "valuation_updates": valuation_updates,
                         "mrp_updates": mrp_updates,
                         # F9 -- DC bulk-tally audit trail.
@@ -3318,7 +3041,7 @@ async def draft_invoice_from_dcs(
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 -- config (valuation method + match tolerance)
+# Phase 2 -- config (match tolerance)
 # ---------------------------------------------------------------------------
 # Registered BEFORE the GET /{invoice_id} catch-all so the literal /config path
 # wins over the {invoice_id} param (same route-order discipline as from-grn).
@@ -3326,21 +3049,18 @@ async def draft_invoice_from_dcs(
 
 @router.get("/config")
 async def get_purchase_config(
-    # F1: exposes the accounting policy (valuation method + match tolerance) --
+    # F1: exposes the accounting policy (the match tolerance) --
     # AP roles only (ACCOUNTANT/ADMIN; SUPERADMIN auto-passes).
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
-    """Effective purchase config: valuation_method (MOVING_AVERAGE | FIFO) +
-    match_tolerance_pct. Returns the stored override merged over safe defaults
-    (so the response is always complete + valid even with no settings doc)."""
+    """Effective purchase config: match_tolerance_pct. Returns the stored
+    override merged over safe defaults (so the response is always complete +
+    valid even with no settings doc). No valuation method: one average cost
+    per product (services/product_cost, owner 2026-10-23)."""
     cfg = _resolved_purchase_config(_get_db())
     return {
         "config": cfg,
-        "defaults": {
-            "valuation_method": pmatch.DEFAULT_VALUATION_METHOD,
-            "match_tolerance_pct": pmatch.DEFAULT_MATCH_TOLERANCE_PCT,
-        },
-        "valuation_methods": list(pmatch.VALID_VALUATION_METHODS),
+        "defaults": {"match_tolerance_pct": pmatch.DEFAULT_MATCH_TOLERANCE_PCT},
     }
 
 
@@ -3355,10 +3075,6 @@ async def update_purchase_config(
     db = _get_db()
     current = _resolved_purchase_config(db)
     payload = dict(current)
-    if body.valuation_method is not None:
-        payload["valuation_method"] = pmatch.normalize_valuation_method(
-            body.valuation_method
-        )
     if body.match_tolerance_pct is not None:
         payload["match_tolerance_pct"] = pmatch.normalize_tolerance_pct(
             body.match_tolerance_pct
@@ -3541,14 +3257,32 @@ async def approve_invoice_exception(
             "prior_status": pmatch.MATCH_ON_HOLD,
         },
     }
+    # S4: releasing the hold ACCEPTS the bill -- its cost and MRP go onto the
+    # products now (a bill booked on hold before S4 carries no cost_state:
+    # its cost went in when it was booked, so it is not applied again).
+    releases_cost = doc.get("cost_state") == product_cost.HELD
+    if releases_cost:
+        override["cost_state"] = product_cost.PENDING
     try:
-        db.get_collection("vendor_bills").update_one(
-            {"bill_id": invoice_id}, {"$set": override}
+        # Guarded on the hold: two approvals at once release it once.
+        done = db.get_collection("vendor_bills").update_one(
+            {"bill_id": invoice_id, "match_status": pmatch.MATCH_ON_HOLD},
+            {"$set": override},
         )
     except Exception as exc:
         raise HTTPException(
             status_code=500, detail="Failed to record exception override"
         ) from exc
+    if not done.matched_count:
+        raise HTTPException(
+            status_code=409,
+            detail="This bill was approved meanwhile. Refresh to see it.",
+        )
+    valuation_updates = mrp_updates = None
+    if releases_cost:
+        valuation_updates, mrp_updates = _apply_accepted_bill(
+            db, {**doc, **override}, actor=current_user.get("user_id")
+        )
 
     # Audit the override (this is a control bypass -- it MUST be recorded; the
     # write above is the source of truth, the audit is best-effort on top).
@@ -3568,6 +3302,8 @@ async def approve_invoice_exception(
                         "match_exceptions": (doc.get("match_detail") or {}).get(
                             "exceptions"
                         ),
+                        "valuation_updates": valuation_updates,
+                        "mrp_updates": mrp_updates,
                     },
                 }
             )
@@ -3833,17 +3569,13 @@ async def allocate_invoice_landed_costs(
     period; 400 when no components are captured (or total is zero) or the
     engine rejects the inputs.
 
-    COST ROLL-IN CHOICE (documented per F19): the existing moving-average
-    cost_price writer (_apply_valuation_trueup -> pmatch.
-    valuation_trueup_for_invoice) is NOT safely re-invokable -- it blends the
-    invoice's receipt qty into the product's CURRENT on-hand average, and at
-    booking time it already blended this invoice's base cost (the receipt is
-    also now part of on-hand), so calling it again here would double-count the
-    same receipt. Instead we persist the per-line landed unit cost on the bill
-    and write the product-level ``landed_cost`` / ``landed_cost_paise`` fields
-    (fail-soft), which _product_state_for_valuation already reads as a cost
-    fallback. cost_price AVCO stays owned by the existing booking-time flow --
-    no second AVCO writer is introduced."""
+    COST ROLL-IN CHOICE (documented per F19): the product's one average cost
+    is moved only by bill acceptance and accounts corrections
+    (services/product_cost); this allocation is NOT folded into it (an open
+    owner question). It persists the per-line landed unit cost on the bill and
+    writes the product-level ``landed_cost`` / ``landed_cost_paise`` fields
+    (fail-soft) for reference; no stock value reads them (one rule:
+    stock_value.average_cost)."""
     db = _get_db()
     doc = _load_purchase_invoice_or_404(db, invoice_id)
     in_reach_or_404(doc, current_user, "Purchase invoice not found")

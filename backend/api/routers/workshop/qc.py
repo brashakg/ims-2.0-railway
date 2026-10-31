@@ -280,8 +280,8 @@ async def rework_job(
             return None
         if not isinstance(prod, dict):
             return None
-        # cost_price IS the WAC: purchase_match.moving_average_cost true-ups
-        # blend every invoice receipt into it.
+        # cost_price IS the one average cost (services/product_cost, S4)
+        # -- re-averaged when a vendor bill is accepted.
         return prod.get("cost_price")
 
     cost_paise = spoilage_analytics.spoilage_cost_paise(job, _lens_cost_rupees)

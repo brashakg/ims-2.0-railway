@@ -598,6 +598,7 @@ async def list_units(
     own barcode, per physical piece. This is where those pieces are listed and
     their labels printed from. Each unit carries the label fields (brand, model,
     colour, size, MRP) so the label renderer needs no second fetch. cost_price
+    is the product's one average cost (S4: every piece carries it) and
     answers to the one product-cost rule (cost_mask "product"), as the ledger.
     """
     if not product_id and not grn_id:
@@ -648,6 +649,7 @@ async def list_units(
     # Units still in the shop first (the ones that need a label), oldest first.
     docs.sort(key=lambda d: (not _in_shop(d), str(d.get("created_at") or "")))
 
+    from ...services import stock_value
     from ...services.product_master import existing_product_summary
     from ...services.quarantine_hold import open_return_of
 
@@ -657,7 +659,11 @@ async def list_units(
     for d in docs:
         pid = d.get("product_id") or ""
         if pid not in products:
-            products[pid] = existing_product_summary(product_repo.find_by_id(pid) or {})
+            doc = product_repo.find_by_id(pid) or {}
+            # S4: every piece carries its product's one average cost -- never
+            # the price one piece was received at.
+            products[pid] = {**existing_product_summary(doc),
+                             "_average_cost": stock_value.average_cost(doc) or None}
         p = products[pid]
         # The one on-hand rule decides AVAILABLE (a legacy 'in_stock' or a unit
         # with no status is on the shelf); anything else by its canonical name.
@@ -694,7 +700,7 @@ async def list_units(
             "colour": p.get("colour_code") or "",
             "size": p.get("size") or "",
             "mrp": p.get("mrp"),
-            "cost_price": d.get("cost_price"),
+            "cost_price": p["_average_cost"],
         }
         units.append(unit)
     return {"units": mask_cost_list(units, current_user, "product"), "total": len(units)}

@@ -22,6 +22,7 @@ from .helpers import (
     _shelf_by_product,
 )
 from ...services.cost_mask import mask_cost
+from ...services import stock_value
 from ...services.reorder_policy import (
     DISCONTINUED_FIELDS,
     buy_qty,
@@ -134,7 +135,7 @@ def _build_stock_alert(
     off (reorder_policy.buy_qty, the one number the Reorder list shows).
     """
     stock = int(product.get("stock_quantity", 0) or 0)
-    cost = float(product.get("cost_price", 0) or 0)
+    cost = stock_value.average_cost(product)  # THE cost rule (S4)
     reorder_point = reorder_level(product, store_id=store_id)  # None = not set
     has_level = reorder_point is not None
     # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1 default)
@@ -388,6 +389,7 @@ async def get_stock_alerts(
                     "mrp": 1,
                     "offer_price": 1,
                     "cost_price": 1,
+                    "cost_price_is_catalogue_only": 1,
                     "reorder_levels": 1,
                     "reorder_quantity": 1,
                     "max_stock": 1,

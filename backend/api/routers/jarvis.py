@@ -39,6 +39,23 @@ from ..utils.ist import (
 )
 from ..services.online_order_status import BOOKED_STATUSES
 
+
+def _stock_value_at_cost() -> float:
+    """Every shop's stock at cost -- THE stock value rule (stock_value:
+    pieces on the shelf x each product's one average cost). Jarvis is
+    SUPERADMIN-only, so cost may show. Fail-soft: 0.0."""
+    try:
+        from ..dependencies import get_product_repository, get_stock_repository
+        from ..services import stock_value
+
+        stock_repo = get_stock_repository()
+        if stock_repo is None:
+            return 0.0
+        return stock_value.total(stock_value.shelf_units(stock_repo, get_product_repository(), None))
+    except Exception:  # noqa: BLE001
+        logger.warning("JARVIS stock value at cost failed", exc_info=True)
+        return 0.0
+
 logger = logging.getLogger(__name__)
 
 # Anthropic Claude Configuration
@@ -194,13 +211,11 @@ class JarvisAnalyticsEngine:
             # Inventory
             products_col = get_db_collection("products")
             total_products = low_stock = out_of_stock = 0
-            inv_value = 0.0
+            inv_value = _stock_value_at_cost()
             if products_col is not None:
                 for p in products_col.find({}):
                     total_products += 1
                     qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-                    price = float(p.get("offer_price") or p.get("mrp") or 0)
-                    inv_value += qty * price
                     if qty <= 0:
                         out_of_stock += 1
                 # Every shop judged by its own level (D12).
@@ -437,7 +452,7 @@ class JarvisAnalyticsEngine:
             critical_alerts = []
             reorder_recs = []
             total = oos = 0
-            total_value = 0.0
+            total_value = _stock_value_at_cost()
             by_id: Dict[str, Dict] = {}
             for p in products_col.find({}):
                 if p.get("is_active") is False:
@@ -445,10 +460,6 @@ class JarvisAnalyticsEngine:
                 total += 1
                 by_id[str(p.get("product_id"))] = p
                 qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-                price = float(
-                    p.get("offer_price") or p.get("mrp") or p.get("cost_price") or 0
-                )
-                total_value += qty * price
                 name = p.get("name") or p.get("product_name") or "Unknown"
                 sku = p.get("sku") or p.get("product_id") or ""
                 if qty <= 0:

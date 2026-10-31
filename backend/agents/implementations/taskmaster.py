@@ -90,6 +90,10 @@ class TaskmasterAgent(JarvisAgent):
         # that shop's own level -- owner ruling D12. TASKMASTER's chain-wide
         # unit-row scan is gone.)
 
+        # 2a. S4: an accepted vendor bill whose cost a crash left half-applied
+        # is finished (exactly once per product -- nothing doubles).
+        actions.extend(self._finish_bill_costs())
+
         # 2b. F8: aged-backorder sweep. Open PO lines past their expected_date
         # get an accountable P2 task (P1 once critically overdue 14d+). Tier 1
         # auto-act -- task creation is fully reversible. Fail-soft.
@@ -623,6 +627,19 @@ class TaskmasterAgent(JarvisAgent):
                 "[TASKMASTER] escalated %d expired refund approval(s)", len(actions)
             )
         return actions
+
+    def _finish_bill_costs(self) -> List[Dict[str, Any]]:
+        """S4 sweeper (purchase_invoices.finish_accepted_bills). Fail-soft."""
+        if self.db is None:
+            return []
+        try:
+            from api.routers.purchase_invoices import finish_accepted_bills
+
+            n = finish_accepted_bills(self.db)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[TASKMASTER] finishing bill costs failed: {e}")
+            return []
+        return [{"action": "bill_costs_finished", "count": n}] if n else []
 
     async def _sweep_aged_backorders(self) -> List[Dict[str, Any]]:
         """F8: turn aged open PO lines into accountable backorder tasks.

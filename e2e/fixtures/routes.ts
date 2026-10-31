@@ -349,6 +349,7 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
   { path: '/customers/:customerId/loyalty', reason: 'needs a seeded customer id; seed_e2e.py creates no customers' },
   { path: '/collections/:id', reason: 'needs a seeded collection id; seed_e2e.py creates no collections' },
   { path: '/walkouts/:walkoutId', reason: 'needs a seeded walkout id; seed_e2e.py creates no walkouts' },
+  { path: '/inventory/stock/:productId', reason: 'S4: the product page (stock and the one average cost); ROUTES matches paths literally (no url field for a parameterised screen). Covered by ProductStockPage.test.tsx.' },
   { path: '/inventory/audit/:countId', reason: 'the stock-count result; needs a finished count id, seed_e2e.py creates none, and ROUTES matches paths literally (no url field for a parameterised screen). Covered by stockCountResult.test.tsx.' },
   { path: '/incentive/staff/:staffId', reason: 'needs a seeded staff id; seed_e2e.py seeds only the admin user' },
   { path: '/workshop/station/:stationCode', reason: 'needs a seeded workshop station; seed_e2e.py creates none' },

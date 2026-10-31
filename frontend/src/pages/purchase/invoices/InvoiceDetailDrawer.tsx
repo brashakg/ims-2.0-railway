@@ -47,17 +47,8 @@ export function MatchBadge({ status }: { status: MatchStatus }) {
   );
 }
 
-// "MOVING_AVERAGE" -> "Moving average" for display.
-function methodLabel(method?: string): string {
-  if (!method) return '';
-  return method
-    .split('_')
-    .map((w) => (w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : w))
-    .join(' ');
-}
-
 // The active config values live under `.config` (GET /config returns
-// { config, defaults, valuation_methods }).
+// { config, defaults }).
 function activeConfig(config: PurchaseInvoiceConfig | null): PurchaseConfig | undefined {
   return config?.config ?? undefined;
 }
@@ -67,21 +58,17 @@ function tolerancePctLabel(pct?: number | null): string {
   return pct == null ? '' : `+/-${pct}%`;
 }
 
-// Small read-only note under the page intro: the active valuation method +
-// match tolerance, so the user understands how MATCHED / ON_HOLD is decided.
-// Renders nothing when the backend exposes no config (fail-soft).
+// Small read-only note under the page intro: the match tolerance, so the
+// user understands how MATCHED / ON_HOLD is decided. Renders nothing when the
+// backend exposes no config (fail-soft).
 export function ConfigNote({ config }: { config: PurchaseInvoiceConfig | null }) {
   const cfg = activeConfig(config);
-  if (!cfg) return null;
-  const method = methodLabel(cfg.valuation_method);
-  const tol = tolerancePctLabel(cfg.match_tolerance_pct);
-  if (!method && !tol) return null;
+  const tol = tolerancePctLabel(cfg?.match_tolerance_pct);
+  if (!tol) return null;
   return (
     <p className="inline-flex flex-wrap items-center gap-x-1.5 text-xs text-gray-400">
       <Scale className="w-3.5 h-3.5 text-gray-400" />
-      {method && <span>Valuation: <span className="font-medium text-gray-500">{method}</span></span>}
-      {method && tol && <span className="text-gray-300">·</span>}
-      {tol && <span>3-way match tolerance: <span className="font-medium text-gray-500">{tol}</span></span>}
+      <span>3-way match tolerance: <span className="font-medium text-gray-500">{tol}</span></span>
     </p>
   );
 }
@@ -236,7 +223,6 @@ export function InvoiceDetailDrawer({
   const invoiceReasons = useMemo(() => Array.from(new Set(match?.exceptions ?? [])), [match]);
 
   const cfg = activeConfig(config);
-  const valuationMethod = cfg?.valuation_method;
   // The active match tolerance %, preferring what the match actually used.
   const tol = match?.tolerance_pct ?? cfg?.match_tolerance_pct;
   const matchLines = match?.lines ?? [];
@@ -253,7 +239,7 @@ export function InvoiceDetailDrawer({
       setRowStatus(newStatus);
       if (res.exception_override) setOverride(res.exception_override);
       onChanged({ purchase_invoice_id: id, match_status: newStatus, exception_override: res.exception_override });
-      toast.success('Exception approved - invoice released for payment');
+      toast.success('Exception approved - bill released for payment; its cost and MRP are now on the products');
     } catch (e) {
       toast.error(getErrorMessage(e, 'Failed to approve the exception'));
     } finally {
@@ -362,48 +348,47 @@ export function InvoiceDetailDrawer({
             <InvoiceLinesFallback invoice={invoice} />
           )}
 
-          {/* Inventory valuation note (the booking trues up product moving-average
-              cost; per-line unit cost is shown only if the backend stamps it). */}
-          {(valuationLines.length > 0 || valuationMethod) && (
-            <div>
-              <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
-                <Scale className="w-4 h-4 text-gray-500" /> Inventory valuation
-                {valuationMethod && <span className="text-xs font-normal text-gray-400">· {methodLabel(valuationMethod)}</span>}
-              </h4>
-              {valuationLines.length > 0 ? (
-                <div className="overflow-x-auto border border-gray-200 rounded-lg">
-                  <table className="w-full text-xs">
-                    <thead className="bg-gray-50 text-gray-500">
-                      <tr>
-                        <th className="text-left px-2 py-1.5">Item</th>
-                        <th className="text-right px-2 py-1.5">Qty</th>
-                        <th className="text-right px-2 py-1.5">Unit cost</th>
-                        <th className="text-right px-2 py-1.5">Stock value</th>
+          {/* S4: what this bill does to cost -- one average cost per product,
+              re-averaged only when the bill is accepted (per-line unit cost is
+              shown only if the backend stamps it). */}
+          <div>
+            <h4 className="text-sm font-semibold text-gray-700 mb-2 flex items-center gap-1.5">
+              <Scale className="w-4 h-4 text-gray-500" /> Product cost
+            </h4>
+            {valuationLines.length > 0 ? (
+              <div className="overflow-x-auto border border-gray-200 rounded-lg">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 text-gray-500">
+                    <tr>
+                      <th className="text-left px-2 py-1.5">Item</th>
+                      <th className="text-right px-2 py-1.5">Qty</th>
+                      <th className="text-right px-2 py-1.5">Unit cost</th>
+                      <th className="text-right px-2 py-1.5">Stock value</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {valuationLines.map((l, i) => (
+                      <tr key={i} className="hover:bg-gray-50">
+                        <td className="px-2 py-1.5 text-gray-900">{l.product_name || l.sku || `Line ${i + 1}`}</td>
+                        <td className="px-2 py-1.5 text-right text-gray-700">{num(l.quantity)}</td>
+                        <td className="px-2 py-1.5 text-right text-gray-700">{l.unit_cost != null ? inr(l.unit_cost) : '-'}</td>
+                        <td className="px-2 py-1.5 text-right text-gray-700">
+                          {l.valuation_amount != null ? inr(l.valuation_amount)
+                            : l.unit_cost != null ? inr(l.unit_cost * (l.quantity || 0)) : '-'}
+                        </td>
                       </tr>
-                    </thead>
-                    <tbody className="divide-y divide-gray-100">
-                      {valuationLines.map((l, i) => (
-                        <tr key={i} className="hover:bg-gray-50">
-                          <td className="px-2 py-1.5 text-gray-900">{l.product_name || l.sku || `Line ${i + 1}`}</td>
-                          <td className="px-2 py-1.5 text-right text-gray-700">{num(l.quantity)}</td>
-                          <td className="px-2 py-1.5 text-right text-gray-700">{l.unit_cost != null ? inr(l.unit_cost) : '-'}</td>
-                          <td className="px-2 py-1.5 text-right text-gray-700">
-                            {l.valuation_amount != null ? inr(l.valuation_amount)
-                              : l.unit_cost != null ? inr(l.unit_cost * (l.quantity || 0)) : '-'}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="text-xs text-gray-500">
-                  Booking this invoice trues up each product&apos;s landed cost
-                  {valuationMethod ? ` using ${methodLabel(valuationMethod)}` : ''} from the invoiced unit price.
-                </p>
-              )}
-            </div>
-          )}
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500">
+                {onHold
+                  ? "On hold: this bill changes no product's cost or MRP until the exception is approved."
+                  : "Accepted: this bill's prices (excl. GST it can claim back) went into each product's one average cost."}
+              </p>
+            )}
+          </div>
         </div>
 
         {/* Footer: approve-exception action (gated, ON_HOLD only) */}

@@ -276,17 +276,16 @@ export interface ApproveExceptionResult {
   exception_override?: ExceptionOverride;
 }
 
-// The effective purchase config (GET /config -> { config, defaults,
-// valuation_methods }). The active values live under `config`.
+// The effective purchase config (GET /config -> { config, defaults }). The
+// active values live under `config`. No valuation method: one average cost
+// per product (S4).
 export interface PurchaseConfig {
-  valuation_method?: string;       // MOVING_AVERAGE | FIFO
   match_tolerance_pct?: number;    // the +/- % tolerance for the 3-way match
 }
 
 export interface PurchaseInvoiceConfig {
   config?: PurchaseConfig;
   defaults?: PurchaseConfig;
-  valuation_methods?: string[];
 }
 
 // Payload to create/book an invoice (manual or from a prepared GRN draft).

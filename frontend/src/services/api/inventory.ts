@@ -480,7 +480,52 @@ export const inventoryApi = {
     const response = await api.post('/inventory/units/barcode-printed', { stock_ids: stockIds });
     return response.data as { updated: number; stock_ids: string[] };
   },
+
+  // S4: a product's one average cost, its stock value and cost history.
+  // Accounts roles only (the server refuses everyone else).
+  getProductCost: async (productId: string) => {
+    const response = await api.get(`/inventory/products/${encodeURIComponent(productId)}/cost`);
+    return response.data as ProductCostCard;
+  },
+
+  correctProductCost: async (productId: string, averageCost: number, reason: string) => {
+    const response = await api.post(`/inventory/products/${encodeURIComponent(productId)}/cost-correction`, {
+      average_cost: averageCost,
+      reason,
+    });
+    return response.data as ProductCostCard;
+  },
 };
+
+/** One change of a product's average cost (S4): a vendor bill accepted, an
+ *  accounts correction, opening stock or the backfill. */
+export interface CostHistoryRow {
+  key: string;
+  kind: 'BILL' | 'CORRECTION' | 'OPENING_STOCK' | 'BACKFILL';
+  at: string;
+  by?: string | null;
+  by_name?: string;
+  bill_number?: string | null;
+  vendor_name?: string | null;
+  qty?: number;
+  price?: number;
+  method?: 'AVERAGE' | 'LATEST_PRICE_PAID';
+  old_cost: number | null;
+  new_cost: number;
+  reason?: string;
+}
+
+/** GET /inventory/products/{id}/cost: pieces held in every shop, the one
+ *  average cost (excl. GST), stock value = pieces x average cost. */
+export interface ProductCostCard {
+  product_id: string;
+  pieces: number;
+  average_cost: number | null;
+  stock_value: number;
+  /** Pieces with no cost yet: the stock value is too low by these. */
+  uncosted_pieces: number;
+  history: CostHistoryRow[];
+}
 
 /** One physical piece on the shelf (GET /inventory/units). cost_price only
  *  reaches roles that see cost. */

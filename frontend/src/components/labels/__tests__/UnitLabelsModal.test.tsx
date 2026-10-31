@@ -143,11 +143,12 @@ describe('the units view (from the stock ledger)', () => {
     await waitFor(() => expect(apiMock.markBarcodePrinted).toHaveBeenCalledWith([...shelf, ...reserved].map((u) => u.stock_id)));
   });
 
-  it('shows cost only when the server sent it', async () => {
+  it("never shows a per-piece cost: every piece carries the product's one average (S4)", async () => {
     apiMock.getUnits.mockResolvedValue({ units: [unit(1, { cost_price: 4200 })], total: 1 });
     render(<UnitLabelsModal productId="P1" title="x" onClose={() => {}} />);
-    expect(await screen.findByText('Cost')).toBeInTheDocument();
-    expect(screen.getByText('₹4,200')).toBeInTheDocument();
+    await screen.findByText('BV--00000001');
+    expect(screen.queryByText(/^Cost$/)).not.toBeInTheDocument();
+    expect(screen.queryByText('₹4,200')).not.toBeInTheDocument();
   });
 
   it('prints the SELECTED units and records exactly those as printed', async () => {

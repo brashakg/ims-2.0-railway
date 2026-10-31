@@ -25,6 +25,7 @@ from .auth import get_current_user
 from ..dependencies import validate_store_access
 from ..services import blind_stock_take as svc
 from ..services.cost_mask import mask_cost
+from ..services import stock_value
 from ..services.non_adapt import rupees_to_paise
 
 router = APIRouter(tags=["blind-stock-take"])
@@ -150,15 +151,17 @@ def _cost_resolver(product_ids):
     ids = list(product_ids)
     try:
         rows = list(db.get_collection("products").find(
-            {"product_id": {"$in": ids}}, {"product_id": 1, "cost_price": 1}))
+            {"product_id": {"$in": ids}},
+            {"product_id": 1, "cost_price": 1, "cost_price_is_catalogue_only": 1}))
     except PyMongoError:
         return {}
-    # cost_price persists in RUPEES -> integer paise once, at the boundary.
+    # THE cost (stock_value.average_cost, S4), in RUPEES -> integer paise
+    # once, at the boundary.
     found_ids = set()
     for p in rows:
         pid = p.get("product_id")
         if pid:
-            out[pid] = rupees_to_paise(p.get("cost_price"))
+            out[pid] = rupees_to_paise(stock_value.average_cost(p))
             found_ids.add(pid)
     # Catalog-only fallback for any ids that were not in the products spine.
     missing = [i for i in ids if i not in found_ids]

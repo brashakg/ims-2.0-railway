@@ -1,0 +1,280 @@
+"""IMS 2.0 - ONE average cost per product (S4; owner MCQ 2026-10-23, which
+confirms 2026-09-28: "re-averaged only when the bill is ACCEPTED/released;
+shelf units carry the same cost as the product").
+
+Every piece of a product carries the product's one average cost
+(stock_value.average_cost): GST-exclusive, with the GST a bill cannot claim
+back inside it (CA Q12). The PO rate is only a provisional cost until a bill
+is accepted (vendors/gst._promote_cost_from_rate fills it when there is none).
+The average moves only here:
+
+  * a vendor bill is ACCEPTED (booked with no hold, or its hold approved):
+        new = (basis x old average + value of the good pieces billed)
+              / (basis + good pieces billed)
+    `basis` = the pieces we hold (shelf, reserved, on the way between shops)
+    that a bill has already costed. Pieces of a receipt that still has
+    unbilled pieces -- this bill's own receipt or delivery challans among
+    them -- are left out: they carry the average only provisionally until
+    their own bill, so a challan's pieces are never counted twice. Rejected
+    pieces never count (no more pieces than the receipts accepted). A product
+    with no average yet takes the bill's price. A walk-in buy keeps the
+    latest price paid (owner 2026-10-12).
+  * accounts correct it, with a reason (correct()).
+  * opening stock gives a product that has none its first cost (seed()).
+
+Sales, transfers and counts never change it. Each change is one row of the
+product's cost_history (the product page shows it; no per-piece cost).
+
+EXACTLY ONCE, with no transactions (prod MongoDB is a single server): the
+history row, its key (cost_keys) and the new average land in ONE
+single-document update, guarded on the key being absent and on the average it
+was worked out from. A retry or a crash re-run never applies a bill twice;
+two bills accepted at once never lose one (the loser re-reads and re-works).
+Money is exact to the paisa (Decimal, half up).
+No emoji (Windows cp1252).
+"""
+
+import logging
+import uuid
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Callable, Dict, List, Optional, Tuple
+
+from api.utils.event_time import utc_now_iso
+
+from . import purchase_match as pmatch
+from . import stock_value
+from .item_events import StockState, canonical_state, is_on_hand
+
+logger = logging.getLogger(__name__)
+
+# A vendor bill's cost_state (S4). HELD: on hold, its cost waits for the
+# approval. PENDING: accepted, its cost being applied (finish_accepted_bills
+# finishes one a crash left half-done). APPLIED: done. A bill booked before S4
+# has none: its cost went in when it was booked.
+HELD, PENDING, APPLIED = "HELD", "PENDING", "APPLIED"
+_BOOKED = {"OUTSTANDING", "PARTIAL", "PAID"}
+_PAISA = Decimal("0.01")
+
+
+def bill_accepted(bill: dict) -> bool:
+    """THE 'is this vendor bill accepted' rule: booked, and not on hold."""
+    return (
+        str((bill or {}).get("status") or "").upper() in _BOOKED
+        and (bill or {}).get("match_status") != pmatch.MATCH_ON_HOLD
+    )
+
+
+def _d(v) -> Decimal:
+    return Decimal(str(pmatch._f(v)))
+
+
+def _paise(v: Decimal) -> float:
+    return float(v.quantize(_PAISA, rounding=ROUND_HALF_UP))
+
+
+def _held(unit: dict) -> bool:
+    """A piece we still hold: on the shelf, reserved, or on the way."""
+    raw = unit.get("status")
+    return is_on_hand(raw, include_reserved=True) or canonical_state(raw) is StockState.TRANSFERRED
+
+
+def _receipt_of(unit: dict) -> Optional[str]:
+    """The goods receipt (or delivery challan) a piece came in on -- it
+    survives a transfer."""
+    if unit.get("grn_id"):
+        return unit["grn_id"]
+    return unit.get("source_id") if unit.get("source_type") == "GRN" else None
+
+
+def _costs_its_receipt(bill: dict, cost_keys) -> bool:
+    if bill.get("cost_state") is None:  # booked before S4
+        return bill_accepted(bill)
+    return (bill.get("invoice_id") or bill.get("bill_id")) in cost_keys
+
+
+def basis_pieces(db, product_id: str, cost_keys=()) -> float:
+    """The pieces of a product we hold that a bill has already costed (see
+    the module doc); `cost_keys`: the bills already in its average."""
+    held: Dict[Optional[str], float] = {}
+    for unit in db.get_collection("stock_units").find({"product_id": product_id}):
+        if _held(unit):
+            r = _receipt_of(unit)
+            held[r] = held.get(r, 0.0) + stock_value._pieces(unit)
+    total = sum(held.values())
+    ids = [r for r in held if r]
+    if not ids:
+        return total
+    receipts = {
+        g["grn_id"]: g
+        for g in db.get_collection("grns").find({"grn_id": {"$in": ids}}, {"_id": 0})
+    }
+    bills = list(db.get_collection("vendor_bills").find(
+        {"$or": [{"grn_id": {"$in": ids}}, {"linked_dc_ids": {"$in": ids}}]}, {"_id": 0}
+    ))
+    for r in ids:
+        if r not in receipts:  # a legacy piece whose receipt is gone: costed
+            continue
+        unbilled = float(pmatch._grn_accepted_by_product(receipts[r]).get(product_id, 0))
+        for b in bills:
+            if not _costs_its_receipt(b, cost_keys):
+                continue
+            if r in (b.get("linked_dc_ids") or []) or (b.get("grn_id") == r and not b.get("lines")):
+                unbilled = 0.0  # a challan bill, or a header-only bill: the whole receipt
+                break
+            if b.get("grn_id") == r:
+                unbilled -= sum(
+                    pmatch._f(ln.get("qty")) for ln in b["lines"] if ln.get("product_id") == product_id
+                )
+        total -= min(held[r], max(0.0, unbilled))
+    return total
+
+
+def _move(
+    db,
+    product_id: str,
+    key: str,
+    work: Callable[[dict, float], Optional[Tuple[float, dict]]],
+    entry: dict,
+) -> Optional[dict]:
+    """Apply one change to a product's average exactly once (module doc).
+    `work(product, old_average)` -> (new average, extra history fields), or
+    None to leave it. Returns the history row written, None when nothing was
+    (already applied, nothing to do, or no such product)."""
+    products = db.get_collection("products")
+    for _ in range(5):
+        prod = products.find_one({"product_id": product_id})
+        if prod is None or key in (prod.get("cost_keys") or []):
+            return None
+        old = stock_value.average_cost(prod)
+        worked = work(prod, old)
+        if worked is None:
+            return None
+        new, extra = worked
+        at = utc_now_iso()
+        row = {**entry, **extra, "key": key, "at": at, "old_cost": old or None, "new_cost": new}
+        done = products.update_one(
+            {
+                "product_id": product_id,
+                "cost_keys": {"$ne": key},
+                "cost_price": prod.get("cost_price"),
+                "cost_price_is_catalogue_only": prod.get("cost_price_is_catalogue_only"),
+            },
+            {
+                "$set": {
+                    "cost_price": new,
+                    "moving_avg_cost": new,
+                    "cost_price_is_catalogue_only": False,
+                    "cost_valuation_pending": False,
+                    "cost_updated_at": at,
+                    "cost_source": entry.get("source"),
+                    "cost_source_id": entry.get("bill_id") or key,
+                },
+                "$push": {"cost_history": row, "cost_keys": key},
+            },
+        )
+        if done.modified_count:
+            _mirror(db, product_id, new, entry.get("source"))
+            return row
+    logger.error("[COST] could not move the average of %s for %s: it kept changing", product_id, key)
+    return None
+
+
+def _mirror(db, product_id: str, cost: float, source: Optional[str]) -> None:
+    """The catalogue copy shows the same cost (fail-soft: the product is the
+    record)."""
+    try:
+        db.get_collection("catalog_products").update_one(
+            {"id": product_id},
+            {"$set": {"pricing.cost_price": cost, "pricing.cost_updated_at": utc_now_iso(),
+                      "pricing.cost_source": source}},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[COST] catalogue mirror of %s failed", product_id, exc_info=True)
+
+
+def apply_bill(
+    db,
+    bill: dict,
+    lines: List[dict],
+    *,
+    key: str,
+    actor: Optional[str],
+    latest_price: bool = False,
+    receipts: Optional[List[dict]] = None,
+) -> List[dict]:
+    """Re-average every product an accepted bill's goods lines name. `lines`
+    are its COST lines (GST it cannot claim already added:
+    purchase_invoices._cost_lines). Returns the history rows written."""
+    billed: Dict[str, List[Decimal]] = {}
+    for ln in lines or []:
+        pid, qty = ln.get("product_id"), _d(ln.get("qty"))
+        if not pid or qty <= 0:
+            continue
+        line_value = _d(ln["taxable"]) if ln.get("taxable") is not None else qty * _d(ln.get("unit_price"))
+        acc = billed.setdefault(pid, [Decimal(0), Decimal(0)])
+        acc[0] += qty
+        acc[1] += line_value
+    good: Optional[Dict[str, float]] = None
+    if receipts:
+        good = {}
+        for g in receipts:
+            for pid, n in pmatch._grn_accepted_by_product(g).items():
+                good[pid] = good.get(pid, 0) + n
+    rows = []
+    for pid, (qty, val) in billed.items():
+        if good is not None:
+            cap = Decimal(str(good.get(pid, 0)))
+            if cap <= 0:
+                continue  # every piece billed was rejected: nothing reached stock
+            if qty > cap:  # rejected pieces never count
+                val, qty = val * cap / qty, cap
+        price = _paise(val / qty)
+
+        def work(prod, old, pid=pid, qty=qty, val=val, price=price):
+            if latest_price or not old:
+                return price, {"qty": float(qty), "price": price, "basis": None}
+            basis = Decimal(str(basis_pieces(db, pid, prod.get("cost_keys") or ())))
+            if basis <= 0:
+                return price, {"qty": float(qty), "price": price, "basis": 0.0}
+            new = (basis * Decimal(str(old)) + val) / (basis + qty)
+            return _paise(new), {"qty": float(qty), "price": price, "basis": float(basis)}
+
+        row = _move(db, pid, key, work, {
+            "kind": "BILL",
+            "source": "PURCHASE_INVOICE",
+            "bill_id": bill.get("invoice_id") or bill.get("bill_id"),
+            "bill_number": bill.get("invoice_number") or bill.get("bill_number"),
+            "vendor_name": bill.get("vendor_name"),
+            "method": "LATEST_PRICE_PAID" if latest_price else "AVERAGE",
+            "by": actor,
+        })
+        if row:
+            rows.append({**row, "product_id": pid})
+    return rows
+
+
+def correct(db, product_id: str, new_cost: float, reason: str, actor: Optional[str]) -> Optional[dict]:
+    """An accounts correction of a product's average, with its reason."""
+    new = _paise(_d(new_cost))
+    return _move(
+        db, product_id, f"correction:{uuid.uuid4().hex}",
+        lambda _prod, old: None if new == old else (new, {}),
+        {"kind": "CORRECTION", "source": "CORRECTION", "reason": reason, "by": actor},
+    )
+
+
+def seed(db, product_id: str, cost: float, *, key: str, kind: str, actor: Optional[str]) -> Optional[dict]:
+    """A product's FIRST cost (opening stock; the backfill): written only
+    while it has none."""
+    first = _paise(_d(cost))
+    return _move(
+        db, product_id, key,
+        lambda _prod, old: None if old or first <= 0 else (first, {}),
+        {"kind": kind, "source": kind, "by": actor},
+    )
+
+
+def history(product: Optional[dict]) -> List[dict]:
+    """The product's cost history, newest first."""
+    rows = [dict(r) for r in (product or {}).get("cost_history") or []]
+    return sorted(rows, key=lambda r: str(r.get("at") or ""), reverse=True)

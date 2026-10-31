@@ -49,6 +49,7 @@ import logging
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+from . import stock_value
 from .margin_basis import LINE_REVENUE_EX_GST_GROUP, group_revenue_ex_gst
 
 logger = logging.getLogger(__name__)
@@ -353,7 +354,8 @@ def _product_price_map(db, product_ids: List[str]) -> Dict[str, Dict]:
                 pid = d.get("product_id")
                 if pid and str(pid) not in out:
                     out[str(pid)] = {
-                        "cost_price": d.get("cost_price"),
+                        # THE cost (stock_value.average_cost, S4); None = none yet.
+                        "cost_price": stock_value.average_cost(d) or None,
                         "offer_price": d.get("offer_price"),
                         "mrp": d.get("mrp"),
                     }

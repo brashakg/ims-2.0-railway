@@ -72,8 +72,9 @@ GSTIN_Z_JH = "20AAACZ1111A1ZH"  # company Z, Jharkhand (Dhanbad shops)
 GSTIN_Z_MH = "27AAACZ1111A1Z3"  # company Z, Maharashtra (Pune shop)
 GSTIN_Y_JH = "20AAACY2222B1ZA"  # company Y, Jharkhand (Bokaro shop)
 
-UNIT_COST = 1850.0  # each unit's own cost, stamped at its goods receipt
-PRODUCT_COST = 2000.0  # the product master's average -- NOT the units' own
+# S4 (owner 2026-10-23): every piece carries its product's ONE average cost.
+UNIT_COST = 1850.0  # the product's average: what each unit carries
+PRODUCT_COST = 2000.0  # another average, set by the tests that change it
 HSN = "900311"
 BARCODES = ("BVQXKDNA01", "BVQXKDNA02")
 
@@ -119,7 +120,7 @@ STORES = [
 PRODUCT = {
     "product_id": "P-CA8895", "sku": "FR-CARRERA-CA8895-807-54",
     "name": "Carrera CA 8895 Rectangle Black", "category": "FRAME",
-    "hsn_code": HSN, "cost_price": PRODUCT_COST, "mrp": 6500.0,
+    "hsn_code": HSN, "cost_price": UNIT_COST, "mrp": 6500.0,
 }
 
 
@@ -238,17 +239,18 @@ def test_f51_challan_lines_carry_the_product_hsn(db):
     assert HSN in _challan(t["id"])
 
 
-def test_f51_challan_values_the_units_at_their_own_cost(db):
+def test_s4_challan_values_the_units_at_the_products_one_average(db):
+    # The price these units were received at (2000) is not their value.
+    db["stock_units"].update_many({}, {"$set": {"unit_cost": PRODUCT_COST, "cost_price": PRODUCT_COST}})
     t = _shipped("ST-BOK-1")
     html = _challan(t["id"])
-    assert _shows_amount(html, UNIT_COST), "per-unit value at the unit's own cost"
+    assert _shows_amount(html, UNIT_COST), "per-unit value at the product's average"
     assert _shows_amount(html, 2 * UNIT_COST), "line / challan total value"
-    # The product master's average is not the value of THESE units.
     assert not _shows_amount(html, PRODUCT_COST)
     assert not _shows_amount(html, 2 * PRODUCT_COST)
 
 
-def test_f51_transfer_is_saved_at_the_units_own_cost(db):
+def test_s4_transfer_is_saved_at_the_products_one_average(db):
     t = _shipped("ST-BOK-1")
     stored = transfers._get_transfer(t["id"])
     assert stored["total_value"] == pytest.approx(2 * UNIT_COST)
@@ -585,9 +587,10 @@ def test_d7_workshop_staff_pick_ship_and_receive_replies_carry_no_cost(db):
 
 def test_f51_unit_without_its_own_cost_is_valued_at_the_product_cost(db):
     """A unit with no cost of its own (an opening-stock row without one) is
-    valued at the product master's cost -- shelf units carry the product's cost
-    (owner ruling 2026-09-28)."""
+    valued at the product's average cost -- shelf units carry the product's
+    cost (owner rulings 2026-09-28 / 2026-10-23)."""
     db["stock_units"].update_many({}, {"$unset": {"unit_cost": "", "cost_price": ""}})
+    db["products"].update_one({}, {"$set": {"cost_price": PRODUCT_COST}})
     t = _shipped("ST-BOK-1")
     stored = transfers._get_transfer(t["id"])
     assert stored["items"][0]["unit_cost"] == pytest.approx(PRODUCT_COST)
@@ -607,7 +610,8 @@ def test_d13_a_unit_with_no_cost_anywhere_stops_the_ship(db):
     assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
     db["products"].update_one({}, {"$set": {"cost_price": PRODUCT_COST}})
     _ship(t["id"])
-    assert _shows_amount(_challan(t["id"]), UNIT_COST + PRODUCT_COST)
+    # Both pieces carry the product's average (S4), whatever one was received at.
+    assert _shows_amount(_challan(t["id"]), 2 * PRODUCT_COST)
 
 
 @pytest.mark.parametrize("side", ["consignor", "consignee"])
@@ -796,7 +800,7 @@ def test_d13_a_move_shipped_on_one_registration_books_nothing_later(db, blank):
 
 def test_d13_challan_total_value_is_the_sum_of_its_lines(db):
     """r4 #3: the tfoot's Value is the sum of the line values (frame 2 x 1850
-    + lens 1 x 1100 = 4,800.00 on 3 units), never Rs 0 -- the F51 defect --
+    + lens 1 x its average 1200 = 4,900.00 on 3 units), never Rs 0 -- the F51 defect --
     or one line's figure."""
     db["products"].insert_one({
         "product_id": "P-LENS", "sku": "LN-1", "name": "Lens pair", "category": "LENS",
@@ -813,7 +817,7 @@ def test_d13_challan_total_value_is_the_sum_of_its_lines(db):
     _ship(t["id"])
     html = _challan(t["id"])
     foot = html[html.index("<tfoot>"): html.index("</tfoot>")]
-    assert _shows_amount(foot, 2 * UNIT_COST + 1100.0), foot
+    assert _shows_amount(foot, 2 * UNIT_COST + 1200.0), foot
     assert "<strong>3</strong>" in foot, foot
 
 
@@ -957,23 +961,24 @@ def test_d7_finance_reconciliation_lists_the_callers_stores_only(db, monkeypatch
     assert mine["transfers"][0]["items"][0]["unit_cost"] == pytest.approx(UNIT_COST)
 
 
-@pytest.mark.parametrize(
-    "own",
-    [{"unit_cost": "1850"}, {"cost_price": UNIT_COST}, {"unit_cost": 0, "cost_price": UNIT_COST}],
-    ids=["unit_cost_as_text", "cost_price_only", "zero_unit_cost_with_cost_price"],
-)
-def test_d13_the_ship_guard_and_the_ship_stamp_ask_one_unit_cost(db, own):
-    """r5: 'this unit has a cost' had two copies -- the ship guard's Mongo
-    predicate and the stamp's _first_cost. The product has no cost, so only
-    the unit's own can value it: a unit the guard lets leave is valued at
-    that cost (never stamped 0, its challan then refused for good), and a
-    cost the stamp reads is never refused at ship (text '1850' was)."""
-    db["stock_units"].update_many({}, {"$unset": {"unit_cost": "", "cost_price": ""}})
-    db["stock_units"].update_many({}, {"$set": own})
-    db["products"].update_one({}, {"$set": {"cost_price": 0}})
+def test_d13_the_ship_guard_and_the_ship_stamp_ask_one_unit_cost(db):
+    """r5 / S4: the ship guard and the stamp ask ONE cost -- the product's
+    average (stock_value.average_cost). A cost the stamp reads is never
+    refused at ship (text '1850' was), and a product with no average is
+    refused before anything moves, whatever its units were received at."""
+    db["products"].update_one({}, {"$set": {"cost_price": "1850"}})
     t = _shipped("ST-BOK-1")
     assert transfers._get_transfer(t["id"])["items"][0]["unit_cost"] == pytest.approx(UNIT_COST)
     assert _shows_amount(_challan(t["id"]), 2 * UNIT_COST)
+
+
+def test_s4_a_units_receipt_price_never_values_a_product_with_no_average(db):
+    db["products"].update_one({}, {"$set": {"cost_price": 0}})
+    t = _create("ST-BOK-1")
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"])
+    assert exc.value.status_code == 409
+    assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
 
 
 def test_d7_the_scorecard_spend_follows_the_payables_gate_role_by_role(app, db, monkeypatch):
@@ -1165,6 +1170,7 @@ def test_d13_the_ship_guard_and_the_stamp_answer_from_one_product_read(db, monke
     Rs 0 and their valued challan was refused for good. One read now, before
     any unit moves: a read after it changes nothing."""
     db["stock_units"].update_many({}, {"$unset": {"unit_cost": "", "cost_price": ""}})
+    db["products"].update_one({}, {"$set": {"cost_price": PRODUCT_COST}})
     t = _create("ST-BOK-1")
     with monkeypatch.context() as m:
         _products_fail(m, after=1)

@@ -42,8 +42,6 @@ const STATUS_TEXT: Record<string, string> = {
  *  second copy of the rule is how the button and the dialog disagreed. */
 const labelable = (u: StockUnit) => u.in_shop && !labelProblem(u.barcode);
 
-const money = (n: number) => `₹${n.toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
-
 interface UnitLabelsModalProps {
   /** Units of this product at the shop (stock ledger door)... */
   productId?: string;
@@ -125,8 +123,6 @@ export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subt
 
   const printable = (units || []).filter(labelable);
   const chosen = printable.filter((u) => selected.has(u.stock_id));
-  const showCost = (units || []).some((u) => u.cost_price !== undefined);
-
   return (
     <div
       className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
@@ -185,7 +181,6 @@ export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subt
                     <th className="py-2 pr-3 text-left">Status</th>
                     <th className="py-2 pr-3 text-left">Received</th>
                     <th className="py-2 pr-3 text-left">Label</th>
-                    {showCost && <th className="py-2 pr-3 text-right">Cost</th>}
                     {canPrint && <th className="py-2" />}
                   </tr>
                 </thead>
@@ -220,9 +215,6 @@ export function UnitLabelsModal({ productId, storeId: shopId, grnId, title, subt
                           'Not printed'
                         )}
                       </td>
-                      {showCost && (
-                        <td className="py-2 pr-3 text-right">{u.cost_price != null ? money(u.cost_price) : '-'}</td>
-                      )}
                       {canPrint && (
                         <td className="py-2 text-right">
                           {labelable(u) && (

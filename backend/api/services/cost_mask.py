@@ -92,10 +92,13 @@ _COST_FIELDS = {
     "uncosted_units", "valuation_cost_pending", "cost_valuation_pending",
     "cost_price_is_catalogue_only",
     # The GST a bill claiming no credit added to a unit's cost (F04,
-    # purchase_invoices._add_unclaimed_gst_to_units) -- a fraction of what we
+    # purchase_invoices before S4, kept masked on old rows) -- a fraction of what we
     # paid -- and the supplier bill a cost came from (H1, GST review
     # 2026-10-19).
     "unclaimed_gst", "cost_source_id",
+    # A product's one average cost history (S4, services/product_cost): each
+    # bill's price and quantity, each correction -- and the bills applied.
+    "cost_history", "cost_keys",
 }
 # Derived margin / COGS figures emitted by analytics + finance payloads.
 _MARGIN_FIELDS = {

@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 868 |
-| **Total `/api/v1` (method x path)** | **1308** |
+| Role-gated (one or more roles) | 870 |
+| **Total `/api/v1` (method x path)** | **1310** |
 | ...of which `store_scoped` | 236 |
 | ...of which `self_enforced` | 47 |
 
@@ -778,6 +778,8 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/inventory/opening-stock/commit` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
 | `POST` | `/api/v1/inventory/opening-stock/preview` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
 | `GET` | `/api/v1/inventory/overstock-analysis` | AUTH |  |  |
+| `GET` | `/api/v1/inventory/products/{product_id}/cost` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/inventory/products/{product_id}/cost-correction` | ACCOUNTANT, ADMIN |  |  |
 | `PUT` | `/api/v1/inventory/reorder-levels/{product_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN | S |  |
 | `GET` | `/api/v1/inventory/reorder-list` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, ACCOUNTANT, SUPERADMIN | S |  |
 | `GET` | `/api/v1/inventory/sell-through-analysis` | AUTH |  |  |

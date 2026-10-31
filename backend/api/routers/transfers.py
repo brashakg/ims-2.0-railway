@@ -28,6 +28,7 @@ from ..dependencies import (
 # W1.4 / OS-032: shared ONLINE store-type detector -- a transfer must never
 # land stock on a pooled, stockless ONLINE store.
 from ..services import org_validation as ov
+from ..services import stock_value
 from ..services.cost_mask import mask_cost
 from ..services.purchase_invoice_engine import classify_supply
 from ..services.stores_util import is_online_store
@@ -803,13 +804,14 @@ def _first_cost(*candidates) -> float:
     return 0.0
 
 
-def _unit_cost(unit: Dict, product: Dict) -> float:
-    """THE cost of one stock unit: its own (unit_cost / cost_price, stamped at
-    its goods receipt or opening stock), else the product master's. One rule
-    for the ship guard (which refuses a crossing move with a unit at 0) and the
-    ship stamp (which values the line by it), so a unit the guard passes is
-    never stamped at 0. Pure."""
-    return _first_cost(unit.get("unit_cost"), unit.get("cost_price"), product.get("cost_price"))
+def _unit_cost(unit: Dict, product: Dict) -> float:  # noqa: ARG001 - one call shape
+    """THE cost of one stock unit: its product's one average cost
+    (stock_value.average_cost -- S4, owner 2026-10-23: every piece carries
+    it; what one piece was received at is not its value). One rule for the
+    ship guard (which refuses a crossing move with a unit at 0) and the ship
+    stamp (which values the line by it), so a unit the guard passes is never
+    stamped at 0. Pure."""
+    return stock_value.average_cost(product)
 
 
 def _ship_products(transfer: Dict) -> Dict[str, Dict]:
@@ -827,7 +829,7 @@ def _ship_products(transfer: Dict) -> Dict[str, Dict]:
             row["product_id"]: row
             for row in db.get_collection("products").find(
                 {"product_id": {"$in": pids}},
-                {"_id": 0, "product_id": 1, "hsn_code": 1, "category": 1, "cost_price": 1},
+                {"_id": 0, "product_id": 1, "hsn_code": 1, "category": 1, "cost_price": 1, "cost_price_is_catalogue_only": 1},
             )
         }
     except Exception as exc:  # noqa: BLE001 - refuse, never guess
@@ -840,12 +842,10 @@ def _ship_products(transfer: Dict) -> Dict[str, Dict]:
 
 def _stamp_shipped_value(line: Dict, units: List[Dict], product: Dict) -> None:
     """F51 / D13: stamp on a line what LEFT the shop -- the units' barcodes,
-    the product's HSN, and the units' OWN cost (unit_cost / cost_price, stamped
-    on each unit at its goods receipt or opening stock) averaged into the
-    line's unit_cost. The product master's cost_price (`product`, the row
-    _ship_products read before the guard) stands in only for a unit that
-    carries no cost of its own (owner 2026-09-28: shelf units carry the
-    product's cost); a unit with neither leaves the line at 0, so a valued
+    the product's HSN, and the cost every unit carries (_unit_cost: the
+    product's one average cost, `product` being the row _ship_products read
+    before the guard -- owner 2026-09-28 / S4 2026-10-23: shelf units carry
+    the product's cost) as the line's unit_cost; none leaves the line at 0, so a valued
     challan refuses instead of printing a short value (a move between two
     registrations never gets here: _assert_valued_paper stops it). A line that
     shipped nothing keeps no client-typed figure (a BOPIS line carries the SALE
@@ -857,13 +857,7 @@ def _stamp_shipped_value(line: Dict, units: List[Dict], product: Dict) -> None:
     of its own, so nothing can fail here after the units moved."""
     line["hsn_code"] = _line_hsn(line, product)
     line["shipped_barcodes"] = [str(u["barcode"]) for u in units if u.get("barcode")]
-    costs = [_unit_cost(u, product) for u in units]
-    # ponytail: one average rate per line (exact for a line of one cost);
-    # per-unit rows if lines of mixed-cost units ever need their own rates.
-    if costs:
-        line["unit_cost"] = sum(costs) / len(costs) if all(costs) else 0.0
-    else:
-        line["unit_cost"] = _first_cost(product.get("cost_price"))
+    line["unit_cost"] = _unit_cost({}, product)
 
 
 def _line_hsn(line: Dict, product: Optional[Dict] = None) -> str:
@@ -2426,21 +2420,18 @@ def _assert_valued_paper(transfer: Dict, products: Dict[str, Dict]) -> tuple:
             "store_id": transfer.get("from_location_id"),
             "status": STOCK_STATUS_AVAILABLE,
         }
-        on_shelf = list(units.find(shelf, {"_id": 0, "unit_cost": 1, "cost_price": 1}))
-        if not on_shelf:
+        if not units.find_one(shelf, {"_id": 1}):
             continue
         in_stock = True
         product = products.get(pid) or {}
         _require_hsn(line.get("product_name") or pid, _line_hsn(line, product))
-        # ponytail: any cost-less unit on the shelf refuses, not only the ones
-        # ship would pick; the fix (a product cost price) is the same.
-        if not all(_unit_cost(u, product) for u in on_shelf):
+        if not _unit_cost({}, product):
             raise HTTPException(
                 status_code=409,
-                detail=f"{line.get('product_name') or pid} has no cost price and "
-                "some of its units here carry no cost. Enter the product's cost "
-                "price before shipping: a transfer between two GST registrations "
-                "is valued at cost.",
+                detail=f"{line.get('product_name') or pid} has no average cost "
+                "yet. Accept its vendor bill (or have accounts enter its cost) "
+                "before shipping: a transfer between two GST registrations is "
+                "valued at cost.",
             )
     if not in_stock:
         raise HTTPException(

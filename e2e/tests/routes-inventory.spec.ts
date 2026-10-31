@@ -87,8 +87,9 @@ test('coverage has not silently shrunk', () => {
       'parameterised screen cannot be probed without a seeded id AND a url field; ' +
       '+3 redirect-only addresses retired into the one Reorder list (stock ' +
       'redesign S5): /catalog/buy-desk, /inventory/replenishment and ' +
-      '/inventory/low-stock, each a Navigate to /inventory/reorders). ' +
+      '/inventory/low-stock, each a Navigate to /inventory/reorders); ' +
+      '+1 for the product page (stock and the one average cost) /inventory/stock/:productId, the same reason). ' +
       'If an exclusion is genuinely new and justified, raise the ceiling here in the ' +
       'same commit that adds it -- deliberately, not by accident.',
-  ).toEqual({ probedAtLeast: true, exclusions: 36 });
+  ).toEqual({ probedAtLeast: true, exclusions: 37 });
 });
