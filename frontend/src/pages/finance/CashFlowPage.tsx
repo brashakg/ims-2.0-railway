@@ -525,7 +525,9 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
   useEffect(() => {
     if (kind !== 'bill') return;
     let cancelled = false;
-    vendorApApi.listExpenseTypes()
+    // A failed load leaves no types: the tick stays the accountant's, unticked.
+    Promise.resolve()
+      .then(() => vendorApApi.listExpenseTypes())
       .then((rows) => { if (!cancelled) setExpenseTypes(rows); })
       .catch(() => { if (!cancelled) setExpenseTypes([]); });
     return () => { cancelled = true; };
