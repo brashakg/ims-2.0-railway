@@ -123,6 +123,8 @@ def test_refused_duplicate_challan_takes_no_receipt_number(monkeypatch):
         dc_number="DC-77",
         dc_date="2026-09-17",
         items=[GRNItemCreate(product_id="P1", received_qty=2, accepted_qty=2, rejected_qty=0)],
+        # S2b: a challan is received only with its photo.
+        **_attach(store),
     )
     with pytest.raises(HTTPException) as exc:
         _create(dc)
