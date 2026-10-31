@@ -48,7 +48,7 @@ from .numbering import (
 from .stock import (
     _assert_serialized_stock_available,
     _canonical_pid,
-    _claim_scanned_units,
+    _claim_units,
     _lens_reservation_key,
     _mark_units_sold,
     _release_claimed_units,
@@ -1035,17 +1035,17 @@ async def create_order(
             ],
         }
 
-        claimed_units: set = set()
+        claimed_units: dict = {}
         approval_spent = False
 
         def _order_was_saved() -> bool:
             return bool(order_repo.find_one({"order_id": precomputed_order_id}))
 
         try:
-            # Scanned units are claimed (atomic) BEFORE the save: a till that
-            # lost its unit to another till since the gate gets a 409 here, and
-            # no bill exists. The release below gives back the lens cells.
-            claimed_units = _claim_scanned_units(
+            # Every unit the bill takes is claimed (atomic) BEFORE the save: a
+            # till that lost a unit (scanned, or the last one) to another till
+            # since the gate gets a 409 here, and no bill exists. The release below gives back the lens cells.
+            claimed_units = _claim_units(
                 precomputed_order_id, items_data, store_id
             )
             # The manager's discount approval (when one lifted the seller's

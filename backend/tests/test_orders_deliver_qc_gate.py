@@ -113,6 +113,9 @@ def _client(monkeypatch, order, jobs, roles=("SALES_CASHIER",), wrepo=None):
     workshop_repo = wrepo if wrepo is not None else _WorkshopRepo(jobs)
 
     monkeypatch.setattr(om, "get_order_repository", lambda: orepo)
+    # No stock in this suite: POS 4 refuses a stock line with no unit,
+    # so the gate must not read a real (empty) stock_units collection.
+    monkeypatch.setattr(om, "get_stock_repository", lambda: None)
     # assert_linked_job_qc_cleared resolves the repo through the workshop module.
     monkeypatch.setattr(wm, "get_workshop_repository", lambda: workshop_repo)
 

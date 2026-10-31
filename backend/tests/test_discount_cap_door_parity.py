@@ -101,6 +101,9 @@ def doors(monkeypatch):
     })
 
     monkeypatch.setattr(orders_module, "get_order_repository", lambda: order_repo)
+    # No stock in this suite: POS 4 refuses a stock line with no unit,
+    # so the gate must not read a real (empty) stock_units collection.
+    monkeypatch.setattr(orders_module, "get_stock_repository", lambda: None)
     monkeypatch.setattr(orders_module, "get_customer_repository", lambda: customer_repo)
     monkeypatch.setattr(orders_module, "get_product_repository", lambda: product_repo)
     monkeypatch.setattr(orders_module, "get_walkin_counter_repository", lambda: None)
@@ -319,6 +322,9 @@ def promo_doors(monkeypatch):
     })
 
     monkeypatch.setattr(orders_module, "get_order_repository", lambda: order_repo)
+    # No stock in this suite: POS 4 refuses a stock line with no unit,
+    # so the gate must not read a real (empty) stock_units collection.
+    monkeypatch.setattr(orders_module, "get_stock_repository", lambda: None)
     monkeypatch.setattr(orders_module, "get_customer_repository", lambda: customer_repo)
     monkeypatch.setattr(orders_module, "get_product_repository", lambda: product_repo)
     monkeypatch.setattr(orders_module, "get_walkin_counter_repository", lambda: None)
