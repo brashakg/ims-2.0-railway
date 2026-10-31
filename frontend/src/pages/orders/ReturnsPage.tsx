@@ -12,6 +12,7 @@ import {
   type ReturnQuote,
 } from '../../services/api/returns';
 import { RefundApprovalModal } from '../../components/returns/RefundApprovalModal';
+import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 import { formatDateIST } from '../../utils/datetime';
 import {
   Search, RotateCcw, ArrowLeftRight, Receipt,
@@ -565,8 +566,10 @@ export default function ReturnsPage() {
     } catch (e: any) {
       // F27: the server gates a tiered refund with 403 reason=REFUND_APPROVAL_REQUIRED.
       // Open the request+poll modal instead of surfacing a raw error.
-      const detail = e?.response?.data?.detail;
-      if (e?.response?.status === 403 && detail?.reason === 'REFUND_APPROVAL_REQUIRED') {
+      // Read through the shared helpers (#1274): the client rejects with an
+      // ApiError, never an axios `.response`.
+      const detail = getErrorDetail(e) as any;
+      if (getErrorStatus(e) === 403 && detail?.reason === 'REFUND_APPROVAL_REQUIRED') {
         setApprovalGate({
           // The server's own figure for this refund (never the screen's quote).
           amount: Number(detail?.this_refund) || netRefund,
@@ -576,8 +579,7 @@ export default function ReturnsPage() {
         });
         return;
       }
-      const msg = typeof detail === 'string' ? detail : detail?.message;
-      setError(msg || 'Failed to process return. Please try again.');
+      setError(getErrorMessage(e, 'Failed to process return. Please try again.'));
     } finally {
       setIsSubmitting(false);
     }

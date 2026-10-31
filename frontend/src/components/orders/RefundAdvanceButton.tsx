@@ -6,6 +6,7 @@ import { Undo2 } from 'lucide-react';
 import { returnsApi } from '../../services/api/returns';
 import type { AdvanceRefundPlan, CashPaidFrom } from '../../services/api/returns';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 export const ADVANCE_REFUND_ROLES = ['ACCOUNTANT', 'ADMIN', 'SUPERADMIN'];
 
@@ -25,9 +26,8 @@ const METHOD_LABEL: Record<string, string> = {
 const rs = (n: number) =>
   `₹${n.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
-function serverMessage(e: any): string {
-  const d = e?.response?.data?.detail;
-  return typeof d === 'string' ? d : d?.message || 'The refund could not be recorded.';
+function serverMessage(e: unknown): string {
+  return getErrorMessage(e, 'The refund could not be recorded.');
 }
 
 export function RefundAdvanceButton({ orderId, onDone }: { orderId: string; onDone: () => void }) {

@@ -16,6 +16,7 @@ import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
 import { orderLinesOf, refreshBillQuote } from './billQuote';
 import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
+import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
 
 // The order-line vocabulary lives with the line builder the quote shares.
 export { mapCategory } from './billQuote';
@@ -121,11 +122,10 @@ const DEAD_APPROVAL_CODES = new Set([
 ]);
 
 /** The server's refusal, in words staff can act on ('' when there is none). */
-function serverReason(e: any): string {
-  const d = e?.response?.data?.detail;
-  if (typeof d === 'string') return d;
-  if (d?.reason === 'insufficient_balance') return 'Not enough loyalty points';
-  return typeof d?.message === 'string' ? d.message : '';
+function serverReason(e: unknown): string {
+  const d = getErrorDetail(e) as { reason?: unknown } | undefined;
+  if (d && typeof d === 'object' && d.reason === 'insufficient_balance') return 'Not enough loyalty points';
+  return getErrorMessage(e, '');
 }
 
 /** `store` is the bound posStore instance (usePOSStore()). Validations run
