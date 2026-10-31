@@ -32,9 +32,9 @@ const auth = vi.hoisted(() => ({ roles: ['STORE_MANAGER'] as string[] }));
 const online = vi.hoisted(() => ({ value: false }));
 
 const inv = vi.hoisted(() => ({ getUnits: vi.fn(), printQuarantineLabel: vi.fn() }));
-const labels = vi.hoisted(() => ({ printUnitLabels: vi.fn(() => ({ method: 'html' })) }));
+const labels = vi.hoisted(() => ({ printQuarantineLabels: vi.fn() }));
 vi.mock('../../../services/api/inventory', () => ({ vendorsApi: api, inventoryApi: inv }));
-vi.mock('../../../components/labels/unitLabel', () => labels);
+vi.mock('../../../components/labels/quarantineLabels', () => labels);
 vi.mock('../../../services/api/grnCockpit', () => ({ grnCockpitApi: cockpit }));
 vi.mock('../../../services/api/products', () => ({ productApi: products }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
@@ -291,7 +291,8 @@ describe('a damaged piece, inline on its row', () => {
     expect(screen.getByText(/Credit asked for Carrera 1234: those pieces are closed off the/)).toBeInTheDocument();
   });
 
-  it('prints the red DO NOT SHELVE label for the quarantined piece through the one unit label', async () => {
+  it('prints the red DO NOT SHELVE label for the quarantined piece through the one quarantine-label door', async () => {
+    labels.printQuarantineLabels.mockResolvedValue({ method: 'html', message: '' });
     inv.getUnits.mockResolvedValue({
       units: [
         { stock_id: 'Q1', barcode: 'BV24CA0101P4', status: 'QUARANTINED', brand: 'Carrera', model: '1234', name: 'Carrera 1234' },
@@ -307,15 +308,18 @@ describe('a damaged piece, inline on its row', () => {
     fireEvent.click(receiveBtn());
     await screen.findByText('Received and put on the shelf.');
     fireEvent.click(screen.getByRole('button', { name: 'Print 1 red DO NOT SHELVE label' }));
-    await waitFor(() => expect(inv.printQuarantineLabel).toHaveBeenCalledWith('Q1'));
+    await waitFor(() => expect(labels.printQuarantineLabels).toHaveBeenCalledTimes(1));
     expect(inv.getUnits).toHaveBeenCalledWith({ grn_id: 'G-NEW', rejected: true });
-    expect(labels.printUnitLabels).toHaveBeenCalledWith([
-      { barcode: 'BV24CA0101P4', brand: 'Carrera', model: '1234', doNotShelve: true },
-    ]);
+    expect(labels.printQuarantineLabels.mock.calls[0][0].map((u: { stock_id: string }) => u.stock_id)).toEqual(['Q1']);
+    expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it('the red label is the managers\' (the quarantine label door refuses others)', async () => {
-    auth.roles = ['ACCOUNTANT'];
+  it('a red label the server refuses (its 403) says so', async () => {
+    labels.printQuarantineLabels.mockRejectedValue(new Error('You do not have permission to print this label'));
+    inv.getUnits.mockResolvedValue({
+      units: [{ stock_id: 'Q1', barcode: 'BV24CA0101P4', status: 'QUARANTINED', brand: 'Carrera', model: '1234', name: 'Carrera 1234' }],
+      total: 1,
+    });
     await openPO();
     fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
     fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
@@ -324,7 +328,32 @@ describe('a damaged piece, inline on its row', () => {
     await attachBill();
     fireEvent.click(receiveBtn());
     await screen.findByText('Received and put on the shelf.');
-    expect(screen.queryByRole('button', { name: /DO NOT SHELVE/ })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Print 1 red DO NOT SHELVE label' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('You do not have permission to print this label'));
+  });
+
+  it('a damage photo the server refuses is marked on its own line', async () => {
+    api.createGRN.mockRejectedValueOnce(
+      new ApiError('bad photo', {
+        status: 400,
+        detail: { code: 'DAMAGE_PHOTO_INVALID', line: 0, message: 'The damage photo on line 1 is no longer available. Take it again.' },
+      }),
+    );
+    await openPO();
+    fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
+    fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Scratched lens' } });
+    fireEvent.click(screen.getByLabelText('Replacement coming (order line stays open)'));
+    cockpit.uploadDoc.mockResolvedValueOnce({ file_id: 'F-DMG', filename: 'dmg.jpg', mime: 'image/jpeg', size: 900, persisted: true });
+    fireEvent.change(screen.getByLabelText('Photo of the damaged piece on line 1'), {
+      target: { files: [new File(['jpg'], 'dmg.jpg', { type: 'image/jpeg' })] },
+    });
+    await screen.findByText('Photo attached');
+    await attachBill();
+    fireEvent.click(receiveBtn());
+    expect(await screen.findByRole('alert')).toHaveTextContent('The damage photo on line 1 is no longer available');
+    expect(screen.queryByText('Photo attached')).toBeNull();
+    expect(screen.getByLabelText('Photo of the damaged piece on line 1')).toBeInTheDocument();
   });
 
   it('a receipt saved but not added to stock says so and never invites a second receipt', async () => {

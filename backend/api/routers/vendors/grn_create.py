@@ -154,14 +154,30 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # kind check and the store bind and re-opened the round-5 theft verbatim.
     # The gate runs whenever an attachment id is PRESENT, whatever the subtype.
     _attachment_meta = _receipt_photo_meta(grn.attachment_file_id, current_user)
-    # S2b: a damaged piece's photo passes the same gate, line by line.
-    for item in grn.items:
+    # S2b: a damaged piece's photo passes the same gate, line by line; a bad
+    # one is named by its line, so the screen marks that line's photo.
+    for index, item in enumerate(grn.items):
         item.rejection_photo_file_id = (
             str(item.rejection_photo_file_id or "").strip() or None
             if item.rejected_qty > 0
             else None
         )
-        _receipt_photo_meta(item.rejection_photo_file_id, current_user)
+        try:
+            _receipt_photo_meta(item.rejection_photo_file_id, current_user)
+        except HTTPException as exc:
+            if exc.status_code != 400:
+                raise
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "DAMAGE_PHOTO_INVALID",
+                    "line": index,
+                    "message": (
+                        f"The damage photo on line {index + 1} is no longer "
+                        "available. Take it again."
+                    ),
+                },
+            ) from exc
 
     # Validate PO exists. For a DC, the PO is optional (lens top-ups arrive with
     # no pre-logged PO) -- only validate when one was supplied.
@@ -459,8 +475,8 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         "attachment_file_id": grn.attachment_file_id,
         "attachment_filename": grn.attachment_filename,
         "attachment_mime": grn.attachment_mime,
-        # D14: the bill photo's sha256 -- the uniq_nopo_bill_hash key (NO_PO
-        # rows only; a DC's challan photo is kept but keyed nowhere).
+        # D14: the photo's sha256, kept on every receipt; only NO_PO rows are
+        # keyed by uniq_nopo_bill_hash.
         "attachment_sha256": photo_sha,
         "items": item_docs,
         "total_received": total_received,

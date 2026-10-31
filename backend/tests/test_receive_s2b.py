@@ -94,7 +94,7 @@ def test_bought_without_po_still_needs_the_bill_photo(world):
 # --- 3. credit closes the order line short (D9) ---------------------------------
 
 
-def _order(world, qty=4):
+def _order(world, qty=4, product=FRAME):
     world["db"].purchase_orders.insert_one(
         {
             "po_id": "PO-S2B",
@@ -109,7 +109,7 @@ def _order(world, qty=4):
             "items": [
                 {
                     "po_item_id": "L1",
-                    "product_id": FRAME,
+                    "product_id": product,
                     "product_name": "Test frame",
                     "quantity": qty,
                     "ordered_qty": qty,
@@ -121,10 +121,10 @@ def _order(world, qty=4):
     )
 
 
-def _receive_damaged(world, choice, arrived=3, damaged=1, photo=None):
+def _receive_damaged(world, choice, arrived=3, damaged=1, photo=None, product=FRAME):
     item = {
         "po_item_id": "L1",
-        "product_id": FRAME,
+        "product_id": product,
         "received_qty": arrived,
         "accepted_qty": arrived - damaged,
         "rejected_qty": damaged,
@@ -212,6 +212,58 @@ def test_a_credit_missed_by_a_failed_write_closes_on_the_next_refresh(world):
     assert po["credit_closed_grns"] == [gid]
 
 
+def test_a_credit_on_a_receipt_held_for_the_catalogue_never_closes_good_pieces(world):
+    # Review: 2 ordered; the box brings 3 -- 2 good (held: the product is not
+    # catalogued yet) and 1 damaged, credited. The 2 good ones are coming onto
+    # the shelf, so the credit has nothing to close; it must not wait to see
+    # them as "not arrived" and withdraw one.
+    from api.routers.vendors.grn_accept import release_held_receipts
+    from tests.test_receipt_without_po import _frame
+
+    held = "P-FR-S2B-HELD"
+    _order(world, qty=2, product=held)
+    gid, acc = _receive_damaged(world, "credit_note", arrived=3, damaged=1, product=held)
+    assert acc["grn_status"] == "PARTIALLY_ACCEPTED", acc
+    db = world["db"]
+    line = db.purchase_orders.find_one({"po_id": "PO-S2B"})["items"][0]
+    assert line["quantity"] == 2 and not line.get("cancelled_qty")
+    # Catalogued: the held pieces go on the shelf; the order is received in
+    # full and the credit closed nothing.
+    db.products.insert_one({**_frame(held, 3000.0), "product_id": held})
+    release_held_receipts(held)
+    po = db.purchase_orders.find_one({"po_id": "PO-S2B"})
+    assert po["items"][0]["quantity"] == 2 and not po["items"][0].get("cancelled_qty")
+    assert po["items"][0]["received_qty"] == 2
+    assert po["status"] == "RECEIVED"
+
+
+def test_a_credit_close_writes_one_audit_row(world):
+    _order(world, qty=4)
+    gid, _ = _receive_damaged(world, "credit_note")
+    rows = list(world["db"].audit_logs.find({"action": "purchase_order.credit_close"}))
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["entity_id"] == "PO-S2B" and row["user_id"] == MANAGER["user_id"]
+    assert row["before"]["quantities"] == [4] and row["after"]["quantities"] == [3]
+    assert row["before"]["total_amount"] != row["after"]["total_amount"]
+    assert row["after"]["grn_ids"] == [gid]
+    # Once: a later re-derivation writes no second row.
+    vd.refresh_po_received(vd.get_purchase_order_repository(), "PO-S2B", gid)
+    assert world["db"].audit_logs.count_documents({"action": "purchase_order.credit_close"}) == 1
+
+
+def test_a_full_credit_and_a_cancel_leave_the_same_line():
+    # One rule for withdrawing due units (po_detail._withdraw): a credit of
+    # everything still due leaves the line exactly as "cancel what is still due".
+    from api.routers.vendors.po_detail import _withdraw
+
+    for received in (0, 2):
+        cancel = {"product_id": FRAME, "quantity": 4, "ordered_qty": 4}
+        credit = dict(cancel)
+        assert _withdraw(cancel, received) == _withdraw(credit, received, units=4 - received)
+        assert cancel == credit
+
+
 # --- 4. damaged-piece photo -------------------------------------------------------
 
 
@@ -247,7 +299,9 @@ def test_a_forged_damaged_photo_is_refused(world):
         },
     )
     assert res.status_code == 400, res.text
-    assert res.json()["detail"]["code"] == "ATTACHMENT_INVALID"
+    # Named by its line, so the screen marks that line's photo chip.
+    assert res.json()["detail"]["code"] == "DAMAGE_PHOTO_INVALID"
+    assert res.json()["detail"]["line"] == 0
     assert world["db"].grns.count_documents({}) == 0
 
 
@@ -266,3 +320,8 @@ def test_the_receipts_quarantined_pieces_are_listed_for_their_red_label(world):
     # The ordinary receipt list still shows only the pieces put on the shelf.
     shelf = http.get("/inventory/units", params={"grn_id": gid}).json()
     assert unit["stock_id"] not in [u["stock_id"] for u in shelf["units"]]
+
+
+def test_rejected_without_a_receipt_is_refused(world):
+    res = world["as_"](MANAGER).get("/inventory/units", params={"product_id": FRAME, "rejected": "true"})
+    assert res.status_code == 400, res.text

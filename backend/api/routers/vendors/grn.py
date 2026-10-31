@@ -266,9 +266,9 @@ async def upload_grn_doc(
     PDF) and get back a file_id to attach to the GRN.
 
     The ops user (Superadmin/Admin/Store Manager) uploads the receipt FIRST,
-    then submits the GRN with the returned file_id. create_grn rejects a
-    STANDARD GRN that has no attachment_file_id (ATTACHMENT_REQUIRED), so this
-    is the only way to clear the gate. Persists the bytes durably in the
+    then submits the GRN with the returned file_id. create_grn rejects any
+    receipt (bill, cash memo or challan) with no attachment_file_id
+    (ATTACHMENT_REQUIRED), so this is the only way to clear the gate. Persists the bytes durably in the
     GridFS-backed file store (Railway disk is ephemeral) -- mirrors the
     expenses upload-bill pattern: size + MIME validation, then store.put(...).
     """

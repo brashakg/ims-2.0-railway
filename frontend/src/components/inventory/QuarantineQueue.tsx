@@ -19,12 +19,8 @@ import {
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import {
-  inventoryApi,
-  type QuarantineUnit,
-  type QuarantineLabel,
-} from '../../services/api/inventory';
-import { printUnitLabels } from '../labels/unitLabel';
+import { inventoryApi, type QuarantineUnit } from '../../services/api/inventory';
+import { printQuarantineLabels } from '../labels/quarantineLabels';
 
 const QUARANTINE_REASONS = [
   'DEFECTIVE',
@@ -34,22 +30,6 @@ const QUARANTINE_REASONS = [
   'QC_FAILED_WORKSHOP',
   'OTHER',
 ] as const;
-
-// The red DO NOT SHELVE label is the ONE thermal unit label (unitLabel.ts,
-// TSC TE244 100 x 15 mm) in its quarantine form -- the same label receiving
-// prints for a damaged piece.
-function printLabel(label: QuarantineLabel): string | null {
-  const r = printUnitLabels([
-    {
-      barcode: label.barcode_value,
-      brand: label.brand,
-      model: label.name,
-      doNotShelve: true,
-      note: label.luxury_brand_line,
-    },
-  ]);
-  return r.method === 'html' ? null : r.message;
-}
 
 export function QuarantineQueue() {
   const { user, hasRole } = useAuth();
@@ -114,12 +94,13 @@ export function QuarantineQueue() {
     }
   };
 
-  const handlePrint = async (stockId: string) => {
-    setBusyId(stockId);
+  // The red DO NOT SHELVE label, through the one door Receive uses too
+  // (checked, recorded, printed).
+  const handlePrint = async (unit: QuarantineUnit) => {
+    setBusyId(unit.stock_id);
     try {
-      const label = await inventoryApi.printQuarantineLabel(stockId);
-      const problem = printLabel(label);
-      if (problem) toast.error(problem);
+      const r = await printQuarantineLabels([unit]);
+      if (r.method !== 'html') toast.error(r.message);
       await load();
     } catch {
       toast.error('Could not print the quarantine label');
@@ -235,7 +216,7 @@ export function QuarantineQueue() {
                     <div className="flex items-center justify-center gap-2">
                       {canManage && (
                         <button
-                          onClick={() => handlePrint(u.stock_id)}
+                          onClick={() => handlePrint(u)}
                           disabled={busyId === u.stock_id}
                           className="inline-flex items-center gap-1 text-xs text-gray-600 hover:text-bv-red-600"
                           title="Print quarantine label"

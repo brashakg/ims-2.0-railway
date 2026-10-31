@@ -43,6 +43,8 @@ export interface UnitLabelData {
   /** A quarantined piece (S2b): the label reads DO NOT SHELVE in a solid
    *  band, and carries no price -- it is not for sale. */
   doNotShelve?: boolean;
+  /** A DO NOT SHELVE label's second line: reason, shop, date (cut to fit). */
+  detail?: string;
   /** A DO NOT SHELVE label's last line (e.g. BRAND AUTHORIZATION REQUIRED). */
   note?: string;
 }
@@ -142,7 +144,7 @@ function mrpText(mrp?: number | null): string {
 function labelHtml(u: UnitLabelData, offsetMm: number, extraClass = ''): string {
   const title = [u.brand, u.model].filter(Boolean).join(' ');
   const info = u.doNotShelve
-    ? `<div class="dns">DO NOT SHELVE</div><div class="b">${esc(title)}</div><div class="two b">${esc(u.note)}</div>`
+    ? `<div class="dns">DO NOT SHELVE</div><div class="b">${esc(title)}</div><div>${esc(u.detail)}</div><div class="b">${esc(u.note)}</div>`
     : `<div class="b two">${esc(title)}</div><div class="two">${esc(u.colour)}</div><div class="size">${esc(u.size)}</div>`;
   return (
     `<div class="lbl"><div class="win${extraClass}" style="left:${offsetMm}mm">` +

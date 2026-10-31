@@ -602,6 +602,8 @@ async def list_units(
     """
     if not product_id and not grn_id:
         raise HTTPException(status_code=400, detail="Provide product_id or grn_id")
+    if rejected and not grn_id:
+        raise HTTPException(status_code=400, detail="rejected lists one receipt's pieces: provide grn_id")
     flt: Dict = {}
     # A receipt's units sit at the shop it was received into, which need not be
     # the caller's active store (an admin receiving for another shop). Without

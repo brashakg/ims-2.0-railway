@@ -37,6 +37,7 @@ from .po_detail import (
     _received_per_line,
     _refresh_received,
     _reprice,
+    audit_change,
     beyond_open_quantity,
     close_credited_short,
     puts_nothing_in_stock,
@@ -703,6 +704,23 @@ def refresh_po_received(po_repo, po_id, grn_id=None) -> tuple:
                     ]
             if po_repo.update_if(po_id, _as_read(po), patch):
                 po_status = state
+                if credit_units:
+                    # The cancel's audit row too (fail-soft, after the write).
+                    audit_change(
+                        po,
+                        "purchase_order.credit_close",
+                        credit_events[0].get("actor"),
+                        before={
+                            "quantities": [it.get("quantity") for it in po.get("items") or []],
+                            "total_amount": po.get("total_amount"),
+                        },
+                        after={
+                            "quantities": [it.get("quantity") for it in updated_items],
+                            "total_amount": patch.get("total_amount"),
+                            "units": credit_units,
+                            "grn_ids": credit_grns,
+                        },
+                    )
                 break
         else:
             logger.warning(

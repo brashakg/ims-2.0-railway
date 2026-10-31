@@ -830,22 +830,29 @@ def _refresh_received(items: list, received: list) -> None:
         it["line_status"] = po_line_status(it, r)
 
 
-def _cancel_remainder(line: dict, received: int) -> int:
-    """Withdraw what is still due on one line, in place; returns the units.
+def _withdraw(line: dict, received: int, units=None) -> int:
+    """Withdraw units still due on one line, in place; returns the units.
+    `units` None: everything still due ("cancel what is still due"); else at
+    most that many (a supplier's credit, close_credited_short).
 
-    The line then orders exactly what arrived, so every reader of `quantity` /
-    `ordered_qty` -- the receiving cockpit, the receipt state, the 3-way match
-    -- stops treating the withdrawn units as due, with no change of its own.
+    The line then orders only what is still coming, so every reader of
+    `quantity` / `ordered_qty` -- the receiving cockpit, the receipt state,
+    the 3-way match -- stops treating the withdrawn units as due, with no
+    change of its own.
     """
     due = _qty(line.get("quantity")) - received
-    if due <= 0:
+    take = due if units is None else min(_qty(units), due)
+    if take <= 0:
         return 0
-    line["cancelled_qty"] = _qty(line.get("cancelled_qty")) + due
+    line["cancelled_qty"] = _qty(line.get("cancelled_qty")) + take
     line["received_qty"] = received
-    line["quantity"] = received
-    line["ordered_qty"] = received
-    line["line_status"] = "RECEIVED" if received else "CANCELLED"
-    return due
+    line["quantity"] = line["ordered_qty"] = _qty(line.get("quantity")) - take
+    line["line_status"] = (
+        po_line_status({**line, "line_status": None}, received)
+        if line["quantity"]
+        else "CANCELLED"
+    )
+    return take
 
 
 def close_credited_short(po: dict, items: list, received: list) -> tuple:
@@ -853,9 +860,14 @@ def close_credited_short(po: dict, items: list, received: list) -> tuple:
     order line short -- nothing is coming for it -- where a replacement keeps
     it open. The receipt rejects the piece with rejection_disposition
     'credit_note'; once that receipt is accepted, the credited units are
-    withdrawn from what is still due on the order, exactly as "cancel what is
-    still due" withdraws them (_cancel_remainder's fields), shared over the
-    product's lines in order -- receipts count per PRODUCT, never per line.
+    withdrawn from what is still due on the order (_withdraw, the one rule
+    "cancel what is still due" uses), shared over the product's lines in
+    order -- receipts count per PRODUCT, never per line.
+
+    A receipt still HOLDING that product for the catalogue waits: its good
+    pieces are coming onto the shelf but are not counted as arrived yet, so
+    the credit would close them off the order. Its release re-accepts the
+    receipt, and that accept's re-derivation closes the credit.
 
     Applied in place on `items` (each line's units already `received`) by the
     one re-derivation every accept runs (grn_accept.refresh_po_received), so
@@ -866,7 +878,6 @@ def close_credited_short(po: dict, items: list, received: list) -> tuple:
     timeline events, the units withdrawn)."""
     done = set(po.get("credit_closed_grns") or [])
     closed, events, units = [], [], 0
-    due = [_qty(it.get("quantity")) - r for it, r in zip(items, received)]
     for g in _order_receipts(po.get("po_id")):
         gid = g.get("grn_id")
         if gid in done or g.get("status") not in ("ACCEPTED", "PARTIALLY_ACCEPTED"):
@@ -878,19 +889,25 @@ def close_credited_short(po: dict, items: list, received: list) -> tuple:
                 credited[pid] = credited.get(pid, 0) + _qty(line.get("rejected_qty"))
         if not any(credited.values()):
             continue
+        holding = {
+            u.get("product_id")
+            for u in g.get("unresolved_lines") or []
+            if isinstance(u, dict) and held_units(u)
+        }
+        if g.get("status") == "PARTIALLY_ACCEPTED" and holding & set(credited):
+            continue
         closed.append(gid)
         for pid, left in credited.items():
             for i, it in enumerate(items):
-                take = min(left, due[i]) if it.get("product_id") == pid else 0
-                if take <= 0:
+                if left <= 0:
+                    break
+                if it.get("product_id") != pid:
+                    continue
+                take = _withdraw(it, received[i], left)
+                if not take:
                     continue
                 left -= take
-                due[i] -= take
                 units += take
-                it["cancelled_qty"] = _qty(it.get("cancelled_qty")) + take
-                it["quantity"] = it["ordered_qty"] = _qty(it.get("quantity")) - take
-                if not it["quantity"]:
-                    it["line_status"] = "CANCELLED"
                 events.append(
                     {
                         "kind": "line_cancelled",
@@ -962,6 +979,13 @@ def _write_change(po_repo, po, patch, events, current_user, action, before, afte
     patch = {**patch, "history": [*(po.get("history") or []), *stamped]}
     if not po_repo.update_if(po["po_id"], _as_read(po), patch):
         raise HTTPException(status_code=409, detail=_CHANGED_MEANWHILE)
+    audit_change(po, action, who, before, after)
+
+
+def audit_change(po, action, who, before, after) -> None:
+    """The one audit row of an order change (_write_change; the credit close
+    in grn_accept.refresh_po_received). Fail-soft: a lost audit row never
+    undoes the change."""
     try:
         audit = get_audit_repository()
         if audit is not None:
@@ -1381,7 +1405,7 @@ async def cancel_po(
         items = [dict(i) for i in po.get("items") or []]
         received = _received_per_line(po, by_product)
         _refresh_received(items, received)
-        units = sum(_cancel_remainder(it, r) for it, r in zip(items, received))
+        units = sum(_withdraw(it, r) for it, r in zip(items, received))
         if units == 0:
             raise HTTPException(
                 status_code=400,
@@ -1484,7 +1508,7 @@ async def cancel_po_line(
         _refuse_if_arrivals_unattributed(line, items, by_product)
         received = _received_per_line(po, by_product)
         _refresh_received(items, received)
-        units = _cancel_remainder(items[line_index], received[line_index])
+        units = _withdraw(items[line_index], received[line_index])
         if units == 0:
             raise HTTPException(
                 status_code=400,

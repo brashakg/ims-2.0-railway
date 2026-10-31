@@ -22,7 +22,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { COST_ROLES } from '../../components/common/CostCell';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
-import { printUnitLabels } from '../../components/labels/unitLabel';
+import { printQuarantineLabels } from '../../components/labels/quarantineLabels';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { istDayString } from '../../utils/datetime';
 import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
@@ -93,10 +93,8 @@ interface ReceiveFormProps {
 
 export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onSaved, onOpenWaiting }: ReceiveFormProps) {
   const toast = useToast();
-  const { user, hasRole } = useAuth();
+  const { user } = useAuth();
   const canEnterPrice = (user?.roles || []).some((r) => COST_ROLES.includes(r));
-  // Mirrors POST /labels/quarantine (labels._QUARANTINE_LABEL_ROLES).
-  const canPrintQuarantine = hasRole(['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER']);
 
   const [kind, setKind] = useState<ReceiveKind>(initialKind);
   const [lines, setLines] = useState<ReceiveLine[]>(() => (po ? linesFromPO(po) : []));
@@ -104,6 +102,8 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   const [labelsFor, setLabelsFor] = useState<Success | null>(null);
   const [redBusy, setRedBusy] = useState(false);
   const [photoBusy, setPhotoBusy] = useState<string | null>(null);
+  // A damage photo the server refused (DAMAGE_PHOTO_INVALID), on its line.
+  const [badPhoto, setBadPhoto] = useState<{ key: string; message: string } | null>(null);
 
   // Header: who, which paper.
   const [vendorId, setVendorId] = useState('');
@@ -278,6 +278,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
       const res = await grnCockpitApi.uploadDoc(file);
       if (!res.file_id) throw new Error('not stored');
       setLine(key, { damagePhotoId: res.file_id });
+      setBadPhoto((b) => (b?.key === key ? null : b));
     } catch (err) {
       const d = apiDetail(err);
       toast.error(typeof d === 'string' && d !== 'not stored' ? d : 'Could not upload the photo - try again');
@@ -286,9 +287,9 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
     }
   };
 
-  // The red DO NOT SHELVE labels for this receipt's quarantined pieces: the
-  // ONE thermal unit label in its quarantine form, each recorded by the
-  // quarantine label door (which notes who printed it).
+  // The red DO NOT SHELVE labels for this receipt's quarantined pieces,
+  // through the one door the Quarantine queue uses too (checked, recorded,
+  // printed). Who may print them is the server's (a 403 says so).
   const printRedLabels = async (grnId: string) => {
     setRedBusy(true);
     try {
@@ -298,17 +299,10 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
         toast.warning('No quarantined pieces found on this receipt.');
         return;
       }
-      const r = printUnitLabels(units.map((u) => ({ barcode: u.barcode, brand: u.brand, model: u.model || u.name, doNotShelve: true })));
-      if (r.method !== 'html') {
-        toast.error(r.message);
-        return;
-      }
-      const recorded = await Promise.allSettled(units.map((u) => inventoryApi.printQuarantineLabel(u.stock_id)));
-      if (recorded.some((x) => x.status === 'rejected')) {
-        toast.warning('Labels sent to the print dialog, but IMS could not record all of them.');
-      }
+      const r = await printQuarantineLabels(units);
+      if (r.method !== 'html') toast.error(r.message);
     } catch (err) {
-      toast.error(getErrorMessage(err, 'Could not load the quarantined pieces - try again.'));
+      toast.error(getErrorMessage(err, 'Could not print the red labels - try again.'));
     } finally {
       setRedBusy(false);
     }
@@ -343,6 +337,15 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
         message: d.message ?? 'Finish it from "Receipts still waiting".',
         grnNumber: d.grn_number ?? '',
       });
+    } else if (d.code === 'DAMAGE_PHOTO_INVALID') {
+      // Named by its position among the lines sent (grnItems).
+      const key = linesToSend(lines)[Number((d as { line?: number }).line)]?.key;
+      const message = d.message ?? 'Take the damage photo again.';
+      if (key) {
+        setLine(key, { damagePhotoId: undefined });
+        setBadPhoto({ key, message });
+      }
+      toast.error(message);
     } else if (d.code === 'ATTACHMENT_REQUIRED' || d.code === 'ATTACHMENT_INVALID') {
       setUpload(null);
       toast.error(d.message ?? 'The bill did not go through - attach it again.');
@@ -558,7 +561,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
               <button type="button" className="btn" disabled={s.units === 0} onClick={() => setLabelsFor(s)}>
                 <Printer className="w-4 h-4" /> Print {s.units} label{s.units === 1 ? '' : 's'}
               </button>
-              {s.quarantined > 0 && canPrintQuarantine && (
+              {s.quarantined > 0 && (
                 <button
                   type="button"
                   className="btn"
@@ -914,6 +917,9 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
                                   }}
                                 />
                               </label>
+                            )}
+                            {badPhoto?.key === l.key && (
+                              <span className="text-xs" role="alert" style={{ color: 'var(--err)' }}>{badPhoto.message}</span>
                             )}
                           </div>
                           <p className="text-xs mt-1" style={{ color: 'var(--ink-3)' }}>

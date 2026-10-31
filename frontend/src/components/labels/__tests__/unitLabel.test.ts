@@ -287,6 +287,14 @@ describe('the DO NOT SHELVE label (S2b: a quarantined piece)', () => {
     expect(doc.body.textContent).toContain('Carrera CA 8895');
   });
 
+  it('carries the reason / shop / date line and the luxury line', () => {
+    const doc = parse(unitLabelsDocument([
+      { ...CARRERA, doNotShelve: true, detail: 'OTHER · BOK02 · 2026-10-31', note: 'BRAND AUTHORIZATION REQUIRED' },
+    ]));
+    const lines = Array.from(doc.querySelectorAll('.info > div')).map((d) => d.textContent);
+    expect(lines).toEqual(['DO NOT SHELVE', 'Carrera CA 8895', 'OTHER · BOK02 · 2026-10-31', 'BRAND AUTHORIZATION REQUIRED']);
+  });
+
   it('never appears on an ordinary stock label', () => {
     const doc = parse(unitLabelsDocument([CARRERA]));
     expect(doc.title).toBe('Stock labels');
