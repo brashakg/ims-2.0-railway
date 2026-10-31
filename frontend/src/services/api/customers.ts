@@ -176,8 +176,10 @@ export const customerApi = {
       }>;
     };
   },
-  issueStoreCredit: async (customerId: string, amount: number, reason?: string, ref?: string) => {
-    const response = await api.post(`/customers/${customerId}/store-credit/issue`, { amount, reason, ref });
+  issueStoreCredit: async (customerId: string, amount: number, reason?: string, ref?: string, idempotencyKey?: string) => {
+    // One key per open form: a re-press or replay resumes the same credit line.
+    const response = await api.post(`/customers/${customerId}/store-credit/issue`, { amount, reason, ref },
+      idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : undefined);
     return response.data;
   },
   redeemStoreCredit: async (customerId: string, amount: number, reason?: string, ref?: string) => {

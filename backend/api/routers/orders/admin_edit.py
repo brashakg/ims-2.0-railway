@@ -616,10 +616,32 @@ async def superadmin_invoice_change(
     )
 
     is_cn = delta["note_type"] == "CREDIT_NOTE"
+    # One credit line per order and correction: a re-press (or a replay) of
+    # the SAME delta resumes that line, never a second note and credit.
+    sacn_id = (f"{order_id}:sacn:{int(round(abs(float(delta.get('abs_delta') or 0)) * 100))}"
+               f":{int(round(float(after.get('grand_total') or 0) * 100))}")
     if is_cn:
         closed = _credit_note_window_closed(order)
         if closed:
             raise HTTPException(status_code=400, detail=closed)
+        from ..returns import _ledger_coll as _rlc
+
+        _ledger = _rlc()
+        try:
+            in_flight = _ledger is not None and _ledger.find_one(
+                {"order_id": order_id, "type": "ISSUING"}) is not None
+            done = _ledger is not None and _ledger.find_one(
+                {"entry_id": sacn_id, "type": {"$in": ["ISSUED", "ADJUSTED"]}}) is not None
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail="Could not check this order's credit notes - try again.") from exc
+        if in_flight:
+            raise HTTPException(status_code=409, detail=(
+                "A credit on this order is still being confirmed - it settles by itself within 10 "
+                "minutes. Do NOT issue another note; check the customer's balance then."))
+        if done:
+            raise HTTPException(status_code=409, detail=(
+                "This exact correction was already issued as a credit note on this order - nothing "
+                "was issued again."))
     marker = utc_now_iso()
     if is_cn and not repo.update_if(
         order_id, {"advance_refund_id": None, "status": order.get("status")},
@@ -706,6 +728,7 @@ async def superadmin_invoice_change(
                 # No returns doc behind this note: the row names its parent.
                 order_id=order.get("order_id"),
                 note_number=note_doc["note_number"],
+                entry_id=sacn_id,
             )
         except CreditNotConfirmed:
             # It may already be on the balance: the order stays claimed (its

@@ -59,6 +59,32 @@ def plan(db) -> dict:
         if c.get("store_credit") is not None
         and (isinstance(c.get("store_credit"), bool) or not isinstance(c.get("store_credit"), (int, float)))
     ]
+    # The ledger read ONCE (not one query per customer), grouped by customer.
+    by_customer: dict = {}
+    for r in db["credit_note_ledger"].find({}):
+        by_customer.setdefault(r.get("customer_id"), []).append(r)
+
+    def _applied_sum(cust):
+        refs = set(cust.get("store_credit_refs") or [])
+        total = 0.0
+        for r in by_customer.get(cust.get("customer_id"), []):
+            if r.get("applied") is False and r.get("entry_id") not in refs:
+                continue
+            try:
+                total += float(r.get("delta") or 0)
+            except (TypeError, ValueError):
+                return None
+        return round(total, 2)
+
+    # Read-only: customers whose number differs from their applied ledger
+    # (a legacy pre-ledger balance, or a real drift) -- shown, never changed.
+    drift = []
+    for cust in db["customers"].find({"store_credit": {"$ne": None}}):
+        value, total = cust.get("store_credit"), _applied_sum(cust)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and total is not None \
+                and abs(float(value) - total) > 0.01:
+            drift.append((cust.get("customer_id"), round(float(value), 2), total))
+
     for cust in db["customers"].find({"store_credit": None}):
         cid = cust.get("customer_id")
         if not cid:
@@ -66,7 +92,7 @@ def plan(db) -> dict:
         refs = set(cust.get("store_credit_refs") or [])
         balance = 0.0
         broken = False
-        for r in db["credit_note_ledger"].find({"customer_id": cid}):
+        for r in by_customer.get(cid, []):
             if r.get("applied") is False and r.get("entry_id") not in refs:
                 if r.get("type") == "VOID" and r.get("note_number"):
                     void_numbered.append(cid)  # never finishes: a new return is needed
@@ -87,7 +113,7 @@ def plan(db) -> dict:
         sets.append((cid, balance))
     return {"sets": sets, "unapplied_left": sorted(set(unapplied)), "negative": negative,
             "non_numeric": non_numeric, "non_numeric_delta": bad_delta,
-            "void_numbered": sorted(set(void_numbered)), "scanned": scanned}
+            "void_numbered": sorted(set(void_numbered)), "scanned": scanned, "drift": drift}
 
 
 def apply(db, sets, backup_path: str) -> int:
@@ -113,6 +139,8 @@ def revert(db, backup_path: str) -> int:
         ids = [r.get("customer_id") for r in json.load(f) if r.get("customer_id")]
     done = 0
     for cust in db["customers"].find({"customer_id": {"$in": ids}, "store_credit_backfilled_at": {"$ne": None}}):
+        if cust.get("store_credit_refs"):
+            continue  # a live credit moved this balance since: fix forward, never revert
         res = db["customers"].update_one(
             {"customer_id": cust["customer_id"], "store_credit": cust.get("store_credit_backfill_value")},
             {"$unset": {"store_credit": "", "store_credit_backfill_value": "", "store_credit_backfilled_at": ""}})
@@ -148,6 +176,11 @@ def main() -> int:
     out = plan(db)
     print(f"[SCANNED] customers: {out['scanned']['customers']}; credit ledger rows: "
           f"{out['scanned']['ledger_rows']} (0 and 0 means the wrong or an empty database)")
+    if not out["scanned"]["customers"]:
+        print("[STOPPED] no customers scanned - wrong or empty database. Nothing written. (exit 3)")
+        return 3
+    for cid, value, total in out["drift"]:
+        print(f"  [DRIFT] {cid}: balance Rs {value:.2f}, ledger Rs {total:.2f} (read-only - not changed)")
     nonzero = [(c, b) for c, b in out["sets"] if b]
     print(f"[PLAN] customers without a store_credit field: {len(out['sets'])} ({len(nonzero)} with a ledger balance)")
     for cid, bal in nonzero:

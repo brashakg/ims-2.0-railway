@@ -34,6 +34,13 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
+  // One Idempotency-Key per open form: pressing again (or a replay) resumes
+  // the same credit line on the server, never pays twice. New on each open.
+  const [formKey, setFormKey] = useState('');
+  useEffect(() => {
+    if (mode) setFormKey(typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  }, [mode]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -55,7 +62,7 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
     if (!amt || amt <= 0) { toast.error('Enter a valid amount'); return; }
     setSaving(true);
     try {
-      if (mode === 'issue') await customerApi.issueStoreCredit(customerId, amt, reason);
+      if (mode === 'issue') await customerApi.issueStoreCredit(customerId, amt, reason, undefined, formKey);
       else await customerApi.redeemStoreCredit(customerId, amt, reason);
       toast.success(mode === 'issue' ? 'Credit issued' : 'Credit redeemed');
       setMode(null); setAmount(''); setReason('');

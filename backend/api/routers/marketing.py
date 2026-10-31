@@ -811,7 +811,8 @@ async def redeem_referral(
                 user_id=current_user.get("user_id"))
             _entry.update(source="REFERRAL_REWARD", entry_id=f"REFERRAL:{referral_id}")
             if post_ledger_credit(cust_repo, _entry) != _POSTED:
-                raise HTTPException(status_code=503, detail="The reward could not be credited just now - try again.")
+                raise HTTPException(status_code=503, detail=("The reward could not be confirmed - it may already be credited. "
+                                                         "Check the referrer's balance before pressing again."))
             return {"message": "Referral reward credited", "referral_id": referral_id, "resumed": True}
         return {
             "message": "Referral already credited",
@@ -841,7 +842,8 @@ async def redeem_referral(
     if post_ledger_credit(cust_repo, entry) != POSTED:
         coll.update_one({"referral_id": referral_id, "status": "REWARD_CREDITED"},
                         {"$set": {"status": referral.get("status")}})
-        raise HTTPException(status_code=503, detail="The reward could not be credited just now - try again.")
+        raise HTTPException(status_code=503, detail=("The reward could not be confirmed - it may already be credited. "
+                                                         "Check the referrer's balance before pressing again."))
     # 2. Loyalty points: must go through the loyalty_accounts ledger, not the
     #    customers doc (which has a phantom loyalty_points field the real engine
     #    never reads — fixed CRM-1). Route via adjust_balance so the balance +

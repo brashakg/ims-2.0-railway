@@ -1533,6 +1533,80 @@ CREDIT_UNCONFIRMED_MESSAGE = (
 )
 
 
+def _gst_view_as_filed(view: Dict[str, Any], entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The return doc's tax breakup restated to the credit note actually filed
+    (its taxable / tax stamps): each rate's share scaled, so the doc and the
+    note never disagree (a restocking fee lowers both alike)."""
+    if not entry or entry.get("taxable") is None or entry.get("tax") is None:
+        return view
+    taxable, tax = float(entry["taxable"]), float(entry["tax"])
+    old_tax = float(view.get("tax") or 0.0)
+    old_taxable = float(view.get("taxable") or 0.0)
+    by_rate = {}
+    for rate, b in (view.get("by_rate") or {}).items():
+        t = round(float(b.get("tax") or 0) * (tax / old_tax), 2) if old_tax else 0.0
+        tv = round(float(b.get("taxable") or 0) * (taxable / old_taxable), 2) if old_taxable else 0.0
+        by_rate[rate] = {"taxable": tv, "tax": t, "gross": round(tv + t, 2)}
+    return {**view, "taxable": round(taxable, 2), "tax": round(tax, 2),
+            "gross": round(taxable + tax, 2), "by_rate": by_rate or view.get("by_rate")}
+
+
+def refundable_ceiling(order: Optional[Dict[str, Any]]) -> Optional[float]:
+    """THE most a bill can refund: what was paid -- and, on an online order
+    whose IMS bill differs from what Shopify charged (shopify_totals_check
+    MISMATCH), never more than Shopify's own total. None when the order
+    tracks no payment (the caller's legacy fallback)."""
+    o = order or {}
+    paid = o.get("amount_paid")
+    if paid is None:
+        return None
+    try:
+        ceiling = float(paid or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    check = o.get("shopify_totals_check") or {}
+    if check.get("status") == "MISMATCH":
+        try:
+            ceiling = min(ceiling, float(check.get("shopify_total")))
+        except (TypeError, ValueError):
+            pass
+    return round(ceiling, 2)
+
+
+_RETURN_STILL_SETTLING = (
+    "An earlier return on this bill is still being confirmed (its store credit could not be "
+    "confirmed at the time). No new return can be taken on this bill until it settles - it "
+    "settles by itself within 10 minutes; if a task about it is open, an admin must finish it "
+    "first. Nothing was recorded."
+)
+
+
+def _refuse_while_a_return_settles(order: Dict[str, Any], order_id: Optional[str]) -> None:
+    """A counter return whose credit was unconfirmed holds the bill: no NEW
+    return (of any unit -- a multi-quantity line's other units too) while its
+    credit line is still ISSUING, or while its kept refund hold has no
+    COMPLETED return doc (the credit landed but the return was never
+    recorded). Fails CLOSED (503)."""
+    if not order_id:
+        return
+    try:
+        ledger = _ledger_coll()
+        if ledger is not None and ledger.find_one(
+                {"order_id": order_id, "type": "ISSUING", "undo_on_void": {"$ne": None}}) is not None:
+            raise HTTPException(status_code=409, detail=_RETURN_STILL_SETTLING)
+        kept = [rid for rid, h in (order.get("refund_holds") or {}).items() if (h or {}).get("kept")]
+        coll = _returns_coll()
+        if kept and coll is not None:
+            done = {d.get("return_id") for d in coll.find({"order_id": order_id, "status": "COMPLETED"})}
+            if any(rid not in done for rid in kept):
+                raise HTTPException(status_code=409, detail=_RETURN_STILL_SETTLING)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] settling state unreadable for %s: %s", order_id, exc)
+        raise HTTPException(status_code=503, detail="Could not check this bill's earlier returns - try again.")
+
+
 def _undo_return_claims(spec: Dict[str, Any]) -> None:
     """A counter return whose credit was unconfirmed kept its unit claims and
     its refund hold (so it could not be redone); its credit line was then
@@ -1728,6 +1802,18 @@ def _issue_store_credit(
             prior.pop("_id", None)
             if prior.get("type") == entry["type"]:
                 return prior
+            if not credit_note and prior.get("final_type") == scl.ISSUED:
+                # Past the section 34 window now: it finishes as money given,
+                # not a credit note -- its number is written off.
+                coll.update_one({"entry_id": prior["entry_id"], "type": PENDING},
+                                {"$set": {"final_type": scl.ADJUSTED},
+                                 "$unset": {"note_number": "", "taxable": "", "tax": "", "gst_rate": ""}})
+                if prior.get("note_number"):
+                    _record_unused_credit_note(prior["note_number"], {"order_id": order_id, "store_id": store_id},
+                                               ref, current_user, "past the section 34 window")
+                prior.update(final_type=scl.ADJUSTED)
+                for k in ("note_number", "taxable", "tax", "gst_rate"):
+                    prior.pop(k, None)
             status = post_ledger_credit(repo, prior, ledger=coll)
             if status == UNCLEAR:
                 raise CreditNotConfirmed(prior["entry_id"])
@@ -3087,6 +3173,10 @@ def _gate_refund_approval_matrix(
                 "reason": "REFUND_APPROVAL_INVALID",
                 "error": res.get("error"),
                 "required_tier": tier,
+                # The screen raises a fresh request with the server's figures.
+                "this_refund": round(float(net_amount), 2),
+                "prior_refunds": round(float(prior_refunds or 0), 2),
+                "running_total": running_total,
                 "message": (
                     "The refund approval token is invalid, expired, already "
                     "used, or bound to a different refund."
@@ -3750,6 +3840,15 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     "item that was not on this sale."
                 ),
             )
+        if "SHIPPING" in (str(orig_line.get("item_type") or "").upper(), str(orig_line.get("category") or "").upper()):
+            # Owner default (pending his ruling): shipping is refunded only
+            # through the Shopify refund, which IMS mirrors -- never at the
+            # counter (that also keeps its tax from being reversed twice).
+            raise HTTPException(
+                status_code=400,
+                detail=("Shipping charges are not returned at the counter. A shipping refund is "
+                        "made on Shopify, and IMS records it from there. Nothing was recorded."),
+            )
         purchased = _line_purchased_qty(orig_line)
         product_id = orig_line.get("product_id")
         back = _units_already_back(resolved_order_id, orig_line)
@@ -3814,14 +3913,13 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # refund on a never-paid order -> amount_paid 0 -> any refund rejected).
     # Checked HERE in the validation phase -- BEFORE the atomic qty claim below --
     # so a rejected over-refund never leaves a phantom reservation. 1-paisa epsilon.
-    _ap = (order or {}).get("amount_paid")
-    if _ap is None:
+    _refund_ceiling = refundable_ceiling(order)
+    if _refund_ceiling is None:
         # Legacy order with no payment tracking -> cap at the order's billed value
         # (still blocks unlimited over-refund). A CURRENT order always has
         # amount_paid present (0 == genuinely never paid -> any refund rejected).
         _refund_ceiling = _order_billed_total(order)
-    else:
-        _refund_ceiling = float(_ap or 0.0)
+    _refuse_while_a_return_settles(order or {}, resolved_order_id)
     return_id = generate_return_id()
     _prior_refunds, _reserved = _reserve_order_refund(resolved_order_id, net_amount, return_id)
     if _reserved:
@@ -4111,6 +4209,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
                                "product_id": d["orig_line"].get("product_id"),
                                "qty": float(d["ret_line"].return_qty)} for d in claimed],
+                    "refund_tenders": refund_tenders,
                 },
             )
         except CreditNotConfirmed:
@@ -4176,6 +4275,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                 reason=f"Refund {return_id} - non-drawer tender portion",
                 note_amount=net_amount,
             )
+            # ONE figure: the return doc carries exactly the note's tax (the
+            # whole refund, net of any restocking fee), never a second one.
+            gst_view = _gst_view_as_filed(gst_view, credit_entry)
             credit_amount = _non_drawer_total
 
     elif body.return_type == "CREDIT_NOTE":
@@ -5031,6 +5133,9 @@ def _bill_month_locked(order: Dict[str, Any]) -> Optional[Tuple[int, str]]:
     return None
 
 
+S34_UNREADABLE = "This invoice's date cannot be read, so its credit-note deadline (section 34) cannot be checked. Ask an admin."
+
+
 def _credit_note_window_closed(order: Dict[str, Any]) -> Optional[str]:
     """Section 34 CGST, THE rule for every door that issues a credit note on
     an invoice (a counter return, the advance refund, a superadmin credit
@@ -5053,8 +5158,7 @@ def _credit_note_window_closed(order: Dict[str, Any]) -> Optional[str]:
         except (TypeError, ValueError):
             continue
     else:
-        return ("This invoice's date cannot be read, so its credit-note deadline (section 34) "
-                "cannot be checked. Ask an admin.")
+        return S34_UNREADABLE
     fy_end_year = y + 1 if m >= 4 else y
     if ist_today() > _date(fy_end_year, 11, 30):
         return (f"The credit-note window for this invoice closed on 30 Nov {fy_end_year} "

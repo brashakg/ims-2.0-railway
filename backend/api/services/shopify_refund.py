@@ -138,7 +138,9 @@ def _posted_credit(db, return_id: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
     try:
         ledger = db.get_collection("credit_note_ledger")
-        row = ledger.find_one({"ref": return_id, "type": "ISSUED"}) if ledger is not None else None
+        from . import store_credit_ledger as scl
+
+        row = ledger.find_one({"ref": return_id, "type": scl.CREDIT_NOTE_TYPE}) if ledger is not None else None
     except Exception:  # noqa: BLE001
         return None
     if row:
@@ -1016,7 +1018,11 @@ def _store_credit_allowance(
                        exc_info=True)
         return None, ("IMS could not read this order just now, so no store credit is given "
                       "yet."), None, False
-    paid = (order or {}).get("amount_paid")
+    # THE refundable ceiling: what was paid, and never above Shopify's own
+    # total on a MISMATCH order (returns.refundable_ceiling).
+    from ..routers.returns import refundable_ceiling
+
+    paid = refundable_ceiling(order) if (order or {}).get("amount_paid") is not None else None
     paid = _f(paid, float("nan")) if paid is not None else float("nan")
     if not math.isfinite(paid):
         return 0.0, ("IMS cannot tell how much was paid for this order, so no store credit "
@@ -1745,17 +1751,34 @@ def _post_locked(
     money_back = credit_note.get("money_back")
     store_credit, credit_why, settlement, _ = allowance
     try:
-        from ..routers.returns import _credit_note_window_closed, _issue_store_credit
+        from ..routers.returns import S34_UNREADABLE, _credit_note_window_closed, _issue_store_credit
 
         # Section 34 (THE rule, every credit-note door): past the window the
         # money Shopify sent back is recorded with NO credit note -- store
-        # credit, if any, as ADJUSTED -- and the CA gets a task.
-        s34_closed = _credit_note_window_closed(order) if credit_entry is None else None
+        # credit, if any, as ADJUSTED -- and the CA gets a task. The REAL
+        # order's dates decide (this door's order carries none of them); an
+        # unreadable date refuses the credit (CREDIT_FAILED, retried), it is
+        # never read as "past the deadline".
+        s34_closed = None
+        s34_unreadable = False
+        if credit_entry is None:
+            try:
+                _dated = db.get_collection("orders").find_one(
+                    {"order_id": order_id}, {"invoice_date": 1, "created_at": 1}) or {}
+            except Exception:  # noqa: BLE001
+                _dated = {"created_at": "unreadable"}
+            s34_closed = _credit_note_window_closed({**order, **{k: _dated[k] for k in ("invoice_date", "created_at")
+                                                                 if _dated.get(k)}})
+            if s34_closed == S34_UNREADABLE:
+                s34_closed, s34_unreadable = None, True
+                logger.error("[SHOPIFY_REFUND] refund=%s order=%s: the invoice date cannot be read; "
+                             "no credit posted (section 34 unchecked)", refund_id, order_id)
         if s34_closed:
             _raise_s34_task(order, return_id, refund_id, s34_closed)
             # The return doc files no tax reversal either (GSTR reads its breakup).
             gst_view = {**gst_view, "taxable": 0.0, "tax": 0.0, "by_rate": {}, "section34_closed": True}
-        if credit_entry is None and customer_id and gross_refund > 0 and store_credit is not None:
+        if (credit_entry is None and customer_id and gross_refund > 0 and store_credit is not None
+                and not s34_unreadable):
             credit_entry = _issue_store_credit(
                 customer_id,
                 gross_refund,

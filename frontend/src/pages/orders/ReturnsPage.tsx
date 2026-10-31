@@ -204,6 +204,9 @@ export default function ReturnsPage() {
     reason?: string;
     requiredTier?: string;
     priorRefunds?: number;
+    // A fresh popup per gate (a refused approval reopens a NEW request, never
+    // the old popup's "approved" state).
+    seq: number;
   } | null>(null);
   // An approval a failed resubmit gave back: reused by the next press.
   const [keptApproval, setKeptApproval] = useState<{ requestId: string; approvalToken?: string } | null>(null);
@@ -319,6 +322,8 @@ export default function ReturnsPage() {
     l: activeReturns.map(i => [i.orderItemId, i.returnQty, i.unitPrice, i.gstRate]),
     r: returnType === 'EXCHANGE' ? replacementItems.map(r => [r.productId, r.quantity, r.unitPrice]) : null,
   });
+  // A kept approval belongs to one bill, lines and amount: any change drops it.
+  useEffect(() => { setKeptApproval(null); }, [quoteKey]);
   useEffect(() => {
     if (step !== 'select' || !selectedOrder || activeReturns.length === 0) {
       setQuote(null);
@@ -558,6 +563,26 @@ export default function ReturnsPage() {
     return true;
   };
 
+  // A 403 from the refund gate: any kept approval is spent or no longer
+  // fits -- dropped; a missing / invalid approval reopens the popup with the
+  // SERVER's figures (never the screen's quote).
+  const handleGate403 = (e: unknown): boolean => {
+    if (getErrorStatus(e) !== 403) return false;
+    setKeptApproval(null);
+    const detail = getErrorDetail(e) as any;
+    if (detail?.reason === 'REFUND_APPROVAL_REQUIRED' || detail?.reason === 'REFUND_APPROVAL_INVALID') {
+      setApprovalGate({
+        amount: Number(detail?.this_refund) || netRefund,
+        reason: dominantMatrixReason(),
+        requiredTier: detail?.required_tier,
+        priorRefunds: Number(detail?.prior_refunds) || 0,
+        seq: Date.now(),
+      });
+      return true;
+    }
+    return false;
+  };
+
   const handleSubmit = async () => {
     if (activeReturns.length === 0) { setError('Select at least one item to return'); return; }
     setError(null);
@@ -566,21 +591,9 @@ export default function ReturnsPage() {
       await submitReturn(keptApproval || undefined);
       setKeptApproval(null);
     } catch (e: any) {
-      // F27: the server gates a tiered refund with 403 reason=REFUND_APPROVAL_REQUIRED.
-      // Open the request+poll modal instead of surfacing a raw error.
-      // Read through the shared helpers (#1274): the client rejects with an
-      // ApiError, never an axios `.response`.
-      const detail = getErrorDetail(e) as any;
-      if (getErrorStatus(e) === 403 && detail?.reason === 'REFUND_APPROVAL_REQUIRED') {
-        setApprovalGate({
-          // The server's own figure for this refund (never the screen's quote).
-          amount: Number(detail?.this_refund) || netRefund,
-          reason: dominantMatrixReason(),
-          requiredTier: detail?.required_tier,
-          priorRefunds: Number(detail?.prior_refunds) || 0,
-        });
-        return;
-      }
+      // F27: the server gates a tiered refund with 403 (read through the
+      // shared helpers, #1274: the client rejects with an ApiError).
+      if (handleGate403(e)) return;
       setError(getErrorMessage(e, 'Failed to process return. Please try again.'));
     } finally {
       setIsSubmitting(false);
@@ -589,7 +602,8 @@ export default function ReturnsPage() {
 
   // After a manager approves the gated refund, re-submit with the token.
   // A failed resubmit gives the approval back (server side), so the page keeps
-  // it and the next press reuses it while it has not expired.
+  // it and the next press reuses it while it has not expired -- unless the
+  // gate itself refused it (handleGate403 drops it).
   const onRefundApproved = async (approval: { requestId: string; approvalToken?: string }) => {
     setApprovalGate(null);
     setIsSubmitting(true);
@@ -599,17 +613,7 @@ export default function ReturnsPage() {
       setKeptApproval(null);
     } catch (e: unknown) {
       setKeptApproval(approval);
-      const detail = getErrorDetail(e) as any;
-      if (getErrorStatus(e) === 403 && detail?.reason === 'REFUND_APPROVAL_REQUIRED') {
-        setKeptApproval(null);
-        setApprovalGate({
-          amount: Number(detail?.this_refund) || netRefund,
-          reason: dominantMatrixReason(),
-          requiredTier: detail?.required_tier,
-          priorRefunds: Number(detail?.prior_refunds) || 0,
-        });
-        return;
-      }
+      if (handleGate403(e)) return;
       setError(getErrorMessage(e, 'The refund could not be finalised after approval. Please retry.'));
     } finally {
       setIsSubmitting(false);
@@ -1203,6 +1207,7 @@ export default function ReturnsPage() {
 
       {approvalGate && (
         <RefundApprovalModal
+          key={approvalGate.seq}
           amount={approvalGate.amount}
           storeId={user?.activeStoreId}
           orderId={selectedOrder?.id || selectedOrder?.order_id || selectedOrder?.orderId}

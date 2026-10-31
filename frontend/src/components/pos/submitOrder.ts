@@ -252,9 +252,9 @@ export async function submitPosOrder(
         const status = getErrorStatus(e);
         const refused = status !== undefined && status >= 400 && status < 500;
         loyaltyWarning = refused
-          ? `Loyalty redeem failed${why ? ` (${why})` : ''} — points were NOT debited, and ` +
+          ? `Loyalty redeem failed${why ? ` (${why})` : ''} — this attempt took NO points, and ` +
             `₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} is still due on the order. ` +
-            `Collect it another way.`
+            `Collect it another way (if an earlier attempt could not be confirmed, check the customer's points first).`
           // No refusal came back: the burn may have landed. Never claim it did not.
           : `The loyalty redeem could not be confirmed — check the customer's points before collecting ` +
             `₹${Math.round(pendingLoyalty.rupeeValue).toLocaleString('en-IN')} another way. If the points ` +

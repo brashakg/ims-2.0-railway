@@ -174,7 +174,7 @@ describe('POS loyalty tender leg', () => {
     const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-4');
     // Order still exists (fail-soft), but never silently.
     expect(res.ok).toBe(true);
-    expect(res.warning).toMatch(/NOT debited/);
+    expect(res.warning).toMatch(/took NO points/);
     expect(res.warning).toMatch(/300/);
 
     // No burn -> no leg. Recording one would gift the discount without
@@ -219,7 +219,7 @@ describe('POS loyalty tender leg', () => {
     const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-8');
     // Round 10: no refusal came back, so the burn may have landed -- never
     // claim "NOT debited"; tell staff to check the points first.
-    expect(res.warning).not.toMatch(/NOT debited/);
+    expect(res.warning).not.toMatch(/took NO points/);
     expect(res.warning).toMatch(/could not be confirmed/);
     expect(res.warning).toMatch(/check the customer's points/);
     expect(res.warning).not.toMatch(/re-apply the points/);

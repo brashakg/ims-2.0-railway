@@ -20,7 +20,7 @@ times. (Since #1264 the payment door also refuses a burn an existing LOYALTY
 payment on the order already names, backfilled or not.)
 
 SAFETY: dry run by default; nothing is written without --apply. --apply first
-writes every row it will change to a backup JSON file. Idempotent (only rows
+writes the fields it will change (txn id and claim) to a backup JSON file. Idempotent (only rows
 with no claim are touched). Prints no secrets. No emoji (Windows cp1252).
 
   python backend/scripts/backfill_loyalty_tender_claims.py            # dry run
@@ -36,6 +36,20 @@ import sys
 from datetime import datetime, timezone
 
 _TXN_IN_REFERENCE = re.compile(r"\btxn\s+(\S+)")
+
+
+def _balance_due(order: dict):
+    """THE balance reading (delivery_gate.order_balance_due semantics: no
+    balance_due key -> the whole bill is due). None when there is no readable
+    number -- an unreadable value is listed, never stamped."""
+    if not order:
+        return None
+    field = "balance_due" if "balance_due" in order else "grand_total"
+    raw = order.get(field)
+    try:
+        return None if raw is None or (isinstance(raw, str) and not raw.strip()) else round(float(raw), 2)
+    except (TypeError, ValueError):
+        return None
 
 
 def plan(db) -> dict:
@@ -61,9 +75,9 @@ def plan(db) -> dict:
             links.append((row["txn_id"], hit))
         else:
             unmatched += 1
-            due = order.get("balance_due")
+            due = _balance_due(order)
             unmatched_rows.append((row["txn_id"], row.get("order_id"), due))
-            if due is not None and float(due or 0) <= 0.01:
+            if due is not None and due <= 0.01:
                 legacy.append(row["txn_id"])  # a settled bill: never claimable again
     claimed = {r.get("tender_payment_id") for r in txns.find({"type": "REDEEM", "tender_payment_id": {"$ne": None}})}
     unbacked = []
@@ -88,7 +102,9 @@ def apply(db, links, backup_path: str, legacy=()) -> int:
     txns = db["loyalty_transactions"]
     links = list(links) + [(t, LEGACY_CLAIM) for t in legacy]
     ids = [t for t, _ in links]
-    rows = list(txns.find({"txn_id": {"$in": ids}}, {"_id": 0}))
+    # Minimal backup: only the fields this script writes (no customer data).
+    rows = list(txns.find({"txn_id": {"$in": ids}},
+                          {"_id": 0, "txn_id": 1, "tender_payment_id": 1, "tender_backfilled_at": 1}))
     os.makedirs(os.path.dirname(backup_path) or ".", exist_ok=True)
     with open(backup_path, "w", encoding="utf-8") as f:
         json.dump(rows, f, default=str, indent=1)

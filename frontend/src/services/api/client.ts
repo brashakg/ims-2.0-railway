@@ -42,20 +42,26 @@ const RETRY_DELAY_MS = 1000;
 // Helper function for delay
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Check if error is retryable (only 5xx server errors and rate limiting)
-// Do NOT retry network/CORS errors - they won't be fixed by retrying
-const isRetryableError = (error: AxiosError): boolean => {
+// Methods that only READ: replaying one can never move money twice.
+const SAFE_METHODS = ['get', 'head', 'options'];
+
+// Check if error is retryable. Do NOT retry network/CORS errors - they won't
+// be fixed by retrying. A 5xx is retried ONLY for a read: a write that failed
+// with a 5xx may already have landed (PR #1264: an "unclear" store credit
+// answers 503 "do NOT redo" -- an automatic replay redid it). A 429 means the
+// server refused the request before doing anything, so any method retries.
+export const isRetryableError = (error: AxiosError): boolean => {
   // CORS errors have no response - don't retry these
   if (!error.response) {
     return false;
   }
-  // Server errors (5xx) - these might be temporary
-  if (error.response.status >= 500 && error.response.status < 600) {
-    return true;
-  }
   // Rate limiting (429) - retry with backoff
   if (error.response.status === 429) {
     return true;
+  }
+  // Server errors (5xx) - these might be temporary; reads only
+  if (error.response.status >= 500 && error.response.status < 600) {
+    return SAFE_METHODS.includes(String(error.config?.method || 'get').toLowerCase());
   }
   // Don't retry other errors (401, 403, 404, CORS, etc.)
   return false;

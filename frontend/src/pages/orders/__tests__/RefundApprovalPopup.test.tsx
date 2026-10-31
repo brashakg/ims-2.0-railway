@@ -68,4 +68,17 @@ describe('Refund approval popup', () => {
     await screen.findByText(/could not be (confirmed|finalised)/);
     expect(screen.queryByText(/could not be confirmed just now/)).toBeTruthy();
   });
+
+  it('reopens the popup with the server figures when the approval is refused as invalid', async () => {
+    create.mockReset();
+    createRequest.mockClear();
+    create.mockRejectedValueOnce(axiosErr(403, GATE));
+    create.mockRejectedValueOnce(axiosErr(403, { reason: 'REFUND_APPROVAL_INVALID', required_tier: 'auto',
+      this_refund: 2400, prior_refunds: 100, running_total: 2500, message: 'approval no longer matches' }));
+    await driveToSubmit();
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    // The popup is up again, asking for the SERVER's figure (not the page's).
+    await waitFor(() => expect(createRequest).toHaveBeenCalledTimes(2), { timeout: 3000 });
+    expect((createRequest.mock.calls[1] as any)[0].amount).toBe(2400);
+  });
 });

@@ -297,8 +297,13 @@ def test_a_return_whose_doc_was_lost_keeps_counting(till, monkeypatch):
     assert holds[rid]["kept"] is True
     holds[rid]["at"] = _ago(10)  # long past the 2-minute window
     till["db"].get_collection("orders").update_one({"order_id": "ORD-1"}, {"$set": {"refund_holds": holds}})
+    # The kept hold still counts (it never ages out) ...
+    live, _ = returns_router._live_refund_holds("ORD-1", holds)
+    assert rid in live
+    # ... and since round 14 the bill takes no new return at all until that
+    # return is recorded (stricter than the approval gate it used to reach).
     r2 = client.post("/api/v1/returns", json=payload, headers=_hdr("CASHIER"))
-    assert r2.status_code == 403 and r2.json()["detail"]["prior_refunds"] == 1800.0, r2.text
+    assert r2.status_code == 409 and "still being confirmed" in r2.text, r2.text
 
 
 # =========================================================================== #

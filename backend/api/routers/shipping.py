@@ -522,15 +522,34 @@ async def book_shipment(
                                       "error": "order could not be re-read before the courier call"}})
             raise HTTPException(status_code=503, detail="Could not re-check the order - nothing was booked. Retry.")
         if fresh is not None:
-            from ..services.delivery_gate import refuse_handover_of_refunded
+            from ..services.delivery_gate import cod_collectable, refuse_handover_of_refunded
 
             try:
+                # The SAME gates as the first read, on the fresh order: a dead
+                # status (the same 400), a refund / cancel claim, and the COD
+                # figure the courier will collect.
+                fresh_status = str(fresh.get("status") or "").strip().upper()
+                if fresh_status in _DEAD_ORDER_STATUSES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail={
+                            "code": "ORDER_NOT_SHIPPABLE",
+                            "message": (
+                                f"Order {fresh.get('order_number') or body.order_id} is "
+                                f"{fresh_status} - nothing ships on it."
+                            ),
+                        },
+                    )
                 refuse_handover_of_refunded(fresh)
+                if is_cod:
+                    cod_amount = cod_collectable(fresh)
             except HTTPException:
                 coll.update_one({"shipment_id": shipment_id},
                                 {"$set": {"status": "FAILED", "updated_at": utc_now_iso(),
-                                          "error": "order cancelled or advance refunded before the courier was called"}})
+                                          "error": "the order changed before the courier was called"}})
                 raise
+            # The courier call and the Shopify fulfilment push use the fresh read.
+            order = fresh
 
     try:
         result = await shiprocket.create_shipment(

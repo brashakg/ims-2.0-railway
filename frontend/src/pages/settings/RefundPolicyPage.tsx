@@ -126,7 +126,7 @@ export function RefundPolicySection() {
           When a bill&apos;s refunds would go above <strong>₹2,000 in total</strong> (everything
           already refunded on that bill plus this refund), a cashier or sales staff member needs a
           store manager (or higher) to approve it with their PIN. Store managers and HQ are not
-          gated. The rule is set by the owner; only a Superadmin can switch it off.
+          gated. The rule is the owner's and always applies - no one can switch it off here.
         </p>
       </div>
 

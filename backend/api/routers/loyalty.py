@@ -551,6 +551,22 @@ async def redeem(
     if accounts is None or txns is None:
         raise HTTPException(status_code=503, detail="Loyalty store unavailable")
 
+    # IDEMPOTENT per (customer, order): a redeem pressed again for the same
+    # bill -- a retry after an unconfirmed answer -- returns the burn that
+    # already landed, never debits twice.
+    if body.order_id:
+        coll = getattr(txns, "collection", None)
+        prior = coll.find_one({"customer_id": body.customer_id, "order_id": body.order_id,
+                               "type": "REDEEM"}) if coll is not None else None
+        if prior:
+            return {
+                "redeemed_points": int(prior.get("points") or 0),
+                "rupee_value": float(prior.get("rupee_value") or 0),
+                "was_capped": bool(prior.get("was_capped")),
+                "txn_id": prior.get("txn_id"),
+                "replayed": True,
+            }
+
     settings = _settings_safe()
     account = accounts.find_or_create(body.customer_id)
 
