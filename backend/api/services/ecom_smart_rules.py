@@ -1,110 +1,32 @@
 """
-IMS 2.0 - E-commerce Smart-Collection Rule Resolver  (BVI Phase 2)
-==================================================================
-Pure, DB-free evaluator for SMART `ecom_collections`. Given a collection's
-`rules` (a list of field rules) + `disjunctive` flag, it decides which catalog
-products belong, mirroring Shopify smart-collection semantics
-(BVI_MERGE_PLAN.md Phase 2; BVI Collection.rules / disjunctive).
+IMS 2.0 - E-commerce Smart-Collection RULE SHAPES  (normalisation only)
+======================================================================
+A SMART ``ecom_collections`` rule is stored in one of two shapes:
 
-A rule is ``{"field": <name>, "relation": <EQUALS|CONTAINS|...>, "value": <str>}``.
-``disjunctive=True`` -> a product matches if ANY rule matches (OR);
-``disjunctive=False`` (default) -> ALL rules must match (AND).
+  IMS      ``{"field": <name>, "relation": <EQUALS|CONTAINS|...|IN>, "value": ...}``
+  Shopify  ``{"column": <VENDOR|TYPE|TAG|...>, "relation": ..., "condition": ...}``
+           (the collections migrated from BVI, scripts/migrate_bvi_pim.py)
 
-SHOPIFY-SHAPE NORMALIZATION (BVI revive): the 1,160 collections migrated from
-BVI (scripts/migrate_bvi_pim.py) carry rules in Shopify's smart-collection
-shape ``{"column": <VENDOR|TYPE|TAG|...>, "relation": ..., "condition": ...}``.
-``normalize_rule`` / ``normalize_rules`` fold that shape into the IMS shape
-above (column -> field via SHOPIFY_COLUMN_MAP, condition -> value), IDEMPOTENTLY
--- a rule already in the IMS shape passes through untouched, so callers
-normalize on EVERY read and the stored docs are never rewritten. The evaluator
-(`_rule_matches`) normalizes internally, so migrated collections resolve
-without any caller change.
+``normalize_rule`` / ``normalize_rules`` fold the Shopify shape into the IMS
+shape (column -> field via SHOPIFY_COLUMN_MAP, condition -> value),
+IDEMPOTENTLY -- a rule already in the IMS shape passes through, so callers
+normalise on every read and stored docs are never rewritten.
 
-SUPPORTED FIELDS (case-insensitive, alias-folded) and where each is read from a
-catalog_products doc -- IMS stores brand inside `attributes`, category top-level,
-and storefront tags under the optional `ecom.seo.tags`:
-
-    brand     -> doc["attributes"]["brand"]   (fallbacks: attributes.brand_name,
-                                               top-level doc["brand"])
-    category  -> doc["category"]               (e.g. FRAME / SUNGLASS)
-    tag/tags  -> doc["ecom"]["seo"]["tags"]    (list; also accepts CSV string +
-                                                top-level doc["tags"])
-    title     -> doc["title"]
-    sku       -> doc["sku"]
-    price     -> doc["pricing"]["offer_price"] (fallbacks: offer_price, price,
-                                                pricing.mrp, mrp)
-
-Anything else is treated as a direct loose key lookup against the doc
-(top-level then inside `attributes`), so a niche attribute like "shape" still
-works without a code change -- but never a cost key (services/cost_mask
-.is_cost_key) and never a nested object: a rule that matches on cost_price, or
-CONTAINS-searches a dict's text, is a cost oracle (a binary search on "cost >
-X" recovers the cost to the paisa), whoever runs the preview. Such a field
-extracts nothing, so it matches no product.
-
-MATCH SEMANTICS:
-  - EQUALS        : case-insensitive exact match (for a list field: any element
-                    equals the value).
-  - NOT_EQUALS    : NO element equals the value (vacuously True when the field
-                    is absent -- a product with no tags does NOT have tag X).
-  - CONTAINS      : case-insensitive substring (for a list field: any element
-                    contains the value).
-  - NOT_CONTAINS  : NO element contains the value (vacuously True when absent).
-  - STARTS_WITH / ENDS_WITH : case-insensitive prefix / suffix on any element.
-  - GREATER_THAN / LESS_THAN : numeric compare (any element parseable as a
-                    number satisfies it; non-numeric -> no match, never raises).
-  - IN            : value is a LIST of strings; matches when any element of the
-                    field's extracted value(s) case-insensitively equals ANY
-                    list entry. The ONLY relation that accepts a list value --
-                    every other relation keeps coercing/rejecting non-string
-                    values exactly as before. An empty list is a VALID rule
-                    that never matches (False, not skipped). Legacy
-                    Shopify-shaped rules never carry IN.
-  - Unknown relation -> defaults to EQUALS (fail-soft, never raises).
-
-FAIL-SOFT CONTRACT: a malformed rule (missing field/value) is SKIPPED. With no
-valid rules, ``matches_product`` returns False (an empty SMART collection rather
-than accidentally matching everything) -- the caller surfaces the empty result.
-No exceptions escape; all inputs are defensively coerced.
+THIS MODULE NO LONGER DECIDES MEMBERSHIP (owner 2026-10-29). The old
+evaluator here read brand / category / tags off the raw catalogue doc, which
+is not what the push sends (the website's tags are generated at push time),
+so IMS said "0 products" for every collection the registry makes. Which
+products a collection holds is answered ONLY by
+``services/collection_membership`` -- Shopify's reading of the rules (through
+``shopify_push.collections.convert_rule_set``) over what the push sends.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from .cost_mask import is_cost_key
-
-# Logical field name -> the catalog_products read path, tried in order. Each path
-# is a tuple of keys to descend; the FIRST path that yields a non-None value wins.
-_FIELD_PATHS: Dict[str, List[tuple]] = {
-    # brand_name: BVI-migrated catalog docs store the display brand there.
-    "brand": [("attributes", "brand"), ("attributes", "brand_name"), ("brand",)],
-    "category": [("category",), ("attributes", "category")],
-    "tag": [("ecom", "seo", "tags"), ("tags",), ("attributes", "tags")],
-    "tags": [("ecom", "seo", "tags"), ("tags",), ("attributes", "tags")],
-    "title": [("title",)],
-    "sku": [("sku",)],
-    "price": [
-        ("pricing", "offer_price"),
-        ("offer_price",),
-        ("price",),
-        ("pricing", "mrp"),
-        ("mrp",),
-    ],
-    "shape": [("attributes", "shape"), ("shape",)],
-    "gender": [("attributes", "gender"), ("gender",)],
-    "frame_material": [("attributes", "frame_material"), ("frame_material",)],
-    "color": [("attributes", "color"), ("color",)],
-}
 
 _EQUALS = "EQUALS"
-_NOT_EQUALS = "NOT_EQUALS"
-_CONTAINS = "CONTAINS"
-_NOT_CONTAINS = "NOT_CONTAINS"
-_STARTS_WITH = "STARTS_WITH"
-_ENDS_WITH = "ENDS_WITH"
-_GREATER_THAN = "GREATER_THAN"
-_LESS_THAN = "LESS_THAN"
 _IN = "IN"
 
 # Shopify smart-collection rule column -> IMS logical field. Lookup key is the
@@ -125,14 +47,6 @@ def _norm_field(field: Optional[str]) -> str:
     if not field:
         return ""
     return field.strip().lower().replace("-", "_").replace(" ", "_")
-
-
-def _to_float(value: Any) -> Optional[float]:
-    """Best-effort numeric coercion ('7,999.00' -> 7999.0), None on failure."""
-    try:
-        return float(str(value).strip().replace(",", ""))
-    except (TypeError, ValueError):
-        return None
 
 
 def _clean_in_values(value: Any) -> List[str]:
@@ -221,198 +135,3 @@ def normalize_rules(rules: Any) -> List[Any]:
     if not isinstance(rules, (list, tuple)):
         return []
     return [normalize_rule(r) for r in rules]
-
-
-def _descend(doc: Dict, path: tuple) -> Any:
-    """Walk a key tuple into a dict, returning the leaf value or None. Stops (and
-    returns None) the moment a non-dict is hit before the leaf."""
-    cur: Any = doc
-    for key in path:
-        if not isinstance(cur, dict):
-            return None
-        cur = cur.get(key)
-        if cur is None:
-            return None
-    return cur
-
-
-def _extract_values(doc: Dict, field: str) -> List[str]:
-    """Resolve a logical field to the list of candidate string values from a
-    product doc. A list field (tags) yields each element; a CSV string is split;
-    a scalar yields a single-item list. Returns [] when the field is absent.
-    """
-    norm = _norm_field(field)
-    paths = _FIELD_PATHS.get(norm)
-    raw: Any = None
-    if paths:
-        for p in paths:
-            raw = _descend(doc, p)
-            if raw is not None:
-                break
-    elif not is_cost_key(norm):
-        # Unknown field -> loose lookup: top-level key, then inside attributes.
-        raw = doc.get(norm)
-        if raw is None and isinstance(doc.get("attributes"), dict):
-            raw = doc["attributes"].get(norm)
-
-    # A nested object is never a rule value: its text carries every key in it
-    # (pricing.cost_price among them).
-    if raw is None or isinstance(raw, dict):
-        return []
-    if isinstance(raw, (list, tuple, set)):
-        out: List[str] = []
-        for item in raw:
-            if item is None or isinstance(item, (dict, list, tuple)):
-                continue
-            out.append(str(item))
-        return out
-    if isinstance(raw, str):
-        # A CSV string (e.g. tags "new,bestseller") splits into discrete values;
-        # a plain scalar string is a single value (commas in a brand are rare and
-        # splitting is harmless for matching).
-        if "," in raw:
-            return [tok.strip() for tok in raw.split(",") if tok.strip()]
-        return [raw]
-    # Numbers / bools -> stringify.
-    return [str(raw)]
-
-
-def _rule_matches(doc: Dict, rule: Dict) -> Optional[bool]:
-    """Evaluate ONE rule against a product. Returns True/False, or None when the
-    rule is malformed (missing field or value) so the caller can skip it.
-
-    Shopify-shape rules ({column, relation, condition} -- the BVI-migrated
-    docs) are normalised on the fly; native IMS rules pass through untouched.
-    """
-    rule = normalize_rule(rule)
-    if not isinstance(rule, dict):
-        return None
-    field = rule.get("field")
-    value = rule.get("value")
-    relation = str(rule.get("relation") or _EQUALS).strip().upper()
-
-    # IN: the ONLY relation whose value is a list. Matches when any extracted
-    # candidate equals ANY list entry (case-insensitive). An empty list is a
-    # VALID rule that never matches -> False (not None), so it can never
-    # accidentally match-all through the malformed-skip path.
-    if relation == _IN:
-        if not field or value is None:
-            return None  # malformed -- skip (same as a missing value today)
-        needles = {v.lower() for v in _clean_in_values(value)}
-        if not needles:
-            return False
-        return any(c.lower() in needles for c in _extract_values(doc, field))
-
-    if not field or value is None or str(value).strip() == "":
-        return None
-
-    needle = str(value).strip().lower()
-    candidates = [c.lower() for c in _extract_values(doc, field)]
-
-    # Negative relations are vacuously TRUE on an absent field (a product with
-    # no tags does NOT have tag X) -- mirrors Shopify smart-collection logic.
-    if relation == _NOT_EQUALS:
-        return all(c != needle for c in candidates)
-    if relation == _NOT_CONTAINS:
-        return all(needle not in c for c in candidates)
-
-    if not candidates:
-        return False
-
-    if relation == _CONTAINS:
-        return any(needle in c for c in candidates)
-    if relation == _STARTS_WITH:
-        return any(c.startswith(needle) for c in candidates)
-    if relation == _ENDS_WITH:
-        return any(c.endswith(needle) for c in candidates)
-    if relation in (_GREATER_THAN, _LESS_THAN):
-        needle_num = _to_float(needle)
-        if needle_num is None:
-            return False  # fail-soft: non-numeric bound never matches
-        nums = [n for n in (_to_float(c) for c in candidates) if n is not None]
-        if not nums:
-            return False
-        if relation == _GREATER_THAN:
-            return any(n > needle_num for n in nums)
-        return any(n < needle_num for n in nums)
-    # Default + EQUALS: exact (case-insensitive) match on any candidate.
-    return any(c == needle for c in candidates)
-
-
-def matches_product(
-    product: Dict, rules: List[Dict], disjunctive: bool = False
-) -> bool:
-    """True if `product` satisfies the SMART `rules` under the given combinator.
-
-    disjunctive=True  -> OR  (any valid rule matches)
-    disjunctive=False -> AND (every valid rule matches)
-
-    Malformed rules are skipped. If NO valid rules remain, returns False (an
-    empty SMART collection -- never an accidental match-all).
-    """
-    if not isinstance(product, dict) or not rules:
-        return False
-
-    results: List[bool] = []
-    for rule in rules:
-        res = _rule_matches(product, rule)
-        if res is None:  # malformed -> skip
-            continue
-        results.append(res)
-
-    if not results:
-        return False
-    return any(results) if disjunctive else all(results)
-
-
-def resolve_skus(
-    products: List[Dict],
-    rules: List[Dict],
-    disjunctive: bool = False,
-    limit: Optional[int] = None,
-) -> List[str]:
-    """Return the SKUs of all products matching the rules, de-duplicated and in
-    input order. `limit` caps the result (None = no cap). Products without a
-    `sku` are skipped. Pure -- the caller supplies the product list (the router
-    reads catalog_products and passes them in)."""
-    out: List[str] = []
-    seen: set = set()
-    for product in products or []:
-        if not isinstance(product, dict):
-            continue
-        sku = product.get("sku")
-        if not sku or sku in seen:
-            continue
-        if matches_product(product, rules, disjunctive=disjunctive):
-            out.append(sku)
-            seen.add(sku)
-            if limit is not None and len(out) >= limit:
-                break
-    return out
-
-
-# Relations + fields the editor UI can offer (kept tiny + introspectable).
-SUPPORTED_RELATIONS = [
-    _EQUALS,
-    _NOT_EQUALS,
-    _CONTAINS,
-    _NOT_CONTAINS,
-    _STARTS_WITH,
-    _ENDS_WITH,
-    _GREATER_THAN,
-    _LESS_THAN,
-    _IN,
-]
-
-
-def supported_fields() -> List[str]:
-    """The logical rule fields the resolver understands natively (for the UI)."""
-    # De-dupe the tag/tags alias for a clean list.
-    seen: set = set()
-    out: List[str] = []
-    for f in _FIELD_PATHS:
-        key = "tag" if f in ("tag", "tags") else f
-        if key not in seen:
-            seen.add(key)
-            out.append(key)
-    return out

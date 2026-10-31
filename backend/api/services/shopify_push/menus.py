@@ -14,23 +14,27 @@ from .transport import _graphql, _user_errors
 from .queries import _MENU_CREATE, _MENU_UPDATE
 from .writeback import _writeback_simple
 
-def build_menu_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_menu_items(items: List[Dict[str, Any]], with_ids: bool = False) -> List[Dict[str, Any]]:
     """Recursively map the IMS ecom_menus item tree -> Shopify MenuItem*Input.
     Each node carries title + type (+ url/resourceId) and its children. Used for
-    BOTH create + update (the input shapes are field-compatible for our subset)."""
+    BOTH create + update (the input shapes are field-compatible for our subset).
+    ``with_ids`` (an update only -- MenuItemCreateInput has no id) sends a
+    node's ``shopify_item_id`` so Shopify keeps that item instead of a new one."""
     out: List[Dict[str, Any]] = []
     for node in items or []:
         item: Dict[str, Any] = {
             "title": node.get("title") or "",
             "type": str(node.get("item_type") or "HTTP").upper(),
         }
+        if with_ids and node.get("shopify_item_id"):
+            item["id"] = node["shopify_item_id"]
         if node.get("url"):
             item["url"] = node["url"]
         if node.get("resource_id"):
             item["resourceId"] = _as_shopify_gid(node["resource_id"], "Collection")
         kids = node.get("children") or []
         if kids:
-            item["items"] = build_menu_items(kids)
+            item["items"] = build_menu_items(kids, with_ids)
         out.append(item)
     return out
 
@@ -44,7 +48,7 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
     behind the gates with gid write-back. Never raises."""
     mid = menu.get("menu_id")
     existing_gid = menu.get("shopify_menu_id")
-    items = build_menu_items(menu.get("items") or [])
+    items = build_menu_items(menu.get("items") or [], with_ids=bool(existing_gid))
     title = menu.get("title") or menu.get("handle")
     handle = menu.get("handle")
     action = "update" if existing_gid else "create"

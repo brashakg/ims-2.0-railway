@@ -484,8 +484,14 @@ def test_block_live_counts_delisted_not_planned(
 def test_block_members_smart_over_1000_not_truncated_at_preview_cap(monkeypatch):
     """A SMART block resolves the FULL banned set, not the 1000 preview cap: 1200
     matching products all come back and truncated stays False (finding #15)."""
-    products = [{"sku": f"S{i}", "brand": "Gucci"} for i in range(1200)]
-    monkeypatch.setattr(osc, "_catalog_products", lambda: products)
+    # THE website membership rule over every listing IMS holds (the facts the
+    # push sends): a block must reach every banned listing.
+    from api.services import collection_membership as cm
+
+    facts = [{"sku": f"S{i}", "brand": "Gucci", "tags": set(), "type": "Sunglass", "prices": []}
+             for i in range(1200)]
+    monkeypatch.setattr(osc, "_get_db", lambda: object())
+    monkeypatch.setattr(cm, "catalogue_facts", lambda db: facts)
     doc = {"collection_id": "C-SMART", "collection_type": "SMART",
            "rules": [{"field": "brand", "relation": "EQUALS", "value": "Gucci"}]}
     skus, truncated = osc._resolve_block_members(doc)
@@ -497,8 +503,14 @@ def test_block_members_truncation_is_surfaced_not_silent(monkeypatch):
     """When even the higher block cap is hit, `truncated` is True (surfaced, so a
     partial delist/requeue is never silent)."""
     monkeypatch.setattr(osc, "_BLOCK_RESOLVE_MAX", 3)
-    products = [{"sku": f"S{i}", "brand": "Gucci"} for i in range(10)]
-    monkeypatch.setattr(osc, "_catalog_products", lambda: products)
+    # THE website membership rule over every listing IMS holds (the facts the
+    # push sends): a block must reach every banned listing.
+    from api.services import collection_membership as cm
+
+    facts = [{"sku": f"S{i}", "brand": "Gucci", "tags": set(), "type": "Sunglass", "prices": []}
+             for i in range(10)]
+    monkeypatch.setattr(osc, "_get_db", lambda: object())
+    monkeypatch.setattr(cm, "catalogue_facts", lambda db: facts)
     doc = {"collection_id": "C-SMART", "collection_type": "SMART",
            "rules": [{"field": "brand", "relation": "EQUALS", "value": "Gucci"}]}
     skus, truncated = osc._resolve_block_members(doc)
@@ -661,3 +673,89 @@ def test_register_webhooks_paginates_past_first_page(monkeypatch):
     assert res["already_registered"] == ["ORDERS_CREATE"]
     assert res["missing"] == []
     assert len(fake.calls) == 2  # two query pages fetched
+
+
+# ===========================================================================
+# Review round 1: a blocked collection with a rule IMS cannot read
+# ===========================================================================
+
+def _unreadable_block_db():
+    """Blocked: brand = Gucci (readable: VENDOR) AND shape = Aviator (an
+    IMS-only field the website cannot read). S1 is a Gucci (the unreadable
+    rule decides), S2 a Ray-Ban (the readable rule already says no)."""
+    db = _EngineDB()
+    db["ecom_collections"].insert_one(
+        {"collection_id": "C-X", "handle": "gucci-aviators", "collection_type": "SMART",
+         "online_sync_blocked": True, "disjunctive": False,
+         "rules": [{"field": "brand", "relation": "EQUALS", "value": "Gucci"},
+                   {"field": "shape", "relation": "EQUALS", "value": "Aviator"}]}
+    )
+    db["products"].insert_one({"sku": "S1", "brand": "Gucci"})
+    db["products"].insert_one({"sku": "S2", "brand": "Ray-Ban"})
+    return db
+
+
+def test_strict_path_decides_per_product_never_halts_the_unrelated():
+    db = _unreadable_block_db()
+    assert online_block.is_blocked_from_online_strict({"sku": "S2", "brand": "Ray-Ban"}, db) is False
+    assert online_block.is_blocked_from_online_strict({"sku": "S1", "brand": "Gucci"}, db) is None
+
+
+def test_sweep_fails_closed_on_an_unreadable_blocked_rule():
+    """The /all-pending sweep path (classify_blocked_skus), not only the
+    strict one: a product only the unreadable rule could be about makes the
+    sweep NOT verifiable (skip, never push a possibly-banned product); a
+    product the readable rule rules out is classified normally."""
+    db = _unreadable_block_db()
+    assert online_block.classify_blocked_skus(db, ["S2"]) == (set(), True)
+    assert online_block.classify_blocked_skus(db, ["S1", "S2"])[1] is False
+
+
+def test_unverifiable_blocks_are_listed_for_store_health_and_the_prod_check():
+    import importlib.util
+
+    from api.services import store_health
+
+    db = _unreadable_block_db()
+    rows = online_block.unverifiable_blocks(db)
+    assert [r["handle"] for r in rows] == ["gucci-aviators"] and "shape" in rows[0]["rules"][0].lower()
+    health = store_health.readiness_score(db)
+    assert health["unverifiable_blocks"][0]["handle"] == "gucci-aviators"
+    assert health["fixes_needed"][0]["check"] == "unverifiable_block"
+    path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                        "scripts", "check_blocked_collection_rules.py")
+    spec = importlib.util.spec_from_file_location("check_blocked", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.run(db) == 1
+
+
+def test_a_collection_with_unreadable_rules_cannot_be_blocked(client, auth_headers, patched_db, monkeypatch):
+    conn = patched_db
+    _force_dark(monkeypatch)
+    conn.db["ecom_collections"].insert_one(
+        {"collection_id": "C-IN", "title": "Two brands", "handle": "two-brands", "collection_type": "SMART",
+         "online_sync_blocked": False,
+         "rules": [{"field": "brand", "relation": "IN", "value": ["Gucci", "Prada"]}]}
+    )
+    r = client.post("/api/v1/online-store/collections/C-IN/block", headers=auth_headers)
+    assert r.status_code == 400, r.text
+    assert "Not readable" in r.json()["detail"]
+    assert conn.db["ecom_collections"].find_one({"collection_id": "C-IN"})["online_sync_blocked"] is False
+
+
+def test_a_blocked_collection_cannot_be_saved_with_unreadable_rules(client, auth_headers, patched_db, monkeypatch):
+    conn = patched_db
+    _force_dark(monkeypatch)
+    conn.db["ecom_collections"].insert_one(
+        {"collection_id": "C-B", "title": "Gucci", "handle": "gucci-b", "collection_type": "SMART",
+         "online_sync_blocked": True,
+         "rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_gucci"}]}
+    )
+    url = "/api/v1/online-store/collections/C-B"
+    bad = {"rules": [{"field": "brand", "relation": "IN", "value": ["Gucci", "Prada"]}]}
+    r = client.put(url, json=bad, headers=auth_headers)
+    assert r.status_code == 400, r.text
+    assert conn.db["ecom_collections"].find_one({"collection_id": "C-B"})["rules"][0]["field"] == "tag"
+    ok = {"rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_prada"}]}
+    assert client.put(url, json=ok, headers=auth_headers).status_code == 200

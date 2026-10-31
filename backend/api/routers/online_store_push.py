@@ -197,6 +197,12 @@ async def push_menu(
     doc = repo.get_by_id(menu_id) if repo else None
     if doc is None:
         raise HTTPException(status_code=404, detail="Menu not found")
+    if doc.get("generated"):
+        # The generated menu is never pushed as stored: rebuilt first, then
+        # pushed by its own path (adopt + backup + audit inside).
+        from ..services import generated_menu
+
+        return {"result": await generated_menu.regenerate_and_push(db, doc, current_user, force=True)}
     result = await shopify_push.push_menu(db, doc)
     data = result.to_dict()
     _write_audit(data, current_user)
@@ -363,7 +369,27 @@ async def push_status(
         "counts": counts,
         # The scheduled live-product sync: settings, last run, next IST slot.
         "live_sync": live_sync.status_block(db),
+        # The self-maintaining website menu(s): last generate / push.
+        "generated_menus": _generated_menu_status(db),
     }
+
+
+def _generated_menu_status(db) -> List[Dict[str, Any]]:
+    """{handle, title, last_generated_at, last_pushed_at, last_push, in_sync,
+    item / hidden counts} per generated menu. Fail-soft -> []."""
+    try:
+        from ..services import generated_menu
+
+        out = []
+        for doc in generated_menu.generated_menus(db):
+            st = generated_menu.status(doc)
+            st["item_count"] = len(st.pop("items") or [])
+            st["hidden_count"] = len(st.pop("hidden") or [])
+            st.pop("template", None)
+            out.append(st)
+        return out
+    except Exception:  # noqa: BLE001
+        return []
 
 
 def _audit_collection_is_real_mongo(audit) -> bool:
@@ -847,11 +873,25 @@ async def push_all_pending(
         for doc in _all_docs(db, "ecom_menus"):
             if len(results) >= limit:
                 break
+            if doc.get("generated"):
+                continue  # the generated menu is rebuilt + pushed below
             if not doc.get("locally_modified"):
                 continue
             data = (await shopify_push.push_menu(db, doc)).to_dict()
             _write_audit(data, current_user)
             _tally("menus", data)
+
+    generated_menus: Optional[Dict[str, Any]] = None
+    if "menus" in selected or "collections" in selected:
+        # THE WEBSITE MENU (owner 2026-10-29): rebuilt from the collections
+        # that have products now, pushed only when it changed.
+        try:
+            from ..services import generated_menu
+
+            generated_menus = await generated_menu.sync_generated_menus(db, current_user)
+        except Exception as exc:  # noqa: BLE001 -- reported, never stops the sweep
+            logger.warning("[PUSH] generated menu skipped: %s", exc)
+            generated_menus = {"error": str(exc)}
 
     if "images" in selected:
         for doc in _all_docs(db, "product_images"):
@@ -904,6 +944,7 @@ async def push_all_pending(
         # The collection registry for this press ({created, updated,
         # unchanged, skipped}), None when collections were not selected.
         "collection_registry": collection_registry,
+        "generated_menus": generated_menus,
         "results": results,
     }
 

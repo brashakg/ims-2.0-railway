@@ -47,6 +47,7 @@ import {
   pushApi,
   syncHealthApi,
   type PushStatus,
+  type GeneratedMenuStatus,
   type PushResult,
   type PushSweepResult,
   type PushHistoryResult,
@@ -138,6 +139,43 @@ function countsFor(
   const total = Number(block.staged ?? block.total ?? 0);
   const totalLabel = key === 'products' ? 'staged' : 'total';
   return { pushed, pending, total, totalLabel };
+}
+
+// ----------------------------------------------------------------------------
+// The self-maintaining website menu (owner 2026-10-29): one line on the Menus
+// card -- it rebuilds itself from the collections with products after every
+// sync and is pushed only when it changed.
+// ----------------------------------------------------------------------------
+export function GeneratedMenuLine({ menus }: { menus: GeneratedMenuStatus[] | null }) {
+  if (menus === null) return null;
+  if (menus.length === 0) {
+    return (
+      <p className="mt-1.5 text-[11px] text-amber-800" data-testid="generated-menu-line">
+        No self-maintaining menu set up yet - the website menu is still the hand-made one.
+      </p>
+    );
+  }
+  return (
+    <div className="mt-1.5 space-y-0.5" data-testid="generated-menu-line">
+      <p className="text-[11px] text-gray-600">
+        {menus.length} generated menu{menus.length === 1 ? '' : 's'} - rebuilt from the collections with products
+        after every sync, pushed only when it changed.
+      </p>
+      {menus.map((m) => {
+        const lp = m.last_push;
+        const failed = lp && lp.ok === false;
+        return (
+          <p key={m.menu_id} className={'text-[11px] ' + (failed ? 'text-red-700' : 'text-gray-600')}>
+            <span className="font-mono">{m.handle}</span>: {m.item_count ?? 0} top-level items
+            {m.hidden_count ? `, ${m.hidden_count} hidden (empty)` : ''} - last pushed{' '}
+            {m.last_pushed_at ? fmtIST(m.last_pushed_at) : 'never'}
+            {lp ? ` - last attempt ${lp.mode === 'LIVE' ? 'LIVE' : 'dry-run'} ${lp.ok ? 'ok' : 'FAILED'}` : ''}
+            {failed && (lp?.error || lp?.reason) ? `: ${lp?.error || lp?.reason}` : ''}
+          </p>
+        );
+      })}
+    </div>
+  );
 }
 
 // ----------------------------------------------------------------------------
@@ -1150,6 +1188,7 @@ export default function OnlineShopifySyncPage() {
                     </span>
                   </div>
                 )}
+                {ent.key === 'menus' && <GeneratedMenuLine menus={status?.generated_menus ?? null} />}
                 {/* Publish counter (owner 2026-10-23): text only -- the caps
                     are the backend's (FIRST_PUBLISH_CAP_PER_SYNC 100,
                     PRODUCT_BATCH_CAP 25), unchanged. */}

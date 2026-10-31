@@ -343,9 +343,6 @@ class TestUpdateStampsAttribution:
         monkeypatch.setattr(
             products_mod._pm, "apply_restamp_atomic", lambda *a, **k: {}
         )
-        monkeypatch.setattr(
-            products_mod, "_refresh_collections_after_product", lambda *a, **k: None
-        )
 
         body = products_mod.ProductUpdate(mrp=1030.0)
         out = asyncio.run(
