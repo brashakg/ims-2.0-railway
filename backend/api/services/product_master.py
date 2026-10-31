@@ -3826,7 +3826,10 @@ def revive_discarded_draft(
     undoes an admin's discard. The spine is written first,
     fenced by the permanent-delete claim (#1273): a product a delete holds is
     never revived (nothing written), and a revive and a delete never both
-    win. True when revived; False (nothing written) for any other product."""
+    win. A catalogue-copy write that fails puts the spine back as it was
+    (fenced on this revive's own stamp) and raises, so the product is still a
+    discarded draft the next order revives. True when revived; False
+    (nothing written) for any other product."""
     if product_repo is None or not product_id:
         return False
     spine = product_repo.find_by_id(product_id)
@@ -3869,18 +3872,38 @@ def revive_discarded_draft(
         twin_id = spine.get("pim_product_id") or product_id
         # Back as _build_pim_doc made it: in Needs review, naming its
         # spine, with no projected is_active and no delete stamp.
-        cat.update_one(
-            {"id": twin_id},
-            {
-                "$set": {
-                    "needs_review": True,
-                    "spine_product_id": product_id,
-                    **price,
-                    **({"pricing.mrp": price["mrp"]} if price else {}),
+        try:
+            cat.update_one(
+                {"id": twin_id},
+                {
+                    "$set": {
+                        "needs_review": True,
+                        "spine_product_id": product_id,
+                        **price,
+                        **({"pricing.mrp": price["mrp"]} if price else {}),
+                    },
+                    "$unset": {"is_active": "", "deleted_at": "", "deleted_by": ""},
                 },
-                "$unset": {"is_active": "", "deleted_at": "", "deleted_by": ""},
-            },
-        )
+            )
+        except Exception:
+            # The twin stayed deleted, outside Needs review: put the spine
+            # back EXACTLY as it was, so it is still a discarded draft the
+            # next order revives (twin and all). Fenced on this revive's own
+            # stamp: a later write to the spine is never undone.
+            back = {k: spine.get(k) for k in revived}
+            try:
+                if not product_repo.update(product_id, back, expected={"revived_at": now, "revived_by": actor}):
+                    logger.error(
+                        "[PRODUCT_MASTER] revive of %s: twin write failed and the spine changed "
+                        "meanwhile, so it was left as it is", product_id,
+                    )
+            except Exception:  # noqa: BLE001 - the twin's error is the one raised
+                logger.error(
+                    "[PRODUCT_MASTER] revive of %s: twin write failed AND the spine could not be "
+                    "put back -- the spine is revived but its catalogue copy is still deleted",
+                    product_id, exc_info=True,
+                )
+            raise
     logger.info(
         "[PRODUCT_MASTER] discarded draft %s ordered again by %s: back in Needs review",
         product_id,
