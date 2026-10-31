@@ -143,6 +143,8 @@ _LIST_PROJECTION: Dict[str, int] = {
     "rx_hold_cleared": 1,
     "rx_hold_cleared_at": 1,
     "invoice_number": 1,
+    # Website 1: IMS total vs what Shopify charged (the row's MISMATCH chip).
+    "shopify_totals_check": 1,
     "placed_at": 1,
     "created_at": 1,
     "updated_at": 1,

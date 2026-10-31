@@ -86,6 +86,29 @@ def build_invoice_lines(order: Dict[str, Any]) -> List[Dict[str, Any]]:
     return rows
 
 
+def ship_to_lines(order: Dict[str, Any]) -> List[str]:
+    """The Ship To block: the order's own delivery address (an online order's
+    checkout address). [] when the order has none. Pure."""
+    a = order.get("shipping_address")
+    if not isinstance(a, dict):
+        return []
+
+    def join(*keys: str, sep: str = ", ") -> str:
+        return sep.join(str(a[k]).strip() for k in keys if str(a.get(k) or "").strip())
+
+    place = " ".join(p for p in (join("city", "province"), join("zip")) if p)
+    lines = [
+        join("name") or join("first_name", "last_name", sep=" "),
+        join("company"),
+        join("address1", "address2"),
+        place,
+        join("country"),
+    ]
+    if str(a.get("phone") or "").strip():
+        lines.append(f"Phone: {str(a['phone']).strip()}")
+    return [ln for ln in lines if ln]
+
+
 def build_hsn_summary_rows(
     order: Dict[str, Any], interstate: bool
 ) -> List[Dict[str, Any]]:
@@ -316,6 +339,11 @@ def build_invoice_pdf(
     caddr = str(c.get("address") or "").strip()
     if caddr:
         cust_lines.append(Paragraph(_esc(caddr), styles["small"]))
+    ship_to = ship_to_lines(order)
+    if ship_to:
+        cust_lines.append(Spacer(1, 2 * mm))
+        cust_lines.append(Paragraph("Ship To", styles["cellb"]))
+        cust_lines.extend(Paragraph(_esc(ln), styles["small"]) for ln in ship_to)
     story.extend(cust_lines)
     story.append(Spacer(1, 4 * mm))
 

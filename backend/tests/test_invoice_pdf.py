@@ -242,3 +242,32 @@ def test_pdf_survives_and_keeps_angle_bracket_names(wired):
     r = p("/orders/ORD-PDF-1/invoice.pdf")
     assert r.status_code == 200, r.text
     assert r.content[:5] == b"%PDF-"
+
+
+def test_ship_to_lines_come_from_the_orders_delivery_address():
+    """Website 1: an online order prints WHERE it ships (the checkout address
+    kept on the order); an order without one prints no Ship To block."""
+    from api.services.invoice_pdf import ship_to_lines
+
+    order = {**_ORDER, "shipping_address": {
+        "name": "Ravi Kumar", "address1": "12 MG Road", "address2": "Flat 3",
+        "city": "Pune", "province": "Maharashtra", "zip": "411001",
+        "country": "India", "phone": "+919800000000",
+    }}
+    assert ship_to_lines(order) == [
+        "Ravi Kumar",
+        "12 MG Road, Flat 3",
+        "Pune, Maharashtra 411001",
+        "India",
+        "Phone: +919800000000",
+    ]
+    assert ship_to_lines(_ORDER) == []
+
+
+def test_pdf_renders_with_a_ship_to_block(wired):
+    client, repo = wired
+    repo._doc["shipping_address"] = {"name": "Ravi", "address1": "12 MG Road",
+                                     "city": "Pune", "zip": "411001"}
+    r = client.get("/orders/ORD-PDF-1/invoice.pdf")
+    assert r.status_code == 200, r.text
+    assert r.content[:5] == b"%PDF-"

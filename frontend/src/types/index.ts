@@ -397,6 +397,32 @@ export interface Order {
    *  the axios camelCase aliaser also exposes it as trackingToken. */
   trackingToken?: string;
   tracking_token?: string;
+  /** Online orders: the delivery address typed at checkout (Shopify field
+   *  names, kept as stored). */
+  shippingAddress?: ShippingAddress | null;
+  /** Online orders: IMS total vs what Shopify charged (MISMATCH = flagged). */
+  shopifyTotalsCheck?: ShopifyTotalsCheck;
+}
+
+export interface ShippingAddress {
+  name?: string;
+  first_name?: string;
+  last_name?: string;
+  company?: string;
+  address1?: string;
+  address2?: string;
+  city?: string;
+  province?: string;
+  zip?: string;
+  country?: string;
+  phone?: string;
+}
+
+export interface ShopifyTotalsCheck {
+  status: 'MATCH' | 'MISMATCH' | 'UNCHECKED';
+  shopifyTotal?: number;
+  imsTotal?: number;
+  difference?: number;
 }
 
 // ============================================================================

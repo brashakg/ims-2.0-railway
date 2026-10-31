@@ -298,7 +298,11 @@ export function OrderShippingCard({
                     s.tracking_status || s.status,
                   )}`}
                 >
-                  {s.tracking_status || s.status}
+                  {/* A dry-run booking never reached a courier and changes
+                      nothing on the order - say so, not just "SIMULATED". */}
+                  {s.simulated || s.status === 'SIMULATED'
+                    ? 'Simulated - not shipped'
+                    : s.tracking_status || s.status}
                 </span>
               </div>
               <div className="flex items-center justify-between mt-1.5">
