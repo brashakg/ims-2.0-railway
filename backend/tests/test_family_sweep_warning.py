@@ -73,3 +73,28 @@ def test_a_catalogue_hold_has_its_own_line_never_sold_out(client, auth_headers, 
     bucket = response.json()["summary"]["products"]
     assert bucket.get("catalogue_held") == 1, bucket
     assert "stock_not_written" not in bucket and "stock_warning" not in bucket
+
+
+@pytest.mark.parametrize("code", ["SHOPIFY_LOCATION_UNMAPPED", "PRICE_NOT_SYNCED", "PHOTOS_NOT_SYNCED"])
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_catalogue_hold_is_counted_whatever_code_wins_the_press(client, auth_headers, patched_db, monkeypatch, code):
+    # Review of #1295: counted like variants_held, outside the code chain --
+    # a stock / price / photo code winning the press never hides the hold.
+    conn, _ = patched_db
+    conn.db["catalog_products"].insert_one(_live_reordered())
+
+    async def push(db, product, variants, blocked=None):
+        return PushResult(
+            mode="LIVE", entity="product", action="update", target_id=product["id"],
+            ok=True, code=code, listing={"held": [UNPRICED]},
+            stock={"ok": True, "set": 0},
+        )
+
+    async def stock(db):
+        return PushResult(mode="LIVE", entity="stock", action="noop", ok=True)
+
+    monkeypatch.setattr(shopify_push, "push_product", push)
+    monkeypatch.setattr(shopify_push, "sync_stock_levels", stock)
+    response = client.post("/api/v1/online-store/push/all-pending?entities=products", headers=auth_headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["summary"]["products"].get("catalogue_held") == 1, response.json()["summary"]

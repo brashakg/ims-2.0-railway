@@ -277,6 +277,7 @@ from .listing import (  # noqa: F401
     FAMILY_UNREADABLE,
     OPTION_CLASH,
     OPTION_MISSING,
+    catalogue_holds,
     held_for_catalogue,
     listing_view,
     missing_option_holds,
