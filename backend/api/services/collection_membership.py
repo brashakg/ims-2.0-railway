@@ -12,8 +12,10 @@ collection_registry._facts), so IMS and the website can never disagree.
     matches(fact, rules, dj)   Shopify's reading of one rule set (pure)
     online_facts(db, strict)   every listing ON the website (Active on
                                Shopify, not a Draft, not taken down,
-                               archived or deleted) -- what a count counts;
-                               strict raises (every writer uses it)
+                               archived or deleted) with the colour / size
+                               SKUs online by online_catalog.skus_on_shopify
+                               -- what a count counts; strict raises (every
+                               writer uses it)
     catalogue_facts(db)        every listing IMS holds, on the website or
                                not (the online-block classifier's haystack)
     members(db, c, facts)      the listings of collection C (+ why empty)
@@ -145,15 +147,30 @@ def online_facts(db, strict: bool = False) -> List[Dict[str, Any]]:
     instead: every WRITER of what membership decides -- the generated menu
     push, the collection_products view -- must never read an unreadable
     catalogue as "no products" (that pushed an About-Us-only menu LIVE)."""
-    from .shopify_push.collection_registry import listing_facts
-
     if strict:
-        return listing_facts(db)
+        return _online(db)
     try:
-        return listing_facts(db)
+        return _online(db)
     except Exception as exc:  # noqa: BLE001 -- a count, never a write
         logger.warning("[MEMBERSHIP] online listings unreadable: %s", exc)
         return []
+
+
+def _online(db) -> List[Dict[str, Any]]:
+    """listing_facts, each listing's colour / size SKUs cut to the ones on
+    the website by #1275's THE colour/size online rule
+    (online_catalog.skus_on_shopify; the lead stands for its live page).
+    Raises on a read failure."""
+    from .online_catalog import skus_on_shopify
+    from .shopify_push.collection_registry import listing_facts
+
+    facts = listing_facts(db)
+    rest = [s for f in facts for s in (f.get("skus") or [])[1:]]
+    mapped = skus_on_shopify(db, rest) if rest else set()
+    for f in facts:
+        skus = f.get("skus") or []
+        f["skus"] = skus[:1] + [s for s in skus[1:] if s in mapped]
+    return facts
 
 
 def facts_for(db, doc: Dict[str, Any]) -> Dict[str, Any]:

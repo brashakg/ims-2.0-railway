@@ -264,10 +264,12 @@ def test_a_colour_mapped_on_its_own_variant_row_is_not_unmapped():
         "catalog_products": _FakeColl([lead, kid, new]),
         "catalog_variants": _FakeColl([{"sku": "K", "parent_product_id": "t1",
                                         "shopify_variant_id": "gid://shopify/ProductVariant/2"}]),
-        "collection_products": _FakeColl([{"sku": s} for s in ("L", "K", "N")]),
     })
     orph = sh.orphan_skus(db)
-    assert orph["no_mapping"] == 1 and [o["sku"] for o in orph["orphans"]] == ["N"]
+    # Collection membership is its own rule (collection_membership); only the
+    # mapping reason is under test here.
+    unmapped = [o["sku"] for o in orph["orphans"] if "no_mapping" in o["reasons"]]
+    assert orph["no_mapping"] == 1 and unmapped == ["N"]
 
 
 def test_archived_products_are_left_out_of_every_count():
@@ -281,7 +283,8 @@ def test_archived_products_are_left_out_of_every_count():
     db = _FakeDb({
         "catalog_products": _FakeColl([live, gone_twin, gone_spine]),
         "products": _FakeColl([{"product_id": "S3", "sku": "SKU-3", "deleted_at": "2026-10-02"}]),
-        "collection_products": _FakeColl([{"handle": "sun", "sku": "SKU-1"}]),
+        # THE website membership rule: the live Ray-Ban listing is in Ray-Ban.
+        "ecom_collections": _FakeColl([_RAYBAN]),
     })
     out = sh.readiness_score(db)
     assert out["total_products"] == 1 and out["coverage"]["missing"]["image"] == 0

@@ -239,3 +239,24 @@ def test_price_bands_read_the_prices_the_push_sends_per_colour():
         {"field": "variant_price", "relation": "LESS_THAN", "value": "10000"}]}
     assert cm.member_skus(db, band, [fact]) == [lead["sku"]]
     assert cm.member_skus(db, band, [fact], every_sku=True) == fact["skus"]
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_colour_is_in_a_website_collection_only_when_it_is_online():
+    """#1275's THE colour/size online rule (online_catalog.skus_on_shopify)
+    decides which of a live listing's colour SKUs are on the website: a
+    colour with no Shopify variant mapped is in no website collection
+    (Store Health, the view) until its variant is."""
+    from tests import test_shopify_model_listings as ml
+
+    db = ml._world()
+    pids = ml._family(db, [("Gold", "001"), ("Black", "002/58", "58")])
+    lead_sku = db["products"].find_one({"product_id": pids[0]})["sku"]
+    colour = db["products"].find_one({"product_id": pids[1]})["sku"]
+    db["catalog_products"].update_one({"sku": lead_sku}, {"$set": {
+        "ecom.shopify_product_id": "gid://shopify/Product/5", "ecom.status": "ACTIVE"}})
+    fact = next(f for f in cm.online_facts(db, strict=True) if f["sku"] == lead_sku)
+    assert fact["skus"] == [lead_sku]
+    db["catalog_variants"].update_one({"sku": colour}, {"$set": {"shopify_variant_id": "gid://shopify/ProductVariant/9"}})
+    fact = next(f for f in cm.online_facts(db, strict=True) if f["sku"] == lead_sku)
+    assert fact["skus"] == [lead_sku, colour]
