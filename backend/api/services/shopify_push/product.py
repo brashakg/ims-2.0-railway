@@ -1595,15 +1595,20 @@ query imsListingTruth($id: ID!) {
 
 _SKU_SEARCH = """
 query imsSkuSearch($q: String!) {
-  productVariants(first: 5, query: $q) { nodes { id sku product { id } } }
+  productVariants(first: 25, query: $q) { nodes { id sku product { id } } }
 }
 """
 
 
-async def _sku_still_listed(db, own_skus: set) -> Optional[str]:
+async def _sku_still_listed(db, own_skus: set, plan: Dict[str, Any]) -> Optional[str]:
     """After Shopify says the planned node is gone: is this product's SKU
     still selling under ANOTHER id (a variant added in the admin, a merge
-    revert)? The refusal, or None. A failed search refuses too."""
+    revert)? The refusal, or None. A failed search refuses too. The planned
+    variant / listing itself never counts: Shopify's search index can still
+    show what was just deleted -- for a colour only its own variant (the
+    model's listing stays, and another variant there selling this SKU counts)."""
+    ours = {plan.get("variant_gid")} | ({plan.get("product_gid")} if plan.get("kind") == "product" else set())
+    ours.discard(None)
     for sku in sorted(own_skus):
         q = 'sku:"' + sku.replace(chr(92), "").replace(chr(34), "") + '"'
         try:
@@ -1613,7 +1618,12 @@ async def _sku_still_listed(db, own_skus: set) -> Optional[str]:
         if not isinstance(body, dict) or body.get("errors") or not isinstance(body.get("data"), dict):
             return f"the website could not be searched for {sku}"
         nodes = ((body["data"].get("productVariants") or {}).get("nodes")) or []
-        if any(str(n.get("sku") or "").strip() == sku for n in nodes):
+        if any(
+            str(n.get("sku") or "").strip() == sku
+            and _as_shopify_gid(n.get("id"), "ProductVariant") not in ours
+            and _as_shopify_gid((n.get("product") or {}).get("id"), "Product") not in ours
+            for n in nodes
+        ):
             return f"its SKU {sku} is still on the website under another listing"
     return None
 
@@ -1637,7 +1647,7 @@ async def shopify_removal_truth(db, plan: Dict[str, Any]) -> Tuple[bool, Optiona
     node = body["data"].get("node")
     if node is None:
         # Gone -- unless its SKU still sells under another id.
-        still = await _sku_still_listed(db, own_skus)
+        still = await _sku_still_listed(db, own_skus, plan)
         return (False, still) if still else (True, None)
     if plan["kind"] == "variant":
         if str(node.get("sku") or "").strip() not in own_skus:

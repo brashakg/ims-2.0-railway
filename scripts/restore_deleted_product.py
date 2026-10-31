@@ -90,6 +90,9 @@ def restore(db, backup_id: str, *, commit: bool = False) -> Dict[str, Any]:
         return {"refused": [f"no backup {backup_id}"]}
     if backup.get("status") == "restored":
         return {"refused": [f"backup {backup_id} was already restored"]}
+    if backup.get("status") not in ("done", "deleting"):
+        # prepared / removing / removed / aborted: no IMS record was deleted.
+        return {"refused": [f"backup {backup_id} is {backup.get('status')!r}: nothing in IMS was deleted"]}
     docs: Dict[str, List[Dict]] = backup.get("docs") or {}
     updated: Dict[str, List[Dict]] = backup.get("updated_docs") or {}
     pid = backup.get("product_id")
@@ -134,9 +137,13 @@ def restore(db, backup_id: str, *, commit: bool = False) -> Dict[str, Any]:
         db["tasks"].update_one({"_id": t["_id"]}, {"$addToSet": {"payload.product_ids": pid}})
     for parent in updated.get("catalog_products") or []:
         qty = (((parent.get("ecom") or {}).get("online_stock") or {}).get("quantities")) or {}
-        back = {f"ecom.online_stock.quantities.{s}": qty[s] for s in skus if s in qty}
-        if back:
-            db["catalog_products"].update_one({"_id": parent["_id"]}, {"$set": back})
+        for s in skus:
+            if s in qty:
+                key = f"ecom.online_stock.quantities.{s}"
+                # Only where it is still missing: a newer baseline stays.
+                db["catalog_products"].update_one(
+                    {"_id": parent["_id"], key: {"$exists": False}}, {"$set": {key: qty[s]}}
+                )
     shopify = backup.get("shopify") or {}
     if (shopify.get("result") or {}).get("ok") and shopify.get("plan"):
         from api.services.product_purge import _forget_shopify

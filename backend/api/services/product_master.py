@@ -3823,11 +3823,10 @@ def revive_discarded_draft(
 
     Called AFTER the order (or the draft edit) that names it is saved
     (purchase_orders.create_typed_in_products), so a refused order never
-    undoes an admin's discard. The catalogue copy is written
-    first: a failure there leaves the spine still discarded (the order's send
-    then refuses the line, loudly), never a provisional spine whose copy is
-    missing from Needs review. True when revived; False (nothing written) for
-    any other product."""
+    undoes an admin's discard. The spine is written first,
+    fenced by the permanent-delete claim (#1273): a product a delete holds is
+    never revived (nothing written), and a revive and a delete never both
+    win. True when revived; False (nothing written) for any other product."""
     if product_repo is None or not product_id:
         return False
     spine = product_repo.find_by_id(product_id)
@@ -3843,6 +3842,25 @@ def revive_discarded_draft(
     price: Dict[str, Any] = {}
     if mrp not in (None, "") and mrp != spine.get("mrp"):
         price = {"mrp": mrp}
+    # The SPINE first, fenced by the permanent-delete claim (#1273): a
+    # delete that holds it and this revive never both win; nothing is
+    # written when the fence is lost.
+    revived = {
+        "provisional": True,
+        "is_active": False,
+        # No longer deleted: a revived draft is a new buy again, not a
+        # discontinued product (reorder_policy.discontinued reads this).
+        "deleted_at": None,
+        "discarded_draft": False,
+        "revived_at": now,
+        "revived_by": actor,
+        "purge_run": None,
+        "purge_run_at": None,
+        **price,
+    }
+    if not product_repo.update(product_id, revived, expected=_free_claim()):
+        logger.warning("[PRODUCT_MASTER] %s was claimed by a permanent delete: not revived", product_id)
+        return False
     # `db is not None`, never a truth test of an attribute: on a pymongo
     # Database any attribute is a Collection, and bool() of one raises
     # (the same trap services/online_delist._raw_db works around).
@@ -3863,26 +3881,6 @@ def revive_discarded_draft(
                 "$unset": {"is_active": "", "deleted_at": "", "deleted_by": ""},
             },
         )
-    revived = {
-        "provisional": True,
-        "is_active": False,
-        # No longer deleted: a revived draft is a new buy again, not a
-        # discontinued product (reorder_policy.discontinued reads this).
-        "deleted_at": None,
-        "discarded_draft": False,
-        "revived_at": now,
-        "revived_by": actor,
-        **price,
-    }
-    if spine.get("purge_run"):
-        # A dead purge claim on it: the write is fenced like Restore's, so a
-        # delete that takes the claim meanwhile and this revive never both win.
-        revived.update(purge_run=None, purge_run_at=None)
-        if not product_repo.update(product_id, revived, expected=_free_claim()):
-            logger.warning("[PRODUCT_MASTER] %s was claimed by a permanent delete: not revived", product_id)
-            return False
-    else:
-        product_repo.update(product_id, revived)
     logger.info(
         "[PRODUCT_MASTER] discarded draft %s ordered again by %s: back in Needs review",
         product_id,

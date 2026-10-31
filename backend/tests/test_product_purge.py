@@ -271,6 +271,7 @@ class _FakeShopify:
         self.read_fail = {}  # gid -> "raise" | "errors" for a ground-truth read
         self.paged = set()  # listing gids whose variants run past one page
         self.media_fail = False
+        self.search_lag = {}  # variant gid -> (sku, product gid): still in the search index
         self.on_media = None  # called while productDeleteMedia answers
         self.calls = []
         self.reads = []
@@ -291,6 +292,8 @@ class _FakeShopify:
             hits = [{"id": v, "sku": s_, "product": {"id": pg}}
                     for pg, vs in self.listings.items() if pg in self.nodes
                     for v, s_ in vs.items() if s_ == sku and v in self.nodes]
+            hits += [{"id": v, "sku": s_, "product": {"id": pg}}
+                     for v, (s_, pg) in self.search_lag.items() if s_ == sku]
             return {"data": {"productVariants": {"nodes": hits}}}
         if "imsListingTruth" in query:
             gid = variables["id"]
@@ -1632,3 +1635,92 @@ def test_r3_a_run_that_died_after_recording_the_removal_is_finished_and_never_re
     res = _purge(env, "P1")  # DARK: the env default; _graphql raises if called
     assert res.status_code == 200, res.text
     assert not db.products.find_one({"product_id": "P1"})
+
+
+# ---------------------------------------------------------------------------
+# Closure check of #1273 (33df7091)
+# ---------------------------------------------------------------------------
+
+
+def test_final_1_only_the_spine_holds_the_models_listing_id(env):
+    # test_r3_1 with the model's listing id on the SPINE alone: the spine
+    # half of _forget_shopify drops it, so the next press goes through.
+    db = env["db"]
+    _size_of_live_model(db)
+    db.products.update_one({"product_id": "P2"}, {"$set": {"shopify_product_id": GID4}})
+    fake = _live(env, {GID4, VGID2})
+    real = fake.__call__
+
+    async def _promo_meanwhile(db_, query, variables):
+        if "productVariantsBulkDelete(" in query:
+            db.promo_rules.insert_one({"promo_id": "PR-1", "name": "Diwali", "product_ids": ["P2"]})
+        return await real(db_, query, variables)
+
+    env["mp"].setattr(shopify_push, "_graphql", _promo_meanwhile)
+    res = _purge(env, "P2")
+    assert res.status_code == 409 and "already taken off the website" in res.json()["detail"]
+    assert "shopify_product_id" not in db.products.find_one({"product_id": "P2"})
+    db.promo_rules.delete_many({})
+    assert _purge(env, "P2").status_code == 200
+
+
+def test_final_2_a_revive_that_loses_the_fence_writes_nothing(env):
+    # The revive read "no claim", then a delete claimed it: the fenced spine
+    # write loses, and the twin (written after it) is never touched.
+    from datetime import timezone
+
+    from api.services import product_master
+
+    db = env["db"]
+    db.products.update_one({"product_id": "P1"}, {"$set": {
+        "discarded_draft": True, "catalog_status": "DRAFT", "is_active": False,
+        "purge_run": "PURGE-LIVE", "purge_run_at": datetime.now(timezone.utc)}})
+    env["mp"].setattr(product_purge, "claim_is_live", lambda doc: False)  # read before the claim
+    assert product_master.revive_discarded_draft("P1", ProductRepository(db.products), db=db) is False
+    assert db.products.find_one({"product_id": "P1"})["deleted_at"] == GONE
+    twin = db.catalog_products.find_one({"id": "T-P1"})
+    assert twin["deleted_at"] == GONE and "needs_review" not in twin
+
+
+@pytest.mark.parametrize("kind", ["variant", "product"])
+def test_final_3_the_search_index_still_showing_our_own_delete_is_not_a_hit(env, kind):
+    db = env["db"]
+    if kind == "variant":
+        _size_of_live_model(db)
+        fake = _live(env, {GID4})  # VGID2 already gone
+        fake.search_lag[VGID2] = ("SKU-P2", GID4)
+        pid = "P2"
+    else:
+        _on_shopify(db)
+        fake = _live(env, set())  # GID1 already gone
+        fake.search_lag[VG1] = ("SKU-P1", GID1)
+        pid = "P1"
+    res = _purge(env, pid)
+    assert res.status_code == 200, res.text
+
+
+def test_final_4_the_restore_script_refuses_a_backup_that_deleted_nothing(env):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "scripts"))
+    import restore_deleted_product as script
+
+    db = env["db"]
+    db.deleted_products_backup.insert_one({"backup_id": "DPB-AB", "product_id": "P1", "status": "aborted",
+                                           "docs": {}, "updated_docs": {}})
+    out = script.restore(db, "DPB-AB", commit=True)
+    assert out["refused"] and "nothing in IMS was deleted" in out["refused"][0]
+
+
+def test_final_4_the_restore_script_never_overwrites_a_newer_stock_baseline(env):
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__)))), "scripts"))
+    import restore_deleted_product as script
+
+    db = env["db"]
+    _size_of_live_model(db)
+    _live(env, {GID4, VGID2})
+    assert _purge(env, "P2").status_code == 200
+    backup_id = db.deleted_products_backup.find_one()["backup_id"]
+    db.catalog_products.update_one({"id": "T-P4"}, {"$set": {"ecom.online_stock.quantities.SKU-P2": {"S1": 7}}})
+    assert script.restore(db, backup_id, commit=True).get("committed")
+    assert db.catalog_products.find_one({"id": "T-P4"})["ecom"]["online_stock"]["quantities"]["SKU-P2"] == {"S1": 7}
