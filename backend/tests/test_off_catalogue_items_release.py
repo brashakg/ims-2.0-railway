@@ -5350,7 +5350,6 @@ def test_r9_the_bills_cost_finishes_the_draft_as_the_editor_does(world, monkeypa
         world.db,
         {"invoice_id": "PI-R9", "grn_id": grn["grn_id"]},
         {"lines": [{"product_id": draft_id, "qty": 2, "unit_price": 1200}]},
-        {"valuation_method": "MOVING_AVERAGE"},
     )
     prod = world.product(draft_id)
     twin = _twin_of(world, draft_id)

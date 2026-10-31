@@ -138,6 +138,12 @@ function ThreeWayTable({ lines, tol }: { lines: MatchLine[]; tol?: number }) {
                 <td className="px-2 py-1.5 border-r border-gray-200">
                   <div className="font-medium text-gray-900">{l.description || l.product_id || `Line ${i + 1}`}</div>
                   {l.hsn && <div className="text-[11px] text-gray-400">HSN {l.hsn}</div>}
+                  {/* S4: the product's one average cost and its history. */}
+                  {l.product_id && (
+                    <a href={`/inventory/stock/${encodeURIComponent(l.product_id)}`} className="text-[11px] hover:underline">
+                      Cost history
+                    </a>
+                  )}
                 </td>
                 {/* PO */}
                 <td className="px-2 py-1.5 text-right text-gray-700">{num(l.ordered_qty ?? undefined)}</td>
