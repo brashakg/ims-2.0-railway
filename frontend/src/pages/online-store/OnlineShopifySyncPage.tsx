@@ -675,9 +675,9 @@ export default function OnlineShopifySyncPage() {
       </div>
       <p className="text-sm text-gray-500 mb-4 max-w-3xl">
         IMS is the only writer of products (with their photos), collections and menus to the website
-        (bettervision.in). An automatic sync runs on a schedule; the buttons here send now. If website writes
-        are switched off on the server, every action is a preview and nothing is sent — the banner below says
-        which.
+        (bettervision.in). An automatic sync runs on a schedule (unless switched off in IMS settings); the buttons
+        here send now. If website writes are switched off on the server, every action is a preview and nothing
+        is sent — the banner below says which.
       </p>
 
       {/* Prominent DARK / LIVE banner (shared component). */}
