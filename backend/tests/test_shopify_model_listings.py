@@ -1116,6 +1116,7 @@ def test_a_colour_whose_twin_lost_its_half_of_the_link_never_gets_a_listing(monk
     _live(monkeypatch, fake)
     res = _push(db, pids[1])
     assert res.ok is False and res.reason == "variant_of" and fake.calls == []
+    assert "website page" in res.error and "push the model" not in res.error, res.error
 
 
 # ---------------------------------------------------------------------------

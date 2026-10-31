@@ -751,7 +751,7 @@ export default function MenusPage() {
                       title={
                         dirty
                           ? 'Save changes before publishing'
-                          : 'Push this menu to Shopify (dry-run unless live writes are armed)'
+                          : 'Send this menu to the website (bettervision.in)'
                       }
                     >
                       {publishing ? (

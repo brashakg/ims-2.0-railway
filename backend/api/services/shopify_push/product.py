@@ -148,8 +148,8 @@ async def push_product(
             target_id=pid,
             ok=False,
             error=(
-                f"size variant of {parent}: its price, barcode and stock ride "
-                "the parent's listing -- push the parent"
+                f"This is a size of {parent}: it is sold on {parent}'s website page, "
+                f"not a page of its own. Send {parent} to the website instead."
             ),
             reason="variant_of",
         )
@@ -227,8 +227,8 @@ async def push_product(
             target_id=pid,
             ok=False,
             error=(
-                f"variant of {listing['variant_of']}: its price, barcode and stock ride "
-                "its model's listing -- push the model"
+                "This is a colour/size of another model: it is sold on that model's "
+                "website page, not a page of its own. Send the model to the website instead."
             ),
             reason="variant_of",
         )
@@ -1204,8 +1204,8 @@ async def push_product_delist(db, product: Dict[str, Any]) -> PushResult:
             ok=True,
             reason="variant_of",
             error=(
-                "size variant rides the parent's listing -- deactivate the "
-                "product to stop selling this size, or take down the parent"
+                "This size is sold on its parent's website page: deactivate this product "
+                "to stop selling the size, or take the parent off the website."
             ),
         )
     if not existing_gid:
