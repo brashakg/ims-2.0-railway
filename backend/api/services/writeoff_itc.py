@@ -19,7 +19,11 @@ ONE rule for every write-off door:
     GSTR-3B until the bill's GSTIN is settled.
   - how much: a bill line's heads H shared over its q pieces cumulatively --
     piece k gets round(H*k/q) - round(H*(k-1)/q) -- so a whole line written
-    off reverses exactly H.
+    off reverses exactly H. A header-only bill (or a transfer's aggregate
+    line) shares its heads the same way, by the fraction of the bill each
+    piece is (its cost / the bill's taxable value, else 1 / the pieces the
+    bill brought in), summed over the bill's rows: the whole bill written
+    off reverses exactly its heads.
   - when: the write-off's IST month; a locked (filed) month moves it to the
     first open month, the original kept as `writeoff_period`.
   - month_reversal(db, gstin, period): what GSTR-3B Table 4(B)(1) adds.
@@ -30,9 +34,8 @@ ONE rule for every write-off door:
     re-claim row in the first open month.
 
 ponytail: k is read from the rows already recorded, so two write-offs of the
-same line at the same instant could share one k (a paisa off); a header-only
-bill (or a transfer's aggregate line) shares by the piece's cost, rounded per
-piece. A re-claim row nets inside month_reversal -- a month whose re-claims
+same line at the same instant could share one k (a paisa off); an atomic
+counter would need undo / crash bookkeeping of its own. A re-claim row nets inside month_reversal -- a month whose re-claims
 outweigh its reversals goes negative; ask the CA where a re-claim files.
 """
 from __future__ import annotations
@@ -139,6 +142,19 @@ def _pieces_recorded(db, bill_id, product_id) -> float:
          "superseded": {"$ne": True}}, {"pieces": 1}))
 
 
+def _share_recorded(db, bill_id) -> float:
+    return sum(_f(r.get("share")) for r in db.get_collection(COLLECTION).find(
+        {"bill_id": bill_id, "kind": "REVERSAL", "superseded": {"$ne": True},
+         "share": {"$exists": True}}, {"share": 1}))
+
+
+def _cumulative(heads: dict, lo: float, hi: float, whole: float = 1.0) -> dict:
+    """The slice (lo, hi] of `whole` of the heads: consecutive slices add up
+    to the heads exactly."""
+    return {h: round(round(heads[h] * hi / whole, 2) - round(heads[h] * lo / whole, 2), 2)
+            for h in _HEADS}
+
+
 def _unit_credit(db, unit: dict, gstin_of) -> Optional[dict]:
     """The credit claimed on this unit's pieces: {bill_id, gstin ('' when no
     return places it), entity_id, igst, cgst, sgst}, or None when none was."""
@@ -166,13 +182,11 @@ def _unit_credit(db, unit: dict, gstin_of) -> Optional[dict]:
         if claimed is None or qty <= 0:
             return None
         done = _pieces_recorded(db, claimed[0].get("bill_id"), pid)
-        lo, hi = min(done, qty), min(done + n, qty)
-        amount = {h: round(round(heads[h] * hi / qty, 2) - round(heads[h] * lo / qty, 2), 2)
-                  for h in _HEADS}
+        amount = _cumulative(heads, min(done, qty), min(done + n, qty), qty)
     else:
         # A header-only bill, or one whose lines name no product (a transfer's
-        # aggregate line): its GST shared by the piece's cost, else equally
-        # over the pieces it brought in.
+        # aggregate line): its GST shared cumulatively by the piece's cost,
+        # else equally over the pieces it brought in.
         amount = None
         for bill in bills:
             lines = bill.get("lines") or []
@@ -183,13 +197,16 @@ def _unit_credit(db, unit: dict, gstin_of) -> Optional[dict]:
             if taxable <= 0 or g is None:
                 continue
             price = _f(unit.get("unit_cost")) or _f(unit.get("cost_price"))
-            share = price / taxable if price else 1.0 / max(_bill_units(db, bill), 1)
-            amount = {h: round(_f(bill.get(f"{h}_total")) * share * n, 2) for h in _HEADS}
+            share = (price / taxable if price else 1.0 / max(_bill_units(db, bill), 1)) * n
+            done = _share_recorded(db, bill.get("bill_id"))
+            amount = _cumulative({h: _f(bill.get(f"{h}_total")) for h in _HEADS},
+                                 min(done, 1.0), min(done + share, 1.0))
+            amount["share"] = share
             claimed = (bill, g)
             break
         if amount is None:
             return None
-    if not any(amount.values()):
+    if not any(amount[h] for h in _HEADS):
         return None
     bill, g = claimed
     return {"bill_id": bill.get("bill_id"), "gstin": g,
@@ -285,6 +302,7 @@ def record_writeoff(db, units: Iterable[dict], *, source_type: str, source_id: s
                 "entity_id": credit["entity_id"], "period": period,
                 **({"writeoff_period": booked} if booked != period else {}),
                 **{h: credit[h] for h in _HEADS},
+                **({"share": credit["share"]} if "share" in credit else {}),
                 "source_type": source_type, "source_id": source_id,
                 "recorded_by": actor_id, "recorded_at": datetime.utcnow(),
             }},

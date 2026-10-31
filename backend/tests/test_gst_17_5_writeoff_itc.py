@@ -564,3 +564,75 @@ def test_a_quarantined_piece_put_back_on_sale_keeps_no_reversal(world, october, 
     else:
         _run(lift_quarantine_stock_unit(sid, LiftQuarantineRequest(lift_reason="put back by mistake"), ADMIN))
     assert db.itc_writeoff_reversals.count_documents({}) == 0
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: exact to the paisa on every bill shape; a supplier return
+# ---------------------------------------------------------------------------
+
+def _three_frames(db, grn_id, cost):
+    """Three frames on one receipt, each at `cost` (0: no price)."""
+    _po_receipt(db, grn_id, cost=cost)
+    priced = {"unit_cost": cost, "cost_price": cost} if cost else {}
+    db.stock_units.insert_one({"stock_id": f"SU-{grn_id}-2", "product_id": FRAME, "store_id": STORE,
+                               "status": "AVAILABLE", "source_type": "GRN", "source_id": grn_id,
+                               "grn_id": grn_id, **priced})
+
+
+@pytest.mark.parametrize("cost", [0, 333.33], ids=["unpriced", "priced"])
+def test_a_header_only_bill_written_off_piece_by_piece_reverses_exactly_its_heads(world, october, cost):
+    """A walk-in receipt booked on the AP door (no lines): Rs 25.00 + 25.00
+    of GST over three pieces. Rounded piece by piece that was 8.33 x 3 =
+    24.99 a head; shared cumulatively, all three reverse exactly 50.00."""
+    db = world["db"]
+    _three_frames(db, "GRN-WO-0021", cost)
+    db.vendor_bills.insert_one({
+        "bill_id": "HB-21", "bill_number": "HB-21", "vendor_id": DEALER, "store_id": STORE,
+        "grn_id": "GRN-WO-0021", "bill_date": "2026-09-14", "status": "OUTSTANDING",
+        "recipient_entity_id": ENTITY, "recipient_gstin": SHOP_GSTIN, "itc_eligible": True,
+        "taxable_amount": 999.99, "cgst_total": 25.0, "sgst_total": 25.0, "igst_total": 0.0,
+        "tax_amount": 50.0,
+    })
+    for i in range(3):
+        _damage(db, f"SU-GRN-WO-0021-{i}")
+    ret = r3b._compute_gstr3b(OCTOBER, STORE)
+    assert (ret["itcWriteOffReversed"]["centralTax"], ret["itcWriteOffReversed"]["stateTax"]) == (25.0, 25.0)
+
+
+def test_a_transfers_aggregate_line_written_off_piece_by_piece_reverses_exactly(two_gstins, october):
+    """Three unpriced pieces moved on one transfer invoice whose only line
+    names no product: Rs 50.00 IGST, all three written off, exactly 50.00."""
+    db = two_gstins["db"]
+    _three_frames(db, "GRN-WO-0022", 0)
+    sids = [f"SU-GRN-WO-0022-{i}" for i in range(3)]
+    _mirror(db, "TRF-22", gstin="", lines=[
+        {"product_id": None, "qty": 0.0, "taxable": 999.99, "cgst": 0.0, "sgst": 0.0, "igst": 50.0}])
+    db.vendor_bills.update_one({"bill_id": "MB-TRF-22"}, {"$set": {
+        "taxable_amount": 999.99, "tax_amount": 50.0, "igst_total": 50.0}})
+    db.stock_units.update_many({"stock_id": {"$in": sids}}, {"$set": {
+        "status": "AVAILABLE", "store_id": MH_STORE, "source_type": "TRANSFER", "source_id": "TRF-22",
+        "transfer_id": None}})
+    db.stock_transfers.insert_one({"id": "TRF-22", "items": [{"product_id": FRAME, "received_stock_ids": sids}]})
+    for sid in sids:
+        _damage(db, sid, MH_ADMIN)
+    assert r3b._compute_gstr3b(OCTOBER, MH_STORE)["itcWriteOffReversed"]["integratedTax"] == 50.0
+
+
+def test_a_piece_shipped_back_to_the_supplier_drops_a_leftover_reversal(world, october):
+    """A damage cut off after its reversal leaves the piece quarantined with
+    a reversal row; shipped back on a supplier return, the supplier's credit
+    note takes the credit back, so the write-off reversal must go."""
+    from api.routers import vendor_returns as vr
+    from api.services import writeoff_itc as wo
+
+    db = world["db"]
+    _stocked(db, "GRN-WO-0023")
+    _line_bill("GRN-WO-0023", "TAX-WO-23")
+    sid = "SU-GRN-WO-0023-0"
+    db.stock_units.update_one({"stock_id": sid}, {"$set": {"status": "QUARANTINED", "rtv_vendor_id": "VR-23"}})
+    wo.record_writeoff(db, [db.stock_units.find_one({"stock_id": sid})], source_type="QUARANTINE_DAMAGE",
+                       source_id=sid, when=datetime(2026, 10, 5, 6, 0))
+    assert db.itc_writeoff_reversals.count_documents({}) == 1
+    assert vr._ship_pieces(db, {"return_id": "VR-23", "store_id": STORE, "stock_ids": [sid]}, "u-admin") == []
+    assert db.itc_writeoff_reversals.count_documents({}) == 0
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 0.0
