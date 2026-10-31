@@ -209,6 +209,18 @@ def test_the_tree_is_deterministic_whatever_the_row_order():
     assert _gen(rows=list(reversed(ROWS))) == _gen(rows=ROWS)
 
 
+def test_a_full_tie_is_broken_by_ims_key_whatever_the_row_order():
+    """Two brand rows with the same title and the same count (a renamed
+    brand's twin): the final ims_key tiebreak keeps Top N and A-Z stable."""
+    rows = ROWS + [_row("brand:boss-eyewear", "boss-eyewear", "Boss")]
+    over = {"boss-eyewear": 13}
+    for template_rows in (rows, list(reversed(rows))):
+        items, _ = _gen(over, rows=template_rows)
+        handles = [c["handle"] for c in next(g for g in _top(items, "Shop by Brand")["children"])["children"]]
+        assert handles.index("boss") < handles.index("boss-eyewear")
+    assert _gen(over, rows=list(reversed(rows))) == _gen(over, rows=rows)
+
+
 def test_a_collection_with_a_push_problem_is_not_linked():
     rows = [dict(r, push_problem="Online Store publish failed: x") if r["handle"] == "carrera" else r for r in ROWS]
     items, hidden = _gen(rows=rows)
@@ -424,8 +436,10 @@ def test_push_only_when_the_menu_changed_and_back_up_every_overwrite(world, monk
     _run(gm.sync_generated_menus(db))
     assert shop.calls.count("imsMenuUpdate") == 1
     state["counts"] = _counts({"ray-ban": 139})  # a count moved; the menu did not
+    reads = len(shop.calls)
     out = _run(gm.sync_generated_menus(db))
     assert out["menus"][0]["changed"] is False and shop.calls.count("imsMenuUpdate") == 1
+    assert len(shop.calls) == reads  # an unchanged menu costs no Shopify read at all
     state["counts"] = _counts({"eyeglasses": 2})  # Eyeglasses got products
     _run(gm.sync_generated_menus(db))
     assert shop.calls.count("imsMenuUpdate") == 2

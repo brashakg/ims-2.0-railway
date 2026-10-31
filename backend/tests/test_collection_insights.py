@@ -931,6 +931,9 @@ def test_preview_and_view_count_every_colour_and_size_of_a_model(monkeypatch):
     lead_sku = db["products"].find_one({"product_id": pids[0]})["sku"]
     db["catalog_products"].update_one({"sku": lead_sku}, {"$set": {
         "ecom.shopify_product_id": "gid://shopify/Product/5", "ecom.status": "ACTIVE"}})
+    for i, p in enumerate(pids[1:], 2):  # the colour and the size are on Shopify (#1275's rule)
+        sku = db["products"].find_one({"product_id": p})["sku"]
+        db["catalog_variants"].update_one({"sku": sku}, {"$set": {"shopify_variant_id": f"gid://shopify/ProductVariant/{i}"}})
     rules = [{"column": "TYPE", "relation": "EQUALS", "condition": "Sunglass"}]
     units = {"sp-1": 1, "sp-2": 2, "sp-3": 3}  # StrictDB has no composite $group: the rollup is the seam
     monkeypatch.setattr(ci, "_stock_rollup", lambda db, pids, store_id=None: {p: units.get(p, 0) for p in pids})
