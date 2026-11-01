@@ -315,6 +315,9 @@ def _near(door, model, **over):
         door(model, **over)
     assert exc.value.status_code == 409, exc.value.detail
     assert exc.value.detail["code"] == "NEAR_DUPLICATE"
+    # main.py sends HTTPException.detail through JSONResponse (plain json.dumps,
+    # no jsonable_encoder): a raw datetime here turns the 409 into a 500.
+    json.dumps(exc.value.detail)
     return exc.value.detail["existing"]
 
 
@@ -323,6 +326,7 @@ def test_the_save_check_answers_409_near_duplicate_only_when_asked(door):
     existing = _near(door, "4340", check_near_duplicates=True)
     assert existing["product_id"] == first["product_id"] and existing["model"] == "RB4340"
     assert existing["created_by_name"] == "admin"
+    assert isinstance(existing["created_at"], str)  # the door row holds a datetime
 
 
 def test_without_the_flag_the_save_goes_ahead_with_its_own_key(door):
@@ -344,6 +348,7 @@ def test_an_exact_twin_stays_the_doors_own_409(door):
     with pytest.raises(HTTPException) as exc:
         door("4340", check_near_duplicates=True)
     assert exc.value.status_code == 409 and exc.value.detail["code"] == "DUPLICATE_PRODUCT"
+    json.dumps(exc.value.detail)  # same summary, same JSONResponse path
 
 
 def test_its_a_different_product_saves_with_a_server_stamped_answer(door):

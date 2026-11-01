@@ -116,6 +116,7 @@ vi.mock('../../../constants/gstRuntime', () => ({
 import { QuickAddPage } from '../QuickAddPage';
 import { ApiError } from '../../../services/api/client';
 import { loadCategoryRegistry } from '../../../domain/catalog/productAdd';
+import { EDIT_QUEUE_KEY, writeReviewQueue } from '../reviewQueue';
 
 const fill = (el: HTMLElement, value: string) => fireEvent.change(el, { target: { value } });
 
@@ -207,6 +208,38 @@ describe('the edit form asks the same question on its PUT', () => {
       distinct_from: [{ product_id: 'P-OLD', reason: 'Different line or series' }],
     });
   });
+
+  it('Save & next: the answer for this product is not sent on the next one', async () => {
+    window.sessionStorage.clear();
+    writeReviewQueue(
+      { ids: ['P-ME', 'P-NEXT'], index: 0, offset: 0, total: 2, filters: {},
+        list: { path: '/catalog', params: {}, pageSize: 50 } },
+      EDIT_QUEUE_KEY,
+    );
+    api.getProduct.mockImplementation(async (id: string) => ({
+      product_id: id, sku: `SG-RAYBAN-4340-${id}`, category: 'SG', brand: 'Ray-Ban', model: '4340',
+      attributes: { brand_name: 'Ray-Ban', model_no: '4340', colour_code: '601/M3', lens_size: '50' },
+      mrp: 8100, offer_price: 8100, hsn_code: '900410', gst_rate: 18, images: [],
+    }));
+    api.updateProduct
+      .mockRejectedValueOnce(
+        new ApiError('same?', { status: 409, code: 'NEAR_DUPLICATE', detail: { code: 'NEAR_DUPLICATE', existing: TWIN } }),
+      )
+      .mockResolvedValue({});
+    const user = userEvent.setup();
+    renderAt('/catalog/add?edit=P-ME&from=list');
+    await user.click(await screen.findByRole('button', { name: /Save & next/ }));
+    await screen.findByRole('heading', { name: 'Is this the same product?' });
+    await answerDifferent(user);
+    await waitFor(() => expect(api.updateProduct).toHaveBeenCalledTimes(2));
+    expect(api.updateProduct.mock.calls[1][1]).toHaveProperty('distinct_from');
+
+    await waitFor(() => expect(api.getProduct).toHaveBeenCalledWith('P-NEXT'));
+    await user.click(await screen.findByRole('button', { name: /Save changes/ }));
+    await waitFor(() => expect(api.updateProduct).toHaveBeenCalledTimes(3));
+    expect(api.updateProduct.mock.calls[2][0]).toBe('P-NEXT');
+    expect(api.updateProduct.mock.calls[2][1]).not.toHaveProperty('distinct_from');
+  });
 });
 
 describe('the strip answer reaches the next save', () => {
@@ -229,6 +262,36 @@ describe('the strip answer reaches the next save', () => {
       check_near_duplicates: true,
       distinct_from: [{ product_id: 'P-OLD', reason: 'Different line or series' }],
     });
+  });
+
+  it('a saved answer is cleared: the next product asks again and sends no distinct_from', async () => {
+    hint.real = true;
+    api.createProduct
+      .mockResolvedValueOnce({ product_id: 'P-NEW', sku: 'SG-RAYBAN-4340-601/M3' })
+      .mockResolvedValueOnce({ product_id: 'P-NEXT', sku: 'SG-RAYBAN-4340-710/51' });
+    const user = userEvent.setup();
+    renderAt('/catalog/add');
+    await loadCategoryRegistry();
+    await user.click(await screen.findByText('Sunglasses'));
+    const typeIn = () => {
+      fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
+      fill(screen.getByLabelText(/^Model No/), '4340');
+      fill(screen.getByLabelText(/^Colour Code/), '601/M3');
+      fill(screen.getByLabelText(/^MRP/), '8100');
+    };
+    typeIn();
+    await answerDifferent(user);
+    await user.click(screen.getByRole('button', { name: /Save \+ New/ }));
+    await waitFor(() => expect(api.createProduct).toHaveBeenCalledTimes(1));
+    expect(api.createProduct.mock.calls[0][0]).toHaveProperty('distinct_from');
+
+    // Next product: the near-twin is asked about again, not hidden by the old answer.
+    await waitFor(() => expect(screen.getByLabelText(/^Model No/)).toHaveValue(''));
+    typeIn();
+    await screen.findByRole('button', { name: "It's a different product" });
+    await user.click(screen.getByRole('button', { name: /Save \+ New/ }));
+    await waitFor(() => expect(api.createProduct).toHaveBeenCalledTimes(2));
+    expect(api.createProduct.mock.calls[1][0]).not.toHaveProperty('distinct_from');
   });
 
   it('review mode (?review=) offers no "different product" answer: its save never sends one', async () => {
