@@ -53,6 +53,40 @@ class _Coll:
         return 0
 
 
+def _match(doc, q):
+    """Tiny evaluator for the filters these tests hand count_documents:
+    {} / {field: value} / {field: {$gte,$lt,$in}} / {$or: [...]}."""
+    for k, v in (q or {}).items():
+        if k == "$or":
+            if not any(_match(doc, sub) for sub in v):
+                return False
+            continue
+        val = doc.get(k)
+        if not isinstance(v, dict):
+            if val != v:
+                return False
+            continue
+        for op, bound in v.items():
+            if op == "$in":
+                if val not in bound:
+                    return False
+            elif isinstance(val, str) != isinstance(bound, str) or val is None:
+                return False  # Mongo never compares across types
+            elif op == "$gte" and not val >= bound:
+                return False
+            elif op == "$lt" and not val < bound:
+                return False
+    return True
+
+
+class _CountColl(_Coll):
+    """_Coll whose count_documents actually applies the filter."""
+
+    def count_documents(self, q, *a, **k):
+        self.queries.append(q)
+        return sum(1 for d in self.docs if _match(d, q))
+
+
 class _Cursor(list):
     def sort(self, *a, **k):
         return self
@@ -103,6 +137,12 @@ def test_p05_workshop_kpis_use_ist_day(monkeypatch, instant, today):
         # Completed 01:00 IST on 1 Jan (19:30Z 31 Dec): IST-today only at NIGHT.
         {"job_id": "c", "status": "READY", "store_id": "S1",
          "completed_at": datetime(2026, 12, 31, 19, 30)},
+        # Delivered 01:00 IST on 1 Jan (19:30Z 31 Dec): delivered today only at NIGHT.
+        {"job_id": "d", "status": "DELIVERED", "store_id": "S1",
+         "status_updated_at": datetime(2026, 12, 31, 19, 30)},
+        # Remade 00:30 IST on 1 Jan (19:00Z 31 Dec): January spoilage only at NIGHT.
+        {"job_id": "e", "status": "QC_FAILED", "store_id": "S1",
+         "remake_reasons": [{"at": datetime(2026, 12, 31, 19, 0), "cost_paise": 500}]},
     ]
 
     class _Repo:
@@ -114,6 +154,9 @@ def test_p05_workshop_kpis_use_ist_day(monkeypatch, instant, today):
         body = _run(board.get_dashboard_kpis(store_id="S1", current_user=ADMIN))
     assert body["overdue"] == 1
     assert body["completed_today"] == 1
+    night = today == "2027-01-01"
+    assert body["delivered_today"] == (1 if night else 0)
+    assert body["spoilage_cost_mtd_paise"] == (500 if night else 0)
 
 
 # --- CLK-P06 follow-ups -----------------------------------------------------
@@ -327,8 +370,36 @@ def test_p15_jarvis_overview_today_is_ist(monkeypatch, instant, today):
          "created_at": datetime(2026, 12, 31, 8, 30)},
     ]
     db = _DB({"orders": orders})
-    monkeypatch.setattr(jarvis, "get_db_collection", lambda n: db.get_collection(n) if n == "orders" else None)
+    # Customer joined 00:30 IST 1 Jan (19:00Z 31 Dec): new this month (Jan)
+    # only at NIGHT; the 8 Dec one is new this month (Dec) only by DAY.
+    customers = _CountColl([
+        {"created_at": datetime(2026, 12, 31, 19, 0)},
+        {"created_at": datetime(2026, 12, 8, 6, 0)},
+        {"created_at": datetime(2026, 12, 8, 7, 0)},
+    ])
+    colls = {"orders": db.get_collection("orders"), "customers": customers}
+    monkeypatch.setattr(jarvis, "get_db_collection", lambda n: colls.get(n))
     with freeze_time(instant, tick=True):
         out = jarvis.JarvisAnalyticsEngine._compute_overview_live()
-    want = 100.0 if today == "2027-01-01" else 7.0
-    assert out["revenue"]["today"] == want
+    night = today == "2027-01-01"
+    assert out["revenue"]["today"] == (100.0 if night else 7.0)
+    assert out["customers"]["new_this_month"] == (1 if night else 2)
+
+
+@pytest.mark.parametrize("instant,today", CASES)
+def test_p15_jarvis_vendor_returns_this_month_is_ist(monkeypatch, instant, today):
+    from api.routers import jarvis
+
+    vr = _CountColl([
+        # Raised 00:30 IST 1 Jan (19:00Z 31 Dec): January only at NIGHT.
+        {"status": "CLOSED", "created_at": datetime(2026, 12, 31, 19, 0)},
+        {"status": "CLOSED", "created_at": "2026-12-10T05:00:00"},
+        {"status": "OPEN", "created_at": datetime(2026, 12, 9, 5, 0)},
+    ])
+    monkeypatch.setattr(
+        jarvis, "get_db_collection", lambda n: vr if n == "vendor_returns" else None
+    )
+    with freeze_time(instant, tick=True):
+        ctx = jarvis.JarvisAnalyticsEngine.get_extended_context()
+    night = today == "2027-01-01"
+    assert ctx["vendor_returns"] == {"open": 1, "this_month": 1 if night else 2}
