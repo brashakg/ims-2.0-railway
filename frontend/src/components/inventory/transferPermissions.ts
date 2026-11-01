@@ -25,7 +25,11 @@ export const APPROVE_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'];
 export const SHIP_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'];
 export const RECEIVE_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'];
 export const COMPLETE_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER'];
-export const CANCEL_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER'];
+export const CANCEL_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
+// "Missing on the way": found / sent for write-off by either shop's managers;
+// the write-off itself is admin-only (owner ruling 2026-08-25).
+export const MISSING_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
+export const WRITE_OFF_ROLES = ['SUPERADMIN', 'ADMIN'];
 
 // Only SUPERADMIN/ADMIN get the backend's cross-store bypass (user_store_scope
 // in dependencies.py). AREA_MANAGER is bounded to their store_ids by
@@ -76,10 +80,15 @@ export const canApprove = (actor: TransferActor, t: TransferLike): boolean =>
   norm(t.status) === 'pending_approval' &&
   isSourceSide(actor, t);
 
-export const canShip = (actor: TransferActor, t: TransferLike): boolean =>
+// S3: pack = scan pieces OUT, any time after approval until the box ships.
+export const canPack = (actor: TransferActor, t: TransferLike): boolean =>
   hasRole(actor, SHIP_ROLES) &&
-  ['approved', 'packed'].includes(norm(t.status)) &&
+  ['approved', 'picking', 'packed'].includes(norm(t.status)) &&
   isSourceSide(actor, t);
+
+// A box ships only once pieces are scanned into it (status packed).
+export const canShip = (actor: TransferActor, t: TransferLike): boolean =>
+  hasRole(actor, SHIP_ROLES) && norm(t.status) === 'packed' && isSourceSide(actor, t);
 
 export const canReceive = (actor: TransferActor, t: TransferLike): boolean =>
   hasRole(actor, RECEIVE_ROLES) &&
@@ -88,13 +97,28 @@ export const canReceive = (actor: TransferActor, t: TransferLike): boolean =>
 
 export const canComplete = (actor: TransferActor, t: TransferLike): boolean =>
   hasRole(actor, COMPLETE_ROLES) &&
-  ['received', 'partially_received'].includes(norm(t.status)) &&
+  ['in_transit', 'received', 'partially_received'].includes(norm(t.status)) &&
   isDestSide(actor, t);
 
+// S3: either end may call off a box that has not shipped -- the asking shop
+// withdraws its request, the sending shop declines to send.
 export const canCancel = (actor: TransferActor, t: TransferLike): boolean =>
   hasRole(actor, CANCEL_ROLES) &&
   CANCELLABLE_STATUSES.includes(norm(t.status)) &&
-  isSourceSide(actor, t);
+  (isSourceSide(actor, t) || isDestSide(actor, t));
+
+// A missing piece is marked found by a manager of the shop where it turned up.
+export const canMarkFound = (
+  actor: TransferActor,
+  t: TransferLike,
+  at: 'source' | 'destination',
+): boolean =>
+  hasRole(actor, MISSING_ROLES) && (at === 'source' ? isSourceSide(actor, t) : isDestSide(actor, t));
+
+export const canRequestWriteOff = (actor: TransferActor, t: TransferLike): boolean =>
+  hasRole(actor, MISSING_ROLES) && (isSourceSide(actor, t) || isDestSide(actor, t));
+
+export const canWriteOff = (actor: TransferActor): boolean => hasRole(actor, WRITE_OFF_ROLES);
 
 // The Delivery Challan button (owner 2026-10-08: a valued challan -- a move
 // between two GST registrations -- is printed by managers and accounts only).
@@ -103,3 +127,7 @@ export const canCancel = (actor: TransferActor, t: TransferLike): boolean =>
 // reply without it offers nothing rather than a button that answers 403.
 export const canPrintChallan = (t: { can_print_challan?: boolean }): boolean =>
   t.can_print_challan === true;
+
+// Who may ask another shop for stock / send their own (create_transfer's roles).
+export const CREATE_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
+export const hasCreateRole = (actor: TransferActor): boolean => hasRole(actor, CREATE_ROLES);
