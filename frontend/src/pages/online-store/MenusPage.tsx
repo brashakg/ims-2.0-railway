@@ -511,16 +511,27 @@ export default function MenusPage() {
     if (!menu) return;
     if (dirty && !window.confirm('The template has unsaved changes. Push the SAVED template anyway?')) return;
     const was = menu.pushed_collection_nodes;
+    const shown = collectionLinks(menu.preview?.items);
     const ask = isDryRun(menu)
-      ? `This records a dry-run push of ${collectionLinks(menu.preview?.items)} collection links; ` +
+      ? `This records a dry-run push of ${shown} collection links; ` +
         'nothing is sent to the website.'
-      : `This overwrites the LIVE website menu: ${collectionLinks(menu.preview?.items)} collection links ` +
+      : `This overwrites the LIVE website menu: ${shown} collection links ` +
         (typeof was === 'number' ? `(was ${was} at the last push).` : '(IMS has not pushed this menu before).');
     if (!window.confirm(ask)) return;
     setPushing(true);
     try {
-      const r = await pushApi.pushMenu(menu.menu_id);
-      const msg = formatPushResult(`Menu ${menu.handle}`, r);
+      // The server sends only the number confirmed; when Shopify's counts
+      // change it, the refusal says the real number and the person is asked again.
+      let r = await pushApi.pushMenu(menu.menu_id, { expected_collection_links: shown });
+      const real = r.collection_links;
+      if (!r.ok && typeof real === 'number' && real !== shown && real > 0
+          && window.confirm(`${r.error || 'The menu changed.'}
+
+Push the LIVE menu with ${real} collection links?`)) {
+        r = await pushApi.pushMenu(menu.menu_id, { expected_collection_links: real });
+      }
+      let msg = formatPushResult(`Menu ${menu.handle}`, r);
+      if (r.ok && typeof r.collection_links === 'number') msg += ` — ${r.collection_links} collection links`;
       if (r.ok) toast.success(msg);
       else toast.error(msg);
       bannerRef.current?.refresh?.();

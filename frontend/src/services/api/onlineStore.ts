@@ -1586,6 +1586,8 @@ export interface PushResult {
   reason?: string | null;
   /** Stable machine code for an actionable failure (e.g. PUBLISH_SCOPE_MISSING). */
   code?: string | null;
+  /** Generated menu: the collection links sent (or, refused, that would be). */
+  collection_links?: number | null;
   /** Photo retry state, independent of any simultaneous price/stock code. */
   photos?: {
     sync_state?: 'pending' | 'failed' | 'synced';
@@ -2003,9 +2005,11 @@ export const pushApi = {
     return _pushResultFrom(res?.data);
   },
 
-  /** Push an ecom_menus doc (the nav / mega-menu tree). */
-  pushMenu: async (menuId: string): Promise<PushResult> => {
-    const res = await api.post(`${PUSH_BASE}/menu/${encodeURIComponent(menuId)}`, undefined, PUSH_TIMEOUT);
+  /** Push an ecom_menus doc (the nav / mega-menu tree). The generated menu
+   *  carries the collection-link count the person's confirm showed; the
+   *  server refuses any other number (result.collection_links = the real one). */
+  pushMenu: async (menuId: string, body?: { expected_collection_links: number }): Promise<PushResult> => {
+    const res = await api.post(`${PUSH_BASE}/menu/${encodeURIComponent(menuId)}`, body, PUSH_TIMEOUT);
     return _pushResultFrom(res?.data);
   },
 

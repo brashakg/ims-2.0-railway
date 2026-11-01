@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from agents.nexus_providers import _as_shopify_gid
 
@@ -187,11 +187,14 @@ async def push_collection(
 @router.post("/menu/{menu_id}")
 async def push_menu(
     menu_id: str,
+    expected_collection_links: Optional[int] = Body(None, embed=True, ge=0),
     current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
 ) -> Dict[str, Any]:
     """Push an ecom_menus doc (the Online Store nav / mega-menu) to Shopify
     (menuCreate/Update, mapping the nested item tree). DARK by default; LIVE
-    behind the gates. Writes a chained audit row. Unknown menu -> 404."""
+    behind the gates. Writes a chained audit row. Unknown menu -> 404.
+    ``expected_collection_links`` (the generated menu): the link count the
+    person's confirm showed; any other number is refused, saying it."""
     db = _require_db()
     repo = _menu_repo(db)
     doc = repo.get_by_id(menu_id) if repo else None
@@ -202,7 +205,8 @@ async def push_menu(
         # pushed by its own path (adopt + backup + audit inside).
         from ..services import generated_menu
 
-        return {"result": await generated_menu.regenerate_and_push(db, doc, current_user, force=True)}
+        return {"result": await generated_menu.regenerate_and_push(
+            db, doc, current_user, force=True, expected=expected_collection_links)}
     from ..services import generated_menu
 
     data = await generated_menu.static_push_refusal(db, doc) or (await shopify_push.push_menu(db, doc)).to_dict()

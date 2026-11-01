@@ -142,8 +142,37 @@ describe('Menus page: the self-maintaining menu', () => {
     expect(confirm).toHaveBeenCalledWith(
       'This overwrites the LIVE website menu: 3 collection links (was 40 at the last push).',
     );
-    await waitFor(() => expect(pushApi.pushMenu).toHaveBeenCalledWith('m1'));
+    await waitFor(() => expect(pushApi.pushMenu).toHaveBeenCalledWith('m1', { expected_collection_links: 3 }));
     expect(toastCalls.some((t) => t.kind === 'success')).toBe(true);
+  });
+
+  it('a press Shopify would thin is asked again with the real number, and the toast states the links sent', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    (pushApi.pushMenu as any)
+      .mockResolvedValueOnce({
+        mode: 'LIVE', entity: 'menu', ok: false, collection_links: 2,
+        error: 'refused: you confirmed 3 collection links but the menu would have 2 now (Shopify shows 1 of 3 collections empty) - press again to confirm 2',
+      })
+      .mockResolvedValueOnce({ mode: 'LIVE', entity: 'menu', action: 'update', ok: true, collection_links: 2 });
+    render(<MenusPage />);
+    await userEvent.click(await screen.findByRole('button', { name: /Regenerate & push now/ }));
+    await waitFor(() => expect(pushApi.pushMenu).toHaveBeenCalledTimes(2));
+    expect(pushApi.pushMenu).toHaveBeenNthCalledWith(1, 'm1', { expected_collection_links: 3 });
+    expect(pushApi.pushMenu).toHaveBeenNthCalledWith(2, 'm1', { expected_collection_links: 2 });
+    expect(confirm.mock.calls[1][0]).toMatch(/Push the LIVE menu with 2 collection links\?/);
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'success' && /2 collection links/.test(t.msg))).toBe(true));
+  });
+
+  it('declining the second question pushes nothing more and says the menu was not pushed', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValueOnce(true).mockReturnValueOnce(false);
+    (pushApi.pushMenu as any).mockResolvedValue({
+      mode: 'LIVE', entity: 'menu', ok: false, collection_links: 2, error: 'refused: ... press again to confirm 2',
+    });
+    render(<MenusPage />);
+    await userEvent.click(await screen.findByRole('button', { name: /Regenerate & push now/ }));
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'error')).toBe(true));
+    expect(pushApi.pushMenu).toHaveBeenCalledTimes(1);
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
   });
 
   it('cancelling the overwrite confirm pushes nothing', async () => {
@@ -303,7 +332,7 @@ describe('Menus page: the self-maintaining menu', () => {
     const titles = screen.getAllByLabelText('Section title') as HTMLInputElement[];
     await userEvent.type(titles[0], '!');
     await userEvent.click(screen.getByRole('button', { name: /Regenerate & push now/ }));
-    await waitFor(() => expect(pushApi.pushMenu).toHaveBeenCalledWith('m1'));
+    await waitFor(() => expect(pushApi.pushMenu).toHaveBeenCalledWith('m1', { expected_collection_links: 3 }));
     expect(confirm.mock.calls[0][0]).toMatch(/unsaved changes/);
     expect(confirm.mock.calls[1][0]).toMatch(/overwrites the LIVE website menu/);
     confirm.mockRestore();

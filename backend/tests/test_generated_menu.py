@@ -930,6 +930,25 @@ def test_regenerate_and_push_now_adopts_backs_up_and_rebuilds(client, auth_heade
     assert "Eyeglasses" in _titles(stored["items"]) and "Eyeglasses" in _titles(shop.updates[0]["items"])
 
 
+def test_the_push_route_hands_the_confirmed_link_count_to_the_push(client, auth_headers, pushed, monkeypatch):
+    """The page posts the count its confirm showed: a different number on
+    the press is refused (nothing sent) and the refusal carries the real
+    count; the right number goes out and the result says how many."""
+    db, mid, _state = pushed
+    shop = _Shop()
+    _live(monkeypatch, shop)
+    url = f"/api/v1/online-store/push/menu/{mid}"
+    r = client.post(url, headers=auth_headers, json={"expected_collection_links": 999})
+    assert r.status_code == 200, r.text
+    res = r.json()["result"]
+    assert res["ok"] is False and "imsMenuUpdate" not in shop.calls, res
+    n = res["collection_links"]
+    assert f"press again to confirm {n}" in res["error"]
+    r = client.post(url, headers=auth_headers, json={"expected_collection_links": n})
+    assert r.json()["result"]["ok"] is True and r.json()["result"]["collection_links"] == n
+    assert shop.calls.count("imsMenuUpdate") == 1
+
+
 def test_push_all_rebuilds_the_generated_menu_through_its_own_path(client, auth_headers, pushed, monkeypatch):
     """push-all: the generated doc is never sent through the plain
     push_menu loop (only its own path, once), the response carries
@@ -1091,6 +1110,54 @@ def test_a_forced_push_is_refused_when_shopify_shows_most_links_empty(world, mon
     for g in shop.products:  # Shopify catches up: the next press goes out
         shop.products[g] = 5
     assert _press(db)["menus"][0]["ok"] is True and shop.calls.count("imsMenuUpdate") == 1
+
+
+def test_a_forced_press_sends_only_the_number_the_person_confirmed(world, monkeypatch):
+    """The person confirmed N links. Shopify then shows ONE collection empty
+    (less than half, so the drop guard lets it by): the press carrying N is
+    refused -- nothing sent, nothing backed up, the stored tree kept -- and
+    says the menu would have N-1, which the page asks about. Pressed again
+    carrying N-1 it goes out, and the result states the links sent."""
+    db, _state, _audit = world
+    shop = _Shop()
+    _live(monkeypatch, shop)
+    gm.regenerate(db, _doc(db), [{"sku": "ANY"}])
+    confirmed = gm.collection_nodes(_doc(db)["items"])
+    shop.products[_gid("ray-ban")] = 0
+    res = _run(gm.regenerate_and_push(db, _doc(db), force=True, expected=confirmed))
+    assert res["ok"] is False and "imsMenuUpdate" not in shop.calls, res
+    assert res["collection_links"] == confirmed - 1, res
+    assert f"press again to confirm {confirmed - 1}" in res["error"], res["error"]
+    assert list(db[gm.BACKUPS].find({})) == []
+    assert gm.collection_nodes(_doc(db)["items"]) == confirmed
+    res = _run(gm.regenerate_and_push(db, _doc(db), force=True, expected=confirmed - 1))
+    assert res["ok"] is True and shop.calls.count("imsMenuUpdate") == 1, res
+    assert res["collection_links"] == confirmed - 1
+
+
+def test_a_refused_first_press_still_leaves_the_hand_made_backup_adopted(world, monkeypatch):
+    """The first LIVE press adopts the shop's menu, then is refused (Shopify
+    shows every collection empty): no backup. The next press goes out: its
+    backup is the hand-made menu, so it is flagged adopted and the restore
+    script's --adopted finds it."""
+    import importlib.util
+
+    db, _state, _audit = world
+    shop = _Shop()
+    counts = dict(shop.products)
+    for g in shop.products:
+        shop.products[g] = 0
+    _live(monkeypatch, shop)
+    assert _press(db)["menus"][0]["ok"] is False
+    assert list(db[gm.BACKUPS].find({})) == []
+    shop.products.update(counts)
+    assert _press(db)["menus"][0]["ok"] is True
+    assert [r.get("adopted") for r in db[gm.BACKUPS].find({})] == [True]
+    path = os.path.join(os.path.dirname(HERE), "scripts", "restore_main_menu_backup.py")
+    spec = importlib.util.spec_from_file_location("restore_main_menu_backup", path)
+    rs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rs)
+    assert _run(rs.run(db, apply=False, which="adopted"))["payload"]["items"] == rs.update_items(LIVE_ITEMS)
 
 
 def test_collections_pushed_this_run_defer_the_automatic_menu_push(world, monkeypatch):

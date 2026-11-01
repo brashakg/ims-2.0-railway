@@ -610,7 +610,8 @@ def _record(db, doc: Dict[str, Any], result: Dict[str, Any], actor: Optional[Dic
     at = _now()
     upd: Dict[str, Any] = {"last_push": {"at": at, "mode": result.get("mode"), "ok": bool(result.get("ok")),
                                          "action": result.get("action"), "error": result.get("error"),
-                                         "reason": result.get("reason")}}
+                                         "reason": result.get("reason"),
+                                         "collection_links": result.get("collection_links")}}
     if result.get("ok") and result.get("mode") == MODE_LIVE:
         upd.update({"pushed_hash": doc.get("generated_hash"), "last_pushed_at": at, "locally_modified": False,
                     "pushed_collection_nodes": collection_nodes(doc.get("items") or [])})
@@ -626,7 +627,8 @@ def _record(db, doc: Dict[str, Any], result: Dict[str, Any], actor: Optional[Dic
 
 async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]] = None,
                          force: bool = False, facts: Optional[List[Dict[str, Any]]] = None,
-                         fresh: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+                         fresh: Optional[Iterable[str]] = None,
+                         expected: Optional[int] = None) -> Dict[str, Any]:
     """Push ``doc``'s generated tree when it differs from what was last
     pushed (or ``force``: the human "Regenerate & push now"). Records
     ``last_push`` on the doc and an audit row. Never raises.
@@ -640,7 +642,11 @@ async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]
     confirmed links gone on Shopify's count, even for a person), wait a run
     when only a collection pushed this run (``fresh`` handles) would change
     the tree, back the live tree up, then menuUpdate carrying the live item
-    ids and tags. Any failure pushes nothing and is retried next run."""
+    ids and tags. Any failure pushes nothing and is retried next run.
+    ``expected``: the collection-link count the person's confirm showed --
+    a press whose tree (after Shopify's counts) has any other number is
+    refused, saying the real number, so the page asks again
+    (``collection_links`` on the result: the links sent, or that would be)."""
     from .shopify_push import MODE_LIVE, MODE_SIMULATED, PushResult, _live_or_reason, push_menu
     from .shopify_push.menus import build_menu_items
 
@@ -659,16 +665,16 @@ async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]
             return {"handle": handle, "changed": False, "mode": MODE_SIMULATED}
         payload = {"title": doc.get("title") or handle, "handle": handle,
                    "items": build_menu_items(doc.get("items") or [], with_ids=bool(gid))}
-        return _record(db, doc, PushResult(
+        return _record(db, doc, dict(PushResult(
             mode=MODE_SIMULATED, entity="menu", action="update" if gid else "create",
             target_id=doc.get("menu_id"), ok=True, shopify_id=gid, payload=payload, reason=reason,
-        ).to_dict(), actor)
+        ).to_dict(), collection_links=collection_nodes(doc.get("items") or [])), actor)
     if not force and not (doc.get("pushed_hash") and gid):
         return _not_sent(db, doc, WAITING_FIRST)
 
     # What the page previewed and the person confirmed: the IMS-only tree.
     confirmed = collection_nodes(doc.get("items") or [])
-    error, shop, send = None, None, doc
+    error, shop, send, links = None, None, doc, None
     try:
         if facts is None:
             from . import collection_membership
@@ -693,6 +699,12 @@ async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]
             # Not saved: the stored tree (and the next confirm) stay the IMS one.
             error = (f"refused: Shopify shows {confirmed - nodes} of {confirmed} collections empty - "
                      "not pushed; try again in a few minutes")
+        elif expected is not None and nodes != expected:
+            # Not saved either: the person confirmed another number.
+            links = nodes
+            error = (f"refused: you confirmed {expected} collection links but the menu would have {nodes} now "
+                     f"(Shopify shows {max(confirmed - nodes, 0)} of {confirmed} collections empty) - "
+                     f"press again to confirm {nodes}")
         elif late and not force and upd["generated_hash"] != doc.get("pushed_hash"):
             return _not_sent(db, doc, f"waiting one run: Shopify is still counting the collections "
                                       f"just updated ({', '.join(late)}); pushed on the next run")
@@ -708,7 +720,11 @@ async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]
                 "title": shop.get("title"), "items": shop.get("items") or [], "taken_at": _now(),
                 # The tree a person's adoption replaced: the hand-made menu
                 # (scripts/restore_main_menu_backup.py --adopted).
-                "adopted": shop.get("id") != gid,
+                # Also when an earlier, refused press already adopted it
+                # (no backup was taken then): the first backup of a menu
+                # is always the hand-made tree.
+                "adopted": shop.get("id") != gid
+                or db[BACKUPS].find_one({"menu_id": doc["menu_id"], "adopted": True}) is None,
             })
             _prune_backups(db, shop.get("handle"))
             db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": {"backup_taken_at": _now()}})
@@ -721,6 +737,8 @@ async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]
                             ok=False, error=error).to_dict()
     else:
         result = (await push_menu(db, send, live=True)).to_dict()
+        links = collection_nodes(doc.get("items") or [])
+    result["collection_links"] = links
     return _record(db, doc, result, actor)
 
 
@@ -747,7 +765,8 @@ def _prune_backups(db, handle: Optional[str]) -> None:
 
 async def regenerate_and_push(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]] = None,
                               force: bool = False, facts: Optional[List[Dict[str, Any]]] = None,
-                              fresh: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+                              fresh: Optional[Iterable[str]] = None,
+                              expected: Optional[int] = None) -> Dict[str, Any]:
     """Rebuild ``doc`` from a STRICT read of the listings and push it when it
     changed. An unreadable catalogue changes nothing (the last generated
     and pushed menu stand) and is reported. Never raises."""
@@ -758,7 +777,7 @@ async def regenerate_and_push(db, doc: Dict[str, Any], actor: Optional[Dict[str,
         if facts is None:
             facts = collection_membership.online_facts(db, strict=True)
         regenerate(db, doc, facts)
-        return await push_generated(db, doc, actor, force=force, facts=facts, fresh=fresh)
+        return await push_generated(db, doc, actor, force=force, facts=facts, fresh=fresh, expected=expected)
     except Exception as e:  # noqa: BLE001
         logger.warning("[MENUS] %s skipped: %s", doc.get("handle"), e)
         from .shopify_push import MODE_LIVE, MODE_SIMULATED, _live_or_reason
