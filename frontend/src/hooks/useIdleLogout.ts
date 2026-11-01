@@ -111,6 +111,30 @@ function _readLastActivity(): number {
   return _now();
 }
 
+function _storedActivity(): number | null {
+  try {
+    const n = parseInt(localStorage.getItem(LAST_ACTIVITY_KEY) || '', 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when the STORED last-activity stamp is already past the idle limit -
+ * e.g. the browser was closed for longer than the timeout. No stamp -> false.
+ * AuthContext checks this before resuming a stored session on page load.
+ */
+export function storedSessionIdleExpired(policy: {
+  enabled: boolean;
+  minutes: number;
+  warnSeconds: number;
+}): boolean {
+  const ts = _storedActivity();
+  if (ts === null) return false;
+  return computeIdleState(_now() - ts, policy.minutes, policy.warnSeconds, policy.enabled).expired;
+}
+
 function _writeLastActivity(ts: number): void {
   try {
     localStorage.setItem(LAST_ACTIVITY_KEY, String(ts));
@@ -199,8 +223,11 @@ export function useIdleLogout(opts: UseIdleLogoutOptions): UseIdleLogoutResult {
     loggedOutRef.current = false;
     lastWriteRef.current = 0;
     warningRef.current = false;
-    // Seed the activity clock on (re)mount so a fresh load starts the timer now.
-    _writeLastActivity(_now());
+    // Seed the activity clock ONLY when none is stored. Overwriting it on every
+    // mount hid the real idle time of a reopened tab / browser (owner 11-01:
+    // reopened Chrome after ~20 min, still signed in) - the first tick must see
+    // how long the session has really been idle. login() writes a fresh stamp.
+    if (_storedActivity() === null) _writeLastActivity(_now());
 
     const handleActivity = () => recordActivity();
 
