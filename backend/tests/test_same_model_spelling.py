@@ -120,7 +120,6 @@ def _found(typed, stored, category="SUNGLASS", brand="Ray-Ban", stored_brand=Non
         ("RB-4345", "4345"),
         ("Ray-Ban RB4345", "4345"),
         ("4345", "RB4345"),
-        ("XL OO9417", "OO9417"),  # the Oakley Holbrook XL is OO9417
         ("RAYBANRB4345", "RB4345"),  # a glued brand #1271 leaves whole
         ("0840", "0840S"),  # a sunglass's trailing S
         ("0840S", "0840"),
@@ -144,6 +143,10 @@ def test_carduc_against_bare_digits_is_found_as_a_soft_warning():
         ("rb21", "rb213", "Ray-Ban"),  # the trailing | still guards
         ("J4345", "RJ4345", "Ray-Ban"),  # a one-letter prefix never fits a longer one
         ("RB4345", "RB4345", "Ray-Ban"),  # the same spelling is a colour chip, not "similar"
+        ("XL OO9417", "OO9417", "Oakley"),  # owner 2026-11-02: Holbrook XL is another model
+        ("OO9417", "XL OO9417", "Oakley"),
+        ("XL9417", "9417", "Oakley"),  # XL alone vs bare digits
+        ("9417", "XL9417", "Oakley"),
     ],
 )
 def test_different_models_stay_apart(typed, stored, brand):
@@ -442,6 +445,22 @@ def test_draft_review_names_the_same_model_written_differently(door):
     warned = cat._promote_duplicate_warnings(door.repo, _draft("4340"))
     assert [(w["sku"], w["reason"]) for w in warned] == [
         (first["sku"], "same model written differently: RB4340 / 4340")]
+
+
+def test_oakley_xl_is_never_the_same_model_at_draft_review_or_the_save_check(door):
+    """Owner 2026-11-02: XL OO9417 (Holbrook XL) is a different model from OO9417."""
+    door("OO9417", brand="Oakley")
+    xl_draft = {"product_id": "CAT-1", "category": "SUNGLASS",
+                "attributes": {"brand_name": "Oakley", "model_no": "XL OO9417"}}
+    assert not [w for w in cat._promote_duplicate_warnings(door.repo, xl_draft)
+                if w["reason"].startswith("same model written")]
+    assert door("XL OO9417", brand="Oakley", check_near_duplicates=True)["product_id"]  # no 409
+    # ...and the other way round: OO9417 typed against a stored XL OO9417.
+    door.repo.collection.docs.clear()
+    door("XL OO9417", brand="Oakley")
+    assert door("OO9417", brand="Oakley", check_near_duplicates=True)["product_id"]
+    # The rule itself still fires for a real spelling twin of the same brand.
+    _near(door, "9417", brand="Oakley", check_near_duplicates=True)
 
 
 def test_draft_review_reason_is_never_crowded_out(door):
