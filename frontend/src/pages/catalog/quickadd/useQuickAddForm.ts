@@ -208,9 +208,18 @@ export function useQuickAddForm() {
   // another's save.
   const editKey = editMode ? `${editMode.kind}:${editMode.id}` : '';
   const variantKey = variantCtx?.sourceProductId ?? '';
+  // ...and to the model as typed: an answer given on RB4340 must not ride a
+  // save retyped to RB5228 (the server refuses it with a 400 and the panel
+  // that took the answer is hidden, so the form could never save).
+  const answerModelKey = JSON.stringify([
+    selectedCategory,
+    attributes.brand_name ?? '',
+    attributes.model_no ?? '',
+    attributes.model_name ?? '',
+  ]);
   useEffect(() => {
     clearDifferent();
-  }, [editKey, variantKey, clearDifferent]);
+  }, [editKey, variantKey, answerModelKey, clearDifferent]);
 
   // ---- Review-mode state (?review=<id>) -------------------------------------
   // The loaded doc + the form values as loaded/last-saved — the diff base for

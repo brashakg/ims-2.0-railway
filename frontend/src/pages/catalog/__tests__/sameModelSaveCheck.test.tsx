@@ -264,6 +264,25 @@ describe('the strip answer reaches the next save', () => {
     });
   });
 
+  it('an answer is dropped when the model is retyped: the save sends no stale distinct_from', async () => {
+    hint.real = true;
+    api.createProduct.mockResolvedValueOnce({ product_id: 'P-NEW', sku: 'SG-RAYBAN-RB5228-601/M3' });
+    const user = userEvent.setup();
+    renderAt('/catalog/add');
+    await loadCategoryRegistry();
+    await user.click(await screen.findByText('Sunglasses'));
+    fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
+    fill(screen.getByLabelText(/^Model No/), 'RB4340');
+    fill(screen.getByLabelText(/^Colour Code/), '601/M3');
+    fill(screen.getByLabelText(/^MRP/), '8100');
+    await answerDifferent(user);
+    // A typo noticed after answering: the answer was about RB4340, not RB5228.
+    fill(screen.getByLabelText(/^Model No/), 'RB5228');
+    await user.click(screen.getByRole('button', { name: /Save \+ New/ }));
+    await waitFor(() => expect(api.createProduct).toHaveBeenCalledTimes(1));
+    expect(api.createProduct.mock.calls[0][0]).not.toHaveProperty('distinct_from');
+  });
+
   it('a saved answer is cleared: the next product asks again and sends no distinct_from', async () => {
     hint.real = true;
     api.createProduct
