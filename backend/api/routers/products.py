@@ -2025,9 +2025,14 @@ def _website_needs(db, product_id: str) -> Dict[str, Any]:
         if is_variant_of(doc) or any(code == "variant_of" for code, _r, _n in gates):
             needs.append(PUSH_THE_MODEL)  # its photo and price ride its model's page
             # What its model's press holds it back on -- the sync screen's own
-            # per-SKU reason. Not when its own refusal already stands: that
-            # is the same readiness / brand fact, said once.
-            hold = None if why else model_hold(db, doc, spine)
+            # per-SKU reason. Dropped only when it repeats the colour's OWN
+            # refusal (its own waiting row, its own archived row, or the same
+            # words -- a shared brand/lock): the model's photo, price, clash or
+            # block is a different fact and is listed now, not after the
+            # colour is finished (review of #1305).
+            hold = model_hold(db, doc, spine)
+            if hold and why and (hold.startswith("not ready - ") or hold == "archived" or why in hold):
+                hold = None
             if hold:
                 needs.append("its model's page: " + hold)
         else:

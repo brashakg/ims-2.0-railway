@@ -323,3 +323,22 @@ def test_a_parent_with_no_sku_never_borrows_a_stray_sku_less_twin_as_lead():
     assert sweep["checked"], sweep
     (row,) = [r for r in sweep["missing_items"] if r["sku"] == spine["sku"]]
     assert row["reason"] == "family lead could not be found", row
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_draft_colour_still_names_its_models_own_blocker(monkeypatch):
+    """The colour's own refusal (a catalogue draft) is a different fact from
+    its model's press verdict (no photo): both are listed at once, never
+    revealed one after the other (review of #1305)."""
+    from api.services import online_content_diagnostics as diag
+    from api.services.shopify_push import product_push_refusal
+    from test_shopify_model_listings import _family, _twin, _world
+
+    db = _world()
+    lead, black = _family(db, [("Gold", "001", "58", {"photos": 0}), ("Black", "002", "58", {"photos": 0})])
+    db["products"].update_one({"product_id": black}, {"$set": {"catalog_status": "DRAFT"}})
+    code, reason, _plan = diag._press_verdict(db, _twin(db, lead))
+    assert code == "no_photo", (code, reason)
+    why = product_push_refusal(db, _twin(db, black))
+    assert why and "draft" in why, why
+    assert _model_needs(monkeypatch, db, black) == [why, diag.PUSH_THE_MODEL, "its model's page: " + reason]
