@@ -596,7 +596,8 @@ describe('a page past the end is never a dead end', () => {
     );
     renderAt('');
     await screen.findByText('Black (179)');
-    fireEvent.change(screen.getByLabelText('Frame colour'), { target: { value: 'Black' } });
+    fireEvent.click(screen.getByLabelText('Frame colour'));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Black (179)' }));
     await screen.findByText('Ray-Ban 3025 Black');
     // The older, unfiltered requests answer last.
     expect(late.length).toBeGreaterThan(0);
@@ -774,5 +775,69 @@ describe('Save & next: the Catalog list hands the edit page its products', () =>
     expect(back.get('sort')).toBe('name_asc');
     expect(back.get('page')).toBe('2');
     expect(back.get('focus')).toBe('P-A');
+  });
+});
+
+describe('Added by and Last edited by: tick boxes on the main row (owner 2026-11-01)', () => {
+  const PEOPLE_FACETS = {
+    ...FACETS,
+    created_by: [
+      { value: 'u-mansi', label: 'Mansi Kumari', count: 319 },
+      { value: 'u-durga', label: 'Durga Devi', count: 41 },
+    ],
+    updated_by: [
+      { value: 'u-ak', label: 'Akshay Ovhal', count: 2 },
+      { value: 'none', label: 'Never edited', count: 356 },
+    ],
+  };
+
+  it('ticks people in both, asks the server for exactly them, and names them in one chip each', async () => {
+    getFacets.mockResolvedValue(PEOPLE_FACETS);
+    renderAt('?page=3');
+    await screen.findByTestId('catalog-table');
+    // Both visible without opening More filters.
+    expect(screen.queryByTestId('more-filters')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Added by' }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Mansi Kumari (319)' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Durga Devi (41)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Last edited by' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Akshay Ovhal (2)' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Never edited (356)' }));
+    await waitFor(() => expect(where().get('edited_by')).toBe('u-ak,none'));
+    expect(where().get('added_by')).toBe('u-mansi,u-durga');
+    expect(where().get('page')).toBeNull();
+    await waitFor(() =>
+      expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({
+        created_by: 'u-mansi,u-durga',
+        updated_by: 'u-ak,none',
+        skip: 0,
+      })
+    );
+    const chips = screen.getByTestId('filter-chips');
+    expect(within(chips).getByText('Added by: Mansi Kumari, Durga Devi')).toBeTruthy();
+    expect(within(chips).getByText('Last edited by: Akshay Ovhal, Never edited')).toBeTruthy();
+  });
+
+  it('an old single-value link still ticks its one person', async () => {
+    getFacets.mockResolvedValue(PEOPLE_FACETS);
+    renderAt('?added_by=u-durga');
+    await screen.findByTestId('catalog-table');
+    expect(getProducts.mock.calls.at(-1)?.[0].created_by).toBe('u-durga');
+    fireEvent.click(screen.getByRole('button', { name: 'Added by' }));
+    const durga = (await screen.findByRole('checkbox', { name: 'Durga Devi (41)' })) as HTMLInputElement;
+    expect(durga.checked).toBe(true);
+    expect(within(screen.getByTestId('filter-chips')).getByText('Added by: Durga Devi')).toBeTruthy();
+  });
+
+  it('category chips tick several at once', async () => {
+    renderAt('');
+    await screen.findByTestId('catalog-table');
+    const chipRow = screen.getByRole('button', { name: 'All' }).parentElement as HTMLElement;
+    const [first, second] = within(chipRow).getAllByRole('button').slice(1);
+    fireEvent.click(first);
+    fireEvent.click(second);
+    await waitFor(() => expect(where().get('category')?.split(',')).toHaveLength(2));
+    expect(first.getAttribute('aria-pressed')).toBe('true');
+    expect(second.getAttribute('aria-pressed')).toBe('true');
   });
 });
