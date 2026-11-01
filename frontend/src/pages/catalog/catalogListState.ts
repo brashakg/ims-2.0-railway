@@ -37,7 +37,21 @@ export const FLAG_TYPES = [
   { value: 'other', label: 'Something else' },
 ] as const;
 export type FlagType = (typeof FLAG_TYPES)[number]['value'];
+/** One Flags choice; the filter itself ticks any number of them. */
 export type FlagFilter = '' | 'any' | 'mine' | 'archived' | FlagType;
+
+/** Every option filter is a tick-box multi-select (owner 2026-11-01): its
+ *  ticked values are ONE comma-separated string in the filters, the address
+ *  and the request ('Black,Gold' = Black OR Gold; one value = an old link).
+ *  The server caps a filter at 50 ticks (catalog_list.MAX_CHOICES). */
+export const MAX_CHOICES = 50;
+export const listOf = (s: string): string[] => (s ? s.split(',') : []);
+/** Ticked values cleaned the server's way: trimmed, 120 characters each,
+ *  blanks and repeats dropped, at most MAX_CHOICES. */
+export const joinList = (values: string[]): string =>
+  [...new Set(values.map((v) => v.trim().slice(0, 120)).filter(Boolean))]
+    .slice(0, MAX_CHOICES)
+    .join(',');
 
 export const flagLabel = (t: string): string =>
   FLAG_TYPES.find((f) => f.value === t)?.label ?? t;
@@ -77,24 +91,27 @@ export interface CatalogFilters {
   shape: string;
   frame_type: string;
   frame_material: string;
-  /** created_by user id */
+  /** created_by user ids (comma-separated, see listOf) */
   added_by: string;
-  /** updated_by user id, or 'none' = never edited */
+  /** updated_by user ids, 'none' = never edited (comma-separated) */
   edited_by: string;
   date_on: 'added' | 'edited';
   /** India days, YYYY-MM-DD, both included */
   from: string;
   to: string;
-  flag: FlagFilter;
+  /** Ticked FlagFilter values (comma-separated). */
+  flag: string;
   photo: '' | 'has' | 'missing';
   inactive: boolean;
   rows: number;
 }
 
-const TEXT_KEYS = [
-  'q', 'category', 'brand', 'frame_color', 'lens_colour', 'gender', 'shape',
+/** The tick-box filters (each a comma-separated list). */
+const LIST_KEYS = [
+  'category', 'brand', 'frame_color', 'lens_colour', 'gender', 'shape',
   'frame_type', 'frame_material', 'added_by', 'edited_by',
 ] as const;
+const TEXT_KEYS = ['q', ...LIST_KEYS] as const;
 
 const DAY = /^\d{4}-\d{2}-\d{2}$/;
 /** A calendar day that exists. Date.parse rolls 2026-02-30 over to 2 March
@@ -130,11 +147,10 @@ export function readFilters(
   const sort = SORT_OPTIONS.some((o) => o.value === sp.get('sort'))
     ? (sp.get('sort') as SortKey)
     : defaultSort(segment);
-  const flagRaw = sp.get('flag') || '';
-  const flag = (['any', 'mine', ...(canSeeArchived ? ['archived'] : [])].includes(flagRaw) ||
-  FLAG_TYPES.some((f) => f.value === flagRaw)
-    ? flagRaw
-    : '') as FlagFilter;
+  const flagOk = (v: string) =>
+    ['any', 'mine', ...(canSeeArchived ? ['archived'] : [])].includes(v) ||
+    FLAG_TYPES.some((f) => f.value === v);
+  const flag = joinList(listOf(sp.get('flag') || '').filter((v) => flagOk(v.trim())));
   const photoRaw = sp.get('photo') || '';
   let from = isDay(text('from')) ? text('from') : '';
   let to = isDay(text('to')) ? text('to') : '';
@@ -158,7 +174,8 @@ export function readFilters(
     inactive: sp.get('inactive') === '1',
     rows,
   } as CatalogFilters;
-  for (const k of TEXT_KEYS) f[k] = text(k);
+  f.q = text('q');
+  for (const k of LIST_KEYS) f[k] = joinList(listOf(sp.get(k) || ''));
   if (segment === 'review') {
     const none = readFilters(new URLSearchParams(), rows);
     const scoped = { ...none } as Record<string, unknown>;
@@ -344,26 +361,33 @@ export function activeChips(
   now: Date = new Date()
 ): FilterChip[] {
   const chips: FilterChip[] = [];
-  const nameOf = (list: PersonOption[], id: string) =>
-    list.find((p) => p.value === id)?.label || id;
+  // One chip per filter, naming every tick: 'Added by: Mansi, Durga'.
+  const names = (v: string, name: (one: string) => string = (one) => one) =>
+    listOf(v).map(name).join(', ');
+  const nameOf = (list: PersonOption[]) => (id: string) =>
+    id === 'none' ? 'Never edited' : list.find((p) => p.value === id)?.label || id;
   if (f.q) chips.push({ key: 'q', label: `Search: ${f.q}` });
-  if (f.category) chips.push({ key: 'category', label: `Category: ${categoryLabel(f.category)}` });
-  if (f.brand) chips.push({ key: 'brand', label: `Brand: ${f.brand}` });
+  if (f.category) chips.push({ key: 'category', label: `Category: ${names(f.category, categoryLabel)}` });
+  if (f.brand) chips.push({ key: 'brand', label: `Brand: ${names(f.brand)}` });
   for (const a of ATTRIBUTE_FILTERS) {
-    if (f[a.key]) chips.push({ key: a.key, label: `${a.label}: ${f[a.key]}` });
+    if (f[a.key]) chips.push({ key: a.key, label: `${a.label}: ${names(f[a.key])}` });
   }
-  if (f.added_by) chips.push({ key: 'added_by', label: `Added by: ${nameOf(people.added, f.added_by)}` });
+  if (f.added_by) {
+    chips.push({ key: 'added_by', label: `Added by: ${names(f.added_by, nameOf(people.added))}` });
+  }
   if (f.edited_by) {
     chips.push({
       key: 'edited_by',
       label:
         f.edited_by === 'none'
           ? 'Never edited'
-          : `Last edited by: ${nameOf(people.edited, f.edited_by)}`,
+          : `Last edited by: ${names(f.edited_by, nameOf(people.edited))}`,
     });
   }
   if (f.from || f.to) chips.push({ key: 'dates', label: dateChipLabel(f, now) });
-  if (f.flag) chips.push({ key: 'flag', label: `Flags: ${flagFilterLabel(f.flag)}` });
+  if (f.flag) {
+    chips.push({ key: 'flag', label: `Flags: ${names(f.flag, (v) => flagFilterLabel(v as FlagFilter))}` });
+  }
   if (f.photo) chips.push({ key: 'photo', label: f.photo === 'has' ? 'Has photo' : 'Photo missing' });
   if (f.inactive) chips.push({ key: 'inactive', label: 'Including inactive' });
   return chips;
@@ -406,10 +430,11 @@ export function resultLine(
   return `${n}${of} product${(total ?? shown) === 1 ? '' : 's'}, ${phrase}`;
 }
 
-/** How many choices sit behind More filters (the button's badge). */
+/** How many choices sit behind More filters (the button's badge). Last
+ *  edited by sits on the main row, beside Added by (owner 2026-11-01). */
 export function moreFiltersCount(f: CatalogFilters): number {
   return (
-    [f.lens_colour, f.gender, f.shape, f.frame_type, f.frame_material, f.edited_by].filter(Boolean)
+    [f.lens_colour, f.gender, f.shape, f.frame_type, f.frame_material].filter(Boolean)
       .length + (quickPickOf(f) === 'custom' ? 1 : 0)
   );
 }

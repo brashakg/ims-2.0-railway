@@ -514,7 +514,8 @@ export function CatalogManagerPage({
     if (segment !== 'review') return;
     let alive = true;
     productApi
-      .getBrandOptions(filters.category || undefined)
+      // One ticked category narrows the brands; several (or none) offer all.
+      .getBrandOptions(filters.category && !filters.category.includes(',') ? filters.category : undefined)
       .then((r) => {
         if (alive) setReviewBrands((r.brands || []).map((b) => b.name).filter(Boolean));
       })

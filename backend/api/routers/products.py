@@ -35,7 +35,9 @@ router = APIRouter()
 
 # The Catalog page's Flags filter: any open flag, open flags on MY entries,
 # one flag type, or the archived (deleted) products -- admins only.
-_FLAG_FILTER_PATTERN = "^(any|mine|archived|" + "|".join(_FLAG_TYPES) + ")$"
+_FLAG_ONE = "(any|mine|archived|" + "|".join(_FLAG_TYPES) + ")"
+# Flags is a tick-box multi-select too (owner 2026-11-01): 'any,price_check'.
+_FLAG_FILTER_PATTERN = f"^{_FLAG_ONE}(,{_FLAG_ONE})*$"
 _ARCHIVE_VIEW_ROLES = {"ADMIN", "SUPERADMIN"}
 
 logger = logging.getLogger("ims.products")
@@ -868,16 +870,16 @@ async def list_products(
     # one of them routes through services/catalog_list (one query for the
     # page AND its count, sorted on the server across the whole result).
     sort: Optional[str] = Query(None, pattern=_catalog_list.SORT_PATTERN),
-    frame_color: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
-    lens_colour: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
-    gender: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
-    shape: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
-    frame_type: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
-    frame_material: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    frame_color: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
+    lens_colour: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
+    gender: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
+    shape: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
+    frame_type: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
+    frame_material: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
     updated_by: Optional[str] = Query(
         None,
-        max_length=_catalog_list.VALUE_MAX,
-        description="Last edited by this user_id; 'none' = never edited.",
+        max_length=_catalog_list.LIST_MAX,
+        description="Last edited by any of these user_ids (comma-separated); 'none' = never edited.",
     ),
     date_on: Optional[str] = Query(None, pattern="^(added|edited)$"),
     date_from: Optional[str] = Query(
@@ -919,35 +921,55 @@ async def list_products(
     def _opt(v):
         return v.strip() if isinstance(v, str) and v.strip() else None
 
-    new = {
-        "sort": _opt(sort),
-        "updated_by": _opt(updated_by),
-        "date_on": _opt(date_on),
-        "date_from": _opt(date_from),
-        "date_to": _opt(date_to),
-        "flag": _opt(flag),
-        "group": _opt(group),
-        "attributes": {
-            k: _opt(v)
-            for k, v in (
-                ("frame_color", frame_color),
-                ("lens_colour", lens_colour),
-                ("gender", gender),
-                ("shape", shape),
-                ("frame_type", frame_type),
-                ("frame_material", frame_material),
-            )
-            if _opt(v)
-        },
-    }
-    use_catalog_list = any(new.values())
-    if new["flag"] == "archived" and not (
+    # Every option filter is a tick-box multi-select (owner 2026-11-01):
+    # 'a,b' = a OR b, one value = an old single-value link; validated and
+    # capped (catalog_list.choices).
+    _many = _catalog_list.choices
+    try:
+        new = {
+            "sort": _opt(sort),
+            "updated_by": _many(updated_by),
+            "date_on": _opt(date_on),
+            "date_from": _opt(date_from),
+            "date_to": _opt(date_to),
+            "flag": _many(flag),
+            "group": _opt(group),
+            "attributes": {
+                k: _many(v)
+                for k, v in (
+                    ("frame_color", frame_color),
+                    ("lens_colour", lens_colour),
+                    ("gender", gender),
+                    ("shape", shape),
+                    ("frame_type", frame_type),
+                    ("frame_material", frame_material),
+                )
+                if _many(v)
+            },
+        }
+        ticked = {
+            "category": _many(category),
+            "brand": _many(brand),
+            "created_by": _many(created_by),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # One ticked value keeps the legacy path (old links, the till search);
+    # two or more need the list path, which reads them as OR.
+    use_catalog_list = any(new.values()) or any(len(v) > 1 for v in ticked.values())
+    if "archived" in new["flag"] and not (
         set(current_user.get("roles") or []) & _ARCHIVE_VIEW_ROLES
     ):
         raise HTTPException(
             status_code=403, detail="Only an admin can see archived products"
         )
-    if new["flag"] == "mine":
+    if "archived" in new["flag"] and len(new["flag"]) > 1:
+        # Archived is a view of its own: mixed with live flags the page would
+        # give deleted rows live-row actions.
+        raise HTTPException(
+            status_code=400, detail="Archived cannot be combined with other flags"
+        )
+    if "mine" in new["flag"]:
         # "Flagged on my entries" depends on who asks: part of the cache key.
         new["me"] = current_user.get("user_id")
     if use_catalog_list:
@@ -1054,10 +1076,10 @@ async def list_products(
             # till's own word rule (or the wide one with match=anywhere) --
             # reused, never changed.
             query = _catalog_list.list_query(
-                category=category,
-                brand=brand,
+                category=[resolve_category(c) or c for c in ticked["category"]],
+                brand=ticked["brand"],
                 is_active=filtered_active,
-                created_by=created_by,
+                created_by=ticked["created_by"],
                 updated_by=new["updated_by"],
                 attributes=new["attributes"],
                 date_on=new["date_on"],
@@ -1075,7 +1097,7 @@ async def list_products(
             if new["group"]:
                 products, total_count = _catalog_list.group_page(
                     repo.collection, query, new["sort"] or "edited", _skip, _limit,
-                    archived=new["flag"] == "archived",
+                    archived=new["flag"] == ["archived"],
                 )
             else:
                 products = _catalog_list.page(
