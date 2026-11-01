@@ -15,6 +15,7 @@ from ...dependencies import get_db, get_workshop_repository, validate_store_acce
 from ._shared import logger, router
 from .helpers import _stamp_job_actor_names, job_to_frontend
 from ...services.cost_mask import mask_cost
+from ...utils.ist import ist_date_str_from_stored, ist_today
 
 
 # ============================================================================
@@ -169,8 +170,9 @@ async def get_dashboard_kpis(
     except Exception:
         return mask_cost(empty, current_user, "product")
 
-    now = datetime.now()
-    today_str = now.date().isoformat()
+    # The IST business day: expected_date is an IST date, and the stored
+    # instants below are naive UTC, so each is read as its IST day.
+    today_str = ist_today().isoformat()
 
     pending = 0
     in_progress = 0
@@ -194,8 +196,7 @@ async def get_dashboard_kpis(
             jobs_with_remake += 1
             for entry in remakes:
                 at = entry.get("at")
-                at_s = at.isoformat() if isinstance(at, datetime) else str(at or "")
-                if at_s.startswith(month_str):
+                if ist_date_str_from_stored(at).startswith(month_str):
                     try:
                         spoilage_cost_mtd_paise += max(
                             0, int(entry.get("cost_paise") or 0)
@@ -243,19 +244,13 @@ async def get_dashboard_kpis(
         # DELIVERED, so the "what shipped today" number is always live.
         completed_at = job.get("completed_at")
         if completed_at:
-            ca_str = (
-                completed_at
-                if isinstance(completed_at, str)
-                else completed_at.isoformat()
-            )
-            if ca_str.startswith(today_str):
+            if ist_date_str_from_stored(completed_at) == today_str:
                 completed_today += 1
 
         if status == "DELIVERED":
             sua = job.get("status_updated_at")
             if sua:
-                sua_str = sua if isinstance(sua, str) else sua.isoformat()
-                if sua_str.startswith(today_str):
+                if ist_date_str_from_stored(sua) == today_str:
                     delivered_today += 1
 
         # Turnaround sample — only include finished jobs with both ts.
@@ -323,5 +318,5 @@ async def get_dashboard_kpis(
         "spoilage_cost_mtd_paise": spoilage_cost_mtd_paise,
         "remake_rate_pct": remake_rate_pct,
         "store_id": active_store,
-        "as_of": now.isoformat(),
+        "as_of": datetime.now().isoformat(),
     }, current_user, "product")

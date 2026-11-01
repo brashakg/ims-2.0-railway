@@ -103,7 +103,6 @@ def _group_cl_rows(rows: List[dict], now: Optional[datetime] = None) -> List[dic
 
     Grouping key = product_id + batch_code + expiry_date so each distinct batch
     surfaces its own nearest-expiry. Pure helper (no DB)."""
-    now = now or datetime.utcnow()
     groups: Dict[tuple, dict] = {}
     for r in rows:
         key = (r.get("product_id"), r.get("batch_code"), r.get("expiry_date"))

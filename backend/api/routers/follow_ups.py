@@ -21,6 +21,7 @@ from .auth import get_current_user
 from ..dependencies import store_in_view
 from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..utils.dates import to_date_str
+from ..utils.ist import ist_today
 
 router = APIRouter()
 
@@ -243,7 +244,7 @@ async def create_follow_up(
             status_code=422,
             detail=f"scheduled_date must be a valid YYYY-MM-DD date, got: {request.scheduled_date!r}",
         )
-    if sched < date.today():
+    if sched < ist_today():
         raise HTTPException(
             status_code=422,
             detail=f"scheduled_date cannot be in the past (got {request.scheduled_date})",
@@ -347,7 +348,7 @@ async def get_due_today(
     store_id = store_in_view(store_id, current_user)
 
     collection = db.get_collection("follow_ups")
-    today = date.today().isoformat()
+    today = ist_today().isoformat()
 
     follow_ups = list(
         collection.find(
@@ -576,9 +577,11 @@ async def get_follow_up_summary(
 
     collection = db.get_collection("follow_ups")
     shop = {"store_id": store_id} if store_id else {}
-    today = date.today().isoformat()
-    week_from_today = (date.today() + timedelta(days=7)).isoformat()
-    month_from_today = (date.today() + timedelta(days=30)).isoformat()
+    # scheduled_date is an IST business date: bound it on the IST day.
+    ist_now = ist_today()
+    today = ist_now.isoformat()
+    week_from_today = (ist_now + timedelta(days=7)).isoformat()
+    month_from_today = (ist_now + timedelta(days=30)).isoformat()
 
     due_today = collection.count_documents(
         {**shop, "status": "pending", "scheduled_date": {"$lte": today}}

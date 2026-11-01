@@ -65,3 +65,33 @@ describe('exportUtils - toCSV numbers', () => {
     );
   });
 });
+
+describe('exportUtils - downloadCSV names the file on the IST day (FE-8)', () => {
+  async function nameAt(iso: string): Promise<string> {
+    const { vi } = await import('vitest');
+    const { downloadCSV } = await import('../exportUtils');
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(iso));
+    let name = '';
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      name = this.download;
+    });
+    URL.createObjectURL = vi.fn(() => 'blob:x');
+    URL.revokeObjectURL = vi.fn();
+    try {
+      downloadCSV('a,b', 'sales');
+    } finally {
+      click.mockRestore();
+      vi.useRealTimers();
+    }
+    return name;
+  }
+
+  it('night: 01:30 IST on 1 Jan is dated 1 Jan', async () => {
+    expect(await nameAt('2026-12-31T20:00:00Z')).toBe('sales_2027-01-01.csv');
+  });
+
+  it('day control: dated 31 Dec', async () => {
+    expect(await nameAt('2026-12-31T09:00:00Z')).toBe('sales_2026-12-31.csv');
+  });
+});

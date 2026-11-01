@@ -631,7 +631,7 @@ async def list_snapshots(
     repo = _snapshot_repo()
     if repo is None:
         return {"items": [], "store_id": store, "year": year}
-    yr = year or datetime.now().year
+    yr = year or ist_today().year
     items = repo.list_for_store_year(store, yr)
     return {
         "items": [_serialize(i) for i in items],

@@ -491,17 +491,6 @@ ALLOWED = {
     # a same-frame duration, never a business-day window on an IST schedule.
     # -----------------------------------------------------------------------
     (
-        "api/routers/analytics.py",
-        "start_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)",
-    ): (
-        "RULED, round 3: the whole /analytics/dashboard family reads the box "
-        "clock (end_date = datetime.now()) for its period windows, and the "
-        "docstring at the site records why a half-fix is worse -- it would "
-        "anchor the revenue figures and the customer split on the SAME "
-        "screen to two different midnights. A dashboard band, not a dated "
-        "document; scheduled by nobody."
-    ),
-    (
         "api/routers/reports/overview.py",
         "today = now_ist().replace(hour=0, minute=0, second=0, microsecond=0)",
     ): (

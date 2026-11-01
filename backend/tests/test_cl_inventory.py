@@ -67,8 +67,8 @@ class TestComputeDaysUntilExpiry:
         assert compute_days_until_expiry("not-a-date", NOW) is None
 
     def test_future_iso_string_positive(self):
-        # _iso(30) is a midnight date; NOW is noon -> 29.5 truncates to 29.
-        assert compute_days_until_expiry(_iso(30), NOW) == 29
+        # Calendar days (IST clock sweep CLK-P09): 30 days out is 30.
+        assert compute_days_until_expiry(_iso(30), NOW) == 30
 
     def test_past_iso_string_negative(self):
         # Past date -> negative day count (expired).
@@ -76,8 +76,8 @@ class TestComputeDaysUntilExpiry:
 
     def test_accepts_date_object(self):
         d = (NOW + timedelta(days=10)).date()
-        # date is midnight; NOW is noon -> 9.5 days truncates to 9.
-        assert compute_days_until_expiry(d, NOW) == 9
+        # Calendar days, not a floored time difference.
+        assert compute_days_until_expiry(d, NOW) == 10
 
     def test_accepts_datetime_object(self):
         dt = NOW + timedelta(days=7)

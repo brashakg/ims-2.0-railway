@@ -28,7 +28,15 @@ from ..services.reorder_policy import buy_qty, low_stock_rows, open_orders, top_
 
 # IST (TZ-P3): the server clock is UTC; every business "today" key below must be
 # the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
-from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
+from ..utils.ist import (
+    instant_in_window_query,
+    ist_date_str,
+    ist_date_str_from_stored,
+    ist_day_start_utc,
+    ist_month_window_utc,
+    ist_today,
+    now_ist,
+)
 from ..services.online_order_status import BOOKED_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -145,9 +153,8 @@ class JarvisAnalyticsEngine:
         if orders_col is None:
             return None
         try:
-            from datetime import datetime as _dt, timedelta as _td
-
-            now = _dt.now()
+            # IST business day / month; each order read as its IST day.
+            now = now_ist()
             today = now.strftime("%Y-%m-%d")
             month_start = now.strftime("%Y-%m-01")
             ly_month_start = f"{now.year - 1:04d}-{now.month:02d}-01"
@@ -159,7 +166,7 @@ class JarvisAnalyticsEngine:
             pending = in_progress = ready = 0
             for o in orders_col.find({}):
                 status = (o.get("status") or "").upper()
-                created = str(o.get("created_at") or "")[:10]
+                created = ist_date_str_from_stored(o.get("created_at"))
                 gt = float(o.get("grand_total") or 0)
                 if status in counted:
                     if created >= month_start:
@@ -207,7 +214,9 @@ class JarvisAnalyticsEngine:
             if customers_col is not None:
                 total_cust = customers_col.count_documents({})
                 new_cust = customers_col.count_documents(
-                    {"created_at": {"$gte": month_start}}
+                    instant_in_window_query(
+                        "created_at", *ist_month_window_utc(now.year, now.month)
+                    )
                 )
 
             # Staff
@@ -1483,9 +1492,10 @@ class JarvisAnalyticsEngine:
                         {"status": {"$in": ["OPEN", "PENDING"]}}
                     ),
                     "this_month": col.count_documents(
-                        {
-                            "created_at": {"$gte": datetime.now().strftime("%Y-%m-01")},
-                        }
+                        instant_in_window_query(
+                            "created_at",
+                            *ist_month_window_utc(now_ist().year, now_ist().month),
+                        )
                     ),
                 }
         except Exception:

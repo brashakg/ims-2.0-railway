@@ -33,7 +33,7 @@ import logging
 
 from .auth import get_current_user
 from ..dependencies import get_leave_repository
-from ..utils.ist import ist_date_str, ist_month_window_utc
+from ..utils.ist import ist_date_str, ist_month_window_utc, now_ist
 from ..services.name_resolver import order_actor_id
 from ..services.online_order_status import SALE_DONE_STATUSES
 
@@ -83,8 +83,8 @@ def _caller_id(current_user: dict) -> Optional[str]:
 
 
 def _month_year(month: Optional[int], year: Optional[int]) -> tuple:
-    """Resolve (month, year), defaulting to the current calendar month."""
-    now = datetime.now()
+    """Resolve (month, year), defaulting to the current IST calendar month."""
+    now = now_ist()
     m = month if (month and 1 <= month <= 12) else now.month
     y = year if (year and 2020 <= year <= 2100) else now.year
     return m, y

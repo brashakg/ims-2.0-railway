@@ -135,7 +135,8 @@ def test_patching_db_datetime_and_helpers_reaches_their_readers():
             assert mod.get_db() == "db", mod.__name__
         # The money gate resolves the job's order through gates' binding.
         assert gates.get_order_repository() == "orders"
-        for mod in (board, jobs, qc, spoilage, lens, lab_stations, vendor):
+        # jobs.py no longer reads datetime: its calendar defaults are IST.
+        for mod in (board, qc, spoilage, lens, lab_stations, vendor):
             assert mod.datetime is FakeDT, mod.__name__
         for mod in (_shared, gates, jobs, status):
             assert mod._check_dc_hardlock == "hardlock", mod.__name__

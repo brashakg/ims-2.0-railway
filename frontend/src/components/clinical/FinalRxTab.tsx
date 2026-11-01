@@ -10,6 +10,7 @@ import { RxPowerInput } from './RxPowerInput';
 import { VA_OPTIONS } from '../../constants/rxLimits';
 import { rxDriftWarning, type PreviousRx } from './rxDrift';
 import type { PowerWarnings } from './EyeTestInput';
+import { istDayString } from '../../utils/datetime';
 
 interface FinalRxTabProps {
   data: FinalRxData;
@@ -260,7 +261,7 @@ export function FinalRxTab({ data, onChange, subjectiveRxData, findings, onFindi
             <input
               type="date"
               value={data.nextCheckup}
-              min={new Date().toISOString().slice(0, 10)}
+              min={istDayString(new Date()) ?? undefined}
               onChange={(e) => onChange({ ...data, nextCheckup: e.target.value })}
               className="input-field"
             />

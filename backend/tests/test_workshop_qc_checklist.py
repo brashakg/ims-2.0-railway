@@ -410,6 +410,9 @@ class TestOverdueDetection:
     def _kpi_overdue(self, monkeypatch, expected_date: str) -> int:
         # Freeze the handler's datetime.now() so today_str == FROZEN_TODAY.
         monkeypatch.setattr(workshop_module, "datetime", _FrozenDateTime)
+        # "Today" is the IST business day (lane B, CLK-P05): pin it too.
+        from api.routers.workshop import board
+        monkeypatch.setattr(board, "ist_today", lambda: FROZEN_TODAY)
         job = _mk_job("j1", "PENDING", expected_date=expected_date)
         repo = FakeRepo([job])
         client = _client_with(monkeypatch, ["SUPERADMIN"], repo)

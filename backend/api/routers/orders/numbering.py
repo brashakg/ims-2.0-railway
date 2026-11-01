@@ -7,7 +7,8 @@ rounding or validation was changed.
 """
 
 import uuid
-from datetime import datetime
+
+from ...utils.ist import now_ist
 
 
 def generate_order_number(store_id: str) -> str:
@@ -36,7 +37,7 @@ def generate_order_number(store_id: str) -> str:
         prefix = "IMS"
     # Sanitize: alnum only, upper, non-empty.
     prefix = "".join(c for c in prefix if c.isalnum()) or "IMS"
-    year = datetime.now().year
+    year = now_ist().year
     short_uuid = str(uuid.uuid4())[:6].upper()
     return f"ORD-{prefix}-{year}-{short_uuid}"
 
