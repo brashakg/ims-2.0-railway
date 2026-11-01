@@ -320,6 +320,34 @@ def test_unblock_endpoint_reverses_flag_and_requeues(
     assert prod["ecom"]["shopify_product_id"] == "gid://shopify/Product/1"
 
 
+def test_unblock_never_requeues_an_archived_member(
+    client, auth_headers, patched_db, monkeypatch
+):
+    """Website 2: an archived member that still carries its Shopify id (taken
+    down, kept) must not go back in the queue -- a push would re-list it."""
+    conn = patched_db
+    _force_dark(monkeypatch)
+    conn.db["ecom_collections"].insert_one(
+        {"collection_id": "C3", "title": "Gucci", "handle": "gucci3",
+         "collection_type": "CUSTOM", "online_sync_blocked": True,
+         "products": [{"sku": "SKU-A", "position": 0}, {"sku": "SKU-Z", "position": 1}]}
+    )
+    conn.db["catalog_products"].insert_one(
+        {"id": "P-A", "sku": "SKU-A",
+         "ecom": {"shopify_product_id": "gid://shopify/Product/1", "locally_modified": False}}
+    )
+    conn.db["catalog_products"].insert_one(
+        {"id": "P-Z", "sku": "SKU-Z", "deleted_at": "2026-10-01T00:00:00+00:00",
+         "ecom": {"shopify_product_id": "gid://shopify/Product/2", "locally_modified": False}}
+    )
+
+    r = client.post("/api/v1/online-store/collections/C3/unblock", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["requeued"] == 1
+    assert conn.db["catalog_products"].find_one({"id": "P-A"})["ecom"]["locally_modified"] is True
+    assert conn.db["catalog_products"].find_one({"id": "P-Z"})["ecom"]["locally_modified"] is False
+
+
 def test_block_unknown_collection_is_404(client, auth_headers, patched_db):
     r = client.post("/api/v1/online-store/collections/NOPE/block", headers=auth_headers)
     assert r.status_code == 404, r.text

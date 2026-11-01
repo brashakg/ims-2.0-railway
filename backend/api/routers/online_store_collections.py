@@ -864,15 +864,14 @@ async def unblock_collection(
     skus, truncated = _resolve_block_members(updated)
     requeued = 0
     if db is not None and skus:
+        from api.services.catalog_ecom import queue_in
+
         for member in _synced_member_products(db, skus):
             try:
                 pid = member.get("id") or member.get("product_id")
-                if not pid:
-                    continue
-                from api.services.catalog_ecom import dirty_marks, update_ecom
-
-                # Compare-and-set + a fresh edit revision (SF-04).
-                if update_ecom(db, pid, lambda ecom: {**ecom, **dirty_marks()}) is not None:
+                # Compare-and-set + a fresh edit revision (SF-04); an archived
+                # member stays off the website (queue_in, Website 2).
+                if pid and queue_in(db["catalog_products"], pid):
                     requeued += 1
             except Exception:  # noqa: BLE001 -- one bad doc never aborts the rest
                 continue

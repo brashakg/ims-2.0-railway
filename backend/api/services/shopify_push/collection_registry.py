@@ -153,6 +153,7 @@ def listing_facts(db, include_ready: bool = False) -> List[Dict[str, Any]]:
     Shopify id, not taken down, archived or deleted). include_ready also counts
     the listings a push-all would publish for the first time (the rebuild's
     dry-run projection only; collections are made from live listings)."""
+    from ..catalog_ecom import is_archived
     from ._shared import is_variant_of, product_push_refusal
 
     out = []
@@ -160,7 +161,7 @@ def listing_facts(db, include_ready: bool = False) -> List[Dict[str, Any]]:
         ecom = doc.get("ecom") or {}
         if (
             is_variant_of(doc)
-            or doc.get("deleted_at")
+            or is_archived(doc)
             or ecom.get("taken_down_at")
             or str(ecom.get("status") or "").upper() == "ARCHIVED"
         ):

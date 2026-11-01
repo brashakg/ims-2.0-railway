@@ -787,6 +787,8 @@ export interface BulkRowResult {
   message: string | null;
   changed: boolean;
   applied?: boolean;
+  // Applied rows only: false = billing price saved, website copy not updated.
+  website_synced?: boolean;
 }
 
 export interface BulkSummary {
@@ -798,6 +800,7 @@ export interface BulkSummary {
   applied: boolean;
   counts: { total: number; valid: number; violations: number; unchanged: number };
   committed: number;
+  website_failed?: number;
   [k: string]: unknown;
 }
 

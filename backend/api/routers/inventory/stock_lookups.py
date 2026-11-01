@@ -127,7 +127,7 @@ def _guard_sells(line: dict, qty: int, store: Optional[str]) -> bool:
     expired unit(s) held back from sale' every 30 s. The mute is a context
     variable, so a real sale refused on another request still logs.
     ponytail: a refused ask still runs the guard's expired-unit count, one
-    indexed read per tracked tile per poll; the guard is not touched to skip it."""
+    indexed read per refused tile per poll; the guard is not touched to skip it."""
     from ..orders import stock as guard
 
     guard.logger.addFilter(_not_while_asking)  # a no-op after the first ask
@@ -195,7 +195,8 @@ def get_sellable_counts(
     product_repo = get_product_repository()
 
     # ponytail: per id, 1-4 reads to resolve it, 1 for the hint, then two asks
-    # of the guard (1 read each untracked, 2-3 tracked): 4-10 indexed reads. A
+    # of the guard (1 read each, 2 when refused -- the expired count): 4-8
+    # indexed reads. A
     # receipt or sale landing mid-call bisects instead (~20 asks, rare). <= 24
     # tiles + the cart per call; move to one aggregate if that ever hurts.
     sellable: Dict[str, Optional[int]] = {}
