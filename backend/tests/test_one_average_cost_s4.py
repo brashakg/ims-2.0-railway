@@ -1515,6 +1515,64 @@ def test_a_stamped_piece_sold_after_a_correction_is_trued_up_from_the_corrected_
     assert db.cogs_variances.count_documents({}) == 0
 
 
+
+def _correct_at(db, corrected, expected, minutes):
+    """A hand correction dated `minutes` after now (its history row's own
+    time: the order corrections and sales happen in, pinned)."""
+    assert product_cost.correct(db, "P", corrected, "credit note", "acc", expected=expected)
+    hist = db.products.find_one({"product_id": "P"})["cost_history"]
+    hist[-1]["at"] = (utc_now() + timedelta(minutes=minutes)).isoformat()
+    db.products.update_one({"product_id": "P"}, {"$set": {"cost_history": hist}})
+
+
+def _sell_g0_0_at(db, cost, minutes):
+    sold_at = (utc_now() + timedelta(minutes=minutes)).replace(tzinfo=None)
+    db.stock_units.update_one({"stock_id": "G0-0"}, {"$set": {"status": "SOLD", "order_id": "O1",
+                                                             "sold_at": sold_at}})
+    db.orders.insert_one({"order_id": "O1", "items": [{"product_id": "P", "quantity": 1, "cost_at_sale": cost}]})
+
+
+def test_the_latest_of_two_corrections_re_values_the_stamped_pieces():
+    """Round 11: stamp 100, corrected to 50, then to 60. G0's pieces are in
+    the pool at 60 (the latest); G0's bill, 10 at 60, gives 60.00 -- never
+    70.00 from trueing up 10 x (60 - 50) on a pool already at 60."""
+    db = _db(100.0, cost_source="PURCHASE_INVOICE")
+    _stamped_g0_at_100(db)
+    _correct_at(db, 50, 100.0, 1)
+    _correct_at(db, 60, 50.0, 2)
+    _accept(db, _bill("B0", 10, 60, grn_id="G0", created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == 60.0
+
+
+def test_a_stamped_piece_sold_between_two_corrections_left_the_pool_at_the_first():
+    """Round 11: stamp 100, corrected to 50, G0-0 sells at 50, corrected to
+    60. G0's bill at 60: G0-0 left the pool at 50, so it owes 60 - 50 = 10
+    (never 0 from the later correction); the 9 held are at 60, average 60."""
+    db = _db(100.0, cost_source="PURCHASE_INVOICE")
+    _stamped_g0_at_100(db)
+    _correct_at(db, 50, 100.0, 1)
+    _sell_g0_0_at(db, 50.0, 2)
+    _correct_at(db, 60, 50.0, 3)
+    _accept(db, _bill("B0", 10, 60, grn_id="G0", bill_date="2026-11-01",
+                      created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == 60.0
+    var = db.cogs_variances.find_one({})
+    assert (var["amount"], var["stock_ids"]) == (10.0, ["G0-0"])
+
+
+def test_a_correction_after_a_stamped_piece_left_never_re_values_it():
+    """Round 11: stamp 100, G0-0 sells at 100, THEN corrected to 50. G0's
+    bill at 100: G0-0 left the pool at 100 -- no variance (never +50 from a
+    correction made after it was gone)."""
+    db = _db(100.0, cost_source="PURCHASE_INVOICE")
+    _stamped_g0_at_100(db)
+    _sell_g0_0_at(db, 100.0, 1)
+    _correct_at(db, 50, 100.0, 5)
+    _accept(db, _bill("B0", 10, 100, grn_id="G0", bill_date="2026-11-01",
+                      created_at="2026-11-01T00:00:00+00:00"))
+    assert db.cogs_variances.count_documents({}) == 0
+
+
 class _Tasks:
     def __init__(self):
         self.collection = mongomock.MongoClient().t.tasks
