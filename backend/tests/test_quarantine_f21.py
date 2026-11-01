@@ -366,46 +366,49 @@ def test_luxury_brand_line_appears_only_for_luxury(env):
 # 4. transfers ship-move rejects a QUARANTINED unit (400)
 # ---------------------------------------------------------------------------
 
-def test_transfer_ship_explicit_quarantined_unit_rejected_400(env, monkeypatch):
-    from fastapi import HTTPException
+def _quarantine_shop(monkeypatch):
+    import mongomock
     from api.routers import transfers as tr
 
-    env["add_product"]()
-    env["add_unit"]("STO-T1", status="QUARANTINED")
-    monkeypatch.setattr(tr, "get_stock_repository", lambda: env["stock_repo"])
+    db = mongomock.MongoClient()["f21_transfers"]
+    db["stock_units"].insert_one({"stock_id": "STO-T1", "product_id": "P-FRAME", "store_id": "S-A",
+                                  "status": "QUARANTINED", "barcode": "BC-STO-T1"})
+    monkeypatch.setattr(tr, "_get_db", lambda: db)
+    return tr, db
 
+
+def test_transfer_ship_packed_quarantined_unit_refused(monkeypatch):
+    """S3: ship moves exactly the packed pieces, each checked first -- a
+    QUARANTINED piece in the box refuses the ship by its barcode, and it
+    stays in quarantine (a defective unit never moves between stores)."""
+    from fastapi import HTTPException
+
+    tr, db = _quarantine_shop(monkeypatch)
     transfer = {
-        "id": "TR-1",
-        "from_location_id": "S-A",
-        "to_location_id": "S-B",
-        "items": [
-            {"product_id": "P-FRAME", "quantity": 1, "stock_ids": ["STO-T1"]}
-        ],
+        "id": "TR-1", "from_location_id": "S-A", "to_location_id": "S-B",
+        "items": [{"product_id": "P-FRAME", "packed_stock_ids": ["STO-T1"],
+                   "packed_barcodes": ["BC-STO-T1"]}],
     }
     with pytest.raises(HTTPException) as exc:
         tr._apply_ship_stock_move(transfer)
-    assert exc.value.status_code == 400
-    assert exc.value.detail["code"] == "quarantined_unit"
+    assert exc.value.status_code == 409 and "BC-STO-T1" in exc.value.detail
+    assert db["stock_units"].find_one({"stock_id": "STO-T1"})["status"] == "QUARANTINED"
 
 
-def test_transfer_ship_never_claims_quarantined_unit(env, monkeypatch):
-    """No explicit stock_ids: the AVAILABLE allowlist must skip the quarantined
-    unit -> zero units moved for that line (never a phantom move)."""
-    from api.routers import transfers as tr
+def test_transfer_pack_refuses_a_quarantined_unit(monkeypatch):
+    """The box cannot even take it: only a FREE (AVAILABLE) piece is packed."""
+    from fastapi import HTTPException
 
-    env["add_product"]()
-    env["add_unit"]("STO-T2", status="QUARANTINED")  # only unit, quarantined
-    monkeypatch.setattr(tr, "get_stock_repository", lambda: env["stock_repo"])
-
-    transfer = {
-        "id": "TR-2",
-        "from_location_id": "S-A",
-        "to_location_id": "S-B",
-        "items": [{"product_id": "P-FRAME", "quantity": 1}],
-    }
-    out = tr._apply_ship_stock_move(transfer)
-    assert out["items"][0]["quantity_shipped"] == 0
-    assert env["stock_repo"].find_by_id("STO-T2")["status"] == "QUARANTINED"
+    tr, db = _quarantine_shop(monkeypatch)
+    tr._save_transfer({
+        "id": "TR-2", "transfer_number": "TR-2", "status": "approved",
+        "from_location_id": "S-A", "to_location_id": "S-B",
+        "items": [{"id": "L1", "product_id": "P-FRAME", "quantity_requested": 1}],
+    })
+    admin = {"user_id": "u", "username": "u", "roles": ["SUPERADMIN"], "store_ids": []}
+    with pytest.raises(HTTPException) as exc:
+        _run(tr.pack_transfer("TR-2", tr.TransferPack(barcodes=["BC-STO-T1"]), admin))
+    assert exc.value.status_code == 400 and "quarantined" in exc.value.detail
 
 
 # ---------------------------------------------------------------------------

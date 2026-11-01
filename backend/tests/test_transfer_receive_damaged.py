@@ -1,34 +1,25 @@
 """
 IMS 2.0 - Transfer RECEIVE hardening (BUG-009 / BUG-011 / BUG-019)
 ==================================================================
-Covers three confirmed receive-side defects on the real /api/v1/transfers
-lifecycle:
+Three confirmed receive-side defects, re-stated for the S3 per-piece flow
+(pieces scanned OUT into the box, scanned IN at the receiving shop):
 
-  * BUG-009 - damaged-in-transit units used to be re-homed as AVAILABLE
-    (sellable). They must now land in QUARANTINE: good units AVAILABLE,
-    damaged units QUARANTINED, and destination sellable on-hand must EXCLUDE
-    the damaged ones.
-  * BUG-011 - quantity_received was accepted uncapped, inflating the doc/summary
-    and falsely marking a partial transfer RECEIVED. An over-receive (received >
-    shipped on a line) must now be rejected with a 400.
-  * BUG-019 - a receive mismatch (short / surplus / damaged) used to close the
-    transfer silently. A follow-up task must now be created in the canonical
-    `tasks` collection, store-scoped to the destination.
+  * BUG-009 - a piece damaged in the box must land in QUARANTINE at the
+    receiving shop, never on the sellable shelf; destination sellable on-hand
+    excludes it.
+  * BUG-011 - a receive can never exceed what shipped: a piece that was not
+    in the box is refused (400) and nothing moves.
+  * BUG-019 - a receipt that does not match (pieces missing on the way or
+    damaged) raises a follow-up task in the canonical `tasks` collection,
+    store-scoped to the destination, when the box is accepted (Complete).
 
-The DB-backed tests drive the real endpoint functions against the REAL
-StockRepository on a throwaway Mongo at MONGO_HOST=127.0.0.1 (same harness as
-test_transfer_stock_movement.py). If no local mongod is reachable they SKIP so
-the suite stays green off-CI while still proving the behavior on CI's mongo.
-
-Pure-logic checks (no DB) lock the over-receive 400 and the mismatch-task
-helper's shape so they run everywhere.
+Runs on mongomock with the real StockRepository.
 """
 
 from __future__ import annotations
 
 import os
 import sys
-import uuid
 import asyncio
 
 import pytest
@@ -37,27 +28,12 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+mongomock = pytest.importorskip("mongomock")
+
 from fastapi import HTTPException  # noqa: E402
 
 from api.routers import transfers  # noqa: E402
-
-
-MONGO_HOST = os.getenv("MONGO_HOST", "127.0.0.1")
-MONGO_PORT = int(os.getenv("MONGO_PORT", "27017"))
-
-
-def _mongo_db():
-    try:
-        from pymongo import MongoClient
-    except Exception:  # noqa: BLE001
-        pytest.skip("pymongo not installed")
-    try:
-        client = MongoClient(MONGO_HOST, MONGO_PORT, serverSelectionTimeoutMS=1500)
-        client.admin.command("ping")
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"no local mongo at {MONGO_HOST}:{MONGO_PORT} ({exc})")
-    name = f"ims_test_transfer_dmg_{uuid.uuid4().hex[:8]}"
-    return client, client[name], name
+import transfer_box as box  # noqa: E402
 
 
 def _on_hand(db, product_id, store_id):
@@ -79,20 +55,15 @@ def _count_status(db, product_id, store_id, status):
 def lifecycle(monkeypatch):
     from database.repositories.product_repository import StockRepository
 
-    client, db, name = _mongo_db()
+    db = mongomock.MongoClient()["ims_test_transfer_dmg"]
     stock_repo = StockRepository(db.get_collection("stock_units"))
-
     monkeypatch.setattr(transfers, "get_stock_repository", lambda: stock_repo)
     monkeypatch.setattr(
         transfers, "_transfers_coll", lambda: db.get_collection("stock_transfers")
     )
     monkeypatch.setattr(transfers, "_get_db", lambda: db)
-
-    try:
-        yield {"db": db, "stock_repo": stock_repo}
-    finally:
-        client.drop_database(name)
-        client.close()
+    monkeypatch.setattr(transfers, "_writeback_units_left", lambda *a, **k: None)
+    return {"db": db, "stock_repo": stock_repo}
 
 
 _ADMIN = {
@@ -117,7 +88,9 @@ def _seed_units(stock_repo, product_id, store_id, n):
         )
 
 
-def _make_transfer(product_id, qty, n_name="Frame"):
+def _shipped(lifecycle, product_id, n, k):
+    """Seed n pieces at A, ask for k to B, pack and ship them."""
+    _seed_units(lifecycle["stock_repo"], product_id, "A", n)
     payload = transfers.TransferInput(
         transfer_type=transfers.TransferType.STORE_TO_STORE,
         from_location_id="A",
@@ -126,249 +99,104 @@ def _make_transfer(product_id, qty, n_name="Frame"):
         to_location_name="Store B",
         items=[
             transfers.TransferItemInput(
-                product_id=product_id,
-                sku="SKU-1",
-                product_name=n_name,
-                quantity_requested=qty,
+                product_id=product_id, sku="SKU-1", product_name="Frame", quantity_requested=k,
             )
         ],
     )
-    res = asyncio.run(transfers.create_transfer(payload, current_user=_ADMIN))
-    return res["transfer"]
+    t = asyncio.run(transfers.create_transfer(payload, current_user=_ADMIN))["transfer"]
+    box.ship(transfers, t["id"], _ADMIN)
+    return t["id"], t["items"][0]["id"]
 
 
 # ===========================================================================
-# BUG-009 - damaged units quarantined, good units available
+# BUG-009 - damaged pieces quarantined, good pieces available
 # ===========================================================================
 
 
 def test_receive_with_damaged_quarantines_only_damaged(lifecycle):
     db = lifecycle["db"]
-    stock_repo = lifecycle["stock_repo"]
     product_id = "PRD-DMG-1"
-    N, K, DMG = 10, 6, 2  # ship 6, of which 2 arrive damaged
+    K, DMG = 6, 2  # ship 6, of which 2 arrive damaged
+    tid, line_id = _shipped(lifecycle, product_id, 10, K)
 
-    _seed_units(stock_repo, product_id, "A", N)
-    transfer = _make_transfer(product_id, K)
-    tid = transfer["id"]
-    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
-    line_id = transfer["items"][0]["id"]
-
-    received = asyncio.run(
-        transfers.receive_transfer(
-            tid,
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id=line_id,
-                    quantity_received=K,
-                    quantity_damaged=DMG,
-                )
-            ],
-            current_user=_ADMIN,
-        )
-    )["transfer"]
+    received = box.receive(transfers, tid, _ADMIN, {line_id: (K, DMG)})["transfer"]
 
     assert received["status"] == transfers.TransferStatus.RECEIVED
-    # Destination SELLABLE on-hand rose only by the GOOD units (K - DMG).
+    # Destination SELLABLE on-hand rose only by the GOOD pieces (K - DMG).
     assert _on_hand(db, product_id, "B") == K - DMG
-    # The damaged units are at B but QUARANTINED -> excluded from on-hand/POS.
+    # The damaged pieces are at B but QUARANTINED -> excluded from on-hand/POS.
     assert _count_status(db, product_id, "B", transfers.STOCK_STATUS_QUARANTINED) == DMG
-    # Doc tracks the quarantined count distinctly.
-    assert received.get("stock_units_quarantined") == DMG
-    assert received.get("stock_units_moved_in") == K - DMG
+    line = received["items"][0]
+    assert (line["quantity_received"], line["quantity_damaged"]) == (K, DMG)
 
 
 def test_receive_all_damaged_quarantines_all(lifecycle):
     db = lifecycle["db"]
-    stock_repo = lifecycle["stock_repo"]
     product_id = "PRD-DMG-ALL"
-    N, K = 5, 3
-
-    _seed_units(stock_repo, product_id, "A", N)
-    transfer = _make_transfer(product_id, K)
-    tid = transfer["id"]
-    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
-    line_id = transfer["items"][0]["id"]
-
-    asyncio.run(
-        transfers.receive_transfer(
-            tid,
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id=line_id, quantity_received=K, quantity_damaged=K
-                )
-            ],
-            current_user=_ADMIN,
-        )
-    )
-    # None sellable at the destination; all K quarantined.
+    K = 3
+    tid, line_id = _shipped(lifecycle, product_id, 5, K)
+    box.receive(transfers, tid, _ADMIN, {line_id: (K, K)})
     assert _on_hand(db, product_id, "B") == 0
     assert _count_status(db, product_id, "B", transfers.STOCK_STATUS_QUARANTINED) == K
 
 
 # ===========================================================================
-# BUG-011 - quantity_received cannot exceed quantity_shipped
+# BUG-011 - a receive can never exceed what shipped
 # ===========================================================================
 
 
-def test_over_receive_is_rejected(lifecycle):
-    stock_repo = lifecycle["stock_repo"]
-    product_id = "PRD-OVER-1"
-    N, K = 10, 4
-
-    _seed_units(stock_repo, product_id, "A", N)
-    transfer = _make_transfer(product_id, K)
-    tid = transfer["id"]
-    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
-    line_id = transfer["items"][0]["id"]
-
-    # Receiving 6 against a 4-unit shipment must be a hard 400.
-    with pytest.raises(HTTPException) as exc:
-        asyncio.run(
-            transfers.receive_transfer(
-                tid,
-                items_received=[
-                    transfers.TransferItemReceive(
-                        transfer_item_id=line_id, quantity_received=K + 2
-                    )
-                ],
-                current_user=_ADMIN,
-            )
-        )
-    assert exc.value.status_code == 400
-    assert isinstance(exc.value.detail, dict)
-    assert exc.value.detail.get("code") == "RECEIVE_EXCEEDS_SHIPPED"
-
-
-def test_over_receive_does_not_inflate_or_mark_received(lifecycle):
-    """The over-receive 400 must fire BEFORE any doc/stock mutation, so the
-    transfer is not falsely advanced to RECEIVED."""
+def test_a_piece_not_in_the_box_is_refused_and_nothing_moves(lifecycle):
     db = lifecycle["db"]
-    stock_repo = lifecycle["stock_repo"]
-    product_id = "PRD-OVER-2"
-    N, K = 8, 5
-
-    _seed_units(stock_repo, product_id, "A", N)
-    transfer = _make_transfer(product_id, K)
-    tid = transfer["id"]
-    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
-    line_id = transfer["items"][0]["id"]
-
-    with pytest.raises(HTTPException):
-        asyncio.run(
-            transfers.receive_transfer(
-                tid,
-                items_received=[
-                    transfers.TransferItemReceive(
-                        transfer_item_id=line_id, quantity_received=99
-                    )
-                ],
-                current_user=_ADMIN,
-            )
-        )
+    product_id = "PRD-OVER-1"
+    tid, _ = _shipped(lifecycle, product_id, 10, 4)
+    # One of the six pieces still on A's shelf, scanned at B.
+    stray = db["stock_units"].find_one({"product_id": product_id, "store_id": "A",
+                                        "status": "AVAILABLE"})["barcode"]
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(transfers.receive_transfer(
+            tid, transfers.TransferPieceReceive(barcode=stray), current_user=_ADMIN
+        ))
+    assert exc.value.status_code == 400
     after = transfers._get_transfer(tid)
     assert after["status"] == transfers.TransferStatus.IN_TRANSIT
-    # No units re-homed to B.
     assert _on_hand(db, product_id, "B") == 0
 
 
 # ===========================================================================
-# BUG-019 - a receive mismatch raises a follow-up task
+# BUG-019 - a mismatched receipt raises a follow-up task (at Complete)
 # ===========================================================================
 
 
-def test_short_receive_creates_discrepancy_task(lifecycle):
+def test_short_receipt_creates_discrepancy_task(lifecycle):
     db = lifecycle["db"]
-    stock_repo = lifecycle["stock_repo"]
     product_id = "PRD-SHORT-T"
-    N, K = 10, 6
+    tid, line_id = _shipped(lifecycle, product_id, 10, 6)
 
-    _seed_units(stock_repo, product_id, "A", N)
-    transfer = _make_transfer(product_id, K)
-    tid = transfer["id"]
-    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
-    line_id = transfer["items"][0]["id"]
-
-    res = asyncio.run(
-        transfers.receive_transfer(
-            tid,
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id=line_id, quantity_received=4  # 2 short of 6
-                )
-            ],
-            current_user=_ADMIN,
-        )
-    )
-    assert res["transfer"]["status"] == transfers.TransferStatus.PARTIALLY_RECEIVED
-    task_id = res["summary"]["discrepancy_task_id"]
+    res = box.receive_complete(transfers, tid, _ADMIN, {line_id: (4, 0)})  # 2 short of 6
+    task_id = res["transfer"]["discrepancy_task_id"]
     assert task_id
     task = db.get_collection("tasks").find_one({"task_id": task_id})
-    assert task is not None
-    # Store-scoped to the DESTINATION; carries the transfer id + short count.
     assert task["store_id"] == "B"
     assert task["task_type"] == "transfer_discrepancy"
     assert task["transfer_id"] == tid
     assert task["discrepancy"]["short"] == 2
-    assert task["priority"] == "P2"  # short shipment is the urgent tier
+    assert task["priority"] == "P2"
+    assert len(res["transfer"]["missing_pieces"]) == 2
 
 
-def test_damaged_receive_creates_discrepancy_task(lifecycle):
+def test_damaged_receipt_creates_discrepancy_task(lifecycle):
     db = lifecycle["db"]
-    stock_repo = lifecycle["stock_repo"]
-    product_id = "PRD-DMG-T"
-    N, K, DMG = 8, 5, 1
-
-    _seed_units(stock_repo, product_id, "A", N)
-    transfer = _make_transfer(product_id, K)
-    tid = transfer["id"]
-    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
-    line_id = transfer["items"][0]["id"]
-
-    res = asyncio.run(
-        transfers.receive_transfer(
-            tid,
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id=line_id, quantity_received=K, quantity_damaged=DMG
-                )
-            ],
-            current_user=_ADMIN,
-        )
-    )
-    # Full received (status RECEIVED) but damaged -> still a discrepancy task.
-    assert res["transfer"]["status"] == transfers.TransferStatus.RECEIVED
-    task_id = res["summary"]["discrepancy_task_id"]
-    assert task_id
-    task = db.get_collection("tasks").find_one({"task_id": task_id})
-    assert task["discrepancy"]["damaged"] == DMG
+    tid, line_id = _shipped(lifecycle, "PRD-DMG-T", 8, 5)
+    res = box.receive_complete(transfers, tid, _ADMIN, {line_id: (5, 1)})
+    task = db.get_collection("tasks").find_one({"task_id": res["transfer"]["discrepancy_task_id"]})
+    assert task["discrepancy"]["damaged"] == 1
 
 
-def test_clean_receive_creates_no_task(lifecycle):
+def test_clean_receipt_creates_no_task(lifecycle):
     db = lifecycle["db"]
-    stock_repo = lifecycle["stock_repo"]
-    product_id = "PRD-CLEAN-T"
-    N, K = 7, 4
-
-    _seed_units(stock_repo, product_id, "A", N)
-    transfer = _make_transfer(product_id, K)
-    tid = transfer["id"]
-    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
-    line_id = transfer["items"][0]["id"]
-
-    res = asyncio.run(
-        transfers.receive_transfer(
-            tid,
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id=line_id, quantity_received=K  # exact, undamaged
-                )
-            ],
-            current_user=_ADMIN,
-        )
-    )
-    assert res["transfer"]["status"] == transfers.TransferStatus.RECEIVED
-    assert res["summary"]["discrepancy_task_id"] is None
+    tid, line_id = _shipped(lifecycle, "PRD-CLEAN-T", 7, 4)
+    res = box.receive_complete(transfers, tid, _ADMIN, {line_id: (4, 0)})
+    assert res["transfer"].get("discrepancy_task_id") is None
     assert db.get_collection("tasks").count_documents({"transfer_id": tid}) == 0
 
 

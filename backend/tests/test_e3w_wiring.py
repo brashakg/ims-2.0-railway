@@ -67,6 +67,12 @@ _CASHIER = {
 }
 
 
+def _run(coro):
+    import asyncio
+
+    return asyncio.run(coro)
+
+
 def _events(db, stock_id=None, event_type=None):
     rows = db.get_collection("item_events").docs
     if stock_id is not None:
@@ -196,10 +202,15 @@ def xfer_env(monkeypatch):
     from api.routers import transfers as tr
     from database.repositories.product_repository import StockRepository
 
-    db = CasDB()
+    import mongomock
+
+    # S3: the per-piece ship / receive use conditional writes
+    # (find_one_and_update / update_one on status), so a real-shaped database.
+    db = _MongoLedger(mongomock.MongoClient()["e3w_transfers"])
     stock_repo = StockRepository(db.get_collection("stock_units"))
     monkeypatch.setattr(tr, "_get_db", lambda: db)
     monkeypatch.setattr(tr, "get_stock_repository", lambda: stock_repo)
+    monkeypatch.setattr(tr, "_writeback_units_left", lambda *a, **k: None)
 
     def add_unit(stock_id, product_id="P-FRAME", status="AVAILABLE", store_id="S-A"):
         db.get_collection("stock_units").insert_one(
@@ -208,6 +219,26 @@ def xfer_env(monkeypatch):
         )
 
     return {"db": db, "stock_repo": stock_repo, "add_unit": add_unit, "tr": tr}
+
+
+class _MongoLedger:
+    """A mongomock database whose item_events collection also answers
+    `.docs` (what _events reads)."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def get_collection(self, name):
+        coll = self._db[name]
+        if name == "item_events":
+            coll.docs = list(coll.find({}, {"_id": 0}))
+        return coll
+
+    def __getitem__(self, name):
+        return self.get_collection(name)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
 
 
 def _transfer(items, **extra):
@@ -226,7 +257,8 @@ def test_transfer_ship_unchanged_and_ledger_row(xfer_env):
     tr = xfer_env["tr"]
     xfer_env["add_unit"]("X1")
     xfer_env["add_unit"]("X2")
-    transfer = _transfer([{"product_id": "P-FRAME", "quantity_requested": 2}])
+    transfer = _transfer([{"product_id": "P-FRAME", "quantity_requested": 2,
+                           "packed_stock_ids": ["X1", "X2"]}])
     out = tr._apply_ship_stock_move(transfer)
     # (i) existing behavior: 2 units flipped to TRANSFERRED, idempotency flag set.
     assert out["stock_shipped"] is True
@@ -243,13 +275,17 @@ def test_transfer_ship_unchanged_and_ledger_row(xfer_env):
 def test_transfer_receive_unchanged_and_ledger_row(xfer_env):
     tr = xfer_env["tr"]
     xfer_env["add_unit"]("X3")
-    transfer = _transfer([{"product_id": "P-FRAME", "quantity_requested": 1}])
+    transfer = _transfer([{"id": "L1", "product_id": "P-FRAME", "quantity_requested": 1,
+                           "packed_stock_ids": ["X3"]}], status="in_transit")
     transfer = tr._apply_ship_stock_move(transfer)
-    # Mark the line received and re-home.
-    transfer["items"][0]["quantity_received"] = 1
-    out = tr._apply_receive_stock_move(transfer)
-    # (i) existing behavior: unit re-homed to S-B as AVAILABLE.
-    assert out["stock_units_moved_in"] == 1
+    tr._save_transfer(transfer)
+    # S3: the receiving shop scans the piece in.
+    out = _run(tr.receive_transfer(
+        "T1", tr.TransferPieceReceive(barcode="BC-X3"),
+        {"user_id": "u", "username": "u", "roles": ["SUPERADMIN"], "store_ids": []},
+    ))["transfer"]
+    # (i) the unit re-homed to S-B as AVAILABLE.
+    assert out["total_received"] == 1
     rehomed = xfer_env["stock_repo"].find_by_id("X3")
     assert rehomed["status"] == "AVAILABLE"
     assert rehomed["store_id"] == "S-B"
@@ -270,7 +306,8 @@ def test_transfer_ledger_failure_does_not_break_ship(xfer_env, monkeypatch):
 
     monkeypatch.setattr(ie, "record_post_write_event", _boom)
     xfer_env["add_unit"]("X4")
-    transfer = _transfer([{"product_id": "P-FRAME", "quantity_requested": 1}])
+    transfer = _transfer([{"product_id": "P-FRAME", "quantity_requested": 1,
+                           "packed_stock_ids": ["X4"]}])
     # (iii) ship still succeeds + the unit still flips, despite the raising recorder.
     out = tr._apply_ship_stock_move(transfer)
     assert out["stock_shipped"] is True

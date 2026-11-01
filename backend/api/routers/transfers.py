@@ -28,6 +28,7 @@ from ..dependencies import (
 # W1.4 / OS-032: shared ONLINE store-type detector -- a transfer must never
 # land stock on a pooled, stockless ONLINE store.
 from ..services import org_validation as ov
+from ..services.barcode import find_unit_by_code
 from ..services.cost_mask import mask_cost
 from ..services.purchase_invoice_engine import classify_supply
 from ..services.stores_util import is_online_store
@@ -53,6 +54,23 @@ STOCK_STATUS_AVAILABLE = "AVAILABLE"
 # silently shipping a quarantined unit. A quarantined unit must never move
 # between stores.
 STOCK_STATUS_QUARANTINED = "QUARANTINED"
+STOCK_STATUS_VOID = "VOID"
+
+# S3: the note a short delivery between two GSTINs is booked on (CA answers
+# 2026-10-23: value received + a CREDIT NOTE for the difference). It sits in
+# vendor_bills next to the transfer's tax invoice (same source_transfer_id),
+# negative, so every sum over those bills nets it.
+TRANSFER_CREDIT_NOTE = "TRANSFER_CREDIT_NOTE"
+
+# A piece scanned OUT and never IN ("Missing on the way") stays open until it
+# is found or written off by an admin.
+MISSING_OPEN = ("missing", "write_off_requested")
+
+# Who does what (the screen's gates mirror these, transferPermissions.ts).
+SHIP_ROLES = ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
+RECEIVE_ROLES = ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
+MISSING_ROLES = ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"]
+CANCEL_ROLES = ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"]
 
 
 # ============================================================================
@@ -135,16 +153,27 @@ class TransferItemInput(BaseModel):
     notes: Optional[str] = None
 
 
-class TransferItemReceive(BaseModel):
-    transfer_item_id: str
-    # BUG FIX: receive quantities must be non-negative; negative would
-    # attempt to un-receive units and flip committed counts backward.
-    quantity_received: int = Field(..., ge=0)
-    # BUG FIX: damaged count must be non-negative and cannot exceed received.
-    # The ge=0 floor is enforced here; the damaged<=received invariant is
-    # enforced in receive_transfer() at the endpoint level.
-    quantity_damaged: int = Field(default=0, ge=0)
-    damage_notes: Optional[str] = None
+class TransferPack(BaseModel):
+    """S3: the pieces scanned OUT into the box, the whole list each time (a
+    scan re-sends it), so a retry or a second tablet never double-packs."""
+
+    barcodes: List[str] = Field(default_factory=list)
+
+
+class TransferPieceReceive(BaseModel):
+    """S3: ONE piece scanned IN at the receiving shop."""
+
+    barcode: str = Field(..., min_length=1)
+    # Damaged in the box: the piece goes to QUARANTINE at the receiving shop,
+    # never to the shelf, and the reason is required.
+    damaged: bool = False
+    damage_reason: Optional[str] = None
+
+
+class MissingFound(BaseModel):
+    """Where a piece that was missing on the way turned up."""
+
+    at: str = Field(..., pattern="^(source|destination)$")
 
 
 class TransferInput(BaseModel):
@@ -174,6 +203,9 @@ class TransferUpdate(BaseModel):
     shipping_cost: Optional[float] = Field(default=None, ge=0)
     tracking_number: Optional[str] = None
     tracking_url: Optional[str] = None
+    # Part B of the e-way bill data, typed on the box page (board TransferBox).
+    eway_bill_number: Optional[str] = Field(default=None, max_length=20)
+    vehicle_number: Optional[str] = Field(default=None, max_length=20)
 
 
 class TransferApproval(BaseModel):
@@ -457,31 +489,6 @@ def _freeze_tax_invoice_lines(transfer: Dict) -> List[Dict]:
 # exactly as before, just without moving units.
 
 
-def _line_ship_qty(line: Dict) -> int:
-    """How many units a transfer line should move on SHIP.
-
-    Prefer an explicit picked/shipped quantity when the picking flow set one;
-    otherwise fall back to the originally requested quantity. Coerced to a
-    whole, non-negative int (serialized stock is one row per unit). Pure.
-    """
-    for key in ("quantity_shipped", "quantity_requested", "quantity"):
-        raw = line.get(key)
-        if raw in (None, 0):
-            continue
-        try:
-            n = int(float(raw))
-        except (TypeError, ValueError):
-            continue
-        if n > 0:
-            return n
-    # quantity_shipped may legitimately be 0 if nothing was picked; respect it
-    # only when it was explicitly set, else default to requested.
-    try:
-        return max(0, int(float(line.get("quantity_requested", 0) or 0)))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _qty(raw) -> int:
     """Coerce a stored quantity to a whole, non-negative int (serialized stock is
     one row per unit). Missing / junk -> 0. Pure."""
@@ -649,142 +656,193 @@ def _create_receive_mismatch_task(transfer: Dict, discrepancy: Dict) -> Optional
         return None
 
 
-def _apply_ship_stock_move(transfer: Dict, products: Optional[Dict[str, Dict]] = None) -> Dict:
-    """Move source on-hand OUT when a transfer ships.
+def _require_roles(current_user: dict, roles: List[str]) -> None:
+    if not any(role in (current_user or {}).get("roles", []) for role in roles):
+        raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    For each line, claim up to `_line_ship_qty` AVAILABLE units of that product
-    at the SOURCE store and flip them to TRANSFERRED, tagging each with the
-    transfer id. The moved unit ids are recorded on the line (`shipped_stock_ids`)
-    and the line's `quantity_shipped` is set to what was actually moved.
 
-    Idempotent: if the transfer is already flagged `stock_shipped`, this is a
-    no-op (returns the transfer untouched) so a double ship/POST cannot
-    double-decrement. Fail-soft: no stock repo -> transfer returned unchanged.
-    `products`: the master rows ship_transfer read ONCE for its guard
-    (_ship_products) -- the stamp's only product source; never re-read here.
+def _units_coll():
+    """stock_units, or a 503: a per-piece move never runs blind."""
+    db = _get_db()
+    if db is None:
+        raise HTTPException(
+            status_code=503,
+            detail="IMS cannot reach the stock records just now. Nothing has "
+            "moved; try again.",
+        )
+    return db.get_collection("stock_units")
+
+
+def _free_at(db, product_id: str, store_id: str) -> tuple:
+    """(free, reserved) pieces of a product at a shop. FREE is what a box can
+    take: status exactly AVAILABLE (the allocation question every claim door
+    asks). RESERVED pieces are promised to a customer and can never be asked
+    for (owner, board Transfer)."""
+    units = db.get_collection("stock_units")
+    where = {"product_id": product_id, "store_id": store_id}
+    free = units.count_documents({**where, "status": STOCK_STATUS_AVAILABLE})
+    reserved = units.count_documents({**where, "status": {"$in": ["RESERVED", "reserved"]}})
+    return free, reserved
+
+
+def _packed_elsewhere(transfer_id: str, stock_ids) -> Dict[str, str]:
+    """{stock_id: transfer number} of the pieces already in ANOTHER box that
+    has not shipped -- one piece, one box."""
+    ids = [str(s) for s in stock_ids]
+    if not ids:
+        return {}
+    open_ = [TransferStatus.APPROVED.value, TransferStatus.PICKING.value, TransferStatus.PACKED.value]
+    coll = _transfers_coll()
+    if coll is not None:
+        docs = coll.find(
+            {"id": {"$ne": transfer_id}, "status": {"$in": open_},
+             "items.packed_stock_ids": {"$in": ids}},
+            {"_id": 0, "id": 1, "status": 1, "transfer_number": 1, "items": 1},
+        )
+    else:
+        docs = [t for t in STOCK_TRANSFERS.values()
+                if t.get("id") != transfer_id and t.get("status") in open_]
+    out: Dict[str, str] = {}
+    for doc in docs:
+        if doc.get("id") == transfer_id or doc.get("status") not in open_:
+            continue
+        for line in doc.get("items") or []:
+            for sid in line.get("packed_stock_ids") or []:
+                if str(sid) in ids:
+                    out[str(sid)] = doc.get("transfer_number") or ""
+    return out
+
+
+def _packed_units(transfer: Dict) -> Dict[str, Dict]:
+    """{stock_id: unit} of the pieces packed in the box, each checked BEFORE
+    anything moves: still free at the sending shop, or already claimed by
+    THIS transfer (a ship that died part-way, pressed again). Anything else
+    -- sold, reserved, moved since packing -- refuses the ship by its
+    barcode, so nothing leaves on a box that is not what was scanned."""
+    units = _units_coll()
+    tid = transfer.get("id")
+    from_store = transfer.get("from_location_id")
+    ids = [str(s) for ln in transfer.get("items") or [] for s in ln.get("packed_stock_ids") or []]
+    found = {
+        str(u.get("stock_id")): u
+        for u in units.find({"stock_id": {"$in": ids}}, {"_id": 0})
+    }
+    gone = []
+    for line in transfer.get("items") or []:
+        codes = list(line.get("packed_barcodes") or [])
+        for n, sid in enumerate(line.get("packed_stock_ids") or []):
+            u = found.get(str(sid)) or {}
+            free = u.get("status") == STOCK_STATUS_AVAILABLE and u.get("store_id") == from_store
+            mine = u.get("status") == STOCK_STATUS_TRANSFERRED and u.get("transfer_id") == tid
+            if not (free or mine):
+                gone.append(codes[n] if n < len(codes) else str(sid))
+    if gone:
+        raise HTTPException(
+            status_code=409,
+            detail="Sold or moved since it was packed: " + ", ".join(gone)
+            + ". Nothing has shipped; scan the box again.",
+        )
+    return found
+
+
+def _apply_ship_stock_move(
+    transfer: Dict,
+    products: Optional[Dict[str, Dict]] = None,
+    units: Optional[Dict[str, Dict]] = None,
+) -> Dict:
+    """Move EXACTLY the packed pieces out of the sending shop (S3).
+
+    Each piece scanned into the box is claimed AVAILABLE -> TRANSFERRED with
+    one conditional write (still this shop's, still AVAILABLE), tagged with
+    the transfer. It used to claim whichever AVAILABLE units of the product
+    the database returned first -- a random frame left the shop while the
+    packed one stayed on the shelf (Fable review 2026-10-23).
+
+    All or nothing: a piece lost to a sale between the check and the claim
+    puts back the pieces this call claimed and refuses (409). Resumable: a
+    piece already TRANSFERRED under this transfer (a ship that died after
+    claiming it, before saving) counts as moved. Audit rows and ledger events
+    are written only once every claim has landed.
+
+    Idempotent on `stock_shipped`. `products`: the master rows ship read
+    ONCE for its guard (_ship_products); `units`: the packed units it checked
+    (_packed_units).
     """
     if transfer.get("stock_shipped"):
         return transfer
-
-    stock_repo = get_stock_repository()
-    if stock_repo is None:
-        # DB down: advance the lifecycle without moving units (pre-fix behavior).
-        return transfer
     products = products or {}
-
+    units = units if units is not None else _packed_units(transfer)
+    coll = _units_coll()
+    tid = transfer.get("id")
     from_store = transfer.get("from_location_id")
+    to_store = transfer.get("to_location_id")
+
+    claimed_now: List[str] = []
+    plan = []
+    for line in transfer.get("items", []):
+        ids = [str(s) for s in line.get("packed_stock_ids") or []]
+        codes = list(line.get("packed_barcodes") or [])
+        moved_units: List[Dict] = []
+        for n, sid in enumerate(ids):
+            unit = units.get(sid) or {}
+            if unit.get("status") == STOCK_STATUS_TRANSFERRED and unit.get("transfer_id") == tid:
+                moved_units.append(unit)
+                continue
+            won = coll.find_one_and_update(
+                {"stock_id": sid, "store_id": from_store, "status": STOCK_STATUS_AVAILABLE},
+                {"$set": {
+                    "status": STOCK_STATUS_TRANSFERRED,
+                    "transfer_id": tid,
+                    "transferred_at": utc_now_iso(),
+                    "transfer_to_store_id": to_store,
+                }},
+            )
+            if not won:
+                if claimed_now:
+                    coll.update_many(
+                        {"stock_id": {"$in": claimed_now}, "transfer_id": tid,
+                         "status": STOCK_STATUS_TRANSFERRED},
+                        {"$set": {"status": STOCK_STATUS_AVAILABLE, "transfer_id": None,
+                                  "transfer_to_store_id": None}},
+                    )
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{codes[n] if n < len(codes) else sid} was sold or moved "
+                    "while the box was shipping. Nothing has shipped; scan the box again.",
+                )
+            claimed_now.append(sid)
+            moved_units.append(unit)
+        plan.append((line, ids, moved_units))
+
     moved_total = 0
     moved_pids: List[str] = []
-    for line in transfer.get("items", []):
+    for line, ids, moved_units in plan:
         product_id = line.get("product_id")
-        want = _line_ship_qty(line)
-        if not product_id or want <= 0 or not from_store:
-            line.setdefault("shipped_stock_ids", [])
-            continue
-
-        # F21: if the caller pins explicit stock_ids on this line, reject LOUDLY
-        # (400) any that are QUARANTINED -- a defective unit must never move
-        # between stores. (When no explicit ids are given, the AVAILABLE
-        # allowlist below already excludes quarantined units from being claimed.)
-        explicit_ids = line.get("stock_ids") or []
-        if explicit_ids:
-            for sid in explicit_ids:
-                try:
-                    pinned = stock_repo.find_by_id(sid)
-                except Exception:  # noqa: BLE001
-                    pinned = None
-                if pinned and (pinned.get("status") or "").strip().upper() == STOCK_STATUS_QUARANTINED:
-                    raise HTTPException(
-                        status_code=400,
-                        detail={
-                            "code": "quarantined_unit",
-                            "message": (
-                                f"Stock unit {sid} is QUARANTINED and cannot be transferred."
-                            ),
-                        },
-                    )
-
-        # Claim AVAILABLE source units for this product (one row per unit).
-        # status=AVAILABLE is an explicit allowlist, so a QUARANTINED unit is
-        # never a candidate here -- F21 safety is structural, not incidental.
-        try:
-            candidates = stock_repo.find_many(
-                {
-                    "product_id": product_id,
-                    "store_id": from_store,
-                    "status": STOCK_STATUS_AVAILABLE,
-                },
-                limit=want,
-            )
-        except TypeError:
-            # Some repo/mocks don't accept limit= -> fall back + slice.
-            candidates = stock_repo.find_many(
-                {
-                    "product_id": product_id,
-                    "store_id": from_store,
-                    "status": STOCK_STATUS_AVAILABLE,
-                }
-            )[:want]
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[TRANSFER] ship lookup failed: %s", exc)
-            candidates = []
-
-        moved_ids: List[str] = []
-        moved_units: List[Dict] = []
-        for unit in candidates[:want]:
-            sid = unit.get("stock_id") or unit.get("stock_unit_id") or unit.get("_id")
-            if not sid:
-                continue
-            # Atomic per-unit claim: flip AVAILABLE -> TRANSFERRED only if the
-            # unit is STILL available, so two concurrent ships of the same product
-            # can never double-claim one physical unit (was find_many + update =
-            # check-then-act). A lost race returns False -> the unit is skipped
-            # (not counted, not double-moved).
-            ok = stock_repo.claim_for_transfer(
-                str(sid), transfer.get("id"), transfer.get("to_location_id")
-            )
-            if ok:
-                moved_ids.append(str(sid))
-                moved_units.append(unit)
+        for sid in ids:
+            if sid in claimed_now:
                 _audit_stock_move(
-                    STOCK_STATUS_AVAILABLE,
-                    STOCK_STATUS_TRANSFERRED,
-                    str(sid),
-                    transfer,
+                    STOCK_STATUS_AVAILABLE, STOCK_STATUS_TRANSFERRED, sid, transfer,
                     {"product_id": product_id},
                 )
                 _ledger_transfer_event(
-                    "TRANSFER_SHIP",
-                    str(sid),
-                    STOCK_STATUS_AVAILABLE,
-                    STOCK_STATUS_TRANSFERRED,
-                    product_id,
-                    from_store,
-                    transfer.get("to_location_id"),
-                    transfer,
+                    "TRANSFER_SHIP", sid, STOCK_STATUS_AVAILABLE, STOCK_STATUS_TRANSFERRED,
+                    product_id, from_store, to_store, transfer,
                 )
-
-        line["shipped_stock_ids"] = moved_ids
-        # Reflect what actually left the floor (may be < requested if the source
-        # didn't hold enough AVAILABLE units - we never move phantom stock).
-        line["quantity_shipped"] = len(moved_ids)
+        line["shipped_stock_ids"] = ids
+        line["quantity_shipped"] = len(ids)
         _stamp_shipped_value(line, moved_units, products.get(product_id) or {})
-        moved_total += len(moved_ids)
-        if moved_ids and product_id not in moved_pids:
+        moved_total += len(ids)
+        if ids and product_id not in moved_pids:
             moved_pids.append(product_id)
 
     if moved_pids:
-        # Per-store online stock (owner ruling 2026-09-06): the units left the
-        # SOURCE shelf (TRANSFERRED -- at neither location while in transit),
-        # so that shop's Shopify location goes down now, like a POS sale.
-        # Fire-and-forget, fail-soft; the destination rises on receive through
-        # the next scheduled pass.
+        # Per-store online stock (owner ruling 2026-09-06): the pieces left the
+        # SOURCE shelf, so that shop's Shopify location goes down now.
         _writeback_units_left(moved_pids, from_store, "transfer_ship")
 
     transfer["stock_shipped"] = True
     transfer["stock_units_moved_out"] = moved_total
-    # F51: the transfer is worth what left the shop, at the units' own cost --
-    # never the request x whatever cost the client sent (the modal sends 0).
+    # F51: the transfer is worth what left the shop, at the units' own cost.
     transfer["total_value"] = round(
         sum(_shipped_line_value(ln) for ln in transfer.get("items", [])), 2
     )
@@ -908,251 +966,202 @@ def _shipped_line_value(line: Dict) -> float:
     return _line_value(line.get("quantity_shipped"), line.get("unit_cost"))
 
 
-def _transferred_pool(stock_repo, transfer, product_id, prefer):
-    """Ordered pool of unit ids shipped under this transfer for a product.
+def _rehome_patch(transfer: Dict, new_status: str, reason: str = "") -> Dict:
+    """The write that lands a piece at the RECEIVING shop (scan in, or found
+    there later). source_* becomes the transfer, but the unit's ORIGIN
+    (grn_id, grn_line_index, line_unit_seq, po_id) is never touched: every
+    "already received from this receipt" count reads it
+    (vendors.grn_accept_lock._receipt_units). A damaged piece goes to
+    QUARANTINE (BUG-009), never to the shelf."""
+    patch = {
+        "status": new_status,
+        "store_id": transfer.get("to_location_id"),
+        "received_at": utc_now_iso(),
+        "source_type": "TRANSFER",
+        "source_id": transfer.get("id"),
+        "transfer_number": transfer.get("transfer_number"),
+        "from_store_id": transfer.get("from_location_id"),
+        "transfer_id": None,
+        "transfer_to_store_id": None,
+    }
+    if new_status == STOCK_STATUS_QUARANTINED:
+        patch["quarantine_reason"] = "TRANSFER_DAMAGED"
+        patch["quarantined_at"] = utc_now_iso()
+        if reason:
+            patch["damage_reason"] = reason
+    return patch
 
-    Starts from the ids SHIP recorded on the line (`prefer`); only when that is
-    empty does it fall back to querying the units still marked TRANSFERRED for
-    this transfer+product (covers legacy docs whose `shipped_stock_ids` wasn't
-    recorded). Fail-soft to `prefer` on any repo error. Pure read."""
-    pool = [str(s) for s in (prefer or []) if s]
-    if pool:
-        return pool
-    try:
-        rows = stock_repo.find_many(
-            {
-                "transfer_id": transfer.get("id"),
-                "product_id": product_id,
-                "status": STOCK_STATUS_TRANSFERRED,
-            }
+
+def _line_of_piece(transfer: Dict, stock_id: str) -> Optional[Dict]:
+    """The transfer line a piece left the shop on (its shipped_stock_ids)."""
+    for line in transfer.get("items") or []:
+        if stock_id in [str(s) for s in line.get("shipped_stock_ids") or []]:
+            return line
+    return None
+
+
+def _settle_line_counts(line: Dict) -> None:
+    """A line's received / damaged figures, derived from the pieces it
+    recorded -- never a typed number."""
+    received = list(dict.fromkeys(str(s) for s in line.get("received_stock_ids") or []))
+    damaged = list(dict.fromkeys(str(s) for s in line.get("damaged_stock_ids") or []))
+    line["received_stock_ids"] = received
+    line["damaged_stock_ids"] = damaged
+    line["quantity_received"] = len(received) + len(damaged)
+    line["quantity_damaged"] = len(damaged)
+    line["received_qty_committed"] = len(received) + len(damaged)
+
+
+def _short_credit_note(transfer: Dict, stock_ids: List[str], reason: str) -> Optional[str]:
+    """CA answers 2026-10-23: a SHORT delivery between two GSTINs is booked as
+    the value actually received + a CREDIT NOTE for the difference. Books that
+    note for `stock_ids` (pieces that never reached the receiving shop: lost
+    and written off, or found back at the sender) and returns its number;
+    None for a move inside one GSTIN (no GST paper).
+
+    Exact to the paisa: each line's note is the invoice line's value at the
+    pieces still counted as delivered BEFORE, minus its value AFTER -- both
+    by the invoice's own rule (_line_value at the line's stamped cost, then
+    split_line_gst at the line's FROZEN rate) -- so the invoice plus all its
+    notes always equals the tax on the value received, head by head.
+
+    From the SENDING shop's "C" series of the one mint, dated today (IST).
+    Booked in vendor_bills next to the invoice, negative, so the sender's
+    GSTR-3B outward, the receiver's input credit and every other sum nets it
+    (GSTR-1 files it under CDNR, gst_itc._transfer_cdnr_rows). Called BEFORE
+    the piece is written off / put back: a refusal changes nothing. One note
+    per piece (note_key, unique): pressing twice books one."""
+    from ..services.purchase_invoice_engine import split_line_gst
+
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="IMS cannot reach the books just now; try again.")
+    _, _, crosses = _transfer_registrations(db, transfer)
+    if not crosses:
+        return None
+    tid = transfer.get("id")
+    bills = db.get_collection("vendor_bills")
+    notes = list(bills.find({"source_transfer_id": tid, "doc_type": TRANSFER_CREDIT_NOTE}, {"_id": 0}))
+    credited = {str(s) for n in notes for s in n.get("credited_stock_ids") or []}
+    todo = [str(s) for s in stock_ids if str(s) not in credited]
+    if not todo:
+        return next(
+            (n.get("bill_number") for n in notes if str(stock_ids[0]) in (n.get("credited_stock_ids") or [])),
+            None,
         )
-    except Exception as exc:  # noqa: BLE001 - fail-soft
-        logger.warning("[TRANSFER] receive pool lookup failed: %s", exc)
-        return pool
-    for unit in rows or []:
-        sid = unit.get("stock_id") or unit.get("stock_unit_id") or unit.get("_id")
-        if sid:
-            pool.append(str(sid))
-    return pool
-
-
-def _apply_receive_stock_move(transfer: Dict) -> Dict:
-    """Raise destination on-hand by RE-HOMING the shipped units.
-
-    A transfer never creates stock. For each line, the SAME physical units that
-    SHIP marked TRANSFERRED (recorded per line in `shipped_stock_ids`) are
-    flipped back and re-homed to the destination store, keeping their ORIGINAL
-    barcode for life (a transfer is not a purchase -> no new barcode is minted).
-
-    BUG-009: units that arrived DAMAGED must NOT land on the sellable floor.
-    The moved pool for a line is split into two:
-      * good    = quantity_received - quantity_damaged -> STOCK_STATUS_AVAILABLE
-                  (counts toward destination on-hand / POS).
-      * damaged = quantity_damaged                     -> STOCK_STATUS_QUARANTINED
-                  (re-homed to the destination store but NEVER AVAILABLE, so it
-                  drops out of on-hand and POS until an explicit disposition).
-    So the destination's sellable on-hand rises by exactly the number of GOOD
-    units that physically arrived; damaged units are tracked distinctly.
-
-    Per line we re-home at most `quantity_received` units, bounded by the pool of
-    units actually shipped (so a receive can never exceed what left the source).
-    A repeated or partial receive only ever moves the units that are still
-    OUTSTANDING - the pool MINUS the ids the line already recorded in
-    `received_stock_ids` / `damaged_stock_ids`. Selecting by identity rather than
-    by a positional slice over a running count is what makes a retry safe: a unit
-    whose earlier re-home failed is still outstanding and gets picked up next
-    pass, instead of being stepped over while an already-moved unit is moved
-    again. The good/damaged split is decided the same way - how many units are
-    still OWED as good and as damaged, each being the declared quantity minus
-    what the line already recorded going that way - so a unit already re-homed as
-    good is never re-classified, and the declared damaged count is honoured even
-    when the pool has shrunk (see the note on _transferred_pool's fallback
-    below).
-
-    Fail-soft: no stock repo -> transfer returned unchanged (lifecycle still
-    advances, as before).
-    """
-    stock_repo = get_stock_repository()
-    if stock_repo is None:
-        return transfer
-
-    to_store = transfer.get("to_location_id")
-    if not to_store:
-        return transfer
-
-    moved_total = 0
-    damaged_total = 0
-    for line in transfer.get("items", []):
-        product_id = line.get("product_id")
-        try:
-            received = int(float(line.get("quantity_received", 0) or 0))
-        except (TypeError, ValueError):
-            received = 0
-        try:
-            damaged = int(float(line.get("quantity_damaged", 0) or 0))
-        except (TypeError, ValueError):
-            damaged = 0
-        # Defensive clamp: damaged can never exceed received (the endpoint also
-        # rejects this with a 400, but the move helper must stay self-consistent
-        # if called directly).
-        if damaged < 0:
-            damaged = 0
-        if damaged > received:
-            damaged = received
-        # What the line has ALREADY re-homed, by identity. De-duplicated: a doc
-        # written before this fix could carry the same id twice (the positional
-        # slice re-moved an already-moved unit), and a dupe would otherwise
-        # inflate the "already done" counts below. Rewriting the de-duped lists
-        # back onto the line repairs such a doc on its next receive.
-        received_ids: List[str] = list(
-            dict.fromkeys(str(s) for s in (line.get("received_stock_ids") or []) if s)
+    _book_mirror_purchase(transfer)
+    invoice = bills.find_one(
+        {"source_transfer_id": tid, "doc_type": {"$ne": TRANSFER_CREDIT_NOTE}}, {"_id": 0}
+    )
+    if not invoice:
+        raise HTTPException(
+            status_code=503,
+            detail="This transfer's tax invoice is not in the books, so IMS cannot "
+            "raise its credit note. Nothing has changed; try again or ask accounts.",
         )
-        damaged_unit_ids: List[str] = list(
-            dict.fromkeys(str(s) for s in (line.get("damaged_stock_ids") or []) if s)
-        )
-
-        # How many units still have to move EACH WAY: the quantities the receiver
-        # declared, minus what the line already recorded going that way. Both
-        # sides derive from the recorded SETS.
-        #
-        # This is not the same as slicing a position out of `pool`. `pool` is only
-        # the full shipment when SHIP recorded shipped_stock_ids; for a legacy
-        # line _transferred_pool re-queries the units still marked TRANSFERRED,
-        # and that pool SHRINKS every pass (re-homing clears a unit's status and
-        # transfer_id). Anything indexing it by a position measured over the full
-        # shipment therefore reads low on a repeat pass and under-quarantines --
-        # putting damaged frames on the sellable floor. Counting what is still
-        # OWED each way is immune to how short the pool has become.
-        good_outstanding = max(0, (received - damaged) - len(received_ids))
-        damaged_outstanding = max(0, damaged - len(damaged_unit_ids))
-        # ...capped by what the line still owes IN TOTAL. Those two are floored
-        # at zero independently, so when one bucket SHRANK between passes -- the
-        # receiver re-classifying a frame from damaged to good or back -- its
-        # negative is discarded instead of offsetting the bucket that grew, and
-        # their sum overshoots. Uncapped, that overshoot re-homes a unit the
-        # receiver never said had arrived: a frame still in transit lands at the
-        # destination, sellable. (The pre-fix `received - already` counter
-        # supplied this cap implicitly; keeping it is what makes splitting the
-        # count into two buckets safe.)
-        want = min(
-            good_outstanding + damaged_outstanding,
-            max(0, received - (len(received_ids) + len(damaged_unit_ids))),
-        )
-        if not product_id or want <= 0:
+    interstate = bool(invoice.get("interstate"))
+    frozen = {ln.get("item_id"): ln for ln in transfer.get("tax_invoice_lines") or [] if isinstance(ln, dict)}
+    heads = ("taxable", "cgst", "sgst", "igst")
+    lines: List[Dict] = []
+    for item in transfer.get("items") or []:
+        shipped = [str(s) for s in item.get("shipped_stock_ids") or []]
+        lost = [s for s in todo if s in shipped]
+        if not lost:
             continue
+        inv = frozen.get(item.get("id"))
+        if not inv:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{item.get('product_name') or item.get('product_id')} has no line on "
+                "the transfer's tax invoice, so IMS cannot price its credit note. Ask accounts.",
+            )
+        n = _qty(inv.get("qty"))
+        cost = _first_cost(item.get("unit_cost"))
+        rate = float(inv.get("gst_rate") or 0)
+        before = len([s for s in shipped if s in credited])
 
-        # The units to re-home are exactly those SHIP marked TRANSFERRED for this
-        # transfer (stable, ordered pool); never mint new ones.
-        pool = _transferred_pool(
-            stock_repo, transfer, product_id, line.get("shipped_stock_ids")
-        )
+        def _value(k):
+            if k == 0:
+                return {h: float(inv.get(h) or 0) for h in heads}
+            return split_line_gst(_line_value(n - k, cost), rate, interstate)
 
-        # Which units those are is a question of IDENTITY, not position. This
-        # used to slice `pool[already : already + want]`, where `already` is a
-        # COUNT -- which assumes the first `already` ids in the pool are exactly
-        # the ones already re-homed. If an earlier pass's _rehome failed on an
-        # EARLY unit and succeeded on a later one, the counter walked past the
-        # failed unit and the slice never came back to it: one frame stranded at
-        # the source store forever, while an already-re-homed unit was moved a
-        # second time. The line records the ids it re-homed, so the outstanding
-        # pool is the SET difference.
-        settled = set(received_ids) | set(damaged_unit_ids)
-        movable = [p for p in pool if p not in settled][:want]
-        # Good units are re-homed first; the damaged ones settle at the tail.
-        good_ids = movable[:good_outstanding]
-        damaged_ids = movable[good_outstanding:]
-        moved_here = 0
-
-        def _rehome(sid, new_status):
-            # source_* becomes the transfer, but the unit's ORIGIN (grn_id,
-            # grn_line_index, line_unit_seq, po_id) is never touched: every
-            # "already received from this receipt" count reads it
-            # (vendors.grn_accept_lock._receipt_units).
-            patch = {
-                "status": new_status,
-                "store_id": to_store,
-                "received_at": utc_now_iso(),
-                "source_type": "TRANSFER",
-                "source_id": transfer.get("id"),
-                "transfer_number": transfer.get("transfer_number"),
-                "from_store_id": transfer.get("from_location_id"),
-                # No longer held against the (now-completed) transfer.
-                "transfer_id": None,
-                "transfer_to_store_id": None,
-            }
-            if new_status == STOCK_STATUS_QUARANTINED:
-                # Flag WHY the unit is parked so the quarantine console can
-                # surface it and an explicit disposition is required to release.
-                patch["quarantine_reason"] = "TRANSFER_DAMAGED"
-                patch["quarantined_at"] = utc_now_iso()
-            return stock_repo.update(sid, patch)
-
-        for sid in good_ids:
-            if _rehome(sid, STOCK_STATUS_AVAILABLE):
-                received_ids.append(str(sid))
-                moved_here += 1
-                moved_total += 1
-                _audit_stock_move(
-                    STOCK_STATUS_TRANSFERRED,
-                    STOCK_STATUS_AVAILABLE,
-                    str(sid),
-                    transfer,
-                    {"product_id": product_id, "moved_to": to_store},
-                )
-                _ledger_transfer_event(
-                    "TRANSFER_RECEIVE",
-                    str(sid),
-                    STOCK_STATUS_TRANSFERRED,
-                    STOCK_STATUS_AVAILABLE,
-                    product_id,
-                    to_store,
-                    None,
-                    transfer,
-                )
-
-        for sid in damaged_ids:
-            if _rehome(sid, STOCK_STATUS_QUARANTINED):
-                damaged_unit_ids.append(str(sid))
-                moved_here += 1
-                damaged_total += 1
-                _audit_stock_move(
-                    STOCK_STATUS_TRANSFERRED,
-                    STOCK_STATUS_QUARANTINED,
-                    str(sid),
-                    transfer,
-                    {
-                        "product_id": product_id,
-                        "moved_to": to_store,
-                        "reason": "TRANSFER_DAMAGED",
-                    },
-                )
-                _ledger_transfer_event(
-                    "TRANSFER_RECEIVE",
-                    str(sid),
-                    STOCK_STATUS_TRANSFERRED,
-                    STOCK_STATUS_QUARANTINED,
-                    product_id,
-                    to_store,
-                    None,
-                    transfer,
-                )
-
-        line["received_stock_ids"] = received_ids
-        if damaged_unit_ids:
-            line["damaged_stock_ids"] = damaged_unit_ids
-        # received_qty_committed counts ALL re-homed units (good + damaged).
-        # Derived from the recorded sets rather than incremented, so it can never
-        # drift away from the ids that back it (a drifted counter is what let the
-        # positional slice step over a unit in the first place).
-        line["received_qty_committed"] = len(received_ids) + len(damaged_unit_ids)
-
-    transfer["stock_units_moved_in"] = (
-        int(transfer.get("stock_units_moved_in", 0) or 0) + moved_total
+        was, now = _value(before), _value(before + len(lost))
+        part = {h: round(float(now[h]) - float(was[h]), 2) for h in heads}
+        codes = dict(zip([str(s) for s in item.get("shipped_stock_ids") or []], item.get("shipped_barcodes") or []))
+        lines.append({
+            "product_id": item.get("product_id"),
+            "description": item.get("product_name") or item.get("product_id"),
+            "hsn": inv.get("hsn"),
+            "qty": float(len(lost)),
+            "unit_price": round(cost, 2),
+            "gst_rate": rate,
+            **part,
+            "line_total": round(sum(part.values()), 2),
+            "item_id": item.get("id"),
+            "serials": [codes.get(s, s) for s in lost],
+        })
+    if not lines:
+        return None
+    total = {h: round(sum(ln[h] for ln in lines), 2) for h in heads}
+    tax = round(total["cgst"] + total["sgst"] + total["igst"], 2)
+    note_key = f"{tid}:{','.join(sorted(todo))}"
+    try:
+        number = next_document_number(db, transfer.get("from_location_id"), "C")
+    except InvoiceNumberError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"Cannot issue this transfer's credit note: {exc}"
+        ) from exc
+    today = _bill_date_ist(utc_now_iso())
+    copied = (
+        "from_store_id", "to_store_id", "store_id", "vendor_id", "vendor_name", "vendor_gstin",
+        "entity_id", "recipient_entity_id", "recipient_name", "recipient_gstin",
+        "place_of_supply", "supply_place_recipient", "interstate", "itc_eligible",
+        "source_transfer_number",
     )
-    transfer["stock_units_quarantined"] = (
-        int(transfer.get("stock_units_quarantined", 0) or 0) + damaged_total
-    )
-    return transfer
+    doc = {
+        **{k: invoice.get(k) for k in copied},
+        "bill_id": f"mbcn_{uuid.uuid4().hex[:12]}",
+        "doc_type": TRANSFER_CREDIT_NOTE,
+        "note_key": note_key,
+        "bill_number": number,
+        "invoice_number": number,
+        "bill_date": today,
+        "invoice_date": today,
+        "source_transfer_id": tid,
+        "original_invoice_number": invoice.get("invoice_number"),
+        "original_invoice_date": invoice.get("invoice_date"),
+        "credited_stock_ids": sorted(todo),
+        "reason": reason,
+        "lines": lines,
+        "taxable_amount": total["taxable"],
+        "tax_amount": tax,
+        "taxable_total": total["taxable"],
+        "cgst_total": total["cgst"],
+        "sgst_total": total["sgst"],
+        "igst_total": total["igst"],
+        "total_amount": round(total["taxable"] + tax, 2),
+        "total": round(total["taxable"] + tax, 2),
+        "qty_basis": "short_delivery",
+        "itc_blocked": False,
+        "status": "OUTSTANDING",
+        "auto_generated": True,
+        "notes": (
+            f"Credit note on transfer tax invoice {invoice.get('invoice_number')} "
+            f"({transfer.get('transfer_number', tid)}): {reason}."
+        ),
+        "created_by": "SYSTEM",
+        "created_at": utc_now_iso(),
+    }
+    try:
+        # ponytail: index made on first use; one note per piece set.
+        bills.create_index("note_key", unique=True, sparse=True)
+        bills.insert_one(doc)
+    except Exception:  # noqa: BLE001 - a racing press booked it: answer that note
+        landed = bills.find_one({"note_key": note_key}, {"_id": 0, "bill_number": 1})
+        if not landed:
+            raise
+        return landed.get("bill_number")
+    return number
 
 
 # ============================================================================
@@ -1277,6 +1286,44 @@ async def get_pending_transfers(
     }
 
 
+@router.get("/free")
+async def free_stock(
+    product_id: str, store_id: str, current_user: dict = Depends(get_current_user)
+):
+    """How many pieces of a product another shop can be asked for (board
+    Transfer: "Bokaro has 2 free, 1 more is reserved"). Counts only -- never
+    a cost, never which pieces."""
+    _require_roles(current_user, MISSING_ROLES)
+    db = _get_db()
+    if db is None:
+        raise HTTPException(status_code=503, detail="IMS cannot reach the stock records just now.")
+    free, reserved = _free_at(db, product_id, store_id)
+    return {"product_id": product_id, "store_id": store_id, "free": free, "reserved": reserved}
+
+
+@router.get("/missing")
+async def list_missing(current_user: dict = Depends(get_current_user)):
+    """"Missing on the way": every piece scanned OUT and never IN, until it is
+    found or written off. Both shops' managers see their own transfers' (the
+    one transfer store reach, _in_callers_stores); the admin sees all."""
+    _require_roles(current_user, MISSING_ROLES)
+    pieces = []
+    for t in _in_callers_stores(_all_transfers(), current_user):
+        for p in t.get("missing_pieces") or []:
+            if isinstance(p, dict) and p.get("status") in MISSING_OPEN:
+                pieces.append({
+                    **p,
+                    "transfer_id": t.get("id"),
+                    "transfer_number": t.get("transfer_number"),
+                    "from_location_id": t.get("from_location_id"),
+                    "from_location_name": t.get("from_location_name"),
+                    "to_location_id": t.get("to_location_id"),
+                    "to_location_name": t.get("to_location_name"),
+                })
+    pieces.sort(key=lambda p: str(p.get("reported_at") or ""))
+    return {"pieces": pieces}
+
+
 @router.get("/{transfer_id}")
 async def get_transfer(
     transfer_id: str, current_user: dict = Depends(get_current_user)
@@ -1304,12 +1351,18 @@ async def create_transfer(
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
 
-    # IDOR guard: the SOURCE store must be one the caller may act for. Without
-    # this, a store-A manager could draft a transfer that drains store B (ship
-    # claims AVAILABLE units at from_location_id). SUPERADMIN/ADMIN pass;
-    # 403 otherwise (validate_store_access raises).
-    if transfer.from_location_id:
-        validate_store_access(transfer.from_location_id, current_user)
+    # IDOR guard (S3): a shop asks ANOTHER shop for stock (board Transfer), or
+    # sends its own -- so the caller must reach one END of the move. Nothing
+    # moves at create: an area manager of the sending side approves, and only
+    # the sending shop packs and ships (side="source" on those doors).
+    if not (
+        can_access_store_scoped(transfer.from_location_id, current_user)
+        or can_access_store_scoped(transfer.to_location_id, current_user)
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="You can ask for stock for your own shop, or send your own shop's stock.",
+        )
 
     # BUG FIX: a self-transfer (source == destination) would mark source units
     # TRANSFERRED then re-home them back to the same store on receive — the
@@ -1343,9 +1396,36 @@ async def create_transfer(
             detail="Transfer must contain at least one item",
         )
 
+    # S3 (board Transfer): a request is capped at what is FREE at the sending
+    # shop -- reserved pieces are promised to a customer and cannot be asked
+    # for. Counted per product across lines.
+    db = _get_db()
+    if db is not None:
+        want: Dict[str, int] = {}
+        names: Dict[str, str] = {}
+        for item in transfer.items:
+            want[item.product_id] = want.get(item.product_id, 0) + item.quantity_requested
+            names[item.product_id] = item.product_name or item.sku or item.product_id
+        for pid, qty in want.items():
+            free, reserved = _free_at(db, pid, transfer.from_location_id)
+            if qty > free:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"{transfer.from_location_name or 'That shop'} has only {free} of "
+                        f"{names[pid]} free"
+                        + (
+                            f" ({reserved} more reserved for customers - reserved pieces "
+                            "cannot be asked for)"
+                            if reserved
+                            else ""
+                        )
+                        + "."
+                    ),
+                )
+
     # Owner ruling 2026-10-13: never to another company from a shop with no
     # GSTIN on file (asked again at ship, _gstin_gap).
-    db = _get_db()
     gap = _gstinless_sender(
         transfer.from_location_name,
         _shop_gst(db, transfer.from_location_id),
@@ -1504,6 +1584,8 @@ async def approve_transfer(
 
     if transfer["status"] != TransferStatus.PENDING_APPROVAL:
         raise HTTPException(status_code=400, detail="Transfer is not pending approval")
+    if not approval.approved and not (approval.rejection_reason or "").strip():
+        raise HTTPException(status_code=400, detail="Give a reason to reject the request.")
 
     if approval.approved:
         new_status = TransferStatus.APPROVED
@@ -1516,7 +1598,7 @@ async def approve_transfer(
     transfer["approved_by"] = current_user.get("user_id")
     transfer["approved_at"] = utc_now_iso()
     transfer["rejection_reason"] = (
-        approval.rejection_reason if not approval.approved else None
+        approval.rejection_reason.strip() if not approval.approved else None
     )
     transfer["updated_at"] = utc_now_iso()
 
@@ -1535,103 +1617,119 @@ async def approve_transfer(
     return {"transfer": _caller_view(transfer, current_user), "message": message}
 
 
-@router.post("/{transfer_id}/start-picking")
-async def start_picking(
-    transfer_id: str, current_user: dict = Depends(get_current_user)
-):
-    """Start picking items for transfer"""
-    if not any(
-        role in current_user.get("roles", [])
-        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
-    transfer = _get_transfer(transfer_id)
-    if not transfer:
-        raise HTTPException(status_code=404, detail="Transfer not found")
-
-    # IDOR guard: picking happens at the SOURCE store.
-    _assert_transfer_access(transfer, current_user, side="source")
-
-    if transfer["status"] != TransferStatus.APPROVED:
-        raise HTTPException(
-            status_code=400, detail="Transfer must be approved before picking"
-        )
-
-    transfer["status"] = TransferStatus.PICKING
-    transfer["picking_started_at"] = utc_now_iso()
-    transfer["picking_by"] = current_user.get("user_id")
-    transfer["updated_at"] = utc_now_iso()
-
-    _append_status_history(
-        transfer,
-        {
-            "status": TransferStatus.PICKING,
-            "timestamp": utc_now_iso(),
-            "user_id": current_user.get("user_id"),
-            "user_name": current_user.get("username"),
-            "notes": "Picking started",
-        },
-    )
-
-    _save_transfer(transfer)
-    return {"transfer": _caller_view(transfer, current_user), "message": "Picking started"}
-
-
-@router.post("/{transfer_id}/complete-picking")
-async def complete_picking(
+@router.post("/{transfer_id}/pack")
+async def pack_transfer(
     transfer_id: str,
-    items_picked: List[Dict[str, Any]],  # [{"item_id": "xxx", "quantity_picked": 10}]
+    body: TransferPack,
     current_user: dict = Depends(get_current_user),
 ):
-    """Complete picking and mark items as packed"""
-    if not any(
-        role in current_user.get("roles", [])
-        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
+    """Pack the box: the pieces scanned OUT at the sending shop (S3, board
+    TransferBox). The whole list each time -- the screen re-sends it on every
+    scan, so the box on the server is always exactly what was scanned and a
+    retry never double-packs; an empty list unpacks the box. Each piece must
+    be this shop's, FREE (status AVAILABLE: never reserved, sold or in
+    quarantine), a product this transfer asked for, within the quantity asked,
+    and in no other open box. Nothing moves here: ship moves exactly these
+    pieces (_apply_ship_stock_move)."""
+    _require_roles(current_user, SHIP_ROLES)
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
-
-    # IDOR guard: packing happens at the SOURCE store.
     _assert_transfer_access(transfer, current_user, side="source")
-
-    if transfer["status"] != TransferStatus.PICKING:
+    status = str(transfer.get("status") or "").lower()
+    if status == TransferStatus.PENDING_APPROVAL.value:
         raise HTTPException(
-            status_code=400, detail="Transfer must be in picking status"
+            status_code=400,
+            detail="An area manager approves this request before it is packed.",
+        )
+    if status not in (
+        TransferStatus.APPROVED.value, TransferStatus.PICKING.value, TransferStatus.PACKED.value
+    ):
+        raise HTTPException(
+            status_code=400, detail="Only an approved box that has not shipped can be packed."
         )
 
-    # Update item quantities
-    item_map = {item["id"]: item for item in transfer["items"]}
-    for picked in items_picked:
-        if picked["item_id"] in item_map:
-            item_map[picked["item_id"]]["quantity_shipped"] = picked.get(
-                "quantity_picked", 0
+    units = _units_coll()
+    from_store = transfer.get("from_location_id")
+    lines_by_pid: Dict[str, List[Dict]] = {}
+    for line in transfer.get("items") or []:
+        lines_by_pid.setdefault(line.get("product_id"), []).append(line)
+    seen: List[str] = []
+    picked: Dict[str, List[tuple]] = {}
+    problems: List[str] = []
+    for raw in body.barcodes:
+        code = str(raw or "").strip()
+        if not code:
+            continue
+        unit = find_unit_by_code(units, code)
+        if not unit:
+            problems.append(f"{code}: not found")
+            continue
+        sid = str(unit.get("stock_id") or unit.get("_id"))
+        label = str(unit.get("barcode") or code)
+        if sid in seen:
+            problems.append(f"{label}: scanned twice")
+            continue
+        seen.append(sid)
+        if unit.get("store_id") != from_store:
+            problems.append(f"{label}: belongs to another shop")
+            continue
+        if unit.get("status") != STOCK_STATUS_AVAILABLE:
+            problems.append(
+                f"{label}: not free to send (it is {str(unit.get('status') or 'unknown').lower()})"
             )
-            item_map[picked["item_id"]]["status"] = "packed"
+            continue
+        line = next(
+            (
+                ln for ln in lines_by_pid.get(unit.get("product_id")) or []
+                if len(picked.get(ln.get("id"), [])) < _qty(ln.get("quantity_requested"))
+            ),
+            None,
+        )
+        if line is None:
+            problems.append(
+                f"{label}: more pieces than were asked for"
+                if unit.get("product_id") in lines_by_pid
+                else f"{label}: this product was not asked for"
+            )
+            continue
+        picked.setdefault(line.get("id"), []).append((sid, label))
+    elsewhere = _packed_elsewhere(transfer_id, [s for got in picked.values() for s, _ in got])
+    for got in picked.values():
+        for sid, label in got:
+            if sid in elsewhere:
+                problems.append(f"{label}: already in another box ({elsewhere[sid]})")
+    if problems:
+        raise HTTPException(
+            status_code=400,
+            detail="These pieces cannot go in this box: " + "; ".join(problems),
+        )
 
-    transfer["status"] = TransferStatus.PACKED
-    transfer["picking_completed_at"] = utc_now_iso()
+    packed = 0
+    for line in transfer.get("items") or []:
+        got = picked.get(line.get("id"), [])
+        line["packed_stock_ids"] = [s for s, _ in got]
+        line["packed_barcodes"] = [c for _, c in got]
+        line["quantity_packed"] = len(got)
+        packed += len(got)
+    new_status = TransferStatus.PACKED if packed else TransferStatus.APPROVED
+    if new_status.value != status:
+        _append_status_history(
+            transfer,
+            {
+                "status": new_status,
+                "timestamp": utc_now_iso(),
+                "user_id": current_user.get("user_id"),
+                "user_name": current_user.get("username"),
+                "notes": f"Packed {packed} pieces" if packed else "Box emptied",
+            },
+        )
+    transfer["status"] = new_status
+    transfer["packed_at"] = utc_now_iso() if packed else None
+    transfer["packed_by"] = current_user.get("user_id") if packed else None
     transfer["updated_at"] = utc_now_iso()
-
-    _append_status_history(
-        transfer,
-        {
-            "status": TransferStatus.PACKED,
-            "timestamp": utc_now_iso(),
-            "user_id": current_user.get("user_id"),
-            "user_name": current_user.get("username"),
-            "notes": "Picking completed, items packed",
-        },
-    )
-
     _save_transfer(transfer)
-    return {
-        "transfer": _caller_view(transfer, current_user),
-        "message": "Picking completed, ready for shipment",
-    }
+    return {"transfer": _caller_view(transfer, current_user), "message": f"{packed} pieces in the box"}
 
 
 @router.post("/{transfer_id}/ship")
@@ -1643,13 +1741,12 @@ async def ship_transfer(
     create_shiprocket: bool = False,
     current_user: dict = Depends(get_current_user),
 ):
-    """Mark transfer as shipped / in transit"""
-    if not any(
-        role in current_user.get("roles", [])
-        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
+    """Ship the packed box: the courier + tracking no. go on, and EXACTLY the
+    pieces scanned out leave the sending shop (S3). Between two GSTINs the
+    box travels on the tax invoice at cost (owner / CA 2026-10-18, numbered
+    here before any piece moves) and that invoice is booked NOW, in the
+    dispatch month (CA answers 2026-10-23, _book_mirror_purchase)."""
+    _require_roles(current_user, SHIP_ROLES)
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
@@ -1658,15 +1755,30 @@ async def ship_transfer(
     # only someone scoped to that store may trigger it.
     _assert_transfer_access(transfer, current_user, side="source")
 
-    if transfer["status"] not in [TransferStatus.APPROVED, TransferStatus.PACKED]:
+    if transfer["status"] not in [
+        TransferStatus.APPROVED, TransferStatus.PICKING, TransferStatus.PACKED
+    ]:
         raise HTTPException(
             status_code=400,
             detail="Transfer must be approved or packed before shipping",
         )
+    if not any(ln.get("packed_stock_ids") for ln in transfer.get("items") or []):
+        raise HTTPException(
+            status_code=409,
+            detail="Scan the pieces into the box first: a box ships only the pieces "
+            "scanned out.",
+        )
+    if not create_shiprocket and not (
+        (courier_name or "").strip() and (tracking_number or "").strip()
+    ):
+        raise HTTPException(
+            status_code=400, detail="Add the courier and the tracking no. before the box ships."
+        )
+    units = _packed_units(transfer)
     products = _ship_products(transfer)
-    src, dst, crosses = _assert_valued_paper(transfer, products)
-    # D13: the registrations the goods leave on, so the challan and the
-    # mirror bill keep ship's answer (_transfer_registrations).
+    src, dst, crosses = _assert_valued_paper(transfer, products, units)
+    # D13: the registrations the goods leave on, so the paper and the books
+    # keep ship's answer (_transfer_registrations).
     transfer["gst_registrations"] = {
         "source": list(src), "destination": list(dst), "crosses": crosses,
     }
@@ -1681,7 +1793,6 @@ async def ship_transfer(
                 detail=f"Cannot issue this transfer's tax invoice: {exc}",
             ) from exc
 
-    # Create Shiprocket shipment if requested
     if create_shiprocket:
         # In production, would call Shiprocket API
         shipment_id = f"SHP_{uuid.uuid4().hex[:8].upper()}"
@@ -1691,22 +1802,17 @@ async def ship_transfer(
         transfer["tracking_url"] = f"https://shiprocket.co/tracking/{awb}"
         transfer["courier_name"] = courier_name or "Delhivery"
     else:
-        transfer["tracking_number"] = tracking_number
+        transfer["tracking_number"] = tracking_number.strip()
         transfer["tracking_url"] = tracking_url
-        transfer["courier_name"] = courier_name
+        transfer["courier_name"] = courier_name.strip()
 
+    transfer = _apply_ship_stock_move(transfer, products, units)
     transfer["status"] = TransferStatus.IN_TRANSIT
     transfer["shipped_at"] = utc_now_iso()
     transfer["shipped_by"] = current_user.get("user_id")
     transfer["updated_at"] = utc_now_iso()
-
-    # Update item statuses
     for item in transfer["items"]:
         item["status"] = "in_transit"
-
-    # SYSTEM_INTENT 5: actually reduce source-store on-hand. Idempotent via the
-    # `stock_shipped` flag set inside the helper, so a re-POST won't double-move.
-    transfer = _apply_ship_stock_move(transfer, products)
     if transfer.get("tax_invoice_number"):
         # The units that left, at their stamped cost and today's HSN / rate:
         # the invoice the number names, frozen.
@@ -1719,13 +1825,15 @@ async def ship_transfer(
             "timestamp": utc_now_iso(),
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
-            # F51: no carrier named -> "Shipped", never "Shipped via None".
             "notes": "Shipped"
             + (f" via {transfer['courier_name']}" if transfer.get("courier_name") else ""),
         },
     )
 
     _save_transfer(transfer)
+    # CA 2026-10-23: the supply is filed in the DISPATCH month. Idempotent and
+    # fail-soft; Complete books it again if this write did not land.
+    _book_mirror_purchase(transfer)
     return {
         "transfer": _caller_view(transfer, current_user),
         "message": "Transfer shipped",
@@ -1739,33 +1847,25 @@ async def ship_transfer(
 @router.post("/{transfer_id}/receive")
 async def receive_transfer(
     transfer_id: str,
-    items_received: List[TransferItemReceive],
+    body: TransferPieceReceive,
     current_user: dict = Depends(get_current_user),
 ):
-    """Receive transfer items at destination"""
-    if not any(
-        role in current_user.get("roles", [])
-        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER", "WORKSHOP_STAFF"]
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
+    """Scan ONE piece IN at the receiving shop (S3, board TransferBox). Only a
+    piece that left in this box lands: it is re-homed to this shop, on the
+    shelf -- or, damaged in the box, in QUARANTINE (with the reason), never
+    on the shelf. The same piece scanned twice counts once. A piece that is
+    never scanned in goes on "Missing on the way" at Complete."""
+    _require_roles(current_user, RECEIVE_ROLES)
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
-    # IDOR guard: receiving re-homes REAL stock_units INTO the DESTINATION
-    # store -- only someone scoped to that store may confirm arrival.
+    # IDOR guard: receiving re-homes REAL stock_units INTO the DESTINATION.
     _assert_transfer_access(transfer, current_user, side="dest")
 
-    # W1.4 / OS-032 (belt and braces): receive is the actual stock-LANDING step
-    # -- _apply_receive_stock_move re-homes real units with store_id = to_store.
-    # create_transfer already blocks an ONLINE destination, but a legacy /
-    # in-flight transfer whose to_location_id was set to an ONLINE store BEFORE
-    # that guard existed could still land owned stock on the pooled, stockless
-    # store here. Mirror the _accept_grn_impl belt-and-braces guard so the
-    # no-own-stock invariant holds on the landing step too. (Ship is NOT guarded
-    # -- it only decrements the SOURCE store's on-hand and lands nothing on the
-    # destination.)
+    # W1.4 / OS-032 (belt and braces): never land owned stock on the pooled,
+    # stockless ONLINE store, even for a legacy transfer created before the
+    # create-time guard existed.
     if transfer.get("to_location_id") and is_online_store(
         _get_db(), transfer.get("to_location_id")
     ):
@@ -1777,170 +1877,92 @@ async def receive_transfer(
                 "Re-route these units to a physical shop."
             ),
         )
+    if transfer["status"] not in [TransferStatus.IN_TRANSIT, TransferStatus.PARTIALLY_RECEIVED]:
+        raise HTTPException(status_code=400, detail="Transfer must be in transit to receive")
+    reason = (body.damage_reason or "").strip()
+    if body.damaged and not reason:
+        raise HTTPException(status_code=400, detail="Say what is wrong with the damaged piece.")
 
-    if transfer["status"] not in [
-        TransferStatus.IN_TRANSIT,
-        TransferStatus.PARTIALLY_RECEIVED,
-    ]:
-        raise HTTPException(
-            status_code=400, detail="Transfer must be in transit to receive"
+    units = _units_coll()
+    code = body.barcode.strip()
+    unit = find_unit_by_code(units, code)
+    sid = str(unit.get("stock_id")) if unit else ""
+    line = _line_of_piece(transfer, sid) if sid else None
+    if line is None:
+        raise HTTPException(status_code=400, detail=f"{code} is not in this box.")
+    label = str(unit.get("barcode") or code)
+    settled = [str(s) for s in (line.get("received_stock_ids") or []) + (line.get("damaged_stock_ids") or [])]
+    if sid in settled:
+        return {
+            "transfer": _caller_view(transfer, current_user),
+            "message": f"{label} is already scanned in",
+            "piece": {"barcode": label, "status": "already"},
+        }
+
+    tid = transfer.get("id")
+    new_status = STOCK_STATUS_QUARANTINED if body.damaged else STOCK_STATUS_AVAILABLE
+    res = units.update_one(
+        {"stock_id": sid, "status": STOCK_STATUS_TRANSFERRED, "transfer_id": tid},
+        {"$set": _rehome_patch(transfer, new_status, reason)},
+    )
+    if not int(getattr(res, "modified_count", 0) or 0):
+        now = units.find_one({"stock_id": sid}) or {}
+        landed = (
+            now.get("store_id") == transfer.get("to_location_id")
+            and now.get("source_id") == tid
+            and now.get("status") in (STOCK_STATUS_AVAILABLE, STOCK_STATUS_QUARANTINED)
         )
-
-    # BUG FIX: damaged qty cannot exceed received qty on any line.
-    for received in items_received:
-        if received.quantity_damaged > received.quantity_received:
+        if not landed:
             raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"quantity_damaged ({received.quantity_damaged}) cannot exceed "
-                    f"quantity_received ({received.quantity_received}) for item "
-                    f"{received.transfer_item_id}"
-                ),
+                status_code=409, detail=f"{label} is no longer on the way to this shop."
             )
-
-    # INV-11: build a multi-key lookup so older transfer docs whose item `id` was
-    # never reliably set (or was stored under a different field name) can still be
-    # received.  Priority: explicit `id` > `product_id` > zero-indexed fallback.
-    # `product_id`-keyed resolution only fires when a doc has no `id` field at all
-    # (e.g. imported / back-filled docs) so it doesn't accidentally merge two
-    # legitimate lines for the same product in a multi-line transfer.
-    item_map: Dict[str, dict] = {}
-    items_without_id: List[dict] = []
-    for item in transfer.get("items", []):
-        item_id = item.get("id") or item.get("item_id") or ""
-        if item_id:
-            item_map[item_id] = item
-        else:
-            items_without_id.append(item)
-    # For items that have no id, register by product_id as a fallback key.
-    product_id_fallback: Dict[str, dict] = {}
-    for item in items_without_id:
-        pid = str(item.get("product_id") or "")
-        if pid and pid not in product_id_fallback:
-            product_id_fallback[pid] = item
-
-    def _resolve_item(transfer_item_id: str) -> Optional[dict]:
-        """Look up a transfer line by the caller's transfer_item_id.
-
-        Falls back to product_id when the id field isn't present on the line
-        (covers back-filled or pre-INV-11 docs). Returns None when no match."""
-        if transfer_item_id in item_map:
-            return item_map[transfer_item_id]
-        # Caller may be sending product_id as transfer_item_id for legacy docs.
-        if transfer_item_id in product_id_fallback:
-            return product_id_fallback[transfer_item_id]
-        return None
-
-    # BUG-011: a line's quantity_received must never exceed what was shipped.
-    # The pool-slice in _apply_receive_stock_move already physically caps the
-    # move, but the RECORDED number must be truthful -- otherwise the doc/summary
-    # math inflates and a partial transfer can be falsely marked RECEIVED. Reject
-    # an over-receive LOUDLY before storing anything. _line_expected_qty is the
-    # SAME definition the completeness math below uses (they used to disagree).
-    for received in items_received:
-        item = _resolve_item(received.transfer_item_id)
-        if item is None:
-            continue
-        shipped_cap = _line_expected_qty(item)
-        if received.quantity_received > shipped_cap:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "RECEIVE_EXCEEDS_SHIPPED",
-                    "message": (
-                        f"quantity_received ({received.quantity_received}) cannot "
-                        f"exceed quantity_shipped ({shipped_cap}) for item "
-                        f"{received.transfer_item_id}."
-                    ),
-                },
-            )
-
-    for received in items_received:
-        item = _resolve_item(received.transfer_item_id)
-        if item is not None:
-            item["quantity_received"] = received.quantity_received
-            item["quantity_damaged"] = received.quantity_damaged
-            item["damage_notes"] = received.damage_notes
-            item["received_at"] = utc_now_iso()
-            item["status"] = "received"
-
-    # SYSTEM_INTENT 5: raise destination on-hand by creating AVAILABLE units at
-    # the receiving store. Tracks per-line committed qty so a partial/repeat
-    # receive only mints the delta - never double-creates. Runs after the line
-    # quantities above are set so it sees the final `quantity_received`.
-    transfer = _apply_receive_stock_move(transfer)
-
-    # Completeness is decided PER LINE, and short/surplus are summed PER LINE.
-    # Comparing two cross-line TOTALS let one line's surplus cancel another's
-    # shortfall: the transfer closed RECEIVED with stock missing, and the
-    # discrepancy task saw a net figure of 0 so it never fired. A line is
-    # complete only when it received exactly what it was shipped.
-    total_expected = 0
-    total_received = 0
-    total_damaged = 0
-    short = 0
-    surplus = 0
-    every_line_complete = True
-    for item in transfer["items"]:
-        expected = _line_expected_qty(item)
-        got = _qty(item.get("quantity_received"))
-        total_expected += expected
-        total_received += got
-        total_damaged += _qty(item.get("quantity_damaged"))
-        short += max(0, expected - got)
-        surplus += max(0, got - expected)
-        if got != expected:
-            every_line_complete = False
-
-    # Determine status
-    if every_line_complete:
-        new_status = TransferStatus.RECEIVED
+        new_status = now["status"]  # a scan that died after the write, pressed again
+    if new_status == STOCK_STATUS_QUARANTINED:
+        line.setdefault("damaged_stock_ids", []).append(sid)
+        line.setdefault("damage_reasons", {})[sid] = reason or "damaged"
+        line["damage_notes"] = "; ".join(f"{v}" for v in line["damage_reasons"].values())
     else:
-        new_status = TransferStatus.PARTIALLY_RECEIVED
-
-    transfer["status"] = new_status
-    transfer["received_at"] = utc_now_iso()
-    transfer["received_by"] = current_user.get("user_id")
-    transfer["total_received"] = total_received
-    transfer["total_damaged"] = total_damaged
-    transfer["updated_at"] = utc_now_iso()
-
-    _append_status_history(
-        transfer,
-        {
-            "status": new_status,
-            "timestamp": utc_now_iso(),
-            "user_id": current_user.get("user_id"),
-            "user_name": current_user.get("username"),
-            "notes": f"Received {total_received} items, {total_damaged} damaged",
-        },
+        line.setdefault("received_stock_ids", []).append(sid)
+    _settle_line_counts(line)
+    line["status"] = "received"
+    line["received_at"] = utc_now_iso()
+    _audit_stock_move(
+        STOCK_STATUS_TRANSFERRED, new_status, sid, transfer,
+        {"product_id": line.get("product_id"), "moved_to": transfer.get("to_location_id"),
+         **({"reason": "TRANSFER_DAMAGED", "damage_reason": reason} if body.damaged else {})},
+    )
+    _ledger_transfer_event(
+        "TRANSFER_RECEIVE", sid, STOCK_STATUS_TRANSFERRED, new_status,
+        line.get("product_id"), transfer.get("to_location_id"), None, transfer,
     )
 
-    # BUG-019: surface any receive mismatch as a follow-up task so a short /
-    # surplus / damaged shipment is reconciled instead of silently closed.
-    # short / surplus are the PER-LINE sums accumulated above -- a net figure
-    # here would let two lines cancel out and suppress the task entirely.
-    discrepancy_task_id = None
-    if short > 0 or surplus > 0 or total_damaged > 0:
-        discrepancy_task_id = _create_receive_mismatch_task(
+    complete = all(
+        _qty(ln.get("quantity_received")) >= len(ln.get("shipped_stock_ids") or [])
+        for ln in transfer.get("items") or []
+    )
+    new_tstatus = TransferStatus.RECEIVED if complete else TransferStatus.PARTIALLY_RECEIVED
+    if transfer.get("status") != new_tstatus.value:
+        _append_status_history(
             transfer,
-            {"short": short, "surplus": surplus, "damaged": total_damaged},
+            {
+                "status": new_tstatus,
+                "timestamp": utc_now_iso(),
+                "user_id": current_user.get("user_id"),
+                "user_name": current_user.get("username"),
+                "notes": "Every piece scanned in" if complete else "Scanning in",
+            },
         )
-        if discrepancy_task_id:
-            transfer["discrepancy_task_id"] = discrepancy_task_id
-
+    transfer["status"] = new_tstatus
+    transfer["received_at"] = utc_now_iso()
+    transfer["received_by"] = current_user.get("user_id")
+    transfer["total_received"] = sum(_qty(ln.get("quantity_received")) for ln in transfer["items"])
+    transfer["total_damaged"] = sum(_qty(ln.get("quantity_damaged")) for ln in transfer["items"])
+    transfer["updated_at"] = utc_now_iso()
     _save_transfer(transfer)
     return {
         "transfer": _caller_view(transfer, current_user),
-        "message": "Items received",
-        "summary": {
-            "expected": total_expected,
-            "received": total_received,
-            "damaged": total_damaged,
-            "short": short,
-            "surplus": surplus,
-            "discrepancy_task_id": discrepancy_task_id,
-        },
+        "message": f"{label} received" + (" damaged, to quarantine" if body.damaged else ""),
+        "piece": {"barcode": label, "status": "damaged" if body.damaged else "received"},
     }
 
 
@@ -1950,13 +1972,13 @@ async def complete_transfer(
     notes: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """Mark transfer as completed"""
-    if not any(
-        role in current_user.get("roles", [])
-        for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
-
+    """Accept the box at the receiving shop. Every piece that left in it and
+    was not scanned in goes on "Missing on the way" -- still tracked against
+    this transfer (TRANSFERRED, at neither shelf) until it is found or an
+    admin writes it off -- so a partial receipt never strands a piece (Fable
+    review 2026-10-23). The tax invoice was booked at ship; booking it again
+    here is a no-op unless that write did not land."""
+    _require_roles(current_user, ["SUPERADMIN", "ADMIN", "STORE_MANAGER"])
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
@@ -1965,6 +1987,7 @@ async def complete_transfer(
     _assert_transfer_access(transfer, current_user, side="dest")
 
     if transfer["status"] not in [
+        TransferStatus.IN_TRANSIT,
         TransferStatus.RECEIVED,
         TransferStatus.PARTIALLY_RECEIVED,
     ]:
@@ -1972,30 +1995,61 @@ async def complete_transfer(
             status_code=400, detail="Transfer must be received before completion"
         )
 
+    known = {str(p.get("stock_id")) for p in transfer.get("missing_pieces") or []}
+    gone: List[tuple] = []
+    for line in transfer.get("items") or []:
+        settled = {str(s) for s in (line.get("received_stock_ids") or []) + (line.get("damaged_stock_ids") or [])}
+        for sid in line.get("shipped_stock_ids") or []:
+            if str(sid) not in settled and str(sid) not in known:
+                gone.append((str(sid), line))
+    codes: Dict[str, str] = {}
+    if gone:
+        codes = {
+            str(u.get("stock_id")): str(u.get("barcode") or "")
+            for u in _units_coll().find(
+                {"stock_id": {"$in": [s for s, _ in gone]}}, {"_id": 0, "stock_id": 1, "barcode": 1}
+            )
+        }
+    now = utc_now_iso()
+    missing = list(transfer.get("missing_pieces") or [])
+    for sid, line in gone:
+        missing.append({
+            "stock_id": sid,
+            "barcode": codes.get(sid) or sid,
+            "item_id": line.get("id"),
+            "product_id": line.get("product_id"),
+            "product_name": line.get("product_name"),
+            "status": "missing",
+            "reported_at": now,
+            "reported_by": current_user.get("user_id"),
+        })
+    transfer["missing_pieces"] = missing
+
     transfer["status"] = TransferStatus.COMPLETED
-    transfer["completed_at"] = utc_now_iso()
+    transfer["completed_at"] = now
     transfer["completed_by"] = current_user.get("user_id")
     transfer["completion_notes"] = notes
-    transfer["updated_at"] = utc_now_iso()
-
+    transfer["updated_at"] = now
     _append_status_history(
         transfer,
         {
             "status": TransferStatus.COMPLETED,
-            "timestamp": utc_now_iso(),
+            "timestamp": now,
             "user_id": current_user.get("user_id"),
             "user_name": current_user.get("username"),
-            "notes": notes or "Transfer completed",
+            "notes": notes
+            or (f"Accepted; {len(gone)} missing on the way" if gone else "Transfer completed"),
         },
     )
-
+    damaged = sum(_qty(ln.get("quantity_damaged")) for ln in transfer.get("items") or [])
+    if gone or damaged:
+        task_id = _create_receive_mismatch_task(
+            transfer, {"short": len(gone), "surplus": 0, "damaged": damaged}
+        )
+        if task_id:
+            transfer["discrepancy_task_id"] = task_id
     _save_transfer(transfer)
-
-    # FIN-3: If this transfer crosses entity boundaries, write the mirror
-    # purchase (vendor_bills) in the receiving entity so it can claim ITC.
-    # Fail-soft -- never blocks the status flip.
     _book_mirror_purchase(transfer)
-
     return {"transfer": _caller_view(transfer, current_user), "message": "Transfer completed"}
 
 
@@ -2045,18 +2099,18 @@ async def cancel_transfer(
     transfer_id: str, reason: str, current_user: dict = Depends(get_current_user)
 ):
     """Cancel a transfer"""
-    if not any(
-        role in current_user.get("roles", [])
-        for role in ["SUPERADMIN", "ADMIN", "AREA_MANAGER"]
-    ):
-        raise HTTPException(status_code=403, detail="Insufficient permissions")
+    _require_roles(current_user, CANCEL_ROLES)
+    if not (reason or "").strip():
+        raise HTTPException(status_code=400, detail="Give a reason to cancel the transfer.")
 
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
 
-    # IDOR guard: cancellation authority follows the SOURCE store's chain.
-    _assert_transfer_access(transfer, current_user, side="source")
+    # IDOR guard (S3): either end may call off a box that has not shipped --
+    # the asking shop withdraws its request, the sending shop declines to
+    # send. Nothing has moved before ship (the allowlist below).
+    _assert_transfer_access(transfer, current_user, side="either")
 
     # ALLOWLIST guard (PR #959 round 2): cancellable ONLY from a pre-ship
     # status. The previous denylist (completed/cancelled/in_transit) still let
@@ -2156,6 +2210,213 @@ async def cancel_transfer(
             )
 
     return {"transfer": _caller_view(transfer, current_user), "message": "Transfer cancelled"}
+
+
+# ============================================================================
+# MISSING ON THE WAY  (S3)
+# ============================================================================
+# A piece scanned OUT and never IN stays TRANSFERRED against its transfer --
+# at neither shelf, on nobody's sellable stock -- and on the "Missing on the
+# way" list both managers and the admin see, until it is FOUND (it lands on
+# the shelf where it turned up) or an ADMIN writes it off (owner ruling
+# 2026-08-25: every write-off is admin-only). Between two GSTINs, a piece that
+# never reached the receiving shop (written off, or found back at the
+# sender) gets its CREDIT NOTE first (_short_credit_note); a piece found at
+# the receiving shop was delivered, so the invoice already covers it.
+
+
+def _open_missing(transfer: Dict, stock_id: str) -> Dict:
+    for piece in transfer.get("missing_pieces") or []:
+        if isinstance(piece, dict) and str(piece.get("stock_id")) == stock_id:
+            if piece.get("status") not in MISSING_OPEN:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"{piece.get('barcode') or stock_id} is no longer missing "
+                    f"({str(piece.get('status') or '').replace('_', ' ')}).",
+                )
+            return piece
+    raise HTTPException(status_code=404, detail="That piece is not missing on this transfer.")
+
+
+@router.post("/{transfer_id}/missing/{stock_id}/found")
+async def found_missing_piece(
+    transfer_id: str,
+    stock_id: str,
+    body: MissingFound,
+    current_user: dict = Depends(get_current_user),
+):
+    """A missing piece turned up -- at the receiving shop (it lands on that
+    shelf, delivered late) or back at the sending shop (it goes back on that
+    shelf; between two GSTINs its credit note is booked first, since it was
+    never delivered). Only a manager of the shop where it turned up (or an
+    admin) can say so."""
+    _require_roles(current_user, MISSING_ROLES)
+    transfer = _get_transfer(transfer_id)
+    if not transfer:
+        raise HTTPException(status_code=404, detail="Transfer not found")
+    at_source = body.at == "source"
+    _assert_transfer_access(transfer, current_user, side="source" if at_source else "dest")
+    piece = _open_missing(transfer, stock_id)
+    store = transfer.get("from_location_id") if at_source else transfer.get("to_location_id")
+    note = (
+        _short_credit_note(transfer, [stock_id], "piece found back at the sending shop, never delivered")
+        if at_source
+        else None
+    )
+    units = _units_coll()
+    tid = transfer.get("id")
+    patch = (
+        {"status": STOCK_STATUS_AVAILABLE, "transfer_id": None, "transfer_to_store_id": None}
+        if at_source
+        else _rehome_patch(transfer, STOCK_STATUS_AVAILABLE)
+    )
+    res = units.update_one(
+        {"stock_id": stock_id, "status": STOCK_STATUS_TRANSFERRED, "transfer_id": tid},
+        {"$set": patch},
+    )
+    if not int(getattr(res, "modified_count", 0) or 0):
+        now_unit = units.find_one({"stock_id": stock_id}) or {}
+        if not (
+            now_unit.get("store_id") == store
+            and now_unit.get("status") == STOCK_STATUS_AVAILABLE
+            and not now_unit.get("transfer_id")
+        ):
+            raise HTTPException(
+                status_code=409, detail=f"{piece.get('barcode') or stock_id} is no longer on the way."
+            )
+    if not at_source:
+        line = _line_of_piece(transfer, stock_id)
+        if line is not None:
+            line.setdefault("received_stock_ids", []).append(stock_id)
+            _settle_line_counts(line)
+    piece.update({
+        "status": "found",
+        "found_side": body.at,
+        "found_at_store_id": store,
+        "resolved_at": utc_now_iso(),
+        "resolved_by": current_user.get("user_id"),
+        **({"credit_note_number": note} if note else {}),
+    })
+    _audit_stock_move(
+        STOCK_STATUS_TRANSFERRED, STOCK_STATUS_AVAILABLE, stock_id, transfer,
+        {"product_id": piece.get("product_id"), "moved_to": store, "reason": "MISSING_FOUND"},
+    )
+    _ledger_transfer_event(
+        "TRANSFER_RECEIVE", stock_id, STOCK_STATUS_TRANSFERRED, STOCK_STATUS_AVAILABLE,
+        piece.get("product_id"), store, None, transfer,
+    )
+    transfer["updated_at"] = utc_now_iso()
+    _save_transfer(transfer)
+    return {"transfer": _caller_view(transfer, current_user), "message": "Found", "credit_note_number": note}
+
+
+@router.post("/{transfer_id}/missing/{stock_id}/write-off-request")
+async def request_missing_write_off(
+    transfer_id: str, stock_id: str, current_user: dict = Depends(get_current_user)
+):
+    """A manager of either shop sends a missing piece to the admin for
+    write-off (only an admin writes stock off, owner ruling 2026-08-25)."""
+    _require_roles(current_user, MISSING_ROLES)
+    transfer = _get_transfer(transfer_id)
+    if not transfer:
+        raise HTTPException(status_code=404, detail="Transfer not found")
+    _assert_transfer_access(transfer, current_user, side="either")
+    piece = _open_missing(transfer, stock_id)
+    if piece.get("status") != "write_off_requested":
+        piece.update({
+            "status": "write_off_requested",
+            "write_off_requested_by": current_user.get("user_id"),
+            "write_off_requested_by_name": current_user.get("username"),
+            "write_off_requested_at": utc_now_iso(),
+        })
+        transfer["updated_at"] = utc_now_iso()
+        _save_transfer(transfer)
+    return {"transfer": _caller_view(transfer, current_user), "message": "Sent to the admin for write-off"}
+
+
+@router.post("/{transfer_id}/missing/{stock_id}/write-off")
+async def write_off_missing_piece(
+    transfer_id: str, stock_id: str, current_user: dict = Depends(get_current_user)
+):
+    """ADMIN / SUPERADMIN write a missing piece off (owner ruling 2026-08-25:
+    every write-off is admin-only). The loss is the SENDING shop's: the piece
+    is VOIDed there (it never left its books), with a stock_shrinkage row at
+    the piece's own cost. Between two GSTINs its credit note is booked first
+    (CA 2026-10-23: short delivery = value received + credit note)."""
+    from .inventory._shared import is_write_off_admin
+
+    if not is_write_off_admin(current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="Only an admin writes stock off. Send it to the admin for write-off.",
+        )
+    transfer = _get_transfer(transfer_id)
+    if not transfer:
+        raise HTTPException(status_code=404, detail="Transfer not found")
+    piece = _open_missing(transfer, stock_id)
+    note = _short_credit_note(transfer, [stock_id], "piece lost on the way, written off")
+    units = _units_coll()
+    tid = transfer.get("id")
+    reason_tag = f"transfer-missing:{tid}"
+    now = utc_now_iso()
+    unit = units.find_one({"stock_id": stock_id}) or {}
+    res = units.update_one(
+        {"stock_id": stock_id, "status": STOCK_STATUS_TRANSFERRED, "transfer_id": tid},
+        {"$set": {"status": STOCK_STATUS_VOID, "voided_at": now, "void_reason": reason_tag,
+                  "transfer_id": None, "transfer_to_store_id": None, "void_transfer_id": tid}},
+    )
+    if not int(getattr(res, "modified_count", 0) or 0) and not (
+        unit.get("status") == STOCK_STATUS_VOID and unit.get("void_reason") == reason_tag
+    ):
+        raise HTTPException(
+            status_code=409, detail=f"{piece.get('barcode') or stock_id} is no longer on the way."
+        )
+    db = _get_db()
+    shrink = db.get_collection("stock_shrinkage")
+    if not shrink.find_one({"transfer_id": tid, "voided_stock_ids": stock_id}):
+        line = _line_of_piece(transfer, stock_id) or {}
+        value = round(_first_cost(unit.get("unit_cost"), unit.get("cost_price"), line.get("unit_cost")), 2)
+        shrink.insert_one({
+            "shrinkage_id": str(uuid.uuid4()),
+            "source": "TRANSFER_MISSING",
+            "transfer_id": tid,
+            "transfer_number": transfer.get("transfer_number"),
+            "store_id": transfer.get("from_location_id"),
+            "product_id": piece.get("product_id"),
+            "product_name": piece.get("product_name"),
+            "sku": line.get("sku"),
+            "shrinkage_quantity": 1,
+            "units_voided": 1,
+            "units_not_voided": 0,
+            "voided_stock_ids": [stock_id],
+            "missing_barcodes": [piece.get("barcode")],
+            "unit_cost": value,
+            "shrinkage_value": value,
+            "credit_note_number": note,
+            "write_off_requested_by": piece.get("write_off_requested_by"),
+            "recorded_at": now,
+            "recorded_by": current_user.get("user_id"),
+        })
+    try:
+        from ..services import item_events as ie
+
+        ie.record_post_write_event(
+            db, event_type=ie.ItemEventType.VOID, actor_id=current_user.get("user_id", ""),
+            stock_id=stock_id, from_state=ie.StockState.TRANSFERRED, to_state=ie.StockState.VOID,
+            store_id=transfer.get("from_location_id"), product_id=piece.get("product_id"),
+            source_type="TRANSFER", source_id=tid, payload={"void_reason": reason_tag},
+        )
+    except Exception as exc:  # noqa: BLE001 - the ledger is additive
+        logger.warning("[TRANSFER] write-off ledger row failed: %s", exc)
+    piece.update({
+        "status": "written_off",
+        "resolved_at": now,
+        "resolved_by": current_user.get("user_id"),
+        **({"credit_note_number": note} if note else {}),
+    })
+    transfer["updated_at"] = now
+    _save_transfer(transfer)
+    return {"transfer": _caller_view(transfer, current_user), "message": "Written off", "credit_note_number": note}
 
 
 # ============================================================================
@@ -2398,57 +2659,49 @@ def _require_hsn(name: str, hsn: str) -> None:
         )
 
 
-def _assert_valued_paper(transfer: Dict, products: Dict[str, Dict]) -> tuple:
-    """D13: a move between two GST registrations travels on a VALUED delivery
-    challan, so it ships only when that paper can be printed -- both GSTINs on
-    file, at least one unit on the shelf to send (never a Rs 0 paper), an HSN
-    and a cost for every line whose units may leave (_unit_cost, the rule the
-    ship stamp values them by, on the same product rows: `products`, from
-    _ship_products). A move IMS cannot place (crosses None) is refused as the
-    data gap it is. Refused BEFORE any unit moves: once shipped, the value is
-    fixed (_stamp_shipped_value), so a cost entered afterwards could not reach
-    it. Returns the registrations, which ship stamps on the transfer
-    (_transfer_registrations)."""
+def _assert_valued_paper(
+    transfer: Dict, products: Dict[str, Dict], units: Optional[Dict[str, Dict]] = None
+) -> tuple:
+    """D13 / CA 2026-10-18: a move between two GST registrations travels on a
+    tax invoice at cost, so it ships only when that paper can be printed --
+    both GSTINs on file, at least one piece in the box (never a Rs 0 paper),
+    an HSN and a cost for every packed piece (_unit_cost, the rule the ship
+    stamp values them by, on the same product rows: `products`, from
+    _ship_products; `units`: the packed pieces, from _packed_units). A move
+    IMS cannot place (crosses None) is refused as the data gap it is. Refused
+    BEFORE any unit moves: once shipped, the value is fixed
+    (_stamp_shipped_value). Returns the registrations, which ship stamps on
+    the transfer (_transfer_registrations)."""
     db = _get_db()
     src, dst, crosses = registrations = _transfer_registrations(db, transfer)
     if crosses is False:
         return registrations
     if crosses is None:
         raise HTTPException(status_code=400, detail=_gstin_gap(transfer, src, dst))
-    units = db.get_collection("stock_units")
-    in_stock = False
+    units = units or {}
+    in_box = False
     for line in transfer.get("items") or []:
         pid = line.get("product_id")
-        if not pid:
+        packed = [units[str(s)] for s in line.get("packed_stock_ids") or [] if str(s) in units]
+        if not pid or not packed:
             continue
-        shelf = {
-            "product_id": pid,
-            "store_id": transfer.get("from_location_id"),
-            "status": STOCK_STATUS_AVAILABLE,
-        }
-        on_shelf = list(units.find(shelf, {"_id": 0, "unit_cost": 1, "cost_price": 1}))
-        if not on_shelf:
-            continue
-        in_stock = True
+        in_box = True
         product = products.get(pid) or {}
         _require_hsn(line.get("product_name") or pid, _line_hsn(line, product))
-        # ponytail: any cost-less unit on the shelf refuses, not only the ones
-        # ship would pick; the fix (a product cost price) is the same.
-        if not all(_unit_cost(u, product) for u in on_shelf):
+        if not all(_unit_cost(u, product) for u in packed):
             raise HTTPException(
                 status_code=409,
                 detail=f"{line.get('product_name') or pid} has no cost price and "
-                "some of its units here carry no cost. Enter the product's cost "
+                "some of its packed pieces carry no cost. Enter the product's cost "
                 "price before shipping: a transfer between two GST registrations "
                 "is valued at cost.",
             )
-    if not in_stock:
+    if not in_box:
         raise HTTPException(
             status_code=409,
-            detail=f"None of these items is in stock at "
-            f"{transfer.get('from_location_name') or 'the sending shop'} in IMS. "
-            "A transfer between two GST registrations travels on a challan valued "
-            "at the units that leave the shop: enter the stock first.",
+            detail="Nothing is packed in this box. A transfer between two GST "
+            "registrations travels on a tax invoice valued at the pieces that leave "
+            "the shop: scan them into the box first.",
         )
     return registrations
 
@@ -2646,10 +2899,11 @@ def _book_mirror_purchase(transfer: Dict) -> None:
     if crosses is False or not (from_entity and to_entity):
         return
 
-    # Idempotent: skip if we already wrote the bill for this transfer.
+    # Idempotent: skip if we already wrote the bill for this transfer (its
+    # credit notes share source_transfer_id; they are not the invoice).
     try:
         if db.get_collection("vendor_bills").find_one(
-            {"source_transfer_id": transfer.get("id")},
+            {"source_transfer_id": transfer.get("id"), "doc_type": {"$ne": TRANSFER_CREDIT_NOTE}},
             {"_id": 1},
         ):
             logger.info(
@@ -2692,7 +2946,15 @@ def _book_mirror_purchase(transfer: Dict) -> None:
         # the paisa. These lines also feed the SENDER's GSTR-1 HSN summary
         # (reports._compute_gstr1), so per-line hsn/rate precision here is what
         # makes both entities' filings correct.
-        lines = _mirror_bill_lines(db, transfer, interstate)
+        # CA answers 2026-10-23: the bill IS the tax invoice as issued -- the
+        # units SHIPPED, at the frozen lines the paper printed -- and a short
+        # delivery is a credit note on it (_short_credit_note), never a
+        # smaller bill.
+        lines = [
+            {k: v for k, v in ln.items() if k not in ("item_id", "serials")}
+            for ln in (transfer.get("tax_invoice_lines") or [])
+            if isinstance(ln, dict)
+        ] or _mirror_bill_lines(db, transfer, interstate, shipped=True)
         if lines:
             taxable = 0.0
             cgst = 0.0
@@ -2758,9 +3020,16 @@ def _book_mirror_purchase(transfer: Dict) -> None:
 
         bill_id = f"mbill_{uuid.uuid4().hex[:12]}"
         now_iso = utc_now_iso()
-        # Filing date in IST frame (the GST tax period is the IST calendar
-        # month); completed_at is a naive-UTC stamp -- see _bill_date_ist.
-        bill_date_iso = _bill_date_ist(transfer.get("completed_at"))
+        # CA answers 2026-10-23: filed in the DISPATCH month -- the tax
+        # invoice's own date (ship), in the IST frame (the GST tax period is
+        # the IST calendar month) -- see _bill_date_ist. Both sides read this
+        # one date (invoice_date == bill_date), so the sender's outward supply
+        # and the receiver's credit land in the same month.
+        bill_date_iso = _bill_date_ist(
+            transfer.get("tax_invoice_date")
+            or transfer.get("shipped_at")
+            or transfer.get("completed_at")
+        )
 
         doc = {
             "bill_id": bill_id,
@@ -2817,11 +3086,9 @@ def _book_mirror_purchase(transfer: Dict) -> None:
             "igst_total": igst,
             "total_amount": round(taxable + tax, 2),
             "total": round(taxable + tax, 2),
-            # D13: the bill books the units RECEIVED (no input credit on goods
-            # that never arrived); the valued challan showed the units SHIPPED.
-            # Both on the bill, so a short receipt's gap is visible -- which
-            # one the sender's GSTR-1 reports is the CA's call.
-            "qty_basis": "received",
+            # CA 2026-10-23: the units SHIPPED (the invoice); a short delivery
+            # is its credit note.
+            "qty_basis": "shipped",
             "challan_value": round(float(transfer.get("total_value") or 0), 2),
             # ITC eligibility: inter-entity transfers are stock-in-trade, so
             # claimable -- decided by the ONE helper every booking door and

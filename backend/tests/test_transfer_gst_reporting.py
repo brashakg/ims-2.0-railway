@@ -741,17 +741,18 @@ def test_missing_destination_gstin_stays_empty_and_loud(static_rates, monkeypatc
 
 
 # ============================================================================
-# REVIEW BLOCKER 3: short-ship -- received qty is authoritative
+# REVIEW BLOCKER 3, as ruled by the CA (2026-10-23): the bill IS the tax
+# invoice -- the quantity SHIPPED is authoritative; a short DELIVERY is a
+# credit note on it (S3, test_transfer_per_piece), never a smaller bill.
 # ============================================================================
 
 
 def test_short_ship_line_not_billed(static_rates):
-    """A line received == 0 on a completed transfer must NOT be billed -- the
-    old `received or requested` fallback billed the FULL requested qty and
-    handed the receiver ITC on goods never received."""
+    """A line that SHIPPED nothing is not on the invoice (the old `received or
+    requested` fallback billed the FULL requested qty)."""
     db = _mini_db()
     t = _mixed_transfer()
-    t["items"][1]["quantity_received"] = 0  # sunglass never arrived
+    t["items"][1]["quantity_shipped"] = 0  # no sunglass left the shop
     _book(db, t)
 
     b = db["vendor_bills"].docs[0]
@@ -760,12 +761,12 @@ def test_short_ship_line_not_billed(static_rates):
     assert b["igst_total"] == 100.0  # frame only, 5%
 
 
-def test_partial_receipt_bills_received_qty(static_rates):
-    """1 received of 10 requested bills exactly 1."""
+def test_partial_shipment_bills_shipped_qty(static_rates):
+    """1 shipped of 10 requested bills exactly 1, whatever was received."""
     db = _mini_db()
     t = _mixed_transfer()
-    t["items"][0].update({"quantity_requested": 10, "quantity_received": 1})
-    t["items"][1]["quantity_received"] = 0
+    t["items"][0].update({"quantity_requested": 10, "quantity_shipped": 1, "quantity_received": 0})
+    t["items"][1]["quantity_shipped"] = 0
     _book(db, t)
 
     b = db["vendor_bills"].docs[0]
@@ -780,8 +781,8 @@ def test_all_lines_short_shipped_zero_bill(static_rates):
     NOT resurrect through the aggregate fallback."""
     db = _mini_db()
     t = _mixed_transfer()
-    t["items"][0]["quantity_received"] = 0
-    t["items"][1]["quantity_received"] = 0
+    t["items"][0]["quantity_shipped"] = 0
+    t["items"][1]["quantity_shipped"] = 0
     _book(db, t)
 
     b = db["vendor_bills"].docs[0]
@@ -812,8 +813,8 @@ def test_legacy_items_without_received_key_bill_requested(static_rates):
 def test_zero_value_bill_emits_no_gstr1_row(static_rates, monkeypatch):
     db = _mini_db()
     t = _mixed_transfer()
-    t["items"][0]["quantity_received"] = 0
-    t["items"][1]["quantity_received"] = 0
+    t["items"][0]["quantity_shipped"] = 0
+    t["items"][1]["quantity_shipped"] = 0
     _book(db, t)
     assert len(db["vendor_bills"].docs) == 1  # bill still booked (audit trail)
 
