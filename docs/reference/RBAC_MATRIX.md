@@ -69,9 +69,9 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 393 |
-| Role-gated (one or more roles) | 869 |
-| **Total `/api/v1` (method x path)** | **1308** |
-| ...of which `store_scoped` | 235 |
+| Role-gated (one or more roles) | 868 |
+| **Total `/api/v1` (method x path)** | **1307** |
+| ...of which `store_scoped` | 236 |
 | ...of which `self_enforced` | 47 |
 
 ## Full matrix (method x path -> policy entry)
@@ -272,12 +272,6 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/budgets/` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `GET` | `/api/v1/budgets/variance` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
 | `DELETE` | `/api/v1/budgets/{budget_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER | S |  |
-
-### `/api/v1/buy-desk`
-
-| Method | Path | Allowed | S | E |
-|---|---|---|---|---|
-| `GET` | `/api/v1/buy-desk/rows` | ADMIN, CATALOG_MANAGER, AREA_MANAGER, STORE_MANAGER, ACCOUNTANT, SUPERADMIN |  |  |
 
 ### `/api/v1/catalog`
 
@@ -785,6 +779,7 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/inventory/opening-stock/preview` | ADMIN, AREA_MANAGER, CATALOG_MANAGER, STORE_MANAGER, WORKSHOP_STAFF |  |  |
 | `GET` | `/api/v1/inventory/overstock-analysis` | AUTH |  |  |
 | `PUT` | `/api/v1/inventory/reorder-levels/{product_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN | S |  |
+| `GET` | `/api/v1/inventory/reorder-list` | ADMIN, AREA_MANAGER, STORE_MANAGER, CATALOG_MANAGER, ACCOUNTANT, SUPERADMIN | S |  |
 | `GET` | `/api/v1/inventory/sell-through-analysis` | AUTH |  |  |
 | `GET` | `/api/v1/inventory/sellable` | AUTH | S |  |
 | `GET` | `/api/v1/inventory/serials` | AUTH | S |  |
@@ -1660,7 +1655,6 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/vendors/purchase-invoices/{invoice_id}/recon` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/vendors/purchase-orders` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `POST` | `/api/v1/vendors/purchase-orders` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
-| `POST` | `/api/v1/vendors/purchase-orders/from-forecast` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/vendors/purchase-orders/{po_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `PUT` | `/api/v1/vendors/purchase-orders/{po_id}` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
 | `POST` | `/api/v1/vendors/purchase-orders/{po_id}/cancel` | ACCOUNTANT, ADMIN, AREA_MANAGER, STORE_MANAGER |  |  |
