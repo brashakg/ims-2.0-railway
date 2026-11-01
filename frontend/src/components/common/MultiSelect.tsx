@@ -15,6 +15,8 @@ export type MultiOption = { value: string; label?: string; count?: number };
 
 /** Long lists get a search box. */
 const SEARCH_FROM = 8;
+/** The panel's width (w-64), to tell whether it fits to the right. */
+const PANEL_PX = 256;
 
 const split = (s: string) => (s ? s.split(',') : []);
 
@@ -36,7 +38,16 @@ export function MultiSelect({
 }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
+  // A box near the right edge (phone widths) opens its panel leftwards.
+  const [alignRight, setAlignRight] = useState(false);
   const box = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  // Closing from inside the panel hands focus back to the button, or the
+  // focused tick box goes hidden and focus falls to the top of the page.
+  const close = () => {
+    setOpen(false);
+    trigger.current?.focus();
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -44,7 +55,7 @@ export function MultiSelect({
       if (!box.current?.contains(e.target as Node)) setOpen(false);
     };
     const esc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false);
+      if (e.key === 'Escape') close();
     };
     document.addEventListener('mousedown', away);
     document.addEventListener('keydown', esc);
@@ -72,15 +83,24 @@ export function MultiSelect({
   return (
     <div
       ref={box}
+      onBlur={(e) => {
+        // Tabbing out of the box closes it, so two panels never stack.
+        if (!box.current?.contains(e.relatedTarget as Node | null)) setOpen(false);
+      }}
       className="relative flex flex-col gap-1 text-[11px] font-medium uppercase tracking-[.06em] text-gray-500"
     >
       <span>{title}</span>
       <button
         type="button"
+        ref={trigger}
         aria-label={title}
         aria-haspopup="true"
         aria-expanded={open}
-        onClick={() => setOpen((o) => !o)}
+        onClick={() => {
+          const r = trigger.current?.getBoundingClientRect();
+          setAlignRight(!!r && r.left + PANEL_PX > window.innerWidth);
+          setOpen((o) => !o);
+        }}
         className={clsx(
           'input-field flex items-center justify-between gap-1 text-left normal-case tracking-normal',
           picked.length > 0 && 'border-gray-500 text-gray-900',
@@ -94,7 +114,10 @@ export function MultiSelect({
         role="group"
         aria-label={`${title} options`}
         hidden={!open}
-        className="absolute left-0 top-full z-30 mt-1 w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-gray-200 bg-white p-2 text-sm font-normal normal-case tracking-normal text-gray-800 shadow-lg"
+        className={clsx(
+          'absolute top-full z-30 mt-1 w-64 max-w-[calc(100vw-2rem)] rounded-lg border border-gray-200 bg-white p-2 text-sm font-normal normal-case tracking-normal text-gray-800 shadow-lg',
+          alignRight ? 'right-0' : 'left-0'
+        )}
       >
         {list.length > SEARCH_FROM && (
           <input
@@ -136,7 +159,7 @@ export function MultiSelect({
           </button>
           <button
             type="button"
-            onClick={() => setOpen(false)}
+            onClick={close}
             className="rounded-md bg-gray-900 px-3 py-1 text-sm font-medium text-white"
           >
             Done

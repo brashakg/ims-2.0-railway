@@ -409,13 +409,14 @@ def stamp_people(db, docs: Iterable[Dict[str, Any]]) -> None:
 def _value_options(values: Iterable[Any]) -> List[Dict[str, Any]]:
     """Distinct values with counts, grouped the way same_value matches them;
     each option shows its most common spelling. A value longer than
-    VALUE_MAX is no option (no filter could take it). ponytail: such a
-    product still lists unfiltered; nothing in the catalogue comes close."""
+    VALUE_MAX is no option (no filter could take it), nor is a value with a
+    comma (ticks join on ',', so it would come back as two values). ponytail:
+    such a product still lists unfiltered; escape commas if one ever matters."""
     counts: Counter = Counter()
     spellings: Dict[str, Counter] = defaultdict(Counter)
     for v in values:
         v = v.strip(_WS) if isinstance(v, str) else ""
-        if not v or len(v) > VALUE_MAX:
+        if not v or len(v) > VALUE_MAX or "," in v:
             continue
         key = v.lower()
         counts[key] += 1

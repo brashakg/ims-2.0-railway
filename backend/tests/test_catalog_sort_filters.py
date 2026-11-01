@@ -767,3 +767,24 @@ def test_two_tick_sets_never_share_a_cached_page(db, cache):
     a = _ids(_list(sort="oldest", is_active="true", frame_color="Gold"))
     b = _ids(_list(sort="oldest", is_active="true", frame_color="Gold,Havana"))
     assert a == ["P03"] and sorted(b) == ["P03", "P04"]
+
+
+@pytest.mark.parametrize(
+    "param,value,expected",
+    [
+        ("created_by", "u-mansi,u-akshay", ["P01", "P02", "P03", "P04", "P07"]),
+        ("brand", "Carrera,Ray-Ban", ["P01", "P02"]),
+        ("category", "FRAME,SUNGLASS", ["P01", "P02", "P03", "P04", "P07"]),
+    ],
+)
+def test_several_ticks_without_a_sort_still_filter(db, param, value, expected):
+    # No sort or other new parameter: the ticks alone must take the list path,
+    # not the legacy one that matched the comma string literally (0 rows).
+    assert sorted(_ids(_list(**{param: value}))) == expected
+
+
+def test_a_value_with_a_comma_is_no_option(db):
+    # A tick joins on ',' and the server splits on it: 'Black, Gold' would
+    # come back as Black OR Gold, so it is never offered.
+    db["products"].insert_one(_extra("P08", frame_color="Black, Gold"))
+    assert "Black, Gold" not in [o["value"] for o in _facets()["frame_color"]]

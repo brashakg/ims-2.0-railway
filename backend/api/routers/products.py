@@ -954,7 +954,9 @@ async def list_products(
         }
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    use_catalog_list = any(new.values())
+    # One ticked value keeps the legacy path (old links, the till search);
+    # two or more need the list path, which reads them as OR.
+    use_catalog_list = any(new.values()) or any(len(v) > 1 for v in ticked.values())
     if "archived" in new["flag"] and not (
         set(current_user.get("roles") or []) & _ARCHIVE_VIEW_ROLES
     ):

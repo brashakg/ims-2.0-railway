@@ -841,3 +841,54 @@ describe('Added by and Last edited by: tick boxes on the main row (owner 2026-11
     expect(second.getAttribute('aria-pressed')).toBe('true');
   });
 });
+
+describe('every tick-box filter keeps all its ticks (fix round 1)', () => {
+  it('two Flags and two shapes reach the address and the server whole', async () => {
+    getFacets.mockResolvedValue({
+      ...FACETS,
+      shape: [
+        { value: 'Round', count: 4 },
+        { value: 'Square', count: 3 },
+      ],
+    });
+    renderAt('');
+    await screen.findByTestId('catalog-table');
+    fireEvent.click(screen.getByRole('button', { name: 'Flags - needs work' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Any flag open (14)' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Price check (5)' }));
+    await waitFor(() => expect(where().get('flag')).toBe('any,price_check'));
+    fireEvent.click(screen.getByRole('button', { name: /More filters/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Shape' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Round (4)' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Square (3)' }));
+    await waitFor(() => expect(where().get('shape')).toBe('Round,Square'));
+    await waitFor(() =>
+      expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({
+        flag: 'any,price_check',
+        shape: 'Round,Square',
+      })
+    );
+  });
+
+  it('Needs review asks for every brand when several categories are ticked', async () => {
+    const getBrandOptions = productApi.getBrandOptions as unknown as ReturnType<typeof vi.fn>;
+    const at = async (search: string) => {
+      getBrandOptions.mockClear();
+      reviewList.mockReset();
+      reviewList.mockResolvedValue({ products: [], total: 0 });
+      const view = render(
+        <MemoryRouter initialEntries={[`/catalog/review${search}`]}>
+          <Routes>
+            <Route path="/catalog/review" element={<CatalogManagerPage segment="review" />} />
+          </Routes>
+        </MemoryRouter>
+      );
+      await waitFor(() => expect(getBrandOptions).toHaveBeenCalled());
+      const arg = getBrandOptions.mock.calls.at(-1)?.[0];
+      view.unmount();
+      return arg;
+    };
+    expect(await at('?category=SUNGLASS,FRAME')).toBeUndefined();
+    expect(await at('?category=SUNGLASS')).toBe('SUNGLASS');
+  });
+});

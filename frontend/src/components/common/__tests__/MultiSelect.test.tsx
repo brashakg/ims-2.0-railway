@@ -2,7 +2,7 @@
 // (owner 2026-11-01). Its value is a comma-separated string.
 
 import { useState } from 'react';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { MultiSelect, type MultiOption } from '../MultiSelect';
 
@@ -67,14 +67,66 @@ describe('MultiSelect', () => {
     expect(screen.queryByLabelText('Search Added by')).toBeNull();
   });
 
-  it('Escape and Done close it', () => {
+  it('Escape and Done close it and hand focus back to the button', () => {
     render(<Harness />);
     const button = screen.getByRole('button', { name: 'Added by' });
     fireEvent.click(button);
+    box('Durga Devi (41)').focus();
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(button);
     fireEvent.click(button);
-    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    const done = screen.getByRole('button', { name: 'Done' });
+    done.focus();
+    fireEvent.click(done);
     expect(button.getAttribute('aria-expanded')).toBe('false');
+    expect(document.activeElement).toBe(button);
+  });
+
+  it('a click elsewhere closes it; a click inside does not', () => {
+    render(<Harness />);
+    const button = screen.getByRole('button', { name: 'Added by' });
+    fireEvent.click(button);
+    fireEvent.mouseDown(box('Durga Devi (41)'));
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.mouseDown(document.body);
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('tabbing out closes it, so two panels never stack', () => {
+    render(
+      <>
+        <Harness />
+        <button type="button">Next</button>
+      </>
+    );
+    const button = screen.getByRole('button', { name: 'Added by' });
+    fireEvent.click(button);
+    fireEvent.blur(box('Durga Devi (41)'), { relatedTarget: box('Mansi Kumari (319)') });
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.blur(box('Durga Devi (41)'), { relatedTarget: screen.getByRole('button', { name: 'Next' }) });
+    expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('near the right edge of a phone the panel opens leftwards, so the page never scrolls sideways', () => {
+    const was = window.innerWidth;
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 375 });
+    try {
+      render(<Harness />);
+      const button = screen.getByRole('button', { name: 'Added by' });
+      const panel = document.querySelector('[aria-label="Added by options"]') as HTMLElement;
+      const at = (left: number) =>
+        vi.spyOn(button, 'getBoundingClientRect').mockReturnValue({ left, right: left + 160 } as DOMRect);
+      at(184);
+      fireEvent.click(button);
+      expect(panel.className.split(' ')).toContain('right-0');
+      expect(panel.className.split(' ')).not.toContain('left-0');
+      fireEvent.click(button);
+      at(16);
+      fireEvent.click(button);
+      expect(panel.className.split(' ')).toContain('left-0');
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: was });
+    }
   });
 });
