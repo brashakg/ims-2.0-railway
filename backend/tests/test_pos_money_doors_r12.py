@@ -128,26 +128,24 @@ def test_the_counter_keeps_its_claims_when_the_void_did_not_stand(till, monkeypa
 # =========================================================================== #
 # BLOCK 2: the hold is kept BEFORE the balance can move
 # =========================================================================== #
-class _Killed(BaseException):
-    pass
-
-
 @pytest.mark.usefixtures("gst_numbers")
 def test_a_worker_killed_after_the_credit_lands_leaves_the_hold_kept(till, monkeypatch):
+    """A kill right after the move runs no handler: what matters is the
+    hold's state at the instant the balance moves -- read there."""
     payload = _two_unit_bill(till, monkeypatch)
     payload["return_type"] = "CREDIT_NOTE"
     _customer(till)
     seen = {}
     real = cust_router.apply_store_credit_delta
 
-    def _land_then_die(*a, **k):
-        real(*a, **k)
+    def _land_and_look(*a, **k):
+        out = real(*a, **k)
         seen["holds"] = dict(_stored(till).get("refund_holds") or {})
-        raise _Killed()
+        return out
 
-    monkeypatch.setattr(cust_router, "apply_store_credit_delta", _land_then_die)
-    with pytest.raises(_Killed):
-        _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    monkeypatch.setattr(cust_router, "apply_store_credit_delta", _land_and_look)
+    r = _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
+    assert r.status_code == 201, r.text
     assert seen["holds"] and all(h.get("kept") for h in seen["holds"].values()), seen
 
 
