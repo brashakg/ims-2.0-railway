@@ -329,10 +329,18 @@ def apply(db, rows: List[dict], run_id: str) -> int:
             done += 1
     # A product a backfill run (this one or an earlier, crashed one) filled or
     # re-averaged from its pieces holds each receipt's pieces at their OWN
-    # cost, not at its new average.
-    filled = {p["product_id"] for p in db["products"].find({}, {"_id": 0, "product_id": 1, "cost_history": 1})
-              if any(r.get("kind") == "BACKFILL" and str(r.get("key") or "").startswith("backfill:")
-                     for r in p.get("cost_history") or [])}
+    # cost, not at its new average -- only a receipt accepted by that fill
+    # (its earliest backfill row): a later one's pieces were never in it, so
+    # they get no figure and wait for their bill.
+    filled_at: Dict[str, str] = {}
+    for p in db["products"].find({}, {"_id": 0, "product_id": 1, "cost_history": 1}):
+        ats = [product_cost._utc_iso(r.get("at")) for r in p.get("cost_history") or []
+               if r.get("kind") == "BACKFILL" and str(r.get("key") or "").startswith("backfill:")]
+        if ats:
+            filled_at[p["product_id"]] = min(ats)
+    filled = set(filled_at)
+    accepted = {g["grn_id"]: product_cost._utc_iso(g.get("accepted_at"))
+                for g in db["grns"].find({}, {"_id": 0, "grn_id": 1, "accepted_at": 1}) if g.get("grn_id")}
     own: Dict[str, Dict[str, float]] = {}
     for pid in filled:
         by_receipt: Dict[Optional[str], List[dict]] = {}
@@ -341,7 +349,7 @@ def apply(db, rows: List[dict], run_id: str) -> int:
                 by_receipt.setdefault(product_cost._receipt_of(u), []).append(u)
         for r, units in by_receipt.items():
             cost = _from_pieces(units, sum(stock_value._pieces(u) for u in units))
-            if r and cost is not None:
+            if r and cost is not None and accepted.get(r, "") <= filled_at[pid]:
                 own.setdefault(r, {})[pid] = cost
     at = utc_now_iso()
     for gid in legacy_receipts(db):
@@ -353,7 +361,9 @@ def apply(db, rows: List[dict], run_id: str) -> int:
     # A receipt an earlier run stamped (a revert kept it for a product that
     # moved) gets a figure for each product on it it has none for -- e.g. one
     # revert put back and this run re-averaged -- never for one a bill or
-    # correction moved since that stamp (its pieces wait for their bill).
+    # correction moved since that stamp (its pieces wait for their bill). Each
+    # added figure carries this run's time: a piece that left before it was
+    # never in the pool at it (product_cost._variance).
     for g in db["grns"].find({product_cost.PRE_S4_STAMP: {"$exists": True, "$ne": run_id}}, {"_id": 0}):
         since = str(g.get(product_cost.PRE_S4_AT) or "")
         pids = {it.get("product_id") for it in g.get("items") or [] if it.get("product_id")}
@@ -364,7 +374,8 @@ def apply(db, rows: List[dict], run_id: str) -> int:
         add = _figures(db, g["grn_id"], pids, filled, own)
         if add:
             db["grns"].update_one({"grn_id": g["grn_id"]},
-                                  {"$set": {f"{product_cost.PRE_S4_AVERAGES}.{p}": c for p, c in add.items()}})
+                                  {"$set": {**{f"{product_cost.PRE_S4_AVERAGES}.{p}": c for p, c in add.items()},
+                                            **{f"{product_cost.PRE_S4_AT_BY}.{p}": at for p in add}}})
     return done
 
 
@@ -428,14 +439,14 @@ def _unstamp(db, run_id: str, key: str) -> None:
         )
         if moved:
             print(f"  receipt {g['grn_id']}: still marked costed before S4 - {', '.join(moved)} moved since the run")
-            drop = {f"{product_cost.PRE_S4_AVERAGES}.{p}": "" for p in g.get(product_cost.PRE_S4_AVERAGES) or {}
-                    if p not in moved}
+            drop = {f"{f}.{p}": "" for p in g.get(product_cost.PRE_S4_AVERAGES) or {} if p not in moved
+                    for f in (product_cost.PRE_S4_AVERAGES, product_cost.PRE_S4_AT_BY)}
             if drop:
                 db["grns"].update_one({"grn_id": g["grn_id"], product_cost.PRE_S4_STAMP: run_id}, {"$unset": drop})
             continue
         db["grns"].update_one({"grn_id": g["grn_id"], product_cost.PRE_S4_STAMP: run_id},
                               {"$unset": {product_cost.PRE_S4_STAMP: "", product_cost.PRE_S4_AT: "",
-                                          product_cost.PRE_S4_AVERAGES: ""}})
+                                          product_cost.PRE_S4_AVERAGES: "", product_cost.PRE_S4_AT_BY: ""}})
 
 
 def _db():

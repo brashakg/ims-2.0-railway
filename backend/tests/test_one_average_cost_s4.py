@@ -1321,3 +1321,97 @@ def test_a_product_filled_from_its_pieces_stamps_each_receipt_at_its_own_cost():
     assert db.grns.find_one({"grn_id": "G2"})[product_cost.PRE_S4_AVERAGES] == {"P": 150.0}
     _accept(db, _bill("B1", 1, 100, grn_id="G1", created_at="2026-11-02T10:00:00+00:00"))
     assert _avg(db) == 125.0
+
+
+# --------------------------------------------------------------------------
+# Fix round 7 (S4): a re-run never stamps pieces the fill never held; a
+# figure a re-run adds carries its own time.
+# --------------------------------------------------------------------------
+
+
+def test_a_re_run_never_stamps_a_receipt_accepted_after_the_fill_at_its_own_cost():
+    """RUN1 re-averages P to (10 x 100 + 200) / 11 = 109.09. Then receipt G5
+    (10 at 150, no S4 bill yet) is accepted and RUN2 runs: G5's pieces were
+    never in 109.09, so RUN2 stamps no figure for P on G5 (its pieces wait
+    for their bill). G5's bill at 150 then gives (1000 + 200 + 1500) / 21 =
+    128.57, never 109.09 (stamped at its own 150, adding 0)."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(200.0, cost_source="GRN_WALKIN")
+    _walk_in_received(db)
+    bf.apply(db, bf.plan(db), "RUN1")
+    assert _avg(db) == 109.09
+    import time
+
+    time.sleep(0.01)
+    _receipt(db, "G5", 10, po_id="PO5", accepted_at=utc_now().isoformat())
+    time.sleep(0.01)
+    _pieces(db, 10, "G5", prefix="F")
+    db.stock_units.update_many({"grn_id": "G5"}, {"$set": {"unit_cost": 150.0}})
+    bf.apply(db, bf.plan(db), "RUN2")
+    assert "P" not in (db.grns.find_one({"grn_id": "G5"}).get(product_cost.PRE_S4_AVERAGES) or {})
+    assert db.grns.find_one({"grn_id": "G1"})[product_cost.PRE_S4_AVERAGES] == {"P": 100.0}
+    _accept(db, _bill("B5", 10, 150, grn_id="G5", created_at="2026-11-03T10:00:00+00:00"))
+    assert _avg(db) == 128.57
+
+
+def _reverted_with_a_gap_sale():
+    """test_a_re_run_after_a_revert...'s RUN1, B1 moves P, revert (G0 stays
+    stamped {P: 400}); then G0Q0 sells at Q's put-back 200."""
+    import time
+
+    from scripts import backfill_average_cost as bf
+
+    db = _g0_with_walk_in_q()
+    bf.apply(db, bf.plan(db), "RUN1")
+    db.grns.insert_one({"grn_id": "G1", "status": "ACCEPTED", "accepted_at": "2026-11-01T10:00:00+00:00",
+                        "items": [{"product_id": "P", "accepted_qty": 5}]})
+    for i in range(5):
+        _unit(db, f"G1P{i}", "P", "G1")
+    _bill_for(db, "B1", "P", 5, 500, "G1", "2026-11-01T00:00:00+00:00")
+    bf.revert(db, "RUN1")
+    # mongomock: the guard's {"$in": [None, []]} misses an emptied [] (real Mongo matches it)
+    db.products.update_many({"cost_keys": []}, {"$unset": {"cost_keys": "", "cost_history": ""}})
+    time.sleep(0.01)
+    db.stock_units.update_one({"stock_id": "G0Q0"}, {"$set": {
+        "status": "SOLD", "order_id": "O1", "sold_at": utc_now().replace(tzinfo=None)}})
+    db.orders.insert_one({"order_id": "O1", "items": [{"product_id": "Q", "quantity": 1, "cost_at_sale": 200.0}]})
+    time.sleep(0.01)
+    return db
+
+
+def test_a_piece_sold_before_the_re_run_added_its_figure_keeps_its_variance():
+    """RUN2 re-averages Q to (10 x 100 + 200 + 9 x 100) / 20 = 105 and adds Q:
+    100 to G0 -- at RUN2's time, not RUN1's. G0Q0 left (at 200) before that:
+    it was never in the pool at 100, so G0's Q bill at 100 books -100, never
+    0 (trued up from the stamped 100)."""
+    from scripts import backfill_average_cost as bf
+
+    db = _reverted_with_a_gap_sale()
+    bf.apply(db, bf.plan(db), "RUN2")
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 105.0
+    assert db.grns.find_one({"grn_id": "G0"})[product_cost.PRE_S4_AVERAGES] == {"P": 400.0, "Q": 100.0}
+    _bill_for(db, "BG0Q", "Q", 10, 100, "G0", "2026-11-02T00:00:00+00:00")
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 105.0
+    assert [(v["amount"], v["stock_ids"]) for v in db.cogs_variances.find()] == [(-100.0, ["G0Q0"])]
+
+
+def test_a_re_run_adds_no_figure_for_a_product_an_s4_bill_moved_since_the_stamp():
+    """As above, but S4 bill BX (5 Q at 300 on new receipt GX) moves Q to
+    (11 x 200 + 1500) / 16 = 231.25 before RUN2. G0's Q pieces were never in
+    that pool: RUN2 leaves G0 at {P: 400} (never Q: 231.25), so G0's Q bill
+    at 100 books -100 for G0Q0 (never -131.25) and Q ends at 184."""
+    from scripts import backfill_average_cost as bf
+
+    db = _reverted_with_a_gap_sale()
+    db.grns.insert_one({"grn_id": "GX", "status": "ACCEPTED", "accepted_at": "2026-11-01T10:00:00+00:00",
+                        "items": [{"product_id": "Q", "accepted_qty": 5}]})
+    for i in range(5):
+        _unit(db, f"GXQ{i}", "Q", "GX")
+    _bill_for(db, "BX", "Q", 5, 300, "GX", "2026-11-01T12:00:00+00:00")
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 231.25
+    bf.apply(db, bf.plan(db), "RUN2")
+    assert db.grns.find_one({"grn_id": "G0"})[product_cost.PRE_S4_AVERAGES] == {"P": 400.0}
+    _bill_for(db, "BG0Q", "Q", 10, 100, "G0", "2026-11-02T00:00:00+00:00")
+    assert [(v["amount"], v["stock_ids"]) for v in db.cogs_variances.find()] == [(-100.0, ["G0Q0"])]
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 184.0

@@ -179,6 +179,10 @@ def _receipt_of(unit: dict) -> Optional[str]:
 PRE_S4_STAMP = "costed_before_s4"
 PRE_S4_AVERAGES = "costed_before_s4_averages"
 PRE_S4_AT = "costed_before_s4_at"
+# {product: when its figure was added} -- a figure a later backfill run added
+# to a receipt an earlier run stamped; that product's pieces entered the pool
+# then, not at PRE_S4_AT.
+PRE_S4_AT_BY = "costed_before_s4_at_by"
 
 
 def _stamped_average(receipt: Optional[dict], product_id: str) -> Optional[float]:
@@ -463,7 +467,8 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
     for at, u in left:
         receipt = by_id[_receipt_of(u)]
         stamped = _stamped_average(receipt, pid)
-        if stamped is not None and at < _utc_iso(receipt.get(PRE_S4_AT)):
+        if stamped is not None and at < _utc_iso((receipt.get(PRE_S4_AT_BY) or {}).get(pid)
+                                                 or receipt.get(PRE_S4_AT)):
             stamped = None  # left before the stamp: never in the pool
         if _written_off(u):
             # ponytail: no sale line -- the product's category for both keys.
