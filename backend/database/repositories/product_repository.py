@@ -14,6 +14,7 @@ from datetime import datetime, date, timedelta, timezone
 
 from api.services.barcode import find_unit_by_code
 from api.services.gtin import gtin_spellings
+from api.utils.expiry import first_sellable_expiry
 from api.utils.ist import ist_today
 
 from .base_repository import BaseRepository
@@ -652,32 +653,34 @@ class StockRepository(BaseRepository):
 
     @staticmethod
     def _expiry_floor_iso() -> str:
-        """IST calendar 'today' as an ISO date string.
+        """The earliest still-sellable expiry as an ISO date string:
+        utils.expiry.first_sellable_expiry, i.e. IST TOMORROW (owner ruling
+        2026-11-01: a lens is expired on its expiry date itself).
 
         IST (not UTC): the box runs UTC, so between 00:00-05:30 IST a naive
         date.today() is still YESTERDAY -- a lens would stay sellable for the
         first 5.5 hours of the day it expired.
         """
         try:
-            return ist_today().isoformat()
+            return first_sellable_expiry().isoformat()
         except Exception:  # noqa: BLE001 -- clock helper must never break a sale
-            return date.today().isoformat()
+            return first_sellable_expiry(date.today()).isoformat()
 
     @staticmethod
     def _expiry_floor_datetime() -> datetime:
-        """IST 'today' at midnight as a NAIVE datetime -- the floor for BSON
-        date-typed expiry values.
+        """The earliest still-sellable expiry at midnight as a NAIVE datetime --
+        the floor for BSON date-typed expiry values.
 
-        Deliberately the same instant the ISO floor represents, and deliberately
-        the same rule inventory.partition_by_expiry uses (days < 0 == expired,
-        so a unit expiring TODAY is still sellable). The two surfaces must agree
-        about a given lens or staff see it quarantined on the Contact Lens
-        screen while the till dispenses it.
+        Deliberately the same day the ISO floor represents, and deliberately
+        the same rule inventory.partition_by_expiry uses (utils.expiry: a unit
+        expiring TODAY is expired). The two surfaces must agree about a given
+        lens or staff see it quarantined on the Contact Lens screen while the
+        till dispenses it.
         """
         try:
-            d = ist_today()
+            d = first_sellable_expiry()
         except Exception:  # noqa: BLE001
-            d = date.today()
+            d = first_sellable_expiry(date.today())
         return datetime(d.year, d.month, d.day)
 
     @classmethod
@@ -792,11 +795,10 @@ class StockRepository(BaseRepository):
         # which is why this returned 0. Compare string-vs-string with date-only
         # ISO bounds, mirroring how /contact-lenses/expiry-status parses these
         # values. ISO date strings sort lexicographically the same as
-        # chronologically, so the window is correct: today (not yet expired)
-        # through today + N days inclusive.
-        now = datetime.now()
-        lower = now.date().isoformat()
-        upper = (now + timedelta(days=days)).date().isoformat()
+        # chronologically. The window is IST days 1..N (utils.expiry): the
+        # expiry day itself is EXPIRED, so the floor is the till's own floor.
+        lower = self._expiry_floor_iso()
+        upper = (ist_today() + timedelta(days=days)).isoformat()
         return self.find_many(
             {
                 "store_id": store_id,

@@ -148,6 +148,9 @@ interface CLLine {
   expiry_date: string | null;
   on_hand: number;
   days_until_expiry: number | null;
+  /** The server's expiry rule (owner 2026-11-01: the expiry date itself is
+   *  expired) -- read it, never re-derive it from days_until_expiry. */
+  expired: boolean;
 }
 
 const NEAR_EXPIRY_DAYS = 90;
@@ -260,7 +263,7 @@ export function ContactLensInventoryWidget() {
               {lines.map((l, i) => {
                 const near =
                   l.days_until_expiry !== null && l.days_until_expiry < NEAR_EXPIRY_DAYS;
-                const expired = l.days_until_expiry !== null && l.days_until_expiry < 0;
+                const expired = l.expired === true;
                 return (
                   <tr
                     key={`${l.product_id}-${l.batch_code ?? 'nobatch'}-${i}`}

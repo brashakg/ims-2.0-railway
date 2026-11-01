@@ -220,21 +220,61 @@ def test_p08_analytics_today_window_starts_at_ist_midnight(instant, today):
 # --- CLK-P09 contact-lens days until expiry ---------------------------------
 
 
-@pytest.mark.parametrize("instant", [NIGHT, DAY])
-def test_p09_expiry_today_is_day_zero_all_day(instant):
-    """A batch expiring on IST today is 0 days out (near-expiry, still
-    sellable, same as the till) at every hour of that IST day."""
+@pytest.mark.parametrize("instant,today", CASES)
+def test_p09_expiry_day_is_expired_all_day(instant, today):
+    """Owner ruling 2026-11-01: a batch expiring on IST today is day 0 and
+    EXPIRED at every hour of that IST day; one expiring tomorrow is day 1,
+    near-expiry (still sold)."""
+    from datetime import timedelta
+
     from api.routers.inventory.helpers import (
         compute_days_until_expiry, partition_by_expiry,
     )
 
+    tomorrow = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
     with freeze_time(instant, tick=True):
-        from api.utils.ist import ist_today
-
-        today = ist_today().isoformat()
         assert compute_days_until_expiry(today) == 0
-        out = partition_by_expiry([{"expiry_date": today}])
-    assert len(out["near_expiry"]) == 1 and not out["expired"]
+        assert compute_days_until_expiry(tomorrow) == 1
+        out = partition_by_expiry(
+            [{"id": "today", "expiry_date": today},
+             {"id": "tomorrow", "expiry_date": tomorrow}]
+        )
+    assert [r["id"] for r in out["expired"]] == ["today"]
+    assert [r["id"] for r in out["near_expiry"]] == ["tomorrow"]
+
+
+@pytest.mark.parametrize("instant,today", CASES)
+def test_p09_cl_screens_call_the_expiry_day_expired(monkeypatch, instant, today):
+    """The Contact Lens screens read the same rule: the line carries
+    expired=True, the near-expiry filter (days 1..N) and the FEFO pick leave
+    it out, and the expiry-status endpoint counts it EXPIRED."""
+    from datetime import timedelta
+
+    from api.routers.inventory import contact_lenses as cl
+
+    tomorrow = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
+    rows = [
+        {"product_id": "P-TODAY", "batch_code": "B0", "expiry_date": today},
+        {"product_id": "P-TMRW", "batch_code": "B1", "expiry_date": tomorrow},
+    ]
+    monkeypatch.setattr(cl, "_get_db", lambda: None)
+    monkeypatch.setattr(cl, "_load_cl_stock_rows", lambda db, store: list(rows))
+    monkeypatch.setattr(cl, "store_in_view", lambda s, u: "S1")
+    with freeze_time(instant, tick=True):
+        lines = {g["product_id"]: g for g in cl._group_cl_rows(rows)}
+        near = _run(cl.list_contact_lens_inventory(
+            store_id=None, brand=None, modality=None, base_curve=None,
+            cl_power=None, near_expiry_days=90, current_user=ADMIN,
+        ))
+        status = _run(cl.get_contact_lens_expiry_status(
+            expiring_within_days=90, store_id=None, current_user=ADMIN,
+        ))
+    assert lines["P-TODAY"]["expired"] is True
+    assert lines["P-TMRW"]["expired"] is False
+    assert [g["product_id"] for g in near["items"]] == ["P-TMRW"]
+    assert [g["product_id"] for g in status["expired"]] == ["P-TODAY"]
+    assert [g["product_id"] for g in status["expiring_soon"]] == ["P-TMRW"]
+    assert [g["product_id"] for g in status["fefo_pick"]] == ["P-TMRW"]
 
 
 # --- CLK-P10 analytics_v2 discount_analysis bounds --------------------------

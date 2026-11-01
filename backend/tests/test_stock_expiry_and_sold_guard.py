@@ -68,6 +68,8 @@ def _op(val, op, arg) -> bool:
         return val is not _MISSING and _same_bson_type(val, arg) and val >= arg
     if op == "$lt":
         return val is not _MISSING and _same_bson_type(val, arg) and val < arg
+    if op == "$lte":
+        return val is not _MISSING and _same_bson_type(val, arg) and val <= arg
     if op == "$type":
         if arg == "string":
             return isinstance(val, str)
@@ -229,13 +231,13 @@ def test_most_expired_unit_is_no_longer_dispensed_first():
     assert by_id["U-ALSO-OLD"]["status"] == "AVAILABLE"
 
 
-def test_unit_expiring_today_is_still_sellable():
-    """Boundary: the floor is >= IST today, so a lens is sellable ON its
-    expiry date and unsellable the day after."""
-    repo = _repo([_unit("U-TODAY", expiry_date=ist_today().isoformat())])
+def test_unit_expiring_tomorrow_is_still_sellable():
+    """Boundary (owner ruling 2026-11-01): a lens is sellable up to the day
+    BEFORE its expiry date; the expiry date itself is expired (tests below)."""
+    repo = _repo([_unit("U-TOMORROW", expiry_date=_iso(1))])
     assert repo.find_available("P1", "S1") == 1
     assert repo.count_expired("P1", "S1") == 0
-    assert repo.claim_one_available("P1", "S1", "O1") == "U-TODAY"
+    assert repo.claim_one_available("P1", "S1", "O1") == "U-TOMORROW"
 
 
 # --- the non-negotiable half: units WITHOUT an expiry are untouched ---------
@@ -659,11 +661,11 @@ def test_date_typed_in_date_unit_is_still_sellable():
     assert repo.claim_one_available("P1", "S1", "O1") == "U-DT-NEW"
 
 
-def test_date_typed_expiring_today_is_sellable():
-    """Same boundary as the ISO path and as partition_by_expiry (days < 0)."""
-    repo = _repo([_unit("U-DT-TODAY", expiry_date=_dt(0))])
+def test_date_typed_expiring_tomorrow_is_sellable():
+    """Same boundary as the ISO path and as partition_by_expiry (is_expired)."""
+    repo = _repo([_unit("U-DT-TOMORROW", expiry_date=_dt(1))])
     assert repo.find_available("P1", "S1") == 1
-    assert repo.claim_one_available("P1", "S1", "O1") == "U-DT-TODAY"
+    assert repo.claim_one_available("P1", "S1", "O1") == "U-DT-TOMORROW"
 
 
 def test_date_typed_fefo_dispenses_earliest_first():
@@ -791,3 +793,96 @@ def test_malformed_value_is_excluded_from_the_dated_phase_entirely(monkeypatch):
     repo = _repo([_unit("U-ONLY", expiry_date="2026-9-8")])
     assert repo.find_available("P1", "S1") == 1
     assert repo.claim_one_available("P1", "S1", "O1") == "U-ONLY"
+
+
+# ===========================================================================
+# OWNER RULING 2026-11-01 -- a batch is EXPIRED on its expiry date itself.
+# Two instants on the same UTC date, so the IST calendar day (#1314) is pinned:
+#   NIGHT 2026-12-31T20:00Z == 2027-01-01 01:30 IST
+#   DAY   2026-12-31T09:00Z == 2026-12-31 14:30 IST
+# ===========================================================================
+
+_NIGHT, _DAY = "2026-12-31T20:00:00Z", "2026-12-31T09:00:00Z"
+_IST_DAY = {_NIGHT: date(2027, 1, 1), _DAY: date(2026, 12, 31)}
+
+
+def _exp(instant, delta_days, shape):
+    d = _IST_DAY[instant] + timedelta(days=delta_days)
+    return d.isoformat() if shape == "iso" else datetime(d.year, d.month, d.day)
+
+
+@pytest.mark.parametrize("shape", ["iso", "date"])
+@pytest.mark.parametrize("instant", [_NIGHT, _DAY])
+def test_expiry_day_unit_is_expired_and_fefo_skips_it(instant, shape):
+    from freezegun import freeze_time
+
+    docs = [
+        _unit("U-TODAY", expiry_date=_exp(instant, 0, shape)),
+        _unit("U-TOMORROW", expiry_date=_exp(instant, 1, shape)),
+    ]
+    with freeze_time(instant):
+        repo = _repo(docs)
+        assert repo.find_available("P1", "S1") == 1
+        assert repo.count_expired("P1", "S1") == 1
+        # FEFO would pick the earliest expiry -- it must skip today's box.
+        assert repo.claim_one_available("P1", "S1", "O1") == "U-TOMORROW"
+        assert repo.claim_one_available("P1", "S1", "O2") is None
+    assert docs[0]["status"] == "AVAILABLE"  # held back, never sold
+
+
+@pytest.mark.parametrize("instant", [_NIGHT, _DAY])
+def test_till_refuses_the_expiry_day_batch(monkeypatch, instant):
+    """The till's own guard (orders/stock.py): a first-available line and a
+    scanned line for a box expiring today are both refused, and the message
+    says EXPIRED."""
+    from fastapi import HTTPException
+    from freezegun import freeze_time
+
+    from api.routers.orders import stock as guard
+
+    docs = [_unit("U-TODAY", expiry_date=_exp(instant, 0, "iso"))]
+    monkeypatch.setattr(guard, "get_stock_repository", lambda: _repo(docs))
+    line = {"product_id": "P1", "item_type": "CONTACT_LENS", "quantity": 1,
+            "product_name": "Daily lens"}
+    with freeze_time(instant):
+        with pytest.raises(HTTPException) as fifo:
+            guard._assert_serialized_stock_available([line], "S1")
+        with pytest.raises(HTTPException) as scan:
+            guard._assert_serialized_stock_available(
+                [dict(line, stock_id="U-TODAY")], "S1"
+            )
+    assert fifo.value.status_code == 409 and "EXPIRED" in fifo.value.detail
+    assert scan.value.status_code == 409 and "EXPIRED" in scan.value.detail
+
+
+@pytest.mark.parametrize("instant", [_NIGHT, _DAY])
+def test_till_still_sells_the_batch_expiring_tomorrow(monkeypatch, instant):
+    from freezegun import freeze_time
+
+    from api.routers.orders import stock as guard
+
+    docs = [_unit("U-TOMORROW", expiry_date=_exp(instant, 1, "iso"))]
+    monkeypatch.setattr(guard, "get_stock_repository", lambda: _repo(docs))
+    line = {"product_id": "P1", "item_type": "CONTACT_LENS", "quantity": 1}
+    with freeze_time(instant):
+        guard._assert_serialized_stock_available([line], "S1")
+        guard._assert_serialized_stock_available([dict(line, stock_id="U-TOMORROW")], "S1")
+
+
+@pytest.mark.parametrize("instant", [_NIGHT, _DAY])
+def test_expiring_report_skips_the_expiry_day_and_counts_ist_days(instant):
+    """GET /inventory/expiring (find_expiring) uses the same rule as the till:
+    today's box is EXPIRED, not 'expiring', and the window is IST days 1..N.
+    NIGHT also pins the UTC lag: yesterday's box must not leak in."""
+    from freezegun import freeze_time
+
+    docs = [
+        _unit("U-YESTERDAY", expiry_date=_exp(instant, -1, "iso")),
+        _unit("U-TODAY", expiry_date=_exp(instant, 0, "iso")),
+        _unit("U-TOMORROW", expiry_date=_exp(instant, 1, "iso")),
+        _unit("U-DAY30", expiry_date=_exp(instant, 30, "iso")),
+        _unit("U-DAY31", expiry_date=_exp(instant, 31, "iso")),
+    ]
+    with freeze_time(instant):
+        rows = _repo(docs).find_expiring("S1", days=30)
+    assert sorted(r["stock_id"] for r in rows) == ["U-DAY30", "U-TOMORROW"]

@@ -164,6 +164,8 @@ describe('"What happens when you press Receive" uses the server arithmetic', () 
 describe('contact-lens expiry is a warning only', () => {
   it('expired, short-dated (inside six months), fine', () => {
     expect(expiryWarning('2026-10-01', '2026-10-23')).toBe('expired');
+    // Owner ruling 2026-11-01: the expiry day itself is expired (the till refuses it).
+    expect(expiryWarning('2026-10-23', '2026-10-23')).toBe('expired');
     expect(expiryWarning('2027-03-01', '2026-10-23')).toBe('short');
     expect(expiryWarning('2028-03-01', '2026-10-23')).toBeNull();
     expect(expiryWarning('', '2026-10-23')).toBeNull();

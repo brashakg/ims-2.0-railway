@@ -21,6 +21,7 @@ from .helpers import (
     fefo_sort,
     partition_by_expiry,
 )
+from ...utils.expiry import is_expired
 
 # ============================================================================
 # 3. CONTACT LENS (CL) INVENTORY + BATCH/EXPIRY TRACKING
@@ -135,6 +136,10 @@ def _group_cl_rows(rows: List[dict], now: Optional[datetime] = None) -> List[dic
             g["days_until_expiry"] = compute_days_until_expiry(
                 r.get("expiry_date"), now
             )
+            # THE rule (utils.expiry), so no screen re-derives it from days.
+            g["expired"] = g["days_until_expiry"] is not None and is_expired(
+                g["days_until_expiry"]
+            )
             groups[key] = g
         g["on_hand"] += 1
 
@@ -198,6 +203,7 @@ async def list_contact_lens_inventory(
             g
             for g in grouped
             if g.get("days_until_expiry") is not None
+            and not g["expired"]
             and g["days_until_expiry"] <= near_expiry_days
         ]
 
@@ -235,12 +241,13 @@ async def get_contact_lens_expiry_status(
     expiring_soon = buckets["near_expiry"]
     safe = buckets["safe"]
 
-    # FEFO pick suggestion: dated batches with on-hand stock, earliest first.
+    # FEFO pick suggestion: SELLABLE dated batches with on-hand stock, earliest
+    # first -- an expired batch (its expiry date included) is never a pick.
     fefo = fefo_sort(
         [
             line
-            for line in lines
-            if line.get("expiry_date") and line.get("on_hand", 0) > 0
+            for line in buckets["near_expiry"] + buckets["safe"]
+            if line.get("on_hand", 0) > 0
         ]
     )
 

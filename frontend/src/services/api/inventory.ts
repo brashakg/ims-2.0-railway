@@ -668,6 +668,8 @@ export interface CLInventoryLine {
   location_code: string | null;
   on_hand: number;
   days_until_expiry: number | null;
+  /** Server expiry rule: true from the expiry date itself (owner 2026-11-01). */
+  expired: boolean;
 }
 
 export interface CLInventoryResponse {
