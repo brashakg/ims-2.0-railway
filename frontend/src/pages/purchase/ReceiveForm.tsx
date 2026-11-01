@@ -5,16 +5,16 @@
 // delivery challan whose invoice comes later. The manager only COUNTS -- no
 // price box (the accountant types the bill's prices on the Bills page; a
 // "Bought without PO" line takes a cost only from the cost roles). No paper,
-// no stock: the bill photo and number go in before the Receive button wakes.
+// no stock: the bill (or challan) photo goes in before the Receive button wakes.
 // A clean box against an open order goes through the express door (which
 // also drafts the bill and runs the 3-way match for accounts); anything else
 // is created and accepted in two calls -- the rules live in receiveLines.ts.
 
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AlertCircle, CheckCircle2, Loader2, Package, Printer, ScanLine, Trash2, X } from 'lucide-react';
+import { AlertCircle, Camera, CheckCircle2, Loader2, Package, Printer, ScanLine, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
-import { vendorsApi } from '../../services/api/inventory';
+import { inventoryApi, vendorsApi } from '../../services/api/inventory';
 import { grnCockpitApi, type UploadDocResult } from '../../services/api/grnCockpit';
 import { productApi } from '../../services/api/products';
 import { ApiError } from '../../services/api/client';
@@ -22,6 +22,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { COST_ROLES } from '../../components/common/CostCell';
 import { UnitLabelsModal } from '../../components/labels/UnitLabelsModal';
+import { printQuarantineLabels } from '../../components/labels/quarantineLabels';
 import { PurchaseStatusChip } from '../../components/purchase/PurchaseStatusChip';
 import { istDayString } from '../../utils/datetime';
 import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
@@ -29,6 +30,7 @@ import { AttachmentZone } from './AttachmentZone';
 import { SupplierFormModal } from './SupplierFormModal';
 import { heldLinesSummary, reportGrnAccept } from './grnAcceptToast';
 import {
+  creditClosed,
   expiryWarning,
   goesExpress,
   goodOf,
@@ -98,6 +100,10 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   const [lines, setLines] = useState<ReceiveLine[]>(() => (po ? linesFromPO(po) : []));
   const [stage, setStage] = useState<Stage>({ kind: 'form' });
   const [labelsFor, setLabelsFor] = useState<Success | null>(null);
+  const [redBusy, setRedBusy] = useState(false);
+  const [photoBusy, setPhotoBusy] = useState<string | null>(null);
+  // A damage photo the server refused (DAMAGE_PHOTO_INVALID), on its line.
+  const [badPhoto, setBadPhoto] = useState<{ key: string; message: string } | null>(null);
 
   // Header: who, which paper.
   const [vendorId, setVendorId] = useState('');
@@ -265,6 +271,43 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
     }
   };
 
+  // A damaged piece's photo: the same upload door as the bill (kind, shop).
+  const handleDamagePhoto = async (key: string, file: File) => {
+    setPhotoBusy(key);
+    try {
+      const res = await grnCockpitApi.uploadDoc(file);
+      if (!res.file_id) throw new Error('not stored');
+      setLine(key, { damagePhotoId: res.file_id });
+      setBadPhoto((b) => (b?.key === key ? null : b));
+    } catch (err) {
+      const d = apiDetail(err);
+      toast.error(typeof d === 'string' && d !== 'not stored' ? d : 'Could not upload the photo - try again');
+    } finally {
+      setPhotoBusy(null);
+    }
+  };
+
+  // The red DO NOT SHELVE labels for this receipt's quarantined pieces,
+  // through the one door the Quarantine queue uses too (checked, recorded,
+  // printed). Who may print them is the server's (a 403 says so).
+  const printRedLabels = async (grnId: string) => {
+    setRedBusy(true);
+    try {
+      const res = await inventoryApi.getUnits({ grn_id: grnId, rejected: true });
+      const units = (res.units || []).filter((u) => u.status === 'QUARANTINED');
+      if (units.length === 0) {
+        toast.warning('No quarantined pieces found on this receipt.');
+        return;
+      }
+      const r = await printQuarantineLabels(units);
+      if (r.method !== 'html') toast.error(r.message);
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not print the red labels - try again.'));
+    } finally {
+      setRedBusy(false);
+    }
+  };
+
   const problem = receiveProblem(
     { kind, hasOrder: !!po, vendorId, billNo, dcNumber, dcDate, billFileId: upload?.file_id ?? null },
     lines,
@@ -294,6 +337,15 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
         message: d.message ?? 'Finish it from "Receipts still waiting".',
         grnNumber: d.grn_number ?? '',
       });
+    } else if (d.code === 'DAMAGE_PHOTO_INVALID') {
+      // Named by its position among the lines sent (grnItems).
+      const key = linesToSend(lines)[Number((d as { line?: number }).line)]?.key;
+      const message = d.message ?? 'Take the damage photo again.';
+      if (key) {
+        setLine(key, { damagePhotoId: undefined });
+        setBadPhoto({ key, message });
+      }
+      toast.error(message);
     } else if (d.code === 'ATTACHMENT_REQUIRED' || d.code === 'ATTACHMENT_INVALID') {
       setUpload(null);
       toast.error(d.message ?? 'The bill did not go through - attach it again.');
@@ -313,7 +365,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
     }
   };
 
-  const creditLines = () => linesToSend(lines).filter((l) => rejectedOf(l) > 0 && l.damageChoice === 'credit_note' && !l.rejectOnly).map((l) => l.product_name);
+  const creditLines = () => linesToSend(lines).filter((l) => creditClosed(l) > 0).map((l) => l.product_name);
 
   const submit = async () => {
     if (problem) {
@@ -382,9 +434,9 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
         vendor_id: po ? undefined : vendorId,
         vendor_invoice_no: billNo.trim() || undefined,
         vendor_invoice_date: kind === 'DELIVERY_CHALLAN' ? istToday() : billDate || undefined,
-        attachment_file_id: kind !== 'DELIVERY_CHALLAN' ? upload?.file_id || undefined : undefined,
-        attachment_filename: kind !== 'DELIVERY_CHALLAN' ? upload?.filename : undefined,
-        attachment_mime: kind !== 'DELIVERY_CHALLAN' ? upload?.mime : undefined,
+        attachment_file_id: upload?.file_id || undefined,
+        attachment_filename: upload?.filename,
+        attachment_mime: upload?.mime,
         items,
         notes: notes.trim() || undefined,
       });
@@ -501,14 +553,26 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
             </p>
             {s.creditLines.length > 0 && (
               <p className="text-sm" style={{ color: 'var(--ink-3)' }}>
-                Credit asked for {s.creditLines.join(', ')}: the order still shows those pieces as due. If no more are
-                coming, cancel what is still due on the <Link className="underline" to="/purchase/orders">order</Link>.
+                Credit asked for {s.creditLines.join(', ')}: those pieces are closed off the{' '}
+                <Link className="underline" to="/purchase/orders">order</Link> (nothing more is coming for them).
               </p>
             )}
             <div className="flex gap-3 pt-3 flex-wrap">
               <button type="button" className="btn" disabled={s.units === 0} onClick={() => setLabelsFor(s)}>
                 <Printer className="w-4 h-4" /> Print {s.units} label{s.units === 1 ? '' : 's'}
               </button>
+              {s.quarantined > 0 && (
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ color: 'var(--err)', borderColor: 'var(--err)' }}
+                  disabled={redBusy}
+                  onClick={() => void printRedLabels(s.grnId)}
+                >
+                  {redBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Printer className="w-4 h-4" />}
+                  Print {s.quarantined} red DO NOT SHELVE label{s.quarantined === 1 ? '' : 's'}
+                </button>
+              )}
               <button type="button" className="btn accent" onClick={onClose}>Done</button>
             </div>
           </div>
@@ -573,7 +637,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
           </div>
           {kind === 'NO_PO' && (
             <p className="text-xs" style={{ color: 'var(--ink-4)' }}>
-              Bought without PO: the dealer and the bill photo. GST credit only from a GST-registered dealer.
+              Bought without PO: the dealer and the bill photo (a cash memo with no number is fine). GST credit only from a GST-registered dealer.
             </p>
           )}
           {rejectOnlyOrder && (
@@ -632,16 +696,19 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
               </label>
             )}
           </div>
-          {kind !== 'DELIVERY_CHALLAN' ? (
-            <div>
-              {label('Bill photo or PDF (required) - no paper, no stock')}
-              <AttachmentZone uploaded={upload} uploading={uploading} onSelect={handleFile} onRemove={() => setUpload(null)} />
-            </div>
-          ) : (
-            <p className="text-xs" style={{ color: 'var(--ink-4)' }}>
-              A challan needs its number; the vendor's bill is attached when it arrives, on the Bills page.
-            </p>
-          )}
+          <div>
+            {label(
+              kind === 'DELIVERY_CHALLAN'
+                ? 'Challan photo (required) - no paper, no stock'
+                : 'Bill photo or PDF (required) - no paper, no stock',
+            )}
+            <AttachmentZone uploaded={upload} uploading={uploading} onSelect={handleFile} onRemove={() => setUpload(null)} />
+            {kind === 'DELIVERY_CHALLAN' && (
+              <p className="text-xs mt-1" style={{ color: 'var(--ink-4)' }}>
+                The vendor's bill is attached when it arrives, on the Bills page.
+              </p>
+            )}
+          </div>
         </div>
       </div>
 
@@ -816,18 +883,47 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
                               <>
                               <span className="text-sm" style={{ color: 'var(--ink-3)' }}>From {po?.vendor_name || 'the supplier'} we want:</span>
                               <label className="flex items-center gap-1.5 text-sm cursor-pointer">
-                                <input type="radio" name={`choice-${l.key}`} checked={l.damageChoice === 'replacement'} onChange={() => setLine(l.key, { damageChoice: 'replacement' })} />
-                                Replacement coming
+                                <input type="radio" name={`choice-${l.key}`} checked={l.damageChoice === 'credit_note'} onChange={() => setLine(l.key, { damageChoice: 'credit_note' })} />
+                                {l.due !== null ? 'Credit (order line closes short)' : 'Credit'}
                               </label>
                               <label className="flex items-center gap-1.5 text-sm cursor-pointer">
-                                <input type="radio" name={`choice-${l.key}`} checked={l.damageChoice === 'credit_note'} onChange={() => setLine(l.key, { damageChoice: 'credit_note' })} />
-                                Credit
+                                <input type="radio" name={`choice-${l.key}`} checked={l.damageChoice === 'replacement'} onChange={() => setLine(l.key, { damageChoice: 'replacement' })} />
+                                {l.due !== null ? 'Replacement coming (order line stays open)' : 'Replacement coming'}
                               </label>
                               </>
                             )}
+                            {l.damagePhotoId ? (
+                              <span className="chip ok">
+                                Photo attached
+                                <button type="button" aria-label={`Remove the damage photo on line ${idx + 1}`} onClick={() => setLine(l.key, { damagePhotoId: undefined })}>
+                                  <X className="w-3 h-3" />
+                                </button>
+                              </span>
+                            ) : (
+                              <label className="btn sm cursor-pointer">
+                                {photoBusy === l.key ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
+                                Take photo
+                                <input
+                                  type="file"
+                                  accept="image/*"
+                                  capture="environment"
+                                  className="sr-only"
+                                  aria-label={`Photo of the damaged piece on line ${idx + 1}`}
+                                  disabled={photoBusy !== null}
+                                  onChange={(e) => {
+                                    const f = e.target.files?.[0];
+                                    e.target.value = '';
+                                    if (f) void handleDamagePhoto(l.key, f);
+                                  }}
+                                />
+                              </label>
+                            )}
+                            {badPhoto?.key === l.key && (
+                              <span className="text-xs" role="alert" style={{ color: 'var(--err)' }}>{badPhoto.message}</span>
+                            )}
                           </div>
                           <p className="text-xs mt-1" style={{ color: 'var(--ink-3)' }}>
-                            The piece goes to Quarantine (never on the shelf), and a draft debit note is made for accounts.
+                            The piece goes to Quarantine with a red DO NOT SHELVE label (never on the shelf), and a draft debit note is made for accounts.
                           </p>
                         </td>
                       </tr>
@@ -855,7 +951,12 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
             <p className="text-sm font-medium mb-1" style={{ color: 'var(--ink)' }}>What happens when you press Receive</p>
             <ul className="text-sm space-y-0.5 list-disc pl-5" style={{ color: 'var(--ink-3)' }}>
               <li>{sums.onShelf} good piece{sums.onShelf === 1 ? '' : 's'} go into stock{lines.some((l) => l.shelf.trim()) ? ' at their shelf codes' : ''}.</li>
-              {sums.rejected > 0 && <li>{sums.rejected} piece{sums.rejected === 1 ? '' : 's'} go to Quarantine; a draft debit note is made for accounts.</li>}
+              {sums.rejected > 0 && (
+                <li>
+                  {sums.rejected} piece{sums.rejected === 1 ? '' : 's'} go to Quarantine with a red DO NOT SHELVE label; a draft debit note is made for accounts.
+                  {sums.credited > 0 && ` ${sums.credited} credited: closed off the order.`}
+                </li>
+              )}
               {sums.short > 0 && <li>{sums.short} piece{sums.short === 1 ? '' : 's'} short stay open on the order.</li>}
               {sums.over > 0 && <li>{sums.over} of them {sums.over === 1 ? 'is' : 'are'} beyond the order: into stock, and the store manager is flagged.</li>}
               {sums.catalogue > 0 && (

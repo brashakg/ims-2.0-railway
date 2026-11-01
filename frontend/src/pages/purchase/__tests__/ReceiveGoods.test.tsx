@@ -31,7 +31,10 @@ const products = vi.hoisted(() => ({ getProduct: vi.fn(), getProducts: vi.fn() }
 const auth = vi.hoisted(() => ({ roles: ['STORE_MANAGER'] as string[] }));
 const online = vi.hoisted(() => ({ value: false }));
 
-vi.mock('../../../services/api/inventory', () => ({ vendorsApi: api }));
+const inv = vi.hoisted(() => ({ getUnits: vi.fn(), printQuarantineLabel: vi.fn() }));
+const labels = vi.hoisted(() => ({ printQuarantineLabels: vi.fn() }));
+vi.mock('../../../services/api/inventory', () => ({ vendorsApi: api, inventoryApi: inv }));
+vi.mock('../../../components/labels/quarantineLabels', () => labels);
 vi.mock('../../../services/api/grnCockpit', () => ({ grnCockpitApi: cockpit }));
 vi.mock('../../../services/api/products', () => ({ productApi: products }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
@@ -242,7 +245,7 @@ describe('a damaged piece, inline on its row', () => {
     await openPO();
     fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Broken hinge' } });
-    fireEvent.click(screen.getByLabelText('Replacement coming'));
+    fireEvent.click(screen.getByLabelText('Replacement coming (order line stays open)'));
     fireEvent.click(screen.getByRole('button', { name: /Everything else arrived as ordered/ }));
     expect((screen.getByLabelText('Damaged on line 1') as HTMLInputElement).value).toBe('1');
     // The edited line is the receiver's own count: it is not ticked for him.
@@ -261,12 +264,19 @@ describe('a damaged piece, inline on its row', () => {
     fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
     fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
     expect(screen.getByText('1 damaged: to quarantine')).toBeInTheDocument();
-    expect(screen.getByText(/goes to Quarantine \(never on the shelf\), and a draft debit note/)).toBeInTheDocument();
+    expect(screen.getByText(/goes to Quarantine with a red DO NOT SHELVE label \(never on the shelf\), and a draft debit note/)).toBeInTheDocument();
     await attachBill();
     expect(receiveBtn()).toBeDisabled();
     fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Scratched lens' } });
     expect(screen.getByTestId('receive-problem')).toHaveTextContent(/replacement coming/);
-    fireEvent.click(screen.getByLabelText('Credit'));
+    fireEvent.click(screen.getByLabelText('Credit (order line closes short)'));
+    expect(screen.getByText(/1 credited: closed off the order/)).toBeInTheDocument();
+    // The damaged piece's photo goes up through the same upload door as the bill.
+    cockpit.uploadDoc.mockResolvedValueOnce({ file_id: 'F-DMG', filename: 'dmg.jpg', mime: 'image/jpeg', size: 900, persisted: true });
+    fireEvent.change(screen.getByLabelText('Photo of the damaged piece on line 1'), {
+      target: { files: [new File(['jpg'], 'dmg.jpg', { type: 'image/jpeg' })] },
+    });
+    await screen.findByText('Photo attached');
     fireEvent.click(receiveBtn());
     await screen.findByText('Received and put on the shelf.');
     expect(cockpit.expressReceive).not.toHaveBeenCalled();
@@ -274,11 +284,76 @@ describe('a damaged piece, inline on its row', () => {
     expect(body).toMatchObject({ grn_subtype: 'STANDARD', po_id: 'PO1', vendor_invoice_no: 'SAF-8841', attachment_file_id: 'F-BILL' });
     expect(body.items[0]).toMatchObject({
       received_qty: 4, accepted_qty: 3, rejected_qty: 1, rejection_reason: 'Scratched lens',
-      rejection_disposition: 'credit_note', tallied: true,
+      rejection_disposition: 'credit_note', rejection_photo_file_id: 'F-DMG', tallied: true,
     });
     expect(screen.getByText(/1 to quarantine, with a draft debit note for accounts/)).toBeInTheDocument();
-    // Credit does not close the order line by itself: say what to do.
-    expect(screen.getByText(/Credit asked for Carrera 1234/)).toBeInTheDocument();
+    // D9: the server closes the credited piece off the order.
+    expect(screen.getByText(/Credit asked for Carrera 1234: those pieces are closed off the/)).toBeInTheDocument();
+  });
+
+  it('prints the red DO NOT SHELVE label for the quarantined piece through the one quarantine-label door', async () => {
+    labels.printQuarantineLabels.mockResolvedValue({ method: 'html', message: '' });
+    inv.getUnits.mockResolvedValue({
+      units: [
+        { stock_id: 'Q1', barcode: 'BV24CA0101P4', status: 'QUARANTINED', brand: 'Carrera', model: '1234', name: 'Carrera 1234' },
+      ],
+      total: 1,
+    });
+    await openPO();
+    fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
+    fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Scratched lens' } });
+    fireEvent.click(screen.getByLabelText('Replacement coming (order line stays open)'));
+    await attachBill();
+    fireEvent.click(receiveBtn());
+    await screen.findByText('Received and put on the shelf.');
+    fireEvent.click(screen.getByRole('button', { name: 'Print 1 red DO NOT SHELVE label' }));
+    await waitFor(() => expect(labels.printQuarantineLabels).toHaveBeenCalledTimes(1));
+    expect(inv.getUnits).toHaveBeenCalledWith({ grn_id: 'G-NEW', rejected: true });
+    expect(labels.printQuarantineLabels.mock.calls[0][0].map((u: { stock_id: string }) => u.stock_id)).toEqual(['Q1']);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('a red label the server refuses (its 403) says so', async () => {
+    labels.printQuarantineLabels.mockRejectedValue(new Error('You do not have permission to print this label'));
+    inv.getUnits.mockResolvedValue({
+      units: [{ stock_id: 'Q1', barcode: 'BV24CA0101P4', status: 'QUARANTINED', brand: 'Carrera', model: '1234', name: 'Carrera 1234' }],
+      total: 1,
+    });
+    await openPO();
+    fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
+    fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Scratched lens' } });
+    fireEvent.click(screen.getByLabelText('Replacement coming (order line stays open)'));
+    await attachBill();
+    fireEvent.click(receiveBtn());
+    await screen.findByText('Received and put on the shelf.');
+    fireEvent.click(screen.getByRole('button', { name: 'Print 1 red DO NOT SHELVE label' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('You do not have permission to print this label'));
+  });
+
+  it('a damage photo the server refuses is marked on its own line', async () => {
+    api.createGRN.mockRejectedValueOnce(
+      new ApiError('bad photo', {
+        status: 400,
+        detail: { code: 'DAMAGE_PHOTO_INVALID', line: 0, message: 'The damage photo on line 1 is no longer available. Take it again.' },
+      }),
+    );
+    await openPO();
+    fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
+    fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
+    fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Scratched lens' } });
+    fireEvent.click(screen.getByLabelText('Replacement coming (order line stays open)'));
+    cockpit.uploadDoc.mockResolvedValueOnce({ file_id: 'F-DMG', filename: 'dmg.jpg', mime: 'image/jpeg', size: 900, persisted: true });
+    fireEvent.change(screen.getByLabelText('Photo of the damaged piece on line 1'), {
+      target: { files: [new File(['jpg'], 'dmg.jpg', { type: 'image/jpeg' })] },
+    });
+    await screen.findByText('Photo attached');
+    await attachBill();
+    fireEvent.click(receiveBtn());
+    expect(await screen.findByRole('alert')).toHaveTextContent('The damage photo on line 1 is no longer available');
+    expect(screen.queryByText('Photo attached')).toBeNull();
+    expect(screen.getByLabelText('Photo of the damaged piece on line 1')).toBeInTheDocument();
   });
 
   it('a receipt saved but not added to stock says so and never invites a second receipt', async () => {
@@ -305,7 +380,7 @@ describe('a damaged piece, inline on its row', () => {
     await openPO();
     fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Scratched lens' } });
-    fireEvent.click(screen.getByLabelText('Credit'));
+    fireEvent.click(screen.getByLabelText('Credit (order line closes short)'));
     fireEvent.click(screen.getByRole('button', { name: /Everything else arrived as ordered/ }));
     fireEvent.click(screen.getByLabelText(/I counted line 1/));
     await attachBill();
@@ -323,7 +398,7 @@ describe('a damaged piece, inline on its row', () => {
     await openPO();
     fireEvent.change(screen.getByLabelText('Damaged on line 1'), { target: { value: '1' } });
     fireEvent.change(screen.getByLabelText('What is wrong on line 1'), { target: { value: 'Scratched lens' } });
-    fireEvent.click(screen.getByLabelText('Credit'));
+    fireEvent.click(screen.getByLabelText('Credit (order line closes short)'));
     fireEvent.click(screen.getByRole('button', { name: /Everything else arrived as ordered/ }));
     fireEvent.click(screen.getByLabelText(/I counted line 1/));
     await attachBill();
@@ -458,22 +533,27 @@ describe('no purchase order', () => {
     expect(api.createGRN.mock.calls[0][0].items[0].unit_price).toBe(3100);
   });
 
-  it('a delivery challan: the challan number, no photo, the supplier; invoice later', async () => {
+  it('a delivery challan: the challan number and its PHOTO (no paper, no stock), the supplier; invoice later', async () => {
     renderAt();
     fireEvent.click(await screen.findByRole('button', { name: /Delivery challan, invoice comes later/ }));
     fireEvent.change(await screen.findByLabelText(/Supplier/), { target: { value: 'V-77' } });
     await typeOneLine();
-    expect(document.querySelector('input[type="file"]')).toBeNull();
     expect(screen.getByTestId('receive-problem')).toHaveTextContent(/challan number/);
     fireEvent.change(screen.getByLabelText('Challan no. *'), { target: { value: 'DC/26/10/4' } });
     fireEvent.change(screen.getByLabelText('Challan date'), { target: { value: '' } });
     expect(screen.getByTestId('receive-problem')).toHaveTextContent(/challan date/);
     fireEvent.change(screen.getByLabelText('Challan date'), { target: { value: '2026-10-20' } });
+    expect(screen.getByText('Challan photo (required) - no paper, no stock')).toBeInTheDocument();
+    expect(screen.getByTestId('receive-problem')).toHaveTextContent(/photo of the delivery challan/);
+    expect(receiveBtn()).toBeDisabled();
+    await attachBill('');
     fireEvent.click(receiveBtn());
     await waitFor(() => expect(api.createGRN).toHaveBeenCalled());
     const body = api.createGRN.mock.calls[0][0];
-    expect(body).toMatchObject({ grn_subtype: 'DELIVERY_CHALLAN', vendor_id: 'V-77', dc_number: 'DC/26/10/4' });
-    expect(body.attachment_file_id).toBeUndefined();
+    expect(body).toMatchObject({
+      grn_subtype: 'DELIVERY_CHALLAN', vendor_id: 'V-77', dc_number: 'DC/26/10/4',
+      attachment_file_id: 'F-BILL', attachment_filename: 'SAF-8841.pdf',
+    });
   });
 });
 

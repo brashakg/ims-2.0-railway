@@ -45,6 +45,44 @@ from .grn import (
 from ...services.purchase_numbering import po_label
 
 
+def _receipt_photo_meta(file_id, current_user: dict):
+    """The file-store metadata of a photo a receipt names (the bill / challan,
+    or a damaged piece), or None when none is named. Refuses (400
+    ATTACHMENT_INVALID) one that is not a receipt document or sits in a shop
+    the caller cannot reach; 503 when storage is down.
+
+    P0 (security panel): existence is NOT authorisation. The id is supplied by
+    the CALLER and ONE bucket holds every binary in the app, so an existence
+    check passes just as happily for a task attachment or an employee Aadhaar
+    scan -- hence the KIND check.
+
+    P0 STORE BIND (security panel round 5, reproduced end to end). Checking
+    only the KIND still let a caller LAUNDER another store's document: the
+    download route is scoped by the GRN RECORD, so binding a victim's
+    grn_document file_id to a GRN in YOUR OWN store walks it straight past that
+    scope. POST /vendors/grn/upload-doc stamps store_id, and the test is the
+    caller's REACHABLE stores (can_access_store_scoped), never the receiving
+    store: upload-doc stamps the uploader's ACTIVE store while a PO-backed GRN
+    is re-pointed to the PO's delivery store, so an ADMIN active at A receiving
+    store B's PO must pass. The UPLOADER is deliberately NOT bound. A blob with
+    no store_id is unreachable for a store-level caller and readable by a
+    cross-store one -- no fail-open."""
+    fid = str(file_id or "").strip()
+    if not fid:
+        return None
+    store = get_file_store()
+    if store is None:
+        raise HTTPException(status_code=503, detail="File storage unavailable")
+    meta = store.get_metadata(fid)
+    if (
+        meta is None
+        or meta.get("kind") != _GRN_DOCUMENT_KIND
+        or not can_access_store_scoped(meta.get("store_id"), current_user)
+    ):
+        raise HTTPException(status_code=400, detail=_ATTACHMENT_INVALID_DETAIL)
+    return meta
+
+
 @router.post("/grn", status_code=201)
 async def create_grn(
     grn: GRNCreate, current_user: dict = Depends(require_roles(*_RECEIVE_ROLES))
@@ -83,60 +121,23 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # reconcile against and there is no "received with no paperwork" hole. The
     # file is uploaded first via POST /vendors/grn/upload-doc (returns file_id),
     # which already validated size + MIME, so here we only assert it is present.
-    # A DELIVERY_CHALLAN is exempt at receipt (its tax invoice arrives later and
-    # is attached at reconciliation). Fail LOUD: a 400 with a stable code the UI
-    # keys on to keep the user on the upload step.
-    if not is_dc and not (
-        grn.attachment_file_id and str(grn.attachment_file_id).strip()
-    ):
+    # S2b (owner 2026-10-23): a DELIVERY_CHALLAN is no longer exempt -- no
+    # paper, no stock: the challan's own photo goes in at receipt (its tax
+    # invoice is attached later, on the bill). Fail LOUD: a 400 with a stable
+    # code the UI keys on to keep the user on the upload step.
+    if not (grn.attachment_file_id and str(grn.attachment_file_id).strip()):
         raise HTTPException(
             status_code=400,
             detail={
                 "code": "ATTACHMENT_REQUIRED",
                 "message": (
-                    "Attach the vendor invoice or challan (image or PDF) before "
-                    "creating the goods receipt."
+                    "Attach a photo of the delivery challan before receiving it."
+                    if is_dc
+                    else "Attach the vendor invoice or challan (image or PDF) "
+                    "before creating the goods receipt."
                 ),
             },
         )
-
-    # BUG-010: the presence check above only proves a NON-EMPTY id was sent -- a
-    # forged / stale id would pass the gate and persist, only 404'ing later at
-    # download time, defeating the mandatory-attachment guarantee. Verify the
-    # file actually exists in the store BEFORE persisting. Only STANDARD GRNs are
-    # gated (a DC has no receipt-time attachment to verify).
-    # Storage-down vs forged-id: get_file_store() returning None means storage
-    # itself is unavailable -> 503 (do NOT mask the existing fail-loud behavior
-    # by 400'ing). A live store whose get() finds nothing == a forged/stale id
-    # -> 400 ATTACHMENT_INVALID.
-    #
-    # P0 (security panel round 6): this gate used to run under `if not is_dc`,
-    # while the persistence below wrote attachment_file_id UNCONDITIONALLY -- so
-    # adding one JSON field, grn_subtype="DELIVERY_CHALLAN", skipped BOTH the
-    # kind check and the store bind and re-opened the round-5 theft verbatim.
-    # The gate now runs whenever an attachment id is PRESENT, whatever the
-    # subtype; the DC exemption is only from the REQUIREMENT to attach (above),
-    # never from authorising an attachment that was sent anyway.
-    _attachment_meta = None
-    if grn.attachment_file_id and str(grn.attachment_file_id).strip():
-        store = get_file_store()
-        if store is None:
-            raise HTTPException(status_code=503, detail="File storage unavailable")
-        # P0 (security panel): existence is NOT authorisation. The id is
-        # supplied by the CALLER (GRNCreate.attachment_file_id) and ONE bucket
-        # holds every binary in the app, so an existence check passes just as
-        # happily for a task attachment or an employee Aadhaar scan.
-        # Kind is checked here; the STORE bind runs below, once the receiving
-        # store is final (a PO-backed GRN is re-pointed to the PO's store).
-        _attachment_meta = store.get_metadata(str(grn.attachment_file_id).strip())
-        if (
-            _attachment_meta is None
-            or _attachment_meta.get("kind") != _GRN_DOCUMENT_KIND
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=_ATTACHMENT_INVALID_DETAIL,
-            )
 
     # Validate PO exists. For a DC, the PO is optional (lens top-ups arrive with
     # no pre-logged PO) -- only validate when one was supplied.
@@ -183,44 +184,47 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
                     )
                 store_id = po_store
 
-    # P0 STORE BIND (security panel round 5, reproduced end to end). Checking
-    # only the KIND still let a caller LAUNDER another store's document: the
-    # download route is scoped by the GRN RECORD
-    # (can_access_store_scoped(grn["store_id"])), so binding a victim's
-    # grn_document file_id to a GRN in YOUR OWN store walks it straight past
-    # that scope. A STORE_MANAGER at WO-JSR-01 bound an ACCOUNTANT's
-    # BV-RANCHI-01 supplier invoice -- a different store AND a different legal
-    # entity -- and streamed it back, cost prices, vendor terms and the real
-    # filename included, while the front door correctly 404'd.
+    # BUG-010: the presence check above only proves a NON-EMPTY id was sent -- a
+    # forged / stale id would pass the gate and persist, only 404'ing later at
+    # download time, defeating the mandatory-attachment guarantee. Verify the
+    # file actually exists in the store BEFORE persisting.
+    # Storage-down vs forged-id: get_file_store() returning None means storage
+    # itself is unavailable -> 503 (do NOT mask the existing fail-loud behavior
+    # by 400'ing). A live store whose get() finds nothing == a forged/stale id
+    # -> 400 ATTACHMENT_INVALID.
     #
-    # POST /vendors/grn/upload-doc already stamps store_id, so binding the store
-    # costs the receiving flow nothing: the live UI uploads and creates from the
-    # same component. The UPLOADER is deliberately NOT bound -- that would
-    # foreclose an ops-uploads / accountant-creates split -- but "don't bind the
-    # uploader" never implied "bind nothing".
-    #
-    # The test is the caller's REACHABLE stores, not the receiving store.
-    # Comparing the blob's stamp to the post-re-point store_id (my round-6
-    # attempt) BROKE THE FORWARD RECEIVING FLOW: upload-doc stamps the uploader's
-    # ACTIVE store, while a PO-backed GRN is re-pointed to the PO's delivery
-    # store, so an ADMIN active at A receiving store B's PO was 400'd -- and
-    # re-uploading produced the same stamp, an unescapable loop, with the
-    # deliberately indistinguishable message making an outage look like a forged
-    # id. The repo's own test_po_store_boundary states that intent.
-    #
-    # can_access_store_scoped is the canonical helper and gets both directions
-    # right: a store-level thief cannot reach the victim's store, so the round-5
-    # theft is still refused; a cross-store ADMIN/AREA_MANAGER is granted nothing
-    # they could not already read through the download route. A blob with no
-    # store_id resolves the same way -- unreachable for a store-level caller,
-    # readable by a cross-store one -- so there is no fail-open either.
-    if _attachment_meta is not None:
-        _blob_store = _attachment_meta.get("store_id")
-        if not can_access_store_scoped(_blob_store, current_user):
+    # P0 (security panel round 6): this gate used to run under `if not is_dc`,
+    # while the persistence below wrote attachment_file_id UNCONDITIONALLY -- so
+    # adding one JSON field, grn_subtype="DELIVERY_CHALLAN", skipped BOTH the
+    # kind check and the store bind and re-opened the round-5 theft verbatim.
+    # The gate runs whenever an attachment id is PRESENT, whatever the subtype,
+    # once the PO boundary has spoken: another shop's order answers 404 before
+    # a photo is judged (test_po_store_boundary).
+    _attachment_meta = _receipt_photo_meta(grn.attachment_file_id, current_user)
+    # S2b: a damaged piece's photo passes the same gate, line by line; a bad
+    # one is named by its line, so the screen marks that line's photo.
+    for index, item in enumerate(grn.items):
+        item.rejection_photo_file_id = (
+            str(item.rejection_photo_file_id or "").strip() or None
+            if item.rejected_qty > 0
+            else None
+        )
+        try:
+            _receipt_photo_meta(item.rejection_photo_file_id, current_user)
+        except HTTPException as exc:
+            if exc.status_code != 400:
+                raise
             raise HTTPException(
                 status_code=400,
-                detail=_ATTACHMENT_INVALID_DETAIL,
-            )
+                detail={
+                    "code": "DAMAGE_PHOTO_INVALID",
+                    "line": index,
+                    "message": (
+                        f"The damage photo on line {index + 1} is no longer "
+                        "available. Take it again."
+                    ),
+                },
+            ) from exc
 
     # W1.4 / OS-006: the receiving store is now FINAL (PO re-point applied).
     # An ONLINE store owns no stock -- accepting goods there would mint real
@@ -315,7 +319,7 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
     # receipt and every shop (vendors.grn._find_duplicate_receipt): the same
     # supplier and bill number in the same financial year, or (bought without
     # PO, D14) the same bill photo by content hash.
-    photo_sha = None if is_dc else (_attachment_meta or {}).get("sha256")
+    photo_sha = (_attachment_meta or {}).get("sha256")
     if not is_dc:
         dup = _find_duplicate_receipt(grn_repo, grn, vendor_id, photo_sha=photo_sha)
         if dup is not None:
@@ -467,15 +471,14 @@ async def _create_grn_impl(grn: GRNCreate, current_user: dict) -> dict:
         ),
         "vendor_invoice_date": grn.vendor_invoice_date,
         # F-S3: the receipt document the ops user attached (file_store id +
-        # metadata). The accountant reconciliation console reads these to render
-        # the "view document" link. None for a DC (attached later) -- and that
-        # is now ENFORCED, not merely documented: this dict used to persist the
-        # caller's id unconditionally, which is what made the DC subtype a
-        # bypass of the authorisation gate above.
-        "attachment_file_id": None if is_dc else grn.attachment_file_id,
-        "attachment_filename": None if is_dc else grn.attachment_filename,
-        "attachment_mime": None if is_dc else grn.attachment_mime,
-        # D14: the bill photo's sha256 -- the uniq_nopo_bill_hash key.
+        # metadata) -- the bill, or a DC's challan photo (S2b) -- authorised
+        # above whatever the subtype. The accountant reconciliation console
+        # reads these to render the "view document" link.
+        "attachment_file_id": grn.attachment_file_id,
+        "attachment_filename": grn.attachment_filename,
+        "attachment_mime": grn.attachment_mime,
+        # D14: the photo's sha256, kept on every receipt; only NO_PO rows are
+        # keyed by uniq_nopo_bill_hash.
         "attachment_sha256": photo_sha,
         "items": item_docs,
         "total_received": total_received,

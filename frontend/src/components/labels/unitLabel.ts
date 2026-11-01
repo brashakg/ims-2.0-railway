@@ -40,6 +40,13 @@ export interface UnitLabelData {
   colour?: string;
   size?: string;
   mrp?: number | null;
+  /** A quarantined piece (S2b): the label reads DO NOT SHELVE in a solid
+   *  band, and carries no price -- it is not for sale. */
+  doNotShelve?: boolean;
+  /** A DO NOT SHELVE label's second line: reason, shop, date (cut to fit). */
+  detail?: string;
+  /** A DO NOT SHELVE label's last line (e.g. BRAND AUTHORIZATION REQUIRED). */
+  note?: string;
 }
 
 // ---- the saved window offset (per computer: it belongs to the printer here) --
@@ -136,12 +143,14 @@ function mrpText(mrp?: number | null): string {
 
 function labelHtml(u: UnitLabelData, offsetMm: number, extraClass = ''): string {
   const title = [u.brand, u.model].filter(Boolean).join(' ');
+  const info = u.doNotShelve
+    ? `<div class="dns">DO NOT SHELVE</div><div class="b">${esc(title)}</div><div>${esc(u.detail)}</div><div class="b">${esc(u.note)}</div>`
+    : `<div class="b two">${esc(title)}</div><div class="two">${esc(u.colour)}</div><div class="size">${esc(u.size)}</div>`;
   return (
     `<div class="lbl"><div class="win${extraClass}" style="left:${offsetMm}mm">` +
     `<div class="code">${barcodeSvg(u.barcode, 8)}<div class="txt">${esc(u.barcode)}</div>` +
-    `<div class="mrp">${esc(mrpText(u.mrp))}</div></div>` +
-    `<div class="info"><div class="b two">${esc(title)}</div><div class="two">${esc(u.colour)}</div>` +
-    `<div class="size">${esc(u.size)}</div></div></div></div>`
+    `<div class="mrp">${u.doNotShelve ? '' : esc(mrpText(u.mrp))}</div></div>` +
+    `<div class="info">${info}</div></div></div>`
   );
 }
 
@@ -169,13 +178,18 @@ body { font-family: Arial, Helvetica, sans-serif; }
 .info .two { white-space: normal; overflow-wrap: anywhere; display: -webkit-box;
   -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .b { font-weight: 700; }
+/* A quarantined piece: a solid band the thermal head prints black (it has
+   one colour); the red is the label stock's, when the shop loads red rolls. */
+.info .dns { background: #000; color: #fff; font-weight: 700; font-size: 8pt; line-height: 1.3;
+  text-align: center; letter-spacing: 0.3px; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 </style></head><body>${body}</body></html>`;
 }
 
 /** A printable document: one 100 x 15 mm page per unit, at the saved offset. */
 export function unitLabelsDocument(units: UnitLabelData[]): string {
   const offset = getLabelOffsetMm();
-  return wrap(units.map((u) => labelHtml(u, offset)).join(''), 'Stock labels');
+  const title = units.length > 0 && units.every((u) => u.doNotShelve) ? 'DO NOT SHELVE labels' : 'Stock labels';
+  return wrap(units.map((u) => labelHtml(u, offset)).join(''), title);
 }
 
 /** One label that outlines the 70 mm window, for calibrating the offset. */

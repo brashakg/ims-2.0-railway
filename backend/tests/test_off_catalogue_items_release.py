@@ -2506,6 +2506,8 @@ def test_r5_a_discarded_draft_is_never_received(world):
                             rejected_qty=0, tallied=True,
                         )
                     ],
+                    # S2b: a challan is received only with its photo.
+                    attachment_file_id="F-RECEIPT-PHOTO",
                 ),
                 MANAGER,
             )
