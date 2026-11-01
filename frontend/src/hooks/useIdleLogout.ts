@@ -101,17 +101,6 @@ function _now(): number {
   return Date.now();
 }
 
-function _readLastActivity(): number {
-  try {
-    const raw = localStorage.getItem(LAST_ACTIVITY_KEY);
-    const n = raw ? parseInt(raw, 10) : NaN;
-    if (Number.isFinite(n) && n > 0) return n;
-  } catch {
-    /* ignore */
-  }
-  return _now();
-}
-
 function _storedActivity(): number | null {
   try {
     const n = parseInt(localStorage.getItem(LAST_ACTIVITY_KEY) || '', 10);
@@ -119,6 +108,10 @@ function _storedActivity(): number | null {
   } catch {
     return null;
   }
+}
+
+function _readLastActivity(): number {
+  return _storedActivity() ?? _now();
 }
 
 /**
