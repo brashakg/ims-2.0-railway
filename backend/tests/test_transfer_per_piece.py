@@ -1556,3 +1556,23 @@ def test_a_kept_piece_back_after_its_write_off_reclaims_exactly_what_it_reversed
     _write_off(world, kept)
     row = world["itc_writeoff_reversals"].find_one({"_id": kept})
     assert (row["cgst"], row["sgst"]) == (75.0, 75.0)
+
+
+@pytest.mark.parametrize("lost, share", [("SU-1", 25.0), ("SU-2", 75.0)])
+def test_probe_kept_written_off_before_the_note(world, lost, share):
+    """Probe (#1321 review): the kept piece written off BEFORE the lost
+    piece's credit note."""
+    from api.routers import transfers
+
+    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"unit_cost": 3000.0}})
+    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"unit_cost": 1000.0}})
+    t = _shipped_box(world, codes=("BVQX001", "BVQX002"))
+    kept = "SU-2" if lost == "SU-1" else "SU-1"
+    _scan_in(t["id"], f"BVQX00{kept[-1]}", user=MGR_BOK, damaged=True, reason="Cracked rim")
+    _complete(t["id"], user=MGR_BOK)
+    _write_off(world, kept)
+    _run(transfers.write_off_missing_piece(t["id"], lost, ADMIN))
+    (invoice,) = [b for b in _bills(world, t["id"]) if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
+    rows = list(world["itc_writeoff_reversals"].find({"bill_id": invoice["bill_id"], "kind": "REVERSAL"}))
+    print("ROWS", [(r["_id"], r.get("cgst"), r.get("sgst")) for r in rows])
+    assert round(sum(r.get("cgst") or 0 for r in rows), 2) == share
