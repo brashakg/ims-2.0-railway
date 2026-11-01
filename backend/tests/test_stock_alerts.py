@@ -80,9 +80,10 @@ class TestReorderAlert:
         assert alert["costImpact"] == round(alert["recommendedOrder"] * 4000.0, 2)
 
     def test_runs_out_within_lead_time_is_reorder(self):
-        # 2 units/day, 10 in stock → ~5 days cover, lead time 14 → reorder
+        # 2 units/day, 10 in stock → ~5 days cover, lead time 14, and the
+        # shop's level (12) says buy: reorder THE buy rule's number (S5).
         alert = _build_stock_alert(
-            _product(stock_quantity=10),
+            _product(stock_quantity=10, reorder_levels={SHOP: 12}),
             sold_30=60,
             last_sale=NOW - timedelta(days=1),
             now=NOW,
@@ -93,6 +94,21 @@ class TestReorderAlert:
         # 5 days > 14/2=7? no, 5 <= 7 → CRITICAL
         assert alert["severity"] == "CRITICAL"
         assert alert["projectedDaysToStockout"] == 5.0
+        assert alert["recommendedOrder"] == 3  # back to one above the level
+
+    def test_runs_out_soon_but_the_level_is_met_suggests_no_buy(self):
+        # S5 one rule: the shop's level (0) is met, so the Reorder list buys
+        # nothing -- the alert may warn, it never recommends a buy of its own.
+        alert = _build_stock_alert(
+            _product(stock_quantity=10),
+            sold_30=60,
+            last_sale=NOW - timedelta(days=1),
+            now=NOW,
+            dead_days=90,
+            lead_time_days=14,
+        )
+        assert alert["alertType"] != "REORDER_ALERT"
+        assert alert["recommendedOrder"] == 0
 
     def test_explicit_reorder_point_triggers_even_with_cover(self):
         # slow sale but stock at/below an explicit reorder point
@@ -131,7 +147,8 @@ class TestReorderAlert:
 class TestLowStock:
     def test_getting_low_but_not_critical(self):
         # 1 unit/day, 12 in stock → 12 days cover. lead 7: >7 (not reorder)
-        # but <=14 (lead*2) → LOW_STOCK
+        # but <=14 (lead*2) → LOW_STOCK, with THE buy rule's number: the level
+        # (0) is met, so nothing to buy (S5).
         alert = _build_stock_alert(
             _product(stock_quantity=12),
             sold_30=30,
@@ -142,7 +159,7 @@ class TestLowStock:
         )
         assert alert["alertType"] == "LOW_STOCK"
         assert alert["severity"] == "MEDIUM"
-        assert alert["recommendedOrder"] >= 1
+        assert alert["recommendedOrder"] == 0
 
 
 # --------------------------------------------------------------------------
@@ -264,7 +281,7 @@ class TestPriorityOrdering:
     def test_fast_seller_about_to_run_out_is_reorder_not_fast_moving(self):
         # high velocity AND low cover → REORDER wins over FAST_MOVING
         alert = _build_stock_alert(
-            _product(stock_quantity=5),
+            _product(stock_quantity=5, reorder_levels={SHOP: 6}),
             sold_30=90,  # 3/day
             last_sale=NOW - timedelta(days=1),
             now=NOW,

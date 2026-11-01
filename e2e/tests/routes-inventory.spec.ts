@@ -84,8 +84,11 @@ test('coverage has not silently shrunk', () => {
       'seed_e2e.py does not create; +1 for the redirect-only forecast catch-all ' +
       '/reports/forecast/*; +1 for the stock-count result /inventory/audit/:countId, ' +
       'which needs a finished count -- ROUTES compares paths literally, so a ' +
-      'parameterised screen cannot be probed without a seeded id AND a url field). ' +
+      'parameterised screen cannot be probed without a seeded id AND a url field; ' +
+      '+3 redirect-only addresses retired into the one Reorder list (stock ' +
+      'redesign S5): /catalog/buy-desk, /inventory/replenishment and ' +
+      '/inventory/low-stock, each a Navigate to /inventory/reorders). ' +
       'If an exclusion is genuinely new and justified, raise the ceiling here in the ' +
       'same commit that adds it -- deliberately, not by accident.',
-  ).toEqual({ probedAtLeast: true, exclusions: 33 });
+  ).toEqual({ probedAtLeast: true, exclusions: 36 });
 });

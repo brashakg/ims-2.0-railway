@@ -15,12 +15,13 @@ import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
+// The catalogue manager's roles, as main's canEdit (Edit / Clone, the
+// Needs-review tab) asks them; a test may add a purchase role.
+const mockAuth = vi.hoisted(() => ({ roles: ['CATALOG_MANAGER'] }));
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 'USR-1', name: 'Cat', roles: ['CATALOG_MANAGER'] },
-    // The catalogue manager's roles, as main's canEdit (Edit / Clone, the
-    // Needs-review tab) asks them.
-    hasRole: (roles: string[]) => roles.includes('CATALOG_MANAGER'),
+    user: { id: 'USR-1', name: 'Cat', roles: mockAuth.roles },
+    hasRole: (roles: string[]) => roles.some((r) => mockAuth.roles.includes(r)),
   }),
 }));
 vi.mock('../../../context/ToastContext', () => ({
@@ -88,6 +89,7 @@ function Where() {
 
 beforeEach(async () => {
   where = '';
+  mockAuth.roles = ['CATALOG_MANAGER'];
   // A test's catalogue rows never leak into the next one.
   const { productApi } = await import('../../../services/api/products');
   (productApi.getProducts as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
@@ -170,8 +172,11 @@ describe('an ordered draft in Needs review', () => {
 
   // Round 9 (6+7): a product finished before the mark was cleared still
   // carries provisional:true; the server's rule says finished, and the screen
-  // reads only that -- POS-ready, Clone and Order stock offered.
+  // reads only that -- POS-ready, Clone and Order stock offered (Order stock
+  // to a role that may raise a purchase order: owner 2026-10-08, not the
+  // catalogue manager alone).
   it('a finished product still marked provisional reads POS-ready, row and drawer', async () => {
+    mockAuth.roles = ['CATALOG_MANAGER', 'STORE_MANAGER'];
     const FINISHED = {
       ...SPINE,
       product_id: 'P-DONE',

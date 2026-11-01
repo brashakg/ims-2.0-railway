@@ -487,11 +487,6 @@ ROWS: List[Dict[str, object]] = [
         "allowed": PURCHASE,
     },
     {
-        "method": "POST",
-        "path": "/api/v1/vendors/purchase-orders/from-forecast",
-        "allowed": PURCHASE,
-    },
-    {
         "method": "GET",
         "path": "/api/v1/vendors/purchase-orders/{po_id}",
         "allowed": PURCHASE,

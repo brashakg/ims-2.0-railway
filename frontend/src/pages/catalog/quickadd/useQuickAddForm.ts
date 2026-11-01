@@ -70,6 +70,7 @@ import { useProductImages } from './useProductImages';
 import { copyableSpecs, softWarnings as buildSoftWarnings } from './formHelpers';
 import { reorderApi } from '../../../services/api/inventory';
 import { REORDER_LEVEL_ROLES } from '../../inventory/inventoryRoles';
+import { PURCHASE_ROLES } from '../../purchase/purchaseRoles';
 import { typedLevel, levelText, isLevelInputValid, LEVEL_INPUT_ERROR } from '../../../utils/reorderLevel';
 
 export function useQuickAddForm() {
@@ -962,12 +963,13 @@ export function useQuickAddForm() {
             ? `Product created — SKU ${createdSku}${createdBarcode ? ` · barcode ${createdBarcode}` : ''}.`
             : 'Product created successfully!',
           8000,
-          // Procurement Phase 1: one-click hop to the Buy Desk with the new
-          // product preselected (?add_product= handled in BuyDeskPage).
-          newId
+          // One click to a new purchase order with the new product on it
+          // (?product= handled by the Purchase orders page) -- for a role that
+          // may raise one (owner 2026-10-08: not the catalogue manager).
+          newId && hasRole(PURCHASE_ROLES)
             ? {
                 label: 'Order this now',
-                onClick: () => navigate(`/catalog/buy-desk?add_product=${encodeURIComponent(newId)}`),
+                onClick: () => navigate(`/purchase/orders?new=1&product=${encodeURIComponent(newId)}`),
               }
             : undefined
         );

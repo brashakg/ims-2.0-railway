@@ -171,9 +171,6 @@ from .analytics import (  # noqa: F401  # re-exported: see _ReportsModule
     sales_seasonality,
 )
 from .purchase import (  # noqa: F401  # re-exported: see _ReportsModule
-    _DEFAULT_LEAD_TIME_DAYS,
-    _DEFAULT_REORDER_CYCLE_DAYS,
-    _DEFAULT_SAFETY_BUFFER_DAYS,
     _confidence_for,
     purchase_recommendations,
 )

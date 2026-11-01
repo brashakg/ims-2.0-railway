@@ -81,6 +81,22 @@ export const REORDER_LEVEL_ROLES: UserRole[] = [
   'STORE_MANAGER',
 ];
 
+/**
+ * Who opens THE Reorder list (/inventory/reorders, stock redesign S5): the
+ * manage ladder plus the ACCOUNTANT, who raises purchase orders (the Buy
+ * Desk's readers). The SAME set as the server's row for
+ * GET /inventory/reorder-list (pinned by test_one_reorder_list.py).
+ * Making the drafts is PURCHASE_ROLES' (the PO create gate).
+ */
+export const REORDER_LIST_ROLES: UserRole[] = [
+  'SUPERADMIN',
+  'ADMIN',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+  'CATALOG_MANAGER',
+  'ACCOUNTANT',
+];
+
 /** Nav visibility for the two sections that live behind tighter gates. */
 export function canManageInventory(roles: readonly string[] | undefined | null): boolean {
   if (!roles) return false;

@@ -15,12 +15,12 @@
 //                   tab was a second address for it with a LOOSER role gate)
 //   power-grid   -> /inventory/power-grid (PowerGridPage - the tab rendered
 //                   the OLD products-based widget instead)
+//   low-stock, reorders -> /inventory/reorders (ReorderListPage, S5: THE one
+//                   Reorder list; /inventory/low-stock forwards to it)
 
-import { Link, useSearchParams } from 'react-router-dom';
-import { AlertTriangle, Package } from 'lucide-react';
+import { useSearchParams } from 'react-router-dom';
 import { StockAlertsOverview } from '../../components/inventory/StockAlertsOverview';
 import { StockTransferManagement } from '../../components/inventory/StockTransferManagement';
-import { ReorderDashboard } from '../../components/inventory/ReorderDashboard';
 import { SerialNumberTracker } from '../../components/inventory/SerialNumberTracker';
 import { StockAgingReport } from '../../components/inventory/StockAgingReport';
 import { NonMovingStockWidget } from '../../components/inventory/NonMovingStockWidget';
@@ -35,8 +35,6 @@ import { QuarantineQueue } from '../../components/inventory/QuarantineQueue';
 import { BrandInsightsWidget } from '../../components/inventory/BrandInsightsWidget';
 import { CollectionInsightsWidget } from '../../components/inventory/CollectionInsightsWidget';
 import { DisplayLayoutPanel } from '../../components/inventory/DisplayLayoutPanel';
-import { useInventoryContext } from './InventoryLayout';
-import { useLowStock } from './inventoryQueries';
 
 /** /inventory/alerts - stock alert overview. */
 export function InventoryAlertsPage() {
@@ -63,68 +61,6 @@ export function InventoryDisplayLayoutPage() {
         setSearchParams(next, { replace: true });
       }}
     />
-  );
-}
-
-/** /inventory/low-stock - items at or below their reorder threshold. */
-export function InventoryLowStockPage() {
-  const { storeId } = useInventoryContext();
-  const lowStockQ = useLowStock(storeId || undefined);
-  const lowStockItems = lowStockQ.data ?? [];
-  return (
-    <div className="card">
-      {lowStockQ.isPending ? (
-        <div className="flex items-center justify-center py-12">
-          <span className="w-8 h-8 border-2 border-bv-red-600 border-t-transparent rounded-full animate-spin" />
-        </div>
-      ) : lowStockItems.length === 0 ? (
-        <div className="text-center py-12 text-gray-500">
-          <Package className="w-12 h-12 mx-auto mb-2 opacity-50" />
-          <p>No low stock items</p>
-        </div>
-      ) : (
-        <div className="space-y-3">
-          {lowStockItems.map(item => (
-            <div
-              key={item.id}
-              className="flex items-center justify-between p-4 bg-amber-50 border border-amber-200 rounded-lg"
-            >
-              <div className="flex items-center gap-4">
-                <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
-                  <AlertTriangle className="w-5 h-5 text-amber-600" />
-                </div>
-                <div>
-                  <p className="font-medium text-gray-900">{item.name}</p>
-                  <p className="text-sm text-gray-500">{item.sku} • {item.brand}</p>
-                </div>
-              </div>
-              <div className="flex items-center gap-4">
-                <div className="text-right">
-                  <p className="text-lg font-bold text-amber-600">{item.stock} left</p>
-                  <p className="text-xs text-gray-500">Min: {item.lowStockThreshold ?? 'not set'}</p>
-                </div>
-                {/* Raise the PO where POs are raised from stock: the reorder desk.
-                    Never for a product the server says is discontinued. */}
-                {item.discontinued ? (
-                  <span className="text-xs text-gray-500">Discontinued - not reordered</span>
-                ) : (
-                  <Link to="/inventory/reorders" className="btn-outline text-sm">Raise PO</Link>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/** /inventory/reorders - reorder dashboard. */
-export function InventoryReordersPage() {
-  return (
-    <div className="space-y-4">
-      <ReorderDashboard />
-    </div>
   );
 }
 

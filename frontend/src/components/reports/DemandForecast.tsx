@@ -68,7 +68,11 @@ interface ApiForecast {
   trend: 'increasing' | 'decreasing' | 'stable';
   predicted_30_day: number;
   current_stock: number;
+  /** THE buy rule's number (reorder_policy.buy_qty), the Reorder list's. */
   reorder_recommended: number;
+  basis?: 'level' | 'sales' | null;
+  /** The server's wording for that number ('' when nothing to buy). */
+  reason?: string;
 }
 
 function mapTrend(t: string): 'UP' | 'DOWN' | 'STABLE' {
@@ -109,15 +113,16 @@ function getCurrentSeason(month: number): string {
 // Derivations from the real /demand-forecast API response
 // ============================================================================
 
-function deriveCategoryForecasts(apiForecasts: ApiForecast[], days: ForecastRange): ForecastItem[] {
+export function deriveCategoryForecasts(apiForecasts: ApiForecast[], days: ForecastRange): ForecastItem[] {
   const byCat: Record<
     string,
-    { stock: number; daily: number; up: number; down: number; n: number }
+    { stock: number; daily: number; up: number; down: number; n: number; buy: number }
   > = {};
   for (const f of apiForecasts) {
     const cat = f.category || 'Uncategorised';
-    const c = (byCat[cat] ??= { stock: 0, daily: 0, up: 0, down: 0, n: 0 });
+    const c = (byCat[cat] ??= { stock: 0, daily: 0, up: 0, down: 0, n: 0, buy: 0 });
     c.stock += f.current_stock || 0;
+    c.buy += f.reorder_recommended || 0;
     c.daily += f.avg_daily_sales || 0;
     if (f.trend === 'increasing') c.up += 1;
     else if (f.trend === 'decreasing') c.down += 1;
@@ -128,8 +133,8 @@ function deriveCategoryForecasts(apiForecasts: ApiForecast[], days: ForecastRang
       const avgDailySales = Math.round(c.daily * 10) / 10;
       const projectedDemand = Math.round(c.daily * days);
       const daysUntilStockout = c.daily > 0 ? Math.round(c.stock / c.daily) : 999;
-      // Reorder qty covers the forecast period plus a 15-day safety buffer.
-      const reorderQty = Math.max(0, projectedDemand - c.stock + Math.round(c.daily * 15));
+      // The server's buys added up -- never a cover formula of this screen's own (S5).
+      const reorderQty = c.buy;
       const trend: 'UP' | 'DOWN' | 'STABLE' =
         c.up > c.down ? 'UP' : c.down > c.up ? 'DOWN' : 'STABLE';
       const confidence: 'HIGH' | 'MEDIUM' | 'LOW' =
@@ -148,7 +153,7 @@ function deriveCategoryForecasts(apiForecasts: ApiForecast[], days: ForecastRang
     .sort((a, b) => b.projectedDemand - a.projectedDemand);
 }
 
-function deriveReorderSuggestions(apiForecasts: ApiForecast[]): ReorderSuggestion[] {
+export function deriveReorderSuggestions(apiForecasts: ApiForecast[]): ReorderSuggestion[] {
   const actionOrder: Record<ReorderSuggestion['suggestedAction'], number> = {
     URGENT_REORDER: 0,
     INCREASE_ORDER: 1,
@@ -167,10 +172,10 @@ function deriveReorderSuggestions(apiForecasts: ApiForecast[]): ReorderSuggestio
       let reason: string;
       if (reorderQty > 0 && daysUntilStockout <= 7) {
         suggestedAction = 'URGENT_REORDER';
-        reason = `Projected to stock out in ~${daysUntilStockout} day(s); reorder ${reorderQty} to cover 30-day demand.`;
+        reason = `Projected to stock out in ~${daysUntilStockout} day(s). ${f.reason || `Buy ${reorderQty}.`}`;
       } else if (trend === 'UP' && reorderQty > 0) {
         suggestedAction = 'INCREASE_ORDER';
-        reason = `Demand trending up; current stock covers ~${daysUntilStockout} day(s).`;
+        reason = `Demand trending up; current stock covers ~${daysUntilStockout} day(s). ${f.reason || ''}`.trim();
       } else if (trend === 'DOWN') {
         suggestedAction = 'REDUCE_ORDER';
         reason = `Demand trending down; ~${daysUntilStockout} day(s) of stock on hand.`;

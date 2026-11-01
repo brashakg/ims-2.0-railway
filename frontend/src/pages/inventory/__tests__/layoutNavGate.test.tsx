@@ -68,10 +68,12 @@ describe('the one manage-ladder list gates the two tighter sections', () => {
   });
 
   it('does not offer WORKSHOP_STAFF the stock count (the old tab leaked it)', () => {
-    renderAs('WORKSHOP_STAFF', '/inventory/reorders');
+    renderAs('WORKSHOP_STAFF', '/inventory/transfers');
     // The Operations sub-nav is open; its other entries prove it rendered.
     expect(screen.getByRole('button', { name: /Transfers/ })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Stock count/ })).not.toBeInTheDocument();
+    // S5: nor the Reorder list (buying is not a workshop job).
+    expect(screen.queryByRole('button', { name: /^Reorder/ })).not.toBeInTheDocument();
   });
 
   it('does not offer WORKSHOP_STAFF the lens power grid', () => {
@@ -81,7 +83,7 @@ describe('the one manage-ladder list gates the two tighter sections', () => {
   });
 
   it.each(INVENTORY_MANAGE_ROLES)('offers %s both gated sections', (role) => {
-    renderAs(role, '/inventory/reorders');
+    renderAs(role, '/inventory/transfers');
     expect(screen.getByRole('button', { name: /Stock count/ })).toBeInTheDocument();
     renderAs(role, '/inventory/serial-numbers');
     expect(screen.getByRole('button', { name: /Lens power grid/ })).toBeInTheDocument();

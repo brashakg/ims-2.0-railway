@@ -87,7 +87,6 @@ from .routers import (
     transfers_router,
     item_events_router,
     catalog_router,
-    buy_desk_router,
     jarvis_router,
     analytics_router,
     follow_ups_router,
@@ -1518,7 +1517,6 @@ app.include_router(
 )
 app.include_router(catalog_router, prefix="/api/v1/catalog", tags=["Catalog"])
 
-app.include_router(buy_desk_router, prefix="/api/v1/buy-desk", tags=["Buy Desk"])
 app.include_router(jarvis_router, prefix="/api/v1/jarvis", tags=["JARVIS"])
 app.include_router(analytics_router, prefix="/api/v1/analytics", tags=["Analytics"])
 app.include_router(follow_ups_router, prefix="/api/v1/follow-ups", tags=["Follow-ups"])

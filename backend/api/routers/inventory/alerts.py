@@ -9,7 +9,6 @@ from ._shared import (
     Query,
     _SOLD_STATUSES,
     _discontinued,
-    _reorder_disabled,
     datetime,
     get_current_user,
     logger,
@@ -25,9 +24,11 @@ from .helpers import (
 from ...services.cost_mask import mask_cost
 from ...services.reorder_policy import (
     DISCONTINUED_FIELDS,
+    buy_qty,
     is_low_stock,
     low_stock_rows,
     on_hand,
+    open_orders,
     reorder_level,
 )
 
@@ -88,14 +89,9 @@ def _summarise_alert_stats(alerts: List[dict]) -> dict:
     return stats
 
 
-def _low_stock(base, stock, cost, velocity, lead_time_days, suggestions_off, action):
-    """Fill `base` as a LOW_STOCK alert. No suggested restock qty when
-    auto-reorder is off or nothing has sold (nothing to size an order by)."""
-    recommended = (
-        0
-        if suggestions_off or velocity <= 0
-        else max(int(round(velocity * lead_time_days * 2 - stock)), 1)
-    )
+def _low_stock(base, cost, recommended, action):
+    """Fill `base` as a LOW_STOCK alert; `recommended` is THE buy rule's
+    number (0 when auto-reorder is off or sent orders cover it)."""
     base.update(
         {
             "alertType": "LOW_STOCK",
@@ -118,6 +114,7 @@ def _build_stock_alert(
     store_id: Optional[str] = None,
     low_stock: bool = False,
     stocked_since: Optional[datetime] = None,
+    on_order: int = 0,
 ) -> Optional[dict]:
     """Pure classifier — given a product doc plus its sales signals, return a
     single frontend-shaped (camelCase) StockAlert dict, or None if the product
@@ -133,6 +130,8 @@ def _build_stock_alert(
     (audit F48). ``stocked_since``: when the oldest unit on the shelf arrived;
     stock younger than the dead-stock window has not had the chance to sell
     and is never called dead. None = unknown = old (helpers._had_the_window).
+    ``on_order``: pieces on SENT orders to this shop -- the buy rule takes them
+    off (reorder_policy.buy_qty, the one number the Reorder list shows).
     """
     stock = int(product.get("stock_quantity", 0) or 0)
     cost = float(product.get("cost_price", 0) or 0)
@@ -142,9 +141,12 @@ def _build_stock_alert(
     # means auto-reorder is DISABLED for this product -- never emit a
     # REORDER_ALERT / restock suggestion for it. Informational alerts
     # (LOW_STOCK without a suggested qty, DEAD_STOCK, OVERSTOCK, FAST_MOVING)
-    # still apply. See api/services/reorder_policy.py, which also turns
-    # reorder off for a discontinued product (reorder_policy.discontinued).
-    reorder_suggestions_off = _reorder_disabled(product)
+    # still apply. THE buy rule (reorder_policy.buy_qty, S5) answers 0 for it,
+    # and for a discontinued product -- the same number as the Reorder list.
+    buy, _basis = buy_qty(
+        product, store_id=store_id, on_hand=stock, on_order=on_order,
+        sold_30d=int(sold_30 or 0),
+    )
     # A discontinued product still on the shelf is scored only as DEAD_STOCK,
     # or LOW_STOCK (no qty) while the low-stock list holds it: 'running low',
     # 'keep well stocked' or 'excess units' is advice for a product the
@@ -185,11 +187,10 @@ def _build_stock_alert(
     runs_out_soon = projected is not None and projected <= lead_time_days
     if (
         has_level
-        and not reorder_suggestions_off
+        and buy > 0
         and (out_of_stock_but_selling or below_reorder_point or runs_out_soon)
     ):
-        target = velocity * lead_time_days * 2  # cover 2x lead time
-        recommended = max(int(round(target - stock)), 1)
+        recommended = buy
         if stock <= 0 or (projected is not None and projected <= lead_time_days / 2):
             severity = "CRITICAL"
         else:
@@ -222,8 +223,7 @@ def _build_stock_alert(
         and projected <= lead_time_days * 2
     ):
         return _low_stock(
-            base, stock, cost, velocity, lead_time_days, reorder_suggestions_off,
-            f"Stock running low (~{int(projected)} days left)",
+            base, cost, buy, f"Stock running low (~{int(projected)} days left)",
         )
 
     # 3. DEAD_STOCK — has stock but no movement in the dead-stock window, and
@@ -261,7 +261,7 @@ def _build_stock_alert(
     # that has sat out the window is dead stock, not something to reorder.
     if low_stock:
         return _low_stock(
-            base, stock, cost, velocity, lead_time_days, reorder_suggestions_off,
+            base, cost, buy,
             f"Only {stock} left - "
             + ("discontinued, not reordered" if discontinued else "at or below the low-stock level"),
         )
@@ -390,6 +390,7 @@ async def get_stock_alerts(
                     "cost_price": 1,
                     "reorder_levels": 1,
                     "reorder_quantity": 1,
+                    "max_stock": 1,
                 },
             )
         )
@@ -418,6 +419,7 @@ async def get_stock_alerts(
             else set()
         )
         shelf = _shelf_by_product(stock_units, active_store)
+        sent, _drafts = open_orders(db.get_collection("purchase_orders"))
 
         alerts: List[dict] = []
         for p in products:
@@ -439,6 +441,7 @@ async def get_stock_alerts(
                 store_id=active_store,
                 low_stock=pid in low_ids,
                 stocked_since=(shelf.get(pid) or {}).get("oldest"),
+                on_order=sent.get((pid, active_store), 0) if active_store else 0,
             )
             if alert:
                 alerts.append(alert)

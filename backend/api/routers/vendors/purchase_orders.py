@@ -1,20 +1,17 @@
-"""Purchase-order list and creation (manual + from forecast)."""
+"""Purchase-order list and creation."""
 
-from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
+from api.utils.event_time import utc_now_iso
 
 
 from collections import Counter
 
 from ._shared import (
-    BaseModel,
     Depends,
-    Field,
     HTTPException,
     Optional,
     Query,
     _RECEIVABLE_PO_STATUSES,
     _VENDOR_ROLES,
-    _auto_reorder_disabled,
     _get_db,
     _pm,
     _po_catalog_gate_on,
@@ -28,7 +25,6 @@ from ._shared import (
     require_roles,
     resolve_store_scope,
     router,
-    timedelta,
     uuid,
     validate_store_access,
 )
@@ -250,274 +246,10 @@ async def list_pos(
 _PO_NEWEST_FIRST = [("created_at", -1), ("_id", -1)]
 
 
-# INV-9: Demand forecast -> nightly draft-PO suggestions
-# Reads the analytics-v2 demand-forecast data for the caller's store and
-# creates a DRAFT purchase order for each product that needs reorder,
-# grouped by the product's preferred_vendor_id.  If no vendor is attached to
-# a product, the item is placed on a catch-all "unassigned" suggestions list.
-# Only SUPERADMIN / ADMIN / AREA_MANAGER / STORE_MANAGER may trigger this
-# (mirrors the PO create gate).  Fail-soft: if the demand data can't be read
-# the endpoint returns an empty result rather than 500.
-
-
-class ForecastPoRequest(BaseModel):
-    store_id: Optional[str] = None  # defaults to caller's active store
-    horizon_days: int = Field(30, ge=7, le=90)  # forecast window
-    safety_stock_days: int = Field(7, ge=0, le=30)  # extra buffer days
-    # If True a real DRAFT PO doc is persisted per vendor; otherwise returns
-    # suggestions only (dry_run=True is safe for the nightly ORACLE cron).
-    dry_run: bool = False
-
-
-@router.post("/purchase-orders/from-forecast", status_code=201)
-async def create_pos_from_forecast(
-    body: ForecastPoRequest,
-    current_user: dict = Depends(require_roles(*_VENDOR_ROLES)),
-):
-    """Generate DRAFT purchase orders from the demand forecast (INV-9).
-
-    Algorithm:
-    1. Pull 90-day sales velocity per product for the store.
-    2. For each product where predicted demand > current_stock + safety_stock,
-       compute the recommended order quantity.
-    3. Group by preferred_vendor_id (stored on the product doc).
-    4. Create one DRAFT PO per vendor group (unless dry_run=True).
-
-    Returns a summary and the list of created (or would-be-created) POs.
-    """
-    db = _get_db()
-    if db is None:
-        raise HTTPException(status_code=503, detail="Database unavailable")
-
-    active_store = body.store_id or current_user.get("active_store_id") or ""
-    if not active_store:
-        raise HTTPException(status_code=400, detail="store_id is required")
-
-    # W1.4 / OS-006: forecast POs deliver to the requesting store -- never an
-    # ONLINE (stockless, pooled) store.
-    if is_online_store(db, active_store):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "Online stores hold no stock - switch to a physical shop "
-                "before generating purchase orders."
-            ),
-        )
-
-    horizon = body.horizon_days
-    safety = body.safety_stock_days
-
-    try:
-        from datetime import timedelta
-
-        now = utc_now().replace(tzinfo=None)
-        ninety_days_ago = now - timedelta(days=90)
-
-        # --- Step 1: compute sales velocity per product (last 90 days) ---
-        orders = list(
-            db.get_collection("orders")
-            .find(
-                {
-                    "store_id": active_store,
-                    "status": {"$nin": ["CANCELLED", "DRAFT"]},
-                    "created_at": {"$gte": ninety_days_ago},
-                },
-                {"items": 1, "order_items": 1},
-            )
-            .limit(10000)
-        )
-
-        product_sales: dict = {}
-        for o in orders:
-            for item in o.get("items") or o.get("order_items") or []:
-                pid = item.get("product_id", "")
-                if not pid:
-                    continue
-                qty = int(item.get("quantity", 1) or 1)
-                if pid not in product_sales:
-                    product_sales[pid] = {
-                        "product_name": item.get("product_name")
-                        or item.get("name", ""),
-                        "sku": item.get("sku", ""),
-                        "qty_90d": 0,
-                    }
-                product_sales[pid]["qty_90d"] += qty
-
-        if not product_sales:
-            return {
-                "store_id": active_store,
-                "dry_run": body.dry_run,
-                "pos_created": 0,
-                "suggestions": [],
-                "message": "No sales data found for the last 90 days",
-            }
-
-        # --- Step 2: join with products for stock + vendor ---
-        products_coll = db.get_collection("products")
-        product_ids = list(product_sales.keys())
-        prod_docs = {
-            p.get("product_id"): p
-            for p in products_coll.find({"product_id": {"$in": product_ids}})
-            if p.get("product_id")
-        }
-
-        reorder_items: dict = {}  # vendor_id -> list of line items
-        suggestions = []
-
-        for pid, sales in product_sales.items():
-            avg_daily = sales["qty_90d"] / 90.0
-            predicted = avg_daily * horizon
-            buffer = avg_daily * safety
-            need = predicted + buffer
-
-            prod = prod_docs.get(pid, {})
-            # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
-            # default) disables auto-reorder for the product -- no forecast
-            # suggestion, no draft PO line (see api/services/reorder_policy.py).
-            if _auto_reorder_disabled(prod):
-                continue
-            current_stock = int(prod.get("quantity", 0) or prod.get("stock", 0) or 0)
-            reorder_qty = max(0, round(need - current_stock))
-            if reorder_qty == 0:
-                continue
-
-            vendor_id = prod.get("preferred_vendor_id") or "UNASSIGNED"
-            sku = sales.get("sku") or prod.get("sku", "")
-            product_name = sales.get("product_name") or prod.get("name", "")
-
-            suggestion = {
-                "product_id": pid,
-                "product_name": product_name,
-                "sku": sku,
-                "vendor_id": vendor_id,
-                "current_stock": current_stock,
-                "avg_daily_sales": round(avg_daily, 2),
-                "predicted_demand": round(predicted, 1),
-                "safety_buffer": round(buffer, 1),
-                "reorder_quantity": reorder_qty,
-            }
-            suggestions.append(suggestion)
-
-            if vendor_id != "UNASSIGNED":
-                reorder_items.setdefault(vendor_id, []).append(
-                    {
-                        "product_id": pid,
-                        "product_name": product_name,
-                        "sku": sku,
-                        "quantity": reorder_qty,
-                    }
-                )
-
-        # Every line priced by the one rule create_po uses (server_line_prices:
-        # last paid to this vendor, else the catalogue cost, else None).
-        prices: dict = {}
-        for sg in suggestions:
-            prices.setdefault(sg["vendor_id"], {})[sg["product_id"]] = (
-                prod_docs.get(sg["product_id"]) or {}
-            ).get("cost_price")
-        prices = {
-            v: server_line_prices(None if v == "UNASSIGNED" else v, cat)
-            for v, cat in prices.items()
-        }
-        for sg in suggestions:
-            sg["estimated_unit_price"] = prices[sg["vendor_id"]][sg["product_id"]]
-        for v_id, lines in reorder_items.items():
-            for ln in lines:
-                ln["unit_price"] = prices[v_id][ln["product_id"]]
-
-        # --- Step 3: create DRAFT POs per vendor group ---
-        created_pos = []
-        if not body.dry_run and reorder_items:
-            po_repo = get_purchase_order_repository()
-            vendor_repo = get_vendor_repository()
-            # The receiving shop is the same for every group -- read it once.
-            _, _store_doc = po_gst_context(active_store, None)
-
-            for v_id, lines in reorder_items.items():
-                vendor = None
-                if vendor_repo is not None:
-                    vendor = vendor_repo.find_by_id(v_id)
-                if vendor is None:
-                    # Skip if vendor not found; include in suggestions only
-                    continue
-
-                po_id = str(uuid.uuid4())
-                po_number = generate_po_number(active_store)
-                # SAME per-line GST as the manual door (build_po_gst): the rate
-                # comes off each product's HSN and splits CGST+SGST vs IGST from
-                # the vendor's and the shop's GST numbers. This used to be a
-                # flat `subtotal * 0.18` with no per-line tax_rate stored, which
-                # over-taxed every 5% lens/frame order AND made the bill later
-                # drafted off it charge 0%.
-                computed = build_po_gst(lines, prod_docs.get, vendor, _store_doc)
-                subtotal = computed["subtotal"]
-                tax = computed["tax"]
-                total = computed["total"]
-
-                po_doc = {
-                    "po_id": po_id,
-                    "po_number": po_number,
-                    "vendor_id": v_id,
-                    "vendor_name": vendor.get("trade_name") or vendor.get("legal_name"),
-                    "delivery_store_id": active_store,
-                    "items": computed["items"],
-                    "subtotal": subtotal,
-                    "tax_amount": tax,
-                    "total_amount": total,
-                    "gst_summary": computed["gst_summary"],
-                    "gst_warnings": computed["warnings"],
-                    **computed["parties"],
-                    "status": "DRAFT",
-                    "source": "demand_forecast",
-                    "forecast_horizon_days": horizon,
-                    "created_by": current_user.get("user_id"),
-                    "created_at": utc_event_iso(now),
-                    "notes": (
-                        f"Auto-generated from {horizon}-day demand forecast "
-                        f"(safety stock {safety} days)"
-                    ),
-                }
-
-                if po_repo is not None:
-                    try:
-                        po_repo.create(po_doc)
-                        created_pos.append(
-                            {
-                                "po_id": po_id,
-                                "po_number": po_number,
-                                "vendor_id": v_id,
-                                "vendor_name": po_doc["vendor_name"],
-                                "lines": len(lines),
-                                "total_amount": round(total, 2),
-                            }
-                        )
-                    except Exception as _e:
-                        logger.warning(
-                            f"[INV-9] PO create failed for vendor {v_id}: {_e}"
-                        )
-
-        return mask_purchase({
-            "store_id": active_store,
-            "dry_run": body.dry_run,
-            "horizon_days": horizon,
-            "safety_stock_days": safety,
-            "products_needing_reorder": len(suggestions),
-            "pos_created": len(created_pos),
-            "created_pos": created_pos,
-            "suggestions": suggestions,
-        }, current_user)
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.warning(f"create_pos_from_forecast error: {e}")
-        return {
-            "store_id": active_store,
-            "dry_run": body.dry_run,
-            "pos_created": 0,
-            "suggestions": [],
-            "message": "Forecast data unavailable",
-        }
+# POST /purchase-orders/from-forecast was retired (stock redesign S5, owner
+# 2026-10-22/23): it worked out "how many to buy" by a 90-day forecast of its
+# own. Reorder drafts are made from THE Reorder list (/inventory/reorders),
+# one draft per vendor through create_po below.
 
 
 def _typed_in_payload(it) -> dict:

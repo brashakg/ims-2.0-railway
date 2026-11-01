@@ -19,7 +19,7 @@ vi.mock('../sections/WorkshopProductivityCard', () => ({ WorkshopProductivityCar
 const row = (id: string, stock: number, level: number | null, low: boolean) => ({
   product_id: id, name: id, brand: 'Carrera', category: 'FR', velocity_90d: 9, daily_velocity: 1,
   current_stock: stock, reorder_point: level, low_stock: low, stock_status: low ? 'low' : 'healthy',
-  desired_cover: 14, gap_units: 1, suggested_order_qty: 3, avg_selling_price: 1, cost_price: 1,
+  basis: 'level', suggested_order_qty: 3, avg_selling_price: 1, cost_price: 1,
   unit_margin: 1, estimated_revenue_impact: 1000, estimated_purchase_cost: 1, estimated_margin: 1,
   confidence: 'HIGH', reason: '',
 });

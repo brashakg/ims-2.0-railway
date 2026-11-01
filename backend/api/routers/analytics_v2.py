@@ -29,7 +29,6 @@ from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.cost_mask import mask_cost_list, can_see_cost
 from ..services.margin_basis import margin_pct_ex_gst, price_ex_gst, product_gst_rate
 from ..services.notification_service import send_notification
-from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
 from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
 from ..services.name_resolver import order_actor_id, order_actor_name_map
 
@@ -335,6 +334,21 @@ async def demand_forecast(
         product_sales.items(), key=lambda x: x[1]["qty"], reverse=True
     )[:20]
 
+    # THE buy rule (reorder_policy.buy_qty, owner S5) with the inputs the
+    # purchase report hands it: this shop's units, its 30-day sales and its
+    # SENT orders -- the same number the report, the alerts and Jarvis show.
+    from ..services.reorder_policy import buy_qty, on_hand, open_orders, sold_by_shop
+
+    top_ids = [pid for pid, _data in top_products]
+    stock_here = {
+        pid: n
+        for (pid, _shop), n in on_hand(
+            db.get_collection("stock_units"), store_id=active_store, product_ids=top_ids
+        ).items()
+    }
+    sold_30d = sold_by_shop(db.get_collection("orders"), store_id=active_store)
+    sent, _drafts = open_orders(db.get_collection("purchase_orders"), top_ids)
+
     forecasts = []
     for pid, data in top_products:
         avg_daily = _safe_div(data["qty"], 90)
@@ -351,18 +365,15 @@ async def demand_forecast(
         else:
             trend = "stable"
 
-        # Lookup current stock
         prod_doc = products_coll.find_one({"product_id": pid}) or {}
-        current_stock = int(
-            prod_doc.get("quantity", 0) or prod_doc.get("stock", 0) or 0
+        # The shop's own units (reorder_policy.on_hand), never a legacy field.
+        current_stock = stock_here.get(pid, 0)
+        # 0 when auto-reorder is off or covered: the row stays as information.
+        reorder, basis = buy_qty(
+            prod_doc, store_id=active_store, on_hand=current_stock,
+            on_order=sent.get((pid, active_store), 0),
+            sold_30d=sold_30d.get((pid, active_store), 0),
         )
-        # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
-        # default) disables auto-reorder -- the forecast row stays (info)
-        # but never recommends a reorder qty (api/services/reorder_policy.py).
-        if _reorder_disabled(prod_doc):
-            reorder = 0
-        else:
-            reorder = max(0, predicted_30 - current_stock)
 
         forecasts.append(
             {
@@ -375,6 +386,13 @@ async def demand_forecast(
                 "predicted_30_day": predicted_30,
                 "current_stock": current_stock,
                 "reorder_recommended": reorder,
+                "basis": basis,
+                # The purchase report's wording for the same number.
+                "reason": (
+                    f"Buy {reorder}: "
+                    + ("back above the shop's level." if basis == "level"
+                       else "the last 30 days' sales.")
+                ) if reorder > 0 else "",
             }
         )
 

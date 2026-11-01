@@ -5,7 +5,8 @@
 // pre-fill, and validation are identical no matter which door the buyer came
 // through (owner ruling: one PO form everywhere):
 //   - the full-page manual form  (PurchaseOrderForm.tsx, mode="page")
-//   - the Buy Desk quick draft   (BuyDeskDraftPOModal.tsx, mode="modal")
+//   - (the Buy Desk quick draft, mode="modal", was retired with the Buy Desk
+//     in stock redesign S5: the Reorder list drafts through the PO door.)
 //
 // The composer owns: vendor select, expected date, notes, the line-item table
 // (product cell + qty + unit cost [with a "last paid Rs X on <date>" caption]
@@ -324,7 +325,7 @@ function enteredSig(lines: ComposerLine[], expectedDate: string, notes: string):
   ]);
 }
 
-const blankLine = (): ComposerLine => ({
+export const blankLine = (): ComposerLine => ({
   productId: '',
   productName: '',
   sku: '',

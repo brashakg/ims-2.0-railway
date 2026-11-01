@@ -784,26 +784,6 @@ def test_sending_a_draft_with_an_unpriced_line_raises_the_accounts_task(client, 
     assert [t["source_ref"] for t in _price_tasks(catalogue)] == ["po-price:PO-CL"]
 
 
-def test_the_forecast_drafts_price_their_lines_by_the_one_rule(client, catalogue):
-    # P1 was last paid COST to V1 (its catalogue says 1234.5); P3 has no price
-    # anywhere. The forecast door stores what create_po stores: COST and None.
-    catalogue.products.update_many(
-        {"product_id": {"$in": ["P1", "P3"]}}, {"$set": {"preferred_vendor_id": "V1"}}
-    )
-    catalogue.orders.insert_one(
-        {"order_id": "O9", "store_id": STORE, "status": "DELIVERED", "created_at": datetime.now(),
-         "items": [{"product_id": "P3", "product_name": "P3", "quantity": 5}]}
-    )
-    r = client.post(
-        "/api/v1/vendors/purchase-orders/from-forecast",
-        json={"store_id": STORE}, headers=_headers("STORE_MANAGER"),
-    )
-    assert r.status_code == 201, r.text
-    assert not _leaks(r.json(), _PRICE_KEYS + ("estimated_unit_price",)), r.json()
-    (po,) = list(catalogue.purchase_orders.find({"source": "demand_forecast"}))
-    assert {it["product_id"]: it["unit_price"] for it in po["items"]} == {"P1": COST, "P3": None}
-
-
 @pytest.mark.parametrize("role", ("ADMIN", "STORE_MANAGER", "AREA_MANAGER"))
 def test_the_cl_drafts_price_their_lines_by_the_one_rule(client, catalogue, monkeypatch, role):
     from api.routers import cl_po

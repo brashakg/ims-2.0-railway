@@ -4,6 +4,7 @@ import { lazy } from 'react';
 import { Route, Navigate, useSearchParams } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import { legacyReviewRedirect } from '../pages/catalog/reviewQueue';
+import { buyDeskForward } from '../pages/inventory/legacyTabRedirect';
 
 // /catalog — the Catalog Manager: the product list over the billing spine,
 // with the slide-over drawer (view / edit / approve). ONE page component serves
@@ -31,7 +32,11 @@ const QuickAddPage = lazy(() => import('../pages/catalog/QuickAddPage'));
 // Catalog Autopilot was removed entirely (owner 2026-08-30: unused feature);
 // /catalog/autopilot redirects to /catalog/add. The old page file
 // is kept in the tree but no longer imported here.
-const BuyDeskPage = lazy(() => import('../pages/catalog/BuyDeskPage'));
+// /catalog/buy-desk was retired into the Reorder list (stock redesign S5).
+function BuyDeskRedirect() {
+  const [sp] = useSearchParams();
+  return <Navigate to={buyDeskForward(sp.toString())} replace />;
+}
 // /catalog/scorecard — per-user cataloguing performance (volume, approvals,
 // corrections, QC error rate) + the random-sample QC review workflow.
 const CataloguingScorecardPage = lazy(() => import('../pages/catalog/CataloguingScorecardPage'));
@@ -132,24 +137,8 @@ export const catalogRoutes = (
       }
     />
 
-    {/* Buy Desk — the one-screen catalog -> purchase landing */}
-    <Route
-      path="catalog/buy-desk"
-      element={
-        <ProtectedRoute
-          allowedRoles={[
-            'SUPERADMIN',
-            'ADMIN',
-            'CATALOG_MANAGER',
-            'AREA_MANAGER',
-            'STORE_MANAGER',
-            'ACCOUNTANT',
-          ]}
-        >
-          <BuyDeskPage />
-        </ProtectedRoute>
-      }
-    />
+    {/* Buy Desk retired into the Reorder list (S5); old links forward. */}
+    <Route path="catalog/buy-desk" element={<BuyDeskRedirect />} />
 
     {/* Catalog Autopilot was removed (owner 2026-08-30). Old bookmarks
         land on /catalog/add. */}

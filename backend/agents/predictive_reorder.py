@@ -13,9 +13,10 @@ Intent (packet F7):
     the 7-day window saw zero sales (avoids a phantom "never sells" reading for
     a SKU that sells weekly). The 30d fallback is the same units/day basis.
   - days_remaining = on_hand / effective_burn_rate ; +inf when burn rate == 0
-  - a reorder is suggested when days_remaining < horizon_days (default 14)
-  - recommended_qty tops the SKU back up to cover (lead_time + horizon) days of
-    burn, never below 1 unit and never below the reorder-point gap.
+  - HOW MANY to buy (and whether to buy at all) is NOT decided here: it is THE
+    buy rule, api/services/reorder_policy.buy_qty (owner S5: the shop's level
+    if set, else its 30-day sales). tally_demand_by_product_store is the one
+    30-day sales reader that rule reads (reorder_policy.sold_by_shop).
 
 NO emoji (Windows cp1252). Everything here is deterministic + DB-free.
 """
@@ -60,33 +61,6 @@ def days_remaining(on_hand: float, effective_rate: float) -> float:
     return max(0.0, float(on_hand or 0)) / rate
 
 
-def recommended_qty(
-    *,
-    on_hand: float,
-    effective_rate: float,
-    horizon_days: int,
-    lead_time_days: int,
-    reorder_point: Optional[int] = None,
-) -> int:
-    """Units to order so stock covers (lead_time + horizon) days of burn.
-
-    The target cover is generous on purpose: by the time the order lands
-    (lead_time) the SKU should still hold a full horizon of cover. Never less
-    than 1 (a flagged SKU always gets a non-zero suggestion) and never below
-    reorder_policy.top_up for the shop's level.
-    """
-    rate = max(0.0, float(effective_rate or 0))
-    cover_days = max(1, int(lead_time_days) + int(horizon_days))
-    target_cover = math.ceil(rate * cover_days)
-    gap = target_cover - max(0.0, float(on_hand or 0))
-    # The shop's level floors the order at the ONE top-up rule (None = not set).
-    from api.services.reorder_policy import top_up
-
-    rp_gap = float(top_up(reorder_point, on_hand))
-    qty = max(gap, rp_gap, 1.0)
-    return int(math.ceil(qty))
-
-
 def projected_stockout_iso(now: datetime, days_left: float) -> Optional[str]:
     """ISO timestamp of projected stockout, or None when stock never runs out
     (days_left is +inf). Caps at a sane far-future horizon to avoid overflow."""
@@ -102,9 +76,31 @@ def projected_stockout_iso(now: datetime, days_left: float) -> Optional[str]:
 
 
 def _order_status_excluded(status: Any) -> bool:
-    """Orders in these states never count toward demand (no real sale)."""
-    s = str(status or "").upper()
-    return s in {"CANCELLED", "DRAFT", "VOID", "VOIDED", "REFUNDED"}
+    """A sale counts only while the order is BOOKED (online_order_status.
+    BOOKED_STATUSES, the set every revenue reader shares): drafts, cancelled,
+    void, refunded and imported history never do."""
+    from api.services.online_order_status import BOOKED_STATUSES
+
+    return str(status or "").upper() not in BOOKED_STATUSES
+
+
+def _fulfilment_shops(order: Dict[str, Any]):
+    """(per-product breakdown {pid: [[shop, qty], ...]}, fallback shop) for an
+    order. An online order is counted at the shop(s) that fulfilled it
+    (fulfillment_breakdown, else the first of fulfillment_stores), never at
+    the online store; anything else at its own store_id."""
+    split: Dict[str, List[List[Any]]] = {}
+    for b in order.get("fulfillment_breakdown") or []:
+        if isinstance(b, dict) and b.get("product_id") and b.get("store_id"):
+            try:
+                n = float(b.get("qty") or 0)
+            except (TypeError, ValueError):
+                n = 0.0
+            if n > 0:
+                split.setdefault(str(b["product_id"]), []).append([str(b["store_id"]), n])
+    stores = [s for s in order.get("fulfillment_stores") or [] if s]
+    fallback = stores[0] if stores else (order.get("store_id") or order.get("store") or "UNKNOWN")
+    return split, str(fallback)
 
 
 def tally_demand_by_product_store(
@@ -132,7 +128,7 @@ def tally_demand_by_product_store(
         created = _coerce_dt(order.get("created_at"))
         if created is None or created < cut30:
             continue
-        store_id = order.get("store_id") or order.get("store") or "UNKNOWN"
+        split, fallback = _fulfilment_shops(order)
         in7 = created >= cut7
         for item in order.get("items") or []:
             pid = item.get("product_id") or item.get("sku")
@@ -147,26 +143,38 @@ def tally_demand_by_product_store(
                 qty = 1.0
             if qty <= 0:
                 continue
-            key = (pid, str(store_id))
-            slot = out.get(key)
-            if slot is None:
-                slot = out[key] = {
-                    "units_7d": 0.0,
-                    "units_30d": 0.0,
-                    "name": item.get("product_name") or item.get("name") or "",
-                    "brand": item.get("brand") or "",
-                    "category": item.get("category") or "",
-                }
-            slot["units_30d"] += qty
-            if in7:
-                slot["units_7d"] += qty
-            # First non-empty descriptor wins (some lines omit them).
-            if not slot["name"]:
-                slot["name"] = item.get("product_name") or item.get("name") or ""
-            if not slot["brand"]:
-                slot["brand"] = item.get("brand") or ""
-            if not slot["category"]:
-                slot["category"] = item.get("category") or ""
+            # The line's pieces go to the shops that sent them, the rest to
+            # the fallback shop.
+            parts: List[tuple] = []
+            for share in split.get(pid, []):
+                take = min(qty, share[1])
+                if take > 0:
+                    parts.append((share[0], take))
+                    share[1] -= take
+                    qty -= take
+            if qty > 0:
+                parts.append((fallback, qty))
+            for store_id, n in parts:
+                key = (pid, store_id)
+                slot = out.get(key)
+                if slot is None:
+                    slot = out[key] = {
+                        "units_7d": 0.0,
+                        "units_30d": 0.0,
+                        "name": item.get("product_name") or item.get("name") or "",
+                        "brand": item.get("brand") or "",
+                        "category": item.get("category") or "",
+                    }
+                slot["units_30d"] += n
+                if in7:
+                    slot["units_7d"] += n
+                # First non-empty descriptor wins (some lines omit them).
+                if not slot["name"]:
+                    slot["name"] = item.get("product_name") or item.get("name") or ""
+                if not slot["brand"]:
+                    slot["brand"] = item.get("brand") or ""
+                if not slot["category"]:
+                    slot["category"] = item.get("category") or ""
     return out
 
 

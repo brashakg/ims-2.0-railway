@@ -196,7 +196,6 @@ export function InventoryLayout() {
     {
       id: 'health', label: 'Stock health', icon: AlertTriangle,
       entries: [
-        { path: '/inventory/low-stock', label: 'Low stock', icon: AlertTriangle, count: lowStockCount },
         { path: '/inventory/non-moving', label: 'Non-moving', icon: TrendingDown },
         { path: '/inventory/aging', label: 'Stock aging', icon: Clock },
         { path: '/inventory/alerts', label: 'Alerts', icon: AlertTriangle },
@@ -205,7 +204,8 @@ export function InventoryLayout() {
     {
       id: 'ops', label: 'Operations', icon: ShoppingCart,
       entries: [
-        { path: '/inventory/reorders', label: 'Reorders', icon: ShoppingCart },
+        // S5: THE Reorder list (Low stock, Replenishment and Buy Desk merged).
+        { path: '/inventory/reorders', label: 'Reorder', icon: ShoppingCart, manageOnly: true },
         { path: '/inventory/transfers', label: 'Transfers', icon: ArrowRightLeft },
         { path: '/inventory/movements', label: 'Movements', icon: Eye },
         { path: '/inventory/rebalance', label: 'Rebalance', icon: ArrowRightLeft },

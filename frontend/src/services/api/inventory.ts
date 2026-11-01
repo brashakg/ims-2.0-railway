@@ -1162,7 +1162,70 @@ export interface VarianceLine {
 // Reorder Settings API (per-product reorder configuration)
 // ============================================================================
 
+/** The product-wide settings + this shop's level, carried on every row. */
+interface ReorderSettingsFields {
+  product_id: string;
+  sku: string;
+  name: string;
+  store_id: string;
+  store_name: string;
+  /** This shop's level; null = not set. */
+  level: number | null;
+  reorder_quantity: number | null;
+  max_stock: number | null;
+  lead_time_days: number | null;
+}
+
+/** One line of THE Reorder list (GET /inventory/reorder-list, S5). Every
+ *  number is the server's: `buy` is THE buy rule (reorder_policy.buy_qty). */
+export interface ReorderRow extends ReorderSettingsFields {
+  brand: string;
+  /** The preferred vendor, else the vendor of the last PO / receipt
+   *  (vendor_source says which); null = choose one before drafting. */
+  vendor_id: string | null;
+  vendor_name: string;
+  vendor_source: 'preferred' | 'last order' | null;
+  basis: 'level' | 'sales';
+  sold_30d: number;
+  on_hand: number;
+  /** On SENT orders: already taken off `buy`. */
+  on_order: number;
+  /** On drafts nobody sent: shown, never taken off (owner D11). */
+  in_draft: number;
+  runs_out_days: number | null;
+  band: 'out-of-stock' | 'critical' | 'low' | 'healthy' | 'not-set';
+  /** 0 = tracked and healthy (or covered by sent orders): nothing to buy. */
+  buy: number;
+  /** Other shops' spare pieces SHARED OUT to this row (never offered twice). */
+  transfer_from: Array<{ store_id: string; store_name: string; qty: number }>;
+  transfer_qty: number;
+  /** The shared-out pieces cover the whole buy: a transfer instead. */
+  transfer_instead: boolean;
+  /** At cost; sent to the cost roles only. */
+  unit_cost?: number | null;
+  est_value?: number | null;
+}
+
+export interface ReorderSkipped extends ReorderSettingsFields {
+  reason: 'discontinued' | 'auto-reorder off' | 'catalogue incomplete';
+  missing?: string[];
+}
+
 export const reorderApi = {
+  /** THE Reorder list for one shop, or every shop (admins, storeId empty). */
+  getList: async (storeId?: string) => {
+    const response = await api.get('/inventory/reorder-list', {
+      params: storeId ? { store_id: storeId } : {},
+    });
+    return response.data as {
+      store_id: string | null;
+      rows: ReorderRow[];
+      skipped: ReorderSkipped[];
+      /** Products (not discontinued) with auto-reorder off: never suggested. */
+      auto_reorder_off: number;
+    };
+  },
+
   /** ONE shop's reorder level (owner ruling D12: levels are per shop).
    *  null clears it = not set = no low-stock alert. */
   setShopLevel: async (productId: string, storeId: string, level: number | null) => {
@@ -1175,11 +1238,8 @@ export const reorderApi = {
 
   updateReorderSettings: async (
     productId: string,
-    settings: {
-      reorder_quantity: number;
-      max_stock: number;
-      lead_time_days: number;
-    }
+    // Only the fields the person changed (0 = not set for the last two).
+    settings: { reorder_quantity?: number; max_stock?: number; lead_time_days?: number }
   ) => {
     // Persist the product's chain-wide reorder settings via the SINGLE
     // validated product-update path (`PUT /products/{id}` in

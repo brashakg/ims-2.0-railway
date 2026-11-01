@@ -543,7 +543,7 @@ interface TransferRec {
   to_store: string;
   quantity: number;
   to_store_qty: number;
-  from_store_qty: number;
+  from_store_name?: string;
 }
 interface ShrinkRow {
   store_id: string;
@@ -588,7 +588,7 @@ export function TransferRecommendationsWidget() {
         <h3 className="text-lg font-semibold text-gray-900 mb-1 flex items-center gap-2">
           <ArrowLeftRight className="w-5 h-5" /> Suggested inter-store transfers
         </h3>
-        <p className="text-sm text-gray-500 mb-4">Refill this store's low/out products from stores holding a surplus.</p>
+        <p className="text-sm text-gray-500 mb-4">The Reorder list's transfer hints: other shops' spare pieces, shared out over the short shops.</p>
         {recs.length === 0 ? (
           <p className="text-sm text-gray-400 py-4">No transfers suggested — nothing is below reorder, or no other store has spare stock.</p>
         ) : (
@@ -607,7 +607,7 @@ export function TransferRecommendationsWidget() {
                 {recs.map((r) => (
                   <tr key={`${r.product_id}-${r.from_store}`} className="border-b border-gray-100">
                     <td className="px-3 py-2 text-gray-900">{r.product_name || r.product_id}</td>
-                    <td className="px-3 py-2"><span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 text-xs">{r.from_store} ({r.from_store_qty})</span></td>
+                    <td className="px-3 py-2"><span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 text-xs">{r.from_store_name || r.from_store}</span></td>
                     <td className="px-3 py-2"><span className="px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs">{r.to_store}</span></td>
                     <td className="px-3 py-2 text-right font-semibold text-gray-900">{r.quantity}</td>
                     <td className="px-3 py-2 text-right text-red-600">{r.to_store_qty}</td>
