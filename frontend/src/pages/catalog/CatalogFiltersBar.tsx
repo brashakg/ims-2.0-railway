@@ -9,11 +9,14 @@ import { useState, type ReactNode } from 'react';
 import { Search, SlidersHorizontal, X } from 'lucide-react';
 import clsx from 'clsx';
 import type { CatalogFacets } from '../../services/api/products';
+import { MultiSelect, type MultiOption as Option } from '../../components/common/MultiSelect';
 import { CATEGORY_BROWSE_OPTIONS } from '../../utils/categoryNormalize';
 import {
   ATTRIBUTE_FILTERS,
   FLAG_TYPES,
   isDay,
+  joinList,
+  listOf,
   QUICK_DATES,
   SORT_OPTIONS,
   activeChips,
@@ -24,57 +27,11 @@ import {
   clearFilters,
   type AttributeKey,
   type CatalogFilters,
-  type FlagFilter,
   type QuickDate,
   type SortKey,
 } from './catalogListState';
 
-/** A filter choice; `count` is shown when the server counted it. */
-type Option = { value: string; count?: number; label?: string };
-
 const label = 'flex flex-col gap-1 text-[11px] font-medium uppercase tracking-[.06em] text-gray-500';
-
-/** A select whose options are the server's values with counts. The current
- *  value stays selectable even when it has no rows now (a shared link). */
-function OptionSelect({
-  title,
-  anyLabel,
-  value,
-  options,
-  onChange,
-  extra,
-  width = 'w-40',
-}: {
-  title: string;
-  anyLabel: string;
-  value: string;
-  options: Option[] | undefined;
-  onChange: (v: string) => void;
-  extra?: Option[];
-  width?: string;
-}) {
-  const list = [...(options || []), ...(extra || [])];
-  const known = !value || list.some((o) => o.value === value);
-  return (
-    <label className={label}>
-      <span>{title}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={clsx('input-field normal-case tracking-normal', width)}
-      >
-        <option value="">{anyLabel}</option>
-        {list.map((o) => (
-          <option key={o.value} value={o.value}>
-            {o.label || o.value}
-            {o.count === undefined ? '' : ` (${o.count.toLocaleString('en-IN')})`}
-          </option>
-        ))}
-        {!known && <option value={value}>{value}</option>}
-      </select>
-    </label>
-  );
-}
 
 /** Chrome reports a year still being typed as 0002, 0020, 0202: no day yet.
  *  A value already applied (the address) is never "still typing". */
@@ -257,7 +214,7 @@ export function CatalogFiltersBar({
       </div>
 
       <div className="flex flex-wrap items-end gap-2">
-        <OptionSelect
+        <MultiSelect
           title="Brand"
           anyLabel="All brands"
           value={f.brand}
@@ -267,19 +224,28 @@ export function CatalogFiltersBar({
         />
         {spine && (
           <>
-            <OptionSelect
+            <MultiSelect
               title="Frame colour"
               anyLabel="Any colour"
               value={f.frame_color}
               options={facets?.frame_color}
               onChange={(v) => set({ frame_color: v })}
             />
-            <OptionSelect
+            {/* Owner 2026-11-01: both people filters on the main row, side by
+                side -- ticks OR inside one, the two AND together. */}
+            <MultiSelect
               title="Added by"
               anyLabel="Anyone"
               value={f.added_by}
               options={facets?.created_by}
               onChange={(v) => set({ added_by: v })}
+            />
+            <MultiSelect
+              title="Last edited by"
+              anyLabel="Anyone"
+              value={f.edited_by}
+              options={facets?.updated_by}
+              onChange={(v) => set({ edited_by: v })}
             />
             <label className={label}>
               <span>Date added</span>
@@ -303,21 +269,26 @@ export function CatalogFiltersBar({
                 )}
               </select>
             </label>
-            <label className={label}>
-              <span>Flags - needs work</span>
-              <select
-                value={f.flag}
-                onChange={(e) => set({ flag: e.target.value as FlagFilter })}
-                className="input-field w-48 normal-case tracking-normal"
-              >
-                <option value="">Any</option>
-                {flagOptions.map((o) => (
-                  <option key={o.value} value={o.value}>
-                    {o.label} ({(o.count ?? 0).toLocaleString('en-IN')})
-                  </option>
-                ))}
-              </select>
-            </label>
+            <MultiSelect
+              title="Flags - needs work"
+              anyLabel="Any"
+              value={f.flag}
+              options={flagOptions}
+              onChange={(v) => {
+                // Archived (deleted) is a view of its own, never mixed with
+                // live flags: ticking it clears the rest, ticking another
+                // flag clears it.
+                const next = v.split(',').filter(Boolean);
+                const had = f.flag.split(',').includes('archived');
+                const flag = !next.includes('archived') || next.length === 1
+                  ? v
+                  : had
+                    ? next.filter((x) => x !== 'archived').join(',')
+                    : 'archived';
+                set({ flag });
+              }}
+              width="w-48"
+            />
           </>
         )}
         {!photoFixed && (
@@ -352,7 +323,7 @@ export function CatalogFiltersBar({
         <div className="space-y-3 rounded-xl border border-gray-200 bg-gray-50 p-3" data-testid="more-filters">
           <div className="flex flex-wrap items-end gap-2">
             {ATTRIBUTE_FILTERS.filter((a) => a.key !== 'frame_color').map((a) => (
-              <OptionSelect
+              <MultiSelect
                 key={a.key}
                 title={a.label}
                 anyLabel={a.any}
@@ -362,13 +333,6 @@ export function CatalogFiltersBar({
                 width="w-36"
               />
             ))}
-            <OptionSelect
-              title="Last edited by"
-              anyLabel="Anyone"
-              value={f.edited_by}
-              options={facets?.updated_by}
-              onChange={(v) => set({ edited_by: v })}
-            />
           </div>
           <div className="flex flex-wrap items-end gap-2" data-testid="date-range">
             <label className={label}>
@@ -407,16 +371,24 @@ export function CatalogFiltersBar({
         >
           All
         </button>
-        {CATEGORY_BROWSE_OPTIONS.map((o) => (
-          <button
-            key={o.value}
-            type="button"
-            onClick={() => set({ category: f.category === o.value ? '' : o.value })}
-            className={clsx('ims-chip', f.category === o.value && 'ims-chip--on')}
-          >
-            {o.label}
-          </button>
-        ))}
+        {CATEGORY_BROWSE_OPTIONS.map((o) => {
+          // Multi-select too: each chip ticks / unticks its category.
+          const cats = listOf(f.category);
+          const on = cats.includes(o.value);
+          return (
+            <button
+              key={o.value}
+              type="button"
+              aria-pressed={on}
+              onClick={() =>
+                set({ category: joinList(on ? cats.filter((c) => c !== o.value) : [...cats, o.value]) })
+              }
+              className={clsx('ims-chip', on && 'ims-chip--on')}
+            >
+              {o.label}
+            </button>
+          );
+        })}
       </div>
 
       {chips.length > 0 && (

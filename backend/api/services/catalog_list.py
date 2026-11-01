@@ -17,8 +17,12 @@ rows that option shows:
                         by the Recently edited sort, the Last edited range
                         and the Added column (as last_edited_at); written
                         only through edit_stamp, with who made it.
-  * list_query       -- every filter, AND-ed; archived (deleted) products only
-                        under the admins' Flags: Archived option.
+  * choices          -- every option filter is a tick-box multi-select
+                        (owner 2026-11-01): 'a,b' ticks a OR b; one value
+                        is an old single-value link. Capped (MAX_CHOICES).
+  * list_query       -- every filter, AND-ed (the ticks inside one filter
+                        OR-ed); archived (deleted) products only under the
+                        admins' Flags: Archived option.
   * stamp_people     -- the full name of who added / last edited a product,
                         from users, falling back to the name stored on it.
 
@@ -142,9 +146,35 @@ _WS_RUN = "[" + _WS + "]*"
 VALUE_MAX = 120
 
 
-def same_value(text: str) -> Dict[str, Any]:
-    """The stored value equals `text`, trimmed (_WS) and case-insensitive."""
-    return {"$regex": "^" + _WS_RUN + re.escape(text.strip(_WS)) + _WS_RUN + "$", "$options": "i"}
+# Ticks one filter takes. Far past any real choice, and no address builds a
+# huge $in or regex.
+MAX_CHOICES = 50
+# The longest raw multi-value parameter (GET /products Query max_length).
+LIST_MAX = MAX_CHOICES * (VALUE_MAX + 1)
+
+
+def choices(raw: Any) -> List[str]:
+    """A filter's ticked values from 'a,b,c' (one value = an old single-value
+    link): trimmed, blanks and repeats dropped. Raises ValueError, in plain
+    words, past MAX_CHOICES ticks or for a value past VALUE_MAX.
+    ponytail: a comma splits, so a stored value holding a comma is ticked as
+    its parts; none in the catalogue does -- escape commas if one ever must."""
+    if not isinstance(raw, str):
+        return []
+    out = list(dict.fromkeys(p.strip() for p in raw.split(",") if p.strip()))
+    if len(out) > MAX_CHOICES:
+        raise ValueError(f"Tick at most {MAX_CHOICES} options in one filter.")
+    if any(len(p) > VALUE_MAX for p in out):
+        raise ValueError(f"An option is longer than {VALUE_MAX} characters.")
+    return out
+
+
+def same_value(texts: Any) -> Dict[str, Any]:
+    """The stored value equals `texts` (one, or any of a list), trimmed (_WS)
+    and case-insensitive."""
+    many = [texts] if isinstance(texts, str) else list(texts)
+    alts = "|".join(re.escape(t.strip(_WS)) for t in many)
+    return {"$regex": "^" + _WS_RUN + "(?:" + alts + ")" + _WS_RUN + "$", "$options": "i"}
 
 
 def _day(text: Optional[str]) -> Optional[date]:
@@ -192,47 +222,64 @@ def _range(gte, lt) -> Dict[str, Any]:
     return out
 
 
+def _flag_clause(flag: str, me: Optional[str]) -> Dict[str, Any]:
+    """One Flags tick: 'archived' (the deleted products -- the only place they
+    show), 'any' (an open flag), 'mine' (an open flag on a product `me`
+    added) or a flag type."""
+    if flag == "archived":
+        return ARCHIVED
+    if flag == "any":
+        return {"$and": [NOT_ARCHIVED, open_flag()]}
+    if flag == "mine":
+        return {"$and": [NOT_ARCHIVED, open_flag(), {"created_by": me or "-"}]}
+    return {"$and": [NOT_ARCHIVED, open_flag(flag)]}
+
+
 def list_query(
     *,
-    category: Optional[str] = None,
-    brand: Optional[str] = None,
+    category: Iterable[str] = (),
+    brand: Iterable[str] = (),
     is_active: Optional[bool] = True,
-    created_by: Optional[str] = None,
-    updated_by: Optional[str] = None,
-    attributes: Optional[Dict[str, str]] = None,
+    created_by: Iterable[str] = (),
+    updated_by: Iterable[str] = (),
+    attributes: Optional[Dict[str, Iterable[str]]] = None,
     date_on: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
-    flag: Optional[str] = None,
+    flag: Iterable[str] = (),
     me: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Every chosen filter, AND-ed. `flag`: 'any' (an open flag), 'mine' (an
-    open flag on a product `me` added), a flag type, or 'archived' (the
-    deleted products -- the only place they show; the caller checks the
-    role). Raises ValueError for a bad date range."""
+    """Every chosen filter, AND-ed; the ticks inside one filter (lists, from
+    choices) OR-ed. `flag` ticks: see _flag_clause (the caller checks the
+    role for 'archived'). Raises ValueError for a bad date range."""
     clauses: List[Dict[str, Any]] = []
-    if flag == "archived":
-        clauses.append(ARCHIVED)
-    else:
-        clauses.append(NOT_ARCHIVED)
+    flags = list(flag or [])
+    if flags:
         # A flag reaches its cataloguer whether the product is on sale or not
         # (a provisional PO buy is born inactive): the Flags filter lists
         # flagged products active or not, as the banner counts them.
-        if is_active is not None and not flag:
+        clauses.append({"$or": [_flag_clause(f, me) for f in flags]})
+    else:
+        clauses.append(NOT_ARCHIVED)
+        if is_active is not None:
             clauses.append({"is_active": is_active})
+    category, brand = list(category or []), list(brand or [])
     if category:
-        clauses.append({"category": category})
+        clauses.append({"category": {"$in": category}})
     if brand:
         clauses.append({"brand": same_value(brand)})
+    created_by = list(created_by or [])
     if created_by:
-        clauses.append({"created_by": created_by})
-    if updated_by == NEVER_EDITED:
-        clauses.append({"updated_by": {"$in": [None, ""]}})
-    elif updated_by:
-        clauses.append({"updated_by": updated_by})
-    for param, value in (attributes or {}).items():
-        if value and param in ATTRIBUTE_FILTERS:
-            clauses.append({ATTRIBUTE_FILTERS[param]: same_value(value)})
+        clauses.append({"created_by": {"$in": created_by}})
+    editors = list(updated_by or [])
+    if editors:
+        people = [u for u in editors if u != NEVER_EDITED]
+        never = [None, ""] if NEVER_EDITED in editors else []
+        clauses.append({"updated_by": {"$in": people + never}})
+    for param, values in (attributes or {}).items():
+        values = list(values or [])
+        if values and param in ATTRIBUTE_FILTERS:
+            clauses.append({ATTRIBUTE_FILTERS[param]: same_value(values)})
     if date_from or date_to:
         gte, lt = ist_day_bounds(date_from, date_to)
         if date_on == "edited":
@@ -247,12 +294,6 @@ def list_query(
             clauses.append({"$expr": {"$and": cond}})
         elif gte is not None or lt is not None:
             clauses.append({"created_at": _range(gte, lt)})
-    if flag == "any":
-        clauses.append(open_flag())
-    elif flag == "mine":
-        clauses += [open_flag(), {"created_by": me or "-"}]
-    elif flag and flag != "archived":
-        clauses.append(open_flag(flag))
     return {"$and": clauses}
 
 
@@ -368,13 +409,14 @@ def stamp_people(db, docs: Iterable[Dict[str, Any]]) -> None:
 def _value_options(values: Iterable[Any]) -> List[Dict[str, Any]]:
     """Distinct values with counts, grouped the way same_value matches them;
     each option shows its most common spelling. A value longer than
-    VALUE_MAX is no option (no filter could take it). ponytail: such a
-    product still lists unfiltered; nothing in the catalogue comes close."""
+    VALUE_MAX is no option (no filter could take it), nor is a value with a
+    comma (ticks join on ',', so it would come back as two values). ponytail:
+    such a product still lists unfiltered; escape commas if one ever matters."""
     counts: Counter = Counter()
     spellings: Dict[str, Counter] = defaultdict(Counter)
     for v in values:
         v = v.strip(_WS) if isinstance(v, str) else ""
-        if not v or len(v) > VALUE_MAX:
+        if not v or len(v) > VALUE_MAX or "," in v:
             continue
         key = v.lower()
         counts[key] += 1

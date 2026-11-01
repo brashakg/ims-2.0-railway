@@ -151,6 +151,14 @@ def capability_for(method: str, path: str) -> Optional[str]:
     if tmpl in ("/api/v1/catalog/products/{product_id}/permanent",
                 "/api/v1/catalog/products/bulk-purge"):
         return "catalog:purge"
+    # Curated finer capability: SUPERADMIN sets ANY user's password (owner ask
+    # 2026-11-01). Its only route is SUPERADMIN-only, so _build_universe makes
+    # the key UNGRANTABLE: a per-user grant of users:write (which ADMIN's
+    # temporary-password reset rides) can never reach a full account takeover.
+    # A deny of users:write / the users module still answers it:
+    # PARENT_CAPABILITY.
+    if tmpl == "/api/v1/users/{user_id}/set-password":
+        return "users:set-password"
     # Curated finer capability: LOGGING a vendor return. Owner ruling
     # 2026-10-12 lets WORKSHOP_STAFF log one (unpriced); on the generic
     # vendor-returns:write key they would join the approve / ship / credit
@@ -192,6 +200,9 @@ PARENT_CAPABILITY: Dict[str, str] = {
     "vendor-returns:create": "vendor-returns:write",
     "vendor-returns:confirm-credit": "vendor-returns:write",
     "vendor-rma:confirm-credit": "vendor-rma:write",
+    # A parent GRANT never lifts it: the resolver refuses any grant of an
+    # ungrantable key, and users:set-password is SUPERADMIN-only.
+    "users:set-password": "users:write",
     "returns:advance-refund": "returns:write",
     "returns:complete-record": "returns:write",
 }

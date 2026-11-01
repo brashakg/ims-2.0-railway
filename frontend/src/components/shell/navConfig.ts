@@ -13,7 +13,6 @@ import {
   STOCK_LOOKUP_ROLES,
   INVENTORY_MODULE_ROLES,
   INVENTORY_MANAGE_ROLES,
-  POWER_GRID_ROLES,
   REORDER_LIST_ROLES,
 } from '../../pages/inventory/inventoryRoles';
 import { RECEIVING_MANAGER_ROLES } from '../../pages/purchase/purchaseTypes';
@@ -31,6 +30,9 @@ export interface NavItem {
   external?: boolean; // render as <a target=_blank> instead of an in-app route
   /** Live count rendered after the label (NavBadge) — a work list's size. */
   badge?: NavBadgeKey;
+  /** Heading the row sits under inside its dropdown (TopNav shows headings
+   *  only when the role's list is long - see TopNav.tsx). */
+  section?: string;
 }
 
 export interface NavGroup {
@@ -106,51 +108,52 @@ export const NAV_GROUPS: NavGroup[] = [
       // no menu entry and no in-app link, so the only way in was to type the
       // address. The module's seventeen sections live behind the Inventory
       // entry, which now lands on the stock ledger.
-      { id: 'inventory', label: 'Inventory', to: '/inventory/stock', icon: 'box', requireRoles: INVENTORY_MODULE_ROLES },
+      { id: 'inventory', label: 'Inventory', to: '/inventory/stock', icon: 'box', requireRoles: INVENTORY_MODULE_ROLES, section: 'Stock and buying' },
       // D7b: the counter's read-only stock lookup (this shop, other shops, in transit).
-      { id: 'stock-lookup', label: 'Stock Lookup', to: '/inventory/lookup', icon: 'box', requireRoles: STOCK_LOOKUP_ROLES },
-      { id: 'stock-count', label: 'Stock Count', to: '/inventory/audit', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
+      { id: 'stock-lookup', label: 'Stock Lookup', to: '/inventory/lookup', icon: 'box', requireRoles: STOCK_LOOKUP_ROLES, section: 'Stock and buying' },
+      { id: 'stock-count', label: 'Stock Count', to: '/inventory/audit', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES, section: 'Stock and buying' },
       // S5: ONE Reorder list (Buy Desk, Replenishment and Low stock merged;
       // their old addresses forward to it). Same list as its route gate.
-      { id: 'reorder', label: 'Reorder - what to buy', to: '/inventory/reorders', icon: 'cart', requireRoles: REORDER_LIST_ROLES },
-      { id: 'opening-stock', label: 'Opening Stock', to: '/inventory/opening-stock', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
-      { id: 'power-grid', label: 'Power Grid', to: '/inventory/power-grid', icon: 'box', requireRoles: POWER_GRID_ROLES },
-      { id: 'online-stock', label: 'Online Stock', to: '/inventory/online-sync', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES },
-      { id: 'purchase', label: 'Purchase - orders, receiving, bills', to: '/purchase', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'] },
+      { id: 'reorder', label: 'Reorder - what to buy', to: '/inventory/reorders', icon: 'cart', requireRoles: REORDER_LIST_ROLES, section: 'Stock and buying' },
+      { id: 'opening-stock', label: 'Opening Stock', to: '/inventory/opening-stock', icon: 'box', requireRoles: INVENTORY_MANAGE_ROLES, section: 'Stock and buying' },
+      // Power Grid and Online Stock moved inside Inventory (owner, 2026-11-01):
+      // Inventory > Optical > Lens power grid and Inventory > Operations >
+      // Online stock; optometrists open Power Grid from Stock Lookup.
+      { id: 'purchase', label: 'Purchase - orders, receiving, bills', to: '/purchase', icon: 'truck', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'], section: 'Stock and buying' },
       // Receive Goods stays in the sidebar: it is the daily-work door for
       // receiving staff (the Purchase page's per-PO "Receive" button lands on
       // the same screen with the PO prefilled). Same list as the
       // /purchase/receive route gate: managers only.
-      { id: 'grn-cockpit', label: 'Receive Goods', to: '/purchase/receive', icon: 'truck', requireRoles: [...RECEIVING_MANAGER_ROLES] },
+      { id: 'grn-cockpit', label: 'Receive Goods', to: '/purchase/receive', icon: 'truck', requireRoles: [...RECEIVING_MANAGER_ROLES], section: 'Stock and buying' },
       // De-dup (owner 2026-07-05): managers/admins reach Vendor Returns via
       // Purchase -> Vendor Returns tab; the sidebar shortcut stays ONLY for
       // WORKSHOP_STAFF, who cannot open /purchase at all.
-      { id: 'vendor-returns', label: 'Vendor Returns', to: '/purchase/vendor-returns', icon: 'refresh', requireRoles: ['WORKSHOP_STAFF'] },
-      { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'] },
+      { id: 'vendor-returns', label: 'Vendor Returns', to: '/purchase/vendor-returns', icon: 'refresh', requireRoles: ['WORKSHOP_STAFF'], section: 'Stock and buying' },
+      { id: 'workshop', label: 'Workshop', to: '/workshop', icon: 'wrench', requireRoles: ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'WORKSHOP_STAFF'], section: 'Stock and buying' },
       // Catalog Manager: the browse/review landing at /catalog ("+ Add product"
       // inside it links on to /catalog/add — no second sidebar entry).
-      { id: 'catalog', label: 'Catalog', to: '/catalog', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER'] },
+      { id: 'catalog', label: 'Catalog', to: '/catalog', icon: 'tag', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'STORE_MANAGER'], section: 'Products' },
       // Two work lists off the Catalog Manager (design 2026-08-30, built
       // 2026-09-04) — real addresses somebody can be SENT to, each with its
       // live size. Same gate as /catalog; the counts come from the server.
-      { id: 'catalog-review', label: 'Needs review', to: '/catalog/review', icon: 'clipboard', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], badge: 'catalog-review' },
-      { id: 'catalog-missing-photos', label: 'Missing photos', to: '/catalog/missing-photos', icon: 'eye', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], badge: 'catalog-missing-photos' },
+      { id: 'catalog-review', label: 'Needs review', to: '/catalog/review', icon: 'clipboard', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], badge: 'catalog-review', section: 'Products' },
+      { id: 'catalog-missing-photos', label: 'Missing photos', to: '/catalog/missing-photos', icon: 'eye', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], badge: 'catalog-missing-photos', section: 'Products' },
       // Cataloguing Scorecard + QC review (attribution phase 2). requireRoles
       // mirrors the /catalog/scorecard ProtectedRoute gate + backend rbac rows.
-      { id: 'catalog-scorecard', label: 'Scorecard', to: '/catalog/scorecard', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
+      { id: 'catalog-scorecard', label: 'Scorecard', to: '/catalog/scorecard', icon: 'chart', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'], section: 'Products' },
       // Catalog Autopilot was REMOVED entirely (owner 2026-08-30: unused). The
       // "Auto-fill from web" panel), so its standalone nav item was removed. The
       // /catalog/autopilot route still resolves (redirects to /catalog/add)
       // so old bookmarks land somewhere useful.
-      { id: 'pricing', label: 'Pricing & Offers', to: '/catalog/pricing', icon: 'coins', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'] },
+      { id: 'pricing', label: 'Pricing & Offers', to: '/catalog/pricing', icon: 'coins', requireRoles: ['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER'], section: 'Products' },
       // Collections Phase 1: merchandising view over the ecom collections
       // system — governed chip builder + per-collection stock/sales KPIs.
       // requireRoles mirrors the /collections ProtectedRoute gate in App.tsx.
-      { id: 'collections', label: 'Collections', to: '/collections', icon: 'layers', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'] },
+      { id: 'collections', label: 'Collections', to: '/collections', icon: 'layers', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER'], section: 'Products' },
       // Share Catalogue: pick products -> share as PDF / save a temporary set.
       // Broad staff surface (anyone helping a customer); mirrors the
       // /catalog/quick-share ProtectedRoute gate + AUTHENTICATED backend routes.
-      { id: 'quick-share', label: 'Share Catalogue', to: '/catalog/quick-share', icon: 'file', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'OPTOMETRIST', 'CASHIER'] },
+      { id: 'quick-share', label: 'Share Catalogue', to: '/catalog/quick-share', icon: 'file', requireRoles: ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'SALES_STAFF', 'SALES_CASHIER', 'OPTOMETRIST', 'CASHIER'], section: 'Products' },
     ],
   },
   {

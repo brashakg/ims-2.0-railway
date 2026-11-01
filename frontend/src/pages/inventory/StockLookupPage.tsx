@@ -87,7 +87,13 @@ export default function StockLookupPage() {
 
   return (
     <div className="p-4 md:p-6 max-w-6xl mx-auto">
-      <h1 className="text-xl font-semibold text-gray-900">Stock lookup</h1>
+      <div className="flex items-center justify-between gap-2">
+        <h1 className="text-xl font-semibold text-gray-900">Stock lookup</h1>
+        {/* The optometrist's door to Power Grid (no menu row since 2026-11-01). */}
+        {canOpenGrid && (
+          <Link to="/inventory/power-grid" className="text-sm text-blue-700 underline">Power Grid</Link>
+        )}
+      </div>
       <p className="text-sm text-gray-500 mb-4">
         Search by brand, model or SKU, or scan the barcode. Shows what the till can sell now at every shop.
       </p>

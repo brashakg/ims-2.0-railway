@@ -31,7 +31,8 @@
 //      browser profile, and logging out one tab would kill the shared token
 //      under their feet.
 //
-// enabled === false makes the hook a COMPLETE no-op: no timers, no listeners.
+// enabled === false: no timers, no listeners, and the stored stamp is dropped
+// (nothing refreshes it while off, so re-enabling must start a fresh clock).
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -100,15 +101,32 @@ function _now(): number {
   return Date.now();
 }
 
-function _readLastActivity(): number {
+function _storedActivity(): number | null {
   try {
-    const raw = localStorage.getItem(LAST_ACTIVITY_KEY);
-    const n = raw ? parseInt(raw, 10) : NaN;
-    if (Number.isFinite(n) && n > 0) return n;
+    const n = parseInt(localStorage.getItem(LAST_ACTIVITY_KEY) || '', 10);
+    return Number.isFinite(n) && n > 0 ? n : null;
   } catch {
-    /* ignore */
+    return null;
   }
-  return _now();
+}
+
+function _readLastActivity(): number {
+  return _storedActivity() ?? _now();
+}
+
+/**
+ * True when the STORED last-activity stamp is already past the idle limit -
+ * e.g. the browser was closed for longer than the timeout. No stamp -> false.
+ * AuthContext checks this before resuming a stored session on page load.
+ */
+export function storedSessionIdleExpired(policy: {
+  enabled: boolean;
+  minutes: number;
+  warnSeconds: number;
+}): boolean {
+  const ts = _storedActivity();
+  if (ts === null) return false;
+  return computeIdleState(_now() - ts, policy.minutes, policy.warnSeconds, policy.enabled).expired;
 }
 
 function _writeLastActivity(ts: number): void {
@@ -188,19 +206,30 @@ export function useIdleLogout(opts: UseIdleLogoutOptions): UseIdleLogoutResult {
   }, []);
 
   useEffect(() => {
-    // Disabled -> COMPLETE no-op. No timers, no listeners, reset any state.
+    // Disabled -> no timers, no listeners, reset any state. Also DROP the
+    // stored stamp: nothing refreshes it while off, so when an admin turns
+    // auto-logout back on the stale stamp would sign out someone who was
+    // working all along. No stamp -> the enabled run below seeds a fresh one.
     if (!enabled) {
       warningRef.current = false;
       setWarning(false);
       setRemainingSec(0);
+      try {
+        localStorage.removeItem(LAST_ACTIVITY_KEY);
+      } catch {
+        /* ignore */
+      }
       return;
     }
 
     loggedOutRef.current = false;
     lastWriteRef.current = 0;
     warningRef.current = false;
-    // Seed the activity clock on (re)mount so a fresh load starts the timer now.
-    _writeLastActivity(_now());
+    // Seed the activity clock ONLY when none is stored. Overwriting it on every
+    // mount hid the real idle time of a reopened tab / browser (owner 11-01:
+    // reopened Chrome after ~20 min, still signed in) - the first tick must see
+    // how long the session has really been idle. login() writes a fresh stamp.
+    if (_storedActivity() === null) _writeLastActivity(_now());
 
     const handleActivity = () => recordActivity();
 

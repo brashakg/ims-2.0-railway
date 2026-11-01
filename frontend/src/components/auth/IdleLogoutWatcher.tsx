@@ -17,7 +17,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import { useIdleLogout } from '../../hooks/useIdleLogout';
-import { usePOSStore } from '../../stores/posStore';
+import { autoParkForIdleLogout, IDLE_LOGIN_PATH } from '../../hooks/idleSignOut';
 import { loadSessionPolicy, getSessionPolicy, type SessionPolicy } from '../../constants/sessionPolicy';
 
 function formatMMSS(totalSeconds: number): string {
@@ -46,24 +46,11 @@ export function IdleLogoutWatcher() {
   }, []);
 
   const handleLogout = () => {
-    // Non-destructive: AUTO-PARK any in-progress POS sale BEFORE logging out so
-    // the cart is never lost (logout's clearAllOnLogout clears the draft but
-    // keeps parked bills). Wrapped so a park failure can never block logout.
-    try {
-      const heldId = usePOSStore
-        .getState()
-        .parkCurrentSale({ auto: true, heldBy: user?.id });
-      if (heldId) {
-        // eslint-disable-next-line no-console
-        console.info('[idle-logout] in-progress sale auto-parked before logout', heldId);
-      }
-    } catch {
-      /* never let a park error block the logout */
-    }
-    // Clear auth state, then route to login with the idle reason. logout() is
-    // async (best-effort server call) but we don't need to await it to navigate.
+    // Park the POS cart first (shared with the page-load check in AuthContext),
+    // then logout() - async best-effort server call, no need to await it.
+    autoParkForIdleLogout(user?.id);
     void logout();
-    navigate('/login?reason=idle', { replace: true });
+    navigate(IDLE_LOGIN_PATH, { replace: true });
   };
 
   const { warning, remainingSec, stayActive } = useIdleLogout({

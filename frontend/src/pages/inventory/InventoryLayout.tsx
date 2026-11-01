@@ -211,6 +211,9 @@ export function InventoryLayout() {
         { path: '/inventory/rebalance', label: 'Rebalance', icon: ArrowRightLeft },
         { path: '/inventory/audit', label: 'Stock count', icon: Barcode, manageOnly: true },
         { path: '/inventory/quarantine', label: 'Quarantine', icon: AlertTriangle, count: quarantineUnlabeled || undefined },
+        // Moved off the Stock & supply menu (owner, 2026-11-01).
+        { path: '/inventory/opening-stock', label: 'Opening stock', icon: Package, manageOnly: true },
+        { path: '/inventory/online-sync', label: 'Online stock', icon: Boxes, manageOnly: true },
       ],
     },
     {
