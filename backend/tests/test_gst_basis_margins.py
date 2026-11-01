@@ -254,11 +254,15 @@ def test_reports_purchase_recommendation_margin(monkeypatch):
     sales = [{"_id": "P18", "units_sold": 6, "revenue": 7080.0, "avg_price": 1180.0}]
     product = {"_id": "P18", "product_id": "P18", "name": "Sunglass", "category": "SG",
                "offer_price": 1180.0, "cost_price": 600.0, "reorder_quantity": 5}
+    # The last 30 days' sales THE buy rule reads (S5: no level -> 30-day sales).
+    from datetime import datetime, timedelta
+    orders = [{"store_id": "S1", "status": "DELIVERED",
+               "created_at": datetime.utcnow() - timedelta(days=2),
+               "items": [{"product_id": "P18", "quantity": 6}]}]
     monkeypatch.setattr(recs, "get_db", lambda: _Db(agg={"orders": sales},
-                                                    products=[product]))
+                                                    products=[product], orders=orders))
     body = asyncio.run(recs.purchase_recommendations(
-        store_id="S1", lookback_days=90, lead_time_days=7, reorder_cycle_days=30,
-        safety_buffer_days=7, min_velocity=1, limit=50, current_user=SU))
+        store_id="S1", lookback_days=90, min_velocity=1, limit=50, current_user=SU))
     rec = body["recommendations"][0]
     assert rec["unit_margin"] == 400.0  # 1180 / 1.18 - 600, not 1180 - 600
     assert rec["estimated_margin"] == round(rec["suggested_order_qty"] * 400.0, 2)
