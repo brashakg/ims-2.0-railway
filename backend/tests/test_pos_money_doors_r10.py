@@ -92,7 +92,7 @@ def test_p2_a_raised_write_with_no_guard_yet_is_left_pending_not_voided(till, mo
     from pymongo.errors import AutoReconnect
 
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number) or True)
     custs = _customer(till)
     real_upd = custs.update_one
     pending = []
@@ -116,7 +116,7 @@ def test_p2_a_raised_write_with_no_guard_yet_is_left_pending_not_voided(till, mo
 
 def test_p3_a_void_racing_a_landed_move_heals_and_writes_nothing_off(till, monkeypatch):
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number) or True)
     _customer(till, store_credit=200.0, store_credit_refs=["E-9"])  # the press's $inc landed
     _ledger(till).insert_one({"_id": "E-9", "entry_id": "E-9", "customer_id": "CUST-1", "type": "ISSUING",
                               "final_type": "ISSUED", "applied": False, "delta": 200.0,
@@ -130,7 +130,7 @@ def test_p3_a_void_racing_a_landed_move_heals_and_writes_nothing_off(till, monke
 
 def test_p4_a_second_void_of_the_same_row_writes_nothing_off_again(till, monkeypatch):
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number) or True)
     _customer(till)
     _ledger(till).insert_one({"_id": "E-8", "entry_id": "E-8", "customer_id": "CUST-1", "type": "ISSUING",
                               "final_type": "ISSUED", "applied": False, "delta": 200.0,
@@ -209,7 +209,7 @@ async def test_a_superadmin_note_that_cannot_be_confirmed_keeps_the_order_and_th
     from api.routers.orders.models import SuperadminEditLine, SuperadminInvoiceChange
 
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number) or True)
     monkeypatch.setattr(admin_edit, "get_order_repository", lambda: till["orders"])
     monkeypatch.setattr(admin_edit, "next_document_number", lambda *a, **k: "TST01/C2627/0042")
     monkeypatch.setattr(admin_edit, "_write_order_edit_audit", lambda **k: True)

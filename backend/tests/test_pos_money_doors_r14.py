@@ -97,7 +97,7 @@ def _void(till, rid="RET-V", **over):
 def test_two_reconcilers_on_one_void_give_back_once(till, monkeypatch):
     released, written_off, holds = [], [], []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
     monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: holds.append(a) or True)
     row = _void(till)
     cust_router._finish_void(_ledger(till), dict(row), "x", undo=True)
@@ -108,7 +108,7 @@ def test_two_reconcilers_on_one_void_give_back_once(till, monkeypatch):
 def test_nothing_paid_racing_the_unsettled_void_sweep_gives_back_once(till, monkeypatch):
     released, written_off = [], []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
     _bill_with_hold(till, "RET-V")
     row = _void(till)
     _complete("RET-V", nothing_paid=True)
@@ -119,7 +119,7 @@ def test_nothing_paid_racing_the_unsettled_void_sweep_gives_back_once(till, monk
 def test_a_finished_record_owns_the_claims_the_void_sweep_skips_them(till, monkeypatch):
     released = []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     till["db"].get_collection("returns").insert_one({"return_id": "RET-V", "status": "NOTHING_PAID"})
     row = _void(till)
     cust_router._finish_void(_ledger(till), dict(row), "x", undo=True)
@@ -134,7 +134,7 @@ def test_a_lost_act_after_its_mark_is_never_repeated(till, monkeypatch):
         raise RuntimeError("died after the mark")
 
     monkeypatch.setattr(returns_router, "_release_returnable_qty", _release)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: True)
     row = _void(till)
     cust_router._finish_void(_ledger(till), dict(row), "x", undo=True)
@@ -152,7 +152,7 @@ def test_an_error_before_the_money_moves_releases_the_claims_and_writes_the_numb
     payload["refund_tenders"] = [{"method": "CASH", "amount": 1800.0}]
     released, written_off = [], []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
 
     # Round 15: the error lands AT the money-out mark (the quarantine now runs
     # after it, where an error keeps everything for a person).
@@ -273,7 +273,7 @@ def test_a_mixed_return_with_a_fee_stamps_gross_and_fee_on_its_credit_line(monke
 # =========================================================================== #
 def test_a_nothing_paid_return_no_longer_counts_and_its_replay_finishes_the_hold(till, monkeypatch):
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     _bill_with_hold(till, "RET-N")
     _complete("RET-N", nothing_paid=True)
     # The hold came back (a lost release): it does not count, nor block the bill...

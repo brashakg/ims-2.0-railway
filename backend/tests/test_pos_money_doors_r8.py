@@ -605,7 +605,7 @@ def test_no_drawer_cash_once_the_shops_day_end_is_counted(till):
 def test_a_stopped_press_number_is_written_off_by_name_once_the_next_press_wins(till, monkeypatch):
     written_off = []
     monkeypatch.setattr(returns_router, "_record_unused_credit_note",
-                        lambda number, *a, **k: written_off.append(number))
+                        lambda number, *a, **k: written_off.append(number) or True)
     _advance_order(till, invoice_number="BOK01/2627/00009", items=[dict(_LINE)])
     _crash_once(monkeypatch, till["orders"], "update_if",
                 lambda oid, exp, data, *a, **k: bool(data.get("advance_refund_credit_note")))

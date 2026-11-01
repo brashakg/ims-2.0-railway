@@ -87,8 +87,9 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
       const r = await customerApi.getStoreCreditLedger(customerId);
       setBalance(r.balance || 0);
       setEntries(r.entries || []);
-      // A kept key whose line the ledger now shows has landed: drop it.
-      const ids = new Set((r.entries || []).map((e: Entry) => e.entry_id));
+      // A kept key whose line the ledger shows FINAL (landed, or voided)
+      // is settled: drop it. A line still ISSUING (being confirmed) keeps it.
+      const ids = new Set((r.entries || []).filter((e: Entry) => e.type !== 'ISSUING').map((e: Entry) => e.entry_id));
       for (const m of ['issue', 'redeem'] as Mode[]) {
         const kept = readKept(customerId, m);
         if (kept && ids.has(lineIdOf(customerId, m, kept.key))) dropKept(customerId, m);

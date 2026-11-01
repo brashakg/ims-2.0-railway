@@ -16,7 +16,7 @@ import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
 import { refreshBillQuote, replayGuaranteed } from './billQuote';
 import { orderPayloadOf } from './orderPayload';
-import { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from './posBillKey';
+import { TILL_SALE_STILL_SAVING, TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from './posBillKey';
 import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
 import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 import { WRITE_UNCONFIRMED_MESSAGE } from '../../services/api/client';
@@ -399,6 +399,9 @@ export async function submitPosOrder(
     const { code, detail } = (err || {}) as { code?: string; detail?: unknown };
     if (code === 'DISCOUNT_NEEDS_APPROVAL') {
       return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed };
+    }
+    if (code === 'SALE_STILL_SAVING') {
+      return { ok: false, error: TILL_SALE_STILL_SAVING };
     }
     if (code && DEAD_APPROVAL_CODES.has(code)) {
       return { ok: false, error: msg, discountApprovalRejected: true };

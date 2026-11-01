@@ -212,7 +212,7 @@ def _sacn_bill(till):
 @pytest.mark.asyncio
 async def test_a_voided_superadmin_attempt_is_issued_again_under_a_new_attempt(till, monkeypatch):
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
     _customer(till)
     _sacn_bill(till)
     real = cust_router.apply_store_credit_delta
@@ -238,7 +238,7 @@ async def test_a_press_that_settles_another_presss_line_reports_that_line(till, 
     from api.routers.orders import admin_edit
 
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
     _customer(till)
     _sacn_bill(till)
     sacn = "ORD-1:sacn:50000:450000"
@@ -360,7 +360,7 @@ def test_a_ledger_read_error_refuses_cleanly_and_writes_the_number_off(till, mon
     payload["return_type"] = "CREDIT_NOTE"
     released, written_off = [], []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
     _customer(till)
     ledger = _ledger(till)
     real_find = ledger.find_one
@@ -513,7 +513,7 @@ def test_a_finish_across_a_financial_year_is_flagged(monkeypatch):
 
 def test_a_redrive_whose_conversion_did_not_match_follows_the_rows_real_state(till, monkeypatch, numbered):
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
     _customer(till, store_credit=300.0, store_credit_refs=["RET-S:credit"])
     ledger = _ledger(till)
     ledger.insert_one(_row("RET-S:credit", ref="RET-S", type=scl.ISSUED, applied=True, delta=300.0,

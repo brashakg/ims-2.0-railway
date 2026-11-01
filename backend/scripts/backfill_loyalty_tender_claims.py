@@ -94,12 +94,22 @@ def plan(db) -> dict:
         for p in order.get("payments") or []:
             if str(p.get("method") or "").upper() == "LOYALTY" and p.get("payment_id") not in used | claimed:
                 unbacked.append((order.get("order_id"), p.get("payment_id"), p.get("amount"), p.get("reference")))
+    # An unmatched burn beside an unbacked LOYALTY payment on the same bill
+    # may be the burn that payment spent (an old payment with no txn id in
+    # its reference): a CONFLICT for the owner -- never linked or stamped here.
+    unbacked_by_order: dict = {}
+    for oid, pid, amt, _ref in unbacked:
+        unbacked_by_order.setdefault(oid, []).append((pid, amt))
+    conflicts = [(txn_id, oid, pid, amt) for txn_id, oid, _due in unmatched_rows
+                 for pid, amt in unbacked_by_order.get(oid, [])]
+    conflict_ids = {c[0] for c in conflicts}
+    legacy = [t for t in legacy if t not in conflict_ids]
     no_order = txns.count_documents({"type": "REDEEM", "order_id": {"$in": [None, ""]}})
     scanned = {"redeem_rows": txns.count_documents({"type": "REDEEM"}),
                "orders": db["orders"].count_documents({})}
     return {"links": links, "unmatched": unmatched, "unbacked": unbacked, "no_order": no_order,
             "unmatched_rows": unmatched_rows, "legacy": legacy, "scanned": scanned,
-            "no_txn_id": no_txn_id}
+            "no_txn_id": no_txn_id, "conflicts": conflicts}
 
 
 LEGACY_CLAIM = "LEGACY-PRE-1088"
@@ -179,6 +189,9 @@ def main() -> int:
               + (" -> stamped LEGACY-PRE-1088 on --apply (settled bill)" if txn_id in out["legacy"] else ""))
     for oid, pid, amt, ref in out["unbacked"]:
         print(f"  [UNBACKED] order {oid} payment {pid} Rs {amt} ref {ref!r}")
+    for txn_id, oid, pid, amt in out["conflicts"]:
+        print(f"  [CONFLICT] burn {txn_id} and payment {pid} (Rs {amt}) on order {oid}: the payment may have spent "
+              "this burn - the owner decides; --apply leaves both alone")
     if not args.apply:
         print("[DRY RUN] nothing written. Re-run with --apply.")
         return 0

@@ -134,7 +134,7 @@ def test_an_inc_that_lands_then_raises_is_resolved_by_its_guard(till, monkeypatc
 @pytest.mark.parametrize("landed", [True, False])
 def test_the_reconciler_finishes_or_voids_a_stale_pending_row(till, monkeypatch, landed):
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number) or True)
     _customer(till, store_credit=200.0 if landed else 0.0, store_credit_refs=["E-1"] if landed else [])
     _ledger(till).insert_one({"_id": "E-1", "entry_id": "E-1", "customer_id": "CUST-1", "type": "ISSUING",
                               "final_type": "ISSUED", "applied": False, "delta": 200.0, "note_number": "TST01/C2627/0007",
@@ -194,7 +194,7 @@ async def test_a_superadmin_credit_note_with_no_credit_is_refused_and_written_of
     from api.routers.orders.models import SuperadminInvoiceChange, SuperadminEditLine
 
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number) or True)
     monkeypatch.setattr(admin_edit, "get_order_repository", lambda: till["orders"])
     monkeypatch.setattr(admin_edit, "next_document_number", lambda *a, **k: "TST01/C2627/0042")
     monkeypatch.setattr(admin_edit, "_write_order_edit_audit", lambda **k: True)

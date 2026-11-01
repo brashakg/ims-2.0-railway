@@ -92,3 +92,26 @@ describe('the lost-sale promise ends with its key', () => {
     }
   });
 });
+
+describe('money review 16: a reload after a lost answer keeps the bill key', () => {
+  it('the same customer picked again presses the SAME bill, though the member and Rx are not restored', () => {
+    localStorage.clear();
+    usePOSStore.setState({ store_id: 'S1', salesperson_id: 'u1' } as any);
+    usePOSStore.getState().resetTransaction();
+    putCart();
+    usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'P2' },
+                           prescription: { id: 'RX1' }, sale_type: 'prescription_order' } as any);
+    const key = billKeyFor(billFingerprint(usePOSStore.getState()));
+    // The reload: the saved draft drops the customer, member and Rx.
+    const saved = (usePOSStore as any).persist.getOptions().partialize(usePOSStore.getState());
+    usePOSStore.setState(JSON.parse(JSON.stringify(saved)));
+    expect(usePOSStore.getState().customer).toBeNull();
+    // The cashier picks the customer again (Primary member, no Rx -> quick sale).
+    usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'P1' },
+                           sale_type: 'quick_sale' } as any);
+    expect(billKeyFor(billFingerprint(usePOSStore.getState()))).toBe(key);
+    // Another customer is another bill.
+    usePOSStore.setState({ customer: { id: 'C2', name: 'Ravi' } } as any);
+    expect(billKeyFor(billFingerprint(usePOSStore.getState()))).not.toBe(key);
+  });
+});

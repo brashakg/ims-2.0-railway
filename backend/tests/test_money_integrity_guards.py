@@ -775,8 +775,9 @@ class TestStoreCreditRedeemEndpoint:
             customers_module._post_credit_entry("CUST-1", "REDEEMED", body, _admin())
         assert ei.value.status_code == 400
         assert "insufficient" in str(ei.value.detail).lower()
-        # No ledger row + balance untouched.
-        assert store_credit_ctx["ledger"].docs == []
+        # No row that moves money (money review 16: the row is written first,
+        # so a refused redeem leaves one VOID row with no delta) + balance untouched.
+        assert [(d["type"], d["delta"]) for d in store_credit_ctx["ledger"].docs] == [("VOID", 0.0)]
         assert store_credit_ctx["coll"].find_one(
             {"customer_id": "CUST-1"}
         )["store_credit"] == 500.0
@@ -795,8 +796,9 @@ class TestStoreCreditRedeemEndpoint:
         assert store_credit_ctx["coll"].find_one(
             {"customer_id": "CUST-1"}
         )["store_credit"] == 100.0
-        # Exactly one redeem ledger row.
-        assert len(store_credit_ctx["ledger"].docs) == 1
+        # Exactly one redeem ledger row that moved money (the refused one is VOID, no delta).
+        assert [d["type"] for d in store_credit_ctx["ledger"].docs if d["type"] != "VOID"] == ["REDEEMED"]
+        assert all(d["delta"] == 0.0 for d in store_credit_ctx["ledger"].docs if d["type"] == "VOID")
 
     def test_issue_credit_still_works_via_snapshot(self, store_credit_ctx):
         # A credit (ISSUE) is not a double-spend risk -> still goes through the
@@ -854,6 +856,9 @@ class TestStoreCreditRedeemEndpoint:
         with pytest.raises(HTTPException) as ei:
             customers_module._post_credit_entry("CUST-1", "REDEEMED", body, _admin())
         assert ei.value.status_code == 503
-        # No ledger row written; balance never touched (no non-atomic decrement).
-        assert ledger.docs == []
+        # No row that counts: the row is written first (money review 16) and
+        # never applied -- this fake cannot update it, so it stays ISSUING for
+        # the reconciler to void (its guard never landed). Balance untouched.
+        assert len(ledger.docs) == 1 and ledger.docs[0]["applied"] is False
+        assert ledger.docs[0]["type"] in ("ISSUING", "VOID")
         assert coll.docs[0]["store_credit"] == 500.0

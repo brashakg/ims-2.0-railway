@@ -20,6 +20,10 @@ export const TILL_SALE_UNCONFIRMED =
   'The server did not confirm this sale. Press Complete Sale again - it will not be charged twice.';
 export const TILL_SALE_UNCONFIRMED_CHECK =
   'The server did not confirm this sale. Check the Orders screen for it before pressing Complete Sale again.';
+/** A same-key press while the first press is still being saved (it holds the
+    units): the bill must NOT change, or the next press is another sale. */
+export const TILL_SALE_STILL_SAVING =
+  'The first press of this sale is still being saved. Do not change the bill - wait a moment and press Complete Sale again.';
 export const BILL_KEY_TTL_MS = 15 * 60_000;
 
 export interface BillKeyEntry { key: string; at: number }

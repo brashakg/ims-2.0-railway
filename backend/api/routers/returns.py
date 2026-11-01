@@ -1864,40 +1864,167 @@ def _task_return_doc_missing(doc: Dict[str, Any]) -> None:
         logger.error("[RETURNS] doc-missing task not raised for %s: %s", doc.get("return_id"), exc)
 
 
-def _undo_return_claims(spec: Dict[str, Any], *, step=None, row: Optional[Dict[str, Any]] = None,
-                        done=None) -> bool:
-    """A counter return whose credit was unconfirmed kept its unit claims and
-    its refund hold (so it could not be redone); its credit line was then
-    voided (it never landed): give both back. ``step(name)`` is the
-    mark-then-act gate (customers.claim_step): each give-back runs ONLY when
-    this call claimed it, so two reconcilers -- or the sweep racing Needs
-    completing -- never give anything back twice."""
-    can = step or (lambda name: True)
-    row = row or {}
+def _undo_return_claims(spec: Dict[str, Any], *, note_number: Optional[str] = None, undo: bool = True,
+                        store_id: Optional[str] = None, why: str = "", ref: str = "") -> bool:
+    """The reconciler's give-backs for a voided counter-return credit line:
+    its credit-note number written off and (``undo``: it was unconfirmed, so
+    the press kept them) the units and the refund hold given back -- each
+    through THE one set of marks (_give_back), so the counter, the reconciler
+    and "Nothing was paid" never repeat one. True when every step is done
+    (the VOID may settle)."""
     order_id, rid = spec.get("order_id"), spec.get("return_id")
-    ok = True
-    for name, act in (
-        ("claims_released", lambda: [ln for ln in spec.get("lines") or []
-                                     if not _release_returnable_qty(order_id, {"item_id": ln.get("item_id"),
-                                                                               "product_id": ln.get("product_id")},
-                                                                    float(ln.get("qty") or 0))]),
-        ("hold_released", lambda: [] if not rid or _release_order_refund(order_id, rid) else [rid]),
-    ):
-        if name == "hold_released" and not rid:
+    acts: Dict[str, Any] = {}
+    if note_number:
+        acts["number_written_off"] = lambda: _record_unused_credit_note(
+            note_number, {"order_id": order_id, "store_id": store_id}, ref or rid or "", {"user_id": "system"},
+            why or "credit line voided")
+    if undo:
+        acts["claims_released"] = lambda: _release_lines(order_id, spec.get("lines") or [])
+    done = _give_back(order_id, rid, store_id, acts, finisher=False, sole_owner=False)
+    if not done or not undo or not rid:
+        return done
+    return _give_back(order_id, rid, store_id, {"hold_released": lambda: _release_order_refund(order_id, rid)},
+                      finisher=False, sole_owner=False)
+
+
+def _release_lines(order_id: Optional[str], lines: List[Dict[str, Any]]) -> bool:
+    """Give back every claimed line; True only when each release landed."""
+    results = [_release_returnable_qty(order_id, {"item_id": ln.get("item_id"), "product_id": ln.get("product_id")},
+                                       float(ln.get("qty") or 0)) for ln in lines]
+    return all(results)
+
+
+# --------------------------------------------------------------------------- #
+# THE one set of give-back marks for a return (money review 16). A return's
+# give-backs -- its units, its credit-note number, its refund hold -- are
+# done by whoever owns its failure: the counter (nothing moved), the
+# reconciler (its credit line voided) or "Nothing was paid". All three claim
+# each step in ONE place: the return's credit line when one exists, else its
+# refund hold on the bill. A step is claimed (with its time), acted, then
+# stamped done. A step claimed but never stamped is lost: its owner raises
+# one P1 task (stamped <step>_tasked), the hold is kept so the return stays in
+# Needs completing, and "Nothing was paid" finishes it once.
+# --------------------------------------------------------------------------- #
+STEP_ERROR = "error"
+
+
+def _step_store(order_id: Optional[str], return_id: Optional[str]):
+    """(collection, filter, field prefix, extra update) of the return's mark
+    store, None when nothing can carry a mark, STEP_ERROR when unreadable."""
+    if not return_id:
+        return None
+    ledger = _ledger_coll()
+    try:
+        if ledger is not None and ledger.find_one({"entry_id": f"{return_id}:credit"}) is not None:
+            return ledger, {"entry_id": f"{return_id}:credit"}, "", {}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] credit line of %s unreadable: %s", return_id, exc)
+        return STEP_ERROR
+    coll = _orders_coll()
+    if coll is None or not order_id:
+        return None
+    path = f"refund_holds.{return_id}"
+    return coll, {"order_id": order_id, path: {"$exists": True}}, f"{path}.", {"$inc": {"refund_holds_v": 1}}
+
+
+def _step_claim(store, step: str):
+    """True: this call claimed the step (act). False: claimed before. None:
+    no mark store. STEP_ERROR: the write's outcome is unknown."""
+    if store is None or store == STEP_ERROR:
+        return store
+    coll, flt, pre, extra = store
+    try:
+        res = coll.update_one({**flt, f"{pre}{step}": {"$ne": True}},
+                              {"$set": {f"{pre}{step}": True, f"{pre}{step}_at": utc_now_iso()}, **extra})
+        if int(getattr(res, "modified_count", 0) or 0) == 1:
+            return True
+        return False if coll.find_one(flt) is not None else None
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] give-back step %s not claimed: %s", step, exc)
+        return STEP_ERROR
+
+
+def _step_marks(store) -> Optional[Dict[str, Any]]:
+    if store is None or store == STEP_ERROR:
+        return None
+    coll, flt, pre, _ = store
+    try:
+        doc = coll.find_one(flt)
+    except Exception:  # noqa: BLE001
+        return None
+    if doc is None:
+        return None
+    if pre:
+        return ((doc.get("refund_holds") or {}).get(pre.split(".")[1]) or {})
+    return dict(doc)
+
+
+def _step_done(store, step: str) -> None:
+    coll, flt, pre, extra = store
+    try:
+        coll.update_one(flt, {"$set": {f"{pre}{step}_done": True}, **extra})
+    except Exception as exc:  # noqa: BLE001 -- left claimed-not-done: a person finishes it
+        logger.error("[RETURNS] give-back step %s not stamped done: %s", step, exc)
+
+
+def _step_stale(at: Any) -> bool:
+    """A claim older than the reconciler's timeout: its act is lost, not
+    running (an unstamped legacy claim counts as old)."""
+    from datetime import timedelta
+
+    from api.utils.event_time import parse_event_utc_naive
+
+    from .customers import PENDING_TIMEOUT_SECONDS
+
+    when = parse_event_utc_naive(at) if at else None
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=PENDING_TIMEOUT_SECONDS)
+    return when is None or when <= cutoff
+
+
+def _step_lost(store, return_id, step: str, detail: Dict[str, Any], store_id: Optional[str]) -> None:
+    """ONE P1 task per return and step (stamped <step>_tasked), never every
+    reconciler pass."""
+    if _step_claim(store, f"{step}_tasked") is False:
+        return
+    _task_step_lost(return_id, step, detail, store_id)
+
+
+def _give_back(order_id, return_id, store_id, acts: Dict[str, Any], *, finisher: bool, sole_owner: bool) -> bool:
+    """Run each give-back step (name -> act returning True on success) ONCE
+    across every owner, on THE one set of marks. ``finisher`` ("Nothing was
+    paid"): a step claimed but lost is finished once. ``sole_owner``: with no
+    mark store at all (no credit line, no hold) the caller still acts. True
+    when every step is done."""
+    store = _step_store(order_id, return_id)
+    all_done = True
+    for step, act in acts.items():
+        got = _step_claim(store, step)
+        if got is None:
+            if not sole_owner:
+                continue  # no line and no hold: whoever released the hold finished it
+            if not act():
+                _task_step_lost(return_id, step, {"order_id": order_id}, store_id)
+                all_done = False
             continue
-        if can(name):
-            lost = act()
-            if lost:
-                # The act failed after its mark: never silent, never settled.
-                _task_step_lost(rid, name, {"order_id": order_id, "lost": lost})
-                return False
-            if done:
-                done(name)
-        elif done and row.get(name) and not row.get(f"{name}_done"):
-            # Claimed earlier but never stamped done: its act was lost.
-            _task_step_lost(rid, name, {"order_id": order_id})
-            ok = False
-    return ok
+        if got is False:
+            marks = _step_marks(store) or {}
+            if marks.get(f"{step}_done"):
+                continue
+            if not _step_stale(marks.get(f"{step}_at")):
+                all_done = False  # another pass is still acting
+                continue
+            if not (finisher and _step_claim(store, f"{step}_finish") is True):
+                _step_lost(store, return_id, step, {"order_id": order_id}, store_id)
+                all_done = False
+                continue
+            got = True
+        if got is True and act():
+            _step_done(store, step)
+            continue
+        # The act failed after its claim, or the claim's outcome is unknown.
+        _step_lost(store, return_id, step, {"order_id": order_id}, store_id)
+        all_done = False
+    return all_done
 
 
 def _issue_store_credit(
@@ -3930,11 +4057,27 @@ def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id:
         version = order.get("refund_holds_v")
         live, documented = _live_refund_holds(order_id, order.get("refund_holds") or {})
         prior = round(documented + sum(float(h.get("amount") or 0) for h in live.values()), 2)
+        # A kept hold of a nothing-paid return is still there only while its
+        # give-backs are unfinished: never counted, never dropped (its marks
+        # are the trace).
+        unfinished = _nothing_paid_ids(order_id)
+        keep = {rid: h for rid, h in (order.get("refund_holds") or {}).items()
+                if rid not in live and (rid in unfinished or "*" in unfinished) and (h or {}).get("kept")}
         live[return_id] = {"amount": round(float(net_amount), 2), "at": utc_now_iso()}
         if update_if(order_id, {"refund_holds_v": version},
-                     {"refund_holds": live, "refund_holds_v": int(version or 0) + 1}):
+                     {"refund_holds": {**keep, **live}, "refund_holds_v": int(version or 0) + 1}):
             return prior, True
     raise HTTPException(status_code=503, detail="Too many refunds on this bill at once - nothing was recorded. Try again.")
+
+
+def _nothing_paid_ids(order_id: Optional[str]) -> set:
+    coll = _returns_coll()
+    if coll is None or not order_id:
+        return set()
+    try:
+        return {d.get("return_id") for d in coll.find({"order_id": order_id, "status": "NOTHING_PAID"})}
+    except Exception:  # noqa: BLE001 -- unreadable: keep every kept hold (never drop a trace)
+        return {"*"}
 
 
 def _keep_order_refund_hold(order_id: Optional[str], return_id: Optional[str], *,
@@ -3981,28 +4124,6 @@ def _release_order_refund(order_id: str, return_id: str) -> bool:
         return False
     logger.error("[RETURNS] refund hold %s on %s NOT released", return_id, order_id)
     return False
-
-
-def _claim_hold_step(order_id: Optional[str], return_id: Optional[str], step: str) -> Optional[bool]:
-    """THE mark-then-act gate of a counter give-back, on the bill's refund
-    hold (money review 15): the step is set on the hold only where it is not
-    set yet, in one write that also bumps refund_holds_v (a stale hold writer
-    can never erase it). True: this call claimed it -- act. False: already
-    claimed, or unreadable -- never act. None: no hold for this return, so
-    nothing durable can carry a mark -- the caller is the only owner."""
-    coll = _orders_coll()
-    if coll is None or not order_id or not return_id:
-        return None
-    path = f"refund_holds.{return_id}"
-    try:
-        res = coll.update_one({"order_id": order_id, path: {"$exists": True}, f"{path}.{step}": {"$ne": True}},
-                              {"$set": {f"{path}.{step}": True}, "$inc": {"refund_holds_v": 1}})
-        if int(getattr(res, "modified_count", 0) or 0) == 1:
-            return True
-        return None if coll.find_one({"order_id": order_id, path: {"$exists": True}}) is None else False
-    except Exception as exc:  # noqa: BLE001
-        logger.error("[RETURNS] hold step %s on %s/%s not claimed: %s", step, order_id, return_id, exc)
-        return False
 
 
 def _task_step_lost(return_id: Optional[str], step: str, detail: Dict[str, Any], store_id: Optional[str] = None) -> None:
@@ -4063,31 +4184,32 @@ async def create_return(
             # Needs completing), never automatically.
             raise
         # Nothing moved: the units this press claimed go back and the
-        # credit-note number it took is written off -- each claimed on the
-        # bill's refund hold FIRST (_claim_hold_step), so "Nothing was paid"
-        # can never give them back again if the hold's release below is lost.
+        # credit-note number it took is written off -- each ONCE, on THE one
+        # set of give-back marks (_give_back). A step that could not be done
+        # (or whose claim's outcome is unknown) raises a P1 task and KEEPS the
+        # hold: the trace is never deleted, and the return shows in Needs
+        # completing, where "Nothing was paid" finishes it.
         rid, hoid = held.get("return_id"), held.get("order_id")
         claimed = held.pop("claimed", None) or []
-        if claimed and _claim_hold_step(hoid, rid, "claims_released") is not False:
-            lost = []
-            for oid, orig_line, qty in claimed:
-                try:
-                    ok = _release_returnable_qty(oid, orig_line, qty)
-                except Exception as exc:  # noqa: BLE001
-                    logger.error("[RETURNS] claim on %s not released: %s", oid, exc)
-                    ok = False
-                if not ok:
-                    lost.append({"order_id": oid, "item_id": orig_line.get("item_id") or orig_line.get("id"),
-                                 "qty": qty})
-            if lost:
-                # Claimed but not given back: never retried by itself -- a person.
-                _task_step_lost(rid, "claims_released", {"order_id": hoid, "lost": lost}, held.get("store_id"))
         number = held.pop("credit_note_number", None)
-        if number and _claim_hold_step(hoid, rid, "number_written_off") is not False:
-            _record_unused_credit_note(number, {"order_id": hoid, "store_id": held.get("store_id")},
-                                       rid or "", current_user, "return not recorded")
-        if held.get("return_id"):
-            _release_order_refund(held["order_id"], held["return_id"])
+        acts: Dict[str, Any] = {}
+        if claimed:
+            acts["claims_released"] = lambda: all([_release_returnable_qty(oid, orig_line, qty)
+                                                   for oid, orig_line, qty in claimed])
+        if number:
+            acts["number_written_off"] = lambda: _record_unused_credit_note(
+                number, {"order_id": hoid, "store_id": held.get("store_id")}, rid or "", current_user,
+                "return not recorded")
+        try:
+            done = _give_back(hoid, rid, held.get("store_id"), acts, finisher=False, sole_owner=True)
+        except Exception as exc:  # noqa: BLE001 -- never hide the return's own error
+            logger.error("[RETURNS] give-backs of %s not finished: %s", rid, exc)
+            done = False
+        if rid:
+            if done:
+                _release_order_refund(hoid, rid)
+            else:
+                _keep_order_refund_hold(hoid, rid)
         if held.get("approval_request_id"):
             # The approval this failed return spent is given back, not burned.
             try:
@@ -5128,7 +5250,9 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                 hold = hold or {}
                 if not hold.get("kept"):
                     continue
-                if coll.find_one({"return_id": rid, "status": {"$in": list(_NO_MONEY_DOC_STATUSES)}}):
+                # A nothing-paid return whose hold is still kept has a
+                # give-back to finish: listed (the hold goes once it is done).
+                if coll.find_one({"return_id": rid, "status": "COMPLETED"}):
                     continue
                 state = _unfinished_return(rid)
                 line = state["line"]
@@ -5343,7 +5467,7 @@ async def complete_return_record(
         existing = dict(existing)
         existing.pop("_id", None)
         if existing.get("status") == "NOTHING_PAID":
-            _nothing_paid_steps(return_id, line, existing, current_user, hold_marks=hold)
+            _nothing_paid_steps(return_id, line, existing, current_user)
         return {**existing, "replayed": True, "message": "This return's record already exists."}
     if line is not None and line.get("type") == "ISSUING":
         raise HTTPException(status_code=409, detail=(
@@ -5499,43 +5623,55 @@ async def mark_owed_paid(
     owed = round(float(doc.get("owed_amount") or 0), 2)
     if owed <= 0:
         raise HTTPException(status_code=409, detail="Nothing is owed on this return.")
-    legs, outside = _place_cash_legs([{"method": body.method, "amount": owed}], body.cash_paid_from,
-                                     doc.get("store_id"))
-    now = utc_now_iso()
+    # The payout row is THE record of the payment, written FIRST under a
+    # fixed _id: a re-press (or a lost answer) replays the STORED payment --
+    # its method, its cash source, its day -- never the new answer, and the
+    # return is marked paid from it afterwards (money review 16).
     try:
-        res = coll.update_one({"return_id": return_id, "status": "COMPLETED", "owed_paid_at": None},
-                              {"$set": {"owed_paid_at": now, "owed_paid_by": current_user.get("user_id"),
-                                        "owed_paid_method": body.method}})
-        first = int(getattr(res, "modified_count", 0) or 0) == 1
-        if not first:
-            doc = coll.find_one({"return_id": return_id}) or doc
+        payout = coll.find_one({"_id": f"payout:{return_id}"})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the return - try again.") from exc
+    first = payout is None
+    if first:
+        legs, outside = _place_cash_legs([{"method": body.method, "amount": owed}], body.cash_paid_from,
+                                         doc.get("store_id"))
+        now = utc_now_iso()
         payout = {
+            "_id": f"payout:{return_id}",
             "return_id": f"{return_id}-PAYOUT", "payout_of": return_id, "order_id": doc.get("order_id"),
             "store_id": doc.get("store_id"), "return_type": "RETURN", "status": "COMPLETED",
             "net_refund": 0.0, "refund_amount": 0.0, "credit_amount": 0.0, "items": [],
-            "refund_tenders": legs, "paid_outside_drawer": outside or None,
+            "refund_tenders": legs, "paid_outside_drawer": outside or None, "method": body.method,
             "cash_paid_from": body.cash_paid_from if body.method == "CASH" else None,
             "drawer_auto_netted": bool(legs), "gst_breakup": None, "credit_note_number": None,
-            "created_at": doc.get("owed_paid_at") or now, "drawer_at": doc.get("owed_paid_at") or now,
-            "created_by": current_user.get("user_id"), "note": body.note or "",
+            "created_at": now, "drawer_at": now, "created_by": current_user.get("user_id"), "note": body.note or "",
         }
         try:
-            coll.insert_one({**payout, "_id": f"payout:{return_id}"})
-        except Exception as exc:  # noqa: BLE001 -- written by the first press (or a lost write)
-            if coll.find_one({"return_id": f"{return_id}-PAYOUT"}) is None:
+            coll.insert_one(dict(payout))
+        except Exception as exc:  # noqa: BLE001 -- another press wrote it first (or a lost answer)
+            try:
+                stored = coll.find_one({"_id": f"payout:{return_id}"})
+            except Exception:  # noqa: BLE001
+                stored = None
+            if stored is None:
                 raise HTTPException(status_code=503, detail=(
                     "The payment could not be booked - press again (it is booked once).")) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail="Could not book the payment - press again.") from exc
-    _close_task(f"return_cash_owed:{return_id}", current_user, f"Paid Rs {owed:.2f} by {body.method}")
-    if first:
-        _audit_complete(return_id, doc.get("store_id"), current_user,
-                        {"owed_paid": owed, "method": body.method, "cash_paid_from": body.cash_paid_from,
-                         "note": body.note or ""}, now)
-    return {"return_id": return_id, "owed_paid": owed, "method": doc.get("owed_paid_method") or body.method,
-            "replayed": not first, "message": f"Rs {owed:.2f} booked as paid to the customer today."}
+            payout, first = stored, False
+        else:
+            _audit_complete(return_id, doc.get("store_id"), current_user,
+                            {"owed_paid": owed, "method": body.method, "cash_paid_from": body.cash_paid_from,
+                             "note": body.note or ""}, now)
+    method = payout.get("method") or body.method
+    try:
+        coll.update_one({"return_id": return_id, "status": "COMPLETED", "owed_paid_at": None},
+                        {"$set": {"owed_paid_at": payout.get("created_at"), "owed_paid_by": payout.get("created_by"),
+                                  "owed_paid_method": method, "owed_paid_from": payout.get("cash_paid_from")}})
+    except Exception as exc:  # noqa: BLE001 -- the payout stands; a re-press marks the return
+        raise HTTPException(status_code=503, detail=(
+            "The payment is booked but the return could not be marked - press again.")) from exc
+    _close_task(f"return_cash_owed:{return_id}", current_user, f"Paid Rs {owed:.2f} by {method}")
+    return {"return_id": return_id, "owed_paid": owed, "method": method, "cash_paid_from": payout.get("cash_paid_from"),
+            "replayed": not first, "message": f"Rs {owed:.2f} booked as paid to the customer."}
 
 
 def _close_task(dedupe_ref: str, current_user: dict, note: str) -> None:
@@ -5596,67 +5732,49 @@ def _complete_nothing_paid(return_id, line, order, hold, store_id, recovered, cu
         coll.insert_one({**tomb, "_id": f"recovered:{return_id}"})
     except Exception as exc:  # noqa: BLE001 -- the other press owns it
         return _replay_or_503(coll, return_id, exc)
-    _nothing_paid_steps(return_id, line, tomb, current_user, hold_marks=hold)
+    _nothing_paid_steps(return_id, line, tomb, current_user)
     _audit_complete(return_id, store_id, current_user, recovered, now)
     return {**tomb, "message": "Nothing was paid on this return: its units and the bill were released, "
                                "and its credit-note number was written off."}
 
 
-def _nothing_paid_steps(return_id: str, line: Optional[Dict[str, Any]], tomb: Dict[str, Any], current_user,
-                        hold_marks: Optional[Dict[str, Any]] = None) -> None:
-    """The give-backs of a nothing-paid return, each claimed BEFORE it acts
-    (customers.claim_step): on the VOID credit line when there is one -- the
-    same marks the reconciler's unsettled-VOID sweep claims, so the two never
-    both act -- else on the tombstone. A replay re-runs only what is
-    unclaimed. The hold release is idempotent."""
-    from .customers import claim_step
-
+def _nothing_paid_steps(return_id: str, line: Optional[Dict[str, Any]], tomb: Dict[str, Any],
+                        current_user) -> None:
+    """The give-backs of a nothing-paid return on THE one set of marks
+    (_give_back): a step the counter or the reconciler already did is not done
+    again; one they claimed but lost is finished here, once. The hold is
+    released only when every step is done (the release is idempotent, so a
+    replay finishes a lost one); then the VOID line settles."""
     order_id, store_id = tomb.get("order_id"), tomb.get("store_id")
-    if line is not None:
-        target, flt = _ledger_coll(), {"entry_id": line["entry_id"], "type": "VOID"}
-    else:
-        target, flt = _returns_coll(), {"return_id": return_id, "status": "NOTHING_PAID"}
-    def _done(name: str) -> None:
-        # The act behind a claimed step finished: the VOID may now settle.
-        target.update_one(flt, {"$set": {f"{name}_done": True}})
-
-    # A give-back the counter already did (marked on the hold) is marked here
-    # too and NOT done again (a lost one the counter tasked itself).
-    for done_by_counter in ("claims_released", "number_written_off"):
-        if (hold_marks or {}).get(done_by_counter):
-            claim_step(target, flt, done_by_counter)
-            _done(done_by_counter)
-    if claim_step(target, flt, "claims_released"):
-        lost = [ln for ln in tomb.get("items") or []
-                if not _release_returnable_qty(order_id, {"item_id": ln.get("item_id"),
-                                                          "product_id": ln.get("product_id")},
-                                               float(ln.get("qty") or 0))]
-        if lost:
-            _task_step_lost(return_id, "claims_released", {"lines": lost}, store_id)
-        else:
-            _done("claims_released")
+    acts: Dict[str, Any] = {"claims_released": lambda: _release_lines(order_id, tomb.get("items") or [])}
     number = tomb.get("credit_note_number")
-    if number and claim_step(target, flt, "number_written_off"):
-        _record_unused_credit_note(number, {"order_id": order_id, "store_id": store_id}, return_id, current_user,
-                                   "return finished with nothing paid")
+    if number:
+        acts["number_written_off"] = lambda: _record_unused_credit_note(
+            number, {"order_id": order_id, "store_id": store_id}, return_id, current_user,
+            "return finished with nothing paid")
+    if not _give_back(order_id, return_id, store_id, acts, finisher=True, sole_owner=False):
+        return  # the hold stays: the return stays in Needs completing
+    store = _step_store(order_id, return_id)
     if order_id:
-        # The hold release is idempotent (a key popped from the bill's map):
-        # every press and replay tries it, so a replay finishes a hold whose
-        # release was lost; marked (and stamped done) once it is gone.
         if _release_order_refund(order_id, return_id):
-            claim_step(target, flt, "hold_released")
-            _done("hold_released")
+            if line is not None and store not in (None, STEP_ERROR):
+                _step_claim(store, "hold_released")
+                _step_done(store, "hold_released")
         else:
-            _task_step_lost(return_id, "hold_released", {"order_id": order_id}, store_id)
+            _step_lost(store, return_id, "hold_released", {"order_id": order_id}, store_id)
+            return
     if line is not None:
         try:
-            # Settled only while no step is claimed-but-unstamped (a lost act,
-            # or a racing pass mid-act): the same rule as customers._finish_void.
-            target.update_one({**flt, "$nor": [{name: True, f"{name}_done": {"$ne": True}}
-                                               for name in ("claims_released", "hold_released")]},
-                              {"$set": {"void_settled": True}})
+            # Settled only while no step is claimed-but-unstamped (the same
+            # rule as customers._finish_void).
+            _ledger_coll().update_one({"entry_id": line["entry_id"], "type": "VOID", "$nor": [
+                {name: True, f"{name}_done": {"$ne": True}} for name in GIVE_BACK_STEPS]},
+                {"$set": {"void_settled": True}})
         except Exception as exc:  # noqa: BLE001
             logger.error("[RETURNS] void %s not marked settled: %s", line.get("entry_id"), exc)
+
+
+GIVE_BACK_STEPS = ("claims_released", "hold_released", "number_written_off")
 
 
 @router.post("/{return_id}/restock")
@@ -6284,17 +6402,18 @@ def _advance_claim_is_stale(order: Dict[str, Any]) -> bool:
 
 
 def _record_unused_credit_note(number: str, order: Dict[str, Any], return_id: str,
-                               current_user: dict, why: str) -> None:
+                               current_user: dict, why: str) -> bool:
     """A credit-note serial taken but never issued: write it off in the audit
     trail so the C series has no silent gap (Rule 53 -- every serial accounted
-    for, as admin_edit does for an unused invoice)."""
+    for, as admin_edit does for an unused invoice). True only when the
+    write-off row was recorded (the give-back steps stamp it done then)."""
     logger.error("[RETURNS] credit note %s UNUSED (refund %s)", number, return_id)
     try:
         from ..dependencies import get_audit_repository
 
         audit = get_audit_repository()
         if audit is not None:
-            audit.create({
+            return audit.create({
                 "action": "CREDIT_NOTE_NUMBER_UNUSED",
                 "entity_type": "order",
                 "entity_id": order.get("order_id"),
@@ -6302,9 +6421,10 @@ def _record_unused_credit_note(number: str, order: Dict[str, Any], return_id: st
                 "user_id": current_user.get("user_id"),
                 "details": {"unused_credit_note_number": number, "refund_id": return_id, "reason": why},
                 "created_at": utc_now_iso(),
-            })
+            }) is not None
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] unused credit note %s not audited: %s", number, exc)
+    return False
 
 
 def _whole_invoice_credit_note(order: Dict[str, Any], order_id: str):

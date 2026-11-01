@@ -67,7 +67,7 @@ def test_the_counter_marks_its_give_backs_on_the_hold_before_it_acts(till, monke
     payload["refund_tenders"] = [{"method": "CASH", "amount": 1800.0}]
     released, written_off = [], []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
     monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: False)  # the release is lost
     _boom_at_money_out(monkeypatch)
     with pytest.raises(RuntimeError):
@@ -80,8 +80,11 @@ def test_the_counter_marks_its_give_backs_on_the_hold_before_it_acts(till, monke
 def test_nothing_paid_honours_the_counters_marks(till, monkeypatch, tasks):
     released, written_off = [], []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
-    _bill_with_hold(till, "RET-K", claims_released=True, number_written_off=True)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note",
+                        lambda n, *a, **k: written_off.append(n) or True)
+    # Round 16: the counter stamped both done on the hold: nothing repeated.
+    _bill_with_hold(till, "RET-K", claims_released=True, claims_released_done=True,
+                    number_written_off=True, number_written_off_done=True)
     _complete("RET-K", nothing_paid=True)
     assert released == [] and written_off == []  # the counter already gave both back
     assert "RET-K" not in (_stored(till).get("refund_holds") or {})
@@ -91,7 +94,7 @@ def test_a_lost_counter_release_raises_a_task(till, monkeypatch, tasks):
     payload = _two_unit_bill(till, monkeypatch)
     payload["refund_tenders"] = [{"method": "CASH", "amount": 1800.0}]
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: False)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     monkeypatch.setattr(returns_router, "next_document_number", lambda *a, **k: "TST01/C2627/0001")
     _boom_at_money_out(monkeypatch)
     with pytest.raises(RuntimeError):
@@ -122,7 +125,7 @@ def test_an_error_after_the_mark_keeps_the_claims_and_the_hold(till, monkeypatch
     payload["refund_tenders"] = [{"method": "CASH", "amount": 1800.0}]
     released, written_off = [], []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
 
     def _boom(*a, **k):
         raise RuntimeError("loyalty store down")
@@ -313,7 +316,7 @@ def test_a_same_key_press_refused_at_the_claim_replays_the_first_order(client, a
 # =========================================================================== #
 def test_a_void_whose_hold_release_is_lost_is_not_settled(till, monkeypatch, tasks):
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: False)
     row = _void(till, "RET-L")
     cust_router._finish_void(_ledger(till), dict(row), "x", undo=True)
@@ -323,7 +326,7 @@ def test_a_void_whose_hold_release_is_lost_is_not_settled(till, monkeypatch, tas
 
 
 def test_a_claimed_step_without_its_done_stamp_never_settles(till, monkeypatch, tasks):
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: True)
     row = _void(till, "RET-D", claims_released=True)  # an earlier pass died after the mark
     cust_router._finish_void(_ledger(till), dict(row), "x", undo=True)
@@ -333,7 +336,7 @@ def test_a_claimed_step_without_its_done_stamp_never_settles(till, monkeypatch, 
 
 def test_nothing_paid_leaves_a_void_with_a_lost_release_unsettled(till, monkeypatch, tasks):
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: False)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     _bill_with_hold(till, "RET-W")
     _void(till, "RET-W")
     _complete("RET-W", nothing_paid=True)
@@ -386,7 +389,7 @@ def test_the_redeem_door_bounds_its_own_writes(till, monkeypatch):
 
 
 def test_a_stale_read_never_settles_a_void_another_pass_is_still_undoing(till, monkeypatch, tasks):
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: True)
     row = _void(till, "RET-R")  # this pass read the row before another pass claimed the units...
     _ledger(till).update_one({"entry_id": "RET-R:credit"}, {"$set": {"claims_released": True}})  # ...mid-act

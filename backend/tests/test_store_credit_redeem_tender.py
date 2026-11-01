@@ -145,7 +145,9 @@ def test_insufficient_redeem_is_refused_and_writes_nothing(monkeypatch):
     assert exc.value.status_code == 400
     assert "insufficient store credit" in str(exc.value.detail)
     assert coll.docs[0]["store_credit"] == 100.0
-    assert ledger.docs == []
+    # Money review 16: the row is written FIRST, so a refused redeem leaves
+    # only a VOID row that moves nothing (no balance, no ledger sum).
+    assert [(d["type"], d["delta"]) for d in ledger.docs] == [("VOID", 0.0)]
 
 
 def test_no_atomic_collection_rejects_503_never_snapshot_spends(monkeypatch):
@@ -176,7 +178,7 @@ def test_no_atomic_collection_rejects_503_never_snapshot_spends(monkeypatch):
         customers.redeem_store_credit_atomic("C1", 50.0)
     assert exc.value.status_code == 503
     assert coll.docs[0]["store_credit"] == 500.0
-    assert ledger.docs == []
+    assert [(d["type"], d["delta"]) for d in ledger.docs] == [("VOID", 0.0)]  # row first; it moved nothing
 
 
 # ---------------------------------------------------------------------------

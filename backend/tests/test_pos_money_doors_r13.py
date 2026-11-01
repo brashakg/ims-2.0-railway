@@ -114,7 +114,7 @@ def test_the_sweep_skips_young_holds_and_holds_another_owner_has(till, tasks):
 def test_nothing_paid_gives_the_claims_hold_and_number_back_once(till, monkeypatch, tasks):
     released, written_off = [], []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
     _bill_with_hold(till, "RET-N")
     with pytest.raises(HTTPException) as e:
         returns_router._refuse_while_a_return_settles(_stored(till), "ORD-1")
@@ -143,7 +143,7 @@ def test_nothing_paid_is_refused_once_store_credit_landed(till):
 def test_a_void_line_held_bill_is_finished_without_releasing_twice(till, monkeypatch):
     released = []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     _bill_with_hold(till, "RET-W")
     _ledger(till).insert_one(_row("RET-W:credit", type="VOID", delta=0.0, void_delta=200.0, claims_released=True,
                                   claims_released_done=True,  # round 15: the void's act stamped done
@@ -291,32 +291,37 @@ def test_a_credit_whose_doc_is_not_completed_still_lowers_the_ceiling(till):
     assert returns_router.refundable_ceiling(_stored(till)) == 3100.0
 
 
-def test_an_unsettled_void_is_finished_by_the_sweep_without_repeating_a_step(till, monkeypatch):
-    written_off, undone = [], []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+def test_an_unsettled_void_is_finished_by_the_sweep_without_repeating_a_step(till, monkeypatch, tasks):
+    written_off, released = [], []
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note",
+                        lambda n, *a, **k: written_off.append(n) or True)
+    monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: True)
     state = {"n": 0}
 
-    def _undo(spec, **k):
+    def _release(*a, **k):
         state["n"] += 1
+        released.append(a)
         if state["n"] == 1:
             raise RuntimeError("worker died mid-undo")
-        if k["step"]("claims_released") and k["step"]("hold_released"):
-            undone.append(spec["return_id"])
-            for name in ("claims_released", "hold_released"):  # round 15: each act stamped done
-                k["done"](name)
         return True
 
-    monkeypatch.setattr(returns_router, "_undo_return_claims", _undo)
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", _release)
     _customer(till)
     _ledger(till).insert_one(_row("RET-U:credit", note_number="TST01/C2627/0050", undo_on_void=_spec()))
-    # The void's undo dies; the same pass's sweep of unsettled VOIDs finishes
-    # it -- the undo once more, the write-off NOT again.
+    # Round 16: the undo dies after claiming the units; the same pass's sweep
+    # does NOT repeat it (the claim is fresh: maybe still running) and never
+    # writes the number off twice. Once the claim is older than the timeout it
+    # is a lost step: ONE task, the VOID unsettled, the units never released twice.
     cust_router.reconcile_pending_credits(_repo(till), ledger=_ledger(till))
     row = _ledger(till).find_one({"entry_id": "RET-U:credit"})
-    assert row["type"] == "VOID" and row["void_settled"] is True and row["number_written_off"] is True
-    assert state["n"] == 2 and undone == ["RET-U"] and written_off == ["TST01/C2627/0050"]
-    cust_router.reconcile_pending_credits(_repo(till), ledger=_ledger(till))  # a settled VOID is left alone
-    assert state["n"] == 2
+    assert row["type"] == "VOID" and row["void_settled"] is False and row["number_written_off_done"] is True
+    assert len(released) == 1 and written_off == ["TST01/C2627/0050"] and tasks == []
+    _ledger(till).update_one({"entry_id": "RET-U:credit"}, {"$set": {"claims_released_at": _ago(30)}})
+    cust_router.reconcile_pending_credits(_repo(till), ledger=_ledger(till))
+    cust_router.reconcile_pending_credits(_repo(till), ledger=_ledger(till))
+    assert len(released) == 1 and written_off == ["TST01/C2627/0050"]
+    assert [t["dedupe_ref"] for t in tasks] == ["return_step_lost:RET-U:claims_released"]
+    assert _ledger(till).find_one({"entry_id": "RET-U:credit"})["void_settled"] is False
 
 
 def test_a_press_never_moves_a_line_older_than_half_the_timeout(till):
@@ -393,7 +398,7 @@ def test_a_shopify_refund_counts_a_kept_hold_without_its_record(env):
 # =========================================================================== #
 def test_a_press_refused_on_another_presss_row_writes_its_own_number_off(till, monkeypatch):
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
     _customer(till)
     _ledger(till).insert_one(_row("ORD-1:sacn:x", type="VOID", delta=0.0, void_delta=500.0,
                                   note_number="TST01/C2627/0060"))
@@ -405,7 +410,7 @@ def test_a_press_refused_on_another_presss_row_writes_its_own_number_off(till, m
 
 def test_a_resumed_press_that_cannot_read_the_row_claims_no_number(till, monkeypatch):
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n) or True)
     _customer(till)
     ledger = _ledger(till)
     ledger.insert_one(_row("ORD-1:sacn:y", delta=500.0, amount=500.0, note_number="TST01/C2627/0070",
@@ -511,7 +516,7 @@ def test_the_hand_fix_sets_only_a_missing_or_broken_balance(monkeypatch, tmp_pat
 def test_two_nothing_paid_presses_release_once(till, monkeypatch):
     released = []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     _bill_with_hold(till, "RET-2")
     _complete("RET-2", nothing_paid=True)
     returns = till["db"].get_collection("returns")
@@ -534,9 +539,11 @@ def test_a_resumed_undo_never_gives_claims_back_twice(till, monkeypatch):
     released, holds = [], []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: holds.append(a) or True)
-    # Round 14: each step acts only when its claim was won (claims already done).
-    claimed = {"claims_released": False, "hold_released": True}
-    returns_router._undo_return_claims(_spec("RET-Z"), step=lambda name: claimed[name])
+    # Round 16: the units were given back (claimed and stamped done on THE one
+    # set of marks, the credit line) -- a resumed undo releases only the hold.
+    _ledger(till).insert_one(_row("RET-Z:credit", type="VOID", claims_released=True, claims_released_done=True,
+                                  undo_on_void=_spec("RET-Z")))
+    assert returns_router._undo_return_claims(_spec("RET-Z")) is True
     assert released == [] and len(holds) == 1
 
 

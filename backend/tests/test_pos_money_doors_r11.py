@@ -115,7 +115,7 @@ async def _sacn(till, monkeypatch, *, number="TST01/C2627/0042"):
 
 @pytest.mark.asyncio
 async def test_an_unconfirmed_superadmin_note_is_never_issued_twice(till, monkeypatch):
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: True)
     _customer(till)
     line = dict(_LINE, item_type="FRAME", unit_price=5000.0, item_total=5000.0)
     till["db"].get_collection("orders").insert_one(_order(invoice_number="BOK01/2627/00009", items=[line],
@@ -210,12 +210,13 @@ def test_a_settled_but_unrecorded_return_credit_raises_a_p1_task(till, monkeypat
 # =========================================================================== #
 def test_a_refused_press_leaves_the_claims_to_one_owner(till, monkeypatch, numbered):
     undone = []
-    monkeypatch.setattr(returns_router, "_undo_return_claims", lambda spec, **k: undone.append(spec) or True)
+    monkeypatch.setattr(returns_router, "_undo_return_claims", lambda spec, **k: undone.append(k.get("undo")) or True)
     monkeypatch.setattr(cust_router, "apply_store_credit_delta", lambda *a, **k: False)  # a clean refusal
     _customer(till)
     out = _issue(ref="RET-R", entry_id="RET-R:credit",
                  undo_on_void={"order_id": "ORD-1", "return_id": "RET-R", "lines": [{"item_id": "li1", "qty": 1}]})
-    assert out is None and undone == []  # the caller releases them, once
+    # Round 16: the void runs its number step only (undo False); the caller releases the units, once.
+    assert out is None and undone == [False]
     assert _ledger(till).find_one({"entry_id": "RET-R:credit"})["type"] == "VOID"
 
 
@@ -353,7 +354,7 @@ def test_a_finish_into_a_locked_month_is_dated_the_finish_day(till, monkeypatch)
 
 def test_a_redrive_past_the_window_finishes_its_in_flight_row_as_money_given(till, monkeypatch, numbered):
     written_off = []
-    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number))
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda number, *a, **k: written_off.append(number) or True)
     _customer(till)
     _ledger(till).insert_one({"_id": "RET-S:credit", "entry_id": "RET-S:credit", "customer_id": "CUST-1",
                               "ref": "RET-S", "type": "ISSUING", "final_type": "ISSUED", "applied": False,

@@ -1805,77 +1805,108 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
         raise HTTPException(status_code=400, detail="amount must be greater than 0")
 
     coll = _ledger_coll()
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Store-credit ledger not available - nothing was taken.")
+    # Row FIRST, then the guarded debit, then the finish (money review 16):
+    # the same at-most-once shape as post_ledger_credit. A debit can never
+    # land without its ISSUING row; a press that dies (or a write that times
+    # out) between them leaves the row for the reconciler, which finishes it
+    # (the guard landed) or voids it (it never did).
+    key = guard_ref or f"REDEEM:{customer_id}:{uuid.uuid4().hex}"
+    prior = None
     if guard_ref:
-        replay = _redeem_replay(repo, coll, customer_id, amt, guard_ref, reason, ref, store_id, user_id)
-        if replay is not None:
-            return replay
-        debited = repo.try_debit_store_credit(customer_id, amt, guard_ref=guard_ref)
-        if debited is None:
-            # A concurrent press with the same key may have won the guard.
+        try:
+            prior = coll.find_one({"entry_id": key})
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
+        if prior is not None and prior.get("type") == VOID:
+            raise HTTPException(status_code=409, detail=(
+                "This form's earlier redemption was cancelled - nothing was taken. Start a new one."))
+        if prior is None or prior.get("type") != PENDING:
+            # A finished row of this form (same amount, else 409) -- or a
+            # pre-deploy debit that landed with no row -- is its answer.
             replay = _redeem_replay(repo, coll, customer_id, amt, guard_ref, reason, ref, store_id, user_id)
             if replay is not None:
                 return replay
-    else:
-        debited = repo.try_debit_store_credit(customer_id, amt)
-    if debited is None:
-        # No document matched the store_credit >= amount guard -> insufficient
-        # (or a concurrent redeem won the race for the last rupees).
-        available = _current_credit_balance(customer_id, existing)
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"insufficient store credit: requested {amt:.2f}, "
-                f"available {available:.2f}"
-            ),
-        )
-    if debited == getattr(repo, "DEBIT_NO_ATOMIC", "__no_atomic__"):
-        # DOUBLE-SPEND GUARD (security): the collection cannot perform a
-        # conditional (atomic) decrement. Taking the old snapshot
-        # read-modify-write fallback here let two concurrent redeems both
-        # pass and spend the same credit twice. A REDEEM (debit) is a
-        # double-spend risk, so REJECT with 503 rather than fall back to the
-        # non-atomic path. (ISSUE/ADJUST credits keep the snapshot path
-        # in _post_credit_entry -- a credit cannot overspend.)
-        raise HTTPException(
-            status_code=503,
-            detail=(
+    row = dict(prior) if prior is not None and prior.get("type") == PENDING else None
+    if row is None:
+        balance_now = _current_credit_balance(customer_id, existing)
+        entry = scl.make_entry(customer_id=customer_id, entry_type=scl.REDEEMED, amount=amt,
+                               current_balance=max(balance_now, amt), reason=reason or "", ref=ref,
+                               store_id=store_id, user_id=user_id)
+        entry.update(entry_id=key, type=PENDING, final_type=scl.REDEEMED, applied=False,
+                     pending_at=utc_now_iso())
+        if guard_ref:
+            entry["source"] = source
+        try:
+            coll.insert_one({**entry, "_id": key})
+            row = entry
+        except Exception as exc:  # noqa: BLE001
+            stored = _row_after_duplicate(coll, key, exc)
+            if stored is None:
+                # Nothing was debited; a row that may have landed is voided by
+                # the reconciler (its guard never lands).
+                raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
+            if stored.get("type") != PENDING:
+                return _redeem_replay(repo, coll, customer_id, amt, key, reason, ref, store_id, user_id) or                     {"entry": stored, "balance": _current_credit_balance(customer_id, repo.find_by_id(customer_id)),
+                     "replayed": True}
+            row = stored
+    if abs(abs(float(row.get("amount") or 0)) - amt) > 0.005:
+        raise HTTPException(status_code=409, detail=(
+            f"This form already took Rs {abs(float(row.get('amount') or 0)):.2f} - close it and check the balance."))
+
+    landed = _guard_landed(repo, customer_id, key)
+    if landed is None:
+        raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE)
+    debited = None
+    if not landed:
+        try:
+            debited = repo.try_debit_store_credit(customer_id, amt, guard_ref=key)
+        except Exception as exc:  # noqa: BLE001 -- it may have landed: the row stays for the reconciler
+            logger.error("[CUSTOMERS] redeem %s debit raised: %s", key, exc)
+            raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
+        if debited == getattr(repo, "DEBIT_NO_ATOMIC", "__no_atomic__"):
+            # DOUBLE-SPEND GUARD (security): no conditional (atomic) decrement
+            # here -- a snapshot fallback let two redeems spend the same
+            # credit twice. Refused; the row is voided (nothing was taken).
+            _void_redeem_row(coll, row, "no atomic debit")
+            raise HTTPException(status_code=503, detail=(
                 "Store-credit redemption is temporarily unavailable: the "
                 "atomic debit path is not available, and a non-atomic "
-                "decrement could double-spend the balance. Please retry."
-            ),
-        )
-    # Authoritative post-update balance from the decremented document.
-    new_balance = float((debited or {}).get("store_credit", 0) or 0)
-    # Build the ledger row whose balance_after matches the atomic result.
-    entry = scl.make_entry(
-        customer_id=customer_id,
-        entry_type=scl.REDEEMED,
-        amount=amt,
-        current_balance=new_balance + amt,  # pre-debit balance
-        reason=reason or "",
-        ref=ref,
-        store_id=store_id,
-        user_id=user_id,
-    )
-    entry["balance_after"] = round(new_balance, 2)
-    if guard_ref:
-        entry["entry_id"] = guard_ref
-        entry["source"] = source
-    if coll is not None:
-        try:
-            # _id = the guard: a double click's second row is a duplicate key.
-            coll.insert_one({**entry, "_id": guard_ref} if guard_ref else dict(entry))
-        except Exception as exc:  # noqa: BLE001
-            if guard_ref:
-                stored = _row_after_duplicate(coll, guard_ref, exc)
-                if stored is not None:
-                    return {"entry": stored, "balance": entry["balance_after"], "replayed": True}
-            logger.error("[CUSTOMERS] redeem %s debited but its ledger row was NOT written: %s",
-                         entry.get("entry_id"), exc)
-            if guard_ref:
-                raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
-    entry.pop("_id", None)
-    return {"entry": entry, "balance": entry["balance_after"]}
+                "decrement could double-spend the balance. Please retry."))
+        if debited is None and not _guard_landed(repo, customer_id, key):
+            # No document matched store_credit >= amount: insufficient (or a
+            # concurrent redeem won the last rupees). Nothing was taken.
+            _void_redeem_row(coll, row, "insufficient store credit")
+            available = _current_credit_balance(customer_id, repo.find_by_id(customer_id))
+            raise HTTPException(status_code=400, detail=(
+                f"insufficient store credit: requested {amt:.2f}, available {available:.2f}"))
+    new_balance = (float((debited or {}).get("store_credit", 0) or 0) if isinstance(debited, dict)
+                   else _current_credit_balance(customer_id, repo.find_by_id(customer_id)))
+    sets = {"type": scl.REDEEMED, "applied": True, "balance_after": round(new_balance, 2), **_finish_dates(row)}
+    try:
+        res = coll.update_one({"entry_id": key, "type": PENDING}, {"$set": sets})
+        finished = bool(getattr(res, "matched_count", getattr(res, "modified_count", 1)))
+    except Exception as exc:  # noqa: BLE001 -- the debit landed: the reconciler finishes the row
+        logger.error("[CUSTOMERS] redeem %s debited, row not finished: %s", key, exc)
+        finished = False
+    if not finished:
+        raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE)
+    out = {k: v for k, v in {**row, **sets}.items() if k not in ("_id", "pending_at", "final_type")}
+    return {"entry": out, "balance": round(new_balance, 2)}
+
+
+def _void_redeem_row(coll, row: Dict[str, Any], why: str) -> None:
+    """A redemption whose debit never landed: its row is voided at once (zero
+    balance effect). Left unsettled on purpose: the reconciler's VOID sweep
+    reads its guard once more after the timeout and heals it if a racing
+    same-key debit landed after all -- never a debit without its row."""
+    try:
+        coll.update_one({"entry_id": row["entry_id"], "type": PENDING},
+                        {"$set": {"type": VOID, "void_reason": why, "delta": 0.0, "void_delta": row.get("delta"),
+                                  "void_settled": False}})
+    except Exception as exc:  # noqa: BLE001 -- left ISSUING: the reconciler voids it (no guard)
+        logger.error("[CUSTOMERS] redeem row %s not voided: %s", row.get("entry_id"), exc)
 
 
 def _row_after_duplicate(coll, entry_id: str, exc: Exception) -> Optional[dict]:
@@ -2236,35 +2267,33 @@ def claim_step(coll, flt: Dict[str, Any], step: str) -> bool:
 
 def _finish_void(ledger, row: Dict[str, Any], why: str, *, undo: bool) -> None:
     """A VOID that stands: its number written off once and (``undo``) the
-    return's claims and hold given back once -- each step claimed on the row
-    BEFORE it acts (claim_step), so two reconcilers or the unsettled-VOID
-    sweep racing Needs completing never repeat one -- then the VOID is
-    settled. A return whose record is already finished (COMPLETED, or
-    NOTHING_PAID) has its claims and hold owned by that record: skipped."""
+    return's claims and hold given back once, then the VOID is settled. A
+    counter return's steps run on THE one set of give-back marks
+    (returns._give_back, read by the counter and "Nothing was paid" too); a
+    return whose record is already finished (COMPLETED, or NOTHING_PAID) owns
+    them: skipped. Any other row's number write-off is claimed on the row.
+    Settled only while no step is claimed but not stamped done."""
     eid = row["entry_id"]
     flt = {"entry_id": eid, "type": VOID}
     try:
-        if row.get("note_number") and claim_step(ledger, flt, "number_written_off"):
-            from .returns import _record_unused_credit_note
+        from .returns import GIVE_BACK_STEPS, _record_unused_credit_note, _task_step_lost, _undo_return_claims
 
-            _record_unused_credit_note(row["note_number"],
-                                       {"order_id": row.get("order_id"), "store_id": row.get("store_id")},
-                                       row.get("ref") or eid, {"user_id": "system"}, why)
         spec = row.get("undo_on_void") or {}
-        if undo and spec and not _return_record_finished(spec.get("return_id")):
-            from .returns import _undo_return_claims
-
-            # Each claimed step is stamped done after its act; a step claimed
-            # but never stamped (its act lost) raises a P1 task and keeps the
-            # VOID unsettled -- never a silent settle.
-            if not _undo_return_claims(spec, step=lambda name: claim_step(ledger, flt, name), row=row,
-                                       done=lambda name: ledger.update_one(flt, {"$set": {f"{name}_done": True}})):
-                return
-        # Settle only while no step is claimed-but-unstamped (a racing pass
-        # still mid-act, or a lost act): the row itself is the judge, not a
-        # stale read of it.
+        if spec.get("return_id") and spec.get("order_id"):
+            if not _return_record_finished(spec.get("return_id")) and not _undo_return_claims(
+                    spec, note_number=row.get("note_number"), undo=undo, store_id=row.get("store_id"),
+                    why=why, ref=row.get("ref") or eid):
+                return  # a step is unfinished: tasked once, the hold kept for a person
+        elif row.get("note_number") and claim_step(ledger, flt, "number_written_off"):
+            if _record_unused_credit_note(row["note_number"],
+                                          {"order_id": row.get("order_id"), "store_id": row.get("store_id")},
+                                          row.get("ref") or eid, {"user_id": "system"}, why):
+                ledger.update_one(flt, {"$set": {"number_written_off_done": True}})
+            else:
+                _task_step_lost(eid, "number_written_off", {"note_number": row["note_number"]},
+                                row.get("store_id"))
         ledger.update_one({**flt, "$nor": [{name: True, f"{name}_done": {"$ne": True}}
-                                           for name in ("claims_released", "hold_released")]},
+                                           for name in GIVE_BACK_STEPS]},
                           {"$set": {"void_settled": True}})
     except Exception as exc:  # noqa: BLE001 -- left unsettled: the reconciler's sweep resumes it
         logger.error("[CUSTOMERS] voided row %s not settled: %s", eid, exc)
@@ -2403,9 +2432,13 @@ def _post_ledger_credit(repo, entry: Dict[str, Any], *, ledger=None) -> str:
                 logger.error("[CUSTOMERS] credit row %s: insert raised and cannot be read back: %s", eid, exc)
                 return UNCLEAR
             if row is None:
-                logger.error("[CUSTOMERS] credit row %s not written: %s", eid, exc)
-                entry[NOT_WRITTEN] = True
-                return REFUSED
+                # The insert raised and no row reads back -- it may still be
+                # landing (no retryable writes on a standalone): never "not
+                # written". UNCLEAR keeps the caller's claims; the reconciler
+                # is their one owner if a row lands, the stuck-hold sweep if
+                # none ever does (money review 16).
+                logger.error("[CUSTOMERS] credit row %s: insert raised, not read back: %s", eid, exc)
+                return UNCLEAR
             if row.get("pending_at") != mine:
                 entry[RESUMED] = True
     row = dict(row)

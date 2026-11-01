@@ -983,7 +983,12 @@ def test_no_branch_claims_credit_when_the_ledger_is_down(ctx, kind):
         ])
     r = c["client"].post("/api/v1/returns", json=body, headers=_HDR)
     assert r.status_code >= 400, (kind, r.status_code, r.text)
-    assert _returned_qty(c["order"]) == 0.0, kind
+    # Money review 16: an insert that raised and cannot be read back may still
+    # be landing -- unclear, never "not written". The units stay claimed for
+    # their one owner (the reconciler if the row lands, else a person through
+    # Needs completing), never given back on a guess.
+    assert r.status_code == 503, (kind, r.text)
+    assert _returned_qty(c["order"]) == 1.0, kind
     assert c["returns"].docs == [], kind
 
 
@@ -1076,7 +1081,7 @@ def test_credit_failure_leaves_no_orphaned_loyalty_reversal(ctx):
     r = c["client"].post("/api/v1/returns", json=body, headers=_HDR)
     assert r.status_code >= 400, r.text
     assert c["returns"].docs == []
-    assert _returned_qty(c["order"]) == 0.0
+    assert _returned_qty(c["order"]) == 1.0  # unclear: kept for one owner (money review 16)
     assert c["loyalty"] == [], c["loyalty"]
 
 

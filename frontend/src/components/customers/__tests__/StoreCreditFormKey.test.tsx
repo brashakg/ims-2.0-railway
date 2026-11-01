@@ -154,3 +154,21 @@ describe('StoreCreditLedgerCard money review 15: the key outlives the form after
     expect((screen.getByPlaceholderText('Amount') as HTMLInputElement).readOnly).toBe(false); // a fresh form
   });
 });
+
+describe('StoreCreditLedgerCard money review 16: the key is kept until its line is final', () => {
+  it('keeps the key while the line is still ISSUING, drops it once the line is VOID', async () => {
+    const { customerApi } = await import('../../../services/api/customers');
+    const spy = vi.spyOn(customerApi, 'getStoreCreditLedger');
+    ssMap.set('ims_sc_key:CUST-7:issue', JSON.stringify({ key: 'K-PEND', at: Date.now(), amount: '500', reason: '', note: 'Do NOT press again' }));
+    spy.mockResolvedValue({ balance: 0, entries: [{ entry_id: 'MANUAL:CUST-7:K-PEND', type: 'ISSUING', amount: 500, delta: 500, balance_after: 0 }] } as any);
+    const first = render(<StoreCreditLedgerCard customerId="CUST-7" />);
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole('button', { name: /Issue/ }));
+    expect((screen.getByPlaceholderText('Amount') as HTMLInputElement).value).toBe('500');
+    expect(ssMap.has('ims_sc_key:CUST-7:issue')).toBe(true);
+    first.unmount();
+    spy.mockResolvedValue({ balance: 0, entries: [{ entry_id: 'MANUAL:CUST-7:K-PEND', type: 'VOID', amount: 500, delta: 0, balance_after: 0 }] } as any);
+    render(<StoreCreditLedgerCard customerId="CUST-7" />);
+    await waitFor(() => expect(ssMap.has('ims_sc_key:CUST-7:issue')).toBe(false));
+  });
+});

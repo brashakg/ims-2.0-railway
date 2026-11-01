@@ -165,3 +165,19 @@ describe('the bill key lives with the bill (money review 15)', () => {
     expect(billFingerprint({ ...store, cart_note: 'gift' })).not.toBe(billFingerprint(store));
   });
 });
+
+describe('money review 16: a same-key press while the first still saves', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('says the sale is still saving and not to change the bill', async () => {
+    const { TILL_SALE_STILL_SAVING } = await import('../posBillKey');
+    seed();
+    mockedCreate.mockRejectedValueOnce(buildApiError({
+      isAxiosError: true, message: 'x', config: { method: 'post' },
+      response: { status: 409, data: { detail: { code: 'SALE_STILL_SAVING', message: 'still saving' } } },
+    } as any));
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-9');
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe(TILL_SALE_STILL_SAVING);
+  });
+});
