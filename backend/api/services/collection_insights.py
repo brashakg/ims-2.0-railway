@@ -655,7 +655,7 @@ def kpis(db, collection: Dict, store_id: Optional[str] = None) -> Dict:
     sold30 = t["units_d30"]
     on_hand = stock["units_on_hand"]
     return {
-        "members": members["listings"],  # listings, as products_count / the website
+        "members": members.get("listings", len(members["skus"])),  # listings, as products_count
         "units_on_hand": on_hand,
         "stock_value": stock["stock_value"],
         "value_basis": stock["value_basis"],
@@ -812,7 +812,7 @@ def summary(
                 "title": doc.get("title") or doc.get("name") or doc.get("handle"),
                 "collection_type": (doc.get("collection_type") or "CUSTOM").upper(),
                 "published": bool(doc.get("published", True)),
-                "members": m["listings"],  # listings, as products_count / the website
+                "members": m.get("listings", len(m["skus"])),  # listings, as products_count
                 "on_hand": valued["units_on_hand"],
                 "stock_value": valued["stock_value"],
                 "value_basis": valued["value_basis"],
