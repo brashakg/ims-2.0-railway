@@ -47,50 +47,85 @@ def colour_size_parity(db):
     spine_by_sku = {str(p.get("sku") or "").strip(): p for p in spines}
     spine_by_id = {str(p.get("product_id")): p for p in spines}
     verdicts = {}
+
+    def verdict_of(lead):
+        key = str(lead.get("id") or lead.get("sku"))
+        if key not in verdicts:
+            verdicts[key] = _press_verdict(db, lead)
+        return verdicts[key]
+
     missing = []
     for product in products:
         sku = str(product.get("sku") or "").strip()
         if sku and sku in online:
             continue
-        ecom = product.get("ecom") or {}
         spine = spine_by_sku.get(sku, {})
-        parent_link = ecom.get("variant_of") or spine.get("variant_of")
-        parent_id = (parent_link.get("product_id") if isinstance(parent_link, dict) else parent_link)
-        parent_spine = spine_by_id.get(str(parent_id), {})
-        lead = (twins_by_id.get(str(parent_link.get("twin_id"))) if isinstance(parent_link, dict) else None)
-        if lead is None:
-            lead = (twins_by_id.get(str(parent_id)) or twins_by_sku.get(str(parent_spine.get("sku") or ""))) if parent_id else product
-        code, reason = None, "not queued"
-        if not sku:
-            reason = "SKU missing - cannot match a website colour/size"
-        elif is_archived_row(product, spine, ecom):
-            reason = "archived"
-        elif lead is None:
-            reason = "family lead could not be found"
-        elif (lead.get("ecom") or {}).get("taken_down_at"):
-            reason = "taken down - not queued for automatic publish"
-        else:
-            key = str(lead.get("id") or lead.get("sku"))
-            try:
-                if key not in verdicts:
-                    verdicts[key] = _press_verdict(db, lead)
-                code, reason, plan = verdicts[key]
-                if code is None:
-                    held = next((h for h in (plan or {}).get("held", []) if h.get("sku") == sku), None)
-                    waiting = next((h for h in (plan or {}).get("waiting", []) if h.get("sku") == sku), None)
-                    if held:
-                        code = held.get("code")
-                        reason = "colour/size held - " + (code or "") + ": " + held.get("reason", "")
-                    elif waiting:
-                        reason = "not ready - " + waiting.get("reason", "")
-            except Exception:
-                code, reason = None, "family readiness could not be read"
+        lead = model_lead(product, spine, twins_by_id.get, twins_by_sku.get, spine_by_id.get)
+        try:
+            code, reason = sku_hold(product, spine, lead, verdict_of) or verdict_of(lead)[:2]
+        except Exception:
+            code, reason = None, "family readiness could not be read"
         missing.append({"sku": sku, "product_id": product.get("id") or product.get("product_id"),
                         "reason": reason, "code": code})
     pages = {str((p.get("ecom") or {}).get("shopify_product_id")) for p in products
              if (p.get("ecom") or {}).get("shopify_product_id")}
     return {"checked": True, "total": len(products), "online": len(products) - len(missing),
             "website_pages": len(pages), "missing": len(missing), "missing_items": missing}
+
+
+def model_lead(product, spine, twin_by_id, twin_by_sku, spine_by_id):
+    """The lead twin whose press carries this SKU: its twin's ecom.variant_of
+    (twin_id, else the parent's product_id / sku), else its spine's
+    variant_of; the product itself when it is no colour/size of another;
+    None when the lead cannot be found. The lookups are the caller's -- the
+    sweep's in-memory maps, the form's reads (model_hold)."""
+    link = (product.get("ecom") or {}).get("variant_of") or spine.get("variant_of")
+    parent_id = link.get("product_id") if isinstance(link, dict) else link
+    lead = twin_by_id(str(link.get("twin_id"))) if isinstance(link, dict) else None
+    if lead is not None:
+        return lead
+    if not parent_id:
+        return product
+    parent_sku = str((spine_by_id(str(parent_id)) or {}).get("sku") or "")
+    return twin_by_id(str(parent_id)) or (twin_by_sku(parent_sku) if parent_sku else None)
+
+
+def sku_hold(product, spine, lead, verdict_of):
+    """What keeps ONE catalogue SKU off its listing's press, as (code, reason)
+    -- its own row, its lead, the press's refusal (verdict_of(lead) ->
+    _press_verdict), then this SKU's hold or wait in the plan -- or None when
+    the press carries it. The sync screen's per-SKU rule; the form's website
+    line asks it too (model_hold). Raises on a read failure."""
+    sku = str(product.get("sku") or "").strip()
+    if not sku:
+        return None, "SKU missing - cannot match a website colour/size"
+    if is_archived_row(product, spine, product.get("ecom") or {}):
+        return None, "archived"
+    if lead is None:
+        return None, "family lead could not be found"
+    if (lead.get("ecom") or {}).get("taken_down_at"):
+        return None, "taken down - not queued for automatic publish"
+    code, reason, plan = verdict_of(lead)
+    if code is not None:
+        return code, reason
+    held = next((h for h in (plan or {}).get("held", []) if h.get("sku") == sku), None)
+    if held:
+        return held.get("code"), "colour/size held - " + (held.get("code") or "") + ": " + held.get("reason", "")
+    waiting = next((h for h in (plan or {}).get("waiting", []) if h.get("sku") == sku), None)
+    if waiting:
+        return None, "not ready - " + waiting.get("reason", "")
+    return None
+
+
+def model_hold(db, product, spine):
+    """sku_hold for ONE colour/size of a model, read from the database (the
+    Add/Edit form's website line): the sync screen's reason, or None when its
+    model's press carries it. Raises on a read failure."""
+    twins, spines = db["catalog_products"], db["products"]
+    lead = model_lead(product, spine, lambda i: twins.find_one({"id": i}),
+                      lambda s: twins.find_one({"sku": s}), lambda i: spines.find_one({"product_id": i}))
+    hold = sku_hold(product, spine, lead, lambda lead: _press_verdict(db, lead))
+    return hold[1] if hold else None
 
 
 PUSH_THE_MODEL = "a colour/size of another model - it goes on the website with its model's page"

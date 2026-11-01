@@ -151,13 +151,67 @@ def test_a_first_publish_with_an_unpriced_colour_needs_a_selling_price(monkeypat
 @pytest.mark.usefixtures("brand_is_for_the_website")
 def test_a_colour_of_a_model_goes_with_its_models_page(monkeypatch):
     """push_product refuses a colour's own press (variant_of): the line says
-    what the sync screen says, never a photo or price of a page it has none of."""
+    what the sync screen says, never a photo of a page it has none of -- and
+    nothing more while its model's press carries it."""
     from api.services import online_content_diagnostics as diag
     from test_shopify_model_listings import _family, _world
 
     db = _world()
-    _lead, black = _family(db, [("Gold", "001"), ("Black", "002", "58", {"photos": 0, "mrp": 0.0})])
+    _lead, black = _family(db, [("Gold", "001"), ("Black", "002", "58", {"photos": 0})])
     assert _model_needs(monkeypatch, db, black) == [diag.PUSH_THE_MODEL]
+
+
+def _sweep_reason(db, pid):
+    """The sync screen's own per-SKU reason for this product."""
+    from api.services import online_content_diagnostics as diag
+
+    sku = db["products"].find_one({"product_id": pid})["sku"]
+    (row,) = [r for r in diag.colour_size_parity(db)["missing_items"] if r["sku"] == sku]
+    return row["reason"]
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_colour_of_a_refused_model_names_its_models_refusal(monkeypatch):
+    """Its model's first publish is refused (it would seed this colour with
+    no price): the colour's line says so, in the sync screen's own words."""
+    from api.services import online_content_diagnostics as diag
+    from test_shopify_model_listings import _family, _world
+
+    db = _world()
+    _lead, black = _family(db, [("Gold", "001"), ("Black", "002", "58", {"mrp": 0.0})])
+    reason = _sweep_reason(db, black)
+    assert reason.startswith("no selling price on "), reason
+    assert _model_needs(monkeypatch, db, black) == [diag.PUSH_THE_MODEL, "its model's page: " + reason]
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_new_unpriced_colour_of_a_live_model_names_its_hold(monkeypatch):
+    """A live model's press goes through but HOLDS a new colour with no
+    price: that colour's line names the hold, as the sync screen does."""
+    from api.services import online_content_diagnostics as diag
+    from api.services import product_master as pm
+    from test_shopify_model_listings import FakeShopify, _item, _live_single, _world
+
+    db = _world()
+    lead, _p, _var = _live_single(db, FakeShopify())
+    black = _item(db, 2, "Black", "002/58", mrp=0.0)
+    pm.link_to_family(db, black, lead, actor="u-admin")
+    reason = _sweep_reason(db, black)
+    assert reason.startswith("colour/size held - UNPRICED_SIZE"), reason
+    assert _model_needs(monkeypatch, db, black) == [diag.PUSH_THE_MODEL, "its model's page: " + reason]
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_colour_of_a_taken_down_model_says_taken_down(monkeypatch):
+    """A colour whose model was taken down will not go up with it."""
+    from api.services import online_content_diagnostics as diag
+    from test_shopify_model_listings import _family, _twin, _world
+
+    db = _world()
+    lead, black = _family(db, [("Gold", "001"), ("Black", "002")])
+    db["catalog_products"].update_one({"id": _twin(db, lead)["id"]}, {"$set": {"ecom.taken_down_at": "2026-10-01"}})
+    assert _model_needs(monkeypatch, db, black) == [
+        diag.PUSH_THE_MODEL, "its model's page: taken down - not queued for automatic publish"]
 
 
 @pytest.mark.usefixtures("brand_is_for_the_website")

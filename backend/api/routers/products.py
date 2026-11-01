@@ -1994,12 +1994,13 @@ def _website_needs(db, product_id: str) -> Dict[str, Any]:
     listing_view), exactly as the sync screen's _press_verdict asks them --
     one rule, never two (review of #1295). A colour/size of another model
     owns no page (push_product refuses its press): it gets the sync screen's
-    own sentence. `gaps`
+    own sentence, plus what its model's press holds it back on
+    (model_hold -- the sync screen's per-SKU reason). `gaps`
     are the catalogue fields the first-publish rule waits on
     (gaps_before_cost -- NEVER the cost price: the purchase brings it and a
     catalogue manager cannot fill it). {"needs": None} when it could not be
     read; [] / [] = nothing missing."""
-    from ..services.online_content_diagnostics import PUSH_THE_MODEL, listing_plan
+    from ..services.online_content_diagnostics import PUSH_THE_MODEL, listing_plan, model_hold
     from ..services.shopify_push import product_push_refusal
     from ..services.shopify_push._shared import is_variant_of
     from ..services.shopify_push.listing import listing_view
@@ -2024,6 +2025,12 @@ def _website_needs(db, product_id: str) -> Dict[str, Any]:
         rows, plan = ([], None) if variant else listing_plan(db, doc)
         if variant or (plan or {}).get("variant_of"):
             needs.append(PUSH_THE_MODEL)  # its photo and price ride its model's page
+            # What its model's press holds it back on -- the sync screen's own
+            # per-SKU reason. Not when its own refusal already stands: that
+            # is the same readiness / brand fact, said once.
+            hold = None if why else model_hold(db, doc, spine)
+            if hold:
+                needs.append("its model's page: " + hold)
         else:
             view = listing_view(doc, plan) if plan else doc
             if not product_photo_urls(view):
