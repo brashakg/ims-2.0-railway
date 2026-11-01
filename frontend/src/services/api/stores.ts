@@ -357,6 +357,13 @@ export const adminUserApi = {
     };
   },
 
+  // SUPERADMIN only: set a chosen password the user KEEPS (no forced change).
+  // The server signs out the user's other logins; it never echoes the value.
+  setPassword: async (userId: string, newPassword: string) => {
+    const response = await api.post(`/users/${userId}/set-password`, { new_password: newPassword });
+    return response.data as { user_id: string; username?: string; message?: string };
+  },
+
   assignStore: async (userId: string, storeId: string, role?: string) => {
     const response = await api.post(`/users/${userId}/assign-store`, { store_id: storeId, role });
     return response.data;
