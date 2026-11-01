@@ -84,6 +84,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,7 @@ SCHEDULER_USER = {"user_id": "scheduler:shopify-live-sync"}
 SHOP_EMPTY = "Shopify shows no products in it"
 SHOP_MISSING = "not found on Shopify"
 NOT_PUBLISHED = "not published on the website"
+RETIRED_REASON = "retired: deleted from the website"
 BACKUPS_KEPT = 20  # plus every adoption backup (the owner's hand-made menu)
 WAITING_FIRST = "waiting for the first push by a person (Regenerate & push now)"
 
@@ -212,6 +214,15 @@ def _count(row: Optional[Dict[str, Any]], counts: Dict[str, Dict[str, Any]]) -> 
     return int((counts.get((row or {}).get("handle")) or {}).get("count") or 0)
 
 
+def _collection_handle(url: str) -> Optional[str]:
+    """The lowercased <h> of any URL whose path is /collections/<h>[/...]
+    (any scheme/host, query or fragment), else None."""
+    path = urlsplit(url.strip()).path
+    if not path.startswith("/collections/"):
+        return None
+    return path[len("/collections/"):].split("/", 1)[0].lower() or None
+
+
 def _usable(
     row: Optional[Dict[str, Any]], counts: Dict[str, Dict[str, Any]],
     shop_counts: Optional[Dict[str, Any]] = None,
@@ -284,6 +295,7 @@ def generate(
     counts: Dict[str, Dict[str, Any]],
     shop_counts: Optional[Dict[str, Any]] = None,
     shop_hidden: Optional[Dict[str, str]] = None,
+    retired: Optional[Iterable[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """(items, hidden): the menu tree in the ecom_menus item shape (what
     shopify_push.menus.build_menu_items sends) and every collection left out
@@ -292,9 +304,13 @@ def generate(
     ones are already out; registry rows carry ``ims_key``), ``counts`` is
     collection_membership.counts_by_handle, ``shop_counts`` Shopify's own
     productsCount per gid (LIVE push only), ``shop_hidden`` what the last
-    LIVE read hid. Pure and deterministic."""
+    LIVE read hid, ``retired`` the handles of retired (deleted from the
+    website) collections, which a template URL may still name. Pure and
+    deterministic."""
     by_key = {str(c["ims_key"]): c for c in collections if c.get("ims_key")}
     by_handle = {str(c["handle"]): c for c in collections if c.get("handle")}
+    by_lower = {h.lower(): c for h, c in by_handle.items()}
+    gone = {str(h).lower() for h in retired or ()}
     items: List[Dict[str, Any]] = []
     hidden: List[Dict[str, Any]] = []
 
@@ -311,12 +327,15 @@ def generate(
         """Every template URL to /collections/<h> of a collection IMS holds
         goes through the same gate as a generated link: None (and listed in
         hidden, with why) when the gate refuses it."""
-        h = url.split("?")[0].rstrip("/").split("/collections/", 1)[-1] if url.startswith("/collections/") else None
-        if h and h in by_handle:
-            ok, why = usable(by_handle[h])
+        h = _collection_handle(url)
+        if h in by_lower:
+            ok, why = usable(by_lower[h])
             if not ok:
-                hide(where, title, by_handle[h], why)
+                hide(where, title, by_lower[h], why)
                 return None
+        elif h in gone:
+            hide(where, title, None, RETIRED_REASON, h)
+            return None
         return url
 
     def statics(where: str, links) -> List[Dict[str, Any]]:
@@ -437,6 +456,14 @@ def regenerate(db, doc: Dict[str, Any], facts: List[Dict[str, Any]],
     return _save(db, doc, _build(db, doc, facts, shop_counts))
 
 
+def retired_handles(db) -> set:
+    """Handles of the collections IMS retired (deleted from the website)."""
+    from . import collection_membership
+
+    return {str(c["handle"]).lower() for c in db["ecom_collections"].find({collection_membership.RETIRED: True})
+            if c.get("handle")}
+
+
 def _save(db, doc: Dict[str, Any], upd: Dict[str, Any]) -> Dict[str, Any]:
     db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": upd})
     doc.update(upd)
@@ -451,7 +478,8 @@ def _build(db, doc: Dict[str, Any], facts: List[Dict[str, Any]],
     collections = collection_membership.live_collections(db)
     counts = collection_membership.counts_by_handle(db, facts, collections)
     stored = None if shop_counts is not None else shop_hidden_of(doc)
-    items, hidden = generate(doc.get("template") or {}, collections, counts, shop_counts, stored)
+    items, hidden = generate(doc.get("template") or {}, collections, counts, shop_counts, stored,
+                             retired=retired_handles(db))
     title = doc.get("title") or doc.get("handle") or MAIN_MENU
     upd: Dict[str, Any] = {
         "items": items, "hidden": hidden, "generated_hash": menu_hash(title, doc.get("handle") or MAIN_MENU, items),

@@ -1470,3 +1470,70 @@ def test_a_links_section_child_to_a_refused_collection_is_dropped():
     items, hidden = _gen(rows=rows, template=t)
     assert [k["title"] for k in _top(items, "Sale")["children"]] == ["Contact"]
     assert any(h["handle"] == "sunglasses" and h["reason"] == gm.NOT_PUBLISHED for h in hidden)
+
+
+# Round 9: every spelling of a collection URL goes through the gate.
+_UNPUB_SUN = [dict(r, published=False) if r["handle"] == "sunglasses" else r for r in ROWS]
+
+
+@pytest.mark.parametrize("url", [
+    "https://bettervision.in/collections/sunglasses",
+    "http://shop.example.com/collections/sunglasses/",
+    "/collections/Sunglasses",
+    "/collections/sunglasses#x",
+    "/collections/SUNGLASSES/?sort=price",
+])
+def test_every_spelling_of_a_refused_collection_url_is_gated(url):
+    # a links child
+    t = _links_template("/pages/about-us", [{"title": "X", "url": url},
+                                            {"title": "Contact", "url": "/pages/contact"}])
+    assert [k["title"] for k in _top(_gen(template=t)[0], "Sale")["children"]] == ["X", "Contact"]  # control
+    items, hidden = _gen(rows=_UNPUB_SUN, template=t)
+    assert [k["title"] for k in _top(items, "Sale")["children"]] == ["Contact"]
+    assert any(h["handle"] == "sunglasses" and h["reason"] == gm.NOT_PUBLISHED for h in hidden)
+    # a panel heading's fallback URL (as _adopt copies it from Shopify)
+    items, hidden = gm.generate(_adopted_template(url), _UNPUB_SUN, _counts())
+    sun = _top(items, "Sunglasses")
+    assert sun["children"] and sun["url"] == "#" and "resource_id" not in sun
+    assert any(h["handle"] == "sunglasses" and h["reason"] == gm.NOT_PUBLISHED for h in hidden)
+
+
+def test_a_url_to_a_retired_collection_is_refused():
+    t = _links_template("/collections/Old-Sale", [{"title": "Old", "url": "https://bettervision.in/collections/old-sale"},
+                                                  {"title": "Contact", "url": "/pages/contact"}])
+    # control: without the retired set the URL is a handle IMS never held -> untouched
+    assert _top(_gen(template=t)[0], "Sale")["url"] == "/collections/Old-Sale"
+    items, hidden = gm.generate(t, ROWS, _counts(), retired={"old-sale"})
+    sale = _top(items, "Sale")
+    assert sale["url"] == "#" and [k["title"] for k in sale["children"]] == ["Contact"]
+    assert [h for h in hidden if h["handle"] == "old-sale"] == [
+        {"section": "Sale", "title": "Sale", "handle": "old-sale", "reason": gm.RETIRED_REASON}]
+
+
+def test_non_collection_urls_and_unknown_handles_are_untouched():
+    links = [{"title": "About", "url": "https://bettervision.in/pages/about"},
+             {"title": "Blog", "url": "/blogs/news"},
+             {"title": "Never", "url": "https://bettervision.in/collections/never-held"},
+             {"title": "Never2", "url": "/collections/Never-Held#x"}]
+    t = _links_template("/collections/never-held", links)
+    items, hidden = gm.generate(t, _UNPUB_SUN, _counts(), retired={"old-sale"})
+    sale = _top(items, "Sale")
+    assert sale["url"] == "/collections/never-held"
+    assert [(k["title"], k["url"]) for k in sale["children"]] == [(x["title"], x["url"]) for x in links]
+    assert not [h for h in hidden if h["handle"] in ("never-held", "old-sale")]
+
+
+def test_build_passes_the_retired_handles(monkeypatch):
+    db = StrictDB()
+    db["ecom_collections"].insert_one({"handle": "Old-Sale", "retired": True, "title": "Old"})
+    seen = {}
+    real = gm.generate
+
+    def spy(*a, **k):
+        seen.update(k)
+        return real(*a, **k)
+
+    monkeypatch.setattr(gm, "generate", spy)
+    doc = gm.make_template_doc()
+    gm._build(db, doc, [])
+    assert seen.get("retired") == {"old-sale"}

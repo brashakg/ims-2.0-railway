@@ -341,6 +341,7 @@ async def get_generated_menus(
             push_mode = None
         collections = collection_membership.live_collections(db)
         unreadable = None
+        retired = generated_menu.retired_handles(db)
         try:
             facts = collection_membership.online_facts(db, strict=True)
             counts = collection_membership.counts_by_handle(db, facts, collections)
@@ -356,7 +357,8 @@ async def get_generated_menus(
                                  "changed_since_push": not st["in_sync"]}
             else:
                 items, hidden = generated_menu.generate(
-                    doc.get("template") or {}, collections, counts, None, generated_menu.shop_hidden_of(doc))
+                    doc.get("template") or {}, collections, counts, None, generated_menu.shop_hidden_of(doc),
+                    retired=retired)
                 st["preview"] = {"items": items, "hidden": hidden, "changed_since_push": not st["in_sync"]}
             out.append(st)
     return {"menus": out, "db_connected": True}
