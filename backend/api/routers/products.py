@@ -420,7 +420,12 @@ def _form_extra_fields(product: "ProductCreate") -> dict:
 
 
 def _create_via_canonical_door(
-    product: "ProductCreate", current_user: dict, *, source: str, as_draft: bool = False
+    product: "ProductCreate",
+    current_user: dict,
+    *,
+    source: str,
+    as_draft: bool = False,
+    distinct_from: Optional[list] = None,
 ) -> dict:
     """Delegate a FORM/BULK create to the ONE canonical product_master door.
 
@@ -451,6 +456,8 @@ def _create_via_canonical_door(
     # Additive door columns. (No website flag: the brand default decides it
     # live at push time -- owner D6.)
     extra = _form_extra_fields(product)
+    if distinct_from:
+        extra["distinct_from"] = distinct_from
 
     try:
         return _pm.create_via_door(
@@ -555,6 +562,14 @@ def _build_product_data(product: "ProductCreate", created_by, created_by_name=No
     return product_data
 
 
+class DistinctFromAnswer(BaseModel):
+    """'It's a different product' (owner 2026-11-01): the product it is not,
+    and why. Who and when are stamped by the server."""
+
+    product_id: str = Field(..., min_length=1, max_length=120)
+    reason: str = Field(..., min_length=1, max_length=300)
+
+
 class ProductCreate(BaseModel):
     # SKU is AUTO-MINTED by the canonical door (product_master.mint_unique_sku)
     # when not supplied, so it is OPTIONAL. A supplied (legacy/imported) SKU is
@@ -570,6 +585,12 @@ class ProductCreate(BaseModel):
     # 'This is a different model' (no automatic link).
     variant_of: Optional[str] = Field(None, max_length=120)
     family_opt_out: bool = False
+    # "Same model, written differently" (owner 2026-11-01): ONLY the Add
+    # Product form and its edit form send it -- CSV import, clone and PO
+    # lines never do. A same colour + size twin under another spelling
+    # (RB4340 / 4340) not answered in distinct_from -> 409 NEAR_DUPLICATE.
+    check_near_duplicates: bool = False
+    distinct_from: Optional[List[DistinctFromAnswer]] = Field(None, max_length=20)
     color: Optional[str] = None
     size: Optional[str] = None
     mrp: float = Field(..., gt=0)
@@ -654,6 +675,10 @@ class ProductUpdate(BaseModel):
     brand: Optional[str] = None
     model: Optional[str] = None
     color: Optional[str] = None
+    # The Add Product edit form's "same model, written differently" check
+    # (ProductCreate); never stored as sent.
+    check_near_duplicates: bool = False
+    distinct_from: Optional[List[DistinctFromAnswer]] = Field(None, max_length=20)
     # Hub Phase 0: a partial attributes patch. This is the ONLY spine-restamp
     # door, and several categories carry their catalog-done required fields IN
     # attributes, not in the flat brand/model/color columns the overlay covers --
@@ -1218,6 +1243,35 @@ async def list_products(
     return {"products": [], "total": 0, "total_count": 0}
 
 
+def _stamped_distinct_from(answers, repo, current_user: dict, *, me: dict, stored=None) -> Optional[list]:
+    """The save's 'It's a different product' answers, stamped by the server
+    (product_master.stamp_distinct_from); None when there are none."""
+    if not answers:
+        return None
+    try:
+        return _pm.stamp_distinct_from(
+            [a.model_dump() for a in answers],
+            repo,
+            actor=current_user.get("user_id"),
+            actor_name=current_user.get("username"),
+            stored=stored,
+            me=me,
+        )
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=_pm_error_detail(err)) from err
+
+
+def _refuse_near_duplicate(repo, spine: dict, me: Optional[dict] = None) -> None:
+    """409 NEAR_DUPLICATE for an unanswered same colour + size twin of this
+    model under another spelling. An exact twin is the create door's own 409,
+    so it is left to the door."""
+    if _pm.identity_conflict(spine, repo, self_id=(me or {}).get("product_id")) is not None:
+        return
+    err = _pm.near_duplicate_conflict(getattr(repo, "collection", None), spine, me=me)
+    if err is not None:
+        raise HTTPException(status_code=409, detail=_pm_error_detail(err))
+
+
 @router.post("", status_code=201)
 async def create_product(
     product: ProductCreate,
@@ -1273,7 +1327,7 @@ async def create_product(
     # via the same core; this is the early loud 422 with the offending field.
     # With as_draft the gate relaxes to the DRAFT floor (brand+model+category).
     try:
-        _pm.build_canonical_product(
+        probe = _pm.build_canonical_product(
             _canonical_door_payload(product, as_draft=as_draft), source="FORM"
         )
     except _pm.ProductMasterError as err:
@@ -1284,8 +1338,13 @@ async def create_product(
     repo = get_product_repository()
 
     if repo is not None:
+        distinct = _stamped_distinct_from(product.distinct_from, repo, current_user, me=probe)
+        if product.check_near_duplicates:
+            # The minted SKU is a guess here (no catalogue read): only a typed
+            # one may name an exact twin.
+            _refuse_near_duplicate(repo, {**probe, "sku": product.sku, "distinct_from": distinct})
         created = _create_via_canonical_door(
-            product, current_user, source="FORM", as_draft=as_draft
+            product, current_user, source="FORM", as_draft=as_draft, distinct_from=distinct
         )
         if created:
             # A new product is shared by every shop.
@@ -2131,10 +2190,15 @@ async def get_similar_products(
         logger.warning("[SIMILAR] lookup failed: %s", e)
     # One empty answer: the service's, which it gives when there is no
     # collection (a second copy here drifted once already -- eye_size_needed).
+    # self_id: the product the editor has open -- never "similar" to itself,
+    # nor to a product it was marked different from.
     return _pm.find_similar_products(
         coll,
         category=category,
-        attributes={k: v for k, v in request.query_params.items() if k != "category"},
+        attributes={
+            k: v for k, v in request.query_params.items() if k not in ("category", "self_id")
+        },
+        self_id=request.query_params.get("self_id") or None,
     )
 
 
@@ -3563,6 +3627,9 @@ async def update_product(
             exclude_unset=True, exclude=product_cost.NOT_IN_EDITOR_WRITES
         )
         _first_cost = product_cost.editor_first_cost(existing, product.cost_price)
+        # The save check's own fields: never stored as sent.
+        _check_near = bool(update_data.pop("check_near_duplicates", False))
+        update_data.pop("distinct_from", None)
 
         # Hub Phase 0 hardening: drop explicit-null values before any persist.
         # ProductUpdate fields are Optional, so a client can send mrp:null /
@@ -3755,6 +3822,19 @@ async def update_product(
             raise HTTPException(
                 status_code=err.status, detail=_pm_error_detail(err)
             ) from err
+
+        # 'It's a different product' answers join the stored ones; the
+        # same-model check runs only when this edit moved the identity (a
+        # price edit on the older twin never asks).
+        _distinct = _stamped_distinct_from(
+            product.distinct_from, repo, current_user, stored=existing.get("distinct_from"),
+            me={**existing, **update_data},
+        )
+        if _distinct is not None:
+            update_data["distinct_from"] = _distinct
+        if _check_near and update_data.get("identity_key") not in (None, existing.get("identity_key")):
+            _merged = {**existing, **update_data}
+            _refuse_near_duplicate(repo, {**_pm.identity_spine(_merged), "attributes": _pm._identity_attributes(_merged)}, me=_merged)
 
         # Cataloguer attribution: THE edit stamp (catalog_list.edit_stamp) --
         # who (id + display name, the JWT's username, falling back to the raw

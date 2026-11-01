@@ -3221,25 +3221,48 @@ def _promote_duplicate_warnings(repo, doc: Dict) -> List[Dict[str, Any]]:
     if not or_terms:
         return []
     warnings: List[Dict[str, Any]] = []
+
+    def _warn(match: Dict[str, Any], reason: str) -> None:
+        warnings.append(
+            {
+                "product_id": match.get("product_id") or match.get("id"),
+                "sku": match.get("sku"),
+                "brand": match.get("brand"),
+                "model": match.get("model"),
+                "name": match.get("name"),
+                "reason": reason,
+            }
+        )
+
+    seen = set()
     try:
         for match in repo.find_many({"$or": or_terms}, limit=5):
-            reason = (
+            if _pm.marked_distinct(doc, match):
+                continue
+            seen.add(match.get("product_id"))
+            _warn(
+                match,
                 "same barcode"
                 if barcode and match.get("barcode") == barcode
-                else "same brand + model"
-            )
-            warnings.append(
-                {
-                    "product_id": match.get("product_id") or match.get("id"),
-                    "sku": match.get("sku"),
-                    "brand": match.get("brand"),
-                    "model": match.get("model"),
-                    "name": match.get("name"),
-                    "reason": reason,
-                }
+                else "same brand + model",
             )
     except Exception:  # noqa: BLE001 - warnings are best-effort, never block
         logger.warning("[CATALOG] promote duplicate-warning query failed", exc_info=True)
+    # The same model written differently (RB4340 / 4340): its OWN read, so the
+    # five rows above can never crowd it out; a pair someone marked "It's a
+    # different product" is skipped (similar_model_rows).
+    if brand and model:
+        try:
+            rows = _pm.similar_model_rows(
+                getattr(repo, "collection", None), doc.get("category"), brand, model, me=doc
+            )
+            for match in rows[:5]:
+                if match.get("product_id") in seen:
+                    continue
+                stored = match.get("model") or (match.get("attributes") or {}).get("model_no")
+                _warn(match, f"same model written differently: {stored} / {model}")
+        except Exception:  # noqa: BLE001
+            logger.warning("[CATALOG] promote same-model warning query failed", exc_info=True)
     return warnings
 
 

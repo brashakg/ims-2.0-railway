@@ -142,6 +142,18 @@ export interface CreateProductPayload {
   variant_of?: string;
   /** G1: 'This is a different model' -- never link it automatically. */
   family_opt_out?: boolean;
+  /** ONLY the Add Product form (and its edit form) sends it: a same colour +
+   *  size twin under another model spelling (RB4340 / 4340) not answered in
+   *  distinct_from -> 409 NEAR_DUPLICATE. */
+  check_near_duplicates?: boolean;
+  /** "It's a different product" answers; the server stamps who and when. */
+  distinct_from?: DistinctAnswer[];
+}
+
+/** "It's a different product" (owner 2026-11-01): the product it is not, and why. */
+export interface DistinctAnswer {
+  product_id: string;
+  reason: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -182,15 +194,25 @@ export interface DuplicateProductInfo {
    *  (typed as the same kind the server brings it back -- R1-64). */
   discarded_draft?: boolean | null;
   image_url?: string | null;
+  /** Who added it and when ("added by priya on 12 Sep"). */
+  created_by_name?: string | null;
+  created_at?: string | null;
 }
 
 export class DuplicateProductError extends Error {
-  readonly code = 'DUPLICATE_PRODUCT';
+  /** DUPLICATE_PRODUCT: the same item (hard). NEAR_DUPLICATE: the same model
+   *  written differently in the same colour + size -- the cataloguer answers. */
+  readonly code: 'DUPLICATE_PRODUCT' | 'NEAR_DUPLICATE';
   readonly existing: DuplicateProductInfo;
-  constructor(message: string, existing: DuplicateProductInfo) {
+  constructor(
+    message: string,
+    existing: DuplicateProductInfo,
+    code: 'DUPLICATE_PRODUCT' | 'NEAR_DUPLICATE' = 'DUPLICATE_PRODUCT',
+  ) {
     super(message);
     this.name = 'DuplicateProductError';
     this.existing = existing || {};
+    this.code = code;
   }
 }
 
@@ -205,8 +227,22 @@ export class DuplicateProductError extends Error {
 // ---------------------------------------------------------------------------
 export type SimilarProductSummary = DuplicateProductInfo;
 
+/** The same model under another stored spelling (RB4340 for a typed 4340). */
+export interface SimilarModelGroup {
+  /** The model as stored. */
+  model?: string | null;
+  brand?: string | null;
+  /** A product in it is this colour and size: it looks like the same item. */
+  same_colour_size: boolean;
+  /** The twin rows first. */
+  products: SimilarProductSummary[];
+}
+
 export interface SimilarProductsResponse {
   exact_match: SimilarProductSummary | null;
+  /** The same model written differently (owner 2026-11-01); hidden in
+   *  variant mode like the siblings. */
+  similar_models?: SimilarModelGroup[];
   /** Typed without the eye size this item is catalogued by: the eye sizes
    *  Save's 422 EYE_SIZE_NEEDED names (the door's one rule), else []. */
   eye_size_needed?: string[];
@@ -326,6 +362,9 @@ export interface UpdateProductPayload {
   cyl?: number;
   axis?: number;
   add?: number;
+  /** The Add Product edit form's same-model check (CreateProductPayload). */
+  check_near_duplicates?: boolean;
+  distinct_from?: DistinctAnswer[];
 }
 
 // ============================================================================
@@ -635,6 +674,7 @@ export const productApi = {
         ?.detail;
       const d = (detail && typeof detail === 'object' ? detail : {}) as {
         message?: string;
+        code?: string;
         existing?: DuplicateProductInfo;
       };
       throw new DuplicateProductError(
@@ -642,7 +682,8 @@ export const productApi = {
           (typeof detail === 'string'
             ? detail
             : 'A product with this identity already exists.'),
-        d.existing || {}
+        d.existing || {},
+        d.code === 'NEAR_DUPLICATE' ? 'NEAR_DUPLICATE' : 'DUPLICATE_PRODUCT',
       );
     }
     return response.data;

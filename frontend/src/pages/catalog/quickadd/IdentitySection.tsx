@@ -44,6 +44,7 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
     setShowAdvanced, openSections, toggleSection, liveErrors, sectionIssues,
     firstFieldRef, editMode, isReviewMode, variantCtx, flaggedFields, clearFlag,
     reviewSnapshot, handleSimilarPick, handleSimilarOpen, handleFamilyFound, setHintBrandInModel,
+    markDifferent, answeredIds,
     copyFromLastFields, copyFromLast, lastSaved, images,
   } = form;
   // "Auto-fill with AI" (description) round-trip in flight.
@@ -488,6 +489,8 @@ export function IdentitySection({ form }: { form: QuickAddForm }) {
                       selfId={editMode?.kind === 'spine' ? editMode.id : null}
                       onFamily={handleFamilyFound}
                       onBrandInModel={setHintBrandInModel}
+                      onMarkDifferent={markDifferent}
+                      answeredIds={answeredIds}
                     />
                   </Fragment>
                 );
