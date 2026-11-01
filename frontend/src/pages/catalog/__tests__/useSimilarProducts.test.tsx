@@ -93,6 +93,17 @@ describe('useSimilarProducts', () => {
     expect(result.current.data).toEqual(RESPONSE);
   });
 
+  it('sends self_id only when editing (selfId set), so the product never shows as its own twin', async () => {
+    renderSimilar({ ...QUERY, selfId: 'P-ME' });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(SIMILAR_DEBOUNCE_MS);
+    });
+    expect(getSimilar).toHaveBeenCalledWith(
+      { category: 'FR', brand_name: 'Ray-Ban', model_no: 'RB-2140', self_id: 'P-ME' },
+      expect.any(AbortSignal)
+    );
+  });
+
   it('never calls the API while un-armed', async () => {
     const { result } = renderSimilar(withAttrs({ brand_name: '' }));
     expect(result.current.armed).toBe(false);

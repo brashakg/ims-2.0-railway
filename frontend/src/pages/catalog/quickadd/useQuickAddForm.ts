@@ -915,8 +915,9 @@ export function useQuickAddForm() {
           // ordered draft (nothing of it shelved or sold yet), where the
           // server re-derives its HSN, rate and identity. The shop's reorder level
           // follows as its own write. An edit that makes this product another
-          // one's twin (an eye size, a CL power) is the server's 409, shown as
-          // the error toast below (not the create's rescue popup).
+          // one's exact twin (an eye size, a CL power) is the server's 409,
+          // shown as the error toast below; a same-model-written-differently
+          // twin (409 NEAR_DUPLICATE) opens "Is this the same product?".
           // (Review mode never reaches handleSubmit — it has its own fork.)
           const payload = buildProductPayload(values);
           const updated = await productApi.updateProduct(editMode.id, {

@@ -158,6 +158,8 @@ def test_never_across_brands_or_categories():
 
 def test_the_trailing_s_folds_for_sunglasses_only():
     assert not _found("0840", "0840S", category="FRAME")
+    assert not _found("0840S", "0840", category="FRAME")  # the direction the guard protects
+    assert _found("0840S", "0840")
     assert _found("RB4345", "4345", category="FRAME")
 
 
@@ -248,6 +250,20 @@ def test_a_pair_marked_different_is_hidden_both_ways():
     coll.docs[1].pop("distinct_from")
     seen = pm.find_similar_products(coll, category="SG", attributes=_typed("RB4340"), self_id="P-OLD")
     assert [p["product_id"] for p in seen["similar_models"][0]["products"]] == ["P-NEW"]
+
+
+def test_similar_models_skip_an_archived_twin_and_a_discarded_draft():
+    archived = _row("RB4340", deleted_at="2026-11-01")
+    discarded = _row("RB4340", colour="BLK", discarded_draft=True, is_active=False, catalog_status="DRAFT")
+    hit = pm.find_similar_products(_Coll([archived, discarded]), category="SG", attributes=_typed("4340"))
+    assert hit["similar_models"] == []
+
+
+def test_the_product_being_edited_is_never_its_own_twin():
+    """Edit form: 4340 retyped as RB4340 must not list itself in red."""
+    me = _row("4340", pid="P-NEW")
+    hit = pm.find_similar_products(_Coll([me]), category="SG", attributes=_typed("RB4340"), self_id="P-NEW")
+    assert hit["similar_models"] == []
 
 
 def test_the_similar_route_reads_self_id_apart_from_the_attributes(monkeypatch):
@@ -378,6 +394,20 @@ def test_an_edit_asks_only_when_it_moves_the_identity(door):
     # Without the flag (any other editor) it saves.
     _put(other["product_id"], attributes=dict(attrs, colour_code="C7"))
     assert door.repo.find_by_id(other["product_id"])["identity_key"] == "rayban|4340|c7|50"
+
+
+def test_an_edit_of_the_model_spelling_is_never_stopped_by_itself(door):
+    """4340 corrected to R4340 moves the key; its own old row is not a twin."""
+    mine = door("4340")
+    _put(mine["product_id"], model="R4340", attributes=dict(mine["attributes"], model_no="R4340"),
+         check_near_duplicates=True)
+    assert door.repo.find_by_id(mine["product_id"])["identity_key"] == "rayban|r4340|601m3|50"
+
+
+def test_draft_review_never_warns_a_draft_about_itself(door):
+    mine = door("4340")
+    warned = cat._promote_duplicate_warnings(door.repo, _draft("R4340", pid=mine["product_id"]))
+    assert not [w for w in warned if w["reason"].startswith("same model written")]
 
 
 def test_an_edit_answer_joins_the_stored_ones_and_is_never_stored_raw(door):
