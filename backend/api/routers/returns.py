@@ -660,7 +660,13 @@ def _claim_returnable_qty(
     # (a count cannot tell it from another door's booking in the meantime).
     # ponytail: tokens are never pulled but by a take-back or a release by
     # token; a line gets one per claim. `token`: the caller's, to release by.
+    # A caller's token makes the claim IDEMPOTENT (money review 18): it never
+    # matches a line already carrying that token, and a token already there
+    # means these units are already held -- never counted twice.
+    explicit = token is not None
     token = token or uuid.uuid4().hex
+    if explicit:
+        elem["claim_tokens"] = {"$ne": token}
     update: Dict[str, Any] = {"$inc": {"items.$.returned_qty": return_qty},
                               "$addToSet": {"items.$.claim_tokens": token}}
     if refund_id:
@@ -704,6 +710,13 @@ def _claim_returnable_qty(
         if refund_id:
             raise
         return False
+    if updated is None and explicit:
+        # No match: over the cap -- or this token's units are already on the
+        # line (a re-assert after a release that never landed): held, once.
+        try:
+            return coll.find_one({"order_id": order_id, "items": {"$elemMatch": {"claim_tokens": token}}}) is not None
+        except Exception:  # noqa: BLE001 -- unknown: not claimed by this call
+            return False
     return updated is not None
 
 

@@ -172,3 +172,35 @@ describe('StoreCreditLedgerCard money review 16: the key is kept until its line 
     await waitFor(() => expect(ssMap.has('ims_sc_key:CUST-7:issue')).toBe(false));
   });
 });
+
+
+describe('StoreCreditLedgerCard money review 18: a definite cancel unlocks the form', () => {
+  it('after an unclear press, a 409 "nothing was taken" drops the key and unlocks with a fresh one', async () => {
+    const { customerApi } = await import('../../../services/api/customers');
+    const { buildApiError } = await import('../../../services/api/client');
+    const err = (status: number, detail: string) => buildApiError({ isAxiosError: true, message: 'x',
+      config: { method: 'post' }, response: { status, data: { detail } } } as any);
+    const redeem = vi.spyOn(customerApi, 'redeemStoreCredit');
+    const ledger = vi.spyOn(customerApi, 'getStoreCreditLedger')
+      .mockResolvedValue({ balance: 500, entries: [] } as any);
+    redeem.mockRejectedValueOnce(err(503, 'could not be confirmed'))
+      .mockRejectedValueOnce(err(409, "This form's earlier redemption was cancelled - nothing was taken. Start a new one."))
+      .mockResolvedValue({} as any);
+    render(<StoreCreditLedgerCard customerId="CUST-6" />);
+    const btn = await screen.findByRole('button', { name: /Redeem/ });
+    await waitFor(() => expect((btn as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(btn);
+    fireEvent.change(screen.getByPlaceholderText('Amount'), { target: { value: '100' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByRole('status')).toBeTruthy();
+    const k1 = redeem.mock.calls[0][4] as string;
+    ledger.mockResolvedValue({ balance: 500, entries: [
+      { entry_id: `MANUAL-REDEEM:CUST-6:${k1}`, type: 'VOID', amount: 100, delta: 0, balance_after: 500 }] } as any);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect((screen.getByPlaceholderText('Amount') as HTMLInputElement).readOnly).toBe(false));
+    expect(ssMap.has('ims_sc_key:CUST-6:redeem')).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(redeem).toHaveBeenCalledTimes(3));
+    expect(redeem.mock.calls[2][4]).not.toBe(k1); // a fresh key: a new redemption
+  });
+});

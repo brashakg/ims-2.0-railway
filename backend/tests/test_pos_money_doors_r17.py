@@ -215,7 +215,11 @@ def test_a_release_re_run_by_its_token_never_takes_another_returns_unit(monkeypa
 
         def find_one_and_update(self, match, update, **kw):
             elem = match["items"]["$elemMatch"]
-            if "claim_tokens" in elem and elem["claim_tokens"] not in self.line["claim_tokens"]:
+            want = elem.get("claim_tokens")
+            if isinstance(want, dict):  # {"$ne": token}: the claim's own idempotency (round 18)
+                if want["$ne"] in self.line["claim_tokens"]:
+                    return None
+            elif want is not None and want not in self.line["claim_tokens"]:
                 return None
             if "returned_qty" in elem and self.line["returned_qty"] < elem["returned_qty"]["$gte"]:
                 return None

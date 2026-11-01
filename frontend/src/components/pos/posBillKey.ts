@@ -22,11 +22,15 @@ export const TILL_SALE_UNCONFIRMED_CHECK =
   'The server did not confirm this sale. Check the Orders screen for it before pressing Complete Sale again.';
 /** A same-key press while the first press is still being saved (it holds the
     units): the bill must NOT change, or the next press is another sale. */
+/** The till's words while a bill is locked (a debit leg unconfirmed). */
+export const TILL_BILL_LOCKED =
+  'This bill is locked: a payment that debits the customer could not be confirmed. Press Complete Sale again, '
+  + 'or check the Orders screen. Do not change the bill or take another tender.';
 export const TILL_SALE_STILL_SAVING =
   'The first press of this sale is still being saved. Do not change the bill - wait a moment and press Complete Sale again.';
 export const BILL_KEY_TTL_MS = 15 * 60_000;
 
-export interface BillKeyEntry { key: string; at: number }
+export interface BillKeyEntry { key: string; at: number; pending?: boolean }
 
 function readAll(now: number): Record<string, BillKeyEntry> {
   try {
@@ -68,9 +72,20 @@ export function billKeyFor(fingerprint: string, now: number = Date.now(), prefer
   const key = preferred || map[fingerprint]?.key
     || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID() : `idem-${now}-${Math.random().toString(36).slice(2)}`);
-  map[fingerprint] = { key, at: now };
+  // `pending`: a press of this bill is in flight or its answer was lost --
+  // the only time the saved draft may keep the customer, member and Rx.
+  map[fingerprint] = { key, at: now, pending: true };
   writeAll(map);
   return key;
+}
+
+/** A definite answer (a refusal) for this bill: its key stays for the next
+ *  press (e.g. after a manager's approval), but nothing is pending any more. */
+export function settleBillKey(fingerprint: string): void {
+  const map = readAll(Date.now());
+  if (!map[fingerprint]) return;
+  map[fingerprint] = { ...map[fingerprint], pending: false };
+  writeAll(map);
 }
 
 /** Drop THIS bill's key (never another tab's or a held bill's). */

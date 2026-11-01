@@ -239,3 +239,35 @@ describe('POS loyalty tender leg', () => {
     expect(cash[0].amount).toBeCloseTo(total - 300, 2);
   });
 });
+
+
+describe('money review 18: a re-press after a lost debit leg', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedCreate.mockResolvedValue({ order_id: 'ord-1', order_number: 'BV-001' } as any);
+    mockedRedeem.mockResolvedValue({ redeemed_points: 200, rupee_value: 200, was_capped: false,
+                                      txn_id: 'txn-1' } as any);
+  });
+
+  it('re-sends the burned LOYALTY leg with its own key and never says it did NOT record', async () => {
+    const total = seedStore(200);
+    usePOSStore.setState({ payments: [
+      { method: 'LOYALTY', amount: 200, reference: 'PENDING:200pts', timestamp: '' },
+      { method: 'STORE_CREDIT', amount: Math.round((total - 200) * 100) / 100, timestamp: '' },
+    ] } as any);
+    const lost = Object.assign(new Error('no answer'), {}) as any;
+    mockedAddPayment
+      .mockResolvedValueOnce({ payment_id: 'pl' } as any) // b:leg:0 LOYALTY
+      .mockRejectedValueOnce(lost) // b:leg:1 STORE_CREDIT: the answer is lost
+      .mockResolvedValue({ payment_id: 'px' } as any);
+    const first = await submitPosOrder(usePOSStore.getState() as any, 'b');
+    expect(first.ok).toBe(false);
+    const second = await submitPosOrder(usePOSStore.getState() as any, 'b');
+    expect(second.ok).toBe(true);
+    expect(second.warning || '').not.toMatch(/LOYALTY .* did NOT record/);
+    expect(mockedRedeem).toHaveBeenCalledTimes(1); // never burned again
+    expect(mockedAddPayment.mock.calls.map((c) => [c[2], (c[1] as any).method])).toEqual([
+      ['b:leg:0', 'LOYALTY'], ['b:leg:1', 'STORE_CREDIT'], ['b:leg:0', 'LOYALTY'], ['b:leg:1', 'STORE_CREDIT']]);
+    expect((mockedAddPayment.mock.calls[2][1] as any).reference).toBe('200pts txn txn-1');
+  });
+});

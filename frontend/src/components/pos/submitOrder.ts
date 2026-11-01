@@ -43,6 +43,13 @@ export interface SubmitPosOrderResult {
   /** Fatal: the approval sent with this try cannot be used (already spent,
       expired, or for another bill) -- the caller drops it. */
   discountApprovalRejected?: boolean;
+  /** The outcome is NOT known (the sale or a leg may have landed): the bill
+      key stays pending. Any other !ok is a definite refusal. */
+  pending?: boolean;
+  /** A leg that debits an account is unconfirmed: the bill is LOCKED to this
+      order and key until it is pressed again successfully (or a manager
+      abandons the attempt). */
+  lock?: boolean;
 }
 
 /** The cart lines a workshop job is built from. ONE predicate: the job
@@ -95,7 +102,8 @@ const DEBIT_TENDERS = new Set(['STORE_CREDIT', 'GIFT_VOUCHER']);
 /** The till's words when a debit leg's answer was lost. */
 export function tillDebitLegUnconfirmed(labels: string[]): string {
   return `The ${labels.join(' and ')} payment could not be confirmed. Do NOT take another tender for this `
-    + 'amount - press Complete Sale again: it finishes this payment once (it is never taken twice).';
+    + 'amount and do not change the bill (it is locked) - press Complete Sale again: it finishes this payment '
+    + 'once, on this same bill.';
 }
 
 export { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from './posBillKey';
@@ -217,6 +225,10 @@ export async function submitPosOrder(
           amount: redeemed.rupee_value,
           reference: `${redeemed.redeemed_points}pts txn ${redeemed.txn_id}`,
         };
+        // Kept on the LOYALTY line itself: a re-press of this bill (a later
+        // leg's answer lost) re-sends THIS leg with its own key -- the server
+        // replays it -- never "did NOT record" for a leg that did.
+        store.markLoyaltyBurned?.(loyaltyLeg);
         const shortfall =
           Math.round((pendingLoyalty.rupeeValue - redeemed.rupee_value) * 100) / 100;
         if (shortfall > 0.01) {
@@ -259,6 +271,7 @@ export async function submitPosOrder(
       // (warned via loyaltyWarning above, or as unrecorded below).
       let leg = p;
       if (p.method === 'LOYALTY') {
+        if (!loyaltyLeg && p.burned) loyaltyLeg = { amount: p.amount, reference: p.reference || '' };
         if (!loyaltyLeg) {
           if (!loyaltyWarning) {
             // A LOYALTY line with no burn behind it (state drift): nothing
@@ -316,7 +329,7 @@ export async function submitPosOrder(
       // (the server guards the debit by that key). Never another tender.
       store.setOrderResult(result.order_id, result.order_number);
       return { ok: false, orderId: result.order_id, orderNumber: result.order_number,
-               error: tillDebitLegUnconfirmed(debitUnconfirmed) };
+               error: tillDebitLegUnconfirmed(debitUnconfirmed), pending: true, lock: true };
     }
     store.setCashTender(null);
     store.setOrderResult(result.order_id, result.order_number);
@@ -421,13 +434,14 @@ export async function submitPosOrder(
       return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed };
     }
     if (code === 'SALE_STILL_SAVING') {
-      return { ok: false, error: TILL_SALE_STILL_SAVING };
+      return { ok: false, error: TILL_SALE_STILL_SAVING, pending: true };
     }
     if (code && DEAD_APPROVAL_CODES.has(code)) {
       return { ok: false, error: msg, discountApprovalRejected: true };
     }
     if (msg === WRITE_UNCONFIRMED_MESSAGE) {
-      return { ok: false, error: replayGuaranteed() ? TILL_SALE_UNCONFIRMED : TILL_SALE_UNCONFIRMED_CHECK };
+      return { ok: false, error: replayGuaranteed() ? TILL_SALE_UNCONFIRMED : TILL_SALE_UNCONFIRMED_CHECK,
+               pending: true };
     }
     return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error') };
   }

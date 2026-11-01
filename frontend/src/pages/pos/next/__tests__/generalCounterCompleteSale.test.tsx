@@ -491,3 +491,34 @@ describe('the till stops promising once the cart changes', () => {
     expect(screen.queryByText(TILL_SALE_UNCONFIRMED)).toBeNull();
   });
 });
+
+
+describe('money review 18: the surface locks the bill on a lost debit leg', () => {
+  it('locks to the order and key, presses again with that key, unlocks on success', async () => {
+    usePOSStore.setState({ bill_lock: null } as any);
+    submitPosOrder.mockResolvedValueOnce({ ok: false, error: 'locked words', pending: true, lock: true, orderId: 'O1' });
+    submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'O1', orderNumber: 'ORD-1' });
+    putSomethingInTheCart();
+    renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(usePOSStore.getState().bill_lock?.orderId).toBe('O1'));
+    const key = submitPosOrder.mock.calls[0][1];
+    expect(usePOSStore.getState().bill_lock?.key).toBe(key);
+    await waitFor(() => expect((completeButton() as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
+    expect(submitPosOrder.mock.calls[1][1]).toBe(key);
+    await waitFor(() => expect(usePOSStore.getState().bill_lock).toBeNull());
+  });
+
+  it('a definite refusal leaves the bill key settled (no customer kept in the draft)', async () => {
+    usePOSStore.setState({ bill_lock: null } as any);
+    submitPosOrder.mockResolvedValueOnce({ ok: false, error: 'Payment incomplete.' });
+    putSomethingInTheCart();
+    renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(1));
+    const entry = billKeyEntry(billFingerprint(usePOSStore.getState()));
+    expect(entry?.pending).toBe(false);
+  });
+});

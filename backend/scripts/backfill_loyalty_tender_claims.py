@@ -104,12 +104,16 @@ def plan(db) -> dict:
                  for pid, amt in unbacked_by_order.get(oid, [])]
     conflict_ids = {c[0] for c in conflicts}
     legacy = [t for t in legacy if t not in conflict_ids]
+    # A conflict on a bill that still has a balance due: the old burn could
+    # pay that bill a second time -- a STOP before --apply (owner decides).
+    stop = sorted({(txn_id, oid, due) for txn_id, oid, due in unmatched_rows
+                   if txn_id in conflict_ids and due is not None and due > 0.01})
     no_order = txns.count_documents({"type": "REDEEM", "order_id": {"$in": [None, ""]}})
     scanned = {"redeem_rows": txns.count_documents({"type": "REDEEM"}),
                "orders": db["orders"].count_documents({})}
     return {"links": links, "unmatched": unmatched, "unbacked": unbacked, "no_order": no_order,
             "unmatched_rows": unmatched_rows, "legacy": legacy, "scanned": scanned,
-            "no_txn_id": no_txn_id, "conflicts": conflicts}
+            "no_txn_id": no_txn_id, "conflicts": conflicts, "stop": stop}
 
 
 LEGACY_CLAIM = "LEGACY-PRE-1088"
@@ -192,6 +196,12 @@ def main() -> int:
     for txn_id, oid, pid, amt in out["conflicts"]:
         print(f"  [CONFLICT] burn {txn_id} and payment {pid} (Rs {amt}) on order {oid}: the payment may have spent "
               "this burn - the owner decides; --apply leaves both alone")
+    if out["stop"]:
+        for txn_id, oid, due in out["stop"]:
+            print(f"[STOP] order {oid} still has Rs {due} due and its burn {txn_id} is a [CONFLICT]: that burn "
+                  "could pay this bill a second time. The owner decides each one BEFORE --apply and the merge.")
+        print("[STOPPED] nothing written. (exit 2)")
+        return 2
     if not args.apply:
         print("[DRY RUN] nothing written. Re-run with --apply.")
         return 0

@@ -81,7 +81,7 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
     setUnclearNote(null);
   }, [mode, customerId]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<Entry[] | null> => {
     setLoading(true);
     try {
       const r = await customerApi.getStoreCreditLedger(customerId);
@@ -94,8 +94,10 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
         const kept = readKept(customerId, m);
         if (kept && ids.has(lineIdOf(customerId, m, kept.key))) dropKept(customerId, m);
       }
+      return r.entries || [];
     } catch {
       /* fail-soft: leave empty */
+      return null;
     } finally {
       setLoading(false);
     }
@@ -118,6 +120,28 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
     } catch (e: any) {
       const status = getErrorStatus(e);
       const msg = getErrorMessage(e, 'Action failed');
+      if (status === 409 && unclearNote && mode) {
+        // A definite answer to the earlier unclear press (money review 18):
+        // the ledger says how it ended. Voided -- nothing was taken: the kept
+        // key is dropped and the form unlocks with a fresh one. Landed: that
+        // press is done, so the form closes. Still settling: stays locked.
+        const line = (await load() || []).find((x) => x.entry_id === lineIdOf(customerId, mode, formKey));
+        if (line?.type === 'VOID') {
+          dropKept(customerId, mode);
+          setFormKey(typeof crypto !== 'undefined' && 'randomUUID' in crypto
+            ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+          setUnclearNote(null);
+          setSent(false);
+          toast.error(msg);
+          return;
+        }
+        if (line && line.type !== 'ISSUING') {
+          dropKept(customerId, mode);
+          toast.error(msg);
+          setMode(null); setAmount(''); setReason('');
+          return;
+        }
+      }
       if (status !== undefined && status < 500 && !unclearNote) {
         // A definite refusal: nothing was recorded under this key, so the
         // form unlocks for a correction.
