@@ -2381,7 +2381,7 @@ async def write_off_missing_piece(
     if not shrink.find_one({"transfer_id": tid, "voided_stock_ids": stock_id}):
         line = _line_of_piece(transfer, stock_id)
         product = _ship_products(transfer).get(piece.get("product_id")) or {}
-        value = round(_unit_cost(unit, product) or _first_cost(line.get("unit_cost")), 2)
+        piece_cost = round(_unit_cost(unit, product) or _first_cost(line.get("unit_cost")), 2)
         shrink.insert_one({
             "shrinkage_id": str(uuid.uuid4()),
             "source": "TRANSFER_MISSING",
@@ -2396,8 +2396,8 @@ async def write_off_missing_piece(
             "units_not_voided": 0,
             "voided_stock_ids": [stock_id],
             "missing_barcodes": [piece.get("barcode")],
-            "unit_cost": value,
-            "shrinkage_value": value,
+            "unit_cost": piece_cost,
+            "shrinkage_value": piece_cost,
             "credit_note_number": note,
             "write_off_requested_by": piece.get("write_off_requested_by"),
             "recorded_at": now,
