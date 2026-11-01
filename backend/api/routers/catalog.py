@@ -2305,7 +2305,7 @@ async def create_catalog_product(
     _pr = get_product_repository()
     if _pr is not None:
         try:
-            _pm.persist_new_spine(_spine, _pr)
+            _pm.persist_new_spine(_spine, _pr, cost_source="CATALOG")
         except _pm.ProductMasterError as err:
             status, detail = _catalog_pm_error(err, product)
             raise HTTPException(status_code=status, detail=detail) from err
@@ -2452,6 +2452,7 @@ async def update_catalog_product(
     if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
     _refuse_ordered_draft(existing)
+    _editor_first_cost = None  # (spine id, cost): seeded once the save lands
     if product.pricing and product.pricing.cost_price is not None:
         # S4: an average is corrected only through its correction box -- the
         # product (spine) holds it, found by the one twin -> spine rule the
@@ -2459,12 +2460,21 @@ async def update_catalog_product(
         # linked by pim_product_id, not by this id).
         from ..dependencies import get_product_repository as _spine_repo
         from ..services.product_cost import refuse_editor_cost
+        from ..services.stock_value import average_cost
 
         try:
             _cost_spine = _spine_of(_spine_repo(), existing)
         except Exception as exc:  # noqa: BLE001 -- not knowing the average is no pass
             raise HTTPException(status_code=503, detail=_SPINE_UNCHECKED) from exc
         refuse_editor_cost(_cost_spine, product.pricing.cost_price)
+        if _cost_spine is not None:
+            # The spine holds the cost: never in the plain twin / spine writes
+            # below (they would overwrite a bill landing between this check and
+            # them; the check proved a sent figure equals the average). A first
+            # cost is seeded after the save, which mirrors it onto this twin.
+            if not average_cost(_cost_spine):
+                _editor_first_cost = (_cost_spine["product_id"], product.pricing.cost_price)
+            product.pricing.cost_price = None
     # Work on a COPY: in no-DB mode _get_catalog_product returns the LIVE
     # in-memory dict, so mutating it mid-handler would leak partial edits into
     # the store on a later 4xx AND defeat the compare-and-swap write below
@@ -3041,6 +3051,14 @@ async def update_catalog_product(
         if weight_sent:
             # The weight has no other copy: say so rather than drop it quietly.
             message = "Saved, but the weight could not be saved. Please save again."
+    if _editor_first_cost:
+        from ..services.product_cost import seed_editor_cost
+
+        try:
+            seed_editor_cost(_get_db(), *_editor_first_cost, current_user.get("user_id"))
+        except Exception:  # noqa: BLE001 -- the rest of the save stands
+            logger.warning("[CATALOG] first cost not saved for %s", product_id, exc_info=True)
+            message = "Saved, but the cost could not be saved. Please save again."
     # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take it OFF
     # Shopify; back on -> queue it for the next press / live sync. The ONE
     # rule lives in services/online_delist; runs AFTER the save (the full-doc
@@ -3336,6 +3354,10 @@ async def promote_catalog_product(
     spine["product_id"] = product_id
     spine["id"] = product_id
     minted_sku = None if doc_sku else spine.get("sku")
+    # The cost the twin carried is the new spine's first average (S4).
+    from ..services.product_cost import born_with_cost
+
+    born_with_cost(spine, source="PROMOTE", actor=current_user.get("user_id"))
 
     try:
         created = repo.create(spine, raise_on_duplicate=True)

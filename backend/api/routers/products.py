@@ -3550,11 +3550,19 @@ async def update_product(
         if existing is None:
             raise HTTPException(status_code=404, detail="Product not found")
         # S4: an average is corrected only through its correction box.
+        from ..services import product_cost, stock_value
         from ..services.product_cost import refuse_editor_cost
 
         refuse_editor_cost(existing, product.cost_price)
 
-        update_data = product.model_dump(exclude_unset=True)
+        # S4: the cost is never in the plain write below -- it would overwrite
+        # a bill landing between the check above and that write. The check
+        # proved a sent figure equals the average; a first cost is seeded
+        # once the save lands (written only while there is still no average).
+        update_data = product.model_dump(
+            exclude_unset=True, exclude=product_cost.NOT_IN_EDITOR_WRITES
+        )
+        _first_cost = None if stock_value.average_cost(existing) else product.cost_price
 
         # Hub Phase 0 hardening: drop explicit-null values before any persist.
         # ProductUpdate fields are Optional, so a client can send mrp:null /
@@ -3783,6 +3791,16 @@ async def update_product(
         else:
             saved = repo.update(product_id, update_data)
         if saved:
+            _restamp_base = existing
+            if _first_cost is not None:
+                from ..dependencies import get_db as _gdb_cost
+
+                _seeded = product_cost.seed_editor_cost(
+                    _gdb_cost(), product_id, _first_cost, current_user.get("user_id")
+                )
+                if _seeded:  # the restamp below reads the product with its cost
+                    _restamp_base = {**existing, "cost_price": _seeded["new_cost"],
+                                     "cost_price_is_catalogue_only": False}
             if _gtin_written and "barcode" not in update_data:
                 _pm.drop_legacy_spine_barcode(repo, product_id)
             # Compact field-classified audit row (scorecard corrections): the
@@ -3861,7 +3879,7 @@ async def update_product(
 
             mirror_outcome = {}
             status_fields, released = catalogue_write_done(
-                product_id, existing, update_data, product_repo=repo,
+                product_id, _restamp_base, update_data, product_repo=repo,
                 mirror_outcome=mirror_outcome,
             )
             # Sync audit gap #2 (owner, 2026-09-06): is_active off -> take the

@@ -164,6 +164,19 @@ def test_promote_happy_path_preserves_id_and_sku(env):
     assert "products:*" in env["cache"].deleted_patterns
 
 
+def test_promote_carries_the_twins_cost_with_its_history_row(env):
+    """S4: the twin's cost becomes the new spine's first average with its
+    history row (kind FIRST_COST, source PROMOTE, the reviewer)."""
+    doc = _bvi_doc(pricing={"mrp": 5000.0, "offer_price": 4500.0, "cost_price": 2100.0})
+    catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc
+    _promote(doc["id"])
+    spine = env["repo"].find_by_id(doc["id"])
+    assert spine["cost_price"] == 2100.0
+    (entry,) = spine["cost_history"]
+    assert (entry["kind"], entry["source"], entry["by"]) == ("FIRST_COST", "PROMOTE", "reviewer-1")
+    assert spine["cost_keys"] == [entry["key"]]
+
+
 def test_promote_sku_absent_mints_and_writes_back(env):
     doc = _bvi_doc(doc_id="clx0nosku0001", sku=None)
     catalog_mod.CATALOG_PRODUCTS[doc["id"]] = doc

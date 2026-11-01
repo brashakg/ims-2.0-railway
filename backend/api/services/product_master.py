@@ -3262,6 +3262,7 @@ def create_via_door(
         # MASTER door) creates the variant on the live listing itself.
         live_lead_rows=p["_source"] == "MASTER",
         extra_fields=extra_fields,
+        cost_source=p["_source"],
         product_repo=product_repo,
         catalog_repo=catalog_repo,
         variant_repo=variant_repo,
@@ -3421,6 +3422,7 @@ def create_product(
     variant_repo=None,
     audit_repo=None,
     db=None,
+    cost_source: str = "CREATE",
 ) -> Dict[str, Any]:
     """SPINE-FIRST + COMPENSATION triple-write.
 
@@ -3523,7 +3525,7 @@ def create_product(
         return spine
 
     # --- STEP 1: spine FIRST + alone (single-document atomic create) ---
-    created = persist_new_spine(spine, product_repo)
+    created = persist_new_spine(spine, product_repo, cost_source=cost_source)
     product_id = created.get("product_id")
 
     # --- STEP 2: gated, best-effort mirror (never corrupts the spine) ---
@@ -3593,14 +3595,21 @@ def create_product(
     return created
 
 
-def persist_new_spine(spine: Dict[str, Any], product_repo) -> Dict[str, Any]:
+def persist_new_spine(
+    spine: Dict[str, Any], product_repo, *, cost_source: str = "CREATE"
+) -> Dict[str, Any]:
     """Persist a validated product with the shared identity and GTIN guards.
 
     Catalogue has its own twin shape and preassigned id, but its billing
     identity must obey the same create rule. A concurrent duplicate is a
     refusal naming the winner, never permission to save an orphan twin.
     Callers must build/validate the spine before entering this write gate.
+    A cost it is created with is its first average, with its history row
+    (product_cost.born_with_cost; `cost_source`: the door).
     """
+    from .product_cost import born_with_cost
+
+    born_with_cost(spine, source=cost_source, actor=spine.get("created_by"))
     conflict = identity_conflict(spine, product_repo)
     if conflict is not None:
         raise conflict

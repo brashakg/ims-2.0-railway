@@ -122,6 +122,21 @@ def test_clone_across_colours_makes_draft_variants():
         assert row["category"] == "FRAME" and row["mrp"] == 5000.0
 
 
+def test_a_cloned_cost_is_each_variants_first_average_with_its_history_row():
+    """S4: the source's cost a variant is born with goes in with its history
+    row (kind FIRST_COST, source CLONE, the actor), never history-less."""
+    repo = _FakeRepo(existing=[_source_frame()])
+    out = pm.clone_and_vary(
+        source_id="SRC-1", variations=[{"colour_code": "RED"}], actor="u-cat",
+        product_repo=repo, db=None,
+    )
+    row = repo.find_by_id(out["created"][0]["product_id"])
+    assert row["cost_price"] == 2000.0
+    (entry,) = row["cost_history"]
+    assert (entry["kind"], entry["source"], entry["by"]) == ("FIRST_COST", "CLONE", "u-cat")
+    assert row["cost_keys"] == [entry["key"]]
+
+
 def test_clone_source_not_found_404():
     repo = _FakeRepo(existing=[])
     with pytest.raises(pm.ProductMasterError) as ei:

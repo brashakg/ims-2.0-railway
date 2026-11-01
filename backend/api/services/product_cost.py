@@ -22,7 +22,9 @@ The average moves only here:
   * accounts correct it, with a reason (correct()) -- the one correction
     door: the product and catalogue editors only type a FIRST cost
     (refuse_editor_cost).
-  * opening stock gives a product that has none its first cost (seed()).
+  * opening stock, or a first cost typed in an editor, gives a product that
+    has none its first cost (seed(); seed_editor_cost()); a product created
+    with a cost carries its first history row from the insert (born_with_cost).
 
 Sales, transfers and counts never change it. Each change is one row of the
 product's cost_history (the product page shows it; no per-piece cost).
@@ -327,6 +329,42 @@ def seed(db, product_id: str, cost: float, *, key: str, kind: str, actor: Option
         lambda _prod, old: None if old or first <= 0 else (first, {}),
         {"kind": kind, "source": kind, "by": actor},
     )
+
+
+# Never in an editor door's plain write (seed_editor_cost writes a first cost).
+NOT_IN_EDITOR_WRITES = frozenset({"cost_price"})
+
+
+def seed_editor_cost(db, product_id: str, cost, actor: Optional[str]) -> Optional[dict]:
+    """A first cost typed in the product or catalogue editor: seeded (the
+    editors never write a cost with a plain update -- it would overwrite a
+    bill landing between their check and their write)."""
+    return seed(db, product_id, cost, key=f"editor:{uuid.uuid4().hex}", kind="EDITOR_FIRST_COST", actor=actor)
+
+
+def born_with_cost(doc: dict, *, source: str, actor: Optional[str]) -> None:
+    """A product CREATED with a cost (the create doors, clone-vary, promote):
+    that cost is its first average, its history row written into the insert
+    itself (one document: nothing can land in between). A provisional
+    (ordered, not yet catalogued) product's PO rate is only a provisional
+    cost: no row, so the receipt's rate can still replace it
+    (vendors/gst._promote_cost_from_rate)."""
+    first = _paise(_d(doc.get("cost_price")))
+    if first <= 0 or doc.get("provisional") or doc.get("cost_price_is_catalogue_only"):
+        return
+    at, key = utc_now_iso(), f"created:{uuid.uuid4().hex}"
+    doc.update({
+        "cost_price": first,
+        "moving_avg_cost": first,
+        "cost_updated_at": at,
+        "cost_source": source,
+        "cost_source_id": key,
+        "cost_keys": [key],
+        "cost_history": [{
+            "kind": "FIRST_COST", "source": source, "by": actor,
+            "key": key, "at": at, "old_cost": None, "new_cost": first,
+        }],
+    })
 
 
 def history(product: Optional[dict]) -> List[dict]:
