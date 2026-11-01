@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timedelta, date, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -57,6 +57,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api.routers import marketing as marketing_mod  # noqa: E402
 from api.routers import follow_ups as fu_mod  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
+from api.utils.ist import ist_today  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -728,7 +729,7 @@ def test_follow_up_create_rejects_past_date(monkeypatch):
 
     client = _mk_fu_client(_Wrapper(), monkeypatch=monkeypatch)
     tok = _tok(["STORE_MANAGER"])
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    yesterday = (ist_today() - timedelta(days=1)).isoformat()  # the IST business day, never the UTC clock
     r = client.post(
         "/api/v1/follow-ups/",
         json={
@@ -764,7 +765,7 @@ def test_follow_up_create_accepts_today(monkeypatch):
 
     client = _mk_fu_client(_Wrapper(), monkeypatch=monkeypatch)
     tok = _tok(["STORE_MANAGER"])
-    today = date.today().isoformat()
+    today = ist_today().isoformat()  # the IST business day, never the UTC clock
     r = client.post(
         "/api/v1/follow-ups/",
         json={
@@ -799,7 +800,7 @@ def test_follow_up_create_accepts_future_date(monkeypatch):
 
     client = _mk_fu_client(_Wrapper(), monkeypatch=monkeypatch)
     tok = _tok(["STORE_MANAGER"])
-    future_date = (date.today() + timedelta(days=7)).isoformat()
+    future_date = (ist_today() + timedelta(days=7)).isoformat()
     r = client.post(
         "/api/v1/follow-ups/",
         json={
