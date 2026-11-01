@@ -38,6 +38,7 @@ mongomock = pytest.importorskip("mongomock")
 from fastapi import HTTPException  # noqa: E402
 
 from api.utils.ist import IST  # noqa: E402
+from tests.ist_business_day import business_day  # noqa: E402
 
 MAY_2026 = datetime(2026, 5, 1, 11, 0, tzinfo=IST)
 GSTIN_Z_JH = "20AAACZ1111A1ZH"  # company Z, Jharkhand (both Dhanbad shops)
@@ -465,13 +466,10 @@ def test_tax_invoice_is_booked_at_ship_in_the_dispatch_month(world):
     (bill,) = _bills(world, t["id"])
     assert bill["invoice_number"] == t["tax_invoice_number"]
     stored = world["stock_transfers"].find_one({"id": t["id"]})
-    shipped_day = datetime.fromisoformat(stored["tax_invoice_date"].replace("Z", "+00:00"))
-    if shipped_day.tzinfo is None:
-        from datetime import timezone
-
-        shipped_day = shipped_day.replace(tzinfo=timezone.utc)
-    ist_day = shipped_day.astimezone(IST).date().isoformat()
-    assert bill["bill_date"][:10] == bill["invoice_date"][:10] == ist_day
+    # The IST day of the invoice, by the tests' own hand-rolled +05:30
+    # (tests/ist_business_day), never the code under test's helper.
+    ist_day = business_day(stored["tax_invoice_date"].replace("Z", "+00:00"))
+    assert bill["bill_date"].split("T")[0] == bill["invoice_date"].split("T")[0] == ist_day
     # The units SHIPPED, at their own cost: 1850 + 1850 + 1850.01.
     assert bill["taxable_amount"] == 5550.01
     assert bill["cgst_total"] + bill["sgst_total"] == 277.50
@@ -631,7 +629,7 @@ def test_an_invoice_booked_late_still_files_in_the_dispatch_month(world, monkeyp
     monkeypatch.setattr(transfers, "_book_mirror_purchase", real)
     _complete(t["id"], user=MGR_BOK)
     (bill,) = _bills(world, t["id"])
-    assert bill["bill_date"][:10] == bill["invoice_date"][:10] == "2026-05-01"
+    assert bill["bill_date"].split("T")[0] == bill["invoice_date"].split("T")[0] == "2026-05-01"
 
 
 def test_a_piece_already_credited_is_never_credited_twice(world):
