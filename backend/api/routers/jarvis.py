@@ -1942,7 +1942,7 @@ class JarvisAnalyticsEngine:
                             ),
                             "action": "Close vendor returns or escalate",
                             "impact": "Frees working capital",
-                            "link": "/inventory/vendor-returns",
+                            "link": "/purchase/vendor-returns",
                         }
                     )
         except Exception:

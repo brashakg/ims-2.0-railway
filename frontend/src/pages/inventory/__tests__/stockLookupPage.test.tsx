@@ -220,3 +220,21 @@ describe('Stock lookup screen', () => {
     },
   );
 });
+
+// 2026-11-01: Power Grid left the Stock & supply menu; the optometrist's
+// standing door is a header link here, shown only to roles its route admits.
+describe('Stock lookup header - Power Grid door', () => {
+  it.each(STOCK_LOOKUP_ROLES.map((r) => [r]))('shows the Power Grid link to %s only if it can open the grid', (role) => {
+    roles = [role];
+    renderPage();
+    const admitted = role === 'SUPERADMIN' || role === 'ADMIN' || POWER_GRID_ROLES.includes(role);
+    const link = screen.queryByRole('link', { name: 'Power Grid' });
+    expect(link?.getAttribute('href') ?? null).toBe(admitted ? '/inventory/power-grid' : null);
+  });
+
+  it('OPTOMETRIST gets it before any search', () => {
+    roles = ['OPTOMETRIST'];
+    renderPage();
+    expect(screen.getByRole('link', { name: 'Power Grid' })).toHaveAttribute('href', '/inventory/power-grid');
+  });
+});

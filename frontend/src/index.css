@@ -1034,6 +1034,8 @@
 .top-nav-dd-item.active { background: var(--bv-50); color: var(--bv); }
 .top-nav-dd-item.active svg { color: var(--bv); }
 .top-nav-dd-item:focus-visible { outline: 2px solid var(--bv); outline-offset: -2px; }
+.top-nav-dd-heading { padding: 8px 10px 4px; font: 600 11px var(--font-sans); text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-4); }
+.top-nav-dd-heading:not(:first-child) { margin-top: 4px; border-top: 1px solid var(--line); }
 
 /* Account / sign-out menu, pinned right. */
 .top-nav-user {

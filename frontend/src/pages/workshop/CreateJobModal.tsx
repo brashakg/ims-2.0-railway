@@ -7,9 +7,14 @@ import { Search } from 'lucide-react';
 import clsx from 'clsx';
 import type { WorkshopPageState } from './useWorkshopPage';
 import { istDayString } from '../../utils/datetime';
+import { Link } from 'react-router-dom';
+import { useAuth } from '../../context/AuthContext';
+import { RECEIVING_MANAGER_ROLES } from '../purchase/purchaseTypes';
 
 export function CreateJobModal({ page }: { page: WorkshopPageState }) {
   const { showCreateJob, setShowCreateJob, setCreateSelectedOrder, setCreateOrders, createSelectedOrder, createOrderSearch, setCreateOrderSearch, searchOrdersForJob, createOrders, createPriority, setCreatePriority, createExpectedDate, setCreateExpectedDate, createFitting, setCreateFitting, createNotes, setCreateNotes, dcHardlock, canOverrideHardlock, overrideReason, setOverrideReason, handleCreateJob, createLoading } = page;
+  // Receive goods is managers-only; workshop staff would land on 'not allowed'.
+  const canReceive = useAuth().hasRole([...RECEIVING_MANAGER_ROLES]);
   return (
     <>
       {/* CREATE JOB MODAL */}
@@ -115,9 +120,11 @@ export function CreateJobModal({ page }: { page: WorkshopPageState }) {
                     <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
                       <p className="font-medium">Delivery Challan required</p>
                       <p className="mt-1">{dcHardlock}</p>
-                      <a href="/purchase/receive" className="mt-2 inline-block underline">
-                        Go to Receive goods (delivery challan)
-                      </a>
+                      {canReceive && (
+                        <Link to="/purchase/receive" className="mt-2 inline-block underline">
+                          Go to Receive goods (delivery challan)
+                        </Link>
+                      )}
                       {canOverrideHardlock && (
                         <div className="mt-3">
                           <label className="block text-xs font-medium mb-1">
