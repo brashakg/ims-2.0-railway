@@ -149,8 +149,11 @@ export const returnsApi = {
     return response.data;
   },
 
-  create: async (payload: CreateReturnPayload) => {
-    const response = await api.post('/returns', payload);
+  // `idempotencyKey`: one per press of the Returns screen, reused by every
+  // re-press of the same return -- a lost answer is never a second refund.
+  create: async (payload: CreateReturnPayload, idempotencyKey?: string) => {
+    const response = await api.post('/returns', payload,
+      idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : undefined);
     return response.data;
   },
 

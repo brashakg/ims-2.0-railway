@@ -172,6 +172,11 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # deny or grant still answers it: PARENT_CAPABILITY.
     if tmpl == "/api/v1/returns/advance-refund":
         return "returns:advance-refund"
+    # Returns > Complete record (money review 12): ACCOUNTANT / ADMIN /
+    # SUPERADMIN finish a counter return whose money went out without its
+    # record. Carved out for the same reason as the advance refund.
+    if tmpl == "/api/v1/returns/{return_id}/complete-record":
+        return "returns:complete-record"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
 
@@ -187,6 +192,7 @@ PARENT_CAPABILITY: Dict[str, str] = {
     "vendor-returns:confirm-credit": "vendor-returns:write",
     "vendor-rma:confirm-credit": "vendor-rma:write",
     "returns:advance-refund": "returns:write",
+    "returns:complete-record": "returns:write",
 }
 
 

@@ -152,6 +152,14 @@ async def add_payment(
                     validate_store_access(order_doc.get("store_id"), current_user)
                     for existing_pmt in order_doc.get("payments") or []:
                         if existing_pmt.get("idempotency_key") == idem_key:
+                            # A reused key carrying another tender or amount is
+                            # refused, never replayed as the old payment.
+                            sent_amt = float(existing_pmt.get("amount") or 0)
+                            if (str(existing_pmt.get("method") or "") != payment.method.value
+                                    or abs(sent_amt - float(payment.amount or 0)) > 0.005):
+                                raise HTTPException(status_code=409, detail=(
+                                    f"This payment was already sent as {existing_pmt.get('method')} "
+                                    f"Rs {sent_amt:.2f} - check the order's payments before adding another."))
                             return {
                                 "payment_id": existing_pmt.get("payment_id"),
                                 "message": "Payment recorded",

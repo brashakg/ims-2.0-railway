@@ -1,7 +1,7 @@
 // ============================================================================
 // IMS 2.0 — Returns, Exchanges & Credit Notes
 // ============================================================================
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { inventoryApi, orderApi, productApi } from '../../services/api';
 import {
@@ -322,8 +322,18 @@ export default function ReturnsPage() {
     l: activeReturns.map(i => [i.orderItemId, i.returnQty, i.unitPrice, i.gstRate]),
     r: returnType === 'EXCHANGE' ? replacementItems.map(r => [r.productId, r.quantity, r.unitPrice]) : null,
   });
-  // A kept approval belongs to one bill, lines and amount: any change drops it.
-  useEffect(() => { setKeptApproval(null); }, [quoteKey]);
+  // What one press asks for: the quote's selection plus the refund tenders.
+  // A kept approval and the press's Idempotency-Key both belong to it: any
+  // change of bill, lines, amounts or tender drops them.
+  const pressKey = JSON.stringify({
+    q: quoteKey,
+    tenders: returnType === 'RETURN' ? refundTenders.map((t) => [t.method, Number(t.amount) || 0]) : null,
+  });
+  useEffect(() => { setKeptApproval(null); }, [pressKey]);
+  // One key per return, made on the first Process press and reused by every
+  // re-press (after a lost answer, the approval resubmit, the kept approval).
+  const returnKeyRef = useRef('');
+  useEffect(() => { returnKeyRef.current = ''; }, [pressKey]);
   useEffect(() => {
     if (step !== 'select' || !selectedOrder || activeReturns.length === 0) {
       setQuote(null);
@@ -545,7 +555,12 @@ export default function ReturnsPage() {
   const submitReturn = async (
     approval?: { requestId: string; approvalToken?: string },
   ): Promise<boolean> => {
-    const result = await returnsApi.create(buildPayload(approval));
+    if (!returnKeyRef.current) {
+      returnKeyRef.current = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    const result = await returnsApi.create(buildPayload(approval), returnKeyRef.current);
+    returnKeyRef.current = ''; // recorded: the next return is a new press
     setResultId(result.return_id || null);
     // Read the SERVER's verdict + the amounts it actually recorded.
     setResultDrawerNetted(result?.drawer_auto_netted === true);

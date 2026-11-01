@@ -25,7 +25,6 @@ const KNOWN_READERS: Record<string, number> = {
   'pages/finance/expenses/DaySettlementSection.tsx': 1,
   'pages/pos/next/BillingSurface.tsx': 1,
   'pages/pos/next/CustomerPanel.tsx': 1,
-  'pages/pos/next/DeliverySurface.tsx': 1,
   'pages/pos/next/GeneralCounterSurface.tsx': 1,
   'pages/purchase/SupplierCreditConfirmation.tsx': 1,
   'pages/purchase/VendorReturns.tsx': 1,

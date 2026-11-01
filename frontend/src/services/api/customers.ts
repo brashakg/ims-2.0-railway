@@ -182,8 +182,10 @@ export const customerApi = {
       idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : undefined);
     return response.data;
   },
-  redeemStoreCredit: async (customerId: string, amount: number, reason?: string, ref?: string) => {
-    const response = await api.post(`/customers/${customerId}/store-credit/redeem`, { amount, reason, ref });
+  redeemStoreCredit: async (customerId: string, amount: number, reason?: string, ref?: string, idempotencyKey?: string) => {
+    // One key per open form: a re-press never debits twice.
+    const response = await api.post(`/customers/${customerId}/store-credit/redeem`, { amount, reason, ref },
+      idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : undefined);
     return response.data;
   },
 

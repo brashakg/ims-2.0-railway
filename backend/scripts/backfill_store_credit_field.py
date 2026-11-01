@@ -39,9 +39,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 from datetime import datetime, timezone
+
+
+def _num(value) -> float:
+    """A finite number, or ValueError (NaN / inf are not amounts)."""
+    out = float(value or 0)
+    if not math.isfinite(out):
+        raise ValueError("not a finite number")
+    return out
 
 
 def plan(db) -> dict:
@@ -57,7 +66,8 @@ def plan(db) -> dict:
         (c.get("customer_id"), c.get("store_credit"))
         for c in db["customers"].find({})  # ponytail: one pass; fine at shop scale
         if c.get("store_credit") is not None
-        and (isinstance(c.get("store_credit"), bool) or not isinstance(c.get("store_credit"), (int, float)))
+        and (isinstance(c.get("store_credit"), bool) or not isinstance(c.get("store_credit"), (int, float))
+             or not math.isfinite(c.get("store_credit")))
     ]
     # The ledger read ONCE (not one query per customer), grouped by customer.
     by_customer: dict = {}
@@ -71,7 +81,7 @@ def plan(db) -> dict:
             if r.get("applied") is False and r.get("entry_id") not in refs:
                 continue
             try:
-                total += float(r.get("delta") or 0)
+                total += _num(r.get("delta"))
             except (TypeError, ValueError):
                 return None
         return round(total, 2)
@@ -81,8 +91,8 @@ def plan(db) -> dict:
     drift = []
     for cust in db["customers"].find({"store_credit": {"$ne": None}}):
         value, total = cust.get("store_credit"), _applied_sum(cust)
-        if isinstance(value, (int, float)) and not isinstance(value, bool) and total is not None \
-                and abs(float(value) - total) > 0.01:
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) \
+                and total is not None and abs(float(value) - total) > 0.01:
             drift.append((cust.get("customer_id"), round(float(value), 2), total))
 
     for cust in db["customers"].find({"store_credit": None}):
@@ -100,7 +110,7 @@ def plan(db) -> dict:
                     unapplied.append(cid)  # ISSUING / numberless: its door finishes it, once
                 continue
             try:
-                balance += float(r.get("delta") or 0)
+                balance += _num(r.get("delta"))
             except (TypeError, ValueError):
                 bad_delta.append((cid, r.get("entry_id"), r.get("delta")))
                 broken = True
@@ -170,6 +180,7 @@ def main() -> int:
         print(f"[MONGO] connect failed: {type(exc).__name__}")
         return 1
     db = client[os.getenv("MONGO_DATABASE", "ims_2_0")]
+    print(f"[DB] {getattr(db, 'name', '?')}")
     if args.revert:
         print(f"[REVERTED] {revert(db, args.revert)} customers")
         return 0

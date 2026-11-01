@@ -268,7 +268,8 @@ export async function submitPosOrder(
     // second cash leg would double the note-by-note ledger.
     let cashCapture: CashTenderCapture | null = store.cash_tender;
     const unrecordedPayments: string[] = [];
-    for (const p of (store.payments || [])) {
+    const unconfirmedPayments: string[] = [];
+    for (const [legIndex, p] of (store.payments || []).entries()) {
       // The LOYALTY tender IS posted to the order. The points were burned by
       // /loyalty/redeem above — but that call only debits the loyalty account
       // and writes the loyalty ledger; it never touches the ORDER, so an
@@ -290,21 +291,39 @@ export async function submitPosOrder(
         leg = { ...p, amount: loyaltyLeg.amount, reference: loyaltyLeg.reference };
         loyaltyLeg = null; // one burn backs at most one recorded leg
       }
-      try {
-        const body = buildPaymentBody(leg, leg.method === 'CASH' ? cashCapture : null);
-        if (leg.method === 'CASH') cashCapture = null;
-        await orderApi.addPayment(result.order_id, body as any);
-      } catch (e) {
-        // Still does not block the order - it exists, and a tender can be
-        // recorded against it later. But it is no longer SILENT: money taken
-        // at the counter that never reached the order is exactly what a
-        // day-end blind count cannot explain. (For a LOYALTY leg the points
-        // ARE burned and the REDEEM ledger row is linked to this order_id;
-        // the server keeps that burn unclaimed for a later LOYALTY tender.)
-        const why = serverReason(e);
-        unrecordedPayments.push(
-          `${leg.method} ₹${Math.round(leg.amount).toLocaleString('en-IN')}${why ? ` (${why})` : ''}`,
-        );
+      // Each leg has its own key (the server dedupes a replay of it), so a
+      // leg whose answer was lost is sent ONCE more safely.
+      const legKey = idempotencyKey ? `${idempotencyKey}:leg:${legIndex}` : undefined;
+      const body = buildPaymentBody(leg, leg.method === 'CASH' ? cashCapture : null);
+      if (leg.method === 'CASH') cashCapture = null;
+      const label = `${leg.method} ₹${Math.round(leg.amount).toLocaleString('en-IN')}`;
+      let failure: unknown = null;
+      for (let attempt = 0; attempt < (legKey ? 2 : 1); attempt += 1) {
+        try {
+          await orderApi.addPayment(result.order_id, body as any, legKey);
+          failure = null;
+          break;
+        } catch (e) {
+          failure = e;
+          const st = getErrorStatus(e);
+          if (st !== undefined && st < 500) break; // a refusal: never re-sent
+        }
+      }
+      if (failure !== null) {
+        const st = getErrorStatus(failure);
+        if (st !== undefined && st >= 400 && st < 500) {
+          // Refused: it did NOT record. Still does not block the order - a
+          // tender can be added later - but never SILENT: money taken at the
+          // counter that never reached the order is what a day-end blind
+          // count cannot explain. (For a LOYALTY leg the points ARE burned
+          // and the REDEEM row is linked to this order_id; the server keeps
+          // that burn unclaimed for a later LOYALTY tender.)
+          const why = serverReason(failure);
+          unrecordedPayments.push(`${label}${why ? ` (${why})` : ''}`);
+        } else {
+          // No answer, or a server error: it may have recorded.
+          unconfirmedPayments.push(label);
+        }
       }
     }
     store.setCashTender(null);
@@ -321,6 +340,12 @@ export async function submitPosOrder(
           + (unrecordedPayments.some((u) => u.startsWith('LOYALTY'))
             ? ` Loyalty points cannot be added there - ask an admin; the redeemed points stay reserved for this bill.`
             : ''),
+      );
+    }
+    if (unconfirmedPayments.length) {
+      warningParts.push(
+        `Order saved, but ${unconfirmedPayments.join(' and ')} could not be confirmed - check the `
+          + `order's payments before adding it again.`,
       );
     }
     if (loyaltyWarning) warningParts.push(loyaltyWarning);

@@ -278,6 +278,14 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/returns/advance-refund",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # Returns > Complete record (money review 12): the record of a counter
+    # return whose money went out without its doc. Its own capability key
+    # (returns:complete-record) so ACCOUNTANT never joins returns:write.
+    {
+        "method": "POST",
+        "path": "/api/v1/returns/{return_id}/complete-record",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     # Its read-only preview for the Orders screen's confirm dialog (same roles;
     # returns:read is already AUTHENTICATED-broad, so it broadens nothing).
     {

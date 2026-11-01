@@ -4,7 +4,7 @@
 // work) retries for any method.
 import { describe, it, expect, vi } from 'vitest';
 import { AxiosError } from 'axios';
-import api, { isRetryableError } from '../client';
+import api, { buildApiError, isRetryableError, WRITE_UNCONFIRMED_MESSAGE } from '../client';
 
 const err = (status: number | undefined, method: string) =>
   ({ config: { method }, response: status === undefined ? undefined : { status } } as unknown as AxiosError);
@@ -29,5 +29,22 @@ describe('automatic retry', () => {
       .rejects.toMatchObject({ status: 503, message: sentence });
     expect(replay).not.toHaveBeenCalled();
     replay.mockRestore();
+  });
+});
+
+// Money review 12: a write whose answer was lost is never told "try again".
+describe('a lost write answer', () => {
+  const lost = (status: number | undefined, method: string, data: unknown = {}) =>
+    ({ message: 'x', config: { method },
+       response: status === undefined ? undefined : { status, data } } as unknown as AxiosError<any>);
+
+  it('says it may already be saved for a write, keeps the old text for a read', () => {
+    expect(buildApiError(lost(500, 'post')).message).toBe(WRITE_UNCONFIRMED_MESSAGE);
+    expect(buildApiError(lost(502, 'patch')).message).toBe(WRITE_UNCONFIRMED_MESSAGE);
+    expect(buildApiError(lost(undefined, 'put')).message).toBe(WRITE_UNCONFIRMED_MESSAGE);
+    expect(buildApiError(lost(503, 'post', { detail: 'Nothing was recorded. Try again.' })).message)
+      .toBe('Nothing was recorded. Try again.');
+    expect(buildApiError(lost(500, 'get')).message).toBe('Server error. Please try again in a moment.');
+    expect(buildApiError(lost(undefined, 'get')).message).toMatch(/Network error/);
   });
 });

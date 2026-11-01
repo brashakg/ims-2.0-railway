@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 393 |
-| Role-gated (one or more roles) | 868 |
-| **Total `/api/v1` (method x path)** | **1307** |
+| Role-gated (one or more roles) | 869 |
+| **Total `/api/v1` (method x path)** | **1308** |
 | ...of which `store_scoped` | 235 |
 | ...of which `self_enforced` | 47 |
 
@@ -1346,6 +1346,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/returns/advance-refund/{order_id}` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/returns/quote` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/returns/{return_id}` | AUTH |  |  |
+| `POST` | `/api/v1/returns/{return_id}/complete-record` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/returns/{return_id}/restock` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
 
 ### `/api/v1/rtv-debit-notes`

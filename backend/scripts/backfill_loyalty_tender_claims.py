@@ -35,21 +35,26 @@ import re
 import sys
 from datetime import datetime, timezone
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 _TXN_IN_REFERENCE = re.compile(r"\btxn\s+(\S+)")
 
 
 def _balance_due(order: dict):
-    """THE balance reading (delivery_gate.order_balance_due semantics: no
-    balance_due key -> the whole bill is due). None when there is no readable
-    number -- an unreadable value is listed, never stamped."""
+    """THE balance reading (delivery_gate.order_balance_due itself: no
+    balance_due key -> the whole bill is due). None when there is no readable,
+    finite number -- an unreadable value is listed, never stamped."""
+    from fastapi import HTTPException
+
+    from api.services.delivery_gate import order_balance_due
+
     if not order:
         return None
-    field = "balance_due" if "balance_due" in order else "grand_total"
-    raw = order.get(field)
     try:
-        return None if raw is None or (isinstance(raw, str) and not raw.strip()) else round(float(raw), 2)
-    except (TypeError, ValueError):
+        due = order_balance_due(order)
+    except HTTPException:
         return None
+    return None if due is None else round(due, 2)
 
 
 def plan(db) -> dict:
@@ -57,10 +62,14 @@ def plan(db) -> dict:
     "no_order": n} -- reads only. ``unbacked``: LOYALTY payments no burn
     backs (no linked row, and none still claimable)."""
     links, unmatched, used = [], 0, set()
-    unmatched_rows, legacy = [], []
+    unmatched_rows, legacy, no_txn_id = [], [], []
     txns = db["loyalty_transactions"]
     unclaimed = {"type": "REDEEM", "order_id": {"$nin": [None, ""]}, "tender_payment_id": None}
     for row in txns.find(unclaimed):
+        if not row.get("txn_id"):
+            # No id to stamp it by: listed, never written.
+            no_txn_id.append(row.get("order_id"))
+            continue
         order = db["orders"].find_one({"order_id": row["order_id"]}) or {}
         hit = None
         for p in order.get("payments") or []:
@@ -72,13 +81,13 @@ def plan(db) -> dict:
                 break
         if hit:
             used.add(hit)
-            links.append((row["txn_id"], hit))
+            links.append((row.get("txn_id"), hit))
         else:
             unmatched += 1
             due = _balance_due(order)
-            unmatched_rows.append((row["txn_id"], row.get("order_id"), due))
+            unmatched_rows.append((row.get("txn_id"), row.get("order_id"), due))
             if due is not None and due <= 0.01:
-                legacy.append(row["txn_id"])  # a settled bill: never claimable again
+                legacy.append(row.get("txn_id"))  # a settled bill: never claimable again
     claimed = {r.get("tender_payment_id") for r in txns.find({"type": "REDEEM", "tender_payment_id": {"$ne": None}})}
     unbacked = []
     for order in db["orders"].find({}):  # ponytail: one pass over all orders; fine at shop scale
@@ -89,7 +98,8 @@ def plan(db) -> dict:
     scanned = {"redeem_rows": txns.count_documents({"type": "REDEEM"}),
                "orders": db["orders"].count_documents({})}
     return {"links": links, "unmatched": unmatched, "unbacked": unbacked, "no_order": no_order,
-            "unmatched_rows": unmatched_rows, "legacy": legacy, "scanned": scanned}
+            "unmatched_rows": unmatched_rows, "legacy": legacy, "scanned": scanned,
+            "no_txn_id": no_txn_id}
 
 
 LEGACY_CLAIM = "LEGACY-PRE-1088"
@@ -150,6 +160,7 @@ def main() -> int:
         print(f"[MONGO] connect failed: {type(exc).__name__}")
         return 1
     db = client[os.getenv("MONGO_DATABASE", "ims_2_0")]
+    print(f"[DB] {getattr(db, 'name', '?')}")
     if args.revert:
         print(f"[REVERTED] unlinked {revert(db)} redemptions")
         return 0
@@ -157,7 +168,12 @@ def main() -> int:
     print(f"[PLAN] redemptions to link: {len(out['links'])}; with no matching payment (left alone): {out['unmatched']}")
     print(f"[SCANNED] REDEEM rows: {out['scanned']['redeem_rows']}; orders: {out['scanned']['orders']} "
           "(0 and 0 means the wrong or an empty database)")
+    if not out["scanned"]["orders"]:
+        print("[STOPPED] no orders scanned - wrong or empty database. Nothing written. (exit 3)")
+        return 3
     print(f"[PLAN] redemptions with no order (inert, never claimable): {out['no_order']}")
+    for oid in out["no_txn_id"]:
+        print(f"  [NO-TXN-ID] a burn on order {oid} has no txn id - listed, never stamped; fix by hand")
     for txn_id, oid, due in out["unmatched_rows"]:
         print(f"  [UNMATCHED] burn {txn_id} on order {oid}, balance due {due}"
               + (" -> stamped LEGACY-PRE-1088 on --apply (settled bill)" if txn_id in out["legacy"] else ""))

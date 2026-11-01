@@ -306,6 +306,14 @@ const isPushTimeout = (error: AxiosError): boolean =>
 const isPurgeTimeout = (error: AxiosError): boolean =>
   isTimeout(error) && String(error.config?.url || '').includes('/catalog/products/bulk-purge');
 
+// A write (anything but GET/HEAD/OPTIONS) whose answer was lost -- a 5xx that
+// is not a deliberate 503 stop, or no response at all -- may already have
+// landed: "try again" is the second press that does it twice (money review 12).
+export const WRITE_UNCONFIRMED_MESSAGE =
+  'The server did not confirm this - it may already be saved. Reload and check before pressing again.';
+const isWrite = (error: AxiosError): boolean =>
+  !SAFE_METHODS.includes(String(error.config?.method || 'get').toLowerCase());
+
 // Pure transform: axios error -> the ApiError components actually receive.
 // Exported so tests reject fixtures through the REAL production transform
 // instead of hand-built axios shapes the client never delivers (the
@@ -325,7 +333,9 @@ export function buildApiError(
       ? PUSH_TIMEOUT_MESSAGE
       : isPurgeTimeout(error)
         ? PURGE_TIMEOUT_MESSAGE
-        : 'Network error. Please check your internet connection and try again.';
+        : isWrite(error)
+          ? WRITE_UNCONFIRMED_MESSAGE
+          : 'Network error. Please check your internet connection and try again.';
   } else if (error.response.status >= 500) {
     // 503 is the only 5xx this API raises DELIBERATELY: it is a safety stop, not
     // a crash. Goods-receipt acceptance uses it to say "N units were received
@@ -346,7 +356,9 @@ export function buildApiError(
     message =
       typeof safeStopDetail === 'string' && safeStopDetail.trim()
         ? safeStopDetail
-        : 'Server error. Please try again in a moment.';
+        : isWrite(error)
+          ? WRITE_UNCONFIRMED_MESSAGE
+          : 'Server error. Please try again in a moment.';
   } else {
     // Handle various API error formats (detail can be string or array)
     const rawDetail = error.response?.data?.detail;

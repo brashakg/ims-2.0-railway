@@ -35,11 +35,16 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
   // One Idempotency-Key per open form: pressing again (or a replay) resumes
-  // the same credit line on the server, never pays twice. New on each open.
+  // the same line on the server, never pays or debits twice. New on each
+  // open. Once a press has SENT it, the amount and reason are locked to what
+  // that key carried (the server refuses other content under it): only
+  // Cancel or a success closes the form and drops the key.
   const [formKey, setFormKey] = useState('');
+  const [sent, setSent] = useState(false);
   useEffect(() => {
     if (mode) setFormKey(typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    setSent(false);
   }, [mode]);
 
   const load = useCallback(async () => {
@@ -61,9 +66,10 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
     const amt = parseFloat(amount);
     if (!amt || amt <= 0) { toast.error('Enter a valid amount'); return; }
     setSaving(true);
+    setSent(true);
     try {
       if (mode === 'issue') await customerApi.issueStoreCredit(customerId, amt, reason, undefined, formKey);
-      else await customerApi.redeemStoreCredit(customerId, amt, reason);
+      else await customerApi.redeemStoreCredit(customerId, amt, reason, undefined, formKey);
       toast.success(mode === 'issue' ? 'Credit issued' : 'Credit redeemed');
       setMode(null); setAmount(''); setReason('');
       await load();
@@ -87,8 +93,15 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
         mode ? (
           <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200 space-y-2">
             <div className="text-xs font-medium text-gray-600">{mode === 'issue' ? 'Issue credit' : 'Redeem credit'}</div>
-            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Amount" className="input-field" />
-            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (e.g. return CN-123)" className="input-field" />
+            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Amount"
+              className="input-field" readOnly={sent} aria-readonly={sent} />
+            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (e.g. return CN-123)"
+              className="input-field" readOnly={sent} aria-readonly={sent} />
+            {sent && (
+              <p className="text-xs text-gray-500">
+                This form was sent. Press Confirm again to finish it, or Cancel and check the balance.
+              </p>
+            )}
             <div className="flex gap-2 justify-end">
               <button onClick={() => { setMode(null); setAmount(''); setReason(''); }} className="px-3 py-1.5 text-xs rounded-md text-gray-600 hover:bg-gray-100">Cancel</button>
               <button onClick={submit} disabled={saving} className="px-3 py-1.5 text-xs rounded-md bg-bv-red-600 text-white disabled:opacity-50">

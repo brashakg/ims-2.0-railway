@@ -65,6 +65,9 @@ describe('Refund approval popup', () => {
     // After approval the resubmit fails: is the SERVER's reason shown?
     await waitFor(() => expect(create).toHaveBeenCalledTimes(2), { timeout: 3000 });
     expect((create.mock.calls[1] as any)[0].refund_approval_token ?? (create.mock.calls[1] as any)[0].refund_approval_request_id).toBeTruthy();
+    // The approval resubmit is the SAME press: the same Idempotency-Key.
+    expect((create.mock.calls[0] as any)[1]).toBeTruthy();
+    expect((create.mock.calls[1] as any)[1]).toBe((create.mock.calls[0] as any)[1]);
     await screen.findByText(/could not be (confirmed|finalised)/);
     expect(screen.queryByText(/could not be confirmed just now/)).toBeTruthy();
   });
@@ -80,5 +83,22 @@ describe('Refund approval popup', () => {
     // The popup is up again, asking for the SERVER's figure (not the page's).
     await waitFor(() => expect(createRequest).toHaveBeenCalledTimes(2), { timeout: 3000 });
     expect((createRequest.mock.calls[1] as any)[0].amount).toBe(2400);
+  });
+
+  it('re-sends the same Idempotency-Key when a press after a lost answer goes again', async () => {
+    create.mockReset();
+    create.mockRejectedValueOnce(axiosErr(503, 'The store credit could not be confirmed just now - Do NOT redo this return.'));
+    create.mockResolvedValueOnce({ return_id: 'RET-1', credit_amount: 2500 });
+    await driveToSubmit();
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    await screen.findByText(/could not be confirmed/);
+    const review = screen.getByRole('button', { name: /Review Credit Note/ });
+    await waitFor(() => expect((review as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(review);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    const k1 = (create.mock.calls[0] as any)[1];
+    expect(k1).toBeTruthy();
+    expect((create.mock.calls[1] as any)[1]).toBe(k1);
   });
 });

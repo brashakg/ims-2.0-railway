@@ -611,7 +611,6 @@ async def superadmin_invoice_change(
         CreditNotConfirmed,
         _credit_note_window_closed,
         _issue_store_credit,
-        _number_on_a_ledger_row,
         _record_unused_credit_note,
     )
 
@@ -630,10 +629,19 @@ async def superadmin_invoice_change(
         try:
             in_flight = _ledger is not None and _ledger.find_one(
                 {"order_id": order_id, "type": "ISSUING"}) is not None
-            done = _ledger is not None and _ledger.find_one(
-                {"entry_id": sacn_id, "type": {"$in": ["ISSUED", "ADJUSTED"]}}) is not None
+            # Every attempt at this correction: the fixed id and its retries
+            # (<id>:r<n>), read over the WHOLE prefix.
+            attempts = [r for r in (_ledger.find({"order_id": order_id}) if _ledger is not None else [])
+                        if str(r.get("entry_id") or "") == sacn_id
+                        or str(r.get("entry_id") or "").startswith(f"{sacn_id}:r")]
+            done = any(r.get("type") in ("ISSUED", "ADJUSTED") for r in attempts)
+            voided = sum(1 for r in attempts if r.get("type") == "VOID")
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=503, detail="Could not check this order's credit notes - try again.") from exc
+        # A VOIDed attempt (its credit never landed, its number written off)
+        # never blocks the correction: the next press posts a new attempt.
+        if voided:
+            sacn_id = f"{sacn_id}:r{voided}"
         if in_flight:
             raise HTTPException(status_code=409, detail=(
                 "A credit on this order is still being confirmed - it settles by itself within 10 "
@@ -704,6 +712,7 @@ async def superadmin_invoice_change(
     # number off (unless a ledger row owns it: then that row's own lifecycle
     # does). A DEBIT note (customer owes more) is recorded for the accountant
     # but is NOT store credit.
+    _outcome: dict = {}
     if is_cn:
         try:
             credit = _issue_store_credit(
@@ -729,6 +738,7 @@ async def superadmin_invoice_change(
                 order_id=order.get("order_id"),
                 note_number=note_doc["note_number"],
                 entry_id=sacn_id,
+                outcome=_outcome,
             )
         except CreditNotConfirmed:
             # It may already be on the balance: the order stays claimed (its
@@ -742,10 +752,23 @@ async def superadmin_invoice_change(
             )
         except Exception as exc:  # noqa: BLE001
             logger.error("[ORDERS] credit note %s not posted: %s", note_doc["note_number"], exc)
-            credit = None
+            # No line written: a refusal. A line (or no answer): its owner is
+            # the reconciler -- never 'nothing given'.
+            try:
+                _line = _ledger.find_one({"entry_id": sacn_id}) if _ledger is not None else None
+            except Exception:  # noqa: BLE001
+                _line = True
+            if _line is not None:
+                raise HTTPException(status_code=503, detail=(
+                    "The credit note could not be confirmed just now - the credit may already be on "
+                    "the customer's balance. Do NOT issue it again: it settles by itself within 10 "
+                    "minutes. Check the customer's store-credit balance then.")) from exc
+            credit, _outcome["not_written"] = None, True
         if credit is None:
             _release_marker()
-            if not _number_on_a_ledger_row(note_doc["note_number"]):
+            # Written off only when no line carrying it was written (a VOID
+            # that stood wrote its own number off).
+            if _outcome.get("not_written"):
                 _record_unused_credit_note(note_doc["note_number"], order, note_doc["note_number"],
                                            current_user, "superadmin credit note not posted")
             raise HTTPException(
@@ -755,6 +778,21 @@ async def superadmin_invoice_change(
                     "take it, so nothing was given. Check the customer record, then try again."
                 ),
             )
+    if is_cn and credit.get("resumed"):
+        # Another press issued this correction first: its line, as stored, is
+        # the note (this press's number was written off). No second note doc.
+        number = credit.get("note_number") or note_doc["note_number"]
+        return {
+            "order_id": order_id,
+            "mode": "CREDIT_NOTE",
+            "message": f"CREDIT_NOTE {number} was already issued for this correction; nothing was issued again.",
+            "note_number": number,
+            "note_type": "CREDIT_NOTE",
+            "amount": credit.get("net_refund") or credit.get("amount"),
+            "original_invoice_number": original_invoice,
+            "delta": delta,
+            "audit_note": "An immutable audit entry recording this change was written.",
+        }
     if db is not None:
         try:
             coll_name = "credit_note_ledger" if is_cn else "debit_note_ledger"

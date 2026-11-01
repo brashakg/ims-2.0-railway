@@ -3,7 +3,7 @@
 // ============================================================================
 // NO MOCK DATA - All data from API
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Search,
@@ -170,6 +170,9 @@ export function OrdersPage() {
 
   // Payment modal state
   const [showPaymentModal, setShowPaymentModal] = useState(false);
+  // One Idempotency-Key per open payment modal: a re-press after a lost
+  // answer replays the same payment, never records it twice.
+  const paymentKeyRef = useRef('');
   const [paymentOrder, setPaymentOrder] = useState<Order | null>(null);
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'CARD' | 'UPI' | 'BANK_TRANSFER'>('CASH');
@@ -348,6 +351,8 @@ export function OrdersPage() {
     setPaymentAmount(String(Math.round((order.balanceDue || 0) * 100) / 100));
     setPaymentMethod('CASH');
     setPaymentReference('');
+    paymentKeyRef.current = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setShowPaymentModal(true);
   };
 
@@ -377,7 +382,7 @@ export function OrdersPage() {
         method: paymentMethod,
         mode: paymentMethod,
         reference: paymentReference || undefined,
-      } as any);
+      } as any, paymentKeyRef.current || undefined);
 
       toast.success(`Payment of ${formatCurrency(amount)} received`);
       setShowPaymentModal(false);
