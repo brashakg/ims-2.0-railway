@@ -241,3 +241,19 @@ def test_the_claim_gate_acts_only_on_modified_count_one():
 
     assert cust_router.claim_step(_Coll(1), {"entry_id": "E"}, "step") is True
     assert cust_router.claim_step(_Coll(0), {"entry_id": "E"}, "step") is False  # another pass set it
+
+
+@pytest.mark.asyncio
+async def test_the_voucher_door_refuses_a_new_debit_beside_an_unresolved_one(till):
+    from api.routers.orders import PaymentCreate, add_payment
+
+    till["db"].get_collection("orders").insert_one(_order())
+    _ledger(till).insert_one({"_id": "POSPAY:OX:k:leg:0", "entry_id": "POSPAY:OX:k:leg:0", "customer_id": "CUST-1",
+                              "type": "ISSUING", "final_type": "REDEEMED", "amount": 100.0, "ref": "OX",
+                              "pending_at": _ago(0)})
+    till["db"].get_collection("vouchers").insert_one({"code": "GV9", "status": "ACTIVE", "balance": 500.0})
+    with pytest.raises(HTTPException) as e:
+        await add_payment("ORD-1", PaymentCreate(method="GIFT_VOUCHER", amount=100.0, voucher_code="GV9"),
+                          _user("CASHIER"), "kv:leg:0")
+    assert e.value.status_code == 409 and "order OX" in e.value.detail
+    assert till["db"].get_collection("vouchers").find_one({"code": "GV9"})["balance"] == 500.0
