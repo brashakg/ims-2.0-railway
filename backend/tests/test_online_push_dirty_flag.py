@@ -640,9 +640,13 @@ def test_a_door_created_products_price_edit_reaches_its_pim_keyed_twin(
 
 def test_internal_cost_edit_on_the_billing_spine_does_not_queue(db, monkeypatch):
     """cost_price is in NO pushed Shopify payload. Queuing on it would send a
-    push that changes nothing on the storefront."""
+    push that changes nothing on the storefront. (S4: the editor types only a
+    FIRST cost -- a product with an average is corrected on its stock page --
+    so the spine here has none yet.)"""
     _seed_pushed(db)
-    _edit_spine(db, monkeypatch, cost_price=2500.0)
+    repo = _spine_repo()
+    repo.collection.update_one({"product_id": "P1"}, {"$set": {"cost_price": None}})
+    _edit_spine(db, monkeypatch, repo=repo, cost_price=2500.0)
 
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["pricing"]["cost_price"] == 2500.0, "the mirror write must still land"
