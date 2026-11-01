@@ -78,7 +78,7 @@ def test_one_return_has_one_doc_by_a_unique_index(monkeypatch):
     monkeypatch.setattr(conn, "_connected", True, raising=False)
     monkeypatch.setattr(conn, "_db", _DB(), raising=False)
     conn.ensure_indexes()
-    assert ("returns", "return_id", True, True, None) in made
+    assert ("returns", "return_id", True, None, {"return_id": {"$type": "string"}}) in made
     assert ("orders", [("store_id", 1), ("idempotency_key", 1)], True, None,
             {"idempotency_key": {"$type": "string"}}) in made
 

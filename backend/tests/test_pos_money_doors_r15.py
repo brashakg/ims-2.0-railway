@@ -383,3 +383,12 @@ def test_the_redeem_door_bounds_its_own_writes(till, monkeypatch):
     monkeypatch.setattr(cust_router, "_redeem_store_credit_atomic", lambda *a, **k: {"entry": {}, "balance": 0.0})
     cust_router.redeem_store_credit_atomic("CUST-1", 10.0, reason="r")
     assert seen == [cust_router.MONEY_WRITE_TIMEOUT_S]
+
+
+def test_a_stale_read_never_settles_a_void_another_pass_is_still_undoing(till, monkeypatch, tasks):
+    monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: True)
+    row = _void(till, "RET-R")  # this pass read the row before another pass claimed the units...
+    _ledger(till).update_one({"entry_id": "RET-R:credit"}, {"$set": {"claims_released": True}})  # ...mid-act
+    cust_router._finish_void(_ledger(till), dict(row), "x", undo=True)
+    assert _ledger(till).find_one({"entry_id": "RET-R:credit"})["void_settled"] is False

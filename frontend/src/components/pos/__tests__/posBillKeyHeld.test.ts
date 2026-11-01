@@ -67,3 +67,28 @@ describe('the bill key and held bills', () => {
     expect(billKeyEntry('another-tab-bill')?.key).toBe(other);
   });
 });
+
+describe('the lost-sale promise ends with its key', () => {
+  it('swaps to the CHECK words once the key is older than the TTL, and at once when it is gone', async () => {
+    const { renderHook } = await import('@testing-library/react');
+    const { vi } = await import('vitest');
+    const { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK, useUnconfirmedWording } = await import('../posBillKey');
+    vi.useFakeTimers();
+    try {
+      localStorage.clear();
+      const now = Date.now();
+      billKeyFor('bill-A', now - BILL_KEY_TTL_MS + 1000); // one second of life left
+      let msg: string | null = TILL_SALE_UNCONFIRMED;
+      const set = (f: (m: string | null) => string | null) => { msg = f(msg); };
+      renderHook(() => useUnconfirmedWording('bill-A', TILL_SALE_UNCONFIRMED, set));
+      expect(msg).toBe(TILL_SALE_UNCONFIRMED);
+      vi.advanceTimersByTime(1500);
+      expect(msg).toBe(TILL_SALE_UNCONFIRMED_CHECK);
+      msg = TILL_SALE_UNCONFIRMED;
+      renderHook(() => useUnconfirmedWording('bill-gone', TILL_SALE_UNCONFIRMED, set));
+      expect(msg).toBe(TILL_SALE_UNCONFIRMED_CHECK);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

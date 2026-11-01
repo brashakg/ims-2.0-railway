@@ -341,9 +341,11 @@ class DatabaseConnection:
         )
         _idx("returns", "order_id", background=True)
         # One doc per return: Needs completing can never write a second
-        # COMPLETED doc beside the counter's (money review 14).
-        _backstop("returns", "return_id", unique=True, sparse=True, name="uniq_returns_return_id",
-                  background=True)
+        # COMPLETED doc beside the counter's (money review 14). Partial on a
+        # string id (money review 15): a doc with an explicit null id never
+        # collides with another (sparse would still index the nulls).
+        _backstop("returns", "return_id", unique=True, name="uniq_returns_return_id",
+                  partialFilterExpression={"return_id": {"$type": "string"}}, background=True)
 
         # Stock units: composite indexes for inventory ledger queries.
         # (store_id, status) supports the $match stage in _build_store_ledger.
