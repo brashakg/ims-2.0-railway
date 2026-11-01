@@ -143,9 +143,10 @@ export const inventoryApi = {
 
   // S3: pack the box -- the pieces scanned OUT at the sending shop. The WHOLE
   // list every time (a retry or a second tablet never double-packs); an empty
-  // list empties the box. Nothing moves until ship.
-  packTransfer: async (transferId: string, barcodes: string[]) => {
-    const response = await api.post(`/transfers/${transferId}/pack`, { barcodes });
+  // list empties the box. Nothing moves until ship. `rev`: the box revision
+  // the list was built from -- a list built from an older box is refused (409).
+  packTransfer: async (transferId: string, barcodes: string[], rev?: number) => {
+    const response = await api.post(`/transfers/${transferId}/pack`, { barcodes, rev });
     return response.data;
   },
 

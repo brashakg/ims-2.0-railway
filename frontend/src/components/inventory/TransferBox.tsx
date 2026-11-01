@@ -40,6 +40,7 @@ export interface BoxTransfer {
   tax_invoice_number?: string;
   eway_bill_number?: string;
   vehicle_number?: string;
+  rev?: number;
 }
 
 const DAMAGE_REASONS = ['Broken hinge', 'Scratched lens', 'Bent frame', 'Box crushed'];
@@ -104,12 +105,12 @@ export function TransferBox({
     }
   };
 
-  const pack = (codes: string[]) => act(() => inventoryApi.packTransfer(transfer.id, codes));
-
   // A barcode gun types the next code and presses Enter while the last scan is
-  // still saving: every Enter joins a queue sent one by one, so no scan is ever
-  // dropped. Each pack re-sends the box as the server last answered it.
-  type Scan = { code: string; damaged: boolean; reason: string };
+  // still saving: every Enter (and every piece taken out) joins a queue sent
+  // one by one, so no change is ever dropped. Each pack re-sends the box as the
+  // server last answered it, with that answer's revision: a box another tablet
+  // changed meanwhile is refused and reloaded, never saved over.
+  type Scan = { code: string; damaged: boolean; reason: string; remove?: boolean };
   const queue = useRef<Scan[]>([]);
   const draining = useRef(false);
   const latest = useRef(transfer);
@@ -119,11 +120,13 @@ export function TransferBox({
 
   const sendScan = async (s: Scan) => {
     try {
+      const inBox = latest.current.items.flatMap((l) => l.packed_barcodes || []);
       const res = packing
-        ? await inventoryApi.packTransfer(transfer.id, [
-            ...latest.current.items.flatMap((l) => l.packed_barcodes || []),
-            s.code,
-          ])
+        ? await inventoryApi.packTransfer(
+            transfer.id,
+            s.remove ? inBox.filter((x) => x !== s.code) : [...inBox, s.code],
+            latest.current.rev,
+          )
         : await inventoryApi.scanInPiece(transfer.id, { barcode: s.code, damaged: s.damaged, damageReason: s.reason });
       if (res?.transfer) {
         latest.current = res.transfer;
@@ -132,6 +135,17 @@ export function TransferBox({
       if (res?.message) toast.success(String(res.message));
     } catch (e) {
       toast.error(`${s.code}: ${errMsg(e)}`);
+      if (packing) {
+        try {
+          const fresh = await inventoryApi.getTransfer(transfer.id);
+          if (fresh?.transfer) {
+            latest.current = fresh.transfer;
+            onChanged(fresh.transfer);
+          }
+        } catch {
+          // the toast above already says the scan did not land
+        }
+      }
     }
   };
 
@@ -251,8 +265,10 @@ export function TransferBox({
                     {bc}
                     {packing && (
                       <button
-                        onClick={() => pack(packed.filter((x) => x !== bc))}
-                        disabled={busy}
+                        onClick={() => {
+                          queue.current.push({ code: bc, damaged: false, reason: '', remove: true });
+                          void drain();
+                        }}
                         aria-label={`Take ${bc} out of the box`}
                         className="text-gray-500 hover:text-red-600"
                       >
@@ -290,26 +306,27 @@ export function TransferBox({
         </div>
       )}
 
+      {gates.canShip(actor, transfer) && (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <input
+            value={courier}
+            onChange={(e) => setCourier(e.target.value)}
+            placeholder="Courier"
+            aria-label="Courier"
+            className="input-field"
+          />
+          <input
+            value={tracking}
+            onChange={(e) => setTracking(e.target.value)}
+            placeholder="Tracking no."
+            aria-label="Tracking no."
+            className="input-field"
+          />
+        </div>
+      )}
+
       {gates.canEditEway(actor, transfer) && (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          {transfer.status === 'packed' && (
-            <>
-              <input
-                value={courier}
-                onChange={(e) => setCourier(e.target.value)}
-                placeholder="Courier"
-                aria-label="Courier"
-                className="input-field"
-              />
-              <input
-                value={tracking}
-                onChange={(e) => setTracking(e.target.value)}
-                placeholder="Tracking no."
-                aria-label="Tracking no."
-                className="input-field"
-              />
-            </>
-          )}
           <input
             value={eway}
             onChange={(e) => setEway(e.target.value)}

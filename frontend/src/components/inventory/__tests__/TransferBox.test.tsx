@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const packTransfer = vi.fn();
 const scanInPiece = vi.fn();
 const shipTransfer = vi.fn();
+const getTransfer = vi.fn();
 const toastError = vi.fn();
 
 vi.mock('../../../context/ToastContext', () => ({
@@ -18,6 +19,7 @@ vi.mock('../../../services/api', () => ({
     packTransfer: (...a: unknown[]) => packTransfer(...a),
     scanInPiece: (...a: unknown[]) => scanInPiece(...a),
     shipTransfer: (...a: unknown[]) => shipTransfer(...a),
+    getTransfer: (...a: unknown[]) => getTransfer(...a),
   },
 }));
 
@@ -31,6 +33,7 @@ const box = (over: Partial<BoxTransfer>): BoxTransfer => ({
   to_location_id: 'BOK',
   to_location_name: 'Bokaro',
   items: [{ id: 'l1', product_id: 'P1', product_name: 'Carrera', quantity_requested: 2, packed_barcodes: ['BV1'] }],
+  rev: 4,
   ...over,
 });
 const sender = { roles: ['STORE_MANAGER'], storeIds: ['DHN'], activeStoreId: 'DHN' };
@@ -48,7 +51,60 @@ describe('TransferBox', () => {
     const input = screen.getByLabelText('Scan a piece out');
     fireEvent.change(input, { target: { value: ' BV2 ' } });
     fireEvent.keyDown(input, { key: 'Enter' });
-    await waitFor(() => expect(packTransfer).toHaveBeenCalledWith('trf_1', ['BV1', 'BV2']));
+    await waitFor(() => expect(packTransfer).toHaveBeenCalledWith('trf_1', ['BV1', 'BV2'], 4));
+  });
+
+  it('taking a piece out while a scan is saving queues behind it, each with the box as it then stands', async () => {
+    let release: (v: unknown) => void = () => {};
+    const afterScan = box({
+      rev: 5,
+      items: [{ id: 'l1', product_id: 'P1', product_name: 'Carrera', quantity_requested: 3, packed_barcodes: ['BV1', 'BV2'] }],
+    });
+    packTransfer.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    const t = box({ items: [{ id: 'l1', product_id: 'P1', product_name: 'Carrera', quantity_requested: 3, packed_barcodes: ['BV1'] }] });
+    render(<TransferBox transfer={t} actor={sender} onChanged={() => {}} onDone={() => {}} />);
+    const input = screen.getByLabelText('Scan a piece out');
+    fireEvent.change(input, { target: { value: 'BV2' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.click(screen.getByLabelText('Take BV1 out of the box'));
+    expect(packTransfer).toHaveBeenCalledTimes(1);
+    release({ transfer: afterScan });
+    await waitFor(() => expect(packTransfer).toHaveBeenCalledTimes(2));
+    expect(packTransfer.mock.calls[0].slice(1)).toEqual([['BV1', 'BV2'], 4]);
+    expect(packTransfer.mock.calls[1].slice(1)).toEqual([['BV2'], 5]);
+  });
+
+  it('a refused pack reloads the box, so the next scan never re-sends a stale list', async () => {
+    const fresh = box({
+      rev: 7,
+      items: [{ id: 'l1', product_id: 'P1', product_name: 'Carrera', quantity_requested: 3, packed_barcodes: ['BV1', 'BV9'] }],
+    });
+    packTransfer.mockRejectedValueOnce({ response: { status: 409, data: { detail: 'This box changed' } } });
+    getTransfer.mockResolvedValue({ transfer: fresh });
+    const onChanged = vi.fn();
+    render(<TransferBox transfer={box({})} actor={sender} onChanged={onChanged} onDone={() => {}} />);
+    const input = screen.getByLabelText('Scan a piece out');
+    fireEvent.change(input, { target: { value: 'BV2' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(onChanged).toHaveBeenCalledWith(fresh));
+    expect(getTransfer).toHaveBeenCalledWith('trf_1');
+    fireEvent.change(input, { target: { value: 'BV3' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(packTransfer).toHaveBeenCalledTimes(2));
+    expect(packTransfer.mock.calls[1].slice(1)).toEqual([['BV1', 'BV9', 'BV3'], 7]);
+  });
+
+  it('workshop staff at the sending shop add the courier and tracking no. and ship', async () => {
+    const workshop = { roles: ['WORKSHOP_STAFF'], storeIds: ['DHN'], activeStoreId: 'DHN' };
+    shipTransfer.mockResolvedValue({ transfer: box({ status: 'in_transit' }) });
+    render(<TransferBox transfer={box({ status: 'packed' })} actor={workshop} onChanged={() => {}} onDone={() => {}} />);
+    fireEvent.change(screen.getByLabelText('Courier'), { target: { value: 'DTDC' } });
+    fireEvent.change(screen.getByLabelText('Tracking no.'), { target: { value: 'D41092277' } });
+    expect(screen.queryByLabelText('E-way bill no.')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Ship 1 pieces/ }));
+    await waitFor(() =>
+      expect(shipTransfer).toHaveBeenCalledWith('trf_1', { courierName: 'DTDC', trackingNumber: 'D41092277' }),
+    );
   });
 
   it('a damaged scan in needs a reason before anything is sent', async () => {

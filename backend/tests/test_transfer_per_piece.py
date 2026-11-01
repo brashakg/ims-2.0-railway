@@ -701,19 +701,19 @@ def test_a_lost_piece_is_credited_at_its_own_cost_not_the_line_average(world):
 
 
 def test_a_piece_that_landed_gets_no_credit_note_from_write_off_or_found(world):
-    """BVQX001 was scanned in at Bokaro (on its shelf) but the box lost the
-    scan, so Complete lists it missing. Write-off and found-at-the-sender
-    refuse BEFORE any note; found-at-the-receiver resolves it, still with
-    no note."""
+    """BVQX001's scan in at Bokaro landed on the unit (on its shelf) only
+    after Complete listed it missing (the scan raced Accept). Write-off and
+    found-at-the-sender refuse BEFORE any note; found-at-the-receiver
+    resolves it, still with no note."""
     from api.routers import transfers
 
     t = _shipped_box(world)
     stored = transfers._get_transfer(t["id"])
+    done = _complete(t["id"], user=MGR_BOK)
+    assert "SU-1" in [p["stock_id"] for p in done["missing_pieces"]]
     world["stock_units"].update_one(
         {"stock_id": "SU-1"}, {"$set": transfers._rehome_patch(stored, "AVAILABLE")}
     )
-    done = _complete(t["id"], user=MGR_BOK)
-    assert "SU-1" in [p["stock_id"] for p in done["missing_pieces"]]
     with pytest.raises(HTTPException) as exc:
         _run(transfers.write_off_missing_piece(t["id"], "SU-1", ADMIN))
     assert _status(exc) == 409
@@ -916,3 +916,357 @@ def test_a_blank_destination_fails_validation(world):
             items=[transfers.TransferItemInput(product_id="P-1", sku="FR-1", product_name="Carrera Frame",
                                            quantity_requested=1)],
         )
+
+
+# ---------------------------------------------------------------------------
+# Fix round 2 (S3 review): two presses on two workers, a note only after the
+# unit moved, a scan racing Accept, a stale pack list, BOPIS line keys
+# ---------------------------------------------------------------------------
+
+
+def _sync(coro):
+    """Run a door to the end INSIDE another door (a press on another worker
+    landing mid-way): the doors make no awaits, so one send finishes them."""
+    try:
+        coro.send(None)
+    except StopIteration as done:
+        return done.value
+    raise AssertionError("the door awaited")
+
+
+class _UnitsHook:
+    """stock_units, with `hook(method, args)` run once before the first call
+    it picks (returns True) -- the moment another worker's press lands."""
+
+    def __init__(self, coll, hook):
+        self._coll, self._hook, self._fired = coll, hook, False
+
+    def __getattr__(self, name):
+        real = getattr(self._coll, name)
+        if name not in ("find_one_and_update", "update_one"):
+            return real
+
+        def call(*args, **kwargs):
+            if not self._fired and self._hook(name, args):
+                self._fired = True
+                self._hook(None, None)
+            return real(*args, **kwargs)
+
+        return call
+
+
+def _hook_units(monkeypatch, transfers, pick, then):
+    real = transfers._units_coll
+    state = {"hook": None}
+
+    def hook(method, args):
+        if method is None:
+            then()
+            return True
+        return pick(method, args)
+
+    def coll():
+        if state["hook"] is None:
+            state["hook"] = _UnitsHook(real(), hook)
+        return state["hook"]
+
+    monkeypatch.setattr(transfers, "_units_coll", coll)
+
+
+def _ship_events(monkeypatch, transfers):
+    """The stock_ids each TRANSFER_SHIP ledger row is written for."""
+    rows: list = []
+    monkeypatch.setattr(transfers, "_ledger_transfer_event",
+                        lambda kind, sid, *a, **k: rows.append(sid) if kind == "TRANSFER_SHIP" else None)
+    return rows
+
+
+def test_a_second_ship_during_the_first_ships_mint_ships_the_box_once(world, monkeypatch):
+    """Ship A has claimed SU-1..3 and is minting the T number when ship B (a
+    second press on another worker) runs to the end. A loses the save and
+    answers B's ship: every piece stays on the way under this transfer, one
+    invoice, one ship ledger row per piece, and Bokaro can scan them in."""
+    from api.routers import transfers
+
+    t = _ask(3)  # Dhanbad (company Z) -> Bokaro (firm Y)
+    _pack(t["id"], ["BVQX001", "BVQX002", "BVQX003"])
+    real = transfers._transfer_tax_invoice
+    fired: dict = {"b": None}
+    ship_rows = _ship_events(monkeypatch, transfers)
+
+    def _mint(transfer):
+        if fired["b"] is None:
+            fired["b"] = "running"
+            fired["b"] = _sync(transfers.ship_transfer(t["id"], "D41092277", None, "DTDC", False, ADMIN))
+        return real(transfer)
+
+    monkeypatch.setattr(transfers, "_transfer_tax_invoice", _mint)
+    a = _ship(t["id"])
+    b = fired["b"] or {}
+    assert b["transfer"]["status"] == "in_transit"
+    assert a["status"] == "in_transit"
+    for sid in ("SU-1", "SU-2", "SU-3"):
+        assert (_unit(world, sid)["status"], _unit(world, sid)["transfer_id"]) == ("TRANSFERRED", t["id"]), sid
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["status"] == "in_transit"
+    assert stored["items"][0]["shipped_stock_ids"] == ["SU-1", "SU-2", "SU-3"]
+    (bill,) = _bills(world, t["id"])
+    assert bill["invoice_number"] == stored["tax_invoice_number"]
+    assert sorted(ship_rows) == ["SU-1", "SU-2", "SU-3"]
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    assert _unit(world, "SU-1")["store_id"] == "ST-BOK-1"
+
+
+def test_a_ship_that_loses_a_claim_never_puts_back_a_piece_another_press_ships(world, monkeypatch):
+    """Ship A has claimed SU-1; before it claims SU-2, ship B runs to the end
+    (it takes SU-1 over and claims SU-2). A's claim of SU-2 fails: A
+    refuses, and SU-1 stays on the way -- it is on B's invoice."""
+    from api.routers import transfers
+
+    t = _ask(2)
+    _pack(t["id"], ["BVQX001", "BVQX002"])
+    claims = {"n": 0}
+
+    def pick(method, args):
+        if method == "find_one_and_update" and args[0].get("status") == "AVAILABLE":
+            claims["n"] += 1
+            return claims["n"] == 2  # A, about to claim SU-2
+        return False
+
+    _hook_units(monkeypatch, transfers, pick,
+                lambda: _sync(transfers.ship_transfer(t["id"], "D1", None, "DTDC", False, ADMIN)))
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"])
+    assert _status(exc) == 409
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["status"] == "in_transit"
+    assert stored["items"][0]["shipped_stock_ids"] == ["SU-1", "SU-2"]
+    for sid in ("SU-1", "SU-2"):
+        assert (_unit(world, sid)["status"], _unit(world, sid)["transfer_id"]) == ("TRANSFERRED", t["id"]), sid
+    (bill,) = _bills(world, t["id"])
+    assert bill["taxable_amount"] == 3700.0
+
+
+def test_a_ship_pressed_again_after_it_landed_answers_the_ship(world, monkeypatch):
+    """A second press that read the box before the first one saved gets the
+    shipped box back, never a 409 and never a second ship."""
+    from api.routers import transfers
+
+    t = _ask(2)
+    _pack(t["id"], ["BVQX001", "BVQX002"])
+    snapshot = transfers._get_transfer(t["id"])
+    ship_rows = _ship_events(monkeypatch, transfers)
+    _ship(t["id"])
+    _stale_once(monkeypatch, transfers, snapshot)
+    again = _ship(t["id"])
+    assert again["status"] == "in_transit"
+    assert len(_bills(world, t["id"])) == 1
+    assert sorted(ship_rows) == ["SU-1", "SU-2"]
+
+
+@pytest.mark.parametrize("door", ["write_off", "found_at_source"])
+def test_a_piece_found_at_the_receiver_mid_write_off_gets_no_credit_note(world, monkeypatch, door):
+    """Write-off (or found at the sender) checked SU-1 is on the way; the
+    Bokaro manager's Found at Bokaro lands on another worker before the
+    door moves the unit. The door refuses and no credit note is booked."""
+    from api.routers import transfers
+
+    t = _shipped_box(world)
+    _scan_in(t["id"], "BVQX002", user=MGR_BOK)
+    _scan_in(t["id"], "BVQX003", user=MGR_BOK)
+    _complete(t["id"], user=MGR_BOK)
+
+    def pick(method, args):
+        if method != "update_one" or args[0].get("stock_id") != "SU-1":
+            return False
+        patch = args[1].get("$set", {})
+        return patch.get("status") == "VOID" or (
+            patch.get("status") == "AVAILABLE" and "store_id" not in patch)
+
+    _hook_units(monkeypatch, transfers, pick, lambda: _sync(transfers.found_missing_piece(
+        t["id"], "SU-1", transfers.MissingFound(at="destination"), MGR_BOK)))
+    with pytest.raises(HTTPException) as exc:
+        if door == "write_off":
+            _run(transfers.write_off_missing_piece(t["id"], "SU-1", ADMIN))
+        else:
+            _run(transfers.found_missing_piece(t["id"], "SU-1", transfers.MissingFound(at="source"), MGR_DHN))
+    assert _status(exc) == 409
+    assert _notes(world, t["id"]) == []
+    assert (_unit(world, "SU-1")["store_id"], _unit(world, "SU-1")["status"]) == ("ST-BOK-1", "AVAILABLE")
+
+
+def test_a_damaged_scan_racing_accept_is_recorded_damaged_not_missing(world, monkeypatch):
+    """Bokaro scans BVQX001 damaged in the box; the unit lands in
+    quarantine, then Accept saves before the scan does. Accept reads the
+    unit: SU-1 is recorded damaged, never put on Missing on the way."""
+    from api.routers import transfers
+
+    t = _shipped_box(world)
+    real = transfers._update_transfer
+    fired = {"done": False}
+
+    def _update(tid, apply):
+        if not fired["done"]:
+            fired["done"] = True
+            _sync(transfers.complete_transfer(t["id"], None, MGR_BOK))
+        return real(tid, apply)
+
+    monkeypatch.setattr(transfers, "_update_transfer", _update)
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK, damaged=True, reason="Broken hinge")
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["status"] == "completed"
+    assert stored["items"][0]["damaged_stock_ids"] == ["SU-1"]
+    assert sorted(p["stock_id"] for p in stored["missing_pieces"]) == ["SU-2", "SU-3"]
+    assert "SU-1" not in [r["stock_id"] for r in _run(transfers.list_missing(ADMIN))["pieces"]]
+    assert _unit(world, "SU-1")["status"] == "QUARANTINED"
+
+
+def test_a_damaged_piece_listed_missing_is_found_at_the_receiver_still_damaged(world):
+    """The other order: Accept listed SU-1 missing, then its damaged scan
+    landed on the unit (quarantine at Bokaro). Found at Bokaro resolves it
+    as damaged and leaves it in quarantine."""
+    from api.routers import transfers
+
+    t = _shipped_box(world)
+    stored = transfers._get_transfer(t["id"])
+    _complete(t["id"], user=MGR_BOK)
+    world["stock_units"].update_one(
+        {"stock_id": "SU-1"},
+        {"$set": transfers._rehome_patch(stored, "QUARANTINED", "Broken hinge")},
+    )
+    _run(transfers.found_missing_piece(t["id"], "SU-1", transfers.MissingFound(at="destination"), MGR_BOK))
+    after = world["stock_transfers"].find_one({"id": t["id"]})
+    assert after["items"][0]["damaged_stock_ids"] == ["SU-1"]
+    assert after["items"][0]["damage_reasons"]["SU-1"] == "Broken hinge"
+    assert {p["stock_id"]: p["status"] for p in after["missing_pieces"]}["SU-1"] == "found"
+    assert (_unit(world, "SU-1")["store_id"], _unit(world, "SU-1")["status"]) == ("ST-BOK-1", "QUARANTINED")
+    assert _notes(world, t["id"]) == []
+
+
+def test_a_pack_list_built_from_an_older_box_is_refused(world):
+    """Tablet B loaded the empty box; tablet A then packed 005 and 007. B's
+    next scan sends its stale list with the box revision it saw: refused,
+    and A's pieces stay in the box."""
+    from api.routers import transfers
+
+    t = _ask(3)
+    seen_by_b = t.get("rev")
+    a = _run(transfers.pack_transfer(
+        t["id"], transfers.TransferPack(barcodes=["BVQX005", "BVQX007"], rev=seen_by_b), ADMIN))
+    assert a["transfer"]["rev"] != seen_by_b
+    with pytest.raises(HTTPException) as exc:
+        _run(transfers.pack_transfer(t["id"], transfers.TransferPack(barcodes=["BVQX009"], rev=seen_by_b), ADMIN))
+    assert _status(exc) == 409
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["items"][0]["packed_barcodes"] == ["BVQX005", "BVQX007"]
+
+
+def test_a_two_line_bopis_transfer_packs_ships_and_lands(world):
+    """orders/bopis.py writes lines with transfer_item_id and no id: each
+    line still keeps its own pieces, invoice line and receipt."""
+    world["products"].insert_one({"product_id": "P-2", "sku": "SG-2", "name": "Vogue Sunglass",
+                                  "category": "SUNGLASS", "hsn_code": "900410", "cost_price": 1000.0})
+    world["stock_units"].insert_one({"stock_id": "SU-V1", "product_id": "P-2", "store_id": "ST-DHN-1",
+                                     "status": "AVAILABLE", "barcode": "BVV001", "unit_cost": 1000.0})
+    tid = "trf_bopis1"
+    world["stock_transfers"].insert_one({
+        "id": tid, "transfer_number": "TRF-BOPIS-1", "order_id": "ORD-1",
+        "transfer_type": "store_to_store", "source": "bopis",
+        "from_location_id": "ST-DHN-1", "from_location_name": NAMES["ST-DHN-1"],
+        "to_location_id": "ST-BOK-1", "to_location_name": NAMES["ST-BOK-1"],
+        "status": "approved", "created_at": "2026-05-01T05:30:00",
+        "items": [
+            {"transfer_item_id": "ti-1", "product_id": "P-1", "sku": "FR-1", "product_name": "Carrera Frame",
+             "quantity_requested": 1, "quantity_shipped": 0, "quantity_received": 0},
+            {"transfer_item_id": "ti-2", "product_id": "P-2", "sku": "SG-2", "product_name": "Vogue Sunglass",
+             "quantity_requested": 1, "quantity_shipped": 0, "quantity_received": 0},
+        ],
+    })
+    packed = _pack(tid, ["BVQX001", "BVV001"])
+    assert [ln["packed_barcodes"] for ln in packed["items"]] == [["BVQX001"], ["BVV001"]]
+    shipped = _ship(tid)
+    assert [ln["shipped_stock_ids"] for ln in shipped["items"]] == [["SU-1"], ["SU-V1"]]
+    stored = world["stock_transfers"].find_one({"id": tid})
+    assert [ln["serials"] for ln in stored["tax_invoice_lines"]] == [["BVQX001"], ["BVV001"]]
+    _scan_in(tid, "BVQX001", user=MGR_BOK)
+    _scan_in(tid, "BVV001", user=MGR_BOK)
+    done = _complete(tid, user=MGR_BOK)
+    assert done["status"] == "completed" and not done.get("missing_pieces")
+    assert [ln["received_stock_ids"] for ln in done["items"]] == [["SU-1"], ["SU-V1"]]
+
+
+def _ship_loses_to_a_repack_during_its_mint(monkeypatch, tid, repack):
+    """Ship took the box and claimed its pieces; while it mints the T number
+    a re-pack saves on another worker. Ship's save is refused (409) after
+    the number, its date and the frozen lines already landed on the doc."""
+    from api.routers import transfers
+
+    real = transfers._transfer_tax_invoice
+    fired = {"done": False}
+
+    def _mint(transfer):
+        if not fired["done"]:
+            fired["done"] = True
+            _sync(transfers.pack_transfer(tid, transfers.TransferPack(barcodes=repack), ADMIN))
+        return real(transfer)
+
+    monkeypatch.setattr(transfers, "_transfer_tax_invoice", _mint)
+    with pytest.raises(HTTPException) as exc:
+        _ship(tid)
+    assert _status(exc) == 409
+    monkeypatch.setattr(transfers, "_transfer_tax_invoice", real)
+
+
+def test_frozen_invoice_lines_are_rebuilt_at_the_ship_that_lands(world, monkeypatch):
+    t = _ask(2)  # Dhanbad -> Bokaro: a tax invoice
+    _pack(t["id"], ["BVQX003", "BVQX004"])  # 1850.01 + 1850
+    _ship_loses_to_a_repack_during_its_mint(monkeypatch, t["id"], ["BVQX005", "BVQX006"])
+    failed = world["stock_transfers"].find_one({"id": t["id"]})
+    assert failed["status"] == "packed" and failed["tax_invoice_number"]
+    assert [ln["serials"] for ln in failed["tax_invoice_lines"]] == [["BVQX003", "BVQX004"]]
+    for sid in ("SU-3", "SU-4"):
+        assert (_unit(world, sid)["status"], _unit(world, sid).get("transfer_id")) == ("AVAILABLE", None), sid
+    _ship(t["id"])
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert [ln["serials"] for ln in stored["tax_invoice_lines"]] == [["BVQX005", "BVQX006"]]
+    assert stored["tax_invoice_lines"][0]["taxable"] == 3700.0
+    (bill,) = _bills(world, t["id"])
+    assert bill["invoice_number"] == failed["tax_invoice_number"]
+    assert bill["taxable_amount"] == 3700.0
+
+
+def test_a_number_from_a_failed_ship_is_redated_at_the_ship_that_lands(world, monkeypatch):
+    t = _ask(2)
+    _pack(t["id"], ["BVQX003", "BVQX004"])
+    _ship_loses_to_a_repack_during_its_mint(monkeypatch, t["id"], ["BVQX005", "BVQX006"])
+    # The failed press's day falls in an earlier month (April).
+    world["stock_transfers"].update_one(
+        {"id": t["id"]}, {"$set": {"tax_invoice_date": "2026-04-15T06:00:00"}}
+    )
+    _ship(t["id"])
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["tax_invoice_date"] != "2026-04-15T06:00:00"
+    ist_day = business_day(stored["tax_invoice_date"].replace("Z", "+00:00"))
+    (bill,) = _bills(world, t["id"])
+    assert bill["invoice_date"].split("T")[0] == ist_day
+    assert not bill["invoice_date"].startswith("2026-04")
+
+
+def test_a_ship_that_read_the_box_before_another_press_took_it_touches_no_piece(world, monkeypatch):
+    """Ship B read the box; ship A then took it (and is still running). B is
+    refused before it claims or puts back any piece, so it can never undo
+    A's claims; A alone can save the ship."""
+    from api.routers import transfers
+
+    t = _ask(2)
+    _pack(t["id"], ["BVQX001", "BVQX002"])
+    snapshot = transfers._get_transfer(t["id"])
+    transfers._take_box(transfers._get_transfer(t["id"]))  # ship A took the box
+    writes = []
+    _hook_units(monkeypatch, transfers, lambda m, a: writes.append(m) and False, lambda: None)
+    _stale_once(monkeypatch, transfers, snapshot)
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"])
+    assert _status(exc) == 409
+    assert writes == []
+    assert world["stock_transfers"].find_one({"id": t["id"]})["status"] == "packed"
