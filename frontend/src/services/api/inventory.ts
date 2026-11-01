@@ -501,7 +501,7 @@ export const inventoryApi = {
  *  accounts correction, opening stock or the backfill. */
 export interface CostHistoryRow {
   key: string;
-  kind: 'BILL' | 'CORRECTION' | 'OPENING_STOCK' | 'BACKFILL';
+  kind: 'BILL' | 'CORRECTION' | 'OPENING_STOCK' | 'BACKFILL' | 'CARRIED_OVER';
   at: string;
   by?: string | null;
   by_name?: string;
@@ -671,6 +671,11 @@ export interface OpeningStockResultRow {
   existing?: number;
   added?: number;
   unit_cost?: number | null;
+  /** The cost the pieces carry: the product's average cost; the typed
+   *  unit_cost only for a product with none yet (S4). */
+  cost_used?: number | null;
+  /** Set when the typed cost is not used (the product has an average). */
+  cost_note?: string | null;
   message: string;
 }
 
@@ -683,7 +688,7 @@ export interface OpeningStockResponse {
     units_added?: number;
     rows_skipped?: number;
     rows_with_errors: number;
-    /** Valuation of the units to add / added (rows carrying a unit_cost). */
+    /** Valuation of the units to add / added: pieces x the cost they carry (cost_used). */
     total_value?: number;
     /** Movements-ledger batch reference (commit only; null if none written). */
     batch_id?: string | null;

@@ -40,7 +40,9 @@ const TILL_TILE_WITH_COLOUR = `button:has-text("${SEED.colourFrame.colour}")`;
  * opened on a seeded product); the inventory guard counts it as its route.
  * The audit measures only what is ON SCREEN, so a part far below the fold
  * names itself in `scrollTo`: it is scrolled to the top of the view before
- * every width is measured.
+ * every width is measured. A PARAMETERISED screen is probed at a URL on a
+ * seeded id: `path` is that URL and `route` the router path it stands for
+ * (what the inventory guard counts).
  *
  * ponytail: `ready` proves the route painted SOMETHING real, not that it
  * painted the right thing — a per-screen React Query error card also has a
@@ -49,7 +51,7 @@ const TILL_TILE_WITH_COLOUR = `button:has-text("${SEED.colourFrame.colour}")`;
  * upgrade to per-screen selectors only if a screen is ever found erroring
  * green in CI.
  */
-export const ROUTES: ReadonlyArray<{ path: string; ready?: string; scrollTo?: string }> = [
+export const ROUTES: ReadonlyArray<{ path: string; route?: string; ready?: string; scrollTo?: string }> = [
   { path: '/approvals' },
   { path: '/approvals/mine' },
   { path: '/returns/approvals' },
@@ -136,6 +138,9 @@ export const ROUTES: ReadonlyArray<{ path: string; ready?: string; scrollTo?: st
   { path: '/incentive/payouts' },
   { path: '/incentive/settings' },
   { path: '/inventory/stock' },
+  // S4: a product's page (its pieces; the one average cost for accounts), on
+  // the seeded frame.
+  { path: `/inventory/stock/${SEED.frame.productId}`, route: '/inventory/stock/:productId' },
   { path: '/inventory/display-layout' },
   { path: '/inventory/non-moving' },
   { path: '/inventory/aging' },
@@ -349,7 +354,6 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
   { path: '/customers/:customerId/loyalty', reason: 'needs a seeded customer id; seed_e2e.py creates no customers' },
   { path: '/collections/:id', reason: 'needs a seeded collection id; seed_e2e.py creates no collections' },
   { path: '/walkouts/:walkoutId', reason: 'needs a seeded walkout id; seed_e2e.py creates no walkouts' },
-  { path: '/inventory/stock/:productId', reason: 'S4: the product page (stock and the one average cost); ROUTES matches paths literally (no url field for a parameterised screen). Covered by ProductStockPage.test.tsx.' },
   { path: '/inventory/audit/:countId', reason: 'the stock-count result; needs a finished count id, seed_e2e.py creates none, and ROUTES matches paths literally (no url field for a parameterised screen). Covered by stockCountResult.test.tsx.' },
   { path: '/incentive/staff/:staffId', reason: 'needs a seeded staff id; seed_e2e.py seeds only the admin user' },
   { path: '/workshop/station/:stationCode', reason: 'needs a seeded workshop station; seed_e2e.py creates none' },

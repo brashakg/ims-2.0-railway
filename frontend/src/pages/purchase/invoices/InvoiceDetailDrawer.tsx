@@ -4,6 +4,7 @@
 // ============================================================================
 
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import {
   X, Loader2, FileText, AlertTriangle, CheckCircle2, ShieldCheck, Scale, ShieldAlert,
 } from 'lucide-react';
@@ -140,9 +141,9 @@ function ThreeWayTable({ lines, tol }: { lines: MatchLine[]; tol?: number }) {
                   {l.hsn && <div className="text-[11px] text-gray-400">HSN {l.hsn}</div>}
                   {/* S4: the product's one average cost and its history. */}
                   {l.product_id && (
-                    <a href={`/inventory/stock/${encodeURIComponent(l.product_id)}`} className="text-[11px] hover:underline">
+                    <Link to={`/inventory/stock/${encodeURIComponent(l.product_id)}`} className="text-[11px] hover:underline">
                       Cost history
-                    </a>
+                    </Link>
                   )}
                 </td>
                 {/* PO */}
@@ -369,7 +370,7 @@ export function InvoiceDetailDrawer({
                       <th className="text-left px-2 py-1.5">Item</th>
                       <th className="text-right px-2 py-1.5">Qty</th>
                       <th className="text-right px-2 py-1.5">Unit cost</th>
-                      <th className="text-right px-2 py-1.5">Stock value</th>
+                      <th className="text-right px-2 py-1.5">Line value</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">

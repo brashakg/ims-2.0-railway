@@ -74,13 +74,39 @@ describe('a product page under one average cost', () => {
     expect(await screen.findByText('Carrera 1234 Havana 55')).toBeInTheDocument();
     expect(screen.getByText('₹3,395')).toBeInTheDocument();
     expect(screen.getByText('₹16,975')).toBeInTheDocument();
-    expect(screen.getByText(/Stock value = pieces × average cost \(5 × ₹3,395\)/)).toBeInTheDocument();
+    expect(await screen.findByText(/Stock value = pieces in every shop × average cost \(5 × ₹3,395\)/)).toBeInTheDocument();
     expect(screen.getByText(/bill SAF\/24-25\/8841 \(Safilo\) accepted by Priya: 3 pieces at ₹3,450 → average ₹3,395/)).toBeInTheDocument();
     expect(screen.getByText(/Priya: average ₹3,520 → ₹3,340 · reason "Safilo credit note/)).toBeInTheDocument();
     // Pieces in this shop: the two standing ones, no cost column.
     expect(screen.getByText('BV24CA0101P4')).toBeInTheDocument();
     expect(screen.queryByText('BV24CA0100X1')).not.toBeInTheDocument();
     expect(screen.getByText('Reserved · customer order')).toBeInTheDocument();
+  });
+
+  it('labels the shop count and the every-shop count apart', async () => {
+    renderAt();
+    expect(await screen.findByText('Pieces in every shop')).toBeInTheDocument();
+    const thisShop = screen.getAllByText('Pieces in this shop')[0].parentElement as HTMLElement;
+    expect(thisShop.textContent).toContain('2');
+  });
+
+  it('a cost-card failure keeps the page and offers a retry', async () => {
+    box.getCost.mockRejectedValueOnce(new Error('503'));
+    renderAt();
+    expect(await screen.findByText('BV24CA0101P4')).toBeInTheDocument();
+    expect(screen.queryByText('Product not found')).not.toBeInTheDocument();
+    expect(await screen.findByText(/The cost could not be loaded/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    expect(await screen.findByText('₹16,975')).toBeInTheDocument();
+  });
+
+  it('words an average carried over from before S4', async () => {
+    box.getCost.mockResolvedValue({ ...CARD, history: [
+      { key: 'backfill:r', kind: 'CARRIED_OVER', at: '2026-10-30T10:00:00+00:00', by: 'script', old_cost: null, new_cost: 3395 },
+    ] });
+    renderAt();
+    expect(await screen.findByText('Carried over')).toBeInTheDocument();
+    expect(screen.getByText(/average ₹3,395 as it stood before bill-by-bill averaging began/)).toBeInTheDocument();
   });
 
   it('says the figure is too low while pieces have no cost', async () => {

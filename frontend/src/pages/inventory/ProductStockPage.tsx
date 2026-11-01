@@ -44,6 +44,9 @@ export function historyLine(row: CostHistoryRow): { label: string; text: string 
   if (row.kind === 'CORRECTION') {
     return { label: 'Correction', text: `${who}: average ${move} · reason "${row.reason || ''}"` };
   }
+  if (row.kind === 'CARRIED_OVER') {
+    return { label: 'Carried over', text: `average ${money(row.new_cost)} as it stood before bill-by-bill averaging began` };
+  }
   return {
     label: row.kind === 'OPENING_STOCK' ? 'Opening stock' : 'First cost',
     text: `first average ${money(row.new_cost)}${row.kind === 'BACKFILL' ? ' from the pieces received before' : ''}`,
@@ -60,26 +63,37 @@ export function ProductStockPage() {
   const [product, setProduct] = useState<Record<string, unknown> | null>(null);
   const [units, setUnits] = useState<StockUnit[] | null>(null);
   const [card, setCard] = useState<ProductCostCard | null>(null);
+  const [costFailed, setCostFailed] = useState(false);
   const [failed, setFailed] = useState(false);
   const [labels, setLabels] = useState(false);
   const [newCost, setNewCost] = useState('');
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
 
-  const load = useCallback(async () => {
+  const loadCost = useCallback(async () => {
+    if (!showCost) return;
+    setCostFailed(false);
     try {
-      const [doc, unitRes, cost] = await Promise.all([
+      setCard(await inventoryApi.getProductCost(productId));
+    } catch {
+      // The cost card alone failed: the pieces still show (never "Product not found").
+      setCostFailed(true);
+    }
+  }, [productId, showCost]);
+
+  const load = useCallback(async () => {
+    loadCost();
+    try {
+      const [doc, unitRes] = await Promise.all([
         productApi.getProduct(productId),
         storeId ? inventoryApi.getUnits({ store_id: storeId, product_id: productId }) : Promise.resolve({ units: [] as StockUnit[] }),
-        showCost ? inventoryApi.getProductCost(productId) : Promise.resolve(null),
       ]);
       setProduct((doc as Record<string, unknown>) || {});
       setUnits((unitRes.units || []).filter((u) => u.in_shop));
-      setCard(cost);
     } catch {
       setFailed(true);
     }
-  }, [productId, storeId, showCost]);
+  }, [productId, storeId, loadCost]);
 
   useEffect(() => {
     load();
@@ -150,21 +164,28 @@ export function ProductStockPage() {
 
       <div className="stat-strip">
         <div>
-          <div className="l">{showCost ? 'Pieces in stock (every shop)' : 'Pieces in this shop'}</div>
-          <div className="v">{showCost && card ? card.pieces : units.length}</div>
+          <div className="l">Pieces in this shop</div>
+          <div className="v">{units.length}</div>
         </div>
         {showCost && card && (
           <>
+            <div><div className="l">Pieces in every shop</div><div className="v">{card.pieces}</div></div>
             <div><div className="l">Average cost (excl. GST)</div><div className="v">{money(card.average_cost)}</div></div>
             <div><div className="l">Stock value</div><div className="v">{money(card.stock_value)}</div></div>
           </>
         )}
       </div>
+      {showCost && costFailed && (
+        <p className="text-sm" style={{ color: 'var(--warn)' }}>
+          The cost could not be loaded.{' '}
+          <button type="button" className="btn" onClick={loadCost}>Retry</button>
+        </p>
+      )}
       {showCost && card && (
         <div className="space-y-1">
           <p className="text-sm" style={{ color: 'var(--ink-4)' }}>
-            Stock value = pieces × average cost ({card.pieces} × {money(card.average_cost)}). The same rule on every
-            screen and report.
+            Stock value = pieces in every shop × average cost ({card.pieces} × {money(card.average_cost)}). The same
+            rule on every screen and report.
           </p>
           {card.uncosted_pieces > 0 && (
             <p className="text-sm" style={{ color: 'var(--warn)' }}>
