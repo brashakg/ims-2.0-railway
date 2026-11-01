@@ -46,10 +46,12 @@ WHAT IT DOES
   * Every accepted goods receipt that no S4 bill has costed is stamped
     `costed_before_s4: <run id>` (product_cost.PRE_S4_STAMP; only receipts
     accepted before the first S4 bill -- run it right after the deploy), with
-    the time and each of its products' average then: its pieces carry that
-    average, so the first S4 bill BLENDS with them instead of replacing the
-    average. A receipt whose bill simply has not come in yet is stamped too:
-    its own S4 bill later trues its pieces up from the stamped average
+    the time and, per product, the figure its pieces are in the pool at: the
+    product's average then -- or, for a product this run filled or
+    re-averaged from its pieces, that receipt's pieces' OWN cost (they went
+    into the new average at it). So the first S4 bill BLENDS with them
+    instead of replacing the average. A receipt whose bill simply has not come in yet is stamped too:
+    its own S4 bill later trues its pieces up from that stamped figure
     (product_cost.PRE_S4_STAMP) instead of re-averaging them in.
   * The dry run FLAGS products whose average came from a bill that is still
     on hold, or from a delivery-challan bill (both could carry a wrong
@@ -61,7 +63,8 @@ WHAT IT DOES
     the run wrote (a later bill or correction is reported, never undone),
     including one written just before a crash, and unstamps the receipts
     -- except one carrying a product whose average moved since the stamp
-    (reported: its pieces are in that average at the stamped figure).
+    (reported: its pieces are in that average at the stamped figure); such a
+    receipt keeps the stamped figure of the moved products only.
   A re-run after --apply finds nothing left to fill.
 
 USAGE (dry run is the default; nothing is written without --apply). NEVER run
@@ -302,6 +305,7 @@ def _recost(db, pid: str, cost: float, expected: float, key: str) -> Optional[di
 def apply(db, rows: List[dict], run_id: str) -> int:
     key = f"backfill:{run_id}"
     done = 0
+    filled = set()
     for row in rows:
         if row["fill"] is None:
             continue
@@ -313,6 +317,7 @@ def apply(db, rows: List[dict], run_id: str) -> int:
         if written:
             db[BACKUPS].update_one({"run_id": run_id, "product_id": row["product_id"]},
                                    {"$set": {"written": written["new_cost"]}})
+            filled.add(row["product_id"])
             done += 1
     for prod in carry_over_candidates(db):
         _backup(db, run_id, prod["product_id"])
@@ -321,13 +326,26 @@ def apply(db, rows: List[dict], run_id: str) -> int:
             db[BACKUPS].update_one({"run_id": run_id, "product_id": prod["product_id"]},
                                    {"$set": {"written": written["new_cost"], "carried_over": True}})
             done += 1
+    # A product this run filled or re-averaged from its pieces holds each
+    # receipt's pieces at their OWN cost, not at its new average.
+    own: Dict[str, Dict[str, float]] = {}
+    for pid in filled:
+        by_receipt: Dict[Optional[str], List[dict]] = {}
+        for u in db["stock_units"].find({"product_id": pid}):
+            if product_cost._held(u):
+                by_receipt.setdefault(product_cost._receipt_of(u), []).append(u)
+        for r, units in by_receipt.items():
+            cost = _from_pieces(units, sum(stock_value._pieces(u) for u in units))
+            if r and cost is not None:
+                own.setdefault(r, {})[pid] = cost
     at = utc_now_iso()
     for gid in legacy_receipts(db):
         receipt = db["grns"].find_one({"grn_id": gid}, {"_id": 0, "items": 1}) or {}
         pids = {it.get("product_id") for it in receipt.get("items") or [] if it.get("product_id")}
         averages = {p["product_id"]: product_cost.average(p)
-                    for p in db["products"].find({"product_id": {"$in": list(pids)}})
+                    for p in db["products"].find({"product_id": {"$in": list(pids - filled)}})
                     if product_cost.average(p)}
+        averages.update({pid: c for pid, c in own.get(gid, {}).items() if pid in pids})
         db["grns"].update_one({"grn_id": gid, product_cost.PRE_S4_STAMP: {"$exists": False}},
                               {"$set": {product_cost.PRE_S4_STAMP: run_id, product_cost.PRE_S4_AT: at,
                                         product_cost.PRE_S4_AVERAGES: averages}})
@@ -372,7 +390,9 @@ def _unstamp(db, run_id: str, key: str) -> None:
     """Take the run's stamp off its receipts -- but never off one carrying a
     product whose average moved after the stamp (a bill or correction, not
     this run): its pieces are in that average at the stamped figure, so
-    their own bill must still find the stamp."""
+    their own bill must still find the stamp. Such a receipt keeps the
+    stamped figure of the moved products only: every other product's entry
+    goes (revert put it back, so its pieces wait for their bill)."""
     for g in db["grns"].find({product_cost.PRE_S4_STAMP: run_id}, {"_id": 0}):
         at = str(g.get(product_cost.PRE_S4_AT) or "")
         pids = [it.get("product_id") for it in g.get("items") or [] if it.get("product_id")]
@@ -382,6 +402,10 @@ def _unstamp(db, run_id: str, key: str) -> None:
         )
         if moved:
             print(f"  receipt {g['grn_id']}: still marked costed before S4 - {', '.join(moved)} moved since the run")
+            drop = {f"{product_cost.PRE_S4_AVERAGES}.{p}": "" for p in g.get(product_cost.PRE_S4_AVERAGES) or {}
+                    if p not in moved}
+            if drop:
+                db["grns"].update_one({"grn_id": g["grn_id"], product_cost.PRE_S4_STAMP: run_id}, {"$unset": drop})
             continue
         db["grns"].update_one({"grn_id": g["grn_id"], product_cost.PRE_S4_STAMP: run_id},
                               {"$unset": {product_cost.PRE_S4_STAMP: "", product_cost.PRE_S4_AT: "",

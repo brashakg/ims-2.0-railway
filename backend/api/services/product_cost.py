@@ -166,8 +166,10 @@ def _receipt_of(unit: dict) -> Optional[str]:
 
 
 # A receipt accepted before S4 that no bill has costed under S4 (the backfill
-# stamps it with its run id, the time, and each product's average then):
-# its held pieces are in the pool at that stamped average, so they are part of
+# stamps it with its run id, the time, and per product the figure its held
+# pieces are in the pool at: the product's average then, or -- for a product
+# the backfill filled or re-averaged from its pieces -- those pieces' own
+# cost): they are in the pool at that stamped average, so they are part of
 # the basis -- the first S4 bill blends with them instead of replacing the
 # average. Its own S4 bill, whenever it lands (its bill may simply not have
 # come in yet), keeps them in the basis and adds n x (bill price - stamped

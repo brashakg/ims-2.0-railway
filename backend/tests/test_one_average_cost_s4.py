@@ -941,12 +941,119 @@ def test_the_backfill_re_averages_a_walk_in_price_set_at_receipt():
     assert (row["fill"], row["recost"]) == (109.09, 200.0) and "walk-in" in row["reason"]
     assert bf.apply(db, [row], "RUN1") == 1
     assert _avg(db) == 109.09
-    assert db.grns.find_one({"grn_id": "GW"})[product_cost.PRE_S4_AVERAGES] == {"P": 109.09}
+    # GW's piece is in the pool at its OWN 200, so that is its stamp (never 109.09)
+    assert db.grns.find_one({"grn_id": "GW"})[product_cost.PRE_S4_AVERAGES] == {"P": 200.0}
 
     db = _db(152.38, cost_source="PURCHASE_INVOICE", cost_source_id="B2")
     _walk_in_received(db, later_bill=True)
     (row,) = bf.plan(db)
     assert (row["fill"], row["recost"]) == (104.76, 152.38) and "walk-in" in row["reason"]
+
+
+# --------------------------------------------------------------------------
+# Fix round 5 (S4).
+# --------------------------------------------------------------------------
+
+
+def test_a_re_averaged_walk_ins_own_bill_at_its_receipt_price_leaves_the_true_average():
+    """The backfill re-averages to (10 x 100 + 200) / 11 = 109.09: GW's piece
+    is in that pool at its OWN 200. GW's S4 bill at 200 then adds nothing --
+    the average stays 109.09, never 117.35 (stamped at 109.09, 200 - 109.09
+    counted a second time)."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(200.0, cost_source="GRN_WALKIN")
+    _walk_in_received(db)
+    bf.apply(db, bf.plan(db), "RUN1")
+    assert _avg(db) == 109.09
+    _accept(db, _bill("BW", 1, 200, grn_id="GW", bill_date="2026-11-02", created_at="2026-11-02T10:00:00+00:00"))
+    assert _avg(db) == 109.09
+    assert db.cogs_variances.count_documents({}) == 0
+
+
+def test_a_re_averaged_walk_in_piece_sold_before_its_bill_owes_no_variance():
+    """As above, but GW's piece is sold after the backfill at 109.09: the pool
+    held 1200 for 11, the sale took 109.09 out. GW's bill at 200 owes no
+    variance (never 200 - 109.09 = 90.91)."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(200.0, cost_source="GRN_WALKIN")
+    _walk_in_received(db)
+    bf.apply(db, bf.plan(db), "RUN1")
+    sold_at = (utc_now() + timedelta(minutes=1)).replace(tzinfo=None)
+    db.stock_units.update_one({"grn_id": "GW"}, {"$set": {"status": "SOLD", "order_id": "O1", "sold_at": sold_at}})
+    db.orders.insert_one({"order_id": "O1", "items": [{"product_id": "P", "quantity": 1, "cost_at_sale": 109.09}]})
+    _accept(db, _bill("BW", 1, 200, grn_id="GW", bill_date="2026-11-02", created_at="2026-11-02T10:00:00+00:00"))
+    assert db.cogs_variances.count_documents({}) == 0
+    assert _avg(db) == 109.09
+
+
+def _unit(db, sid, pid, gid, cost=None):
+    doc = {"stock_id": sid, "product_id": pid, "store_id": "S1", "status": "AVAILABLE", "quantity": 1, "grn_id": gid}
+    if cost is not None:
+        doc["unit_cost"] = cost
+    db.stock_units.insert_one(doc)
+
+
+def _bill_for(db, bid, pid, qty, price, gid, created):
+    bill = {**_bill(bid, qty, price, grn_id=gid, created_at=created),
+            "lines": [{"product_id": pid, "qty": qty, "unit_price": price, "taxable": qty * price, "gst_rate": 5}]}
+    db.vendor_bills.insert_one(copy.deepcopy(bill))
+    return pi._apply_accepted_bill(db, bill, actor="acc")
+
+
+@pytest.mark.parametrize("p_moved", (True, False))
+def test_revert_unstamps_a_put_back_product_on_a_receipt_it_keeps_stamped(p_moved):
+    """P averages 400; Q's 200 is a pre-S4 walk-in latest price (GW). Legacy
+    receipt G0 carries 10 P and 10 Q (Q at 100), its bills not in. RUN1
+    re-averages Q to (10 x 100 + 200 + 10 x 100) / 21 = 104.76 and stamps G0.
+    S4 bill B1 moves P (433.33); revert puts Q back to 200 and keeps G0's
+    stamp for P only. G0's Q bill at 10 x 100: G0's Q pieces wait for it,
+    (11 x 200 + 1000) / 21 = 152.38 -- the same as when nothing moved, never
+    197.73. G0's P bill at 400 still gives 433.33."""
+    from scripts import backfill_average_cost as bf
+
+    db = mongomock.MongoClient().s4
+    db.products.insert_many([
+        {"product_id": "P", "cost_price": 400.0, "cost_source": "PURCHASE_INVOICE"},
+        {"product_id": "Q", "cost_price": 200.0, "cost_source": "PURCHASE_INVOICE", "cost_source_id": "BW"}])
+    db.grns.insert_many([
+        {"grn_id": "GQ", "status": "ACCEPTED", "po_id": "POQ", "accepted_at": "2026-10-01T10:00:00+00:00",
+         "items": [{"product_id": "Q", "accepted_qty": 10}]},
+        {"grn_id": "GW", "status": "ACCEPTED", "grn_subtype": "NO_PO", "accepted_at": "2026-10-20T10:00:00+00:00",
+         "items": [{"product_id": "Q", "accepted_qty": 1}]},
+        {"grn_id": "G0", "status": "ACCEPTED", "po_id": "PO0", "accepted_at": "2026-10-21T10:00:00+00:00",
+         "items": [{"product_id": "P", "accepted_qty": 10}, {"product_id": "Q", "accepted_qty": 10}]}])
+    for i in range(10):
+        _unit(db, f"GQ{i}", "Q", "GQ", 100.0)
+        _unit(db, f"G0P{i}", "P", "G0")
+        _unit(db, f"G0Q{i}", "Q", "G0", 100.0)
+    _unit(db, "GW0", "Q", "GW", 200.0)
+    db.vendor_bills.insert_many([
+        {"bill_id": "BQ", "invoice_id": "BQ", "grn_id": "GQ", "status": "PAID", "match_status": "MATCHED",
+         "created_at": "2026-10-02T10:00:00+00:00"},
+        {"bill_id": "BW", "invoice_id": "BW", "grn_id": "GW", "status": "PAID", "match_status": "MATCHED",
+         "created_at": "2026-10-21T10:00:00+00:00"}])
+    bf.apply(db, bf.plan(db), "RUN1")
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 104.76
+    if p_moved:
+        db.grns.insert_one({"grn_id": "G1", "status": "ACCEPTED", "accepted_at": "2026-11-01T10:00:00+00:00",
+                            "items": [{"product_id": "P", "accepted_qty": 5}]})
+        for i in range(5):
+            _unit(db, f"G1P{i}", "P", "G1")
+        _bill_for(db, "B1", "P", 5, 500, "G1", "2026-11-01T00:00:00+00:00")
+        assert db.products.find_one({"product_id": "P"})["cost_price"] == 433.33
+    bf.revert(db, "RUN1")
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 200.0
+    g0 = db.grns.find_one({"grn_id": "G0"})
+    assert g0.get(product_cost.PRE_S4_AVERAGES) == ({"P": 400.0} if p_moved else None)
+    # mongomock: the guard's {"$in": [None, []]} misses an emptied [] (real Mongo matches it)
+    db.products.update_many({"cost_keys": []}, {"$unset": {"cost_keys": "", "cost_history": ""}})
+    _bill_for(db, "BG0Q", "Q", 10, 100, "G0", "2026-11-02T00:00:00+00:00")
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 152.38
+    if p_moved:
+        _bill_for(db, "BG0P", "P", 10, 400, "G0", "2026-11-02T00:00:00+00:00")
+        assert db.products.find_one({"product_id": "P"})["cost_price"] == 433.33
 
 
 def test_a_backfill_re_run_after_an_s4_bill_never_re_averages_a_walk_in():
