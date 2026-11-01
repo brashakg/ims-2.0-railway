@@ -579,3 +579,75 @@ def test_eway_bill_and_vehicle_no_typed_on_the_box_print_on_the_invoice(world):
         MGR_DHN))
     html = _run(print_documents.tax_invoice_for_transfer(t["id"], "ORIGINAL", False, ADMIN)).body.decode()
     assert "391000123456" in html and "JH10AB1234" in html
+
+
+# ---------------------------------------------------------------------------
+# Cost: read through THE stock cost rule (services/stock_value), never inline
+# ---------------------------------------------------------------------------
+
+
+def test_transfer_value_reads_the_one_stock_cost_rule(world):
+    """A late-priced invoice layer is worth its landed cost (stock_value's
+    rule), so the tax invoice is valued at it -- not at the supplier base
+    price a second, inline rule would read. When S4 merges, the same reader
+    answers with the product's one average cost."""
+    world["stock_units"].update_one(
+        {"stock_id": "SU-4"},
+        {"$set": {"cost_source": "PURCHASE_INVOICE", "landed_cost": 1902.5}},
+    )
+    t = _shipped_box(world, codes=("BVQX004",))
+    assert t["items"][0]["unit_cost"] == 1902.5
+    (bill,) = _bills(world, t["id"])
+    assert bill["taxable_amount"] == 1902.5
+
+
+def test_a_catalogue_only_price_is_no_cost_for_the_invoice(world):
+    """A price typed only to finish cataloguing is not a cost (stock_value):
+    a cost-less piece of such a product refuses a crossing ship."""
+    world["products"].update_one({"product_id": "P-1"}, {"$set": {"cost_price_is_catalogue_only": True}})
+    world["stock_units"].update_one({"stock_id": "SU-4"}, {"$unset": {"unit_cost": ""}})
+    t = _ask(1)
+    _pack(t["id"], ["BVQX004"])
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"])
+    assert _status(exc) == 409
+    assert _unit(world, "SU-4")["status"] == "AVAILABLE"
+
+
+def test_an_invoice_booked_late_still_files_in_the_dispatch_month(world, monkeypatch):
+    """If ship's booking did not land, Complete books it -- dated the tax
+    invoice's own day (IST), never the day it was completed."""
+    from api.routers import transfers
+
+    real = transfers._book_mirror_purchase
+    monkeypatch.setattr(transfers, "_book_mirror_purchase", lambda t: None)
+    t = _shipped_box(world)
+    assert _bills(world, t["id"]) == []
+    # Invoiced 30 Apr 20:00 UTC = 1 May 01:30 IST: the May return.
+    world["stock_transfers"].update_one(
+        {"id": t["id"]}, {"$set": {"tax_invoice_date": "2026-04-30T20:00:00"}}
+    )
+    transfers.STOCK_TRANSFERS.clear()
+    monkeypatch.setattr(transfers, "_book_mirror_purchase", real)
+    _complete(t["id"], user=MGR_BOK)
+    (bill,) = _bills(world, t["id"])
+    assert bill["bill_date"][:10] == bill["invoice_date"][:10] == "2026-05-01"
+
+
+def test_a_piece_already_credited_is_never_credited_twice(world):
+    """Notes over overlapping pieces: each piece is credited once, and the
+    invoice plus every note still equals the tax on what was delivered."""
+    from api.routers import transfers
+    from api.services.purchase_invoice_engine import split_line_gst
+
+    t = _shipped_box(world)
+    stored = transfers._get_transfer(t["id"])
+    transfers._short_credit_note(stored, ["SU-1"], "test")
+    transfers._short_credit_note(stored, ["SU-1", "SU-2"], "test")
+    bills = _bills(world, t["id"])
+    notes = [b for b in bills if b.get("doc_type") == "TRANSFER_CREDIT_NOTE"]
+    assert sorted(s for n in notes for s in n["credited_stock_ids"]) == ["SU-1", "SU-2"]
+    (invoice,) = [b for b in bills if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
+    left = split_line_gst(transfers._line_value(1, stored["items"][0]["unit_cost"]), 5.0, False)
+    assert round(invoice["taxable_amount"] + sum(n["taxable_amount"] for n in notes), 2) == left["taxable"]
+    assert round(invoice["cgst_total"] + sum(n["cgst_total"] for n in notes), 2) == left["cgst"]

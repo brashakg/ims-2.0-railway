@@ -28,6 +28,7 @@ from ..dependencies import (
 # W1.4 / OS-032: shared ONLINE store-type detector -- a transfer must never
 # land stock on a pooled, stockless ONLINE store.
 from ..services import org_validation as ov
+from ..services import stock_value
 from ..services.barcode import find_unit_by_code
 from ..services.cost_mask import mask_cost
 from ..services.purchase_invoice_engine import classify_supply
@@ -862,12 +863,14 @@ def _first_cost(*candidates) -> float:
 
 
 def _unit_cost(unit: Dict, product: Dict) -> float:
-    """THE cost of one stock unit: its own (unit_cost / cost_price, stamped at
-    its goods receipt or opening stock), else the product master's. One rule
-    for the ship guard (which refuses a crossing move with a unit at 0) and the
-    ship stamp (which values the line by it), so a unit the guard passes is
-    never stamped at 0. Pure."""
-    return _first_cost(unit.get("unit_cost"), unit.get("cost_price"), product.get("cost_price"))
+    """THE cost of one stock unit, read through THE stock cost rule
+    (services/stock_value -- never computed here): the unit's own recorded
+    cost, else its product's (a catalogue-only price is no cost). When S4
+    (#1303) merges, that reader becomes the product's one average cost and
+    this line follows it -- no second rule. One reader for the ship guard
+    (which refuses a crossing move with a unit at 0), the ship stamp (which
+    values the line by it) and a missing piece's write-off. Pure."""
+    return stock_value.resolved_cost(unit, stock_value.master_fallback_cost(product))
 
 
 def _ship_products(transfer: Dict) -> Dict[str, Dict]:
@@ -885,7 +888,8 @@ def _ship_products(transfer: Dict) -> Dict[str, Dict]:
             row["product_id"]: row
             for row in db.get_collection("products").find(
                 {"product_id": {"$in": pids}},
-                {"_id": 0, "product_id": 1, "hsn_code": 1, "category": 1, "cost_price": 1},
+                {"_id": 0, "product_id": 1, "hsn_code": 1, "category": 1, "cost_price": 1,
+                 "cost_price_is_catalogue_only": 1},
             )
         }
     except Exception as exc:  # noqa: BLE001 - refuse, never guess
@@ -921,7 +925,7 @@ def _stamp_shipped_value(line: Dict, units: List[Dict], product: Dict) -> None:
     if costs:
         line["unit_cost"] = sum(costs) / len(costs) if all(costs) else 0.0
     else:
-        line["unit_cost"] = _first_cost(product.get("cost_price"))
+        line["unit_cost"] = _unit_cost({}, product)
 
 
 def _line_hsn(line: Dict, product: Optional[Dict] = None) -> str:
@@ -2375,7 +2379,8 @@ async def write_off_missing_piece(
     shrink = db.get_collection("stock_shrinkage")
     if not shrink.find_one({"transfer_id": tid, "voided_stock_ids": stock_id}):
         line = _line_of_piece(transfer, stock_id) or {}
-        value = round(_first_cost(unit.get("unit_cost"), unit.get("cost_price"), line.get("unit_cost")), 2)
+        product = _ship_products(transfer).get(piece.get("product_id")) or {}
+        value = round(_unit_cost(unit, product) or _first_cost(line.get("unit_cost")), 2)
         shrink.insert_one({
             "shrinkage_id": str(uuid.uuid4()),
             "source": "TRANSFER_MISSING",
