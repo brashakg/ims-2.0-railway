@@ -2032,16 +2032,20 @@ async def get_website_verdict(
 def _website_needs(db, product_id: str) -> Dict[str, Any]:
     """What keeps a SAVED product off the website, asked of the push's own
     rules (never worked out again here): product_push_refusal (lock, first-
-    publish readiness, brand), the photo rule (product_photo_urls -- "no
-    photo, no publish") and the one price rule (unpriced_size_names). `gaps`
+    publish readiness, brand), then the press's own gates (press_gates: block
+    status, the family plan's refusals, the photo rule and the price rule on
+    the LISTING VIEW) -- the very function the sync screen's _press_verdict
+    asks, one rule, never two (reviews of #1295 / #1305). A colour/size of another model
+    owns no page (push_product refuses its press): it gets the sync screen's
+    own sentence, plus what its model's press holds it back on
+    (model_hold -- the sync screen's per-SKU reason). `gaps`
     are the catalogue fields the first-publish rule waits on
     (gaps_before_cost -- NEVER the cost price: the purchase brings it and a
     catalogue manager cannot fill it). {"needs": None} when it could not be
     read; [] / [] = nothing missing."""
-    from ..services.shopify_live_sync import variants_for_product
+    from ..services.online_content_diagnostics import PUSH_THE_MODEL, model_hold, press_gates
     from ..services.shopify_push import product_push_refusal
-    from ..services.shopify_push.media import product_photo_urls
-    from ..services.shopify_push.product_input import unpriced_size_names
+    from ..services.shopify_push._shared import is_variant_of
 
     if db is None:
         return {"needs": None, "gaps": []}
@@ -2057,11 +2061,31 @@ def _website_needs(db, product_id: str) -> Dict[str, Any]:
         why = product_push_refusal(db, doc)
         if why:
             needs.append(why)
-        if not product_photo_urls(doc):
-            needs.append("a photo")
-        unpriced = unpriced_size_names(doc, variants_for_product(db, twin) if twin else [])
-        if unpriced:
-            needs.append("a selling price (" + ", ".join(unpriced) + ")")
+        # The press's own gates past its refusal (press_gates -- the sync
+        # screen's _press_verdict asks the same function): block status, the
+        # family plan's refusals, photo, price. A colour/size of another
+        # model fails them as "variant_of".
+        gates = [] if is_variant_of(doc) else press_gates(db, doc)[0]
+        if is_variant_of(doc) or any(code == "variant_of" for code, _r, _n in gates):
+            needs.append(PUSH_THE_MODEL)  # its photo and price ride its model's page
+            # What its model's press holds it back on -- the sync screen's own
+            # per-SKU reason. Dropped only when it repeats the colour's OWN
+            # refusal (its own waiting row, its own archived row, or the same
+            # words for a fact the two truly share -- the brand refusal or a
+            # push-lock): the model's photo, price, clash or block is a
+            # different fact and is listed now, not after the colour is
+            # finished (review of #1305). A readiness refusal ("not put on the
+            # website: ...", product_push_refusal's one wrap) never names its
+            # product, so the same words from the model are the MODEL's own
+            # draft/review/archive and stay listed.
+            hold = model_hold(db, doc, spine)
+            shared = why and why in (hold or "") and not why.startswith("not put on the website: ")
+            if hold and why and (hold.startswith("not ready - ") or hold == "archived" or shared):
+                hold = None
+            if hold:
+                needs.append("its model's page: " + hold)
+        else:
+            needs.extend(need for _c, _r, need in gates)
         first_publish = not ((doc.get("ecom") or {}).get("shopify_product_id"))
         gaps = (_pm.gaps_before_cost(spine)
                 if first_publish and _pm.effective_catalog_status(spine) != "ACTIVE" else [])

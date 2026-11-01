@@ -392,6 +392,11 @@ ROWS: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "SUPERADMIN"],
     },
     {
+        "method": "POST",
+        "path": "/api/v1/users/{user_id}/set-password",
+        "allowed": ["SUPERADMIN"],
+    },
+    {
         "method": "DELETE",
         "path": "/api/v1/users/{user_id}/roles/{role}",
         "allowed": ["ADMIN", "SUPERADMIN"],
