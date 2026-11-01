@@ -1819,11 +1819,10 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
             prior = coll.find_one({"entry_id": key})
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
-        if prior is not None and prior.get("type") == VOID:
-            return _redeem_void_answer(repo, coll, customer_id, prior)
         if prior is None or prior.get("type") != PENDING:
-            # A finished row of this form (same amount, else 409) -- or a
-            # pre-deploy debit that landed with no row -- is its answer.
+            # A finished row of this form (same amount, else 409), a VOID one
+            # (answered by its guard), or a pre-deploy debit that landed with
+            # no row: _redeem_replay is THE answer for each.
             replay = _redeem_replay(repo, coll, customer_id, amt, guard_ref, reason, ref, store_id, user_id)
             if replay is not None:
                 return replay
@@ -1846,8 +1845,6 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
                 # Nothing was debited; a row that may have landed is voided by
                 # the reconciler (its guard never lands).
                 raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
-            if stored.get("type") == VOID:
-                return _redeem_void_answer(repo, coll, customer_id, stored)
             if stored.get("type") != PENDING:
                 return _redeem_replay(repo, coll, customer_id, amt, key, reason, ref, store_id, user_id) or                     {"entry": stored, "balance": _current_credit_balance(customer_id, repo.find_by_id(customer_id)),
                      "replayed": True}
