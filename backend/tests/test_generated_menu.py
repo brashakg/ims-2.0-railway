@@ -1420,3 +1420,53 @@ def test_shop_all_is_dropped_when_shopify_shows_its_collection_empty():
     items, hidden = gm.generate(gm.default_template(), ROWS, _counts(), shop)
     assert not _shop_all(items)
     assert any(h["handle"] == "sunglasses" and h["reason"] == gm.SHOP_EMPTY for h in hidden)
+
+
+def _adopted_template(heading_url):
+    """The default template after _adopt read a live menu whose Sunglasses
+    heading links ``heading_url`` (what the first person's press writes)."""
+    db = StrictDB()
+    doc = gm.make_template_doc()
+    db[gm.MENUS].insert_one(copy.deepcopy(doc))
+    gm._adopt(db, doc, {"id": "gid://shopify/Menu/1", "items": [{"title": "Sunglasses", "url": heading_url}]})
+    return doc["template"]
+
+
+def test_an_adopted_panel_heading_never_links_a_collection_the_gate_refused():
+    t = _adopted_template("/collections/sunglasses")
+    gid = {r["handle"]: r["shopify_collection_id"] for r in ROWS}
+    unpublished = [dict(r, published=False) if r["handle"] == "sunglasses" else r for r in ROWS]
+    for rows, shop, why in (
+        (unpublished, None, gm.NOT_PUBLISHED),
+        (ROWS, dict({g: 5 for g in gid.values()}, **{gid["sunglasses"]: 0}), gm.SHOP_EMPTY),
+    ):
+        items, hidden = gm.generate(t, rows, _counts(), shop)
+        sun = _top(items, "Sunglasses")
+        assert sun["children"] and sun["url"] != "/collections/sunglasses" and "resource_id" not in sun
+        assert any(h["handle"] == "sunglasses" and h["reason"] == why for h in hidden)
+
+
+def _links_template(url, links=()):
+    return {"sections": [{"kind": "links", "title": "Sale", "url": url, "links": list(links)}]}
+
+
+def test_a_links_section_heading_never_links_a_collection_the_gate_refused():
+    gid = {r["handle"]: r["shopify_collection_id"] for r in ROWS}
+    shop = dict({g: 5 for g in gid.values()}, **{gid["sunglasses"]: 0})
+    t = _links_template("/collections/sunglasses", [{"title": "Contact", "url": "/pages/contact"}])
+    items, hidden = gm.generate(t, ROWS, _counts(), shop)
+    sale = _top(items, "Sale")
+    assert sale["url"] == "#" and [k["title"] for k in sale["children"]] == ["Contact"]
+    assert any(h["handle"] == "sunglasses" and h["reason"] == gm.SHOP_EMPTY for h in hidden)
+    # control: a usable collection keeps its url
+    assert _top(gm.generate(t, ROWS, _counts())[0], "Sale")["url"] == "/collections/sunglasses"
+
+
+def test_a_links_section_child_to_a_refused_collection_is_dropped():
+    t = _links_template("/pages/about-us", [{"title": "X", "url": "/collections/sunglasses"},
+                                            {"title": "Contact", "url": "/pages/contact"}])
+    assert [k["title"] for k in _top(_gen(template=t)[0], "Sale")["children"]] == ["X", "Contact"]  # control
+    rows = [dict(r, published=False) if r["handle"] == "sunglasses" else r for r in ROWS]
+    items, hidden = _gen(rows=rows, template=t)
+    assert [k["title"] for k in _top(items, "Sale")["children"]] == ["Contact"]
+    assert any(h["handle"] == "sunglasses" and h["reason"] == gm.NOT_PUBLISHED for h in hidden)

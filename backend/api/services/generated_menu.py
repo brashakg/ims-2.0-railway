@@ -307,20 +307,27 @@ def generate(
             return  # a brand left out of Top N and of A-Z is listed once
         hidden.append({"section": section, "title": title, "handle": h, "reason": why})
 
+    def gate_url(where: str, title: str, url: str) -> Optional[str]:
+        """Every template URL to /collections/<h> of a collection IMS holds
+        goes through the same gate as a generated link: None (and listed in
+        hidden, with why) when the gate refuses it."""
+        h = url.split("?")[0].rstrip("/").split("/collections/", 1)[-1] if url.startswith("/collections/") else None
+        if h and h in by_handle:
+            ok, why = usable(by_handle[h])
+            if not ok:
+                hide(where, title, by_handle[h], why)
+                return None
+        return url
+
     def statics(where: str, links) -> List[Dict[str, Any]]:
-        """A static link to /collections/<h> of a collection IMS holds goes
-        through the same gate as a generated one (Shop all -> a collection
-        the gate refused is dropped, with why)."""
+        """Static links (Shop all, a links section's children): one to a
+        collection the gate refused is dropped."""
         out = []
         for link in links or []:
-            t, url = str(link["title"]), str(link["url"])
-            h = url.split("?")[0].rstrip("/").split("/collections/", 1)[-1] if url.startswith("/collections/") else None
-            if h and h in by_handle:
-                ok, why = usable(by_handle[h])
-                if not ok:
-                    hide(where, t, by_handle[h], why)
-                    continue
-            out.append(_link_node(t, url))
+            t = str(link["title"])
+            url = gate_url(where, t, str(link["url"]))
+            if url is not None:
+                out.append(_link_node(t, url))
         return out
 
     for s in (template or {}).get("sections") or []:
@@ -333,7 +340,7 @@ def generate(
             else:
                 hide(title, title, row, why, s.get("handle"))
         elif kind == "links":
-            node = _link_node(title, str(s.get("url") or "#"))
+            node = _link_node(title, gate_url(title, title, str(s.get("url") or "#")) or "#")
             node["children"] = statics(title, s.get("links"))
             items.append(node)
         elif kind == "panel":
@@ -372,7 +379,7 @@ def generate(
             if ok:
                 node = _coll_node(head_row, title, _count(head_row, counts))
             else:
-                node = _link_node(title, str(s.get("url") or "#"))
+                node = _link_node(title, gate_url(title, title, str(s.get("url") or "#")) or "#")
                 node.pop("static")
             node["children"] = columns
             items.append(node)
