@@ -1368,6 +1368,35 @@ def test_apply_refuses_while_a_run_is_applied():
         bf.apply(db, bf.plan(db), "RUN2")
 
 
+def test_apply_refuses_while_only_a_receipt_stamp_keeps_a_run_applied():
+    """P already has S4 history, so RUN1 never touches it: RUN1 re-averages Q
+    (104.76) and stamps G0 {P: 400, Q: 100}. S4 bill B1 moves P; revert puts
+    Q back and keeps G0's stamp for P only. No product carries a backfill key
+    now -- only G0's stamp keeps RUN1 applied, and --apply must still refuse
+    (a RUN2 would re-average Q but never stamp G0 for it: 102.49, not 104.76)."""
+    from scripts import backfill_average_cost as bf
+
+    db = _g0_with_walk_in_q()
+    db.products.update_one({"product_id": "P"}, {"$set": {"cost_keys": ["bill:OLD"], "cost_history": [
+        {"kind": "BILL", "key": "bill:OLD", "at": "2026-09-01T10:00:00+00:00", "old_cost": 0.0, "new_cost": 400.0}]}})
+    bf.apply(db, bf.plan(db), "RUN1")
+    assert db.products.find_one({"product_id": "P"})["cost_keys"] == ["bill:OLD"]
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 104.76
+    db.grns.insert_one({"grn_id": "G1", "status": "ACCEPTED", "accepted_at": "2026-11-01T10:00:00+00:00",
+                        "items": [{"product_id": "P", "accepted_qty": 5}]})
+    for i in range(5):
+        _unit(db, f"G1P{i}", "P", "G1")
+    _bill_for(db, "B1", "P", 5, 500, "G1", "2026-11-01T00:00:00+00:00")
+    bf.revert(db, "RUN1")
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 200.0
+    assert db.grns.find_one({"grn_id": "G0"})[product_cost.PRE_S4_AVERAGES] == {"P": 400.0}
+    assert not [k for p in db.products.find() for k in p.get("cost_keys") or [] if k.startswith("backfill:")]
+    assert bf.live_runs(db) == ["RUN1"]
+    with pytest.raises(SystemExit):
+        bf.apply(db, bf.plan(db), "RUN2")
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 200.0
+
+
 @pytest.mark.parametrize("where", ("fill", "carry", "stamp"))
 def test_revert_of_a_crashed_run_restores_the_exact_before_state(monkeypatch, where):
     from scripts import backfill_average_cost as bf

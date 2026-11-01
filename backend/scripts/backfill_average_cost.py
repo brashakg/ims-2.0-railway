@@ -74,8 +74,14 @@ ONE LIVE RUN AT A TIME
     a run a crash cut short (it undoes whatever was written). The one thing
     it never undoes: a product a bill or correction moved since the run
     (reported), and the stamped figure of that product on its receipts (its
-    pieces are in that average at it). Such a run stays in the data, so
-    --apply keeps refusing: restore the backup instead.
+    pieces are in that average at it). Such a run stays in the data and
+    --apply keeps refusing; leave it there. Once any S4 bill or correction
+    has landed since the run, NEVER restore the backup (it would delete that
+    bill's average move, its history row and every sale and receipt since)
+    and do not revert: accounts correct any product still wrong one by one
+    in the product page's correction box. A backup restore is allowed only
+    when nothing has been booked since the run -- in practice, right after
+    --apply.
 
 RUNBOOK (prod, the lead only, owner's go-ahead)
 -----------------------------------------------
@@ -83,7 +89,9 @@ RUNBOOK (prod, the lead only, owner's go-ahead)
   2. take a Mongo backup;
   3. --apply -- note the run id it prints first;
   4. on ANY failure (a crash, a wrong figure): --revert --run-id <that id>,
-     then --apply again. Never re-run --apply on top of a run.
+     then --apply again. Never re-run --apply on top of a run. Once an S4
+     bill or correction has landed since the run: no revert, no backup
+     restore -- correct products by hand (see ONE LIVE RUN AT A TIME).
 
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" backend/scripts/backfill_average_cost.py
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" backend/scripts/backfill_average_cost.py --apply
