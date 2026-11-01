@@ -996,12 +996,13 @@ def _rehome_patch(transfer: Dict, new_status: str, reason: str = "") -> Dict:
     return patch
 
 
-def _line_of_piece(transfer: Dict, stock_id: str) -> Optional[Dict]:
-    """The transfer line a piece left the shop on (its shipped_stock_ids)."""
+def _line_of_piece(transfer: Dict, stock_id: str) -> Dict:
+    """The transfer line a piece left the shop on (its shipped_stock_ids);
+    {} when it left on none."""
     for line in transfer.get("items") or []:
         if stock_id in [str(s) for s in line.get("shipped_stock_ids") or []]:
             return line
-    return None
+    return {}
 
 
 def _settle_line_counts(line: Dict) -> None:
@@ -1891,8 +1892,8 @@ async def receive_transfer(
     code = body.barcode.strip()
     unit = find_unit_by_code(units, code)
     sid = str(unit.get("stock_id")) if unit else ""
-    line = _line_of_piece(transfer, sid) if sid else None
-    if line is None:
+    line = _line_of_piece(transfer, sid) if sid else {}
+    if not line:
         raise HTTPException(status_code=400, detail=f"{code} is not in this box.")
     label = str(unit.get("barcode") or code)
     settled = [str(s) for s in (line.get("received_stock_ids") or []) + (line.get("damaged_stock_ids") or [])]
@@ -2290,7 +2291,7 @@ async def found_missing_piece(
             )
     if not at_source:
         line = _line_of_piece(transfer, stock_id)
-        if line is not None:
+        if line:
             line.setdefault("received_stock_ids", []).append(stock_id)
             _settle_line_counts(line)
     piece.update({
@@ -2378,7 +2379,7 @@ async def write_off_missing_piece(
     db = _get_db()
     shrink = db.get_collection("stock_shrinkage")
     if not shrink.find_one({"transfer_id": tid, "voided_stock_ids": stock_id}):
-        line = _line_of_piece(transfer, stock_id) or {}
+        line = _line_of_piece(transfer, stock_id)
         product = _ship_products(transfer).get(piece.get("product_id")) or {}
         value = round(_unit_cost(unit, product) or _first_cost(line.get("unit_cost")), 2)
         shrink.insert_one({
