@@ -21,7 +21,6 @@ import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import {
   billKeyFor, clearBillKey, settleBillKey, useUnconfirmedWording,
 } from '../../../components/pos/posBillKey';
-import { BillLockNotice } from '../../../components/pos/BillLockNotice';
 import { billFingerprint } from '../../../components/pos/orderPayload';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
@@ -163,10 +162,8 @@ export function BillingSurface() {
       // lost answer presses the SAME bill again -- never a second sale. Taken
       // AFTER the writes above: the fingerprint is the body the sale sends.
       const fp = billFingerprint(usePOSStore.getState());
-      // A LOCKED bill (a debit leg unconfirmed) presses with ITS key, always.
-      const lockedKey = usePOSStore.getState().bill_lock?.key;
       idempotencyKeyRef.current = billKeyFor(fp, Date.now(),
-        lockedKey || (billFpRef.current === fp ? idempotencyKeyRef.current : null));
+        billFpRef.current === fp ? idempotencyKeyRef.current : null);
       billFpRef.current = fp;
       // Read the LIVE store, not this render's snapshot -- the write above
       // landed in the store, while `store` is the value from render time.
@@ -177,11 +174,8 @@ export function BillingSurface() {
       );
       if (!res.ok) {
         // A definite refusal: nothing is pending, so the saved draft keeps no
-        // customer, member or Rx. A debit leg unconfirmed LOCKS the bill.
+        // customer, member or Rx.
         if (!res.pending) settleBillKey(fp);
-        if (res.lock && idempotencyKeyRef.current) {
-          usePOSStore.getState().lockBill({ orderId: res.orderId ?? null, key: idempotencyKeyRef.current });
-        }
         if (res.discountApproval) {
           setApprovalNeed(res.discountApproval);
           return;
@@ -192,7 +186,6 @@ export function BillingSurface() {
         return;
       }
       clearBillKey(billFpRef.current || '');
-      usePOSStore.getState().unlockBill();
       idempotencyKeyRef.current = null;
       billFpRef.current = null;
       approvalIdRef.current = null;
@@ -233,7 +226,6 @@ export function BillingSurface() {
   return (
     <div className="min-h-full lg:h-full lg:min-h-0 flex flex-col overflow-y-auto lg:overflow-hidden bg-gray-50">
       <WalkoutComplianceBanner />
-      <BillLockNotice />
 
       {errorMsg && (
         <div className="mx-3 mt-2 bg-red-50 border border-red-200 rounded-lg p-2.5 flex items-center gap-2 text-sm text-red-700">

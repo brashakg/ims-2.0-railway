@@ -493,43 +493,8 @@ describe('the till stops promising once the cart changes', () => {
 });
 
 
-describe('money review 18: the surface locks the bill on a lost debit leg', () => {
-  it('locks to the order and key, presses again with that key, unlocks on success', async () => {
-    usePOSStore.setState({ bill_lock: null } as any);
-    submitPosOrder.mockResolvedValueOnce({ ok: false, error: 'locked words', pending: true, lock: true, orderId: 'O1' });
-    submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'O1', orderNumber: 'ORD-1' });
-    putSomethingInTheCart();
-    renderCounter();
-    fireEvent.click(completeButton());
-    await waitFor(() => expect(usePOSStore.getState().bill_lock?.orderId).toBe('O1'));
-    const key = submitPosOrder.mock.calls[0][1];
-    expect(usePOSStore.getState().bill_lock?.key).toBe(key);
-    await waitFor(() => expect((completeButton() as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(completeButton());
-    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
-    expect(submitPosOrder.mock.calls[1][1]).toBe(key);
-    await waitFor(() => expect(usePOSStore.getState().bill_lock).toBeNull());
-  });
-
-  it('a locked bill presses with ITS key even after a reload drops every other key', async () => {
-    usePOSStore.setState({ bill_lock: null } as any);
-    submitPosOrder.mockResolvedValueOnce({ ok: false, error: 'locked words', pending: true, lock: true, orderId: 'O2' });
-    submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'O2', orderNumber: 'ORD-2' });
-    putSomethingInTheCart();
-    const view = renderCounter();
-    fireEvent.click(completeButton());
-    await waitFor(() => expect(usePOSStore.getState().bill_lock?.orderId).toBe('O2'));
-    const key = submitPosOrder.mock.calls[0][1];
-    view.unmount(); // a reload: the surface's in-memory key is gone...
-    localStorage.removeItem('ims_pos_bill_keys'); // ...and so is the kept key (past its time)
-    renderCounter();
-    fireEvent.click(completeButton());
-    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
-    expect(submitPosOrder.mock.calls[1][1]).toBe(key);
-  });
-
+describe('money review 18: a definite refusal at the surface', () => {
   it('a definite refusal leaves the bill key settled (no customer kept in the draft)', async () => {
-    usePOSStore.setState({ bill_lock: null } as any);
     submitPosOrder.mockResolvedValueOnce({ ok: false, error: 'Payment incomplete.' });
     putSomethingInTheCart();
     renderCounter();

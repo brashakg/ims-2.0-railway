@@ -126,7 +126,9 @@ def test_concurrent_double_redeem_spends_the_credit_once(monkeypatch):
     losses = [o for o in outcomes if o[0] == "http"]
     # Exactly ONE spend: 500 - 400 leaves 100, which cannot cover another 400.
     assert len(wins) == 1, f"expected exactly one winner, got {outcomes}"
-    assert len(losses) == 1 and losses[0][1] == 400
+    # 400 insufficient once the winner finished; 409 while its line is still being
+    # confirmed (money review 19: no new debit beside an unresolved one).
+    assert len(losses) == 1 and losses[0][1] in (400, 409)
     assert wins[0][1] == 100.0
     # The document agrees, and exactly one REDEEMED audit row was written.
     assert coll.docs[0]["store_credit"] == 100.0

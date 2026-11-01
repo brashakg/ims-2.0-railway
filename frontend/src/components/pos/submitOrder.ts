@@ -46,10 +46,6 @@ export interface SubmitPosOrderResult {
   /** The outcome is NOT known (the sale or a leg may have landed): the bill
       key stays pending. Any other !ok is a definite refusal. */
   pending?: boolean;
-  /** A leg that debits an account is unconfirmed: the bill is LOCKED to this
-      order and key until it is pressed again successfully (or a manager
-      abandons the attempt). */
-  lock?: boolean;
 }
 
 /** The cart lines a workshop job is built from. ONE predicate: the job
@@ -102,8 +98,8 @@ const DEBIT_TENDERS = new Set(['STORE_CREDIT', 'GIFT_VOUCHER']);
 /** The till's words when a debit leg's answer was lost. */
 export function tillDebitLegUnconfirmed(labels: string[]): string {
   return `The ${labels.join(' and ')} payment could not be confirmed. Do NOT take another tender for this `
-    + 'amount and do not change the bill (it is locked) - press Complete Sale again: it finishes this payment '
-    + 'once, on this same bill.';
+    + 'amount - press Complete Sale again: it finishes this payment once, on this same bill. (The server '
+    + 'refuses any new store-credit or voucher payment for this customer until this one is resolved.)';
 }
 
 export { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from './posBillKey';
@@ -329,7 +325,7 @@ export async function submitPosOrder(
       // (the server guards the debit by that key). Never another tender.
       store.setOrderResult(result.order_id, result.order_number);
       return { ok: false, orderId: result.order_id, orderNumber: result.order_number,
-               error: tillDebitLegUnconfirmed(debitUnconfirmed), pending: true, lock: true };
+               error: tillDebitLegUnconfirmed(debitUnconfirmed), pending: true };
     }
     store.setCashTender(null);
     store.setOrderResult(result.order_id, result.order_number);

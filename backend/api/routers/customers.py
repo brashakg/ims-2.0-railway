@@ -1709,6 +1709,23 @@ def _ledger_coll():
         return None
 
 
+def _named_coll(name: str):
+    """A collection read the same way as the ledger (None when no database)."""
+    from ..dependencies import get_db
+
+    db = get_db()
+    if db is None or not getattr(db, "is_connected", True):
+        return None
+    try:
+        return db.get_collection(name)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _vouchers_coll():
+    return _named_coll("vouchers")
+
+
 def _current_credit_balance(customer_id: str, customer_doc: Optional[dict]) -> float:
     """Authoritative running balance = `customer.store_credit`.
 
@@ -1793,7 +1810,14 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
     repo = get_customer_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
-    existing = repo.find_by_id(customer_id)
+    # A read that fails is "could not be confirmed" (503), never "not found":
+    # the repository's find_by_id swallows errors into None (money review 19).
+    try:
+        _ccoll = getattr(repo, "collection", None)
+        existing = (_ccoll.find_one({"customer_id": customer_id}) if _ccoll is not None
+                    else repo.find_by_id(customer_id))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
     if existing is None:
         raise HTTPException(status_code=404, detail="Customer not found")
 
@@ -1828,6 +1852,9 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
                 return replay
     row = dict(prior) if prior is not None and prior.get("type") == PENDING else None
     if row is None:
+        # A NEW debit (not this key resuming): refused while the customer has
+        # an unresolved debit on another bill (money review 19).
+        refuse_unresolved_debit(customer_id, key.split(":")[1] if key.startswith("POSPAY:") else None)
         balance_now = _current_credit_balance(customer_id, existing)
         entry = scl.make_entry(customer_id=customer_id, entry_type=scl.REDEEMED, amount=amt,
                                current_balance=max(balance_now, amt), reason=reason or "", ref=ref,
@@ -1849,9 +1876,7 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
                 return _redeem_replay(repo, coll, customer_id, amt, key, reason, ref, store_id, user_id) or                     {"entry": stored, "balance": _current_credit_balance(customer_id, repo.find_by_id(customer_id)),
                      "replayed": True}
             row = stored
-    if abs(abs(float(row.get("amount") or 0)) - amt) > 0.005:
-        raise HTTPException(status_code=409, detail=(
-            f"This form already took Rs {abs(float(row.get('amount') or 0)):.2f} - close it and check the balance."))
+    _refuse_other_redemption(row, customer_id, amt)
 
     landed = _guard_landed(repo, customer_id, key)
     if landed is None:
@@ -1937,11 +1962,86 @@ def _redeem_void_answer(repo, coll, customer_id: str, row: Dict[str, Any], amt: 
 
 def _refuse_other_redemption(row: Dict[str, Any], customer_id: str, amt: float) -> None:
     """A press replaying this form's line must be THE same redemption: the
-    same customer and the same amount, else 409 -- never answered as done."""
+    same customer and the same amount, else 409 -- never answered as done.
+    A leg whose credit was given back is never taken on the bill again."""
+    if row.get("given_back"):
+        raise HTTPException(status_code=409, detail=(
+            "This store-credit payment was given back to the customer - take another tender for this amount."))
     took = abs(float(row.get("amount") or row.get("void_delta") or row.get("delta") or 0))
     if row.get("customer_id") not in (None, customer_id) or abs(took - amt) > 0.005:
         raise HTTPException(status_code=409, detail=(
             f"This form already took Rs {took:.2f} - close it and check the balance."))
+
+
+UNRESOLVED_DEBIT_MESSAGE = (
+    "This customer has a store-credit or gift-voucher payment on order {order} that could not be confirmed - "
+    "finish that bill first (press Complete Sale on it) or ask Accounts to resolve it.")
+
+
+def _leg_billed(order: Optional[Dict[str, Any]], leg_key: Optional[str], method: str, amt: float) -> bool:
+    """THE rule for "this debit leg is on its bill": a payment of that method
+    and amount under the leg's own key (another tender reusing the key never
+    counts)."""
+    return any(p.get("idempotency_key") == leg_key and str(p.get("method") or "").upper() == method
+               and abs(float(p.get("amount") or 0) - amt) <= 0.005
+               for p in (order or {}).get("payments") or [])
+
+
+def _leg_of(key: str, order_id: str) -> Optional[str]:
+    prefix = f"POSPAY:{order_id}:"
+    return key[len(prefix):] if key.startswith(prefix) else None
+
+
+def _unresolved_debit(customer_id: str, order_id: Optional[str]) -> Optional[str]:
+    """The order (or "a manual redemption") of this customer's unresolved
+    debit outside ``order_id``: a redemption line still ISSUING, or a till
+    store-credit / gift-voucher debit not on its bill and not given back.
+    Raises on a read error (the caller answers 503)."""
+    ledger, ocoll = _ledger_coll(), _named_coll("orders")
+    if ledger is not None:
+        for row in ledger.find({"customer_id": customer_id, "type": {"$in": [PENDING, "REDEEMED"]},
+                                "given_back": {"$ne": True}, "bill_checked": {"$ne": True}}):
+            ref = row.get("ref") or ""
+            if order_id and str(row.get("entry_id") or "").startswith(f"POSPAY:{order_id}:"):
+                continue  # this bill's own leg: the same key resumes it
+            if row.get("type") == PENDING:
+                if (row.get("final_type") or "") == "REDEEMED":
+                    return ref or "a manual redemption"
+                continue
+            if row.get("source") != "POS_PAYMENT" or ocoll is None:
+                continue
+            leg = _leg_of(str(row.get("entry_id") or ""), ref)
+            if leg and not _leg_billed(ocoll.find_one({"order_id": ref}), leg, "STORE_CREDIT",
+                                       abs(float(row.get("amount") or 0))):
+                return ref
+    vcoll = _vouchers_coll()
+    if ocoll is None or vcoll is None:
+        return None
+    for order in ocoll.find({"customer_id": customer_id, "balance_due": {"$gt": 0.01},
+                             "status": {"$ne": "CANCELLED"}}):
+        oid = order.get("order_id")
+        if not oid or oid == order_id:
+            continue
+        for v in vcoll.find({"money_ledger.idempotency_key": {"$regex": f"^POSPAY:{re.escape(oid)}:"}}):
+            for e in v.get("money_ledger") or []:
+                leg = _leg_of(str(e.get("idempotency_key") or ""), oid)
+                if leg and not _leg_billed(order, leg, "GIFT_VOUCHER", abs(float(e.get("delta") or 0))):
+                    return oid
+    return None
+
+
+def refuse_unresolved_debit(customer_id: Optional[str], order_id: Optional[str]) -> None:
+    """THE one rule (money review 19): a NEW store-credit or gift-voucher debit
+    for a customer is refused (409) while that customer has an unresolved
+    debit on another bill. The same key on the same bill still resumes."""
+    if not customer_id or str(customer_id).startswith("walkin-"):
+        return
+    try:
+        other = _unresolved_debit(customer_id, order_id)
+    except Exception as exc:  # noqa: BLE001 -- unknown: never debit on a guess
+        raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
+    if other:
+        raise HTTPException(status_code=409, detail=UNRESOLVED_DEBIT_MESSAGE.format(order=other))
 
 
 def _void_redeem_row(coll, row: Dict[str, Any], why: str) -> None:
@@ -2572,76 +2672,136 @@ def reconcile_pending_credits(repo=None, *, customer_id: Optional[str] = None, l
 
 
 def _check_pos_redemptions_billed(ledger, cutoff: str) -> None:
-    """A till store-credit leg whose debit landed but whose payment never got
-    on the bill (its answer lost, e.g. the 30 s bound): ONE P1 task per leg
-    ("store credit taken but not on the bill"). Billed means a STORE_CREDIT
-    payment of that amount under that leg's key -- another tender reusing the
-    key never counts. A tasked leg is checked again every pass and its task
-    closed once it is billed. Fail-soft."""
+    """A till store-credit or gift-voucher leg whose debit landed but whose
+    payment never got on the bill (its answer lost, e.g. the 30 s bound): ONE
+    P1 task per leg, raised (and stamped) only once it really exists, and
+    closed itself once the payment is on the bill -- or, for store credit,
+    once the credit was given back. Fail-soft."""
+    orders = _named_coll("orders")
+    if orders is None:
+        return  # unreadable: never decided
+    from .returns import _close_task
+
     try:
         rows = list(ledger.find({"source": "POS_PAYMENT", "type": "REDEEMED", "bill_checked": {"$ne": True},
                                  "pending_at": {"$lt": cutoff}}))
     except Exception as exc:  # noqa: BLE001
         logger.error("[CUSTOMERS] POS redemptions unreadable: %s", exc)
-        return
-    if not rows:
-        return
-    from ..dependencies import get_order_repository
-
-    orders = get_order_repository()
-    if orders is None:
-        return  # unreadable: never decided
+        rows = []
     for row in rows:
         eid, order_id = row.get("entry_id") or "", row.get("ref") or ""
-        leg_key = eid[len(f"POSPAY:{order_id}:"):] if eid.startswith(f"POSPAY:{order_id}:") else None
+        leg_key = _leg_of(eid, order_id)
         try:
-            order = orders.find_by_id(order_id) if order_id else None
+            order = orders.find_one({"order_id": order_id}) if order_id else None
         except Exception:  # noqa: BLE001
             continue  # unreadable: the next pass
-        amt = abs(float(row.get("amount") or 0))
-        billed = any(p.get("idempotency_key") == leg_key and str(p.get("method") or "").upper() == "STORE_CREDIT"
-                     and abs(float(p.get("amount") or 0) - amt) <= 0.005
-                     for p in (order or {}).get("payments") or []) if leg_key else True
         try:
-            if billed:
+            if row.get("given_back") or not leg_key or _leg_billed(order, leg_key, "STORE_CREDIT",
+                                                                     abs(float(row.get("amount") or 0))):
                 if row.get("bill_tasked"):
-                    from .returns import _close_task
-
                     _close_task(f"store_credit_unbilled:{eid}", {"user_id": "system"},
-                                "The store-credit payment reached the bill.")
+                                "The credit was given back." if row.get("given_back")
+                                else "The store-credit payment reached the bill.")
                 ledger.update_one({"entry_id": eid}, {"$set": {"bill_checked": True}})
-            elif not row.get("bill_tasked"):
-                _task_redemption_not_billed(row, order_id)
+            elif not row.get("bill_tasked") and _task_redemption_not_billed(row, order_id):
                 ledger.update_one({"entry_id": eid}, {"$set": {"bill_tasked": True}})
         except Exception:  # noqa: BLE001 -- checked again next pass; the task is deduped
             pass
+    _check_pos_vouchers_billed(orders, cutoff, _close_task)
 
 
-def _task_redemption_not_billed(row: Dict[str, Any], order_id: str) -> None:
+def _check_pos_vouchers_billed(orders, cutoff: str, close_task) -> None:
+    """The same rule for gift-voucher legs: their debit lives in the voucher's
+    own money_ledger (keyed POSPAY:<order>:<leg>); checked and tasked keys are
+    kept on the voucher (pos_bill_checked / pos_bill_tasked)."""
     try:
-        from ..dependencies import get_task_repository
-        from ..services.task_triggers import create_system_task
+        vcoll = _vouchers_coll()
+        vouchers = list(vcoll.find({"money_ledger.idempotency_key": {"$regex": "^POSPAY:"}})) if vcoll else []
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] POS voucher debits unreadable: %s", exc)
+        return
+    for v in vouchers:
+        checked, tasked = set(v.get("pos_bill_checked") or []), set(v.get("pos_bill_tasked") or [])
+        for e in v.get("money_ledger") or []:
+            key = str(e.get("idempotency_key") or "")
+            if not key.startswith("POSPAY:") or key in checked or str(e.get("created_at") or "") >= cutoff:
+                continue
+            order_id = key.split(":")[1]
+            try:
+                order = orders.find_one({"order_id": order_id})
+                if _leg_billed(order, _leg_of(key, order_id), "GIFT_VOUCHER", abs(float(e.get("delta") or 0))):
+                    if key in tasked:
+                        close_task(f"voucher_unbilled:{key}", {"user_id": "system"},
+                                   "The gift-voucher payment reached the bill.")
+                    vcoll.update_one({"code": v.get("code")}, {"$addToSet": {"pos_bill_checked": key}})
+                elif key not in tasked and _task_voucher_not_billed(v, e, order_id):
+                    vcoll.update_one({"code": v.get("code")}, {"$addToSet": {"pos_bill_tasked": key}})
+            except Exception:  # noqa: BLE001 -- the next pass
+                continue
 
+
+def _raise_once(dedupe_ref: str, *, title: str, description: str, priority: str, category: str,
+                store_id: Optional[str], extra: Dict[str, Any]) -> bool:
+    """Raise a system task; True only when it now exists (created, or an
+    active one found by its ref) -- so a failed insert is retried next pass."""
+    from ..dependencies import get_task_repository
+    from ..services.task_triggers import active_tasks, create_system_task
+
+    repo = get_task_repository()
+    if create_system_task(repo, title=title, description=description, priority=priority, category=category,
+                          store_id=store_id, dedupe_ref=dedupe_ref, extra=extra):
+        return True
+    try:
+        return bool(active_tasks(repo, dedupe_ref))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _task_voucher_not_billed(voucher: Dict[str, Any], entry: Dict[str, Any], order_id: str) -> bool:
+    try:
+        amt = abs(float(entry.get("delta") or 0))
+        return _raise_once(
+            f"voucher_unbilled:{entry.get('idempotency_key')}",
+            title=f"Gift voucher Rs {amt:.2f} taken for order {order_id} but not on the bill",
+            description=(f"The till took Rs {amt:.2f} from gift voucher {voucher.get('code')} for order {order_id}, "
+                         "but the payment never reached the bill (its answer was lost). Press Complete Sale again "
+                         "on that open bill (the same leg finishes once). If the customer has left, Accounts put "
+                         f"Rs {amt:.2f} back on voucher {voucher.get('code')} by hand. This task closes itself when "
+                         "the payment reaches the bill."),
+            priority="P1",
+            category="Accounts",
+            store_id=entry.get("store_id"),
+            extra={"payload": {"order_id": order_id, "voucher": voucher.get("code"), "amount": amt,
+                               "idempotency_key": entry.get("idempotency_key")}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] unbilled-voucher task not raised: %s", exc)
+        return False
+
+
+def _task_redemption_not_billed(row: Dict[str, Any], order_id: str) -> bool:
+    """True only when the task now exists (so bill_tasked is stamped only then)."""
+    try:
         amt = abs(float(row.get("amount") or 0))
-        create_system_task(
-            get_task_repository(),
+        eid = row.get("entry_id")
+        return _raise_once(
+            f"store_credit_unbilled:{eid}",
             title=f"Store credit Rs {amt:.2f} taken for order {order_id} but not on the bill",
             description=(f"The till took Rs {amt:.2f} of store credit from customer {row.get('customer_id')} for "
                          f"order {order_id}, but the payment never reached the bill (its answer was lost). "
-                         "Do NOT add another store-credit payment - it takes the credit again. First check the "
-                         f"order's payments for a STORE_CREDIT payment of Rs {amt:.2f} (this task closes itself "
-                         "when it lands). If it is missing: press Complete Sale again on the same open till bill "
-                         f"(the same leg finishes once), or give Rs {amt:.2f} back to the customer with a store-credit "
-                         "ADJUSTMENT (never Issue - that files a GST credit note) quoting ledger line "
-                         f"{row.get('entry_id')}, then collect the bill normally."),
+                         "Press Complete Sale again on that open bill (the same leg finishes once). If the customer "
+                         "has left, give the credit back: Customers > this customer > Store credit > Issue, "
+                         f"Rs {amt:.2f}, with Reason {eid} (it posts as an adjustment, never a GST credit note) - "
+                         "that also stops this leg from ever being taken on the bill. This task closes itself when "
+                         "the payment reaches the bill or the credit is given back."),
             priority="P1",
             category="Accounts",
             store_id=row.get("store_id"),
-            dedupe_ref=f"store_credit_unbilled:{row.get('entry_id')}",
-            extra={"payload": {"order_id": order_id, "entry_id": row.get("entry_id"), "amount": amt}},
+            extra={"payload": {"order_id": order_id, "entry_id": eid, "amount": amt}},
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("[CUSTOMERS] unbilled-redemption task not raised for %s: %s", row.get("entry_id"), exc)
+        return False
 
 
 async def scheduled_credit_reconcile() -> None:
@@ -2789,6 +2949,11 @@ def _post_credit_entry(
                     "The store credit could not be confirmed - it may already be credited. Do NOT press "
                     "again: it settles by itself within 10 minutes. Check the customer's balance then."),
         )
+    # A give-back of a till store-credit leg that never reached its bill:
+    # Issue quoting the leg's ledger line (POSPAY:...) marks that leg given
+    # back, so it is never taken on the bill afterwards (money review 19).
+    _mark_leg_given_back(ledger, customer_id, f"{body.ref or ''} {body.reason or ''}", float(body.amount),
+                         entry["entry_id"])
     # The answer is what is STORED (a resumed line keeps its own figures) and
     # the customer's real balance, never this press's snapshot.
     try:
@@ -2799,6 +2964,19 @@ def _post_credit_entry(
     stored = dict(stored)
     stored.pop("_id", None)
     return {"entry": stored, "balance": balance}
+
+
+def _mark_leg_given_back(ledger, customer_id: str, text: str, amount: float, by: str) -> None:
+    m = re.search(r"POSPAY:\S+", text or "")
+    if ledger is None or not m:
+        return
+    try:
+        ledger.update_one({"entry_id": m.group(0), "customer_id": customer_id, "type": "REDEEMED",
+                           "amount": {"$gte": round(amount, 2) - 0.005, "$lte": round(amount, 2) + 0.005},
+                           "given_back": {"$ne": True}},
+                          {"$set": {"given_back": True, "given_back_by": by}})
+    except Exception as exc:  # noqa: BLE001 -- the task stays open for a person
+        logger.error("[CUSTOMERS] give-back of %s not marked: %s", m.group(0), exc)
 
 
 @router.post("/{customer_id}/store-credit/issue")

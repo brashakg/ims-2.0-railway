@@ -34,7 +34,7 @@ export interface HeldBill {
   reason?: string;
   state: unknown;
   /** The bill key of an unconfirmed sale, carried so a recall replays it. */
-  bill_key?: { key: string; at: number; lock?: { orderId: string | null; key: string } } | null;
+  bill_key?: { key: string; at: number } | null;
 }
 
 function readAll(): HeldBill[] {

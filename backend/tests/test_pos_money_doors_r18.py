@@ -234,8 +234,11 @@ def test_the_task_never_tells_staff_to_debit_again(till, redeem_env, bill, tasks
     _redeem()
     _age_and_reconcile(till, redeem_env)
     text = tasks[0]["description"]
-    assert "Do NOT add another store-credit payment" in text and "ADJUSTMENT (never Issue" in text
-    assert "record the store-credit payment" not in text
+    # Round 19: ONE remedy -- press again; if the customer left, the real door
+    # (Issue on the card, quoting the line) -- never a second store-credit payment.
+    assert "Press Complete Sale again on that open bill" in text
+    assert f"Store credit > Issue, Rs 100.00, with Reason {KEY}" in text
+    assert "record the store-credit payment" not in text and "never Issue" not in text
 
 
 def test_the_task_closes_itself_once_the_leg_is_billed(till, redeem_env, bill, tasks, monkeypatch):

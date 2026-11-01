@@ -69,7 +69,7 @@ def _spec(rid="RET-U", **over):
 @pytest.fixture()
 def tasks(monkeypatch):
     out = []
-    monkeypatch.setattr("api.services.task_triggers.create_system_task", lambda repo, **k: out.append(k))
+    monkeypatch.setattr("api.services.task_triggers.create_system_task", lambda repo, **k: out.append(k) or k)
     monkeypatch.setattr("api.dependencies.get_task_repository", lambda: object(), raising=False)
     return out
 

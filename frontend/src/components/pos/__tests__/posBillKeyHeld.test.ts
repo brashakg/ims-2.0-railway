@@ -130,40 +130,11 @@ describe('money review 17: the member is part of the bill; a reload keeps member
 });
 
 
-describe('money review 18: a locked bill, and the draft only while a press is pending', () => {
+describe('money review 18: the draft keeps PII only while a press is pending', () => {
   beforeEach(() => {
     localStorage.clear();
-    usePOSStore.setState({ store_id: 'S1', salesperson_id: 'u1', bill_lock: null } as any);
+    usePOSStore.setState({ store_id: 'S1', salesperson_id: 'u1' } as any);
     usePOSStore.getState().resetTransaction();
-  });
-
-  it('a locked bill cannot be changed, reset or held; a manager abandons it', () => {
-    putCart();
-    usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'P1' } } as any);
-    const before = JSON.stringify(usePOSStore.getState().cart);
-    usePOSStore.getState().lockBill({ orderId: 'O1', key: 'K1' });
-    const s = usePOSStore.getState();
-    s.updateQuantity(s.cart[0].id, 5);
-    s.setPatient({ id: 'P2' } as any);
-    s.addPayment({ method: 'CASH', amount: 10 } as any);
-    s.resetTransaction();
-    expect(s.parkCurrentSale({ heldBy: 'u1' })).toBeNull();
-    const now = usePOSStore.getState();
-    expect(JSON.stringify(now.cart)).toBe(before);
-    expect([now.patient?.id, now.payments.length, now.bill_lock?.key]).toEqual(['P1', 0, 'K1']);
-    now.abandonLockedBill();
-    expect(usePOSStore.getState().bill_lock).toBeNull();
-    expect(usePOSStore.getState().cart).toEqual([]);
-  });
-
-  it('an idle auto-park carries the lock, and a recall brings it back', () => {
-    putCart();
-    usePOSStore.getState().lockBill({ orderId: 'O1', key: 'K1' });
-    usePOSStore.getState().parkCurrentSale({ auto: true, heldBy: 'u1' });
-    const held = heldBills()[0];
-    usePOSStore.getState().clearAllOnLogout();
-    usePOSStore.getState().restoreHeldSale(held.state, held.bill_key);
-    expect(usePOSStore.getState().bill_lock).toEqual({ orderId: 'O1', key: 'K1' });
   });
 
   it('a refused press leaves no customer, member or Rx in the saved draft (after the save delay)', async () => {

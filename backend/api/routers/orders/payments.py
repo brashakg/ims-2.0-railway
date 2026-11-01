@@ -209,7 +209,18 @@ async def add_payment(
                 logger.warning(
                     "[ORDERS] payment idempotency lookup skipped: %s", _idem_exc
                 )
-        order = repo.find_by_id(order_id)
+        # A read that fails is "could not be confirmed" (503), never "not
+        # found": find_by_id swallows errors into None, and the till files a
+        # 4xx as "did NOT record" -- for a debit leg that may have landed
+        # (money review 19).
+        try:
+            _ocoll = getattr(repo, "collection", None)
+            order = (_ocoll.find_one({"order_id": order_id}) if _ocoll is not None
+                     else repo.find_by_id(order_id))
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail=(
+                "The order could not be read just now - the payment could not be confirmed. Check the "
+                "order's payments before adding it again.")) from exc
         if order is None:
             raise HTTPException(status_code=404, detail="Order not found")
 
@@ -259,7 +270,11 @@ async def add_payment(
                     detail="Voucher: a voucher code is required for GIFT_VOUCHER payments",
                 )
             from ...dependencies import get_seeded_db
+            from ..customers import refuse_unresolved_debit
 
+            # THE one rule: no new gift-voucher debit while this customer has
+            # an unresolved store-credit or voucher debit on another bill.
+            refuse_unresolved_debit(str(order.get("customer_id") or ""), order_id)
             result = redeem_voucher_atomic(
                 get_seeded_db(),
                 voucher_code,
