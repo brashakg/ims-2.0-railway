@@ -123,8 +123,49 @@ _REL = (
     "RELATIVE OFFSET, not a business day. The value goes to a validator that "
     "compares it against ITS OWN clock read, and the assertion is about the "
     "SIGN of the difference (past / today / future), not about which calendar "
-    "day it is. A whole-day frame shift moves both sides together."
+    "day it is. A whole-day frame shift moves both sides together. ONLY TRUE "
+    "while that validator still reads date.today() -- see _SAME_CLOCK."
 )
+
+# THE HOLE THAT LET test_follow_up_create_accepts_today THROUGH (CI red at
+# 01:15 IST, 2026-11-02). Its `today = date.today()` sat in ALLOWED as _REL,
+# but follow_ups.py had already moved to `sched < ist_today()`: the validator
+# no longer shared the test's clock, so between 00:00 and 05:30 IST "today" was
+# yesterday and the create returned 422. A _REL reason is a claim about
+# PRODUCTION code, and nothing re-checked it. Now every file with a _REL entry
+# names the exact production line whose clock it shares, and
+# test_relative_offset_entries_still_share_production_clock fails the moment
+# that line is gone (moved to ist_today, reworded, deleted) -- so the test has
+# to follow the validator to the IST day instead of silently drifting.
+_SAME_CLOCK = {
+    "test_customer_validation.py": (
+        "routers/customers.py",
+        ("if v is not None and v > date.today():",),
+    ),
+    "test_unification_5_ensure_customer.py": (
+        "routers/customers.py",
+        ("if v is not None and v > date.today():",),
+    ),
+    "test_unification_customer_guards.py": (
+        "routers/customers.py",
+        ("if v is not None and v > date.today():",),
+    ),
+    "test_order_delivery_and_cart_discount.py": (
+        "routers/orders/models.py",
+        ("if v is not None and v < date.today():",),
+    ),
+    "test_orders_hardening.py": (
+        "routers/orders/models.py",
+        ("if v is not None and v < date.today():",),
+    ),
+    "test_pos_workshop_autolink.py": (
+        "routers/orders/models.py",
+        (
+            "if v is not None and v < date.today():",
+            "if v is not None and v > date.today() + timedelta(days=365):",
+        ),
+    ),
+}
 
 _HEX = (
     "NOT A DATE. A uuid4 hex slice used to build a unique test id. The [:10] "
@@ -187,53 +228,6 @@ ALLOWED = {
         "test_unification_customer_guards.py",
         "CustomerUpdate(dob=date.today() + timedelta(days=1))",
     ): _REL,
-    (
-        "test_marketing_correctness.py",
-        "yesterday = (date.today() - timedelta(days=1)).isoformat()",
-    ): _REL,
-    ("test_marketing_correctness.py", "today = date.today().isoformat()"): _REL,
-    (
-        "test_marketing_correctness.py",
-        "future_date = (date.today() + timedelta(days=7)).isoformat()",
-    ): _REL,
-    # -- leave notice: a DIFFERENCE in days, both ends off one clock ---------
-    (
-        "test_f26_remote_approval.py",
-        "self.from_date = date.today() + timedelta(days=from_days_ahead)",
-    ): (
-        "NOTICE PERIOD, a difference. `_is_fast_path_leave` measures from_date "
-        "minus its own today against the policy threshold, so both ends move "
-        "together under a frame shift."
-    ),
-    ("test_f26_remote_approval.py", "self.to_date = date.today() + timedelta("): (
-        "Continuation of the leave-window construction above; same difference."
-    ),
-    (
-        "test_f26_remote_approval.py",
-        'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=1), "S1") is True',
-    ): ("1 day of notice against a 2-day threshold -- a difference, not a day."),
-    (
-        "test_f26_remote_approval.py",
-        'assert hr_router._is_fast_path_leave("SICK", date.today(), "S1") is True',
-    ): ("Zero notice against a 2-day threshold -- a difference, not a day."),
-    (
-        "test_f26_remote_approval.py",
-        'assert hr_router._is_fast_path_leave("EARNED", date.today() + timedelta(days=1), "S1") is False',
-    ): (
-        "Asserts the leave TYPE gate, not the date; the date is 1 day of "
-        "notice either way."
-    ),
-    (
-        "test_f26_remote_approval.py",
-        'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=5), "S1") is False',
-    ): ("5 days of notice against a 2-day threshold -- a difference, not a day."),
-    (
-        "test_f26_remote_approval.py",
-        'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=5), "S1") is True',
-    ): (
-        "The same 5-day notice re-asserted under a monkeypatched 7-day "
-        "threshold; still a difference."
-    ),
     # -- deliberate widening -------------------------------------------------
     (
         "test_off_till_expenses.py",
@@ -405,3 +399,29 @@ def test_every_allow_list_entry_states_a_reason():
         "an exemption without a real reason is how this class comes back:\n"
         + "\n".join(thin)
     )
+
+
+def test_relative_offset_entries_still_share_production_clock():
+    """A _REL exemption is only sound while the validator it feeds reads the
+    SAME box clock (date.today()). Prove it, per file, against production."""
+    api_dir = os.path.join(os.path.dirname(TESTS_DIR), "api")
+    problems = []
+    for name in sorted({n for (n, _), r in ALLOWED.items() if r.startswith(_REL)}):
+        if name not in _SAME_CLOCK:
+            problems.append(
+                "%s: _REL entry with no _SAME_CLOCK anchor -- name the "
+                "production line whose clock it shares, or convert the test "
+                "to tests.ist_business_day" % name
+            )
+            continue
+        rel_path, needles = _SAME_CLOCK[name]
+        with io.open(os.path.join(api_dir, rel_path), encoding="utf-8") as fh:
+            prod = {line.strip() for line in fh}
+        problems += [
+            "%s: api/%s no longer has `%s` -- the validator changed clocks; "
+            "move the test to the IST day (tests.ist_business_day)"
+            % (name, rel_path, needle)
+            for needle in needles
+            if needle not in prod
+        ]
+    assert not problems, "\n".join(problems)
