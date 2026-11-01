@@ -199,6 +199,27 @@ def test_the_editor_doors_never_change_an_average(client, shop, path, body, role
     assert r.status_code != 409, (path, r.status_code, r.text[:300])
 
 
+@pytest.mark.parametrize("role", ("ADMIN", "SUPERADMIN"))
+def test_the_catalogue_editor_finds_a_create_door_spine(client, shop, role):
+    """A product made through the create door links spine and twin through
+    the spine's pim_product_id (a different uuid): the guard reads that
+    spine, not a spine sharing the twin's id."""
+    from api.services.product_cost import EDITOR_COST_REFUSED
+
+    shop.products.update_one({"product_id": "P1"}, {"$set": {"pim_product_id": "TWIN1"}})
+    shop.catalog_products.insert_one({"id": "TWIN1", "name": "Aviator", "category": "FR",
+                                      "pricing": {"mrp": 9999.0, "cost_price": COST}})
+    path = "/api/v1/catalog/products/TWIN1"
+    r = client.put(path, json={"pricing": {"cost_price": 1234.0}}, headers=_headers(role))
+    assert r.status_code == 409, (r.status_code, r.text[:300])
+    assert r.json()["detail"] == EDITOR_COST_REFUSED
+    spine = shop.products.find_one({"product_id": "P1"})
+    assert spine["cost_price"] == COST and not spine.get("cost_history")
+    r = client.put(path, json={"pricing": {"cost_price": COST}}, headers=_headers(role))
+    assert r.status_code == 200, (r.status_code, r.text[:300])
+    assert shop.products.find_one({"product_id": "P1"})["cost_price"] == COST
+
+
 # ---------------------------------------------------------------------------
 # FU-02: the receipt's bill is read back by the accounts roles only
 # ---------------------------------------------------------------------------

@@ -2454,13 +2454,17 @@ async def update_catalog_product(
     _refuse_ordered_draft(existing)
     if product.pricing and product.pricing.cost_price is not None:
         # S4: an average is corrected only through its correction box -- the
-        # product (spine) holds it.
+        # product (spine) holds it, found by the one twin -> spine rule the
+        # spine sync below writes through (a create-door twin's spine is
+        # linked by pim_product_id, not by this id).
         from ..dependencies import get_product_repository as _spine_repo
         from ..services.product_cost import refuse_editor_cost
 
-        _repo = _spine_repo()
-        refuse_editor_cost(_repo.find_by_id(product_id) if _repo is not None else None,
-                           product.pricing.cost_price)
+        try:
+            _cost_spine = _spine_of(_spine_repo(), existing)
+        except Exception as exc:  # noqa: BLE001 -- not knowing the average is no pass
+            raise HTTPException(status_code=503, detail=_SPINE_UNCHECKED) from exc
+        refuse_editor_cost(_cost_spine, product.pricing.cost_price)
     # Work on a COPY: in no-DB mode _get_catalog_product returns the LIVE
     # in-memory dict, so mutating it mid-handler would leak partial edits into
     # the store on a later 4xx AND defeat the compare-and-swap write below

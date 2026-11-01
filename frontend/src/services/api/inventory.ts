@@ -748,7 +748,9 @@ export interface CLExpiryStatusResponse {
 export interface BrandInsightRow {
   brand: string;
   units_on_hand: number;
-  stock_value: number;
+  /** Units for sale x offer price (MRP when none): what the stock sells for,
+   *  not its cost (stock value is at the one average cost). */
+  selling_value: number;
   units_sold: number;
   revenue: number;
   /** 0..100 percentage; null = no signal (no stock AND no sales). */

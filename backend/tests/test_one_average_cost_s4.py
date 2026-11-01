@@ -312,6 +312,19 @@ def test_the_cost_card_and_a_correction(monkeypatch):
                     json={"average_cost": 3395, "reason": "  "}).status_code == 422
 
 
+@pytest.mark.parametrize("twin_id,link", [("TWIN", {"pim_product_id": "TWIN"}), ("P", {})])
+def test_the_catalogue_copy_follows_the_average(twin_id, link):
+    """A correction and a first cost reach the catalogue copy by the one
+    mirror rule: a create-door twin (keyed by the spine's pim_product_id, a
+    different uuid) as well as a converged one (sharing the product id)."""
+    db = _db(None, **link)
+    db.catalog_products.insert_one({"id": twin_id, "pricing": {"cost_price": 1.0}})
+    product_cost.seed(db, "P", 800, key="opening:1", kind="OPENING_STOCK", actor="m")
+    assert db.catalog_products.find_one({"id": twin_id})["pricing"]["cost_price"] == 800.0
+    product_cost.correct(db, "P", 812.5, "credit note", "acc")
+    assert db.catalog_products.find_one({"id": twin_id})["pricing"]["cost_price"] == 812.5
+
+
 def test_a_product_with_no_cost_says_its_figure_is_too_low(monkeypatch):
     db = _db(None)
     _pieces(db, 3)

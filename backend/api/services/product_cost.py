@@ -197,23 +197,17 @@ def _move(
             },
         )
         if done.modified_count:
-            _mirror(db, product_id, new, entry.get("source"))
+            # The catalogue copy shows the same cost, by THE spine -> twin
+            # mirror rule (fail-soft: the product is the record). A cost is in
+            # no pushed payload: nothing queues.
+            from .product_master import mirror_update_to_catalog_twin
+
+            mirror_update_to_catalog_twin(
+                product_id=product_id, current=prod, patch={"cost_price": new}, db=db, mark_dirty=False
+            )
             return row
     logger.error("[COST] could not move the average of %s for %s: it kept changing", product_id, key)
     return None
-
-
-def _mirror(db, product_id: str, cost: float, source: Optional[str]) -> None:
-    """The catalogue copy shows the same cost (fail-soft: the product is the
-    record)."""
-    try:
-        db.get_collection("catalog_products").update_one(
-            {"id": product_id},
-            {"$set": {"pricing.cost_price": cost, "pricing.cost_updated_at": utc_now_iso(),
-                      "pricing.cost_source": source}},
-        )
-    except Exception:  # noqa: BLE001
-        logger.warning("[COST] catalogue mirror of %s failed", product_id, exc_info=True)
 
 
 def apply_bill(

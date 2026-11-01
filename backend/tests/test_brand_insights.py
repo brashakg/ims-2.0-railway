@@ -95,7 +95,7 @@ class TestFoldBrandRows:
         rb = rows["Ray-Ban"]
         assert rb["units_on_hand"] == 5  # 3 + 2 (P4 qty 0 excluded)
         # 3 x offer 4500 + 2 x mrp 2000 (offer=0 is junk -> mrp fallback)
-        assert rb["stock_value"] == 17500.0
+        assert rb["selling_value"] == 17500.0
         assert rb["units_sold"] == 2
         assert rb["revenue"] == 9000.0
         # sell_through(2, 5) = 2/7 -> 28.6%
@@ -105,14 +105,14 @@ class TestFoldBrandRows:
 
         oak = rows["Oakley"]
         assert oak["units_on_hand"] == 0
-        assert oak["stock_value"] == 0.0
+        assert oak["selling_value"] == 0.0
         assert oak["units_sold"] == 4
         assert oak["sell_through_percent"] == 100.0
         assert oak["days_cover"] == 0.0  # stock gone, still selling
 
         unk = rows["Unknown"]
         assert unk["units_on_hand"] == 5  # P3 (blank brand)
-        assert unk["stock_value"] == 0.0  # no usable price
+        assert unk["selling_value"] == 0.0  # no usable price
         assert unk["units_sold"] == 1  # GHOST line folded, not dropped
         assert unk["revenue"] == 100.0
 
@@ -288,7 +288,7 @@ class TestBrandInsightsEndpoint:
 
         rb = by_brand["Ray-Ban"]
         assert rb["units_on_hand"] == 4
-        assert rb["stock_value"] == 4 * 4500.0
+        assert rb["selling_value"] == 4 * 4500.0
         assert rb["units_sold"] == 2
         assert rb["revenue"] == 9000.0
         assert rb["sell_through_percent"] == round(2 / 6 * 100, 1)
