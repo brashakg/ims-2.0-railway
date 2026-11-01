@@ -179,9 +179,9 @@ def _receipt_of(unit: dict) -> Optional[str]:
 PRE_S4_STAMP = "costed_before_s4"
 PRE_S4_AVERAGES = "costed_before_s4_averages"
 PRE_S4_AT = "costed_before_s4_at"
-# {product: when its figure was added} -- a figure a later backfill run added
-# to a receipt an earlier run stamped; that product's pieces entered the pool
-# then, not at PRE_S4_AT.
+# {product: when its pieces entered the pool} -- a product the backfill filled
+# or re-averaged from its pieces: its fill time (written in the same stamp),
+# not PRE_S4_AT -- a piece sold after the fill was in the pool at its figure.
 PRE_S4_AT_BY = "costed_before_s4_at_by"
 
 

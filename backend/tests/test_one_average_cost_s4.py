@@ -78,6 +78,12 @@ def _avg(db):
     return db.products.find_one({"product_id": "P"})["cost_price"]
 
 
+def _snapshot(db):
+    """Every business document a backfill run can touch, for an exact compare."""
+    return {c: sorted(({k: v for k, v in d.items() if k != "_id"} for d in db[c].find()), key=repr)
+            for c in ("products", "grns", "catalog_products", "stock_units", "vendor_bills")}
+
+
 # --------------------------------------------------------------------------
 # The two named bugs
 # --------------------------------------------------------------------------
@@ -398,13 +404,13 @@ def test_the_backfill_fills_backs_up_and_reverts():
     rows = {r["product_id"]: r for r in bf.plan(db)}
     assert (rows["FULL"]["fill"], rows["PART"]["fill"], rows["HAS"]["fill"]) == (100.5, None, None)
     assert rows["HAS"]["value_s4"] == 500.0 and rows["HAS"]["value_before"] == 900.0
+    before = _snapshot(db)
     # FULL filled; HAS (an average with no history) carried over into it.
     assert bf.apply(db, list(rows.values()), "RUN1") == 2
     assert db.products.find_one({"product_id": "FULL"})["cost_price"] == 100.5
     assert bf.plan(db)[0]["fill"] is None  # a re-run finds nothing left
     assert bf.revert(db, "RUN1") == 2
-    full = db.products.find_one({"product_id": "FULL"})
-    assert full["cost_price"] is None and full["cost_history"] == [] and full["cost_keys"] == []
+    assert _snapshot(db) == before  # exactly as before the run
 
 
 # --------------------------------------------------------------------------
@@ -526,16 +532,17 @@ def test_the_backfill_carries_an_old_average_into_the_history_and_reverts_it():
 
     db = _db(3340.0, cost_source="PURCHASE_INVOICE")  # a pre-S4 bill's average
     _pieces(db, 2)
+    before = _snapshot(db)
     assert bf.apply(db, bf.plan(db), "RUN2") == 1
     product = db.products.find_one({})
     (row,) = product["cost_history"]
     assert (row["kind"], row["old_cost"], row["new_cost"], row["source"]) == (
         "CARRIED_OVER", None, 3340.0, "PURCHASE_INVOICE")
     assert product["cost_price"] == 3340.0
-    assert bf.apply(db, bf.plan(db), "RUN3") == 0  # nothing left to carry over
+    with pytest.raises(SystemExit):  # never a run on top of RUN2
+        bf.apply(db, bf.plan(db), "RUN3")
     assert bf.revert(db, "RUN2") == 1
-    product = db.products.find_one({})
-    assert (product["cost_price"], product["cost_history"], product["cost_keys"]) == (3340.0, [], [])
+    assert _snapshot(db) == before
 
 
 def test_the_backfill_revert_finds_a_product_written_just_before_a_crash():
@@ -744,6 +751,7 @@ def test_the_backfill_re_averages_a_pre_s4_walk_in_latest_price():
     (row,) = bf.plan(db)
     assert row["fill"] == 109.09 and "walk-in" in row["reason"]
     assert _avg(db) == 200.0  # the dry run writes nothing
+    before = _snapshot(db)
     assert bf.apply(db, [row], "RUN5") == 1
     product = db.products.find_one({})
     assert product["cost_price"] == 109.09
@@ -751,8 +759,7 @@ def test_the_backfill_re_averages_a_pre_s4_walk_in_latest_price():
     assert (hist["kind"], hist["old_cost"], hist["new_cost"]) == ("BACKFILL", 200.0, 109.09)
     assert bf.plan(db)[0]["fill"] is None  # a re-run finds nothing left
     assert bf.revert(db, "RUN5") == 1
-    product = db.products.find_one({})
-    assert (product["cost_price"], product["cost_history"]) == (200.0, [])
+    assert _snapshot(db) == before
 
 
 
@@ -1055,8 +1062,6 @@ def test_revert_unstamps_a_put_back_product_on_a_receipt_it_keeps_stamped(p_move
     assert db.products.find_one({"product_id": "Q"})["cost_price"] == 200.0
     g0 = db.grns.find_one({"grn_id": "G0"})
     assert g0.get(product_cost.PRE_S4_AVERAGES) == ({"P": 400.0} if p_moved else None)
-    # mongomock: the guard's {"$in": [None, []]} misses an emptied [] (real Mongo matches it)
-    db.products.update_many({"cost_keys": []}, {"$unset": {"cost_keys": "", "cost_history": ""}})
     _bill_for(db, "BG0Q", "Q", 10, 100, "G0", "2026-11-02T00:00:00+00:00")
     assert db.products.find_one({"product_id": "Q"})["cost_price"] == 152.38
     if p_moved:
@@ -1084,7 +1089,8 @@ def test_a_backfill_re_run_after_an_s4_bill_never_re_averages_a_walk_in():
     db.stock_units.update_one({"grn_id": "G3"}, {"$set": {"status": "SOLD", "order_id": "O9"}})
     (row,) = bf.plan(db)
     assert row["fill"] is None
-    bf.apply(db, bf.plan(db), "RUN2")
+    with pytest.raises(SystemExit):  # RUN1 is still applied: never a run on top
+        bf.apply(db, bf.plan(db), "RUN2")
     product = db.products.find_one({})
     assert product["cost_price"] == after_bill
     assert [h["kind"] for h in product["cost_history"]] == ["BACKFILL", "BILL"]
@@ -1244,60 +1250,9 @@ def test_the_walk_in_detection_fires_only_on_this_products_accepted_pre_s4_walk_
 
 
 # --------------------------------------------------------------------------
-# Fix round 6 (S4): the backfill after a crash, a re-run after a revert.
+# Fix round 6 (S4): a product filled from its pieces stamps each receipt at
+# its own cost.
 # --------------------------------------------------------------------------
-
-
-def test_a_backfill_re_run_after_a_crash_stamps_a_re_averaged_walk_in_at_its_own_cost(monkeypatch):
-    """RUN1 re-averages P to 109.09 and crashes before stamping a receipt.
-    RUN2 finds nothing to re-average but stamps GW at its pieces' OWN 200
-    (they are in 109.09 at it, never at 109.09): GW's bill at 200 leaves
-    109.09, never 117.35."""
-    from scripts import backfill_average_cost as bf
-
-    db = _db(200.0, cost_source="GRN_WALKIN")
-    _walk_in_received(db)
-
-    def crash(_db):
-        raise RuntimeError("connection lost")
-
-    with monkeypatch.context() as m:
-        m.setattr(bf, "legacy_receipts", crash)
-        with pytest.raises(RuntimeError):
-            bf.apply(db, bf.plan(db), "RUN1")
-    assert _avg(db) == 109.09 and db.grns.count_documents({product_cost.PRE_S4_STAMP: {"$exists": True}}) == 0
-    bf.apply(db, bf.plan(db), "RUN2")
-    assert db.grns.find_one({"grn_id": "GW"})[product_cost.PRE_S4_AVERAGES] == {"P": 200.0}
-    assert db.grns.find_one({"grn_id": "G1"})[product_cost.PRE_S4_AVERAGES] == {"P": 100.0}
-    _accept(db, _bill("BW", 1, 200, grn_id="GW", bill_date="2026-11-02", created_at="2026-11-02T10:00:00+00:00"))
-    assert _avg(db) == 109.09
-
-
-def test_a_re_run_after_a_revert_stamps_a_put_back_product_on_a_receipt_revert_kept_stamped():
-    """As test_revert_unstamps...: S4 bill B1 moves P, revert puts Q back to
-    200 and keeps G0 stamped for P only. RUN2 re-averages Q to 104.76 (G0's
-    Q pieces in it at 100) and adds Q: 100 to G0's stamp, keeping P: 400.
-    G0's Q bill at 10 x 100 then leaves 104.76, never 102.49."""
-    from scripts import backfill_average_cost as bf
-
-    db = _g0_with_walk_in_q()
-    bf.apply(db, bf.plan(db), "RUN1")
-    db.grns.insert_one({"grn_id": "G1", "status": "ACCEPTED", "accepted_at": "2026-11-01T10:00:00+00:00",
-                        "items": [{"product_id": "P", "accepted_qty": 5}]})
-    for i in range(5):
-        _unit(db, f"G1P{i}", "P", "G1")
-    _bill_for(db, "B1", "P", 5, 500, "G1", "2026-11-01T00:00:00+00:00")
-    bf.revert(db, "RUN1")
-    assert db.grns.find_one({"grn_id": "G0"})[product_cost.PRE_S4_AVERAGES] == {"P": 400.0}
-    # mongomock: the guard's {"$in": [None, []]} misses an emptied [] (real Mongo matches it)
-    db.products.update_many({"cost_keys": []}, {"$unset": {"cost_keys": "", "cost_history": ""}})
-    bf.apply(db, bf.plan(db), "RUN2")
-    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 104.76
-    g0 = db.grns.find_one({"grn_id": "G0"})
-    assert g0[product_cost.PRE_S4_STAMP] == "RUN1"
-    assert g0[product_cost.PRE_S4_AVERAGES] == {"P": 400.0, "Q": 100.0}
-    _bill_for(db, "BG0Q", "Q", 10, 100, "G0", "2026-11-02T00:00:00+00:00")
-    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 104.76
 
 
 def test_a_product_filled_from_its_pieces_stamps_each_receipt_at_its_own_cost():
@@ -1324,44 +1279,82 @@ def test_a_product_filled_from_its_pieces_stamps_each_receipt_at_its_own_cost():
 
 
 # --------------------------------------------------------------------------
-# Fix round 7 (S4): a re-run never stamps pieces the fill never held; a
-# figure a re-run adds carries its own time.
+# Fix round 8 (S4): one live run at a time. --apply refuses while a run is
+# in the data; --revert puts back everything the latest run wrote (a crashed
+# one too); the recovery after a crash is revert, then apply again.
 # --------------------------------------------------------------------------
 
 
-def test_a_re_run_never_stamps_a_receipt_accepted_after_the_fill_at_its_own_cost():
-    """RUN1 re-averages P to (10 x 100 + 200) / 11 = 109.09. Then receipt G5
-    (10 at 150, no S4 bill yet) is accepted and RUN2 runs: G5's pieces were
-    never in 109.09, so RUN2 stamps no figure for P on G5 (its pieces wait
-    for their bill). G5's bill at 150 then gives (1000 + 200 + 1500) / 21 =
-    128.57, never 109.09 (stamped at its own 150, adding 0)."""
-    from scripts import backfill_average_cost as bf
+def _round8_db():
+    """_g0_with_walk_in_q (P carried over at 400; Q's walk-in 200 re-averaged
+    to 104.76; legacy G0 holds 10 P + 10 Q at 100) plus F: no average, legacy
+    receipt GF with pieces at 50 and 70 (fill 60), its catalogue copy at 1.0;
+    Q's copy shows 200 and sits in Needs review."""
+    db = _g0_with_walk_in_q()
+    db.products.insert_one({"product_id": "F", "cost_price": None})
+    db.grns.insert_one({"grn_id": "GF", "status": "ACCEPTED", "po_id": "POF", "accepted_at": "2026-10-22T10:00:00+00:00",
+                        "items": [{"product_id": "F", "accepted_qty": 2}]})
+    _unit(db, "GF0", "F", "GF", 50.0)
+    _unit(db, "GF1", "F", "GF", 70.0)
+    db.catalog_products.insert_many([
+        {"id": "F", "pricing": {"cost_price": 1.0, "mrp": 999.0}},
+        {"id": "Q", "spine_product_id": "Q", "needs_review": True, "pricing": {"cost_price": 200.0}}])
+    return db
 
-    db = _db(200.0, cost_source="GRN_WALKIN")
-    _walk_in_received(db)
-    bf.apply(db, bf.plan(db), "RUN1")
-    assert _avg(db) == 109.09
+
+def _crash(m, bf, where):
+    """The run dies: right after F's seed wrote (before its backup says so),
+    right after a carry-over, or after the first receipt stamp."""
+    def boom(*_a, **_k):
+        raise RuntimeError("connection lost")
+
+    if where == "fill":
+        real_seed = product_cost.seed
+        m.setattr(product_cost, "seed", lambda *a, **k: (real_seed(*a, **k), boom()))
+    elif where == "carry":
+        real_carry = bf.carry_over
+        m.setattr(bf, "carry_over", lambda *a, **k: (real_carry(*a, **k), boom()))
+    else:
+        real_legacy = bf.legacy_receipts
+
+        def first_then_die(db):
+            yield real_legacy(db)[0]
+            boom()
+
+        m.setattr(bf, "legacy_receipts", first_then_die)
+
+
+def _sell_g0q0_between_fill_and_stamp(m, bf):
+    """A0: one of G0's Q pieces sells at Q's new average after Q's fill wrote,
+    before the receipts are stamped."""
     import time
 
-    time.sleep(0.01)
-    _receipt(db, "G5", 10, po_id="PO5", accepted_at=utc_now().isoformat())
-    time.sleep(0.01)
-    _pieces(db, 10, "G5", prefix="F")
-    db.stock_units.update_many({"grn_id": "G5"}, {"$set": {"unit_cost": 150.0}})
-    bf.apply(db, bf.plan(db), "RUN2")
-    assert "P" not in (db.grns.find_one({"grn_id": "G5"}).get(product_cost.PRE_S4_AVERAGES) or {})
-    assert db.grns.find_one({"grn_id": "G1"})[product_cost.PRE_S4_AVERAGES] == {"P": 100.0}
-    _accept(db, _bill("B5", 10, 150, grn_id="G5", created_at="2026-11-03T10:00:00+00:00"))
-    assert _avg(db) == 128.57
+    real = bf.carry_over_candidates
+
+    def sell_then(db):
+        time.sleep(0.01)
+        q = db.products.find_one({"product_id": "Q"})["cost_price"]
+        db.stock_units.update_one({"stock_id": "G0Q0"}, {"$set": {
+            "status": "SOLD", "order_id": "O1", "sold_at": utc_now().replace(tzinfo=None)}})
+        db.orders.insert_one({"order_id": "O1", "items": [{"product_id": "Q", "quantity": 1, "cost_at_sale": q}]})
+        time.sleep(0.01)
+        return real(db)
+
+    m.setattr(bf, "carry_over_candidates", sell_then)
 
 
-def _reverted_with_a_gap_sale():
-    """test_a_re_run_after_a_revert...'s RUN1, B1 moves P, revert (G0 stays
-    stamped {P: 400}); then G0Q0 sells at Q's put-back 200."""
-    import time
-
+def test_apply_refuses_while_a_run_is_applied():
     from scripts import backfill_average_cost as bf
 
+    db = _round8_db()
+    assert bf.apply(db, bf.plan(db), "RUN1") == 3
+    with pytest.raises(SystemExit):
+        bf.apply(db, bf.plan(db), "RUN2")
+    assert db.backfill_average_cost_backups.count_documents({"run_id": "RUN2"}) == 0
+    bf.revert(db, "RUN1")
+    assert bf.apply(db, bf.plan(db), "RUN2") == 3  # nothing of RUN1 left: a fresh run
+    # A run a revert could only partly undo (S4 bill B1 moved P since) stays
+    # applied: --apply keeps refusing (restore the backup instead).
     db = _g0_with_walk_in_q()
     bf.apply(db, bf.plan(db), "RUN1")
     db.grns.insert_one({"grn_id": "G1", "status": "ACCEPTED", "accepted_at": "2026-11-01T10:00:00+00:00",
@@ -1370,48 +1363,78 @@ def _reverted_with_a_gap_sale():
         _unit(db, f"G1P{i}", "P", "G1")
     _bill_for(db, "B1", "P", 5, 500, "G1", "2026-11-01T00:00:00+00:00")
     bf.revert(db, "RUN1")
-    # mongomock: the guard's {"$in": [None, []]} misses an emptied [] (real Mongo matches it)
-    db.products.update_many({"cost_keys": []}, {"$unset": {"cost_keys": "", "cost_history": ""}})
-    time.sleep(0.01)
-    db.stock_units.update_one({"stock_id": "G0Q0"}, {"$set": {
-        "status": "SOLD", "order_id": "O1", "sold_at": utc_now().replace(tzinfo=None)}})
-    db.orders.insert_one({"order_id": "O1", "items": [{"product_id": "Q", "quantity": 1, "cost_at_sale": 200.0}]})
-    time.sleep(0.01)
-    return db
+    assert bf.live_runs(db) == ["RUN1"]
+    with pytest.raises(SystemExit):
+        bf.apply(db, bf.plan(db), "RUN2")
 
 
-def test_a_piece_sold_before_the_re_run_added_its_figure_keeps_its_variance():
-    """RUN2 re-averages Q to (10 x 100 + 200 + 9 x 100) / 20 = 105 and adds Q:
-    100 to G0 -- at RUN2's time, not RUN1's. G0Q0 left (at 200) before that:
-    it was never in the pool at 100, so G0's Q bill at 100 books -100, never
-    0 (trued up from the stamped 100)."""
+@pytest.mark.parametrize("where", ("fill", "carry", "stamp"))
+def test_revert_of_a_crashed_run_restores_the_exact_before_state(monkeypatch, where):
     from scripts import backfill_average_cost as bf
 
-    db = _reverted_with_a_gap_sale()
-    bf.apply(db, bf.plan(db), "RUN2")
-    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 105.0
-    assert db.grns.find_one({"grn_id": "G0"})[product_cost.PRE_S4_AVERAGES] == {"P": 400.0, "Q": 100.0}
-    _bill_for(db, "BG0Q", "Q", 10, 100, "G0", "2026-11-02T00:00:00+00:00")
-    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 105.0
-    assert [(v["amount"], v["stock_ids"]) for v in db.cogs_variances.find()] == [(-100.0, ["G0Q0"])]
+    db = _round8_db()
+    before = _snapshot(db)
+    with monkeypatch.context() as m:
+        _crash(m, bf, where)
+        with pytest.raises(RuntimeError):
+            bf.apply(db, bf.plan(db), "RUN1")
+    assert _snapshot(db) != before
+    with pytest.raises(SystemExit):  # the crashed run is still applied
+        bf.apply(db, bf.plan(db), "RUN2")
+    bf.revert(db, "RUN1")
+    assert _snapshot(db) == before
+    assert bf.live_runs(db) == []
 
 
-def test_a_re_run_adds_no_figure_for_a_product_an_s4_bill_moved_since_the_stamp():
-    """As above, but S4 bill BX (5 Q at 300 on new receipt GX) moves Q to
-    (11 x 200 + 1500) / 16 = 231.25 before RUN2. G0's Q pieces were never in
-    that pool: RUN2 leaves G0 at {P: 400} (never Q: 231.25), so G0's Q bill
-    at 100 books -100 for G0Q0 (never -131.25) and Q ends at 184."""
+def _outcome(db):
+    """Averages, history, stamps -- without the run's id and times."""
+    return ({p["product_id"]: (p.get("cost_price"), [(h["kind"], h["old_cost"], h["new_cost"])
+                                                     for h in p.get("cost_history") or []])
+             for p in db.products.find()},
+            {g["grn_id"]: g.get(product_cost.PRE_S4_AVERAGES) for g in db.grns.find()})
+
+
+@pytest.mark.parametrize("where", ("fill", "carry", "stamp"))
+def test_crash_revert_apply_gives_the_same_result_as_one_clean_apply(monkeypatch, where):
+    """Both final runs sell A0 (G0Q0) at Q's new 104.76 between Q's fill and
+    the stamp: G0 is stamped Q: 100 with Q's FILL time, so A0 was in the pool
+    at 100 -- G0's Q bill at 100 owes no variance (never 100 - 104.76)."""
     from scripts import backfill_average_cost as bf
 
-    db = _reverted_with_a_gap_sale()
-    db.grns.insert_one({"grn_id": "GX", "status": "ACCEPTED", "accepted_at": "2026-11-01T10:00:00+00:00",
-                        "items": [{"product_id": "Q", "accepted_qty": 5}]})
-    for i in range(5):
-        _unit(db, f"GXQ{i}", "Q", "GX")
-    _bill_for(db, "BX", "Q", 5, 300, "GX", "2026-11-01T12:00:00+00:00")
-    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 231.25
+    clean = _round8_db()
+    with monkeypatch.context() as m:
+        _sell_g0q0_between_fill_and_stamp(m, bf)
+        bf.apply(clean, bf.plan(clean), "RUN1")
+    crashed = _round8_db()
+    with monkeypatch.context() as m:
+        _crash(m, bf, where)
+        with pytest.raises(RuntimeError):
+            bf.apply(crashed, bf.plan(crashed), "RUN1")
+    bf.revert(crashed, "RUN1")
+    with monkeypatch.context() as m:
+        _sell_g0q0_between_fill_and_stamp(m, bf)
+        bf.apply(crashed, bf.plan(crashed), "RUN2")
+    assert _outcome(crashed) == _outcome(clean)
+    assert _outcome(clean)[1]["G0"] == {"P": 400.0, "Q": 100.0}
+    for db in (clean, crashed):
+        assert db.orders.find_one()["items"][0]["cost_at_sale"] == 104.76
+        _bill_for(db, "BG0Q", "Q", 10, 100, "G0", "2026-11-02T00:00:00+00:00")
+        assert db.cogs_variances.count_documents({}) == 0
+    assert _outcome(crashed) == _outcome(clean)
+
+
+def test_revert_of_the_latest_run_restores_the_exact_state_and_only_the_latest():
+    from scripts import backfill_average_cost as bf
+
+    db = _round8_db()
+    before = _snapshot(db)
+    bf.apply(db, bf.plan(db), "RUN1")
+    assert db.catalog_products.find_one({"id": "F"})["pricing"]["cost_price"] == 60.0
+    assert db.catalog_products.find_one({"id": "Q"})["needs_review"] is False
+    bf.revert(db, "RUN1")
+    assert _snapshot(db) == before
     bf.apply(db, bf.plan(db), "RUN2")
-    assert db.grns.find_one({"grn_id": "G0"})[product_cost.PRE_S4_AVERAGES] == {"P": 400.0}
-    _bill_for(db, "BG0Q", "Q", 10, 100, "G0", "2026-11-02T00:00:00+00:00")
-    assert [(v["amount"], v["stock_ids"]) for v in db.cogs_variances.find()] == [(-100.0, ["G0Q0"])]
-    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 184.0
+    with pytest.raises(SystemExit):  # RUN1 is not the latest run
+        bf.revert(db, "RUN1")
+    bf.revert(db, "RUN2")
+    assert _snapshot(db) == before

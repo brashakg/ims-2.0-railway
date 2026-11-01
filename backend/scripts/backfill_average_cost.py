@@ -47,31 +47,44 @@ WHAT IT DOES
     `costed_before_s4: <run id>` (product_cost.PRE_S4_STAMP; only receipts
     accepted before the first S4 bill -- run it right after the deploy), with
     the time and, per product, the figure its pieces are in the pool at: the
-    product's average then -- or, for a product a backfill run (any run)
-    filled or re-averaged from its pieces, that receipt's pieces' OWN cost (they went
-    into the new average at it). So the first S4 bill BLENDS with them
-    instead of replacing the average. A receipt whose bill simply has not come in yet is stamped too:
-    its own S4 bill later trues its pieces up from that stamped figure
-    (product_cost.PRE_S4_STAMP) instead of re-averaging them in.
+    product's average then -- or, for a product this run filled or
+    re-averaged from its pieces, that receipt's held pieces' OWN cost (they
+    went into the new average at it), with the product's fill time in the
+    same write (PRE_S4_AT_BY: a piece sold after the fill was in the pool at
+    it). So the first S4 bill BLENDS with them instead of replacing the
+    average. A receipt whose bill simply has not come in yet is stamped too:
+    its own S4 bill later trues its pieces up from that stamped figure.
   * The dry run FLAGS products whose average came from a bill that is still
     on hold, or from a delivery-challan bill (both could carry a wrong
     pre-S4 average). That list is for accounts to correct by hand on the
     product page -- this script never changes them.
-  * --apply: the run id is printed BEFORE the first write; each product's
-    before-values are backed up in `backfill_average_cost_backups` first.
-    --revert --run-id <id> puts back only products whose cost is still what
-    the run wrote (a later bill or correction is reported, never undone),
-    including one written just before a crash, and unstamps the receipts
-    -- except one carrying a product whose average moved since the stamp
-    (reported: its pieces are in that average at the stamped figure); such a
-    receipt keeps the stamped figure of the moved products only; the next
-    run adds a figure for each product revert put back on it.
-  A re-run after --apply finds nothing left to fill. After a crash either
-  re-run --apply (safe: a product an earlier run filled keeps its receipts at
-  their pieces' own cost) or --revert the crashed run's id.
 
-USAGE (dry run is the default; nothing is written without --apply). NEVER run
-it on prod without the owner's go-ahead.
+ONE LIVE RUN AT A TIME
+----------------------
+  * --apply prints the run id BEFORE the first write; every write carries it
+    (the backup row, the product's backfill:<id> history row, the receipt
+    stamp), and each product's before-values -- and its catalogue copy's
+    cost -- are backed up in `backfill_average_cost_backups` first.
+  * --apply REFUSES (exit 1) while any run is still in the data: a product
+    carrying a backfill:<id> row or a receipt carrying a stamp. There is no
+    run on top of a run.
+  * --revert --run-id <id> works on the LATEST run only and puts back
+    everything it wrote -- averages, history rows, receipt stamps with every
+    figure and time -- so the data is exactly as before the run. It works on
+    a run a crash cut short (it undoes whatever was written). The one thing
+    it never undoes: a product a bill or correction moved since the run
+    (reported), and the stamped figure of that product on its receipts (its
+    pieces are in that average at it). Such a run stays in the data, so
+    --apply keeps refusing: restore the backup instead.
+
+RUNBOOK (prod, the lead only, owner's go-ahead)
+-----------------------------------------------
+  1. dry run (the default; nothing written) -- read the list;
+  2. take a Mongo backup;
+  3. --apply -- note the run id it prints first;
+  4. on ANY failure (a crash, a wrong figure): --revert --run-id <that id>,
+     then --apply again. Never re-run --apply on top of a run.
+
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" backend/scripts/backfill_average_cost.py
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" backend/scripts/backfill_average_cost.py --apply
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" backend/scripts/backfill_average_cost.py --revert --run-id <id>
@@ -97,8 +110,10 @@ from api.utils.event_time import utc_now_iso  # noqa: E402
 
 BACKUPS = "backfill_average_cost_backups"
 ACTOR = "script:backfill_average_cost"
+# Every product field a run writes: a revert puts each back exactly.
 _FIELDS = ("cost_price", "moving_avg_cost", "cost_price_is_catalogue_only", "cost_valuation_pending",
-           "cost_updated_at", "cost_source", "cost_source_id")
+           "cost_updated_at", "cost_source", "cost_source_id", "cost_history", "cost_keys")
+MISSING = {"__missing__": True}
 
 
 def own_cost(unit: dict) -> float:
@@ -146,6 +161,7 @@ def plan(db) -> List[dict]:
             "product_id": pid, "sku": prod.get("sku"), "pieces": pieces, "average": average or None,
             "value_s4": stock_value.value(pieces, prod), "value_before": round(old_value, 2),
             "fill": fill, "recost": recost, "reason": reason, "check": check or _suspect(db, prod),
+            "own": _own_by_receipt(units) if fill is not None else {},
         })
     return rows
 
@@ -157,6 +173,17 @@ def _from_pieces(units: List[dict], pieces: float) -> Optional[float]:
         return None
     total = sum(Decimal(str(stock_value._pieces(u))) * Decimal(str(own_cost(u))) for u in units)
     return float((total / Decimal(str(pieces))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _own_by_receipt(units: List[dict]) -> Dict[str, float]:
+    """{receipt: its held pieces' own average} -- the very pieces a fill
+    averages, so each receipt's pieces are stamped at the cost they went
+    into the new average at."""
+    by: Dict[str, List[dict]] = {}
+    for u in units:
+        if product_cost._receipt_of(u):
+            by.setdefault(product_cost._receipt_of(u), []).append(u)
+    return {r: _from_pieces(us, sum(stock_value._pieces(u) for u in us)) for r, us in by.items()}
 
 
 def _source_bill(db, prod: dict) -> dict:
@@ -271,11 +298,33 @@ def legacy_receipts(db) -> List[str]:
     return out
 
 
+def live_runs(db) -> List[str]:
+    """The runs whose writes are still in the data: a product carrying a
+    run's key (backfill:<id>: its BACKFILL or Carried-over row) or a receipt
+    carrying its stamp. A run a revert could only partly undo (a bill or
+    correction moved a product since) stays here for good."""
+    runs = {k[len("backfill:"):] for p in db["products"].find({}, {"_id": 0, "cost_keys": 1})
+            for k in p.get("cost_keys") or [] if str(k).startswith("backfill:")}
+    runs |= {g[product_cost.PRE_S4_STAMP] for g in db["grns"].find(
+        {product_cost.PRE_S4_STAMP: {"$exists": True}}, {"_id": 0, product_cost.PRE_S4_STAMP: 1})}
+    return sorted(runs)
+
+
+def _twins(db, prod: dict) -> List[dict]:
+    """The catalogue copies a cost write mirrors to (mirror_update_to_catalog_twin)."""
+    pid = prod.get("product_id")
+    ids = [i for i in {prod.get("pim_product_id"), pid} if i]
+    return list(db["catalog_products"].find({"$or": [{"id": {"$in": ids}}, {"spine_product_id": pid}]},
+                                            {"_id": 1, "pricing": 1, "needs_review": 1}))
+
+
 def _backup(db, run_id: str, pid: str) -> None:
     prod = db["products"].find_one({"product_id": pid}) or {}
     db[BACKUPS].insert_one({
         "run_id": run_id, "product_id": pid, "at": utc_now_iso(),
-        "before": {k: prod.get(k, {"__missing__": True}) for k in _FIELDS},
+        "before": {k: prod.get(k, MISSING) for k in _FIELDS},
+        "twins": [{"_id": t["_id"], "cost": (t.get("pricing") or {}).get("cost_price", MISSING),
+                   "needs_review": t.get("needs_review", MISSING)} for t in _twins(db, prod)],
     })
 
 
@@ -306,8 +355,16 @@ def _recost(db, pid: str, cost: float, expected: float, key: str) -> Optional[di
 
 
 def apply(db, rows: List[dict], run_id: str) -> int:
+    """One run. Refuses while any earlier run is still in the data (never a
+    run on top: after a crash, --revert that run, then --apply again). Every
+    write carries the run id, so a run a crash cut short reverts in full."""
+    live = live_runs(db)
+    if live:
+        sys.exit(f"refused: run {', '.join(live)} is still applied. Revert it first "
+                 f"(--revert --run-id {live[-1]}), then apply again - never run on top of it.")
     key = f"backfill:{run_id}"
     done = 0
+    filled: Dict[str, str] = {}  # product filled or re-averaged from its pieces -> its fill time
     for row in rows:
         if row["fill"] is None:
             continue
@@ -319,105 +376,70 @@ def apply(db, rows: List[dict], run_id: str) -> int:
         if written:
             db[BACKUPS].update_one({"run_id": run_id, "product_id": row["product_id"]},
                                    {"$set": {"written": written["new_cost"]}})
+            filled[row["product_id"]] = written["at"]
             done += 1
     for prod in carry_over_candidates(db):
         _backup(db, run_id, prod["product_id"])
         written = carry_over(db, prod, key)
         if written:
             db[BACKUPS].update_one({"run_id": run_id, "product_id": prod["product_id"]},
-                                   {"$set": {"written": written["new_cost"], "carried_over": True}})
+                                   {"$set": {"written": written["new_cost"]}})
             done += 1
-    # A product a backfill run (this one or an earlier, crashed one) filled or
-    # re-averaged from its pieces holds each receipt's pieces at their OWN
-    # cost, not at its new average -- only a receipt accepted by that fill
-    # (its earliest backfill row): a later one's pieces were never in it, so
-    # they get no figure and wait for their bill.
-    filled_at: Dict[str, str] = {}
-    for p in db["products"].find({}, {"_id": 0, "product_id": 1, "cost_history": 1}):
-        ats = [product_cost._utc_iso(r.get("at")) for r in p.get("cost_history") or []
-               if r.get("kind") == "BACKFILL" and str(r.get("key") or "").startswith("backfill:")]
-        if ats:
-            filled_at[p["product_id"]] = min(ats)
-    filled = set(filled_at)
-    accepted = {g["grn_id"]: product_cost._utc_iso(g.get("accepted_at"))
-                for g in db["grns"].find({}, {"_id": 0, "grn_id": 1, "accepted_at": 1}) if g.get("grn_id")}
-    own: Dict[str, Dict[str, float]] = {}
-    for pid in filled:
-        by_receipt: Dict[Optional[str], List[dict]] = {}
-        for u in db["stock_units"].find({"product_id": pid}):
-            if product_cost._held(u):
-                by_receipt.setdefault(product_cost._receipt_of(u), []).append(u)
-        for r, units in by_receipt.items():
-            cost = _from_pieces(units, sum(stock_value._pieces(u) for u in units))
-            if r and cost is not None and accepted.get(r, "") <= filled_at[pid]:
-                own.setdefault(r, {})[pid] = cost
+    own = {row["product_id"]: row.get("own") or {} for row in rows}
     at = utc_now_iso()
     for gid in legacy_receipts(db):
         receipt = db["grns"].find_one({"grn_id": gid}, {"_id": 0, "items": 1}) or {}
         pids = {it.get("product_id") for it in receipt.get("items") or [] if it.get("product_id")}
+        # A product filled from its pieces holds this receipt's pieces at their
+        # OWN cost, in the pool from its fill time; any other at its average.
+        figures = {p["product_id"]: product_cost.average(p)
+                   for p in db["products"].find({"product_id": {"$in": list(pids - set(filled))}})
+                   if product_cost.average(p)}
+        mine = {p: own[p][gid] for p in pids & set(filled) if gid in own.get(p, {})}
+        figures.update(mine)
         db["grns"].update_one({"grn_id": gid, product_cost.PRE_S4_STAMP: {"$exists": False}},
                               {"$set": {product_cost.PRE_S4_STAMP: run_id, product_cost.PRE_S4_AT: at,
-                                        product_cost.PRE_S4_AVERAGES: _figures(db, gid, pids, filled, own)}})
-    # A receipt an earlier run stamped (a revert kept it for a product that
-    # moved) gets a figure for each product on it it has none for -- e.g. one
-    # revert put back and this run re-averaged -- never for one a bill or
-    # correction moved since that stamp (its pieces wait for their bill). Each
-    # added figure carries this run's time: a piece that left before it was
-    # never in the pool at it (product_cost._variance).
-    for g in db["grns"].find({product_cost.PRE_S4_STAMP: {"$exists": True, "$ne": run_id}}, {"_id": 0}):
-        since = str(g.get(product_cost.PRE_S4_AT) or "")
-        pids = {it.get("product_id") for it in g.get("items") or [] if it.get("product_id")}
-        pids -= set(g.get(product_cost.PRE_S4_AVERAGES) or {})
-        pids -= {p["product_id"] for p in db["products"].find({"product_id": {"$in": list(pids)}})
-                 if any(not str(r.get("key") or "").startswith("backfill:") and str(r.get("at") or "") >= since
-                        for r in p.get("cost_history") or [])}
-        add = _figures(db, g["grn_id"], pids, filled, own)
-        if add:
-            db["grns"].update_one({"grn_id": g["grn_id"]},
-                                  {"$set": {**{f"{product_cost.PRE_S4_AVERAGES}.{p}": c for p, c in add.items()},
-                                            **{f"{product_cost.PRE_S4_AT_BY}.{p}": at for p in add}}})
+                                        product_cost.PRE_S4_AVERAGES: figures,
+                                        product_cost.PRE_S4_AT_BY: {p: filled[p] for p in mine}}})
     return done
 
 
-def _figures(db, gid: str, pids: set, filled: set, own: Dict[str, Dict[str, float]]) -> Dict[str, float]:
-    """The figure each product's pieces of receipt `gid` are in the pool at:
-    their own cost for a product filled from its pieces, else its average."""
-    figures = {p["product_id"]: product_cost.average(p)
-               for p in db["products"].find({"product_id": {"$in": list(pids - filled)}})
-               if product_cost.average(p)}
-    figures.update({pid: c for pid, c in own.get(gid, {}).items() if pid in pids})
-    return figures
-
-
 def revert(db, run_id: str) -> int:
+    """Put back everything run `run_id` wrote -- the latest run only, applied
+    in full or cut short by a crash -- except a product a bill or correction
+    moved since (reported, never undone) and that product's receipt figures."""
+    live = live_runs(db)
+    if live and run_id not in live:
+        sys.exit(f"refused: {run_id} is not the latest run - only run {', '.join(live)} can be reverted")
     key = f"backfill:{run_id}"
     back = 0
     for b in db[BACKUPS].find({"run_id": run_id}):
         pid = b["product_id"]
         prod = db["products"].find_one({"product_id": pid}) or {}
         ours = [r for r in prod.get("cost_history") or [] if r.get("key") == key]
-        written = b.get("written")
-        if written is None:  # written just before a crash: its history row says what
-            if not ours:
-                continue  # the run never wrote it
-            written = ours[0].get("new_cost")
+        if not ours:
+            continue  # the run never wrote it (or a revert already put it back)
+        written = b.get("written", ours[0].get("new_cost"))  # a crash can land before "written"
         if (prod.get("cost_keys") or [])[-1:] != [key] or prod.get("cost_price") != written:
             print(f"  {pid}: changed since the run (a bill or correction) - left as it is")
             continue
-        if b.get("carried_over") or any(r.get("kind") == "CARRIED_OVER" for r in ours):
-            # only a history row was added: take it out, the average stays
-            db["products"].update_one({"product_id": pid, "cost_price": written},
-                                      {"$pull": {"cost_keys": key, "cost_history": {"key": key}}})
-            back += 1
-            continue
-        sets = {k: v for k, v in b["before"].items() if v != {"__missing__": True}}
-        unsets = {k: "" for k, v in b["before"].items() if v == {"__missing__": True}}
-        update: Dict[str, dict] = {"$pull": {"cost_keys": key, "cost_history": {"key": key}}}
+        sets = {k: v for k, v in b["before"].items() if v != MISSING}
+        unsets = {k: "" for k, v in b["before"].items() if v == MISSING}
+        update: Dict[str, dict] = {}
         if sets:
             update["$set"] = sets
         if unsets:
             update["$unset"] = unsets
-        db["products"].update_one({"product_id": pid, "cost_price": written}, update)
+        db["products"].update_one({"product_id": pid, "cost_price": written, "cost_keys": prod["cost_keys"]}, update)
+        for t in b.get("twins") or []:
+            twin = db["catalog_products"].find_one({"_id": t["_id"]}) or {}
+            if (twin.get("pricing") or {}).get("cost_price") == written and t["cost"] != written:
+                # ponytail: a twin with no pricing before keeps an empty one
+                db["catalog_products"].update_one(
+                    {"_id": t["_id"]}, {"$unset": {"pricing.cost_price": ""}} if t["cost"] == MISSING
+                    else {"$set": {"pricing.cost_price": t["cost"]}})
+            if t["needs_review"] is True and twin.get("needs_review") is False:
+                db["catalog_products"].update_one({"_id": t["_id"]}, {"$set": {"needs_review": True}})
         back += 1
     _unstamp(db, run_id, key)
     return back
