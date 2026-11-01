@@ -135,8 +135,12 @@ def _bills_for(db, unit: dict, gstin_of) -> list:
         # no return places yet is still that shop's, held unallocated.
         return here in {gstin_of(b) or None, gstins.get(b.get("to_store_id") or b.get("store_id"))}
 
+    # The transfer's tax invoice only: its credit note (same source_transfer_id)
+    # covers pieces that never arrived, and its negative heads would clamp a
+    # landed piece's reversal to 0 for good.
     mirrors = {b.get("source_transfer_id"): b for b in db.get_collection("vendor_bills").find({
-        "status": {"$nin": _gst_itc()._DEAD_BILL}, "source_transfer_id": {"$in": tids}})}
+        "status": {"$nin": _gst_itc()._DEAD_BILL}, "source_transfer_id": {"$in": tids},
+        "doc_type": {"$ne": _gst_itc().TRANSFER_CREDIT_NOTE}})}
     moved = {t.get("id"): t for t in db.get_collection("stock_transfers").find(
         {"id": {"$in": tids}}, {"id": 1, "shipped_at": 1, "received_at": 1, "gst_registrations": 1,
                                 "from_location_id": 1, "to_location_id": 1})}
@@ -551,7 +555,10 @@ def reverse_on_new_bill(db, bill: dict, actor_id: str = "") -> dict:
     count or as lost on a transfer, or DAMAGED) claims credit on them: reverse it now, in the month of
     the loss -- or the bill's month when the loss came first (credit is never
     reversed before it is claimed). Once per piece, so safe to repeat. Every
-    bill door calls this after storing the bill."""
+    bill door calls this after storing the bill. A transfer credit note is no
+    bill of the pieces: it claims nothing on them."""
+    if bill.get("doc_type") == _gst_itc().TRANSFER_CREDIT_NOTE:
+        return totals([])
     if bill.get("source_transfer_id"):
         whose = _transfer_units(db, bill["source_transfer_id"])
     else:

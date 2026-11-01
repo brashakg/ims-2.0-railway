@@ -2535,11 +2535,13 @@ async def found_missing_piece(
     def _found_here(u: Dict) -> bool:  # already where this door puts it
         if not at_source:
             return _landed(u, transfer)  # on the shelf, or damaged in quarantine
-        return (u.get("store_id") == store and u.get("status") == STOCK_STATUS_AVAILABLE
-                and not u.get("transfer_id"))
+        # The lasting stamp of the move back: whatever the piece did since
+        # (sold, reserved, packed again) a retry still books its note.
+        return u.get("found_back_from_transfer_id") == tid
 
     patch = (
-        {"status": STOCK_STATUS_AVAILABLE, "transfer_id": None, "transfer_to_store_id": None}
+        {"status": STOCK_STATUS_AVAILABLE, "transfer_id": None, "transfer_to_store_id": None,
+         "found_back_from_transfer_id": tid}
         if at_source
         else _rehome_patch(transfer, STOCK_STATUS_AVAILABLE)
     )

@@ -1389,3 +1389,104 @@ def test_a_piece_that_landed_then_was_sold_or_reserved_is_never_stuck_missing(wo
     # Its arrival is audited as it landed (the shelf), not as it is now.
     row = world["stock_audit"].find_one({"stock_id": "SU-2", "reason": "MISSING_FOUND"})
     assert row and row["new_status"] == "AVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# Review round 4: a credit note on the box is never the bill a write-off reads
+# ---------------------------------------------------------------------------
+
+
+def test_a_damaged_write_off_on_a_box_with_a_credit_note_reverses_the_invoice_credit(world):
+    """Dhanbad (Z) ships BVQX001-003 to Bokaro (Y): 001 in good, 002 damaged,
+    003 lost and written off (credit note DHN01/C2627/0001). Writing 002 off
+    as damaged takes back Bokaro's credit on the tax invoice line -- 92.50 --
+    never the credit note's negative heads clamped to 0."""
+    from datetime import datetime as _dt
+
+    from api.routers import transfers
+    from api.services import writeoff_itc
+
+    t = _shipped_box(world)
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _scan_in(t["id"], "BVQX002", user=MGR_BOK, damaged=True, reason="Cracked rim")
+    _complete(t["id"], user=MGR_BOK)
+    _run(transfers.write_off_missing_piece(t["id"], "SU-3", ADMIN))
+    assert len(_notes(world, t["id"])) == 1
+    (invoice,) = [b for b in _bills(world, t["id"]) if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
+    out = writeoff_itc.record_writeoff(world, [_unit(world, "SU-2")], source_type="QUARANTINE_DAMAGE",
+                                       source_id="SU-2", when=_dt.utcnow(), actor_id="u-admin")
+    row = world["itc_writeoff_reversals"].find_one({"_id": "SU-2"})
+    assert (row["bill_id"], row["gstin"]) == (invoice["bill_id"], GSTIN_Y_JH)
+    assert (row["cgst"], row["sgst"], row["igst"]) == (46.25, 46.25, 0.0)
+    assert out["total"] == 92.5
+
+
+def test_a_piece_lost_on_its_second_hop_reverses_the_first_hops_invoice_not_its_credit_note(world):
+    """T0 Dhanbad -> Bokaro lands BVQX001 and BVQX002; BVQX003 is lost
+    (credit note on T0). T1 Bokaro -> Dhanbad then loses BVQX001: Bokaro
+    takes back the credit T0's tax invoice gave it -- 92.50 -- and the
+    shrinkage record says so."""
+    from api.routers import transfers
+
+    t0 = _lost_one(world, "ST-BOK-1")
+    _run(transfers.write_off_missing_piece(t0["id"], "SU-3", ADMIN))
+    (invoice,) = [b for b in _bills(world, t0["id"]) if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
+    t1 = _ask(1, frm="ST-BOK-1", to="ST-DHN-1")
+    _pack(t1["id"], ["BVQX001"])
+    _ship(t1["id"])
+    _complete(t1["id"], user=MGR_DHN)
+    _run(transfers.write_off_missing_piece(t1["id"], "SU-1", ADMIN))
+    row = world["itc_writeoff_reversals"].find_one({"_id": "SU-1"})
+    assert (row["bill_id"], row["gstin"]) == (invoice["bill_id"], GSTIN_Y_JH)
+    assert (row["cgst"], row["sgst"], row["igst"]) == (46.25, 46.25, 0.0)
+    shrink = world["stock_shrinkage"].find_one({"transfer_id": t1["id"]})
+    assert shrink["itc_reversed"]["total"] == 92.5
+
+
+def test_a_credit_note_is_never_read_as_a_late_transfer_bill(world):
+    """reverse_on_new_bill on a transfer credit note books nothing -- not
+    even for a piece of the box written off as damaged: the note only covers
+    pieces that never arrived, and a row it wrote would stand for good."""
+    from api.routers import transfers
+    from api.services import writeoff_itc
+
+    t = _shipped_box(world)
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _scan_in(t["id"], "BVQX002", user=MGR_BOK, damaged=True, reason="Cracked rim")
+    _complete(t["id"], user=MGR_BOK)
+    _run(transfers.write_off_missing_piece(t["id"], "SU-3", ADMIN))
+    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"status": "DAMAGED"}})
+    (note,) = _notes(world, t["id"])
+    assert writeoff_itc.reverse_on_new_bill(world, note)["total"] == 0.0
+    assert _reversals(world) == []
+
+
+def test_found_at_the_sender_after_a_failed_note_and_a_sale_still_books_the_note(world, monkeypatch):
+    """Dhanbad -> Bokaro, BVQX002 missing. Found at Dhanbad: the unit moves
+    back, then the credit note fails once; the counter sells the piece. The
+    second press books exactly one note and resolves the piece."""
+    from api.routers import transfers
+
+    t = _shipped_box(world)
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _scan_in(t["id"], "BVQX003", user=MGR_BOK)
+    _complete(t["id"], user=MGR_BOK)
+    real = transfers._short_credit_note
+    calls = {"n": 0}
+
+    def _flaky(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise HTTPException(status_code=503, detail="database blip")
+        return real(*a, **k)
+
+    monkeypatch.setattr(transfers, "_short_credit_note", _flaky)
+    with pytest.raises(HTTPException) as exc:
+        _run(transfers.found_missing_piece(t["id"], "SU-2", transfers.MissingFound(at="source"), MGR_DHN))
+    assert _status(exc) == 503
+    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"status": "SOLD"}})
+    _run(transfers.found_missing_piece(t["id"], "SU-2", transfers.MissingFound(at="source"), MGR_DHN))
+    (note,) = _notes(world, t["id"])
+    assert note["credited_stock_ids"] == ["SU-2"]
+    assert _run(transfers.list_missing(ADMIN))["pieces"] == []
+    assert _unit(world, "SU-2")["status"] == "SOLD"
