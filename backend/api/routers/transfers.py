@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+from ..utils.ist import now_ist
 from enum import Enum
 import logging
 import uuid
@@ -371,9 +372,9 @@ def generate_transfer_number() -> str:
     coll = _transfers_coll()
     if coll is not None:
         seq = coll.count_documents({}) + 1001
-        return f"TRF-{datetime.now().strftime('%Y%m')}-{seq}"
+        return f"TRF-{now_ist().strftime('%Y%m')}-{seq}"
     TRANSFER_COUNTER["count"] += 1
-    return f"TRF-{datetime.now().strftime('%Y%m')}-{TRANSFER_COUNTER['count']}"
+    return f"TRF-{now_ist().strftime('%Y%m')}-{TRANSFER_COUNTER['count']}"
 
 
 def _transfer_tax_invoice(transfer: Dict) -> str:

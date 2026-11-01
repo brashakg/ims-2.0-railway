@@ -6,9 +6,10 @@ rounding or validation was changed.
 """
 
 import logging
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Optional
 from ...dependencies import get_order_repository
+from ...utils.ist import ist_today
 
 # Item-type / category buckets used to decide whether a confirmed order needs a
 # workshop/lab job. Mirrors the POS client's Phase-6.8 gate so the safety-net and
@@ -113,7 +114,7 @@ def _ensure_workshop_job_for_order(
         # expected_date: the order's scheduled delivery (YYYY-MM-DD) or +5 days.
         exp = str(order.get("expected_delivery") or "")[:10]
         if not exp:
-            exp = (date.today() + timedelta(days=5)).isoformat()
+            exp = (ist_today() + timedelta(days=5)).isoformat()
 
         from ..workshop import generate_job_number
 

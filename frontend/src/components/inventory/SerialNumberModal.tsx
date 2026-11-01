@@ -13,6 +13,7 @@ import {
   CheckCircle,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
+import { istDayString } from '../../utils/datetime';
 
 interface SerialNumberModalProps {
   isOpen: boolean;
@@ -57,7 +58,7 @@ export function SerialNumberModal({
   const [status, setStatus] = useState<SerialNumberData['status']>(editData?.status || 'IN_STOCK');
   const [locationCode, setLocationCode] = useState(editData?.locationCode || '');
   const [purchaseDate, setPurchaseDate] = useState(
-    editData?.purchaseDate || new Date().toISOString().split('T')[0]
+    editData?.purchaseDate || (istDayString(new Date()) ?? '')
   );
   const [warrantyMonths, setWarrantyMonths] = useState(editData?.warrantyMonths || 12);
   const [supplierBatch, setSupplierBatch] = useState(editData?.supplierBatch || '');

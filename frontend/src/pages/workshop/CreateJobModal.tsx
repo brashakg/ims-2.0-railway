@@ -6,6 +6,7 @@
 import { Search } from 'lucide-react';
 import clsx from 'clsx';
 import type { WorkshopPageState } from './useWorkshopPage';
+import { istDayString } from '../../utils/datetime';
 
 export function CreateJobModal({ page }: { page: WorkshopPageState }) {
   const { showCreateJob, setShowCreateJob, setCreateSelectedOrder, setCreateOrders, createSelectedOrder, createOrderSearch, setCreateOrderSearch, searchOrdersForJob, createOrders, createPriority, setCreatePriority, createExpectedDate, setCreateExpectedDate, createFitting, setCreateFitting, createNotes, setCreateNotes, dcHardlock, canOverrideHardlock, overrideReason, setOverrideReason, handleCreateJob, createLoading } = page;
@@ -89,7 +90,7 @@ export function CreateJobModal({ page }: { page: WorkshopPageState }) {
                   <div>
                     <label className="text-xs text-gray-500 block mb-1">Expected Delivery Date</label>
                     <input type="date" value={createExpectedDate} onChange={e => setCreateExpectedDate(e.target.value)}
-                      min={new Date().toISOString().split('T')[0]}
+                      min={istDayString(new Date()) ?? undefined}
                       className="w-full px-3 py-2 border border-gray-300 bg-white text-gray-900 rounded-lg text-sm"
                       title="Expected Delivery Date" />
                   </div>

@@ -34,6 +34,7 @@ import {
 } from './eyeTestTypes';
 import { hydrateEyeTest, storedExamHasData, type StoredEyeTest } from './eyeTestHydrate';
 import { validateEyeTest } from './eyeTestValidation';
+import { istDayString } from '../../utils/datetime';
 
 export interface ExamDraft {
   examDate: string;
@@ -56,7 +57,7 @@ export interface ExamDraft {
 
 export function emptyExamDraft(optometristName = ''): ExamDraft {
   return {
-    examDate: new Date().toISOString().split('T')[0],
+    examDate: istDayString(new Date()) ?? '',
     optometristName,
     chiefComplaint: '',
     vduUsage: 'None',

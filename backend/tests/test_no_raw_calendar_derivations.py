@@ -90,27 +90,6 @@ _SKIP_DIRS = {"tests", "__pycache__", ".git", "node_modules", ".venv"}
 
 ALLOWED = {
     (
-        "api/routers/analytics.py",
-        'if to_date_str(c.get("created_at")) >= start_date.date().isoformat()',
-    ): (
-        "New-vs-returning customer split. `start_date` comes from "
-        "analytics.get_date_range() == datetime.now(), the SAME naive box "
-        "clock created_at is stored in, so both sides of this comparison are "
-        "already in one frame. The same start/end pair is ALSO handed to "
-        "_fetch_orders_in_window as Mongo bounds, which must move the OPPOSITE "
-        "way -- converting the stored side alone would relocate the error, not "
-        "remove it. See the ruling in get_date_range's docstring."
-    ),
-    (
-        "api/routers/analytics.py",
-        'if to_date_str(c.get("created_at")) < start_date.date().isoformat()',
-    ): (
-        "Same comparison, the returning-customer half of the same split. Same "
-        "ruling: `start_date` is the naive box clock, so both sides already "
-        "share one frame and the Mongo bounds built from the same pair must "
-        "move the opposite way."
-    ),
-    (
         "api/routers/finance/bank_statement.py",
         'pmt_date = (pmt.get("payment_date") or pmt.get("created_at") or "")[:10]',
     ): (
@@ -131,29 +110,6 @@ ALLOWED = {
         "SECOND reminder for ~8 percent of tests -- a customer called twice -- "
         "to buy a reminder one day earlier on a 365-day horizon. Exactness "
         "needs a migration that re-keys the stored values."
-    ),
-    (
-        "api/routers/jarvis.py",
-        'created = str(o.get("created_at") or "")[:10]',
-    ): (
-        "Jarvis today/this-month/last-year revenue roll-up. The bounds it is "
-        "compared against (`today`, `month_start`, `ly_month_*`) are all built "
-        "from the same datetime.now() a few lines above, so both sides are in "
-        "the box frame. Converting one side only would move the boundary."
-    ),
-    (
-        "api/routers/jarvis.py",
-        '"created_at": {"$gte": datetime.now().strftime("%Y-%m-01")},',
-    ): (
-        "vendor_returns 'this month' COUNT in the Jarvis context blob. "
-        "vendor_returns.created_at is a naive-UTC ISO STRING "
-        "(vendor_returns.py writes datetime.now().isoformat(), no repository), "
-        "so this string bound and the stored strings are in ONE frame today. "
-        "Making it IST means a BOUND moving backward, which for a string "
-        "column means emitting a full '...T18:30:00' timestamp rather than a "
-        "'%Y-%m-01' prefix -- a different fix shape from every other site, and "
-        "it belongs with a decision about that collection's storage frame. The "
-        "value here is a count in an AI briefing, not a document."
     ),
     (
         "api/routers/payout.py",

@@ -10,7 +10,6 @@ from api.utils.event_time import utc_now_iso
 
 from fastapi import HTTPException, Depends, Query, Response
 from typing import Optional
-from datetime import datetime
 import uuid
 from ..auth import get_current_user, require_roles
 from ...dependencies import store_in_view
@@ -23,6 +22,7 @@ from ...dependencies import (
     can_access_store_scoped,
 )
 from ._shared import _FITTING_ROLES, _check_dc_hardlock, logger, router
+from ...utils.ist import now_ist
 from .models import FittingDetailsUpdate, WorkshopJobCreate, WorkshopJobUpdate
 from .helpers import (
     _assert_job_store_access,
@@ -327,8 +327,8 @@ async def update_fitting_details(
 
     # Stamp metadata we want server-controlled rather than trusting the client.
     fd = payload.fitting_details.model_dump(mode="json")
-    # These are existing calendar defaults, not event instants.
-    now = datetime.now()
+    # Calendar defaults, not event instants: the IST wall clock.
+    now = now_ist()
     fd["order_date"] = fd.get("order_date") or now.date().isoformat()
     fd["order_time"] = fd.get("order_time") or now.strftime("%H:%M")
     fd["ordered_by"] = fd.get("ordered_by") or current_user.get("user_id")

@@ -10,6 +10,7 @@ from ._shared import (
     datetime,
     is_online_store,
 )
+from ...utils.ist import ist_today
 
 # ============================================================================
 # HELPERS
@@ -205,15 +206,18 @@ def _shelf_by_product(stock_coll, store_id: Optional[str]) -> Dict[str, dict]:
 
 
 def compute_days_until_expiry(expiry, now: Optional[datetime] = None) -> Optional[int]:
-    """Whole days from `now` until `expiry` (negative = already expired).
+    """Calendar days from today (IST) until `expiry` (negative = expired).
 
+    An expiry date is a calendar date, so this counts calendar days against
+    the IST business day: a batch expiring today is 0 (still sellable, the
+    till's rule) at every hour of that day. `now` overrides "today" in tests.
     Returns None when the expiry is missing/unparseable. Pure + testable.
     """
-    now = now or datetime.utcnow()
     parsed = _parse_expiry(expiry)
     if parsed is None:
         return None
-    return (parsed - now).days
+    today = now.date() if now is not None else ist_today()
+    return (parsed.date() - today).days
 
 
 def fefo_sort(stock_rows: List[dict], now: Optional[datetime] = None) -> List[dict]:
@@ -223,7 +227,6 @@ def fefo_sort(stock_rows: List[dict], now: Optional[datetime] = None) -> List[di
     expiry sort LAST (you'd pick a dated unit before an undated one). Stable
     for equal expiries. Pure helper — does not mutate the input list.
     """
-    now = now or datetime.utcnow()
 
     def _key(row):
         parsed = _parse_expiry(row.get("expiry_date"))
@@ -247,7 +250,6 @@ def partition_by_expiry(
       - days > near         -> safe
       - no parseable expiry -> undated
     """
-    now = now or datetime.utcnow()
     expired: List[dict] = []
     near: List[dict] = []
     safe: List[dict] = []

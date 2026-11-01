@@ -162,8 +162,17 @@ async def discount_analysis(
 
     query: dict = {"store_id": active_store}
     now = datetime.now()
-    dt_from = _parse_date(date_from)
-    dt_to = _parse_date(date_to)
+    # Requested IST days -> naive-UTC bounds covering them whole (same shape
+    # as the void-anomaly route below).
+    parsed_from = _parse_date(date_from)
+    parsed_to = _parse_date(date_to)
+    dt_from = ist_day_start_utc(parsed_from.date()) if parsed_from else None
+    dt_to = (
+        ist_day_start_utc(parsed_to.date() + timedelta(days=1))
+        - timedelta(microseconds=1)
+        if parsed_to
+        else None
+    )
 
     if dt_from or dt_to:
         # Datetime objects, NOT .isoformat() strings -- created_at is a BSON
