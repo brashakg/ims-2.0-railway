@@ -135,12 +135,15 @@ def _bills_for(db, unit: dict, gstin_of) -> list:
     mirrors = list(db.get_collection("vendor_bills").find({
         "status": {"$nin": _gst_itc()._DEAD_BILL}, "source_transfer_id": {"$in": tids}}))
     if mirrors:
-        # Newest by when its transfer delivered the piece, never by the
-        # mirror's date: a mirror is booked at COMPLETE, which can come after
-        # a later transfer has moved the piece on (and been completed).
-        received = {t.get("id"): str(t.get("received_at") or "") for t in db.get_collection(
-            "stock_transfers").find({"id": {"$in": tids}}, {"id": 1, "received_at": 1})}
-        latest = max(mirrors, key=lambda b: (received.get(b.get("source_transfer_id"), ""),
+        # Newest by when its transfer SHIPPED (stamped once; the piece can
+        # only ship on B after it arrived on A). Never by the mirror's date (a
+        # mirror is booked at COMPLETE, which can come after a later transfer
+        # moved the piece on) nor by received_at (every receive call restamps
+        # it, so a partial receive finished later would outrank B).
+        moved = {t.get("id"): (str(t.get("shipped_at") or ""), str(t.get("received_at") or ""))
+                 for t in db.get_collection("stock_transfers").find(
+                     {"id": {"$in": tids}}, {"id": 1, "shipped_at": 1, "received_at": 1})}
+        latest = max(mirrors, key=lambda b: (moved.get(b.get("source_transfer_id"), ("", "")),
                                              str(b.get("bill_date") or ""), str(b.get("created_at") or "")))
         return [latest] if landed_here(latest) else []
     return [b for b in _receipt_bills(db, rids) if landed_here(b)] if rids else []

@@ -1031,9 +1031,11 @@ def test_two_transfers_completed_out_of_order_reverse_against_the_one_that_deliv
     _line_bill("GRN-WO-0071", "TAX-WO-71")
     sid = "SU-GRN-WO-0071-0"
     _rehomed(db, sid, "TRF-A", MH_STORE)
-    db.stock_transfers.update_one({"id": "TRF-A"}, {"$set": {"received_at": "2026-10-01T05:00:00"}})
+    db.stock_transfers.update_one({"id": "TRF-A"}, {"$set": {
+        "shipped_at": "2026-09-30T05:00:00", "received_at": "2026-10-01T05:00:00"}})
     _rehomed(db, sid, "TRF-B", STORE)
-    db.stock_transfers.update_one({"id": "TRF-B"}, {"$set": {"received_at": "2026-10-02T05:00:00"}})
+    db.stock_transfers.update_one({"id": "TRF-B"}, {"$set": {
+        "shipped_at": "2026-10-01T09:00:00", "received_at": "2026-10-02T05:00:00"}})
     _mirror(db, "TRF-B", gstin=SHOP_GSTIN, to_store=STORE, day="2026-10-03")
     _mirror(db, "TRF-A", day="2026-10-04" if order == "next_day" else "2026-10-03")
     db.vendor_bills.update_one({"bill_id": "MB-TRF-B"}, {"$set": {"created_at": "2026-10-03T01:00:00"}})
@@ -1043,6 +1045,35 @@ def test_two_transfers_completed_out_of_order_reverse_against_the_one_that_deliv
     assert (row["gstin"], row["bill_id"], row["igst"]) == (SHOP_GSTIN, "MB-TRF-B", 155.0)
     assert _written_off(r3b._compute_gstr3b(OCTOBER, MH_STORE)) == 0.0
 
+
+
+# ---------------------------------------------------------------------------
+# Fix round 7 (round-6 review): rank crossings by when the transfer SHIPPED.
+# received_at is restamped on every receive call, so a partial receive whose
+# rest arrives later would outrank the transfer that brought the piece back.
+# ---------------------------------------------------------------------------
+
+def test_a_partial_receive_finished_after_the_piece_moved_on_still_reverses(two_gstins, october):
+    """TRF-A (JH -> MH) receives only the line holding the piece on 1 Oct;
+    the piece ships back on TRF-B (MH -> JH), received 2 Oct and completed.
+    The rest of TRF-A arrives on 3 Oct, restamping its received_at, then
+    TRF-A completes. Damaged at JH: TRF-B delivered it here (it shipped
+    after TRF-A did), so Jharkhand reverses against MB-TRF-B."""
+    db = two_gstins["db"]
+    _stocked(db, "GRN-WO-0073")
+    _line_bill("GRN-WO-0073", "TAX-WO-73")
+    sid = "SU-GRN-WO-0073-0"
+    _rehomed(db, sid, "TRF-A", MH_STORE)
+    _rehomed(db, sid, "TRF-B", STORE)
+    db.stock_transfers.update_one({"id": "TRF-A"}, {"$set": {
+        "shipped_at": "2026-09-30T05:00:00", "received_at": "2026-10-03T05:00:00"}})
+    db.stock_transfers.update_one({"id": "TRF-B"}, {"$set": {
+        "shipped_at": "2026-10-01T09:00:00", "received_at": "2026-10-02T05:00:00"}})
+    _mirror(db, "TRF-B", gstin=SHOP_GSTIN, to_store=STORE, day="2026-10-02")
+    _mirror(db, "TRF-A", day="2026-10-03")
+    assert _damage(db, sid, MH_ADMIN)["itc_reversed"]["total"] == 155.0
+    row = db.itc_writeoff_reversals.find_one({"_id": sid})
+    assert (row["gstin"], row["bill_id"], row["igst"]) == (SHOP_GSTIN, "MB-TRF-B", 155.0)
 
 @pytest.mark.parametrize("lost,found,net", [
     (3, 0, 20.0),   # all three lost, a piece with a slice found
