@@ -76,6 +76,7 @@ No emoji (Windows cp1252).
 
 from __future__ import annotations
 
+import ast
 import io
 import os
 import re
@@ -123,8 +124,90 @@ _REL = (
     "RELATIVE OFFSET, not a business day. The value goes to a validator that "
     "compares it against ITS OWN clock read, and the assertion is about the "
     "SIGN of the difference (past / today / future), not about which calendar "
-    "day it is. A whole-day frame shift moves both sides together."
+    "day it is. A whole-day frame shift moves both sides together. ONLY TRUE "
+    "while that validator still reads date.today() -- see _SAME_CLOCK."
 )
+
+# THE HOLE THAT LET test_follow_up_create_accepts_today THROUGH (CI red at
+# 01:15 IST, 2026-11-02). Its `today = date.today()` sat in ALLOWED as _REL,
+# but follow_ups.py had already moved to `sched < ist_today()`: the validator
+# no longer shared the test's clock, so between 00:00 and 05:30 IST "today" was
+# yesterday and the create returned 422. A _REL reason is a claim about
+# PRODUCTION code, and nothing re-checked it. Now every file with a _REL entry
+# names the exact production line whose clock it shares, and
+# test_relative_offset_entries_still_share_production_clock fails the moment
+# that line is gone (moved to ist_today, reworded, deleted) -- so the test has
+# to follow the validator to the IST day instead of silently drifting.
+# Each anchor is (file, ((def qualname, exact line), ...)): the line must be a
+# real code line INSIDE THAT DEF, not merely somewhere in the file. A file-wide
+# match let a partial migration through: customers.py carries the same DOB
+# check twice (_check_dob_not_future and PatientCreate.dob_not_future), so
+# moving only the first to ist_today() left the needle alive via the second
+# while test_customer_validation's "tomorrow is rejected" case broke at night.
+_DOB = "if v is not None and v > date.today():"
+_DELIVERY_PAST = "if v is not None and v < date.today():"
+_DELIVERY_FAR = "if v is not None and v > date.today() + timedelta(days=365):"
+_DELIVERY_FN = "OrderCreate._validate_delivery_date_not_past"
+_SAME_CLOCK = {
+    "test_customer_validation.py": (
+        "routers/customers.py",
+        (("_check_dob_not_future", _DOB), ("PatientCreate.dob_not_future", _DOB)),
+    ),
+    "test_unification_5_ensure_customer.py": (
+        "routers/customers.py",
+        (("_check_dob_not_future", _DOB),),
+    ),
+    "test_unification_customer_guards.py": (
+        "routers/customers.py",
+        (("_check_dob_not_future", _DOB),),
+    ),
+    "test_order_delivery_and_cart_discount.py": (
+        "routers/orders/models.py",
+        ((_DELIVERY_FN, _DELIVERY_PAST),),
+    ),
+    "test_orders_hardening.py": (
+        "routers/orders/models.py",
+        ((_DELIVERY_FN, _DELIVERY_PAST),),
+    ),
+    "test_pos_workshop_autolink.py": (
+        "routers/orders/models.py",
+        ((_DELIVERY_FN, _DELIVERY_PAST), (_DELIVERY_FN, _DELIVERY_FAR)),
+    ),
+}
+
+
+def _def_code_lines(source, qualname):
+    """Stripped code lines of the def named `qualname` ("func" or
+    "Class.method"), comments and docstring excluded; None if no such def."""
+    tree = ast.parse(source)
+    nodes, node = tree.body, None
+    for part in qualname.split("."):
+        node = next(
+            (
+                n
+                for n in nodes
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and n.name == part
+            ),
+            None,
+        )
+        if node is None:
+            return None
+        nodes = node.body
+    lines = source.splitlines()
+    body = node.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(
+        getattr(body[0], "value", None), ast.Constant
+    ):
+        body = body[1:]  # drop the docstring
+    if not body:
+        return []
+    return [
+        line.strip()
+        for line in lines[body[0].lineno - 1 : node.end_lineno]
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
 
 _HEX = (
     "NOT A DATE. A uuid4 hex slice used to build a unique test id. The [:10] "
@@ -187,44 +270,6 @@ ALLOWED = {
         "test_unification_customer_guards.py",
         "CustomerUpdate(dob=date.today() + timedelta(days=1))",
     ): _REL,
-    # -- leave notice: a DIFFERENCE in days, both ends off one clock ---------
-    (
-        "test_f26_remote_approval.py",
-        "self.from_date = date.today() + timedelta(days=from_days_ahead)",
-    ): (
-        "NOTICE PERIOD, a difference. `_is_fast_path_leave` measures from_date "
-        "minus its own today against the policy threshold, so both ends move "
-        "together under a frame shift."
-    ),
-    ("test_f26_remote_approval.py", "self.to_date = date.today() + timedelta("): (
-        "Continuation of the leave-window construction above; same difference."
-    ),
-    (
-        "test_f26_remote_approval.py",
-        'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=1), "S1") is True',
-    ): ("1 day of notice against a 2-day threshold -- a difference, not a day."),
-    (
-        "test_f26_remote_approval.py",
-        'assert hr_router._is_fast_path_leave("SICK", date.today(), "S1") is True',
-    ): ("Zero notice against a 2-day threshold -- a difference, not a day."),
-    (
-        "test_f26_remote_approval.py",
-        'assert hr_router._is_fast_path_leave("EARNED", date.today() + timedelta(days=1), "S1") is False',
-    ): (
-        "Asserts the leave TYPE gate, not the date; the date is 1 day of "
-        "notice either way."
-    ),
-    (
-        "test_f26_remote_approval.py",
-        'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=5), "S1") is False',
-    ): ("5 days of notice against a 2-day threshold -- a difference, not a day."),
-    (
-        "test_f26_remote_approval.py",
-        'assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=5), "S1") is True',
-    ): (
-        "The same 5-day notice re-asserted under a monkeypatched 7-day "
-        "threshold; still a difference."
-    ),
     # -- deliberate widening -------------------------------------------------
     (
         "test_off_till_expenses.py",
@@ -396,3 +441,30 @@ def test_every_allow_list_entry_states_a_reason():
         "an exemption without a real reason is how this class comes back:\n"
         + "\n".join(thin)
     )
+
+
+def test_relative_offset_entries_still_share_production_clock():
+    """A _REL exemption is only sound while the validator it feeds reads the
+    SAME box clock (date.today()). Prove it, per file, against production."""
+    api_dir = os.path.join(os.path.dirname(TESTS_DIR), "api")
+    problems = []
+    for name in sorted({n for (n, _), r in ALLOWED.items() if r.startswith(_REL)}):
+        if name not in _SAME_CLOCK:
+            problems.append(
+                "%s: _REL entry with no _SAME_CLOCK anchor -- name the "
+                "production line whose clock it shares, or convert the test "
+                "to tests.ist_business_day" % name
+            )
+            continue
+        rel_path, anchors = _SAME_CLOCK[name]
+        with io.open(os.path.join(api_dir, rel_path), encoding="utf-8") as fh:
+            source = fh.read()
+        for qualname, needle in anchors:
+            body = _def_code_lines(source, qualname)
+            if body is None or needle not in body:
+                problems.append(
+                    "%s: %s in api/%s no longer has `%s` -- the validator "
+                    "changed clocks (or moved); move the test to the IST day "
+                    "(tests.ist_business_day)" % (name, qualname, rel_path, needle)
+                )
+    assert not problems, "\n".join(problems)
