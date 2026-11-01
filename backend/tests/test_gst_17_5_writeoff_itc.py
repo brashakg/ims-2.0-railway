@@ -1131,3 +1131,72 @@ def test_a_part_bill_after_the_loss_month_is_filed_tops_up_in_the_open_month(
     assert (top["period"], top["cgst"], top["sgst"]) == ("2026-11", 10.0, 10.0)
     assert r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]["centralTax"] == 10.0
     assert r3b._compute_gstr3b("2026-11", STORE)["itcWriteOffReversed"]["centralTax"] == 10.0
+
+
+# ---------------------------------------------------------------------------
+# Fix round 8 (round-7 review): a mirror is booked only at Complete, so "no
+# mirror yet" is not "no GSTIN crossed". Rank the crossings the piece rode
+# (a mirror, ship's stamp, else the two shops' GSTINs), not the bills booked.
+# ---------------------------------------------------------------------------
+
+def _shipped(db, tid, src, dst, shipped):
+    db.stock_transfers.update_one({"id": tid}, {"$set": {
+        "from_location_id": src, "to_location_id": dst, "shipped_at": shipped}})
+
+
+@pytest.mark.parametrize("b_first", [True, False], ids=["return-mirror-first", "first-mirror-first"])
+def test_a_piece_back_on_its_receipt_gstin_waits_for_the_return_mirror(two_gstins, october, b_first):
+    """JH -> MH on TRF-A, back MH -> JH on TRF-B, both received, neither
+    completed; damaged at JH. The Jharkhand purchase bill no longer holds
+    the credit (it left with the piece), so nothing is reversed until
+    MB-TRF-B lands -- then IGST on Jharkhand, against MB-TRF-B."""
+    from api.services import writeoff_itc as wo
+
+    db = two_gstins["db"]
+    _stocked(db, "GRN-WO-0081")
+    _line_bill("GRN-WO-0081", "TAX-WO-81")
+    sid = "SU-GRN-WO-0081-0"
+    _rehomed(db, sid, "TRF-A8", MH_STORE)
+    _rehomed(db, sid, "TRF-B8", STORE)
+    _shipped(db, "TRF-A8", STORE, MH_STORE, "2026-09-30T05:00:00")
+    _shipped(db, "TRF-B8", MH_STORE, STORE, "2026-10-01T09:00:00")
+    assert _damage(db, sid, MH_ADMIN)["itc_reversed"]["total"] == 0.0
+    assert db.itc_writeoff_reversals.count_documents({}) == 0
+    mirrors = [("TRF-B8", dict(gstin=SHOP_GSTIN, to_store=STORE, day="2026-10-06")),
+               ("TRF-A8", dict(day="2026-10-07"))]
+    for tid, kw in mirrors if b_first else mirrors[::-1]:
+        _mirror(db, tid, **kw)
+        wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": f"MB-{tid}"}))
+    row = db.itc_writeoff_reversals.find_one({"_id": sid})
+    assert (row["gstin"], row["bill_id"], row["igst"], row["cgst"], row["sgst"]) == (
+        SHOP_GSTIN, "MB-TRF-B8", 155.0, 0.0, 0.0)
+
+
+def test_the_newest_crossing_without_a_mirror_holds_the_reversal_until_it_lands(two_gstins, october):
+    """TRF-A (JH -> MH) completed: MB on MH. TRF-B (MH -> JH) and TRF-C
+    (JH -> MH) received, neither completed; damaged at MH. TRF-C brought it
+    here, so nothing is reversed against MB-TRF-A, nor when MB-TRF-B lands;
+    MB-TRF-C does it."""
+    from api.services import writeoff_itc as wo
+
+    db = two_gstins["db"]
+    _stocked(db, "GRN-WO-0082")
+    _line_bill("GRN-WO-0082", "TAX-WO-82")
+    sid = "SU-GRN-WO-0082-0"
+    _rehomed(db, sid, "TRF-A9", MH_STORE)
+    _rehomed(db, sid, "TRF-B9", STORE)
+    _rehomed(db, sid, "TRF-C9", MH_STORE)
+    _shipped(db, "TRF-A9", STORE, MH_STORE, "2026-09-30T05:00:00")
+    _shipped(db, "TRF-B9", MH_STORE, STORE, "2026-10-01T09:00:00")
+    _shipped(db, "TRF-C9", STORE, MH_STORE, "2026-10-02T09:00:00")
+    _mirror(db, "TRF-A9")
+    assert _damage(db, sid, MH_ADMIN)["itc_reversed"]["total"] == 0.0
+    _mirror(db, "TRF-B9", gstin=SHOP_GSTIN, to_store=STORE, day="2026-10-06")
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "MB-TRF-B9"}))
+    assert db.itc_writeoff_reversals.count_documents({}) == 0
+    _mirror(db, "TRF-C9", day="2026-10-07")
+    db.vendor_bills.update_one({"bill_id": "MB-TRF-C9"}, {"$set": {"igst_total": 150.0,
+                                                                  "lines.0.igst": 150.0}})
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "MB-TRF-C9"}))
+    row = db.itc_writeoff_reversals.find_one({"_id": sid})
+    assert (row["gstin"], row["bill_id"], row["igst"]) == (MH_GSTIN, "MB-TRF-C9", 150.0)

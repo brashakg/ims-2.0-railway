@@ -12,9 +12,10 @@ ONE rule for every write-off door:
     the totals to show on the write-off record.
   - the bill: the one that brought the piece onto the GSTIN it is on now --
     the mirror bill of the newest inter-GSTIN crossing by ship time (every transfer the piece
-    rode, so a later move inside one GSTIN keeps it), else its goods
-    receipt's bills; none while the crossing that brought it here has no
-    mirror booked yet (reversed when it is).
+    rode, so a later move inside one GSTIN keeps it; a crossing is a mirror,
+    ship's stamp, else two shop GSTINs), its goods receipt's bills only when
+    it rode no crossing; none while the newest crossing has no mirror booked
+    yet (booked at Complete, after Receive; reversed when it is).
   - claimed, and on which GSTIN: gst_itc.bill_return_gstin -- the bill is in
     Table 4 (_itc_match) of that GSTIN's return. Credit no return places yet
     is stored `unallocated` (no GSTIN), never shown as reversed, and listed on
@@ -121,9 +122,10 @@ def _bills_for(db, unit: dict, gstin_of) -> list:
     if not tids:
         return _receipt_bills(db, rids) if rids else []
     # It rode a transfer: a bill counts only if it brought the piece onto the
-    # GSTIN it is on now -- the latest crossing's mirror, else (no GSTIN
-    # crossed: no mirror is ever booked) the receipt's bills. A crossing whose
-    # mirror is not booked yet is reversed when it is (reverse_on_new_bill).
+    # GSTIN it is on now -- the newest crossing's mirror; the receipt's bills
+    # only when it rode no crossing at all. A mirror is booked at Complete, a
+    # step after Receive, so a crossing whose mirror is not booked yet holds
+    # the reversal until it is (reverse_on_new_bill), never a stale bill.
     gstins = _gst_itc().shop_gstins(db)
     here = gstins.get(unit.get("store_id")) or ""
 
@@ -132,21 +134,31 @@ def _bills_for(db, unit: dict, gstin_of) -> list:
         # no return places yet is still that shop's, held unallocated.
         return here in {gstin_of(b) or None, gstins.get(b.get("to_store_id") or b.get("store_id"))}
 
-    mirrors = list(db.get_collection("vendor_bills").find({
-        "status": {"$nin": _gst_itc()._DEAD_BILL}, "source_transfer_id": {"$in": tids}}))
-    if mirrors:
-        # Newest by when its transfer SHIPPED (stamped once; the piece can
-        # only ship on B after it arrived on A). Never by the mirror's date (a
-        # mirror is booked at COMPLETE, which can come after a later transfer
-        # moved the piece on) nor by received_at (every receive call restamps
-        # it, so a partial receive finished later would outrank B).
-        moved = {t.get("id"): (str(t.get("shipped_at") or ""), str(t.get("received_at") or ""))
-                 for t in db.get_collection("stock_transfers").find(
-                     {"id": {"$in": tids}}, {"id": 1, "shipped_at": 1, "received_at": 1})}
-        latest = max(mirrors, key=lambda b: (moved.get(b.get("source_transfer_id"), ("", "")),
-                                             str(b.get("bill_date") or ""), str(b.get("created_at") or "")))
-        return [latest] if landed_here(latest) else []
-    return [b for b in _receipt_bills(db, rids) if landed_here(b)] if rids else []
+    mirrors = {b.get("source_transfer_id"): b for b in db.get_collection("vendor_bills").find({
+        "status": {"$nin": _gst_itc()._DEAD_BILL}, "source_transfer_id": {"$in": tids}})}
+    moved = {t.get("id"): t for t in db.get_collection("stock_transfers").find(
+        {"id": {"$in": tids}}, {"id": 1, "shipped_at": 1, "received_at": 1, "gst_registrations": 1,
+                                "from_location_id": 1, "to_location_id": 1})}
+    crossings = []
+    for tid in tids:
+        t, m = moved.get(tid) or {}, mirrors.get(tid) or {}
+        stamp = t.get("gst_registrations")
+        # Ship's stamp (None -- cannot tell -- books a mirror too), else the
+        # two shops' GSTINs: the rule of transfers._transfer_registrations.
+        crosses = bool(m) or (stamp.get("crosses") is not False if isinstance(stamp, dict) else
+                              (gstins.get(t.get("from_location_id")) or "")
+                              != (gstins.get(t.get("to_location_id")) or ""))
+        if crosses:
+            # Newest by when the transfer SHIPPED (stamped once; the piece can
+            # only ship on B after it arrived on A). Never by the mirror's date
+            # first (booked at COMPLETE, maybe after a later move) nor by
+            # received_at (restamped by every receive call).
+            crossings.append(((str(t.get("shipped_at") or ""), str(t.get("received_at") or ""),
+                               str(m.get("bill_date") or ""), str(m.get("created_at") or "")), tid))
+    if not crossings:
+        return [b for b in _receipt_bills(db, rids) if landed_here(b)] if rids else []
+    latest = mirrors.get(max(crossings)[1])
+    return [latest] if latest and landed_here(latest) else []
 
 
 def _transfer_units(db, tid: str) -> dict:
