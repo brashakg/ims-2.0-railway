@@ -453,16 +453,22 @@ def _true_up(db, bills: list, pid, gstin_of, bill: Optional[dict] = None, when=N
     return {**add, "unallocated": not g}
 
 
-def _settle_unallocated(db, period: str) -> None:
-    """A held (no-GSTIN) reversal whose bill now lands on a return takes that
-    GSTIN -- the accountant settled the bill."""
+def _settle_unallocated(db) -> None:
+    """A held (no-GSTIN) reversal -- of any month -- whose bill now lands on
+    a return takes that GSTIN: the accountant settled the bill. Its month
+    already filed (locked), it files in the first open month instead, the
+    original kept as `writeoff_period` (record_writeoff's rule)."""
     coll = db.get_collection(COLLECTION)
-    for row in coll.find({"unallocated": True, "period": period}):
+    for row in coll.find({"unallocated": True}):
         bill = db.get_collection("vendor_bills").find_one({"bill_id": row.get("bill_id")})
         g = bill_return_gstin(db, bill) if bill else None
-        if g:
-            coll.update_one({"_id": row["_id"], "unallocated": True},
-                            {"$set": {"gstin": g, "unallocated": False}})
+        if not g:
+            continue
+        fix = {"gstin": g, "unallocated": False}
+        if row.get("period") and _locked(db, row["period"]):
+            fix.update(period=_open_period(db, _now()),
+                       writeoff_period=row.get("writeoff_period") or row["period"])
+        coll.update_one({"_id": row["_id"], "unallocated": True}, {"$set": fix})
 
 
 def month_reversal(db, gstin: str, period: str) -> dict:
@@ -470,7 +476,7 @@ def month_reversal(db, gstin: str, period: str) -> dict:
     this GSTIN wrote off in `period` (YYYY-MM)."""
     if not gstin:
         return totals([])
-    _settle_unallocated(db, period)
+    _settle_unallocated(db)
     return totals(db.get_collection(COLLECTION).find(
         {"gstin": gstin, "period": period, "kind": "REVERSAL"}))
 
@@ -489,15 +495,16 @@ def month_reclaim(db, gstin: str, period: str) -> dict:
 
 
 def unallocated_writeoffs(db, entity_id, period: str) -> dict:
-    """Write-off reversals of `period` held without a GSTIN (their bill is on
-    no return yet), for GSTR-3B's allocation warning."""
+    """Write-off reversals of `period` or earlier still held without a GSTIN
+    (their bill is on no return yet), for GSTR-3B's allocation warning -- a
+    filed month's held row warns on every later return until it is settled."""
     out = {"count": 0, "tax": 0.0, "bill_numbers": []}
     if not entity_id:
         return out
     try:
-        _settle_unallocated(db, period)
+        _settle_unallocated(db)
         for row in db.get_collection(COLLECTION).find(
-                {"unallocated": True, "period": period, "entity_id": entity_id}):
+                {"unallocated": True, "period": {"$lte": period}, "entity_id": entity_id}):
             out["count"] += 1
             out["tax"] = round(out["tax"] + sum(_f(row.get(h)) for h in _HEADS), 2)
             if row.get("bill_id") not in out["bill_numbers"]:

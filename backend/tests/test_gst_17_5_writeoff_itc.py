@@ -1200,3 +1200,119 @@ def test_the_newest_crossing_without_a_mirror_holds_the_reversal_until_it_lands(
     wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "MB-TRF-C9"}))
     row = db.itc_writeoff_reversals.find_one({"_id": sid})
     assert (row["gstin"], row["bill_id"], row["igst"]) == (MH_GSTIN, "MB-TRF-C9", 150.0)
+
+
+# ---------------------------------------------------------------------------
+# Review round 8: a held reversal settled after its month is filed; two
+# DAMAGE clicks at once; ship's registration stamp decides the crossing
+# ---------------------------------------------------------------------------
+
+def test_a_held_reversal_settled_after_its_month_is_filed_files_in_the_open_month(
+        two_gstins, october, monkeypatch):
+    """Held (no GSTIN) on 5 October; October filed and locked with the amber
+    banner; the accountant settles the bill in November: the reversal files
+    in November's 4(B)(1), the filed October stays as filed."""
+    db = two_gstins["db"]
+    db.stores.insert_one({"store_id": "BV-NOGST", "store_name": "BV Kiosk", "state": "Karnataka",
+                          "state_code": "29", "entity_id": ENTITY, "is_active": True})
+    _stocked(db, "GRN-WO-0091")
+    _line_bill("GRN-WO-0091", "TAX-WO-91")
+    sid = "SU-GRN-WO-0091-0"
+    _mirror(db, "TRF-H1", gstin="", to_store="BV-NOGST")
+    _rehomed(db, sid, "TRF-H1", "BV-NOGST")
+    _damage(db, sid, {**ADMIN, "store_ids": [STORE, "BV-NOGST"]})
+    assert db.itc_writeoff_reversals.find_one({"_id": sid})["period"] == OCTOBER
+    db.period_locks.insert_one({"month": 10, "year": 2026})
+    _to_november(monkeypatch)
+    # Still held: November's return keeps warning about it.
+    assert r3b._compute_gstr3b("2026-11", STORE)["unallocatedWriteOffs"]["tax"] == 155.0
+    db.vendor_bills.update_one({"bill_id": "MB-TRF-H1"}, {"$set": {"recipient_gstin": MH_GSTIN}})
+    nov = r3b._compute_gstr3b("2026-11", MH_STORE)
+    assert _written_off(nov) == 155.0
+    assert nov["unallocatedWriteOffs"]["count"] == 0
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, MH_STORE)) == 0.0
+    row = db.itc_writeoff_reversals.find_one({"_id": sid})
+    assert (row["period"], row["writeoff_period"]) == ("2026-11", OCTOBER)
+
+
+def test_two_damage_clicks_at_once_keep_the_winners_reversal(world, october, monkeypatch):
+    """A second DAMAGE request finishes inside the first one's reversal
+    write: the first loses the move (409) and must not delete the row the
+    winner answered with."""
+    import threading
+
+    db = world["db"]
+    _stocked(db, "GRN-WO-0092")
+    _line_bill("GRN-WO-0092", "TAX-WO-92")
+    sid = "SU-GRN-WO-0092-0"
+    db.stock_units.update_one({"stock_id": sid}, {"$set": {"status": "QUARANTINED"}})
+    real, calls, won = iev._reverse_damaged, [], {}
+
+    def other():
+        won["out"] = _run(iev.quarantine_release(
+            sid, iev.QuarantineReleaseRequest(disposition="DAMAGE"), current_user=ADMIN))
+
+    def interleaved(db_, unit, user, *, when):
+        calls.append(1)
+        if len(calls) == 1:
+            th = threading.Thread(target=other)
+            th.start()
+            th.join()
+        return real(db_, unit, user, when=when)
+
+    monkeypatch.setattr(iev, "_reverse_damaged", interleaved)
+    with pytest.raises(Exception) as lost:
+        _run(iev.quarantine_release(sid, iev.QuarantineReleaseRequest(disposition="DAMAGE"),
+                                    current_user=ADMIN))
+    assert getattr(lost.value, "status_code", None) == 409
+    assert won["out"]["itc_reversed"]["total"] == 155.0
+    assert db.itc_writeoff_reversals.count_documents({"_id": sid}) == 1
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 155.0
+
+
+def _stamped(db, tid, src, dst, crosses):
+    """Ship's registration stamp, as ship_transfer writes it."""
+    db.stock_transfers.update_one({"id": tid}, {"$set": {
+        "from_location_id": src, "to_location_id": dst, "shipped_at": "2026-10-01T09:00:00",
+        "gst_registrations": {"source": [ENTITY, SHOP_GSTIN, "Jharkhand"],
+                              "destination": [ENTITY, MH_GSTIN if crosses else SHOP_GSTIN,
+                                              "Maharashtra" if crosses else "Jharkhand"],
+                              "crosses": crosses}}})
+
+
+@pytest.mark.parametrize("crosses", [True, None], ids=["crosses", "cannot-tell"])
+def test_ship_stamped_a_crossing_the_shops_gstins_no_longer_show(
+        two_gstins, shared_gstin, october, crosses):
+    """Shipped JH -> SISTER while SISTER was on Maharashtra (stamp: crosses,
+    or None -- cannot tell, which books a mirror too); SISTER is on the
+    Jharkhand GSTIN now. The stamp wins: no reversal on the receipt bill at
+    damage; the mirror books it when it lands."""
+    from api.services import writeoff_itc as wo
+
+    db = two_gstins["db"]
+    _stocked(db, "GRN-WO-0093")
+    _line_bill("GRN-WO-0093", "TAX-WO-93")
+    sid = "SU-GRN-WO-0093-0"
+    _rehomed(db, sid, "TRF-S1", SISTER)
+    _stamped(db, "TRF-S1", STORE, SISTER, crosses)
+    assert _damage(db, sid, {**ADMIN, "store_ids": [STORE, SISTER]})["itc_reversed"]["total"] == 0.0
+    assert db.itc_writeoff_reversals.count_documents({}) == 0
+    _mirror(db, "TRF-S1", gstin=SHOP_GSTIN, to_store=SISTER, day="2026-10-06")
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "MB-TRF-S1"}))
+    row = db.itc_writeoff_reversals.find_one({"_id": sid})
+    assert (row["gstin"], row["bill_id"], row["igst"]) == (SHOP_GSTIN, "MB-TRF-S1", 155.0)
+
+
+def test_ship_stamped_no_crossing_though_the_shops_gstins_now_differ(two_gstins, shared_gstin, october):
+    """Shipped JH -> SISTER on one GSTIN (stamp: no crossing); the sending
+    shop's GSTIN was changed afterwards. The stamp wins: the receipt bill
+    still carries the credit, reversed at once."""
+    db = two_gstins["db"]
+    _stocked(db, "GRN-WO-0094")
+    _line_bill("GRN-WO-0094", "TAX-WO-94")
+    sid = "SU-GRN-WO-0094-0"
+    _rehomed(db, sid, "TRF-S2", SISTER)
+    _stamped(db, "TRF-S2", STORE, SISTER, False)
+    db.stores.update_one({"store_id": STORE}, {"$set": {"gstin": MH_GSTIN}})
+    out = _damage(db, sid, {**ADMIN, "store_ids": [STORE, SISTER]})
+    assert out["itc_reversed"] == {"igst": 0.0, "cgst": 77.5, "sgst": 77.5, "total": 155.0}

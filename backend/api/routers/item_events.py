@@ -280,7 +280,12 @@ async def quarantine_release(
         payload={"disposition": disp, "notes": (req.notes or "")[:200]},
     )
     if not ok:
-        if disp == "DAMAGE" and not had_row:
+        # Drop only a row this request wrote for a move that never happened:
+        # a concurrent DAMAGE that won the move owns the same row.
+        now = (db.get_collection("stock_units").find_one(
+            {"stock_id": unit.get("stock_id")}, {"status": 1}) or {}).get("status")
+        if (disp == "DAMAGE" and not had_row
+                and ie.canonical_state(now) != ie.StockState.DAMAGED):
             writeoff_itc.forget(db, unit)
         raise HTTPException(
             status_code=409,
