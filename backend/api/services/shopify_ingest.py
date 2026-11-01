@@ -357,7 +357,8 @@ def _shipping_address(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _totals_check(
-    payload: Dict[str, Any], grand_total: float, *, current: bool = False
+    payload: Dict[str, Any], grand_total: float, *, current: bool = False,
+    refunded: float = 0.0,
 ) -> Dict[str, Any]:
     """THE check that the IMS invoice is what Shopify charged: its total_price
     against the booked grand_total, to the paisa. MISMATCH is flagged on the
@@ -365,12 +366,14 @@ def _totals_check(
     total_price (never a real order) is UNCHECKED. Shopify's own discount /
     shipping / tax figures ride along so the admin sees where it differs.
     `current`: an order edit's re-check (online_order_mapper) reads Shopify's
-    current_* figures, which follow edits."""
+    current_* figures, which follow edits. `refunded`: money Shopify's
+    current total nets that IMS answers with a credit note (shopify_refund),
+    added back so a refund is never read as an edit."""
     pre = "current_" if current else ""
     raw = payload.get(pre + "total_price")
     if raw is None or str(raw).strip() == "":
         return {"status": "UNCHECKED"}
-    shopify_p = _paise(raw)
+    shopify_p = _paise(raw) + _paise(refunded)
     ims_p = _paise(grand_total)
     ship_set = (payload.get("total_shipping_price_set") or {}).get("shop_money") or {}
     return {

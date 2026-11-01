@@ -1487,3 +1487,75 @@ def test_no_refresh_once_dispatched_or_for_a_cancel_or_stale_body(wired, monkeyp
     assert order["shopify_totals_check"]["status"] == "MATCH"
     assert order["shopify_totals_check"]["shopify_total"] == 1098.0
     assert not _mismatch_tasks(task_repo, order)
+
+
+@pytest.mark.parametrize("status", ["CANCELLED", "VOID", "REFUNDED"])
+def test_no_refresh_on_an_order_ims_already_closed(wired, monkeypatch, status):
+    """A dead IMS order (cancelled / voided / refunded on the IMS side, the
+    Shopify body stating no cancel) is never re-checked: no MISMATCH and no
+    P1 task on an order nobody will ship."""
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7123)
+    wired["orders"].update_one({"order_id": order["order_id"]}, {"$set": {"status": status}})
+    order = _edit(wired, payload, "600.00", minute=1)
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+    assert order["shopify_totals_check"]["shopify_total"] == 1098.0
+    assert not _mismatch_tasks(task_repo, order)
+
+
+def test_a_body_without_current_total_keeps_the_stored_mismatch(wired, monkeypatch):
+    """A replayed / trimmed orders/updated body with no current_total_price
+    is UNCHECKED and never overwrites a stored MISMATCH: the COD gate keeps
+    refusing the old, higher IMS total."""
+    from fastapi import HTTPException
+
+    from api.services.delivery_gate import cod_collectable
+
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7124)
+    _edit(wired, payload, "600.00", minute=1)
+    body = {**payload, "updated_at": "2026-11-01T10:02:00+05:30"}
+    body.pop("current_total_price")
+    online_order_mapper.map_shopify_order(body, wired["db"], topic="orders/updated")
+    order = wired["orders"].find_one({"shopify_order_id": str(payload["id"])})
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MISMATCH"
+    assert check["shopify_total"] == 600.0
+    with pytest.raises(HTTPException) as exc:
+        cod_collectable(order)
+    assert exc.value.detail["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
+    assert len(_mismatch_tasks(task_repo, order)) == 1
+
+
+def test_a_refund_before_dispatch_is_not_a_mismatch(wired, monkeypatch):
+    """A prepaid order still to ship: the merchant removes an item on Shopify
+    and refunds Rs 400. Shopify's current_total_price nets the refund
+    (Rs 698), but IMS answers that money with a credit note
+    (shopify_refund) and never edits grand_total, so the re-check adds the
+    refunded lines + shipping back: MATCH, no task."""
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7125)
+    refund = {
+        "id": 99001,
+        "refund_line_items": [{"quantity": 1, "restock_type": "cancel",
+                               "subtotal": 338.98, "total_tax": 61.02}],
+        "refund_shipping_lines": [],
+        "order_adjustments": [],
+    }
+    order = _edit(wired, payload, "698.00", minute=1,
+                  financial_status="partially_refunded", refunds=[refund])
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MATCH"
+    assert check["ims_total"] == 1098.0
+    assert not _mismatch_tasks(task_repo, order)
+
+
+def test_an_edit_after_a_refund_still_mismatches(wired, monkeypatch):
+    """The add-back covers only the refunded money: an edit on top of a
+    Rs 400 refund that lowers the total by another Rs 100 still flags."""
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7126)
+    refund = {"id": 99002, "refund_line_items": [
+        {"quantity": 1, "restock_type": "cancel", "subtotal": 338.98, "total_tax": 61.02}]}
+    order = _edit(wired, payload, "598.00", minute=1,
+                  financial_status="partially_refunded", refunds=[refund])
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MISMATCH"
+    assert check["difference"] == -100.0
+    assert len(_mismatch_tasks(task_repo, order)) == 1
