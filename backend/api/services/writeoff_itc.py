@@ -11,7 +11,7 @@ ONE rule for every write-off door:
     unit off twice, or a retry after a crash, never reverses twice. Returns
     the totals to show on the write-off record.
   - the bill: the one that brought the piece onto the GSTIN it is on now --
-    the mirror bill of the newest inter-GSTIN crossing by receive (every transfer the piece
+    the mirror bill of the newest inter-GSTIN crossing by ship time (every transfer the piece
     rode, so a later move inside one GSTIN keeps it), else its goods
     receipt's bills; none while the crossing that brought it here has no
     mirror booked yet (reversed when it is).

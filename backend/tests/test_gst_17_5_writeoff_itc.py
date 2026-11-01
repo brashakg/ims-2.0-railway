@@ -1060,9 +1060,9 @@ def test_a_partial_receive_finished_after_the_piece_moved_on_still_reverses(two_
     TRF-A completes. Damaged at JH: TRF-B delivered it here (it shipped
     after TRF-A did), so Jharkhand reverses against MB-TRF-B."""
     db = two_gstins["db"]
-    _stocked(db, "GRN-WO-0073")
-    _line_bill("GRN-WO-0073", "TAX-WO-73")
-    sid = "SU-GRN-WO-0073-0"
+    _stocked(db, "GRN-WO-0074")
+    _line_bill("GRN-WO-0074", "TAX-WO-74")
+    sid = "SU-GRN-WO-0074-0"
     _rehomed(db, sid, "TRF-A", MH_STORE)
     _rehomed(db, sid, "TRF-B", STORE)
     db.stock_transfers.update_one({"id": "TRF-A"}, {"$set": {
