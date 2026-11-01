@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 COLLECTION = "itc_writeoff_reversals"
 _HEADS = ("igst", "cgst", "sgst")
 COUNT_VOID_PREFIX = "cycle-count-reconcile:"
+TRANSFER_MISSING_PREFIX = "transfer-missing:"  # a piece lost on the way (transfers)
 
 
 def _gst_itc():
@@ -518,10 +519,12 @@ def unallocated_writeoffs(db, entity_id, period: str) -> dict:
 
 def writeoff_source(unit: dict) -> tuple:
     """(source_type, source_id) of a written-off unit: the count that voided
-    it, else its damage write-off."""
+    it, the transfer it was lost on, else its damage write-off."""
     reason = str(unit.get("void_reason") or "")
     if reason.startswith(COUNT_VOID_PREFIX):
         return "STOCK_COUNT", reason[len(COUNT_VOID_PREFIX):]
+    if reason.startswith(TRANSFER_MISSING_PREFIX):
+        return "TRANSFER_MISSING", reason[len(TRANSFER_MISSING_PREFIX):]
     return "QUARANTINE_DAMAGE", _sid(unit)
 
 
@@ -545,7 +548,7 @@ def _lost_at(db, unit: dict) -> Optional[datetime]:
 
 def reverse_on_new_bill(db, bill: dict, actor_id: str = "") -> dict:
     """A bill booked AFTER pieces it covers were written off (voided by a
-    count, or DAMAGED) claims credit on them: reverse it now, in the month of
+    count or as lost on a transfer, or DAMAGED) claims credit on them: reverse it now, in the month of
     the loss -- or the bill's month when the loss came first (credit is never
     reversed before it is claimed). Once per piece, so safe to repeat. Every
     bill door calls this after storing the bill."""
@@ -556,7 +559,8 @@ def reverse_on_new_bill(db, bill: dict, actor_id: str = "") -> dict:
         if not rids:
             return totals([])
         whose = {"$or": [{"grn_id": {"$in": rids}}, {"source_type": "GRN", "source_id": {"$in": rids}}]}
-    gone = {"$or": [{"void_reason": {"$regex": "^" + COUNT_VOID_PREFIX}}, {"status": "DAMAGED"}]}
+    gone = {"$or": [{"void_reason": {"$regex": "^" + COUNT_VOID_PREFIX}},
+                    {"void_reason": {"$regex": "^" + TRANSFER_MISSING_PREFIX}}, {"status": "DAMAGED"}]}
     day = str(bill.get("invoice_date") or bill.get("bill_date") or "")[:10]
     try:
         billed = datetime.fromisoformat(day) + timedelta(hours=6)  # 11:30 IST that day

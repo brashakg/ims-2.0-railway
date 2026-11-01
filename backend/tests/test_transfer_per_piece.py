@@ -1270,3 +1270,122 @@ def test_a_ship_that_read_the_box_before_another_press_took_it_touches_no_piece(
     assert _status(exc) == 409
     assert writes == []
     assert world["stock_transfers"].find_one({"id": t["id"]})["status"] == "packed"
+
+
+# ---------------------------------------------------------------------------
+# Fix round 3 (S3 review): a piece lost on the way takes back the SENDER's
+# input credit (section 17(5)(h), #1302's one write-off rule); a piece that
+# landed and then changed state is never stuck on "Missing on the way"
+# ---------------------------------------------------------------------------
+
+
+def _purchase_bill(world, bill_id="PB-1", grn_id="GRN-1"):
+    """The ten pieces came in on GRN-1; its bill was billed to company Z's
+    Jharkhand GSTIN at 5%: Rs 46.25 CGST + 46.25 SGST a piece."""
+    world["stock_units"].update_many({"stock_id": {"$regex": "^SU-[0-9]"}}, {"$set": {"grn_id": grn_id}})
+    bill = {
+        "bill_id": bill_id, "bill_number": f"INV-{bill_id}", "grn_id": grn_id, "status": "OUTSTANDING",
+        "bill_date": "2026-05-02", "invoice_date": "2026-05-02", "vendor_id": "V-1",
+        "vendor_gstin": "20AAACV3333C1ZQ", "recipient_gstin": GSTIN_Z_JH, "recipient_entity_id": "ENT-Z",
+        "entity_id": "ENT-Z", "store_id": "ST-DHN-1", "itc_eligible": True,
+        "taxable_amount": 18500.0, "tax_amount": 925.0, "igst_total": 0.0,
+        "cgst_total": 462.5, "sgst_total": 462.5,
+        "lines": [{"product_id": "P-1", "qty": 10, "taxable": 18500.0, "gst_rate": 5.0,
+                   "cgst": 462.5, "sgst": 462.5, "igst": 0.0}],
+    }
+    world["vendor_bills"].insert_one(bill)
+    return bill
+
+
+def _reversals(world):
+    return list(world["itc_writeoff_reversals"].find({}))
+
+
+def _lost_one(world, to):
+    t = _shipped_box(world, to=to)
+    who = MGR_DHN2 if to == "ST-DHN-2" else MGR_BOK
+    _scan_in(t["id"], "BVQX001", user=who)
+    _scan_in(t["id"], "BVQX002", user=who)
+    _complete(t["id"], user=who)
+    return t
+
+
+@pytest.mark.parametrize("to", ["ST-DHN-2", "ST-BOK-1"])  # same GSTIN / crossing
+def test_a_piece_lost_on_the_way_takes_back_the_senders_input_credit(world, to):
+    from api.routers import transfers
+    from api.services import writeoff_itc
+
+    _purchase_bill(world)
+    t = _lost_one(world, to)
+    _run(transfers.write_off_missing_piece(t["id"], "SU-3", ADMIN))
+    # Exactly one reversal, on the SENDER's GSTIN, against the bill that put
+    # the piece there -- never this box's own tax invoice (the credit note
+    # already nets that for the receiver).
+    (row,) = _reversals(world)
+    assert (row["_id"], row["gstin"], row["bill_id"]) == ("SU-3", GSTIN_Z_JH, "PB-1")
+    assert (row["cgst"], row["sgst"], row["igst"]) == (46.25, 46.25, 0.0)
+    assert (row["source_type"], row["source_id"]) == ("TRANSFER_MISSING", t["id"])
+    # GSTR-3B 4(B)(1) of the write-off month takes it back.
+    period = writeoff_itc._period(_unit(world, "SU-3")["voided_at"])
+    assert writeoff_itc.month_reversal(world, GSTIN_Z_JH, period)["total"] == 92.5
+    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, period)["total"] == 0.0
+    shrink = world["stock_shrinkage"].find_one({"transfer_id": t["id"]})
+    assert shrink["itc_reversed"]["total"] == 92.5
+    # Crossing: the credit note is booked as well; same GSTIN: no GST paper.
+    assert len(_notes(world, t["id"])) == (1 if to == "ST-BOK-1" else 0)
+    # Found after the write-off is refused: the reversal stands, once.
+    with pytest.raises(HTTPException) as exc:
+        _run(transfers.found_missing_piece(t["id"], "SU-3", transfers.MissingFound(at="source"), MGR_DHN))
+    assert _status(exc) == 409
+    assert len(_reversals(world)) == 1
+
+
+@pytest.mark.parametrize("at", ["source", "destination"])
+def test_a_missing_piece_found_reverses_no_credit(world, at):
+    from api.routers import transfers
+
+    _purchase_bill(world)
+    t = _lost_one(world, "ST-BOK-1")
+    who = MGR_DHN if at == "source" else MGR_BOK
+    _run(transfers.found_missing_piece(t["id"], "SU-3", transfers.MissingFound(at=at), who))
+    assert _reversals(world) == []
+
+
+def test_a_bill_booked_after_the_piece_was_lost_on_the_way_reverses_it(world):
+    from api.routers import transfers
+    from api.services import writeoff_itc
+
+    t = _lost_one(world, "ST-DHN-2")
+    _run(transfers.write_off_missing_piece(t["id"], "SU-3", ADMIN))
+    assert _reversals(world) == []  # no bill yet: nothing claimed
+    bill = _purchase_bill(world)
+    writeoff_itc.reverse_on_new_bill(world, world["vendor_bills"].find_one({"bill_id": bill["bill_id"]}))
+    (row,) = _reversals(world)
+    assert (row["_id"], row["gstin"], row["cgst"], row["sgst"]) == ("SU-3", GSTIN_Z_JH, 46.25, 46.25)
+    assert (row["source_type"], row["source_id"]) == ("TRANSFER_MISSING", t["id"])
+
+
+def test_a_piece_that_landed_then_was_sold_or_reserved_is_never_stuck_missing(world):
+    """Bokaro's scans of BVQX001 and BVQX002 landed on the units but not on
+    the box (a scan racing Accept, or a worker that died between the two
+    writes); the counter then sold BVQX001 and reserved BVQX002. Accept
+    records the sold one received; Found at Bokaro resolves the reserved one."""
+    from api.routers import transfers
+
+    t = _shipped_box(world)
+    stored = transfers._get_transfer(t["id"])
+    for sid, then in (("SU-1", "SOLD"), ("SU-2", "RESERVED")):
+        world["stock_units"].update_one({"stock_id": sid}, {"$set": transfers._rehome_patch(stored, "AVAILABLE")})
+        world["stock_units"].update_one({"stock_id": sid}, {"$set": {"status": then}})
+        if sid == "SU-1":
+            done = _complete(t["id"], user=MGR_BOK)
+    assert sorted(p["stock_id"] for p in done["missing_pieces"]) == ["SU-2", "SU-3"]
+    _run(transfers.found_missing_piece(t["id"], "SU-2", transfers.MissingFound(at="destination"), MGR_BOK))
+    after = world["stock_transfers"].find_one({"id": t["id"]})
+    assert after["items"][0]["received_stock_ids"] == ["SU-1", "SU-2"]
+    assert [r["stock_id"] for r in _run(transfers.list_missing(ADMIN))["pieces"]] == ["SU-3"]
+    assert _notes(world, t["id"]) == []
+    assert (_unit(world, "SU-1")["status"], _unit(world, "SU-2")["status"]) == ("SOLD", "RESERVED")
+    # Its arrival is audited as it landed (the shelf), not as it is now.
+    row = world["stock_audit"].find_one({"stock_id": "SU-2", "reason": "MISSING_FOUND"})
+    assert row and row["new_status"] == "AVAILABLE"

@@ -1136,14 +1136,22 @@ def _line_of_piece(transfer: Dict, stock_id: str) -> Dict:
 
 
 def _landed(unit: Dict, transfer: Dict) -> bool:
-    """The piece already landed at the RECEIVING shop from this transfer (on
-    the shelf, or damaged in quarantine): the write a scan in or a found at
-    the receiver makes (_rehome_patch)."""
+    """The piece already landed at the RECEIVING shop from this transfer: the
+    write a scan in or a found at the receiver makes (_rehome_patch, the only
+    write that stamps source_id = this transfer). Whatever it did since --
+    sold, reserved, out of quarantine, shipped on by another transfer -- it
+    landed, so it is never stuck on "Missing on the way"."""
     return (
-        unit.get("store_id") == transfer.get("to_location_id")
+        unit.get("source_type") == "TRANSFER"
         and unit.get("source_id") == transfer.get("id")
-        and unit.get("status") in (STOCK_STATUS_AVAILABLE, STOCK_STATUS_QUARANTINED)
+        and unit.get("transfer_id") != transfer.get("id")
     )
+
+
+def _landed_as(unit: Dict) -> str:
+    """The state a landed piece arrived in: quarantine when it still sits
+    there, else the shelf (it may have been sold or reserved since)."""
+    return STOCK_STATUS_QUARANTINED if unit.get("status") == STOCK_STATUS_QUARANTINED else STOCK_STATUS_AVAILABLE
 
 
 def _land_on_line(line: Dict, sid: str, status: str, reason: str = "") -> None:
@@ -2148,7 +2156,7 @@ async def receive_transfer(
             raise HTTPException(
                 status_code=409, detail=f"{label} is no longer on the way to this shop."
             )
-        new_status = now["status"]  # a scan that died after the write, pressed again
+        new_status = _landed_as(now)  # a scan that died after the write, pressed again
     _audit_stock_move(
         STOCK_STATUS_TRANSFERRED, new_status, sid, transfer,
         {"product_id": line.get("product_id"), "moved_to": transfer.get("to_location_id"),
@@ -2573,7 +2581,7 @@ async def found_missing_piece(
         t["updated_at"] = utc_now_iso()
 
     transfer = _update_transfer(transfer_id, _resolve)
-    landed_as = unit.get("status") or STOCK_STATUS_AVAILABLE  # QUARANTINED: found damaged
+    landed_as = _landed_as(unit)  # QUARANTINED: found damaged
     _audit_stock_move(
         STOCK_STATUS_TRANSFERRED, landed_as, stock_id, transfer,
         {"product_id": piece.get("product_id"), "moved_to": store, "reason": "MISSING_FOUND"},
@@ -2652,8 +2660,20 @@ async def write_off_missing_piece(
             raise HTTPException(
                 status_code=409, detail=f"{piece.get('barcode') or stock_id} is no longer on the way."
             )
-    note = _short_credit_note(transfer, [stock_id], "piece lost on the way, written off")
     db = _get_db()
+    # Section 17(5)(h): the SENDER's input credit on the lost piece is taken
+    # back (#1302's one write-off rule, once per piece, so pressing again is
+    # safe). Read AFTER the VOID: transfer_id is cleared, so the rule picks
+    # the bill that put the piece on the sender's GSTIN -- never this box's
+    # own tax invoice, which the credit note nets for the receiver.
+    from ..services.writeoff_itc import record_writeoff
+
+    itc = record_writeoff(
+        db, [units.find_one({"stock_id": stock_id}) or {"stock_id": stock_id}],
+        source_type="TRANSFER_MISSING", source_id=tid, when=now,
+        actor_id=current_user.get("user_id", ""),
+    )
+    note = _short_credit_note(transfer, [stock_id], "piece lost on the way, written off")
     shrink = db.get_collection("stock_shrinkage")
     if not shrink.find_one({"transfer_id": tid, "voided_stock_ids": stock_id}):
         line = _line_of_piece(transfer, stock_id)
@@ -2676,6 +2696,7 @@ async def write_off_missing_piece(
             "unit_cost": piece_cost,
             "shrinkage_value": piece_cost,
             "credit_note_number": note,
+            "itc_reversed": itc,
             "write_off_requested_by": piece.get("write_off_requested_by"),
             "recorded_at": now,
             "recorded_by": current_user.get("user_id"),
