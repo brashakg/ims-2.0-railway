@@ -243,6 +243,17 @@ ROWS: List[Dict[str, object]] = [
         "allowed": ["ADMIN", "AREA_MANAGER", "SUPERADMIN"],
     },
     {"method": "GET", "path": "/api/v1/transfers/pending", "allowed": "AUTHENTICATED"},
+    # S3: free pieces at a shop (counts only) and "Missing on the way".
+    {
+        "method": "GET",
+        "path": "/api/v1/transfers/free",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "GET",
+        "path": "/api/v1/transfers/missing",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/transfers/{transfer_id}",
@@ -261,7 +272,7 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/transfers/{transfer_id}/cancel",
-        "allowed": ["ADMIN", "AREA_MANAGER", "SUPERADMIN"],
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
     },
     {
         "method": "POST",
@@ -270,13 +281,31 @@ ROWS: List[Dict[str, object]] = [
     },
     {
         "method": "POST",
-        "path": "/api/v1/transfers/{transfer_id}/complete-picking",
-        "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN", "WORKSHOP_STAFF"],
+        "path": "/api/v1/transfers/{transfer_id}/create-shiprocket-shipment",
+        "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN"],
+    },
+    # S3: missing on the way - found / sent for write-off by either shop's
+    # managers; the write-off itself is admin-only (owner ruling 2026-08-25).
+    {
+        "method": "POST",
+        "path": "/api/v1/transfers/{transfer_id}/missing/{stock_id}/found",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
     },
     {
         "method": "POST",
-        "path": "/api/v1/transfers/{transfer_id}/create-shiprocket-shipment",
-        "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN"],
+        "path": "/api/v1/transfers/{transfer_id}/missing/{stock_id}/write-off",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/transfers/{transfer_id}/missing/{stock_id}/write-off-request",
+        "allowed": ["ADMIN", "AREA_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
+    },
+    # S3: pack = the pieces scanned OUT into the box (the sending shop).
+    {
+        "method": "POST",
+        "path": "/api/v1/transfers/{transfer_id}/pack",
+        "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN", "WORKSHOP_STAFF"],
     },
     {
         "method": "POST",
@@ -286,11 +315,6 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/transfers/{transfer_id}/ship",
-        "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN", "WORKSHOP_STAFF"],
-    },
-    {
-        "method": "POST",
-        "path": "/api/v1/transfers/{transfer_id}/start-picking",
         "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN", "WORKSHOP_STAFF"],
     },
     {

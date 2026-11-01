@@ -48,6 +48,7 @@ from .gst_itc import (
     _order_held_off_returns,
     net_cash_due,
     _return_interstate_flag,
+    _split_transfer_bills,
     _transfer_outward_bills,
 )
 
@@ -233,12 +234,23 @@ def _transfer_outward_totals(db, active_store, year, mon, last_day):
     outward figure equals the receiver's ITC claim to the paisa. A read
     failure raises (via _transfer_outward_bills, M7)."""
     igst = cgst = sgst = taxable = 0.0
-    for b in _transfer_outward_bills(db, active_store, year, mon, last_day):
+    for b in _split_transfer_bills(_transfer_outward_bills(db, active_store, year, mon, last_day))[0]:
         igst = round(igst + float(b.get("igst_total", 0) or 0), 2)
         cgst = round(cgst + float(b.get("cgst_total", 0) or 0), 2)
         sgst = round(sgst + float(b.get("sgst_total", 0) or 0), 2)
         taxable = round(taxable + float(b.get("taxable_amount", 0) or 0), 2)
     return igst, cgst, sgst, taxable
+
+
+def _transfer_note_totals(db, active_store, year, mon, last_day):
+    """S3: (igst, cgst, sgst, taxable) of the sender's transfer credit notes
+    dated in the month, as POSITIVE amounts -- netted from Table 3.1(a) with
+    every other credit note (the same CDNR rows GSTR-1 files)."""
+    notes = _split_transfer_bills(_transfer_outward_bills(db, active_store, year, mon, last_day))[1]
+    return tuple(
+        round(-sum(float(b.get(f, 0) or 0) for b in notes), 2)
+        for f in ("igst_total", "cgst_total", "sgst_total", "taxable_amount")
+    )
 
 
 def _rcm_placed(db, active_store, year, mon, last_day):
@@ -484,6 +496,9 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             n_i, n_c, n_s, n_t = _credit_note_totals(db, shop, year, mon, last_day)
             cn_igst, cn_cgst = round(cn_igst + n_i, 2), round(cn_cgst + n_c, 2)
             cn_sgst, cn_taxable = round(cn_sgst + n_s, 2), round(cn_taxable + n_t, 2)
+            t_i, t_c, t_s, t_t = _transfer_note_totals(db, shop, year, mon, last_day)
+            cn_igst, cn_cgst = round(cn_igst + t_i, 2), round(cn_cgst + t_c, 2)
+            cn_sgst, cn_taxable = round(cn_sgst + t_s, 2), round(cn_taxable + t_t, 2)
         cn_carry = {
             "integratedTax": round(max(0.0, cn_igst - out_igst), 2),
             "centralTax": round(max(0.0, cn_cgst - out_cgst), 2),

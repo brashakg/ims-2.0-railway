@@ -53,6 +53,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from strict_fakes import StrictDB  # noqa: E402
+import transfer_box as box  # noqa: E402
 from api.utils.ist import IST  # noqa: E402
 from database.repositories.order_repository import (  # noqa: E402
     InvoiceNumberError,
@@ -316,7 +317,7 @@ def _ship_to(to_store, qty=2, frm="ST-DHN-1"):
                                            quantity_requested=qty)],
     )
     t = _run(transfers.create_transfer(body, ADMIN))["transfer"]
-    return _run(transfers.ship_transfer(t["id"], None, None, None, False, ADMIN))["transfer"]
+    return box.ship(transfers, t["id"], ADMIN)["transfer"]
 
 
 def _receive_complete(t, received=None):
@@ -324,10 +325,7 @@ def _receive_complete(t, received=None):
 
     line = transfers._get_transfer(t["id"])["items"][0]
     qty = line["quantity_shipped"] if received is None else received
-    _run(transfers.receive_transfer(
-        t["id"], [transfers.TransferItemReceive(transfer_item_id=line["id"],
-                                                quantity_received=qty)], ADMIN))
-    _run(transfers.complete_transfer(t["id"], None, ADMIN))
+    box.receive_complete(transfers, t["id"], ADMIN, {line["id"]: (qty, 0)})
 
 
 def _gstr1(world, store="ST-DHN-1"):
@@ -437,17 +435,15 @@ def test_inter_gstin_transfer_in_gstr1_b2b(world, to_store, heads):
         to_store, to_store, "ENT-Y" if to_store == "ST-BOK-1" else "ENT-Z")
 
 
-def test_short_receipt_is_flagged_against_the_issued_invoice(world):
+def test_short_receipt_files_the_issued_invoice_not_the_received_value(world):
+    """CA answers 2026-10-23: the books carry the invoice as issued (the
+    units SHIPPED); a short delivery is a credit note on it (S3), so GSTR-1
+    no longer files the received value under the invoice's number."""
     t = _ship_to("ST-BOK-1")
     _receive_complete(t, received=1)
     rep = _gstr1(world)
-    assert rep["b2b"][0]["taxableValue"] == UNIT_COST
-    issues = [i["issue"] for i in rep["validation"]["issues"]]
-    assert (
-        "IMS files the RECEIVED value Rs 1850.00 (taxable) under DHN01/T2627/0001; "
-        "the printed invoice and e-way bill show the SHIPPED value Rs 3700.00. "
-        "Ask the CA whether to amend."
-    ) in issues, issues
+    assert rep["b2b"][0]["taxableValue"] == 2 * UNIT_COST
+    assert not [i for i in rep["validation"]["issues"] if "RECEIVED value" in i["issue"]]
 
 
 def test_a_move_shipped_before_numbering_is_numbered_at_complete(world):
@@ -456,6 +452,7 @@ def test_a_move_shipped_before_numbering_is_numbered_at_complete(world):
         {"id": t["id"]}, {"$unset": {"tax_invoice_number": "", "tax_invoice_date": ""}}
     )
     world["counters"].delete_many({})
+    world["vendor_bills"].delete_many({})  # shipped before ship booked it
     _receive_complete(t)
     (bill,) = world["vendor_bills"].find({})
     assert bill["invoice_number"] == "DHN01/T2627/0001"
@@ -491,17 +488,21 @@ def test_reprint_and_books_keep_the_lines_frozen_at_ship(world, monkeypatch):
         185.0, 5, "900311")
 
 
-def test_a_short_receipt_books_at_the_invoiced_rate(world, monkeypatch):
-    """Two shipped at 5%, the rate table then says 18%, one arrives: the bill
-    books the one received at the invoice's 5% (IGST 92.50), never 18%."""
+def test_a_short_receipt_credit_note_is_at_the_invoiced_rate(world, monkeypatch):
+    """Two shipped at 5%, the rate table then says 18%, one never arrives and
+    is written off: its credit note reverses the invoice's 5% (IGST 92.50),
+    never 18%."""
+    from api.routers import transfers
     from api.services import gst_rates
 
     t = _ship_to("ST-PUN-1")
     monkeypatch.setattr(gst_rates, "resolve_gst_rate", lambda **_k: 18.0)
     _receive_complete(t, received=1)
-    (bill,) = world["vendor_bills"].find({})
-    assert (bill["taxable_amount"], bill["igst_total"], bill["lines"][0]["gst_rate"]) == (
-        UNIT_COST, 92.5, 5)
+    (missing,) = transfers._get_transfer(t["id"])["missing_pieces"]
+    _run(transfers.write_off_missing_piece(t["id"], missing["stock_id"], ADMIN))
+    note = world["vendor_bills"].find_one({"doc_type": "TRANSFER_CREDIT_NOTE"})
+    assert (note["taxable_amount"], note["igst_total"], note["lines"][0]["gst_rate"]) == (
+        -UNIT_COST, -92.5, 5)
 
 
 def _ship_and_complete_across_month_end(monkeypatch):
@@ -515,26 +516,16 @@ def _ship_and_complete_across_month_end(monkeypatch):
     return t
 
 
-def test_month_boundary_row_carries_the_ship_date(world, monkeypatch):
-    from api.routers import reports
-
-    _ship_and_complete_across_month_end(monkeypatch)
-    (row,) = reports._compute_gstr1("2026-10", "ST-DHN-1")["b2b"]
-    assert (row["invoiceNumber"], row["invoiceDate"]) == ("DHN01/T2627/0001", "2026-09-30")
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="known gap: a transfer lands on the GSTR-1 (and 3B) of the month it is "
-    "COMPLETED -- the mirror bill's bill_date -- not the month its tax invoice was "
-    "issued; the sender's outward row at ship is the follow-up after #1238",
-)
 def test_month_boundary_row_files_in_the_ship_month(world, monkeypatch):
+    """CA answers 2026-10-23: a transfer invoice is filed in the DISPATCH
+    month, even when the box is received in the next one (this was a strict
+    xfail 'known gap' until S3)."""
     from api.routers import reports
 
     _ship_and_complete_across_month_end(monkeypatch)
-    sep = reports._compute_gstr1("2026-09", "ST-DHN-1")["b2b"]
-    assert [r["invoiceNumber"] for r in sep] == ["DHN01/T2627/0001"]
+    (row,) = reports._compute_gstr1("2026-09", "ST-DHN-1")["b2b"]
+    assert (row["invoiceNumber"], row["invoiceDate"]) == ("DHN01/T2627/0001", "2026-09-30")
+    assert reports._compute_gstr1("2026-10", "ST-DHN-1")["b2b"] == []
 
 
 def test_gstr1_flags_an_old_transfer_number(world):

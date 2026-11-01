@@ -409,8 +409,8 @@ def test_mirror_value_from_items():
         "to_location_id": "s2",
         "total_value": 0,
         "items": [
-            {"quantity_received": 3, "unit_cost": 500.0},
-            {"quantity_received": 2, "unit_cost": 250.0},
+            {"quantity_shipped": 3, "unit_cost": 500.0},
+            {"quantity_shipped": 2, "unit_cost": 250.0},
         ],
     }
     with patch("api.routers.transfers._get_db", return_value=db):

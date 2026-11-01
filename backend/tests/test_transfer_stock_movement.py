@@ -21,7 +21,7 @@ MONGO_HOST=127.0.0.1, so the on-hand math is exercised end to end:
       -> assert A on-hand == N - K  and  B on-hand == K
       -> re-ship + re-receive  ->  no double-move (still N-K / K)
 
-A pure-helper layer (_line_ship_qty) is tested without any DB.
+Runs on mongomock (the per-piece flow: pack, ship, scan in).
 
 If Mongo isn't reachable the DB-backed tests SKIP (they don't fail), so the
 suite stays green on machines without a local mongod while still proving the
@@ -42,25 +42,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.routers import transfers  # noqa: E402
-
-
-# ===========================================================================
-# Pure helper: per-line ship quantity (no DB)
-# ===========================================================================
-
-
-def test_line_ship_qty_prefers_explicit_shipped():
-    assert transfers._line_ship_qty({"quantity_shipped": 3, "quantity_requested": 5}) == 3
-
-
-def test_line_ship_qty_falls_back_to_requested():
-    assert transfers._line_ship_qty({"quantity_shipped": 0, "quantity_requested": 5}) == 5
-
-
-def test_line_ship_qty_handles_missing_and_garbage():
-    assert transfers._line_ship_qty({}) == 0
-    assert transfers._line_ship_qty({"quantity_requested": "nope"}) == 0
-    assert transfers._line_ship_qty({"quantity_requested": 4.0}) == 4
+import transfer_box as box  # noqa: E402
 
 
 # ===========================================================================
@@ -73,19 +55,10 @@ MONGO_PORT = int(os.getenv("MONGO_PORT", "27017"))
 
 
 def _mongo_db():
-    """Connect to a throwaway DB on the local mongo, or skip if unreachable."""
-    try:
-        from pymongo import MongoClient
-    except Exception:  # noqa: BLE001
-        pytest.skip("pymongo not installed")
-    try:
-        client = MongoClient(
-            MONGO_HOST, MONGO_PORT, serverSelectionTimeoutMS=1500
-        )
-        client.admin.command("ping")
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"no local mongo at {MONGO_HOST}:{MONGO_PORT} ({exc})")
+    """A throwaway mongomock database (S3: runs everywhere, no mongod)."""
+    mongomock = pytest.importorskip("mongomock")
     name = f"ims_test_transfer_{uuid.uuid4().hex[:8]}"
+    client = mongomock.MongoClient()
     return client, client[name], name
 
 
@@ -116,6 +89,7 @@ def lifecycle(monkeypatch):
         transfers, "_transfers_coll", lambda: db.get_collection("stock_transfers")
     )
     monkeypatch.setattr(transfers, "_get_db", lambda: db)
+    monkeypatch.setattr(transfers, "_writeback_units_left", lambda *a, **k: None)
 
     try:
         yield {"db": db, "stock_repo": stock_repo}
@@ -181,7 +155,7 @@ def test_ship_then_receive_moves_on_hand(lifecycle):
     # SUPERADMIN auto-approves on create -> straight to ship.
     assert transfer["status"] == transfers.TransferStatus.APPROVED
 
-    shipped = asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))["transfer"]
+    shipped = box.ship(transfers, tid, _ADMIN)["transfer"]
     assert shipped["stock_shipped"] is True
     assert shipped["stock_units_moved_out"] == K
     # Source on-hand dropped by K; the K units are now TRANSFERRED, not gone.
@@ -195,18 +169,7 @@ def test_ship_then_receive_moves_on_hand(lifecycle):
     # Destination not credited until RECEIVE.
     assert _on_hand(db, product_id, "B") == 0
 
-    line_id = shipped["items"][0]["id"]
-    received = asyncio.run(
-        transfers.receive_transfer(
-            tid,
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id=line_id, quantity_received=K
-                )
-            ],
-            current_user=_ADMIN,
-        )
-    )["transfer"]
+    received = box.receive(transfers, tid, _ADMIN)["transfer"]
     assert received["status"] == transfers.TransferStatus.RECEIVED
     # Destination on-hand rose by K; source unchanged from the post-ship state.
     assert _on_hand(db, product_id, "B") == K
@@ -223,7 +186,7 @@ def test_reship_and_rereceive_do_not_double_move(lifecycle):
     transfer = _make_transfer(product_id, K)
     tid = transfer["id"]
 
-    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
+    box.ship(transfers, tid, _ADMIN)
     assert _on_hand(db, product_id, "A") == N - K
 
     # Re-ship: the doc is IN_TRANSIT now so the endpoint guard would 400 in
@@ -233,23 +196,16 @@ def test_reship_and_rereceive_do_not_double_move(lifecycle):
     assert moved["stock_units_moved_out"] == K  # unchanged
     assert _on_hand(db, product_id, "A") == N - K  # still only K moved out
 
-    line_id = transfer["items"][0]["id"]
-    asyncio.run(
-        transfers.receive_transfer(
-            tid,
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id=line_id, quantity_received=K
-                )
-            ],
-            current_user=_ADMIN,
-        )
-    )
+    box.receive(transfers, tid, _ADMIN)
     assert _on_hand(db, product_id, "B") == K
 
-    # Re-receive the SAME qty: must not mint more destination units.
-    after = transfers._apply_receive_stock_move(transfers._get_transfer(tid))
-    transfers._save_transfer(after)
+    # Scanning the SAME pieces again (status RECEIVED: refused) never mints.
+    first = transfers._get_transfer(tid)["items"][0]["received_stock_ids"][0]
+    code = db["stock_units"].find_one({"stock_id": first})["barcode"]
+    with pytest.raises(Exception):
+        asyncio.run(transfers.receive_transfer(
+            tid, transfers.TransferPieceReceive(barcode=code), current_user=_ADMIN
+        ))
     assert _on_hand(db, product_id, "B") == K  # no duplicates
 
 
@@ -262,36 +218,16 @@ def test_partial_receive_then_complete_moves_only_delta(lifecycle):
     _seed_units(stock_repo, product_id, "A", N)
     transfer = _make_transfer(product_id, K)
     tid = transfer["id"]
-    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
+    box.ship(transfers, tid, _ADMIN)
     line_id = transfer["items"][0]["id"]
 
-    # First receive only 2 of 5.
-    part = asyncio.run(
-        transfers.receive_transfer(
-            tid,
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id=line_id, quantity_received=2
-                )
-            ],
-            current_user=_ADMIN,
-        )
-    )["transfer"]
+    # First scan in only 2 of 5.
+    part = box.receive(transfers, tid, _ADMIN, {line_id: (2, 0)})["transfer"]
     assert part["status"] == transfers.TransferStatus.PARTIALLY_RECEIVED
     assert _on_hand(db, product_id, "B") == 2
 
-    # Now receive the full 5 (cumulative) -> only 3 more units re-homed (delta).
-    full = asyncio.run(
-        transfers.receive_transfer(
-            tid,
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id=line_id, quantity_received=5
-                )
-            ],
-            current_user=_ADMIN,
-        )
-    )["transfer"]
+    # Scanning all 5 again: the first 2 count once, 3 more land.
+    full = box.receive(transfers, tid, _ADMIN, {line_id: (5, 0)})["transfer"]
     assert full["status"] == transfers.TransferStatus.RECEIVED
     assert _on_hand(db, product_id, "B") == 5  # 2 + 3, no double count
 
@@ -316,19 +252,8 @@ def test_received_units_keep_original_barcode_and_no_mint(lifecycle):
 
     transfer = _make_transfer(product_id, K)
     tid = transfer["id"]
-    asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))
-    line_id = transfer["items"][0]["id"]
-    asyncio.run(
-        transfers.receive_transfer(
-            tid,
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id=line_id, quantity_received=K
-                )
-            ],
-            current_user=_ADMIN,
-        )
-    )
+    box.ship(transfers, tid, _ADMIN)
+    box.receive(transfers, tid, _ADMIN)
 
     # No new stock_unit docs were created - the units just changed location.
     assert units.count_documents({"product_id": product_id}) == total_before == N
@@ -342,31 +267,36 @@ def test_received_units_keep_original_barcode_and_no_mint(lifecycle):
     assert all(not bc.startswith("B-") for bc in dest_barcodes)
 
 
-def test_ship_caps_at_available_source_units(lifecycle):
-    """Never move phantom stock: if the source holds fewer AVAILABLE units than
-    requested, only what exists leaves the floor (and on-hand can't go below 0)."""
+def test_ask_caps_at_free_source_units(lifecycle):
+    """Never move phantom stock: S3 caps the request itself at what is FREE at
+    the source, and a short-packed box ships only the pieces scanned."""
     db = lifecycle["db"]
     stock_repo = lifecycle["stock_repo"]
     product_id = "PRD-SHORT-1"
-    N, K = 2, 5  # request 5 but only 2 on hand
+    _seed_units(stock_repo, product_id, "A", 2)
+    with pytest.raises(Exception) as exc:
+        _make_transfer(product_id, 5)  # request 5 but only 2 free
+    assert getattr(exc.value, "status_code", None) == 409
+    transfer = _make_transfer(product_id, 2)
+    shipped = box.ship(
+        transfers, transfer["id"], _ADMIN, per_line={transfer["items"][0]["id"]: 1}
+    )["transfer"]
+    assert shipped["stock_units_moved_out"] == 1
+    assert _on_hand(db, product_id, "A") == 1
+    assert shipped["items"][0]["quantity_shipped"] == 1
 
-    _seed_units(stock_repo, product_id, "A", N)
-    transfer = _make_transfer(product_id, K)
-    tid = transfer["id"]
-    shipped = asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))["transfer"]
-    assert shipped["stock_units_moved_out"] == N  # only the 2 that existed
-    assert _on_hand(db, product_id, "A") == 0
-    assert shipped["items"][0]["quantity_shipped"] == N
 
-
-def test_fail_soft_when_stock_repo_down(lifecycle, monkeypatch):
-    """No stock layer -> the transfer lifecycle still advances the doc; it just
-    doesn't move units (pre-fix behavior, but no crash)."""
-    monkeypatch.setattr(transfers, "get_stock_repository", lambda: None)
+def test_ship_refuses_when_the_stock_records_cannot_be_read(lifecycle, monkeypatch):
+    """S3: a per-piece move never runs blind -- no database, no ship (503),
+    instead of advancing the doc without moving the pieces."""
+    db = lifecycle["db"]
     product_id = "PRD-FAILSOFT-1"
+    _seed_units(lifecycle["stock_repo"], product_id, "A", 3)
     transfer = _make_transfer(product_id, 3)
     tid = transfer["id"]
-    shipped = asyncio.run(transfers.ship_transfer(tid, current_user=_ADMIN))["transfer"]
-    assert shipped["status"] == transfers.TransferStatus.IN_TRANSIT
-    # No stock_shipped flag set when there's no repo to move with.
-    assert not shipped.get("stock_shipped")
+    box.pack_all(transfers, tid, _ADMIN)
+    monkeypatch.setattr(transfers, "_get_db", lambda: None)
+    with pytest.raises(Exception) as exc:
+        asyncio.run(transfers.ship_transfer(tid, "T1", None, "DTDC", False, _ADMIN))
+    assert getattr(exc.value, "status_code", None) == 503
+    assert _on_hand(db, product_id, "A") == 3

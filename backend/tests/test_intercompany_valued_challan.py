@@ -63,6 +63,7 @@ from fastapi import HTTPException  # noqa: E402
 
 from api import dependencies as deps  # noqa: E402
 from api.routers import print_documents, transfers  # noqa: E402
+import transfer_box as box  # noqa: E402
 
 mongomock = pytest.importorskip("mongomock")
 
@@ -198,10 +199,9 @@ def _create(to_store, qty=2, unit_cost=0.0, by=ADMIN, extra=()):
     return _run(transfers.create_transfer(body, by))["transfer"]
 
 
-def _ship(tid, courier_name=None):
-    return _run(
-        transfers.ship_transfer(tid, None, None, courier_name, False, SOURCE_MANAGER)
-    )["transfer"]
+def _ship(tid, courier_name="DTDC", user=SOURCE_MANAGER):
+    # S3: the sending shop scans the pieces out, then ships with a courier.
+    return box.ship(transfers, tid, user, courier=courier_name)["transfer"]
 
 
 def _challan(tid, user=SOURCE_ACCOUNTS):
@@ -256,15 +256,17 @@ def test_f51_transfer_is_saved_at_the_units_own_cost(db):
 
 
 def test_f51_value_counts_the_units_that_left_not_the_request(db):
-    t = _shipped("ST-BOK-1", qty=3)  # only 2 units on the shelf
+    t = _create("ST-BOK-1", qty=2)
+    # S3: only ONE piece is scanned into the box.
+    box.ship(transfers, t["id"], SOURCE_MANAGER, per_line={t["items"][0]["id"]: 1})
     stored = transfers._get_transfer(t["id"])
-    assert stored["items"][0]["quantity_shipped"] == 2
+    assert stored["items"][0]["quantity_shipped"] == 1
     html = _challan(t["id"])
-    assert _shows_amount(html, 2 * UNIT_COST)
-    assert not _shows_amount(html, 3 * UNIT_COST)
-    assert stored["total_value"] == pytest.approx(2 * UNIT_COST)
-    # The quantity printed is what left (2), not the request (3).
-    assert "<strong>2</strong>" in html and "<strong>3</strong>" not in html
+    assert _shows_amount(html, UNIT_COST)
+    assert not _shows_amount(html, 2 * UNIT_COST)
+    assert stored["total_value"] == pytest.approx(UNIT_COST)
+    # The quantity printed is what left (1), not the request (2).
+    assert "<strong>1</strong>" in html and "<strong>2</strong>" not in html
 
 
 def test_f51_challan_names_both_gstins_and_the_consignee_address(db):
@@ -285,11 +287,17 @@ def test_f51_challan_serial_column_prints_the_unit_barcodes(db):
         assert code in html
 
 
-def test_f51_ship_without_a_carrier_never_reads_none(db):
+def test_f51_ship_without_a_carrier_is_refused_and_never_reads_none(db):
+    """S3: the courier + tracking no. go on at ship, so a box never leaves
+    "via None" -- it does not leave at all without them."""
     t = _create("ST-BOK-1")
-    shipped = _ship(t["id"], courier_name=None)
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"], courier_name=None)
+    assert exc.value.status_code == 400
+    assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
+    shipped = _ship(t["id"])
     notes = [h.get("notes") or "" for h in shipped.get("status_history") or []]
-    assert notes and not any("None" in n for n in notes), notes
+    assert "Shipped via DTDC" in notes and not any("None" in n for n in notes), notes
 
 
 def test_f51_challan_before_ship_is_refused(db):
@@ -349,11 +357,7 @@ def test_d13_challan_is_valued_exactly_when_the_gstins_differ(db, to_store):
 
 def _receive_and_complete(t, received=2):
     line_id = transfers._get_transfer(t["id"])["items"][0]["id"]
-    _run(transfers.receive_transfer(
-        t["id"], [transfers.TransferItemReceive(transfer_item_id=line_id, quantity_received=received)],
-        ADMIN,
-    ))
-    _run(transfers.complete_transfer(t["id"], None, ADMIN))
+    box.receive_complete(transfers, t["id"], ADMIN, {line_id: (received, 0)})
 
 
 def test_d13_any_mirror_bill_carries_the_challan_value(db):
@@ -372,13 +376,16 @@ def test_d13_short_receipt_bill_states_its_basis_and_the_challan_value(db):
     never received) and says so on the bill, next to the challan's value, so
     the gap is visible instead of two silent figures. Which one the sender's
     GSTR-1 reports is the CA's call (owner ruling D13)."""
-    t = _shipped("ST-BOK-1", qty=3)
+    # CA answers 2026-10-23 replace D13's received-value bill: the bill IS the
+    # invoice as issued (the 2 that LEFT); the short piece is a credit note
+    # when it is written off (test_transfer_per_piece).
+    t = _shipped("ST-BOK-1", qty=2)
     _receive_and_complete(t, received=1)
     assert transfers._get_transfer(t["id"])["total_value"] == pytest.approx(2 * UNIT_COST)
     assert _shows_amount(_challan(t["id"]), 2 * UNIT_COST)
     (bill,) = db["vendor_bills"].find({"source_transfer_id": t["id"]})
-    assert bill["taxable_amount"] == pytest.approx(UNIT_COST)
-    assert (bill["qty_basis"], bill["challan_value"]) == ("received", pytest.approx(2 * UNIT_COST))
+    assert bill["taxable_amount"] == pytest.approx(2 * UNIT_COST)
+    assert (bill["qty_basis"], bill["challan_value"]) == ("shipped", pytest.approx(2 * UNIT_COST))
 
 
 def test_d13_the_paper_and_the_books_ask_one_rule(db, monkeypatch):
@@ -556,19 +563,15 @@ def test_d7_workshop_staff_pick_ship_and_receive_replies_carry_no_cost(db):
     is costed from the start, as a BOPIS line is; ship stamps the units' own
     cost. None of the four replies may carry it."""
     t = _create("ST-BOK-1", unit_cost=UNIT_COST)
-    line_id = t["items"][0]["id"]
     picker = _user("WORKSHOP_STAFF")
     receiver = _user("WORKSHOP_STAFF", "ST-BOK-1")
     replies = {
-        "start-picking": _run(transfers.start_picking(t["id"], picker)),
-        "complete-picking": _run(transfers.complete_picking(
-            t["id"], [{"item_id": line_id, "quantity_picked": 2}], picker
+        "pack": _run(transfers.pack_transfer(
+            t["id"], transfers.TransferPack(barcodes=list(BARCODES)), picker
         )),
-        "ship": _run(transfers.ship_transfer(t["id"], None, None, None, False, picker)),
+        "ship": _run(transfers.ship_transfer(t["id"], "T1", None, "DTDC", False, picker)),
         "receive": _run(transfers.receive_transfer(
-            t["id"],
-            [transfers.TransferItemReceive(transfer_item_id=line_id, quantity_received=2)],
-            receiver,
+            t["id"], transfers.TransferPieceReceive(barcode=BARCODES[0]), receiver,
         )),
     }
     for route, reply in replies.items():
@@ -647,8 +650,10 @@ def test_f51_a_line_that_shipped_nothing_prints_a_cost_not_the_client_figure(db)
         product_id="P-LENS", sku="LN-1", product_name="Lens pair",
         quantity_requested=1, unit_cost=9999,
     )
+    db["stock_units"].insert_one({"stock_id": "SU-L", "product_id": "P-LENS", "store_id": "ST-DHN-1",
+                                  "status": "AVAILABLE", "barcode": "BVLENS01", "unit_cost": 1200.0})
     t = _create("ST-BOK-1", extra=[lens])
-    _ship(t["id"])
+    box.ship(transfers, t["id"], SOURCE_MANAGER, per_line={t["items"][1]["id"]: 0})
     line = transfers._get_transfer(t["id"])["items"][1]
     assert (line["quantity_shipped"], line["unit_cost"]) == (0, pytest.approx(1200.0))
     assert not _shows_amount(_challan(t["id"]), 9999)
@@ -706,12 +711,16 @@ def test_f51_a_crossing_move_with_nothing_on_the_shelf_never_ships(db):
     """Dhanbad -> Bokaro with both units SOLD: shipping would move 0 units and
     the valued challan would read 'Total Quantity 0 / Rs 0.00' between two
     GSTINs -- the F51 paper. Refused before ship; nothing changes."""
-    db["stock_units"].update_many({}, {"$set": {"status": "SOLD"}})
     t = _create("ST-BOK-1")
+    db["stock_units"].update_many({}, {"$set": {"status": "SOLD"}})
     with pytest.raises(HTTPException) as exc:
-        _ship(t["id"])
-    assert exc.value.status_code == 409 and "in stock" in exc.value.detail
+        _ship(t["id"])  # nothing free to scan into the box
+    assert exc.value.status_code == 409 and "Scan the pieces" in exc.value.detail
     assert transfers._get_transfer(t["id"])["status"] == transfers.TransferStatus.APPROVED
+    # ...and S3: nothing free can even be asked for.
+    with pytest.raises(HTTPException) as exc:
+        _create("ST-BOK-1")
+    assert exc.value.status_code == 409 and "free" in exc.value.detail
 
 
 def test_f51_a_crossing_transfer_that_shipped_nothing_prints_no_rs_0_challan(db):
@@ -1013,6 +1022,7 @@ def test_d13_ship_refuses_when_it_cannot_read_the_shops(db, monkeypatch):
     db["stock_units"].update_one({"stock_id": "SU-2"}, {"$unset": {"unit_cost": "", "cost_price": ""}})
     db["products"].update_one({}, {"$set": {"cost_price": 0}})
     t = _create("ST-BOK-1")
+    box.pack_all(transfers, t["id"], SOURCE_MANAGER)
     real = mongomock.collection.Collection.find_one
 
     def flaky(self, *args, **kwargs):
@@ -1026,7 +1036,7 @@ def test_d13_ship_refuses_when_it_cannot_read_the_shops(db, monkeypatch):
             _ship(t["id"])
     assert exc.value.status_code == 503
     assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
-    assert transfers._get_transfer(t["id"])["status"] == transfers.TransferStatus.APPROVED
+    assert transfers._get_transfer(t["id"])["status"] == transfers.TransferStatus.PACKED
 
 
 @pytest.mark.parametrize("case", ["valued_before_ship", "cannot_place", "gstin_lost_after_ship"])
@@ -1071,11 +1081,7 @@ def test_owner_every_transfer_action_reply_carries_the_routes_answer(db):
             tid, transfers.TransferApproval(approved=True), area
         ))["transfer"], False),
         ("ship", SOURCE_MANAGER, lambda: _ship(tid), True),
-        ("receive", receiver, lambda: _run(transfers.receive_transfer(
-            tid,
-            [transfers.TransferItemReceive(transfer_item_id=line_id, quantity_received=2)],
-            receiver,
-        ))["transfer"], True),
+        ("receive", receiver, lambda: box.receive(transfers, tid, receiver)["transfer"], True),
         ("complete", receiver, lambda: _run(
             transfers.complete_transfer(tid, None, receiver)
         )["transfer"], True),
@@ -1088,6 +1094,11 @@ def test_owner_every_transfer_action_reply_carries_the_routes_answer(db):
     # ...and accounts are offered it once it has shipped.
     seen = _run(transfers.get_transfer(tid, SOURCE_ACCOUNTS))["transfer"]
     assert seen["can_print_challan"] is _prints(tid, SOURCE_ACCOUNTS) is True
+    db["stock_units"].insert_many([  # both pieces left on the first box
+        {"stock_id": f"SU-X{n}", "product_id": PRODUCT["product_id"], "store_id": "ST-DHN-1",
+         "status": "AVAILABLE", "barcode": f"BVX0{n}", "unit_cost": UNIT_COST}
+        for n in (1, 2)
+    ])
     other = _create("ST-DHN-2")  # unvalued: the area manager prints it
     cancelled = _run(transfers.cancel_transfer(other["id"], "Not needed", area))["transfer"]
     assert cancelled.get("can_print_challan") is _prints(other["id"], area) is True
@@ -1179,6 +1190,7 @@ def test_d13_ship_refuses_when_it_cannot_read_the_products(db, monkeypatch):
     """r6 #1: the one product read fails -> 503 before anything moves: no
     unit claimed, the transfer still APPROVED, no verdict stamped."""
     t = _create("ST-BOK-1")
+    box.pack_all(transfers, t["id"], SOURCE_MANAGER)
     with monkeypatch.context() as m:
         _products_fail(m)
         with pytest.raises(HTTPException) as exc:
@@ -1186,7 +1198,7 @@ def test_d13_ship_refuses_when_it_cannot_read_the_products(db, monkeypatch):
     assert exc.value.status_code == 503
     assert db["stock_units"].count_documents({"status": "AVAILABLE"}) == 2
     stored = db["stock_transfers"].find_one({"id": t["id"]})
-    assert stored["status"] == transfers.TransferStatus.APPROVED
+    assert stored["status"] == transfers.TransferStatus.PACKED
     assert "gst_registrations" not in stored
 
 
@@ -1196,11 +1208,8 @@ def test_d13_a_legacy_move_whose_shops_cannot_be_read_still_completes(db, monkey
     complete still answers success -- the status flip is never blocked."""
     t = _shipped("ST-BOK-1")
     db["stock_transfers"].update_one({"id": t["id"]}, {"$unset": {"gst_registrations": ""}})
-    line_id = transfers._get_transfer(t["id"])["items"][0]["id"]
-    _run(transfers.receive_transfer(
-        t["id"], [transfers.TransferItemReceive(transfer_item_id=line_id, quantity_received=2)],
-        ADMIN,
-    ))
+    db["vendor_bills"].delete_many({})  # shipped before ship booked the invoice
+    box.receive(transfers, t["id"], ADMIN)
     real = mongomock.collection.Collection.find_one
 
     def flaky(self, *args, **kwargs):
