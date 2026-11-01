@@ -1,6 +1,11 @@
 # IMS 2.0 — live plan status
 
-Updated **2026-11-01** (07:15): **#1299 merged and live** (build 48001dfa, healthy) - stock redesign **S2b, the Receive follow-ups**:
+Updated **2026-11-01** (07:45): **The clock sweep finished.** It looked everywhere for the night-time mistake behind #1306 (a business day or month taken from the UTC clock instead of IST). **#1312 merged** (test-only): three more tests would have broken on 31 Mar 2027. In the product itself it found **25 real places**, each confirmed by an independent check. None has touched real money yet (not billing live), but each would once the shops are. The serious ones:
+- the **Tally B2B and sales-journal exports** put bills made between 00:00 and 05:30 IST into the previous day's export;
+- **promotions** switched on and off by the UTC date, so an expired offer applied to bills until 05:30;
+- the **Finance dashboard's** default dates, including the month the period-lock button locks, were a day (or a month) behind at night.
+
+Also: month-to-date expenses, the GSTR-1/3B default month, day-end / petty-cash / cash-reconciliation / journal / expense default dates, workshop and follow-up counts, analytics 'today', rosters, staff self-service months, contact-lens expiry. **Two fix PRs are in build:** lane A (money, GST, accounts; strictest review) and lane B (operational). The date stamp in RET-/SHP-/VR- numbers waits for #1264 (same files). **Website menu #1280**: the round-3 fixes passed CI; a final review round is running before merge and the one-time live setup. Earlier, 2026-11-01 (07:15): **#1299 merged and live** (build 48001dfa, healthy) - stock redesign **S2b, the Receive follow-ups**:
 - a delivery-challan receipt needs its photo (refused without it, and the photo is now kept);
 - a cash memo with no number is fine but its photo is required;
 - a damaged piece marked 'Credit' closes that much of the purchase order short;
