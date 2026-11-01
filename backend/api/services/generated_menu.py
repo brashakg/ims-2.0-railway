@@ -150,6 +150,14 @@ def default_template() -> Dict[str, Any]:
     }
 
 
+def _unparseable(url: Any) -> bool:
+    try:
+        urlsplit(str(url or "").strip())
+        return False
+    except ValueError:
+        return True
+
+
 def validate_template(template: Any) -> List[str]:
     """Every problem with a template (empty when it can be generated). Pure."""
     errs: List[str] = []
@@ -165,6 +173,16 @@ def validate_template(template: Any) -> List[str]:
             errs.append(f"{where}: needs a title")
         if s["kind"] == "collection" and not str(s.get("handle") or "").strip():
             errs.append(f"{where}: needs the collection handle")
+        if s["kind"] in ("links", "panel") and _unparseable(s.get("url")):
+            errs.append(f"{where}: every link needs a valid url")
+        def _lst(x: Any) -> List[Any]:
+            return x if isinstance(x, list) else []
+        urls = list(_lst(s.get("links")))
+        urls += [lk for g in _lst(s.get("groups")) if isinstance(g, dict) for lk in _lst(g.get("links"))]
+        for link in urls:
+            if isinstance(link, dict) and _unparseable(link.get("url")):
+                errs.append(f"{where}: every link needs a valid url")
+                break
         if s["kind"] == "links":
             links = s.get("links")
             if not isinstance(links, list) or not links:
@@ -217,7 +235,10 @@ def _count(row: Optional[Dict[str, Any]], counts: Dict[str, Dict[str, Any]]) -> 
 def _collection_handle(url: str) -> Optional[str]:
     """The lowercased <h> of any URL whose path is /collections/<h>[/...]
     (any scheme/host, query or fragment), else None."""
-    path = urlsplit(url.strip()).path
+    try:
+        path = urlsplit(url.strip()).path
+    except ValueError:  # e.g. 'http://[oops' -- not a collection link
+        return None
     if not path.startswith("/collections/"):
         return None
     return path[len("/collections/"):].split("/", 1)[0].lower() or None

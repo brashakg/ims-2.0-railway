@@ -1537,3 +1537,12 @@ def test_build_passes_the_retired_handles(monkeypatch):
     doc = gm.make_template_doc()
     gm._build(db, doc, [])
     assert seen.get("retired") == {"old-sale"}
+
+
+@pytest.mark.parametrize("url", ["http://[oops", "https://bettervision.in]/x", "http://bettervision.in]/pages/a"])
+def test_an_unparseable_url_never_crashes_generate_and_is_refused_on_save(url):
+    # A link child and a heading URL each: generate() must not raise (one
+    # typo would 500 the whole menus page and stall the rebuild).
+    for t in (_links_template("/pages/a", [{"title": "a", "url": url}]), _links_template(url)):
+        gm.generate(t, ROWS, _counts())
+        assert "section 1: every link needs a valid url" in gm.validate_template(t)
