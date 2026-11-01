@@ -143,25 +143,45 @@ def _press_verdict(db, lead):
         return "NOT_FOR_WEBSITE", "not for the website - " + refusal, None
     if is_variant_of(lead):
         return "variant_of", PUSH_THE_MODEL, None
-    blocked = online_block.is_blocked_from_online_strict(lead, db)
-    if blocked is None:
-        return "block_status_unverifiable", "block status could not be read - the push skips it", None
-    if blocked:
-        return "online_sync_blocked", "blocked from online - in an online_sync_blocked collection", None
-    rows, plan = listing_plan(db, lead)
-    if plan and plan.get("variant_of"):
-        return "variant_of", PUSH_THE_MODEL, None
-    if plan and plan.get("refusal"):
-        return plan["refusal"][0], "family push refused - " + plan["refusal"][0], plan
-    view = listing_view(lead, plan) if plan else lead
-    if not product_photo_urls(view):
-        return "no_photo", "no photo - the push refuses a product with no photograph", plan
-    unpriced = press_unpriced_sizes(view, plan["rows"] if plan else rows, plan)
-    if unpriced:
-        return UNPRICED_SIZE, "no selling price on " + ", ".join(unpriced) + " - the push is refused until it is priced", plan
+    gates, plan = press_gates(db, lead)
+    if gates:
+        code, reason, _need = gates[0]  # the press stops at the first
+        return code, reason, plan
     if product_online_state(lead, None)["queued"]:
         return None, "queued - awaiting publish; no current refusal found", plan
     return None, "not queued", plan
+
+
+def press_gates(db, lead):
+    """Every press gate past the writer's own refusal and variant_of checks
+    that this listing fails, in push_product's order, as
+    ([(code, reason, need)], plan). _press_verdict reports the first (the
+    press stops there); the Add/Edit form's website line lists every `need`
+    (_website_needs) -- one rule, two screens. A listing-level stop (block
+    status, another lead's listing, a family refusal) ends the list; photo
+    and price are both listed. Raises on a read failure."""
+    blocked = online_block.is_blocked_from_online_strict(lead, db)
+    if blocked is None:
+        why = "block status could not be read - the push skips it"
+        return [("block_status_unverifiable", why, why)], None
+    if blocked:
+        why = "blocked from online - in an online_sync_blocked collection"
+        return [("online_sync_blocked", why, why)], None
+    rows, plan = listing_plan(db, lead)
+    if plan and plan.get("variant_of"):
+        return [("variant_of", PUSH_THE_MODEL, PUSH_THE_MODEL)], None
+    if plan and plan.get("refusal"):
+        why = "family push refused - " + plan["refusal"][0]
+        return [(plan["refusal"][0], why, why)], plan
+    gates = []
+    view = listing_view(lead, plan) if plan else lead
+    if not product_photo_urls(view):
+        gates.append(("no_photo", "no photo - the push refuses a product with no photograph", "a photo"))
+    unpriced = press_unpriced_sizes(view, plan["rows"] if plan else rows, plan)
+    if unpriced:
+        gates.append((UNPRICED_SIZE, "no selling price on " + ", ".join(unpriced)
+                      + " - the push is refused until it is priced", "a selling price (" + ", ".join(unpriced) + ")"))
+    return gates, plan
 
 
 def expected_content(db, product):

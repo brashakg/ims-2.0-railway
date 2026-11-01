@@ -241,3 +241,85 @@ def test_an_unreadable_model_is_not_guessed(monkeypatch):
     lead, _black = _family(db, [("Gold", "001"), ("Black", "002")])
     monkeypatch.setattr(diag, "variant_rows_for_product", _dead)
     assert _model_needs(monkeypatch, db, lead) is None
+
+
+# ---------------------------------------------------------------------------
+# A lead's own line asks the press's OWN gates (press_gates, the function
+# _press_verdict asks) -- block status and the family plan's refusals too,
+# never a partial copy that checks only photo and price (review of #1305).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+@pytest.mark.parametrize("blocked, code", [(True, "online_sync_blocked"), (None, "block_status_unverifiable")])
+def test_a_blocked_or_unreadable_block_lead_says_what_the_press_says(monkeypatch, blocked, code):
+    from api.services import online_block
+    from api.services import online_content_diagnostics as diag
+    from test_shopify_model_listings import _item, _twin, _world
+
+    db = _world()
+    lead = _item(db, 1, "Gold", "001")
+    monkeypatch.setattr(online_block, "is_blocked_from_online_strict", lambda product, db: blocked)
+    got_code, reason, _plan = diag._press_verdict(db, _twin(db, lead))
+    assert got_code == code
+    assert _model_needs(monkeypatch, db, lead) == [reason]
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_model_whose_family_push_is_refused_says_so(monkeypatch):
+    """Two colours that look the same: the press refuses the family
+    (OPTION_CLASH) -- the lead's line must not read 'nothing more is needed'."""
+    from api.services import online_content_diagnostics as diag
+    from test_shopify_model_listings import _family, _twin, _world
+
+    db = _world()
+    lead, _twin_colour = _family(db, [("Gold", "001", "58"), ("Gold", "001", "58")])
+    code, reason, _plan = diag._press_verdict(db, _twin(db, lead))
+    assert code == "OPTION_CLASH", (code, reason)
+    assert _model_needs(monkeypatch, db, lead) == [reason]
+
+
+def test_a_colour_whose_own_refusal_stands_does_not_repeat_it_through_its_model(monkeypatch):
+    """Colour and lead share a brand kept off the website: the colour's own
+    refusal is said once, never again as 'its model's page: ...'."""
+    from api.services import catalog_dictionary
+    from api.services import online_content_diagnostics as diag
+    from api.services.shopify_push import product_push_refusal
+    from test_shopify_model_listings import _family, _twin, _world
+
+    monkeypatch.setattr(catalog_dictionary, "brand_website_refusal",
+                        lambda db, brand: "Ray-Ban is kept off the website")
+    db = _world()
+    _lead, black = _family(db, [("Gold", "001"), ("Black", "002")])
+    why = product_push_refusal(db, _twin(db, black))
+    assert why, "the brand keeps the colour off the website"
+    needs = _model_needs(monkeypatch, db, black)
+    assert needs == [why, diag.PUSH_THE_MODEL], needs
+    assert not any(n.startswith("its model's page:") for n in needs)
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_parent_with_no_sku_never_borrows_a_stray_sku_less_twin_as_lead():
+    """The parent spine has no SKU and a stray twin has sku '': model_lead
+    must find no lead (never the stray), and the sync screen and the form
+    both say so."""
+    from api.services import online_content_diagnostics as diag
+    from test_shopify_model_listings import _item, _twin, _world
+
+    db = _world()
+    lead = _item(db, 1, "Gold", "001")
+    black = _item(db, 2, "Black", "002")
+    db["products"].update_one({"product_id": black}, {"$set": {"variant_of": lead}})
+    db["products"].update_one({"product_id": lead}, {"$set": {"sku": ""}})
+    db["catalog_products"].insert_one({"id": "tw-stray", "sku": "", "name": "stray", "ecom": {}})
+    spine = db["products"].find_one({"product_id": black})
+    product = _twin(db, black)
+    twins, spines = db["catalog_products"], db["products"]
+    assert diag.model_lead(product, spine, lambda i: twins.find_one({"id": i}),
+                           lambda s: twins.find_one({"sku": s}),
+                           lambda i: spines.find_one({"product_id": i})) is None
+    assert diag.model_hold(db, product, spine) == "family lead could not be found"
+    sweep = diag.colour_size_parity(db)
+    assert sweep["checked"], sweep
+    (row,) = [r for r in sweep["missing_items"] if r["sku"] == spine["sku"]]
+    assert row["reason"] == "family lead could not be found", row
