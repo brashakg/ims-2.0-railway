@@ -1,7 +1,7 @@
 // FE-7: a new journal entry and a new expense default their date to the IST
 // day. At 01:00 IST on 1 April the UTC day is 31 March: the closed year.
 import { it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 vi.stubGlobal('requestIdleCallback', () => 0);
@@ -51,6 +51,24 @@ it.each(CLOCKS)('a new expense at %s is dated %s', async (clock, day) => {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date(clock));
   const { container } = render(<MemoryRouter><ExpensesLayout /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: /Add expense/i }));
+  expect(dateInput(container).value).toBe(day);
+});
+
+// After a save, resetForm re-dates the next expense: that path must be IST too.
+it.each(CLOCKS)('the next expense after a save at %s is dated %s', async (clock, day) => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date(clock));
+  exp.createExpense.mockResolvedValue({ expense_id: 'E1' });
+  const { container } = render(<MemoryRouter><ExpensesLayout /></MemoryRouter>);
+  fireEvent.click(await screen.findByRole('button', { name: /Add expense/i }));
+  fireEvent.change(screen.getByTitle('Amount'), { target: { value: '100' } });
+  fireEvent.change(screen.getByTitle('Description'), { target: { value: 'Tea' } });
+  fireEvent.change(dateInput(container), { target: { value: '2027-03-15' } });
+  fireEvent.click(screen.getByRole('button', { name: /^Submit$/ }));
+  await waitFor(() => expect(exp.createExpense).toHaveBeenCalled());
+  expect(exp.createExpense.mock.calls[0][0].expense_date).toBe('2027-03-15');
+  await waitFor(() => expect(screen.queryByRole('button', { name: /^Submit$/ })).toBeNull());
   fireEvent.click(await screen.findByRole('button', { name: /Add expense/i }));
   expect(dateInput(container).value).toBe(day);
 });

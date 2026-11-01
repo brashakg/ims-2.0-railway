@@ -69,6 +69,12 @@ const CLOCKS = [
   ['2026-12-31T09:00:00Z', '2026-12-31'], // day control
 ] as const;
 
+// The '30 days ago' from-bound is IST too: at night the UTC day is a day behind.
+const FROM_30 = [
+  ['2026-12-31T20:00:00Z', '2026-12-02'], // night: IST 1 Jan - 30
+  ['2026-12-31T09:00:00Z', '2026-12-01'], // day control
+] as const;
+
 function at(clock: string) {
   vi.useFakeTimers({ toFake: ['Date'] });
   vi.setSystemTime(new Date(clock));
@@ -113,11 +119,25 @@ it.each(CLOCKS)('workshop productivity at %s runs to %s', async (clock, day) => 
   expect(JSON.stringify(m.prod.mock.calls[0])).toContain(day);
 });
 
+it.each(FROM_30)('workshop productivity at %s runs from %s', async (clock, from) => {
+  at(clock);
+  render(<WorkshopProductivityCard storeId="S" />);
+  await waitFor(() => expect(m.prod).toHaveBeenCalled());
+  expect(m.prod.mock.calls[0][1]).toBe(from);
+});
+
 it.each(CLOCKS)('ad performance at %s runs to %s', async (clock, day) => {
   at(clock);
   render(<AdPerformancePage />);
   await waitFor(() => expect(m.adperf).toHaveBeenCalled());
   expect(m.adperf.mock.calls[0][0].to).toBe(day);
+});
+
+it.each(FROM_30)('ad performance at %s runs from %s', async (clock, from) => {
+  at(clock);
+  render(<AdPerformancePage />);
+  await waitFor(() => expect(m.adperf).toHaveBeenCalled());
+  expect(m.adperf.mock.calls[0][0].from).toBe(from);
 });
 
 it.each(CLOCKS)('promotions report at %s runs to %s', async (clock, day) => {
