@@ -442,36 +442,43 @@ def _true_up(db, bills: list, pid, gstin_of, bill: Optional[dict] = None, when=N
     target = {h: round(heads[h] * min(lost, qty) / qty, 2) for h in _HEADS}
     if bill is None:
         over = {h: round(have[h] - target[h], 2) for h in _HEADS}
-        rows = coll.find({"kind": "REVERSAL", "superseded": {"$ne": True}, "product_id": pid,
-                          "bill_id": {"$in": line_bills}})
-        for row in sorted(rows, key=lambda r: (bool(r.get("topup")), r["period"]), reverse=True):
-            # A held (no-GSTIN) row was never filed, whatever its month's lock.
-            locked = _locked(db, row["period"]) and not row.get("unallocated")
-            net = {h: _f(row.get(h)) for h in _HEADS}
-            for r in coll.find({"kind": "RECLAIM", "reclaims": row["_id"],
-                                "superseded": {"$ne": True}}) if locked else []:
-                net = {h: net[h] + _f(r.get(h)) for h in _HEADS}
-            cut = {h: round(min(net[h], max(0.0, over[h])), 2) for h in _HEADS}
-            if not any(cut.values()):
-                continue
-            if locked:
-                # The filed return stands, as undo_writeoff keeps a filed row.
-                period = _open_period(db, _now())
-                body = {k: v for k, v in row.items() if k not in ("_id", *_HEADS)}
-                # A piece's row: a `trim` re-claim (no pieces), keyed by when
-                # the row was written, so undo_writeoff nets it and a later
-                # write-off of the piece never adds to the old one.
-                rid = (f"{row['_id']}:reclaim:{period}" if row.get("topup") else
-                       f"{row['_id']}:{row.get('recorded_at')}:trim:{period}")
-                coll.update_one({"_id": rid}, {
-                    "$inc": {h: -cut[h] for h in _HEADS},
-                    "$setOnInsert": {**body, "kind": "RECLAIM", "reclaims": row["_id"],
-                                     **({} if row.get("topup") else {"trim": True, "pieces": 0.0}),
-                                     "period": period, "recorded_at": _now()}}, upsert=True)
-            else:
-                coll.update_one({"_id": row["_id"]}, {"$set": {h: round(net[h] - cut[h], 2)
-                                                               for h in _HEADS}})
-            over = {h: over[h] - cut[h] for h in _HEADS}
+        live = {"kind": "REVERSAL", "superseded": {"$ne": True}, "product_id": pid,
+                "bill_id": {"$in": line_bills}}
+        # Evenly first: each piece's row down to its slice of the target (a
+        # top-up row holds no piece, so it goes first), so an undo later never
+        # leaves the pieces still lost short; then any rounding left over.
+        for even in (True, False):
+            for row in sorted(coll.find(live), key=lambda r: (bool(r.get("topup")), r["period"]),
+                              reverse=True):
+                # A held (no-GSTIN) row was never filed, whatever its month's lock.
+                locked = _locked(db, row["period"]) and not row.get("unallocated")
+                net = {h: _f(row.get(h)) for h in _HEADS}
+                for r in coll.find({"kind": "RECLAIM", "reclaims": row["_id"],
+                                    "superseded": {"$ne": True}}) if locked else []:
+                    net = {h: net[h] + _f(r.get(h)) for h in _HEADS}
+                part = _f(row.get("pieces")) / lost if even and lost else 0.0
+                cut = {h: round(max(0.0, min(net[h] - target[h] * part, over[h])), 2)
+                       for h in _HEADS}
+                if not any(cut.values()):
+                    continue
+                if locked:
+                    # The filed return stands, as undo_writeoff keeps a filed row.
+                    period = _open_period(db, _now())
+                    body = {k: v for k, v in row.items() if k not in ("_id", *_HEADS)}
+                    # A piece's row: a `trim` re-claim (no pieces), keyed by when
+                    # the row was written, so undo_writeoff nets it and a later
+                    # write-off of the piece never adds to the old one.
+                    rid = (f"{row['_id']}:reclaim:{period}" if row.get("topup") else
+                           f"{row['_id']}:{row.get('recorded_at')}:trim:{period}")
+                    coll.update_one({"_id": rid}, {
+                        "$inc": {h: -cut[h] for h in _HEADS},
+                        "$setOnInsert": {**body, "kind": "RECLAIM", "reclaims": row["_id"],
+                                         **({} if row.get("topup") else {"trim": True, "pieces": 0.0}),
+                                         "period": period, "recorded_at": _now()}}, upsert=True)
+                else:
+                    coll.update_one({"_id": row["_id"]}, {"$set": {h: round(net[h] - cut[h], 2)
+                                                                   for h in _HEADS}})
+                over = {h: over[h] - cut[h] for h in _HEADS}
         return None
     g = gstin_of(bill)
     add = {h: max(0.0, round(target[h] - have[h], 2)) for h in _HEADS}
@@ -688,9 +695,9 @@ def undo_writeoff(db, unit: dict) -> None:
 
 def _trim_top_up(db, unit: dict, row: dict) -> None:
     """Hold the line at the lost pieces' slice on BOTH sides after an undo:
-    the excess given back, and -- the rows left were cut unevenly (a credit
-    note's give-back) -- the shortfall a top-up on the undone row's bill in
-    the month the pieces were lost, or the first open month if that one is
+    the excess given back, and any shortfall (the give-back cuts evenly, so
+    only a capped line has one) a top-up on the undone row's bill in the
+    month of the pieces still lost, or the first open month if that one is
     filed (a filed month is never edited)."""
     if "share" not in row:  # a header-only bill's rows take no top-up
         gstin_of = _gstin_lookup(db)
@@ -698,8 +705,11 @@ def _trim_top_up(db, unit: dict, row: dict) -> None:
         _true_up(db, bills, pid, gstin_of)
         bill = next((b for b in bills if b.get("bill_id") == row.get("bill_id")), None)
         if bill:
-            _true_up(db, bills, pid, gstin_of, bill, row.get("recorded_at") or _now(),
-                     source=("UNDO", _sid(unit)))
+            still = [r["period"] for r in db.get_collection(COLLECTION).find({
+                "kind": "REVERSAL", "superseded": {"$ne": True}, "topup": {"$ne": True},
+                "product_id": pid, "bill_id": {"$in": [b.get("bill_id") for b in bills]}})]
+            when = f"{max(still)}-15T06:00:00" if still else _now()
+            _true_up(db, bills, pid, gstin_of, bill, when, source=("UNDO", _sid(unit)))
 
 
 def forget(db, unit: dict) -> None:

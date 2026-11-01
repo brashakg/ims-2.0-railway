@@ -1517,13 +1517,13 @@ def _unequal_box(world, lost):
     return kept, invoice
 
 
-def _write_off(world, sid):
+def _write_off(world, sid, when=None):
     from datetime import datetime as _dt
 
     from api.services import writeoff_itc
 
     return writeoff_itc.record_writeoff(world, [_unit(world, sid)], source_type="QUARANTINE_DAMAGE",
-                                        source_id=sid, when=_dt.utcnow(), actor_id="u-admin")
+                                        source_id=sid, when=when or _dt.utcnow(), actor_id="u-admin")
 
 
 @pytest.mark.parametrize("lost, share", [("SU-1", 25.0), ("SU-2", 75.0)])  # expensive / cheap lost
@@ -1660,11 +1660,11 @@ def test_a_filed_kept_write_off_gives_the_excess_back_and_its_undo_nets_it(world
 # ---------------------------------------------------------------------------
 
 
-def _three_cost_box(world):
+def _three_cost_box(world, su3_at=None):
     """Three pieces 3000/1000/2000 (invoice 150/150); SU-2 and SU-3 land
-    damaged and are written off (50/50 each), then SU-1 -- missing -- is
-    written off: its credit note (75/75) leaves 75/75 on the two kept pieces,
-    given back unevenly (SU-2 25, SU-3 50)."""
+    damaged and are written off (50/50 each; SU-3 at `su3_at`), then SU-1 --
+    missing -- is written off: its credit note (75/75) leaves 75/75 on the two
+    kept pieces, given back evenly (37.5 each)."""
     from api.routers import transfers
 
     for sid, cost in (("SU-1", 3000.0), ("SU-2", 1000.0), ("SU-3", 2000.0)):
@@ -1676,9 +1676,11 @@ def _three_cost_box(world):
     (invoice,) = [b for b in _bills(world, t["id"]) if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
     assert invoice["cgst_total"] == 150.0
     _write_off(world, "SU-2")
-    _write_off(world, "SU-3")
+    _write_off(world, "SU-3", su3_at)
     _run(transfers.write_off_missing_piece(t["id"], "SU-1", ADMIN))
     assert _on_invoice(world, invoice) == (75.0, 75.0, 0.0)
+    for sid in ("SU-2", "SU-3"):
+        assert world["itc_writeoff_reversals"].find_one({"_id": sid})["cgst"] == 37.5
     return invoice
 
 
@@ -1698,8 +1700,8 @@ def test_one_of_two_kept_pieces_back_after_the_note_holds_the_other_at_its_slice
 
 def test_a_kept_piece_back_into_a_filed_month_tops_up_in_the_open_month(world, monkeypatch):
     """The write-offs' month is filed when SU-3 comes back: the filed return
-    stands (75/75), SU-3's 50/50 is re-claimed and the 12.5/12.5 SU-2 is short
-    is topped up, both in the first open month -- 37.5/37.5 held in all."""
+    stands (75/75), SU-3's 37.5/37.5 is re-claimed in the first open month and
+    SU-2 already holds its 37.5/37.5, so nothing is topped up."""
     from api.services import writeoff_itc
 
     invoice = _three_cost_box(world)
@@ -1707,19 +1709,18 @@ def test_a_kept_piece_back_into_a_filed_month_tops_up_in_the_open_month(world, m
     monkeypatch.setattr(writeoff_itc, "_locked", lambda db, period: period == filed)
     writeoff_itc.undo_writeoff(world, _unit(world, "SU-3"))
     nxt = writeoff_itc._next_month(filed)
-    assert world["itc_writeoff_reversals"].find_one({"_id": "SU-2"})["cgst"] == 25.0
+    assert world["itc_writeoff_reversals"].find_one({"_id": "SU-2"})["cgst"] == 37.5
     assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, filed)["cgst"] == 75.0
-    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, nxt)["cgst"] == 12.5
-    assert writeoff_itc.month_reclaim(world, GSTIN_Y_JH, nxt)["cgst"] == 50.0
+    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, nxt)["cgst"] == 0.0
+    assert writeoff_itc.month_reclaim(world, GSTIN_Y_JH, nxt)["cgst"] == 37.5
     _done, heads = writeoff_itc._recorded(world, {"bill_id": invoice["bill_id"]}, "pieces")
     assert heads["cgst"] == 37.5
 
 
 def test_a_kept_piece_back_next_month_tops_up_in_the_still_open_loss_month(world, monkeypatch):
     """SU-3 comes back after the month rolls over, the loss month still open:
-    SU-2's 12.5/12.5 shortfall is topped up in the month SU-2 was lost, so that
-    month holds 37.5/37.5 and the undo's month holds nothing -- the same as
-    when SU-2 is the piece back."""
+    SU-2 still reverses its 37.5/37.5 in the month it was lost and the undo's
+    month holds nothing -- the same as when SU-2 is the piece back."""
     from datetime import timedelta
 
     from api.services import writeoff_itc
@@ -1733,3 +1734,24 @@ def test_a_kept_piece_back_next_month_tops_up_in_the_still_open_loss_month(world
     assert writeoff_itc._period(later) != loss
     assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, loss)["cgst"] == 37.5
     assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, writeoff_itc._period(later))["cgst"] == 0.0
+
+
+def test_the_earlier_month_piece_back_leaves_the_later_month_holding_the_line(world, monkeypatch):
+    """SU-2 lost in month M, SU-3 in M+1, then the missing SU-1's credit note.
+    SU-2 back: M holds nothing and M+1 holds the whole 37.5/37.5 -- never a
+    top-up dated at SU-2's own write-off."""
+    from datetime import datetime as _dt
+
+    from api.services import writeoff_itc
+
+    nxt = writeoff_itc._next_month(writeoff_itc._period(_dt.utcnow())) + "-15T06:00:00"
+    invoice = _three_cost_box(world, su3_at=nxt)
+    m = world["itc_writeoff_reversals"].find_one({"_id": "SU-2"})["period"]
+    m1 = world["itc_writeoff_reversals"].find_one({"_id": "SU-3"})["period"]
+    assert m1 == writeoff_itc._next_month(m)
+    monkeypatch.setattr(writeoff_itc, "_locked", lambda db, period: False)
+    writeoff_itc.undo_writeoff(world, _unit(world, "SU-2"))
+    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, m)["cgst"] == 0.0
+    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, m1)["cgst"] == 37.5
+    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, m1)["sgst"] == 37.5
+    assert _on_invoice(world, invoice) == (37.5, 37.5, 0.0)
