@@ -188,6 +188,38 @@ def test_reports_margin_readers_include_the_variance(monkeypatch):
     assert cats["total_profit"] == 740.0
     stores = asyncio.run(growth.profit_by_store(from_date=f, to_date=t, current_user=SU))
     assert (stores["data"][0]["cost"], stores["total_profit"]) == (1260.0, 740.0)
+    kpis = _enterprise_kpis(monkeypatch, db, _orders())
+    assert (kpis["gross_profit"], kpis["gross_margin_percent"]) == (740.0, 37.0)
+
+
+def _enterprise_kpis(monkeypatch, db, orders):
+    from api.routers import analytics as an
+
+    monkeypatch.setattr(an, "get_order_repository", lambda: _Repo(orders))
+    monkeypatch.setattr(an, "get_stock_repository", lambda: _Repo([]))
+    monkeypatch.setattr(an, "get_customer_repository", lambda: _Repo([]))
+    monkeypatch.setattr(an, "get_db", lambda: db)
+    return asyncio.run(an.get_enterprise_kpis(current_user=SU, period="month", store_id="S1"))["margins"]
+
+
+def test_the_collection_margin_includes_its_products_variance():
+    """A collection's 30-day margin (352.38 on its own lines) less its
+    product's variance at this shop in the 30 days (60): 292.38. Last
+    month's, another shop's and a non-member product's are left out."""
+    from tests.test_collection_insights import _kpi_db
+    from api.services import collection_insights as ci
+
+    db = _kpi_db()
+    db._c["cogs_variances"] = mongomock.MongoClient().ci.cogs_variances
+    db.get_collection = db.__getitem__
+    today = ist_today()
+    for vid, pid, amount, store, day in (("IN", "P1", 60.0, "BV-01", today),
+                                         ("OLD", "P1", 7.0, "BV-01", today - timedelta(days=40)),
+                                         ("S2", "P1", 11.0, "BV-02", today),
+                                         ("NM", "P9", 13.0, "BV-01", today)):
+        db["cogs_variances"].insert_one({"variance_id": vid, "product_id": pid, "amount": amount,
+                                         "store_id": store, "day": day.isoformat()})
+    assert ci.kpis(db, {"collection_id": "C1", "title": "Test"}, store_id="BV-01")["margin_30d"] == 292.38
 
 
 # --------------------------------------------------------------------------
@@ -345,6 +377,7 @@ def test_every_reader_keeps_the_variance_to_its_shop_and_dates(monkeypatch):
     acc = {"user_id": "a", "roles": ["ACCOUNTANT"], "active_store_id": "S1", "store_ids": ["S1"]}
     by_store = asyncio.run(growth.profit_by_store(from_date=f, to_date=t, current_user=acc))
     assert {r["store_id"]: r["cost"] for r in by_store["data"]} == {"S1": 1260.0}
+    assert _enterprise_kpis(monkeypatch, mdb, _till_orders())["gross_profit"] == 740.0
 
 
 

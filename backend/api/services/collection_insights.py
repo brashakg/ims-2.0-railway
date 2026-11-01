@@ -580,6 +580,20 @@ def movement_summary(
                 if age < 30:
                     srow["units_d30"] += units
 
+    # Pieces sold before their supplier bill (owner 2026-11-01 (a)): the
+    # bill's true-up joins the 30-day COGS (product_cost.variance_by).
+    try:
+        from .product_cost import variance_by
+
+        var = variance_by(db, "product_id", store_ids=[store_id] if store_id else None,
+                          from_day=(ist_today - timedelta(days=29)).isoformat(), to_day=ist_today.isoformat())
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[COLL-INSIGHTS] cost-of-goods variance read failed: %s", exc)
+        var = {}
+    for pid in pids:
+        for tgt in [totals] + ([per_product[pid]] if pid in per_product else []):
+            tgt["cogs_d30"] += var.get(pid, 0.0)
+
     for tgt in [totals] + list(per_product.values()):
         tgt["revenue_d30"] = round(tgt["revenue_d30"], 2)
         tgt["revenue_d90"] = round(tgt["revenue_d90"], 2)

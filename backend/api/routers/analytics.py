@@ -25,7 +25,7 @@ from ..dependencies import (
 )
 
 from ..services.cost_mask import mask_cost
-from ..services import stock_value
+from ..services import product_cost, stock_value
 from ..services.margin_basis import (
     cost_by_product,
     line_unit_cost,
@@ -1285,7 +1285,12 @@ async def get_enterprise_kpis(
             for order in current_orders
             for item in order.get("items", [])
         )
-        total_cogs = total_cost
+        # Pieces sold before their supplier bill (owner 2026-11-01 (a)): the
+        # bill's true-up of their cost, dated by the bill (product_cost).
+        total_cogs = total_cost + product_cost.variance_by(
+            get_db(), store_ids=[store_id], from_day=ist_date_str_from_stored(start_date),
+            to_day=ist_date_str_from_stored(end_date),
+        ).get(None, 0.0)
         # Ex-GST cost against ex-GST revenue: the GST inside total_revenue is
         # owed to the government, not margin.
         net_revenue = sum(_safe_float(o.get("revenue_ex_gst")) for o in current_orders)

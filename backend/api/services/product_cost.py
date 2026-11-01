@@ -137,17 +137,24 @@ def _written_off(unit: dict) -> bool:
     return canonical_state(unit.get("status")) in (StockState.VOID, StockState.DAMAGED)
 
 
+def _utc_iso(value) -> str:
+    """One clock for every instant compared as text here: the till's naive
+    datetime (taken as UTC) and the ISO strings alike, as a UTC ISO string;
+    "" when unreadable."""
+    from api.utils.event_time import parse_event_utc, utc_event_iso
+
+    at = parse_event_utc(value)
+    return utc_event_iso(at) if at else ""
+
+
 def _left_at(db, unit: dict) -> str:
     """When a piece left us: its sale, else its write-off (writeoff_itc._lost_at:
     the count's void stamp or its DAMAGED event), as a UTC ISO string."""
     if unit.get("order_id") and not _written_off(unit):
-        return str(unit.get("sold_at") or "")
-    from api.utils.event_time import utc_event_iso
-
+        return _utc_iso(unit.get("sold_at"))
     from .writeoff_itc import _lost_at
 
-    at = _lost_at(db, unit)
-    return utc_event_iso(at) if at else ""
+    return _utc_iso(_lost_at(db, unit))
 
 
 def _receipt_of(unit: dict) -> Optional[str]:
@@ -454,7 +461,7 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
     for at, u in left:
         receipt = by_id[_receipt_of(u)]
         stamped = _stamped_average(receipt, pid)
-        if stamped is not None and at < str(receipt.get(PRE_S4_AT) or ""):
+        if stamped is not None and at < _utc_iso(receipt.get(PRE_S4_AT)):
             stamped = None  # left before the stamp: never in the pool
         if _written_off(u):
             # ponytail: no sale line -- the product's category for both keys.
