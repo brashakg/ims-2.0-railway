@@ -286,6 +286,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/returns/{return_id}/complete-record",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # Its list (Returns > Needs completing panel). returns:read is already
+    # AUTHENTICATED-broad, so it broadens nothing.
+    {
+        "method": "GET",
+        "path": "/api/v1/returns/needs-completing",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     # Its read-only preview for the Orders screen's confirm dialog (same roles;
     # returns:read is already AUTHENTICATED-broad, so it broadens nothing).
     {

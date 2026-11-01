@@ -101,4 +101,39 @@ describe('Refund approval popup', () => {
     expect(k1).toBeTruthy();
     expect((create.mock.calls[1] as any)[1]).toBe(k1);
   });
+
+  it('makes a new press key after a success, and after any change of the return', async () => {
+    create.mockReset();
+    create.mockResolvedValueOnce({ return_id: 'RET-1', credit_amount: 2500 });
+    create.mockRejectedValueOnce(axiosErr(503, 'The store credit could not be confirmed just now - Do NOT redo this return.'));
+    create.mockResolvedValue({ return_id: 'RET-3', credit_amount: 2400 });
+    await driveToSubmit();
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    // A success: the next return is a new press.
+    fireEvent.click(await screen.findByRole('button', { name: 'New Return' }));
+    fireEvent.change(screen.getByPlaceholderText(/Order number/), { target: { value: 'Asha' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Search' }));
+    fireEvent.click(await screen.findByText('BV/26-27/0001'));
+    fireEvent.change((await screen.findAllByRole('combobox'))[0], { target: { value: '1' } });
+    let review = await screen.findByRole('button', { name: /Review Credit Note/ });
+    await waitFor(() => expect((review as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(review);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    const [k1, k2] = [(create.mock.calls[0] as any)[1], (create.mock.calls[1] as any)[1]];
+    expect(k1).toBeTruthy();
+    expect(k2).toBeTruthy();
+    expect(k2).not.toBe(k1);
+    // A lost answer, then the return changes (a restocking fee): a new press key.
+    await screen.findByText(/could not be confirmed/);
+    const fee = screen.getAllByRole('spinbutton').find((el) => (el as HTMLInputElement).max !== '') as HTMLInputElement;
+    fireEvent.change(fee, { target: { value: '100' } });
+    review = await screen.findByRole('button', { name: /Review Credit Note/ });
+    await waitFor(() => expect((review as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(review);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(3));
+    expect((create.mock.calls[2] as any)[1]).toBeTruthy();
+    expect((create.mock.calls[2] as any)[1]).not.toBe(k2);
+  });
 });

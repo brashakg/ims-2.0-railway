@@ -734,8 +734,13 @@ async def test_same_key_loyalty_twin_replays_instead_of_refusing(till):
     out = await add_payment(
         "ORD-1", PaymentCreate(method="LOYALTY", amount=300.0), _user("CASHIER"), idempotency_key="idem-L"
     )
-    assert out["payment_id"] == "pay-twin" and out["_idempotent_replay"] is True
-    assert _stored(till)["payments"] == []  # the twin records it, not this request
+    # Round 13: a replay only of a payment that EXISTS. The twin's row is not
+    # on the order, so its claim is freed and THIS request records the leg once.
+    assert not out.get("_idempotent_replay")
+    pays = _stored(till)["payments"]
+    assert [p["payment_id"] for p in pays] == [out["payment_id"]]
+    row = till["db"].get_collection("loyalty_transactions").find_one({"txn_id": burned["txn_id"]})
+    assert row["tender_payment_id"] == out["payment_id"]
 
 
 def test_backfill_links_old_redemptions_to_their_payment_only_by_reference(tmp_path):

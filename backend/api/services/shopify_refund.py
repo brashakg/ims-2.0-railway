@@ -918,9 +918,12 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
     return_ids = set()
     doc_entries = set()
     own_return = None
+    completed = set()
     try:
         for doc in db.get_collection(_RETURNS_COLLECTION).find({"order_id": order_id}):
             return_ids.add(_norm(doc.get("return_id")))
+            if _norm(doc.get("status")).upper() == "COMPLETED":
+                completed.add(_norm(doc.get("return_id")))
             # The doc's OWN credit row is counted through the doc below.
             own_entry = _norm((doc.get("credit_entry") or {}).get("entry_id"))
             if own_entry:
@@ -954,6 +957,14 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
                 shopify_back += _f(back)
             elif _norm(doc.get("status")).upper() not in _RETURN_NO_MONEY:
                 total += _f(doc.get("net_refund"))
+        # A counter return whose money went out but whose doc is not
+        # COMPLETED yet: its KEPT refund hold is its record (the same rule as
+        # returns._live_refund_holds) -- counted at its amount, and its own
+        # credit line through it, never twice.
+        for hrid, hold in (order.get("refund_holds") or {}).items():
+            if (hold or {}).get("kept") and _norm(hrid) not in completed:
+                total += _f((hold or {}).get("amount"))
+                doc_entries.add(_norm(f"{hrid}:credit"))
         for row in db.get_collection(_REVIEW_COLLECTION).find({"order_id": order_id}):
             rid = _norm(row.get("shopify_refund_id"))
             if rid and rid not in seen:

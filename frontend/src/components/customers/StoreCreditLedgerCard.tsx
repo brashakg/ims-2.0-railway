@@ -12,7 +12,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { formatDateTimeIST } from '../../utils/datetime';
 import clsx from 'clsx';
-import { getErrorMessage } from '../../utils/errorHandler';
+import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 
 interface Entry {
   entry_id: string; type: string; amount: number; delta: number;
@@ -41,10 +41,14 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
   // Cancel or a success closes the form and drops the key.
   const [formKey, setFormKey] = useState('');
   const [sent, setSent] = useState(false);
+  // The server's own sentence after an unconfirmed answer: the ONE
+  // instruction shown (no second, contradicting line of ours).
+  const [unclearNote, setUnclearNote] = useState<string | null>(null);
   useEffect(() => {
     if (mode) setFormKey(typeof crypto !== 'undefined' && 'randomUUID' in crypto
       ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
     setSent(false);
+    setUnclearNote(null);
   }, [mode]);
 
   const load = useCallback(async () => {
@@ -74,7 +78,16 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
       setMode(null); setAmount(''); setReason('');
       await load();
     } catch (e: any) {
-      toast.error(getErrorMessage(e, 'Action failed'));
+      const status = getErrorStatus(e);
+      const msg = getErrorMessage(e, 'Action failed');
+      if (status !== undefined && status < 500 && !unclearNote) {
+        // A definite refusal: nothing was recorded under this key, so the
+        // form unlocks for a correction.
+        setSent(false);
+        toast.error(msg);
+      } else {
+        setUnclearNote(msg); // it may have landed: locked, the server's words only
+      }
     } finally {
       setSaving(false);
     }
@@ -97,11 +110,7 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
               className="input-field" readOnly={sent} aria-readonly={sent} />
             <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (e.g. return CN-123)"
               className="input-field" readOnly={sent} aria-readonly={sent} />
-            {sent && (
-              <p className="text-xs text-gray-500">
-                This form was sent. Press Confirm again to finish it, or Cancel and check the balance.
-              </p>
-            )}
+            {unclearNote && <p role="status" className="text-xs text-amber-700">{unclearNote}</p>}
             <div className="flex gap-2 justify-end">
               <button onClick={() => { setMode(null); setAmount(''); setReason(''); }} className="px-3 py-1.5 text-xs rounded-md text-gray-600 hover:bg-gray-100">Cancel</button>
               <button onClick={submit} disabled={saving} className="px-3 py-1.5 text-xs rounded-md bg-bv-red-600 text-white disabled:opacity-50">

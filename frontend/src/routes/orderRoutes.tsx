@@ -74,7 +74,9 @@ export const orderRoutes = (
       path="returns"
       element={
         <ProtectedRoute
-          allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF']}
+          // ACCOUNTANT reaches only the Needs-completing panel (no return desk,
+          // no menu entry: linked from the P1 tasks). PR #1264 review 13.
+          allowedRoles={['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF', 'ACCOUNTANT']}
         >
           <ReturnsPage />
         </ProtectedRoute>

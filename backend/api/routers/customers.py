@@ -1743,6 +1743,7 @@ def redeem_store_credit_atomic(
     store_id: Optional[str] = None,
     user_id: Optional[str] = None,
     guard_ref: Optional[str] = None,
+    source: str = "MANUAL_REDEEM",
 ) -> dict:
     """THE one store-credit spend door: atomic guarded decrement + ledger row.
 
@@ -1850,17 +1851,40 @@ def redeem_store_credit_atomic(
     entry["balance_after"] = round(new_balance, 2)
     if guard_ref:
         entry["entry_id"] = guard_ref
-        entry["source"] = "MANUAL_REDEEM"
+        entry["source"] = source
     if coll is not None:
         try:
-            coll.insert_one(dict(entry))
+            # _id = the guard: a double click's second row is a duplicate key.
+            coll.insert_one({**entry, "_id": guard_ref} if guard_ref else dict(entry))
         except Exception as exc:  # noqa: BLE001
+            if guard_ref:
+                stored = _row_after_duplicate(coll, guard_ref, exc)
+                if stored is not None:
+                    return {"entry": stored, "balance": entry["balance_after"], "replayed": True}
             logger.error("[CUSTOMERS] redeem %s debited but its ledger row was NOT written: %s",
                          entry.get("entry_id"), exc)
             if guard_ref:
                 raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
     entry.pop("_id", None)
     return {"entry": entry, "balance": entry["balance_after"]}
+
+
+def _row_after_duplicate(coll, entry_id: str, exc: Exception) -> Optional[dict]:
+    """The row a concurrent press wrote under this id (a duplicate key), read
+    back as the answer; None for any other failure."""
+    from pymongo.errors import DuplicateKeyError
+
+    if not isinstance(exc, DuplicateKeyError):
+        return None
+    try:
+        row = coll.find_one({"entry_id": entry_id})
+    except Exception:  # noqa: BLE001
+        return None
+    if row is None:
+        return None
+    row = dict(row)
+    row.pop("_id", None)
+    return row
 
 
 REDEEM_UNCONFIRMED_MESSAGE = (
@@ -1899,8 +1923,11 @@ def _redeem_replay(repo, coll, customer_id, amt, guard_ref, reason, ref, store_i
     entry.update(entry_id=guard_ref, source="MANUAL_REDEEM", balance_after=round(balance, 2),
                  written_on_replay=True)
     try:
-        coll.insert_one(dict(entry))
+        coll.insert_one({**entry, "_id": guard_ref})
     except Exception as exc:  # noqa: BLE001
+        stored = _row_after_duplicate(coll, guard_ref, exc)
+        if stored is not None:
+            return {"entry": stored, "balance": balance, "replayed": True}
         raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
     entry.pop("_id", None)
     return {"entry": entry, "balance": balance, "replayed": True}
@@ -2075,15 +2102,15 @@ def _task_credit_settled_without_record(row: Dict[str, Any]) -> None:
                 f"Lines: {lines or '-'}. Refund tenders: {tenders or '-'} (cash leg Rs {cash:.2f}). "
                 "Do this: complete the return record and put the goods back in stock; check whether the cash "
                 "leg was paid. Never redo the return - the credit already stands. Finish it with "
-                f"Returns > Complete record ({spec.get('return_id')})."
+                f"Returns > Needs completing ({spec.get('return_id')})."
             ),
             priority="P1",
             category="Accounts",
             store_id=row.get("store_id"),
             dedupe_ref=f"return_credit_settled:{row.get('entry_id')}",
-            extra={"payload": {"order_id": spec.get("order_id"), "return_id": spec.get("return_id"),
-                               "entry_id": row.get("entry_id"),
-                               "action": f"/api/v1/returns/{spec.get('return_id')}/complete-record"}},
+            extra={"link": f"/returns?panel=needs-completing&return={spec.get('return_id')}",
+                   "payload": {"order_id": spec.get("order_id"), "return_id": spec.get("return_id"),
+                               "entry_id": row.get("entry_id")}},
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("[CUSTOMERS] settled-without-record task not raised for %s: %s", row.get("entry_id"), exc)
@@ -2114,7 +2141,8 @@ def _heal_voided_row(ledger, row: Dict[str, Any], why: str, *, unrecorded: bool 
     try:
         ledger.update_one({"entry_id": row["entry_id"], "type": VOID},
                           {"$set": {"type": row.get("final_type") or "ADJUSTED", "applied": True,
-                                    "delta": row.get("delta"), "healed_from_void": True, **_finish_dates(row)}})
+                                    "delta": row.get("delta"), "healed_from_void": True, **_finish_dates(row)},
+                           "$unset": {"void_settled": ""}})
     except Exception as exc:  # noqa: BLE001
         logger.error("[CUSTOMERS] credit row %s not healed: %s", row.get("entry_id"), exc)
         return
@@ -2141,7 +2169,11 @@ def _void_credit_row(repo, ledger, row: Dict[str, Any], why: str, *, undo: bool 
     try:
         res = ledger.update_one(
             {"entry_id": eid, "type": PENDING, "applied": False, "pending_at": row.get("pending_at")},
-            {"$set": {"type": VOID, "void_reason": why, "delta": 0.0, "void_delta": row.get("delta")}})
+            {"$set": {"type": VOID, "void_reason": why, "delta": 0.0, "void_delta": row.get("delta"),
+                      # Settled only once the guard is read, the number written
+                      # off and (``undo``) the claims given back: the reconciler
+                      # sweeps an unsettled VOID a dead worker left.
+                      "void_settled": False, "void_undo": bool(undo)}})
     except Exception as exc:  # noqa: BLE001 -- applied False: still never counted
         logger.error("[CUSTOMERS] credit row %s not voided: %s", eid, exc)
         return False
@@ -2153,27 +2185,61 @@ def _void_credit_row(repo, ledger, row: Dict[str, Any], why: str, *, undo: bool 
             ledger.update_one({"entry_id": eid, "type": VOID},
                               {"$set": {"type": PENDING, "pending_at": row.get("pending_at"),
                                         "delta": row.get("delta")},
-                               "$unset": {"void_reason": "", "void_delta": ""}})
+                               "$unset": {"void_reason": "", "void_delta": "", "void_settled": "",
+                                          "void_undo": ""}})
         except Exception as exc:  # noqa: BLE001
             logger.error("[CUSTOMERS] credit row %s left VOID with an unreadable guard: %s", eid, exc)
         return False
     if landed:
         _heal_voided_row(ledger, row, "its balance move landed after all", unrecorded=undo)
         return False
-    if row.get("note_number"):
-        from .returns import _record_unused_credit_note
-
-        _record_unused_credit_note(row["note_number"], {"order_id": row.get("order_id"), "store_id": row.get("store_id")},
-                                   row.get("ref") or eid, {"user_id": "system"}, why)
-    if undo and row.get("undo_on_void"):
-        from .returns import _undo_return_claims
-
-        _undo_return_claims(row["undo_on_void"])
+    _finish_void(ledger, row, why, undo=undo)
     return True
+
+
+def _finish_void(ledger, row: Dict[str, Any], why: str, *, undo: bool) -> None:
+    """A VOID that stands: its number written off once, (``undo``) the
+    return's claims and hold given back once -- each step marked on the row,
+    so the reconciler's sweep of an unsettled VOID never repeats one -- then
+    the VOID is settled."""
+    eid = row["entry_id"]
+
+    def _mark(**fields):
+        try:
+            ledger.update_one({"entry_id": eid, "type": VOID}, {"$set": fields})
+            row.update(fields)
+        except Exception as exc:  # noqa: BLE001 -- the sweep finishes it
+            logger.error("[CUSTOMERS] voided row %s not marked %s: %s", eid, list(fields), exc)
+            raise
+
+    try:
+        if row.get("note_number") and not row.get("number_written_off"):
+            from .returns import _record_unused_credit_note
+
+            _record_unused_credit_note(row["note_number"],
+                                       {"order_id": row.get("order_id"), "store_id": row.get("store_id")},
+                                       row.get("ref") or eid, {"user_id": "system"}, why)
+            _mark(number_written_off=True)
+        spec = row.get("undo_on_void") or {}
+        if undo and spec:
+            from .returns import _undo_return_claims
+
+            _undo_return_claims(spec, row=row, mark=_mark)
+        _mark(void_settled=True)
+    except Exception:  # noqa: BLE001 -- left unsettled: the reconciler's sweep resumes it
+        return
 
 
 def _settle_credit_row(repo, ledger, row: Dict[str, Any]) -> str:
     cid, eid = row.get("customer_id"), row["entry_id"]
+    # A line pending longer than half the reconciler's timeout is the
+    # reconciler's: a late press moving it could race the void it is about to
+    # write (and a re-press after it). Unclear -- never moved here.
+    from datetime import timedelta, timezone as _tz
+
+    half = (datetime.now(_tz.utc) - timedelta(seconds=PENDING_TIMEOUT_SECONDS / 2)).isoformat()
+    if row.get("pending_at") and str(row["pending_at"]) < half:
+        return UNCLEAR
     try:
         moved: Optional[bool] = apply_store_credit_delta(
             repo, cid, float(row.get("delta") or 0), guard_ref=eid,
@@ -2326,16 +2392,41 @@ def reconcile_pending_credits(repo=None, *, customer_id: Optional[str] = None, l
             out["finished"] += 1
         elif _void_credit_row(repo, ledger, row, "never applied (stale)", undo=True):
             out["voided"] += 1
-    if out["finished"] or out["voided"]:
+    # A VOID a dead worker left unsettled (its write-off or undo may not
+    # have run): finished here, each step once.
+    vflt: Dict[str, Any] = {"type": VOID, "void_settled": False, "pending_at": {"$lt": cutoff}}
+    if customer_id:
+        vflt["customer_id"] = customer_id
+    try:
+        unsettled = list(ledger.find(vflt))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] unsettled voids unreadable: %s", exc)
+        unsettled = []
+    for row in unsettled:
+        landed = _guard_landed(repo, row.get("customer_id"), row.get("entry_id"))
+        if landed is None:
+            continue
+        if landed:
+            _heal_voided_row(ledger, {**row, "delta": row.get("void_delta", row.get("delta"))},
+                             "its balance move landed after all", unrecorded=bool(row.get("void_undo")))
+        else:
+            _finish_void(ledger, dict(row), row.get("void_reason") or "never applied (stale)",
+                         undo=bool(row.get("void_undo")))
+        out["voids_settled"] = out.get("voids_settled", 0) + 1
+    if out["finished"] or out["voided"] or out.get("voids_settled"):
         logger.warning("[CUSTOMERS] pending credits settled: %s", out)
     return out
 
 
 async def scheduled_credit_reconcile() -> None:
-    """Scheduler tick (agents/scheduler): blocking pymongo off the event loop."""
+    """Scheduler tick (agents/scheduler): blocking pymongo off the event loop.
+    Then the kept refund holds no one owns (returns.sweep_stuck_return_holds)."""
     import asyncio
 
+    from .returns import sweep_stuck_return_holds
+
     await asyncio.to_thread(reconcile_pending_credits)
+    await asyncio.to_thread(sweep_stuck_return_holds)
 
 
 def apply_store_credit_delta(

@@ -22,7 +22,8 @@ vi.mock('../../../services/api', async (importOriginal) => {
 import { orderApi } from '../../../services/api';
 import { buildApiError } from '../../../services/api/client';
 import { usePOSStore } from '../../../stores/posStore';
-import { submitPosOrder } from '../submitOrder';
+import { submitPosOrder, TILL_SALE_UNCONFIRMED } from '../submitOrder';
+import { billKeyFor, cartFingerprint, clearBillKey } from '../posBillKey';
 
 const mockedCreate = vi.mocked(orderApi.createOrder);
 const mockedAddPayment = vi.mocked(orderApi.addPayment);
@@ -66,5 +67,44 @@ describe('till payment legs', () => {
     expect(res.warning).toMatch(/UPI ₹600 could not be confirmed - check the order's payments before adding it again/);
     expect(res.warning).toMatch(/CASH ₹400 \(Amount exceeds balance due\) did NOT record/);
     expect(res.warning).not.toMatch(/UPI ₹600[^.]*did NOT record/);
+  });
+});
+
+describe('money review 13 at the till', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedCreate.mockResolvedValue({ order_id: 'ord-1', order_number: 'BV-001' } as any);
+  });
+
+  it('never auto-retries a leg that debits store credit; says to check instead', async () => {
+    seed();
+    usePOSStore.setState({ payments: [{ method: 'STORE_CREDIT', amount: 1000, timestamp: '' }] } as any);
+    mockedAddPayment.mockRejectedValue(apiErr(undefined));
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-3');
+    expect(mockedAddPayment).toHaveBeenCalledTimes(1);
+    expect(res.warning).toMatch(/STORE_CREDIT ₹1,000 could not be confirmed - check the order's payments/);
+  });
+
+  it('a sale whose answer was lost says to press Complete Sale again, without the failure prefix', async () => {
+    seed();
+    mockedCreate.mockRejectedValueOnce(apiErr(undefined));
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-4');
+    expect(res.ok).toBe(false);
+    expect(res.error).toBe(TILL_SALE_UNCONFIRMED);
+    expect(res.error).not.toMatch(/^Failed to create order/);
+  });
+});
+
+describe('the bill key lives with the cart', () => {
+  it('survives a reload for the same cart, changes with the cart, and clears on success', () => {
+    sessionStorage.clear();
+    const fp = cartFingerprint({ cart: [{ product_id: 'p', quantity: 1, unit_price: 100 }], customer: { id: 'c' } });
+    const k1 = billKeyFor(fp);
+    expect(billKeyFor(fp)).toBe(k1); // a reload reads the same key back
+    const other = cartFingerprint({ cart: [{ product_id: 'p', quantity: 2, unit_price: 100 }], customer: { id: 'c' } });
+    const k2 = billKeyFor(other);
+    expect(k2).not.toBe(k1);
+    clearBillKey();
+    expect(billKeyFor(other)).not.toBe(k2);
   });
 });

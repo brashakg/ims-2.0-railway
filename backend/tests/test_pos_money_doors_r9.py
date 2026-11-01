@@ -303,7 +303,7 @@ def test_a_return_whose_doc_was_lost_keeps_counting(till, monkeypatch):
     # ... and since round 14 the bill takes no new return at all until that
     # return is recorded (stricter than the approval gate it used to reach).
     r2 = client.post("/api/v1/returns", json=payload, headers=_hdr("CASHIER"))
-    assert r2.status_code == 409 and f"({rid}) was paid out but its record was not saved" in r2.text, r2.text
+    assert r2.status_code == 409 and f"({rid}) was recorded at the counter but its record was not saved" in r2.text, r2.text
 
 
 # =========================================================================== #

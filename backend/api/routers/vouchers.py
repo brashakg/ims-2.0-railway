@@ -254,8 +254,13 @@ def redeem_voucher_atomic(
     amount: float,
     order_id: Optional[str] = None,
     redeemed_by: Optional[str] = None,
+    idempotency_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Atomically decrement `amount` off a voucher's balance.
+
+    ``idempotency_key`` (a till payment leg's key): the debit lands at most
+    once -- the marker rides in the same write (money_guard), and a re-sent
+    leg answers ok with the balance, never a second spend.
 
     This is the single source of truth for voucher spend. Both the HTTP
     POST /{code}/redeem endpoint and the POS payment path
@@ -306,6 +311,7 @@ def redeem_voucher_atomic(
         set_extra={"updated_at": now},
         push_extra={"redemptions": redemption},
         record_ledger=False,
+        idempotency_key=idempotency_key,
     )
 
     if not res.ok:

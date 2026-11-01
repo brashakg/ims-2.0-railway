@@ -91,6 +91,20 @@ export interface CreateReturnPayload {
 // prefill the refund-tender picker from `net_refund` rather than computing an
 // amount client-side — a client-side GST gross-up drifted from the server on
 // every inclusive-priced sale and 400'd the refund with no way to recover.
+export interface NeedsCompletingItem {
+  return_id: string;
+  order_id?: string;
+  order_number?: string;
+  store_id?: string;
+  amount: number;
+  at?: string;
+  credit_line: { type: string; amount?: number; note_number?: string } | null;
+  cash_leg: number;
+  record_not_saved: boolean;
+  /** IMS knows money moved (a credit landed, or the counter recorded it). */
+  money_known: boolean;
+}
+
 export interface ReturnQuote {
   order_id?: string;
   return_type: ReturnType;
@@ -154,6 +168,21 @@ export const returnsApi = {
   create: async (payload: CreateReturnPayload, idempotencyKey?: string) => {
     const response = await api.post('/returns', payload,
       idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : undefined);
+    return response.data;
+  },
+
+  /** Returns > Needs completing: unfinished counter returns (Accounts / Admin). */
+  needsCompleting: async (): Promise<{ items: NeedsCompletingItem[] }> => {
+    const response = await api.get('/returns/needs-completing');
+    return response.data;
+  },
+
+  /** Finish one: was the cash part paid (yes / no), or was nothing paid? */
+  completeRecord: async (
+    returnId: string,
+    answer: { cash_leg_paid?: boolean; nothing_paid?: boolean; note?: string },
+  ) => {
+    const response = await api.post(`/returns/${encodeURIComponent(returnId)}/complete-record`, answer);
     return response.data;
   },
 

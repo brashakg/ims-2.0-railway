@@ -48,3 +48,15 @@ describe('a lost write answer', () => {
     expect(buildApiError(lost(undefined, 'get')).message).toMatch(/Network error/);
   });
 });
+
+describe('read-like POSTs keep the plain wording (money review 13)', () => {
+  const lostAt = (url: string) =>
+    ({ message: 'x', config: { method: 'post', url }, response: { status: 500, data: {} } } as unknown as AxiosError<any>);
+
+  it('a quote or a sign-in is never "may already be saved"', () => {
+    expect(buildApiError(lostAt('/orders/quote')).message).toBe('Server error. Please try again in a moment.');
+    expect(buildApiError(lostAt('/returns/quote')).message).toBe('Server error. Please try again in a moment.');
+    expect(buildApiError(lostAt('/auth/login')).message).toBe('Server error. Please try again in a moment.');
+    expect(buildApiError(lostAt('/returns')).message).toBe(WRITE_UNCONFIRMED_MESSAGE);
+  });
+});

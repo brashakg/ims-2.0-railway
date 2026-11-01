@@ -17,6 +17,7 @@ import { buildPaymentBody } from './paymentBody';
 import { orderLinesOf, refreshBillQuote } from './billQuote';
 import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
 import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
+import { WRITE_UNCONFIRMED_MESSAGE } from '../../services/api/client';
 
 // The order-line vocabulary lives with the line builder the quote shares.
 export { mapCategory } from './billQuote';
@@ -122,6 +123,15 @@ const DEAD_APPROVAL_CODES = new Set([
 ]);
 
 /** The server's refusal, in words staff can act on ('' when there is none). */
+// Tenders that only RECORD money taken at the counter: re-sending one with its
+// key is safe. Store credit, vouchers and loyalty debit an account.
+const RECORD_ONLY_TENDERS = new Set(['CASH', 'CARD', 'UPI']);
+
+/** The till's own words for a sale whose answer was lost: the bill key is
+    kept with the cart, so pressing again replays it, never charges twice. */
+export const TILL_SALE_UNCONFIRMED =
+  'The server did not confirm this sale. Press Complete Sale again - it will not be charged twice.';
+
 function serverReason(e: unknown): string {
   const d = getErrorDetail(e) as { reason?: unknown } | undefined;
   if (d && typeof d === 'object' && d.reason === 'insufficient_balance') return 'Not enough loyalty points';
@@ -291,14 +301,17 @@ export async function submitPosOrder(
         leg = { ...p, amount: loyaltyLeg.amount, reference: loyaltyLeg.reference };
         loyaltyLeg = null; // one burn backs at most one recorded leg
       }
-      // Each leg has its own key (the server dedupes a replay of it), so a
-      // leg whose answer was lost is sent ONCE more safely.
+      // Each leg has its own key (the server dedupes a replay of it). Only a
+      // record-only tender (cash, card, UPI) whose answer was lost is sent
+      // ONCE more automatically; a leg that DEBITS something (store credit, a
+      // gift voucher, loyalty points) never is -- the till says to check.
       const legKey = idempotencyKey ? `${idempotencyKey}:leg:${legIndex}` : undefined;
+      const autoRetry = Boolean(legKey) && RECORD_ONLY_TENDERS.has(String(leg.method || '').toUpperCase());
       const body = buildPaymentBody(leg, leg.method === 'CASH' ? cashCapture : null);
       if (leg.method === 'CASH') cashCapture = null;
       const label = `${leg.method} ₹${Math.round(leg.amount).toLocaleString('en-IN')}`;
       let failure: unknown = null;
-      for (let attempt = 0; attempt < (legKey ? 2 : 1); attempt += 1) {
+      for (let attempt = 0; attempt < (autoRetry ? 2 : 1); attempt += 1) {
         try {
           await orderApi.addPayment(result.order_id, body as any, legKey);
           failure = null;
@@ -431,6 +444,7 @@ export async function submitPosOrder(
     if (code && DEAD_APPROVAL_CODES.has(code)) {
       return { ok: false, error: msg, discountApprovalRejected: true };
     }
+    if (msg === WRITE_UNCONFIRMED_MESSAGE) return { ok: false, error: TILL_SALE_UNCONFIRMED };
     return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error') };
   }
 }

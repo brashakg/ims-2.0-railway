@@ -280,10 +280,13 @@ def test_complete_record_writes_the_missing_doc_once_and_frees_the_bill(till, ta
                                   order_id="ORD-1", undo_on_void=_spec()))
     with pytest.raises(HTTPException) as before:
         returns_router._refuse_while_a_return_settles(_stored(till), "ORD-1")
-    assert before.value.status_code == 409 and "Complete record (RET-U)" in before.value.detail
+    assert before.value.status_code == 409 and "Needs completing (RET-U)" in before.value.detail
+    assert "gave store credit" in before.value.detail
     doc = _complete("RET-U", paid=False)
     assert doc["status"] == "COMPLETED" and doc["credit_note_number"] == "TST01/C2627/0007"
-    assert [t["method"] for t in doc["refund_tenders"]] == ["STORE_CREDIT"] and doc["net_refund"] == 1200.0
+    # Round 13: the unpaid cash part stays on the doc as OWED (the note covers the whole return).
+    assert [(t["method"], t.get("status")) for t in doc["refund_tenders"]] == [("CASH", "OWED"), ("STORE_CREDIT", None)]
+    assert doc["net_refund"] == 1800.0 and doc["owed_amount"] == 600.0
     again = _complete("RET-U", paid=True)
     assert again.get("replayed") is True and till["db"].get_collection("returns").count_documents({}) == 1
     returns_router._refuse_while_a_return_settles(_stored(till), "ORD-1")  # no longer blocked

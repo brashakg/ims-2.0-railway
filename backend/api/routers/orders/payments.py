@@ -98,6 +98,18 @@ def _claim_loyalty_redemption(order: dict, amount: float, payment_id: str, idem_
     )
 
 
+def _release_twin_claim(order_id: str, idem_key: str, twin_payment_id: str) -> None:
+    """Release a burn claimed under this key by a request whose payment row
+    never landed. Compare-and-set on the twin's own payment id."""
+    from ...dependencies import get_loyalty_transaction_repository
+
+    txns = get_loyalty_transaction_repository()
+    twin = txns.collection.find_one({"order_id": order_id, "type": "REDEEM", "tender_idempotency_key": idem_key,
+                                     "tender_payment_id": twin_payment_id})
+    if twin:
+        _release_loyalty_redemption(twin["txn_id"], twin_payment_id)
+
+
 def _release_loyalty_redemption(txn_id: str, payment_id: str) -> None:
     """Undo a claim whose payment row never landed, so the burn stays spendable."""
     from ...dependencies import get_loyalty_transaction_repository
@@ -233,6 +245,9 @@ async def add_payment(
                 payment.amount,
                 order_id,
                 current_user.get("user_id"),
+                # The till leg's key keys the DEBIT itself: a re-sent leg whose
+                # answer was lost never takes the card twice.
+                idempotency_key=f"POSPAY:{order_id}:{idem_key}" if idem_key else None,
             )
             if not result.get("ok"):
                 raise HTTPException(
@@ -264,6 +279,10 @@ async def add_payment(
                 ref=order_id,
                 store_id=current_user.get("active_store_id"),
                 user_id=current_user.get("user_id"),
+                # The till leg's key guards the DEBIT itself (the manual
+                # door's pattern): a re-sent leg never debits twice.
+                guard_ref=f"POSPAY:{order_id}:{idem_key}" if idem_key else None,
+                source="POS_PAYMENT",
             )
 
         # Loyalty: the points must have been really redeemed for THIS bill.
@@ -278,6 +297,16 @@ async def add_payment(
             loyalty_txn_id, twin_payment_id = _claim_loyalty_redemption(
                 order, payment.amount, payment_id, idem_key
             )
+            if twin_payment_id and not any(
+                    (p or {}).get("payment_id") == twin_payment_id
+                    for p in (repo.find_by_id(order_id) or {}).get("payments") or []):
+                # The twin claimed the burn but its payment row never landed
+                # (that request died): give the burn back and claim it for THIS
+                # request -- never a replay of a payment that does not exist.
+                _release_twin_claim(order_id, idem_key, twin_payment_id)
+                loyalty_txn_id, twin_payment_id = _claim_loyalty_redemption(
+                    order, payment.amount, payment_id, idem_key
+                )
             if twin_payment_id:
                 # The same request is already recording this tender: replay it.
                 return {

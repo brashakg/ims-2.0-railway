@@ -781,11 +781,15 @@ async def superadmin_invoice_change(
     if is_cn and credit.get("resumed"):
         # Another press issued this correction first: its line, as stored, is
         # the note (this press's number was written off). No second note doc.
-        number = credit.get("note_number") or note_doc["note_number"]
+        # This press's own number was written off: never reported as issued.
+        number = credit.get("note_number")
         return {
             "order_id": order_id,
             "mode": "CREDIT_NOTE",
-            "message": f"CREDIT_NOTE {number} was already issued for this correction; nothing was issued again.",
+            "message": (f"CREDIT_NOTE {number} was already issued for this correction; nothing was issued again."
+                        if number else
+                        "This correction was already issued by another press; its note number could not be "
+                        "read just now - check the customer's credit notes. Nothing was issued again."),
             "note_number": number,
             "note_type": "CREDIT_NOTE",
             "amount": credit.get("net_refund") or credit.get("amount"),

@@ -33,6 +33,7 @@ import { Link } from 'react-router-dom';
 import { AlertTriangle, X, Glasses, ShoppingBag, Home } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
+import { billKeyFor, cartFingerprint, clearBillKey } from '../../../components/pos/posBillKey';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import { useProducts, useSellableStock } from '../../../hooks/usePOSQueries';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
@@ -208,12 +209,9 @@ export function GeneralCounterSurface() {
     if (store.is_processing) return;
     setErrorMsg(null);
     store.setProcessing(true);
-    if (!idempotencyKeyRef.current) {
-      idempotencyKeyRef.current =
-        typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    }
+    // The bill key lives with the cart (sessionStorage), so a reload after a
+    // lost answer presses the SAME bill again -- never a second sale.
+    idempotencyKeyRef.current = billKeyFor(cartFingerprint(usePOSStore.getState()));
     try {
       // This counter only ever rings a QUICK SALE. A 'prescription_order' left
       // in the store by the optical POS would be refused by the shared submit
@@ -246,6 +244,7 @@ export function GeneralCounterSurface() {
         return;
       }
       idempotencyKeyRef.current = null;
+      clearBillKey();
       approvalIdRef.current = null;
       setApprovalNeed(null);
       // Owner ruling 2026-09-04: a completed take-away counter sale IS the

@@ -209,7 +209,7 @@ def test_a_settled_but_unrecorded_return_credit_raises_a_p1_task(till, monkeypat
 # =========================================================================== #
 def test_a_refused_press_leaves_the_claims_to_one_owner(till, monkeypatch, numbered):
     undone = []
-    monkeypatch.setattr(returns_router, "_undo_return_claims", lambda spec: undone.append(spec))
+    monkeypatch.setattr(returns_router, "_undo_return_claims", lambda spec, **k: undone.append(spec))
     monkeypatch.setattr(cust_router, "apply_store_credit_delta", lambda *a, **k: False)  # a clean refusal
     _customer(till)
     out = _issue(ref="RET-R", entry_id="RET-R:credit",
@@ -311,8 +311,9 @@ def test_a_void_with_an_unreadable_guard_goes_back_to_pending(till, monkeypatch)
 
 def test_a_press_landing_after_a_void_heals_the_line(till, monkeypatch):
     _customer(till)
+    # A press still in its window (round 13: an older line is the reconciler's).
     row = {"entry_id": "E-4", "customer_id": "CUST-1", "type": "ISSUING", "final_type": "ISSUED",
-           "applied": False, "delta": 200.0, "pending_at": _ago(30)}
+           "applied": False, "delta": 200.0, "pending_at": _ago(2)}
     _ledger(till).insert_one({**row, "_id": "E-4"})
     real_apply = cust_router.apply_store_credit_delta
 
@@ -368,7 +369,9 @@ def test_the_reconciler_tick_runs_off_the_event_loop(monkeypatch):
     seen = []
     monkeypatch.setattr(asyncio, "to_thread", lambda fn, *a, **k: _done(seen.append(fn)))
     asyncio.run(cust_router.scheduled_credit_reconcile())
-    assert seen == [cust_router.reconcile_pending_credits]
+    from api.routers.returns import sweep_stuck_return_holds
+
+    assert seen == [cust_router.reconcile_pending_credits, sweep_stuck_return_holds]
 
 
 async def _done(_):

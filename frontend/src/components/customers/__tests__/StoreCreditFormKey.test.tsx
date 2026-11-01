@@ -72,3 +72,29 @@ describe('StoreCreditLedgerCard money review 12', () => {
     expect(redeem.mock.calls[0][4]).toBeTruthy();
   });
 });
+
+describe('StoreCreditLedgerCard money review 13', () => {
+  const apiErr = async (status: number, detail: string) => {
+    const { buildApiError } = await import('../../../services/api/client');
+    return buildApiError({ isAxiosError: true, message: 'x', config: { method: 'post' },
+                           response: { status, data: { detail } } } as any);
+  };
+
+  it('unlocks after a definite refusal; after an unclear answer shows only the server sentence', async () => {
+    issue.mockReset();
+    toast.error.mockClear();
+    issue.mockRejectedValueOnce(await apiErr(400, 'amount must be greater than 0'));
+    issue.mockRejectedValueOnce(await apiErr(503, 'The store credit could not be confirmed - it may already be credited. Do NOT press again.'));
+    render(<StoreCreditLedgerCard customerId="CUST-1" />);
+    fireEvent.click(await screen.findByRole('button', { name: /Issue/ }));
+    fireEvent.change(screen.getByPlaceholderText('Amount'), { target: { value: '250' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith('amount must be greater than 0'));
+    expect((screen.getByPlaceholderText('Amount') as HTMLInputElement).readOnly).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByRole('status')).toBeTruthy();
+    expect(screen.getByRole('status').textContent).toMatch(/Do NOT press again/);
+    expect(toast.error).toHaveBeenCalledTimes(1); // the unclear answer is not a second, competing toast
+    expect((screen.getByPlaceholderText('Amount') as HTMLInputElement).readOnly).toBe(true);
+  });
+});

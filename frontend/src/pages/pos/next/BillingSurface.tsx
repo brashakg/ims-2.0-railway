@@ -18,6 +18,7 @@ import { useSellableStock } from '../../../hooks/usePOSQueries';
 import { AlertTriangle, X } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
+import { billKeyFor, cartFingerprint, clearBillKey } from '../../../components/pos/posBillKey';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
@@ -134,12 +135,9 @@ export function BillingSurface() {
     if (store.is_processing) return;
     setErrorMsg(null);
     store.setProcessing(true);
-    if (!idempotencyKeyRef.current) {
-      idempotencyKeyRef.current =
-        typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    }
+    // The bill key lives with the cart (sessionStorage), so a reload after a
+    // lost answer presses the SAME bill again -- never a second sale.
+    idempotencyKeyRef.current = billKeyFor(cartFingerprint(usePOSStore.getState()));
     try {
       // sale_type drives the WORKSHOP JOB: submitOrder creates one only for a
       // 'prescription_order', and only the classic till ever set it, so an Rx
@@ -172,6 +170,7 @@ export function BillingSurface() {
         return;
       }
       idempotencyKeyRef.current = null;
+      clearBillKey();
       approvalIdRef.current = null;
       setApprovalNeed(null);
       if (res.warning) setErrorMsg(res.warning);

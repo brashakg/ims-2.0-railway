@@ -46,11 +46,13 @@ from datetime import datetime, timezone
 
 
 def _num(value) -> float:
-    """A finite number, or ValueError (NaN / inf are not amounts)."""
-    out = float(value or 0)
-    if not math.isfinite(out):
+    """A finite int or float (a missing delta is 0), else ValueError: a
+    string, a bool, NaN or inf is not an amount -- it stops the run."""
+    if value is None:
+        return 0.0
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         raise ValueError("not a finite number")
-    return out
+    return float(value)
 
 
 def plan(db) -> dict:
@@ -142,6 +144,34 @@ def apply(db, sets, backup_path: str) -> int:
     return done
 
 
+def hand_set(db, sets, backup_path: str) -> int:
+    """The exit-2 hand fix (``--set CUSTOMER_ID=AMOUNT``): the owner decided a
+    customer's balance. Written ONLY where the field is missing or not a
+    number (a numeric balance is never overwritten here), backed up first,
+    and stamped like a backfill so ``--revert`` undoes it."""
+    ids = [c for c, _ in sets]
+    rows = list(db["customers"].find({"customer_id": {"$in": ids}}, {"_id": 0, "customer_id": 1, "store_credit": 1}))
+    os.makedirs(os.path.dirname(backup_path) or ".", exist_ok=True)
+    with open(backup_path, "w", encoding="utf-8") as f:
+        json.dump(rows, f, default=str, indent=1)
+    by_id = {r.get("customer_id"): r.get("store_credit") for r in rows}
+    done = 0
+    for cid, amount in sets:
+        old = by_id.get(cid, "absent")
+        if old == "absent":
+            print(f"  [SET-REFUSED] {cid}: no such customer")
+            continue
+        if isinstance(old, (int, float)) and not isinstance(old, bool) and math.isfinite(old):
+            print(f"  [SET-REFUSED] {cid}: already has a numeric balance Rs {float(old):.2f} - never overwritten")
+            continue
+        res = db["customers"].update_one(
+            {"customer_id": cid, "store_credit": old},
+            {"$set": {"store_credit": amount, "store_credit_backfill_value": amount,
+                      "store_credit_backfilled_at": datetime.now(tz=timezone.utc), "store_credit_hand_set": True}})
+        done += int(getattr(res, "modified_count", 0) or 0)
+    return done
+
+
 def revert(db, backup_path: str) -> int:
     """Undo --apply for the customers in the backup, only where the balance
     still equals what the script set (a live move since means fix forward)."""
@@ -166,7 +196,14 @@ def main() -> int:
     ap.add_argument("--backup",
                     default=os.path.join("backups", f"store_credit_field_backup_{datetime.now():%Y%m%d_%H%M%S}.json"))
     ap.add_argument("--revert", metavar="BACKUP", help="undo an --apply run from its backup file")
+    ap.add_argument("--set", action="append", default=[], metavar="CUSTOMER_ID=AMOUNT",
+                    help="the exit-2 hand fix: set a decided balance where the field is missing or not a number")
     args = ap.parse_args()
+    try:
+        hand = [(c.strip(), round(_num(float(a)), 2)) for c, a in (x.split("=", 1) for x in args.set)]
+    except (ValueError, TypeError):
+        print("[USAGE] --set takes CUSTOMER_ID=AMOUNT with a number")
+        return 1
     url = os.getenv("MONGO_PUBLIC_URL") or os.getenv("MONGO_URL") or os.getenv("MONGODB_URL")
     print(f"[MONGO] connection string: {'SET' if url else 'NOT SET'}")
     if not url:
@@ -183,6 +220,10 @@ def main() -> int:
     print(f"[DB] {getattr(db, 'name', '?')}")
     if args.revert:
         print(f"[REVERTED] {revert(db, args.revert)} customers")
+        return 0
+    if hand:
+        n = hand_set(db, hand, args.backup)
+        print(f"[SET] {n} customer(s) set by hand; backup of the rows before: {args.backup}")
         return 0
     out = plan(db)
     print(f"[SCANNED] customers: {out['scanned']['customers']}; credit ledger rows: "

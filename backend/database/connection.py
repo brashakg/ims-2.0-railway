@@ -108,6 +108,12 @@ class DatabaseConfig:
         return uri
 
 
+# A write whose reply never comes must fail (and be resolved by its guard)
+# within bounds -- never hang a request past the reconciler's half-timeout
+# (customers._settle_credit_row). PR #1264 money review 13.
+MONGO_CLIENT_OPTIONS = {"socketTimeoutMS": 30_000, "waitQueueTimeoutMS": 30_000}
+
+
 class DatabaseConnection:
     """
     MongoDB Connection Manager
@@ -145,7 +151,7 @@ class DatabaseConnection:
             self._config = DatabaseConfig.from_env()
 
         try:
-            self._client = MongoClient(self._config.get_uri())
+            self._client = MongoClient(self._config.get_uri(), **MONGO_CLIENT_OPTIONS)
             # Test connection
             self._client.admin.command("ping")
             self._db = self._client[self._config.database]

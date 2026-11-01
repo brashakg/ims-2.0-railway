@@ -12,6 +12,7 @@ import {
   type ReturnQuote,
 } from '../../services/api/returns';
 import { RefundApprovalModal } from '../../components/returns/RefundApprovalModal';
+import { NeedsCompletingPanel } from '../../components/returns/NeedsCompletingPanel';
 import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 import { formatDateIST } from '../../utils/datetime';
 import {
@@ -147,7 +148,33 @@ const RETURN_TYPE_OPTIONS: {
     desc: 'Issue credit for future use' },
 ];
 
+// Who may finish an unfinished return (Returns > Needs completing), and who
+// runs the return desk. Accounts see the panel ONLY -- no return powers.
+const COMPLETE_RECORD_ROLES = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
+const RETURN_DESK_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF'];
+
 export default function ReturnsPage() {
+  const { user } = useAuth();
+  const roles: string[] = (user as any)?.roles || [];
+  const canComplete = roles.some((r) => COMPLETE_RECORD_ROLES.includes(r));
+  const canReturn = roles.some((r) => RETURN_DESK_ROLES.includes(r));
+  if (!canReturn) {
+    return (
+      <div className="inv-body">
+        <div className="inv-head" style={{ maxWidth: 900 }}>
+          <div>
+            <div className="eyebrow" style={{ marginBottom: 6 }}>Returns</div>
+            <h1>Needs completing</h1>
+          </div>
+        </div>
+        {canComplete && <NeedsCompletingPanel standalone />}
+      </div>
+    );
+  }
+  return <ReturnsDesk canComplete={canComplete} />;
+}
+
+function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
   const { user } = useAuth();
   const [step, setStep] = useState<'search' | 'select' | 'review' | 'complete'>('search');
   const [searchQuery, setSearchQuery] = useState('');
@@ -709,6 +736,8 @@ export default function ReturnsPage() {
           ))}
         </div>
       </div>
+
+      {canComplete && <NeedsCompletingPanel />}
 
       {mode === 'new' && (
       <>

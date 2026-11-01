@@ -789,6 +789,35 @@ def _billed_unit_gross(line: Dict[str, Any]) -> Optional[float]:
     return round(gross_line / qty, 2)
 
 
+def _refuse_shipping_line(orig_line: Optional[Dict[str, Any]]) -> None:
+    """THE counter rule for a shipping line, for the quote and the create
+    alike (owner default, pending his ruling): shipping is refunded only
+    through the Shopify refund, which IMS mirrors -- never at the counter
+    (that also keeps its tax from being reversed twice)."""
+    o = orig_line or {}
+    if "SHIPPING" in (str(o.get("item_type") or "").upper(), str(o.get("category") or "").upper()):
+        raise HTTPException(
+            status_code=400,
+            detail=("Shipping charges are not returned at the counter. A shipping refund is "
+                    "made on Shopify, and IMS records it from there. Nothing was recorded."),
+        )
+
+
+def _refuse_counter_shipping(lines: List[ReturnLine], order: Optional[Dict[str, Any]]) -> None:
+    """The counter's shipping rule over a return's lines, matched as the
+    pricing matches them -- for the quote (the create runs it per resolved
+    line). The Shopify refund door prices through the same helpers and DOES
+    refund shipping, so the rule lives at the counter doors only."""
+    idx = _order_line_index(order)
+    for ln in lines:
+        orig = None
+        if ln.order_item_id and str(ln.order_item_id) in idx["by_item"]:
+            orig = idx["by_item"][str(ln.order_item_id)]
+        elif ln.product_id and str(ln.product_id) in idx["by_product"]:
+            orig = idx["by_product"][str(ln.product_id)]
+        _refuse_shipping_line(orig)
+
+
 def _priced_return_lines(
     lines: List[ReturnLine], order: Optional[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
@@ -1588,7 +1617,7 @@ def credit_notes_outside_returns(order_id: Optional[str]) -> float:
     try:
         rows = list(ledger.find({"order_id": order_id, "type": {"$in": [scl.ISSUED, "ISSUING"]}}))
         coll = _returns_coll()
-        documented = ({d.get("return_id") for d in coll.find({"order_id": order_id})}
+        documented = ({d.get("return_id") for d in coll.find({"order_id": order_id, "status": "COMPLETED"})}
                       if coll is not None and rows else set())
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] credit notes unreadable for %s: %s", order_id, exc)
@@ -1661,18 +1690,30 @@ def _refuse_while_a_return_settles(order: Dict[str, Any], order_id: Optional[str
                 line = ledger.find_one({"entry_id": f"{rid}:credit"}) if ledger is not None else None
                 if line is not None and line.get("type") == "ISSUING":
                     raise HTTPException(status_code=409, detail=_RETURN_STILL_SETTLING)
-                raise HTTPException(status_code=409, detail=(
-                    f"An earlier return on this bill ({rid}) was paid out but its record was not saved"
-                    if line is None else
-                    f"An earlier return on this bill ({rid}) gave store credit but its record was never "
-                    "completed") + (
-                    f". An admin must finish it first: Returns > Complete record ({rid}), or the open "
-                    "task about it. Nothing was recorded."))
+                raise HTTPException(status_code=409, detail=_unfinished_return_message(
+                    rid, line, (order.get("refund_holds") or {}).get(rid) or {}))
     except HTTPException:
         raise
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] settling state unreadable for %s: %s", order_id, exc)
         raise HTTPException(status_code=503, detail="Could not check this bill's earlier returns - try again.")
+
+
+_NO_MONEY_DOC_STATUSES = ("COMPLETED", "NOTHING_PAID")
+
+
+def _unfinished_return_message(rid: str, line: Optional[Dict[str, Any]], hold: Dict[str, Any]) -> str:
+    """THE refusal for a bill held by an unfinished return: "paid" is said
+    only when a credit line is final (or a person confirmed it); otherwise
+    what IMS knows -- never a claim that money went out when it did not."""
+    if line is not None and line.get("type") in (scl.ISSUED, scl.ADJUSTED) and line.get("applied") is not False:
+        what = "gave store credit but its record was never completed"
+    elif hold.get("doc") or hold.get("money_out"):
+        what = "was recorded at the counter but its record was not saved"
+    else:
+        what = "was never finished - IMS does not know whether anything was paid on it"
+    return (f"An earlier return on this bill ({rid}) {what}. An admin or Accounts must finish it first: "
+            f"Returns > Needs completing ({rid}). Nothing was recorded.")
 
 
 def _reassert_return_claims(row: Dict[str, Any]) -> None:
@@ -1700,6 +1741,77 @@ def _reassert_return_claims(row: Dict[str, Any]) -> None:
         _task_credit_settled_without_record(row)
 
 
+def sweep_stuck_return_holds() -> int:
+    """The reconciler's look at kept refund holds no one owns: older than the
+    pending timeout, with no COMPLETED (or nothing-paid) doc, and no credit
+    line -- or a VOID one -- and no unsaved doc (those carry their own task).
+    Each raises ONE P1 task (return_hold_stuck:<return id>) for the store and
+    Accounts. Never released here: a cash-only return may already have put
+    its units back. Returns the number found. ponytail: one pass over orders
+    holding refund holds; fine at shop scale."""
+    from datetime import timedelta
+
+    from api.utils.event_time import parse_event_utc_naive
+
+    from .customers import PENDING_TIMEOUT_SECONDS
+
+    orders, coll, ledger = _orders_coll(), _returns_coll(), _ledger_coll()
+    if orders is None or coll is None:
+        return 0
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=PENDING_TIMEOUT_SECONDS)
+    found = 0
+    try:
+        bills = list(orders.find({"refund_holds_v": {"$ne": None}}))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] refund holds unreadable: %s", exc)
+        return 0
+    for order in bills:
+        for rid, hold in (order.get("refund_holds") or {}).items():
+            hold = hold or {}
+            at = parse_event_utc_naive(hold.get("at"))
+            if not hold.get("kept") or hold.get("doc") or (at is not None and at > cutoff):
+                continue
+            try:
+                if coll.find_one({"return_id": rid, "status": {"$in": list(_NO_MONEY_DOC_STATUSES)}}):
+                    continue
+                line = ledger.find_one({"entry_id": f"{rid}:credit"}) if ledger is not None else None
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[RETURNS] stuck hold %s unreadable: %s", rid, exc)
+                continue
+            if line is not None and line.get("type") != "VOID":
+                continue  # ISSUING: the reconciler's; final: its own task
+            found += 1
+            _task_return_hold_stuck(order, rid, hold, line)
+    return found
+
+
+def _task_return_hold_stuck(order: Dict[str, Any], rid: str, hold: Dict[str, Any],
+                            line: Optional[Dict[str, Any]]) -> None:
+    try:
+        from ..dependencies import get_task_repository
+        from ..services.task_triggers import create_system_task
+
+        create_system_task(
+            get_task_repository(),
+            title=f"Return {rid} on bill {order.get('order_number') or order.get('order_id')} never finished",
+            description=(
+                f"Return {rid} (Rs {float(hold.get('amount') or 0):.2f}) stopped part way: "
+                + ("its store credit never landed (void). " if line is not None else "no store credit was written. ")
+                + "The bill takes no new return until it is finished. Do this: Returns > Needs completing "
+                f"({rid}) - say whether anything was paid. Nothing is released by itself (its units may "
+                "already be back on the shelf)."
+            ),
+            priority="P1",
+            category="Accounts",
+            store_id=hold.get("store_id") or order.get("store_id"),
+            dedupe_ref=f"return_hold_stuck:{rid}",
+            extra={"link": f"/returns?panel=needs-completing&return={rid}",
+                   "payload": {"order_id": order.get("order_id"), "return_id": rid}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] stuck-hold task not raised for %s: %s", rid, exc)
+
+
 def _task_return_doc_missing(doc: Dict[str, Any]) -> None:
     """The money of a counter return went out but its doc was not saved: a P1
     task carrying the doc, deduped per return. Fail-soft."""
@@ -1715,31 +1827,39 @@ def _task_return_doc_missing(doc: Dict[str, Any]) -> None:
                 f"Return {rid} on order {doc.get('order_id')} paid out Rs {float(doc.get('net_refund') or 0):.2f} "
                 f"(tenders: {doc.get('refund_tenders') or doc.get('refund_method') or '-'}; credit note "
                 f"{doc.get('credit_note_number') or '-'}), but its record could not be saved. The bill takes no "
-                f"new return until it is. Do this: Returns > Complete record ({rid}) and confirm whether the "
+                f"new return until it is. Do this: Returns > Needs completing ({rid}) and confirm whether the "
                 "cash leg was paid. Never redo the return."
             ),
             priority="P1",
             category="Accounts",
             store_id=doc.get("store_id"),
             dedupe_ref=f"return_doc_missing:{rid}",
-            extra={"payload": {"order_id": doc.get("order_id"), "return_id": rid,
-                               "action": f"/api/v1/returns/{rid}/complete-record",
+            extra={"link": f"/returns?panel=needs-completing&return={rid}",
+                   "payload": {"order_id": doc.get("order_id"), "return_id": rid,
                                "doc": {k: v for k, v in doc.items() if k != "_id"}}},
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] doc-missing task not raised for %s: %s", doc.get("return_id"), exc)
 
 
-def _undo_return_claims(spec: Dict[str, Any]) -> None:
+def _undo_return_claims(spec: Dict[str, Any], *, row: Optional[Dict[str, Any]] = None, mark=None) -> None:
     """A counter return whose credit was unconfirmed kept its unit claims and
     its refund hold (so it could not be redone); its credit line was then
-    voided by the reconciler (it never landed): give both back."""
+    voided by the reconciler (it never landed): give both back. ``row`` /
+    ``mark``: each step is skipped when the row says it ran and marked when
+    it does, so a resumed undo never gives anything back twice."""
+    row = row if row is not None else {}
     order_id = spec.get("order_id")
-    for line in spec.get("lines") or []:
-        _release_returnable_qty(order_id, {"item_id": line.get("item_id"), "product_id": line.get("product_id")},
-                                float(line.get("qty") or 0))
-    if spec.get("return_id"):
+    if not row.get("claims_released"):
+        for line in spec.get("lines") or []:
+            _release_returnable_qty(order_id, {"item_id": line.get("item_id"), "product_id": line.get("product_id")},
+                                    float(line.get("qty") or 0))
+        if mark:
+            mark(claims_released=True)
+    if spec.get("return_id") and not row.get("hold_released"):
         _release_order_refund(order_id, spec["return_id"])
+        if mark:
+            mark(hold_released=True)
 
 
 def _issue_store_credit(
@@ -1998,6 +2118,19 @@ def _issue_store_credit(
         status = post_ledger_credit(repo, entry, ledger=coll)
         outcome["not_written"] = bool(entry.pop(NOT_WRITTEN, False))
         resumed = bool(entry.pop(RESUMED, False))
+        stored = None
+        if resumed:
+            # Another press wrote this line: it carries its OWN number, so the
+            # one this press took is on no row -- written off here, whatever
+            # the outcome (the caller must not write it off again).
+            try:
+                stored = coll.find_one({"entry_id": entry["entry_id"]})
+            except Exception:  # noqa: BLE001
+                stored = None
+            if note_number and (stored is None or stored.get("note_number") != note_number):
+                _record_unused_credit_note(note_number, {"order_id": order_id, "store_id": entry.get("store_id")},
+                                           ref, current_user, "another press issued this credit note")
+                outcome["not_written"] = False
         if status == UNCLEAR:
             raise CreditNotConfirmed(entry["entry_id"])
         if status != POSTED:
@@ -2005,19 +2138,13 @@ def _issue_store_credit(
             return None
         entry["applied"] = True
         if resumed:
-            # Another press wrote this line: the answer is the row AS STORED;
-            # a number this press took that the row does not carry is written off.
-            try:
-                stored = coll.find_one({"entry_id": entry["entry_id"]})
-            except Exception:  # noqa: BLE001
-                stored = None
-            if stored is not None:
-                stored = dict(stored)
-                stored.pop("_id", None)
-                if note_number and stored.get("note_number") != note_number:
-                    _record_unused_credit_note(note_number, {"order_id": order_id, "store_id": entry.get("store_id")},
-                                               ref, current_user, "another press issued this credit note")
-                return {**stored, "applied": True, "resumed": True}
+            if stored is None:
+                # It posted, but the row cannot be read back: no number is
+                # claimed (this press's own was written off above).
+                return {**entry, "note_number": None, "resumed": True}
+            stored = dict(stored)
+            stored.pop("_id", None)
+            return {**stored, "applied": True, "resumed": True}
     else:
         try:
             coll.insert_one(dict(entry))
@@ -3581,6 +3708,7 @@ async def quote_return(
         raise HTTPException(status_code=400, detail="No returnable lines supplied")
 
     resolved_order_id = body.order_id or order.get("order_id")
+    _refuse_counter_shipping(active_lines, order)
     priced_lines, gross_refund, refund_round_off = _price_return(
         active_lines, order, resolved_order_id
     )
@@ -3839,8 +3967,11 @@ async def create_return(
     try:
         return await _create_return(body, current_user, idempotency_key, held)
     except BaseException:
-        if held.get("unclear"):
-            raise  # the credit may have landed: the hold and the approval stay spent
+        if held.get("unclear") or held.get("money_out"):
+            # The credit may have landed, or it did (money_out): the hold and
+            # the approval stay spent -- released only by a person (Returns >
+            # Needs completing), never automatically.
+            raise
         if held.get("return_id"):
             _release_order_refund(held["order_id"], held["return_id"])
         if held.get("approval_request_id"):
@@ -4043,15 +4174,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     "item that was not on this sale."
                 ),
             )
-        if "SHIPPING" in (str(orig_line.get("item_type") or "").upper(), str(orig_line.get("category") or "").upper()):
-            # Owner default (pending his ruling): shipping is refunded only
-            # through the Shopify refund, which IMS mirrors -- never at the
-            # counter (that also keeps its tax from being reversed twice).
-            raise HTTPException(
-                status_code=400,
-                detail=("Shipping charges are not returned at the counter. A shipping refund is "
-                        "made on Shopify, and IMS records it from there. Nothing was recorded."),
-            )
+        _refuse_shipping_line(orig_line)
         purchased = _line_purchased_qty(orig_line)
         product_id = orig_line.get("product_id")
         back = _units_already_back(resolved_order_id, orig_line)
@@ -4345,6 +4468,21 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] order refund mark skipped: %s", exc)
 
+    def _hold_facts() -> Dict[str, Any]:
+        """What the kept hold records for Needs completing: the claimed lines,
+        the tenders, the credit-note number, the store."""
+        return {
+            "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
+                       "product_id": d["orig_line"].get("product_id"),
+                       "qty": float(d["ret_line"].return_qty)} for d in claimed],
+            "tenders": refund_tenders,
+            "note_number": credit_note_number,
+            "store_id": store_id,
+            "return_type": body.return_type,
+            "order_number": body.order_number or (order or {}).get("order_number"),
+            "customer_id": customer_id,
+        }
+
     def _issue_credit_or_fail(
         amount: float,
         *,
@@ -4394,7 +4532,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # the credit lands never leaves it to age out (the cap and the
         # Rs 2,000 tier would forget a paid credit). A clean refusal releases
         # it (create_return); the reconciler's undo is the only other releaser.
-        _keep_order_refund_hold(resolved_order_id, held.get("return_id"))
+        # It carries what Needs completing needs if the press dies here.
+        _keep_order_refund_hold(resolved_order_id, held.get("return_id"), extra=_hold_facts())
         _outcome: Dict[str, Any] = {}
         try:
             entry = _issue_store_credit(
@@ -4488,6 +4627,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     f"this return, so NOTHING was recorded: {_why}."
                 ),
             )
+        held["money_out"] = True  # the credit landed: a later error releases nothing
         return entry
 
     if body.return_type == "RETURN":
@@ -4672,10 +4812,12 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
 
     # The money is out (credit issued / refund recorded below): the
     # reservation is now part of the order's refunded total -- keep it, and
-    # it never ages out until this return's doc exists.
+    # it never ages out until this return's doc exists. Any later error keeps
+    # the hold and the approval (money_out).
     if held.get("return_id"):
-        _keep_order_refund_hold(held.get("order_id"), held.get("return_id"))
-    held.clear()
+        _keep_order_refund_hold(held.get("order_id"), held.get("return_id"),
+                                extra={**_hold_facts(), "money_out": True})
+    held["money_out"] = True
 
     # 4. Persist the return doc.
     now = utc_now_iso()
@@ -4699,8 +4841,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # optional restocking fee, and the resulting net refund. Persisted so
         # the credit note / GSTR-1 reversal is auditable.
         "gross_refund": gross_refund,
-        # The bill's round off this return gave back (inside gross_refund).
-        "round_off": refund_round_off,
+        # The bill's round off this return gave back (its share of the net
+        # when a restocking fee scaled the refund).
+        "round_off": _ro,
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
         "gst_breakup": gst_view,
@@ -4825,8 +4968,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "return_type": body.return_type,
         "returned_value": ret_value,
         "gross_refund": gross_refund,
-        # The bill's round off this return gave back (inside gross_refund).
-        "round_off": refund_round_off,
+        # The bill's round off this return gave back (scaled under a fee).
+        "round_off": _ro,
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
         "gst_breakup": gst_view,
@@ -4856,6 +4999,59 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "restock_store_reason": restock_result.get("restock_store_reason"),
         "message": message,
     }
+
+
+_COMPLETE_RECORD_ROLES = ("ACCOUNTANT", "ADMIN")  # SUPERADMIN auto-passes
+
+
+@router.get("/needs-completing")
+async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE_RECORD_ROLES))):
+    """Returns > Needs completing: counter returns held by a kept refund hold
+    with no finished record -- what is known (credit line, unsaved record,
+    cash leg) for the person who completes them. Store-scoped."""
+    orders, coll = _orders_coll(), _returns_coll()
+    if orders is None or coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    out: List[Dict[str, Any]] = []
+    try:
+        bills = list(orders.find({"refund_holds_v": {"$ne": None}}))
+        for order in bills:
+            store = order.get("store_id")
+            if not can_access_store_scoped(store, current_user):
+                continue
+            for rid, hold in (order.get("refund_holds") or {}).items():
+                hold = hold or {}
+                if not hold.get("kept"):
+                    continue
+                if coll.find_one({"return_id": rid, "status": {"$in": list(_NO_MONEY_DOC_STATUSES)}}):
+                    continue
+                state = _unfinished_return(rid)
+                line = state["line"]
+                if line is not None and line.get("type") == "ISSUING":
+                    continue  # still settling by itself
+                doc = hold.get("doc") or {}
+                tenders = doc.get("refund_tenders") or (line or {}).get("undo_on_void", {}).get("refund_tenders") \
+                    or hold.get("tenders")
+                out.append({
+                    "return_id": rid,
+                    "order_id": order.get("order_id"),
+                    "order_number": order.get("order_number") or hold.get("order_number"),
+                    "store_id": hold.get("store_id") or store,
+                    "amount": round(float(hold.get("amount") or 0), 2),
+                    "at": _money_moved_at(state),
+                    "credit_line": ({"type": line.get("type"), "amount": line.get("delta") if line.get("type") != "VOID"
+                                     else line.get("void_delta"), "note_number": line.get("note_number")}
+                                    if line is not None else None),
+                    "cash_leg": round(sum(float(t.get("amount") or 0) for t in _drawer(tenders)), 2),
+                    "record_not_saved": bool(doc),
+                    "money_known": bool((line is not None and line.get("type") != "VOID") or doc
+                                        or hold.get("money_out")),
+                })
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the unfinished returns - try again.") from exc
+    return {"items": sorted(out, key=lambda r: str(r.get("at") or ""))}
 
 
 @router.get("")
@@ -4925,13 +5121,59 @@ async def get_return(
 
 
 class CompleteRecordBody(BaseModel):
-    # The person finishing the record CONFIRMS whether the drawer / gateway
-    # legs of the refund were actually paid out at the time (no default).
-    cash_leg_paid: bool
+    # The person finishing the record answers ONE question: was the cash
+    # part of the refund paid out (Yes / No), or was nothing paid at all
+    # (the return stopped before any money moved)?
+    cash_leg_paid: Optional[bool] = None
+    nothing_paid: bool = False
     note: str = ""
 
 
-_COMPLETE_RECORD_ROLES = ("ACCOUNTANT", "ADMIN")  # SUPERADMIN auto-passes
+def _unfinished_return(return_id: str) -> Dict[str, Any]:
+    """What IMS holds for an unfinished counter return: its credit line, the
+    bill (by the refund hold) and the hold. Raises 503 when unreadable."""
+    ledger, orders = _ledger_coll(), _orders_coll()
+    try:
+        line = ledger.find_one({"entry_id": f"{return_id}:credit"}) if ledger is not None else None
+        order = (orders.find_one({f"refund_holds.{return_id}": {"$exists": True}}) if orders is not None else None)
+        if order is None and line is not None and orders is not None:
+            order = orders.find_one({"order_id": (line.get("undo_on_void") or {}).get("order_id") or line.get("order_id")})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read this return - try again.") from exc
+    hold = ((order or {}).get("refund_holds") or {}).get(return_id) or {}
+    return {"line": line, "order": order or {}, "hold": hold}
+
+
+def _money_moved_at(state: Dict[str, Any]) -> Optional[str]:
+    """When the money of an unfinished return moved: its credit line's date,
+    else the unsaved doc's, else the hold's."""
+    line, hold = state["line"] or {}, state["hold"]
+    return line.get("created_at") or (hold.get("doc") or {}).get("created_at") or hold.get("at")
+
+
+def _drawer(tenders: Optional[List[Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    return [t for t in (tenders or []) if str(t.get("method") or "") not in _REFUND_NON_DRAWER]
+
+
+def _task_cash_owed(rid: str, amount: float, store_id: Optional[str], order_id: Optional[str]) -> None:
+    try:
+        from ..dependencies import get_task_repository
+        from ..services.task_triggers import create_system_task
+
+        create_system_task(
+            get_task_repository(),
+            title=f"Pay customer Rs {amount:.2f} for return {rid} (cash part never paid)",
+            description=(f"Return {rid} on order {order_id}: its record was completed and the person said the "
+                         f"cash part (Rs {amount:.2f}) was never paid. The customer is owed it: pay it and "
+                         "note the payment on the return."),
+            priority="P1",
+            category="Accounts",
+            store_id=store_id,
+            dedupe_ref=f"return_cash_owed:{rid}",
+            extra={"payload": {"order_id": order_id, "return_id": rid, "amount": amount}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] cash-owed task not raised for %s: %s", rid, exc)
 
 
 @router.post("/{return_id}/complete-record", status_code=201)
@@ -4940,15 +5182,23 @@ async def complete_return_record(
     body: CompleteRecordBody = Body(...),
     current_user: dict = Depends(require_roles(*_COMPLETE_RECORD_ROLES)),
 ):
-    """Returns > Complete record (money review 12): write the missing doc of
-    a counter return whose money went out but whose record never landed --
-    its store credit settled without the return (from the credit line's
-    undo_on_void), or the doc insert failed (from the doc kept on the bill's
-    refund hold). Linked from the P1 task. A person confirms whether the cash
-    leg was paid (an unpaid drawer leg is not recorded as refunded).
-    Idempotent: an existing doc is returned as it is. The doc is COMPLETED,
-    so the bill takes returns again; its units are restocked by hand (the
-    doc says restock_applied False)."""
+    """Returns > Needs completing (money reviews 12-13): finish a counter
+    return whose record never landed. The person answers ONE question:
+
+    * cash_leg_paid True / False -- money moved (its store credit settled, or
+      its record could not be saved): the doc is written COMPLETED, dated when
+      the money moved (a locked month dates the first open day, flagged). An
+      unpaid cash part stays on the doc as OWED and raises a P1 "pay the
+      customer" task; the credit note stands (the goods came back).
+    * nothing_paid -- it stopped before any money moved (no credit line, or a
+      VOID one): the hold and the unit claims go back and its credit-note
+      number is written off, once.
+
+    Store-scoped (Admin / Superadmin any store). Idempotent: an existing doc
+    is returned as it is."""
+    if body.nothing_paid == (body.cash_leg_paid is not None):
+        raise HTTPException(status_code=422, detail=(
+            "Answer one question: was the cash part paid (yes / no), or was nothing paid at all?"))
     coll = _returns_coll()
     if coll is None:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -4961,113 +5211,192 @@ async def complete_return_record(
         existing.pop("_id", None)
         return {**existing, "replayed": True, "message": "This return's record already exists."}
 
-    ledger = _ledger_coll()
-    try:
-        line = ledger.find_one({"entry_id": f"{return_id}:credit"}) if ledger is not None else None
-        orders = _orders_coll()
-        order = (orders.find_one({f"refund_holds.{return_id}": {"$exists": True}}) if orders is not None else None)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=503, detail="Could not read this return's credit - try again.") from exc
-    hold = ((order or {}).get("refund_holds") or {}).get(return_id) or {}
+    state = _unfinished_return(return_id)
+    line, order, hold = state["line"], state["order"], state["hold"]
+    spec = (line or {}).get("undo_on_void") or {}
+    store_id = (line or {}).get("store_id") or hold.get("store_id") or order.get("store_id")
+    if not line and not hold:
+        raise HTTPException(status_code=404, detail=(
+            "Nothing to complete: no credit line and no held refund were found for this return."))
+    if not can_access_store_scoped(store_id, current_user):
+        raise HTTPException(status_code=403, detail="This return belongs to another store.")
+    if line is not None and line.get("type") == "ISSUING":
+        raise HTTPException(status_code=409, detail=(
+            "This return's store credit is still being confirmed - it settles by itself within 10 "
+            "minutes. Complete the record then."))
+    credit_landed = line is not None and line.get("type") != "VOID"
+    doc_kept = dict(hold.get("doc") or {})
+    order_id = spec.get("order_id") or order.get("order_id") or doc_kept.get("order_id")
     now = utc_now_iso()
-    recovered = {"by": current_user.get("user_id"), "at": now, "cash_leg_paid": body.cash_leg_paid,
-                 "note": body.note or ""}
+    recovered = {"by": current_user.get("user_id"), "at": now, "note": body.note or "",
+                 "cash_leg_paid": body.cash_leg_paid, "nothing_paid": body.nothing_paid}
 
-    def _tenders(tenders):
+    if body.nothing_paid:
+        if credit_landed or doc_kept.get("credit_entry"):
+            raise HTTPException(status_code=409, detail=(
+                "Store credit was given on this return, so it cannot be marked as nothing paid. Answer "
+                "whether the cash part was paid."))
+        return _complete_nothing_paid(return_id, line, order, hold, doc_kept, store_id, recovered, current_user)
+
+    if not credit_landed and not doc_kept and not hold.get("money_out"):
+        raise HTTPException(status_code=409, detail=(
+            "IMS gave nothing on this return (no store credit, no saved record). If cash was handed over "
+            "anyway, Accounts records it by hand; otherwise answer 'Nothing was paid'."))
+
+    # Dated when the money moved; a locked or filed month dates the first open
+    # day, flagged -- the rule every ledger row follows (customers._finish_dates).
+    from .customers import _audit_credit_event, _finish_dates
+
+    moved_at = _money_moved_at(state) or now
+    redate = _finish_dates({"entry_id": f"return:{return_id}", "created_at": moved_at})
+    created_at = redate.get("created_at", moved_at)
+
+    def _owed(tenders):
         if body.cash_leg_paid or not tenders:
-            return tenders
-        return [t for t in tenders if str(t.get("method") or "") in _REFUND_NON_DRAWER]
+            return tenders, 0.0
+        out, owed = [], 0.0
+        for t in tenders:
+            if str(t.get("method") or "") in _REFUND_NON_DRAWER:
+                out.append(t)
+            else:
+                owed += float(t.get("amount") or 0)
+                out.append({**t, "status": "OWED"})
+        return out, round(owed, 2)
 
-    if hold.get("doc"):
-        doc = dict(hold["doc"])
+    if doc_kept:
+        doc = doc_kept
         doc.pop("_id", None)
-        tenders = _tenders(doc.get("refund_tenders"))
-        if tenders != doc.get("refund_tenders"):
-            paid = round(sum(float(t.get("amount") or 0) for t in tenders or []), 2)
-            doc.update(refund_tenders=tenders, net_refund=paid, refund_amount=paid, drawer_auto_netted=False)
-        doc.update(status="COMPLETED", recovered=dict(recovered, source="unsaved doc"))
-    elif line is not None:
-        if line.get("type") == "ISSUING":
-            raise HTTPException(status_code=409, detail=(
-                "This return's store credit is still being confirmed - it settles by itself within 10 "
-                "minutes. Complete the record then."))
-        if line.get("type") == "VOID":
-            raise HTTPException(status_code=409, detail=(
-                "This return's store credit never landed (its line is void and its units were given "
-                "back), so there is no record to complete."))
-        spec = line.get("undo_on_void") or {}
-        if not spec:
-            raise HTTPException(status_code=404, detail="This credit line belongs to no counter return.")
-        tenders = _tenders(spec.get("refund_tenders"))
-        credit = round(float(line.get("delta") or 0), 2)
-        drawer = round(sum(float(t.get("amount") or 0) for t in tenders or []
-                           if str(t.get("method") or "") not in _REFUND_NON_DRAWER), 2)
-        rtype = spec.get("return_type") or ("RETURN" if spec.get("refund_tenders") else "CREDIT_NOTE")
+        tenders, owed = _owed(doc.get("refund_tenders"))
+        doc.update(refund_tenders=tenders, drawer_auto_netted=False if owed else doc.get("drawer_auto_netted"))
+        source = "unsaved doc"
+    else:
+        base = line if credit_landed else {}
+        tenders_in = spec.get("refund_tenders") or hold.get("tenders")
+        tenders, owed = _owed(tenders_in)
+        credit = round(float(base.get("delta") or 0), 2)
+        drawer = round(sum(float(t.get("amount") or 0) for t in _drawer(tenders_in)), 2)
+        rtype = spec.get("return_type") or hold.get("return_type") or ("RETURN" if tenders_in else "CREDIT_NOTE")
         gst = None
-        if line.get("taxable") is not None and line.get("tax") is not None:
-            tv, t = float(line["taxable"]), float(line["tax"])
-            rate = line.get("gst_rate")
+        if base.get("taxable") is not None and base.get("tax") is not None:
+            tv, t = float(base["taxable"]), float(base["tax"])
+            rate = base.get("gst_rate")
             gst = {"taxable": tv, "tax": t, "gross": round(tv + t, 2), "gst_rate": rate,
                    "by_rate": {str(rate): {"taxable": tv, "tax": t, "gross": round(tv + t, 2)}} if rate else {}}
-        stored_line = {k: v for k, v in line.items() if k != "_id"}
+        net = round(credit + drawer, 2)  # the whole refund: its credit note covers all of it
         doc = {
             "return_id": return_id,
-            "order_id": spec.get("order_id"),
-            "order_number": (order or {}).get("order_number"),
-            "customer_id": line.get("customer_id"),
-            "customer_name": (order or {}).get("customer_name") or "",
-            "store_id": line.get("store_id") or (order or {}).get("store_id"),
+            "order_id": order_id,
+            "order_number": order.get("order_number") or hold.get("order_number"),
+            "customer_id": base.get("customer_id") or hold.get("customer_id"),
+            "customer_name": order.get("customer_name") or "",
+            "store_id": store_id,
             "return_type": rtype,
-            "items": spec.get("lines") or [],
+            "items": spec.get("lines") or hold.get("lines") or [],
             "replacement_items": [],
-            "gross_refund": line.get("gross_refund") or round(credit + drawer, 2),
-            "restocking_fee": line.get("restocking_fee") or 0.0,
-            "net_refund": round(credit + drawer, 2),
+            "gross_refund": base.get("gross_refund") or net,
+            "restocking_fee": base.get("restocking_fee") or 0.0,
+            "net_refund": net,
             "gst_breakup": gst,
-            "credit_note_number": line.get("note_number"),
-            "refund_amount": round(credit + drawer, 2) if rtype == "RETURN" else None,
+            "credit_note_number": base.get("note_number") or hold.get("note_number"),
+            "refund_amount": net if rtype == "RETURN" else None,
             "refund_method": "STORE_CREDIT" if rtype == "CREDIT_NOTE" else None,
             "refund_tenders": tenders if rtype == "RETURN" else None,
             # A drawer leg paid at the time belongs to that day's Day-End,
-            # never netted again today.
+            # never netted again by this record.
             "drawer_auto_netted": False,
             "credit_amount": credit,
-            "credit_entry": stored_line,
+            "credit_entry": {k: v for k, v in base.items() if k != "_id"} or None,
             "restocked": [],
             "restock_applied": False,
             "restock_stock_ids": [],
-            "status": "COMPLETED",
-            "recovered": dict(recovered, source="credit line"),
             "created_by": current_user.get("user_id"),
-            "created_at": now,
         }
-    else:
-        raise HTTPException(status_code=404, detail=(
-            "Nothing to complete: no credit line and no unsaved record were found for this return."))
+        source = "credit line" if credit_landed else "held refund"
+    if owed:
+        doc["owed_amount"] = owed
+    doc.update(status="COMPLETED", created_at=created_at,
+               recovered=dict(recovered, source=source, redated_from=redate.get("redated_from"),
+                              redated_cross_fy=redate.get("redated_cross_fy")))
     try:
         coll.insert_one({**doc, "_id": f"recovered:{return_id}"})
     except Exception as exc:  # noqa: BLE001 -- a concurrent press wrote it, or the write failed
-        try:
-            again = coll.find_one({"return_id": return_id})
-        except Exception:  # noqa: BLE001
-            again = None
-        if again is None:
-            raise HTTPException(status_code=503, detail=(
-                "The record could not be saved - nothing changed. Try again.")) from exc
-        again = dict(again)
-        again.pop("_id", None)
-        return {**again, "replayed": True, "message": "This return's record already exists."}
+        return _replay_or_503(coll, return_id, exc)
+    if owed:
+        _task_cash_owed(return_id, owed, store_id, order_id)
+    if redate.get("redated_from"):
+        _audit_credit_event("RETURN_RECORD_REDATED", {"entry_id": f"return:{return_id}", "store_id": store_id,
+                                                      "order_id": order_id})
+    _audit_complete(return_id, store_id, current_user, recovered, now)
+    return {**doc, "message": "Return record completed. Put its units back in stock by hand."
+            + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else "")}
+
+
+def _replay_or_503(coll, return_id: str, exc: Exception) -> Dict[str, Any]:
+    try:
+        again = coll.find_one({"return_id": return_id})
+    except Exception:  # noqa: BLE001
+        again = None
+    if again is None:
+        raise HTTPException(status_code=503, detail="The record could not be saved - nothing changed. Try again.") from exc
+    again = dict(again)
+    again.pop("_id", None)
+    return {**again, "replayed": True, "message": "This return's record already exists."}
+
+
+def _audit_complete(return_id, store_id, current_user, details, now) -> None:
     try:
         from ..dependencies import get_audit_repository
 
         audit = get_audit_repository()
         if audit is not None:
             audit.create({"action": "RETURN_RECORD_COMPLETED", "entity_type": "return", "entity_id": return_id,
-                          "store_id": doc.get("store_id"), "user_id": current_user.get("user_id"),
-                          "details": recovered, "created_at": now})
+                          "store_id": store_id, "user_id": current_user.get("user_id"),
+                          "details": details, "created_at": now})
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] complete-record audit skipped: %s", exc)
-    return {**doc, "message": "Return record completed. Put its units back in stock by hand."}
+
+
+def _complete_nothing_paid(return_id, line, order, hold, doc_kept, store_id, recovered, current_user):
+    """Nothing moved: the claims and the hold go back and the credit-note
+    number is written off -- once. A tombstone doc (status NOTHING_PAID, no
+    money) is written FIRST under a fixed _id, so of two presses exactly one
+    gives anything back."""
+    coll = _returns_coll()
+    spec = (line or {}).get("undo_on_void") or {}
+    order_id = spec.get("order_id") or order.get("order_id") or doc_kept.get("order_id")
+    lines = spec.get("lines") or hold.get("lines") or [
+        {"item_id": it.get("order_item_id") or it.get("item_id"), "product_id": it.get("product_id"),
+         "qty": float(it.get("return_qty") or it.get("qty") or 0)} for it in doc_kept.get("items") or []]
+    number = (line or {}).get("note_number") or hold.get("note_number") or doc_kept.get("credit_note_number")
+    now = recovered["at"]
+    tomb = {"return_id": return_id, "order_id": order_id, "store_id": store_id, "status": "NOTHING_PAID",
+            "net_refund": 0.0, "refund_amount": 0.0, "credit_amount": 0.0, "items": lines,
+            "credit_note_number": number, "created_at": now, "created_by": current_user.get("user_id"),
+            "recovered": dict(recovered, source="nothing paid")}
+    try:
+        coll.insert_one({**tomb, "_id": f"recovered:{return_id}"})
+    except Exception as exc:  # noqa: BLE001 -- the other press is giving it back
+        return _replay_or_503(coll, return_id, exc)
+    void_done = line or {}
+    if not void_done.get("claims_released"):
+        for ln in lines:
+            _release_returnable_qty(order_id, {"item_id": ln.get("item_id"), "product_id": ln.get("product_id")},
+                                    float(ln.get("qty") or 0))
+    if number and not void_done.get("number_written_off"):
+        _record_unused_credit_note(number, {"order_id": order_id, "store_id": store_id}, return_id, current_user,
+                                   "return finished with nothing paid")
+    if order_id:
+        _release_order_refund(order_id, return_id)
+    if line is not None:
+        try:
+            _ledger_coll().update_one({"entry_id": line["entry_id"], "type": "VOID"},
+                                      {"$set": {"claims_released": True, "hold_released": True,
+                                                "number_written_off": True, "void_settled": True}})
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[RETURNS] void %s not marked settled: %s", line.get("entry_id"), exc)
+    _audit_complete(return_id, store_id, current_user, recovered, now)
+    return {**tomb, "message": "Nothing was paid on this return: its units and the bill were released, "
+                               "and its credit-note number was written off."}
 
 
 @router.post("/{return_id}/restock")

@@ -311,8 +311,11 @@ const isPurgeTimeout = (error: AxiosError): boolean =>
 // landed: "try again" is the second press that does it twice (money review 12).
 export const WRITE_UNCONFIRMED_MESSAGE =
   'The server did not confirm this - it may already be saved. Reload and check before pressing again.';
+// POSTs that only READ (a price quote) or sign in: nothing to have "saved".
+const READ_LIKE_POSTS = [/\/auth\//, /\/orders\/quote(\?|$)/, /\/returns\/quote(\?|$)/];
 const isWrite = (error: AxiosError): boolean =>
-  !SAFE_METHODS.includes(String(error.config?.method || 'get').toLowerCase());
+  !SAFE_METHODS.includes(String(error.config?.method || 'get').toLowerCase())
+  && !READ_LIKE_POSTS.some((re) => re.test(String(error.config?.url || '')));
 
 // Pure transform: axios error -> the ApiError components actually receive.
 // Exported so tests reject fixtures through the REAL production transform
