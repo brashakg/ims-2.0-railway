@@ -994,3 +994,17 @@ def test_a_same_gstin_transfer_of_a_piece_whose_bill_no_return_places_is_held(
     assert out["itc_reversed"]["unallocated_total"] == 155.0
     row = db.itc_writeoff_reversals.find_one({"_id": sid})
     assert (row["gstin"], row["unallocated"]) == (None, True)
+
+
+def test_a_backdated_bill_booked_after_a_later_loss_reverses_in_the_loss_month(world, october):
+    """Damaged on 5 October, then a bill dated September is booked: the
+    credit was claimed before the loss, so the reversal is October's (the
+    loss month), never back-dated into September."""
+    db = world["db"]
+    _stocked(db, "GRN-WO-0067")
+    sid = "SU-GRN-WO-0067-0"
+    assert _damage(db, sid)["itc_reversed"]["total"] == 0.0
+    _line_bill("GRN-WO-0067", "TAX-WO-67")
+    assert db.vendor_bills.find_one({"grn_id": "GRN-WO-0067"})["bill_date"][:7] == MONTH
+    assert db.itc_writeoff_reversals.find_one({"_id": sid})["period"] == OCTOBER
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 155.0
