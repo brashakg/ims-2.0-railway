@@ -3332,14 +3332,15 @@ def clone_and_vary(
         for k, v in _overlay_attributes(src).items()
         if manufacturer_barcode_key(k) is None
     }
-    base_payload: Dict[str, Any] = {}
-    for f in _CLONE_CATALOG_FIELDS:
-        if src.get(f) is not None:
-            base_payload[f] = src.get(f)
     from .stock_value import average_cost
 
-    if not average_cost(src):  # S4: a catalogue-only price is no cost to clone
-        base_payload.pop("cost_price", None)
+    base_payload: Dict[str, Any] = {}
+    for f in _CLONE_CATALOG_FIELDS:
+        # S4: the cost a variant is born with is the source's average (a
+        # catalogue-only price is no cost).
+        value = (average_cost(src) or None) if f == "cost_price" else src.get(f)
+        if value is not None:
+            base_payload[f] = value
 
     created: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
