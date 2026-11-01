@@ -295,6 +295,23 @@ ALLOWED = {
         "then the BOUND rule converts. Correct frame (AR/AP + P&L monthly)."
     ),
     (
+        "api/routers/finance/cash_flow.py",
+        '"expense_date": {"$gte": today.replace(day=1).isoformat()},',
+    ): (
+        "expense_date is a date-only IST business-date STRING, not a stored "
+        "instant: the bound is the IST 1st as a string (today is ist_today()). "
+        "NOT start.date() -- that is IST midnight in UTC, the previous month's "
+        "last day (CLK-P03). Pinned by test_ist_dates_money."
+    ),
+    (
+        "api/routers/finance/cash_flow.py",
+        '"expense_date": {"$gte": now.replace(day=1).date().isoformat()},',
+    ): (
+        "now is now_ist_naive() (IST wall clock); expense_date is a date-only "
+        "IST business-date STRING, so the bound is the IST 1st as a string, "
+        "not start.date() (CLK-P03). Pinned by test_ist_dates_money."
+    ),
+    (
         "api/routers/finance/survival.py",
         "start = ist_day_start_utc(now.replace(day=1).date())",
     ): (
