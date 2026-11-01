@@ -11,6 +11,9 @@ import { usePOSStore } from '../stores/posStore';
 import { permissionToCapability, isUngrantableCapability } from '../utils/capabilities';
 import { userSeesAllStores } from '../utils/storeAccess';
 import { USER_SHOPS_SYNCED_EVENT } from '../services/api/client';
+import { getSessionPolicy } from '../constants/sessionPolicy';
+import { LAST_ACTIVITY_KEY, storedSessionIdleExpired } from '../hooks/useIdleLogout';
+import { IDLE_LOGIN_PATH, autoParkForIdleLogout } from '../hooks/idleSignOut';
 
 // ============================================================================
 // Types
@@ -158,7 +161,20 @@ export function AuthProvider({ children }: AuthProviderProps) {
       if (token && userJson) {
         try {
           // Verify stored user JSON is valid (parsing test)
-          JSON.parse(userJson) as User;
+          const cachedUser = JSON.parse(userJson) as User;
+
+          // Idle past the limit while the browser/tab was closed (owner
+          // 11-01): sign out BEFORE any server call, so the stored token is
+          // never resumed or silently refreshed. Same steps as the idle
+          // watcher (autoParkForIdleLogout parks then clears synchronously, so
+          // a second run under React StrictMode finds no cart to re-park).
+          if (storedSessionIdleExpired(getSessionPolicy())) {
+            autoParkForIdleLogout(cachedUser?.id);
+            await logout();
+            // AuthProvider sits outside the router, so a plain replace.
+            window.location.replace(IDLE_LOGIN_PATH);
+            return;
+          }
 
           // Check if token looks valid (basic JWT format check)
           const tokenParts = token.split('.');
@@ -291,6 +307,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
         }
         localStorage.setItem('ims_user', JSON.stringify(response.user));
         localStorage.setItem('ims_login_time', Date.now().toString());
+        // A fresh login is fresh activity: an old idle stamp must never sign
+        // this session straight back out.
+        localStorage.setItem(LAST_ACTIVITY_KEY, Date.now().toString());
         // Reset the sidebar to grouped/expanded on every login (key owned by
         // components/shell/Rail.tsx COLLAPSED_GROUPS_KEY).
         localStorage.removeItem('ims_rail_collapsed_groups');

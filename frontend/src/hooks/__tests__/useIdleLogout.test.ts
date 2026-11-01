@@ -204,8 +204,8 @@ describe('useIdleLogout (enforcement)', () => {
       useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
     );
 
-    // Pin last-activity to the anchor; the hook also seeded it on mount, so
-    // overwrite AFTER mount to simulate the user having been idle since BASE.
+    // Pin last-activity to the anchor (the hook seeds it on mount only when
+    // none is stored) to simulate the user having been idle since BASE.
     setLastActivity(BASE);
 
     // Throttled tab: previous tick before the warn window, next tick past the
@@ -382,5 +382,38 @@ describe('useIdleLogout (enforcement)', () => {
     tickAt(BASE + 851_000);
     expect(onLogout).not.toHaveBeenCalled();
     expect(result.current.warning).toBe(false);
+  });
+
+  it('mount does NOT overwrite a stored stamp: a tab reopened 20 min later logs out on the first tick', () => {
+    setLastActivity(BASE - 20 * 60_000); // browser closed 20 min ago
+    const onLogout = vi.fn();
+    renderHook(() =>
+      useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
+    );
+    expect(onLogout).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(LAST_ACTIVITY_KEY)).toBe(String(BASE - 20 * 60_000));
+  });
+
+  it('mount seeds the stamp when none is stored, and does not log out', () => {
+    const onLogout = vi.fn();
+    renderHook(() =>
+      useIdleLogout({ enabled: true, minutes: MIN, warnSeconds: WARN, onLogout }),
+    );
+    expect(localStorage.getItem(LAST_ACTIVITY_KEY)).toBe(String(BASE));
+    tickAt(BASE + 60_000);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
+
+  it('turning auto-logout back on does not sign out someone who kept working while it was off', () => {
+    setLastActivity(BASE - 60 * 60_000); // last stamp from before the switch-off
+    const onLogout = vi.fn();
+    const { rerender } = renderHook(
+      ({ enabled }) => useIdleLogout({ enabled, minutes: MIN, warnSeconds: WARN, onLogout }),
+      { initialProps: { enabled: false } },
+    );
+    moveMouse(); // working while it is off - nothing records it
+    rerender({ enabled: true }); // /health now says on
+    tickAt(BASE + 1_000);
+    expect(onLogout).not.toHaveBeenCalled();
   });
 });
