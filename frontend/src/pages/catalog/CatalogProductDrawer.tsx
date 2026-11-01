@@ -696,6 +696,22 @@ export function CatalogProductDrawer({
             />
           </dl>
 
+          {/* "It's a different product" answers (owner 2026-11-01): who said
+              this is not the same model written differently, and why. */}
+          {Array.isArray(doc.distinct_from) && doc.distinct_from.length > 0 && (
+            <>
+              <GroupTitle>Marked a different product</GroupTitle>
+              <ul className="space-y-1 text-xs text-gray-600" data-testid="distinct-from">
+                {(doc.distinct_from as Array<Record<string, unknown>>).map((d, i) => (
+                  <li key={str(d.product_id) || i}>
+                    Not the same as {str(d.sku) || str(d.product_id)}: {str(d.reason)}
+                    {str(d.by_name) ? ` (by ${str(d.by_name)}${str(d.at) ? `, ${str(d.at).slice(0, 10)}` : ''})` : ''}
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
+
           {/* G1: the model's colours and sizes (+ Link to model / Unlink). */}
           {!isImported && id && <ModelFamilyPanel productId={id} canEdit={canEdit} />}
 
