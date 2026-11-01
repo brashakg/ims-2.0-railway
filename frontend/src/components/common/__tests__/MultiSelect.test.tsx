@@ -4,6 +4,7 @@
 import { useState } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MultiSelect, type MultiOption } from '../MultiSelect';
 
 const PEOPLE: MultiOption[] = [
@@ -106,6 +107,18 @@ describe('MultiSelect', () => {
     expect(button.getAttribute('aria-expanded')).toBe('true');
     fireEvent.blur(box('Durga Devi (41)'), { relatedTarget: screen.getByRole('button', { name: 'Next' }) });
     expect(button.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('clicking a name ticks it and keeps the panel open (a real click moves focus)', async () => {
+    const user = userEvent.setup();
+    render(<Harness />);
+    const button = screen.getByRole('button', { name: 'Added by' });
+    await user.click(button);
+    await user.click(screen.getByText('Mansi Kumari (319)'));
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    await user.click(screen.getByText('Durga Devi (41)'));
+    expect(button.getAttribute('aria-expanded')).toBe('true');
+    expect(value()).toBe('u-mansi,u-durga');
   });
 
   it('near the right edge of a phone the panel opens leftwards, so the page never scrolls sideways', () => {

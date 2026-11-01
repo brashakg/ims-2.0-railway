@@ -870,6 +870,23 @@ describe('every tick-box filter keeps all its ticks (fix round 1)', () => {
     );
   });
 
+  it('Archived is a view of its own: ticking it clears the other flags, and the bar offers Restore', async () => {
+    auth.roles = ['ADMIN'];
+    renderAt('');
+    await screen.findByTestId('catalog-table');
+    fireEvent.click(screen.getByRole('button', { name: 'Flags - needs work' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Any flag open (14)' }));
+    await waitFor(() => expect(where().get('flag')).toBe('any'));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Archived (deleted) (3)' }));
+    await waitFor(() => expect(where().get('flag')).toBe('archived'));
+    fireEvent.click(await screen.findByLabelText('Select Carrera 8035 Black'));
+    const bar = await screen.findByTestId('selection-bar');
+    expect(within(bar).getByText('Restore')).toBeTruthy();
+    // Ticking another flag leaves the archived view.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Price check (5)' }));
+    await waitFor(() => expect(where().get('flag')).toBe('price_check'));
+  });
+
   it('Needs review asks for every brand when several categories are ticked', async () => {
     const getBrandOptions = productApi.getBrandOptions as unknown as ReturnType<typeof vi.fn>;
     const at = async (search: string) => {

@@ -88,8 +88,11 @@ export function MultiSelect({
     <div
       ref={box}
       onBlur={(e) => {
-        // Tabbing out of the box closes it, so two panels never stack.
-        if (!box.current?.contains(e.relatedTarget as Node | null)) setOpen(false);
+        // Tabbing out of the box closes it, so two panels never stack. A blur
+        // with no relatedTarget is a mousedown on a label or padding inside:
+        // closing then would hide the panel before the click lands. Clicks
+        // outside are the document mousedown listener's job.
+        if (e.relatedTarget && !box.current?.contains(e.relatedTarget as Node)) setOpen(false);
       }}
       className="relative flex flex-col gap-1 text-[11px] font-medium uppercase tracking-[.06em] text-gray-500"
     >

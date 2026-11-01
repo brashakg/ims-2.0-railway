@@ -274,7 +274,19 @@ export function CatalogFiltersBar({
               anyLabel="Any"
               value={f.flag}
               options={flagOptions}
-              onChange={(v) => set({ flag: v })}
+              onChange={(v) => {
+                // Archived (deleted) is a view of its own, never mixed with
+                // live flags: ticking it clears the rest, ticking another
+                // flag clears it.
+                const next = v.split(',').filter(Boolean);
+                const had = f.flag.split(',').includes('archived');
+                const flag = !next.includes('archived') || next.length === 1
+                  ? v
+                  : had
+                    ? next.filter((x) => x !== 'archived').join(',')
+                    : 'archived';
+                set({ flag });
+              }}
               width="w-48"
             />
           </>

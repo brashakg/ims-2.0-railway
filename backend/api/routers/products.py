@@ -963,6 +963,12 @@ async def list_products(
         raise HTTPException(
             status_code=403, detail="Only an admin can see archived products"
         )
+    if "archived" in new["flag"] and len(new["flag"]) > 1:
+        # Archived is a view of its own: mixed with live flags the page would
+        # give deleted rows live-row actions.
+        raise HTTPException(
+            status_code=400, detail="Archived cannot be combined with other flags"
+        )
     if "mine" in new["flag"]:
         # "Flagged on my entries" depends on who asks: part of the cache key.
         new["me"] = current_user.get("user_id")

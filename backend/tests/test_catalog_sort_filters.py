@@ -743,9 +743,14 @@ def test_added_by_and_edited_by_and_together(db):
     assert out["total_count"] == 2
 
 
-def test_archived_ticked_beside_another_flag_shows_both(db):
-    out = _list(sort="oldest", is_active="true", flag="archived,photo_redo")
-    assert sorted(_ids(out)) == ["P04", "P06"]
+def test_archived_is_never_ticked_beside_another_flag(db):
+    # Archived is a view of its own: mixed with live flags, deleted rows would
+    # get live-row actions on the page.
+    for flag in ("archived,photo_redo", "any,archived"):
+        with pytest.raises(HTTPException) as exc:
+            _list(sort="oldest", is_active="true", flag=flag)
+        assert exc.value.status_code == 400
+    assert _ids(_list(sort="oldest", flag="archived")) == ["P06"]
     with pytest.raises(HTTPException) as exc:
         _list(user=CATALOGUER, sort="name_asc", flag="any,archived")
     assert exc.value.status_code == 403
