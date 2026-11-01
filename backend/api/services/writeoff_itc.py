@@ -121,7 +121,12 @@ def _bills_for(db, unit: dict) -> list:
 
 def _bill_unit_costs(db, bill: dict) -> list:
     """(cost, pieces) of every unit the bill's receipt (or transfer) brought
-    in; cost 0 when the unit carries no price."""
+    in; cost 0 when the unit carries no price. Rejected custody is left out,
+    as purchase_invoices does: the bill covers the accepted pieces.
+
+    ponytail: a bill that also covers rejected pieces (billed rejects behind
+    the rejected-goods hold) still shares its whole GST over the accepted pieces only; net
+    the confirmed supplier credit off that bill's base if that shape appears."""
     if bill.get("source_transfer_id"):
         tid = bill["source_transfer_id"]
         # A piece that moved on since (_rehome restamps source_id) is still
@@ -135,7 +140,8 @@ def _bill_unit_costs(db, bill: dict) -> list:
         rids = [r for r in [bill.get("grn_id"), *(bill.get("linked_dc_ids") or [])] if r]
         if not rids:
             return []
-        q = {"$or": [{"grn_id": {"$in": rids}}, {"source_type": "GRN", "source_id": {"$in": rids}}]}
+        q = {"$or": [{"grn_id": {"$in": rids}}, {"source_type": "GRN", "source_id": {"$in": rids}}],
+             "receipt_disposition": {"$ne": "REJECTED"}}
     return [(_f(u.get("unit_cost")) or _f(u.get("cost_price")), _pieces(u))
             for u in db.get_collection("stock_units").find(
                 q, {"unit_cost": 1, "cost_price": 1, "quantity": 1})]

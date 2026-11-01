@@ -713,3 +713,57 @@ def test_unticking_17_5_after_a_write_off_reverses_the_lost_piece(world, october
     assert (_written_off(sept), _heads(sept["itcAvailable"])) == (155.0, 218.0)
     assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 0.0
     assert db.itc_writeoff_reversals.count_documents({"period": MONTH}) == 1
+
+
+# ---------------------------------------------------------------------------
+# Review round 4: the cost base is the pieces the bill paid for (rejected
+# custody excluded); a piece that moved on stays in its transfer's base
+# ---------------------------------------------------------------------------
+
+def _rejected_piece(db, grn_id):
+    """One rejected piece exactly as grn_rejections.handoff_rejected_units
+    mints it: same receipt, no price."""
+    sid = f"GRN-REJ-{grn_id}-0-0"
+    db.stock_units.insert_one({
+        "_id": sid, "stock_id": sid, "store_id": STORE, "product_id": FRAME, "quantity": 1,
+        "status": "QUARANTINED", "source_type": "GRN", "source_id": grn_id, "grn_id": grn_id,
+        "grn_line_index": 0, "line_unit_seq": -1, "receipt_disposition": "REJECTED",
+        "rtv_vendor_id": f"VR-GRN-{grn_id}-0"})
+
+
+@pytest.mark.parametrize("costs,written_off,expected", [
+    # The whole accepted receipt written off reverses exactly the bill's heads.
+    ([300.0, 300.0, 300.0], 3, (25.0, 25.0)),
+    # One piece takes its cost share: 600 / 900 of the heads.
+    ([600.0, 200.0, 100.0], 1, (16.67, 16.67)),
+], ids=["whole-receipt", "cost-share"])
+def test_a_rejected_piece_on_the_receipt_is_not_in_the_bills_cost_base(
+        world, october, costs, written_off, expected):
+    db = world["db"]
+    _frames_costing(db, "GRN-WO-0041", costs, 900.0)
+    _rejected_piece(db, "GRN-WO-0041")
+    for i in range(written_off):
+        _damage(db, f"SU-GRN-WO-0041-{i}")
+    ret = r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]
+    assert (ret["centralTax"], ret["stateTax"]) == expected
+
+
+def test_a_piece_moved_on_by_a_later_transfer_stays_in_its_transfers_cost_base(two_gstins, october):
+    """Three priced pieces (600 / 200 / 100) received at Pune on TRF-42's
+    aggregate-line mirror bill (Rs 50 IGST). One moves on by TRF-43, which
+    restamps its source_id; it is still listed on TRF-42. The Rs 200 piece
+    written off reverses 200/900 of 50, not 200/300."""
+    db = two_gstins["db"]
+    _frames_costing(db, "GRN-WO-0042", [600.0, 200.0, 100.0], 900.0)
+    sids = [f"SU-GRN-WO-0042-{i}" for i in range(3)]
+    _mirror(db, "TRF-42", gstin="", lines=[
+        {"product_id": None, "qty": 0.0, "taxable": 900.0, "cgst": 0.0, "sgst": 0.0, "igst": 50.0}])
+    db.vendor_bills.update_one({"bill_id": "MB-TRF-42"}, {"$set": {
+        "taxable_amount": 900.0, "tax_amount": 50.0, "igst_total": 50.0}})
+    db.stock_units.update_many({"stock_id": {"$in": sids}}, {"$set": {
+        "status": "AVAILABLE", "store_id": MH_STORE, "source_type": "TRANSFER", "source_id": "TRF-42",
+        "transfer_id": None}})
+    db.stock_transfers.insert_one({"id": "TRF-42", "items": [{"product_id": FRAME, "received_stock_ids": sids}]})
+    _rehomed(db, sids[0], "TRF-43", MH2_STORE)
+    _damage(db, sids[1], MH_ADMIN)
+    assert r3b._compute_gstr3b(OCTOBER, MH_STORE)["itcWriteOffReversed"]["integratedTax"] == 11.11
