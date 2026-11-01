@@ -222,26 +222,14 @@ def _member_product_gids(db, collection: Dict[str, Any]) -> Tuple[List[str], int
     never create a product from here. Fail-soft -> ([], 0)."""
     if str(collection.get("collection_type") or "CUSTOM").upper() != "CUSTOM":
         return [], 0
-    members = sorted(
-        (collection.get("products") or []),
-        key=lambda p: int((p or {}).get("position", 0) or 0),
-    )
-    skus = [p.get("sku") for p in members if isinstance(p, dict) and p.get("sku")]
+    from ..collection_membership import manual_listings
+
     gids: List[str] = []
     skipped = 0
-    for sku in skus:
-        gid = None
-        try:
-            doc = db["catalog_products"].find_one({"sku": sku}) if db is not None else None
-            # A colour/size of a model (G1) is on its MODEL's listing: the
-            # collection holds that listing (once).
-            link = ((doc or {}).get("ecom") or {}).get("variant_of")
-            if isinstance(link, dict) and link.get("twin_id"):
-                doc = db["catalog_products"].find_one({"id": link["twin_id"]})
-            if doc is not None:
-                gid = (doc.get("ecom") or {}).get("shopify_product_id")
-        except Exception:  # noqa: BLE001 -- one bad lookup never blocks the rest
-            gid = None
+    # A colour/size of a model (G1) is on its MODEL's listing: the
+    # collection holds that listing (once) -- THE rule the view shares.
+    for _sku, doc in manual_listings(db, collection):
+        gid = (doc.get("ecom") or {}).get("shopify_product_id") if doc is not None else None
         if gid and _as_shopify_gid(gid, "Product") in gids:
             continue
         if gid:

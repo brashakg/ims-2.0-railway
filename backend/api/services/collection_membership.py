@@ -234,19 +234,43 @@ def catalogue_facts(db, strict: bool = False) -> List[Dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def manual_listings(db, collection: Dict[str, Any], strict: bool = False) -> List[Tuple[str, Optional[Dict[str, Any]]]]:
+    """THE "manual SKU -> listing" rule of a CUSTOM collection (the push's,
+    shared by the membership view and the online block): each manual SKU in
+    position order with the catalogue doc of the listing it puts on the
+    website -- its catalog_products doc, or for a colour / size of a model
+    (ecom.variant_of.twin_id) the model's lead twin. None: no such doc (the
+    push skips it, so it is in nothing). A lookup error is None too, or
+    raises when ``strict``."""
+    rows = sorted((collection or {}).get("products") or [], key=lambda p: int((p or {}).get("position", 0) or 0))
+    out: List[Tuple[str, Optional[Dict[str, Any]]]] = []
+    for p in rows:
+        sku = (p or {}).get("sku") if isinstance(p, dict) else None
+        if not sku:
+            continue
+        try:
+            doc = db["catalog_products"].find_one({"sku": sku}) if db is not None else None
+            link = ((doc or {}).get("ecom") or {}).get("variant_of")
+            if isinstance(link, dict) and link.get("twin_id"):
+                doc = db["catalog_products"].find_one({"id": link["twin_id"]})
+        except Exception:  # noqa: BLE001 -- one bad lookup never blocks the rest
+            if strict:
+                raise
+            doc = None
+        out.append((str(sku), doc))
+    return out
+
+
 def _custom_members(db, collection: Dict[str, Any], facts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """A CUSTOM collection's manual members, as the listings that carry them
-    (a colour / size resolves to its listing), in position order, once each."""
-    by_sku: Dict[str, Dict[str, Any]] = {}
-    for f in facts:
-        for s in f.get("skus") or [f.get("sku")]:
-            if s:
-                by_sku.setdefault(str(s), f)
-    rows = sorted(collection.get("products") or [], key=lambda p: int((p or {}).get("position", 0) or 0))
+    """A CUSTOM collection's manual members, as the listings the push puts
+    in it (manual_listings), among ``facts``, in position order, once each
+    -- whether or not the named colour's own variant is mapped yet."""
+    by_sku = {str(f.get("sku")): f for f in facts if f.get("sku")}
     out: List[Dict[str, Any]] = []
     seen = set()
-    for p in rows:
-        f = by_sku.get(str((p or {}).get("sku") or ""))
+    for sku, doc in manual_listings(db, collection):
+        # No doc read: only a listing's own SKU names it (a fact IS a doc).
+        f = by_sku.get(str(doc.get("sku") or "") if doc is not None else sku)
         if f is not None and id(f) not in seen:
             seen.add(id(f))
             out.append(f)

@@ -519,7 +519,7 @@ def test_block_members_smart_over_1000_not_truncated_at_preview_cap(monkeypatch)
     facts = [{"sku": f"S{i}", "brand": "Gucci", "tags": set(), "type": "Sunglass", "prices": []}
              for i in range(1200)]
     monkeypatch.setattr(osc, "_get_db", lambda: object())
-    monkeypatch.setattr(cm, "catalogue_facts", lambda db: facts)
+    monkeypatch.setattr(cm, "catalogue_facts", lambda db, strict=False: facts)
     doc = {"collection_id": "C-SMART", "collection_type": "SMART",
            "rules": [{"field": "brand", "relation": "EQUALS", "value": "Gucci"}]}
     skus, truncated = osc._resolve_block_members(doc)
@@ -538,7 +538,7 @@ def test_block_members_truncation_is_surfaced_not_silent(monkeypatch):
     facts = [{"sku": f"S{i}", "brand": "Gucci", "tags": set(), "type": "Sunglass", "prices": []}
              for i in range(10)]
     monkeypatch.setattr(osc, "_get_db", lambda: object())
-    monkeypatch.setattr(cm, "catalogue_facts", lambda db: facts)
+    monkeypatch.setattr(cm, "catalogue_facts", lambda db, strict=False: facts)
     doc = {"collection_id": "C-SMART", "collection_type": "SMART",
            "rules": [{"field": "brand", "relation": "EQUALS", "value": "Gucci"}]}
     skus, truncated = osc._resolve_block_members(doc)

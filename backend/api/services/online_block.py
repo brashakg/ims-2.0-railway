@@ -58,7 +58,7 @@ def _blocked_collections(db, strict: bool = False) -> List[Dict[str, Any]]:
     if db is None:
         return []
     try:
-        return list(db["ecom_collections"].find({"online_sync_blocked": True}))
+        return [with_listings(db, c, strict) for c in db["ecom_collections"].find({"online_sync_blocked": True})]
     except Exception as exc:  # noqa: BLE001 -- a config read must never raise into a push
         logger.warning("online-block: reading blocked collections failed: %s", exc)
         if strict:
@@ -72,10 +72,33 @@ def _listing(db, product: Dict[str, Any], strict: bool = False) -> Dict[str, Any
     return collection_membership.listing_facts_of(db, _catalog_doc(db, product), strict)
 
 
+def with_listings(db, collection: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
+    """``collection`` carrying ``_listing_skus``: for a CUSTOM one, the
+    listings THE manual-SKU rule puts in it (collection_membership
+    .manual_listings -- the push's and the view's rule), resolved once."""
+    if str(collection.get("collection_type") or "CUSTOM").upper() == "SMART":
+        return collection
+    found = collection_membership.manual_listings(db, collection, strict)
+    return dict(collection, _listing_skus={str(d["sku"]) for _s, d in found if d and d.get("sku")})
+
+
 def _in_custom(collection: Dict[str, Any], fact: Dict[str, Any]) -> bool:
-    """True if the listing carries ANY manual member SKU of a CUSTOM collection."""
+    """True if the listing is one the manual list puts in the collection
+    (``_listing_skus``, with_listings) or carries ANY manual member SKU (a
+    ban never narrower than the website collection: a named size SKU with
+    no catalogue doc still blocks its listing)."""
+    if str(fact.get("sku")) in (collection.get("_listing_skus") or ()):
+        return True
     manual = {str(p.get("sku")) for p in collection.get("products") or [] if isinstance(p, dict) and p.get("sku")}
     return any(str(s) in manual for s in (fact.get("skus") or [fact.get("sku")]) if s)
+
+
+def member_listing_skus(db, collection: Dict[str, Any], facts: List[Dict[str, Any]]) -> List[str]:
+    """The listing SKUs among ``facts`` this classifier counts as members of
+    ``collection`` -- what a block sweep delists and an unblock requeues, so
+    the sweep and the classifier can never disagree. Raises on a read error."""
+    c = with_listings(db, collection, strict=True)
+    return [str(f["sku"]) for f in facts if f.get("sku") and _in_collection(c, f)]
 
 
 def _catalog_doc(db, product: Dict[str, Any]) -> Dict[str, Any]:

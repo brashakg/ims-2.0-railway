@@ -150,6 +150,8 @@ def test_relations_follow_shopify():
 
 def test_custom_membership_resolves_a_colour_to_its_listing():
     db = _db()
+    # The colour's catalogue doc points at A's twin (G1): THE push rule.
+    db["catalog_products"].insert_one({"id": "A-BLUE", "sku": "A-BLUE", "ecom": {"variant_of": {"twin_id": "A", "sku": "A"}}})
     facts = cm.online_facts(db)
     facts[0]["skus"] = {"A", "A-BLUE"}  # a colour on A's listing
     found, _ = cm.members(db, {"collection_type": "CUSTOM", "products": [{"sku": "A-BLUE", "position": 0}]}, facts)
@@ -478,3 +480,79 @@ def test_a_strict_facts_read_raises_when_a_model_is_unreadable(monkeypatch):
         reg._facts(db, doc, strict=True)
     with pytest.raises(RuntimeError):
         cm.online_facts(db, strict=True)
+
+
+# ---------------------------------------------------------------------------
+# Review round 4
+# ---------------------------------------------------------------------------
+
+
+def _colour_world():
+    """A live Gold lead (Shopify product 5) and its Black colour, whose
+    variant is NOT mapped on Shopify yet; the colour has no product id."""
+    from tests import test_shopify_model_listings as ml
+
+    db = ml._world()
+    pids = ml._family(db, [("Gold", "001"), ("Black", "002/58", "58")])
+    lead = ml._twin(db, pids[0])
+    colour = db["products"].find_one({"product_id": pids[1]})["sku"]
+    db["catalog_products"].update_one({"sku": lead["sku"]}, {"$set": {
+        "ecom.shopify_product_id": "gid://shopify/Product/5", "ecom.status": "ACTIVE"}})
+    return db, db["catalog_products"].find_one({"sku": lead["sku"]}), colour
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_custom_collection_has_one_membership_rule_push_view_and_menu():
+    """A CUSTOM collection naming a colour whose variant is not mapped yet:
+    the push puts the lead's product in the website collection, so the
+    membership view, the count the menu reads and the push agree -- one
+    listing, the lead."""
+    from api.services.shopify_push.collections import _member_product_gids
+
+    db, lead, colour = _colour_world()
+    coll = {"collection_id": "pick", "handle": "pick", "collection_type": "CUSTOM",
+            "products": [{"sku": colour, "position": 0}]}
+    db.seed("ecom_collections", [dict(coll)])
+    gids, _skipped = _member_product_gids(db, coll)
+    assert gids == ["gid://shopify/Product/5"]
+    assert [f["sku"] for f in cm.members(db, coll, cm.online_facts(db, strict=True))[0]] == [lead["sku"]]
+    assert cm.counts_by_handle(db)["pick"]["count"] == len(gids) == 1
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_blocking_a_custom_collection_that_names_a_colour_delists_its_lead(monkeypatch):
+    """The classifier blocks the colour's listing; the block sweep must take
+    THAT listing down (the lead carries the Shopify product), and the
+    unblock sweep must requeue it."""
+    from api.routers import online_store_collections as osc
+    from api.services import online_block as ob
+
+    db, lead, colour = _colour_world()
+    coll = {"collection_id": "ban", "handle": "ban", "collection_type": "CUSTOM",
+            "online_sync_blocked": True, "products": [{"sku": colour, "position": 0}]}
+    db.seed("ecom_collections", [dict(coll)])
+    assert ob.is_blocked_from_online(lead, db) is True
+    monkeypatch.setattr(osc, "_get_db", lambda: db)
+    skus, truncated = osc._resolve_block_members(coll)
+    assert [d["sku"] for d in osc._synced_member_products(db, skus)] == [lead["sku"]] and not truncated
+
+
+def test_a_block_sweep_over_an_unreadable_catalogue_is_a_503_not_a_partial_sweep(monkeypatch):
+    """catalogue_facts is read strictly for a sweep: one listing whose facts
+    cannot be read is a 503, never silently left live."""
+    from fastapi import HTTPException
+
+    from api.routers import online_store_collections as osc
+
+    def _facts(db, strict=False):
+        if strict:
+            raise RuntimeError("model listing unreadable")
+        return []
+
+    monkeypatch.setattr(osc, "_get_db", lambda: object())
+    monkeypatch.setattr(cm, "catalogue_facts", _facts)
+    doc = {"collection_id": "C", "collection_type": "SMART",
+           "rules": [{"field": "brand", "relation": "EQUALS", "value": "Gucci"}]}
+    with pytest.raises(HTTPException) as e:
+        osc._resolve_block_members(doc)
+    assert e.value.status_code == 503

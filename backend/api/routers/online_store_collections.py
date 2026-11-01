@@ -672,49 +672,34 @@ def _refuse_unreadable_block(doc: Dict) -> None:
         )
 
 
-def _resolve_member_skus(doc: Dict) -> List[str]:
-    """The effective member SKUs of a collection: CUSTOM -> its manual list (in
-    position order); SMART -> the rule set resolved over the catalog. Mirrors
-    /resolved-products. Fail-soft -> []."""
-    ctype = (doc.get("collection_type") or "CUSTOM").upper()
-    if ctype == "CUSTOM":
-        members = sorted(
-            (doc.get("products") or []),
-            key=lambda p: int((p or {}).get("position", 0) or 0),
-        )
-        return [p.get("sku") for p in members if isinstance(p, dict) and p.get("sku")]
-    return _rule_members(doc)[:_RESOLVE_MAX]
+def _resolve_block_members(doc: Dict) -> Tuple[List[str], bool]:
+    """Listing SKUs for a block / unblock sweep, plus a `truncated` flag.
 
-
-def _rule_members(doc: Dict) -> List[str]:
-    """A SMART collection's listing SKUs over EVERY listing IMS holds (on the
-    website or delisted), by THE website membership rule -- a block must
-    reach the live ones, an unblock the ones a block took down."""
-    from ..services import collection_membership
+    THE online-block classifier's own membership (online_block
+    .member_listing_skus) over EVERY listing IMS holds, on the website or
+    delisted -- a block must reach the live ones, an unblock the ones a block
+    took down; a CUSTOM collection naming a colour reaches its model's lead
+    (the doc that carries the Shopify product). The catalogue is read
+    STRICTLY: an unreadable listing is a 503, never a partial sweep. Capped
+    at _BLOCK_RESOLVE_MAX (the view cap, NOT the 1000 preview cap -- finding
+    #15); hitting it is DETECTABLE (truncated + logged), never silent."""
+    from ..services import collection_membership, online_block
 
     db = _get_db()
     if db is None:
-        return []
-    return collection_membership.member_skus(db, doc, collection_membership.catalogue_facts(db))
-
-
-def _resolve_block_members(doc: Dict) -> Tuple[List[str], bool]:
-    """Member SKUs for a block / unblock sweep, plus a `truncated` flag.
-
-    CUSTOM membership is stored in full (the embedded manual list), so it is never
-    truncated. SMART membership is resolved over the catalog up to
-    _BLOCK_RESOLVE_MAX (the view cap, NOT the 1000 preview cap -- finding #15). We
-    request one MORE than the cap so hitting it is DETECTABLE, then trim + log so a
-    partial delist / requeue is never silent. Fail-soft -> ([], False)."""
-    ctype = (doc.get("collection_type") or "CUSTOM").upper()
-    if ctype == "CUSTOM":
-        return _resolve_member_skus(doc), False
-    skus = _rule_members(doc)
+        return [], False
+    try:
+        skus = online_block.member_listing_skus(db, doc, collection_membership.catalogue_facts(db, strict=True))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503,
+            detail=f"The catalogue could not be read, so nothing was changed; try again. ({exc})",
+        ) from exc
     truncated = len(skus) > _BLOCK_RESOLVE_MAX
     if truncated:
         skus = skus[:_BLOCK_RESOLVE_MAX]
         logger.warning(
-            "block/unblock: SMART membership hit the %s cap for collection %s "
+            "block/unblock: membership hit the %s cap for collection %s "
             "(>%s members) -- delist/requeue is PARTIAL",
             _BLOCK_RESOLVE_MAX,
             doc.get("collection_id"),
@@ -806,6 +791,8 @@ async def block_collection(
     if doc is None:
         raise HTTPException(status_code=404, detail="Collection not found")
     _refuse_unreadable_block(doc)
+    # Resolved BEFORE the flag flips: an unreadable catalogue changes nothing.
+    skus, truncated = _resolve_block_members(doc)
 
     updated = repo.set_block(collection_id, True, current_user.get("user_id"))
     if updated is None:
@@ -815,7 +802,6 @@ async def block_collection(
     _materialize(collection_id)
 
     db = _get_db()
-    skus, truncated = _resolve_block_members(updated)
     delist_results: List[Dict] = []
     # HONEST DARK REPORTING (finding #14): only a LIVE productUpdate actually
     # takes a product off the storefront. When the push gates are DARK (prod's
@@ -873,6 +859,8 @@ async def unblock_collection(
     doc = repo.get_by_id(collection_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Collection not found")
+    # Full member coverage (finding #15), resolved before the flag flips.
+    skus, truncated = _resolve_block_members(doc)
 
     updated = repo.set_block(collection_id, False, current_user.get("user_id"))
     if updated is None:
@@ -880,10 +868,6 @@ async def unblock_collection(
     _materialize(collection_id)
 
     db = _get_db()
-    # Full member coverage (finding #15): a broad SMART collection's requeue must
-    # not silently stop at the 1000 preview cap, else ~800 members would stay
-    # un-requeued (stranded off the storefront).
-    skus, truncated = _resolve_block_members(updated)
     requeued = 0
     if db is not None and skus:
         from api.services.catalog_ecom import queue_in
