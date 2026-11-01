@@ -47,8 +47,8 @@ WHAT IT DOES
     `costed_before_s4: <run id>` (product_cost.PRE_S4_STAMP; only receipts
     accepted before the first S4 bill -- run it right after the deploy), with
     the time and, per product, the figure its pieces are in the pool at: the
-    product's average then -- or, for a product this run filled or
-    re-averaged from its pieces, that receipt's pieces' OWN cost (they went
+    product's average then -- or, for a product a backfill run (any run)
+    filled or re-averaged from its pieces, that receipt's pieces' OWN cost (they went
     into the new average at it). So the first S4 bill BLENDS with them
     instead of replacing the average. A receipt whose bill simply has not come in yet is stamped too:
     its own S4 bill later trues its pieces up from that stamped figure
@@ -64,8 +64,11 @@ WHAT IT DOES
     including one written just before a crash, and unstamps the receipts
     -- except one carrying a product whose average moved since the stamp
     (reported: its pieces are in that average at the stamped figure); such a
-    receipt keeps the stamped figure of the moved products only.
-  A re-run after --apply finds nothing left to fill.
+    receipt keeps the stamped figure of the moved products only; the next
+    run adds a figure for each product revert put back on it.
+  A re-run after --apply finds nothing left to fill. After a crash either
+  re-run --apply (safe: a product an earlier run filled keeps its receipts at
+  their pieces' own cost) or --revert the crashed run's id.
 
 USAGE (dry run is the default; nothing is written without --apply). NEVER run
 it on prod without the owner's go-ahead.
@@ -305,7 +308,6 @@ def _recost(db, pid: str, cost: float, expected: float, key: str) -> Optional[di
 def apply(db, rows: List[dict], run_id: str) -> int:
     key = f"backfill:{run_id}"
     done = 0
-    filled = set()
     for row in rows:
         if row["fill"] is None:
             continue
@@ -317,7 +319,6 @@ def apply(db, rows: List[dict], run_id: str) -> int:
         if written:
             db[BACKUPS].update_one({"run_id": run_id, "product_id": row["product_id"]},
                                    {"$set": {"written": written["new_cost"]}})
-            filled.add(row["product_id"])
             done += 1
     for prod in carry_over_candidates(db):
         _backup(db, run_id, prod["product_id"])
@@ -326,8 +327,12 @@ def apply(db, rows: List[dict], run_id: str) -> int:
             db[BACKUPS].update_one({"run_id": run_id, "product_id": prod["product_id"]},
                                    {"$set": {"written": written["new_cost"], "carried_over": True}})
             done += 1
-    # A product this run filled or re-averaged from its pieces holds each
-    # receipt's pieces at their OWN cost, not at its new average.
+    # A product a backfill run (this one or an earlier, crashed one) filled or
+    # re-averaged from its pieces holds each receipt's pieces at their OWN
+    # cost, not at its new average.
+    filled = {p["product_id"] for p in db["products"].find({}, {"_id": 0, "product_id": 1, "cost_history": 1})
+              if any(r.get("kind") == "BACKFILL" and str(r.get("key") or "").startswith("backfill:")
+                     for r in p.get("cost_history") or [])}
     own: Dict[str, Dict[str, float]] = {}
     for pid in filled:
         by_receipt: Dict[Optional[str], List[dict]] = {}
@@ -342,14 +347,35 @@ def apply(db, rows: List[dict], run_id: str) -> int:
     for gid in legacy_receipts(db):
         receipt = db["grns"].find_one({"grn_id": gid}, {"_id": 0, "items": 1}) or {}
         pids = {it.get("product_id") for it in receipt.get("items") or [] if it.get("product_id")}
-        averages = {p["product_id"]: product_cost.average(p)
-                    for p in db["products"].find({"product_id": {"$in": list(pids - filled)}})
-                    if product_cost.average(p)}
-        averages.update({pid: c for pid, c in own.get(gid, {}).items() if pid in pids})
         db["grns"].update_one({"grn_id": gid, product_cost.PRE_S4_STAMP: {"$exists": False}},
                               {"$set": {product_cost.PRE_S4_STAMP: run_id, product_cost.PRE_S4_AT: at,
-                                        product_cost.PRE_S4_AVERAGES: averages}})
+                                        product_cost.PRE_S4_AVERAGES: _figures(db, gid, pids, filled, own)}})
+    # A receipt an earlier run stamped (a revert kept it for a product that
+    # moved) gets a figure for each product on it it has none for -- e.g. one
+    # revert put back and this run re-averaged -- never for one a bill or
+    # correction moved since that stamp (its pieces wait for their bill).
+    for g in db["grns"].find({product_cost.PRE_S4_STAMP: {"$exists": True, "$ne": run_id}}, {"_id": 0}):
+        since = str(g.get(product_cost.PRE_S4_AT) or "")
+        pids = {it.get("product_id") for it in g.get("items") or [] if it.get("product_id")}
+        pids -= set(g.get(product_cost.PRE_S4_AVERAGES) or {})
+        pids -= {p["product_id"] for p in db["products"].find({"product_id": {"$in": list(pids)}})
+                 if any(not str(r.get("key") or "").startswith("backfill:") and str(r.get("at") or "") >= since
+                        for r in p.get("cost_history") or [])}
+        add = _figures(db, g["grn_id"], pids, filled, own)
+        if add:
+            db["grns"].update_one({"grn_id": g["grn_id"]},
+                                  {"$set": {f"{product_cost.PRE_S4_AVERAGES}.{p}": c for p, c in add.items()}})
     return done
+
+
+def _figures(db, gid: str, pids: set, filled: set, own: Dict[str, Dict[str, float]]) -> Dict[str, float]:
+    """The figure each product's pieces of receipt `gid` are in the pool at:
+    their own cost for a product filled from its pieces, else its average."""
+    figures = {p["product_id"]: product_cost.average(p)
+               for p in db["products"].find({"product_id": {"$in": list(pids - filled)}})
+               if product_cost.average(p)}
+    figures.update({pid: c for pid, c in own.get(gid, {}).items() if pid in pids})
+    return figures
 
 
 def revert(db, run_id: str) -> int:

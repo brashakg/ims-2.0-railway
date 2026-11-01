@@ -1002,17 +1002,10 @@ def _bill_for(db, bid, pid, qty, price, gid, created):
     return pi._apply_accepted_bill(db, bill, actor="acc")
 
 
-@pytest.mark.parametrize("p_moved", (True, False))
-def test_revert_unstamps_a_put_back_product_on_a_receipt_it_keeps_stamped(p_moved):
-    """P averages 400; Q's 200 is a pre-S4 walk-in latest price (GW). Legacy
-    receipt G0 carries 10 P and 10 Q (Q at 100), its bills not in. RUN1
-    re-averages Q to (10 x 100 + 200 + 10 x 100) / 21 = 104.76 and stamps G0.
-    S4 bill B1 moves P (433.33); revert puts Q back to 200 and keeps G0's
-    stamp for P only. G0's Q bill at 10 x 100: G0's Q pieces wait for it,
-    (11 x 200 + 1000) / 21 = 152.38 -- the same as when nothing moved, never
-    197.73. G0's P bill at 400 still gives 433.33."""
-    from scripts import backfill_average_cost as bf
-
+def _g0_with_walk_in_q():
+    """P averages 400; Q's 200 is a pre-S4 walk-in latest price (GW, 1 at
+    200; GQ 10 at 100 billed). Legacy receipt G0 carries 10 P and 10 Q (Q at
+    100), its bills not in."""
     db = mongomock.MongoClient().s4
     db.products.insert_many([
         {"product_id": "P", "cost_price": 400.0, "cost_source": "PURCHASE_INVOICE"},
@@ -1034,6 +1027,21 @@ def test_revert_unstamps_a_put_back_product_on_a_receipt_it_keeps_stamped(p_move
          "created_at": "2026-10-02T10:00:00+00:00"},
         {"bill_id": "BW", "invoice_id": "BW", "grn_id": "GW", "status": "PAID", "match_status": "MATCHED",
          "created_at": "2026-10-21T10:00:00+00:00"}])
+    return db
+
+
+@pytest.mark.parametrize("p_moved", (True, False))
+def test_revert_unstamps_a_put_back_product_on_a_receipt_it_keeps_stamped(p_moved):
+    """P averages 400; Q's 200 is a pre-S4 walk-in latest price (GW). Legacy
+    receipt G0 carries 10 P and 10 Q (Q at 100), its bills not in. RUN1
+    re-averages Q to (10 x 100 + 200 + 10 x 100) / 21 = 104.76 and stamps G0.
+    S4 bill B1 moves P (433.33); revert puts Q back to 200 and keeps G0's
+    stamp for P only. G0's Q bill at 10 x 100: G0's Q pieces wait for it,
+    (11 x 200 + 1000) / 21 = 152.38 -- the same as when nothing moved, never
+    197.73. G0's P bill at 400 still gives 433.33."""
+    from scripts import backfill_average_cost as bf
+
+    db = _g0_with_walk_in_q()
     bf.apply(db, bf.plan(db), "RUN1")
     assert db.products.find_one({"product_id": "Q"})["cost_price"] == 104.76
     if p_moved:
@@ -1233,3 +1241,83 @@ def test_the_walk_in_detection_fires_only_on_this_products_accepted_pre_s4_walk_
     rows = {r["product_id"]: r for r in bf.plan(db)}
     assert {pid: (r["fill"], r["reason"]) for pid, r in rows.items()} == {
         pid: (None, "has an average") for pid in cases}
+
+
+# --------------------------------------------------------------------------
+# Fix round 6 (S4): the backfill after a crash, a re-run after a revert.
+# --------------------------------------------------------------------------
+
+
+def test_a_backfill_re_run_after_a_crash_stamps_a_re_averaged_walk_in_at_its_own_cost(monkeypatch):
+    """RUN1 re-averages P to 109.09 and crashes before stamping a receipt.
+    RUN2 finds nothing to re-average but stamps GW at its pieces' OWN 200
+    (they are in 109.09 at it, never at 109.09): GW's bill at 200 leaves
+    109.09, never 117.35."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(200.0, cost_source="GRN_WALKIN")
+    _walk_in_received(db)
+
+    def crash(_db):
+        raise RuntimeError("connection lost")
+
+    with monkeypatch.context() as m:
+        m.setattr(bf, "legacy_receipts", crash)
+        with pytest.raises(RuntimeError):
+            bf.apply(db, bf.plan(db), "RUN1")
+    assert _avg(db) == 109.09 and db.grns.count_documents({product_cost.PRE_S4_STAMP: {"$exists": True}}) == 0
+    bf.apply(db, bf.plan(db), "RUN2")
+    assert db.grns.find_one({"grn_id": "GW"})[product_cost.PRE_S4_AVERAGES] == {"P": 200.0}
+    assert db.grns.find_one({"grn_id": "G1"})[product_cost.PRE_S4_AVERAGES] == {"P": 100.0}
+    _accept(db, _bill("BW", 1, 200, grn_id="GW", bill_date="2026-11-02", created_at="2026-11-02T10:00:00+00:00"))
+    assert _avg(db) == 109.09
+
+
+def test_a_re_run_after_a_revert_stamps_a_put_back_product_on_a_receipt_revert_kept_stamped():
+    """As test_revert_unstamps...: S4 bill B1 moves P, revert puts Q back to
+    200 and keeps G0 stamped for P only. RUN2 re-averages Q to 104.76 (G0's
+    Q pieces in it at 100) and adds Q: 100 to G0's stamp, keeping P: 400.
+    G0's Q bill at 10 x 100 then leaves 104.76, never 102.49."""
+    from scripts import backfill_average_cost as bf
+
+    db = _g0_with_walk_in_q()
+    bf.apply(db, bf.plan(db), "RUN1")
+    db.grns.insert_one({"grn_id": "G1", "status": "ACCEPTED", "accepted_at": "2026-11-01T10:00:00+00:00",
+                        "items": [{"product_id": "P", "accepted_qty": 5}]})
+    for i in range(5):
+        _unit(db, f"G1P{i}", "P", "G1")
+    _bill_for(db, "B1", "P", 5, 500, "G1", "2026-11-01T00:00:00+00:00")
+    bf.revert(db, "RUN1")
+    assert db.grns.find_one({"grn_id": "G0"})[product_cost.PRE_S4_AVERAGES] == {"P": 400.0}
+    # mongomock: the guard's {"$in": [None, []]} misses an emptied [] (real Mongo matches it)
+    db.products.update_many({"cost_keys": []}, {"$unset": {"cost_keys": "", "cost_history": ""}})
+    bf.apply(db, bf.plan(db), "RUN2")
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 104.76
+    g0 = db.grns.find_one({"grn_id": "G0"})
+    assert g0[product_cost.PRE_S4_STAMP] == "RUN1"
+    assert g0[product_cost.PRE_S4_AVERAGES] == {"P": 400.0, "Q": 100.0}
+    _bill_for(db, "BG0Q", "Q", 10, 100, "G0", "2026-11-02T00:00:00+00:00")
+    assert db.products.find_one({"product_id": "Q"})["cost_price"] == 104.76
+
+
+def test_a_product_filled_from_its_pieces_stamps_each_receipt_at_its_own_cost():
+    """No average; G1's piece cost 100, G2's 150: the backfill fills 125 and
+    stamps G1 at 100, G2 at 150 (never both at 125). G1's bill at 100 then
+    leaves 125, never 112.5."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(None)
+    _receipt(db, "G1", 1, po_id="PO1", accepted_at="2026-10-01T10:00:00+00:00")
+    _receipt(db, "G2", 1, po_id="PO2", accepted_at="2026-10-02T10:00:00+00:00")
+    _pieces(db, 1, "G1", prefix="A")
+    _pieces(db, 1, "G2", prefix="B")
+    db.stock_units.update_one({"grn_id": "G1"}, {"$set": {"unit_cost": 100.0}})
+    db.stock_units.update_one({"grn_id": "G2"}, {"$set": {"unit_cost": 150.0}})
+    (row,) = bf.plan(db)
+    assert (row["fill"], row["recost"]) == (125.0, None)
+    bf.apply(db, [row], "RUN1")
+    assert _avg(db) == 125.0
+    assert db.grns.find_one({"grn_id": "G1"})[product_cost.PRE_S4_AVERAGES] == {"P": 100.0}
+    assert db.grns.find_one({"grn_id": "G2"})[product_cost.PRE_S4_AVERAGES] == {"P": 150.0}
+    _accept(db, _bill("B1", 1, 100, grn_id="G1", created_at="2026-11-02T10:00:00+00:00"))
+    assert _avg(db) == 125.0
