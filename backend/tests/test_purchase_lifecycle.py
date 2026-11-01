@@ -137,6 +137,10 @@ class _Coll:
             if isinstance(v, dict) and "$ne" in v:
                 cur = d.get(k)
                 return v["$ne"] not in cur if isinstance(cur, list) else cur != v["$ne"]
+            # $in [None, []]: no keys yet (the S4 guard on the keys the work
+            # was based on); a list value is whole-array equality, as Mongo.
+            if isinstance(v, dict) and "$in" in v:
+                return d.get(k) in v["$in"]
             return d.get(k) == v
 
         for d in self.rows:

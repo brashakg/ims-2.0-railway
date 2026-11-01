@@ -1077,17 +1077,20 @@ def _apply_valuation_trueup(db, invoice_doc, computed, *, key=None, actor=None) 
         receipts = [grn] if grn else list(grns.find(
             {"grn_id": {"$in": list(invoice_doc.get("linked_dc_ids") or [])}}, {"_id": 0}))
         walk_in = (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
+        keep = set()
         if walk_in:
             # The latest price paid is the newest ACCEPTED receipt's, dated by
             # its acceptance (as /vendors/last-cost dates it), never the newest
             # booking: a walk-in bill booked late puts no older price back
-            # over a product a later receipt has bought.
-            lines = [ln for ln in lines if not _bought_since(db, ln.get("product_id"), grn.get("accepted_at"))]
+            # over a product a later receipt has bought (its key still lands).
+            keep = {ln.get("product_id") for ln in lines
+                    if _bought_since(db, ln.get("product_id"), grn.get("accepted_at"))}
+            lines = [ln for ln in lines if ln.get("product_id") not in keep]
         rows = product_cost.apply_bill(
             db, invoice_doc, _cost_lines(invoice_doc, lines),
             key=key or invoice_doc.get("invoice_id") or invoice_doc.get("bill_id"),
             actor=actor or invoice_doc.get("created_by"),
-            latest_price=walk_in, receipts=receipts or None,
+            latest_price=walk_in, receipts=receipts or None, keep=keep,
         )
         # Rulings 11/12: the bill brings the cost, so it may be a draft's
         # last gap. It finishes the product through the editor's own path
@@ -1123,16 +1126,36 @@ def _apply_accepted_bill(db, bill: dict, actor=None) -> Tuple[Optional[list], Op
     if db is None:
         return None, None
     bill_id = bill.get("invoice_id") or bill.get("bill_id")
+    if not bill.get("lines") and bill.get("grn_id"):
+        # A header-only bill (vendors/ap_bills): priced off its receipt.
+        from .vendors.ap_bills import _true_up_header_bill
+
+        linked = db.get_collection("grns").find_one({"grn_id": bill["grn_id"]}, {"_id": 0})
+        if linked:
+            _true_up_header_bill(db, {**bill, "invoice_id": bill_id}, linked, actor=actor)
+        return None, None
     costs = _apply_valuation_trueup(db, bill, {"lines": bill.get("lines") or []}, actor=actor)
     mrps = _apply_invoice_mrp(db, bill.get("invoice_mrp") or [], bill_id)
+    mark_cost_applied(db, bill_id, bill.get("lines") or [])
+    return costs, mrps
+
+
+def mark_cost_applied(db, bill_id, lines) -> bool:
+    """Mark a bill's cost APPLIED -- only when it really is in the average of
+    every product its `lines` name (product_cost.applied). A failed or
+    half-done apply stays PENDING, so finish_accepted_bills retries it."""
     try:
+        if not product_cost.applied(db, lines, bill_id):
+            logger.warning("[PI] bill %s's cost is not in every product's average yet: left PENDING", bill_id)
+            return False
         db.get_collection("vendor_bills").update_one(
             {"bill_id": bill_id, "cost_state": product_cost.PENDING},
             {"$set": {"cost_state": product_cost.APPLIED, "cost_applied_at": utc_now_iso()}},
         )
-    except Exception:  # noqa: BLE001 - the sweeper re-runs it; both steps repeat safely
+        return True
+    except Exception:  # noqa: BLE001 - the sweeper re-runs it; every step repeats safely
         logger.warning("[PI] marking bill %s's cost applied failed", bill_id, exc_info=True)
-    return costs, mrps
+        return False
 
 
 def finish_accepted_bills(db) -> int:
@@ -1142,7 +1165,6 @@ def finish_accepted_bills(db) -> int:
     from datetime import timedelta
 
     from api.utils.event_time import utc_now
-    from .vendors.ap_bills import _true_up_header_bill
 
     before = (utc_now() - timedelta(minutes=5)).isoformat()
     done = 0
@@ -1151,13 +1173,7 @@ def finish_accepted_bills(db) -> int:
     ):
         if not product_cost.bill_accepted(bill):
             continue
-        if bill.get("lines"):
-            _apply_accepted_bill(db, bill, actor="system")
-        else:  # a header-only bill: priced off its receipt
-            linked = db.get_collection("grns").find_one({"grn_id": bill.get("grn_id")}, {"_id": 0})
-            if not linked:
-                continue
-            _true_up_header_bill(db, {**bill, "invoice_id": bill.get("bill_id")}, linked, actor="system")
+        _apply_accepted_bill(db, bill, actor="system")
         done += 1
     return done
 

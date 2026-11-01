@@ -13,10 +13,11 @@ from ._shared import _get_db, _pm, get_store_repository, get_vendor_repository, 
 # at a call site that could silently be passed the wrong thing.
 _PO_PROVISIONAL_COST_SOURCE = "PO_RATE"
 _COST_SOURCE_RANK = {_PO_PROVISIONAL_COST_SOURCE: 1, "GRN_PO": 2}
-# A walk-in buy (a "Bought without PO" receipt, D14) at acceptance: what was
-# paid over the counter IS the product's cost from then on, over any cost on
-# file -- the LATEST PRICE PAID WINS (owner 2026-10-12). Labelled as itself,
-# never as a PO price.
+# A walk-in buy (a "Bought without PO" receipt, D14) at acceptance, labelled
+# as itself, never as a PO price. It fills only an EMPTY cost: the latest
+# price paid (owner 2026-10-12) reaches a product that has a cost through the
+# walk-in's BILL, the one average writer (services/product_cost, S4
+# 2026-10-23: the cost moves only when a bill is accepted), with its history row.
 WALK_IN_COST_SOURCE = "GRN_WALKIN"
 
 
@@ -30,10 +31,11 @@ def _promote_cost_from_rate(
     raising the PO COMPLETES the cataloguing instead of being blocked by it) and
     the rate on the goods receipt that follows.
 
-    Writes into an EMPTY cost, or over a cost whose source this one OUTRANKS
-    (see _COST_SOURCE_RANK) -- a walk-in buy's price over any cost
-    (WALK_IN_COST_SOURCE). Cost feeds margin and stock valuation, so every
-    other existing figure is left exactly as it is. Restamps the catalogue
+    Writes into an EMPTY cost, or over a provisional cost whose source this
+    one OUTRANKS (see _COST_SOURCE_RANK) -- never over a product's average
+    (a cost history: services/product_cost is its only writer). Cost feeds
+    margin and stock valuation, so every other existing figure is left
+    exactly as it is. Restamps the catalogue
     status atomically, so a product that was DRAFT for the single reason
     "no cost" turns ACTIVE the moment a rate is agreed. Returns True when a cost
     was written. Fail-soft: never raises.
@@ -46,7 +48,9 @@ def _promote_cost_from_rate(
         return False
     if cost <= 0:
         return False
-    if prod.get("cost_price") and source != WALK_IN_COST_SOURCE:
+    if prod.get("cost_history"):
+        return False
+    if prod.get("cost_price"):
         held = _COST_SOURCE_RANK.get(str(prod.get("cost_source") or ""))
         mine = _COST_SOURCE_RANK.get(str(source or ""))
         if held is None or mine is None or mine <= held:

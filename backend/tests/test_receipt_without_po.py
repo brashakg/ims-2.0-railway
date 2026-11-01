@@ -1097,25 +1097,25 @@ def test_c7_accept_puts_units_on_the_shelf_at_what_was_paid(world):
 
 
 def test_c7_the_latest_price_paid_is_the_product_cost(world):
-    """Owner ruling 2026-10-12: a walk-in buy's price updates the product's
-    cost price -- the LATEST PRICE PAID WINS -- through the same
-    cost-at-acceptance promote as a PO receipt, labelled GRN_WALKIN. It used
-    to fill only a missing cost (the catalogue's 3000 stood) and called
-    itself GRN_PO."""
+    """Owner ruling 2026-10-12 (the LATEST PRICE PAID WINS) under S4
+    (2026-10-23: the cost moves only when a bill is accepted). Receiving a
+    walk-in buy fills only an EMPTY cost (labelled GRN_WALKIN, never GRN_PO);
+    a product that has a cost keeps it until the walk-in's BILL, the one
+    average writer, puts the price paid on it with a cost-history row."""
     db = world["db"]
 
     def cost(pid):
         prod = db.products.find_one({"product_id": pid})
         return prod["cost_price"], prod.get("cost_source")
 
-    db.products.update_one({"product_id": LENS}, {"$set": {"cost_source": "GRN_PO"}})
-    _on_the_shelf(world)
-    assert cost(FRAME) == (3100.0, "GRN_WALKIN")
-    assert cost(LENS) == (420.0, "GRN_WALKIN")  # over a PO receipt's cost too
-    items = _no_po_body(world)["items"]
-    items[0]["unit_price"] = 3050.0
-    _on_the_shelf(world, vendor_invoice_no="CASH-78", items=items)
-    assert cost(FRAME) == (3050.0, "GRN_WALKIN")
+    db.products.update_one({"product_id": LENS}, {"$set": {"cost_price": None}})
+    grn = _on_the_shelf(world)
+    assert cost(FRAME) == (3000.0, None)  # receiving never overwrites a cost
+    assert cost(LENS) == (420.0, "GRN_WALKIN")  # an empty one it fills
+    _book_as_drafted(grn)
+    frame = db.products.find_one({"product_id": FRAME})
+    assert frame["cost_price"] == 3100.0
+    assert (frame["cost_history"][-1]["method"], frame["cost_history"][-1]["new_cost"]) == ("LATEST_PRICE_PAID", 3100.0)
 
 
 def test_c7_accept_sends_the_bill_to_accounts(world):
@@ -1724,6 +1724,9 @@ def test_c7_what_was_paid_has_one_visibility_rule(world, monkeypatch):
     read moves together. "purchase" keeps who sold it and the bill only."""
     from api.services.cost_mask import PURCHASE_ROLES, _CONTEXT_ROLES, can_see_cost
 
+    # A product with no cost yet: receiving the walk-in fills it (S4 -- one
+    # with an average keeps it until the bill).
+    world["db"].products.update_one({"product_id": FRAME}, {"$set": {"cost_price": None}})
     grn_id, barcode = _walk_in_on_the_shelf(world)
 
     def prices(user):
@@ -2314,6 +2317,8 @@ def test_g1_an_unregistered_dealers_walk_in_costs_what_was_paid(world, recorded_
     units, the product and the last price are the price paid, the draft is
     0% (the payable is the cash memo), and the bill is in Table 5 only."""
     db = world["db"]
+    # No cost yet: receiving fills it (S4 -- an average waits for the bill).
+    db.products.update_many({"product_id": {"$in": [FRAME, LENS]}}, {"$set": {"cost_price": None}})
     sharma = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="1")
     cost = {u["product_id"]: u["unit_cost"] for u in db.stock_units.find({"source_id": sharma})}
     assert cost == {FRAME: 3100.0, LENS: 420.0}
@@ -2466,9 +2471,10 @@ def test_g1_a_late_walk_in_bill_never_puts_back_an_older_price(world):
     _minted(db, "GRN-PO-1002", 2000.0)
     newest = _on_the_shelf(world, vendor_invoice_no="CASH-N")
     db.grns.update_one({"grn_id": newest}, {"$set": {"accepted_at": "2026-09-25T10:00:00"}})
-    # Accepting it set the cost to its price; its bill, booked with credit
-    # off, adds the GST it cannot claim back.
-    assert frame_cost() == 3100.0
+    # Accepting it leaves the average (S4: only a bill moves it); its bill,
+    # booked with credit off, puts the price paid + the GST it cannot claim
+    # back on it.
+    assert frame_cost() == 2000.0
     off = _invoice_body(newest, "CASH-N")
     off.itc_eligible = False
     _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))

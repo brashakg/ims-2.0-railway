@@ -19,7 +19,9 @@ The average moves only here:
     pieces never count (no more pieces than the receipts accepted). A product
     with no average yet takes the bill's price. A walk-in buy keeps the
     latest price paid (owner 2026-10-12).
-  * accounts correct it, with a reason (correct()).
+  * accounts correct it, with a reason (correct()) -- the one correction
+    door: the product and catalogue editors only type a FIRST cost
+    (refuse_editor_cost).
   * opening stock gives a product that has none its first cost (seed()).
 
 Sales, transfers and counts never change it. Each change is one row of the
@@ -27,9 +29,13 @@ product's cost_history (the product page shows it; no per-piece cost).
 
 EXACTLY ONCE, with no transactions (prod MongoDB is a single server): the
 history row, its key (cost_keys) and the new average land in ONE
-single-document update, guarded on the key being absent and on the average it
-was worked out from. A retry or a crash re-run never applies a bill twice;
-two bills accepted at once never lose one (the loser re-reads and re-works).
+single-document update, guarded on the exact keys and the average it was
+worked out from. A retry or a crash re-run never applies a bill twice; two
+bills accepted at once never lose one (the loser re-reads and re-works), even
+when the first left the average where it was. A bill that moves no average
+still puts its key on every product it bills (mark), and is marked APPLIED
+only once every such product holds it (applied); until then it stays
+PENDING for the sweeper.
 Money is exact to the paisa (Decimal, half up).
 No emoji (Windows cp1252).
 """
@@ -37,7 +43,7 @@ No emoji (Windows cp1252).
 import logging
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from api.utils.event_time import utc_now_iso
 
@@ -86,6 +92,17 @@ def _receipt_of(unit: dict) -> Optional[str]:
     return unit.get("source_id") if unit.get("source_type") == "GRN" else None
 
 
+# A receipt accepted before S4 that no bill has costed under S4 (the backfill
+# stamps it with its run id): its pieces carry the average they came in at, so
+# they are part of the basis -- the first S4 bill blends with them instead of
+# replacing the average. An S4 bill on it later prices it as usual.
+PRE_S4_STAMP = "costed_before_s4"
+
+
+def _links(bill: dict, receipt_id: str) -> bool:
+    return bill.get("grn_id") == receipt_id or receipt_id in (bill.get("linked_dc_ids") or [])
+
+
 def _costs_its_receipt(bill: dict, cost_keys) -> bool:
     if bill.get("cost_state") is None:  # booked before S4
         return bill_accepted(bill)
@@ -114,6 +131,10 @@ def basis_pieces(db, product_id: str, cost_keys=()) -> float:
     for r in ids:
         if r not in receipts:  # a legacy piece whose receipt is gone: costed
             continue
+        if receipts[r].get(PRE_S4_STAMP) and not any(
+            b.get("cost_state") is not None and _links(b, r) for b in bills
+        ):
+            continue  # accepted before S4 with no S4 bill: it carries the old cost
         unbilled = float(pmatch._grn_accepted_by_product(receipts[r]).get(product_id, 0))
         for b in bills:
             if not _costs_its_receipt(b, cost_keys):
@@ -155,7 +176,10 @@ def _move(
         done = products.update_one(
             {
                 "product_id": product_id,
-                "cost_keys": {"$ne": key},
+                # The keys the work was based on, exactly (not only "this key
+                # absent"): a bill that landed meanwhile -- even one that left
+                # the average where it was -- changes the basis, so re-work.
+                "cost_keys": prod.get("cost_keys") or {"$in": [None, []]},
                 "cost_price": prod.get("cost_price"),
                 "cost_price_is_catalogue_only": prod.get("cost_price_is_catalogue_only"),
             },
@@ -201,10 +225,17 @@ def apply_bill(
     actor: Optional[str],
     latest_price: bool = False,
     receipts: Optional[List[dict]] = None,
+    keep: Iterable[str] = (),
 ) -> List[dict]:
     """Re-average every product an accepted bill's goods lines name. `lines`
     are its COST lines (GST it cannot claim already added:
-    purchase_invoices._cost_lines). Returns the history rows written."""
+    purchase_invoices._cost_lines). `keep`: products the bill names whose
+    average it must leave as it is (a walk-in buy a later receipt has
+    outpriced). Every product the bill names ends up holding its key, moved
+    or not (mark), so its receipt's pieces join the basis. Returns the
+    history rows written."""
+    for pid in keep:
+        mark(db, pid, key)
     billed: Dict[str, List[Decimal]] = {}
     for ln in lines or []:
         pid, qty = ln.get("product_id"), _d(ln.get("qty"))
@@ -224,8 +255,9 @@ def apply_bill(
     for pid, (qty, val) in billed.items():
         if good is not None:
             cap = Decimal(str(good.get(pid, 0)))
-            if cap <= 0:
-                continue  # every piece billed was rejected: nothing reached stock
+            if cap <= 0:  # every piece billed was rejected: nothing reached stock
+                mark(db, pid, key)
+                continue
             if qty > cap:  # rejected pieces never count
                 val, qty = val * cap / qty, cap
         price = _paise(val / qty)
@@ -253,6 +285,35 @@ def apply_bill(
     return rows
 
 
+def mark(db, product_id: str, key: str) -> None:
+    """Record that bill `key` is in this product's average although it moved
+    nothing (one guarded single-document update, no average change): without
+    it the bill's receipt would wait for good, its pieces out of the basis."""
+    db.get_collection("products").update_one(
+        {"product_id": product_id, "cost_keys": {"$ne": key}}, {"$push": {"cost_keys": key}}
+    )
+
+
+def billed_products(lines) -> List[str]:
+    """The products a bill's goods lines name (a positive quantity)."""
+    return sorted({ln["product_id"] for ln in lines or [] if ln.get("product_id") and _d(ln.get("qty")) > 0})
+
+
+def applied(db, lines, key: str) -> bool:
+    """Whether bill `key` is in the average of every product its lines name
+    (a product that no longer exists counts as done) -- THE test before a
+    bill is marked APPLIED, so a failed or half-done apply stays PENDING for
+    the sweeper."""
+    pids = billed_products(lines)
+    if not pids:
+        return True
+    found = {
+        p["product_id"]: p.get("cost_keys") or []
+        for p in db.get_collection("products").find({"product_id": {"$in": pids}}, {"product_id": 1, "cost_keys": 1})
+    }
+    return all(key in keys for keys in found.values())
+
+
 def correct(db, product_id: str, new_cost: float, reason: str, actor: Optional[str]) -> Optional[dict]:
     """An accounts correction of a product's average, with its reason."""
     new = _paise(_d(new_cost))
@@ -278,3 +339,25 @@ def history(product: Optional[dict]) -> List[dict]:
     """The product's cost history, newest first."""
     rows = [dict(r) for r in (product or {}).get("cost_history") or []]
     return sorted(rows, key=lambda r: str(r.get("at") or ""), reverse=True)
+
+
+EDITOR_COST_REFUSED = (
+    "This product already has an average cost, so the product editor cannot change it. "
+    "Use 'Correct the average cost' on the product's stock page (Inventory > Stock > the product): "
+    "it asks for a reason and goes into the cost history."
+)
+
+
+def refuse_editor_cost(product: Optional[dict], sent) -> None:
+    """THE editor-door rule (product editor, catalogue editor): once a
+    product has an average, a cost typed there that differs from it is a 409
+    pointing to correct() -- one correction door, with a reason and a history
+    row. A first cost on a product with none (or the same figure sent back
+    unchanged) passes."""
+    if sent is None:
+        return
+    average = stock_value.average_cost(product)
+    if average and _paise(_d(sent)) != _paise(_d(average)):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=409, detail=EDITOR_COST_REFUSED)

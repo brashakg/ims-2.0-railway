@@ -280,9 +280,12 @@ async def rework_job(
             return None
         if not isinstance(prod, dict):
             return None
-        # cost_price IS the one average cost (services/product_cost, S4)
-        # -- re-averaged when a vendor bill is accepted.
-        return prod.get("cost_price")
+        # THE one average cost (stock_value.average_cost, S4) -- None when
+        # the product has none (a price typed only to finish cataloguing is
+        # not a cost).
+        from ...services import stock_value
+
+        return stock_value.average_cost(prod) or None
 
     cost_paise = spoilage_analytics.spoilage_cost_paise(job, _lens_cost_rupees)
 

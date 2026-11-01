@@ -2452,6 +2452,15 @@ async def update_catalog_product(
     if existing is None:
         raise HTTPException(status_code=404, detail="Product not found")
     _refuse_ordered_draft(existing)
+    if product.pricing and product.pricing.cost_price is not None:
+        # S4: an average is corrected only through its correction box -- the
+        # product (spine) holds it.
+        from ..dependencies import get_product_repository as _spine_repo
+        from ..services.product_cost import refuse_editor_cost
+
+        _repo = _spine_repo()
+        refuse_editor_cost(_repo.find_by_id(product_id) if _repo is not None else None,
+                           product.pricing.cost_price)
     # Work on a COPY: in no-DB mode _get_catalog_product returns the LIVE
     # in-memory dict, so mutating it mid-handler would leak partial edits into
     # the store on a later 4xx AND defeat the compare-and-swap write below

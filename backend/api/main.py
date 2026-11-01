@@ -192,6 +192,18 @@ async def lifespan(app: FastAPI):
                 get_db().ensure_indexes()
             except Exception as e:
                 logger.warning(f"[WARN] Index creation skipped: {e}")
+            # S4: finish any vendor bill whose cost a crash left half-applied
+            # (cost_state PENDING) -- a crash restarts the app, so this is
+            # where recovery runs even with the Taskmaster agent switched off.
+            # Idempotent (exactly once per product and bill); fail-soft.
+            try:
+                from .routers.purchase_invoices import finish_accepted_bills
+
+                _fb = finish_accepted_bills(get_db().db)
+                if _fb:
+                    logger.info(f"[OK] Finished {_fb} accepted bill(s) left half-applied")
+            except Exception as e:
+                logger.warning(f"[WARN] Accepted-bill finish skipped: {e}")
             # Seed the editable HSN -> GST rate master (idempotent; never
             # overwrites owner edits). Powers POS GST resolution overrides
             # via services/gst_rates.py.

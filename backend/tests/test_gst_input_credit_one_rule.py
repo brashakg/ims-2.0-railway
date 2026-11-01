@@ -715,3 +715,64 @@ def test_the_supplier_note_date_is_a_real_day_up_to_today_in_ist():
             confirm(wrong)
         assert refused.value.code == "SUPPLIER_NOTE_DATE_REQUIRED", wrong
     assert confirm(date(2017, 7, 1))["credit_note_date"] == "2017-07-01"
+
+
+# ---------------------------------------------------------------------------
+# S4 review: the header-only bill door runs the 3-way match before it moves
+# any cost; unticking 17(5) on an AVERAGED goods bill raises an accounts task
+# ---------------------------------------------------------------------------
+
+
+def _po_at_3000(db, po_id):
+    db.purchase_orders.insert_one({"po_id": po_id, "delivery_store_id": STORE, "vendor_id": DEALER,
+                                   "items": [{"product_id": FRAME, "quantity": 2, "unit_price": 3000.0}]})
+
+
+def test_an_over_tolerance_header_bill_is_held_and_moves_no_cost_until_approved(world):
+    """3300 a frame on an order at 3000 (10% over, the tolerance is 5%):
+    the header bill books ON HOLD and the average stays until it is approved."""
+    db = world["db"]
+    _po_at_3000(db, "PO-0405")
+    _po_receipt(db, "GRN-STD-0405", po_id="PO-0405")
+    before = _cost(db)
+    bill = vd.VendorBillCreate(bill_number="PO-405", bill_date="2026-09-14", taxable_amount=6600.0,
+                               tax_amount=330.0, total_amount=6930.0, grn_id="GRN-STD-0405")
+    booked = _run(vd.create_vendor_bill(DEALER, bill, current_user=ACCOUNTANT))
+    assert (booked["match_status"], booked["cost_state"]) == ("ON_HOLD_EXCEPTION", "HELD")
+    assert _cost(db) == before
+    assert not db.products.find_one({"product_id": FRAME}).get("cost_history")
+    _run(pi.approve_invoice_exception(booked["bill_id"], pi.ExceptionOverride(reason="price rise agreed"),
+                                      current_user=ACCOUNTANT))
+    assert db.vendor_bills.find_one({"bill_id": booked["bill_id"]})["cost_state"] == "APPLIED"
+    (row,) = db.products.find_one({"product_id": FRAME})["cost_history"]
+    assert (row["kind"], row["price"]) == ("BILL", 3300.0)
+
+
+def test_a_header_bill_within_tolerance_moves_the_cost_at_once(world):
+    db = world["db"]
+    _po_at_3000(db, "PO-0406")
+    _po_receipt(db, "GRN-STD-0406", po_id="PO-0406")
+    bill = vd.VendorBillCreate(bill_number="PO-406", bill_date="2026-09-14", taxable_amount=6100.0,
+                               tax_amount=305.0, total_amount=6405.0, grn_id="GRN-STD-0406")
+    booked = _run(vd.create_vendor_bill(DEALER, bill, current_user=ACCOUNTANT))
+    assert (booked["match_status"], booked["cost_state"]) == ("MATCHED", "PENDING")
+    assert db.vendor_bills.find_one({"bill_id": booked["bill_id"]})["cost_state"] == "APPLIED"
+    assert db.products.find_one({"product_id": FRAME})["cost_history"][-1]["price"] == 3050.0
+
+
+def test_unticking_17_5_on_an_averaged_challan_bill_raises_an_accounts_task(world):
+    """A delivery challan's bill, booked with 17(5) ticked, put its GST into
+    the AVERAGE; unticking claims that GST back. How to take it out is CA
+    question 3 (open), so accounts get a task naming the product and the GST
+    -- the average itself is left as it is."""
+    db = world["db"]
+    _po_receipt(db, "DC-0007", subtype="DELIVERY_CHALLAN", po_id=None)
+    bill = vd.VendorBillCreate(bill_number="DC-7", bill_date="2026-09-14", taxable_amount=6200.0,
+                               tax_amount=310.0, total_amount=6510.0, grn_id="DC-0007", itc_blocked=True)
+    booked = _run(vd.create_vendor_bill(DEALER, bill, current_user=ACCOUNTANT))
+    cost = _cost(db)
+    assert _tick(booked, False)["itc_eligible"] is True
+    assert _cost(db) == cost
+    (task,) = list(db.tasks.find({"source_ref": f"bill_credit_claimed:{booked['bill_id']}"}))
+    assert "310.00" in task["description"] and task["payload"]["gst"] == 310.0
+    assert task["payload"]["products"]

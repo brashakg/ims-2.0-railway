@@ -3549,6 +3549,10 @@ async def update_product(
         existing = repo.find_by_id(product_id)
         if existing is None:
             raise HTTPException(status_code=404, detail="Product not found")
+        # S4: an average is corrected only through its correction box.
+        from ..services.product_cost import refuse_editor_cost
+
+        refuse_editor_cost(existing, product.cost_price)
 
         update_data = product.model_dump(exclude_unset=True)
 

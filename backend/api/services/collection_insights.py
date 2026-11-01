@@ -19,12 +19,12 @@ DATA SOURCES
   * `products`             -- the billing spine (product_id, sku, brand, model,
     mrp, offer_price, cost_price, images, category).
 
-VALUATION (owner decision)
-  Stock value uses cost_price when present, else offer_price -- and the mix is
-  ALWAYS labelled via `value_basis`: 'cost' when every member holding stock has
-  a cost, 'offer' when none do, 'mixed' otherwise (None when nothing is in
-  stock). Selling-price valuation is SHOWN with a label, never hidden or
-  silently mixed. `stock_value_mrp` is reported alongside.
+VALUATION (THE stock value rule, services/stock_value; S4 2026-10-23)
+  Stock value = pieces x each product's one average cost (at cost, never at
+  the offer price). Pieces of a product with no cost yet add nothing and are
+  counted in `uncosted_units` ("N pieces have no cost, so this is too low").
+  `value_basis` is 'cost' (None when nothing is in stock). The selling value
+  is a separate, labelled figure: `stock_value_mrp` (at MRP).
 
 TIME WINDOWS
   Movement runs as ONE 90-day orders aggregation whose day sub-groups are
@@ -365,18 +365,16 @@ def _product_price_map(db, product_ids: List[str]) -> Dict[str, Dict]:
 
 
 def _value_stock(on_hand_by_pid: Dict[str, int], price_map: Dict[str, Dict]) -> Dict:
-    """Value a {product_id: units} holding. Cost-first per product, offer as
-    the labelled fallback (owner decision: selling-price valuation is SHOWN
-    with a label, never hidden).
+    """Value a {product_id: units} holding by THE stock value rule (module
+    doc): pieces x average cost; pieces with no cost counted apart.
 
-    Returns {"units_on_hand", "stock_value", "value_basis", "stock_value_mrp"}
-    where value_basis is 'cost' | 'offer' | 'mixed' | None (None = nothing in
-    stock)."""
+    Returns {"units_on_hand", "stock_value", "value_basis", "uncosted_units",
+    "stock_value_mrp"}; value_basis is 'cost', or None when nothing is in
+    stock."""
     units = 0
     value = 0.0
     value_mrp = 0.0
-    n_stocked = 0
-    n_cost = 0
+    uncosted = 0
     for pid, qty in on_hand_by_pid.items():
         try:
             qty = int(qty)
@@ -385,29 +383,18 @@ def _value_stock(on_hand_by_pid: Dict[str, int], price_map: Dict[str, Dict]) -> 
         if qty <= 0:
             continue
         units += qty
-        n_stocked += 1
         prices = price_map.get(pid, {}) or {}
         cost = _num(prices.get("cost_price"))
-        offer = _num(prices.get("offer_price"))
-        mrp = _num(prices.get("mrp"))
-        if cost is not None:
-            n_cost += 1
+        if cost is None:
+            uncosted += qty
+        else:
             value += cost * qty
-        elif offer is not None:
-            value += offer * qty
-        value_mrp += (mrp or 0.0) * qty
-    if n_stocked == 0:
-        basis = None
-    elif n_cost == n_stocked:
-        basis = "cost"
-    elif n_cost == 0:
-        basis = "offer"
-    else:
-        basis = "mixed"
+        value_mrp += (_num(prices.get("mrp")) or 0.0) * qty
     return {
         "units_on_hand": units,
         "stock_value": round(value, 2),
-        "value_basis": basis,
+        "value_basis": "cost" if units else None,
+        "uncosted_units": uncosted,
         "stock_value_mrp": round(value_mrp, 2),
     }
 
@@ -419,7 +406,7 @@ def stock_summary(db, members: Dict, store_id: Optional[str] = None) -> Dict:
     Returns {
         "per_product": {pid: {"on_hand": int}},
         "units_on_hand": int,
-        "stock_value": float, "value_basis": 'cost'|'offer'|'mixed'|None,
+        "stock_value": float, "value_basis": 'cost'|None, "uncosted_units": int,
         "stock_value_mrp": float,
     }"""
     pids = list((members or {}).get("product_ids") or [])
@@ -661,6 +648,7 @@ def kpis(db, collection: Dict, store_id: Optional[str] = None) -> Dict:
         "units_on_hand": on_hand,
         "stock_value": stock["stock_value"],
         "value_basis": stock["value_basis"],
+        "uncosted_units": stock["uncosted_units"],
         "stock_value_mrp": stock["stock_value_mrp"],
         "sold": {"d7": t["units_d7"], "d30": sold30, "d90": t["units_d90"]},
         "revenue_30d": t["revenue_d30"],
@@ -743,6 +731,7 @@ def store_breakdown(
                 "on_hand": valued["units_on_hand"],
                 "stock_value": valued["stock_value"],
                 "value_basis": valued["value_basis"],
+                "uncosted_units": valued["uncosted_units"],
                 "sold_30d": sold30,
                 "sell_through": sell_through(sold30, valued["units_on_hand"]),
                 "days_of_cover": days_of_cover(valued["units_on_hand"], sold30),
@@ -818,6 +807,7 @@ def summary(
                 "on_hand": valued["units_on_hand"],
                 "stock_value": valued["stock_value"],
                 "value_basis": valued["value_basis"],
+                "uncosted_units": valued["uncosted_units"],
                 "sold_30d": sold30,
             }
         )

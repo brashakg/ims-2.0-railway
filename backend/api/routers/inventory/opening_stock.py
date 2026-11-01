@@ -23,7 +23,7 @@ from ._shared import (
     uuid,
 )
 from ...services.cost_mask import mask_cost, refuse_cost_write
-from ...services import product_cost
+from ...services import product_cost, stock_value
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
@@ -98,6 +98,19 @@ def _opening_stock_cost_fields(row) -> Dict:
             "cost_source": "OPENING_STOCK",
         }
     return {}
+
+
+def _opening_cost(product: dict, typed: Optional[float]) -> tuple:
+    """(the cost the pieces carry, a note when the typed cost is not used).
+    THE stock value rule: every piece carries the product's one average cost
+    (stock_value.average_cost). A typed cost only gives a product with no
+    average its first one (product_cost.seed); a product that has one keeps it."""
+    average = stock_value.average_cost(product)
+    if average:
+        note = (f"Valued at the product's average cost Rs {average:.2f}; the cost typed here is not used."
+                if typed and round(float(typed), 2) != average else None)
+        return average, note
+    return (typed or None), None
 
 
 def _write_opening_stock_batch(
@@ -188,6 +201,7 @@ async def opening_stock_preview(
             )
             continue
         unit_cost = _opening_stock_cost_fields(row).get("unit_cost")
+        cost_used, cost_note = _opening_cost(product, unit_cost)
         already = existing > 0
         if already and payload.skip_if_existing:
             will_skip += 1
@@ -195,8 +209,8 @@ async def opening_stock_preview(
             msg = f"Already has {existing} in stock — will be skipped."
         else:
             to_add += row.quantity
-            if unit_cost:
-                total_value += unit_cost * row.quantity
+            if cost_used:
+                total_value += cost_used * row.quantity
             status = "WILL_ADD" if not already else "WILL_ADD_ON_TOP"
             msg = (
                 f"Will add {row.quantity}."
@@ -213,6 +227,8 @@ async def opening_stock_preview(
                 "quantity": row.quantity,
                 "existing": existing,
                 "unit_cost": unit_cost,
+                "cost_used": cost_used,
+                "cost_note": cost_note,
                 "message": msg,
             }
         )
@@ -226,12 +242,13 @@ async def opening_stock_preview(
             "units_to_add": to_add,
             "rows_to_skip": will_skip,
             "rows_with_errors": errors,
-            # Valuation the operator is about to put on the shelf (only rows
-            # that WILL add units and carry a unit_cost contribute).
+            # Valuation the operator is about to put on the shelf: pieces x
+            # the cost they will carry (the product's average; the typed cost
+            # only where it has none). Rows with no cost add nothing.
             "total_value": round(total_value, 2),
             "skip_if_existing": payload.skip_if_existing,
         },
-    }, current_user, "product", extra=("total_value",))
+    }, current_user, "product", extra=("total_value", "cost_used", "cost_note"))
 
 
 @router.post("/opening-stock/commit")
@@ -298,6 +315,7 @@ async def opening_stock_commit(
 
         pid = product.get("product_id")
         cost_fields = _opening_stock_cost_fields(row)
+        cost_used, cost_note = _opening_cost(product, cost_fields.get("unit_cost"))
         created_count = 0
         for _ in range(row.quantity):
             barcode = barcode_svc.mint_unit_barcode(_db, active_store)
@@ -319,8 +337,9 @@ async def opening_stock_commit(
             if stock_repo.create(stock_data):
                 created_count += 1
         units_added += created_count
+        if cost_used:
+            total_value += cost_used * created_count
         if cost_fields:
-            total_value += cost_fields["unit_cost"] * created_count
             # S4: the pieces carry the product's ONE average cost; opening
             # stock gives a product that has none its first (a cost-history
             # row). A product that already has an average keeps it.
@@ -350,6 +369,8 @@ async def opening_stock_commit(
                 "sku": product.get("sku"),
                 "added": created_count,
                 "unit_cost": cost_fields.get("unit_cost"),
+                "cost_used": cost_used,
+                "cost_note": cost_note,
                 "message": f"Added {created_count} unit(s).",
             }
         )
@@ -395,5 +416,5 @@ async def opening_stock_commit(
         },
         current_user,
         "product",
-        extra=("total_value",),
+        extra=("total_value", "cost_used", "cost_note"),
     )

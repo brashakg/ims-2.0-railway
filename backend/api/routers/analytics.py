@@ -866,9 +866,9 @@ async def get_store_performance(
             # THE stock value rule (stock_value: pieces on the shelf x each
             # product's one average cost), at cost -- the accounts roles'
             # only (masked below, owner ruling 2026-10-12).
-            store_stock_value = stock_value.total(
-                stock_value.shelf_units(stock_repo, get_product_repository(), store_id)
-            ) if stock_repo is not None else 0.0
+            shelf = (stock_value.shelf_units(stock_repo, get_product_repository(), store_id)
+                     if stock_repo is not None else [])
+            store_stock_value = stock_value.total(shelf)
 
             # Metrics calculation. margin_percent / revenue_per_sqft /
             # staff_count are null rather than fabricated — margin needs
@@ -883,6 +883,8 @@ async def get_store_performance(
                     "avg_order_value": float(avg_order_value),
                     "margin_percent": None,
                     "stock_value": float(store_stock_value),
+                    # Pieces with no cost yet: the value is too low by them.
+                    "stock_uncosted_units": stock_value.uncosted(shelf),
                     "staff_count": None,
                     "revenue_per_sqft": None,
                     "revenue_trend": float(revenue_change),
@@ -903,7 +905,7 @@ async def get_store_performance(
                 ),
                 "avg_margin": None,  # needs per-item COGS (was fabricated 40.5)
             },
-        }, current_user, stock_value.COST_CONTEXT, extra=("stock_value",))
+        }, current_user, stock_value.COST_CONTEXT, extra=("stock_value", "stock_uncosted_units"))
 
     except HTTPException:
         raise

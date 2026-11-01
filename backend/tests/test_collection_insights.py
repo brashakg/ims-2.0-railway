@@ -7,9 +7,9 @@ api/routers/collections_insights.py:
   * member_ids reads the materialised collection_products view, prefers the
     row's product_id, falls back to a sku -> products join CHUNKED at 1000,
     and reports capped (5000-row cap / membership_capped flag).
-  * stock value is cost-first with an HONEST value_basis label:
-    'cost' when every stocked member has a cost, 'offer' when none do,
-    'mixed' otherwise, None when nothing is in stock.
+  * stock value is THE stock value rule (S4): pieces x average cost, never
+    the offer price; pieces with no cost are counted in uncosted_units
+    (value_basis 'cost', None when nothing is in stock).
   * movement windows (d7/d30/d90) bucket by IST calendar day (orders are UTC;
     an Indian early morning / late evening must not split across UTC days).
   * sell-through / days-of-cover edge cases (zero sales, zero stock).
@@ -266,7 +266,7 @@ def test_member_ids_failsoft_no_db():
 
 
 # ===========================================================================
-# stock value basis -- cost / offer / mixed / none
+# stock value at cost; pieces with no cost counted apart (S4)
 # ===========================================================================
 
 _MEMBERS_2 = {"product_ids": ["P1", "P2"], "skus": ["S1", "S2"], "capped": False}
@@ -295,24 +295,23 @@ def test_stock_value_basis_cost_when_all_costed():
     assert s["stock_value_mrp"] == 2 * 200 + 3 * 100
 
 
-def test_stock_value_basis_offer_when_none_costed():
+def test_stock_value_never_prices_uncosted_pieces_at_the_offer():
     db = _stock_db([
         {"product_id": "P1", "offer_price": 150, "mrp": 200},
         {"product_id": "P2", "cost_price": None, "offer_price": 80, "mrp": 100},
     ])
     s = ci.stock_summary(db, _MEMBERS_2)
-    assert s["stock_value"] == 2 * 150 + 3 * 80
-    assert s["value_basis"] == "offer"
+    assert (s["stock_value"], s["uncosted_units"], s["value_basis"]) == (0.0, 5, "cost")
+    assert s["stock_value_mrp"] == 2 * 200 + 3 * 100  # the selling value, labelled apart
 
 
-def test_stock_value_basis_mixed():
+def test_stock_value_counts_the_pieces_with_no_cost():
     db = _stock_db([
         {"product_id": "P1", "cost_price": 100, "offer_price": 150, "mrp": 200},
         {"product_id": "P2", "offer_price": 80, "mrp": 100},
     ])
     s = ci.stock_summary(db, _MEMBERS_2)
-    assert s["stock_value"] == 2 * 100 + 3 * 80
-    assert s["value_basis"] == "mixed"
+    assert (s["stock_value"], s["uncosted_units"]) == (2 * 100, 3)
 
 
 def test_stock_value_basis_none_when_no_stock():
@@ -578,7 +577,7 @@ def test_summary_is_batched_and_sorted_by_sold_desc():
     assert [r["collection_id"] for r in rows] == ["CB", "CA"]
     cb, ca = rows[0], rows[1]
     assert cb["sold_30d"] == 5 and cb["on_hand"] == 1
-    assert cb["stock_value"] == 300.0 and cb["value_basis"] == "offer"
+    assert (cb["stock_value"], cb["uncosted_units"]) == (0.0, 1)
     assert cb["published"] is False and cb["collection_type"] == "SMART"
     assert ca["sold_30d"] == 0 and ca["on_hand"] == 4
     assert ca["stock_value"] == 400.0 and ca["value_basis"] == "cost"
@@ -633,7 +632,7 @@ def test_store_breakdown_rows_names_and_metrics():
 
     s2 = by_id["BV-02"]
     assert s2["store_name"] == "BV-02"          # fail-soft to the id
-    assert s2["on_hand"] == 2 and s2["value_basis"] == "offer"
+    assert s2["on_hand"] == 2 and (s2["stock_value"], s2["uncosted_units"]) == (0.0, 2)
     assert s2["sold_30d"] == 0
     assert s2["sell_through"] == 0.0
     assert s2["days_of_cover"] == 999.0

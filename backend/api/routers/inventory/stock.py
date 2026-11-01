@@ -27,6 +27,7 @@ from ._shared import (
     validate_store_access,
 )
 from ...services.cost_mask import mask_cost_list
+from ...services import stock_value
 from ...services.gtin import fold_barcode_spellings
 from ...services.product_master import main_photo
 from ...services.item_events import on_hand_match
@@ -505,9 +506,11 @@ def _ledger_row(
         "model": model,
         "category": product.get("category", ""),
         "mrp": mrp,
-        # Per-unit cost (the Reorder dashboard's PO estimate and PO rate);
-        # get_stock strips it outside cost_mask's "product" context.
-        "cost_price": product.get("cost_price"),
+        # Per-unit cost (the Reorder dashboard's PO estimate and PO rate):
+        # THE one average cost (stock_value.average_cost, S4), None when the
+        # product has none; get_stock strips it outside cost_mask's "product"
+        # context.
+        "cost_price": stock_value.average_cost(product) or None,
         "offerPrice": offer_price,
         "offer_price": offer_price,
         "stock": on_hand,

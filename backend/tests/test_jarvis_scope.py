@@ -280,11 +280,11 @@ def test_extended_context_surfaces_product_catalog_analytics():
     class _FakeProductsCollection:
         # The aggregations are called in a known order:
         #   1. top_products_by_price
-        #   2. top_stock_value
-        #   3. catalog_by_category
-        #   4. catalog_by_brand
-        #   5. catalog_by_store
-        #   6. low_stock_value_at_risk
+        #   2. catalog_by_category
+        #   3. catalog_by_brand
+        #   4. catalog_by_store (SKU count; its value is at cost, from
+        #      the stock units -- S4, never offer x stock_quantity)
+        # top_stock_value reads the stock units at cost (no aggregate).
         # Return canned data per call index — simpler than pipeline matching.
         def __init__(self):
             self._calls = 0
@@ -293,17 +293,13 @@ def test_extended_context_surfaces_product_catalog_analytics():
                 [{"name": "RAYBAN MAYBACH", "brand": "MAYBACH", "category": "FRAME",
                   "store_id": "BV-PUN-01", "mrp": 297990, "price": 297990,
                   "stock_quantity": 1, "barcode": "2512239"}],
-                # 2. top_stock_value
-                [],
-                # 3. catalog_by_category
+                # 2. catalog_by_category
                 [{"_id": "FRAME", "sku_count": 4000, "total_units": 5000,
                   "avg_price": 5200.0, "max_price": 297990.0}],
-                # 4. catalog_by_brand
+                # 3. catalog_by_brand
                 [{"_id": "RAYBAN", "sku_count": 850, "total_units": 1200, "avg_price": 8500.0}],
-                # 5. catalog_by_store
-                [{"_id": "BV-PUN-01", "sku_count": 10805, "total_stock_value": 1234567.0}],
-                # 6. low_stock_value_at_risk
-                [],
+                # 4. catalog_by_store
+                [{"_id": "BV-PUN-01", "sku_count": 10805}],
             ]
         def aggregate(self, _pipeline):
             i = self._calls

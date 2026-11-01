@@ -26,6 +26,7 @@ from ._shared import (
     can_access_store_scoped,
 )
 from .models import GRN_SUBTYPE_DC
+from ...services import purchase_match as pmatch
 
 # The 17(5) tick: a services / expense bill's, or -- when it is booked -- a
 # bill for goods bought WITHOUT a purchase order (gifts, samples, personal
@@ -593,14 +594,24 @@ async def create_vendor_bill(
         "bill_kind": ap_engine.BILL_KIND_GOODS if bill.grn_id else bill.bill_kind,
         "notes": bill.notes,
         "status": "OUTSTANDING",
-        # S4: a receipt's bill is accepted when booked (this door has no
-        # match, so no hold) -- its cost goes into the products' average
-        # below; finish_accepted_bills finishes it after a crash.
+        # S4: a receipt's bill is accepted when booked -- its cost goes into
+        # the products' average below (finish_accepted_bills finishes it
+        # after a crash) -- unless the 3-way match holds it (below).
         **({"cost_state": "PENDING"} if bill.grn_id else {}),
         "created_by": current_user.get("user_id"),
         "created_at": utc_now_iso(),
     }
     db = _get_db()
+    # The 3-way match the line-detail door runs (pmatch.three_way_match, the
+    # shop's tolerance) on a PO receipt's header bill: beyond tolerance the
+    # bill books ON HOLD and its cost waits for /approve-exception, exactly
+    # as on that door -- never re-averaged unchecked.
+    if db is not None and linked and doc.get("cost_state") and linked.get("po_id"):
+        match = _header_bill_match(db, doc, linked)
+        if match:
+            doc.update({"match_status": match.get("match_status"), "match_detail": match})
+            if match.get("match_status") == pmatch.MATCH_ON_HOLD:
+                doc["cost_state"] = "HELD"
 
     # CLAIM the Delivery Challan before the payable exists (the DC branch's
     # proven guarded-stamp shape): of two racing bills on the same DC exactly
@@ -665,7 +676,7 @@ async def create_vendor_bill(
     # as its rate.
     # ponytail: one share for every line; a mixed-rate bill wants the
     # line-detail door (Purchase -> Invoices -> Create from GRN).
-    if db is not None and linked:
+    if db is not None and linked and doc.get("cost_state") == "PENDING":
         _true_up_header_bill(db, {**doc, "invoice_id": bill_id}, linked,
                              actor=current_user.get("user_id"))
     if db is not None:
@@ -677,19 +688,37 @@ async def create_vendor_bill(
     return _clean(doc)
 
 
-def _true_up_header_bill(db, doc: dict, linked: dict, *, key=None, actor=None) -> None:
-    """The cost true-up of a header-only bill on its receipt (G1 / F04): the
+def _header_bill_po(db, linked: dict) -> Optional[dict]:
+    if linked.get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO or not linked.get("po_id"):
+        return None
+    return db.get_collection("purchase_orders").find_one({"po_id": linked["po_id"]}, {"_id": 0})
+
+
+def _header_bill_match(db, doc: dict, linked: dict) -> Optional[dict]:
+    """The 3-way match of a header bill on a PO receipt, on the lines its
+    cost would use (_header_bill_lines). None when it cannot be run."""
+    from ..purchase_invoices import _resolved_purchase_config
+
+    po = _header_bill_po(db, linked)
+    if po is None:
+        return None
+    try:
+        tol = _resolved_purchase_config(db)["match_tolerance_pct"]
+        return pmatch.three_way_match(po, linked, _header_bill_lines(db, doc, linked, po), tol)
+    except Exception:  # noqa: BLE001 - no verdict, as on the line-detail door
+        logger.warning("[AP] 3-way match of header bill %s failed", doc.get("bill_id"), exc_info=True)
+        return None
+
+
+def _header_bill_lines(db, doc: dict, linked: dict, po: Optional[dict]) -> list:
+    """A header-only bill's cost lines on its receipt (G1 / F04): the
     receipt's lines carry the bill's tax share as their rate. A walk-in buy
     costs at the price paid; a PO receipt at the BILL's price -- its taxable
     value spread over the receipt's lines in their order-price proportion
     (evenly per piece when the order names no prices; LOW 17)."""
-    from ..purchase_invoices import _apply_valuation_trueup
     from ...services.purchase_invoice_engine import lines_from_grn
 
     walk_in = linked.get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
-    po = None
-    if not walk_in and linked.get("po_id"):
-        po = db.get_collection("purchase_orders").find_one({"po_id": linked["po_id"]}, {"_id": 0})
     taxable = float(doc.get("taxable_amount") or 0)
     share = ap_engine.header_bill_gst_rate(doc.get("tax_amount"), taxable) or 0.0
     lines = lines_from_grn(linked, po)
@@ -701,17 +730,19 @@ def _true_up_header_bill(db, doc: dict, linked: dict, *, key=None, actor=None) -
                      for ln in lines]
         elif pieces > 0:
             lines = [{**ln, "unit_price": round(taxable / pieces, 2)} for ln in lines]
-    _apply_valuation_trueup(
-        db, doc, {"lines": [{**ln, "gst_rate": share} for ln in lines]}, key=key, actor=actor,
-    )
+    return [{**ln, "gst_rate": share} for ln in lines]
+
+
+def _true_up_header_bill(db, doc: dict, linked: dict, *, key=None, actor=None) -> None:
+    """The cost true-up of a header-only bill on its receipt
+    (_header_bill_lines), then -- under the bill's own key -- the bill marked
+    APPLIED once every product holds it."""
+    from ..purchase_invoices import _apply_valuation_trueup, mark_cost_applied
+
+    lines = _header_bill_lines(db, doc, linked, _header_bill_po(db, linked))
+    _apply_valuation_trueup(db, doc, {"lines": lines}, key=key, actor=actor)
     if key is None:
-        try:
-            db.get_collection("vendor_bills").update_one(
-                {"bill_id": doc.get("invoice_id") or doc.get("bill_id"), "cost_state": "PENDING"},
-                {"$set": {"cost_state": "APPLIED", "cost_applied_at": utc_now_iso()}},
-            )
-        except Exception:  # noqa: BLE001 - the sweeper re-runs it safely
-            logger.warning("[AP] marking a header bill's cost applied failed", exc_info=True)
+        mark_cost_applied(db, doc.get("invoice_id") or doc.get("bill_id"), lines)
 
 
 @router.get("/{vendor_id}/bills")
@@ -856,6 +887,8 @@ async def set_vendor_bill_itc_blocked(
             # an accounts correction (one untick per bill: never re-ticked).
             _true_up_header_bill(db, {**bill, **update, "invoice_id": bill_id}, linked,
                                  key=f"{bill_id}:credit-claimed", actor=current_user.get("user_id"))
+        else:
+            _raise_credit_claimed_task(db, bill, linked)
         # The bill now claims credit on pieces written off while it was
         # ticked (they reversed nothing then): reverse them, in the bill's
         # month -- the month the credit lands. Once per piece, so repeat-safe.
@@ -879,6 +912,45 @@ async def set_vendor_bill_itc_blocked(
     except Exception:  # noqa: BLE001 - the audit row never undoes the change
         logger.warning("[AP] audit of the 17(5) tick on %s failed", bill_id, exc_info=True)
     return _clean(bills.find_one({"bill_id": bill_id}, {"_id": 0}) or {**bill, **update})
+
+
+def _raise_credit_claimed_task(db, bill: dict, linked: Optional[dict]) -> None:
+    """A goods bill whose cost was AVERAGED (not a walk-in's latest price)
+    had its GST in the average; unticking 17(5) claims that GST back, so the
+    average is now too high by its share. How to take it out is CA question 3
+    (still open), so accounts get a task naming the products and the GST --
+    never a silent change. Fail-soft: the untick stands."""
+    try:
+        from ...dependencies import get_task_repository
+        from ...services.task_triggers import create_system_task
+
+        lines = bill.get("lines") or (
+            _header_bill_lines(db, bill, linked, _header_bill_po(db, linked)) if linked else []
+        )
+        names = []
+        for pid in sorted({ln.get("product_id") for ln in lines if ln.get("product_id")}):
+            prod = db.get_collection("products").find_one({"product_id": pid}, {"_id": 0, "sku": 1}) or {}
+            names.append(prod.get("sku") or pid)
+        gst = round(float(bill.get("tax_amount") or 0), 2)
+        create_system_task(
+            get_task_repository(),
+            title=f"Bill {bill.get('bill_number')}: GST now claimed - check the average cost",
+            description=(
+                f"Credit was switched back on for bill {bill.get('bill_number')} "
+                f"({bill.get('vendor_name') or bill.get('vendor_id')}). Its GST of Rs {gst:.2f} "
+                f"went into the average cost of: {', '.join(names) or 'its products'}. "
+                "If the CA says it should come out, correct each product's average on its stock page "
+                "(Correct the average cost), with this bill as the reason."
+            ),
+            priority="P2",
+            category="Accounts",
+            store_id=bill.get("store_id"),
+            assigned_to="ACCOUNTANT",
+            dedupe_ref=f"bill_credit_claimed:{bill.get('bill_id')}",
+            extra={"payload": {"bill_id": bill.get("bill_id"), "products": names, "gst": gst}},
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("[AP] credit-claimed task for %s not raised", bill.get("bill_id"), exc_info=True)
 
 
 def _rejected_goods_hold(db, bill_id: Optional[str]) -> Optional[str]:

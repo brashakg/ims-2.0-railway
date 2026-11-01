@@ -18,10 +18,25 @@ WHAT IT DOES
     own gets their weighted average as its first average (to the paisa), a
     'BACKFILL' row in its cost history. Pieces without a cost of their own,
     or a product that already has an average, are listed and left alone.
+  * A product that already has an average but an EMPTY cost history (its
+    average is from before S4) gets one 'Carried over' row (kind
+    CARRIED_OVER: old none, new = its average, source = its cost_source) so
+    the product page never shows an average with "no bill yet". The average
+    itself is not changed.
+  * Every accepted goods receipt that no S4 bill has costed is stamped
+    `costed_before_s4: <run id>` (product_cost.PRE_S4_STAMP; only receipts
+    accepted before the first S4 bill -- run it right after the deploy): its pieces
+    carry the average they came in at, so the first S4 bill BLENDS with them
+    instead of replacing the average.
+  * The dry run FLAGS products whose average came from a bill that is still
+    on hold, or from a delivery-challan bill (both could carry a wrong
+    pre-S4 average). That list is for accounts to correct by hand on the
+    product page -- this script never changes them.
   * --apply: the run id is printed BEFORE the first write; each product's
     before-values are backed up in `backfill_average_cost_backups` first.
     --revert --run-id <id> puts back only products whose cost is still what
-    the run wrote (a later bill or correction is reported, never undone).
+    the run wrote (a later bill or correction is reported, never undone),
+    including one written just before a crash, and unstamps the receipts.
   A re-run after --apply finds nothing left to fill.
 
 USAGE (dry run is the default; nothing is written without --apply). NEVER run
@@ -87,38 +102,127 @@ def plan(db) -> List[dict]:
         rows.append({
             "product_id": pid, "sku": prod.get("sku"), "pieces": pieces, "average": average or None,
             "value_s4": stock_value.value(pieces, prod), "value_before": round(old_value, 2),
-            "fill": fill, "reason": reason,
+            "fill": fill, "reason": reason, "check": _suspect(db, prod),
         })
     return rows
 
 
+def _suspect(db, prod: dict) -> Optional[str]:
+    """Why accounts should check this product's pre-S4 average by hand, or
+    None: it came from a bill still on hold, or from a delivery-challan bill
+    (the old rule counted a challan's pieces twice)."""
+    bill_id = prod.get("cost_source_id")
+    if not bill_id:
+        return None
+    bill = db["vendor_bills"].find_one({"bill_id": bill_id}, {"_id": 0}) or {}
+    if bill.get("match_status") == "ON_HOLD_EXCEPTION":
+        return f"average from bill {bill.get('bill_number') or bill_id}, still on hold"
+    if bill.get("linked_dc_ids"):
+        return f"average from delivery-challan bill {bill.get('bill_number') or bill_id}"
+    return None
+
+
+def carry_over_candidates(db) -> List[dict]:
+    """Products with an average but no cost history (an average from before
+    S4)."""
+    return [
+        p for p in db["products"].find({"cost_price": {"$gt": 0}}, {"_id": 0})
+        if stock_value.average_cost(p) and not p.get("cost_history")
+    ]
+
+
+def legacy_receipts(db) -> List[str]:
+    """Accepted goods receipts no S4 bill has costed (and not yet stamped),
+    accepted before the first S4 bill was booked (a later one is an S4
+    receipt waiting for its bill). Run the backfill right after the deploy."""
+    from api.routers.vendors.grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
+
+    first = next(iter(db["vendor_bills"].find({"cost_state": {"$ne": None}}, {"_id": 0, "created_at": 1})
+                      .sort("created_at", 1).limit(1)), {}).get("created_at")
+    out = []
+    for g in db["grns"].find({"status": {"$in": list(_GRN_TERMINAL_ACCEPT_STATUSES)},
+                              product_cost.PRE_S4_STAMP: {"$exists": False}},
+                             {"_id": 0, "grn_id": 1, "accepted_at": 1}):
+        gid = g.get("grn_id")
+        if first and str(g.get("accepted_at") or "") >= str(first):
+            continue
+        if gid and not db["vendor_bills"].find_one({
+            "cost_state": {"$ne": None},
+            "$or": [{"grn_id": gid}, {"linked_dc_ids": gid}],
+        }):
+            out.append(gid)
+    return out
+
+
+def _backup(db, run_id: str, pid: str) -> None:
+    prod = db["products"].find_one({"product_id": pid}) or {}
+    db[BACKUPS].insert_one({
+        "run_id": run_id, "product_id": pid, "at": utc_now_iso(),
+        "before": {k: prod.get(k, {"__missing__": True}) for k in _FIELDS},
+    })
+
+
+def carry_over(db, prod: dict, key: str) -> Optional[dict]:
+    """One 'Carried over' history row on a product whose average has no
+    history; the average is not changed. One guarded single-document update
+    (on the average and the empty history): a re-run, or a bill landing
+    meanwhile, is never overwritten."""
+    row = {"kind": "CARRIED_OVER", "source": prod.get("cost_source"), "key": key, "at": utc_now_iso(),
+           "old_cost": None, "new_cost": stock_value.average_cost(prod), "by": ACTOR}
+    done = db["products"].update_one(
+        {"product_id": prod["product_id"], "cost_price": prod.get("cost_price"),
+         "cost_history": {"$in": [None, []]}, "cost_keys": {"$ne": key}},
+        {"$push": {"cost_history": row, "cost_keys": key}},
+    )
+    return row if done.modified_count else None
+
+
 def apply(db, rows: List[dict], run_id: str) -> int:
+    key = f"backfill:{run_id}"
     done = 0
     for row in rows:
         if row["fill"] is None:
             continue
-        prod = db["products"].find_one({"product_id": row["product_id"]}) or {}
-        db[BACKUPS].insert_one({
-            "run_id": run_id, "product_id": row["product_id"], "at": utc_now_iso(),
-            "before": {k: prod.get(k, {"__missing__": True}) for k in _FIELDS},
-        })
-        written = product_cost.seed(db, row["product_id"], row["fill"], key=f"backfill:{run_id}",
-                                    kind="BACKFILL", actor=ACTOR)
+        _backup(db, run_id, row["product_id"])
+        written = product_cost.seed(db, row["product_id"], row["fill"], key=key, kind="BACKFILL", actor=ACTOR)
         if written:
             db[BACKUPS].update_one({"run_id": run_id, "product_id": row["product_id"]},
                                    {"$set": {"written": written["new_cost"]}})
             done += 1
+    for prod in carry_over_candidates(db):
+        _backup(db, run_id, prod["product_id"])
+        written = carry_over(db, prod, key)
+        if written:
+            db[BACKUPS].update_one({"run_id": run_id, "product_id": prod["product_id"]},
+                                   {"$set": {"written": written["new_cost"], "carried_over": True}})
+            done += 1
+    for gid in legacy_receipts(db):
+        db["grns"].update_one({"grn_id": gid, product_cost.PRE_S4_STAMP: {"$exists": False}},
+                              {"$set": {product_cost.PRE_S4_STAMP: run_id}})
     return done
 
 
 def revert(db, run_id: str) -> int:
     key = f"backfill:{run_id}"
     back = 0
-    for b in db[BACKUPS].find({"run_id": run_id, "written": {"$exists": True}}):
+    db["grns"].update_many({product_cost.PRE_S4_STAMP: run_id}, {"$unset": {product_cost.PRE_S4_STAMP: ""}})
+    for b in db[BACKUPS].find({"run_id": run_id}):
         pid = b["product_id"]
         prod = db["products"].find_one({"product_id": pid}) or {}
-        if (prod.get("cost_keys") or [])[-1:] != [key] or prod.get("cost_price") != b["written"]:
+        ours = [r for r in prod.get("cost_history") or [] if r.get("key") == key]
+        written = b.get("written")
+        if written is None:  # written just before a crash: its history row says what
+            if not ours:
+                continue  # the run never wrote it
+            written = ours[0].get("new_cost")
+        if (prod.get("cost_keys") or [])[-1:] != [key] or prod.get("cost_price") != written:
             print(f"  {pid}: changed since the run (a bill or correction) - left as it is")
+            continue
+        if b.get("carried_over") or any(r.get("kind") == "CARRIED_OVER" for r in ours):
+            # only a history row was added: take it out, the average stays
+            db["products"].update_one({"product_id": pid, "cost_price": written},
+                                      {"$pull": {"cost_keys": key, "cost_history": {"key": key}}})
+            back += 1
             continue
         sets = {k: v for k, v in b["before"].items() if v != {"__missing__": True}}
         unsets = {k: "" for k, v in b["before"].items() if v == {"__missing__": True}}
@@ -127,7 +231,7 @@ def revert(db, run_id: str) -> int:
             update["$set"] = sets
         if unsets:
             update["$unset"] = unsets
-        db["products"].update_one({"product_id": pid, "cost_price": b["written"]}, update)
+        db["products"].update_one({"product_id": pid, "cost_price": written}, update)
         back += 1
     return back
 
@@ -157,10 +261,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     for r in rows:
         print(f"{r['sku'] or r['product_id']}: {r['pieces']:g} pcs, average {r['average']}, "
               f"value S4 {r['value_s4']:.2f} (before {r['value_before']:.2f}) - {r['reason']}"
-              + (f" -> {r['fill']:.2f}" if r["fill"] is not None else ""))
+              + (f" -> {r['fill']:.2f}" if r["fill"] is not None else "")
+              + (f"  CHECK BY HAND: {r['check']}" if r.get("check") else ""))
     print(f"total value S4 {sum(r['value_s4'] for r in rows):.2f}, "
           f"before {sum(r['value_before'] for r in rows):.2f}; "
-          f"{sum(1 for r in rows if r['fill'] is not None)} product(s) to fill")
+          f"{sum(1 for r in rows if r['fill'] is not None)} product(s) to fill; "
+          f"{len(carry_over_candidates(db))} average(s) to carry over into the history; "
+          f"{len(legacy_receipts(db))} receipt(s) to mark as costed before S4; "
+          f"{sum(1 for r in rows if r.get('check'))} product(s) for accounts to check by hand")
     if not args.apply:
         print("dry run - nothing written (add --apply)")
         return 0

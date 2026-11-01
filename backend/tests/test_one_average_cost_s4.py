@@ -361,9 +361,158 @@ def test_the_backfill_fills_backs_up_and_reverts():
     rows = {r["product_id"]: r for r in bf.plan(db)}
     assert (rows["FULL"]["fill"], rows["PART"]["fill"], rows["HAS"]["fill"]) == (100.5, None, None)
     assert rows["HAS"]["value_s4"] == 500.0 and rows["HAS"]["value_before"] == 900.0
-    assert bf.apply(db, list(rows.values()), "RUN1") == 1
+    # FULL filled; HAS (an average with no history) carried over into it.
+    assert bf.apply(db, list(rows.values()), "RUN1") == 2
     assert db.products.find_one({"product_id": "FULL"})["cost_price"] == 100.5
     assert bf.plan(db)[0]["fill"] is None  # a re-run finds nothing left
-    assert bf.revert(db, "RUN1") == 1
+    assert bf.revert(db, "RUN1") == 2
     full = db.products.find_one({"product_id": "FULL"})
     assert full["cost_price"] is None and full["cost_history"] == [] and full["cost_keys"] == []
+
+
+# --------------------------------------------------------------------------
+# Review round 1 (S4): every accepted bill puts its key on every product it
+# bills; the exactly-once guard is on the keys the work was based on; a bill
+# is APPLIED only when it really is in every average; legacy receipts blend.
+# --------------------------------------------------------------------------
+
+
+def _walk_in_booked_late(db):
+    """Walk-in receipt W (5 at 100) accepted, then PO receipt R (5, minted at
+    200) accepted; W's bill is booked only after R -- the latest price paid
+    is R's, so W's bill must leave the average where it is."""
+    _receipt(db, "W", 5, grn_subtype="NO_PO", accepted_at="2026-10-01T10:00:00+00:00")
+    _pieces(db, 5, "W", prefix="W")
+    _receipt(db, "R", 5, accepted_at="2026-10-02T10:00:00+00:00", po_id="PO1")
+    _pieces(db, 5, "R", prefix="R")
+    db.stock_units.update_many({"grn_id": "R"}, {"$set": {"unit_cost": 200.0}})
+    _accept(db, _bill("BW", 5, 100, grn_id="W"))
+
+
+def test_a_bill_that_moves_no_average_still_puts_its_receipt_in_the_basis():
+    db = _db(100.0)
+    _walk_in_booked_late(db)
+    product = db.products.find_one({})
+    assert product["cost_price"] == 100.0 and product["cost_keys"] == ["BW"]
+    assert product_cost.basis_pieces(db, "P", product["cost_keys"]) == 5
+    assert db.vendor_bills.find_one({"bill_id": "BW"})["cost_state"] == product_cost.APPLIED
+    # R's bill blends with W's 5 pieces: (5 x 100 + 5 x 200) / 10 = 150, not 200.
+    _accept(db, _bill("BR", 5, 200, grn_id="R"))
+    assert _avg(db) == 150.0
+
+
+def test_a_bill_landing_between_read_and_write_is_re_worked_even_if_it_moved_nothing(monkeypatch):
+    """A-B-A: B2 (10 at 100 on an average of 100) lands after B1 worked out
+    its basis but before B1's write; the average did not move, yet B2's 10
+    pieces joined the basis. B1 must re-work: (20 x 100 + 10 x 130) / 30 =
+    110 -- never the stale (10 x 100 + 10 x 130) / 20 = 115. (The product
+    has moved before, so no other field changes when B2 lands.)"""
+    db = _db(100.0, cost_price_is_catalogue_only=False, cost_keys=["OLD"])
+    _pieces(db, 10)
+    _receipt(db, "G1", 10)
+    _receipt(db, "G2", 10)
+    _pieces(db, 10, "G1")
+    _pieces(db, 10, "G2")
+    b2 = _bill("B2", 10, 100, grn_id="G2")
+    db.vendor_bills.insert_one(copy.deepcopy(b2))
+    real = product_cost.basis_pieces
+    fired = []
+
+    def stale(*a, **k):
+        n = real(*a, **k)
+        if not fired:
+            fired.append(1)
+            pi._apply_accepted_bill(db, b2, actor="acc")
+        return n
+
+    monkeypatch.setattr(product_cost, "basis_pieces", stale)
+    _accept(db, _bill("B1", 10, 130, grn_id="G1"))
+    product = db.products.find_one({})
+    assert product["cost_keys"] == ["OLD", "B2", "B1"]
+    assert product["cost_price"] == 110.0
+
+
+def test_a_failed_apply_stays_pending_and_the_sweeper_finishes_it(monkeypatch):
+    db = _db(100.0)
+    _pieces(db, 10)
+    _receipt(db, "G", 10)
+    _pieces(db, 10, "G")
+    bill = _bill("B", 10, 120, grn_id="G", created_at=(utc_now() - timedelta(minutes=10)).isoformat())
+    real = product_cost.basis_pieces
+    blips = []
+
+    def flaky(*a, **k):
+        if not blips:
+            blips.append(1)
+            raise RuntimeError("database blip")
+        return real(*a, **k)
+
+    monkeypatch.setattr(product_cost, "basis_pieces", flaky)
+    _accept(db, bill)
+    assert (_avg(db), db.vendor_bills.find_one({})["cost_state"]) == (100.0, product_cost.PENDING)
+    assert pi.finish_accepted_bills(db) == 1
+    assert (_avg(db), db.vendor_bills.find_one({})["cost_state"]) == (110.0, product_cost.APPLIED)
+
+
+def test_legacy_receipt_pieces_blend_with_the_first_s4_bill():
+    """10 pieces of a receipt accepted before S4 (never billed) carry the
+    average 1000; a new receipt's bill, 5 at 1100, blends with them:
+    (10 x 1000 + 5 x 1100) / 15 = 1033.33 -- not 1100."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(1000.0)
+    _receipt(db, "OLD", 10)
+    _pieces(db, 10, "OLD")
+    assert bf.legacy_receipts(db) == ["OLD"]
+    bf.apply(db, bf.plan(db), "RUN1")
+    _receipt(db, "NEW", 5)
+    _pieces(db, 5, "NEW")
+    _accept(db, _bill("B", 5, 1100, grn_id="NEW", created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == 1033.33
+    # A receipt accepted after the first S4 bill is never taken for a legacy one.
+    _receipt(db, "LATER", 1, accepted_at="2026-11-02T00:00:00+00:00")
+    assert bf.legacy_receipts(db) == []
+    bf.revert(db, "RUN1")
+    assert not db.grns.find_one({"grn_id": "OLD"}).get(product_cost.PRE_S4_STAMP)
+
+
+def test_the_backfill_carries_an_old_average_into_the_history_and_reverts_it():
+    from scripts import backfill_average_cost as bf
+
+    db = _db(3340.0, cost_source="GRN_PO")
+    _pieces(db, 2)
+    assert bf.apply(db, bf.plan(db), "RUN2") == 1
+    product = db.products.find_one({})
+    (row,) = product["cost_history"]
+    assert (row["kind"], row["old_cost"], row["new_cost"], row["source"]) == ("CARRIED_OVER", None, 3340.0, "GRN_PO")
+    assert product["cost_price"] == 3340.0
+    assert bf.apply(db, bf.plan(db), "RUN3") == 0  # nothing left to carry over
+    assert bf.revert(db, "RUN2") == 1
+    product = db.products.find_one({})
+    assert (product["cost_price"], product["cost_history"], product["cost_keys"]) == (3340.0, [], [])
+
+
+def test_the_backfill_revert_finds_a_product_written_just_before_a_crash():
+    from scripts import backfill_average_cost as bf
+
+    db = _db(None)
+    _pieces(db, 2)
+    db.stock_units.update_many({}, {"$set": {"unit_cost": 500.0}})
+    rows = bf.plan(db)
+    bf._backup(db, "RUN4", "P")  # the backup landed, the seed wrote, then the process died
+    product_cost.seed(db, "P", rows[0]["fill"], key="backfill:RUN4", kind="BACKFILL", actor="script")
+    assert _avg(db) == 500.0
+    assert bf.revert(db, "RUN4") == 1
+    assert _avg(db) is None
+
+
+def test_the_dry_run_flags_an_average_from_a_held_or_challan_bill():
+    from scripts import backfill_average_cost as bf
+
+    db = _db(120.0, cost_source_id="HB")
+    _pieces(db, 1)
+    db.vendor_bills.insert_one({"bill_id": "HB", "bill_number": "INV-9", "match_status": "ON_HOLD_EXCEPTION"})
+    assert "still on hold" in bf.plan(db)[0]["check"]
+    db.vendor_bills.update_one({"bill_id": "HB"}, {"$set": {"match_status": "MATCHED", "linked_dc_ids": ["DC1"]}})
+    assert "delivery-challan" in bf.plan(db)[0]["check"]
+    assert _avg(db) == 120.0  # flagged, never changed

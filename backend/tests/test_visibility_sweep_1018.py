@@ -166,10 +166,37 @@ def test_catalog_manager_cannot_set_cost_on_any_door(client, shop, method, path,
 
 
 @pytest.mark.parametrize("role", ("ADMIN", "SUPERADMIN"))
-def test_accounts_still_set_cost(client, shop, role):
+def test_accounts_still_set_a_first_cost(client, shop, role):
+    """A product with no cost yet takes its first one from the editor."""
+    shop.products.update_one({"product_id": "P1"}, {"$set": {"cost_price": None}})
     r = client.put("/api/v1/products/P1", json={"cost_price": 1234.0}, headers=_headers(role))
     assert r.status_code == 200, r.text[:300]
     assert shop.products.find_one({"product_id": "P1"})["cost_price"] == 1234.0
+
+
+# S4 review: once a product has an average, the editor doors refuse a
+# different cost (409 pointing to the correction box, which asks a reason and
+# writes the cost history); the same figure sent back unchanged passes.
+_EDITOR_COST_DOORS = [
+    ("/api/v1/products/P1", lambda c: {"cost_price": c}),
+    ("/api/v1/catalog/products/P1", lambda c: {"pricing": {"cost_price": c}}),
+]
+
+
+@pytest.mark.parametrize("path,body", _EDITOR_COST_DOORS)
+@pytest.mark.parametrize("role", ("ADMIN", "SUPERADMIN"))
+def test_the_editor_doors_never_change_an_average(client, shop, path, body, role):
+    from api.services.product_cost import EDITOR_COST_REFUSED
+
+    shop.catalog_products.insert_one({"id": "P1", "name": "Aviator", "category": "FR",
+                                      "pricing": {"mrp": 9999.0, "cost_price": COST}})
+    r = client.put(path, json=body(1234.0), headers=_headers(role))
+    assert r.status_code == 409, (path, r.status_code, r.text[:300])
+    assert r.json()["detail"] == EDITOR_COST_REFUSED
+    assert shop.products.find_one({"product_id": "P1"})["cost_price"] == COST
+    assert not shop.products.find_one({"product_id": "P1"}).get("cost_history")
+    r = client.put(path, json=body(COST), headers=_headers(role))
+    assert r.status_code != 409, (path, r.status_code, r.text[:300])
 
 
 # ---------------------------------------------------------------------------
