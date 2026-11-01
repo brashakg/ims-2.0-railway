@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from datetime import date, timedelta
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -55,6 +55,13 @@ from api.routers.auth import hash_password  # noqa: E402
 from api.routers import hr as hr_router  # noqa: E402
 from api.services import approvals as appr  # noqa: E402
 from api.services.approvals import ApprovalEngine  # noqa: E402
+from tests.ist_business_day import business_now  # noqa: E402
+
+
+def _ist_today():
+    # hr._is_fast_path_leave measures notice from ist_today(); the test must
+    # count from the same IST day or 00:00-05:30 IST shifts the notice by one.
+    return business_now().date()
 
 
 # ============================================================================
@@ -322,8 +329,8 @@ class _Leave:
 
     def __init__(self, leave_type, from_days_ahead, to_days_ahead=None, reason="x"):
         self.leave_type = leave_type
-        self.from_date = date.today() + timedelta(days=from_days_ahead)
-        self.to_date = date.today() + timedelta(
+        self.from_date = _ist_today() + timedelta(days=from_days_ahead)
+        self.to_date = _ist_today() + timedelta(
             days=to_days_ahead if to_days_ahead is not None else from_days_ahead
         )
         self.reason = reason
@@ -638,12 +645,12 @@ def test_cross_store_manager_cannot_approve(wired):
 
 def test_fast_path_type_and_notice_both_required(wired):
     # No DB dependency in the helper; just the policy default of 2 days.
-    assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=1), "S1") is True
-    assert hr_router._is_fast_path_leave("SICK", date.today(), "S1") is True
+    assert hr_router._is_fast_path_leave("CASUAL", _ist_today() + timedelta(days=1), "S1") is True
+    assert hr_router._is_fast_path_leave("SICK", _ist_today(), "S1") is True
     # EARNED with 1-day notice -> not a fast-path TYPE.
-    assert hr_router._is_fast_path_leave("EARNED", date.today() + timedelta(days=1), "S1") is False
+    assert hr_router._is_fast_path_leave("EARNED", _ist_today() + timedelta(days=1), "S1") is False
     # CASUAL with 5-day notice -> enough NOTICE, not fast-path.
-    assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=5), "S1") is False
+    assert hr_router._is_fast_path_leave("CASUAL", _ist_today() + timedelta(days=5), "S1") is False
 
 
 def test_fast_path_threshold_reads_e2_get_policy(monkeypatch):
@@ -658,7 +665,7 @@ def test_fast_path_threshold_reads_e2_get_policy(monkeypatch):
 
     monkeypatch.setattr(pe, "get_policy", fake_get_policy)
     # CASUAL with 5-day notice is now fast-path under a 7-day threshold.
-    assert hr_router._is_fast_path_leave("CASUAL", date.today() + timedelta(days=5), "S1") is True
+    assert hr_router._is_fast_path_leave("CASUAL", _ist_today() + timedelta(days=5), "S1") is True
 
 
 # ============================================================================
