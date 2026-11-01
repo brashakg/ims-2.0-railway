@@ -1416,7 +1416,7 @@ async def set_password(
         raise HTTPException(status_code=404, detail="User not found")
 
     keep_sid = current_user.get("sid") if current_user.get("user_id") == user_id else None
-    repo.update(
+    saved = repo.update(
         user_id,
         {
             "password_hash": new_hash,
@@ -1427,8 +1427,10 @@ async def set_password(
             "token_version_kept_sid": keep_sid,
         },
     )
-    # ponytail: a refresh landing between the write above and this revoke can
-    # still mint one access token (<= 45 min); close with a version on the chain.
+    if not saved:  # BaseRepository.update swallows DB errors -> False
+        raise HTTPException(status_code=500, detail="Password was not saved. Try again.")
+    # A refresh racing this set is refused by /auth/refresh itself: every
+    # refresh doc carries the token_version it was minted at (auth.refresh_token).
     from ..services.refresh_tokens import refresh_token_store
 
     try:

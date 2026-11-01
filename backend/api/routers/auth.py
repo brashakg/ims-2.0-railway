@@ -1142,6 +1142,7 @@ async def login(request: LoginRequest, req: Request = None):
             user_id=token_data["user_id"],
             username=token_data["username"],
             session_start=session_start,
+            tv=token_data["tv"],
         )
         if issued is not None:
             refresh_token_value, rt_doc = issued
@@ -1494,6 +1495,18 @@ async def refresh_token(request: RefreshTokenRequest):
             )
             raise HTTPException(status_code=403, detail="Account is disabled")
 
+        # Minted before a password set -> dead, whatever order the set's writes
+        # and this rotation interleaved in (the doc carries its mint version).
+        if token_superseded(
+            {"tv": rt_doc.get("tv"), "sid": rt_doc.get("family_id")}, db_user
+        ):
+            refresh_token_store.revoke_family(
+                rt_doc.get("family_id"), reason="password_set"
+            )
+            raise HTTPException(
+                status_code=401, detail="Your password was changed. Please log in again."
+            )
+
         base = dict(claims or {})
         base["user_id"] = rt_doc.get("user_id")
         base["username"] = rt_doc.get("username")
@@ -1514,6 +1527,7 @@ async def refresh_token(request: RefreshTokenRequest):
             session_start=session_start_dt,
             family_id=rt_doc.get("family_id"),
             rotated_from=rt_doc.get("token_hash"),
+            tv=token_data["tv"],
         )
         if reissued is None:
             raise HTTPException(
@@ -1569,6 +1583,7 @@ async def refresh_token(request: RefreshTokenRequest):
                 if sess_start is not None
                 else None
             ),
+            tv=token_data["tv"],
         )
         if issued is not None:
             new_refresh, rt_doc = issued

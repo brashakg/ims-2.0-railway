@@ -127,12 +127,15 @@ class RefreshTokenStore:
         session_start: Optional[datetime] = None,
         family_id: Optional[str] = None,
         rotated_from: Optional[str] = None,
+        tv: int = 0,
     ) -> Optional[Tuple[str, dict]]:
         """Mint + persist a new refresh token.
 
         Returns (plaintext_token, doc) -- the plaintext exists ONLY in the
         return value; the doc stores its sha256. Returns None when the absolute
         session cap has already passed (session exhausted -> caller 401s).
+        ``tv`` is the user's token_version at mint time: a password set bumps
+        it, and /auth/refresh refuses a doc stamped below the live version.
         """
         now = _utcnow()
         start = session_start or now
@@ -150,6 +153,7 @@ class RefreshTokenStore:
             "expires_at": expires_at,
             "absolute_session_start": start,
             "rotated_from": rotated_from,
+            "tv": int(tv or 0),
             "revoked": False,
             "revoked_at": None,
             "revoked_reason": None,
@@ -270,7 +274,9 @@ class RefreshTokenStore:
         NOT fail-soft: a password set that cannot sign the user out must say so."""
         now = _utcnow()
         update = {"revoked": True, "revoked_at": now, "revoked_reason": reason}
-        flt = {"user_id": user_id, "revoked": False}
+        # Already-revoked docs too: a token rotated inside the grace window
+        # would otherwise keep reason 'rotated' and be re-presentable.
+        flt = {"user_id": user_id}
         if keep_family_id:
             flt["family_id"] = {"$ne": keep_family_id}
         coll = self._coll()
@@ -280,7 +286,6 @@ class RefreshTokenStore:
             for doc in self._mem.values():
                 if (
                     doc.get("user_id") == user_id
-                    and not doc.get("revoked")
                     and doc.get("family_id") != keep_family_id
                 ):
                     doc.update(update)
