@@ -63,6 +63,7 @@ def world(monkeypatch):
         _user("su-2", "boss2", ["SUPERADMIN"], SUPER_PW),
         _user("ad-1", "admin1", ["ADMIN"], SUPER_PW),
         _user("st-1", "staff1", ["SALES_STAFF"], STAFF_PW, must_change_password=True),
+        _user("sm-1", "manager1", ["STORE_MANAGER"], SUPER_PW),
     ])
 
     def _update(uid, data):
@@ -152,6 +153,41 @@ def test_non_superadmin_is_refused(client, world, actor, pw):
     before = world.coll.find_one({"user_id": "st-1"})["password_hash"]
     r = _set(client, headers, "st-1")
     assert r.status_code == 403, r.text
+    assert world.coll.find_one({"user_id": "st-1"})["password_hash"] == before
+
+
+@pytest.mark.parametrize("actor", ["manager1", "admin1"])
+@pytest.mark.parametrize("grant", ["users:write", "users:set-password"])
+def test_a_per_user_grant_never_reaches_set_password(client, world, actor, grant):
+    # users:write is grantable (ADMIN's temporary reset rides it); set-password
+    # has its own UNGRANTABLE key, so the RBAC middleware itself refuses --
+    # the "Forbidden:" detail is the middleware's, not the route's own check.
+    world.coll.update_one(
+        {"username": actor}, {"$set": {"permissions": {"grant": {grant: True}}}}
+    )
+    headers, _ = _session(client, actor, SUPER_PW)
+    before = world.coll.find_one({"user_id": "st-1"})["password_hash"]
+    r = _set(client, headers, "st-1")
+    assert r.status_code == 403, r.text
+    assert r.json()["detail"].startswith("Forbidden:"), r.text
+    assert world.coll.find_one({"user_id": "st-1"})["password_hash"] == before
+
+
+@pytest.mark.parametrize("roles", [["ADMIN"], ["STORE_MANAGER"], []])
+def test_the_route_refuses_a_non_superadmin_on_its_own(world, roles):
+    # Second layer: called past the middleware, the route still refuses.
+    import asyncio
+
+    from fastapi import HTTPException
+
+    before = world.coll.find_one({"user_id": "st-1"})["password_hash"]
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(users_module.set_password(
+            "st-1",
+            users_module.SetPasswordBody(new_password=NEW_PW),
+            current_user={"user_id": "ad-1", "roles": roles},
+        ))
+    assert exc.value.status_code == 403
     assert world.coll.find_one({"user_id": "st-1"})["password_hash"] == before
 
 
