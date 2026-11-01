@@ -103,7 +103,7 @@ def _product_ids_by_sku(db, skus: List[str]) -> Dict[str, Any]:
     return out
 
 
-def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = None) -> int:
+def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = None) -> Optional[int]:
     """Recompute + persist a collection's membership into `collection_products`.
 
     Replaces ALL prior rows for the collection with one row per member SKU:
@@ -111,8 +111,9 @@ def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = N
     `product_id` is denormalised from the `products` spine (batched, fail-soft
     -> None when the sku has no spine doc). Also writes back `products_count`
     (LISTINGS -- the website's number, the menu's) + `materialized_at` onto
-    the collection doc (best-effort). Returns the listing count. Fail-soft
-    -> 0."""
+    the collection doc (best-effort). Returns the listing count. Fail-soft:
+    unreadable listings or a failed write -> None (the last view stands;
+    never reported as "0 products")."""
     if db is None or not isinstance(collection, dict):
         return 0
     collection_id = collection.get("collection_id") or collection.get("id")
@@ -123,12 +124,12 @@ def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = N
         members = _member_rows(db, collection, facts)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[COLL-MAT] resolve failed for %s: %s", collection_id, exc)
-        return 0
+        return None
 
     try:
         view = db[_VIEW]
     except Exception:  # noqa: BLE001
-        return 0
+        return None
 
     computed_at = _now()
     try:
@@ -153,7 +154,7 @@ def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = N
             view.insert_many(rows)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[COLL-MAT] persist failed for %s: %s", collection_id, exc)
-        return 0
+        return None
 
     # Best-effort: stamp the count back on the collection so list views can show
     # it without re-counting the view. Never fatal.
@@ -168,7 +169,7 @@ def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = N
     return listings
 
 
-def materialize_all(db, only_smart: bool = False, facts: Optional[List[Dict]] = None) -> Dict[str, int]:
+def materialize_all(db, only_smart: bool = False, facts: Optional[List[Dict]] = None) -> Dict[str, Optional[int]]:
     """Recompute every LIVE website collection (or only SMART ones). Returns
     {collection_id: member_count}. A temporary Quick Share set (a hand-picked
     list -- its count is its own length) and a retired collection are never
@@ -186,7 +187,7 @@ def materialize_all(db, only_smart: bool = False, facts: Optional[List[Dict]] = 
     ]
     if facts is None:
         facts = collection_membership.online_facts(db, strict=True)  # read ONCE for every collection
-    out: Dict[str, int] = {}
+    out: Dict[str, Optional[int]] = {}
     for coll in collections:
         if not isinstance(coll, dict):
             continue
@@ -197,9 +198,9 @@ def materialize_all(db, only_smart: bool = False, facts: Optional[List[Dict]] = 
     return out
 
 
-def refresh_collection(db, collection_id: str) -> int:
+def refresh_collection(db, collection_id: str) -> Optional[int]:
     """Recompute ONE collection by id (after its rules / membership change).
-    Fail-soft -> 0."""
+    Fail-soft -> 0 (no such collection) / None (could not recompute)."""
     if db is None or not collection_id:
         return 0
     try:
@@ -277,7 +278,8 @@ def browse(db, collection: Dict, skip: int = 0, limit: int = 24) -> Dict[str, An
             # Lazy FIRST materialise so a freshly-created collection browses
             # without an explicit refresh call (one already materialised and
             # empty stays empty until the next sync -- never a rescan per view).
-            materialize_collection(db, collection)
+            if materialize_collection(db, collection) is None:
+                return {**empty, "total": None, "unreadable": True}
             total = view.count_documents(leads)
         rows = list(
             view.find(leads)

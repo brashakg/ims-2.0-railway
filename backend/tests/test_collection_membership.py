@@ -191,7 +191,7 @@ def test_writers_read_strictly_and_keep_the_last_view(monkeypatch):
         cm.online_facts(db, strict=True)
     with pytest.raises(RuntimeError):
         mat.materialize_all(db)
-    assert mat.materialize_collection(db, rows[0]) == 0
+    assert mat.materialize_collection(db, rows[0]) is None  # unreadable, never "0 products"
     assert sorted((r["collection_id"], r["sku"]) for r in db["collection_products"].find({})) == before
 
 
@@ -555,4 +555,31 @@ def test_a_block_sweep_over_an_unreadable_catalogue_is_a_503_not_a_partial_sweep
            "rules": [{"field": "brand", "relation": "EQUALS", "value": "Gucci"}]}
     with pytest.raises(HTTPException) as e:
         osc._resolve_block_members(doc)
+    assert e.value.status_code == 503
+
+
+def test_an_unreadable_catalogue_is_never_reported_as_0_products(monkeypatch):
+    """A forced refresh over unreadable listings answers 503 ("the last
+    membership stands"), never {materialized: True, products_count: 0};
+    the lazy first browse says unreadable, never an empty page."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from api.routers import collections_browse as cb
+
+    db = _db()
+    coll = {"collection_id": "c-rb", "handle": "ray-ban", "collection_type": "SMART",
+            "rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_rayban"}]}
+    db["ecom_collections"].insert_one(dict(coll))
+
+    def _down(db, include_ready=False, strict=False):
+        raise RuntimeError("Mongo down")
+
+    monkeypatch.setattr(reg, "listing_facts", _down)
+    page = mat.browse(db, coll)
+    assert page["unreadable"] is True and page["total"] is None, page
+    monkeypatch.setattr(cb, "_get_db", lambda: db)
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(cb.refresh_collection_membership("ray-ban", current_user={"roles": ["ADMIN"]}))
     assert e.value.status_code == 503

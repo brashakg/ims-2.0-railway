@@ -13,6 +13,7 @@ import { Link } from 'react-router-dom';
 import { Layers, ArrowLeft, RefreshCw, Loader2, Sparkles, ListChecks } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 import {
   collectionBrowseApi,
   type BrowseCollection,
@@ -77,8 +78,7 @@ export default function CollectionBrowsePage() {
       toast.success(`Recomputed membership: ${res.products_count} products`);
       loadPage(active, 0);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Refresh failed';
-      toast.error(msg);
+      toast.error(getErrorMessage(e, 'Refresh failed'));
     } finally {
       setRefreshing(false);
     }
@@ -167,7 +167,9 @@ export default function CollectionBrowsePage() {
             <>
               <div className="flex items-center justify-between mb-3">
                 <p className="text-sm text-gray-500">
-                  {total === 0
+                  {page?.unreadable
+                    ? 'The products in this collection could not be read just now - the last membership stands. Try again shortly.'
+                    : total === 0
                     ? 'No products in this collection.'
                     : `Showing ${skip + 1}–${showingTo} of ${total}`}
                 </p>
