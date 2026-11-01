@@ -15,14 +15,22 @@
 //      -> just closes; the form behind is left FULLY intact.
 //
 // There is deliberately NO "create anyway" — the owner ruled duplicates are
-// never creatable. Extracted as its own component (not inline in QuickAddPage)
+// never creatable.
+//
+// "MAYBE" mode (409 NEAR_DUPLICATE, owner 2026-11-01): the same model written
+// differently (RB4340 vs 4340) in the same colour + size. "Is this the same
+// product?" with "Open it" (a NEW TAB -- the typed form and photos stay),
+// "Add a new colour or size of <stored model>" and "It's a different product"
+// (a reason is required; the save is sent again with distinct_from). NO
+// Enter default here: one key press must never decide it. Extracted as its own component (not inline in QuickAddPage)
 // per the components-outside-components rule.
 
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { CopyPlus, ExternalLink, Undo2, ImageOff, AlertTriangle } from 'lucide-react';
 import type { DuplicateProductInfo } from '../../services/api/products';
 import { resolveApiAssetUrl } from '../../services/api/client';
 import { CANONICAL_TO_PICKER, CATEGORIES } from '../../domain/catalog/productAdd/categoryFields';
+import { DifferentProductReason, addedBy, openInNewTab } from './DifferentProductReason';
 
 export interface DuplicateProductModalProps {
   /** The 409 `existing` payload. */
@@ -35,6 +43,12 @@ export interface DuplicateProductModalProps {
   onClose: () => void;
   /** Disables the actions while the variant seed is being fetched. */
   busy?: boolean;
+  /** 409 NEAR_DUPLICATE: the "Is this the same product?" mode. */
+  maybe?: boolean;
+  /** What was typed (the maybe mode's body names it). */
+  typed?: { model?: string; colour?: string; size?: string };
+  /** Maybe mode: "It's a different product" with its reason -> save again. */
+  onDifferent?: (reason: string) => void;
 }
 
 /** Rupee display for the price line; '' when absent. */
@@ -85,8 +99,13 @@ export function DuplicateProductModal({
   onOpenExisting,
   onClose,
   busy = false,
+  maybe = false,
+  typed,
+  onDifferent,
 }: DuplicateProductModalProps) {
   const primaryRef = useRef<HTMLButtonElement | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const [asking, setAsking] = useState(false);
   // Audit C3: a manager's typed-in draft is not "a product to add a variant
   // to" -- it is THE product, waiting to be finished. Lead there.
   const finishDraft = Boolean(info.provisional);
@@ -105,6 +124,8 @@ export function DuplicateProductModal({
         e.preventDefault();
         e.stopPropagation();
         onClose();
+      } else if (maybe) {
+        // No Enter default in the maybe mode (the reason box keeps its keys).
       } else if (e.key === 'Enter' && !busy) {
         e.preventDefault();
         e.stopPropagation();
@@ -113,12 +134,13 @@ export function DuplicateProductModal({
     };
     window.addEventListener('keydown', onKeyDown, true);
     return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [onPrimary, onClose, busy]);
+  }, [onPrimary, onClose, busy, maybe]);
 
-  // Land focus on the primary action so Enter/Tab flow starts there.
+  // Land focus on the primary action so Enter/Tab flow starts there -- in the
+  // maybe mode on the dialog itself, so Enter presses no button.
   useEffect(() => {
-    primaryRef.current?.focus();
-  }, []);
+    (maybe ? dialogRef.current : primaryRef.current)?.focus();
+  }, [maybe]);
 
   const name =
     info.name || [info.brand, info.model].filter(Boolean).join(' ') || 'this product';
@@ -142,10 +164,12 @@ export function DuplicateProductModal({
       role="presentation"
     >
       <div
+        ref={dialogRef}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
-        aria-label="Product already exists"
-        className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden"
+        aria-label={maybe ? 'Is this the same product?' : 'Product already exists'}
+        className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -154,13 +178,28 @@ export function DuplicateProductModal({
             <AlertTriangle className="w-4 h-4" />
           </span>
           <div>
-            <h2 className="text-base font-bold text-gray-900">
-              This product already exists
-            </h2>
-            <p className="text-xs text-gray-500 mt-0.5">
-              Same brand + model + colour{info.size ? ' + size' : ''} as an existing
-              SKU — duplicates can&apos;t be created.
-            </p>
+            {maybe ? (
+              <>
+                <h2 className="text-base font-bold text-gray-900">Is this the same product?</h2>
+                <p className="text-xs text-gray-600 mt-0.5">
+                  {[info.brand, info.model, info.colour_code].filter(Boolean).join(' ')}
+                  {info.size ? ` size ${info.size}` : ''} is already in the catalogue. Saving{' '}
+                  {[typed?.model, typed?.colour].filter(Boolean).join(' ')}
+                  {typed?.size ? ` size ${typed.size}` : ''} would make a second copy, and its stock and
+                  sales would be split between the two.
+                </p>
+              </>
+            ) : (
+              <>
+                <h2 className="text-base font-bold text-gray-900">
+                  This product already exists
+                </h2>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  Same brand + model + colour{info.size ? ' + size' : ''} as an existing
+                  SKU — duplicates can&apos;t be created.
+                </p>
+              </>
+            )}
           </div>
         </div>
 
@@ -189,6 +228,7 @@ export function DuplicateProductModal({
                 {info.size ? <> · Size {info.size}</> : null}
               </p>
               {priceLine && <p className="text-xs text-gray-600 mt-0.5">{priceLine}</p>}
+              {maybe && addedBy(info) && <p className="text-xs text-gray-500 mt-0.5">{addedBy(info)}</p>}
               <p
                 className={
                   note.tone === 'ok'
@@ -202,7 +242,53 @@ export function DuplicateProductModal({
           </div>
 
           {/* Actions */}
-          {discardedOther ? (
+          {maybe ? (
+            asking ? (
+              <DifferentProductReason
+                onCancel={() => setAsking(false)}
+                onSave={(reason) => onDifferent?.(reason)}
+              />
+            ) : (
+              <div className="mt-4 space-y-2">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => openInNewTab(info)}
+                  className="btn-secondary w-full flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                  Open it
+                </button>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={onAddVariant}
+                  className="btn-secondary w-full flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  <CopyPlus className="w-4 h-4" />
+                  {busy ? 'Loading…' : `Add a new colour or size of ${info.model || 'this model'}`}
+                </button>
+                {onDifferent && (
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setAsking(true)}
+                    className="btn-secondary w-full flex items-center justify-center gap-2 disabled:opacity-60"
+                  >
+                    It&apos;s a different product
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg text-sm font-medium text-gray-600 hover:bg-gray-100"
+                >
+                  <Undo2 className="w-4 h-4" />
+                  Go back <kbd className="qa-kbd ml-1">Esc</kbd>
+                </button>
+              </div>
+            )
+          ) : discardedOther ? (
             <div className="mt-4">
               <button
                 ref={primaryRef}

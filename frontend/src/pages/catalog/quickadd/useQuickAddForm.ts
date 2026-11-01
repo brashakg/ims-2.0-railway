@@ -18,6 +18,7 @@ import { COST_ROLES } from '../../../components/common/CostCell';
 import {
   productApi,
   DuplicateProductError,
+  type DistinctAnswer,
   type DuplicateProductInfo,
   type FamilyHint,
   type SimilarProductSummary,
@@ -67,6 +68,7 @@ import { IDENTITY_DEBOUNCE_MS, answerStillHolds, typedAttributes } from '../iden
 import { useSimilarProducts } from '../useSimilarProducts';
 import { existingProductPath, sectionOfError, type EditMode, type SectionId } from './shared';
 import { useProductImages } from './useProductImages';
+import { ApiError } from '../../../services/api/client';
 import { copyableSpecs, softWarnings as buildSoftWarnings } from './formHelpers';
 import { reorderApi } from '../../../services/api/inventory';
 import { REORDER_LEVEL_ROLES } from '../../inventory/inventoryRoles';
@@ -143,6 +145,29 @@ export function useQuickAddForm() {
   // the model-level fields for the next sibling.
   const [dupInfo, setDupInfo] = useState<DuplicateProductInfo | null>(null);
   const [dupBusy, setDupBusy] = useState(false);
+  // 409 NEAR_DUPLICATE (owner 2026-11-01): the popup asks "Is this the same
+  // product?" -- the same model written differently, same colour + size.
+  const [dupMaybe, setDupMaybe] = useState(false);
+  // "It's a different product" answers (reason required), sent with the save
+  // as distinct_from. A ref too, so the save sent right after an answer
+  // carries it.
+  const distinctRef = useRef<DistinctAnswer[]>([]);
+  const [distinctAnswers, setDistinctAnswers] = useState<DistinctAnswer[]>([]);
+  const markDifferent = useCallback((productIds: string[], reason: string) => {
+    const next = [
+      ...distinctRef.current.filter((a) => !productIds.includes(a.product_id)),
+      ...productIds.map((product_id) => ({ product_id, reason })),
+    ];
+    distinctRef.current = next;
+    setDistinctAnswers(next);
+  }, []);
+  const clearDifferent = useCallback(() => {
+    distinctRef.current = [];
+    setDistinctAnswers([]);
+  }, []);
+  const answeredIds = useMemo(() => new Set(distinctAnswers.map((a) => a.product_id)), [distinctAnswers]);
+  // The last Save pressed: "It's a different product" in the popup sends it again.
+  const lastSubmitRef = useRef<{ saveAndNew: boolean; thenNext: boolean }>({ saveAndNew: false, thenNext: false });
   const [variantCtx, setVariantCtx] = useState<{
     sourceProductId: string;
     /** G1: the model's lead -- the save sends it as variant_of. */
@@ -875,6 +900,13 @@ export function useQuickAddForm() {
         }
       };
 
+      lastSubmitRef.current = { saveAndNew, thenNext };
+      // Only this form asks the server about the same model written
+      // differently (CSV import, clone and PO lines never do).
+      const nearCheck = {
+        check_near_duplicates: true,
+        ...(distinctRef.current.length ? { distinct_from: distinctRef.current } : {}),
+      };
       setIsSubmitting(true);
       try {
         if (editMode?.kind === 'spine') {
@@ -904,7 +936,9 @@ export function useQuickAddForm() {
             ...(payload.discount_category
               ? { discount_category: payload.discount_category }
               : {}),
+            ...nearCheck,
           });
+          clearDifferent();
           // Finishing a product releases the units receipts held for it.
           const released = Number((updated as { released_units?: number })?.released_units) || 0;
           // G1: a model-level edit on the model reaches its colours/sizes; any
@@ -941,7 +975,9 @@ export function useQuickAddForm() {
             : optedOutLeadId && familyHint?.lead_id === optedOutLeadId
               ? { family_opt_out: true }
               : {}),
+          ...nearCheck,
         });
+        clearDifferent();
         // A TYPED level is this shop's, written for the new product_id. The
         // SKU is auto-minted by the backend and our internal barcode is assigned
         // at Goods Receipt — neither is entered here.
@@ -1002,7 +1038,16 @@ export function useQuickAddForm() {
         if (err instanceof DuplicateProductError) {
           // Duplicate hard-block (409): open the rescue popup with the
           // existing product. The form state stays FULLY intact behind it.
+          // NEAR_DUPLICATE opens it in the "Is this the same product?" mode.
+          setDupMaybe(err.code === 'NEAR_DUPLICATE');
           setDupInfo(err.existing || {});
+          return;
+        }
+        if (err instanceof ApiError && err.code === 'NEAR_DUPLICATE') {
+          // The edit form's PUT: the same question.
+          const detail = (err.detail || {}) as { existing?: DuplicateProductInfo };
+          setDupMaybe(true);
+          setDupInfo(detail.existing || {});
           return;
         }
         toast.error(
@@ -1018,8 +1063,21 @@ export function useQuickAddForm() {
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
       optedOutLeadId, familyHint, enterVariantMode,
       editMode, editLevels, reorderLevel, reorderBadInput, canSetReorderLevel, reorderShop,
-      focusAttrField, storedAttributes, advanceEdit, editBusy,
+      focusAttrField, storedAttributes, advanceEdit, editBusy, clearDifferent,
     ]
+  );
+
+  // Maybe popup: "It's a different product" -> record the answer (reason
+  // required) and send the same save again.
+  const handleDupDifferent = useCallback(
+    (reason: string) => {
+      const pid = dupInfo?.product_id;
+      if (pid) markDifferent([pid], reason);
+      setDupInfo(null);
+      setDupMaybe(false);
+      void handleSubmit(lastSubmitRef.current.saveAndNew, lastSubmitRef.current.thenNext);
+    },
+    [dupInfo, markDifferent, handleSubmit]
   );
 
   // ==========================================================================
@@ -1825,6 +1883,9 @@ export function useQuickAddForm() {
     cloneSku, setCloneSku, cloning, handleCloneFromSku,
     // duplicate rescue
     dupInfo, setDupInfo, dupBusy, handleDupAddVariant, handleDupOpenExisting,
+    dupMaybe, handleDupDifferent,
+    // same model written differently: "It's a different product" answers
+    markDifferent, answeredIds,
     // similar products
     handleSimilarPick, handleSimilarOpen, handleFamilyFound, setHintBrandInModel,
     // submit

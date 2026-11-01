@@ -1447,6 +1447,12 @@ def compute_identity_key(
     return "|".join(parts)
 
 
+def _iso_or_none(value: Any) -> Optional[str]:
+    if value in (None, ""):
+        return None
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+
 def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
     """The display projection of an EXISTING spine row the FE dup surfaces
     render: the duplicate-rescue popup (409 conflict payload, Phase 1) and the
@@ -1514,6 +1520,10 @@ def existing_product_summary(existing: Dict[str, Any]) -> Dict[str, Any]:
         # it comes back (revive_discarded_draft); the popup says so (R1-64).
         "discarded_draft": revivable_discarded_draft(existing),
         "image_url": main_photo(existing),
+        # Who added it and when ("added by Priya on 12 Sep").
+        "created_by_name": existing.get("created_by_name"),
+        # A string: the 409 detail is plain JSON (a datetime would 500 it).
+        "created_at": _iso_or_none(existing.get("created_at")),
     }
 
 
@@ -1733,12 +1743,196 @@ def model_family_query(category: Any, brand: Any, model: Any) -> Optional[Dict[s
     }
 
 
+# "Same model, written differently" (owner 2026-11-01): RB4345, 4345 and
+# XL OO9417 / OO9417. Only frame and sunglass codes follow the letters-then-
+# number shape; a lens's model slot holds its sub-brand or index ("156").
+_SAME_MODEL_CATEGORIES = ("FRAME", "SUNGLASS")
+_MODEL_SHAPE = re.compile(r"^([a-z]*)(\d[a-z0-9]*)$")
+
+
+def _model_shape(category: str, model_part: str) -> Optional[Tuple[str, str]]:
+    """(letter prefix, digit-led core) of a normalised model, None when it has
+    no digit. A sunglass's trailing S is folded off the core (0840S is 0840)."""
+    hit = _MODEL_SHAPE.match(model_part or "")
+    if not hit:
+        return None
+    prefix, core = hit.groups()
+    if category == "SUNGLASS" and len(core) > 1 and core.endswith("s"):
+        core = core[:-1]
+    return prefix, core
+
+
+def _prefixes_fit(a: str, b: str) -> bool:
+    """Two letter prefixes name one model: equal, one empty (RB4345 / 4345),
+    or the shorter (2+ letters) ends the longer (XLOO / OO, RAYBANRB / RB).
+    RJ / RB, MARC / MJ and SPLL / SPLN stay apart."""
+    if a == b or not a or not b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    return len(short) >= 2 and long_.endswith(short)
+
+
+def similar_model_query(category: Any, brand: Any, model: Any) -> Optional[Dict[str, Any]]:
+    """The filter for every row that may be this model under ANY spelling --
+    same category and brand, any letters before the same digit core (and a
+    sunglass's optional trailing S) -- or None: not a frame or sunglass, no
+    brand, or a model with no digit. A superset: same_model_spelling decides
+    each row. Walks the identity_key index from the literal "brand|"."""
+    canonical = resolve_category(category)
+    if canonical not in _SAME_MODEL_CATEGORIES:
+        return None
+    b = normalise_identity_component(brand)
+    shape = _model_shape(canonical, model_without_brand(brand, model))
+    if not b or shape is None:
+        return None
+    tail = "s?" if canonical == "SUNGLASS" else ""
+    return {
+        "category": canonical,
+        "identity_key": {
+            "$regex": "^" + re.escape(f"{b}|") + "[a-z]*" + re.escape(shape[1]) + tail + r"\|"
+        },
+    }
+
+
+def same_model_spelling(category: Any, brand: Any, model: Any, identity_key: Any) -> bool:
+    """A stored identity_key's model is the typed model, in this or another
+    spelling (similar_model_query's rule, the prefix fit included)."""
+    canonical = resolve_category(category)
+    parts = str(identity_key or "").split("|")
+    if canonical not in _SAME_MODEL_CATEGORIES or len(parts) < 3:
+        return False
+    if parts[0] != normalise_identity_component(brand):
+        return False
+    mine = _model_shape(canonical, model_without_brand(brand, model))
+    theirs = _model_shape(canonical, parts[1])
+    return bool(mine and theirs and mine[1] == theirs[1] and _prefixes_fit(mine[0], theirs[0]))
+
+
+def same_colour_and_size(key_a: Any, key_b: Any) -> bool:
+    """Two identity keys name the same colour and size: a size missing on
+    either side (an older 3-part key) counts as the same."""
+    a, b = str(key_a or "").split("|"), str(key_b or "").split("|")
+    if len(a) < 3 or len(b) < 3 or not a[2] or a[2] != b[2]:
+        return False
+    return len(a) < 4 or len(b) < 4 or a[3] == b[3]
+
+
+def _distinct_ids(doc: Optional[Dict[str, Any]]) -> set:
+    return {
+        str(d.get("product_id"))
+        for d in (doc or {}).get("distinct_from") or []
+        if isinstance(d, dict) and d.get("product_id")
+    }
+
+
+def marked_distinct(a: Optional[Dict[str, Any]], b: Optional[Dict[str, Any]]) -> bool:
+    """Someone said "It's a different product" about this pair, either way."""
+    a, b = a or {}, b or {}
+    ids_a = {str(x) for x in (a.get("product_id"), a.get("id")) if x}
+    ids_b = {str(x) for x in (b.get("product_id"), b.get("id")) if x}
+    return bool(_distinct_ids(a) & ids_b or _distinct_ids(b) & ids_a)
+
+
+def _live_row(doc: Dict[str, Any]) -> bool:
+    """In the catalogue: not archived, not a discarded draft."""
+    return not _is_archived(doc) and not revivable_discarded_draft(doc)
+
+
+# ponytail: one brand's rows of one digit core (every colour of every
+# spelling) -- tens on prod; raise if a model ever carries hundreds.
+_SAME_MODEL_SCAN = 200
+
+
+def similar_model_rows(
+    products_collection, category: Any, brand: Any, model: Any, *, me: Optional[Dict[str, Any]] = None
+) -> List[Dict[str, Any]]:
+    """Live rows of this model typed DIFFERENTLY (another spelling), never a
+    row `me` (the product being saved) was marked different from, either way.
+    [] when the rule does not apply."""
+    query = similar_model_query(category, brand, model)
+    if query is None or products_collection is None:
+        return []
+    m = model_without_brand(brand, model)
+    me = me or {}
+    out = []
+    for d in products_collection.find(query).limit(_SAME_MODEL_SCAN):
+        key = str(d.get("identity_key") or "")
+        if (
+            key.split("|")[1:2] != [m]
+            and same_model_spelling(category, brand, model, key)
+            and _live_row(d)
+            and not (me.get("product_id") and d.get("product_id") == me.get("product_id"))
+            and not marked_distinct(me, d)
+        ):
+            out.append(d)
+    return out
+
+
+def near_duplicate_conflict(products_collection, spine: Dict[str, Any], *, me: Optional[Dict[str, Any]] = None):
+    """THE Add Product save check (check_near_duplicates): a live product of
+    this model under another spelling in the same colour and size, which the
+    save has not answered -> the 409 NEAR_DUPLICATE naming it; else None. An
+    exact twin is the create door's own 409, so it is left to the door.
+    Fail-soft: an unread catalogue lets the save go on (the warning is soft)."""
+    try:
+        category = spine.get("category")
+        brand, model, _, _ = identity_parts(spine.get("attributes") or {}, category)
+        key = spine.get("identity_key")
+        if not key:
+            return None
+        for row in similar_model_rows(products_collection, category, brand, model, me=me or spine):
+            if same_colour_and_size(key, row.get("identity_key")):
+                summary = existing_product_summary(row)
+                err = ProductMasterError(
+                    f"{' '.join(str(v) for v in (summary.get('brand'), summary.get('model')) if v)} "
+                    "in this colour and size is already in the catalogue. Is this the same product?",
+                    status=409,
+                    field="model_no",
+                )
+                err.code = "NEAR_DUPLICATE"
+                err.conflict = summary
+                return err
+    except Exception as exc:  # noqa: BLE001 - a soft check never blocks a save
+        logger.warning("[PM] near-duplicate check failed: %s", exc)
+    return None
+
+
+def stamp_distinct_from(
+    answers: Any, product_repo, *, actor: Any, actor_name: Any, stored: Any = None
+) -> List[Dict[str, Any]]:
+    """The "It's a different product" answers as stored: each named product
+    must exist and carry a reason; WHO and WHEN are the server's, never the
+    browser's. A product answered again replaces its earlier answer."""
+    out = [d for d in (stored or []) if isinstance(d, dict)]
+    for a in answers or []:
+        a = a if isinstance(a, dict) else dict(a)
+        pid = str(a.get("product_id") or "").strip()
+        reason = " ".join(str(a.get("reason") or "").split())
+        if not pid or not reason:
+            raise ProductMasterError(
+                "Say why it is a different product.", status=422, field="distinct_from"
+            )
+        other = product_repo.find_by_id(pid) if product_repo is not None else None
+        if other is None:
+            raise ProductMasterError(
+                "The product it was marked different from was not found.",
+                status=422,
+                field="distinct_from",
+            )
+        out = [d for d in out if d.get("product_id") != pid] + [
+            {"product_id": pid, "sku": other.get("sku"), "reason": reason[:300],
+             "by": actor, "by_name": actor_name, "at": utc_now_iso()}
+        ]
+    return out
+
+
 def find_similar_products(
     products_collection,
     *,
     category: Any,
     attributes: Optional[Dict[str, Any]] = None,
     limit: int = SIMILAR_SIBLINGS_CAP,
+    self_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Live as-you-type "similar products" lookup for the Add-Product form
     (dup-detect council ruling, Phase 2).
@@ -1783,6 +1977,7 @@ def find_similar_products(
         "exact_match": None,
         "eye_size_needed": [],
         "siblings": [],
+        "similar_models": [],
         "model_colour_count": 0,
     }
     # The form's "brand in the model number" hint: the key's own fold, read
@@ -1822,17 +2017,38 @@ def find_similar_products(
         code = getattr(answer, "code", None)
         exact = answer.conflict if code == "DUPLICATE_PRODUCT" else None
 
+        # ONE read for the model's own rows (the colour chips) and its other
+        # spellings (similar_models): the wider query when the rule applies.
+        wide_query = similar_model_query(canonical, brand, model)
         docs = list(
-            products_collection.find(sibling_query)
+            products_collection.find(wide_query or sibling_query)
             .sort("identity_key", 1)
-            .limit(int(limit) + 1)
+            .limit(_SAME_MODEL_SCAN if wide_query else int(limit) + 1)
         )
+        m = model_without_brand(brand, model)
+        own = [d for d in docs if str(d.get("identity_key") or "").split("|")[1:2] == [m]]
         exact_ident = (exact or {}).get("identity_key")
         siblings = [
             existing_product_summary(d)
-            for d in docs
+            for d in own
             if not (exact_ident and d.get("identity_key") == exact_ident)
         ][: int(limit)]
+        me = products_collection.find_one({"product_id": self_id}) if self_id else None
+        me = me or ({"product_id": self_id} if self_id else None)
+        typed_key = compute_identity_key(brand, model, colour, size)
+        similar_models = _similar_model_groups(
+            [
+                d
+                for d in docs
+                if d not in own
+                and same_model_spelling(canonical, brand, model, d.get("identity_key"))
+                and _live_row(d)
+                and not (self_id and d.get("product_id") == self_id)
+                and not marked_distinct(me, d)
+            ],
+            typed_key,
+            int(limit),
+        )
 
         # Distinct colours across ALL of the model's rows (uncapped): the
         # colour is segment 3 of the identity_key, already normalised.
@@ -1860,6 +2076,9 @@ def find_similar_products(
             # Typed without the eye size it is catalogued by: Save asks for it.
             "eye_size_needed": list(answer.sizes) if code == "EYE_SIZE_NEEDED" else [],
             "siblings": siblings,
+            # The same model typed differently (RB4340 / 4340): groups by
+            # stored spelling, a same colour + size twin first (red).
+            "similar_models": similar_models,
             "model_colour_count": model_colour_count,
             # G1: the model this item will join (Add Product's banner).
             "family": _family_hint(products_collection, canonical, attributes or {}),
@@ -1870,6 +2089,41 @@ def find_similar_products(
     except Exception as exc:  # noqa: BLE001 - fail-soft: hint only, never a 5xx
         logger.warning("[PM] find_similar_products failed: %s", exc)
         return empty
+
+
+def _similar_model_groups(rows: List[Dict[str, Any]], typed_key: Any, cap: int) -> List[Dict[str, Any]]:
+    """similar_models: up to 3 groups, one per stored spelling, each flagged
+    same_colour_size when a row is this colour and size (red); a red group
+    and its twin rows first, `cap` summaries in all."""
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for d in rows:
+        groups.setdefault(str(d.get("identity_key")).split("|")[1], []).append(d)
+    out = []
+    for members in groups.values():
+        members.sort(key=lambda d: not same_colour_and_size(typed_key, d.get("identity_key")))
+        out.append(
+            {
+                "same_colour_size": same_colour_and_size(typed_key, members[0].get("identity_key")),
+                "members": members,
+            }
+        )
+    out.sort(key=lambda g: not g["same_colour_size"])
+    left = int(cap)
+    groups_out = []
+    for g in out[:3]:
+        products = [existing_product_summary(d) for d in g["members"][: max(left, 0)]]
+        if not products:
+            break
+        left -= len(products)
+        groups_out.append(
+            {
+                "model": products[0].get("model"),
+                "brand": products[0].get("brand"),
+                "same_colour_size": g["same_colour_size"],
+                "products": products,
+            }
+        )
+    return groups_out
 
 
 def _family_hint(products_collection, category: str, attributes: Dict[str, Any]) -> Optional[Dict[str, Any]]:
