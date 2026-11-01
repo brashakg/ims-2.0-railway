@@ -1653,3 +1653,63 @@ def test_a_filed_kept_write_off_gives_the_excess_back_and_its_undo_nets_it(world
     assert writeoff_itc.month_reclaim(world, GSTIN_Y_JH, nxt)["cgst"] == 50.0
     done, heads = writeoff_itc._recorded(world, {"bill_id": invoice["bill_id"]}, "pieces")
     assert (done, heads["cgst"]) == (0.0, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# Review round 7: an undo holds the line at the pieces still lost, both sides
+# ---------------------------------------------------------------------------
+
+
+def _three_cost_box(world):
+    """Three pieces 3000/1000/2000 (invoice 150/150); SU-2 and SU-3 land
+    damaged and are written off (50/50 each), then SU-1 -- missing -- is
+    written off: its credit note (75/75) leaves 75/75 on the two kept pieces,
+    given back unevenly (SU-2 25, SU-3 50)."""
+    from api.routers import transfers
+
+    for sid, cost in (("SU-1", 3000.0), ("SU-2", 1000.0), ("SU-3", 2000.0)):
+        world["stock_units"].update_one({"stock_id": sid}, {"$set": {"unit_cost": cost}})
+    t = _shipped_box(world)
+    _scan_in(t["id"], "BVQX002", user=MGR_BOK, damaged=True, reason="Cracked rim")
+    _scan_in(t["id"], "BVQX003", user=MGR_BOK, damaged=True, reason="Cracked rim")
+    _complete(t["id"], user=MGR_BOK)
+    (invoice,) = [b for b in _bills(world, t["id"]) if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
+    assert invoice["cgst_total"] == 150.0
+    _write_off(world, "SU-2")
+    _write_off(world, "SU-3")
+    _run(transfers.write_off_missing_piece(t["id"], "SU-1", ADMIN))
+    assert _on_invoice(world, invoice) == (75.0, 75.0, 0.0)
+    return invoice
+
+
+@pytest.mark.parametrize("back", ["SU-2", "SU-3"])
+def test_one_of_two_kept_pieces_back_after_the_note_holds_the_other_at_its_slice(world, back):
+    """Either piece back, the other still reverses 37.5/37.5 -- half of what
+    Bokaro kept -- never the 25/25 the uneven give-back left on SU-2. Written
+    off again, the line is back at 75/75."""
+    from api.services import writeoff_itc
+
+    invoice = _three_cost_box(world)
+    writeoff_itc.undo_writeoff(world, _unit(world, back))
+    assert _on_invoice(world, invoice) == (37.5, 37.5, 0.0)
+    _write_off(world, back)
+    assert _on_invoice(world, invoice) == (75.0, 75.0, 0.0)
+
+
+def test_a_kept_piece_back_into_a_filed_month_tops_up_in_the_open_month(world, monkeypatch):
+    """The write-offs' month is filed when SU-3 comes back: the filed return
+    stands (75/75), SU-3's 50/50 is re-claimed and the 12.5/12.5 SU-2 is short
+    is topped up, both in the first open month -- 37.5/37.5 held in all."""
+    from api.services import writeoff_itc
+
+    invoice = _three_cost_box(world)
+    filed = world["itc_writeoff_reversals"].find_one({"_id": "SU-2"})["period"]
+    monkeypatch.setattr(writeoff_itc, "_locked", lambda db, period: period == filed)
+    writeoff_itc.undo_writeoff(world, _unit(world, "SU-3"))
+    nxt = writeoff_itc._next_month(filed)
+    assert world["itc_writeoff_reversals"].find_one({"_id": "SU-2"})["cgst"] == 25.0
+    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, filed)["cgst"] == 75.0
+    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, nxt)["cgst"] == 12.5
+    assert writeoff_itc.month_reclaim(world, GSTIN_Y_JH, nxt)["cgst"] == 50.0
+    _done, heads = writeoff_itc._recorded(world, {"bill_id": invoice["bill_id"]}, "pieces")
+    assert heads["cgst"] == 37.5

@@ -43,7 +43,8 @@ ONE rule for every write-off door:
     the line net of the note (_true_up_note).
   - undo_writeoff(db, unit): a written-off piece back in play (re-quarantined,
     restocked) drops its reversal -- deleted while its month is open, else a
-    re-claim row in the first open month.
+    re-claim row in the first open month -- and the line's rows are held to
+    the pieces still lost (_trim_top_up: give-back or top-up).
 
 ponytail: k is read from the rows already recorded, so two write-offs of the
 same line at the same instant could share one k (a paisa off); an atomic
@@ -686,9 +687,17 @@ def undo_writeoff(db, unit: dict) -> None:
 
 
 def _trim_top_up(db, unit: dict, row: dict) -> None:
+    """Hold the line at the lost pieces' slice on BOTH sides after an undo:
+    the excess given back, and -- the rows left were cut unevenly (a credit
+    note's give-back) -- the shortfall a top-up on the undone row's bill in
+    the open month (a filed month is never edited)."""
     if "share" not in row:  # a header-only bill's rows take no top-up
         gstin_of = _gstin_lookup(db)
-        _true_up(db, _bills_for(db, unit, gstin_of), row.get("product_id"), gstin_of)
+        bills, pid = _bills_for(db, unit, gstin_of), row.get("product_id")
+        _true_up(db, bills, pid, gstin_of)
+        bill = next((b for b in bills if b.get("bill_id") == row.get("bill_id")), None)
+        if bill:
+            _true_up(db, bills, pid, gstin_of, bill, _now(), source=("UNDO", _sid(unit)))
 
 
 def forget(db, unit: dict) -> None:
