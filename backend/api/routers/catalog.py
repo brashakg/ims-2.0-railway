@@ -2036,6 +2036,13 @@ async def list_catalog_products(
     current_user: dict = Depends(get_current_user),
 ):
     """List all products in catalog"""
+
+    def _ticked(raw):
+        try:
+            return _catalog_list.choices(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     products = _all_catalog_products()
     # Direct-call safety (unit suites call this handler as a plain function):
     # an unsupplied `photo` arrives as its Query default object, not None.
@@ -2066,15 +2073,17 @@ async def list_catalog_products(
         # and the shared browse vocabulary sends canonical values. Fail-open to
         # a raw match when either side is unresolvable -- this can only ADD
         # matches for legacy callers sending short codes.
-        want = _pm.resolve_category(category) or category
+        # Tick-box multi-select (owner 2026-11-01): 'a,b' = a OR b.
+        want = {_pm.resolve_category(c) or c for c in _ticked(category)}
         products = [
             p
             for p in products
-            if (_pm.resolve_category(p.get("category")) or p.get("category")) == want
+            if (_pm.resolve_category(p.get("category")) or p.get("category")) in want
         ]
     if brand:
+        brands = set(_ticked(brand))
         products = [
-            p for p in products if p.get("attributes", {}).get("brand_name") == brand
+            p for p in products if p.get("attributes", {}).get("brand_name") in brands
         ]
     if search:
         search_lower = search.lower()
