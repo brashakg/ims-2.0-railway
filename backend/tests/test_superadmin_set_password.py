@@ -276,3 +276,25 @@ def test_a_failed_password_write_is_not_reported_as_done(client, world, monkeypa
     assert not [x for x in world.audit.rows if x.get("action") == "PASSWORD_SET"]
     assert _me(client, staff).status_code == 200  # nothing was signed out
     assert _refresh(client, staff_body).status_code == 200
+
+
+def test_a_failed_chain_revoke_still_reports_done_and_audits(
+    client, world, monkeypatch
+):
+    # The password is saved and token_version bumped: the bump alone already
+    # kills every old access token and refresh chain. A failing belt-and-braces
+    # revoke must not 500 ("try again") nor skip the audit row.
+    from api.services.refresh_tokens import refresh_token_store
+
+    staff, staff_body = _session(client, "staff1", STAFF_PW)
+    boss, _ = _session(client, "boss", SUPER_PW)
+
+    def _boom(*a, **k):
+        raise TimeoutError("refresh_tokens timed out")
+
+    monkeypatch.setattr(refresh_token_store, "revoke_user_families", _boom)
+    r = _set(client, boss, "st-1")
+    assert r.status_code == 200, r.text
+    assert [x for x in world.audit.rows if x.get("action") == "PASSWORD_SET"]
+    assert _me(client, staff).status_code == 401
+    assert _refresh(client, staff_body).status_code == 401

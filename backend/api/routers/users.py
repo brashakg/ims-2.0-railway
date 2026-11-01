@@ -6,6 +6,7 @@ User management endpoints
 
 from api.utils.event_time import utc_now_iso
 
+import logging
 import re
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -37,6 +38,9 @@ from ..services.user_roles import (
     validate_roles,
 )
 from ..services import permission_audit as _perm_audit
+
+logger = logging.getLogger(__name__)
+
 # The statutory identity fields answer to the SAME role tier as pay -- ADMIN /
 # SUPERADMIN, per the owner ruling. Reusing the one shared predicate (rather
 # than a second local tuple that says "SUPERADMIN", "ADMIN") is the whole point
@@ -1429,21 +1433,22 @@ async def set_password(
     )
     if not saved:  # BaseRepository.update swallows DB errors -> False
         raise HTTPException(status_code=500, detail="Password was not saved. Try again.")
-    # A refresh racing this set is refused by /auth/refresh itself: every
-    # refresh doc carries the token_version it was minted at (auth.refresh_token).
+    # Saved = a real credential change: audit it before anything else can fail.
+    _write_password_reset_audit(current_user, existing, action="PASSWORD_SET")
+
+    # The token_version bump above already signs every other login out: old
+    # access tokens and refresh docs carry an older tv (absent = 0) and are
+    # refused (auth.token_superseded). Revoking the chains is belt-and-braces
+    # for a refresh whose live-user lookup fails, so a failure here only logs.
     from ..services.refresh_tokens import refresh_token_store
 
     try:
         refresh_token_store.revoke_user_families(
             user_id, reason="password_set", keep_family_id=keep_sid
         )
-    except Exception:  # noqa: BLE001
-        raise HTTPException(
-            status_code=500,
-            detail="Password saved, but their other logins could not be signed out. Try again.",
-        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("set-password: refresh chain revoke failed for %s: %s", user_id, e)
 
-    _write_password_reset_audit(current_user, existing, action="PASSWORD_SET")
     return {
         "user_id": user_id,
         "username": existing.get("username"),

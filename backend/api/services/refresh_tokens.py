@@ -271,7 +271,8 @@ class RefreshTokenStore:
         self, user_id: str, reason: str, keep_family_id: Optional[str] = None
     ) -> None:
         """Revoke every chain of ``user_id`` except ``keep_family_id``.
-        NOT fail-soft: a password set that cannot sign the user out must say so."""
+        Raises on a DB error; the caller (set-password) logs it and carries on,
+        since the token_version bump already refuses every older chain."""
         now = _utcnow()
         update = {"revoked": True, "revoked_at": now, "revoked_reason": reason}
         # Already-revoked docs too: a token rotated inside the grace window
