@@ -84,6 +84,8 @@ export default function CollectionBrowsePage() {
     }
   };
 
+  // total null = the membership could not be read -- never shown as 0.
+  const unreadable = !!page && (page.unreadable === true || page.total == null);
   const total = page?.total ?? 0;
   const showingTo = Math.min(skip + PAGE_SIZE, total);
 
@@ -167,7 +169,7 @@ export default function CollectionBrowsePage() {
             <>
               <div className="flex items-center justify-between mb-3">
                 <p className="text-sm text-gray-500">
-                  {page?.unreadable
+                  {unreadable
                     ? 'The products in this collection could not be read just now - the last membership stands. Try again shortly.'
                     : total === 0
                     ? 'No products in this collection.'
@@ -178,7 +180,7 @@ export default function CollectionBrowsePage() {
                 <div className="card p-10 text-center text-gray-400">
                   <Loader2 size={20} className="animate-spin mx-auto" />
                 </div>
-              ) : !page || page.products.length === 0 ? (
+              ) : unreadable ? null : !page || page.products.length === 0 ? (
                 <div className="card p-10 text-center text-gray-400">Empty collection.</div>
               ) : (
                 <>

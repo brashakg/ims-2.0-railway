@@ -583,3 +583,36 @@ def test_an_unreadable_catalogue_is_never_reported_as_0_products(monkeypatch):
     with pytest.raises(HTTPException) as e:
         asyncio.run(cb.refresh_collection_membership("ray-ban", current_user={"roles": ["ADMIN"]}))
     assert e.value.status_code == 503
+
+
+def test_a_failed_view_read_on_a_materialised_collection_is_unreadable_not_empty(monkeypatch):
+    """Round 5: a Mongo blip reading the view of an ALREADY materialised
+    collection (count_documents or find raises) is unreadable, never
+    {products: [], total: 0}; the router's no-db branch says the same."""
+    import asyncio
+
+    from api.routers import collections_browse as cb
+
+    coll = {"collection_id": "c1", "handle": "h", "materialized_at": NOW}
+
+    class _BlipView:
+        def __init__(self, fail_on):
+            self.fail_on = fail_on
+
+        def count_documents(self, *_a, **_k):
+            if self.fail_on == "count":
+                raise RuntimeError("mongo blip")
+            return 3
+
+        def find(self, *_a, **_k):
+            raise RuntimeError("mongo blip")
+
+    for fail_on in ("count", "find"):
+        db = {mat._VIEW: _BlipView(fail_on)}
+        page = mat.browse(db, coll)
+        assert page["unreadable"] is True and page["total"] is None, (fail_on, page)
+        assert page["products"] == []
+
+    monkeypatch.setattr(cb, "_get_db", lambda: None)
+    page = asyncio.run(cb.browse_collection_products("h", skip=0, limit=24, current_user={}))
+    assert page["unreadable"] is True and page["total"] is None, page

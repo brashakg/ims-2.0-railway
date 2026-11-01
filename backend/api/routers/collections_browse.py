@@ -114,7 +114,8 @@ async def browse_collection_products(
             "handle": handle,
             "collection_type": None,
             "products": [],
-            "total": 0,
+            "total": None,
+            "unreadable": True,
             "skip": skip,
             "limit": limit,
         }

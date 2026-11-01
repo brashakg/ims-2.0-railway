@@ -262,8 +262,9 @@ def browse(db, collection: Dict, skip: int = 0, limit: int = 24) -> Dict[str, An
 
     Reads `collection_products` (sorted by position), joins product detail, and
     returns {products, total, skip, limit}. If the view has no rows yet (never
-    materialised), it transparently materialises once then reads. Fail-soft ->
-    an empty page (never raises)."""
+    materialised), it transparently materialises once then reads. A failed
+    read never raises and is never "0 products": it answers
+    {total: None, unreadable: True} (no db / no id stays an empty page)."""
     empty = {"products": [], "total": 0, "skip": skip, "limit": limit}
     if db is None or not isinstance(collection, dict):
         return empty
@@ -289,7 +290,7 @@ def browse(db, collection: Dict, skip: int = 0, limit: int = 24) -> Dict[str, An
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[COLL-MAT] browse failed for %s: %s", collection_id, exc)
-        return empty
+        return {**empty, "total": None, "unreadable": True}
 
     skus = [r.get("sku") for r in rows if r.get("sku")]
     detail = _product_detail_by_sku(db, skus)
