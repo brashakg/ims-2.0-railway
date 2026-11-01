@@ -76,6 +76,7 @@ No emoji (Windows cp1252).
 
 from __future__ import annotations
 
+import ast
 import io
 import os
 import re
@@ -137,35 +138,76 @@ _REL = (
 # test_relative_offset_entries_still_share_production_clock fails the moment
 # that line is gone (moved to ist_today, reworded, deleted) -- so the test has
 # to follow the validator to the IST day instead of silently drifting.
+# Each anchor is (file, ((def qualname, exact line), ...)): the line must be a
+# real code line INSIDE THAT DEF, not merely somewhere in the file. A file-wide
+# match let a partial migration through: customers.py carries the same DOB
+# check twice (_check_dob_not_future and PatientCreate.dob_not_future), so
+# moving only the first to ist_today() left the needle alive via the second
+# while test_customer_validation's "tomorrow is rejected" case broke at night.
+_DOB = "if v is not None and v > date.today():"
+_DELIVERY_PAST = "if v is not None and v < date.today():"
+_DELIVERY_FAR = "if v is not None and v > date.today() + timedelta(days=365):"
+_DELIVERY_FN = "OrderCreate._validate_delivery_date_not_past"
 _SAME_CLOCK = {
     "test_customer_validation.py": (
         "routers/customers.py",
-        ("if v is not None and v > date.today():",),
+        (("_check_dob_not_future", _DOB), ("PatientCreate.dob_not_future", _DOB)),
     ),
     "test_unification_5_ensure_customer.py": (
         "routers/customers.py",
-        ("if v is not None and v > date.today():",),
+        (("_check_dob_not_future", _DOB),),
     ),
     "test_unification_customer_guards.py": (
         "routers/customers.py",
-        ("if v is not None and v > date.today():",),
+        (("_check_dob_not_future", _DOB),),
     ),
     "test_order_delivery_and_cart_discount.py": (
         "routers/orders/models.py",
-        ("if v is not None and v < date.today():",),
+        ((_DELIVERY_FN, _DELIVERY_PAST),),
     ),
     "test_orders_hardening.py": (
         "routers/orders/models.py",
-        ("if v is not None and v < date.today():",),
+        ((_DELIVERY_FN, _DELIVERY_PAST),),
     ),
     "test_pos_workshop_autolink.py": (
         "routers/orders/models.py",
-        (
-            "if v is not None and v < date.today():",
-            "if v is not None and v > date.today() + timedelta(days=365):",
-        ),
+        ((_DELIVERY_FN, _DELIVERY_PAST), (_DELIVERY_FN, _DELIVERY_FAR)),
     ),
 }
+
+
+def _def_code_lines(source, qualname):
+    """Stripped code lines of the def named `qualname` ("func" or
+    "Class.method"), comments and docstring excluded; None if no such def."""
+    tree = ast.parse(source)
+    nodes, node = tree.body, None
+    for part in qualname.split("."):
+        node = next(
+            (
+                n
+                for n in nodes
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and n.name == part
+            ),
+            None,
+        )
+        if node is None:
+            return None
+        nodes = node.body
+    lines = source.splitlines()
+    body = node.body
+    if body and isinstance(body[0], ast.Expr) and isinstance(
+        getattr(body[0], "value", None), ast.Constant
+    ):
+        body = body[1:]  # drop the docstring
+    if not body:
+        return []
+    return [
+        line.strip()
+        for line in lines[body[0].lineno - 1 : node.end_lineno]
+        if line.strip() and not line.strip().startswith("#")
+    ]
+
 
 _HEX = (
     "NOT A DATE. A uuid4 hex slice used to build a unique test id. The [:10] "
@@ -414,14 +456,15 @@ def test_relative_offset_entries_still_share_production_clock():
                 "to tests.ist_business_day" % name
             )
             continue
-        rel_path, needles = _SAME_CLOCK[name]
+        rel_path, anchors = _SAME_CLOCK[name]
         with io.open(os.path.join(api_dir, rel_path), encoding="utf-8") as fh:
-            prod = {line.strip() for line in fh}
-        problems += [
-            "%s: api/%s no longer has `%s` -- the validator changed clocks; "
-            "move the test to the IST day (tests.ist_business_day)"
-            % (name, rel_path, needle)
-            for needle in needles
-            if needle not in prod
-        ]
+            source = fh.read()
+        for qualname, needle in anchors:
+            body = _def_code_lines(source, qualname)
+            if body is None or needle not in body:
+                problems.append(
+                    "%s: %s in api/%s no longer has `%s` -- the validator "
+                    "changed clocks (or moved); move the test to the IST day "
+                    "(tests.ist_business_day)" % (name, qualname, rel_path, needle)
+                )
     assert not problems, "\n".join(problems)
