@@ -22,9 +22,11 @@ from api.services.gstn_export import to_gstr3b_json
 from tests.test_gst_input_credit_one_rule import (  # noqa: F401 -- fixtures
     MH_GSTIN,
     MH_STORE,
+    SISTER,
     _before_septembers_return_is_due,
     _heads,
     _po_receipt,
+    shared_gstin,
     two_gstins,
 )
 from tests.test_receipt_without_po import (  # noqa: F401 -- `world` is the fixture
@@ -556,6 +558,9 @@ def test_a_damaged_piece_brought_back_after_its_month_is_filed_is_reclaimed(worl
     oth = next(r for r in portal["itc_avl"] if r["ty"] == "OTH")
     assert (rul["camt"], rul["samt"], oth["camt"], oth["samt"], portal["itc_net"]["camt"]) == (
         0.0, 0.0, 77.5, 77.5, 77.5)
+    # The re-claim is the GSTIN's own credit (the slice bound to it), never
+    # the company-wide remainder.
+    assert (_heads(nov["itcAvailableGstin"]), _heads(nov["itcAvailableRegular"])) == (155.0, 0.0)
     # A month with both: the November loss files whole in 4(B)(1), the
     # re-claim whole in 4(A)(5), net nil.
     _damage(db, "SU-GRN-WO-0019-1")
@@ -863,3 +868,129 @@ def test_a_receipt_billed_in_parts_at_different_gst_reverses_exactly_what_was_cl
     _damage(db, "SU-GRN-WO-0053-2")
     ret = r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]
     assert (ret["centralTax"], ret["stateTax"]) == (30.0, 30.0)
+
+
+# ---------------------------------------------------------------------------
+# Fix round 5 (round-4 review): a crossing whose mirror is not booked yet, on
+# the way back too; a part bill after every piece is lost; a piece moved on
+# before its transfer completes; a same-GSTIN transfer keeps the receipt bill
+# ---------------------------------------------------------------------------
+
+def test_a_piece_sent_back_reverses_on_the_gstin_it_came_back_to(two_gstins, october):
+    """JH -> MH (mirror booked) -> back to JH (received, its mirror not booked
+    yet), damaged at JH: the Maharashtra crossing no longer holds it, so
+    nothing is reversed until the return mirror lands -- then on Jharkhand,
+    against that mirror."""
+    from api.services import writeoff_itc as wo
+
+    db = two_gstins["db"]
+    _stocked(db, "GRN-WO-0061")
+    _line_bill("GRN-WO-0061", "TAX-WO-61")
+    sid = "SU-GRN-WO-0061-0"
+    _mirror(db, "TRF-RA")
+    _rehomed(db, sid, "TRF-RA", MH_STORE)
+    _rehomed(db, sid, "TRF-RB", STORE)
+    assert _damage(db, sid, MH_ADMIN)["itc_reversed"]["total"] == 0.0
+    assert db.itc_writeoff_reversals.count_documents({}) == 0
+    _mirror(db, "TRF-RB", gstin=SHOP_GSTIN, to_store=STORE, day="2026-10-05")
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "MB-TRF-RB"}))
+    row = db.itc_writeoff_reversals.find_one({"_id": sid})
+    assert (row["gstin"], row["bill_id"], row["igst"], row["period"]) == (SHOP_GSTIN, "MB-TRF-RB", 155.0, OCTOBER)
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 155.0
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, MH_STORE)) == 0.0
+
+
+@pytest.mark.parametrize("a_first", [True, False], ids=["two-piece-bill-first", "one-piece-bill-first"])
+def test_every_piece_lost_before_the_receipts_second_part_bill_reverses_both_bills(
+        world, october, a_first):
+    """All three pieces lost while only one part bill is booked: the pieces
+    past its quantity reverse nothing yet. The second part bill then takes
+    back the rest, so exactly the Rs 30 + 30 claimed is reversed."""
+    from api.services import writeoff_itc as wo
+
+    db = world["db"]
+    _three_frames(db, "GRN-WO-0062", 0)
+    first, second = (("BA-62", 2, 10.0), ("BB-62", 1, 20.0)) if a_first else (("BB-62", 1, 20.0), ("BA-62", 2, 10.0))
+    _part_bill(db, "GRN-WO-0062", *first)
+    for i in range(3):
+        _damage(db, f"SU-GRN-WO-0062-{i}")
+    _part_bill(db, "GRN-WO-0062", *second)
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": second[0]}))
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": second[0]}))  # a re-run adds nothing
+    ret = r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]
+    assert (ret["centralTax"], ret["stateTax"]) == (30.0, 30.0)
+
+
+def test_a_piece_found_after_a_part_bill_top_up_gives_its_share_back(world, october):
+    """Two of three pieces lost under bill A (Rs 10 + 10 for two), then bill
+    B (Rs 20 + 20 for one): the two lost pieces' slice of Rs 30 is Rs 20.
+    One is then found: Rs 10 stays reversed, never the whole top-up."""
+    from api.services import writeoff_itc as wo
+
+    db = world["db"]
+    _three_frames(db, "GRN-WO-0065", 0)
+    _part_bill(db, "GRN-WO-0065", "BA-65", 2, 10.0)
+    _damage(db, "SU-GRN-WO-0065-0")
+    _damage(db, "SU-GRN-WO-0065-1")
+    _part_bill(db, "GRN-WO-0065", "BB-65", 1, 20.0)
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "BB-65"}))
+    assert r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]["centralTax"] == 20.0
+    _requarantine("SU-GRN-WO-0065-0")
+    assert r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]["centralTax"] == 10.0
+
+
+def test_a_piece_moved_on_before_its_transfer_completes_reverses_when_the_mirror_lands(
+        two_gstins, october):
+    """Received at Pune on TRF-M1 (not completed), moved on to a second Pune
+    shop on TRF-M2 (one GSTIN, which restamps its source), damaged there.
+    Completing TRF-M1 books its mirror: the piece is still listed on its
+    lines, so Maharashtra's credit on it is reversed then."""
+    from api.services import writeoff_itc as wo
+
+    db = two_gstins["db"]
+    db.stores.insert_one({"store_id": MH2_STORE, "store_name": "BV Pune 2", "state": "Maharashtra",
+                          "state_code": "27", "entity_id": ENTITY, "gstin": MH_GSTIN, "is_active": True})
+    _stocked(db, "GRN-WO-0063")
+    _line_bill("GRN-WO-0063", "TAX-WO-63")
+    sid = "SU-GRN-WO-0063-0"
+    _rehomed(db, sid, "TRF-M1", MH_STORE)
+    _rehomed(db, sid, "TRF-M2", MH2_STORE)
+    assert _damage(db, sid, MH_ADMIN)["itc_reversed"]["total"] == 0.0
+    _mirror(db, "TRF-M1")
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "MB-TRF-M1"}))
+    row = db.itc_writeoff_reversals.find_one({"_id": sid})
+    assert (row["gstin"], row["bill_id"], row["igst"]) == (MH_GSTIN, "MB-TRF-M1", 155.0)
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, MH_STORE)) == 155.0
+
+
+def test_a_piece_moved_between_two_shops_on_one_gstin_keeps_its_receipt_bill(
+        two_gstins, shared_gstin, october):
+    """No GSTIN crossed, so no mirror bill: the receipt bill still carries
+    the piece's credit, reversed on Jharkhand."""
+    db = two_gstins["db"]
+    _stocked(db, "GRN-WO-0064")
+    _line_bill("GRN-WO-0064", "TAX-WO-64")
+    sid = "SU-GRN-WO-0064-0"
+    _rehomed(db, sid, "TRF-J1", SISTER)
+    out = _damage(db, sid, {**ADMIN, "store_ids": [STORE, SISTER]})
+    assert out["itc_reversed"] == {"igst": 0.0, "cgst": 77.5, "sgst": 77.5, "total": 155.0}
+    assert db.itc_writeoff_reversals.find_one({"_id": sid})["gstin"] == SHOP_GSTIN
+
+
+def test_a_same_gstin_transfer_of_a_piece_whose_bill_no_return_places_is_held(
+        two_gstins, shared_gstin, october):
+    """The receipt bill carries credit no return places yet (no recipient
+    GSTIN, a linked receipt that cannot be found): moved within the one
+    GSTIN, the piece's reversal is held unallocated, as it is unmoved --
+    never dropped."""
+    db = two_gstins["db"]
+    _stocked(db, "GRN-WO-0066")
+    _line_bill("GRN-WO-0066", "TAX-WO-66")
+    db.vendor_bills.update_one({"grn_id": "GRN-WO-0066"}, {"$set": {
+        "recipient_gstin": "", "linked_dc_ids": ["GRN-WO-GONE"]}})
+    sid = "SU-GRN-WO-0066-0"
+    _rehomed(db, sid, "TRF-J2", SISTER)
+    out = _damage(db, sid, {**ADMIN, "store_ids": [STORE, SISTER]})
+    assert out["itc_reversed"]["unallocated_total"] == 155.0
+    row = db.itc_writeoff_reversals.find_one({"_id": sid})
+    assert (row["gstin"], row["unallocated"]) == (None, True)
