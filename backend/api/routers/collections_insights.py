@@ -165,7 +165,7 @@ def _load_collection_or_404(db, collection_id: str) -> Dict:
     return doc
 
 
-# Stock value (at cost where a cost is known -- value_basis) and the 30-day
+# Stock value (at cost: pieces x average, S4) and the 30-day
 # margin are what we pay: the accounts roles' only (owner ruling 2026-10-12).
 # The MRP value, units and sales stay.
 def _masked(body: Dict, user: dict) -> Dict:
@@ -178,6 +178,7 @@ def _zero_kpis() -> Dict:
         "units_on_hand": 0,
         "stock_value": 0.0,
         "value_basis": None,
+        "uncosted_units": 0,
         "stock_value_mrp": 0.0,
         "sold": {"d7": 0, "d30": 0, "d90": 0},
         "revenue_30d": 0.0,

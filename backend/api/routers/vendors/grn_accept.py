@@ -1016,10 +1016,9 @@ def _accept_grn_claimed(
         except Exception:  # noqa: BLE001
             po_unit_price = {}
 
-    # G1 (owner 2026-10-13) is decided at the BILL, not here: a walk-in unit
-    # goes on the shelf at the price paid, the GST an unclaimed bill adds to
-    # its cost is the GST that bill charged (purchase_invoices.
-    # _apply_valuation_trueup, on both bill doors). Receiving cannot know it:
+    # G1 (owner 2026-10-13) is decided at the BILL, not here: the GST an
+    # unclaimed bill adds to the product's cost is the GST that bill charged
+    # (purchase_invoices._apply_valuation_trueup, on both bill doors). Receiving cannot know it:
     # an unregistered dealer charges none, and a registered one's credit
     # hangs on its bill and GSTR-2B.
     # The catalogue release's order cap (_order_cap), read under the claim.
@@ -1140,9 +1139,8 @@ def _accept_grn_claimed(
                 line_cost = po_unit_price.get(product_id, 0.0)
             cost_fields = {}
             if line_cost and line_cost > 0:
-                # A walk-in buy's price is labelled as one (and, as that
-                # source, is the product's cost from now on -- the latest price
-                # paid wins); a PO receipt's is the PO price.
+                # A walk-in buy's price is labelled as one; a PO receipt's is
+                # the PO price. Either is provisional until the bill.
                 source = (
                     WALK_IN_COST_SOURCE
                     if grn.get("grn_subtype") == GRN_SUBTYPE_NO_PO
@@ -1250,11 +1248,10 @@ def _accept_grn_claimed(
                         "grn_number": grn_number,
                         "po_id": po_id,
                         "created_by": user_id,
+                        # The receipt's price (the last-paid quote reads it).
+                        # What the piece is WORTH is its product's one
+                        # average cost (stock_value.average_cost, S4).
                         **cost_fields,
-                        # Receiving is allowed before Accounts prices it. An
-                        # unrelated existing/later master price is not evidence
-                        # of this accepted unit's cost.
-                        **({"valuation_cost_pending": True} if not cost_fields else {}),
                         **batch_fields,
                     },
                     mint_raises_on_duplicate,

@@ -23,7 +23,7 @@ one of:
 
 A read that fails RAISES (the route answers 503): a stock or open-order read
 must never read as 'none', or the list would suggest buying everything.
-Value is at the product's cost (stock_value.master_fallback_cost), never MRP;
+Value is at the product's one average cost (stock_value.average_cost), never MRP;
 the caller masks it for roles that do not see cost. Reads only. No emojis.
 """
 
@@ -94,7 +94,7 @@ def build(db, *, store_id: Optional[str] = None, now=None) -> Dict[str, Any]:
     physical shop (None). `db` is a pymongo-style database; `now` dates the
     30-day sales (default: the clock). Empty when db is None. Raises when a
     read fails."""
-    from .stock_value import master_fallback_cost
+    from .stock_value import average_cost
     from .stores_util import is_online_store
 
     if db is None:
@@ -166,7 +166,7 @@ def build(db, *, store_id: Optional[str] = None, now=None) -> Dict[str, Any]:
                 continue
             on_order = sent.get((pid, shop), 0)
             buy, _ = rp.buy_qty(p, store_id=shop, on_hand=on_hand, on_order=on_order, sold_30d=sold_30d)
-            cost = master_fallback_cost(p) or None
+            cost = average_cost(p) or None
             vendor_id = _preferred_vendor(p)
             source = "preferred" if vendor_id else None
             if not vendor_id and last_vendor.get(pid):

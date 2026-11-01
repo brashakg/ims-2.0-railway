@@ -104,7 +104,7 @@ export function CollectionInsightsWidget() {
               {visible.map((c) => {
                 const st = sellThrough30(c.sold_30d ?? 0, c.on_hand ?? 0);
                 const dc = cover30(c.on_hand ?? 0, c.sold_30d ?? 0);
-                const basis = basisLabel(c.value_basis);
+                const basis = basisLabel(c.uncosted_units);
                 return (
                   <tr key={c.collection_id} className="border-b border-gray-200 hover:bg-white">
                     <td className="px-4 py-2">

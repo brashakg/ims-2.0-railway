@@ -29,6 +29,13 @@ export const INVENTORY_MODULE_ROLES: UserRole[] = [
 ];
 
 /**
+ * A product's own page (S4, /inventory/stock/:productId): the module plus
+ * the ACCOUNTANT, who accepts bills and corrects the one average cost. The
+ * cost boxes on it are COST_ROLES' only (the server refuses the rest).
+ */
+export const PRODUCT_STOCK_ROLES: UserRole[] = [...INVENTORY_MODULE_ROLES, 'ACCOUNTANT'];
+
+/**
  * The manager ladder for stock-changing surfaces: replenishment, the stock
  * count (blind day-end audit), the opening-stock importer and online sync.
  * Verbatim the list that was typed four times in the old route file.

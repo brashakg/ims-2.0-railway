@@ -453,3 +453,29 @@ def test_commit_audit_failure_is_fail_soft(client, auth_headers, patched):
     assert resp.status_code == 200, resp.text
     assert resp.json()["summary"]["units_added"] == 1
     assert len(stock.created) == 1
+
+
+# S4 review: every piece carries the product's ONE average cost, so the
+# preview and the commit value a product that already has an average at it;
+# the typed cost only gives a product with none its first one, and a row says
+# so when the typed cost is not used.
+_AVERAGED = ({"P9": {"product_id": "P9", "sku": "SKU9", "model": "Avg", "cost_price": 3340.0}},
+             {"SKU9": {"product_id": "P9", "sku": "SKU9", "model": "Avg", "cost_price": 3340.0}})
+
+
+@pytest.mark.parametrize("path", (_PREVIEW, _COMMIT))
+def test_a_product_with_an_average_is_valued_at_it_not_the_typed_cost(client, auth_headers, patched, path):
+    patched(*_AVERAGED, {})
+    body = {"rows": [{"product_id": "P9", "quantity": 2, "unit_cost": 3000}]}
+    out = client.post(path, json=body, headers=auth_headers).json()
+    assert out["summary"]["total_value"] == pytest.approx(6680.0)
+    row = out["rows"][0]
+    assert row["cost_used"] == 3340.0 and "not used" in row["cost_note"]
+
+
+def test_a_product_with_no_average_is_valued_at_the_typed_cost(client, auth_headers, patched):
+    patched(*_TWO_PRODUCTS, {})
+    out = client.post(_PREVIEW, json={"rows": [{"product_id": "P1", "quantity": 2, "unit_cost": 100}]},
+                      headers=auth_headers).json()
+    assert (out["summary"]["total_value"], out["rows"][0]["cost_used"], out["rows"][0]["cost_note"]) == (
+        200.0, 100.0, None)

@@ -281,7 +281,9 @@ def world(monkeypatch):
     handle["stores"].insert_many([dict(s) for s in SHOPS])
     handle["products"].insert_one({
         "product_id": "P-1", "sku": "FR-1", "name": "Carrera Frame", "category": "FRAME",
-        "hsn_code": "900311", "cost_price": 2000.0,
+        # S4: every piece carries the product's ONE average cost -- the
+        # transfer is valued at it (a unit's own receipt price is not its value).
+        "hsn_code": "900311", "cost_price": UNIT_COST,
     })
     handle["stock_units"].insert_many([
         {"stock_id": f"SU-{n}", "product_id": "P-1", "store_id": "ST-DHN-1",

@@ -513,15 +513,18 @@ class _SpineConn:
 
     is_connected = True
 
-    def __init__(self, coll):
+    def __init__(self, coll, products=None):
         self._catalog = coll
+        self._products = products  # the spine repo's own (product_cost reads it)
 
     def get_collection(self, name):
+        if name == "products" and self._products is not None:
+            return self._products
         return self._catalog if name == "catalog_products" else MockCollection(name)
 
 
-def _spine_repo():
-    coll = MockCollection("products")
+def _spine_repo(coll=None):
+    coll = MockCollection("products") if coll is None else coll
     coll.insert_one(
         {
             "_id": "P1",
@@ -550,7 +553,9 @@ def _edit_spine(db, monkeypatch, repo=None, spine_id="P1", **fields):
 
     repo = repo or _spine_repo()
     monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
-    monkeypatch.setattr(deps_mod, "get_db", lambda: _SpineConn(db["catalog_products"]))
+    monkeypatch.setattr(
+        deps_mod, "get_db", lambda: _SpineConn(db["catalog_products"], repo.collection)
+    )
     _run(
         products_mod.update_product(
             spine_id,
@@ -640,9 +645,16 @@ def test_a_door_created_products_price_edit_reaches_its_pim_keyed_twin(
 
 def test_internal_cost_edit_on_the_billing_spine_does_not_queue(db, monkeypatch):
     """cost_price is in NO pushed Shopify payload. Queuing on it would send a
-    push that changes nothing on the storefront."""
+    push that changes nothing on the storefront. (S4: the editor types only a
+    FIRST cost -- a product with an average is corrected on its stock page --
+    so the spine here has none yet.)"""
+    import mongomock
+
     _seed_pushed(db)
-    _edit_spine(db, monkeypatch, cost_price=2500.0)
+    # Real query semantics: the first cost is a guarded seed (product_cost).
+    repo = _spine_repo(mongomock.MongoClient().db["products"])
+    repo.collection.update_one({"product_id": "P1"}, {"$set": {"cost_price": None}})
+    _edit_spine(db, monkeypatch, repo=repo, cost_price=2500.0)
 
     saved = db["catalog_products"].find_one({"id": "P1"})
     assert saved["pricing"]["cost_price"] == 2500.0, "the mirror write must still land"

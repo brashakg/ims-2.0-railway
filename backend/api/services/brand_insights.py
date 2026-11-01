@@ -116,8 +116,8 @@ def fold_brand_rows(
     (ghost order line / orphan stock row) folds into "Unknown" rather than
     being dropped, so the totals stay honest.
 
-    Returns rows sorted by revenue desc (ties: stock_value desc, brand asc):
-      [{brand, units_on_hand, stock_value, units_sold, revenue,
+    Returns rows sorted by revenue desc (ties: selling_value desc, brand asc):
+      [{brand, units_on_hand, selling_value, units_sold, revenue,
         sell_through_percent, days_cover}]
     """
     brand_by_pid, value_by_pid = brand_maps(product_docs)
@@ -130,7 +130,7 @@ def fold_brand_rows(
             {
                 "brand": brand,
                 "units_on_hand": 0,
-                "stock_value": 0.0,
+                "selling_value": 0.0,
                 "units_sold": 0,
                 "revenue": 0.0,
             },
@@ -146,7 +146,7 @@ def fold_brand_rows(
         pid = str(pid)
         row = _bucket(brand_by_pid.get(pid, UNKNOWN_BRAND))
         row["units_on_hand"] += units
-        row["stock_value"] += units * float(value_by_pid.get(pid, 0.0))
+        row["selling_value"] += units * float(value_by_pid.get(pid, 0.0))
 
     for pid, sale in (sales_by_pid or {}).items():
         if not isinstance(sale, dict):
@@ -167,7 +167,7 @@ def fold_brand_rows(
 
     rows: List[Dict[str, Any]] = []
     for row in acc.values():
-        row["stock_value"] = round(row["stock_value"], 2)
+        row["selling_value"] = round(row["selling_value"], 2)
         row["revenue"] = round(row["revenue"], 2)
         row["sell_through_percent"] = sell_through_percent(
             row["units_sold"], row["units_on_hand"]
@@ -177,5 +177,5 @@ def fold_brand_rows(
         )
         rows.append(row)
 
-    rows.sort(key=lambda r: (-r["revenue"], -r["stock_value"], r["brand"]))
+    rows.sort(key=lambda r: (-r["revenue"], -r["selling_value"], r["brand"]))
     return rows

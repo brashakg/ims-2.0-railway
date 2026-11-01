@@ -573,9 +573,8 @@ def _receipt_price_paid(stock, grn, product_id, db=None) -> Optional[float]:
     """THE price goods receipt `grn_id` paid for `product_id`: the cost at
     acceptance its mint stamped on a unit of it (wherever that unit is now),
     or a unique booked invoice price when the units arrived unpriced. A held
-    line with no minted unit never answers. /vendors/last-cost and the
-    walk-in bill's cost true-up (purchase_invoices._bought_since) both ask
-    this, so "the latest price paid" is one rule. `stock` is the stock
+    line with no minted unit never answers. /vendors/last-cost asks this
+    (a last price paid to show; the cost is the average). `stock` is the stock
     repository or the raw collection -- anything with find_one(filter)."""
     for flt in _receipt_unit_filters(
         grn, product_id=product_id, unit_cost={"$gt": 0}

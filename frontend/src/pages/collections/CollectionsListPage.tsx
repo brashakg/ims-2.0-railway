@@ -165,7 +165,7 @@ export default function CollectionsListPage() {
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {visible.map((c) => {
-            const basis = basisLabel(c.value_basis);
+            const basis = basisLabel(c.uncosted_units);
             return (
               <Link
                 key={c.collection_id}

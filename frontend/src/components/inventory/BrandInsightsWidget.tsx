@@ -7,7 +7,7 @@
 // with the Collections insights so the two tabs always agree.
 // Styled after SellThroughAnalysisWidget (AdvancedInventoryFeatures.tsx).
 //
-// Audit F47: the server's `stock_value` here is units x offer price (MRP when
+// Audit F47: the server's `selling_value` here is units x offer price (MRP when
 // there is none) -- what the stock SELLS for, not what it cost. The page's
 // "Stock value" tile is at cost, so this column is headed "Selling value" and
 // says its basis; the same words must not mean two figures on one screen.
@@ -132,7 +132,7 @@ export function BrandInsightsWidget() {
                 <tr key={r.brand} className="border-b border-gray-200 hover:bg-white">
                   <td className="px-4 py-2 text-gray-900 font-medium">{r.brand}</td>
                   <td className="px-4 py-2 text-right text-gray-700">{fmtInt(r.units_on_hand)}</td>
-                  <td className="px-4 py-2 text-right text-gray-700">{rupee(r.stock_value)}</td>
+                  <td className="px-4 py-2 text-right text-gray-700">{rupee(r.selling_value)}</td>
                   <td className="px-4 py-2 text-right text-gray-700">{fmtInt(r.units_sold)}</td>
                   <td className="px-4 py-2 text-right text-gray-900 font-medium">{rupee(r.revenue)}</td>
                   <td className="px-4 py-2 text-right">

@@ -480,7 +480,58 @@ export const inventoryApi = {
     const response = await api.post('/inventory/units/barcode-printed', { stock_ids: stockIds });
     return response.data as { updated: number; stock_ids: string[] };
   },
+
+  // S4: a product's one average cost, its stock value and cost history.
+  // Accounts roles only (the server refuses everyone else).
+  getProductCost: async (productId: string) => {
+    const response = await api.get(`/inventory/products/${encodeURIComponent(productId)}/cost`);
+    return response.data as ProductCostCard;
+  },
+
+  /** `expectedAverageCost`: the average the card showed (null: none) -- a
+   *  bill accepted since then refuses the correction (409). */
+  correctProductCost: async (productId: string, averageCost: number, expectedAverageCost: number | null, reason: string) => {
+    const response = await api.post(`/inventory/products/${encodeURIComponent(productId)}/cost-correction`, {
+      average_cost: averageCost,
+      expected_average_cost: expectedAverageCost,
+      reason,
+    });
+    return response.data as ProductCostCard;
+  },
 };
+
+/** One change of a product's average cost (S4): a vendor bill accepted, an
+ *  accounts correction, opening stock or the backfill. */
+export interface CostHistoryRow {
+  key: string;
+  kind: 'BILL' | 'CORRECTION' | 'OPENING_STOCK' | 'BACKFILL' | 'CARRIED_OVER';
+  at: string;
+  by?: string | null;
+  by_name?: string;
+  bill_number?: string | null;
+  vendor_name?: string | null;
+  qty?: number;
+  price?: number;
+  method?: 'AVERAGE';
+  /** Pieces of the bill sold before it arrived (owner 2026-11-01): their
+   *  bill-price true-up went to cost of goods, not into the average. */
+  variance?: { pieces: number; amount: number } | null;
+  old_cost: number | null;
+  new_cost: number;
+  reason?: string;
+}
+
+/** GET /inventory/products/{id}/cost: pieces held in every shop, the one
+ *  average cost (excl. GST), stock value = pieces x average cost. */
+export interface ProductCostCard {
+  product_id: string;
+  pieces: number;
+  average_cost: number | null;
+  stock_value: number;
+  /** Pieces with no cost yet: the stock value is too low by these. */
+  uncosted_pieces: number;
+  history: CostHistoryRow[];
+}
 
 /** One physical piece on the shelf (GET /inventory/units). cost_price only
  *  reaches roles that see cost. */
@@ -626,6 +677,11 @@ export interface OpeningStockResultRow {
   existing?: number;
   added?: number;
   unit_cost?: number | null;
+  /** The cost the pieces carry: the product's average cost; the typed
+   *  unit_cost only for a product with none yet (S4). */
+  cost_used?: number | null;
+  /** Set when the typed cost is not used (the product has an average). */
+  cost_note?: string | null;
   message: string;
 }
 
@@ -638,7 +694,7 @@ export interface OpeningStockResponse {
     units_added?: number;
     rows_skipped?: number;
     rows_with_errors: number;
-    /** Valuation of the units to add / added (rows carrying a unit_cost). */
+    /** Valuation of the units to add / added: pieces x the cost they carry (cost_used). */
     total_value?: number;
     /** Movements-ledger batch reference (commit only; null if none written). */
     batch_id?: string | null;
@@ -698,7 +754,9 @@ export interface CLExpiryStatusResponse {
 export interface BrandInsightRow {
   brand: string;
   units_on_hand: number;
-  stock_value: number;
+  /** Units for sale x offer price (MRP when none): what the stock sells for,
+   *  not its cost (stock value is at the one average cost). */
+  selling_value: number;
   units_sold: number;
   revenue: number;
   /** 0..100 percentage; null = no signal (no stock AND no sales). */

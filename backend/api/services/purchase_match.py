@@ -1,6 +1,6 @@
 """
-IMS 2.0 - Purchase 3-Way Match + Inventory Valuation engine (Phase 2)
-=====================================================================
+IMS 2.0 - Purchase 3-Way Match engine (Phase 2)
+===============================================
 Pure, side-effect-free helpers for the procure-to-pay control: comparing the
 THREE documents that must agree before a vendor invoice is paid --
 
@@ -10,8 +10,8 @@ THREE documents that must agree before a vendor invoice is paid --
         vs
     VENDOR INVOICE (what the supplier billed us for + at what price)
 
-plus the moving-average inventory-valuation math used to true-up product cost
-when an invoice is booked. No DB imports here -- the router fetches the three
+A product's cost is NOT worked out here: one average cost per product,
+services/product_cost (S4). No DB imports here -- the router fetches the three
 docs and calls these helpers, so the logic is trivially unit-testable.
 
 WHY THIS MATTERS (docs/SYSTEM_INTENT.md -- Control over Convenience, Fail
@@ -22,8 +22,8 @@ instead of silently booking the payable. A clean match (every line's received
 and invoiced quantity AND the invoiced price are within tolerance of the PO)
 returns MATCHED and the invoice books normally.
 
-CONFIGURABILITY: the quantity/price tolerance (default 5%) and the valuation
-method (default MOVING_AVERAGE) are constants here with a DB-override resolver
+CONFIGURABILITY: the quantity/price tolerance (default 5%) is a constant here
+with a DB-override resolver
 (``resolve_config`` reads a single ``purchase_settings`` doc), mirroring the
 hsn_gst_master "static seed + DB override, fail-soft to the seed" pattern so the
 behaviour is identical to the defaults when no settings doc exists and never
@@ -40,19 +40,6 @@ from typing import Dict, List, Optional
 # Configurable defaults (static seed; DB can override via resolve_config)
 # ---------------------------------------------------------------------------
 
-# Valuation methods we support. MOVING_AVERAGE updates a single blended cost on
-# the product each receipt/invoice; FIFO is recorded as the chosen method (the
-# per-unit unit_cost stamped on each serialized stock_unit at GRN time IS the
-# FIFO layer) but the product-level blended true-up is a no-op under FIFO.
-VALUATION_MOVING_AVERAGE = "MOVING_AVERAGE"
-VALUATION_FIFO = "FIFO"
-VALID_VALUATION_METHODS = (VALUATION_MOVING_AVERAGE, VALUATION_FIFO)
-# Not a setting: a walk-in buy (a "Bought without PO" receipt) is costed at the
-# LATEST PRICE PAID at receiving and at booking alike (owner 2026-10-12), never
-# blended into what is on hand -- the bill's true-up passes this in.
-VALUATION_LATEST_PRICE = "LATEST_PRICE_PAID"
-
-DEFAULT_VALUATION_METHOD = VALUATION_MOVING_AVERAGE
 # Percentage tolerance for the qty + price 3-way match. 5% by default: a line is
 # MATCHED when received qty, invoiced qty, and invoiced unit price are each
 # within +/-5% of the PO. Beyond that the line (and the whole invoice) goes
@@ -101,17 +88,6 @@ def _pct_diff(actual: float, expected: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-def normalize_valuation_method(value: Optional[str]) -> str:
-    """Normalise a valuation-method string to one of VALID_VALUATION_METHODS,
-    falling back to the default for anything unrecognised. Never raises."""
-    s = str(value or "").strip().upper().replace("-", "_").replace(" ", "_")
-    if s in VALID_VALUATION_METHODS:
-        return s
-    if s in ("MOVING_AVG", "AVERAGE", "WEIGHTED_AVERAGE", "AVCO"):
-        return VALUATION_MOVING_AVERAGE
-    return DEFAULT_VALUATION_METHOD
-
-
 def normalize_tolerance_pct(value) -> float:
     """Normalise a tolerance percentage. Clamps to [0, 100]; non-numeric or
     negative -> the default. 0 is allowed (exact-match-only)."""
@@ -129,13 +105,14 @@ def normalize_tolerance_pct(value) -> float:
 def resolve_config(settings_doc: Optional[dict]) -> dict:
     """Resolve the effective purchase config from an optional settings doc.
 
-    Returns {valuation_method, match_tolerance_pct} with safe defaults applied,
-    so callers get a complete, valid config whether the doc is None, partial, or
-    has junk values. This is the single place the defaults live.
+    Returns {match_tolerance_pct} with safe defaults applied, so callers get a
+    complete, valid config whether the doc is None, partial, or has junk
+    values. This is the single place the defaults live. (There is no valuation
+    method to choose: one average cost per product, services/product_cost --
+    owner 2026-10-23.)
     """
     doc = settings_doc if isinstance(settings_doc, dict) else {}
     return {
-        "valuation_method": normalize_valuation_method(doc.get("valuation_method")),
         "match_tolerance_pct": normalize_tolerance_pct(
             doc.get("match_tolerance_pct", DEFAULT_MATCH_TOLERANCE_PCT)
         ),
@@ -216,7 +193,7 @@ def _grn_accepted_by_product(grn: Optional[dict]) -> Dict[str, int]:
     return out
 
 
-def _invoice_by_product(invoice_lines: Optional[List[dict]], *, preserve_missing_price=False) -> Dict[str, dict]:
+def _invoice_by_product(invoice_lines: Optional[List[dict]]) -> Dict[str, dict]:
     """{product_id: {invoiced_qty, unit_price}} from invoice lines.
 
     A line's unit price is taken explicitly when present, else derived from
@@ -237,7 +214,7 @@ def _invoice_by_product(invoice_lines: Optional[List[dict]], *, preserve_missing
             taxable = ln.get("taxable")
             if taxable is not None:
                 unit_price = _f(taxable) / qty if qty else 0.0
-        price = _valuation_cost(unit_price) if preserve_missing_price else _f(unit_price)
+        price = _f(unit_price)
         cur = out.get(pid)
         if cur is None:
             out[pid] = {
@@ -602,130 +579,6 @@ def dc_bulk_match(
             "total_lines": len(detail),
         },
     }
-
-
-# ---------------------------------------------------------------------------
-# INVENTORY VALUATION -- moving-average cost true-up
-# ---------------------------------------------------------------------------
-
-
-def moving_average_cost(
-    old_qty,
-    old_cost,
-    receipt_qty,
-    receipt_unit_cost,
-) -> Optional[float]:
-    """Weighted-average (AVCO) blended unit cost after a receipt.
-
-        new_cost = (old_qty * old_cost + receipt_qty * receipt_unit_cost)
-                   / (old_qty + receipt_qty)
-
-    Missing cost is unknown, never a zero-cost layer. Degenerate cases:
-      * total qty <= 0      -> fall back to the receipt unit cost (or old cost
-                               if the receipt cost is 0) so cost is never NaN.
-      * receipt_qty <= 0    -> cost unchanged (returns old_cost).
-    Returns a 2dp float, or None when a positive-quantity layer is unpriced.
-    """
-    oq = _f(old_qty)
-    oc = _valuation_cost(old_cost)
-    rq = _f(receipt_qty)
-    rc = _valuation_cost(receipt_unit_cost)
-    if rq <= 0:
-        return oc
-    if rc is None or (oq > 0 and oc is None):
-        return None
-    total_qty = oq + rq
-    if total_qty <= 0:
-        return rc if rc > 0 else oc
-    blended = (oq * (oc or 0) + rq * rc) / total_qty
-    return round(blended, 2)
-
-
-def _valuation_cost(value) -> Optional[float]:
-    """Optional numeric cost; an explicitly recorded zero remains distinct."""
-    import math
-
-    if value is None or value == "":
-        return None
-    try:
-        cost = float(value)
-    except (TypeError, ValueError):
-        return None
-    return cost if math.isfinite(cost) and cost >= 0 else None
-
-
-def valuation_trueup_for_invoice(
-    invoice_lines: Optional[List[dict]],
-    product_state: Dict[str, dict],
-    method: str = DEFAULT_VALUATION_METHOD,
-) -> List[dict]:
-    """Compute per-product cost updates to apply when an invoice is booked.
-
-    The invoice's per-unit landed price is the AUTHORITATIVE cost (the GRN
-    stamped the PO price provisionally; the invoice trues it up to what we were
-    actually billed). For MOVING_AVERAGE we blend that into the product's
-    current on-hand cost; for FIFO the product-level blended cost is left as-is
-    (the per-unit unit_cost on each stock_unit is the FIFO layer) and we simply
-    record the latest invoice cost.
-
-    Args:
-      invoice_lines:  computed invoice lines ({product_id, qty, unit_price,
-                      taxable}).
-      product_state:  {product_id: {on_hand_qty, cost_price, uncosted_qty,
-                      receipt_uncosted_qty}} -- prior quantity, average of its
-                      known layers, and unresolved quantities (the router reads
-                      these from products / stock_units before calling).
-      method:         resolved valuation method.
-
-    Returns a list of {product_id, old_cost, new_cost, receipt_qty,
-    receipt_unit_cost, method, unknown_old_qty, unknown_receipt_qty,
-    cost_complete} -- one per product with positive invoiced qty. An incomplete
-    moving average returns new_cost=None. The router persists these fail-soft
-    (a valuation update must never block the booking).
-    """
-    meth = (
-        VALUATION_LATEST_PRICE
-        if method == VALUATION_LATEST_PRICE
-        else normalize_valuation_method(method)
-    )
-    inv_idx = _invoice_by_product(invoice_lines, preserve_missing_price=True)
-    updates: List[dict] = []
-    for pid, line in inv_idx.items():
-        recv_qty = _f(line.get("invoiced_qty"))
-        recv_unit_cost = _valuation_cost(line.get("unit_price"))
-        if recv_qty <= 0:
-            continue
-        cur = product_state.get(pid) if isinstance(product_state, dict) else None
-        old_qty = _f((cur or {}).get("on_hand_qty"))
-        old_cost = _valuation_cost((cur or {}).get("cost_price"))
-        unknown_old_qty = _f((cur or {}).get("uncosted_qty"))
-        unknown_receipt_qty = _f((cur or {}).get("receipt_uncosted_qty"))
-        if old_qty > 0 and old_cost is None:
-            unknown_old_qty = max(unknown_old_qty, old_qty)
-        if meth != VALUATION_MOVING_AVERAGE:
-            # FIFO / a walk-in buy: don't blend the product-level cost; record
-            # the latest cost. (The stock_units carry their own unit_cost.)
-            new_cost = recv_unit_cost if recv_unit_cost is not None and recv_unit_cost > 0 else old_cost
-        else:
-            new_cost = (
-                None if unknown_old_qty > 0 or unknown_receipt_qty > 0
-                else moving_average_cost(old_qty, old_cost, recv_qty, recv_unit_cost)
-            )
-        updates.append(
-            {
-                "product_id": pid,
-                "old_cost": old_cost,
-                "new_cost": new_cost,
-                "receipt_qty": recv_qty,
-                "receipt_unit_cost": recv_unit_cost,
-                "old_qty": old_qty,
-                "unknown_old_qty": unknown_old_qty,
-                "unknown_receipt_qty": unknown_receipt_qty,
-                "cost_complete": new_cost is not None,
-                "method": meth,
-            }
-        )
-    return updates
 
 
 # ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@
 // product" rescue linked it - that live bug is fixed here (deliberate).
 
 import { useMemo, useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import {
   Barcode,
   Download,
@@ -443,7 +443,13 @@ export function InventoryStockPage() {
                             </div>
                           )}
                           <div>
-                            <p className="font-medium text-gray-900">{item.name}</p>
+                            {item.id ? (
+                              <Link to={`/inventory/stock/${encodeURIComponent(item.id)}`} className="font-medium text-gray-900 hover:underline">
+                                {item.name}
+                              </Link>
+                            ) : (
+                              <p className="font-medium text-gray-900">{item.name}</p>
+                            )}
                             <p className="text-sm text-gray-500">{item.brand}</p>
                             {/* Cataloguer attribution (manager-only). */}
                             {canSeeCataloguers && item.created_by_name && (
