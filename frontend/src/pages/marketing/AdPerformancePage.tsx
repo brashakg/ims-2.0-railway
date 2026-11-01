@@ -19,17 +19,17 @@ import {
   ChevronDown,
 } from 'lucide-react';
 import { marketingApi, type AdPerformanceResponse, type CampaignRowOut } from '../../services/api/marketing';
+import { istDayString } from '../../utils/datetime';
 
 // ---- date helpers ----------------------------------------------------------
 
 function today(): string {
-  return new Date().toISOString().slice(0, 10);
+  return istDayString(new Date())!;
 }
 
+// IST has no DST: n x 24h earlier is exactly n IST days earlier.
 function daysAgo(n: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() - n);
-  return d.toISOString().slice(0, 10);
+  return istDayString(new Date(Date.now() - n * 86_400_000))!;
 }
 
 // ---- formatting helpers ----------------------------------------------------

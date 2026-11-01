@@ -10,6 +10,7 @@ import { AlertTriangle, Download, Loader2, Wrench } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
 import { exportToCSV } from '../../../utils/exportUtils';
 import { getErrorMessage } from '../../../utils/errorHandler';
+import { istDayString } from '../../../utils/datetime';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getWorkshopProductivity>>;
 
@@ -20,13 +21,12 @@ function num(n: number | null): string {
   return n === null || n === undefined ? '—' : String(n);
 }
 
+// IST days (IST has no DST, so 30 x 24h is exactly 30 IST days).
 function defaultFrom(): string {
-  const d = new Date();
-  d.setDate(d.getDate() - 30);
-  return d.toISOString().slice(0, 10);
+  return istDayString(new Date(Date.now() - 30 * 86_400_000))!;
 }
 function defaultTo(): string {
-  return new Date().toISOString().slice(0, 10);
+  return istDayString(new Date())!;
 }
 
 export function WorkshopProductivityCard({ storeId }: { storeId?: string }) {

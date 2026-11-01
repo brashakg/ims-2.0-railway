@@ -23,7 +23,6 @@ from ...services.cost_mask import COST_VISIBLE_ROLES
 from ._shared import (
     _get_db,
     _je_cal_day,
-    _parse_range_dt,
     check_period_locked,
     router,
 )
@@ -377,8 +376,11 @@ async def get_tally_journal_jv(
     _require_roles_for(current_user, _JE_READER_ROLES, _JE_READ_REFUSED)
     db = _get_db()
     store_id = resolve_store_scope(store_id, current_user)
-    from_dt = _parse_range_dt(from_date)
-    to_dt = _parse_range_dt(to_date, end=True)
+    # entry_date is an IST accounting date (calendar midnight for manual JEs,
+    # the IST wall clock for reversals), not a naive-UTC stored instant: bound
+    # it by calendar day, never by the IST-shifted created_at bounds.
+    from_dt = _je_cal_day(from_date)
+    to_dt = _je_cal_day(to_date, end=True)
     rows = je_service.list_jes(
         db, store_id=store_id, status=je_service.STATUS_POSTED, limit=1000
     )
@@ -387,7 +389,7 @@ async def get_tally_journal_jv(
     for je in rows:
         ed = je.get("entry_date")
         if isinstance(ed, str):
-            ed = _parse_range_dt(ed)
+            ed = _je_cal_day(ed)
         if from_dt is not None and ed is not None and ed < from_dt:
             continue
         if to_dt is not None and ed is not None and ed > to_dt:

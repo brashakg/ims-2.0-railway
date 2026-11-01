@@ -15,6 +15,7 @@ import { useToast } from '../../context/ToastContext';
 import { financeApi } from '../../services/api/finance';
 import type { JournalEntry, JeStatus, ChartAccount } from './financeTypes';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { istDayString } from '../../utils/datetime';
 
 const STATUS_STYLE: Record<JeStatus, string> = {
   DRAFT: 'bg-gray-100 text-gray-700',
@@ -54,7 +55,7 @@ export default function JournalEntriesPanel() {
   const [showDrawer, setShowDrawer] = useState(false);
   const [description, setDescription] = useState('');
   const [reference, setReference] = useState('');
-  const [entryDate, setEntryDate] = useState(new Date().toISOString().split('T')[0]);
+  const [entryDate, setEntryDate] = useState(() => istDayString(new Date())!);
   const [lines, setLines] = useState<DraftLine[]>([blankLine(), blankLine()]);
   const [saving, setSaving] = useState(false);
 
@@ -105,7 +106,7 @@ export default function JournalEntriesPanel() {
   const resetDraft = () => {
     setDescription('');
     setReference('');
-    setEntryDate(new Date().toISOString().split('T')[0]);
+    setEntryDate(istDayString(new Date())!);
     setLines([blankLine(), blankLine()]);
   };
 

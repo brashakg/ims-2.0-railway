@@ -41,6 +41,7 @@ import {
 } from '../../services/api/cashReconciliation';
 import { OFF_TILL_EXPENSE_NOTICE } from './offTillExpenseCopy';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { istDayString } from '../../utils/datetime';
 
 const inr = (n?: number | null) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
@@ -72,12 +73,11 @@ function fmtDay(day?: string | null): string {
 }
 
 function todayIso(): string {
-  return new Date().toISOString().slice(0, 10);
+  return istDayString(new Date())!;
 }
 
 function monthStartIso(): string {
-  const d = new Date();
-  return `${d.toISOString().slice(0, 7)}-01`;
+  return `${todayIso().slice(0, 7)}-01`;
 }
 
 interface StoreOpt {

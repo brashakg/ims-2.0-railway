@@ -13,15 +13,15 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { promotionsApi, type PromoReport } from '../../services/api/promotions';
 import { COST_ROLES } from '../../components/common/CostCell';
+import { istDayString } from '../../utils/datetime';
 
 function rupees(n: number): string {
   return `Rs ${(n || 0).toLocaleString('en-IN', { maximumFractionDigits: 2 })}`;
 }
 
+// IST day, offset by whole days (IST has no DST, so 24h == one IST day).
 function todayISO(offsetDays = 0): string {
-  const d = new Date();
-  d.setDate(d.getDate() + offsetDays);
-  return d.toISOString().slice(0, 10);
+  return istDayString(new Date(Date.now() + offsetDays * 86_400_000))!;
 }
 
 export default function PromotionsReportPage() {

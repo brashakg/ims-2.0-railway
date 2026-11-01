@@ -70,12 +70,12 @@ async def get_cash_flow(
     # Outflows (expenses + purchase orders) — scoped to the active store.
     # NOTE: POs store the store as `delivery_store_id`, expenses as `store_id`.
     # Expenses are dated on `expense_date` (date-only 'YYYY-MM-DD' string), NOT
-    # `date`; the old field name dropped every expense. The boundary uses
-    # start.date().isoformat() (date-only) so it compares cleanly with the
-    # stored date-only strings and INCLUDES 1st-of-month expenses (a datetime
-    # 'YYYY-MM-01T00:00:00' boundary would sort AFTER the bare 'YYYY-MM-01').
+    # `date`; the old field name dropped every expense. The boundary is the IST
+    # 1st as a date-only string, so it compares cleanly with the stored
+    # date-only strings and INCLUDES 1st-of-month expenses. NOT start.date():
+    # `start` is IST midnight in UTC, i.e. the previous month's last day.
     exp_match = {
-        "expense_date": {"$gte": start.date().isoformat()},
+        "expense_date": {"$gte": today.replace(day=1).isoformat()},
         "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
     }
     if active_store:
@@ -429,8 +429,9 @@ async def owner_dashboard(current_user: dict = Depends(get_current_user)):
             # Expenses are dated on `expense_date` (date-only 'YYYY-MM-DD'
             # string), NOT `date` -- the old field name matched nothing, so
             # this-month expenses read 0 and net_cash_flow was overstated by
-            # the entire expense total. Use a date-only bound to match.
-            "expense_date": {"$gte": start.date().isoformat()},
+            # the entire expense total. Use a date-only bound to match: the
+            # IST 1st, not start.date() (the previous month's last day).
+            "expense_date": {"$gte": now.replace(day=1).date().isoformat()},
             "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
             **shop,
         },

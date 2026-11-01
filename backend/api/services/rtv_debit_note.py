@@ -562,7 +562,7 @@ def _tally_debit_note_voucher(
 
     party = str((note.get("vendor") or {}).get("name") or "Vendor")
     dn_number = escape(str(note.get("debit_note_number") or ""))
-    issue = str(note.get("issue_date") or _now().date().isoformat())
+    issue = str(note.get("issue_date") or _now_ist().date().isoformat())
     vch_date = issue.replace("-", "")[:8]  # yyyymmdd
 
     # Build the legs (signed): vendor debit (negative), then the credit legs.
