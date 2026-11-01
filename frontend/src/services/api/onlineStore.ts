@@ -801,6 +801,8 @@ export const collectionsApi = {
         { params: { limit: args.limit ?? 50 } },
       );
       const data = res?.data ?? {};
+      // The listings could not be read: "unavailable", never "0 products".
+      if (data.unreadable) return { products: [], total: 0, available: false };
       const skus = (Array.isArray(data.skus) ? data.skus : []) as string[];
       const products: CollectionProduct[] = skus.map((sku) => ({
         product_id: sku,
@@ -1169,6 +1171,8 @@ export interface GeneratedMenu {
   pushed_collection_nodes?: number | null;
   /** Whether IMS has ever pushed this menu LIVE. */
   pushed_live?: boolean;
+  /** What a push would do NOW (the gates): LIVE or SIMULATED (dry-run). */
+  push_mode?: 'LIVE' | 'SIMULATED' | null;
   preview?: {
     items: GeneratedMenuItem[];
     hidden: HiddenMenuItem[];

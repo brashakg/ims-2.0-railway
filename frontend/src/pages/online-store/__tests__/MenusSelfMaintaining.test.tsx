@@ -283,16 +283,62 @@ describe('Menus page: the self-maintaining menu', () => {
     expect((generatedMenusApi.saveTemplate as any).mock.calls[0][1].sections[0].groups[0].category).toBe('eyeglasses');
   });
 
-  it('a dirty template asks before pushing, and cancelling pushes nothing', async () => {
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+  it('a dirty template asks before pushing, and cancelling that question pushes nothing', async () => {
+    // Only the unsaved-changes question says no; the overwrite confirm would say yes.
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValue(true);
     render(<MenusPage />);
     await screen.findByTestId('menu-preview');
     const titles = screen.getAllByLabelText('Section title') as HTMLInputElement[];
     await userEvent.type(titles[0], '!');
     await userEvent.click(screen.getByRole('button', { name: /Regenerate & push now/ }));
-    expect(confirm).toHaveBeenCalled();
+    expect(confirm.mock.calls[0][0]).toMatch(/unsaved changes/);
     expect(pushApi.pushMenu).not.toHaveBeenCalled();
     confirm.mockRestore();
+  });
+
+  it('a dirty template pushed anyway asks both questions, then pushes', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<MenusPage />);
+    await screen.findByTestId('menu-preview');
+    const titles = screen.getAllByLabelText('Section title') as HTMLInputElement[];
+    await userEvent.type(titles[0], '!');
+    await userEvent.click(screen.getByRole('button', { name: /Regenerate & push now/ }));
+    await waitFor(() => expect(pushApi.pushMenu).toHaveBeenCalledWith('m1'));
+    expect(confirm.mock.calls[0][0]).toMatch(/unsaved changes/);
+    expect(confirm.mock.calls[1][0]).toMatch(/overwrites the LIVE website menu/);
+    confirm.mockRestore();
+  });
+
+  it('never says dry-run on a LIVE store: waiting for a person, or not pushed yet', async () => {
+    (generatedMenusApi.list as any).mockResolvedValue([{ ...MENU, pushed_live: false, push_mode: 'LIVE', last_push: {
+      at: '2026-10-29T03:30:00+00:00', mode: 'LIVE', ok: false, waiting: true,
+      reason: 'waiting for the first push by a person (Regenerate & push now)' } }]);
+    const { unmount } = render(<MenusPage />);
+    await screen.findByTestId('menu-preview');
+    expect(screen.queryByTestId('dry-run-note')).toBeNull();
+    expect(screen.getByText(/Waiting for the first push by a person \(Regenerate/)).toBeTruthy();
+    unmount();
+    (generatedMenusApi.list as any).mockResolvedValue([{ ...MENU, pushed_live: false, push_mode: 'LIVE', last_push: null }]);
+    const second = render(<MenusPage />);
+    await screen.findByTestId('menu-preview');
+    expect(screen.queryByTestId('dry-run-note')).toBeNull();
+    second.unmount();
+    (generatedMenusApi.list as any).mockResolvedValue([{ ...MENU, pushed_live: false, last_push: null }]);
+    render(<MenusPage />);
+    await screen.findByTestId('menu-preview');
+    expect(screen.queryByTestId('dry-run-note')).toBeNull();
+    expect(within(screen.getByTestId('menu-status')).getAllByText('not pushed yet').length).toBeGreaterThan(0);
+  });
+
+  it('in dry-run the push confirm says nothing is sent to the website', async () => {
+    (generatedMenusApi.list as any).mockResolvedValue([{ ...MENU, pushed_live: false, push_mode: 'SIMULATED',
+      last_push: null }]);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<MenusPage />);
+    await screen.findByTestId('dry-run-note');
+    await userEvent.click(screen.getByRole('button', { name: /Regenerate & push now/ }));
+    expect(confirm.mock.calls[0][0]).toMatch(/dry-run push.*nothing is sent to the website/);
+    expect(confirm.mock.calls[0][0]).not.toMatch(/overwrites the LIVE/);
   });
 
   it('labels the last attempt LIVE or dry-run', async () => {
@@ -346,6 +392,21 @@ describe('Sync page Menus card line', () => {
     expect(line.textContent).toMatch(/2 hidden/);
     expect(line.textContent).toMatch(/FAILED: Throttled/);
     expect(line.textContent).toMatch(/last pushed never/);
+  });
+
+  it('a run that sent nothing on purpose is not a failure, and says why once', () => {
+    const reason = 'waiting one run: Shopify is still counting the collections just updated (oakley); pushed on the next run';
+    render(
+      <GeneratedMenuLine
+        menus={[{ menu_id: 'm1', handle: 'main-menu', title: 'Main', last_pushed_at: null, item_count: 4,
+          hidden_count: 0, last_push: { mode: 'LIVE', ok: false, waiting: true, reason } }]}
+      />,
+    );
+    const line = screen.getByTestId('generated-menu-line');
+    const row = within(line).getByText(/not sent:/);
+    expect(row.className).not.toMatch(/text-red-700/);
+    expect((line.textContent ?? '').split(reason).length - 1).toBe(1);
+    expect(line.textContent).not.toMatch(/FAILED/);
   });
 
   it('formats the last push time and the attempt mode', () => {

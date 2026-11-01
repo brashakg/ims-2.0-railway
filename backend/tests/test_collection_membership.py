@@ -180,7 +180,7 @@ def test_writers_read_strictly_and_keep_the_last_view(monkeypatch):
     before = sorted((r["collection_id"], r["sku"]) for r in db["collection_products"].find({}))
     assert before
 
-    def _down(db, include_ready=False):
+    def _down(db, include_ready=False, strict=False):
         raise RuntimeError("Mongo down")
 
     monkeypatch.setattr(reg, "listing_facts", _down)
@@ -324,3 +324,157 @@ def test_a_colour_not_online_does_not_put_its_price_in_a_band():
     assert cm.member_skus(db, band, cm.online_facts(db, strict=True)) == []
     db["catalog_variants"].update_one({"sku": colour}, {"$set": {"shopify_variant_id": "gid://shopify/ProductVariant/9"}})
     assert cm.member_skus(db, band, cm.online_facts(db, strict=True)) == [lead_sku]
+
+
+# ---------------------------------------------------------------------------
+# Review round 3
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_blocked_custom_colour_blocks_its_listing_with_or_without_the_view():
+    """A blocked CUSTOM collection that names a COLOUR SKU: the view holds
+    the colour's whole listing, so the lead is blocked by the view; the
+    direct path must say the same before the view exists (and the colour
+    itself is blocked either way)."""
+    from api.services import online_block as ob
+    from tests import test_shopify_model_listings as ml
+
+    db = ml._world()
+    pids = ml._family(db, [("Gold", "001"), ("Black", "002/58", "58")])
+    lead = ml._twin(db, pids[0])
+    colour = db["products"].find_one({"product_id": pids[1]})["sku"]
+    db["catalog_products"].update_one({"sku": lead["sku"]}, {"$set": {
+        "ecom.shopify_product_id": "gid://shopify/Product/5", "ecom.status": "ACTIVE"}})
+    db["catalog_variants"].update_one({"sku": colour}, {"$set": {"shopify_variant_id": "gid://shopify/ProductVariant/9"}})
+    db.seed("ecom_collections", [{"collection_id": "ban", "handle": "ban", "collection_type": "CUSTOM",
+                                  "online_sync_blocked": True, "products": [{"sku": colour, "position": 0}]}])
+    db.seed("collection_products", [])
+    colour_doc = db["catalog_products"].find_one({"sku": colour})
+    before = (ob.is_blocked_from_online(lead, db), ob.is_blocked_from_online(colour_doc, db),
+              ob.blocked_skus(db, [lead["sku"], colour], strict=True))
+    mat.materialize_all(db)
+    assert {r["sku"] for r in db["collection_products"].find({"collection_id": "ban"})} == {lead["sku"], colour}
+    after = (ob.is_blocked_from_online(lead, db), ob.is_blocked_from_online(colour_doc, db),
+             ob.blocked_skus(db, [lead["sku"], colour], strict=True))
+    assert before == after == (True, True, {lead["sku"], colour})
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_the_registry_makes_a_collection_only_where_the_one_rule_counts_a_product():
+    """A Rs 4,000 listing with an UNMAPPED Rs 12,000 colour: the website
+    has no Rs 12,000 variant, so the registry must not create Over Rs
+    10,000 (it read listing_facts, which still carried that price) -- every
+    collection it makes has the count counts_by_handle gives it."""
+    from tests import test_shopify_model_listings as ml
+
+    db = ml._world()
+    db.seed(reg.REBUILD_STATE, [{"_id": "rebuild", "old_ids": []}])
+    db.seed("brand_masters", [{"name": "Ray-Ban", "is_active": True}])
+    db.seed("ecom_collections", [])
+    pids = ml._family(db, [("Gold", "001", "58", {"mrp": 4000.0}),
+                           ("Black", "002/58", "58", {"mrp": 12000.0})])
+    lead_sku = db["products"].find_one({"product_id": pids[0]})["sku"]
+    db["catalog_products"].update_one({"sku": lead_sku}, {"$set": {
+        "ecom.shopify_product_id": "gid://shopify/Product/5", "ecom.status": "ACTIVE"}})
+    out = reg.apply_collection_registry(db)
+    rows = list(db["ecom_collections"].find({"ims_managed": True}))
+    assert rows and "over-10000" not in {r["handle"] for r in rows}, out
+    counts = cm.counts_by_handle(db)
+    assert all(counts[r["handle"]]["count"] > 0 for r in rows), {r["handle"]: counts[r["handle"]] for r in rows}
+
+
+def test_materialize_all_leaves_a_quick_share_set_alone():
+    """A temporary Quick Share set is a hand-picked list (E is not on the
+    website): materialize_all must not overwrite its products_count with
+    the website count, nor write it into the view; the share page reads its
+    own length."""
+    from api.routers.catalogue_pdf import _temp_public
+
+    db = _db()
+    temp = {"collection_id": "qs", "handle": "qs-1", "collection_type": "CUSTOM", "is_temporary": True,
+            "products": [{"sku": "E", "position": 0}, {"sku": "A", "position": 1}], "products_count": 2}
+    db["ecom_collections"].insert_one(dict(temp))
+    mat.materialize_all(db)
+    assert db["ecom_collections"].find_one({"collection_id": "qs"})["products_count"] == 2
+    assert list(db["collection_products"].find({"collection_id": "qs"})) == []
+    assert _temp_public(dict(temp, products_count=0))["products_count"] == 2
+
+
+def test_collection_insights_members_count_listings_like_products_count():
+    """The Collections list / detail 'Products' figure is LISTINGS: a
+    two-colour listing is one product there, as products_count, browse and
+    the menu say -- the stock join still sees both colour SKUs."""
+    from api.services import collection_insights as ci
+
+    db = _db()
+    coll = {"collection_id": "c-rb", "handle": "ray-ban", "collection_type": "SMART",
+            "rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_rayban"}]}
+    db["ecom_collections"].insert_one(dict(coll))
+    facts = cm.online_facts(db, strict=True)
+    next(f for f in facts if f["sku"] == "A")["skus"] = ["A", "A-BLUE"]
+    mat.materialize_collection(db, coll, facts)
+    count = db["ecom_collections"].find_one({"collection_id": "c-rb"})["products_count"]
+    m = ci.member_ids(db, "c-rb")
+    assert m["listings"] == count == 2 and set(m["skus"]) == {"A", "A-BLUE", "B"}
+    assert ci.members_by_collection(db, ["c-rb"])["c-rb"]["listings"] == count
+    assert ci.kpis(db, db["ecom_collections"].find_one({"collection_id": "c-rb"}))["members"] == count
+    row = next(r for r in ci.summary(db, list(db["ecom_collections"].find({}))) if r["collection_id"] == "c-rb")
+    assert row["members"] == count
+
+
+def test_the_catalogue_pdf_lists_the_range_and_says_so_when_it_cannot_read(monkeypatch):
+    """A SMART collection's PDF asks the one rule of EVERY listing IMS holds
+    (E is not on the website, G is a Shopify Draft -- both are still the
+    range), with their colours; one unreadable listing is an error the
+    router reports, never a shorter or empty PDF."""
+    from api.services import catalogue_pdf as pdf
+
+    db = _db()
+    db["ecom_collections"].insert_one({"collection_id": "c-idee", "handle": "idee", "collection_type": "SMART",
+                                       "rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_idee"}]})
+    assert [d["sku"] for d in pdf.resolve_collection_products(db, "c-idee")] == ["E", "F", "G"]
+    real = reg._facts
+
+    def _flaky(db, doc, strict=False):
+        if doc.get("sku") == "F":
+            raise RuntimeError("model unreadable")
+        return real(db, doc, strict)
+
+    monkeypatch.setattr(reg, "_facts", _flaky)
+    with pytest.raises(RuntimeError):
+        pdf.resolve_collection_products(db, "c-idee")
+
+
+def test_the_rule_preview_says_unreadable_not_zero(monkeypatch):
+    """The New Collection preview over an unreadable catalogue reports
+    'unreadable' (the page keeps Create off), never 0 matches."""
+    from api.services import collection_insights as ci
+
+    db = _db()
+
+    def _down(db, include_ready=False, strict=False):
+        raise RuntimeError("Mongo down")
+
+    monkeypatch.setattr(reg, "listing_facts", _down)
+    out = ci.preview(db, [{"field": "tag", "relation": "EQUALS", "value": "brand_rayban"}])
+    assert out["unreadable"] and out["match_count"] == 0
+
+
+def test_a_strict_facts_read_raises_when_a_model_is_unreadable(monkeypatch):
+    """_facts counts an unreadable model by the doc's own tags for a page,
+    but a STRICT read (every writer) raises."""
+    from api.services.shopify_push import listing
+
+    db = _db()
+    doc = db["catalog_products"].find_one({"sku": "A"})
+
+    def _boom(db, product, variants):
+        raise RuntimeError("model unreadable")
+
+    monkeypatch.setattr(listing, "model_listing", _boom)
+    assert reg._facts(db, doc)["sku"] == "A"
+    with pytest.raises(RuntimeError):
+        reg._facts(db, doc, strict=True)
+    with pytest.raises(RuntimeError):
+        cm.online_facts(db, strict=True)

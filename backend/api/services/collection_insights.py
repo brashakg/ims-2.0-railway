@@ -175,10 +175,21 @@ def _fold_member_rows(rows: List[Dict]) -> Tuple[List[str], List[str], List[str]
     return pids, skus, missing
 
 
+def _listing_count(rows: List[Dict]) -> int:
+    """How many LISTINGS the view rows hold (the lead rows -- the number the
+    menu, products_count and the website show); a legacy view with no lead
+    flag counts its SKUs."""
+    if not any(isinstance(r, dict) and "lead" in r for r in rows):
+        return len({r.get("sku") for r in rows if isinstance(r, dict) and r.get("sku")})
+    return len({r.get("sku") for r in rows if isinstance(r, dict) and r.get("lead") and r.get("sku")})
+
+
 def member_ids(db, collection_id: str, collection: Optional[Dict] = None) -> Dict:
     """A collection's member ids from the materialised view.
 
-    Returns {"product_ids": [...], "skus": [...], "capped": bool}.
+    Returns {"product_ids": [...], "skus": [...], "listings": int, "capped": bool}
+    (skus / product_ids: every colour / size, for the stock and sales joins;
+    listings: what the page calls Products).
 
       * product_id is read straight off the view row when present; rows
         without one are resolved sku -> products (chunked $in at 1000).
@@ -187,7 +198,7 @@ def member_ids(db, collection_id: str, collection: Optional[Dict] = None) -> Dic
         stamp it; we only read it).
 
     Fail-soft -> empty lists."""
-    out = {"product_ids": [], "skus": [], "capped": False}
+    out = {"product_ids": [], "skus": [], "listings": 0, "capped": False}
     if db is None or not collection_id:
         return out
     view = _coll(db, _VIEW)
@@ -220,7 +231,7 @@ def member_ids(db, collection_id: str, collection: Optional[Dict] = None) -> Dic
     if isinstance(doc, dict) and doc.get("membership_capped"):
         capped = True
 
-    return {"product_ids": pids, "skus": skus, "capped": capped}
+    return {"product_ids": pids, "skus": skus, "listings": _listing_count(rows), "capped": capped}
 
 
 def members_by_collection(db, collection_ids: List[str]) -> Dict[str, Dict]:
@@ -267,6 +278,7 @@ def members_by_collection(db, collection_ids: List[str]) -> Dict[str, Dict]:
         out[cid] = {
             "product_ids": pids,
             "skus": skus,
+            "listings": _listing_count(grouped.get(cid, [])),
             "row_count": len(grouped.get(cid, [])),
         }
     return out
@@ -643,7 +655,7 @@ def kpis(db, collection: Dict, store_id: Optional[str] = None) -> Dict:
     sold30 = t["units_d30"]
     on_hand = stock["units_on_hand"]
     return {
-        "members": len(members["skus"]),
+        "members": members["listings"],  # listings, as products_count / the website
         "units_on_hand": on_hand,
         "stock_value": stock["stock_value"],
         "value_basis": stock["value_basis"],
@@ -786,7 +798,7 @@ def summary(
         cid = doc.get("collection_id") or doc.get("id")
         if not cid:
             continue
-        m = membership.get(cid, {"product_ids": [], "skus": [], "row_count": 0})
+        m = membership.get(cid, {"product_ids": [], "skus": [], "listings": 0, "row_count": 0})
         holding = {
             pid: on_hand_by_pid.get(pid, 0)
             for pid in m["product_ids"]
@@ -800,7 +812,7 @@ def summary(
                 "title": doc.get("title") or doc.get("name") or doc.get("handle"),
                 "collection_type": (doc.get("collection_type") or "CUSTOM").upper(),
                 "published": bool(doc.get("published", True)),
-                "members": len(m["skus"]),
+                "members": m["listings"],  # listings, as products_count / the website
                 "on_hand": valued["units_on_hand"],
                 "stock_value": valued["stock_value"],
                 "value_basis": valued["value_basis"],
@@ -865,11 +877,13 @@ def preview(
     try:
         from . import collection_membership
 
-        facts = collection_membership.online_facts(db)
+        facts = collection_membership.online_facts(db, strict=True)
         found, why = collection_membership.members(
             db, {"collection_type": "SMART", "rules": list(rules or []), "disjunctive": bool(disjunctive)}, facts
         )
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001 -- said so, never "0 products"
+        logger.warning("[COLL-INSIGHTS] preview listings unreadable: %s", exc)
+        out["unreadable"] = "the listings could not be read just now -- try again in a minute"
         return out
     if why:
         out["not_evaluable"] = why

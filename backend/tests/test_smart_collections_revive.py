@@ -198,7 +198,7 @@ def seeded(monkeypatch):
               "prices": [float((p.get("pricing") or {}).get("offer_price") or p.get("offer_price") or 0)]}
              for p in CATALOG]
     monkeypatch.setattr(osc, "_get_db", lambda: object())
-    monkeypatch.setattr(cm, "online_facts", lambda db: facts)
+    monkeypatch.setattr(cm, "online_facts", lambda db, strict=False: facts)
     return {"mock": mock, "repo": repo, "cid": created["collection_id"]}
 
 
@@ -277,3 +277,19 @@ def test_resolved_products_counts_a_custom_collection_by_the_one_rule(client, au
     body = r.json()
     assert body["skus"] == ["BOSS-1"] and body["count"] == 1 and body["source"] == "website_rule"
     assert body["manual_skus"] == ["GONE-1", "BOSS-1"]
+
+
+def test_resolved_products_says_unreadable_never_zero(client, auth_headers, seeded, monkeypatch):
+    """The listings cannot be read: the route says so (count None,
+    ``unreadable``), never "0 products" (review round 3)."""
+    from api.services import collection_membership as cm
+
+    def _facts(db, strict=False):
+        if strict:
+            raise RuntimeError("Mongo down")
+        return []
+
+    monkeypatch.setattr(cm, "online_facts", _facts)
+    r = client.get(f"/api/v1/online-store/collections/{seeded['cid']}/resolved-products", headers=auth_headers)
+    assert r.status_code == 200, r.text
+    assert r.json()["unreadable"] and r.json()["count"] is None

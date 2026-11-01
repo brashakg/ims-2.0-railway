@@ -114,8 +114,10 @@ def _words(slug: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
-    """What the product push sends for this listing: productType, tags, prices."""
+def _facts(db, doc: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
+    """What the product push sends for this listing: productType, tags, prices.
+    An unreadable model listing is counted by the doc's own tags, or raises
+    when ``strict`` (every writer of what membership decides)."""
     from ..ecom_category_map import ims_to_shopify_type
     from ..online_catalog import variant_rows_for_product
     from .listing import listing_view, model_listing
@@ -134,6 +136,8 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
         else:
             lst = None
     except Exception as exc:  # noqa: BLE001 -- a count, never a write
+        if strict:
+            raise
         logger.warning("[COLLECTIONS] model of %s unreadable, counted by its own tags: %s", doc.get("sku"), exc)
         lst = None
     tags = ims_product_tags(view)
@@ -163,11 +167,17 @@ def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def listing_facts(db, include_ready: bool = False) -> List[Dict[str, Any]]:
+def listing_facts(db, include_ready: bool = False, strict: bool = False) -> List[Dict[str, Any]]:
     """Facts for every listing ON the website (a lead or single product with a
-    Shopify id, not taken down, archived or deleted). include_ready also counts
-    the listings a push-all would publish for the first time (the rebuild's
-    dry-run projection only; collections are made from live listings)."""
+    Shopify id, not a Shopify Draft, not taken down, archived or deleted).
+    include_ready also counts the listings a push-all would publish for the
+    first time (the rebuild's dry-run projection only; collections are made
+    from live listings). ``strict``: an unreadable model listing raises.
+
+    DELIBERATELY NOT online_catalog.product_online_state's LIVE: that is the
+    Catalog screen's "is it on Shopify" (a Draft is LIVE there -- it still
+    syncs stock); this is "can a shopper see it in a collection", so a Draft
+    is out. Each docstring names the other."""
     from ..catalog_ecom import is_archived
     from ._shared import is_variant_of, product_push_refusal
 
@@ -186,7 +196,7 @@ def listing_facts(db, include_ready: bool = False) -> List[Dict[str, Any]]:
                 continue  # on Shopify but a Draft: not on the website
         elif not (include_ready and product_push_refusal(db, doc) is None):
             continue
-        out.append(_facts(db, doc))
+        out.append(_facts(db, doc, strict))
     return out
 
 
@@ -298,9 +308,15 @@ def mark_rebuilt(db, old_ids: List[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def apply_collection_registry(db, definitions: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+def apply_collection_registry(
+    db, definitions: Optional[List[Dict[str, Any]]] = None, facts: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
     """Create / update the IMS-managed ecom_collections rows from the
-    definitions (derived from the live listings when not given). A changed
+    definitions (derived, when not given, from THE listings the menu, the
+    collection_products view and Store Health count --
+    collection_membership.online_facts, a STRICT read unless ``facts`` hands
+    the caller's own read in -- so a collection exists only while that same
+    rule counts a product in it). A changed
     row is queued (locally_modified) for the push; an unchanged one is left
     alone. A handle still held by an old collection is skipped and named --
     scripts/rebuild_collections.py frees it. Collections whose products have
@@ -312,7 +328,11 @@ def apply_collection_registry(db, definitions: Optional[List[Dict[str, Any]]] = 
     if rebuild_state(db) is None:
         return {"waiting": "scripts/rebuild_collections.py --apply has not run yet"}
     if definitions is None:
-        definitions = derive_definitions(listing_facts(db), brand_names(db))
+        if facts is None:
+            from .. import collection_membership
+
+            facts = collection_membership.online_facts(db, strict=True)
+        definitions = derive_definitions(facts, brand_names(db))
     coll = db["ecom_collections"]
     repo = EcomCollectionRepository(coll)
     out: Dict[str, Any] = {"created": [], "updated": [], "unchanged": 0, "skipped": []}
@@ -349,18 +369,19 @@ def apply_collection_registry(db, definitions: Optional[List[Dict[str, Any]]] = 
     return out
 
 
-async def sync_collections(db) -> Dict[str, Any]:
+async def sync_collections(db, facts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """The registry, then a push of every queued IMS collection (create /
     update + Online Store). The scheduled sync's and the rebuild's step; the
     push-all press applies the registry and sends the queue with its own
     sweep. LIVE only: a dark run changes nothing. One collection's failure
-    never stops the rest."""
+    never stops the rest. ``facts``: the live sync's one strict listings
+    read (shared with the view and the menu)."""
     from ._shared import _live_or_reason
 
     live, reason = _live_or_reason(db)
     if not live:
         return {"dark": reason}
-    out = apply_collection_registry(db)
+    out = apply_collection_registry(db, facts=facts)
     if out.get("waiting"):
         return out
     out["pushed"], out["failed"] = [], []

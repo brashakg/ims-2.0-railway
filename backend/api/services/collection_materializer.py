@@ -169,17 +169,22 @@ def materialize_collection(db, collection: Dict, facts: Optional[List[Dict]] = N
 
 
 def materialize_all(db, only_smart: bool = False, facts: Optional[List[Dict]] = None) -> Dict[str, int]:
-    """Recompute every collection (or only SMART ones). Returns
-    {collection_id: member_count}. ``facts`` (the live sync passes the one
-    read it shares with the menu) or a STRICT read: an unreadable catalogue
-    raises and nothing is rewritten (the last view stands)."""
+    """Recompute every LIVE website collection (or only SMART ones). Returns
+    {collection_id: member_count}. A temporary Quick Share set (a hand-picked
+    list -- its count is its own length) and a retired collection are never
+    touched (collection_membership.live_collections). ``facts`` (the live
+    sync passes the one read it shares with the menu) or a STRICT read: an
+    unreadable catalogue raises and nothing is rewritten (the last view
+    stands)."""
     if db is None:
         return {}
-    query: Dict = {"collection_type": "SMART"} if only_smart else {}
-    collections = list(db["ecom_collections"].find(query))
-    if facts is None:
-        from . import collection_membership
+    from . import collection_membership
 
+    collections = [
+        c for c in collection_membership.live_collections(db)
+        if not only_smart or str(c.get("collection_type") or "").upper() == "SMART"
+    ]
+    if facts is None:
         facts = collection_membership.online_facts(db, strict=True)  # read ONCE for every collection
     out: Dict[str, int] = {}
     for coll in collections:
@@ -268,9 +273,10 @@ def browse(db, collection: Dict, skip: int = 0, limit: int = 24) -> Dict[str, An
         view = db[_VIEW]
         leads = {"collection_id": collection_id, "lead": True}
         total = view.count_documents(leads)
-        if total == 0:
-            # Lazy first-materialise so a freshly-created collection browses
-            # without an explicit refresh call.
+        if total == 0 and not collection.get("materialized_at"):
+            # Lazy FIRST materialise so a freshly-created collection browses
+            # without an explicit refresh call (one already materialised and
+            # empty stays empty until the next sync -- never a rescan per view).
             materialize_collection(db, collection)
             total = view.count_documents(leads)
         rows = list(

@@ -148,7 +148,7 @@ def online_facts(db, strict: bool = False) -> List[Dict[str, Any]]:
     push, the collection_products view -- must never read an unreadable
     catalogue as "no products" (that pushed an About-Us-only menu LIVE)."""
     if strict:
-        return _online(db)
+        return _online(db, strict=True)
     try:
         return _online(db)
     except Exception as exc:  # noqa: BLE001 -- a count, never a write
@@ -156,17 +156,17 @@ def online_facts(db, strict: bool = False) -> List[Dict[str, Any]]:
         return []
 
 
-def _online(db) -> List[Dict[str, Any]]:
+def _online(db, strict: bool = False) -> List[Dict[str, Any]]:
     """listing_facts, each listing's colour / size SKUs cut to the ones on
     the website by #1275's THE colour/size online rule
     (online_catalog.skus_on_shopify; the lead stands for its live page),
     and the price-band prices cut to the rows still in (a colour not on the
     website has no variant there, so no price for Shopify to match).
-    Raises on a read failure."""
+    Raises on a read failure (``strict``: also on one listing's)."""
     from .online_catalog import skus_on_shopify
     from .shopify_push.collection_registry import listing_facts
 
-    facts = listing_facts(db)
+    facts = listing_facts(db, strict=True) if strict else listing_facts(db)
     rest = [s for f in facts for s in (f.get("skus") or [])[1:]]
     mapped = skus_on_shopify(db, rest) if rest else set()
     for f in facts:
@@ -179,17 +179,41 @@ def _online(db) -> List[Dict[str, Any]]:
     return facts
 
 
-def facts_for(db, doc: Dict[str, Any]) -> Dict[str, Any]:
+def facts_for(db, doc: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
     """The facts the push would send for ONE product doc (on the website or
-    not). Raises on a read failure (the caller decides)."""
+    not). Raises on a read failure (the caller decides); ``strict`` also
+    when its model listing is unreadable."""
     from .shopify_push.collection_registry import _facts
 
-    return _facts(db, doc)
+    return _facts(db, doc, strict)
 
 
-def catalogue_facts(db) -> List[Dict[str, Any]]:
+def listing_facts_of(db, doc: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
+    """The facts of the LISTING ``doc`` sells on: a size variant or a colour
+    resolves to its model's lead (so "is P in C" is asked of the listing,
+    exactly as the collection_products view holds it); a lead or single
+    product is its own listing. Raises on a read failure."""
+    from .shopify_push._shared import is_variant_of
+    from .shopify_push.listing import lead_spine
+
+    lead = None
+    if is_variant_of(doc):
+        sku = ((doc.get("ecom") or {}).get("variant_of") or {}).get("sku")
+        lead = db["catalog_products"].find_one({"sku": sku}) if sku else None
+    else:
+        spine = lead_spine(db, doc)
+        if spine is not None and spine.get("variant_of"):
+            parent = db["products"].find_one({"product_id": spine["variant_of"]})
+            if parent is not None and parent.get("sku"):
+                lead = db["catalog_products"].find_one({"sku": parent["sku"]})
+    return facts_for(db, lead if lead is not None else doc, strict)
+
+
+def catalogue_facts(db, strict: bool = False) -> List[Dict[str, Any]]:
     """Every listing IMS holds (lead or single product, not a size variant,
-    not deleted), whether or not it is on the website. Fail-soft per doc."""
+    not deleted), whether or not it is on the website. Fail-soft per doc;
+    ``strict`` raises instead (Store Health -> degraded, the catalogue PDF
+    -> an error, never a silently shorter list)."""
     from .shopify_push._shared import is_variant_of
 
     out: List[Dict[str, Any]] = []
@@ -197,8 +221,10 @@ def catalogue_facts(db) -> List[Dict[str, Any]]:
         if is_variant_of(doc) or doc.get("deleted_at"):
             continue
         try:
-            out.append(facts_for(db, doc))
+            out.append(facts_for(db, doc, strict))
         except Exception as exc:  # noqa: BLE001
+            if strict:
+                raise
             logger.warning("[MEMBERSHIP] facts of %s unreadable: %s", doc.get("sku"), exc)
     return out
 

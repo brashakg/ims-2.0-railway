@@ -170,7 +170,7 @@ export function GeneratedMenuLine({ menus }: { menus: GeneratedMenuStatus[] | nu
             {m.hidden_count ? `, ${m.hidden_count} hidden (empty)` : ''} - last pushed{' '}
             {m.last_pushed_at ? fmtIST(m.last_pushed_at) : 'never'}
             {lp?.waiting
-              ? ' - waiting for the first push by a person (Menus page, Regenerate & push now)'
+              ? ` - not sent: ${lp.reason || 'waiting'}`
               : lp
                 ? ` - last attempt ${lp.mode === 'LIVE' ? 'LIVE' : 'dry-run'} ${lp.ok ? 'ok' : 'FAILED'}`
                 : ''}

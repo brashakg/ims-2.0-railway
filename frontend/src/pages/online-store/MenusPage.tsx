@@ -437,6 +437,12 @@ function ReadOnlyTree({ items }: { items: EcomMenu['items'] }) {
   );
 }
 
+/** Dry-run only when the gates say so (push_mode, read with the page), or --
+ *  when the server did not say -- when the last attempt was simulated. */
+function isDryRun(m: GeneratedMenu): boolean {
+  return m.push_mode ? m.push_mode === 'SIMULATED' : m.last_push?.mode === 'SIMULATED';
+}
+
 export default function MenusPage() {
   const toast = useToast();
   const { hasRole } = useAuth();
@@ -505,13 +511,12 @@ export default function MenusPage() {
     if (!menu) return;
     if (dirty && !window.confirm('The template has unsaved changes. Push the SAVED template anyway?')) return;
     const was = menu.pushed_collection_nodes;
-    if (
-      !window.confirm(
-        `This overwrites the LIVE website menu: ${collectionLinks(menu.preview?.items)} collection links ` +
-          (typeof was === 'number' ? `(was ${was} at the last push).` : '(IMS has not pushed this menu before).'),
-      )
-    )
-      return;
+    const ask = isDryRun(menu)
+      ? `This records a dry-run push of ${collectionLinks(menu.preview?.items)} collection links; ` +
+        'nothing is sent to the website.'
+      : `This overwrites the LIVE website menu: ${collectionLinks(menu.preview?.items)} collection links ` +
+        (typeof was === 'number' ? `(was ${was} at the last push).` : '(IMS has not pushed this menu before).');
+    if (!window.confirm(ask)) return;
     setPushing(true);
     try {
       const r = await pushApi.pushMenu(menu.menu_id);
@@ -548,6 +553,7 @@ export default function MenusPage() {
 
   const preview = menu?.preview ?? null;
   const lp = menu?.last_push ?? null;
+  const dryRun = !!menu && isDryRun(menu);
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -630,8 +636,10 @@ export default function MenusPage() {
             <div>
               <div className="text-gray-500">Last pushed to the website</div>
               <div className="text-gray-900">{fmtIST(menu.last_pushed_at)}</div>
-              {preview && !menu.pushed_live && lp?.mode !== 'LIVE' ? (
+              {preview && !menu.pushed_live && dryRun ? (
                 <div className="text-gray-600" data-testid="dry-run-note">dry-run mode - not sent to the website</div>
+              ) : preview && !menu.pushed_live && !menu.push_mode && !lp ? (
+                <div className="text-gray-900">not pushed yet</div>
               ) : preview && !menu.pushed_live ? (
                 <div className="text-amber-700">Waiting for the first push by a person (Regenerate &amp; push now)</div>
               ) : preview ? (
@@ -644,7 +652,8 @@ export default function MenusPage() {
               <div className="text-gray-500">Last push attempt</div>
               {lp?.waiting ? (
                 <div className="text-amber-700">
-                  Not sent - {lp.reason}. The sync never overwrites the hand-made menu by itself the first time.
+                  Not sent - {lp.reason}.
+                  {menu.pushed_live ? null : ' The sync never overwrites the hand-made menu by itself the first time.'}
                 </div>
               ) : lp ? (
                 <div className={lp.ok ? 'text-gray-900' : 'text-red-700'}>

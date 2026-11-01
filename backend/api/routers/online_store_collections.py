@@ -599,13 +599,20 @@ async def resolved_products(
     from ..services import collection_membership
 
     ctype = (doc.get("collection_type") or "CUSTOM").upper()
+    db = _get_db()
+    try:
+        facts = collection_membership.online_facts(db, strict=True) if db is not None else []
+    except Exception as exc:  # noqa: BLE001 -- said so, never "0 products"
+        logger.warning("[COLLECTIONS] resolved-products listings unreadable: %s", exc)
+        return {"collection_id": collection_id, "collection_type": ctype, "skus": [], "count": None,
+                "source": "website_rule",
+                "unreadable": "the listings could not be read just now -- try again in a minute"}
     if ctype == "CUSTOM":
         members = sorted(
             (doc.get("products") or []),
             key=lambda p: int(p.get("position", 0)),
         )
-        db = _get_db()
-        on_site = collection_membership.member_skus(db, doc)[:limit] if db is not None else []
+        on_site = collection_membership.member_skus(db, doc, facts)[:limit] if db is not None else []
         return {
             "collection_id": collection_id,
             "collection_type": "CUSTOM",
@@ -619,8 +626,6 @@ async def resolved_products(
     # listings on the website these rules hold, read as Shopify reads them.
     rules = ecom_smart_rules.normalize_rules(doc.get("rules") or [])
     disjunctive = bool(doc.get("disjunctive", False))
-    db = _get_db()
-    facts = collection_membership.online_facts(db) if db is not None else []
     found, why = collection_membership.members(db, doc, facts)
     skus = [str(f["sku"]) for f in found if f.get("sku")][:limit]
     return {

@@ -333,6 +333,12 @@ async def get_generated_menus(
     docs = generated_menu.generated_menus(db)
     out = []
     if docs:
+        from ..services.shopify_push import MODE_LIVE, MODE_SIMULATED, _live_or_reason
+
+        try:  # what a push would do now: the page names dry-run only when it is
+            push_mode = MODE_LIVE if _live_or_reason(db)[0] else MODE_SIMULATED
+        except Exception:  # noqa: BLE001
+            push_mode = None
         collections = collection_membership.live_collections(db)
         unreadable = None
         try:
@@ -344,6 +350,7 @@ async def get_generated_menus(
             unreadable = f"The website listings could not be read just now ({exc}); try again shortly."
         for doc in docs:
             st = generated_menu.status(doc)
+            st["push_mode"] = push_mode
             if counts is None:
                 st["preview"] = {"items": [], "hidden": [], "unreadable": unreadable,
                                  "changed_since_push": not st["in_sync"]}

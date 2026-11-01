@@ -378,3 +378,16 @@ def test_endpoint_forbidden_for_sales_staff(client, staff_headers):
 def test_endpoint_requires_auth(client):
     r = client.get(STORE_HEALTH)
     assert r.status_code in (401, 403), r.text
+
+
+def test_one_unreadable_listing_is_degraded_never_an_orphan(monkeypatch):
+    """One listing's facts cannot be read (its model is unreadable): Store
+    Health is degraded, never 'SKU-1 is in no collection' (review round 3)."""
+    from api.services.shopify_push import collection_registry as reg
+
+    db = _FakeDb({"catalog_products": _FakeColl([_eligible_product()]), "ecom_collections": _FakeColl([_RAYBAN])})
+
+    def dead(db, doc, strict=False):
+        raise RuntimeError("model unreadable")
+    monkeypatch.setattr(reg, "_facts", dead)
+    assert sh.store_health_envelope(db)["degraded"] is True

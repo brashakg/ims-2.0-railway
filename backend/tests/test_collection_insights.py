@@ -262,7 +262,7 @@ def test_member_ids_capped_via_flag_on_collection_doc():
 
 
 def test_member_ids_failsoft_no_db():
-    assert ci.member_ids(None, "C1") == {"product_ids": [], "skus": [], "capped": False}
+    assert ci.member_ids(None, "C1") == {"product_ids": [], "skus": [], "listings": 0, "capped": False}
 
 
 # ===========================================================================

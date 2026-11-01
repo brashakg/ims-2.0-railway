@@ -823,34 +823,53 @@ async def sync_live_products(
         stock = {"ok": False, "error": str(e), "payload": {}}
     stock_payload = stock.get("payload") or {}
 
+    # ONE strict read of the listings on the website for the collections,
+    # the membership view and the menu (collection_membership.online_facts):
+    # the registry makes a collection only where the menu and the view count
+    # a product. An unreadable catalogue skips all three (the last
+    # collections, view and pushed menu stand) instead of reading as "no
+    # products".
+    from . import collection_materializer, collection_membership, generated_menu
+
+    unreadable = ""
+    try:
+        facts = collection_membership.online_facts(db, strict=True)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[LIVE-SYNC] listings unreadable, collections and menu skipped: %s", e)
+        facts = None
+        unreadable = f"listings unreadable, the last collections, view and pushed menu stand: {e}"
+
     # THE IMS COLLECTIONS (owner 2026-10-19): re-derived from the listings
     # now on the website and the changed ones sent, so a collection appears
     # with its first product without anyone pressing. Fail-soft, like stock.
-    try:
-        collections = await shopify_push.sync_collections(db)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[LIVE-SYNC] collections pass failed: %s", e)
-        collections = {"error": str(e)}
+    if facts is None:
+        collections = {"error": unreadable}
+    else:
+        try:
+            collections = await shopify_push.sync_collections(db, facts=facts)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[LIVE-SYNC] collections pass failed: %s", e)
+            collections = {"error": str(e)}
 
     # THE MEMBERSHIP VIEW, then THE WEBSITE MENU (owner 2026-10-29): the
     # collection_products cache is refreshed from the one membership rule,
     # and the generated main menu is rebuilt from the collections that now
-    # have products and pushed only when it changed. Fail-soft, like stock.
-    try:
-        from . import collection_materializer, collection_membership, generated_menu
-
-        # ONE strict read of the listings for both: an unreadable catalogue
-        # skips the view refresh AND the menu (the last view and the last
-        # pushed menu stand) instead of reading as "no products".
-        facts = collection_membership.online_facts(db, strict=True)
+    # have products and pushed only when it changed. The collections this
+    # run just pushed are handed in: Shopify is still counting them, so the
+    # menu waits a run rather than trust a zero for them. Fail-soft.
+    if facts is None:
+        menus = {"menus": [], "error": unreadable}
+    else:
         try:
             collection_materializer.materialize_all(db, facts=facts)
         except Exception as e:  # noqa: BLE001
             logger.warning("[LIVE-SYNC] membership view refresh failed: %s", e)
-        menus = await generated_menu.sync_generated_menus(db, {"user_id": actor}, facts=facts)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[LIVE-SYNC] menu pass skipped: %s", e)
-        menus = {"menus": [], "error": f"listings unreadable, the last view and pushed menu stand: {e}"}
+        try:
+            menus = await generated_menu.sync_generated_menus(
+                db, {"user_id": actor}, facts=facts, fresh=collections.get("pushed") or [])
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[LIVE-SYNC] menu pass skipped: %s", e)
+            menus = {"menus": [], "error": f"menu pass skipped, the last pushed menu stands: {e}"}
 
     summary = {
         "finished_at": _utc_now(),

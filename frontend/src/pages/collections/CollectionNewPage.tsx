@@ -309,6 +309,10 @@ export default function CollectionNewPage() {
       toast.error(`The website cannot read these rules: ${notEvaluable}`);
       return;
     }
+    if (previewState !== 'ready') {
+      toast.error('Wait for the preview to check the rules, then create');
+      return;
+    }
     setSaving(true);
     try {
       const { id } = await collectionsInsightsApi.createSmart({
@@ -323,7 +327,7 @@ export default function CollectionNewPage() {
     } finally {
       setSaving(false);
     }
-  }, [title, rules, multi, notEvaluable, toast, navigate]);
+  }, [title, rules, multi, notEvaluable, previewState, toast, navigate]);
 
   const sample = (preview?.sample ?? []).slice(0, 12);
 
@@ -536,7 +540,14 @@ export default function CollectionNewPage() {
             <button
               type="button"
               onClick={onSave}
-              disabled={saving || rules.length === 0 || multi.length > 0 || !!notEvaluable || !title.trim()}
+              disabled={
+                saving ||
+                rules.length === 0 ||
+                multi.length > 0 ||
+                !!notEvaluable ||
+                previewState !== 'ready' ||
+                !title.trim()
+              }
               className="btn-primary w-full inline-flex items-center justify-center gap-2 disabled:opacity-50"
             >
               {saving ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />}
@@ -573,9 +584,9 @@ export default function CollectionNewPage() {
               </div>
             )}
             {previewState === 'unavailable' && (
-              <p className="text-sm text-amber-600">
-                Preview isn't available yet (the insights service may not be deployed). You can
-                still create the collection.
+              <p className="text-sm text-amber-600" data-testid="preview-unavailable">
+                The preview could not check these rules just now. Create waits until it can — try
+                again in a minute.
               </p>
             )}
             {previewState === 'ready' && preview && (

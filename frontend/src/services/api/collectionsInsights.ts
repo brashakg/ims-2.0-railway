@@ -176,7 +176,8 @@ export const collectionsInsightsApi = {
     try {
       const res = await api.post(`${BASE}/preview`, { rules, disjunctive });
       const data = res?.data;
-      if (!data || typeof data !== 'object') return null;
+      // No body, or the listings could not be read: "unavailable", never "0".
+      if (!data || typeof data !== 'object' || data.unreadable) return null;
       return {
         match_count: Number(data.match_count ?? 0),
         units_on_hand: Number(data.units_on_hand ?? 0),

@@ -12,19 +12,22 @@ THE MULTI-COLLECTION RULE (a HARD block):
   collection memberships. A brand ban wins: being in one clean collection does
   NOT rescue a product that is also in a banned brand's collection.
 
-MEMBERSHIP RESOLUTION (covers BOTH kinds of collection):
-  * CUSTOM -> the embedded manual ``products[].sku`` list.
+MEMBERSHIP RESOLUTION -- asked of the LISTING the product sells on (a
+colour / size resolves to its model's lead: collection_membership
+.listing_facts_of), exactly as the collection_products view holds it:
+  * CUSTOM -> the listing is in when ANY SKU it carries is in the embedded
+    manual ``products[].sku`` list (a picked colour puts its listing in).
   * SMART  -> THE website membership rule (``collection_membership``): the
     rules read exactly as Shopify reads them, over what the push would send
-    for the product (its generated tags, productType, vendor, prices). A
+    for that listing (its generated tags, productType, vendor, prices). A
     blocked collection whose rules IMS cannot evaluate that way is UNKNOWN for
     the products only such a rule could be about -- fail CLOSED on the strict
     push path and the sweep, never a silent pass. Such a collection cannot be
     blocked (POST /block, a rule save on a blocked one) and Store Health lists
     any that already are.
-  The fast path also consults the materialised ``collection_products`` view
-  (which already holds CUSTOM + SMART membership); the direct manual / rule
-  checks are the fallback so a stale-or-unmaterialised view never mis-classifies.
+  The materialised ``collection_products`` view is NOT read here: it is a
+  cache refreshed by the sync, so a product edited since would be judged by a
+  stale row. The rule is asked directly, every time (one implementation).
 
 CONTRACT: 100% FAIL-SOFT. Any error / no DB -> ``False`` (never wrongly HIDE a
 product on a lookup blip; the owner re-runs the block sweep). No exceptions
@@ -63,14 +66,16 @@ def _blocked_collections(db, strict: bool = False) -> List[Dict[str, Any]]:
         return []
 
 
-def _product_in_custom(collection: Dict[str, Any], sku: Optional[str]) -> bool:
-    """True if `sku` is a manual member of a CUSTOM collection's embedded list."""
-    if not sku:
-        return False
-    for p in collection.get("products") or []:
-        if isinstance(p, dict) and p.get("sku") == sku:
-            return True
-    return False
+def _listing(db, product: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
+    """The facts of the listing ``product`` sells on (a spine doc reads its
+    catalogue twin first). Raises on a read failure."""
+    return collection_membership.listing_facts_of(db, _catalog_doc(db, product), strict)
+
+
+def _in_custom(collection: Dict[str, Any], fact: Dict[str, Any]) -> bool:
+    """True if the listing carries ANY manual member SKU of a CUSTOM collection."""
+    manual = {str(p.get("sku")) for p in collection.get("products") or [] if isinstance(p, dict) and p.get("sku")}
+    return any(str(s) in manual for s in (fact.get("skus") or [fact.get("sku")]) if s)
 
 
 def _catalog_doc(db, product: Dict[str, Any]) -> Dict[str, Any]:
@@ -83,12 +88,13 @@ def _catalog_doc(db, product: Dict[str, Any]) -> Dict[str, Any]:
     return product
 
 
-def _smart_verdict(collection: Dict[str, Any], product: Dict[str, Any], db=None) -> Optional[bool]:
-    """Is ``product`` in this SMART collection? True / False when the rules
-    IMS can read decide it; None (UNKNOWN) when only a rule IMS cannot read
-    (an IN list, shape, gender ... -- collection_membership.rule_set) could.
+def _smart_verdict(collection: Dict[str, Any], fact: Dict[str, Any]) -> Optional[bool]:
+    """Is the listing ``fact`` in this SMART collection? True / False when
+    the rules IMS can read decide it; None (UNKNOWN) when only a rule IMS
+    cannot read (an IN list, shape, gender ... -- collection_membership
+    .rule_set) could.
 
-    Decided per product, never guessed: an all-AND set whose readable rule
+    Decided per listing, never guessed: an all-AND set whose readable rule
     fails is a definite NO (the unreadable rule cannot rescue it), an ANY set
     whose readable rule holds is a definite YES -- so a blocked collection
     with one unreadable rule only ever stalls the products it may be about."""
@@ -96,10 +102,7 @@ def _smart_verdict(collection: Dict[str, Any], product: Dict[str, Any], db=None)
     if not rules and not lost:
         return False
     dj = bool(collection.get("disjunctive", False))
-    hits = []
-    if rules:
-        fact = collection_membership.facts_for(db, _catalog_doc(db, product))
-        hits = [collection_membership.matches(fact, [r]) for r in rules]
+    hits = [collection_membership.matches(fact, [r]) for r in rules]
     if dj and any(hits):
         return True
     if not dj and not all(hits):
@@ -109,13 +112,13 @@ def _smart_verdict(collection: Dict[str, Any], product: Dict[str, Any], db=None)
     return not dj  # AND: every rule held; ANY: none did
 
 
-def _product_in_smart(
-    collection: Dict[str, Any], product: Dict[str, Any], db=None, strict: bool = False
-) -> bool:
-    """True if `product` satisfies a SMART collection's rules, read by THE
-    website membership rule. UNKNOWN (a rule IMS cannot read decides it):
-    strict -> raises (fail closed); otherwise False, logged."""
-    verdict = _smart_verdict(collection, product, db)
+def _in_collection(collection: Dict[str, Any], fact: Dict[str, Any], strict: bool = False) -> bool:
+    """True if the listing ``fact`` is a member of ``collection`` (CUSTOM or
+    SMART). UNKNOWN (a SMART rule IMS cannot read decides it): strict ->
+    raises (fail closed); otherwise False, logged."""
+    if str(collection.get("collection_type") or "CUSTOM").upper() != "SMART":
+        return _in_custom(collection, fact)
+    verdict = _smart_verdict(collection, fact)
     if verdict is None:
         logger.warning(
             "online-block: blocked collection %s has rules IMS cannot evaluate: %s",
@@ -144,38 +147,11 @@ def unverifiable_blocks(db) -> List[Dict[str, Any]]:
 def _membership_hit(
     product: Dict[str, Any], db, blocked: List[Dict[str, Any]], strict: bool = False
 ) -> bool:
-    """True iff `product` is a member of ANY collection in `blocked` (assumed
-    already loaded + non-empty). Uses the materialised membership view fast path,
-    then the direct manual / rule fallback so a stale-or-unmaterialised view never
-    mis-classifies. The view read is fail-soft (falls through to the direct check);
-    the direct check is pure in-memory."""
-    sku = product.get("sku")
-    blocked_cids = [c.get("collection_id") for c in blocked if c.get("collection_id")]
-
-    # Fast path: the materialised membership view already holds CUSTOM +
-    # SMART membership for every collection.
-    if sku and db is not None and blocked_cids:
-        try:
-            hit = db["collection_products"].find_one(
-                {"collection_id": {"$in": blocked_cids}, "sku": sku}
-            )
-            if hit is not None:
-                return True
-        except Exception as exc:  # noqa: BLE001 -- view is a cache; fall through
-            logger.warning(
-                "online-block: membership view lookup failed, using fallback: %s", exc
-            )
-
-    # Fallback (view stale / never materialised): check membership directly.
-    for c in blocked:
-        ctype = str(c.get("collection_type") or "CUSTOM").upper()
-        if ctype == "SMART":
-            if _product_in_smart(c, product, db, strict):
-                return True
-        else:
-            if _product_in_custom(c, sku):
-                return True
-    return False
+    """True iff the listing ``product`` sells on is a member of ANY collection
+    in ``blocked`` (assumed already loaded + non-empty), by THE membership
+    rule asked directly (never the materialised view: a stale cache)."""
+    fact = _listing(db, product, strict)
+    return any(_in_collection(c, fact, strict) for c in blocked)
 
 
 def is_blocked_from_online(product: Dict[str, Any], db) -> bool:
@@ -270,13 +246,14 @@ def blocked_skus(db, skus: List[str], *, strict: bool = False) -> Set[str]:
     """Batch form of ``is_blocked_from_online`` for the availability paths: given
     a list of SKUs, return the subset that is blocked from online sale.
 
-    Efficient: loads the blocked collections ONCE, resolves membership via the
-    materialised view + the manual list + (for SMART) a single batched product
-    load. Fail-soft -> empty set (never wrongly mark a SKU blocked on error).
+    Efficient: loads the blocked collections ONCE and the products in one
+    batched load, then asks THE membership rule of each SKU's listing (the
+    same one ``is_blocked_from_online`` asks). Fail-soft -> empty set (never
+    wrongly mark a SKU blocked on error).
 
     ``strict=True`` RE-RAISES instead: every membership source -- the config,
-    the materialised view and the SMART product load -- becomes UNKNOWN rather
-    than "not blocked". THE online quantity rule uses it (audit round-6 P4).
+    the product load and each listing's facts -- becomes UNKNOWN rather than
+    "not blocked". THE online quantity rule uses it (audit round-6 P4).
     There the block is the only thing holding a blocked collection at 0 online,
     so a swallowed read error published the SHELF count for a banned product as
     an absolute quantity and recorded it as the baseline.
@@ -289,51 +266,20 @@ def blocked_skus(db, skus: List[str], *, strict: bool = False) -> Set[str]:
         blocked = _blocked_collections(db, strict=strict)
         if not blocked:
             return out
-        sku_set = set(clean)
-        blocked_cids = [c.get("collection_id") for c in blocked if c.get("collection_id")]
-
-        # 1. Materialised membership view (CUSTOM + SMART).
-        if blocked_cids:
+        prod_by_sku = _load_products_by_sku(db, clean, strict=strict)
+        for s in dict.fromkeys(clean):
+            doc = prod_by_sku.get(s)
             try:
-                for row in db["collection_products"].find(
-                    {"collection_id": {"$in": blocked_cids}, "sku": {"$in": clean}}
-                ):
-                    s = row.get("sku")
-                    if s in sku_set:
-                        out.add(s)
+                # A SKU with no product doc is judged as itself (a manual
+                # CUSTOM entry can still name it).
+                fact = _listing(db, doc, strict) if doc else {"sku": s, "skus": [s]}
+                hit = any(_in_collection(c, fact, strict) for c in blocked)
             except Exception:  # noqa: BLE001
                 if strict:
                     raise
-
-        # 2. Manual CUSTOM membership (catches an un-materialised collection).
-        for c in blocked:
-            if str(c.get("collection_type") or "CUSTOM").upper() != "CUSTOM":
-                continue
-            for p in c.get("products") or []:
-                s = (p or {}).get("sku") if isinstance(p, dict) else None
-                if s in sku_set:
-                    out.add(s)
-
-        # 3. SMART rules against the still-unresolved SKUs (one batched load).
-        remaining = sku_set - out
-        smart = [
-            c for c in blocked
-            if str(c.get("collection_type") or "").upper() == "SMART"
-        ]
-        if remaining and smart:
-            prod_by_sku = _load_products_by_sku(db, list(remaining), strict=strict)
-            for c in smart:
-                for s in list(remaining):
-                    doc = prod_by_sku.get(s)
-                    try:
-                        hit = bool(doc) and _product_in_smart(c, doc, db, strict)
-                    except Exception:  # noqa: BLE001
-                        if strict:
-                            raise
-                        hit = False
-                    if hit:
-                        out.add(s)
-                        remaining.discard(s)
+                hit = False
+            if hit:
+                out.add(s)
         return out
     except Exception:  # noqa: BLE001
         if strict:

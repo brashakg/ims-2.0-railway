@@ -354,3 +354,14 @@ def test_temp_collection_ttl_index_created():
     assert ttl is not None
     assert ttl.get("expireAfterSeconds") == 0
     assert ttl.get("partialFilterExpression") == {"is_temporary": True}
+
+
+def test_an_unreadable_catalogue_is_reported_not_an_empty_pdf(client, auth_headers, monkeypatch):
+    """resolve_collection_products raises (a listing could not be read):
+    the route answers 503 with a plain message, never a 'no products' PDF."""
+    def _boom(db, collection_id):
+        raise RuntimeError("model unreadable")
+
+    monkeypatch.setattr(pdf, "resolve_collection_products", _boom)
+    r = client.post(PDF_URL, json={"collection_id": "c-1"}, headers=auth_headers)
+    assert r.status_code == 503 and "could not be read" in r.json()["detail"], r.text

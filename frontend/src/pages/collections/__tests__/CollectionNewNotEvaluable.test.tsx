@@ -63,4 +63,12 @@ describe('New Collection: rules the website cannot read', () => {
     expect(screen.queryByTestId('not-evaluable-warning')).toBeNull();
     expect((screen.getByRole('button', { name: /Create collection/ }) as HTMLButtonElement).disabled).toBe(false);
   });
+
+  it('keeps Create off while the preview cannot check the rules', async () => {
+    vi.mocked(collectionsInsightsApi.preview).mockResolvedValue(null);
+    render(<CollectionNewPage />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Sunglasses' }));
+    await screen.findByTestId('preview-unavailable');
+    expect((screen.getByRole('button', { name: /Create collection/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });

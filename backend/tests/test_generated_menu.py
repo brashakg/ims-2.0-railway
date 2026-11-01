@@ -384,6 +384,7 @@ def test_dark_is_simulated_never_the_network_and_not_re_audited(world, monkeypat
     assert out["menus"][0]["mode"] == "SIMULATED" and out["menus"][0]["ok"] is True
     doc = _doc(db)
     assert doc["items"] and doc["last_generated_at"] and not doc.get("pushed_hash")
+    assert doc.get("pushed_collection_nodes") is None  # a LIVE success only
     assert len(audit.rows) == 1
     _run(gm.sync_generated_menus(db))
     assert len(audit.rows) == 1  # the same tree is not simulated (audited) again
@@ -841,6 +842,7 @@ def test_preview_and_template_routes(client, auth_headers, routed):
     r = client.get("/api/v1/online-store/menus/generated", headers=auth_headers)
     assert r.status_code == 200, r.text
     m = r.json()["menus"][0]
+    assert m["push_mode"] == "SIMULATED"  # the gates are DARK in the test env
     assert _titles(m["preview"]["items"]) == ["New Arrivals", "Sunglasses", "Shop by Brand", "About Us"]
     assert any(h["handle"] == "eyeglasses" for h in m["preview"]["hidden"])
     bad = gm.default_template()
@@ -1056,3 +1058,277 @@ def test_the_seed_is_a_dry_run_by_default_and_refuses_a_second_doc(monkeypatch):
     assert doc["generated"] is True and doc["items"] and not doc.get("shopify_menu_id")
     assert seed.run(db, apply=True) == {"created": False, "reason": "exists"}
     assert len(list(db["ecom_menus"].find({}))) == 1
+
+
+# ---------------------------------------------------------------------------
+# Review round 3
+# ---------------------------------------------------------------------------
+
+
+def _gid(handle):
+    return next(r["shopify_collection_id"] for r in ROWS if r["handle"] == handle)
+
+
+def test_a_forced_push_is_refused_when_shopify_shows_most_links_empty(world, monkeypatch):
+    """BLOCK: the person confirmed the IMS-only tree (N links). Shopify then
+    shows every collection empty but Ray-Ban: even the forced press sends
+    nothing, says 'Shopify shows X of N collections empty', backs nothing
+    up and keeps the stored tree (so the next confirm is the same N)."""
+    db, _state, _audit = world
+    shop = _Shop()
+    for g in shop.products:
+        shop.products[g] = 0
+    shop.products[_gid("ray-ban")] = 5
+    _live(monkeypatch, shop)
+    gm.regenerate(db, _doc(db), [{"sku": "ANY"}])
+    confirmed = gm.collection_nodes(_doc(db)["items"])
+    out = _press(db)
+    res = out["menus"][0]
+    assert res["ok"] is False and "imsMenuUpdate" not in shop.calls and "imsMenuCreate" not in shop.calls, res
+    assert f"of {confirmed} collections empty" in res["error"] and "not pushed" in res["error"]
+    assert list(db[gm.BACKUPS].find({})) == []
+    assert gm.collection_nodes(_doc(db)["items"]) == confirmed and not _doc(db).get("shop_hidden")
+    for g in shop.products:  # Shopify catches up: the next press goes out
+        shop.products[g] = 5
+    assert _press(db)["menus"][0]["ok"] is True and shop.calls.count("imsMenuUpdate") == 1
+
+
+def test_collections_pushed_this_run_defer_the_automatic_menu_push(world, monkeypatch):
+    """A collection the same run just pushed new rules for reads 0 on
+    Shopify for a while: an AUTOMATIC run whose tree that zero would change
+    waits a run (nothing sent, said why); the next run, Shopify's count is
+    trusted again. A person's press is never deferred."""
+    db, state, _audit = world
+    shop = _Shop()
+    _live(monkeypatch, shop)
+    _press(db)
+    shop.products[_gid("oakley")] = 0
+    state["counts"] = _counts({"eyeglasses": 2})  # a real change is due too
+    out = _run(gm.sync_generated_menus(db, fresh=["oakley"]))
+    assert out["menus"][0]["changed"] is False and "next run" in out["menus"][0]["reason"], out
+    assert shop.calls.count("imsMenuUpdate") == 1 and "Oakley" in str(_doc(db)["items"])
+    _run(gm.sync_generated_menus(db))  # next run: Oakley's 0 is Shopify's real count
+    assert shop.calls.count("imsMenuUpdate") == 2 and "Oakley" not in str(shop.updates[-1]["items"])
+    shop.products[_gid("vogue")] = 0
+    state["counts"] = _counts({"eyeglasses": 2, "kids-sunglasses": 3})
+    res = _run(gm.regenerate_and_push(db, _doc(db), force=True, fresh=["vogue"]))
+    assert res["ok"] is True and shop.calls.count("imsMenuUpdate") == 3
+
+
+def test_the_live_sync_hands_the_collections_it_pushed_to_the_menu(monkeypatch):
+    from api.services import shopify_live_sync as ls
+
+    db = StrictDB()
+    db.seed("ecom_menus", [gm.make_template_doc()])
+    db.seed("ecom_collections", [dict(r, collection_id=r["handle"]) for r in ROWS])
+    _live_sync_world(monkeypatch, db)
+    seen = {}
+
+    async def _collections(db, facts=None):
+        seen["facts"] = facts
+        return {"pushed": ["oakley"], "failed": []}
+
+    async def _menus(db, actor=None, force=False, facts=None, fresh=None):
+        seen["menu_facts"], seen["fresh"] = facts, list(fresh or [])
+        return {"menus": []}
+
+    monkeypatch.setattr(shopify_push, "sync_collections", _collections)
+    monkeypatch.setattr(gm, "sync_generated_menus", _menus)
+    _run(ls.sync_live_products(db, trigger="scheduled", actor="scheduler:shopify-live-sync"))
+    assert seen["fresh"] == ["oakley"] and seen["facts"] is seen["menu_facts"] and seen["facts"] is not None
+
+
+def test_a_partial_menus_read_never_creates_a_duplicate_main_menu(world, monkeypatch):
+    """Shopify answers the menus read with data (the footer only, no next
+    page) AND errors: that read is partial -- no menuCreate of a second
+    main-menu, nothing backed up, last_push not ok."""
+    db, _state, _audit = world
+    shop = _Shop()
+    real = shop.__call__
+
+    async def _partial(db, query, variables):
+        if "imsMenuByHandle" in query:
+            shop.calls.append("imsMenuByHandle")
+            return {"data": {"menus": {"nodes": [{"id": "gid://shopify/Menu/1", "handle": "footer", "items": []}],
+                                       "pageInfo": {"hasNextPage": False}}},
+                    "errors": [{"message": "Internal error reading main-menu"}]}
+        return await real(db, query, variables)
+
+    _live(monkeypatch, _partial)
+    out = _press(db)
+    assert "imsMenuCreate" not in shop.calls and "imsMenuUpdate" not in shop.calls
+    assert out["menus"][0]["ok"] is False and _doc(db)["last_push"]["ok"] is False
+    assert list(db[gm.BACKUPS].find({})) == []
+
+
+def test_an_unusable_panel_heading_is_a_plain_link_not_its_collection():
+    """The Sunglasses panel's own collection is not usable (not on Shopify,
+    a push problem, or Shopify shows it empty) while its groups have
+    products: the heading is an HTTP link to the template url."""
+    t = gm.default_template()
+    t["sections"][1]["url"] = "/pages/sunglasses"
+    shop = {r["shopify_collection_id"]: 5 for r in ROWS}
+    for rows, shop_counts in (
+        ([dict(r, shopify_collection_id=None) if r["handle"] == "sunglasses" else r for r in ROWS], None),
+        ([dict(r, push_problem="publish failed") if r["handle"] == "sunglasses" else r for r in ROWS], None),
+        (ROWS, dict(shop, **{_gid("sunglasses"): 0})),
+    ):
+        items, _ = gm.generate(t, rows, _counts(), shop_counts)
+        sun = _top(items, "Sunglasses")
+        assert sun["item_type"] == "HTTP" and sun["url"] == "/pages/sunglasses" and sun["children"]
+        assert "resource_id" not in sun
+
+
+def test_an_unpublished_collection_is_never_linked():
+    rows = [dict(r, published=False) if r["handle"] in ("carrera", "new-arrivals") else r for r in ROWS]
+    items, hidden = _gen(rows=rows)
+    assert "Carrera" not in str(items) and "New Arrivals" not in _titles(items)
+    why = {h["handle"]: h["reason"] for h in hidden}
+    assert why["carrera"] == gm.NOT_PUBLISHED and why["new-arrivals"] == gm.NOT_PUBLISHED
+
+
+def test_an_empty_brand_is_listed_under_brands_a_to_z_not_top_n():
+    hidden = {h["handle"]: h for h in _gen()[1]}
+    assert hidden["gucci"]["section"] == "Shop by Brand > Brands"
+
+
+def test_each_live_item_id_is_carried_once():
+    shop_items = [{"id": "gid://shopify/MenuItem/7", "title": "About Us", "tags": ["mega-hide"], "items": []}]
+    items = [{"title": "About Us", "item_type": "HTTP", "url": "/a"},
+             {"title": "about us", "item_type": "HTTP", "url": "/b"}]
+    out = gm._carry_ids(items, shop_items)
+    assert out[0]["shopify_item_id"] == "gid://shopify/MenuItem/7" and out[0]["shopify_item_tags"] == ["mega-hide"]
+    assert "shopify_item_id" not in out[1]
+
+
+def test_a_carried_item_keeps_its_live_tags_on_the_push(world, monkeypatch):
+    db, _state, _audit = world
+    shop = _Shop()
+    shop.menus[0]["items"][1]["tags"] = ["mega-hide"]
+    _live(monkeypatch, shop)
+    _press(db)
+    sent = {i["title"]: i for i in shop.updates[0]["items"]}
+    assert sent["About Us"]["tags"] == ["mega-hide"] and "tags" not in sent["New Arrivals"]
+    assert "mega-hide" not in str(_doc(db)["items"])
+
+
+def test_the_adoption_backup_is_marked_and_kept_and_the_restore_can_pick_it(world, monkeypatch):
+    """The backup taken at adoption is flagged; later overwrites prune to the
+    20 newest but never drop it; the restore script lists them and puts the
+    ADOPTED (hand-made) menu back on request, newest by default."""
+    import importlib.util
+    from datetime import datetime, timedelta, timezone
+
+    db, state, _audit = world
+    shop = _Shop()
+    _live(monkeypatch, shop)
+    _press(db)
+    first = db[gm.BACKUPS].find_one({})
+    assert first["adopted"] is True
+    old = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for i in range(25):
+        db[gm.BACKUPS].insert_one({"backup_id": f"old-{i}", "menu_id": "m", "handle": "main-menu", "shopify_menu_id": SHOP_MENU_GID,
+                                   "title": "x", "items": [{"title": f"old {i}"}], "taken_at": old + timedelta(hours=i),
+                                   "adopted": False})
+    db[gm.BACKUPS].update_one({"backup_id": first["backup_id"]}, {"$set": {"taken_at": old - timedelta(days=1)}})
+    shop.menus[0]["items"] = [{"id": "gid://shopify/MenuItem/50", "title": "Generated", "items": []}]
+    state["counts"] = _counts({"eyeglasses": 2})
+    _run(gm.sync_generated_menus(db))
+    rows = list(db[gm.BACKUPS].find({}))
+    assert len(rows) == gm.BACKUPS_KEPT + 1 and sum(1 for r in rows if r.get("adopted")) == 1
+    newest = max(rows, key=lambda r: r["taken_at"])
+    assert newest["adopted"] is False and newest["items"][0]["title"] == "Generated"
+    path = os.path.join(os.path.dirname(HERE), "scripts", "restore_main_menu_backup.py")
+    spec = importlib.util.spec_from_file_location("restore_main_menu_backup", path)
+    rs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rs)
+    assert len(rs.list_backups(db)) == gm.BACKUPS_KEPT + 1
+    assert _run(rs.run(db, apply=False))["payload"]["items"][0]["title"] == "Generated"
+    dry = _run(rs.run(db, apply=False, which="adopted"))
+    assert dry["payload"]["items"] == rs.update_items(LIVE_ITEMS)
+    exact = str(newest["taken_at"])
+    assert _run(rs.run(db, apply=False, taken_at=exact))["taken_at"] == newest["taken_at"]
+    assert _run(rs.run(db, apply=True, which="adopted"))["restored"] is True
+    assert [i["title"] for i in shop.updates[-1]["items"]] == ["Shop by Brand", "About Us"]
+
+
+def test_a_failure_inside_the_push_still_says_its_mode(world, monkeypatch):
+    db, _state, _audit = world
+    shop = _Shop()
+    _live(monkeypatch, shop)
+
+    def _boom(db, doc, facts, shop_counts=None):
+        raise RuntimeError("bad template")
+
+    monkeypatch.setattr(gm, "regenerate", _boom)
+    res = _press(db)["menus"][0]
+    assert res["ok"] is False and res["mode"] == "LIVE"
+
+
+def test_the_gate_decision_is_made_once_both_ways(world, monkeypatch):
+    """LIVE decided, then the gates read DARK mid-push: the push that
+    decided LIVE (read, backed up) sends on that decision -- push_menu does
+    not re-decide and leave a backed-up but unsent menu recorded as LIVE."""
+    db, _state, _audit = world
+    shop = _Shop()
+    _live(monkeypatch, shop)
+    seen = []
+
+    def flip(db):
+        seen.append(1)
+        return (True, None) if len(seen) == 1 else (False, "dark")
+
+    monkeypatch.setattr(shopify_push, "_live_or_reason", flip)
+    res = _press(db)["menus"][0]
+    assert res["ok"] is True and res["mode"] == "LIVE" and shop.calls.count("imsMenuUpdate") == 1
+
+
+def test_a_static_menu_push_never_creates_a_duplicate_handle(client, auth_headers, pushed, monkeypatch):
+    """The read-only footer has no shopify_menu_id: pushing it LIVE would
+    menuCreate a second 'footer'. The shop already has one -> refused, no
+    menuCreate. A handle the shop does not have is created."""
+    db, _mid, _state = pushed
+    shop = _Shop()
+    shop.menus.append({"id": "gid://shopify/Menu/2", "handle": "footer", "title": "Footer", "items": []})
+    _live(monkeypatch, shop)
+    r = client.post("/api/v1/online-store/push/menu/footer-1", headers=auth_headers)
+    assert r.status_code == 200 and r.json()["result"]["ok"] is False, r.text
+    assert "duplicate" in r.json()["result"]["error"] and "imsMenuCreate" not in shop.calls
+    shop.menus.pop()
+    r = client.post("/api/v1/online-store/push/menu/footer-1", headers=auth_headers)
+    assert r.json()["result"]["ok"] is True and shop.calls.count("imsMenuCreate") == 1
+
+
+def test_the_template_save_never_rebuilds_from_an_unreadable_catalogue(client, auth_headers, routed, monkeypatch):
+    from api.services import collection_membership as cm
+
+    db, mid, _state = routed
+    gm.regenerate(db, db["ecom_menus"].find_one({"menu_id": mid}), [{"sku": "ANY"}])
+    before = copy.deepcopy(db["ecom_menus"].find_one({"menu_id": mid}))
+
+    def _facts(db, strict=False):
+        if strict:
+            raise RuntimeError("Mongo down")
+        return []
+
+    monkeypatch.setattr(cm, "online_facts", _facts)
+    # What a fail-soft read would count: nothing (the menu would be About Us only).
+    monkeypatch.setattr(cm, "counts_by_handle", lambda db, facts=None, collections=None:
+                        _counts() if facts else _counts({h: 0 for h in COUNTS}))
+    t = gm.default_template()
+    t["sections"] = [s for s in t["sections"] if s["title"] != "New Arrivals"]
+    r = client.put(f"/api/v1/online-store/menus/generated/{mid}/template", json={"template": t}, headers=auth_headers)
+    assert r.status_code == 200, r.text
+    after = db["ecom_menus"].find_one({"menu_id": mid})
+    assert after["template"] == t
+    assert after["items"] == before["items"] and after["generated_hash"] == before["generated_hash"]
+
+
+def test_a_failed_status_read_is_not_no_menu(monkeypatch):
+    from api.routers import online_store_push as osp
+
+    def _boom(db):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(gm, "generated_menus", _boom)
+    assert osp._generated_menu_status(object()) is None

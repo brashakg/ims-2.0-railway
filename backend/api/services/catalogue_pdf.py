@@ -267,10 +267,15 @@ def resolve_collection_products(db, collection_id: str) -> Optional[List[Dict]]:
     CUSTOM / temporary (Quick Share) -> its manual SKU list in position
                  order, exactly as picked (in-store products and the
                  picked colour included -- it is a hand-picked set).
-    SMART  -> THE website membership rule (services/collection_membership):
-              the listings the collection shows on the website, in order.
+    SMART  -> THE website membership rule (services/collection_membership)
+              asked of EVERY listing IMS holds, on the website or not, with
+              all its colours / sizes (catalogue_facts, as Store Health and
+              the block path read it): a catalogue for a customer is the
+              range, not only what is online today.
     Returns None ONLY when the collection does not exist (so the caller 404s);
-    a real-but-empty collection returns []. Fail-soft -> [] on any read error."""
+    a real-but-empty collection returns []. An unreadable catalogue RAISES
+    (the router reports it) -- never an empty PDF that looks like "no
+    products"."""
     if db is None or not collection_id:
         return None
     try:
@@ -283,19 +288,18 @@ def resolve_collection_products(db, collection_id: str) -> Optional[List[Dict]]:
     if doc is None:
         return None
 
-    try:
-        if str(doc.get("collection_type") or "CUSTOM").upper() == "SMART":
-            from . import collection_membership
+    if str(doc.get("collection_type") or "CUSTOM").upper() == "SMART":
+        from . import collection_membership
 
-            skus = collection_membership.member_skus(db, doc)[:MAX_PRODUCTS]
-        else:
-            members = sorted(
-                (doc.get("products") or []),
-                key=lambda p: int((p or {}).get("position", 0) or 0),
-            )
-            skus = [m.get("sku") for m in members if m.get("sku")][:MAX_PRODUCTS]
-    except Exception:  # noqa: BLE001
-        return []
+        skus = collection_membership.member_skus(
+            db, doc, collection_membership.catalogue_facts(db, strict=True), every_sku=True
+        )[:MAX_PRODUCTS]
+    else:
+        members = sorted(
+            (doc.get("products") or []),
+            key=lambda p: int((p or {}).get("position", 0) or 0),
+        )
+        skus = [m.get("sku") for m in members if m.get("sku")][:MAX_PRODUCTS]
 
     detail = _detail_by_sku(db, skus)
     # Preserve membership order; a sku with no catalog row still appears (sku-only)

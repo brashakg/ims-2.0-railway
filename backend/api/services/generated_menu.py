@@ -60,6 +60,18 @@ menu stands. DARK / SIMULATED vs LIVE is decided once per push
 the other pushes. A failed or refused push is recorded on the doc
 (``last_push``) and retried on the next run.
 
+The confirm a person sees is the IMS-only tree: when Shopify's counts would
+take away more than half of those links, the push is refused EVEN for the
+press ("Shopify shows X of N collections empty - not pushed"). A collection
+the same run just pushed new rules for is still being counted by Shopify
+for a while, so an AUTOMATIC run whose tree its zero count would change
+waits for the next run instead of churning the live menu.
+
+KNOWN LIMIT: an unchanged menu (generated hash == pushed hash, nothing
+hidden by the last read) costs no Shopify read, so a linked collection that
+Shopify alone empties stays linked until the menu next changes or a person
+presses "Regenerate & push now" (both re-read the counts).
+
 No emoji (Windows cp1252).
 """
 
@@ -71,7 +83,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +99,8 @@ _GENDER_LABEL = {"men": "Men's", "women": "Women's", "unisex": "Unisex", "kids":
 SCHEDULER_USER = {"user_id": "scheduler:shopify-live-sync"}
 SHOP_EMPTY = "Shopify shows no products in it"
 SHOP_MISSING = "not found on Shopify"
+NOT_PUBLISHED = "not published on the website"
+BACKUPS_KEPT = 20  # plus every adoption backup (the owner's hand-made menu)
 WAITING_FIRST = "waiting for the first push by a person (Regenerate & push now)"
 
 
@@ -221,6 +235,8 @@ def _usable(
         return False, "not on Shopify yet"
     if row.get("push_problem"):
         return False, f"not on the website yet ({row['push_problem']})"
+    if row.get("published") is False:
+        return False, NOT_PUBLISHED
     if shop_counts is not None:
         gid = _as_shopify_gid(row["shopify_collection_id"], "Collection")
         if gid not in shop_counts:
@@ -395,6 +411,18 @@ def regenerate(db, doc: Dict[str, Any], facts: List[Dict[str, Any]],
     STRICT read by the caller -- an unreadable catalogue never becomes "no
     products") and save the result (items, hidden, generated_hash,
     last_generated_at). Returns the update."""
+    return _save(db, doc, _build(db, doc, facts, shop_counts))
+
+
+def _save(db, doc: Dict[str, Any], upd: Dict[str, Any]) -> Dict[str, Any]:
+    db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": upd})
+    doc.update(upd)
+    return upd
+
+
+def _build(db, doc: Dict[str, Any], facts: List[Dict[str, Any]],
+           shop_counts: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """What regenerate would save (nothing written)."""
     from . import collection_membership
 
     collections = collection_membership.live_collections(db)
@@ -409,8 +437,6 @@ def regenerate(db, doc: Dict[str, Any], facts: List[Dict[str, Any]],
     if shop_counts is not None:
         upd["shop_hidden"] = [{"handle": h["handle"], "reason": h["reason"]} for h in hidden
                               if h.get("handle") and h["reason"] in (SHOP_EMPTY, SHOP_MISSING)]
-    db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": upd})
-    doc.update(upd)
     return upd
 
 
@@ -450,6 +476,29 @@ async def _shop_menu(db, handle: str) -> Optional[Dict[str, Any]]:
         after = info.get("endCursor")
 
 
+async def static_push_refusal(db, doc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The refused result for a LIVE push of a NON-generated menu that has no
+    Shopify id (push_menu would menuCreate it) when the shop already has a
+    menu with its handle -- a second "footer" -- or the menus cannot be read
+    to check. None = push it (DARK, or it carries its id, or the handle is
+    free)."""
+    from .shopify_push import MODE_LIVE, PushResult, _live_or_reason
+
+    handle = doc.get("handle") or ""
+    if doc.get("generated") or doc.get("shopify_menu_id") or not _live_or_reason(db)[0]:
+        return None
+    try:
+        shop = await _shop_menu(db, handle)
+        why = None if shop is None else (f"refused: Shopify already has a menu with the handle {handle}; "
+                                         "creating it again would make a duplicate")
+    except Exception as e:  # noqa: BLE001 -- unchecked => not created
+        why = f"refused: the Shopify menus could not be read to check the handle {handle}: {e}"
+    if why is None:
+        return None
+    return PushResult(mode=MODE_LIVE, entity="menu", action="create", target_id=doc.get("menu_id"),
+                      ok=False, error=why).to_dict()
+
+
 def _key(title: Any) -> str:
     return str(title or "").strip().lower()
 
@@ -479,15 +528,16 @@ def _adopt(db, doc: Dict[str, Any], shop: Dict[str, Any]) -> None:
 def _carry_ids(items: List[Dict[str, Any]], shop_items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """A copy of ``items`` where every node whose title path (Sunglasses >
     By Shape > Square) exists in the live menu carries that live item's id,
-    so menuUpdate keeps the ids of unchanged items (per-item mega-menu
-    settings an app keys on them survive). Each live id is used once."""
-    pool: Dict[Tuple[str, ...], str] = {}
+    so menuUpdate keeps the ids of unchanged items -- and their tags (per-item
+    mega-menu settings an app keys on them survive). Each live id is used
+    once."""
+    pool: Dict[Tuple[str, ...], Dict[str, Any]] = {}
 
     def walk(nodes, path):
         for n in nodes or []:
             p = path + (_key(n.get("title")),)
             if n.get("id"):
-                pool.setdefault(p, n["id"])
+                pool.setdefault(p, n)
             walk(n.get("items"), p)
 
     def attach(nodes, path):
@@ -496,7 +546,10 @@ def _carry_ids(items: List[Dict[str, Any]], shop_items: List[Dict[str, Any]]) ->
             p = path + (_key(n.get("title")),)
             m = dict(n)
             if pool.get(p):
-                m["shopify_item_id"] = pool.pop(p)
+                live = pool.pop(p)
+                m["shopify_item_id"] = live["id"]
+                if live.get("tags"):
+                    m["shopify_item_tags"] = list(live["tags"])
             if n.get("children"):
                 m["children"] = attach(n["children"], p)
             out.append(m)
@@ -572,7 +625,8 @@ def _record(db, doc: Dict[str, Any], result: Dict[str, Any], actor: Optional[Dic
 
 
 async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]] = None,
-                         force: bool = False, facts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                         force: bool = False, facts: Optional[List[Dict[str, Any]]] = None,
+                         fresh: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """Push ``doc``'s generated tree when it differs from what was last
     pushed (or ``force``: the human "Regenerate & push now"). Records
     ``last_push`` on the doc and an audit row. Never raises.
@@ -582,9 +636,11 @@ async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]
     website menu is only ever a person's press -- an automatic run waits.
     Then: read the shop's menu (adopt it on the press) and every
     collection's Shopify productsCount, rebuild hiding what Shopify shows
-    empty, refuse a suspicious push (_refusal), back the live tree up,
-    then menuUpdate carrying the live item ids. Any failure pushes nothing
-    and is retried next run."""
+    empty, refuse a suspicious push (_refusal; more than half of the
+    confirmed links gone on Shopify's count, even for a person), wait a run
+    when only a collection pushed this run (``fresh`` handles) would change
+    the tree, back the live tree up, then menuUpdate carrying the live item
+    ids and tags. Any failure pushes nothing and is retried next run."""
     from .shopify_push import MODE_LIVE, MODE_SIMULATED, PushResult, _live_or_reason, push_menu
     from .shopify_push.menus import build_menu_items
 
@@ -608,12 +664,10 @@ async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]
             target_id=doc.get("menu_id"), ok=True, shopify_id=gid, payload=payload, reason=reason,
         ).to_dict(), actor)
     if not force and not (doc.get("pushed_hash") and gid):
-        last = {"at": _now(), "mode": MODE_LIVE, "ok": False, "action": None, "error": None,
-                "reason": WAITING_FIRST, "waiting": True}
-        db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": {"last_push": last}})
-        doc["last_push"] = last
-        return {"handle": handle, "changed": False, **last}
+        return _not_sent(db, doc, WAITING_FIRST)
 
+    # What the page previewed and the person confirmed: the IMS-only tree.
+    confirmed = collection_nodes(doc.get("items") or [])
     error, shop, send = None, None, doc
     try:
         if facts is None:
@@ -631,16 +685,32 @@ async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]
         else:
             _adopt(db, doc, shop)  # a person's press: first push, or the menu was recreated
     if error is None:
-        regenerate(db, doc, facts, shop_counts)
-        if not force and doc.get("generated_hash") == doc.get("pushed_hash"):
-            return {"handle": handle, "changed": False}
-        error = _refusal(doc, facts, force)
+        upd = _build(db, doc, facts, shop_counts)
+        nodes = collection_nodes(upd["items"])
+        late = sorted({h["handle"] for h in upd["hidden"]
+                       if h.get("handle") in set(fresh or ()) and h["reason"] in (SHOP_EMPTY, SHOP_MISSING)})
+        if confirmed and confirmed - nodes > confirmed * DROP_LIMIT:
+            # Not saved: the stored tree (and the next confirm) stay the IMS one.
+            error = (f"refused: Shopify shows {confirmed - nodes} of {confirmed} collections empty - "
+                     "not pushed; try again in a few minutes")
+        elif late and not force and upd["generated_hash"] != doc.get("pushed_hash"):
+            return _not_sent(db, doc, f"waiting one run: Shopify is still counting the collections "
+                                      f"just updated ({', '.join(late)}); pushed on the next run")
+        else:
+            _save(db, doc, upd)
+            if not force and doc.get("generated_hash") == doc.get("pushed_hash"):
+                return {"handle": handle, "changed": False}
+            error = _refusal(doc, facts, force)
     if error is None and shop is not None:
         try:  # every LIVE overwrite saves the tree it replaces
             db[BACKUPS].insert_one({
-                "menu_id": doc["menu_id"], "handle": shop.get("handle"), "shopify_menu_id": shop.get("id"),
+                "backup_id": str(uuid.uuid4()), "menu_id": doc["menu_id"], "handle": shop.get("handle"), "shopify_menu_id": shop.get("id"),
                 "title": shop.get("title"), "items": shop.get("items") or [], "taken_at": _now(),
+                # The tree a person's adoption replaced: the hand-made menu
+                # (scripts/restore_main_menu_backup.py --adopted).
+                "adopted": shop.get("id") != gid,
             })
+            _prune_backups(db, shop.get("handle"))
             db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": {"backup_taken_at": _now()}})
             doc["backup_taken_at"] = _now()
             send = dict(doc, items=_carry_ids(doc.get("items") or [], shop.get("items") or []))
@@ -650,12 +720,34 @@ async def push_generated(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]
         result = PushResult(mode=MODE_LIVE, entity="menu", action="update", target_id=doc.get("menu_id"),
                             ok=False, error=error).to_dict()
     else:
-        result = (await push_menu(db, send)).to_dict()
+        result = (await push_menu(db, send, live=True)).to_dict()
     return _record(db, doc, result, actor)
 
 
+def _not_sent(db, doc: Dict[str, Any], why: str) -> Dict[str, Any]:
+    """Record a LIVE run that sent nothing on purpose (waiting for a
+    person's first press, or one run for Shopify's counts): last_push says
+    why; no audit row (nothing was attempted)."""
+    from .shopify_push import MODE_LIVE
+
+    last = {"at": _now(), "mode": MODE_LIVE, "ok": False, "action": None, "error": None,
+            "reason": why, "waiting": True}
+    db[MENUS].update_one({"menu_id": doc["menu_id"]}, {"$set": {"last_push": last}})
+    doc["last_push"] = last
+    return {"handle": doc.get("handle") or MAIN_MENU, "changed": False, **last}
+
+
+def _prune_backups(db, handle: Optional[str]) -> None:
+    """Keep every adoption backup and the BACKUPS_KEPT newest others."""
+    rows = sorted(db[BACKUPS].find({"handle": handle}), key=lambda r: r.get("taken_at") or _now(), reverse=True)
+    extra = [r for r in rows if not r.get("adopted")][BACKUPS_KEPT:]
+    for r in extra:
+        db[BACKUPS].delete_one({"backup_id": r["backup_id"]} if r.get("backup_id") else {"_id": r.get("_id")})
+
+
 async def regenerate_and_push(db, doc: Dict[str, Any], actor: Optional[Dict[str, Any]] = None,
-                              force: bool = False, facts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                              force: bool = False, facts: Optional[List[Dict[str, Any]]] = None,
+                              fresh: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """Rebuild ``doc`` from a STRICT read of the listings and push it when it
     changed. An unreadable catalogue changes nothing (the last generated
     and pushed menu stand) and is reported. Never raises."""
@@ -666,19 +758,28 @@ async def regenerate_and_push(db, doc: Dict[str, Any], actor: Optional[Dict[str,
         if facts is None:
             facts = collection_membership.online_facts(db, strict=True)
         regenerate(db, doc, facts)
-        return await push_generated(db, doc, actor, force=force, facts=facts)
+        return await push_generated(db, doc, actor, force=force, facts=facts, fresh=fresh)
     except Exception as e:  # noqa: BLE001
         logger.warning("[MENUS] %s skipped: %s", doc.get("handle"), e)
-        return {"handle": doc.get("handle"), "ok": False, "changed": False,
+        from .shopify_push import MODE_LIVE, MODE_SIMULATED, _live_or_reason
+
+        try:  # the toast says LIVE / dry-run truthfully, even for a failure
+            mode = MODE_LIVE if _live_or_reason(db)[0] else MODE_SIMULATED
+        except Exception:  # noqa: BLE001
+            mode = None
+        return {"handle": doc.get("handle"), "ok": False, "changed": False, "mode": mode,
                 "error": f"skipped, the last menu stands: {e}"}
 
 
 async def sync_generated_menus(db, actor: Optional[Dict[str, Any]] = None, force: bool = False,
-                               facts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                               facts: Optional[List[Dict[str, Any]]] = None,
+                               fresh: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """Regenerate every generated menu and push the changed ones -- the live
     sync's last step. The listings are read ONCE, STRICTLY (or handed in by
     the live sync, shared with the membership view): an unreadable catalogue
-    skips the run and keeps the last pushed menu. Never raises."""
+    skips the run and keeps the last pushed menu. ``fresh``: the handles of
+    the collections the same run just pushed (push_generated waits a run
+    rather than trust Shopify's count for them yet). Never raises."""
     try:
         docs = generated_menus(db)
     except Exception as e:  # noqa: BLE001
@@ -693,7 +794,8 @@ async def sync_generated_menus(db, actor: Optional[Dict[str, Any]] = None, force
         except Exception as e:  # noqa: BLE001
             logger.warning("[MENUS] listings unreadable, menus skipped: %s", e)
             return {"menus": [], "error": f"listings unreadable, the last pushed menu stands: {e}"}
-    return {"menus": [await regenerate_and_push(db, doc, actor, force=force, facts=facts) for doc in docs]}
+    return {"menus": [await regenerate_and_push(db, doc, actor, force=force, facts=facts, fresh=fresh)
+                      for doc in docs]}
 
 
 def status(doc: Dict[str, Any]) -> Dict[str, Any]:

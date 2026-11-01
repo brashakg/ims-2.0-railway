@@ -819,6 +819,10 @@ def product_online_state(doc: Dict[str, Any], refusal: Optional[str]) -> Dict[st
                    BLOCKED  not live and no usable photo: the push refuses it
                    QUEUED   has a photo, waiting for a human to press push
                    OFF      not live, not queued
+                   (DELIBERATELY not collection_registry.listing_facts:
+                   LIVE here includes a Shopify Draft -- it still syncs
+                   stock; "can a shopper see it in a collection" there
+                   leaves a Draft out. Each docstring names the other.)
       note      -- the gate's own reason, whenever it refuses: a LIVE listing
                    still sells (stock keeps syncing) but its price and images
                    no longer sync; a NOT_FOR_WEBSITE row says which (a brand

@@ -171,14 +171,15 @@ def _skus_in_any_collection(db) -> set:
     (services/collection_membership) over every listing IMS holds
     (catalogue_facts), so the eligible products orphan_skus scans, online
     or not yet, are all judged by the same rule. A listing's own SKU and
-    every colour / size SKU it carries. A read failure RAISES (the
-    envelope's degraded flag), never an empty set that reads as "every
-    product is in no collection"."""
+    every colour / size SKU it carries. A read failure -- of the
+    catalogue or of any ONE listing -- RAISES (the envelope's degraded
+    flag), never a set missing that listing that reads as "not in any
+    collection"."""
     if db is None:
         return set()
     from . import collection_membership
 
-    return collection_membership.skus_in_any_collection(db, collection_membership.catalogue_facts(db))
+    return collection_membership.skus_in_any_collection(db, collection_membership.catalogue_facts(db, strict=True))
 
 
 # ===========================================================================
