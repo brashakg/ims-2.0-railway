@@ -2476,7 +2476,7 @@ def _post_credit_entry(
     # the customer's real balance, never this press's snapshot.
     try:
         stored = (ledger.find_one({"entry_id": entry["entry_id"]}) if ledger is not None else None) or entry
-        balance = _current_credit_balance(customer_id, repo.find_by_id(customer_id))
+        balance = _current_credit_balance(customer_id, _scoped_customer_or_404(customer_id, current_user, write=True))
     except Exception:  # noqa: BLE001 -- it posted; the snapshot is the best answer left
         stored, balance = entry, entry["balance_after"]
     stored = dict(stored)
