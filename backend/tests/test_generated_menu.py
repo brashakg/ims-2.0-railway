@@ -1399,3 +1399,24 @@ def test_a_failed_status_read_is_not_no_menu(monkeypatch):
 
     monkeypatch.setattr(gm, "generated_menus", _boom)
     assert osp._generated_menu_status(object()) is None
+
+
+def _shop_all(items):
+    return [k for col in _top(items, "Sunglasses")["children"] for k in col["children"] if k["title"] == "Shop all"]
+
+
+def test_shop_all_is_dropped_when_its_collection_is_unpublished():
+    assert _shop_all(_gen()[0])  # control: shown when sunglasses is usable
+    rows = [dict(r, published=False) if r["handle"] == "sunglasses" else r for r in ROWS]
+    items, hidden = _gen(rows=rows)
+    assert not _shop_all(items)
+    assert any(h["handle"] == "sunglasses" and h["reason"] == gm.NOT_PUBLISHED for h in hidden)
+
+
+def test_shop_all_is_dropped_when_shopify_shows_its_collection_empty():
+    gid = {r["handle"]: r["shopify_collection_id"] for r in ROWS}
+    shop = {g: 5 for g in gid.values()}
+    shop[gid["sunglasses"]] = 0
+    items, hidden = gm.generate(gm.default_template(), ROWS, _counts(), shop)
+    assert not _shop_all(items)
+    assert any(h["handle"] == "sunglasses" and h["reason"] == gm.SHOP_EMPTY for h in hidden)

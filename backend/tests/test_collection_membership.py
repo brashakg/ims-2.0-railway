@@ -616,3 +616,64 @@ def test_a_failed_view_read_on_a_materialised_collection_is_unreadable_not_empty
     monkeypatch.setattr(cb, "_get_db", lambda: None)
     page = asyncio.run(cb.browse_collection_products("h", skip=0, limit=24, current_user={}))
     assert page["unreadable"] is True and page["total"] is None, page
+
+
+# ---------------------------------------------------------------------------
+# Review round 6
+# ---------------------------------------------------------------------------
+
+
+def test_a_view_built_before_the_lead_field_still_browses():
+    """A view row written before this PR has no "lead" field: browse counts
+    it as before, never "No products in this collection" until the next sync."""
+    db = _db()
+    coll = {"collection_id": "old", "handle": "old", "materialized_at": NOW}
+    db.seed("collection_products", [{"collection_id": "old", "handle": "old", "sku": s, "position": i}
+                                    for i, s in enumerate(["A", "B"])])
+    page = mat.browse(db, coll)
+    assert page["total"] == 2 and [r["sku"] for r in page["products"]] == ["A", "B"]
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_custom_collection_naming_a_colour_is_never_one_short_on_a_blip(monkeypatch):
+    """catalog_products.find_one raising for a CUSTOM collection naming a
+    colour SKU: counts_by_handle raises and materialize_collection returns
+    None (the last view stands) -- never a count of 0 or a smaller view."""
+    db, lead, colour = _colour_world()
+    coll = {"collection_id": "pick", "handle": "pick", "collection_type": "CUSTOM",
+            "products": [{"sku": colour, "position": 0}]}
+    db.seed("ecom_collections", [dict(coll)])
+    facts = cm.online_facts(db, strict=True)
+    assert mat.materialize_collection(db, coll, facts) == 1
+    before = list(db["collection_products"].find({"collection_id": "pick"}))
+
+    cp = db["catalog_products"]
+
+    def _blip(*_a, **_k):
+        raise RuntimeError("mongo blip")
+
+    monkeypatch.setattr(cp, "find_one", _blip)
+    with pytest.raises(RuntimeError):
+        cm.counts_by_handle(db, facts)
+    assert mat.materialize_collection(db, coll, facts) is None
+    assert list(db["collection_products"].find({"collection_id": "pick"})) == before
+
+
+def test_a_strict_facts_read_raises_when_the_variant_rows_are_unreadable(monkeypatch):
+    """_facts passes strict to variant_rows_for_product: a dead
+    catalog_variants read raises, never lead-only SKUs."""
+    from api.services import online_catalog
+
+    db = _db()
+    doc = db["catalog_products"].find_one({"sku": "A"})
+    real = online_catalog.variant_rows_for_product
+
+    def _flaky(db, product, *, strict=False):
+        if strict:
+            raise RuntimeError("catalog_variants unreadable")
+        return real(db, product)
+
+    monkeypatch.setattr(online_catalog, "variant_rows_for_product", _flaky)
+    assert reg._facts(db, doc)["sku"] == "A"
+    with pytest.raises(RuntimeError):
+        reg._facts(db, doc, strict=True)

@@ -268,7 +268,8 @@ def _custom_members(db, collection: Dict[str, Any], facts: List[Dict[str, Any]])
     by_sku = {str(f.get("sku")): f for f in facts if f.get("sku")}
     out: List[Dict[str, Any]] = []
     seen = set()
-    for sku, doc in manual_listings(db, collection):
+    # strict: a dead lookup raises, never a CUSTOM collection one member short.
+    for sku, doc in manual_listings(db, collection, strict=True):
         # No doc read: only a listing's own SKU names it (a fact IS a doc).
         f = by_sku.get(str(doc.get("sku") or "") if doc is not None else sku)
         if f is not None and id(f) not in seen:

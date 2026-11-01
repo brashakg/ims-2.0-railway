@@ -273,7 +273,9 @@ def browse(db, collection: Dict, skip: int = 0, limit: int = 24) -> Dict[str, An
         return empty
     try:
         view = db[_VIEW]
-        leads = {"collection_id": collection_id, "lead": True}
+        # A row with no "lead" field is the pre-listing view shape (one row
+        # per member): counted as before until the next sync rewrites it.
+        leads = {"collection_id": collection_id, "lead": {"$ne": False}}
         total = view.count_documents(leads)
         if total == 0 and not collection.get("materialized_at"):
             # Lazy FIRST materialise so a freshly-created collection browses

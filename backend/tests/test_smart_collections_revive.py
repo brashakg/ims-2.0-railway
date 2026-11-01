@@ -197,7 +197,11 @@ def seeded(monkeypatch):
               "tags": set(), "type": "Sunglass",
               "prices": [float((p.get("pricing") or {}).get("offer_price") or p.get("offer_price") or 0)]}
              for p in CATALOG]
-    monkeypatch.setattr(osc, "_get_db", lambda: object())
+    from strict_fakes import StrictDB
+
+    db = StrictDB()  # the catalogue a CUSTOM collection's manual SKUs are read from
+    db.seed("catalog_products", [dict(p) for p in CATALOG])
+    monkeypatch.setattr(osc, "_get_db", lambda: db)
     monkeypatch.setattr(cm, "online_facts", lambda db, strict=False: facts)
     return {"mock": mock, "repo": repo, "cid": created["collection_id"]}
 
@@ -277,6 +281,27 @@ def test_resolved_products_counts_a_custom_collection_by_the_one_rule(client, au
     body = r.json()
     assert body["skus"] == ["BOSS-1"] and body["count"] == 1 and body["source"] == "website_rule"
     assert body["manual_skus"] == ["GONE-1", "BOSS-1"]
+
+
+def test_resolved_products_says_unreadable_when_a_custom_lookup_blips(client, auth_headers, seeded, monkeypatch):
+    """A Mongo blip reading a CUSTOM collection's manual SKU: the route says
+    unreadable, never a count one member short (review round 6)."""
+    custom = seeded["repo"].create({
+        "title": "Picks", "handle": "picks", "collection_type": "CUSTOM",
+        "products": [{"sku": "BOSS-1", "position": 0}],
+    })
+    db = osc._get_db()
+
+    def _blip(*_a, **_k):
+        raise RuntimeError("mongo blip")
+
+    monkeypatch.setattr(db["catalog_products"], "find_one", _blip)
+    r = client.get(
+        f"/api/v1/online-store/collections/{custom['collection_id']}/resolved-products",
+        headers=auth_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["count"] is None and r.json()["unreadable"]
 
 
 def test_resolved_products_says_unreadable_never_zero(client, auth_headers, seeded, monkeypatch):

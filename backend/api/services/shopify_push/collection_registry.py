@@ -123,7 +123,7 @@ def _facts(db, doc: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
     from .listing import listing_view, model_listing
     from .product_input import _resolve_variant_pricing, ims_product_tags
 
-    raw = variant_rows_for_product(db, doc) or []
+    raw = variant_rows_for_product(db, doc, strict=strict) or []
     # The tags, prices and vendor the push SENDS: a model's listing view and
     # its rows (product.push_product prices every listing row with
     # _resolve_variant_pricing over listing_view), so a count never differs

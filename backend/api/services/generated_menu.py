@@ -307,6 +307,22 @@ def generate(
             return  # a brand left out of Top N and of A-Z is listed once
         hidden.append({"section": section, "title": title, "handle": h, "reason": why})
 
+    def statics(where: str, links) -> List[Dict[str, Any]]:
+        """A static link to /collections/<h> of a collection IMS holds goes
+        through the same gate as a generated one (Shop all -> a collection
+        the gate refused is dropped, with why)."""
+        out = []
+        for link in links or []:
+            t, url = str(link["title"]), str(link["url"])
+            h = url.split("?")[0].rstrip("/").split("/collections/", 1)[-1] if url.startswith("/collections/") else None
+            if h and h in by_handle:
+                ok, why = usable(by_handle[h])
+                if not ok:
+                    hide(where, t, by_handle[h], why)
+                    continue
+            out.append(_link_node(t, url))
+        return out
+
     for s in (template or {}).get("sections") or []:
         kind, title = s.get("kind"), str(s.get("title") or "").strip()
         if kind == "collection":
@@ -318,7 +334,7 @@ def generate(
                 hide(title, title, row, why, s.get("handle"))
         elif kind == "links":
             node = _link_node(title, str(s.get("url") or "#"))
-            node["children"] = [_link_node(str(link["title"]), str(link["url"])) for link in s.get("links") or []]
+            node["children"] = statics(title, s.get("links"))
             items.append(node)
         elif kind == "panel":
             columns = []
@@ -343,7 +359,7 @@ def generate(
                         hide(where, label, row, why)
                 if not kids:
                     continue  # a column with no collection with products is left out
-                kids.extend(_link_node(str(link["title"]), str(link["url"])) for link in g.get("links") or [])
+                kids.extend(statics(where, g.get("links")))
                 col = _link_node(str(g.get("title") or ""), "#")
                 col.pop("static")
                 col["children"] = kids
