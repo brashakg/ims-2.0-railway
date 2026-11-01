@@ -986,19 +986,19 @@ def _sync_existing_order_status(
     # order still to ship) re-reads the totals check from Shopify's
     # current_total_price, as one of this event's markers: the COD courier
     # gate reads it (delivery_gate.cod_collectable). Shopify's current total
-    # also nets refunds, which IMS answers with credit notes (shopify_refund,
-    # before dispatch too), never invoice edits: the refunded lines + shipping
-    # are added back. Once the goods are out (returns) there is no re-check.
+    # also nets refunds. Only the MONEY Shopify sent back is added back (IMS
+    # answers it with a credit note and never edits grand_total): a refund on
+    # an unpaid COD order moves no money, the buyer simply owes less, so it
+    # stays a MISMATCH and the courier never collects the old, higher IMS
+    # balance. Once the goods are out (returns) there is no re-check.
     check = None
     status_now = _norm(existing.get("status")).upper()
     if fact is None and status_now in BOOKED_STATUSES and status_now not in GOODS_OUT:
         from .shopify_ingest import _totals_check
-        from .shopify_refund import _shipping_refunded
+        from .shopify_refund import _money_back_on_shopify
 
         refunded = sum(
-            _shipping_refunded(r) + sum(
-                _f(li.get("subtotal")) + _f(li.get("total_tax"))
-                for li in r.get("refund_line_items") or [] if isinstance(li, dict))
+            _money_back_on_shopify(r)[0]
             for r in payload.get("refunds") or [] if isinstance(r, dict))
         check = _totals_check(
             payload, _f(existing.get("grand_total")), current=True, refunded=refunded)

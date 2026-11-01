@@ -366,9 +366,10 @@ def _totals_check(
     total_price (never a real order) is UNCHECKED. Shopify's own discount /
     shipping / tax figures ride along so the admin sees where it differs.
     `current`: an order edit's re-check (online_order_mapper) reads Shopify's
-    current_* figures, which follow edits. `refunded`: money Shopify's
-    current total nets that IMS answers with a credit note (shopify_refund),
-    added back so a refund is never read as an edit."""
+    current_* figures, which follow edits. `refunded`: the refund money
+    Shopify sent back (its current total nets it; IMS answers it with a
+    credit note, shopify_refund), added back so a refund is never read as an
+    edit. A refund that moved no money is not added back."""
     pre = "current_" if current else ""
     raw = payload.get(pre + "total_price")
     if raw is None or str(raw).strip() == "":
