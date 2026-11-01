@@ -240,10 +240,12 @@ export const creditClosed = (l: ReceiveLine) =>
     ? Math.min(rejectedOf(l), Math.max(0, l.due - goodOf(l)))
     : 0;
 
-/** Contact-lens expiry: expired or within six months is a WARNING only. */
+/** Contact-lens expiry: expired (on or past the expiry day) or within six
+ *  months is a WARNING only. */
 export function expiryWarning(expiry: string, today: string): 'expired' | 'short' | null {
   if (!expiry || !today) return null;
-  if (expiry < today) return 'expired';
+  // Mirrors backend/api/utils/expiry.py: the expiry day itself is expired.
+  if (expiry <= today) return 'expired';
   const d = new Date(`${today}T00:00:00Z`);
   d.setUTCMonth(d.getUTCMonth() + 6);
   return expiry < d.toISOString().slice(0, 10) ? 'short' : null;

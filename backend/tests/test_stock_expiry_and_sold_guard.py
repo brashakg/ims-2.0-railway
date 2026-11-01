@@ -68,6 +68,8 @@ def _op(val, op, arg) -> bool:
         return val is not _MISSING and _same_bson_type(val, arg) and val >= arg
     if op == "$lt":
         return val is not _MISSING and _same_bson_type(val, arg) and val < arg
+    if op == "$lte":
+        return val is not _MISSING and _same_bson_type(val, arg) and val <= arg
     if op == "$type":
         if arg == "string":
             return isinstance(val, str)
@@ -865,3 +867,22 @@ def test_till_still_sells_the_batch_expiring_tomorrow(monkeypatch, instant):
     with freeze_time(instant):
         guard._assert_serialized_stock_available([line], "S1")
         guard._assert_serialized_stock_available([dict(line, stock_id="U-TOMORROW")], "S1")
+
+
+@pytest.mark.parametrize("instant", [_NIGHT, _DAY])
+def test_expiring_report_skips_the_expiry_day_and_counts_ist_days(instant):
+    """GET /inventory/expiring (find_expiring) uses the same rule as the till:
+    today's box is EXPIRED, not 'expiring', and the window is IST days 1..N.
+    NIGHT also pins the UTC lag: yesterday's box must not leak in."""
+    from freezegun import freeze_time
+
+    docs = [
+        _unit("U-YESTERDAY", expiry_date=_exp(instant, -1, "iso")),
+        _unit("U-TODAY", expiry_date=_exp(instant, 0, "iso")),
+        _unit("U-TOMORROW", expiry_date=_exp(instant, 1, "iso")),
+        _unit("U-DAY30", expiry_date=_exp(instant, 30, "iso")),
+        _unit("U-DAY31", expiry_date=_exp(instant, 31, "iso")),
+    ]
+    with freeze_time(instant):
+        rows = _repo(docs).find_expiring("S1", days=30)
+    assert sorted(r["stock_id"] for r in rows) == ["U-DAY30", "U-TOMORROW"]

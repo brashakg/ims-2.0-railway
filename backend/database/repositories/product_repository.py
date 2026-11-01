@@ -15,6 +15,7 @@ from datetime import datetime, date, timedelta, timezone
 from api.services.barcode import find_unit_by_code
 from api.services.gtin import gtin_spellings
 from api.utils.expiry import first_sellable_expiry
+from api.utils.ist import ist_today
 
 from .base_repository import BaseRepository
 
@@ -794,11 +795,10 @@ class StockRepository(BaseRepository):
         # which is why this returned 0. Compare string-vs-string with date-only
         # ISO bounds, mirroring how /contact-lenses/expiry-status parses these
         # values. ISO date strings sort lexicographically the same as
-        # chronologically, so the window is correct: today (not yet expired)
-        # through today + N days inclusive.
-        now = datetime.now()
-        lower = now.date().isoformat()
-        upper = (now + timedelta(days=days)).date().isoformat()
+        # chronologically. The window is IST days 1..N (utils.expiry): the
+        # expiry day itself is EXPIRED, so the floor is the till's own floor.
+        lower = self._expiry_floor_iso()
+        upper = (ist_today() + timedelta(days=days)).isoformat()
         return self.find_many(
             {
                 "store_id": store_id,

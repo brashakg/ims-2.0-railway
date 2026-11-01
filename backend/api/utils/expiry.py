@@ -8,8 +8,10 @@ expiry day is day 0 and the near-expiry window is days 1..N.
 Every reader goes through here: the Contact Lens screens (partition_by_expiry,
 the near-expiry filter, the FEFO pick) ask ``is_expired``; the till and the
 stock claim (StockRepository's expiry floor) sell only expiries on or after
-``first_sellable_expiry``. Both come from ``EXPIRED_THROUGH_DAY``, so the
-screen and the till can never disagree about the same lens.
+``first_sellable_expiry``, and the expiring report (find_expiring) starts its
+window there. All come from ``EXPIRED_THROUGH_DAY``, so the screen and the till
+can never disagree about the same lens. The one frontend copy, the goods-receipt
+warning (frontend/src/pages/purchase/receiveLines.ts expiryWarning), mirrors it.
 """
 
 from __future__ import annotations
