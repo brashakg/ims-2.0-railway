@@ -1713,3 +1713,23 @@ def test_a_kept_piece_back_into_a_filed_month_tops_up_in_the_open_month(world, m
     assert writeoff_itc.month_reclaim(world, GSTIN_Y_JH, nxt)["cgst"] == 50.0
     _done, heads = writeoff_itc._recorded(world, {"bill_id": invoice["bill_id"]}, "pieces")
     assert heads["cgst"] == 37.5
+
+
+def test_a_kept_piece_back_next_month_tops_up_in_the_still_open_loss_month(world, monkeypatch):
+    """SU-3 comes back after the month rolls over, the loss month still open:
+    SU-2's 12.5/12.5 shortfall is topped up in the month SU-2 was lost, so that
+    month holds 37.5/37.5 and the undo's month holds nothing -- the same as
+    when SU-2 is the piece back."""
+    from datetime import timedelta
+
+    from api.services import writeoff_itc
+
+    _three_cost_box(world)
+    loss = world["itc_writeoff_reversals"].find_one({"_id": "SU-2"})["period"]
+    later = writeoff_itc._now() + timedelta(days=40)
+    monkeypatch.setattr(writeoff_itc, "_now", lambda: later)
+    monkeypatch.setattr(writeoff_itc, "_locked", lambda db, period: False)
+    writeoff_itc.undo_writeoff(world, _unit(world, "SU-3"))
+    assert writeoff_itc._period(later) != loss
+    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, loss)["cgst"] == 37.5
+    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, writeoff_itc._period(later))["cgst"] == 0.0

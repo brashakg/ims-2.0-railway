@@ -690,14 +690,16 @@ def _trim_top_up(db, unit: dict, row: dict) -> None:
     """Hold the line at the lost pieces' slice on BOTH sides after an undo:
     the excess given back, and -- the rows left were cut unevenly (a credit
     note's give-back) -- the shortfall a top-up on the undone row's bill in
-    the open month (a filed month is never edited)."""
+    the month the pieces were lost, or the first open month if that one is
+    filed (a filed month is never edited)."""
     if "share" not in row:  # a header-only bill's rows take no top-up
         gstin_of = _gstin_lookup(db)
         bills, pid = _bills_for(db, unit, gstin_of), row.get("product_id")
         _true_up(db, bills, pid, gstin_of)
         bill = next((b for b in bills if b.get("bill_id") == row.get("bill_id")), None)
         if bill:
-            _true_up(db, bills, pid, gstin_of, bill, _now(), source=("UNDO", _sid(unit)))
+            _true_up(db, bills, pid, gstin_of, bill, row.get("recorded_at") or _now(),
+                     source=("UNDO", _sid(unit)))
 
 
 def forget(db, unit: dict) -> None:
