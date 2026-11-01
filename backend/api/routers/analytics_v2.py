@@ -19,7 +19,7 @@ from api.utils.event_time import utc_now_iso
 
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
-from typing import Dict, List, Optional
+from typing import List, Optional
 from datetime import date, datetime, timedelta
 import uuid
 
@@ -334,13 +334,20 @@ async def demand_forecast(
         product_sales.items(), key=lambda x: x[1]["qty"], reverse=True
     )[:20]
 
-    # THE buy rule's number per product at this shop: the Reorder list's
-    # (owner S5 -- one number everywhere, never a forecast of our own).
-    from ..services.reorder_list import build as _reorder_list
+    # THE buy rule (reorder_policy.buy_qty, owner S5) with the inputs the
+    # purchase report hands it: this shop's units, its 30-day sales and its
+    # SENT orders -- the same number the report, the alerts and Jarvis show.
+    from ..services.reorder_policy import buy_qty, on_hand, open_orders, sold_by_shop
 
-    to_buy: Dict[str, int] = {}
-    for r in _reorder_list(db, store_id=active_store or None)["rows"]:
-        to_buy[r["product_id"]] = to_buy.get(r["product_id"], 0) + int(r["buy"])
+    top_ids = [pid for pid, _data in top_products]
+    stock_here = {
+        pid: n
+        for (pid, _shop), n in on_hand(
+            db.get_collection("stock_units"), store_id=active_store, product_ids=top_ids
+        ).items()
+    }
+    sold_30d = sold_by_shop(db.get_collection("orders"), store_id=active_store)
+    sent, _drafts = open_orders(db.get_collection("purchase_orders"), top_ids)
 
     forecasts = []
     for pid, data in top_products:
@@ -358,14 +365,15 @@ async def demand_forecast(
         else:
             trend = "stable"
 
-        # Lookup current stock
         prod_doc = products_coll.find_one({"product_id": pid}) or {}
-        current_stock = int(
-            prod_doc.get("quantity", 0) or prod_doc.get("stock", 0) or 0
+        # The shop's own units (reorder_policy.on_hand), never a legacy field.
+        current_stock = stock_here.get(pid, 0)
+        # 0 when auto-reorder is off or covered: the row stays as information.
+        reorder, basis = buy_qty(
+            prod_doc, store_id=active_store, on_hand=current_stock,
+            on_order=sent.get((pid, active_store), 0),
+            sold_30d=sold_30d.get((pid, active_store), 0),
         )
-        # The Reorder list's number (0 when auto-reorder is off: the forecast
-        # row stays as information).
-        reorder = to_buy.get(pid, 0)
 
         forecasts.append(
             {
@@ -378,6 +386,13 @@ async def demand_forecast(
                 "predicted_30_day": predicted_30,
                 "current_stock": current_stock,
                 "reorder_recommended": reorder,
+                "basis": basis,
+                # The purchase report's wording for the same number.
+                "reason": (
+                    f"Buy {reorder}: "
+                    + ("back above the shop's level." if basis == "level"
+                       else "the last 30 days' sales.")
+                ) if reorder > 0 else "",
             }
         )
 

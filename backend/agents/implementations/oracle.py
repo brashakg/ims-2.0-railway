@@ -420,30 +420,29 @@ class OracleAgent(JarvisAgent):
 
     async def _propose_reorders(self) -> int:
         """
-        #7 Predictive purchasing. For every (product, store) that sold in the
-        last 30 days and that THE buy rule says to buy for (reorder_policy.
-        buy_qty, owner S5: the shop's level if set, else its 30-day sales,
-        minus stock and sent orders -- the Reorder list's number), enqueue a
-        reversible ``draft_po`` change-proposal for human review. Approving it (SUPERADMIN/ADMIN) creates a DRAFT
-        purchase order via the shared executor; SENDING the PO to the vendor
-        remains a separate, non-reversible, human step.
+        #7 Predictive purchasing. For every row of THE Reorder list with
+        something to buy (services/reorder_list.build: physical shops only,
+        the skip rules, the shop's own stock, sent orders, max stock -- owner
+        S5: the shop's level if set, else its 30-day sales), enqueue a
+        reversible ``draft_po`` change-proposal for human review. The product,
+        shop and quantity are the list's; ORACLE adds only its burn-rate
+        wording. Approving it (SUPERADMIN/ADMIN) creates a DRAFT purchase
+        order via the shared executor; SENDING the PO to the vendor remains a
+        separate, non-reversible, human step.
 
         This is READ-ONLY analytics + a suggestion record only. It NEVER auto-
-        creates or sends a PO that commits money. The days of stock left (burn
-        rate below) are told in the rationale; they no longer decide (S5).
+        creates or sends a PO that commits money.
 
         Burn rate (units/day) is computed in PYTHON from booked ``orders`` line
-        items over a 7-day + 30-day trailing window (no aggregation pipeline, so
-        the behaviour is identical over a fake in-memory DB and real Mongo). The
-        7-day rate is primary; a SKU with zero 7-day sales falls back to its 30-
-        day rate so a weekly-selling SKU is not mistaken for a dead one.
+        items over a 7-day + 30-day trailing window; the 7-day rate is primary,
+        a SKU with zero 7-day sales falls back to its 30-day rate. It is told in
+        the rationale (days of stock left); it never decides.
 
         One proposal per (product_id, store_id) per day, de-duped on
         ``draft_po:{product_id}:{store_id}:{date}``. Capped at 50 per tick. Fully
         fail-soft - returns the count enqueued (0 on any problem) and never raises.
         """
-        orders_coll = self.get_collection("orders")
-        if orders_coll is None:
+        if self.db is None:
             return 0
         # Lazy imports keep ORACLE importable even if a module is absent.
         try:
@@ -452,9 +451,7 @@ class OracleAgent(JarvisAgent):
                 tally_demand_by_product_store, burn_rates, days_remaining,
                 projected_stockout_iso,
             )
-            from api.services.reorder_policy import (
-                auto_reorder_disabled, buy_qty, open_orders, reorder_level,
-            )
+            from api.services import reorder_list
         except Exception as e:  # pragma: no cover
             logger.debug(f"[ORACLE] predictive-reorder import failed: {e}")
             return 0
@@ -462,162 +459,44 @@ class OracleAgent(JarvisAgent):
         now = now_ist_naive()
         horizon = self._reorder_horizon_days()
 
-        # 1. Booked-order demand over the trailing 30 days (Python-side tally).
+        # 1. THE Reorder list's rows with a buy: which product, which shop, how many.
         try:
-            orders = list(orders_coll.find({
-                "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
-                "created_at": {"$gte": now - timedelta(days=30)},
-            }))
-        except Exception as e:
-            logger.debug(f"[ORACLE] order demand scan error: {e}")
-            # Fall back to an unfiltered scan if the DB rejects the filter shape
-            # (e.g. a fake DB that ignores comparison operators on created_at).
-            try:
-                orders = list(orders_coll.find({}))
-            except Exception:  # noqa: BLE001
-                return 0
-
-        demand = tally_demand_by_product_store(orders, now=now)
-        if not demand:
+            rows = [r for r in reorder_list.build(self.db, now=now)["rows"] if r["buy"] > 0]
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"[ORACLE] reorder list read failed: {e}")
+            return 0
+        if not rows:
             return 0
 
-        # 2. On-hand per (product_id, store_id) from stock_units (AVAILABLE),
-        #    summed in Python. Missing collection -> on_hand defaults to 0.
-        #    P2 hardening: the scan is bounded SERVER-SIDE to the demanded
-        #    product ids + on-hand-ish statuses instead of a full-collection
-        #    scan every tick (stock_units is one doc per physical unit -- the
-        #    biggest collection in the system). Semantics are preserved
-        #    exactly: the status list mirrors item_events.ON_HAND_STATUSES
-        #    (upper+lower variants, the same list inventory.py filters with),
-        #    and `$in` with None matches BOTH a null and a MISSING status in
-        #    real Mongo, so legacy blank/absent-status units still count as
-        #    on-hand. The Python-side normalization below stays as the
-        #    canonical filter so the fallback full scan behaves identically.
-        wanted_ids = sorted({pid for (pid, _store) in demand.keys()})
-        try:
-            from api.services.item_events import ON_HAND_STATUSES as _on_hand_statuses
-        except Exception:  # noqa: BLE001  # pragma: no cover - defensive
-            _on_hand_statuses = ["AVAILABLE", "available", "IN_STOCK", "in_stock"]
-        on_hand_map: Dict[tuple, int] = {}
-        stock_coll = self.get_collection("stock_units")
-        if stock_coll is not None:
-            stock_query = {
-                "status": {"$in": list(_on_hand_statuses) + [None, ""]},
-                "$or": [
-                    {"product_id": {"$in": wanted_ids}},
-                    {"sku": {"$in": wanted_ids}},
-                ],
-            }
-            stock_proj = {"_id": 0, "product_id": 1, "sku": 1, "store_id": 1,
-                          "status": 1, "quantity": 1}
+        # 2. The 7-day pace, for the wording only (burn rate, days left).
+        demand: Dict[tuple, Dict[str, Any]] = {}
+        orders_coll = self.get_collection("orders")
+        if orders_coll is not None:
             try:
-                units = list(stock_coll.find(stock_query, stock_proj))
+                demand = tally_demand_by_product_store(
+                    list(orders_coll.find({"created_at": {"$gte": now - timedelta(days=30)}})),
+                    now=now,
+                )
             except Exception as e:  # noqa: BLE001
-                logger.debug(f"[ORACLE] filtered stock_units scan failed "
-                             f"(full-scan fallback): {e}")
-                try:
-                    units = list(stock_coll.find({}))
-                except Exception as e2:  # noqa: BLE001
-                    logger.debug(f"[ORACLE] stock_units scan error: {e2}")
-                    units = []
-            for su in units:
-                pid = su.get("product_id") or su.get("sku")
-                if not pid:
-                    continue
-                status = str(su.get("status") or "").upper()
-                # RESERVED is held for an order -> NOT sellable on-hand (mirrors
-                # item_events.ON_HAND_STATUSES + inventory.py). Only AVAILABLE/
-                # IN_STOCK (or a legacy blank status) count toward the reorder
-                # on-hand signal; counting RESERVED would over-state stock and
-                # SUPPRESS a legitimate reorder (the opposite of this feature's job).
-                if status and status not in ("AVAILABLE", "IN_STOCK"):
-                    continue
-                key = (str(pid), str(su.get("store_id") or "UNKNOWN"))
-                qty = su.get("quantity")
-                qty = 1 if qty is None else qty
-                try:
-                    qty = int(qty)
-                except (TypeError, ValueError):
-                    qty = 0
-                on_hand_map[key] = on_hand_map.get(key, 0) + qty
-
-        # 3. Product master lookup for preferred_vendor_id + reorder_point.
-        #    P2 hardening: server-side filter on the demanded ids over the SAME
-        #    identifier fields the match loop reads (product_id / sku / _id --
-        #    string _ids match; IMS products always carry a string product_id)
-        #    + a projection, instead of a full products scan.
-        products_coll = self.get_collection("products")
-        prod_by_id: Dict[str, Dict[str, Any]] = {}
-        if products_coll is not None:
-            from api.services.reorder_policy import DISCONTINUED_FIELDS
-
-            wanted = set(wanted_ids)
-            prod_query = {"$or": [
-                {"product_id": {"$in": wanted_ids}},
-                {"sku": {"$in": wanted_ids}},
-                {"_id": {"$in": wanted_ids}},
-            ]}
-            prod_proj = {"product_id": 1, "sku": 1, "preferred_vendor_id": 1,
-                         "default_vendor_id": 1, "vendor_id": 1,
-                         "reorder_levels": 1, "reorder_quantity": 1,
-                         **{f: 1 for f in DISCONTINUED_FIELDS}}
-            try:
-                prods = list(products_coll.find(prod_query, prod_proj))
-            except Exception as e:  # noqa: BLE001
-                logger.debug(f"[ORACLE] filtered products scan failed "
-                             f"(full-scan fallback): {e}")
-                try:
-                    prods = list(products_coll.find({}))
-                except Exception as e2:  # noqa: BLE001
-                    logger.debug(f"[ORACLE] products scan error: {e2}")
-                    prods = []
-            for p in prods:
-                for idf in ("product_id", "sku", "_id"):
-                    val = p.get(idf)
-                    if val is not None and str(val) in wanted:
-                        prod_by_id.setdefault(str(val), p)
-
-        # Pieces on SENT orders per (product, shop): THE buy rule takes them off.
-        sent, _drafts = open_orders(self.get_collection("purchase_orders"), wanted_ids)
+                logger.debug(f"[ORACLE] order pace scan error: {e}")
 
         today = now.strftime("%y%m%d")
         enqueued = 0
         CAP = 50
-        for (pid, store_id), d in demand.items():
+        for r in rows:
             if enqueued >= CAP:
                 break
+            pid, store_id, qty, on_hand = r["product_id"], r["store_id"], r["buy"], r["on_hand"]
+            d = demand.get((pid, store_id)) or {"units_7d": 0, "units_30d": r["sold_30d"]}
             rates = burn_rates(d["units_7d"], d["units_30d"])
             eff = rates["effective"]
-            on_hand = on_hand_map.get((pid, store_id), 0)
             d_left = days_remaining(on_hand, eff)
-
-            prod = prod_by_id.get(pid, {})
-            # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
-            # default) means auto-reorder is DISABLED for this product -- no
-            # predictive reorder proposal. Missing field = legacy doc, enabled.
-            if auto_reorder_disabled(prod):
-                continue
-            # THE buy rule (owner S5: the shop's level if set, else its 30-day
-            # sales, minus stock and sent orders) decides WHETHER and HOW MANY:
-            # the same number the Reorder list shows. Nothing to buy -> no
-            # proposal, however fast the last week sold.
-            qty, _basis = buy_qty(
-                prod, store_id=store_id, on_hand=on_hand,
-                on_order=sent.get((pid, store_id), 0),
-                sold_30d=int(d.get("units_30d") or 0),
-            )
-            if qty <= 0:
-                continue
-            preferred_vendor_id = (
-                prod.get("preferred_vendor_id")
-                or prod.get("default_vendor_id")
-                or prod.get("vendor_id")
-            )
+            preferred_vendor_id = r["vendor_id"]
             # THIS shop's level (D12); None = not set (30-day sales decide).
-            reorder_point = reorder_level(prod, store_id=store_id)
-            name = d.get("name") or pid
-            brand = d.get("brand") or ""
-            label = (f"{brand} {name}".strip()) or pid
+            reorder_point = r["level"]
+            name = r["name"] or d.get("name") or pid
+            brand = r["brand"] or d.get("brand") or ""
+            label = (name if brand and name.startswith(brand) else f"{brand} {name}").strip() or pid
             stockout = projected_stockout_iso(now, d_left)
             vendor_missing = not bool(preferred_vendor_id)
 

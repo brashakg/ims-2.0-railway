@@ -76,9 +76,31 @@ def projected_stockout_iso(now: datetime, days_left: float) -> Optional[str]:
 
 
 def _order_status_excluded(status: Any) -> bool:
-    """Orders in these states never count toward demand (no real sale)."""
-    s = str(status or "").upper()
-    return s in {"CANCELLED", "DRAFT", "VOID", "VOIDED", "REFUNDED"}
+    """A sale counts only while the order is BOOKED (online_order_status.
+    BOOKED_STATUSES, the set every revenue reader shares): drafts, cancelled,
+    void, refunded and imported history never do."""
+    from api.services.online_order_status import BOOKED_STATUSES
+
+    return str(status or "").upper() not in BOOKED_STATUSES
+
+
+def _fulfilment_shops(order: Dict[str, Any]):
+    """(per-product breakdown {pid: [[shop, qty], ...]}, fallback shop) for an
+    order. An online order is counted at the shop(s) that fulfilled it
+    (fulfillment_breakdown, else the first of fulfillment_stores), never at
+    the online store; anything else at its own store_id."""
+    split: Dict[str, List[List[Any]]] = {}
+    for b in order.get("fulfillment_breakdown") or []:
+        if isinstance(b, dict) and b.get("product_id") and b.get("store_id"):
+            try:
+                n = float(b.get("qty") or 0)
+            except (TypeError, ValueError):
+                n = 0.0
+            if n > 0:
+                split.setdefault(str(b["product_id"]), []).append([str(b["store_id"]), n])
+    stores = [s for s in order.get("fulfillment_stores") or [] if s]
+    fallback = stores[0] if stores else (order.get("store_id") or order.get("store") or "UNKNOWN")
+    return split, str(fallback)
 
 
 def tally_demand_by_product_store(
@@ -106,7 +128,7 @@ def tally_demand_by_product_store(
         created = _coerce_dt(order.get("created_at"))
         if created is None or created < cut30:
             continue
-        store_id = order.get("store_id") or order.get("store") or "UNKNOWN"
+        split, fallback = _fulfilment_shops(order)
         in7 = created >= cut7
         for item in order.get("items") or []:
             pid = item.get("product_id") or item.get("sku")
@@ -121,26 +143,38 @@ def tally_demand_by_product_store(
                 qty = 1.0
             if qty <= 0:
                 continue
-            key = (pid, str(store_id))
-            slot = out.get(key)
-            if slot is None:
-                slot = out[key] = {
-                    "units_7d": 0.0,
-                    "units_30d": 0.0,
-                    "name": item.get("product_name") or item.get("name") or "",
-                    "brand": item.get("brand") or "",
-                    "category": item.get("category") or "",
-                }
-            slot["units_30d"] += qty
-            if in7:
-                slot["units_7d"] += qty
-            # First non-empty descriptor wins (some lines omit them).
-            if not slot["name"]:
-                slot["name"] = item.get("product_name") or item.get("name") or ""
-            if not slot["brand"]:
-                slot["brand"] = item.get("brand") or ""
-            if not slot["category"]:
-                slot["category"] = item.get("category") or ""
+            # The line's pieces go to the shops that sent them, the rest to
+            # the fallback shop.
+            parts: List[tuple] = []
+            for share in split.get(pid, []):
+                take = min(qty, share[1])
+                if take > 0:
+                    parts.append((share[0], take))
+                    share[1] -= take
+                    qty -= take
+            if qty > 0:
+                parts.append((fallback, qty))
+            for store_id, n in parts:
+                key = (pid, store_id)
+                slot = out.get(key)
+                if slot is None:
+                    slot = out[key] = {
+                        "units_7d": 0.0,
+                        "units_30d": 0.0,
+                        "name": item.get("product_name") or item.get("name") or "",
+                        "brand": item.get("brand") or "",
+                        "category": item.get("category") or "",
+                    }
+                slot["units_30d"] += n
+                if in7:
+                    slot["units_7d"] += n
+                # First non-empty descriptor wins (some lines omit them).
+                if not slot["name"]:
+                    slot["name"] = item.get("product_name") or item.get("name") or ""
+                if not slot["brand"]:
+                    slot["brand"] = item.get("brand") or ""
+                if not slot["category"]:
+                    slot["category"] = item.get("category") or ""
     return out
 
 

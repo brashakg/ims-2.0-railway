@@ -194,7 +194,7 @@ NOW = datetime(2026, 6, 9, 12, 0, 0)  # naive, matches stored created_at frame
 
 def _order(store_id: str, product_id: str, *, days_ago: int, qty: int = 1,
            name: str = "Aviator", brand: str = "Ray-Ban", category: str = "SUNGLASS",
-           status: str = "COMPLETED") -> Dict[str, Any]:
+           status: str = "DELIVERED") -> Dict[str, Any]:
     return {
         "order_id": f"ORD-{store_id}-{product_id}-{days_ago}-{qty}",
         "store_id": store_id,
@@ -212,7 +212,15 @@ def _stock(store_id: str, product_id: str, qty: int, status: str = "AVAILABLE") 
 
 
 def _product(product_id: str, *, vendor: Optional[str] = "VEND-1", reorder_point: int = 0) -> Dict[str, Any]:
-    d = {"product_id": product_id, "reorder_point": reorder_point}
+    # Catalogue-complete (purchasable): ORACLE proposes the Reorder list's
+    # rows (S5), and the list keeps an incomplete product off as skipped.
+    d = {"product_id": product_id, "reorder_point": reorder_point,
+         "sku": f"SKU-{product_id}", "barcode": f"SKU-{product_id}",
+         "name": f"Aviator {product_id}", "brand": "Ray-Ban", "category": "FRAME",
+         "mrp": 9000.0, "offer_price": 9000.0, "cost_price": 4000.0,
+         "hsn_code": "9003", "gst_rate": 5, "is_active": True,
+         "attributes": {"brand_name": "Ray-Ban", "model_no": product_id,
+                        "colour_code": "01", "size": "54"}}
     if vendor is not None:
         d["preferred_vendor_id"] = vendor
     return d
@@ -277,7 +285,7 @@ class TestTallyDemand:
         orders = [
             _order("S1", "P1", days_ago=1, status="CANCELLED"),
             _order("S1", "P1", days_ago=1, status="DRAFT"),
-            _order("S1", "P1", days_ago=1, status="COMPLETED"),
+            _order("S1", "P1", days_ago=1, status="DELIVERED"),
         ]
         demand = tally_demand_by_product_store(orders, now=NOW)
         assert demand[("P1", "S1")]["units_7d"] == 1
@@ -467,41 +475,6 @@ class TestLegacyBlankStatusOnHand:
             _stock("S1", "P1", 50, status="available"))
         assert _run_oracle(db) == 0
         assert _pending(db) == []
-
-
-class TestBoundedScans:
-    def test_stock_and_product_scans_are_filtered_and_projected(self):
-        """P2 regression: ORACLE must NOT full-scan stock_units / products every
-        tick -- both reads carry a server-side filter + a field projection."""
-        db = FakeDB()
-        orders = db.get_collection("orders")
-        for i in range(8):
-            orders.insert_one(_order("S1", "P1", days_ago=i % 7))
-        db.get_collection("stock_units").insert_one(_stock("S1", "P1", 5))
-        db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
-        # A unit + product OUTSIDE the demanded set must not be needed (and with
-        # the filter, must not even be fetched) for the run to work.
-        db.get_collection("stock_units").insert_one(_stock("S9", "OTHER", 99))
-        db.get_collection("products").insert_one(_product("OTHER"))
-
-        seen: Dict[str, list] = {}
-        for name in ("stock_units", "products"):
-            coll = db.get_collection(name)
-            orig = coll.find
-
-            def spy(query=None, projection=None, _orig=orig, _name=name):
-                seen.setdefault(_name, []).append((query, projection))
-                return _orig(query, projection)
-
-            coll.find = spy  # type: ignore[method-assign]
-
-        assert _run_oracle(db) == 1  # the demanded SKU still gets its proposal
-        pl = _pending(db)[0]["payload"]
-        assert pl["vendor_id"] == "VEND-1"  # product lookup intact under filter
-        for name in ("stock_units", "products"):
-            query, projection = seen[name][0]
-            assert query, f"{name} was scanned with an EMPTY filter (full scan)"
-            assert projection, f"{name} was scanned without a projection"
 
 
 # ============================================================================

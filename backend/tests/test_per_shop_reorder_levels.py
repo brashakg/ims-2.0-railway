@@ -84,6 +84,10 @@ def _product(pid, **extra):
         "name": f"Carrera {pid}", "brand": "Carrera", "category": "FRAME",
         "mrp": 9000.0, "offer_price": 9000.0, "cost_price": 4000.0,
         "is_active": True, "preferred_vendor_id": "V1",
+        # Catalogue-complete: the Reorder list (Rebalance, ORACLE) never
+        # suggests a product it could not purchase.
+        "hsn_code": "9003", "gst_rate": 5,
+        "attributes": {"brand_name": "Carrera", "model_no": pid, "colour_code": "01", "size": "54"},
         # auto-reorder ON (a positive qty): only the LEVEL decides below.
         # No `stock_quantity`: nothing maintains it on a current product (only
         # the TechCherry import wrote it), so on-hand per shop comes from
@@ -288,13 +292,18 @@ def test_stock_alerts_are_per_shop(world):
         assert a.get("reorderPoint") is None, a
 
 
-def test_transfer_recommendations_only_refill_a_shop_that_has_a_level(world):
+def test_transfer_recommendations_follow_the_reorder_list(world):
+    """Owner 10-23: reorder = the shop's level if set, else its 30-day sales
+    -- so Bokaro (no level, sold 10, holds 1) is refilled too, and Pune's 15
+    spare are shared out, the bigger need first, never offered twice."""
     def recs(store):
-        res = _get("/api/v1/inventory/transfer-recommendations", store_id=store, threshold=5)
-        return {(r["product_id"], r["from_store"]) for r in res.get("recommendations") or []}
+        res = _get("/api/v1/inventory/transfer-recommendations", store_id=store)
+        return {(r["product_id"], r["from_store"], r["quantity"]) for r in res.get("recommendations") or []}
 
-    assert recs(DHN) == {("P-FRAME", PUN)}  # low at its own level; Pune has surplus
-    assert recs(BOK) == set()  # no level at Bokaro: nothing to refill
+    # P-FRAME: Bokaro buys 10 (9 short, packs of 2), Dhanbad 2 (back above its level 2).
+    # P-OWNER: both buy 10; Bokaro first (same stock, same buy), Dhanbad gets the 5 left.
+    assert recs(BOK) == {("P-FRAME", PUN, 10), ("P-OWNER", PUN, 10)}
+    assert recs(DHN) == {("P-FRAME", PUN, 2), ("P-OWNER", PUN, 5)}
 
 
 def test_report_low_stock_counts_are_per_shop(world):

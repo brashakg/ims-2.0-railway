@@ -231,36 +231,86 @@ def spare(product: Any, *, store_id: Optional[str], on_hand: Any, sold_30d: Any 
     return max(0, count - (target or 0))
 
 
-def sold_by_shop(orders, *, store_id: Optional[str] = None, days: int = SALES_DAYS, now=None) -> Dict[Tuple[str, str], int]:
+def share_spares(needs: List[Tuple[Any, int]], spares: Dict[str, int]) -> Dict[Any, List[Tuple[str, int]]]:
+    """THE transfer rule: share other shops' spare pieces (spare()) out over
+    the short rows of ONE product. `needs` = [(row key, pieces short)] worst
+    first; `spares` = {donor shop: spare pieces}. Each row takes from the
+    donors with the most left, and each share comes off that donor, so one
+    shop's spares are never offered twice. A row's own shop is never its
+    donor (row keys are (product, shop) or any key whose [1] is the shop).
+    Returns {row key: [(donor, pieces)]}."""
+    left = {s: n for s, n in spares.items() if n > 0}
+    out: Dict[Any, List[Tuple[str, int]]] = {}
+    for key, need in needs:
+        for donor in sorted(left, key=lambda s: (-left[s], s)):
+            if need <= 0:
+                break
+            if donor == key[1] or left[donor] <= 0:
+                continue
+            take = min(need, left[donor])
+            out.setdefault(key, []).append((donor, take))
+            left[donor] -= take
+            need -= take
+    return out
+
+
+def band(on_hand: Any, target: Optional[int], basis: Optional[str]) -> str:
+    """The Reorder list's chip for a shop's stock against its buy_target. A
+    shop level: stock_status (level = target - 1). 30-day sales (no level to
+    halve): 'healthy' once the shop holds the sales, 'out-of-stock' when it
+    holds none, else 'low'."""
+    if basis == "level" and target is not None:
+        return stock_status(target - 1, on_hand)
+    count = max(0, _whole(on_hand) or 0)
+    if target is None or count >= target:
+        return "healthy"
+    return "out-of-stock" if count <= 0 else "low"
+
+
+def sold_by_shop(
+    orders, *, store_id: Optional[str] = None, days: int = SALES_DAYS, now=None, strict: bool = False
+) -> Dict[Tuple[str, str], int]:
     """Units sold per (product_id, store_id) in the last `days` days -- the
-    sales the buy rule reads. ONE reader: predictive_reorder's tally (cancelled,
-    draft, void and refunded orders never count). {} if the read fails."""
+    sales the buy rule reads. ONE reader: predictive_reorder's tally (booked
+    orders only; an online order counts at the shop that fulfilled it).
+    {} if the read fails -- or, with strict, the error is raised (a list that
+    must not read a failed read as 'sold nothing')."""
     from datetime import datetime, timedelta
 
     from agents.predictive_reorder import tally_demand_by_product_store
+    from .online_order_status import BOOKED_STATUSES
 
     coll = _coll(orders)
     if coll is None:
         return {}
     now = now or datetime.utcnow()
+    # No store filter in the query: an online order fulfilled by this shop
+    # carries the online store's id (the tally moves it to the shop).
     match: Dict[str, Any] = {
         "created_at": {"$gte": now - timedelta(days=days)},
-        "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
+        "status": {"$in": sorted(BOOKED_STATUSES)},
     }
-    if store_id:
-        match["store_id"] = store_id
     try:
-        docs = list(coll.find(match, {"store_id": 1, "status": 1, "created_at": 1, "items": 1}))
+        docs = list(coll.find(match, {
+            "store_id": 1, "status": 1, "created_at": 1, "items": 1,
+            "fulfillment_breakdown": 1, "fulfillment_stores": 1,
+        }))
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return {}
     tally = tally_demand_by_product_store(docs, now=now)
-    return {k: int(v["units_30d"]) for k, v in tally.items() if v.get("units_30d")}
+    return {k: int(v["units_30d"]) for k, v in tally.items()
+            if v.get("units_30d") and (not store_id or k[1] == store_id)}
 
 
-def open_orders(purchase_orders, product_ids=None) -> Tuple[Dict[Tuple[str, str], int], Dict[Tuple[str, str], int]]:
+def open_orders(
+    purchase_orders, product_ids=None, *, strict: bool = False
+) -> Tuple[Dict[Tuple[str, str], int], Dict[Tuple[str, str], int]]:
     """(on order, in draft) per (product_id, delivery shop): ordered minus
     received. On order = SENT to the vendor only (owner D11); a draft nobody
-    sent is counted apart and never taken off a buy. ({}, {}) if unreadable."""
+    sent is counted apart and never taken off a buy. ({}, {}) if unreadable,
+    or the error raised with strict."""
     from .po_variance_engine import AWAITING_DELIVERY_STATUSES
 
     coll = _coll(purchase_orders)
@@ -289,6 +339,8 @@ def open_orders(purchase_orders, product_ids=None) -> Tuple[Dict[Tuple[str, str]
                 if ordered - got > 0:
                     out[(pid, shop)] = out.get((pid, shop), 0) + ordered - got
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return {}, {}
     return sent, draft
 
@@ -327,19 +379,20 @@ class _StockOnly:
 
 
 def on_hand(
-    stock_units, *, store_id: Optional[str], product_ids=None
+    stock_units, *, store_id: Optional[str], product_ids=None, strict: bool = False
 ) -> Dict[Tuple[str, str], int]:
     """Sellable units per (product_id, store_id) -- the count a level is
     compared with. This is NOT a second rule: it asks
     inventory_balancing._on_hand_by_product_store (item_events decides which
-    unit is on hand). store_id None = every shop. {} if the read fails."""
+    unit is on hand). store_id None = every shop. {} if the read fails, or
+    the error raised with strict."""
     from .inventory_balancing import _on_hand_by_product_store
 
     coll = _coll(stock_units)
     if coll is None:
         return {}
     ids = None if product_ids is None else [str(p) for p in product_ids]
-    return _on_hand_by_product_store(_StockOnly(coll), ids, store_id)
+    return _on_hand_by_product_store(_StockOnly(coll), ids, store_id, strict=strict)
 
 
 def out_of_stock_count(

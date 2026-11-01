@@ -145,9 +145,12 @@ def world(monkeypatch):
 
 
 def _client(user):
+    from api.routers.analytics_v2 import router as analytics_v2_router
+
     app = FastAPI()
     app.include_router(inventory_router, prefix="/api/v1/inventory")
     app.include_router(reports_router, prefix="/api/v1/reports")
+    app.include_router(analytics_v2_router, prefix="/api/v1/analytics-v2")
     app.dependency_overrides[get_current_user] = lambda: user
     return TestClient(app)
 
@@ -234,7 +237,6 @@ def test_skipped_products_say_why(world):
     skipped = {s["product_id"]: s for s in _list(store_id=DHN)["skipped"]}
     assert skipped["P-DISC"]["reason"] == "discontinued"
     assert skipped["P-OFF"]["reason"] == "auto-reorder off"
-    assert skipped["P-NOVEND"]["reason"] == "no vendor set"
     assert skipped["P-NOHSN"]["reason"] == "catalogue incomplete"
     assert "hsn_code" in skipped["P-NOHSN"]["missing"]
     rows = {r["product_id"] for r in _list(store_id=DHN)["rows"]}
@@ -243,12 +245,133 @@ def test_skipped_products_say_why(world):
 
 def test_another_shops_spare_pieces_suggest_a_transfer(world):
     lvl = _row(_list(store_id=DHN), "P-LVL")
-    assert lvl["spares"] == [{"store_id": PUN, "store_name": "Pune", "spare": 6}]
-    assert lvl["transfer_instead"] is True  # Pune's 6 cover the buy of 3
+    assert lvl["transfer_from"] == [{"store_id": PUN, "store_name": "Pune", "qty": 3}]
+    assert lvl["transfer_instead"] is True  # Pune's spares cover the buy of 3
     # Pune sells it fast: its pieces are its own, nothing to spare.
     world.orders.insert_many(_orders("P-LVL", PUN, 6))
     lvl = _row(_list(store_id=DHN), "P-LVL")
-    assert lvl["spares"] == [] and lvl["transfer_instead"] is False
+    assert lvl["transfer_from"] == [] and lvl["transfer_instead"] is False
+
+
+def test_one_donors_spares_are_shared_out_never_offered_twice(world):
+    """Review: Pune's 6 spare were offered whole to EVERY short shop. Two short
+    shops, one donor: worst row first, each share comes off the donor."""
+    world.products.update_one({"product_id": "P-LVL"},
+                              {"$set": {"reorder_levels": {DHN: 3, BOK: 4}}})
+    body = _list()
+    bok, dhn = _row(body, "P-LVL", BOK), _row(body, "P-LVL", DHN)
+    assert (bok["buy"], dhn["buy"]) == (5, 3)
+    # both hold none: the bigger buy (Bokaro) is served first
+    assert bok["transfer_from"] == [{"store_id": PUN, "store_name": "Pune", "qty": 5}]
+    assert bok["transfer_qty"] == 5 and bok["transfer_instead"] is True
+    assert dhn["transfer_from"] == [{"store_id": PUN, "store_name": "Pune", "qty": 1}]
+    assert dhn["transfer_qty"] == 1 and dhn["transfer_instead"] is False  # 1 does not cover 3
+    assert bok["transfer_qty"] + dhn["transfer_qty"] == 6  # Pune's spare, once
+
+
+def test_no_preferred_vendor_falls_back_to_the_last_po_vendor(world):
+    """Review BLOCK: nothing in the app sets preferred_vendor_id, so the list
+    must not drop a product without one. A past PO from Safilo names it."""
+    world.vendors.insert_one({"vendor_id": "V-SAF", "trade_name": "Safilo"})
+    world.purchase_orders.insert_one(
+        {"po_id": "PO-OLD", "status": "RECEIVED", "vendor_id": "V-SAF", "delivery_store_id": BOK,
+         "created_at": "2026-09-01T10:00:00", "items": [{"product_id": "P-NOVEND", "quantity": 2}],
+         "received_qty_by_product": {"P-NOVEND": 2}})
+    row = _row(_list(store_id=DHN), "P-NOVEND")
+    assert (row["vendor_id"], row["vendor_name"], row["vendor_source"]) == ("V-SAF", "Safilo", "last order")
+    assert row["buy"] == 4
+    assert "P-NOVEND" not in {s["product_id"] for s in _list(store_id=DHN)["skipped"]}
+
+
+def test_no_vendor_anywhere_is_still_a_row_to_choose_a_vendor_for(world):
+    row = _row(_list(store_id=DHN), "P-NOVEND")
+    assert (row["vendor_id"], row["vendor_source"], row["buy"]) == (None, None, 4)
+
+
+def test_a_failed_stock_read_is_an_error_never_a_full_buy_list(world, monkeypatch):
+    """Review: a failed stock / open-order read read as zero, so the list
+    suggested buying everything. It answers 503 with no rows."""
+    import mongomock.collection as mc
+
+    real = mc.Collection.find
+
+    def boom(self, *a, **k):
+        if self.name in ("stock_units", "purchase_orders"):
+            raise RuntimeError("mongo down")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(mc.Collection, "find", boom)
+    res = _client(_ADMIN).get("/api/v1/inventory/reorder-list", params={"store_id": DHN})
+    assert res.status_code == 503, res.text[:300]
+    assert "rows" not in res.json()
+    assert res.json()["detail"] == "Could not load the reorder list"
+
+
+def test_thirty_day_sales_chip_bands_by_running_out_the_boards_vogue(world):
+    """Board: Vogue VO5286, no level, sold 5, holds 1, runs out in 6 days ->
+    Low (not a made-up level's Critical). Ray-Ban, level 3, holds 0 -> Critical."""
+    body = _list(store_id=DHN)
+    vogue = _row(body, "P-SALES")
+    assert (vogue["sold_30d"], vogue["on_hand"], vogue["runs_out_days"]) == (5, 1, 6)
+    assert vogue["band"] == "low"
+    assert _row(body, "P-LVL")["band"] == "out-of-stock"
+    world.stock_units.delete_many({"product_id": "P-SALES"})
+    assert _row(_list(store_id=DHN), "P-SALES")["band"] == "out-of-stock"
+
+
+def test_a_healthy_tracked_line_shows_under_all_with_nothing_to_buy(world):
+    """Board: Carrera 1234, level 2, 5 in stock, buy 0, shown under All."""
+    world.products.insert_one(_product("P-OK", reorder_levels={DHN: 2}))
+    world.stock_units.insert_many(_units("P-OK", DHN, 5))
+    ok = _row(_list(store_id=DHN), "P-OK")
+    assert (ok["buy"], ok["band"], ok["transfer_from"]) == (0, "healthy", [])
+    # a healthy line of a skipped product is not news
+    assert "P-DISC" not in {r["product_id"] for r in _list(store_id=DHN)["rows"]}
+
+
+def test_the_header_counts_products_with_auto_reorder_off(world):
+    assert _list(store_id=DHN)["auto_reorder_off"] == 1  # P-OFF (P-DISC is discontinued)
+
+
+def test_an_online_sale_counts_at_the_shop_that_fulfilled_it(world):
+    from api.services.reorder_policy import sold_by_shop
+
+    world.stores.insert_one({"store_id": "BV-WEB", "store_name": "Website", "store_type": "ONLINE"})
+    when = datetime.utcnow() - timedelta(days=1)
+    world.orders.insert_many([
+        {"order_id": "SH-1", "store_id": "BV-WEB", "status": "SHIPPED", "created_at": when,
+         "items": [{"product_id": "P-LVL", "quantity": 2}],
+         "fulfillment_breakdown": [{"product_id": "P-LVL", "store_id": BOK, "qty": 2}],
+         "fulfillment_stores": [BOK]},
+        {"order_id": "SH-2", "store_id": "BV-WEB", "status": "DELIVERED", "created_at": when,
+         "items": [{"product_id": "P-LVL", "quantity": 1}], "fulfillment_stores": [PUN]},
+    ])
+    sold = sold_by_shop(world.orders)
+    assert sold[("P-LVL", BOK)] == 2 and sold[("P-LVL", PUN)] == 1
+    assert ("P-LVL", "BV-WEB") not in sold
+    assert sold_by_shop(world.orders, store_id=BOK) == {("P-LVL", BOK): 2}
+
+
+def test_only_booked_orders_are_sales(world):
+    from api.services.reorder_policy import sold_by_shop
+
+    world.orders.insert_many(_orders("P-LVL", BOK, 3, status="ON_HOLD")
+                             + _orders("P-LVL", BOK, 2, status="CONFIRMED"))
+    assert sold_by_shop(world.orders, store_id=BOK) == {("P-LVL", BOK): 2}
+
+
+def test_rebalance_suggests_the_lists_shared_out_transfers(world):
+    """Review: one rule for spare pieces. Rebalance shows exactly the Reorder
+    list's shared-out transfers for the shop."""
+    world.products.update_one({"product_id": "P-LVL"},
+                              {"$set": {"reorder_levels": {DHN: 3, BOK: 4}}})
+    for shop in (DHN, BOK):
+        res = _client(_ADMIN).get("/api/v1/inventory/transfer-recommendations", params={"store_id": shop})
+        assert res.status_code == 200, res.text[:300]
+        got = {(r["product_id"], r["from_store"], r["quantity"]) for r in res.json()["recommendations"]}
+        want = {(r["product_id"], t["store_id"], t["qty"]) for r in _list(store_id=shop)["rows"]
+                for t in r["transfer_from"]}
+        assert got == want and got, shop
 
 
 def test_all_shops_for_an_admin_one_shop_for_a_manager(world):
@@ -313,17 +436,39 @@ def test_jarvis_recommends_the_rules_number(world):
     assert recs[("SKU-P-LVL", DHN)] == _row(_list(store_id=DHN), "P-LVL")["buy"]
 
 
-def test_oracle_proposes_the_rules_number(world):
+def test_oracle_proposes_the_lists_rows_and_nothing_else(world):
     from agents.implementations.oracle import OracleAgent
 
+    # max stock caps the buy; an online-store sale and a catalogue-incomplete
+    # product are never proposed (review BLOCK: ORACLE kept its own count).
+    world.products.update_one({"product_id": "P-SALES"}, {"$set": {"max_stock": 3}})
+    world.stores.insert_one({"store_id": "BV-WEB", "store_name": "Website", "store_type": "ONLINE"})
+    world.orders.insert_many(_orders("P-LVL", "BV-WEB", 4))
     asyncio.run(OracleAgent(db=world)._propose_reorders())
     got = {(p["payload"]["product_id"], p["payload"]["store_id"]): p["payload"]["quantity"]
            for p in world.ai_proposals.find({"type": "draft_po"})}
-    body = _list(store_id=DHN)
-    assert got[("P-SALES", DHN)] == _row(body, "P-SALES")["buy"]
-    assert got[("P-LVL", DHN)] == _row(body, "P-LVL")["buy"]
-    # nothing to buy -> no proposal (P-OFF is auto-reorder off)
-    assert ("P-OFF", DHN) not in got
+    want = {(r["product_id"], r["store_id"]): r["buy"] for r in _list()["rows"] if r["buy"] > 0}
+    assert want[("P-SALES", DHN)] == 2  # capped: max 3, holds 1
+    assert got == want
+    assert ("P-OFF", DHN) not in got and ("P-NOHSN", DHN) not in got
+    assert not [k for k in got if k[1] == "BV-WEB"]
+
+
+def test_the_forecast_suggests_what_the_report_suggests(world):
+    """Review: the forecast read only list rows, so a product the list skips
+    (catalogue incomplete) read 0 there and a buy in the report. Both now ask
+    buy_qty with the same inputs; stock is the shop's own units."""
+    report = _client(_ADMIN).get("/api/v1/reports/purchase/recommendations",
+                                 params={"store_id": DHN, "min_velocity": 1}).json()
+    recs = {r["product_id"]: r["suggested_order_qty"] for r in report["recommendations"]}
+    res = _client(_user("SUPERADMIN")).get("/api/v1/analytics-v2/demand-forecast", params={"store_id": DHN})
+    assert res.status_code == 200, res.text[:300]
+    fc = {f["product_id"]: f for f in res.json()["forecasts"]}
+    for pid in ("P-NOHSN", "P-NOVEND", "P-SALES", "P-LVL"):
+        assert fc[pid]["reorder_recommended"] == recs.get(pid, 0), pid
+    assert fc["P-NOHSN"]["reorder_recommended"] == 4
+    assert fc["P-SALES"]["current_stock"] == 1  # the shop's units, not a legacy field
+    assert fc["P-SALES"]["reason"] == "Buy 4: the last 30 days' sales."
 
 
 def test_buy_desk_is_gone():

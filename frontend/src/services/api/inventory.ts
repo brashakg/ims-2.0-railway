@@ -1180,8 +1180,11 @@ interface ReorderSettingsFields {
  *  number is the server's: `buy` is THE buy rule (reorder_policy.buy_qty). */
 export interface ReorderRow extends ReorderSettingsFields {
   brand: string;
-  vendor_id: string;
+  /** The preferred vendor, else the vendor of the last PO / receipt
+   *  (vendor_source says which); null = choose one before drafting. */
+  vendor_id: string | null;
   vendor_name: string;
+  vendor_source: 'preferred' | 'last order' | null;
   basis: 'level' | 'sales';
   sold_30d: number;
   on_hand: number;
@@ -1191,10 +1194,12 @@ export interface ReorderRow extends ReorderSettingsFields {
   in_draft: number;
   runs_out_days: number | null;
   band: 'out-of-stock' | 'critical' | 'low' | 'healthy' | 'not-set';
+  /** 0 = tracked and healthy (or covered by sent orders): nothing to buy. */
   buy: number;
-  /** Other shops holding pieces beyond their own need, most first. */
-  spares: Array<{ store_id: string; store_name: string; spare: number }>;
-  /** One shop's spares cover the whole buy: a transfer instead. */
+  /** Other shops' spare pieces SHARED OUT to this row (never offered twice). */
+  transfer_from: Array<{ store_id: string; store_name: string; qty: number }>;
+  transfer_qty: number;
+  /** The shared-out pieces cover the whole buy: a transfer instead. */
   transfer_instead: boolean;
   /** At cost; sent to the cost roles only. */
   unit_cost?: number | null;
@@ -1202,7 +1207,7 @@ export interface ReorderRow extends ReorderSettingsFields {
 }
 
 export interface ReorderSkipped extends ReorderSettingsFields {
-  reason: 'discontinued' | 'auto-reorder off' | 'catalogue incomplete' | 'no vendor set';
+  reason: 'discontinued' | 'auto-reorder off' | 'catalogue incomplete';
   missing?: string[];
 }
 
@@ -1212,7 +1217,13 @@ export const reorderApi = {
     const response = await api.get('/inventory/reorder-list', {
       params: storeId ? { store_id: storeId } : {},
     });
-    return response.data as { store_id: string | null; rows: ReorderRow[]; skipped: ReorderSkipped[] };
+    return response.data as {
+      store_id: string | null;
+      rows: ReorderRow[];
+      skipped: ReorderSkipped[];
+      /** Products (not discontinued) with auto-reorder off: never suggested. */
+      auto_reorder_off: number;
+    };
   },
 
   /** ONE shop's reorder level (owner ruling D12: levels are per shop).
@@ -1227,11 +1238,8 @@ export const reorderApi = {
 
   updateReorderSettings: async (
     productId: string,
-    settings: {
-      reorder_quantity: number;
-      max_stock: number;
-      lead_time_days: number;
-    }
+    // Only the fields the person changed (0 = not set for the last two).
+    settings: { reorder_quantity?: number; max_stock?: number; lead_time_days?: number }
   ) => {
     // Persist the product's chain-wide reorder settings via the SINGLE
     // validated product-update path (`PUT /products/{id}` in

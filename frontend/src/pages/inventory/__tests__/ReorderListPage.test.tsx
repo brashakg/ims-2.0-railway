@@ -26,23 +26,31 @@ const ROW = {
   sku: '', brand: 'Ray-Ban', vendor_id: 'V-LUX', vendor_name: 'Luxottica',
   store_id: 'BV-DHN-02', store_name: 'Dhanbad', level: null, reorder_quantity: null,
   max_stock: null, lead_time_days: null, sold_30d: 0, on_hand: 0, on_order: 0, in_draft: 0,
-  runs_out_days: 0, band: 'out-of-stock', spares: [], transfer_instead: false,
+  runs_out_days: 0, band: 'out-of-stock', transfer_from: [], transfer_qty: 0, transfer_instead: false,
+  vendor_source: 'preferred',
 };
 const LIST = {
   store_id: null,
+  auto_reorder_off: 12,
   rows: [
     { ...ROW, product_id: 'P-LVL', name: 'Ray-Ban RB3025', level: 3, reorder_quantity: 3, basis: 'level', sold_30d: 7,
       on_order: 1, in_draft: 2, buy: 3, unit_cost: 4000, est_value: 12000 },
     { ...ROW, product_id: 'P-SALES', name: 'Vogue VO5286', basis: 'sales', sold_30d: 5, on_hand: 1,
       runs_out_days: 6, band: 'low', buy: 4, unit_cost: 1000, est_value: 4000 },
     { ...ROW, product_id: 'P-SAF', name: 'Carrera 1234', vendor_id: 'V-SAF', vendor_name: 'Safilo',
-      basis: 'sales', sold_30d: 2, buy: 2, unit_cost: null, est_value: null },
+      vendor_source: 'last order', basis: 'sales', sold_30d: 2, buy: 2, unit_cost: null, est_value: null },
     { ...ROW, product_id: 'P-MOVE', name: 'Oakley Radar', basis: 'sales', sold_30d: 2, buy: 2,
-      spares: [{ store_id: 'BV-PUN-01', store_name: 'Pune', spare: 6 }], transfer_instead: true },
+      transfer_from: [{ store_id: 'BV-PUN-01', store_name: 'Pune', qty: 2 }], transfer_qty: 2, transfer_instead: true },
+    { ...ROW, product_id: 'P-NOV', name: 'Carrera 2045T', sku: 'CA-2045', vendor_id: null, vendor_name: '',
+      vendor_source: null, basis: 'sales', sold_30d: 3, buy: 3 },
+    // Drafted last visit: 3 in draft cover the buy of 3 -> starts unticked.
+    { ...ROW, product_id: 'P-DRAFTED', name: 'Prada PR17', basis: 'sales', sold_30d: 3, in_draft: 3, buy: 3 },
+    // Tracked and healthy (board: Carrera 1234, 5 weeks): shown, nothing to buy.
+    { ...ROW, product_id: 'P-OK', name: 'Carrera 5050', level: 2, basis: 'level', sold_30d: 4, on_hand: 5,
+      runs_out_days: 37, band: 'healthy', buy: 0 },
   ],
   skipped: [
     { ...ROW, product_id: 'P-HSN', name: 'Carrera 8862', sku: 'CA-8862', reason: 'catalogue incomplete', missing: ['hsn_code'] },
-    { ...ROW, product_id: 'P-NOV', name: 'Carrera 2045T', sku: 'CA-2045', reason: 'no vendor set' },
   ],
 };
 
@@ -83,7 +91,13 @@ beforeEach(() => {
   for (const fn of Object.values(http)) fn.mockClear();
   Object.values(toast).forEach((f) => f.mockClear());
   http.get.mockImplementation(async (url: string) => ({
-    data: url.includes('reorder-list') ? LIST : url.includes('stores') ? { stores: [] } : {},
+    data: url.includes('reorder-list')
+      ? LIST
+      : url.includes('stores')
+        ? { stores: [] }
+        : url === '/vendors'
+          ? { vendors: [{ vendor_id: 'V-LUX', trade_name: 'Luxottica' }, { vendor_id: 'V-SAF', trade_name: 'Safilo' }] }
+          : {},
   }));
   http.post.mockImplementation(async () => ({ data: { po_number: 'PO-1' } }));
 });
@@ -105,12 +119,53 @@ describe('the one Reorder list shows the server numbers', () => {
     expect(within(sales).getByRole('spinbutton')).toHaveValue(4);
   });
 
-  it("another shop's spares suggest a transfer, and that row starts unticked", async () => {
+  it("another shop's shared-out spares suggest a transfer, and that row starts unticked", async () => {
     renderPage();
     const move = await rowOf('Oakley Radar');
-    expect(within(move).getByText(/Pune has 6 spare - transfer instead of buying/)).toBeInTheDocument();
+    expect(within(move).getByText(/Pune can send 2 - transfer instead of buying/)).toBeInTheDocument();
     expect(within(move).getByRole('checkbox')).not.toBeChecked();
     expect(within(await rowOf('Vogue VO5286')).getByRole('checkbox')).toBeChecked();
+  });
+
+  it('a row already covered by drafts starts unticked but stays editable (review NIT)', async () => {
+    renderPage();
+    const drafted = await rowOf('Prada PR17');
+    expect(within(drafted).getByRole('checkbox')).not.toBeChecked();
+    expect(within(drafted).getByRole('spinbutton')).not.toBeDisabled();
+  });
+
+  it('a healthy tracked line shows under All with nothing to buy, unticked (board)', async () => {
+    renderPage();
+    const ok = await rowOf('Carrera 5050');
+    expect(within(ok).getByRole('checkbox')).not.toBeChecked();
+    expect(within(ok).getByRole('spinbutton')).toHaveValue(0);
+    expect(screen.getByRole('button', { name: /^All/ })).toHaveTextContent('7');
+  });
+
+  it("says where the vendor came from when it is the last order's", async () => {
+    renderPage();
+    expect(within(await rowOf('Carrera 1234')).getByText('(last order)')).toBeInTheDocument();
+  });
+
+  it('counts the products with auto-reorder off in the header', async () => {
+    renderPage();
+    expect(await screen.findByText('12 products have auto-reorder off')).toBeInTheDocument();
+  });
+
+  it('a list the server could not read says so and offers nothing to buy (503)', async () => {
+    http.get.mockImplementation(async (url: string) => {
+      if (url.includes('reorder-list')) {
+        throw Object.assign(new Error('Request failed with status code 503'), {
+          isAxiosError: true,
+          response: { status: 503, data: { detail: 'Could not load the reorder list' } },
+        });
+      }
+      return { data: url.includes('stores') ? { stores: [] } : {} };
+    });
+    renderPage();
+    expect(await screen.findByText(/Could not load the reorder list/)).toBeInTheDocument();
+    expect(screen.queryByRole('spinbutton')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Make draft orders' })).toBeDisabled();
   });
 
   it('the Critical and Low filters and the vendor filter narrow the list', async () => {
@@ -125,18 +180,25 @@ describe('the one Reorder list shows the server numbers', () => {
     expect(screen.queryByText('Vogue VO5286')).toBeNull();
   });
 
-  it('says why a product is not suggested and where to fix it', async () => {
+  it('says why a product is not suggested and opens that product in the catalogue', async () => {
     renderPage();
     expect(await screen.findByText(/catalogue incomplete: can't purchase · Missing: HSN/)).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Fix in Catalogue' })).toHaveAttribute('href', '/catalog?search=CA-8862');
-    expect(screen.getByRole('link', { name: 'Set vendor' })).toHaveAttribute('href', '/catalog?search=CA-2045');
+    expect(screen.getByRole('link', { name: 'Fix in Catalogue' })).toHaveAttribute('href', '/catalog?focus=P-HSN');
+  });
+
+  it('a role that cannot edit products is told to ask the catalogue manager, not given a link', async () => {
+    auth.roles = ['STORE_MANAGER'];
+    renderPage();
+    expect(await screen.findByText(/catalogue incomplete/)).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Fix in Catalogue' })).toBeNull();
+    expect(screen.getByText('ask the catalogue manager')).toBeInTheDocument();
   });
 });
 
 describe('value at cost is for the cost roles only', () => {
   it('an admin sees the value column; a store manager does not', async () => {
     renderPage();
-    expect(await screen.findByRole('columnheader', { name: 'Est. value at cost' })).toBeInTheDocument();
+    expect((await screen.findAllByRole('columnheader', { name: 'Est. value at cost' })).length).toBeGreaterThan(0);
     expect(within(await rowOf('Ray-Ban RB3025')).getByText('₹ 12,000')).toBeInTheDocument();
     expect(within(await rowOf('Carrera 1234')).getByText('no cost')).toBeInTheDocument();
   });
@@ -145,7 +207,7 @@ describe('value at cost is for the cost roles only', () => {
     auth.roles = ['STORE_MANAGER'];
     renderPage();
     await rowOf('Ray-Ban RB3025');
-    expect(screen.queryByRole('columnheader', { name: 'Est. value at cost' })).toBeNull();
+    expect(screen.queryAllByRole('columnheader', { name: 'Est. value at cost' })).toHaveLength(0);
     expect(screen.queryByText(/₹/)).toBeNull();
   });
 });
@@ -167,6 +229,21 @@ describe('Make draft orders', () => {
     ]); // P-MOVE (transfer instead) is unticked
     expect(sent.find((p) => p.vendor_id === 'V-SAF')!.items).toHaveLength(1);
     expect(JSON.stringify(sent)).not.toMatch(/unit_price/);
+    // the row with no vendor is not drafted until one is chosen
+    expect(JSON.stringify(sent)).not.toMatch(/P-NOV/);
+  });
+
+  it('a row with no vendor sits under "Choose vendor"; the vendor picked there drafts it (review BLOCK)', async () => {
+    renderPage();
+    const group = (await screen.findByText('Choose vendor')).closest('section') as HTMLElement;
+    expect(within(group).getByText('Carrera 2045T')).toBeInTheDocument();
+    const picker = within(group).getByLabelText('Vendor for Carrera 2045T at Dhanbad');
+    await within(group).findByRole('option', { name: 'Safilo' });
+    fireEvent.change(picker, { target: { value: 'V-SAF' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Make draft orders' }));
+    await screen.findByText('Purchase orders page');
+    const saf = posts().find((p) => p.vendor_id === 'V-SAF')!;
+    expect((saf.items as Array<{ product_id: string }>).map((i) => i.product_id)).toEqual(['P-SAF', 'P-NOV']);
   });
 
   it('after a failure, pressing again never makes a second draft for a vendor already done', async () => {
@@ -207,12 +284,12 @@ describe('reorder settings save, by role (ported from the Reorder dashboard)', (
     expect(putUrls()).not.toContain('/products/P-LVL');
   });
 
-  it('an untouched level is never re-sent (round 4 #14)', async () => {
+  it('an untouched save writes nothing: no level, no max stock, no lead time (round 4 #14, review)', async () => {
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Reorder settings for Ray-Ban RB3025 at Dhanbad' }));
     fireEvent.click(await screen.findByRole('button', { name: /save/i }));
-    await waitFor(() => expect(putUrls()).toContain('/products/P-LVL'));
-    expect(putUrls().some((u) => u.includes('reorder-levels'))).toBe(false);
+    await waitFor(() => expect(toast.success).toHaveBeenCalled());
+    expect(http.put).not.toHaveBeenCalled();
   });
 
   it('the level field is locked for a catalogue manager, open for an admin (round 5 #5)', async () => {
@@ -227,12 +304,14 @@ describe('reorder settings save, by role (ported from the Reorder dashboard)', (
     expect(await screen.findByPlaceholderText('not set')).not.toBeDisabled();
   });
 
-  it('a catalogue manager saves the product-wide fields and never the shop level', async () => {
+  it('a catalogue manager saves only the product-wide field they changed, never the shop level', async () => {
     auth.roles = ['CATALOG_MANAGER'];
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Reorder settings for Ray-Ban RB3025 at Dhanbad' }));
+    fireEvent.change(await screen.findByLabelText('Order in packs of'), { target: { value: '6' } });
     fireEvent.click(await screen.findByRole('button', { name: /save/i }));
     await waitFor(() => expect(putUrls()).toContain('/products/P-LVL'));
+    expect((http.put.mock.calls[0] as unknown[])[1]).toEqual({ reorder_quantity: 6 });
     expect(putUrls().some((u) => u.includes('reorder-levels'))).toBe(false);
   });
 });

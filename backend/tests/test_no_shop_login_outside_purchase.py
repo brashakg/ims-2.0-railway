@@ -254,7 +254,7 @@ def test_the_reorder_list_is_empty_for_a_login_with_no_shop(world):
     # The Buy Desk's place (stock redesign S5): the one Reorder list.
     r = world(_user("STORE_MANAGER"), "/inventory/reorder-list")
     assert r.status_code == 200, r.text
-    assert r.json() == {"store_id": None, "rows": [], "skipped": []}
+    assert r.json() == {"store_id": None, "rows": [], "skipped": [], "auto_reorder_off": 0}
 
 
 # ============================================================================
