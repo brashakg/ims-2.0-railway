@@ -175,7 +175,7 @@ def _drawer_cash_refunds(till, day_start, day_end):
 
 def test_day_end_nets_a_refund_on_the_day_its_cash_moved(till):
     returns = till["db"].get_collection("returns")
-    today = cust_router.utc_now_iso()[:10]
+    today = "2026-10-20"  # a fixed stored-frame day (no clock: the windows are plain strings)
     returns.insert_one({"return_id": "RET-R1", "store_id": STORE, "status": "COMPLETED", "return_type": "RETURN",
                         "created_at": f"{today}T06:00:00+00:00", "drawer_at": "2026-10-01T06:00:00+00:00",
                         "refund_tenders": [{"method": "CASH", "amount": 600.0}],
