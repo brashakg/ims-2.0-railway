@@ -210,7 +210,7 @@ def test_a_receipt_billed_in_two_parts_trues_up_its_own_pieces(first):
     assert (var["bill_id"], var["amount"], sorted(var["stock_ids"])) == ("B2", 60.0, ["SG2", "SG3"])
 
 
-@pytest.mark.parametrize("status", ("QUARANTINED", "DAMAGED"))
+@pytest.mark.parametrize("status", ("QUARANTINED", "UNDER_AUDIT"))
 def test_a_billed_piece_still_ours_but_off_the_shelf_averages_in(status):
     """10 old pieces at 100; receipt G brought 5: 3 on the shelf, 1 `status`
     (still ours, not sold), 1 sold at a frozen 100. Bill 5 x 130 = 650, all
@@ -228,17 +228,22 @@ def test_a_billed_piece_still_ours_but_off_the_shelf_averages_in(status):
     assert (row["held"], row["variance"]["amount"]) == (4.0, 30.0)
 
 
-def test_a_billed_piece_written_off_before_its_bill_is_trued_up():
-    """As above, but the odd piece was WRITTEN OFF (stock count: VOID) at the
-    then average 100. Bill 650 = 3 x 130 averaged in + the sold piece (100 +
-    30) + the written-off piece (100 + 30): the variance is 60, its write-off
+@pytest.mark.parametrize("status", ("VOID", "DAMAGED"))
+def test_a_billed_piece_written_off_before_its_bill_is_trued_up(status):
+    """As above, but the odd piece was WRITTEN OFF (a stock count's VOID; or
+    quarantine released as DAMAGED, dated by its DAMAGED event) at the then
+    average 100. Bill 650 = 3 x 130 averaged in + the sold piece (100 + 30)
+    + the written-off piece (100 + 30): the variance is 60, its write-off
     part named."""
     db = _db(100.0)
     _pieces(db, 10)
     _receipt(db, "G", 5)
     _pieces(db, 3, "G")
-    db.stock_units.insert_one({"stock_id": "W1", "product_id": "P", "store_id": "S1", "status": "VOID",
-                               "quantity": 1, "grn_id": "G", "voided_at": "2026-10-25T10:00:00+00:00"})
+    lost = {"voided_at": "2026-10-25T10:00:00+00:00"} if status == "VOID" else {}
+    db.stock_units.insert_one({"stock_id": "W1", "product_id": "P", "store_id": "S1", "status": status,
+                               "quantity": 1, "grn_id": "G", **lost})
+    if status == "DAMAGED":
+        db.item_events.insert_one({"stock_id": "W1", "to_state": "DAMAGED", "at": "2026-10-25T10:00:00+00:00"})
     _sold(db, "G", [100.0])
     _accept(db, _bill("B", 5, 130, grn_id="G", bill_date="2026-10-31"))
     assert _avg(db) == 106.92
@@ -340,3 +345,69 @@ def test_every_reader_keeps_the_variance_to_its_shop_and_dates(monkeypatch):
     acc = {"user_id": "a", "roles": ["ACCOUNTANT"], "active_store_id": "S1", "store_ids": ["S1"]}
     by_store = asyncio.run(growth.profit_by_store(from_date=f, to_date=t, current_user=acc))
     assert {r["store_id"]: r["cost"] for r in by_store["data"]} == {"S1": 1260.0}
+
+
+
+# --------------------------------------------------------------------------
+# Fix round 3 (S4).
+# --------------------------------------------------------------------------
+
+
+def _written_off_g(db):
+    """10 old pieces at 100; receipt G brought 4: 3 on the shelf, W1 written
+    off on 2026-10-01 (its loss booked at the then average, 100)."""
+    _pieces(db, 10)
+    _receipt(db, "G", 4)
+    _pieces(db, 3, "G", prefix="G")
+    db.stock_units.insert_one({"stock_id": "W1", "product_id": "P", "store_id": "S1", "status": "VOID",
+                               "quantity": 1, "grn_id": "G", "voided_at": "2026-10-01T10:00:00+00:00"})
+
+
+def test_a_write_off_is_trued_up_at_the_average_then_not_after_a_later_bill():
+    """W1 written off at 100; bill BH on receipt H (10 at 160) then moves the
+    average to 130; G's bill, 4 at 130: W1's variance is 130 - 100 = 30 --
+    never 130 - 130 = 0 at the live average."""
+    db = _db(100.0)
+    _written_off_g(db)
+    _receipt(db, "H", 10)
+    _pieces(db, 10, "H", prefix="H")
+    _accept(db, _bill("BH", 10, 160, grn_id="H"))
+    assert _avg(db) == 130.0
+    _accept(db, _bill("B", 4, 130, grn_id="G", bill_date="2026-11-01"))
+    var = db.cogs_variances.find_one({})
+    assert (var["amount"], var["written_off"], var["sold_at_cost"]) == (30.0, 1, 100.0)
+
+
+def test_a_write_off_older_than_the_carried_over_average_is_trued_up_at_it():
+    """W1 written off on 10-01 at the pre-S4 average 100; the backfill
+    carries 100 over (a history row dated the run); bill B1 on G1 (5 at 160)
+    moves it to 120; G's bill at 130: the variance is 130 - 100 = 30, never
+    130 - 120 = 10 at the live average."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(100.0, cost_source="PURCHASE_INVOICE")
+    _written_off_g(db)
+    assert bf.carry_over(db, db.products.find_one({}), "backfill:RUN1")
+    _receipt(db, "G1", 5)
+    _pieces(db, 5, "G1", prefix="K")
+    _accept(db, _bill("B1", 5, 160, grn_id="G1"))
+    assert _avg(db) == 120.0
+    _accept(db, _bill("B", 4, 130, grn_id="G", bill_date="2026-11-01"))
+    assert db.cogs_variances.find_one({})["amount"] == 30.0
+
+
+def test_the_variance_split_adds_up_to_the_variance_to_the_paisa():
+    """Rs 100.00 for 3 pieces, all sold at a frozen 30 on lines of three
+    item_types: each share rounds to 3.33, the remainder goes to one so the
+    split adds up to the variance, 10.00 -- never 9.99."""
+    db = _db(30.0)
+    _receipt(db, "G", 3)
+    _sold(db, "G", [30.0, 30.0, 30.0])
+    for i, kind in enumerate(("FRAME", "LENS", "SUNGLASS")):
+        db.orders.update_one({"order_id": f"OG{i}"}, {"$set": {"items.0.item_type": kind}})
+    bill = _bill("B", 3, 33.33, grn_id="G", bill_date="2026-10-31")
+    bill["lines"][0]["taxable"] = 100.0
+    _accept(db, bill)
+    split = product_cost.variance_by(db, "item_type")
+    assert set(split) == {"FRAME", "LENS", "SUNGLASS"}
+    assert round(sum(split.values()), 2) == product_cost.variance_by(db)[None] == 10.0

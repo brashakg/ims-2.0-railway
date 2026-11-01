@@ -745,3 +745,149 @@ def test_the_backfill_re_averages_a_pre_s4_walk_in_latest_price():
     assert bf.revert(db, "RUN5") == 1
     product = db.products.find_one({})
     assert (product["cost_price"], product["cost_history"]) == (200.0, [])
+
+
+
+# --------------------------------------------------------------------------
+# Fix round 3 (S4).
+# --------------------------------------------------------------------------
+
+
+def _stamped_g0(db):
+    """Average 400 (a pre-S4 bill's); PO receipt G0 (10 pieces) accepted
+    before S4, its bill not in yet: the backfill stamps it at 400. Then G1's
+    S4 bill, 5 at 500: (10 x 400 + 5 x 500) / 15 = 433.33."""
+    from scripts import backfill_average_cost as bf
+
+    _receipt(db, "G0", 10, po_id="PO0", accepted_at="2026-10-20T10:00:00+00:00")
+    _pieces(db, 10, "G0", prefix="G0-")
+    bf.apply(db, bf.plan(db), "RUN1")
+    g0 = db.grns.find_one({"grn_id": "G0"})
+    assert (g0[product_cost.PRE_S4_STAMP], g0[product_cost.PRE_S4_AVERAGES]) == ("RUN1", {"P": 400.0})
+    _receipt(db, "G1", 5, accepted_at="2026-11-01T10:00:00+00:00")
+    _pieces(db, 5, "G1", prefix="G1-")
+    _accept(db, _bill("B1", 5, 500, grn_id="G1", created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == 433.33
+
+
+def test_a_stamped_receipts_own_s4_bill_after_another_keeps_its_weight():
+    """G0's own S4 bill lands after B1, 10 at 400: its pieces stay in the
+    basis and add 10 x (400 - 400) = 0 -- the average stays the true
+    (10 x 400 + 5 x 500) / 15 = 433.33, never 411.11 (G0 dropped out, then
+    re-averaged in at 400 over B1's blend)."""
+    db = _db(400.0, cost_source="PURCHASE_INVOICE")
+    _stamped_g0(db)
+    _accept(db, _bill("B0", 10, 400, grn_id="G0", created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == 433.33
+    row = db.products.find_one({})["cost_history"][-1]
+    assert (row["held"], row["pre_s4"]) == (10.0, 10.0)
+
+
+def test_a_stamped_piece_sold_after_the_stamp_is_trued_up_from_its_stamped_average():
+    """As above; one G0 piece is sold at 433.33 after B1, then G0's bill
+    lands at 460. The 9 held pieces add 9 x (460 - 400) = 540 to the pool:
+    (14 x 433.33 + 540) / 14 = 471.90. The sold piece entered the pool at
+    400, so its variance is 460 - 400 = 60 (never 460 - 433.33): pool +
+    COGS + variance = every rupee billed."""
+    from api.utils.event_time import utc_now_iso
+
+    db = _db(400.0, cost_source="PURCHASE_INVOICE")
+    _stamped_g0(db)
+    db.stock_units.update_one({"stock_id": "G0-0"}, {"$set": {"status": "SOLD", "order_id": "O1",
+                                                             "sold_at": utc_now_iso()}})
+    db.orders.insert_one({"order_id": "O1", "items": [{"product_id": "P", "quantity": 1, "cost_at_sale": 433.33}]})
+    _accept(db, _bill("B0", 10, 460, grn_id="G0", bill_date="2026-11-01",
+                      created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == 471.9
+    var = db.cogs_variances.find_one({})
+    assert (var["amount"], var["stock_ids"]) == (60.0, ["G0-0"])
+
+
+def test_damaged_pieces_are_written_off_never_in_the_basis():
+    """10 shelf pieces at 100 and 10 DAMAGED (a write-off: off the books, its
+    input credit reversed); a new receipt's bill, 10 at 200: (1000 + 2000) /
+    20 = 150 -- the damaged pieces never dilute it to 133.33."""
+    db = _db(100.0)
+    _pieces(db, 10)
+    _pieces(db, 10, status="DAMAGED", prefix="D")
+    _receipt(db, "G", 10)
+    _pieces(db, 10, "G", prefix="G")
+    _accept(db, _bill("B", 10, 200, grn_id="G"))
+    assert _avg(db) == 150.0
+
+
+def _walk_in_blended_over(db, *, uncosted=False):
+    """Before S4: 10 G1 pieces at 100; a walk-in bill BW (2026-10-15) for 1 at
+    200 set the latest price 200; then PO bill B2 (10 at 100) blended over it
+    to 152.38 -- cost_source_id names B2, not the walk-in bill."""
+    _receipt(db, "G1", 10, po_id="PO1")
+    _receipt(db, "GW", 1, grn_subtype="NO_PO")
+    _receipt(db, "G2", 10, po_id="PO2")
+    _pieces(db, 10, "G1", prefix="A")
+    _pieces(db, 1, "GW", prefix="W")
+    _pieces(db, 10, "G2", prefix="C")
+    db.stock_units.update_many({"grn_id": {"$in": ["G1", "G2"]}}, {"$set": {"unit_cost": 100.0}})
+    db.stock_units.update_many({"grn_id": "GW"}, {"$set": {"unit_cost": 200.0}})
+    if uncosted:
+        db.stock_units.update_one({"stock_id": "C20"}, {"$unset": {"unit_cost": ""}})
+    db.vendor_bills.insert_many([
+        {"bill_id": "BW", "invoice_id": "BW", "grn_id": "GW", "status": "PAID", "match_status": "MATCHED",
+         "created_at": "2026-10-15T10:00:00+00:00", "lines": [{"product_id": "P", "qty": 1, "unit_price": 200}]},
+        {"bill_id": "B2", "invoice_id": "B2", "grn_id": "G2", "status": "PAID", "match_status": "MATCHED",
+         "created_at": "2026-10-16T10:00:00+00:00", "lines": [{"product_id": "P", "qty": 10, "unit_price": 100}]},
+    ])
+
+
+def test_the_backfill_finds_a_walk_in_latest_price_a_later_bill_blended_over():
+    """Ruling (b): (10 x 100 + 200 + 10 x 100) / 21 = 104.76, although the
+    product's cost source is the later PO bill."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(152.38, cost_source="PURCHASE_INVOICE", cost_source_id="B2")
+    _walk_in_blended_over(db)
+    (row,) = bf.plan(db)
+    assert (row["fill"], row["recost"]) == (104.76, 152.38) and "walk-in" in row["reason"]
+
+
+def test_the_backfill_flags_a_walk_in_latest_price_with_an_uncosted_piece():
+    """A walk-in latest price with a held piece that has no cost: CHECK BY
+    HAND, nothing filled; --apply leaves the average where it is."""
+    from scripts import backfill_average_cost as bf
+
+    for source in ("INV-W1", "B2"):  # the walk-in bill is the source / a later bill blended over it
+        db = _db(200.0, cost_source="PURCHASE_INVOICE", cost_source_id=source)
+        if source == "B2":
+            _walk_in_blended_over(db, uncosted=True)
+        else:
+            _receipt(db, "G2", 2, grn_subtype="NO_PO")
+            _pieces(db, 2, "G2")
+            db.stock_units.update_one({"stock_id": "U0"}, {"$set": {"unit_cost": 200.0}})
+            db.vendor_bills.insert_one({"bill_id": "INV-W1", "invoice_id": "INV-W1", "grn_id": "G2",
+                                        "status": "PAID", "match_status": "MATCHED"})
+        (row,) = bf.plan(db)
+        assert row["fill"] is None and "walk-in" in row["check"]
+        bf.apply(db, [row], "RUN6")
+        assert _avg(db) == 200.0
+
+
+def test_the_backfill_re_average_never_overwrites_a_bill_landing_after_the_dry_run():
+    """The dry run read 200; an S4 bill moves the average to 180 before
+    --apply: the stale re-average (109.09) is not written."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(200.0, cost_source="PURCHASE_INVOICE", cost_source_id="INV-W1")
+    _receipt(db, "G1", 10)
+    _receipt(db, "G2", 1, grn_subtype="NO_PO")
+    _pieces(db, 10, "G1")
+    _pieces(db, 1, "G2")
+    db.stock_units.update_many({"grn_id": "G1"}, {"$set": {"unit_cost": 100.0}})
+    db.stock_units.update_many({"grn_id": "G2"}, {"$set": {"unit_cost": 200.0}})
+    db.vendor_bills.insert_one({"bill_id": "INV-W1", "invoice_id": "INV-W1", "grn_id": "G2",
+                                "status": "PAID", "match_status": "MATCHED"})
+    (row,) = bf.plan(db)
+    assert row["fill"] == 109.09
+    product_cost._move(db, "P", "bill:S4", lambda _p, _o: (180.0, {}), {"kind": "BILL", "source": "PURCHASE_INVOICE"})
+    assert bf.apply(db, [row], "RUN7") == 0
+    product = db.products.find_one({})
+    assert product["cost_price"] == 180.0
+    assert [h["key"] for h in product["cost_history"]] == ["bill:S4"]

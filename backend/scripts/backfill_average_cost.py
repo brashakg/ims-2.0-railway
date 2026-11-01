@@ -26,7 +26,9 @@ WHAT IT DOES
           like every other receipt's -- no "latest price paid" replaces the
           average.
   * A product whose average came from a pre-S4 WALK-IN bill (main costed
-    those at the latest price from 2026-10-12) is re-averaged from its held
+    those at the latest price from 2026-10-12 -- the bill its cost names, or
+    any accepted walk-in bill since then that a later bill blended over) is
+    re-averaged from its held
     pieces' own costs under (a) and (b), a 'BACKFILL' row (backed up, revert
     puts the old average back); if a piece has no cost it is flagged to check
     by hand instead.
@@ -42,9 +44,12 @@ WHAT IT DOES
     so it IS carried over and the first S4 bill blends with it.
   * Every accepted goods receipt that no S4 bill has costed is stamped
     `costed_before_s4: <run id>` (product_cost.PRE_S4_STAMP; only receipts
-    accepted before the first S4 bill -- run it right after the deploy): its pieces
-    carry the average they came in at, so the first S4 bill BLENDS with them
-    instead of replacing the average.
+    accepted before the first S4 bill -- run it right after the deploy), with
+    the time and each of its products' average then: its pieces carry that
+    average, so the first S4 bill BLENDS with them instead of replacing the
+    average. A receipt whose bill simply has not come in yet is stamped too:
+    its own S4 bill later trues its pieces up from the stamped average
+    (product_cost.PRE_S4_STAMP) instead of re-averaging them in.
   * The dry run FLAGS products whose average came from a bill that is still
     on hold, or from a delivery-challan bill (both could carry a wrong
     pre-S4 average). That list is for accounts to correct by hand on the
@@ -119,7 +124,7 @@ def plan(db) -> List[dict]:
             fill = mine
             reason = ("filled from its pieces" if mine is not None
                       else "some pieces have no cost: left for a bill or a correction")
-        elif _walk_in_latest_price(db, prod):
+        elif _walk_in_latest_price(db, prod, pid):
             if mine is None:
                 check = "average is a pre-S4 walk-in latest price and some pieces have no cost"
             elif mine != average:
@@ -149,14 +154,28 @@ def _source_bill(db, prod: dict) -> dict:
     return db["vendor_bills"].find_one({"$or": [{"bill_id": sid}, {"invoice_id": sid}]}, {"_id": 0}) or {}
 
 
-def _walk_in_latest_price(db, prod: dict) -> bool:
-    """Its average came from a pre-S4 walk-in (no-PO) bill: from 2026-10-12
-    main costed one at the LATEST price, not averaged (ruling (b) reverses it)."""
+# From this day main costed a walk-in (no-PO) bill at the LATEST price paid.
+LATEST_PRICE_FROM = "2026-10-12"
+
+
+def _walk_in_latest_price(db, prod: dict, pid: str) -> bool:
+    """A pre-S4 walk-in (no-PO) bill set its average at the LATEST price, not
+    averaged (ruling (b) reverses it): the bill its cost names, or any accepted
+    pre-S4 bill booked from 2026-10-12 on a walk-in receipt of the product --
+    a later bill may have blended over that price, naming itself instead."""
     if prod.get("cost_source") != "PURCHASE_INVOICE":
         return False
     gid = _source_bill(db, prod).get("grn_id")
     receipt = db["grns"].find_one({"grn_id": gid}, {"_id": 0, "grn_subtype": 1}) if gid else None
-    return (receipt or {}).get("grn_subtype") == GRN_SUBTYPE_NO_PO
+    if (receipt or {}).get("grn_subtype") == GRN_SUBTYPE_NO_PO:
+        return True
+    walk_ins = [g["grn_id"] for g in db["grns"].find(
+        {"grn_subtype": GRN_SUBTYPE_NO_PO, "items.product_id": pid}, {"_id": 0, "grn_id": 1})]
+    return bool(walk_ins) and any(
+        b.get("cost_state") is None and product_cost.bill_accepted(b)
+        and str(b.get("created_at") or "") >= LATEST_PRICE_FROM
+        for b in db["vendor_bills"].find({"grn_id": {"$in": walk_ins}}, {"_id": 0})
+    )
 
 
 def billed_before_s4(db, units: List[dict]) -> bool:
@@ -279,16 +298,25 @@ def apply(db, rows: List[dict], run_id: str) -> int:
             db[BACKUPS].update_one({"run_id": run_id, "product_id": prod["product_id"]},
                                    {"$set": {"written": written["new_cost"], "carried_over": True}})
             done += 1
+    at = utc_now_iso()
     for gid in legacy_receipts(db):
+        receipt = db["grns"].find_one({"grn_id": gid}, {"_id": 0, "items": 1}) or {}
+        pids = {it.get("product_id") for it in receipt.get("items") or [] if it.get("product_id")}
+        averages = {p["product_id"]: product_cost.average(p)
+                    for p in db["products"].find({"product_id": {"$in": list(pids)}})
+                    if product_cost.average(p)}
         db["grns"].update_one({"grn_id": gid, product_cost.PRE_S4_STAMP: {"$exists": False}},
-                              {"$set": {product_cost.PRE_S4_STAMP: run_id}})
+                              {"$set": {product_cost.PRE_S4_STAMP: run_id, product_cost.PRE_S4_AT: at,
+                                        product_cost.PRE_S4_AVERAGES: averages}})
     return done
 
 
 def revert(db, run_id: str) -> int:
     key = f"backfill:{run_id}"
     back = 0
-    db["grns"].update_many({product_cost.PRE_S4_STAMP: run_id}, {"$unset": {product_cost.PRE_S4_STAMP: ""}})
+    db["grns"].update_many({product_cost.PRE_S4_STAMP: run_id},
+                           {"$unset": {product_cost.PRE_S4_STAMP: "", product_cost.PRE_S4_AT: "",
+                                       product_cost.PRE_S4_AVERAGES: ""}})
     for b in db[BACKUPS].find({"run_id": run_id}):
         pid = b["product_id"]
         prod = db["products"].find_one({"product_id": pid}) or {}

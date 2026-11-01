@@ -12,8 +12,8 @@ The average moves only here:
         new = (basis x old average + value of the good pieces billed)
               / (basis + good pieces billed)
     `basis` = the pieces we hold (shelf, reserved, on the way between shops,
-    or off the shelf but still ours: quarantined, damaged, under a count)
-    that a bill has already costed. Pieces of a receipt that still has
+    or off the shelf but still ours: quarantined, under a count -- a DAMAGED
+    piece is written off, not held) that a bill has already costed. Pieces of a receipt that still has
     unbilled pieces -- this bill's own receipt or delivery challans among
     them -- are left out: they carry the average only provisionally until
     their own bill, so a challan's pieces are never counted twice. Rejected
@@ -29,7 +29,8 @@ The average moves only here:
     COST-OF-GOODS VARIANCE, recorded once in the bill's history row and in
     `cogs_variances` (variance_by is THE reader the P&L / margin reports add
     to their COGS). A piece WRITTEN OFF before its bill is trued up the same
-    way, at (bill price - the average its write-off loss was taken at). Each
+    way, at (bill price - the average its write-off loss was taken at; a
+    stock count's VOID or a quarantine release as DAMAGED). Each
     bill CLAIMS the gone pieces it took (history row `claimed`), even at no
     variance, so a second bill on the same receipt takes the next ones.
   * accounts correct it, with a reason (correct()) -- the one correction
@@ -118,9 +119,9 @@ def average(product: Optional[dict]) -> float:
 
 
 # Still ours, not sold (owner 2026-11-01: "still held"): off the shelf too --
-# quarantined, damaged, under audit or count -- it carries the average.
-_STILL_OURS = {StockState.QUARANTINED, StockState.DAMAGED, StockState.UNDER_AUDIT, StockState.BLIND_COUNT,
-               StockState.TRANSFERRED}
+# quarantined, under audit or count -- it carries the average. DAMAGED is a
+# write-off (quarantine release, its input credit reversed): _written_off.
+_STILL_OURS = {StockState.QUARANTINED, StockState.UNDER_AUDIT, StockState.BLIND_COUNT, StockState.TRANSFERRED}
 
 
 def _held(unit: dict) -> bool:
@@ -131,8 +132,22 @@ def _held(unit: dict) -> bool:
 
 
 def _written_off(unit: dict) -> bool:
-    """A piece written off (a stock count's shrinkage: VOID)."""
-    return canonical_state(unit.get("status")) is StockState.VOID
+    """A piece written off: a stock count's shrinkage (VOID) or a quarantine
+    release as DAMAGED (writeoff_itc counts both as gone)."""
+    return canonical_state(unit.get("status")) in (StockState.VOID, StockState.DAMAGED)
+
+
+def _left_at(db, unit: dict) -> str:
+    """When a piece left us: its sale, else its write-off (writeoff_itc._lost_at:
+    the count's void stamp or its DAMAGED event), as a UTC ISO string."""
+    if unit.get("order_id") and not _written_off(unit):
+        return str(unit.get("sold_at") or "")
+    from api.utils.event_time import utc_event_iso
+
+    from .writeoff_itc import _lost_at
+
+    at = _lost_at(db, unit)
+    return utc_event_iso(at) if at else ""
 
 
 def _receipt_of(unit: dict) -> Optional[str]:
@@ -144,14 +159,24 @@ def _receipt_of(unit: dict) -> Optional[str]:
 
 
 # A receipt accepted before S4 that no bill has costed under S4 (the backfill
-# stamps it with its run id): its pieces carry the average they came in at, so
-# they are part of the basis -- the first S4 bill blends with them instead of
-# replacing the average. An S4 bill on it later prices it as usual.
+# stamps it with its run id, the time, and each product's average then):
+# its held pieces are in the pool at that stamped average, so they are part of
+# the basis -- the first S4 bill blends with them instead of replacing the
+# average. Its own S4 bill, whenever it lands (its bill may simply not have
+# come in yet), keeps them in the basis and adds n x (bill price - stamped
+# average) to the pool; a stamped piece that left after the stamp is trued up
+# from the stamped average too (it entered the pool at it). A product with no
+# real average at the stamp is not in the map: its pieces wait for their bill.
 PRE_S4_STAMP = "costed_before_s4"
+PRE_S4_AVERAGES = "costed_before_s4_averages"
+PRE_S4_AT = "costed_before_s4_at"
 
 
-def _links(bill: dict, receipt_id: str) -> bool:
-    return bill.get("grn_id") == receipt_id or receipt_id in (bill.get("linked_dc_ids") or [])
+def _stamped_average(receipt: Optional[dict], product_id: str) -> Optional[float]:
+    if not (receipt or {}).get(PRE_S4_STAMP):
+        return None
+    avg = (receipt.get(PRE_S4_AVERAGES) or {}).get(product_id)
+    return pmatch._f(avg) if avg else None
 
 
 def _costs_its_receipt(bill: dict, cost_keys) -> bool:
@@ -160,9 +185,9 @@ def _costs_its_receipt(bill: dict, cost_keys) -> bool:
     return (bill.get("invoice_id") or bill.get("bill_id")) in cost_keys
 
 
-def basis_pieces(db, product_id: str, cost_keys=()) -> float:
-    """The pieces of a product we hold that a bill has already costed (see
-    the module doc); `cost_keys`: the bills already in its average."""
+def _waiting(db, product_id: str, cost_keys) -> Tuple[float, Dict[str, float], Dict[str, dict]]:
+    """(pieces held, {receipt: held pieces of it still waiting for their bill},
+    {receipt id: receipt}) -- a receipt's sold pieces are taken as billed first."""
     held: Dict[Optional[str], float] = {}
     for unit in db.get_collection("stock_units").find({"product_id": product_id}):
         if _held(unit):
@@ -171,7 +196,7 @@ def basis_pieces(db, product_id: str, cost_keys=()) -> float:
     total = sum(held.values())
     ids = [r for r in held if r]
     if not ids:
-        return total
+        return total, {}, {}
     receipts = {
         g["grn_id"]: g
         for g in db.get_collection("grns").find({"grn_id": {"$in": ids}}, {"_id": 0})
@@ -179,13 +204,10 @@ def basis_pieces(db, product_id: str, cost_keys=()) -> float:
     bills = list(db.get_collection("vendor_bills").find(
         {"$or": [{"grn_id": {"$in": ids}}, {"linked_dc_ids": {"$in": ids}}]}, {"_id": 0}
     ))
+    waiting: Dict[str, float] = {}
     for r in ids:
         if r not in receipts:  # a legacy piece whose receipt is gone: costed
             continue
-        if receipts[r].get(PRE_S4_STAMP) and not any(
-            b.get("cost_state") is not None and _links(b, r) for b in bills
-        ):
-            continue  # accepted before S4 with no S4 bill: it carries the old cost
         unbilled = float(pmatch._grn_accepted_by_product(receipts[r]).get(product_id, 0))
         for b in bills:
             if not _costs_its_receipt(b, cost_keys):
@@ -197,8 +219,31 @@ def basis_pieces(db, product_id: str, cost_keys=()) -> float:
                 unbilled -= sum(
                     pmatch._f(ln.get("qty")) for ln in b["lines"] if ln.get("product_id") == product_id
                 )
-        total -= min(held[r], max(0.0, unbilled))
-    return total
+        waiting[r] = min(held[r], max(0.0, unbilled))
+    return total, waiting, receipts
+
+
+def basis_pieces(db, product_id: str, cost_keys=()) -> float:
+    """The pieces of a product we hold that a bill has already costed (see
+    the module doc); `cost_keys`: the bills already in its average. A
+    stamped pre-S4 receipt's pieces are in it while they wait (PRE_S4_STAMP)."""
+    total, waiting, receipts = _waiting(db, product_id, cost_keys)
+    return total - sum(n for r, n in waiting.items() if _stamped_average(receipts[r], product_id) is None)
+
+
+def _pre_s4_trueup(db, product_id: str, cost_keys, key: str, unit: Decimal) -> Tuple[Decimal, Decimal]:
+    """(held stamped pieces bill `key` prices, what it adds to the pool:
+    n x (bill unit price - their stamped average)) -- PRE_S4_STAMP."""
+    _, before, receipts = _waiting(db, product_id, cost_keys)
+    _, after, _ = _waiting(db, product_id, list(cost_keys) + [key])
+    n, add = Decimal(0), Decimal(0)
+    for r, waited in before.items():
+        stamped = _stamped_average(receipts[r], product_id)
+        priced = Decimal(str(waited - after.get(r, 0.0)))
+        if stamped is not None and priced > 0:
+            n += priced
+            add += priced * (unit - _d(stamped))
+    return n, add
 
 
 def _move(
@@ -306,21 +351,27 @@ def apply_bill(
         def work(prod, old, pid=pid, qty=qty, val=val, price=price):
             keys = list(prod.get("cost_keys") or ())
             basis = Decimal(str(basis_pieces(db, pid, keys)))
-            held = qty
+            held, stamped, add = qty, Decimal(0), Decimal(0)
             if receipts:
                 # The billed pieces still held = what this bill adds to the
-                # basis (a receipt's sold pieces are taken as billed first).
+                # basis (a receipt's sold pieces are taken as billed first),
+                # plus the stamped pre-S4 pieces it prices (already in it).
                 after = Decimal(str(basis_pieces(db, pid, keys + [key])))
                 held = min(qty, max(Decimal(0), after - basis))
+                stamped, add = _pre_s4_trueup(db, pid, keys, key, val / qty)
+                if stamped > qty - held:  # never more pieces than billed
+                    add, stamped = add * (qty - held) / stamped, qty - held
             avg = Decimal(str(average(prod)))
-            extra = {"qty": float(qty), "price": price, "held": float(held),
+            extra = {"qty": float(qty), "price": price, "held": float(held + stamped),
                      "basis": float(basis) if avg else None}
+            if stamped:
+                extra["pre_s4"] = float(stamped)
             if avg and basis + held > 0:
-                new = _paise((basis * avg + val * held / qty) / (basis + held))
+                new = _paise((basis * avg + val * held / qty + add) / (basis + held))
             else:  # no average yet, only a provisional one, or nothing held at all
                 new = price
-            if held < qty:
-                claimed, var = _variance(db, prod, pid, receipts, int(qty - held), val / qty)
+            if held + stamped < qty:
+                claimed, var = _variance(db, prod, pid, receipts, int(qty - held - stamped), val / qty)
                 if claimed:  # even at no variance: a later bill on the receipt takes the next ones
                     extra["claimed"] = claimed
                 if var:
@@ -346,13 +397,18 @@ def apply_bill(
 
 
 def _average_at(prod: dict, at) -> float:
-    """The average in force at instant `at` (it moves only at a history row)."""
+    """The average in force at instant `at` (it moves only at a history row).
+    Older than every row: the oldest row's old cost -- a carried-over row's
+    own figure (the carry-over moved nothing), else 0.0 when it had none (the
+    loss was booked at no cost). No row at all: it never moved."""
     rows = sorted(prod.get("cost_history") or [], key=lambda r: str(r.get("at") or ""))
+    if not rows:
+        return stock_value.average_cost(prod)
     before = [r for r in rows if str(r.get("at") or "") <= str(at or "")]
     if before:
         return pmatch._f(before[-1].get("new_cost"))
-    after = rows[0].get("old_cost") if rows else None
-    return pmatch._f(after) or stock_value.average_cost(prod)
+    first = rows[0]
+    return pmatch._f(first.get("new_cost") if first.get("kind") == "CARRIED_OVER" else first.get("old_cost"))
 
 
 def _split(acc: Dict[str, Decimal], amount: float) -> List[dict]:
@@ -373,17 +429,20 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
     line with no frozen cost is read at the product's live cost by the COGS
     readers: claimed, no variance. The variance carries its split per order
     line item_type and category (by_item_type / by_category: the keys the
-    P&L readers group on)."""
-    ids = [g["grn_id"] for g in receipts or [] if g.get("grn_id")]
+    P&L readers group on). A stamped pre-S4 receipt's piece that left after
+    the stamp is trued up from its stamped average (PRE_S4_STAMP)."""
+    by_id = {g["grn_id"]: g for g in receipts or [] if g.get("grn_id")}
+    ids = list(by_id)
     if not ids or gone <= 0:
         return [], None
     taken = {s for r in history(prod) for s in r.get("claimed") or []}
-    units = sorted(
-        (u for u in db.get_collection("stock_units").find({"product_id": pid})
+    left = sorted(
+        ((_left_at(db, u), u) for u in db.get_collection("stock_units").find({"product_id": pid})
          if _receipt_of(u) in ids and u.get("stock_id") not in taken
          and ((u.get("order_id") and not _held(u)) or _written_off(u))),
-        key=lambda u: str(u.get("sold_at") or u.get("voided_at") or ""),
+        key=lambda p: p[0],
     )[:gone]
+    units = [u for _, u in left]
     orders = {
         o["order_id"]: o for o in db.get_collection("orders").find(
             {"order_id": {"$in": [u["order_id"] for u in units if u.get("order_id")]}},
@@ -392,10 +451,14 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
     stock_ids, at_sale, written_off = [], Decimal(0), 0
     by_type: Dict[str, Decimal] = {}
     by_cat: Dict[str, Decimal] = {}
-    for u in units:
+    for at, u in left:
+        receipt = by_id[_receipt_of(u)]
+        stamped = _stamped_average(receipt, pid)
+        if stamped is not None and at < str(receipt.get(PRE_S4_AT) or ""):
+            stamped = None  # left before the stamp: never in the pool
         if _written_off(u):
             # ponytail: no sale line -- the product's category for both keys.
-            cost, kt = _average_at(prod, u.get("voided_at")), prod.get("category")
+            cost, kt = (stamped if stamped is not None else _average_at(prod, at)), prod.get("category")
             kc = kt
             written_off += 1
         else:
@@ -404,6 +467,8 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
             if line is None:
                 continue
             cost, kt, kc = line["cost_at_sale"], line.get("item_type") or line.get("category"), line.get("category")
+            if stamped is not None:
+                cost = stamped
         stock_ids.append(u["stock_id"])
         at_sale += _d(cost)
         by_type[kt or "OTHER"] = by_type.get(kt or "OTHER", Decimal(0)) + unit - _d(cost)
