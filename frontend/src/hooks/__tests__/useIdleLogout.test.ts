@@ -403,4 +403,17 @@ describe('useIdleLogout (enforcement)', () => {
     tickAt(BASE + 60_000);
     expect(onLogout).not.toHaveBeenCalled();
   });
+
+  it('turning auto-logout back on does not sign out someone who kept working while it was off', () => {
+    setLastActivity(BASE - 60 * 60_000); // last stamp from before the switch-off
+    const onLogout = vi.fn();
+    const { rerender } = renderHook(
+      ({ enabled }) => useIdleLogout({ enabled, minutes: MIN, warnSeconds: WARN, onLogout }),
+      { initialProps: { enabled: false } },
+    );
+    moveMouse(); // working while it is off - nothing records it
+    rerender({ enabled: true }); // /health now says on
+    tickAt(BASE + 1_000);
+    expect(onLogout).not.toHaveBeenCalled();
+  });
 });

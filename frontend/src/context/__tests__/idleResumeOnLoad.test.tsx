@@ -77,6 +77,10 @@ describe('page load after the browser was closed', () => {
     expect(authApi.getProfile).not.toHaveBeenCalled(); // never resumed
     expect(authApi.logout).toHaveBeenCalledTimes(1); // server revoke attempted
     expect(park).toHaveBeenCalledWith({ auto: true, heldBy: 'u-1' });
+    // Parked BEFORE anything empties the cart, or the sale is lost.
+    const parkedAt = park.mock.invocationCallOrder[0];
+    expect(parkedAt).toBeLessThan(clearPos.mock.invocationCallOrder[0]);
+    expect(parkedAt).toBeLessThan(mocked(authApi.logout).mock.invocationCallOrder[0]);
     expect(mem.get('ims_token')).toBeUndefined();
     expect(mem.get('ims_refresh_token')).toBeUndefined();
     expect(seen.auth.isAuthenticated).toBe(false);

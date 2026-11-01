@@ -31,7 +31,8 @@
 //      browser profile, and logging out one tab would kill the shared token
 //      under their feet.
 //
-// enabled === false makes the hook a COMPLETE no-op: no timers, no listeners.
+// enabled === false: no timers, no listeners, and the stored stamp is dropped
+// (nothing refreshes it while off, so re-enabling must start a fresh clock).
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 
@@ -212,11 +213,19 @@ export function useIdleLogout(opts: UseIdleLogoutOptions): UseIdleLogoutResult {
   }, []);
 
   useEffect(() => {
-    // Disabled -> COMPLETE no-op. No timers, no listeners, reset any state.
+    // Disabled -> no timers, no listeners, reset any state. Also DROP the
+    // stored stamp: nothing refreshes it while off, so when an admin turns
+    // auto-logout back on the stale stamp would sign out someone who was
+    // working all along. No stamp -> the enabled run below seeds a fresh one.
     if (!enabled) {
       warningRef.current = false;
       setWarning(false);
       setRemainingSec(0);
+      try {
+        localStorage.removeItem(LAST_ACTIVITY_KEY);
+      } catch {
+        /* ignore */
+      }
       return;
     }
 

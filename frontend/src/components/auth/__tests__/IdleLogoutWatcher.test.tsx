@@ -25,7 +25,7 @@ vi.mock('../../../context/AuthContext', () => ({
 const parkSpy = vi.fn(() => null);
 vi.mock('../../../stores/posStore', () => ({
   usePOSStore: {
-    getState: () => ({ parkCurrentSale: parkSpy }),
+    getState: () => ({ parkCurrentSale: parkSpy, clearAllOnLogout: vi.fn() }),
   },
 }));
 

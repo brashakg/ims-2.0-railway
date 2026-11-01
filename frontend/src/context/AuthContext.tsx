@@ -13,6 +13,7 @@ import { userSeesAllStores } from '../utils/storeAccess';
 import { USER_SHOPS_SYNCED_EVENT } from '../services/api/client';
 import { getSessionPolicy } from '../constants/sessionPolicy';
 import { LAST_ACTIVITY_KEY, storedSessionIdleExpired } from '../hooks/useIdleLogout';
+import { IDLE_LOGIN_PATH, autoParkForIdleLogout } from '../hooks/idleSignOut';
 
 // ============================================================================
 // Types
@@ -165,20 +166,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
           // Idle past the limit while the browser/tab was closed (owner
           // 11-01): sign out BEFORE any server call, so the stored token is
           // never resumed or silently refreshed. Same steps as the idle
-          // watcher: auto-park the POS cart, then the normal logout (which
-          // revokes the refresh chain). The park-then-clear is synchronous so
-          // a second run (React StrictMode in dev) finds no cart to re-park.
+          // watcher (autoParkForIdleLogout parks then clears synchronously, so
+          // a second run under React StrictMode finds no cart to re-park).
           if (storedSessionIdleExpired(getSessionPolicy())) {
-            try {
-              const pos = usePOSStore.getState();
-              pos.parkCurrentSale({ auto: true, heldBy: cachedUser?.id });
-              pos.clearAllOnLogout();
-            } catch {
-              /* never let a park error block the logout */
-            }
+            autoParkForIdleLogout(cachedUser?.id);
             await logout();
             // AuthProvider sits outside the router, so a plain replace.
-            window.location.replace('/login?reason=idle');
+            window.location.replace(IDLE_LOGIN_PATH);
             return;
           }
 
