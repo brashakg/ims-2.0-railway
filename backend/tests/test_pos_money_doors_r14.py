@@ -216,6 +216,15 @@ def test_cash_owed_now_paid_books_the_drawer_leg_once_and_closes_the_task(till, 
 # =========================================================================== #
 # BLOCK 5 / should-fix 7: a cash-only hold is recovered from its own figures
 # =========================================================================== #
+def test_an_unpaid_cash_part_never_sits_on_the_drawer_legs(till, tasks):
+    _bill_with_hold(till, "RET-Q")
+    _ledger(till).insert_one(_row("RET-Q:credit", type=scl.ISSUED, applied=True, delta=1200.0, order_id="ORD-1",
+                                  undo_on_void=_spec("RET-Q"), store_id=STORE))
+    doc = _complete("RET-Q", cash_leg_paid=False)
+    assert all(t["method"] != "CASH" for t in doc["refund_tenders"])
+    assert [t["method"] for t in doc["owed_tenders"]] == ["CASH"]
+
+
 def test_a_cash_only_hold_is_recovered_from_its_kept_figures(till, tasks):
     view = {"taxable": 1525.42, "tax": 274.58, "gross": 1800.0, "gst_rate": 18.0,
             "by_rate": {"18.0": {"taxable": 1525.42, "tax": 274.58, "gross": 1800.0}}}
@@ -363,12 +372,19 @@ def test_the_money_doors_bound_their_own_writes(till, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_workshop_staff_still_take_a_payment_at_handover(till):
+async def test_workshop_staff_never_record_a_payment(till):
+    """Owner ruling 2026-11-01: workshop staff never touch a customer's money."""
     from api.routers.orders import PaymentCreate, add_payment
+    from api.routers.orders._shared import HANDOVER_ROLES
+    from api.services import rbac_policy
 
     till["db"].get_collection("orders").insert_one(_order())
-    await add_payment("ORD-1", PaymentCreate(method="CASH", amount=100.0), _user("WORKSHOP_STAFF"))
-    assert _stored(till)["amount_paid"] == 100.0
+    with pytest.raises(HTTPException) as exc:
+        await add_payment("ORD-1", PaymentCreate(method="CASH", amount=100.0), _user("WORKSHOP_STAFF"))
+    assert exc.value.status_code == 403 and _stored(till)["amount_paid"] == 0.0
+    row = next(r for r in rbac_policy.POLICY if r["path"] == "/api/v1/orders/{order_id}/payments")
+    assert "WORKSHOP_STAFF" not in row["allowed"]
+    assert "WORKSHOP_STAFF" in HANDOVER_ROLES  # the handover roles are unchanged
 
 
 # =========================================================================== #

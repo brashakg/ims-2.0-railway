@@ -1099,7 +1099,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/orders/{order_id}/invoice.pdf` | AUTH |  |  |
 | `POST` | `/api/v1/orders/{order_id}/items` | AUTH |  |  |
 | `DELETE` | `/api/v1/orders/{order_id}/items/{item_id}` | AUTH |  |  |
-| `POST` | `/api/v1/orders/{order_id}/payments` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, CASHIER, OPTOMETRIST, ACCOUNTANT, WORKSHOP_STAFF |  |  |
+| `POST` | `/api/v1/orders/{order_id}/payments` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, CASHIER, OPTOMETRIST, ACCOUNTANT |  |  |
 | `POST` | `/api/v1/orders/{order_id}/ready` | AUTH |  |  |
 | `PUT` | `/api/v1/orders/{order_id}/superadmin-edit` | AUTH |  |  |
 | `PUT` | `/api/v1/orders/{order_id}/superadmin-invoice-change` | AUTH |  |  |
