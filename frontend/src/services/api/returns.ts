@@ -146,6 +146,18 @@ export interface AdvanceRefundPlan {
 
 export type CashPaidFrom = 'STORE_DRAWER' | 'HQ';
 
+/** A completed return whose cash part is still owed to the customer. */
+export interface OwedReturn {
+  return_id: string;
+  order_id?: string;
+  order_number?: string;
+  store_id?: string;
+  owed_amount: number;
+  owed_tenders?: { method?: string; amount?: number }[];
+}
+
+export type OwedPaidMethod = 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER';
+
 export const returnsApi = {
   advanceRefundPreview: async (orderId: string): Promise<AdvanceRefundPlan> => {
     const response = await api.get(`/returns/advance-refund/${encodeURIComponent(orderId)}`);
@@ -172,7 +184,7 @@ export const returnsApi = {
   },
 
   /** Returns > Needs completing: unfinished counter returns (Accounts / Admin). */
-  needsCompleting: async (): Promise<{ items: NeedsCompletingItem[] }> => {
+  needsCompleting: async (): Promise<{ items: NeedsCompletingItem[]; owed?: OwedReturn[] }> => {
     const response = await api.get('/returns/needs-completing');
     return response.data;
   },
@@ -183,6 +195,16 @@ export const returnsApi = {
     answer: { cash_leg_paid?: boolean; nothing_paid?: boolean; note?: string },
   ) => {
     const response = await api.post(`/returns/${encodeURIComponent(returnId)}/complete-record`, answer);
+    return response.data;
+  },
+
+  /** "Cash owed - now paid": the owed part was paid to the customer today.
+   *  CASH says where it came from (the shop drawer, or HQ). */
+  owedPaid: async (
+    returnId: string,
+    body: { method: OwedPaidMethod; cash_paid_from?: CashPaidFrom; note?: string },
+  ) => {
+    const response = await api.post(`/returns/${encodeURIComponent(returnId)}/owed-paid`, body);
     return response.data;
   },
 

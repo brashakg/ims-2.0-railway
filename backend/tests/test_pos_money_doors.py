@@ -1116,7 +1116,7 @@ def test_counter_return_backs_out_when_an_advance_refund_claims_mid_way(monkeypa
         return ok
 
     monkeypatch.setattr(returns_router, "_claim_returnable_qty", _claim_then_door_claims)
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     r = client.post("/api/v1/returns", json=_qa_payload(), headers=_hdr("STORE_MANAGER"))
     assert r.status_code == 409, r.text
     assert returns.count_documents({}) == 0
@@ -1985,7 +1985,7 @@ def test_two_returns_at_once_cannot_dodge_the_2000_rule(till, monkeypatch):
     # The per-line unit claim (positional array update) is not what is under
     # test here -- the order's refunded TOTAL is; let the unit claim pass.
     monkeypatch.setattr(returns_router, "_claim_returnable_qty", lambda *a, **k: True)
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: True)
     payload = {"order_id": "ORD-1", "return_type": "RETURN", "items": [{
         "order_item_id": "li1", "product_id": "P1", "product_name": "Frame", "sku": "F1",
         "return_qty": 1, "unit_price": 1525.42, "reason": "DEFECTIVE", "condition": "GOOD"}]}

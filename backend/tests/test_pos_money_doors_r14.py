@@ -96,9 +96,9 @@ def _void(till, rid="RET-V", **over):
 
 def test_two_reconcilers_on_one_void_give_back_once(till, monkeypatch):
     released, written_off, holds = [], [], []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
-    monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: holds.append(a))
+    monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: holds.append(a) or True)
     row = _void(till)
     cust_router._finish_void(_ledger(till), dict(row), "x", undo=True)
     cust_router._finish_void(_ledger(till), dict(row), "x", undo=True)  # the second read the same row
@@ -107,7 +107,7 @@ def test_two_reconcilers_on_one_void_give_back_once(till, monkeypatch):
 
 def test_nothing_paid_racing_the_unsettled_void_sweep_gives_back_once(till, monkeypatch):
     released, written_off = [], []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
     _bill_with_hold(till, "RET-V")
     row = _void(till)
@@ -118,7 +118,7 @@ def test_nothing_paid_racing_the_unsettled_void_sweep_gives_back_once(till, monk
 
 def test_a_finished_record_owns_the_claims_the_void_sweep_skips_them(till, monkeypatch):
     released = []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
     till["db"].get_collection("returns").insert_one({"return_id": "RET-V", "status": "NOTHING_PAID"})
     row = _void(till)
@@ -135,7 +135,7 @@ def test_a_lost_act_after_its_mark_is_never_repeated(till, monkeypatch):
 
     monkeypatch.setattr(returns_router, "_release_returnable_qty", _release)
     monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
-    monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: True)
     row = _void(till)
     cust_router._finish_void(_ledger(till), dict(row), "x", undo=True)
     cust_router._finish_void(_ledger(till), dict(_ledger(till).find_one({"entry_id": "RET-V:credit"})), "x",
@@ -151,13 +151,19 @@ def test_an_error_before_the_money_moves_releases_the_claims_and_writes_the_numb
     payload = _two_unit_bill(till, monkeypatch)
     payload["refund_tenders"] = [{"method": "CASH", "amount": 1800.0}]
     released, written_off = [], []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
 
-    def _boom(*a, **k):
-        raise RuntimeError("quarantine store down")
+    # Round 15: the error lands AT the money-out mark (the quarantine now runs
+    # after it, where an error keeps everything for a person).
+    real = returns_router._keep_order_refund_hold
 
-    monkeypatch.setattr(returns_router, "_quarantine_damaged_units", _boom)
+    def _keep(order_id, return_id, **kw):
+        if (kw.get("extra") or {}).get("money_out"):
+            raise RuntimeError("died before the money-out mark")
+        return real(order_id, return_id, **kw)
+
+    monkeypatch.setattr(returns_router, "_keep_order_refund_hold", _keep)
     with pytest.raises(RuntimeError):
         _advance_client().post("/api/v1/returns", json=payload, headers=_hdr("STORE_MANAGER"))
     assert len(released) == 1 and written_off == ["TST01/C2627/0001"]
@@ -203,13 +209,15 @@ def test_cash_owed_now_paid_books_the_drawer_leg_once_and_closes_the_task(till, 
     returns = till["db"].get_collection("returns")
     returns.insert_one({"return_id": "RET-O", "order_id": "ORD-1", "store_id": STORE, "status": "COMPLETED",
                         "owed_amount": 600.0, "owed_tenders": [{"method": "CASH", "amount": 600.0}]})
-    body = returns_router.OwedPaidBody(method="CASH")
+    monkeypatch.setattr(returns_router, "_drawer_closed_today", lambda store_id: False)
+    body = returns_router.OwedPaidBody(method="CASH", cash_paid_from="STORE_DRAWER")
     out = asyncio.run(returns_router.mark_owed_paid("RET-O", body, _user("ACCOUNTANT")))
     assert out["owed_paid"] == 600.0 and closed == ["return_cash_owed:RET-O"]
     again = asyncio.run(returns_router.mark_owed_paid("RET-O", body, _user("ACCOUNTANT")))
     assert again["replayed"] is True
     payouts = list(returns.find({"payout_of": "RET-O"}))
-    assert len(payouts) == 1 and payouts[0]["refund_tenders"] == [{"method": "CASH", "amount": 600.0}]
+    assert len(payouts) == 1
+    assert [(t["method"], t["amount"]) for t in payouts[0]["refund_tenders"]] == [("CASH", 600.0)]
     assert payouts[0]["net_refund"] == 0.0 and payouts[0]["drawer_at"]
 
 
@@ -264,7 +272,7 @@ def test_a_mixed_return_with_a_fee_stamps_gross_and_fee_on_its_credit_line(monke
 # SHOULD-FIX 6 / 8
 # =========================================================================== #
 def test_a_nothing_paid_return_no_longer_counts_and_its_replay_finishes_the_hold(till, monkeypatch):
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: True)
     monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
     _bill_with_hold(till, "RET-N")
     _complete("RET-N", nothing_paid=True)

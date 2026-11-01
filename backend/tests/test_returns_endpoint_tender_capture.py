@@ -178,7 +178,12 @@ class _ClaimingOrdersColl:
                 if cap is not None and returned > cap:
                     return None
             elif isinstance(elem.get("returned_qty"), dict):
-                return None  # the impossible-match branch (cap < 0)
+                rq = elem["returned_qty"]
+                # The release's floor (money review 15): only while the line
+                # still holds that many units. Else the impossible-match
+                # branch of the claim (cap < 0).
+                if "$gte" not in rq or returned < rq["$gte"]:
+                    return None
             line["returned_qty"] = returned + inc
             return dict(self.order)
         return None

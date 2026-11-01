@@ -2141,20 +2141,25 @@ def _audit_credit_event(action: str, row: Dict[str, Any]) -> None:
         logger.error("[CUSTOMERS] %s not audited: %s", action, exc)
 
 
-def _heal_voided_row(ledger, row: Dict[str, Any], why: str, *, unrecorded: bool = False) -> None:
+def _heal_voided_row(ledger, row: Dict[str, Any], why: str, *, unrecorded: bool = False) -> bool:
     """A balance move that landed on a line already VOID: the money moved, so
     the line is real -- made final again (dated by THE redate rule), and the
     write-off of its number is recorded as reinstated for the CA.
     ``unrecorded`` (the reconciler's heal): a counter return's credit that
-    landed without its return record raises the P1 task and keeps the hold."""
+    landed without its return record raises the P1 task and keeps the hold.
+    Everything after the flip runs ONLY for the call that flipped VOID ->
+    final (two passes healing one row never take the units back twice).
+    True when this call healed it."""
     try:
-        ledger.update_one({"entry_id": row["entry_id"], "type": VOID},
-                          {"$set": {"type": row.get("final_type") or "ADJUSTED", "applied": True,
-                                    "delta": row.get("delta"), "healed_from_void": True, **_finish_dates(row)},
-                           "$unset": {"void_settled": ""}})
+        res = ledger.update_one({"entry_id": row["entry_id"], "type": VOID},
+                                {"$set": {"type": row.get("final_type") or "ADJUSTED", "applied": True,
+                                          "delta": row.get("delta"), "healed_from_void": True, **_finish_dates(row)},
+                                 "$unset": {"void_settled": ""}})
     except Exception as exc:  # noqa: BLE001
         logger.error("[CUSTOMERS] credit row %s not healed: %s", row.get("entry_id"), exc)
-        return
+        return False
+    if int(getattr(res, "modified_count", 0) or 0) != 1:
+        return False  # another pass healed it
     logger.warning("[CUSTOMERS] credit row %s healed: %s", row.get("entry_id"), why)
     if row.get("note_number"):
         _audit_credit_event("CREDIT_NOTE_NUMBER_REINSTATED", row)
@@ -2169,6 +2174,7 @@ def _heal_voided_row(ledger, row: Dict[str, Any], why: str, *, unrecorded: bool 
             _reassert_return_claims(row)
         else:
             _keep_return_hold(row)
+    return True
 
 
 def _void_credit_row(repo, ledger, row: Dict[str, Any], why: str, *, undo: bool = False) -> bool:
@@ -2248,8 +2254,18 @@ def _finish_void(ledger, row: Dict[str, Any], why: str, *, undo: bool) -> None:
         if undo and spec and not _return_record_finished(spec.get("return_id")):
             from .returns import _undo_return_claims
 
-            _undo_return_claims(spec, step=lambda name: claim_step(ledger, flt, name))
-        ledger.update_one(flt, {"$set": {"void_settled": True}})
+            # Each claimed step is stamped done after its act; a step claimed
+            # but never stamped (its act lost) raises a P1 task and keeps the
+            # VOID unsettled -- never a silent settle.
+            if not _undo_return_claims(spec, step=lambda name: claim_step(ledger, flt, name), row=row,
+                                       done=lambda name: ledger.update_one(flt, {"$set": {f"{name}_done": True}})):
+                return
+        # Settle only while no step is claimed-but-unstamped (a racing pass
+        # still mid-act, or a lost act): the row itself is the judge, not a
+        # stale read of it.
+        ledger.update_one({**flt, "$nor": [{name: True, f"{name}_done": {"$ne": True}}
+                                           for name in ("claims_released", "hold_released")]},
+                          {"$set": {"void_settled": True}})
     except Exception as exc:  # noqa: BLE001 -- left unsettled: the reconciler's sweep resumes it
         logger.error("[CUSTOMERS] voided row %s not settled: %s", eid, exc)
 
@@ -2300,12 +2316,12 @@ def _settle_credit_row(repo, ledger, row: Dict[str, Any]) -> str:
             except Exception:  # noqa: BLE001
                 return UNCLEAR
             if now_row.get("type") == VOID:
-                _heal_voided_row(ledger, {**row, **{k: v for k, v in now_row.items() if k == "pending_at"}},
-                                 "the press's move landed after a reconciler voided it")
-                if row.get("undo_on_void"):
+                healed = _heal_voided_row(ledger, {**row, **{k: v for k, v in now_row.items() if k == "pending_at"}},
+                                          "the press's move landed after a reconciler voided it")
+                if healed and row.get("undo_on_void") and now_row.get("claims_released"):
                     # The reconciler gave this return's claims and hold back
-                    # when it voided the line; the money moved, so take them
-                    # again (the press records the return).
+                    # when it voided the line (and only then); the money
+                    # moved, so take them again (the press records the return).
                     from .returns import _reassert_return_claims
 
                     _reassert_return_claims(row)

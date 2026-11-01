@@ -20,12 +20,14 @@ const ITEMS = [
     credit_line: { type: 'ISSUED', amount: 500, note_number: 'TST01/C2627/0008' }, cash_leg: 0,
     record_not_saved: false, money_known: true },
 ];
-const needsCompleting = vi.fn(async () => ({ items: ITEMS }));
+const needsCompleting = vi.fn(async (): Promise<any> => ({ items: ITEMS }));
+const owedPaid = vi.fn(async (..._a: unknown[]) => ({ message: 'Booked' }));
 const completeRecord = vi.fn(async () => ({ message: 'Done' }));
 vi.mock('../../../services/api/returns', () => ({
   returnsApi: {
     needsCompleting: () => needsCompleting(),
     completeRecord: (...a: unknown[]) => (completeRecord as any)(...a),
+    owedPaid: (...a: unknown[]) => owedPaid(...a),
     quote: vi.fn(), create: vi.fn(), list: vi.fn(async () => ({ returns: [] })),
   },
 }));
@@ -79,5 +81,39 @@ describe('Needs completing panel', () => {
     render(<ReturnsPage />);
     expect(await screen.findByText('New return')).toBeTruthy();
     expect(needsCompleting).not.toHaveBeenCalled();
+  });
+});
+
+describe('NeedsCompletingPanel - Owed to customer (money review 15)', () => {
+  it('books a cash owed part as paid only once the cash source is said, after a confirm step', async () => {
+    needsCompleting.mockResolvedValue({ items: [], owed: [
+      { return_id: 'RET-O', order_id: 'ORD-9', order_number: 'BV/0009', store_id: 'BV-PUN-01', owed_amount: 600,
+        owed_tenders: [{ method: 'CASH', amount: 600 }] },
+    ] });
+    owedPaid.mockClear();
+    render(<NeedsCompletingPanel standalone />);
+    const paidBy = await screen.findByLabelText('Paid by');
+    fireEvent.change(paidBy, { target: { value: 'CASH' } });
+    expect(screen.queryByRole('button', { name: /Cash owed - now paid/ })).toBeNull(); // no source yet
+    fireEvent.change(screen.getByLabelText('Cash from'), { target: { value: 'HQ' } });
+    fireEvent.click(screen.getByRole('button', { name: /Cash owed - now paid/ }));
+    expect(owedPaid).not.toHaveBeenCalled(); // a confirm step first
+    fireEvent.click(screen.getByRole('button', { name: /Confirm: Rs 600.00 paid today/ }));
+    await waitFor(() => expect(owedPaid).toHaveBeenCalledTimes(1));
+    expect(owedPaid.mock.calls[0]).toEqual(['RET-O', { method: 'CASH', cash_paid_from: 'HQ' }]);
+  });
+
+  it('a UPI payout needs no cash source', async () => {
+    needsCompleting.mockResolvedValue({ items: [], owed: [
+      { return_id: 'RET-U', order_id: 'ORD-8', store_id: 'BV-PUN-01', owed_amount: 300, owed_tenders: [] },
+    ] });
+    owedPaid.mockClear();
+    render(<NeedsCompletingPanel />); // shown at the desk too, though nothing else needs completing
+    fireEvent.change(await screen.findByLabelText('Paid by'), { target: { value: 'UPI' } });
+    expect(screen.queryByLabelText('Cash from')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Cash owed - now paid/ }));
+    fireEvent.click(screen.getByRole('button', { name: /Confirm: Rs 300.00 paid today/ }));
+    await waitFor(() => expect(owedPaid).toHaveBeenCalledTimes(1));
+    expect(owedPaid.mock.calls[0]).toEqual(['RET-U', { method: 'UPI' }]);
   });
 });

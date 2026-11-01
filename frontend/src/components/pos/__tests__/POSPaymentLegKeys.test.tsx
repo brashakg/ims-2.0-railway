@@ -38,7 +38,8 @@ import { orderApi } from '../../../services/api';
 import { buildApiError } from '../../../services/api/client';
 import { usePOSStore } from '../../../stores/posStore';
 import { submitPosOrder, TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from '../submitOrder';
-import { billKeyFor, cartFingerprint, clearBillKey } from '../posBillKey';
+import { billKeyEntry, billKeyFor, clearBillKey } from '../posBillKey';
+import { billFingerprint, orderPayloadOf } from '../orderPayload';
 
 const mockedCreate = vi.mocked(orderApi.createOrder);
 const mockedAddPayment = vi.mocked(orderApi.addPayment);
@@ -115,18 +116,52 @@ describe('money review 13 at the till', () => {
   });
 });
 
-describe('the bill key lives with the cart', () => {
-  it('survives a reload for the same cart, changes with the cart, expires, and clears on success', () => {
+describe('the bill key lives with the bill (money review 15)', () => {
+  const bill = (qty: number) => billFingerprint({
+    customer: { id: 'c' }, store_id: 's', cart: [{ product_id: 'p', category: 'FRAME', quantity: qty, unit_price: 100 }],
+  });
+
+  it('survives a reload for the same bill, differs per bill, and expires', () => {
     localStorage.clear();
-    const fp = cartFingerprint({ cart: [{ product_id: 'p', quantity: 1, unit_price: 100 }], customer: { id: 'c' } });
-    const k1 = billKeyFor(fp);
-    expect(billKeyFor(fp)).toBe(k1); // a reload reads the same key back
-    const other = cartFingerprint({ cart: [{ product_id: 'p', quantity: 2, unit_price: 100 }], customer: { id: 'c' } });
-    const k2 = billKeyFor(other);
+    const k1 = billKeyFor(bill(1));
+    expect(billKeyFor(bill(1))).toBe(k1); // a reload reads the same key back
+    const k2 = billKeyFor(bill(2));
     expect(k2).not.toBe(k1);
-    clearBillKey();
-    const k3 = billKeyFor(other);
-    expect(k3).not.toBe(k2);
-    expect(billKeyFor(other, Date.now() + 16 * 60_000)).not.toBe(k3); // older than 15 minutes: a new key
+    expect(billKeyFor(bill(1))).toBe(k1); // the other bill's key was never overwritten
+    expect(billKeyFor(bill(2), Date.now() + 16 * 60_000)).not.toBe(k2); // older than 15 minutes: a new key
+  });
+
+  it('each press refreshes the key time, so a bill re-pressed for 20 minutes keeps it', () => {
+    localStorage.clear();
+    const t0 = Date.now();
+    const k = billKeyFor(bill(1), t0);
+    expect(billKeyFor(bill(1), t0 + 10 * 60_000)).toBe(k);
+    expect(billKeyFor(bill(1), t0 + 20 * 60_000)).toBe(k);
+  });
+
+  it('prefers the surface in-memory key for the bill over a kept or a fresh one', () => {
+    localStorage.clear();
+    billKeyFor(bill(1));
+    expect(billKeyFor(bill(1), Date.now(), 'mem-key')).toBe('mem-key');
+    expect(billKeyEntry(bill(1))?.key).toBe('mem-key');
+  });
+
+  it('clearing one bill never wipes another tab key', () => {
+    localStorage.clear();
+    const mine = billKeyFor(bill(1));
+    const theirs = billKeyFor(bill(2));
+    clearBillKey(bill(1));
+    expect(billKeyEntry(bill(1))).toBeNull();
+    expect(billKeyEntry(bill(2))?.key).toBe(theirs);
+    expect(billKeyFor(bill(1))).not.toBe(mine);
+  });
+
+  it('ONE fingerprint: it is the order body the sale sends, minus the approval id', () => {
+    const store = { customer: { id: 'c' }, store_id: 's', cart: [{ product_id: 'p', category: 'FRAME', quantity: 1, unit_price: 100 }] };
+    expect(billFingerprint(store)).toBe(JSON.stringify(orderPayloadOf(store)));
+    expect(billFingerprint(store)).toBe(JSON.stringify(orderPayloadOf(store, null)));
+    expect(JSON.stringify(orderPayloadOf(store, 'REQ-1'))).not.toBe(billFingerprint(store));
+    // A field the sale sends (the bill note) makes it another bill.
+    expect(billFingerprint({ ...store, cart_note: 'gift' })).not.toBe(billFingerprint(store));
   });
 });

@@ -6,7 +6,8 @@
 // Persists draft cart to localStorage so sales aren't lost on browser crash.
 
 import { create } from 'zustand';
-import { clearBillKey } from '../components/pos/posBillKey';
+import { billKeyEntry, clearBillKey, putBillKey } from '../components/pos/posBillKey';
+import { billFingerprint } from '../components/pos/orderPayload';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Customer, Patient, Prescription } from '../types';
 import type { DenomRow } from '../utils/denominations';
@@ -268,7 +269,7 @@ export interface POSState {
   // Park/Hold: atomically REPLACE the current transaction with a previously
   // held one (no merge into the existing cart, per-item discounts preserved,
   // cart-level discount + delivery fields restored).
-  restoreHeldSale: (snapshot: any) => void;
+  restoreHeldSale: (snapshot: any, billKey?: { key?: string } | null) => void;
 
   // Computed getters
   getSubtotal: () => number;
@@ -579,7 +580,7 @@ export const usePOSStore = create<POSState>()(
       // --- Reset ---
       resetTransaction: () => {
         const { store_id, salesperson_id, salesperson_name } = get();
-        clearBillKey(); // a new sale is a new press
+        clearBillKey(billFingerprint(get())); // a new sale is a new press (only THIS bill's key)
         set({ ...initialState, store_id, salesperson_id, salesperson_name });
       },
 
@@ -591,7 +592,6 @@ export const usePOSStore = create<POSState>()(
       // to reset the transaction afterward (manual hold does; auto-park lets the
       // subsequent logout clear it).
       parkCurrentSale: (meta?: { auto?: boolean; heldBy?: string }) => {
-        clearBillKey(); // a held bill is pressed again later as a new press
         const state = get();
         const cart = state.cart || [];
         if (cart.length === 0) return null; // nothing to park
@@ -604,8 +604,13 @@ export const usePOSStore = create<POSState>()(
         } catch {
           bills = [];
         }
+        // The bill's key travels WITH the held bill (manual hold and
+        // auto-park alike): an unconfirmed sale parked and recalled is
+        // pressed again with the same key, never rung twice.
+        const billKey = billKeyEntry(billFingerprint(state));
         bills.push({
           id,
+          bill_key: billKey,
           customer: state.customer?.name || 'Walk-in',
           items: cart.length,
           total: get().getGrandTotal(),
@@ -649,8 +654,8 @@ export const usePOSStore = create<POSState>()(
       // This sets everything in ONE atomic write: cart verbatim (per-item
       // discount_amount/reason intact), cart-discount recomputed
       // from the restored cart, delivery + advance flags restored.
-      restoreHeldSale: (snapshot: any) => {
-        clearBillKey();
+      restoreHeldSale: (snapshot: any, billKey?: { key?: string } | null) => {
+        clearBillKey(billFingerprint(get())); // the bill being replaced
         const { store_id, salesperson_id, salesperson_name } = get();
         const snap = snapshot || {};
         const cart: CartLineItem[] = (Array.isArray(snap.cart) ? snap.cart : []).map(migrateLegacyItemNote);
@@ -676,6 +681,8 @@ export const usePOSStore = create<POSState>()(
           cart_discount_reason: snap.cart_discount_reason ?? null,
           current_step: cart.length > 0 ? 'review' : 'customer',
         });
+        // The held bill's key comes back with it, freshly stamped.
+        if (billKey?.key) putBillKey(billFingerprint(get()), billKey.key);
       },
 
       // --- Full clear (for logout) ---
@@ -686,7 +693,7 @@ export const usePOSStore = create<POSState>()(
       // (POSLayout filters held bills by held_by === current user), not by
       // wiping every parked cart on logout.
       clearAllOnLogout: () => {
-        clearBillKey();
+        clearBillKey(billFingerprint(get()));
         set(initialState);
         try {
           localStorage.removeItem('ims-pos-draft');

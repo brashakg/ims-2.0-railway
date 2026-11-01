@@ -324,7 +324,7 @@ def _two_unit_bill(till, monkeypatch, **over):
     monkeypatch.setattr(returns_router, "get_product_repository", lambda: None)
     monkeypatch.setattr(returns_router, "next_document_number", lambda *a, **k: "TST01/C2627/0001")
     monkeypatch.setattr(returns_router, "_claim_returnable_qty", lambda *a, **k: True)
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: None)
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: True)
     return {"order_id": "ORD-1", "return_type": "RETURN", "items": [{
         "order_item_id": "li1", "product_id": "P1", "product_name": "Frame", "sku": "F1",
         "return_qty": 1, "unit_price": 1525.42, "reason": "DEFECTIVE", "condition": "GOOD"}]}

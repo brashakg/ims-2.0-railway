@@ -14,14 +14,15 @@ import { orderApi, loyaltyApi, workshopApi } from '../../services/api';
 import { canonicalCategory } from '../../utils/categoryNormalize';
 import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
-import { orderLinesOf, refreshBillQuote, replayGuaranteed } from './billQuote';
+import { refreshBillQuote, replayGuaranteed } from './billQuote';
+import { orderPayloadOf } from './orderPayload';
 import { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from './posBillKey';
 import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
 import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 import { WRITE_UNCONFIRMED_MESSAGE } from '../../services/api/client';
 
-// The order-line vocabulary lives with the line builder the quote shares.
-export { mapCategory } from './billQuote';
+// The order body, its lines and THE bill fingerprint live in orderPayload.
+export { mapCategory, orderPayloadOf, billFingerprint } from './orderPayload';
 
 export interface SubmitPosOrderResult {
   ok: boolean;
@@ -57,46 +58,6 @@ export function workshopItemsOf(cart: any[]): { frameItem?: any; lensItem?: any 
       (i: any) => canonicalCategory(i.category) === 'OPTICAL_LENS' || !!i.lens_details,
     ),
   };
-}
-
-/** THE order body the till sends -- for the sale, and for "Ask a manager to
-    approve" (the same bill, so the server prices exactly what will be sold).
-    WHO approved a discount is the server's decision: no approver name is
-    ever sent from here (owner 2026-10-18). */
-export function orderPayloadOf(store: any, discountApprovalId?: string | null) {
-  return {
-    customer_id: store.customer?.id,
-    // BILL-TO-MEMBER P1: send the selected member so the order bills to a
-    // member, not the bare account. Omitted for walk-ins (the backend
-    // synthesizes a Primary for the synthetic account).
-    patient_id: store.patient?.id || undefined,
-    store_id: store.store_id,
-    order_type: store.sale_type,
-    salesperson_id: store.salesperson_id,
-    salesperson_name: store.salesperson_name,
-    items: orderLinesOf(store.cart),
-    notes: store.cart_note || undefined,
-    // Phase 6.7 — pass delivery + cart-discount fields through to backend
-    delivery_date: store.delivery_date || undefined,
-    delivery_time_slot: store.delivery_time_slot || undefined,
-    delivery_priority: store.delivery_priority || 'NORMAL',
-    cart_discount_percent: store.cart_discount_percent || 0,
-    cart_discount_amount: store.cart_discount_amount || 0,
-    cart_discount_reason: store.cart_discount_reason || undefined,
-    // Over the seller's limit the sale carries a manager-approved request id
-    // for exactly this bill.
-    discount_approval_id: discountApprovalId || undefined,
-  };
-}
-
-/** The bill as the till will send it, for "has the bill changed since the
-    manager was asked?" -- whose bill, its lines and the bill %. */
-export function billFingerprint(store: any): string {
-  return JSON.stringify([
-    store.customer?.id ?? null,
-    orderLinesOf(store.cart),
-    store.cart_discount_percent || 0,
-  ]);
 }
 
 /** "Ask a manager to approve": re-send THIS bill with request_approval. The

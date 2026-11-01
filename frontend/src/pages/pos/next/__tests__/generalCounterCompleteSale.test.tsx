@@ -140,6 +140,8 @@ vi.mock('../../../../components/pos/DiscountApprovalPanel', () => ({
 import { MemoryRouter } from 'react-router-dom';
 import { GeneralCounterSurface } from '../GeneralCounterSurface';
 import { MAX_PRODUCT_RESULTS } from '../ProductResultsStrip';
+import { billKeyEntry, billKeyFor } from '../../../../components/pos/posBillKey';
+import { billFingerprint } from '../../../../components/pos/orderPayload';
 import { usePOSStore } from '../../../../stores/posStore';
 
 function renderCounter() {
@@ -453,7 +455,7 @@ describe('the bill key ends with the sale', () => {
     fireEvent.click(completeButton());
     await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
     expect(keyOf(1)).toBe(keyOf(0));
-    expect(localStorage.getItem('ims_pos_bill_key')).toBeNull(); // the success dropped it
+    expect(billKeyEntry(billFingerprint(usePOSStore.getState()))).toBeNull(); // the success dropped it
     view.unmount();
     usePOSStore.getState().resetTransaction();
     submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-2', orderNumber: 'ORD-2' });
@@ -464,14 +466,15 @@ describe('the bill key ends with the sale', () => {
     expect(keyOf(2)).not.toBe(keyOf(0));
   });
 
-  it('a reset or a hold drops the key', () => {
-    localStorage.setItem('ims_pos_bill_key', JSON.stringify({ key: 'k', fp: 'x', at: Date.now() }));
-    usePOSStore.getState().resetTransaction();
-    expect(localStorage.getItem('ims_pos_bill_key')).toBeNull();
+  it('a reset drops only THIS bill key, never another bill key', () => {
     putSomethingInTheCart();
-    localStorage.setItem('ims_pos_bill_key', JSON.stringify({ key: 'k', fp: 'x', at: Date.now() }));
-    usePOSStore.getState().parkCurrentSale({ heldBy: 'u-1' });
-    expect(localStorage.getItem('ims_pos_bill_key')).toBeNull();
+    const fp = billFingerprint(usePOSStore.getState());
+    const k = billKeyFor(fp);
+    const other = billKeyFor('another-tab-bill');
+    usePOSStore.getState().resetTransaction();
+    expect(billKeyEntry(fp)).toBeNull();
+    expect(billKeyEntry('another-tab-bill')?.key).toBe(other);
+    expect(k).toBeTruthy();
   });
 });
 

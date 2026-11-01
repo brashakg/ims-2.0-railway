@@ -1,6 +1,17 @@
 // Money review 11 of #1264: one Idempotency-Key per open form -- a re-press
 // after an unclear answer resumes the same credit line; a new form, a new key.
-import { describe, it, expect, vi } from 'vitest';
+// A Map-backed sessionStorage stand-in (the runner's has no working setItem),
+// installed before any import and emptied before each test.
+const ssMap = new Map<string, string>();
+Object.defineProperty(globalThis, 'sessionStorage', { configurable: true, writable: true, value: {
+  getItem: (k: string) => (ssMap.has(k) ? ssMap.get(k)! : null),
+  setItem: (k: string, v: string) => { ssMap.set(k, String(v)); },
+  removeItem: (k: string) => { ssMap.delete(k); },
+  clear: () => { ssMap.clear(); },
+  key: (i: number) => Array.from(ssMap.keys())[i] ?? null,
+  get length() { return ssMap.size; },
+} });
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('../../../context/AuthContext', () => ({ useAuth: () => ({ user: { roles: ['ADMIN'] } }) }));
@@ -16,6 +27,8 @@ vi.mock('../../../services/api/customers', () => ({
 }));
 
 import { StoreCreditLedgerCard } from '../StoreCreditLedgerCard';
+
+beforeEach(() => { ssMap.clear(); });
 
 describe('StoreCreditLedgerCard idempotency key', () => {
   it('re-sends the same key on a re-press and a new key for a new form', async () => {
@@ -96,5 +109,48 @@ describe('StoreCreditLedgerCard money review 13', () => {
     expect(screen.getByRole('status').textContent).toMatch(/Do NOT press again/);
     expect(toast.error).toHaveBeenCalledTimes(1); // the unclear answer is not a second, competing toast
     expect((screen.getByPlaceholderText('Amount') as HTMLInputElement).readOnly).toBe(true);
+  });
+});
+
+describe('StoreCreditLedgerCard money review 15: the key outlives the form after an unclear answer', () => {
+  const unclear = async () => {
+    const { buildApiError } = await import('../../../services/api/client');
+    return buildApiError({ isAxiosError: true, message: 'x', config: { method: 'post' },
+                           response: { status: 503, data: { detail: 'Could not be confirmed - do NOT press again.' } } } as any);
+  };
+
+  it('closing and reopening the form resumes the same key, amount and note', async () => {
+    issue.mockReset();
+    issue.mockRejectedValueOnce(await unclear()).mockResolvedValue({});
+    const first = render(<StoreCreditLedgerCard customerId="CUST-9" />);
+    fireEvent.click(await screen.findByRole('button', { name: /Issue/ }));
+    fireEvent.change(screen.getByPlaceholderText('Amount'), { target: { value: '250' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    expect(await screen.findByRole('status')).toBeTruthy();
+    const k1 = issue.mock.calls[0][4];
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    first.unmount(); // a reload, or the page left and come back to
+    render(<StoreCreditLedgerCard customerId="CUST-9" />);
+    fireEvent.click(await screen.findByRole('button', { name: /Issue/ }));
+    expect((screen.getByPlaceholderText('Amount') as HTMLInputElement).value).toBe('250');
+    expect((screen.getByPlaceholderText('Amount') as HTMLInputElement).readOnly).toBe(true);
+    expect(screen.getByRole('status').textContent).toMatch(/do NOT press again/);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }));
+    await waitFor(() => expect(issue).toHaveBeenCalledTimes(2));
+    expect(issue.mock.calls[1][4]).toBe(k1);
+    await waitFor(() => expect(ssMap.size).toBe(0)); // the success dropped it
+  });
+
+  it('drops the kept key once the ledger shows its line, and after the reconciler window', async () => {
+    const { customerApi } = await import('../../../services/api/customers');
+    ssMap.set('ims_sc_key:CUST-8:issue', JSON.stringify({ key: 'K-LANDED', at: Date.now(), amount: '10', reason: '', note: 'n' }));
+    ssMap.set('ims_sc_key:CUST-8:redeem', JSON.stringify({ key: 'K-OLD', at: Date.now() - 11 * 60_000, amount: '5', reason: '', note: 'n' }));
+    vi.spyOn(customerApi, 'getStoreCreditLedger').mockResolvedValue(
+      { balance: 10, entries: [{ entry_id: 'MANUAL:CUST-8:K-LANDED', type: 'ADJUSTED', amount: 10, delta: 10, balance_after: 10 }] } as any);
+    render(<StoreCreditLedgerCard customerId="CUST-8" />);
+    await waitFor(() => expect(ssMap.has('ims_sc_key:CUST-8:issue')).toBe(false));
+    expect(ssMap.has('ims_sc_key:CUST-8:redeem')).toBe(false); // older than 10 minutes
+    fireEvent.click(await screen.findByRole('button', { name: /Issue/ }));
+    expect((screen.getByPlaceholderText('Amount') as HTMLInputElement).readOnly).toBe(false); // a fresh form
   });
 });

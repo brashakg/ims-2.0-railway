@@ -865,8 +865,16 @@ async def create_order(
         precomputed_order_id = str(uuid.uuid4())
 
         # BUG-097: block serialized non-lens oversell BEFORE reserving any lens
-        # cells, so a 409 here leaks no reservation.
-        _assert_serialized_stock_available(items_data, store_id)
+        # cells, so a 409 here leaks no reservation. A second press of the
+        # SAME bill (its first still saving holds the unit) replays the first
+        # order instead of a stock refusal (money review 15).
+        try:
+            _assert_serialized_stock_available(items_data, store_id)
+        except HTTPException:
+            twin = _twin_of(order_repo, idem_key, store_id)
+            if twin:
+                return _order_create_response(twin)
+            raise
 
         lens_reserve_failed = False
         lens_reservations: List[Dict[str, Any]] = []
@@ -929,6 +937,9 @@ async def create_order(
                         "[LENS_HOOK] rollback outer error: %s",
                         rb_exc,
                     )
+            twin = _twin_of(order_repo, idem_key, store_id)
+            if twin:
+                return _order_create_response(twin)
             raise
         except Exception as exc:  # noqa: BLE001
             # Non-blocking soft failure (mongo blip, etc.). Tag the
@@ -1100,15 +1111,16 @@ async def create_order(
                         pass  # fail-soft compensating action
             except Exception:  # noqa: BLE001
                 pass
-            if isinstance(create_exc, HTTPException):
-                raise  # the claim's 409 (unit sold on another bill)
             # Two presses of one bill (same Idempotency-Key) at once: the
-            # unique (store_id, idempotency_key) index refused the second --
-            # it answers with the order the first one saved.
-            if idem_key and _is_idempotency_duplicate(create_exc):
-                twin = order_repo.find_one({"idempotency_key": idem_key, "store_id": store_id})
+            # first holds the units / the approval (a 409 here), or the unique
+            # (store_id, idempotency_key) index refused this insert -- either
+            # way this press answers with the order the first one saved.
+            if idem_key and (isinstance(create_exc, HTTPException) or _is_idempotency_duplicate(create_exc)):
+                twin = _twin_of(order_repo, idem_key, store_id)
                 if twin:
                     return _order_create_response(twin)
+            if isinstance(create_exc, HTTPException):
+                raise  # the claim's 409 (unit sold on another bill)
             raise HTTPException(
                 status_code=500,
                 detail="Failed to create order: {0}".format(create_exc),
@@ -1252,6 +1264,17 @@ class BillQuoteRequest(BaseModel):
     # priced exactly as the edit door will save it -- an order billed before
     # the round-off rule keeps its exact paise (bills_round_off).
     order_id: Optional[str] = None
+
+
+def _twin_of(order_repo, idem_key: Optional[str], store_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The order an earlier press of the same bill saved (same key, same
+    shop), or None. Never raises."""
+    if not idem_key or order_repo is None:
+        return None
+    try:
+        return order_repo.find_one({"idempotency_key": idem_key, "store_id": store_id})
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _is_idempotency_duplicate(exc: Exception) -> bool:

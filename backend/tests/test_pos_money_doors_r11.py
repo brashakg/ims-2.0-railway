@@ -67,6 +67,7 @@ def _multi_qty_bill(till, monkeypatch):
 
     def _release(order_id, orig_line, qty, *a, **k):
         claimed["n"] -= qty
+        return True
 
     monkeypatch.setattr(returns_router, "_claim_returnable_qty", _claim)
     monkeypatch.setattr(returns_router, "_release_returnable_qty", _release)
@@ -209,7 +210,7 @@ def test_a_settled_but_unrecorded_return_credit_raises_a_p1_task(till, monkeypat
 # =========================================================================== #
 def test_a_refused_press_leaves_the_claims_to_one_owner(till, monkeypatch, numbered):
     undone = []
-    monkeypatch.setattr(returns_router, "_undo_return_claims", lambda spec, **k: undone.append(spec))
+    monkeypatch.setattr(returns_router, "_undo_return_claims", lambda spec, **k: undone.append(spec) or True)
     monkeypatch.setattr(cust_router, "apply_store_credit_delta", lambda *a, **k: False)  # a clean refusal
     _customer(till)
     out = _issue(ref="RET-R", entry_id="RET-R:credit",

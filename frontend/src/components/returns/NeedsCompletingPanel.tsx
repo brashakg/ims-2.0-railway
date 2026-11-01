@@ -9,7 +9,9 @@
 // the rest (writes the record, or gives the units and the bill back).
 
 import { useCallback, useEffect, useState } from 'react';
-import { returnsApi, type NeedsCompletingItem } from '../../services/api/returns';
+import {
+  returnsApi, type CashPaidFrom, type NeedsCompletingItem, type OwedPaidMethod, type OwedReturn,
+} from '../../services/api/returns';
 import { useToast } from '../../context/ToastContext';
 import { getErrorMessage } from '../../utils/errorHandler';
 import { formatDateTimeIST } from '../../utils/datetime';
@@ -39,12 +41,16 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
   const [error, setError] = useState<string | null>(null);
   const [picked, setPicked] = useState<Record<string, Answer>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  // Owed to customer: completed returns whose cash part is still unpaid.
+  const [owed, setOwed] = useState<OwedReturn[]>([]);
+  const [payPick, setPayPick] = useState<Record<string, { method: OwedPaidMethod; from?: CashPaidFrom; confirm?: boolean }>>({});
   const focus = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('return') : null;
 
   const load = useCallback(async () => {
     try {
       const r = await returnsApi.needsCompleting();
       setItems(r.items || []);
+      setOwed(r.owed || []);
       setError(null);
     } catch (e) {
       setError(getErrorMessage(e, 'Could not load the returns that need completing.'));
@@ -70,7 +76,25 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
     }
   };
 
-  if (!standalone && (!items || items.length === 0) && !error) return null;
+  const payOwed = async (row: OwedReturn) => {
+    const pick = payPick[row.return_id];
+    if (!pick) return;
+    setBusy(row.return_id);
+    try {
+      const res = await returnsApi.owedPaid(row.return_id, {
+        method: pick.method, ...(pick.method === 'CASH' && pick.from ? { cash_paid_from: pick.from } : {}),
+      });
+      toast.success(res?.message || 'Booked as paid.');
+      setPayPick((p) => { const n = { ...p }; delete n[row.return_id]; return n; });
+      await load();
+    } catch (e) {
+      toast.error(getErrorMessage(e, 'Could not book this payment.'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!standalone && (!items || items.length === 0) && owed.length === 0 && !error) return null;
 
   return (
     <section aria-label="Needs completing" className="bg-white border border-amber-300 rounded-lg p-4 mb-4">
@@ -144,6 +168,57 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
               })}
             </tbody>
           </table>
+        </div>
+      )}
+      {owed.length > 0 && (
+        <div aria-label="Owed to customer" className="mt-4">
+          <h3 className="text-sm font-semibold text-gray-900 mb-1">Owed to customer</h3>
+          <p className="text-xs text-gray-500 mb-2">
+            Completed returns whose cash part was not paid at the counter. Book it here the day it is paid.
+          </p>
+          <ul className="divide-y divide-gray-100">
+            {owed.map((row) => {
+              const pick = payPick[row.return_id];
+              const set = (v: Partial<{ method: OwedPaidMethod; from?: CashPaidFrom; confirm?: boolean }>) =>
+                setPayPick((p) => ({ ...p, [row.return_id]: Object.assign({ method: 'CASH' as OwedPaidMethod }, p[row.return_id], v) }));
+              const ready = pick && (pick.method !== 'CASH' || !!pick.from);
+              return (
+                <li key={row.return_id}
+                  ref={focus === row.return_id ? (el) => el?.scrollIntoView?.({ block: 'center' }) : undefined}
+                  className={'py-2 flex flex-wrap items-center gap-2 text-sm' + (focus === row.return_id ? ' bg-amber-50' : '')}>
+                  <span className="font-medium">{row.order_number || row.order_id || '-'}</span>
+                  <span className="text-xs text-gray-400">{row.return_id}{row.store_id ? ` - ${row.store_id}` : ''}</span>
+                  <span className="ml-auto font-medium">{rs(row.owed_amount)}</span>
+                  <select aria-label="Paid by" className="input-field w-auto text-xs" value={pick?.method || ''}
+                    onChange={(e) => set({ method: e.target.value as OwedPaidMethod, confirm: false })}>
+                    <option value="" disabled>Paid by...</option>
+                    <option value="CASH">Cash</option>
+                    <option value="UPI">UPI</option>
+                    <option value="CARD">Card</option>
+                    <option value="BANK_TRANSFER">Bank transfer</option>
+                  </select>
+                  {pick?.method === 'CASH' && (
+                    <select aria-label="Cash from" className="input-field w-auto text-xs" value={pick.from || ''}
+                      onChange={(e) => set({ from: e.target.value as CashPaidFrom, confirm: false })}>
+                      <option value="" disabled>Cash from...</option>
+                      <option value="STORE_DRAWER">The shop drawer</option>
+                      <option value="HQ">HQ</option>
+                    </select>
+                  )}
+                  {ready && !pick?.confirm && (
+                    <button type="button" onClick={() => set({ confirm: true })}
+                      className="px-3 py-1 text-xs rounded-md border border-gray-300 hover:bg-gray-50">Cash owed - now paid</button>
+                  )}
+                  {ready && pick?.confirm && (
+                    <button type="button" onClick={() => payOwed(row)} disabled={busy === row.return_id}
+                      className="px-3 py-1 text-xs rounded-md bg-bv-red-600 text-white disabled:opacity-50">
+                      {busy === row.return_id ? 'Saving...' : `Confirm: ${rs(row.owed_amount)} paid today`}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
         </div>
       )}
     </section>

@@ -172,7 +172,7 @@ def test_p6_counter_unclear_keeps_the_claim_and_the_hold_and_refuses_a_redo(till
     monkeypatch.setattr(returns_router, "_claim_returnable_qty",
                         lambda *a, **k: (claims.__setitem__("n", claims["n"] + 1) or claims["n"] <= 1))
     released = []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     _customer(till)
     _down(monkeypatch, till["db"].get_collection("customers"))
     from tests.test_pos_money_doors import _advance_client
@@ -193,7 +193,7 @@ def test_p6_counter_unclear_keeps_the_claim_and_the_hold_and_refuses_a_redo(till
 
 def test_a_voided_unconfirmed_return_gives_its_claims_and_hold_back(till, monkeypatch):
     undone = []
-    monkeypatch.setattr(returns_router, "_undo_return_claims", lambda spec, **k: undone.append(spec))
+    monkeypatch.setattr(returns_router, "_undo_return_claims", lambda spec, **k: undone.append(spec) or True)
     _customer(till)
     spec = {"order_id": "ORD-1", "return_id": "RET-U", "lines": [{"item_id": "li1", "qty": 1.0}]}
     _ledger(till).insert_one({"_id": "RET-U:credit", "entry_id": "RET-U:credit", "customer_id": "CUST-1",

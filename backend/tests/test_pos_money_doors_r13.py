@@ -113,7 +113,7 @@ def test_the_sweep_skips_young_holds_and_holds_another_owner_has(till, tasks):
 
 def test_nothing_paid_gives_the_claims_hold_and_number_back_once(till, monkeypatch, tasks):
     released, written_off = [], []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
     _bill_with_hold(till, "RET-N")
     with pytest.raises(HTTPException) as e:
@@ -142,10 +142,11 @@ def test_nothing_paid_is_refused_once_store_credit_landed(till):
 
 def test_a_void_line_held_bill_is_finished_without_releasing_twice(till, monkeypatch):
     released = []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
     _bill_with_hold(till, "RET-W")
     _ledger(till).insert_one(_row("RET-W:credit", type="VOID", delta=0.0, void_delta=200.0, claims_released=True,
+                                  claims_released_done=True,  # round 15: the void's act stamped done
                                   number_written_off=True, void_settled=False, undo_on_void=_spec("RET-W")))
     with pytest.raises(HTTPException) as e:
         returns_router._refuse_while_a_return_settles(_stored(till), "ORD-1")
@@ -301,6 +302,9 @@ def test_an_unsettled_void_is_finished_by_the_sweep_without_repeating_a_step(til
             raise RuntimeError("worker died mid-undo")
         if k["step"]("claims_released") and k["step"]("hold_released"):
             undone.append(spec["return_id"])
+            for name in ("claims_released", "hold_released"):  # round 15: each act stamped done
+                k["done"](name)
+        return True
 
     monkeypatch.setattr(returns_router, "_undo_return_claims", _undo)
     _customer(till)
@@ -506,7 +510,7 @@ def test_the_hand_fix_sets_only_a_missing_or_broken_balance(monkeypatch, tmp_pat
 
 def test_two_nothing_paid_presses_release_once(till, monkeypatch):
     released = []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda *a, **k: None)
     _bill_with_hold(till, "RET-2")
     _complete("RET-2", nothing_paid=True)
@@ -528,8 +532,8 @@ def test_two_nothing_paid_presses_release_once(till, monkeypatch):
 
 def test_a_resumed_undo_never_gives_claims_back_twice(till, monkeypatch):
     released, holds = [], []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
-    monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: holds.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
+    monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: holds.append(a) or True)
     # Round 14: each step acts only when its claim was won (claims already done).
     claimed = {"claims_released": False, "hold_released": True}
     returns_router._undo_return_claims(_spec("RET-Z"), step=lambda name: claimed[name])

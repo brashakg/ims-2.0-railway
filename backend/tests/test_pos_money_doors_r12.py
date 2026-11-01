@@ -114,7 +114,7 @@ def test_the_counter_keeps_its_claims_when_the_void_did_not_stand(till, monkeypa
     payload = _two_unit_bill(till, monkeypatch)
     payload["return_type"] = "CREDIT_NOTE"
     released = []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     _customer(till)
     monkeypatch.setattr(cust_router, "apply_store_credit_delta", lambda *a, **k: False)
     monkeypatch.setattr(cust_router, "_guard_landed", lambda *a, **k: None)
@@ -359,7 +359,7 @@ def test_a_ledger_read_error_refuses_cleanly_and_writes_the_number_off(till, mon
     payload = _two_unit_bill(till, monkeypatch)
     payload["return_type"] = "CREDIT_NOTE"
     released, written_off = [], []
-    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
+    monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a) or True)
     monkeypatch.setattr(returns_router, "_record_unused_credit_note", lambda n, *a, **k: written_off.append(n))
     _customer(till)
     ledger = _ledger(till)
