@@ -1316,3 +1316,74 @@ def test_ship_stamped_no_crossing_though_the_shops_gstins_now_differ(two_gstins,
     db.stores.update_one({"store_id": STORE}, {"$set": {"gstin": MH_GSTIN}})
     out = _damage(db, sid, {**ADMIN, "store_ids": [STORE, SISTER]})
     assert out["itc_reversed"] == {"igst": 0.0, "cgst": 77.5, "sgst": 77.5, "total": 155.0}
+
+
+# ---------------------------------------------------------------------------
+# Review round 9: a held reversal undone after its month is locked was filed
+# on no return, so nothing is kept and nothing re-claimed
+# ---------------------------------------------------------------------------
+
+class _December(datetime):
+    """A later step happens on 3 December (11:30 IST)."""
+
+    @classmethod
+    def utcnow(cls):
+        return datetime(2026, 12, 3, 6, 0)
+
+
+def _to_december(monkeypatch):
+    from api.services import writeoff_itc as wo
+
+    for mod in (scr, iev):
+        monkeypatch.setattr(mod, "datetime", _December)
+    monkeypatch.setattr(wo, "_now", _December.utcnow)
+    monkeypatch.setattr(iev.ie, "_now", lambda: _December.utcnow().replace(tzinfo=timezone.utc))
+
+
+def _held_then_found(db, monkeypatch):
+    """Damaged on 5 October into BV-NOGST (held, no GSTIN); October locked
+    with the amber banner; the piece re-quarantined on 3 November."""
+    db.stores.insert_one({"store_id": "BV-NOGST", "store_name": "BV Kiosk", "state": "Karnataka",
+                          "state_code": "29", "entity_id": ENTITY, "is_active": True})
+    _stocked(db, "GRN-WO-0191")
+    _line_bill("GRN-WO-0191", "TAX-WO-191")
+    sid = "SU-GRN-WO-0191-0"
+    _mirror(db, "TRF-P1", gstin="", to_store="BV-NOGST")
+    _rehomed(db, sid, "TRF-P1", "BV-NOGST")
+    _damage(db, sid, {**ADMIN, "store_ids": [STORE, "BV-NOGST"]})
+    assert db.itc_writeoff_reversals.find_one({"_id": sid})["unallocated"] is True
+    db.period_locks.insert_one({"month": 10, "year": 2026})
+    _to_november(monkeypatch)
+    _requarantine(sid)
+    # Never filed: the row simply goes, no superseded copy, no re-claim, and
+    # the banner has nothing left to hold.
+    assert db.itc_writeoff_reversals.count_documents({}) == 0
+    assert r3b._compute_gstr3b("2026-11", STORE)["unallocatedWriteOffs"] == {
+        "count": 0, "tax": 0.0, "bill_numbers": []}
+
+
+def test_a_held_piece_found_after_its_month_is_locked_then_settled_files_nothing(
+        two_gstins, october, monkeypatch):
+    """Settled to MH in November: no return ever reversed this credit, so
+    November neither reverses (4(B)(1)) nor re-claims (4(A)(5)) it."""
+    db = two_gstins["db"]
+    _held_then_found(db, monkeypatch)
+    db.vendor_bills.update_one({"bill_id": "MB-TRF-P1"}, {"$set": {"recipient_gstin": MH_GSTIN}})
+    nov = r3b._compute_gstr3b("2026-11", MH_STORE)
+    assert (_written_off(nov), _heads(nov["itcWriteOffReclaimed"])) == (0.0, 0.0)
+    assert db.itc_writeoff_reversals.count_documents({}) == 0
+
+
+def test_a_held_piece_found_in_november_settled_in_december_files_nothing_in_either(
+        two_gstins, october, monkeypatch):
+    """The bill is settled, and GSTR-3B first computed, on 3 December while
+    November is still open: neither month reverses or re-claims anything."""
+    db = two_gstins["db"]
+    _held_then_found(db, monkeypatch)
+    _to_december(monkeypatch)
+    db.vendor_bills.update_one({"bill_id": "MB-TRF-P1"}, {"$set": {"recipient_gstin": MH_GSTIN}})
+    nov = r3b._compute_gstr3b("2026-11", MH_STORE)
+    dec = r3b._compute_gstr3b("2026-12", MH_STORE)
+    assert (_written_off(nov), _heads(nov["itcWriteOffReclaimed"])) == (0.0, 0.0)
+    assert (_written_off(dec), _heads(dec["itcWriteOffReclaimed"])) == (0.0, 0.0)
+    assert db.itc_writeoff_reversals.count_documents({}) == 0

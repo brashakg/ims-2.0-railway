@@ -416,7 +416,8 @@ def _true_up(db, bills: list, pid, gstin_of, bill: Optional[dict] = None, when=N
         over = {h: round(have[h] - target[h], 2) for h in _HEADS}
         for row in coll.find({"topup": True, "kind": "REVERSAL", "product_id": pid,
                               "bill_id": {"$in": line_bills}}).sort("period", -1):
-            locked = _locked(db, row["period"])
+            # A held (no-GSTIN) row was never filed, whatever its month's lock.
+            locked = _locked(db, row["period"]) and not row.get("unallocated")
             net = {h: _f(row.get(h)) for h in _HEADS}
             for r in coll.find({"kind": "RECLAIM", "reclaims": row["_id"]}) if locked else []:
                 net = {h: net[h] + _f(r.get(h)) for h in _HEADS}
@@ -459,7 +460,8 @@ def _settle_unallocated(db) -> None:
     already filed (locked), it files in the first open month instead, the
     original kept as `writeoff_period` (record_writeoff's rule)."""
     coll = db.get_collection(COLLECTION)
-    for row in coll.find({"unallocated": True}):
+    live = {"unallocated": True, "kind": "REVERSAL", "superseded": {"$ne": True}}
+    for row in coll.find(live):
         bill = db.get_collection("vendor_bills").find_one({"bill_id": row.get("bill_id")})
         g = bill_return_gstin(db, bill) if bill else None
         if not g:
@@ -590,13 +592,15 @@ def undo_writeoff(db, unit: dict) -> None:
     """The piece is back from its write-off: its reversal goes. While its
     month is open the row is deleted; once that return is locked (filed) it
     stays there and a re-claim row in the first open month adds the credit
-    back. Each step is idempotent, so a cut-off run is safe to repeat."""
+    back. A held (no-GSTIN) row was filed on no return, so it is deleted
+    whatever its month's lock. Each step is idempotent, so a cut-off run is
+    safe to repeat."""
     coll = db.get_collection(COLLECTION)
     sid = _sid(unit)
     row = coll.find_one({"_id": sid})
     if not row:
         return
-    if not _locked(db, row["period"]):
+    if row.get("unallocated") or not _locked(db, row["period"]):
         coll.delete_one({"_id": sid})
         _trim_top_up(db, unit, row)
         return
