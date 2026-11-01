@@ -1820,8 +1820,7 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
         if prior is not None and prior.get("type") == VOID:
-            raise HTTPException(status_code=409, detail=(
-                "This form's earlier redemption was cancelled - nothing was taken. Start a new one."))
+            return _redeem_void_answer(repo, coll, customer_id, prior)
         if prior is None or prior.get("type") != PENDING:
             # A finished row of this form (same amount, else 409) -- or a
             # pre-deploy debit that landed with no row -- is its answer.
@@ -1847,6 +1846,8 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
                 # Nothing was debited; a row that may have landed is voided by
                 # the reconciler (its guard never lands).
                 raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
+            if stored.get("type") == VOID:
+                return _redeem_void_answer(repo, coll, customer_id, stored)
             if stored.get("type") != PENDING:
                 return _redeem_replay(repo, coll, customer_id, amt, key, reason, ref, store_id, user_id) or                     {"entry": stored, "balance": _current_credit_balance(customer_id, repo.find_by_id(customer_id)),
                      "replayed": True}
@@ -1859,6 +1860,12 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
     if landed is None:
         raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE)
     debited = None
+    if not landed and row.get("pending_at") and str(row["pending_at"]) < _half_timeout_ago():
+        # ONE owner per row (money review 17): a row this old is the
+        # reconciler's, which may be voiding it right now -- a debit here
+        # could land on a VOID. The press never moves money on it; the
+        # reconciler settles it (voids it: nothing was taken).
+        raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE)
     if not landed:
         try:
             debited = repo.try_debit_store_credit(customer_id, amt, guard_ref=key)
@@ -1891,9 +1898,41 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
         logger.error("[CUSTOMERS] redeem %s debited, row not finished: %s", key, exc)
         finished = False
     if not finished:
+        try:
+            now_row = coll.find_one({"entry_id": key})
+        except Exception:  # noqa: BLE001
+            now_row = None
+        if now_row is not None and now_row.get("type") == VOID:
+            return _redeem_void_answer(repo, coll, customer_id, now_row)
         raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE)
     out = {k: v for k, v in {**row, **sets}.items() if k not in ("_id", "pending_at", "final_type")}
     return {"entry": out, "balance": round(new_balance, 2)}
+
+
+def _half_timeout_ago() -> str:
+    from datetime import timedelta, timezone as _tz
+
+    return (datetime.now(_tz.utc) - timedelta(seconds=PENDING_TIMEOUT_SECONDS / 2)).isoformat()
+
+
+def _redeem_void_answer(repo, coll, customer_id: str, row: Dict[str, Any]) -> dict:
+    """THE truthful answer for a redemption whose row is VOID: its guard says
+    whether the money was taken. Taken (a debit that raced the void): the row
+    is healed back to REDEEMED and the press is answered as done. Not taken:
+    409 "nothing was taken" -- never a replayed success."""
+    landed = _guard_landed(repo, customer_id, row["entry_id"])
+    if landed is None:
+        raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE)
+    if not landed:
+        raise HTTPException(status_code=409, detail=(
+            "This form's earlier redemption was cancelled - nothing was taken. Start a new one."))
+    _heal_voided_row(coll, {**row, "delta": row.get("void_delta", row.get("delta")),
+                            "final_type": row.get("final_type") or "REDEEMED"},
+                     "a redemption's debit landed after its row was voided")
+    healed = dict(coll.find_one({"entry_id": row["entry_id"]}) or row)
+    healed.pop("_id", None)
+    return {"entry": healed, "balance": _current_credit_balance(customer_id, repo.find_by_id(customer_id)),
+            "replayed": True}
 
 
 def _void_redeem_row(coll, row: Dict[str, Any], why: str) -> None:
@@ -1945,6 +1984,8 @@ def _redeem_replay(repo, coll, customer_id, amt, guard_ref, reason, ref, store_i
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
     balance = _current_credit_balance(customer_id, repo.find_by_id(customer_id))
+    if prior is not None and prior.get("type") == VOID:
+        return _redeem_void_answer(repo, coll, customer_id, prior)
     if prior is not None:
         sent = abs(float(prior.get("amount") or prior.get("delta") or 0))
         if abs(sent - amt) > 0.005:
@@ -2496,6 +2537,7 @@ def reconcile_pending_credits(repo=None, *, customer_id: Optional[str] = None, l
             out["finished"] += 1
         elif _void_credit_row(repo, ledger, row, "never applied (stale)", undo=True):
             out["voided"] += 1
+    _check_pos_redemptions_billed(ledger, cutoff)
     # A VOID a dead worker left unsettled (its write-off or undo may not
     # have run): finished here, each step once.
     vflt: Dict[str, Any] = {"type": VOID, "void_settled": False, "pending_at": {"$lt": cutoff}}
@@ -2520,6 +2562,63 @@ def reconcile_pending_credits(repo=None, *, customer_id: Optional[str] = None, l
     if out["finished"] or out["voided"] or out.get("voids_settled"):
         logger.warning("[CUSTOMERS] pending credits settled: %s", out)
     return out
+
+
+def _check_pos_redemptions_billed(ledger, cutoff: str) -> None:
+    """A till store-credit leg whose debit landed but whose payment never got
+    on the bill (its answer lost, e.g. the 30 s bound): ONE P1 task per leg
+    ("store credit taken but not on the bill"), checked once per row after
+    the press window. Fail-soft."""
+    try:
+        rows = list(ledger.find({"source": "POS_PAYMENT", "type": "REDEEMED", "bill_checked": {"$ne": True},
+                                 "pending_at": {"$lt": cutoff}}))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] POS redemptions unreadable: %s", exc)
+        return
+    if not rows:
+        return
+    from ..dependencies import get_order_repository
+
+    orders = get_order_repository()
+    for row in rows:
+        eid, order_id = row.get("entry_id") or "", row.get("ref") or ""
+        leg_key = eid[len(f"POSPAY:{order_id}:"):] if eid.startswith(f"POSPAY:{order_id}:") else None
+        try:
+            order = orders.find_by_id(order_id) if orders is not None and order_id else None
+        except Exception:  # noqa: BLE001
+            continue  # unreadable: the next pass
+        billed = any(p.get("idempotency_key") == leg_key for p in (order or {}).get("payments") or []) \
+            if leg_key else True
+        if not billed:
+            _task_redemption_not_billed(row, order_id)
+        try:
+            ledger.update_one({"entry_id": eid}, {"$set": {"bill_checked": True}})
+        except Exception:  # noqa: BLE001 -- checked again next pass; the task is deduped
+            pass
+
+
+def _task_redemption_not_billed(row: Dict[str, Any], order_id: str) -> None:
+    try:
+        from ..dependencies import get_task_repository
+        from ..services.task_triggers import create_system_task
+
+        amt = abs(float(row.get("amount") or 0))
+        create_system_task(
+            get_task_repository(),
+            title=f"Store credit Rs {amt:.2f} taken for order {order_id} but not on the bill",
+            description=(f"The till took Rs {amt:.2f} of store credit from customer {row.get('customer_id')} for "
+                         f"order {order_id}, but the payment never reached the bill (its answer was lost). Do NOT "
+                         "collect this amount again: press Complete Sale again on that bill (the same leg finishes "
+                         "once), or record the store-credit payment on the order. Ledger line "
+                         f"{row.get('entry_id')}."),
+            priority="P1",
+            category="Accounts",
+            store_id=row.get("store_id"),
+            dedupe_ref=f"store_credit_unbilled:{row.get('entry_id')}",
+            extra={"payload": {"order_id": order_id, "entry_id": row.get("entry_id"), "amount": amt}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[CUSTOMERS] unbilled-redemption task not raised for %s: %s", row.get("entry_id"), exc)
 
 
 async def scheduled_credit_reconcile() -> None:

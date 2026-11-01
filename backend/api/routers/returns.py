@@ -1756,7 +1756,7 @@ def _reassert_return_claims(row: Dict[str, Any]) -> None:
         orig = {"item_id": line.get("item_id"), "product_id": line.get("product_id"),
                 "quantity": line.get("purchased") or line.get("qty")}
         try:
-            if not _claim_returnable_qty(order_id, orig, float(line.get("qty") or 0)):
+            if not _claim_returnable_qty(order_id, orig, float(line.get("qty") or 0), token=line.get("token")):
                 lost.append(line)
         except Exception:  # noqa: BLE001
             lost.append(line)
@@ -1888,9 +1888,14 @@ def _undo_return_claims(spec: Dict[str, Any], *, note_number: Optional[str] = No
 
 
 def _release_lines(order_id: Optional[str], lines: List[Dict[str, Any]]) -> bool:
-    """Give back every claimed line; True only when each release landed."""
+    """Give back every claimed line; True only when each release landed. A
+    line carrying its claim's token releases BY that token (exactly once: a
+    re-run of a release that landed matches nothing). No lines: the facts are
+    missing, so nothing is known to give back -- never "done" (money review 17)."""
+    if not lines:
+        return False
     results = [_release_returnable_qty(order_id, {"item_id": ln.get("item_id"), "product_id": ln.get("product_id")},
-                                       float(ln.get("qty") or 0)) for ln in lines]
+                                       float(ln.get("qty") or 0), token=ln.get("token")) for ln in lines]
     return all(results)
 
 
@@ -2007,7 +2012,10 @@ def _give_back(order_id, return_id, store_id, acts: Dict[str, Any], *, finisher:
                 all_done = False
             continue
         if got is False:
-            marks = _step_marks(store) or {}
+            marks = _step_marks(store)
+            if marks is None:
+                all_done = False  # unreadable: unknown -- never acted on a guess; the next pass retries
+                continue
             if marks.get(f"{step}_done"):
                 continue
             if not _step_stale(marks.get(f"{step}_at")):
@@ -4194,8 +4202,8 @@ async def create_return(
         number = held.pop("credit_note_number", None)
         acts: Dict[str, Any] = {}
         if claimed:
-            acts["claims_released"] = lambda: all([_release_returnable_qty(oid, orig_line, qty)
-                                                   for oid, orig_line, qty in claimed])
+            acts["claims_released"] = lambda: all([_release_returnable_qty(oid, orig_line, qty, token=tok)
+                                                   for oid, orig_line, qty, tok in claimed])
         if number:
             acts["number_written_off"] = lambda: _record_unused_credit_note(
                 number, {"order_id": hoid, "store_id": held.get("store_id")}, rid or "", current_user,
@@ -4209,7 +4217,13 @@ async def create_return(
             if done:
                 _release_order_refund(hoid, rid)
             else:
-                _keep_order_refund_hold(hoid, rid)
+                # Kept WITH its facts: "Nothing was paid" knows which units
+                # and which number to give back (money review 17).
+                _keep_order_refund_hold(hoid, rid, extra={
+                    "lines": [{"item_id": orig_line.get("item_id") or orig_line.get("id"),
+                               "product_id": orig_line.get("product_id"), "qty": qty, "token": tok}
+                              for _oid, orig_line, qty, tok in claimed],
+                    "note_number": number, "store_id": held.get("store_id")})
         if held.get("approval_request_id"):
             # The approval this failed return spent is given back, not burned.
             try:
@@ -4615,9 +4629,12 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     #     (all-or-nothing) so a partial reservation never lingers, and so we
     #     never issue store credit / persist a return that lost the race.
     claimed: List[Dict[str, Any]] = []
-    for rl in resolved_lines:
+    for idx, rl in enumerate(resolved_lines):
+        # The claim's own token (this return, this line): its release matches
+        # only while the token is on the line and pulls it -- exactly once.
+        rl["token"] = f"{return_id}:{idx}"
         ok = _claim_returnable_qty(
-            resolved_order_id, rl["orig_line"], float(rl["ret_line"].return_qty)
+            resolved_order_id, rl["orig_line"], float(rl["ret_line"].return_qty), token=rl["token"]
         )
         if not ok:
             for done in claimed:
@@ -4625,6 +4642,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     resolved_order_id,
                     done["orig_line"],
                     float(done["ret_line"].return_qty),
+                    token=done["token"],
                 )
             name = (
                 rl["ret_line"].product_name
@@ -4641,7 +4659,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             )
         claimed.append(rl)
     # Every later error before the money moves gives these back (create_return).
-    held["claimed"] = [(resolved_order_id, d["orig_line"], float(d["ret_line"].return_qty)) for d in claimed]
+    held["claimed"] = [(resolved_order_id, d["orig_line"], float(d["ret_line"].return_qty), d["token"])
+                       for d in claimed]
     held["store_id"] = store_id
 
     # The refund-advance door claims the ORDER (advance_refund_id) and then
@@ -4697,7 +4716,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         return {
             "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
                        "product_id": d["orig_line"].get("product_id"),
-                       "qty": float(d["ret_line"].return_qty)} for d in claimed],
+                       "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in claimed],
             "tenders": refund_tenders,
             "note_number": credit_note_number,
             "store_id": store_id,
@@ -4798,7 +4817,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
                                "product_id": d["orig_line"].get("product_id"),
                                "purchased": _line_purchased_qty(d["orig_line"]),
-                               "qty": float(d["ret_line"].return_qty)} for d in claimed],
+                               "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in claimed],
                     "refund_tenders": refund_tenders,
                     "net_amount": round(float(net_amount), 2),
                     "return_type": body.return_type,

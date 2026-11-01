@@ -74,13 +74,12 @@ export function orderPayloadOf(store: any, discountApprovalId?: string | null) {
 }
 
 /** THE bill fingerprint: the order body the sale sends, minus the manager's
-    approval id (asking a manager does not make it another bill) and minus
-    what a reload cannot bring back -- the member and the sale type, which
-    come from the member and the Rx the saved draft never keeps (no clinical
-    data on a shared till). The customer stays: no bill is pressed without
-    picking one again. So a reload after a lost answer, with the same customer
-    picked again, presses the SAME bill (money review 16). */
+    approval id (asking a manager does not make it another bill) and minus the
+    sale type (worked out again at each press from the Rx). The member stays:
+    another family member's identical bill is another sale (money review 17).
+    A reload keeps the bill's key because the saved draft keeps the customer,
+    member and Rx while an unconfirmed press of it is pending (posStore). */
 export function billFingerprint(store: any): string {
-  const { patient_id: _member, order_type: _saleType, ...body } = orderPayloadOf(store);
+  const { order_type: _saleType, ...body } = orderPayloadOf(store);
   return JSON.stringify(body);
 }

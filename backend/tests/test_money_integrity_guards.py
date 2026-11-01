@@ -105,6 +105,9 @@ class _FakeOrdersColl:
                         return False
                     if op == "$exists" and (bool(operand) != (key in elem)):
                         return False
+            elif isinstance(val, list):
+                if c not in val:  # Mongo array membership (a claim token)
+                    return False
             elif val != c:
                 return False
         return True
@@ -121,6 +124,13 @@ class _FakeOrdersColl:
                     for field, delta in inc.items():
                         leaf = field.split(".")[-1]
                         line[leaf] = (line.get(leaf) or 0) + delta
+                    # The claim token rides in the same write (round 17: a
+                    # release matches by it and pulls it).
+                    for field, tok in ((update or {}).get("$addToSet") or {}).items():
+                        line.setdefault(field.split(".")[-1], []).append(tok)
+                    for field, tok in ((update or {}).get("$pull") or {}).items():
+                        leaf = field.split(".")[-1]
+                        line[leaf] = [t for t in line.get(leaf) or [] if t != tok]
                     return copy.deepcopy(d)
             return None
         return None

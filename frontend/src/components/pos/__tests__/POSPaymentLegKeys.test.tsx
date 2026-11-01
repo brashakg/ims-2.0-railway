@@ -31,6 +31,7 @@ vi.mock('../../../services/api', async (importOriginal) => {
         subtotal: 1000, taxable: 952.38, tax: 47.62, total_discount: 0, grand_total: 1000, round_off: 0,
       })),
     },
+    workshopApi: { createJob: vi.fn(async () => ({ job_id: 'JOB-1' })) },
   };
 });
 
@@ -92,13 +93,25 @@ describe('money review 13 at the till', () => {
     mockedCreate.mockResolvedValue({ order_id: 'ord-1', order_number: 'BV-001' } as any);
   });
 
-  it('never auto-retries a leg that debits store credit; says to check instead', async () => {
+  it('never auto-retries a leg that debits store credit; the sale is not done and says not to take another tender', async () => {
     seed();
     usePOSStore.setState({ payments: [{ method: 'STORE_CREDIT', amount: 1000, timestamp: '' }] } as any);
     mockedAddPayment.mockRejectedValue(apiErr(undefined));
     const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-3');
     expect(mockedAddPayment).toHaveBeenCalledTimes(1);
-    expect(res.warning).toMatch(/STORE_CREDIT ₹1,000 could not be confirmed - check the order's payments/);
+    // Money review 17: not ok -- the till keeps the bill key, so pressing again
+    // re-sends THIS leg with its own key (the server finishes it once).
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/STORE_CREDIT ₹1,000 payment could not be confirmed\. Do NOT take another tender/);
+  });
+
+  it('a re-press re-sends the same debit leg key (it finishes once)', async () => {
+    seed();
+    usePOSStore.setState({ payments: [{ method: 'STORE_CREDIT', amount: 1000, timestamp: '' }] } as any);
+    mockedAddPayment.mockRejectedValueOnce(apiErr(undefined)).mockResolvedValue({ payment_id: 'p' } as any);
+    expect((await submitPosOrder(usePOSStore.getState() as any, 'bill-7')).ok).toBe(false);
+    expect((await submitPosOrder(usePOSStore.getState() as any, 'bill-7')).ok).toBe(true);
+    expect(mockedAddPayment.mock.calls.map((c) => c[2])).toEqual(['bill-7:leg:0', 'bill-7:leg:0']);
   });
 
   it('a lost sale promises a safe re-press ONLY while the server guarantees the replay', async () => {
@@ -179,5 +192,27 @@ describe('money review 16: a same-key press while the first still saves', () => 
     const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-9');
     expect(res.ok).toBe(false);
     expect(res.error).toBe(TILL_SALE_STILL_SAVING);
+  });
+});
+
+
+describe('money review 17: a replayed Rx sale gets its workshop job', () => {
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  it('a reload that restored the Rx replays the order and creates exactly one job', async () => {
+    const { workshopApi } = await import('../../../services/api');
+    seed();
+    usePOSStore.setState({
+      sale_type: 'prescription_order', prescription: { id: 'RX1' }, patient: { id: 'P2' },
+      payments: [{ method: 'CASH', amount: 1000, timestamp: '' }],
+      cart: [{ id: 'l', product_id: 'p-l', name: 'Lens', sku: 'SKU-L', category: 'OPTICAL_LENS', unit_price: 1000,
+               mrp: 1000, quantity: 1, discount_percent: 0, discount_amount: 0, line_total: 1000 }],
+    } as any);
+    mockedCreate.mockResolvedValueOnce({ order_id: 'ord-1', order_number: 'BV-001' } as any); // the replay
+    mockedAddPayment.mockResolvedValue({ payment_id: 'p' } as any);
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-rx');
+    expect(res.error).toBeUndefined();
+    expect(res.ok).toBe(true);
+    expect(vi.mocked(workshopApi.createJob)).toHaveBeenCalledTimes(1);
   });
 });

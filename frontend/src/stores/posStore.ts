@@ -828,10 +828,14 @@ export const usePOSStore = create<POSState>()(
       // they contain no identity data and the cashier needs them on refresh.
       partialize: (state: POSState) => ({
         ...state,
-        // Strip PII / sensitive clinical data
-        customer: null,
-        patient: null,
-        prescription: null,
+        // Strip PII / sensitive clinical data -- except while an unconfirmed
+        // press of THIS bill is pending (its bill key is kept): then the
+        // customer, member and Rx stay with the draft, so a reload presses
+        // the SAME bill (same key: the server replays it, and the Rx sale
+        // gets its workshop job) instead of a second sale (money review 17).
+        ...(billKeyEntry(billFingerprint(state))
+          ? {}
+          : { customer: null, patient: null, prescription: null }),
         customerLoyaltyPoints: 0,
         appliedVoucher: undefined,
         pendingLoyaltyRedeem: null,

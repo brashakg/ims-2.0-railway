@@ -93,25 +93,38 @@ describe('the lost-sale promise ends with its key', () => {
   });
 });
 
-describe('money review 16: a reload after a lost answer keeps the bill key', () => {
-  it('the same customer picked again presses the SAME bill, though the member and Rx are not restored', () => {
+describe('money review 17: the member is part of the bill; a reload keeps member and Rx', () => {
+  beforeEach(() => {
     localStorage.clear();
     usePOSStore.setState({ store_id: 'S1', salesperson_id: 'u1' } as any);
     usePOSStore.getState().resetTransaction();
+  });
+
+  it('another family member with the same cart is another bill (a NEW key)', () => {
+    putCart();
+    usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'MOTHER' } } as any);
+    const key = billKeyFor(billFingerprint(usePOSStore.getState()));
+    usePOSStore.setState({ patient: { id: 'SON' } } as any);
+    expect(billKeyFor(billFingerprint(usePOSStore.getState()))).not.toBe(key);
+  });
+
+  it('a reload after an unconfirmed press restores the customer, member and Rx, and keeps the key', () => {
     putCart();
     usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'P2' },
                            prescription: { id: 'RX1' }, sale_type: 'prescription_order' } as any);
     const key = billKeyFor(billFingerprint(usePOSStore.getState()));
-    // The reload: the saved draft drops the customer, member and Rx.
     const saved = (usePOSStore as any).persist.getOptions().partialize(usePOSStore.getState());
     usePOSStore.setState(JSON.parse(JSON.stringify(saved)));
-    expect(usePOSStore.getState().customer).toBeNull();
-    // The cashier picks the customer again (Primary member, no Rx -> quick sale).
-    usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'P1' },
-                           sale_type: 'quick_sale' } as any);
+    const s = usePOSStore.getState() as any;
+    expect([s.customer?.id, s.patient?.id, s.prescription?.id]).toEqual(['C1', 'P2', 'RX1']);
     expect(billKeyFor(billFingerprint(usePOSStore.getState()))).toBe(key);
-    // Another customer is another bill.
-    usePOSStore.setState({ customer: { id: 'C2', name: 'Ravi' } } as any);
-    expect(billKeyFor(billFingerprint(usePOSStore.getState()))).not.toBe(key);
+  });
+
+  it('with no press pending, the draft keeps no customer, member or Rx', () => {
+    putCart();
+    usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'P2' },
+                           prescription: { id: 'RX1' } } as any);
+    const saved = (usePOSStore as any).persist.getOptions().partialize(usePOSStore.getState());
+    expect([saved.customer, saved.patient, saved.prescription]).toEqual([null, null, null]);
   });
 });

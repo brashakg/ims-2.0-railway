@@ -88,6 +88,15 @@ const DEAD_APPROVAL_CODES = new Set([
 // Tenders that only RECORD money taken at the counter: re-sending one with its
 // key is safe. Store credit, vouchers and loyalty debit an account.
 const RECORD_ONLY_TENDERS = new Set(['CASH', 'CARD', 'UPI']);
+// Tenders whose leg debits an account under the leg's own key (the server's
+// guard): a lost answer is finished by re-sending the SAME leg, never another.
+const DEBIT_TENDERS = new Set(['STORE_CREDIT', 'GIFT_VOUCHER']);
+
+/** The till's words when a debit leg's answer was lost. */
+export function tillDebitLegUnconfirmed(labels: string[]): string {
+  return `The ${labels.join(' and ')} payment could not be confirmed. Do NOT take another tender for this `
+    + 'amount - press Complete Sale again: it finishes this payment once (it is never taken twice).';
+}
 
 export { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from './posBillKey';
 
@@ -238,6 +247,7 @@ export async function submitPosOrder(
     let cashCapture: CashTenderCapture | null = store.cash_tender;
     const unrecordedPayments: string[] = [];
     const unconfirmedPayments: string[] = [];
+    const debitUnconfirmed: string[] = [];
     for (const [legIndex, p] of (store.payments || []).entries()) {
       // The LOYALTY tender IS posted to the order. The points were burned by
       // /loyalty/redeem above — but that call only debits the loyalty account
@@ -295,8 +305,18 @@ export async function submitPosOrder(
         } else {
           // No answer, or a server error: it may have recorded.
           unconfirmedPayments.push(label);
+          if (DEBIT_TENDERS.has(String(leg.method || '').toUpperCase())) debitUnconfirmed.push(label);
         }
       }
+    }
+    if (debitUnconfirmed.length) {
+      // A leg that DEBITS an account whose answer was lost: the sale is NOT
+      // done. The till keeps the bill key, so pressing again replays the
+      // order and re-sends this leg with ITS key -- which finishes it once
+      // (the server guards the debit by that key). Never another tender.
+      store.setOrderResult(result.order_id, result.order_number);
+      return { ok: false, orderId: result.order_id, orderNumber: result.order_number,
+               error: tillDebitLegUnconfirmed(debitUnconfirmed) };
     }
     store.setCashTender(null);
     store.setOrderResult(result.order_id, result.order_number);
