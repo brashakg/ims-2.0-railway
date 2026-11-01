@@ -538,7 +538,9 @@ def to_gstr3b_json(
     blocked = {k: _num((data.get("itcBlocked") or {}).get(src)) for k, src in keys.items()}
     # Section 17(5)(h): credit claimed earlier on stock written off this month.
     # Already off itcAvailable (the net), so 4(A)(5) adds it back and 4(B)(1)
-    # reverses it, like a supplier note's reversal in 4(B)(2).
+    # reverses it, like a supplier note's reversal in 4(B)(2). A re-claim
+    # (itcWriteOffReclaimed) is already in itcAvailable, so 4(A)(5) carries it
+    # and 4(B)(1) holds reversals only -- never negative.
     written_off = {k: _num((data.get("itcWriteOffReversed") or {}).get(src)) for k, src in keys.items()}
     itc_elg = {
         "itc_avl": [

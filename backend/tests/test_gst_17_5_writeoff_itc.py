@@ -7,7 +7,7 @@
     credit claimed on those exact pieces, per GSTIN, in GSTR-3B Table 4(B)(1)
     of the write-off month (services/writeoff_itc), shown on the write-off.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -118,6 +118,8 @@ class _October(datetime):
 def october(monkeypatch):
     monkeypatch.setattr(scr, "datetime", _October)
     monkeypatch.setattr(iev, "datetime", _October)
+    # The item ledger's own clock: a DAMAGED event is dated 5 October too.
+    monkeypatch.setattr(iev.ie, "_now", lambda: _October.utcnow().replace(tzinfo=timezone.utc))
 
 
 def _stocked(db, grn_id, vendor=DEALER):
@@ -288,6 +290,7 @@ def _to_november(monkeypatch):
 
     for mod in (scr, iev, wo):
         monkeypatch.setattr(mod, "datetime", _November)
+    monkeypatch.setattr(iev.ie, "_now", lambda: _November.utcnow().replace(tzinfo=timezone.utc))
 
 
 def _mirror(db, tid, *, gstin=MH_GSTIN, to_store=MH_STORE, lines=None, day="2026-09-20"):
@@ -427,8 +430,9 @@ def test_a_whole_line_written_off_reverses_exactly_its_heads(world, october):
 
 @pytest.mark.parametrize("door", ["line_bill", "header_bill"])
 def test_a_bill_booked_after_the_write_off_reverses_it(world, october, door):
-    """Counted missing before the bill came: the bill claims credit on the
-    lost piece, so booking it reverses that credit, in the bill's month."""
+    """Counted missing (5 October) before the September bill came: the bill
+    claims credit on the lost piece, so booking it reverses that credit, in
+    the month of the loss -- never before the loss happened."""
     db = world["db"]
     _stocked(db, "GRN-WO-0013")
     assert _count_write_off(db, "GRN-WO-0013")["itc_reversed"]["total"] == 0.0
@@ -439,8 +443,9 @@ def test_a_bill_booked_after_the_write_off_reverses_it(world, october, door):
             bill_number="HDR-13", bill_date="2026-09-14", taxable_amount=6200.0, tax_amount=310.0,
             total_amount=6510.0, grn_id="GRN-WO-0013"), current_user=ACCOUNTANT))
     row = db.itc_writeoff_reversals.find_one({})
-    assert (row["cgst"] + row["sgst"], row["period"], row["source_type"]) == (155.0, MONTH, "STOCK_COUNT")
-    assert _written_off(r3b._compute_gstr3b(MONTH, STORE)) == 155.0
+    assert (row["cgst"] + row["sgst"], row["period"], row["source_type"]) == (155.0, OCTOBER, "STOCK_COUNT")
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 155.0
+    assert _written_off(r3b._compute_gstr3b(MONTH, STORE)) == 0.0
 
 
 def test_a_header_only_bill_shares_equally_when_the_pieces_carry_no_price(world, october):
@@ -541,7 +546,24 @@ def test_a_damaged_piece_brought_back_after_its_month_is_filed_is_reclaimed(worl
     _to_november(monkeypatch)
     _requarantine(sid)
     assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 155.0  # the filed return stands
-    assert _written_off(r3b._compute_gstr3b("2026-11", STORE)) == -155.0  # re-claimed
+    # Re-claimed in November: 4(A)(5) takes the credit back, 4(B)(1) never
+    # goes negative.
+    nov = r3b._compute_gstr3b("2026-11", STORE)
+    assert (_written_off(nov), _heads(nov["itcWriteOffReclaimed"]), _heads(nov["itcAvailable"])) == (
+        0.0, 155.0, 155.0)
+    portal = to_gstr3b_json(nov, gstin=SHOP_GSTIN, period="2026-11")["itc_elg"]
+    rul = next(r for r in portal["itc_rev"] if r["ty"] == "RUL")
+    oth = next(r for r in portal["itc_avl"] if r["ty"] == "OTH")
+    assert (rul["camt"], rul["samt"], oth["camt"], oth["samt"], portal["itc_net"]["camt"]) == (
+        0.0, 0.0, 77.5, 77.5, 77.5)
+    # A month with both: the November loss files whole in 4(B)(1), the
+    # re-claim whole in 4(A)(5), net nil.
+    _damage(db, "SU-GRN-WO-0019-1")
+    nov = r3b._compute_gstr3b("2026-11", STORE)
+    portal = to_gstr3b_json(nov, gstin=SHOP_GSTIN, period="2026-11")["itc_elg"]
+    rul = next(r for r in portal["itc_rev"] if r["ty"] == "RUL")
+    oth = next(r for r in portal["itc_avl"] if r["ty"] == "OTH")
+    assert (rul["camt"], oth["camt"], portal["itc_net"]["camt"]) == (77.5, 77.5, 0.0)
 
 
 @pytest.mark.parametrize("door", ["restock", "lift"])
@@ -693,9 +715,9 @@ def test_a_header_only_bill_shares_its_gst_by_the_receipts_own_costs(
 
 def test_unticking_17_5_after_a_write_off_reverses_the_lost_piece(world, october):
     """A walk-in bill booked with the 17(5) tick claims no credit, so a piece
-    damaged meanwhile reverses nothing. Unticked while September is open,
-    the bill claims Rs 373 in September: the lost piece's share of it is
-    reversed there too."""
+    damaged meanwhile (5 October) reverses nothing. Unticked while September
+    is open, the bill claims Rs 373 in September: the lost piece's share of
+    it is reversed in October, the month of the loss."""
     from tests.test_gst_input_credit_one_rule import _tick
     from tests.test_receipt_without_po import _on_the_shelf
 
@@ -708,11 +730,11 @@ def test_unticking_17_5_after_a_write_off_reverses_the_lost_piece(world, october
     assert _damage(db, unit["stock_id"])["itc_reversed"]["total"] == 0.0
     assert _tick(booked, False)["itc_eligible"] is True
     sept = r3b._compute_gstr3b(MONTH, STORE)
-    # Rs 373 claimed; the lost Rs 3,100 frame's share (3100/7460) reversed,
-    # so the net credit is 373 - 155.
-    assert (_written_off(sept), _heads(sept["itcAvailable"])) == (155.0, 218.0)
-    assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 0.0
-    assert db.itc_writeoff_reversals.count_documents({"period": MONTH}) == 1
+    # Rs 373 claimed in September; the lost Rs 3,100 frame's share
+    # (3100/7460) reversed in October.
+    assert (_written_off(sept), _heads(sept["itcAvailable"])) == (0.0, 373.0)
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 155.0
+    assert db.itc_writeoff_reversals.count_documents({"period": OCTOBER}) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -767,3 +789,77 @@ def test_a_piece_moved_on_by_a_later_transfer_stays_in_its_transfers_cost_base(t
     _rehomed(db, sids[0], "TRF-43", MH2_STORE)
     _damage(db, sids[1], MH_ADMIN)
     assert r3b._compute_gstr3b(OCTOBER, MH_STORE)["itcWriteOffReversed"]["integratedTax"] == 11.11
+
+
+# ---------------------------------------------------------------------------
+# Review round 5: a transfer's mirror not booked yet; the loss month; partial
+# bills of one receipt
+# ---------------------------------------------------------------------------
+
+def test_a_piece_lost_before_its_transfers_mirror_is_booked_reverses_on_the_receiving_gstin(
+        two_gstins, october):
+    """Received at Pune (TRF-P3), damaged there before Complete books the
+    mirror bill: Jharkhand's credit already left with the piece, so nothing is
+    reversed on Jharkhand. Booking the mirror reverses it on Maharashtra, in
+    the month of the loss."""
+    from api.services import writeoff_itc as wo
+
+    db = two_gstins["db"]
+    _stocked(db, "GRN-WO-0051")
+    _line_bill("GRN-WO-0051", "TAX-WO-51")
+    sid = "SU-GRN-WO-0051-0"
+    _rehomed(db, sid, "TRF-P3", MH_STORE)
+    assert _damage(db, sid, MH_ADMIN)["itc_reversed"]["total"] == 0.0
+    assert db.itc_writeoff_reversals.count_documents({}) == 0
+    _mirror(db, "TRF-P3")
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "MB-TRF-P3"}))
+    row = db.itc_writeoff_reversals.find_one({"_id": sid})
+    assert (row["gstin"], row["bill_id"], row["igst"], row["period"]) == (MH_GSTIN, "MB-TRF-P3", 155.0, OCTOBER)
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, MH_STORE)) == 155.0
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 0.0
+
+
+def test_a_bill_booked_after_an_earlier_loss_reverses_in_the_bills_month(world, october):
+    """Damaged in August, billed in September: credit cannot be reversed
+    before it is claimed, so the reversal is September's."""
+    db = world["db"]
+    _stocked(db, "GRN-WO-0052")
+    sid = "SU-GRN-WO-0052-0"
+    db.stock_units.update_one({"stock_id": sid}, {"$set": {"status": "DAMAGED"}})
+    db.item_events.insert_one({"stock_id": sid, "event_type": "QUARANTINE_OUT", "to_state": "DAMAGED",
+                               "at": datetime(2026, 8, 20, 6, 0)})
+    _line_bill("GRN-WO-0052", "TAX-WO-52")
+    assert db.itc_writeoff_reversals.find_one({"_id": sid})["period"] == MONTH
+    assert _written_off(r3b._compute_gstr3b(MONTH, STORE)) == 155.0
+
+
+def _part_bill(db, grn_id, bill_id, qty, head):
+    db.vendor_bills.insert_one({
+        "bill_id": bill_id, "bill_number": bill_id, "vendor_id": DEALER, "store_id": STORE,
+        "grn_id": grn_id, "bill_date": "2026-09-14", "status": "OUTSTANDING",
+        "recipient_entity_id": ENTITY, "recipient_gstin": SHOP_GSTIN, "itc_eligible": True,
+        "taxable_amount": 100.0 * qty, "cgst_total": head, "sgst_total": head, "igst_total": 0.0,
+        "tax_amount": 2 * head, "lines": [{"product_id": FRAME, "qty": qty, "taxable": 100.0 * qty,
+                                           "cgst": head, "sgst": head, "igst": 0.0}],
+    })
+
+
+@pytest.mark.parametrize("a_first", [True, False], ids=["two-piece-bill-first", "one-piece-bill-first"])
+def test_a_receipt_billed_in_parts_at_different_gst_reverses_exactly_what_was_claimed(
+        world, october, a_first):
+    """Three pieces: bill A covers two (Rs 10 + 10), bill B the third
+    (Rs 20 + 20). All three written off, in either order of the bills, take
+    back exactly the Rs 30 + 30 claimed."""
+    db = world["db"]
+    _three_frames(db, "GRN-WO-0053", 0)
+    first, second = (("BA-53", 2, 10.0), ("BB-53", 1, 20.0)) if a_first else (("BB-53", 1, 20.0), ("BA-53", 2, 10.0))
+    _part_bill(db, "GRN-WO-0053", *first)
+    _damage(db, "SU-GRN-WO-0053-0")
+    _damage(db, "SU-GRN-WO-0053-1")
+    _part_bill(db, "GRN-WO-0053", *second)
+    from api.services import writeoff_itc as wo
+
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": second[0]}))
+    _damage(db, "SU-GRN-WO-0053-2")
+    ret = r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]
+    assert (ret["centralTax"], ret["stateTax"]) == (30.0, 30.0)

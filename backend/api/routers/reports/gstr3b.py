@@ -363,6 +363,7 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
     supplier_reversal = {"igst": 0.0, "cgst": 0.0, "sgst": 0.0}
     # Section 17(5)(h): credit taken back on stock written off this month.
     writeoff_reversal = {"igst": 0.0, "cgst": 0.0, "sgst": 0.0}
+    writeoff_reclaim = {"igst": 0.0, "cgst": 0.0, "sgst": 0.0}
 
     # Credit-note totals + the per-head excess the zero-clamp would otherwise
     # swallow SILENTLY (filled below when a DB is present).
@@ -547,15 +548,18 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
         # Section 17(5)(h): the credit claimed on goods this GSTIN wrote off
         # (lost, stolen, destroyed) this month comes off its net credit and
         # shows in Table 4(B)(1) (services/writeoff_itc, every write-off door).
-        from ...services.writeoff_itc import month_reversal
+        # A piece back after its write-off month was filed re-claims that
+        # credit this month (4(A)(5), never a negative 4(B)(1)).
+        from ...services.writeoff_itc import month_reclaim, month_reversal
 
         writeoff_reversal = month_reversal(db, store_gstin, month)
-        itc_igst -= writeoff_reversal["igst"]
-        itc_cgst -= writeoff_reversal["cgst"]
-        itc_sgst -= writeoff_reversal["sgst"]
-        t_itc_igst -= writeoff_reversal["igst"]
-        t_itc_cgst -= writeoff_reversal["cgst"]
-        t_itc_sgst -= writeoff_reversal["sgst"]
+        writeoff_reclaim = month_reclaim(db, store_gstin, month)
+        itc_igst += writeoff_reclaim["igst"] - writeoff_reversal["igst"]
+        itc_cgst += writeoff_reclaim["cgst"] - writeoff_reversal["cgst"]
+        itc_sgst += writeoff_reclaim["sgst"] - writeoff_reversal["sgst"]
+        t_itc_igst += writeoff_reclaim["igst"] - writeoff_reversal["igst"]
+        t_itc_cgst += writeoff_reclaim["cgst"] - writeoff_reversal["cgst"]
+        t_itc_sgst += writeoff_reclaim["sgst"] - writeoff_reversal["sgst"]
 
     # Net cash liability = output tax less the ITC the law lets set it off
     # (across heads: IGST credit also pays CGST/SGST), plus reverse-charge tax,
@@ -688,6 +692,15 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             "integratedTax": _r(writeoff_reversal["igst"]),
             "centralTax": _r(writeoff_reversal["cgst"]),
             "stateTax": _r(writeoff_reversal["sgst"]),
+            "cess": 0.0,
+        },
+        # Re-claimed this month on written-off pieces that came back after
+        # their month was filed: already in itcAvailable, so 4(A)(5) carries
+        # it (gstn_export); shown on its own, never netted into 4(B)(1).
+        "itcWriteOffReclaimed": {
+            "integratedTax": _r(writeoff_reclaim["igst"]),
+            "centralTax": _r(writeoff_reclaim["cgst"]),
+            "stateTax": _r(writeoff_reclaim["sgst"]),
             "cess": 0.0,
         },
         # Table 5: exempt, nil-rated, non-GST and composition inward supplies,

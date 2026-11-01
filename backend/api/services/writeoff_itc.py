@@ -18,30 +18,33 @@ ONE rule for every write-off door:
     is stored `unallocated` (no GSTIN), never shown as reversed, and listed on
     GSTR-3B until the bill's GSTIN is settled.
   - how much: a bill line's heads H shared over its q pieces cumulatively --
-    piece k gets round(H*k/q) - round(H*(k-1)/q) -- so a whole line written
-    off reverses exactly H. A header-only bill (or a transfer's aggregate
+    the k-th piece gets round(H*k/q) less what the receipt's rows already
+    reversed (H and q over every bill of the receipt) -- so a whole line
+    written off reverses exactly H, however the bills came in between. A header-only bill (or a transfer's aggregate
     line) shares its heads the same way, by the fraction of the receipt each
     piece is (its cost / the sum of the receipt's unit costs; when any unit
     is unpriced, 1 / the pieces the bill brought in), summed over the bill's
     rows: the whole bill written off reverses exactly its heads.
   - when: the write-off's IST month; a locked (filed) month moves it to the
     first open month, the original kept as `writeoff_period`.
-  - month_reversal(db, gstin, period): what GSTR-3B Table 4(B)(1) adds.
+  - month_reversal(db, gstin, period): what GSTR-3B Table 4(B)(1) adds;
+    month_reclaim: re-claims, back in 4(A)(5), never netted into 4(B)(1).
   - reverse_on_new_bill(db, bill): a bill booked AFTER pieces of its receipt
-    were written off reverses them, dated in the bill's month.
+    were written off reverses them, in the later of the loss month and the
+    bill's month. A piece lost after a GSTIN-crossing transfer delivered it,
+    before the mirror bill is booked, reverses when the mirror lands.
   - undo_writeoff(db, unit): a written-off piece back in play (re-quarantined,
     restocked) drops its reversal -- deleted while its month is open, else a
     re-claim row in the first open month.
 
 ponytail: k is read from the rows already recorded, so two write-offs of the
 same line at the same instant could share one k (a paisa off); an atomic
-counter would need undo / crash bookkeeping of its own. A re-claim row nets inside month_reversal -- a month whose re-claims
-outweigh its reversals goes negative; ask the CA where a re-claim files.
+counter would need undo / crash bookkeeping of its own.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
 from ..utils.ist import ist_date_str
@@ -101,7 +104,7 @@ def _transfer_ids(db, unit: dict) -> list:
     return sorted(ids)
 
 
-def _bills_for(db, unit: dict) -> list:
+def _bills_for(db, unit: dict, gstin_of) -> list:
     """The live bills that brought this unit onto its current GSTIN."""
     bills = db.get_collection("vendor_bills")
     live = {"status": {"$nin": _gst_itc()._DEAD_BILL}}
@@ -115,8 +118,15 @@ def _bills_for(db, unit: dict) -> list:
     rids = _receipt_ids(unit)
     if not rids:
         return []
-    return list(bills.find({**live, "$or": [{"grn_id": {"$in": rids}},
-                                            {"linked_dc_ids": {"$in": rids}}]}))
+    found = list(bills.find({**live, "$or": [{"grn_id": {"$in": rids}},
+                                             {"linked_dc_ids": {"$in": rids}}]}))
+    if tids:
+        # It rode a transfer with no mirror bill (yet): the receipt's credit
+        # counts only if it is the GSTIN the piece is on now. A crossing whose
+        # mirror is booked later is reversed then (reverse_on_new_bill).
+        here = _gst_itc().shop_gstins(db).get(unit.get("store_id")) or ""
+        found = [b for b in found if gstin_of(b) == here]
+    return found
 
 
 def _bill_unit_costs(db, bill: dict) -> list:
@@ -151,23 +161,22 @@ def _pieces(unit: dict) -> float:
     return 1.0 if unit.get("quantity") is None else _f(unit.get("quantity"))
 
 
-def _pieces_recorded(db, bill_id, product_id) -> float:
-    return sum(_f(r.get("pieces")) for r in db.get_collection(COLLECTION).find(
-        {"bill_id": bill_id, "product_id": product_id, "kind": "REVERSAL",
-         "superseded": {"$ne": True}}, {"pieces": 1}))
+def _recorded(db, query: dict, count: str) -> tuple:
+    """(sum of `count`, heads) over the live reversal rows matching `query`."""
+    done, heads = 0.0, dict.fromkeys(_HEADS, 0.0)
+    for r in db.get_collection(COLLECTION).find(
+            {**query, "kind": "REVERSAL", "superseded": {"$ne": True}}):
+        done += _f(r.get(count))
+        for h in _HEADS:
+            heads[h] += _f(r.get(h))
+    return done, heads
 
 
-def _share_recorded(db, bill_id) -> float:
-    return sum(_f(r.get("share")) for r in db.get_collection(COLLECTION).find(
-        {"bill_id": bill_id, "kind": "REVERSAL", "superseded": {"$ne": True},
-         "share": {"$exists": True}}, {"share": 1}))
-
-
-def _cumulative(heads: dict, lo: float, hi: float, whole: float = 1.0) -> dict:
-    """The slice (lo, hi] of `whole` of the heads: consecutive slices add up
-    to the heads exactly."""
-    return {h: round(round(heads[h] * hi / whole, 2) - round(heads[h] * lo / whole, 2), 2)
-            for h in _HEADS}
+def _cumulative(heads: dict, recorded: dict, hi: float, whole: float = 1.0) -> dict:
+    """The slice of the heads up to hi/whole, less what is already recorded:
+    however bills or rows came in between, the slices add up to the heads
+    exactly."""
+    return {h: max(0.0, round(round(heads[h] * hi / whole, 2) - recorded[h], 2)) for h in _HEADS}
 
 
 def _unit_credit(db, unit: dict, gstin_of) -> Optional[dict]:
@@ -175,16 +184,18 @@ def _unit_credit(db, unit: dict, gstin_of) -> Optional[dict]:
     return places it), entity_id, igst, cgst, sgst}, or None when none was."""
     pid = unit.get("product_id")
     n = _pieces(unit)
-    bills = _bills_for(db, unit)
+    bills = _bills_for(db, unit, gstin_of)
     heads = dict.fromkeys(_HEADS, 0.0)
     qty = 0.0
     claimed = None
     has_lines = False
+    line_bills = []
     for bill in bills:
         lines = [ln for ln in bill.get("lines") or [] if ln.get("product_id") == pid]
         if not lines:
             continue
         has_lines = True
+        line_bills.append(bill.get("bill_id"))
         qty += sum(_f(ln.get("qty")) for ln in lines)
         g = gstin_of(bill)
         if g is None:
@@ -196,8 +207,9 @@ def _unit_credit(db, unit: dict, gstin_of) -> Optional[dict]:
     if has_lines:
         if claimed is None or qty <= 0:
             return None
-        done = _pieces_recorded(db, claimed[0].get("bill_id"), pid)
-        amount = _cumulative(heads, min(done, qty), min(done + n, qty), qty)
+        # Every bill on the receipt, whichever the find returns first.
+        done, recorded = _recorded(db, {"bill_id": {"$in": line_bills}, "product_id": pid}, "pieces")
+        amount = _cumulative(heads, recorded, min(done + n, qty), qty)
     else:
         # A header-only bill, or one whose lines name no product (a transfer's
         # aggregate line): its GST shared cumulatively by the piece's share
@@ -219,16 +231,17 @@ def _unit_credit(db, unit: dict, gstin_of) -> Optional[dict]:
             base = sum(c * q for c, q in costs) if costs and all(c for c, _q in costs) else 0.0
             share = (price / base if price and base else
                      1.0 / max(sum(q for _c, q in costs), 1.0)) * n
-            done = _share_recorded(db, bill.get("bill_id"))
+            done, recorded = _recorded(db, {"bill_id": bill.get("bill_id"),
+                                            "share": {"$exists": True}}, "share")
             amount = _cumulative({h: _f(bill.get(f"{h}_total")) for h in _HEADS},
-                                 min(done, 1.0), min(done + share, 1.0))
+                                 recorded, min(done + share, 1.0))
             amount["share"] = share
             claimed = (bill, g)
             break
         if amount is None:
             return None
-    if not any(amount[h] for h in _HEADS):
-        return None
+    # A nil slice (the bills so far fully reversed) is still recorded: the
+    # piece counts as done, so the pieces after it take the rest.
     bill, g = claimed
     return {"bill_id": bill.get("bill_id"), "gstin": g,
             "entity_id": bill.get("recipient_entity_id") or bill.get("entity_id"), **amount}
@@ -351,7 +364,21 @@ def month_reversal(db, gstin: str, period: str) -> dict:
     if not gstin:
         return totals([])
     _settle_unallocated(db, period)
-    return totals(db.get_collection(COLLECTION).find({"gstin": gstin, "period": period}))
+    return totals(db.get_collection(COLLECTION).find(
+        {"gstin": gstin, "period": period, "kind": "REVERSAL"}))
+
+
+def month_reclaim(db, gstin: str, period: str) -> dict:
+    """Credit taken back in `period` on written-off pieces that came back
+    after their month was filed: positive, it files in Table 4(A)(5), never
+    netted into 4(B)(1).
+
+    ponytail: CBIC Circular 170/02/2022 also lists a re-claim in 4(D)(1) for
+    information; the portal file leaves 4(D)(1) nil until the CA confirms."""
+    if not gstin:
+        return totals([])
+    rows = db.get_collection(COLLECTION).find({"gstin": gstin, "period": period, "kind": "RECLAIM"})
+    return totals({h: -_f(r.get(h)) for h in _HEADS} for r in rows)
 
 
 def unallocated_writeoffs(db, entity_id, period: str) -> dict:
@@ -382,11 +409,30 @@ def writeoff_source(unit: dict) -> tuple:
     return "QUARANTINE_DAMAGE", _sid(unit)
 
 
+def _lost_at(db, unit: dict) -> Optional[datetime]:
+    """When the piece was written off (naive UTC): the count's void stamp, else
+    its DAMAGED event; None when neither is on record."""
+    at = unit.get("voided_at")
+    if not at:
+        ev = db.get_collection("item_events").find_one(
+            {"stock_id": unit.get("stock_id"), "to_state": "DAMAGED"}, sort=[("at", -1)])
+        at = (ev or {}).get("at")
+    if isinstance(at, str):
+        try:
+            at = datetime.fromisoformat(at.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if not isinstance(at, datetime):
+        return None
+    return at.astimezone(timezone.utc).replace(tzinfo=None) if at.tzinfo else at
+
+
 def reverse_on_new_bill(db, bill: dict, actor_id: str = "") -> dict:
     """A bill booked AFTER pieces it covers were written off (voided by a
-    count, or DAMAGED) claims credit on them: reverse it now, dated in the
-    bill's month (the month its credit lands). Once per piece, so safe to
-    repeat. Every bill door calls this after storing the bill."""
+    count, or DAMAGED) claims credit on them: reverse it now, in the month of
+    the loss -- or the bill's month when the loss came first (credit is never
+    reversed before it is claimed). Once per piece, so safe to repeat. Every
+    bill door calls this after storing the bill."""
     if bill.get("source_transfer_id"):
         tid = bill["source_transfer_id"]
         whose = {"$or": [{"source_type": "TRANSFER", "source_id": tid}, {"transfer_id": tid}]}
@@ -398,14 +444,15 @@ def reverse_on_new_bill(db, bill: dict, actor_id: str = "") -> dict:
     gone = {"$or": [{"void_reason": {"$regex": "^" + COUNT_VOID_PREFIX}}, {"status": "DAMAGED"}]}
     day = str(bill.get("invoice_date") or bill.get("bill_date") or "")[:10]
     try:
-        when = datetime.fromisoformat(day) + timedelta(hours=6)  # 11:30 IST that day
+        billed = datetime.fromisoformat(day) + timedelta(hours=6)  # 11:30 IST that day
     except ValueError:
-        when = datetime.utcnow()
+        billed = datetime.utcnow()
     rows = []
     for unit in db.get_collection("stock_units").find({"$and": [whose, gone]}):
         source_type, source_id = writeoff_source(unit)
+        lost = _lost_at(db, unit)
         rows.append(record_writeoff(db, [unit], source_type=source_type, source_id=source_id,
-                                    when=when, actor_id=actor_id))
+                                    when=max(billed, lost) if lost else billed, actor_id=actor_id))
     return totals(rows)
 
 

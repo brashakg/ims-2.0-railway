@@ -67,6 +67,9 @@ interface GSTR3BData {
   // Table 4(B)(1), section 17(5)(h): credit claimed earlier on stock written
   // off this month -- already taken off itcAvailable.
   itcWriteOffReversed?: GSTR3BITCAvailable;
+  // Re-claimed this month on written-off pieces that came back after their
+  // month was filed -- already inside itcAvailable (Table 4(A)(5)).
+  itcWriteOffReclaimed?: GSTR3BITCAvailable;
 
   // Table 5: Exempt, Nil rated and Non-GST supplies
   exemptSupplies: number;
@@ -154,6 +157,7 @@ export function GSTR3BReport() {
   const itcAvailable = canSeeInputTax ? reportData?.itcAvailable : undefined;
   const itcBlocked = canSeeInputTax ? reportData?.itcBlocked : undefined;
   const itcWriteOffReversed = canSeeInputTax ? reportData?.itcWriteOffReversed : undefined;
+  const itcWriteOffReclaimed = canSeeInputTax ? reportData?.itcWriteOffReclaimed : undefined;
   const itcUtilized = canSeeInputTax ? reportData?.itcUtilized : undefined;
   const taxPaidCash = canSeeInputTax ? reportData?.taxPaidCash : undefined;
 
@@ -413,6 +417,8 @@ export function GSTR3BReport() {
                     renderTaxLiabilityRow('Not claimable, section 17(5) - Table 4(B)(1), not in the ITC above', itcBlocked)}
                   {itcWriteOffReversed && getTotalTax(itcWriteOffReversed) > 0 &&
                     renderTaxLiabilityRow('Reversed on stock written off, section 17(5)(h) - Table 4(B)(1), already taken off the ITC above', itcWriteOffReversed)}
+                  {itcWriteOffReclaimed && getTotalTax(itcWriteOffReclaimed) > 0 &&
+                    renderTaxLiabilityRow('Re-claimed on written-off stock back in use after its month was filed - Table 4(A)(5), already in the ITC above', itcWriteOffReclaimed)}
                 </tbody>
               </table>
             </div>
