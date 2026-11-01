@@ -801,6 +801,8 @@ export const collectionsApi = {
         { params: { limit: args.limit ?? 50 } },
       );
       const data = res?.data ?? {};
+      // The listings could not be read: "unavailable", never "0 products".
+      if (data.unreadable) return { products: [], total: 0, available: false };
       const skus = (Array.isArray(data.skus) ? data.skus : []) as string[];
       const products: CollectionProduct[] = skus.map((sku) => ({
         product_id: sku,
@@ -1091,6 +1093,111 @@ export const menusApi = {
     const m = _menuFrom(res?.data);
     if (!m) throw new Error('Save menu tree returned no menu');
     return m;
+  },
+};
+
+// ============================================================================
+// THE GENERATED WEBSITE MENU (owner 2026-10-29) -- backend
+// services/generated_menu.py. The main menu builds itself from the IMS
+// collections that have products on the website; only its TEMPLATE is edited.
+// ============================================================================
+
+export type MenuGroupSource = 'gender' | 'shape' | 'price' | 'top_brands' | 'brands_az';
+
+export interface MenuLink {
+  title: string;
+  url: string;
+}
+
+export interface MenuGroup {
+  title: string;
+  source: MenuGroupSource;
+  category?: string;
+  limit?: number;
+  links?: MenuLink[];
+}
+
+export type MenuSection =
+  | { kind: 'collection'; title: string; handle: string }
+  | { kind: 'links'; title: string; url?: string; links: MenuLink[] }
+  | { kind: 'panel'; title: string; handle?: string; url?: string; groups: MenuGroup[] };
+
+export interface MenuTemplate {
+  sections: MenuSection[];
+}
+
+/** One node of the generated tree (count = products on the website). */
+export interface GeneratedMenuItem {
+  title: string;
+  item_type: string;
+  url?: string | null;
+  handle?: string | null;
+  count?: number | null;
+  children?: GeneratedMenuItem[] | null;
+}
+
+export interface HiddenMenuItem {
+  section: string;
+  title: string;
+  handle?: string | null;
+  reason: string;
+}
+
+export interface GeneratedMenuLastPush {
+  at?: string | null;
+  mode?: string | null;
+  ok?: boolean | null;
+  action?: string | null;
+  error?: string | null;
+  reason?: string | null;
+  /** The first LIVE overwrite waits for a person's "Regenerate & push now". */
+  waiting?: boolean | null;
+}
+
+export interface GeneratedMenu {
+  menu_id: string;
+  handle: string;
+  title: string;
+  template: MenuTemplate;
+  items: GeneratedMenuItem[];
+  hidden: HiddenMenuItem[];
+  shopify_menu_id?: string | null;
+  last_generated_at?: string | null;
+  last_pushed_at?: string | null;
+  last_push?: GeneratedMenuLastPush | null;
+  in_sync?: boolean;
+  backup_taken_at?: string | null;
+  /** Collection links in the tree last pushed LIVE (the push confirm's "was M"). */
+  pushed_collection_nodes?: number | null;
+  /** Whether IMS has ever pushed this menu LIVE. */
+  pushed_live?: boolean;
+  /** What a push would do NOW (the gates): LIVE or SIMULATED (dry-run). */
+  push_mode?: 'LIVE' | 'SIMULATED' | null;
+  preview?: {
+    items: GeneratedMenuItem[];
+    hidden: HiddenMenuItem[];
+    changed_since_push: boolean;
+    /** Set when the website listings could not be read (no preview shown). */
+    unreadable?: string | null;
+  } | null;
+}
+
+export const generatedMenusApi = {
+  /** Every generated menu with a live preview. Fail-soft -> null (unknown). */
+  list: async (): Promise<GeneratedMenu[] | null> => {
+    try {
+      const res = await api.get(`${MENUS_BASE}/generated`);
+      const rows = res?.data?.menus;
+      return Array.isArray(rows) ? (rows as GeneratedMenu[]) : [];
+    } catch {
+      return null;
+    }
+  },
+
+  /** Replace a generated menu's template (ADMIN). Throws (400 names the problem). */
+  saveTemplate: async (menuId: string, template: MenuTemplate): Promise<GeneratedMenu> => {
+    const res = await api.put(`${MENUS_BASE}/generated/${encodeURIComponent(menuId)}/template`, { template });
+    return res?.data?.menu as GeneratedMenu;
   },
 };
 
@@ -1479,6 +1586,8 @@ export interface PushResult {
   reason?: string | null;
   /** Stable machine code for an actionable failure (e.g. PUBLISH_SCOPE_MISSING). */
   code?: string | null;
+  /** Generated menu: the collection links sent (or, refused, that would be). */
+  collection_links?: number | null;
   /** Photo retry state, independent of any simultaneous price/stock code. */
   photos?: {
     sync_state?: 'pending' | 'failed' | 'synced';
@@ -1520,6 +1629,22 @@ export interface PushStatus {
   /** The scheduled live-product sync (owner ruling 2026-09-06): settings,
    *  last run, next IST slot. Null on a stale deploy / failed read. */
   live_sync?: LiveSyncStatus | null;
+  /** The self-maintaining website menu(s) (owner 2026-10-29). */
+  generated_menus?: GeneratedMenuStatus[] | null;
+}
+
+/** One generated menu on the Sync page's Menus card. */
+export interface GeneratedMenuStatus {
+  menu_id: string;
+  handle: string;
+  title: string;
+  last_generated_at?: string | null;
+  last_pushed_at?: string | null;
+  last_push?: GeneratedMenuLastPush | null;
+  in_sync?: boolean;
+  pushed_live?: boolean;
+  item_count?: number;
+  hidden_count?: number;
 }
 
 /** One product the live sync could not update (from online_sync_runs). */
@@ -1841,6 +1966,9 @@ export const pushApi = {
         counts: (data.counts ?? {}) as PushCounts,
         status_reason: null,
         live_sync: (data.live_sync as LiveSyncStatus | undefined) ?? null,
+        generated_menus: Array.isArray(data.generated_menus)
+          ? (data.generated_menus as GeneratedMenuStatus[])
+          : null,
       };
     } catch (err) {
       // RC-E/OS-018: label the failed read. A 403 (catalog/design manager)
@@ -1877,9 +2005,11 @@ export const pushApi = {
     return _pushResultFrom(res?.data);
   },
 
-  /** Push an ecom_menus doc (the nav / mega-menu tree). */
-  pushMenu: async (menuId: string): Promise<PushResult> => {
-    const res = await api.post(`${PUSH_BASE}/menu/${encodeURIComponent(menuId)}`, undefined, PUSH_TIMEOUT);
+  /** Push an ecom_menus doc (the nav / mega-menu tree). The generated menu
+   *  carries the collection-link count the person's confirm showed; the
+   *  server refuses any other number (result.collection_links = the real one). */
+  pushMenu: async (menuId: string, body?: { expected_collection_links: number }): Promise<PushResult> => {
+    const res = await api.post(`${PUSH_BASE}/menu/${encodeURIComponent(menuId)}`, body, PUSH_TIMEOUT);
     return _pushResultFrom(res?.data);
   },
 

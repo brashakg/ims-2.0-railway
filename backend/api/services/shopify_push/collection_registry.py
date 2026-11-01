@@ -114,45 +114,70 @@ def _words(slug: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _facts(db, doc: Dict[str, Any]) -> Dict[str, Any]:
-    """What the product push sends for this listing: productType, tags, prices."""
+def _facts(db, doc: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
+    """What the product push sends for this listing: productType, tags, prices.
+    An unreadable model listing is counted by the doc's own tags, or raises
+    when ``strict`` (every writer of what membership decides)."""
     from ..ecom_category_map import ims_to_shopify_type
     from ..online_catalog import variant_rows_for_product
-    from ._shared import _product_brand
     from .listing import listing_view, model_listing
     from .product_input import _resolve_variant_pricing, ims_product_tags
 
-    raw = variant_rows_for_product(db, doc) or []
-    rows = raw or [{}]
-    # The tags the push SENDS: a model's listing tags (every colour,
-    # shopify_tag_gen.listing_tags), so a count never differs from who is in.
-    tags = None
+    raw = variant_rows_for_product(db, doc, strict=strict) or []
+    # The tags, prices and vendor the push SENDS: a model's listing view and
+    # its rows (product.push_product prices every listing row with
+    # _resolve_variant_pricing over listing_view), so a count never differs
+    # from who is in on the website.
+    view, lst = doc, None
     try:
         lst = model_listing(db, doc, raw)
         if lst is not None and not lst.get("variant_of") and not lst.get("refusal"):
-            tags = ims_product_tags(listing_view(doc, lst))
+            view = listing_view(doc, lst)
+        else:
+            lst = None
     except Exception as exc:  # noqa: BLE001 -- a count, never a write
+        if strict:
+            raise
         logger.warning("[COLLECTIONS] model of %s unreadable, counted by its own tags: %s", doc.get("sku"), exc)
-    if tags is None:
-        tags = ims_product_tags(doc)
-    # ponytail: the lead's price rule per variant row, not listing.model_listing's
-    # per-colour prices -- close enough to decide whether a price band is empty.
-    prices = [p for p in (_resolve_variant_pricing(doc, r)[0] for r in rows) if p]
+        lst = None
+    tags = ims_product_tags(view)
+    rows = (lst or {}).get("rows") or raw or [{}]
+    # (row sku, price) per listing row: a count that cuts the colours not on
+    # the website (collection_membership.online_facts) cuts their prices too.
+    priced = [(str(r.get("sku") or "") if isinstance(r, dict) else "", _resolve_variant_pricing(view, r)[0])
+              for r in rows]
+    priced = [(s, p) for s, p in priced if p]
+    prices = [p for _s, p in priced]
+    # Every SKU the listing carries, lead first then in listing order: "is
+    # SKU X in a collection" is answered by the listing it sells on.
+    skus = [str(doc["sku"])] if doc.get("sku") else []
+    for r in list((lst or {}).get("rows") or []) + list(raw):
+        if isinstance(r, dict) and r.get("sku") and str(r["sku"]) not in skus:
+            skus.append(str(r["sku"]))
     return {
         "id": doc.get("id"),
         "sku": doc.get("sku"),
         "type": ims_to_shopify_type(doc["category"]) if doc.get("category") else "",
         "tags": set(tags),
         "prices": prices,
-        "brand": str(_product_brand(doc) or "").strip(),
+        "priced": priced,
+        # product_input sends vendor = the listing view's own brand field.
+        "brand": str(view.get("brand") or "").strip(),
+        "skus": skus,
     }
 
 
-def listing_facts(db, include_ready: bool = False) -> List[Dict[str, Any]]:
+def listing_facts(db, include_ready: bool = False, strict: bool = False) -> List[Dict[str, Any]]:
     """Facts for every listing ON the website (a lead or single product with a
-    Shopify id, not taken down, archived or deleted). include_ready also counts
-    the listings a push-all would publish for the first time (the rebuild's
-    dry-run projection only; collections are made from live listings)."""
+    Shopify id, not a Shopify Draft, not taken down, archived or deleted).
+    include_ready also counts the listings a push-all would publish for the
+    first time (the rebuild's dry-run projection only; collections are made
+    from live listings). ``strict``: an unreadable model listing raises.
+
+    DELIBERATELY NOT online_catalog.product_online_state's LIVE: that is the
+    Catalog screen's "is it on Shopify" (a Draft is LIVE there -- it still
+    syncs stock); this is "can a shopper see it in a collection", so a Draft
+    is out. Each docstring names the other."""
     from ..catalog_ecom import is_archived
     from ._shared import is_variant_of, product_push_refusal
 
@@ -171,7 +196,7 @@ def listing_facts(db, include_ready: bool = False) -> List[Dict[str, Any]]:
                 continue  # on Shopify but a Draft: not on the website
         elif not (include_ready and product_push_refusal(db, doc) is None):
             continue
-        out.append(_facts(db, doc))
+        out.append(_facts(db, doc, strict))
     return out
 
 
@@ -187,22 +212,11 @@ def brand_names(db) -> Dict[str, str]:
 
 
 def _matches(fact: Dict[str, Any], rules: List[Dict[str, str]], disjunctive: bool = False) -> bool:
-    """Shopify's reading of a rule set (all-AND, or ANY when
-    ``disjunctive``), over what the push sends."""
-    if disjunctive:
-        return any(_matches(fact, [r]) for r in rules)
-    for r in rules:
-        field, rel, value = r["field"], r["relation"], r["value"]
-        if field == "tag":
-            ok = value.lower() in fact["tags"]
-        elif field == "product_type":
-            ok = fact["type"].lower() == value.lower()
-        else:  # variant_price: any variant
-            v = float(value)
-            ok = any(p > v if rel == "GREATER_THAN" else p < v for p in fact["prices"])
-        if not ok:
-            return False
-    return True
+    """Shopify's reading of a rule set over what the push sends -- THE one
+    membership rule (services/collection_membership.matches)."""
+    from ..collection_membership import matches
+
+    return matches(fact, rules, disjunctive)
 
 
 def _values(facts: Iterable[Dict[str, Any]], prefix: str) -> List[str]:
@@ -294,9 +308,15 @@ def mark_rebuilt(db, old_ids: List[str]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def apply_collection_registry(db, definitions: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+def apply_collection_registry(
+    db, definitions: Optional[List[Dict[str, Any]]] = None, facts: Optional[List[Dict[str, Any]]] = None
+) -> Dict[str, Any]:
     """Create / update the IMS-managed ecom_collections rows from the
-    definitions (derived from the live listings when not given). A changed
+    definitions (derived, when not given, from THE listings the menu, the
+    collection_products view and Store Health count --
+    collection_membership.online_facts, a STRICT read unless ``facts`` hands
+    the caller's own read in -- so a collection exists only while that same
+    rule counts a product in it). A changed
     row is queued (locally_modified) for the push; an unchanged one is left
     alone. A handle still held by an old collection is skipped and named --
     scripts/rebuild_collections.py frees it. Collections whose products have
@@ -308,7 +328,11 @@ def apply_collection_registry(db, definitions: Optional[List[Dict[str, Any]]] = 
     if rebuild_state(db) is None:
         return {"waiting": "scripts/rebuild_collections.py --apply has not run yet"}
     if definitions is None:
-        definitions = derive_definitions(listing_facts(db), brand_names(db))
+        if facts is None:
+            from .. import collection_membership
+
+            facts = collection_membership.online_facts(db, strict=True)
+        definitions = derive_definitions(facts, brand_names(db))
     coll = db["ecom_collections"]
     repo = EcomCollectionRepository(coll)
     out: Dict[str, Any] = {"created": [], "updated": [], "unchanged": 0, "skipped": []}
@@ -345,18 +369,19 @@ def apply_collection_registry(db, definitions: Optional[List[Dict[str, Any]]] = 
     return out
 
 
-async def sync_collections(db) -> Dict[str, Any]:
+async def sync_collections(db, facts: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """The registry, then a push of every queued IMS collection (create /
     update + Online Store). The scheduled sync's and the rebuild's step; the
     push-all press applies the registry and sends the queue with its own
     sweep. LIVE only: a dark run changes nothing. One collection's failure
-    never stops the rest."""
+    never stops the rest. ``facts``: the live sync's one strict listings
+    read (shared with the view and the menu)."""
     from ._shared import _live_or_reason
 
     live, reason = _live_or_reason(db)
     if not live:
         return {"dark": reason}
-    out = apply_collection_registry(db)
+    out = apply_collection_registry(db, facts=facts)
     if out.get("waiting"):
         return out
     out["pushed"], out["failed"] = [], []
@@ -384,7 +409,8 @@ async def shop_collections(db) -> List[Dict[str, Any]]:
     while True:
         body = await _graphql(db, _COLLECTIONS_READ, {"after": after})
         page = ((body or {}).get("data") or {}).get("collections")
-        if page is None:
+        if page is None or (body or {}).get("errors"):
+            # A partial read (data AND errors) silently drops counts / rows.
             raise RuntimeError(f"collections read failed: {(body or {}).get('errors')}")
         for c in page.get("nodes") or []:
             out.append({

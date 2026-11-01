@@ -114,7 +114,8 @@ async def browse_collection_products(
             "handle": handle,
             "collection_type": None,
             "products": [],
-            "total": 0,
+            "total": None,
+            "unreadable": True,
             "skip": skip,
             "limit": limit,
         }
@@ -136,7 +137,8 @@ async def refresh_collection_membership(
     current_user: dict = Depends(require_roles(*_REFRESH_ROLES)),
 ):
     """Force-recompute a collection's materialised membership (catalogue roles).
-    404 if the handle is unknown. Fail-soft on the materialise itself."""
+    404 if the handle is unknown; 503 when the listings cannot be read (the
+    last membership stands -- never "0 products")."""
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Collections store unavailable")
@@ -145,4 +147,6 @@ async def refresh_collection_membership(
     if doc is None:
         raise HTTPException(status_code=404, detail=f"Collection not found: {handle}")
     count = _mat.materialize_collection(db, doc)
+    if count is None:
+        raise HTTPException(status_code=503, detail="The listings could not be read; the last membership stands")
     return {"handle": handle, "materialized": True, "products_count": count}

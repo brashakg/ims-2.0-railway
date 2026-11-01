@@ -54,6 +54,13 @@ def _FakeDb(colls=None):
     return db
 
 
+# A registry-style SMART collection: the rule reads the tag the push sends.
+_RAYBAN = {
+    "collection_id": "c-rb", "handle": "ray-ban", "title": "Ray-Ban", "collection_type": "SMART",
+    "rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_rayban"}],
+}
+
+
 def _eligible_product(**overrides):
     """A fully-ready online-eligible catalog_products row (has an ecom sub-doc)."""
     doc = {
@@ -112,7 +119,8 @@ def test_all_ready_product_scores_100():
     db = _FakeDb(
         {
             "catalog_products": _FakeColl([_eligible_product()]),
-            "collection_products": _FakeColl([{"handle": "sun", "sku": "SKU-1"}]),
+            # THE website membership rule: a Ray-Ban collection holds the live listing.
+            "ecom_collections": _FakeColl([_RAYBAN]),
         }
     )
     out = sh.readiness_score(db)
@@ -183,13 +191,14 @@ def test_orphan_reasons_classified():
                 [
                     # mapped + in collection -> ready
                     _eligible_product(product_id="P1", sku="SKU-1"),
-                    # no ecom mapping + not in collection -> orphan (2 reasons)
-                    _eligible_product(product_id="P2", sku="SKU-2", ecom={}),
+                    # no ecom mapping + a brand no collection holds -> orphan (2 reasons)
+                    _eligible_product(product_id="P2", sku="SKU-2", brand="Idee", ecom={}),
                     # no sku -> missing_spine orphan
                     _eligible_product(product_id="P3", sku=""),
                 ]
             ),
-            "collection_products": _FakeColl([{"handle": "sun", "sku": "SKU-1"}]),
+            # THE website membership rule: a Ray-Ban collection holds the live listing.
+            "ecom_collections": _FakeColl([_RAYBAN]),
         }
     )
     orph = sh.orphan_skus(db)
@@ -197,7 +206,7 @@ def test_orphan_reasons_classified():
     assert orph["orphan_count"] == 2  # P2 + P3 (P1 is fully ready)
     assert orph["no_mapping"] == 1  # only P2 has an empty ecom (P3 keeps its gid)
     assert orph["missing_spine"] == 1  # P3 has no sku
-    # P2 has a sku not in the collection view -> not_in_collection; P1 is in it.
+    # P2 (Idee) is in no collection by the rule; P1 (Ray-Ban) is.
     # P3 has no sku so it is not double-counted as not_in_collection.
     assert orph["not_in_collection"] == 1
 
@@ -255,10 +264,12 @@ def test_a_colour_mapped_on_its_own_variant_row_is_not_unmapped():
         "catalog_products": _FakeColl([lead, kid, new]),
         "catalog_variants": _FakeColl([{"sku": "K", "parent_product_id": "t1",
                                         "shopify_variant_id": "gid://shopify/ProductVariant/2"}]),
-        "collection_products": _FakeColl([{"sku": s} for s in ("L", "K", "N")]),
     })
     orph = sh.orphan_skus(db)
-    assert orph["no_mapping"] == 1 and [o["sku"] for o in orph["orphans"]] == ["N"]
+    # Collection membership is its own rule (collection_membership); only the
+    # mapping reason is under test here.
+    unmapped = [o["sku"] for o in orph["orphans"] if "no_mapping" in o["reasons"]]
+    assert orph["no_mapping"] == 1 and unmapped == ["N"]
 
 
 def test_archived_products_are_left_out_of_every_count():
@@ -272,7 +283,8 @@ def test_archived_products_are_left_out_of_every_count():
     db = _FakeDb({
         "catalog_products": _FakeColl([live, gone_twin, gone_spine]),
         "products": _FakeColl([{"product_id": "S3", "sku": "SKU-3", "deleted_at": "2026-10-02"}]),
-        "collection_products": _FakeColl([{"handle": "sun", "sku": "SKU-1"}]),
+        # THE website membership rule: the live Ray-Ban listing is in Ray-Ban.
+        "ecom_collections": _FakeColl([_RAYBAN]),
     })
     out = sh.readiness_score(db)
     assert out["total_products"] == 1 and out["coverage"]["missing"]["image"] == 0
@@ -287,6 +299,32 @@ def test_an_unreadable_mapping_is_degraded_never_all_unmapped():
     def dead(*_a, **_k):
         raise RuntimeError("blip")
     db["catalog_variants"].find = dead
+    assert sh.store_health_envelope(db)["degraded"] is True
+
+
+def test_not_in_collection_judges_online_and_offline_by_the_same_rule():
+    """The eligible set holds products not on the website yet: an offline
+    Ray-Ban the Ray-Ban collection WILL hold is not "in no collection"; an
+    offline Idee (no Idee collection) is (review round 2)."""
+    db = _FakeDb({
+        "catalog_products": _FakeColl([
+            _eligible_product(product_id="P2", sku="SKU-2", ecom={}),
+            _eligible_product(product_id="P4", sku="SKU-4", brand="Idee", ecom={}),
+        ]),
+        "ecom_collections": _FakeColl([_RAYBAN]),
+    })
+    orph = sh.orphan_skus(db)
+    assert [o["sku"] for o in orph["orphans"] if "not_in_collection" in o["reasons"]] == ["SKU-4"]
+
+
+def test_an_unreadable_membership_is_degraded_never_all_orphans(monkeypatch):
+    from api.services import collection_membership as cm
+
+    db = _FakeDb({"catalog_products": _FakeColl([_eligible_product()]), "ecom_collections": _FakeColl([_RAYBAN])})
+
+    def dead(*_a, **_k):
+        raise RuntimeError("blip")
+    monkeypatch.setattr(cm, "skus_in_any_collection", dead)
     assert sh.store_health_envelope(db)["degraded"] is True
 
 
@@ -340,3 +378,16 @@ def test_endpoint_forbidden_for_sales_staff(client, staff_headers):
 def test_endpoint_requires_auth(client):
     r = client.get(STORE_HEALTH)
     assert r.status_code in (401, 403), r.text
+
+
+def test_one_unreadable_listing_is_degraded_never_an_orphan(monkeypatch):
+    """One listing's facts cannot be read (its model is unreadable): Store
+    Health is degraded, never 'SKU-1 is in no collection' (review round 3)."""
+    from api.services.shopify_push import collection_registry as reg
+
+    db = _FakeDb({"catalog_products": _FakeColl([_eligible_product()]), "ecom_collections": _FakeColl([_RAYBAN])})
+
+    def dead(db, doc, strict=False):
+        raise RuntimeError("model unreadable")
+    monkeypatch.setattr(reg, "_facts", dead)
+    assert sh.store_health_envelope(db)["degraded"] is True

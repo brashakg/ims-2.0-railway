@@ -1926,7 +1926,9 @@ def test_a_live_take_down_by_any_door_closes_the_task(monkeypatch, door):
 _CLASSES = {
     "plain": ("SKU-1", 5, 0),
     "blocked": ("SKU-1", 0, 5),
-    "size_of_a_blocked_parent": ("SKU-2", 1, 5),
+    # A size rides its parent's listing, so a blocked parent's size is
+    # blocked too (THE membership rule asks the listing): online 0.
+    "size_of_a_blocked_parent": ("SKU-2", 0, 5),
 }
 
 

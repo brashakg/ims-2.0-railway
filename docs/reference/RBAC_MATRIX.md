@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 864 |
-| **Total `/api/v1` (method x path)** | **1304** |
+| Role-gated (one or more roles) | 866 |
+| **Total `/api/v1` (method x path)** | **1306** |
 | ...of which `store_scoped` | 236 |
 | ...of which `self_enforced` | 47 |
 
@@ -1041,6 +1041,8 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/online-store/images/{image_id}/status` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `GET` | `/api/v1/online-store/menus` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/online-store/menus` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/online-store/menus/generated` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
+| `PUT` | `/api/v1/online-store/menus/generated/{menu_id}/template` | ADMIN, SUPERADMIN |  |  |
 | `DELETE` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `GET` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |
 | `PUT` | `/api/v1/online-store/menus/{menu_id}` | ADMIN, CATALOG_MANAGER, DESIGN_MANAGER, SUPERADMIN |  |  |

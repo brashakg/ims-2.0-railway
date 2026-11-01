@@ -57,11 +57,6 @@ _IMG_CONCURRENCY = 8
 # Longest edge (px) an embedded image is downscaled to (keeps the PDF small).
 _IMG_MAX_EDGE = 420
 
-# Cap PER SOURCE COLLECTION for the product-union scan (mirrors
-# collection_materializer._SCAN_MAX) so a runaway catalogue can never make the
-# PDF's member resolution scan unbounded -- while each source keeps its own
-# budget (a large catalog_products must not starve the `products` spine).
-_SCAN_MAX = 5000
 
 
 # ===========================================================================
@@ -249,45 +244,6 @@ def _strip_id(doc: Dict) -> Dict:
     return {k: v for k, v in doc.items() if k != "_id"}
 
 
-def _product_union(db) -> List[Dict]:
-    """UNION of the `products` spine + `catalog_products`, de-duped by SKU with the
-    SPINE WINNING (so governed tags/attrs are present for the smart resolver).
-    Fail-soft -> []. EACH source's scan is capped at _SCAN_MAX (was fully
-    unbounded) so total work is bounded (<= 2x _SCAN_MAX docs) while the spine
-    keeps its own budget and is never starved by a large catalog_products."""
-    if db is None:
-        return []
-    by_sku: Dict[str, Dict] = {}
-    order: List[str] = []
-    for coll_name in ("catalog_products", "products"):
-        try:
-            cursor = db[coll_name].find({})
-        except Exception:  # noqa: BLE001
-            continue
-        scanned = 0
-        for doc in cursor:
-            if scanned >= _SCAN_MAX:
-                # Cap trip must never be silent: the PDF would omit products
-                # past this point with no operational signal otherwise.
-                logger.warning(
-                    "[PDF] %s scan capped at %d docs - catalogue PDF may be "
-                    "missing products beyond the cap",
-                    coll_name,
-                    _SCAN_MAX,
-                )
-                break
-            scanned += 1
-            if not isinstance(doc, dict):
-                continue
-            sku = doc.get("sku")
-            if not sku:
-                continue
-            if sku not in by_sku:
-                order.append(sku)
-            by_sku[sku] = _strip_id(doc)
-    return [by_sku[s] for s in order]
-
-
 def _detail_by_sku(db, skus: List[str]) -> Dict[str, Dict]:
     """sku -> rich product doc, looked up in `products` then `catalog_products`
     (spine wins). Fail-soft -> {}."""
@@ -308,10 +264,18 @@ def _detail_by_sku(db, skus: List[str]) -> Dict[str, Dict]:
 def resolve_collection_products(db, collection_id: str) -> Optional[List[Dict]]:
     """Resolve a collection's effective, ordered product docs.
 
-    CUSTOM -> its manual membership SKUs in position order.
-    SMART  -> the shared ecom_smart_rules resolver over the product union.
+    CUSTOM / temporary (Quick Share) -> its manual SKU list in position
+                 order, exactly as picked (in-store products and the
+                 picked colour included -- it is a hand-picked set).
+    SMART  -> THE website membership rule (services/collection_membership)
+              asked of EVERY listing IMS holds, on the website or not, with
+              all its colours / sizes (catalogue_facts, as Store Health and
+              the block path read it): a catalogue for a customer is the
+              range, not only what is online today.
     Returns None ONLY when the collection does not exist (so the caller 404s);
-    a real-but-empty collection returns []. Fail-soft -> [] on any read error."""
+    a real-but-empty collection returns []. An unreadable catalogue RAISES
+    (the router reports it) -- never an empty PDF that looks like "no
+    products"."""
     if db is None or not collection_id:
         return None
     try:
@@ -324,24 +288,18 @@ def resolve_collection_products(db, collection_id: str) -> Optional[List[Dict]]:
     if doc is None:
         return None
 
-    ctype = str(doc.get("collection_type") or "CUSTOM").upper()
-    try:
-        if ctype == "SMART":
-            from . import ecom_smart_rules
+    if str(doc.get("collection_type") or "CUSTOM").upper() == "SMART":
+        from . import collection_membership
 
-            rules = ecom_smart_rules.normalize_rules(doc.get("rules") or [])
-            disjunctive = bool(doc.get("disjunctive", False))
-            skus = ecom_smart_rules.resolve_skus(
-                _product_union(db), rules, disjunctive=disjunctive, limit=MAX_PRODUCTS
-            )
-        else:
-            members = sorted(
-                (doc.get("products") or []),
-                key=lambda p: int((p or {}).get("position", 0) or 0),
-            )
-            skus = [m.get("sku") for m in members if m.get("sku")][:MAX_PRODUCTS]
-    except Exception:  # noqa: BLE001
-        return []
+        skus = collection_membership.member_skus(
+            db, doc, collection_membership.catalogue_facts(db, strict=True), every_sku=True
+        )[:MAX_PRODUCTS]
+    else:
+        members = sorted(
+            (doc.get("products") or []),
+            key=lambda p: int((p or {}).get("position", 0) or 0),
+        )
+        skus = [m.get("sku") for m in members if m.get("sku")][:MAX_PRODUCTS]
 
     detail = _detail_by_sku(db, skus)
     # Preserve membership order; a sku with no catalog row still appears (sku-only)

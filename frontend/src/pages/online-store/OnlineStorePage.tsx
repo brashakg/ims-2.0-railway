@@ -109,14 +109,14 @@ const SECTIONS: Section[] = [
   },
   {
     key: 'menus',
-    title: 'Mega-menu editor',
+    title: 'Website menu',
     blurb:
-      'Visual editor for the storefront navigation tree — nested items, thumbnails, badges and pin-to-top, matching the live mega-menu.',
+      'The website menu builds itself from the collections that have products and updates after every sync. Edit its template here.',
     icon: MenuIcon,
     phase: 'Phase 3',
     countKey: 'menus',
     countLabel: 'menus',
-    // Phase 3 shipped: the Mega-menu editor is live in-app.
+    // Self-maintaining menu (owner 2026-10-29).
     href: '/online-store/menus',
   },
   {

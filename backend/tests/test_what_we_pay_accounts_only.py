@@ -732,6 +732,14 @@ def test_a_collection_rule_cannot_search_on_cost(client, buying, role):
     buying.products.update_one(
         {"product_id": "P1"}, {"$set": {"pricing": {"cost_price": COST, "offer_price": 9999.0}}}
     )
+    # The preview reads THE website membership rule (services/
+    # collection_membership): the listings ON the website, over what the push
+    # sends -- so the "real rule" needs a live listing, carrying the cost too.
+    buying.catalog_products.insert_one(
+        {"id": "P1", "product_id": "P1", "sku": "SKU-P1", "brand": "Ray-Ban", "category": "SUNGLASS",
+         "mrp": 9999.0, "pricing": {"cost_price": COST, "offer_price": 9999.0},
+         "ecom": {"shopify_product_id": "gid://shopify/Product/1"}}
+    )
 
     def count(rules):
         r = client.post("/api/v1/collections/preview", json={"rules": rules}, headers=_headers(role))

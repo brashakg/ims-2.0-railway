@@ -41,9 +41,11 @@ export interface BrowsePage {
   title?: string;
   collection_type?: 'CUSTOM' | 'SMART' | null;
   products: BrowseProduct[];
-  total: number;
+  /** null when the membership could not be read (never "0 products"). */
+  total: number | null;
   skip: number;
   limit: number;
+  unreadable?: boolean;
 }
 
 export const collectionBrowseApi = {
@@ -57,7 +59,8 @@ export const collectionBrowseApi = {
     }
   },
 
-  /** Page a collection's materialised membership. Fail-soft -> empty page. */
+  /** Page a collection's materialised membership. Fail-soft -> an
+   *  `unreadable` page (never an empty one that reads as "no products"). */
   async products(handle: string, skip = 0, limit = 24): Promise<BrowsePage> {
     const empty: BrowsePage = { handle, products: [], total: 0, skip, limit };
     try {
@@ -66,7 +69,7 @@ export const collectionBrowseApi = {
       });
       return (data ?? empty) as BrowsePage;
     } catch {
-      return empty;
+      return { ...empty, total: null, unreadable: true };
     }
   },
 

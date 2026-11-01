@@ -44,7 +44,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from agents.nexus_providers import _as_shopify_gid
 
@@ -187,18 +187,29 @@ async def push_collection(
 @router.post("/menu/{menu_id}")
 async def push_menu(
     menu_id: str,
+    expected_collection_links: Optional[int] = Body(None, embed=True, ge=0),
     current_user: dict = Depends(require_roles(*_PUSH_ROLES)),
 ) -> Dict[str, Any]:
     """Push an ecom_menus doc (the Online Store nav / mega-menu) to Shopify
     (menuCreate/Update, mapping the nested item tree). DARK by default; LIVE
-    behind the gates. Writes a chained audit row. Unknown menu -> 404."""
+    behind the gates. Writes a chained audit row. Unknown menu -> 404.
+    ``expected_collection_links`` (the generated menu): the link count the
+    person's confirm showed; any other number is refused, saying it."""
     db = _require_db()
     repo = _menu_repo(db)
     doc = repo.get_by_id(menu_id) if repo else None
     if doc is None:
         raise HTTPException(status_code=404, detail="Menu not found")
-    result = await shopify_push.push_menu(db, doc)
-    data = result.to_dict()
+    if doc.get("generated"):
+        # The generated menu is never pushed as stored: rebuilt first, then
+        # pushed by its own path (adopt + backup + audit inside).
+        from ..services import generated_menu
+
+        return {"result": await generated_menu.regenerate_and_push(
+            db, doc, current_user, force=True, expected=expected_collection_links)}
+    from ..services import generated_menu
+
+    data = await generated_menu.static_push_refusal(db, doc) or (await shopify_push.push_menu(db, doc)).to_dict()
     _write_audit(data, current_user)
     return {"result": data}
 
@@ -363,7 +374,28 @@ async def push_status(
         "counts": counts,
         # The scheduled live-product sync: settings, last run, next IST slot.
         "live_sync": live_sync.status_block(db),
+        # The self-maintaining website menu(s): last generate / push.
+        "generated_menus": _generated_menu_status(db),
     }
+
+
+def _generated_menu_status(db) -> Optional[List[Dict[str, Any]]]:
+    """{handle, title, last_generated_at, last_pushed_at, last_push, in_sync,
+    item / hidden counts} per generated menu. A failed read is None (the
+    Sync card shows nothing), never [] -- that reads as "no menu set up"."""
+    try:
+        from ..services import generated_menu
+
+        out = []
+        for doc in generated_menu.generated_menus(db):
+            st = generated_menu.status(doc)
+            st["item_count"] = len(st.pop("items") or [])
+            st["hidden_count"] = len(st.pop("hidden") or [])
+            st.pop("template", None)
+            out.append(st)
+        return out
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _audit_collection_is_real_mongo(audit) -> bool:
@@ -829,36 +861,91 @@ async def push_all_pending(
         if start + processed < eligible_total:
             next_offset = start + processed
 
+    # ONE strict read of the listings on the website, AFTER the product
+    # sweep above, for the collection registry, the membership view and the
+    # menu (collection_membership.online_facts): a collection exists only
+    # where the menu and the view count a product. Unreadable -> the three
+    # are skipped and reported (the last ones stand).
+    facts: Optional[List[Dict[str, Any]]] = None
+    facts_error: Optional[str] = None
+    if "collections" in selected or "menus" in selected:
+        from ..services import collection_membership
+
+        try:
+            facts = collection_membership.online_facts(db, strict=True)
+        except Exception as exc:  # noqa: BLE001 -- reported, never stops the sweep
+            logger.warning("[PUSH] listings unreadable: %s", exc)
+            facts_error = str(exc)
+
     collection_registry: Optional[Dict[str, Any]] = None
+    collections_left = False
+    collections_pushed: List[str] = []
     if "collections" in selected:
-        # THE IMS collection set (owner 2026-10-19), derived from the listings
-        # on the website AFTER the product sweep above, so a press that puts
-        # a brand's / shape's first product live queues its collection too.
+        # THE IMS collection set (owner 2026-10-19), so a press that puts a
+        # brand's / shape's first product live queues its collection too.
         # LIVE only: a dark press changes nothing.
         try:
             live, why = shopify_push._live_or_reason(db)
-            collection_registry = shopify_push.apply_collection_registry(db) if live else {"dark": why}
+            if facts_error is not None:
+                collection_registry = {"error": f"listings unreadable: {facts_error}"}
+            else:
+                collection_registry = shopify_push.apply_collection_registry(db, facts=facts) if live else {"dark": why}
         except Exception as exc:  # noqa: BLE001 -- reported, never stops the sweep
             logger.warning("[PUSH] collection registry skipped: %s", exc)
             collection_registry = {"error": str(exc)}
         for doc in _all_docs(db, "ecom_collections"):
-            if len(results) >= limit:
-                break
             if not doc.get("locally_modified"):
                 continue
+            if len(results) >= limit:
+                collections_left = True
+                break
             data = (await shopify_push.push_collection(db, doc)).to_dict()
             _write_audit(data, current_user)
             _tally("collections", data)
+            if data.get("ok") and data.get("mode") == shopify_push.MODE_LIVE and doc.get("handle"):
+                collections_pushed.append(doc["handle"])
 
     if "menus" in selected:
         for doc in _all_docs(db, "ecom_menus"):
             if len(results) >= limit:
                 break
+            if doc.get("generated"):
+                continue  # the generated menu is rebuilt + pushed below
             if not doc.get("locally_modified"):
                 continue
-            data = (await shopify_push.push_menu(db, doc)).to_dict()
+            from ..services import generated_menu as _gm
+
+            data = await _gm.static_push_refusal(db, doc) or (await shopify_push.push_menu(db, doc)).to_dict()
             _write_audit(data, current_user)
             _tally("menus", data)
+
+    generated_menus: Optional[Dict[str, Any]] = None
+    if collections_left:
+        # The sweep stopped at its limit with collections still queued: their
+        # new rules are not on Shopify yet, so the menu waits for them.
+        generated_menus = {"menus": [], "skipped": "collections still queued (limit reached) -- "
+                           "the menu is rebuilt once they are pushed"}
+    elif "menus" in selected or "collections" in selected:
+        # THE WEBSITE MENU (owner 2026-10-29): the membership view refreshed
+        # and the menu rebuilt from ONE strict read of the listings, pushed
+        # only when it changed.
+        try:
+            from ..services import collection_materializer, generated_menu
+
+            if facts_error is not None:
+                raise RuntimeError(facts_error)
+            if "collections" in selected:
+                try:
+                    collection_materializer.materialize_all(db, facts=facts)
+                except Exception as exc:  # noqa: BLE001 -- the last view stands
+                    logger.warning("[PUSH] membership view refresh failed: %s", exc)
+            # The collections this press just pushed: Shopify is still
+            # counting them, so the menu waits a run rather than trust a 0.
+            generated_menus = await generated_menu.sync_generated_menus(
+                db, current_user, facts=facts, fresh=collections_pushed)
+        except Exception as exc:  # noqa: BLE001 -- reported, never stops the sweep
+            logger.warning("[PUSH] generated menu skipped: %s", exc)
+            generated_menus = {"error": f"listings unreadable, the last pushed menu stands: {exc}"}
 
     if "images" in selected:
         for doc in _all_docs(db, "product_images"):
@@ -911,6 +998,7 @@ async def push_all_pending(
         # The collection registry for this press ({created, updated,
         # unchanged, skipped}), None when collections were not selected.
         "collection_registry": collection_registry,
+        "generated_menus": generated_menus,
         "results": results,
     }
 

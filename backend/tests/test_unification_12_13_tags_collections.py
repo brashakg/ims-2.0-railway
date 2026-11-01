@@ -224,27 +224,43 @@ def test_repo_get_tags_builds_unwind_group_pipeline(product_repo, monkeypatch):
 # ===========================================================================
 
 
+_LIVE = {"shopify_product_id": "gid://shopify/Product/1"}
+
+
+def _seed_listing(db, *, sku, category, brand, live=True, spine=True):
+    """A catalogue listing (what the push reads) + its spine doc. SMART
+    membership is THE website rule (services/collection_membership): the
+    rules over what the push SENDS (generated tags, productType, vendor) for
+    the listings ON the website -- so only a live listing can be a member."""
+    db["catalog_products"].insert_one({
+        "id": sku, "sku": sku, "category": category, "brand": brand, "mrp": 5000.0,
+        "attributes": {}, "ecom": dict(_LIVE) if live else {},
+    })
+    if spine:
+        _seed_product(db, sku=sku, category=category, brand=brand, tags=[])
+
+
 def _db_with_catalog():
     db = MockDatabase()
-    _seed_product(db, sku="RB-1", category="FRAME", brand="Ray-Ban",
-                  tags=["ray-ban", "frames"])
-    _seed_product(db, sku="SUN-1", category="SUNGLASS", brand="Gucci",
-                  tags=["gucci"])
-    _seed_product(db, sku="GZ-1", category="FRAME", brand="Gucci",
-                  tags=["gucci", "frames"])
+    _seed_listing(db, sku="RB-1", category="FRAME", brand="Ray-Ban")
+    _seed_listing(db, sku="SUN-1", category="SUNGLASS", brand="Gucci")
+    _seed_listing(db, sku="GZ-1", category="FRAME", brand="Gucci")
+    _seed_listing(db, sku="OFF-1", category="SUNGLASS", brand="Gucci", live=False)  # not on the website
     return db
 
 
 def test_smart_rule_tag_or_category_materialises_correct_membership():
-    """Rule: tag EQUALS ray-ban  OR  category EQUALS SUNGLASS (disjunctive).
-    RB-1 (tag) + SUN-1 (category) match; GZ-1 (gucci frame) does NOT."""
+    """Rule: tag EQUALS brand_rayban OR productType EQUALS Sunglass
+    (disjunctive), read as Shopify reads it over what the push sends.
+    RB-1 (tag) + SUN-1 (type) match; GZ-1 (Gucci frame) does NOT, and the
+    Gucci sunglass that is not on the website never counts."""
     db = _db_with_catalog()
     cid = _seed_collection(
         db,
         handle="rayban-or-sunglass",
         rules=[
-            {"field": "tag", "relation": "EQUALS", "value": "ray-ban"},
-            {"field": "category", "relation": "EQUALS", "value": "SUNGLASS"},
+            {"field": "tag", "relation": "EQUALS", "value": "brand_rayban"},
+            {"field": "product_type", "relation": "EQUALS", "value": "Sunglass"},
         ],
         disjunctive=True,
     )
@@ -258,8 +274,8 @@ def test_smart_rule_tag_or_category_materialises_correct_membership():
 
 
 def test_shopify_shape_rule_normalised_on_materialise():
-    """A Shopify-shape rule ({column:VENDOR, condition:Gucci}) resolves via the
-    on-the-fly normaliser -> the two Gucci products."""
+    """A Shopify-shape rule ({column:VENDOR, condition:Gucci}) is read as the
+    push sends it -> the two Gucci listings on the website."""
     db = _db_with_catalog()
     cid = _seed_collection(
         db,
@@ -278,7 +294,7 @@ def test_browse_pages_materialised_membership():
     cid = _seed_collection(
         db,
         handle="frames",
-        rules=[{"field": "tag", "relation": "EQUALS", "value": "frames"}],
+        rules=[{"field": "product_type", "relation": "EQUALS", "value": "Spectacles"}],
         disjunctive=True,
     )
     coll = db["ecom_collections"].find_one({"collection_id": cid})
@@ -302,13 +318,13 @@ def test_browse_lazy_materialises_on_first_read():
     cid = _seed_collection(
         db,
         handle="lazy",
-        rules=[{"field": "tag", "relation": "EQUALS", "value": "gucci"}],
+        rules=[{"field": "tag", "relation": "EQUALS", "value": "brand_gucci"}],
         disjunctive=True,
     )
     coll = db["ecom_collections"].find_one({"collection_id": cid})
     assert db["collection_products"].count_documents({"collection_id": cid}) == 0
     page = mat.browse(db, coll, skip=0, limit=10)
-    # gucci tag is carried by SUN-1 and GZ-1.
+    # brand_gucci is sent for SUN-1 and GZ-1 (OFF-1 is not on the website).
     assert page["total"] == 2
     assert {p["sku"] for p in page["products"]} == {"SUN-1", "GZ-1"}
 
@@ -331,25 +347,26 @@ def test_custom_collection_materialises_manual_membership_in_order():
     assert [r["sku"] for r in rows] == ["RB-1", "GZ-1"]  # position order honoured
 
 
-def test_refresh_for_product_recomputes_smart_membership():
-    """A newly-added product carrying the rule tag joins the SMART collection
-    after refresh_for_product (the canonical create/update hook)."""
+def test_the_live_sync_refresh_picks_up_a_new_listing():
+    """The view is a CACHE the live sync rebuilds every run
+    (materialize_all): a newly-live ray-ban listing joins on that refresh.
+    No per-product-save full refresh (it recomputed the whole catalogue on
+    every save)."""
     db = _db_with_catalog()
     cid = _seed_collection(
         db,
         handle="ray-ban",
-        rules=[{"field": "tag", "relation": "EQUALS", "value": "ray-ban"}],
+        rules=[{"field": "tag", "relation": "EQUALS", "value": "brand_rayban"}],
         disjunctive=True,
     )
     coll = db["ecom_collections"].find_one({"collection_id": cid})
     mat.materialize_collection(db, coll)
     assert {r["sku"] for r in db["collection_products"].find({"collection_id": cid})} == {"RB-1"}
 
-    # New ray-ban product arrives; the create-hook refreshes SMART collections.
-    _seed_product(db, sku="RB-2", category="FRAME", brand="Ray-Ban",
-                  tags=["ray-ban"])
-    mat.refresh_for_product(db, {"sku": "RB-2"})
+    _seed_listing(db, sku="RB-2", category="FRAME", brand="Ray-Ban")
+    mat.materialize_all(db)
     assert {r["sku"] for r in db["collection_products"].find({"collection_id": cid})} == {"RB-1", "RB-2"}
+    assert not hasattr(mat, "refresh_for_product")
 
 
 def test_rule_change_recomputes_membership():
@@ -357,7 +374,7 @@ def test_rule_change_recomputes_membership():
     cid = _seed_collection(
         db,
         handle="switch",
-        rules=[{"field": "tag", "relation": "EQUALS", "value": "ray-ban"}],
+        rules=[{"field": "tag", "relation": "EQUALS", "value": "brand_rayban"}],
         disjunctive=True,
     )
     coll = db["ecom_collections"].find_one({"collection_id": cid})
@@ -367,7 +384,7 @@ def test_rule_change_recomputes_membership():
     # Rule edited to target gucci instead; refresh_collection recomputes.
     db["ecom_collections"].update_one(
         {"collection_id": cid},
-        {"$set": {"rules": [{"field": "tag", "relation": "EQUALS", "value": "gucci"}]}},
+        {"$set": {"rules": [{"field": "tag", "relation": "EQUALS", "value": "brand_gucci"}]}},
     )
     mat.refresh_collection(db, cid)
     assert {r["sku"] for r in db["collection_products"].find({"collection_id": cid})} == {"SUN-1", "GZ-1"}
@@ -395,7 +412,6 @@ def test_empty_collection_browses_empty_not_error():
 
 def test_materialize_failsoft_no_db():
     assert mat.materialize_collection(None, {"collection_id": "x"}) == 0
-    assert mat.refresh_for_product(None, {}) == {}
     assert mat.refresh_collection(None, "x") == 0
     assert mat.browse(None, {"collection_id": "x"}) == {
         "products": [], "total": 0, "skip": 0, "limit": 24
@@ -416,7 +432,7 @@ def test_materialized_rows_carry_spine_product_id():
     cid = _seed_collection(
         db,
         handle="frames-pid",
-        rules=[{"field": "tag", "relation": "EQUALS", "value": "frames"}],
+        rules=[{"field": "product_type", "relation": "EQUALS", "value": "Spectacles"}],
         disjunctive=True,
     )
     coll = db["ecom_collections"].find_one({"collection_id": cid})
@@ -431,17 +447,11 @@ def test_materialized_rows_product_id_none_when_sku_not_on_spine():
     """A catalog_products-only member (no `products` spine doc) still
     materialises -- fail-soft with product_id None, never an error."""
     db = MockDatabase()
-    db["catalog_products"].insert_one(
-        {
-            "sku": "CAT-ONLY",
-            "category": "SUNGLASS",
-            "attributes": {"brand": "Prada"},
-        }
-    )
+    _seed_listing(db, sku="CAT-ONLY", category="SUNGLASS", brand="Prada", spine=False)
     cid = _seed_collection(
         db,
         handle="cat-only",
-        rules=[{"field": "category", "relation": "EQUALS", "value": "SUNGLASS"}],
+        rules=[{"field": "product_type", "relation": "EQUALS", "value": "Sunglass"}],
         disjunctive=True,
     )
     coll = db["ecom_collections"].find_one({"collection_id": cid})
@@ -454,8 +464,10 @@ def test_materialized_rows_product_id_none_when_sku_not_on_spine():
 
 
 def test_custom_collection_rows_also_carry_product_id():
-    """The CUSTOM (manual membership) write path denormalises product_id the
-    same way; an unresolvable sku writes product_id None (fail-soft)."""
+    """A CUSTOM collection is materialised by THE website rule too: its
+    manual members that are listings ON the website (a SKU with no listing
+    -- GHOST -- is on no website collection), each row carrying the
+    denormalised product_id."""
     db = _db_with_catalog()
     cid = _seed_collection(
         db,
@@ -464,30 +476,9 @@ def test_custom_collection_rows_also_carry_product_id():
         products=[{"sku": "RB-1", "position": 0}, {"sku": "GHOST", "position": 1}],
     )
     coll = db["ecom_collections"].find_one({"collection_id": cid})
-    assert mat.materialize_collection(db, coll) == 2
+    assert mat.materialize_collection(db, coll) == 1
     rows = {r["sku"]: r for r in db["collection_products"].find({"collection_id": cid})}
-    assert rows["RB-1"]["product_id"] == "RB-1"
-    assert rows["GHOST"]["product_id"] is None
-
-
-def test_all_products_scan_cap_does_not_starve_spine(monkeypatch):
-    """When catalog_products ALONE exceeds _SCAN_MAX, the `products` spine loop
-    must still contribute (per-source budget). The old break only fired inside
-    the spine loop, so a big catalog scanned unbounded AND killed the spine
-    loop after one doc -- governed tags silently vanished from the rule
-    engine's view."""
-    monkeypatch.setattr(mat, "_SCAN_MAX", 5)
-    db = MockDatabase()
-    for i in range(10):  # catalog alone exceeds the (patched) cap
-        db["catalog_products"].insert_one({"sku": f"CAT-{i}", "category": "FRAME"})
-    db["products"].insert_one({"sku": "SP-1", "product_id": "SP-1", "tags": ["a"]})
-    db["products"].insert_one({"sku": "SP-2", "product_id": "SP-2", "tags": ["b"]})
-
-    skus = {d["sku"] for d in mat._all_products(db)}
-    # Spine NOT starved: both spine docs present.
-    assert "SP-1" in skus and "SP-2" in skus
-    # Cap bounds the catalog scan (was unbounded in the first loop).
-    assert sum(1 for s in skus if s.startswith("CAT-")) == 5
+    assert set(rows) == {"RB-1"} and rows["RB-1"]["product_id"] == "RB-1"
 
 
 def test_products_by_sku_spine_wins_over_catalog_row(monkeypatch):
@@ -495,7 +486,7 @@ def test_products_by_sku_spine_wins_over_catalog_row(monkeypatch):
     `products` spine doc over a catalog_products doc with the SAME sku --
     catalog rows carry neither images nor product_id, so a catalog row
     shadowing the spine renders image-less member rows with a wrong id
-    (spine-wins is the convention everywhere else: _all_products,
+    (spine-wins is the convention everywhere else:
     catalogue_pdf._detail_by_sku)."""
     from api.routers import online_store_collections as osc
 
