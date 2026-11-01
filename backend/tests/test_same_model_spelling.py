@@ -123,6 +123,7 @@ def _found(typed, stored, category="SUNGLASS", brand="Ray-Ban", stored_brand=Non
         ("RAYBANRB4345", "RB4345"),  # a glued brand #1271 leaves whole
         ("0840", "0840S"),  # a sunglass's trailing S
         ("0840S", "0840"),
+        ("OAKLEYXLOO9417", "XL OO9417"),  # both carry XL: the same Holbrook XL
     ],
 )
 def test_the_same_model_in_another_spelling_is_found(typed, stored):
@@ -147,6 +148,8 @@ def test_carduc_against_bare_digits_is_found_as_a_soft_warning():
         ("OO9417", "XL OO9417", "Oakley"),
         ("XL9417", "9417", "Oakley"),  # XL alone vs bare digits
         ("9417", "XL9417", "Oakley"),
+        ("OAKLEYXLOO9417", "OO9417", "Oakley"),  # a glued brand keeps XL a size marker
+        ("OO9417", "OAKLEYXLOO9417", "Oakley"),
     ],
 )
 def test_different_models_stay_apart(typed, stored, brand):

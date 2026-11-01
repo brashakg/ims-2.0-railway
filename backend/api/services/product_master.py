@@ -1768,12 +1768,12 @@ def _model_shape(category: str, model_part: str) -> Optional[Tuple[str, str]]:
 def _prefixes_fit(a: str, b: str) -> bool:
     """Two letter prefixes name one model: equal, one empty (RB4345 / 4345),
     or the shorter (2+ letters) ends the longer (RAYBANRB / RB).
-    RJ / RB, MARC / MJ and SPLL / SPLN stay apart, and so does a leading XL
+    RJ / RB, MARC / MJ and SPLL / SPLN stay apart, and so does an XL
     size marker (XLOO / OO, XL / bare digits: owner 2026-11-02)."""
     if a == b:
         return True
     short, long_ = sorted((a, b), key=len)
-    if long_ == "xl" + short:
+    if long_.endswith("xl" + short):  # OAKLEYXLOO glues the brand on
         return False
     return not short or (len(short) >= 2 and long_.endswith(short))
 
