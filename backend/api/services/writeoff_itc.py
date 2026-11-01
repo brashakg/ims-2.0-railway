@@ -20,10 +20,10 @@ ONE rule for every write-off door:
   - how much: a bill line's heads H shared over its q pieces cumulatively --
     piece k gets round(H*k/q) - round(H*(k-1)/q) -- so a whole line written
     off reverses exactly H. A header-only bill (or a transfer's aggregate
-    line) shares its heads the same way, by the fraction of the bill each
-    piece is (its cost / the bill's taxable value, else 1 / the pieces the
-    bill brought in), summed over the bill's rows: the whole bill written
-    off reverses exactly its heads.
+    line) shares its heads the same way, by the fraction of the receipt each
+    piece is (its cost / the sum of the receipt's unit costs; when any unit
+    is unpriced, 1 / the pieces the bill brought in), summed over the bill's
+    rows: the whole bill written off reverses exactly its heads.
   - when: the write-off's IST month; a locked (filed) month moves it to the
     first open month, the original kept as `writeoff_period`.
   - month_reversal(db, gstin, period): what GSTR-3B Table 4(B)(1) adds.
@@ -119,17 +119,26 @@ def _bills_for(db, unit: dict) -> list:
                                             {"linked_dc_ids": {"$in": rids}}]}))
 
 
-def _bill_units(db, bill: dict) -> int:
-    """How many pieces the bill's receipt (or transfer) brought in."""
+def _bill_unit_costs(db, bill: dict) -> list:
+    """(cost, pieces) of every unit the bill's receipt (or transfer) brought
+    in; cost 0 when the unit carries no price."""
     if bill.get("source_transfer_id"):
         tid = bill["source_transfer_id"]
-        q = {"$or": [{"source_type": "TRANSFER", "source_id": tid}, {"transfer_id": tid}]}
+        # A piece that moved on since (_rehome restamps source_id) is still
+        # listed on this transfer's lines.
+        listed = [s for t in db.get_collection("stock_transfers").find({"id": tid}, {"items": 1})
+                  for it in t.get("items") or []
+                  for s in (it.get("received_stock_ids") or []) + (it.get("damaged_stock_ids") or [])]
+        q = {"$or": [{"source_type": "TRANSFER", "source_id": tid}, {"transfer_id": tid},
+                     {"stock_id": {"$in": listed}}]}
     else:
         rids = [r for r in [bill.get("grn_id"), *(bill.get("linked_dc_ids") or [])] if r]
         if not rids:
-            return 0
+            return []
         q = {"$or": [{"grn_id": {"$in": rids}}, {"source_type": "GRN", "source_id": {"$in": rids}}]}
-    return db.get_collection("stock_units").count_documents(q)
+    return [(_f(u.get("unit_cost")) or _f(u.get("cost_price")), _pieces(u))
+            for u in db.get_collection("stock_units").find(
+                q, {"unit_cost": 1, "cost_price": 1, "quantity": 1})]
 
 
 def _pieces(unit: dict) -> float:
@@ -185,8 +194,8 @@ def _unit_credit(db, unit: dict, gstin_of) -> Optional[dict]:
         amount = _cumulative(heads, min(done, qty), min(done + n, qty), qty)
     else:
         # A header-only bill, or one whose lines name no product (a transfer's
-        # aggregate line): its GST shared cumulatively by the piece's cost,
-        # else equally over the pieces it brought in.
+        # aggregate line): its GST shared cumulatively by the piece's share
+        # of the receipt's cost, else equally over the pieces it brought in.
         amount = None
         for bill in bills:
             lines = bill.get("lines") or []
@@ -196,8 +205,14 @@ def _unit_credit(db, unit: dict, gstin_of) -> Optional[dict]:
             g = gstin_of(bill)
             if taxable <= 0 or g is None:
                 continue
+            # The piece's fraction of the receipt's OWN cost (a freight line
+            # or a bill discount leaves that apart from the bill's taxable
+            # value); any unpriced piece: an equal share each, never a mix.
             price = _f(unit.get("unit_cost")) or _f(unit.get("cost_price"))
-            share = (price / taxable if price else 1.0 / max(_bill_units(db, bill), 1)) * n
+            costs = _bill_unit_costs(db, bill)
+            base = sum(c * q for c, q in costs) if costs and all(c for c, _q in costs) else 0.0
+            share = (price / base if price and base else
+                     1.0 / max(sum(q for _c, q in costs), 1.0)) * n
             done = _share_recorded(db, bill.get("bill_id"))
             amount = _cumulative({h: _f(bill.get(f"{h}_total")) for h in _HEADS},
                                  min(done, 1.0), min(done + share, 1.0))

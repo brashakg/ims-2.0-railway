@@ -847,6 +847,13 @@ async def set_vendor_bill_itc_blocked(
             # ponytail: a challan bill's moving average keeps the GST until
             # its next bill (logged by the review: DC moving-average blend).
             _true_up_header_bill(db, {**bill, **update, "invoice_id": bill_id}, linked)
+        # The bill now claims credit on pieces written off while it was
+        # ticked (they reversed nothing then): reverse them, in the bill's
+        # month -- the month the credit lands. Once per piece, so repeat-safe.
+        from ...services.writeoff_itc import after_bill_booked
+
+        after_bill_booked(db, bills.find_one({"bill_id": bill_id}) or {**bill, **update},
+                          current_user.get("user_id") or "")
     try:
         repo = get_audit_repository()
         if repo is not None:

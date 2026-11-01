@@ -636,3 +636,80 @@ def test_a_piece_shipped_back_to_the_supplier_drops_a_leftover_reversal(world, o
     assert vr._ship_pieces(db, {"return_id": "VR-23", "store_id": STORE, "stock_ids": [sid]}, "u-admin") == []
     assert db.itc_writeoff_reversals.count_documents({}) == 0
     assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Review round 3: a header-only bill shares its GST by the receipt's own
+# costs; unticking 17(5) after a write-off reverses the lost pieces
+# ---------------------------------------------------------------------------
+
+def _frames_costing(db, grn_id, costs, taxable):
+    """Three frames on one receipt at `costs` (0: no price), billed on a
+    header-only bill: `taxable`, Rs 25.00 CGST + 25.00 SGST."""
+    _three_frames(db, grn_id, 1.0)
+    for i, cost in enumerate(costs):
+        priced = {"unit_cost": cost, "cost_price": cost} if cost else {}
+        db.stock_units.update_one({"stock_id": f"SU-{grn_id}-{i}"},
+                                  {"$unset": {"unit_cost": "", "cost_price": ""}})
+        if priced:
+            db.stock_units.update_one({"stock_id": f"SU-{grn_id}-{i}"}, {"$set": priced})
+    db.vendor_bills.insert_one({
+        "bill_id": f"HB-{grn_id}", "bill_number": f"HB-{grn_id}", "vendor_id": DEALER,
+        "store_id": STORE, "grn_id": grn_id, "bill_date": "2026-09-14", "status": "OUTSTANDING",
+        "recipient_entity_id": ENTITY, "recipient_gstin": SHOP_GSTIN, "itc_eligible": True,
+        "taxable_amount": taxable, "cgst_total": 25.0, "sgst_total": 25.0, "igst_total": 0.0,
+        "tax_amount": 50.0,
+    })
+
+
+def _rows_of(db, grn_id):
+    return [(r["cgst"], r["sgst"]) for r in db.itc_writeoff_reversals.find(
+        {"stock_id": {"$regex": f"^SU-{grn_id}-"}}).sort("stock_id", 1)]
+
+
+@pytest.mark.parametrize("costs,taxable,written_off,expected", [
+    # Freight on the bill: the pieces cost Rs 900 of a Rs 1,000 bill. The
+    # whole receipt written off still reverses exactly the bill's heads.
+    ([300.0, 300.0, 300.0], 1000.0, 3, [(8.33, 8.33), (8.34, 8.34), (8.33, 8.33)]),
+    # A bill discount: the pieces kept their Rs 400 PO price. One piece is a
+    # third of the receipt, not 400/1000 of the bill.
+    ([400.0, 400.0, 400.0], 1000.0, 1, [(8.33, 8.33)]),
+    # Unequal costs: each piece's share follows its cost.
+    ([666.66, 222.22, 111.11], 999.99, 3, [(16.67, 16.67), (5.55, 5.55), (2.78, 2.78)]),
+    # One piece unpriced: no cost base, so every piece shares equally.
+    ([900.0, 0, 0], 1000.0, 1, [(8.33, 8.33)]),
+], ids=["costs-below-taxable", "costs-above-taxable", "unequal-costs", "one-unpriced"])
+def test_a_header_only_bill_shares_its_gst_by_the_receipts_own_costs(
+        world, october, costs, taxable, written_off, expected):
+    db = world["db"]
+    _frames_costing(db, "GRN-WO-0031", costs, taxable)
+    for i in range(written_off):
+        _damage(db, f"SU-GRN-WO-0031-{i}")
+    assert _rows_of(db, "GRN-WO-0031") == expected
+    ret = r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]
+    assert (ret["centralTax"], ret["stateTax"]) == tuple(round(sum(r[k] for r in expected), 2)
+                                                          for k in (0, 1))
+
+
+def test_unticking_17_5_after_a_write_off_reverses_the_lost_piece(world, october):
+    """A walk-in bill booked with the 17(5) tick claims no credit, so a piece
+    damaged meanwhile reverses nothing. Unticked while September is open,
+    the bill claims Rs 373 in September: the lost piece's share of it is
+    reversed there too."""
+    from tests.test_gst_input_credit_one_rule import _tick
+    from tests.test_receipt_without_po import _on_the_shelf
+
+    db = world["db"]
+    walk_in = _on_the_shelf(world, vendor_invoice_no="GIFT-1")
+    gift = vd.VendorBillCreate(bill_number="GIFT-1", bill_date="2026-09-14", taxable_amount=7460.0,
+                               tax_amount=373.0, total_amount=7833.0, grn_id=walk_in, itc_blocked=True)
+    booked = _run(vd.create_vendor_bill(DEALER, gift, current_user=ACCOUNTANT))
+    unit = db.stock_units.find_one({"grn_id": walk_in, "product_id": FRAME})
+    assert _damage(db, unit["stock_id"])["itc_reversed"]["total"] == 0.0
+    assert _tick(booked, False)["itc_eligible"] is True
+    sept = r3b._compute_gstr3b(MONTH, STORE)
+    # Rs 373 claimed; the lost Rs 3,100 frame's share (3100/7460) reversed,
+    # so the net credit is 373 - 155.
+    assert (_written_off(sept), _heads(sept["itcAvailable"])) == (155.0, 218.0)
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 0.0
+    assert db.itc_writeoff_reversals.count_documents({"period": MONTH}) == 1
