@@ -680,3 +680,68 @@ def test_the_backfill_averages_held_pieces_only_walk_ins_included_and_leaves_pro
     assert bf.carry_over_candidates(db) == []
     assert bf.apply(db, list(rows.values()), "RUN9") == 1
     assert db.products.find_one({"product_id": "PROV"}).get("cost_history") is None
+
+
+# --------------------------------------------------------------------------
+# Fix round 2 (S4): the backfill under the owner's 2026-11-01 rulings.
+# --------------------------------------------------------------------------
+
+
+def test_a_po_rate_cost_already_billed_before_s4_blends_with_the_first_s4_bill():
+    """Before S4 a GST-claiming header bill on a PO receipt left the product at
+    its PO rate (cost_source GRN_PO, no history). That cost IS billed: the
+    backfill carries it over, so the first S4 bill BLENDS with the 10 old
+    pieces: (10 x 400 + 5 x 500) / 15 = 433.33 -- not 500. A PO rate no bill
+    ever priced stays provisional."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(400.0, cost_source="GRN_PO")
+    _receipt(db, "G0", 10)
+    _pieces(db, 10, "G0")
+    db.vendor_bills.insert_one({"bill_id": "OLD", "grn_id": "G0", "status": "PAID", "itc_eligible": True})
+    assert "billed before S4" in bf.plan(db)[0]["reason"]
+    bf.apply(db, bf.plan(db), "RUN1")
+    (row,) = db.products.find_one({})["cost_history"]
+    assert (row["kind"], row["new_cost"]) == ("CARRIED_OVER", 400.0)
+    _receipt(db, "G1", 5)
+    _pieces(db, 5, "G1")
+    _accept(db, _bill("B", 5, 500, grn_id="G1", created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == 433.33
+
+    unbilled = _db(400.0, cost_source="GRN_PO")
+    _receipt(unbilled, "G0", 10)
+    _pieces(unbilled, 10, "G0")
+    unbilled.vendor_bills.insert_one({"bill_id": "HOLD", "grn_id": "G0", "status": "OUTSTANDING",
+                                      "match_status": "ON_HOLD_EXCEPTION"})
+    assert bf.carry_over_candidates(unbilled) == []
+    assert "provisional" in bf.plan(unbilled)[0]["reason"]
+
+
+def test_the_backfill_re_averages_a_pre_s4_walk_in_latest_price():
+    """From 2026-10-12 main costed a walk-in bill at the LATEST price: 10 held
+    pieces at 100, a walk-in bill for 1 at 200 left the average at 200. Under
+    ruling (b) walk-ins average in: the dry run shows (10 x 100 + 1 x 200) /
+    11 = 109.09, --apply writes it (backed up), --revert puts 200 back."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(200.0, cost_source="PURCHASE_INVOICE", cost_source_id="INV-W1")
+    _receipt(db, "G1", 10)
+    _receipt(db, "G2", 1, grn_subtype="NO_PO")
+    _pieces(db, 10, "G1")
+    _pieces(db, 1, "G2")
+    db.stock_units.update_many({"grn_id": "G1"}, {"$set": {"unit_cost": 100.0}})
+    db.stock_units.update_many({"grn_id": "G2"}, {"$set": {"unit_cost": 200.0}})
+    db.vendor_bills.insert_one({"bill_id": "INV-W1", "invoice_id": "INV-W1", "grn_id": "G2",
+                                "status": "PAID", "match_status": "MATCHED"})
+    (row,) = bf.plan(db)
+    assert row["fill"] == 109.09 and "walk-in" in row["reason"]
+    assert _avg(db) == 200.0  # the dry run writes nothing
+    assert bf.apply(db, [row], "RUN5") == 1
+    product = db.products.find_one({})
+    assert product["cost_price"] == 109.09
+    (hist,) = product["cost_history"]
+    assert (hist["kind"], hist["old_cost"], hist["new_cost"]) == ("BACKFILL", 200.0, 109.09)
+    assert bf.plan(db)[0]["fill"] is None  # a re-run finds nothing left
+    assert bf.revert(db, "RUN5") == 1
+    product = db.products.find_one({})
+    assert (product["cost_price"], product["cost_history"]) == (200.0, [])

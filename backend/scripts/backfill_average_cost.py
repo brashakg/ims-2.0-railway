@@ -25,13 +25,21 @@ WHAT IT DOES
       (b) a walk-in (no-PO) receipt's pieces are averaged in at their price
           like every other receipt's -- no "latest price paid" replaces the
           average.
+  * A product whose average came from a pre-S4 WALK-IN bill (main costed
+    those at the latest price from 2026-10-12) is re-averaged from its held
+    pieces' own costs under (a) and (b), a 'BACKFILL' row (backed up, revert
+    puts the old average back); if a piece has no cost it is flagged to check
+    by hand instead.
   * A product that already has an average but an EMPTY cost history (its
     average is from before S4) gets one 'Carried over' row (kind
     CARRIED_OVER: old none, new = its average, source = its cost_source) so
     the product page never shows an average with "no bill yet". The average
     itself is not changed. A PROVISIONAL cost (a PO or receipt rate,
     product_cost.provisional) is NOT carried over: it stays provisional, so
-    its first real bill replaces it instead of blending with it.
+    its first real bill replaces it instead of blending with it -- unless a
+    pre-S4 bill was ACCEPTED on a held piece's receipt (a GST-claiming header
+    bill on a PO receipt left the PO rate as the cost): that cost is billed,
+    so it IS carried over and the first S4 bill blends with it.
   * Every accepted goods receipt that no S4 bill has costed is stamped
     `costed_before_s4: <run id>` (product_cost.PRE_S4_STAMP; only receipts
     accepted before the first S4 bill -- run it right after the deploy): its pieces
@@ -70,6 +78,7 @@ from typing import Dict, List, Optional
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.services import product_cost, stock_value  # noqa: E402
+from api.services.ap_engine import GRN_SUBTYPE_NO_PO  # noqa: E402
 from api.utils.event_time import utc_now_iso  # noqa: E402
 
 BACKUPS = "backfill_average_cost_backups"
@@ -99,23 +108,69 @@ def plan(db) -> List[dict]:
         average = stock_value.average_cost(prod)
         pieces = sum(stock_value._pieces(u) for u in units)
         old_value = sum(stock_value._pieces(u) * (own_cost(u) or average) for u in units)
-        fill = None
+        fill = recost = check = None
         reason = "has an average" if average else ""
+        mine = _from_pieces(units, pieces)
         if product_cost.provisional(prod):
-            reason = "provisional (a PO / receipt rate): its first bill replaces it"
+            reason = ("provisional source, but billed before S4: carried over as its average"
+                      if billed_before_s4(db, units) else
+                      "provisional (a PO / receipt rate): its first bill replaces it")
         elif not average:
-            if all(own_cost(u) for u in units):
-                total = sum(Decimal(str(stock_value._pieces(u))) * Decimal(str(own_cost(u))) for u in units)
-                fill = float((total / Decimal(str(pieces))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
-                reason = "filled from its pieces"
-            else:
-                reason = "some pieces have no cost: left for a bill or a correction"
+            fill = mine
+            reason = ("filled from its pieces" if mine is not None
+                      else "some pieces have no cost: left for a bill or a correction")
+        elif _walk_in_latest_price(db, prod):
+            if mine is None:
+                check = "average is a pre-S4 walk-in latest price and some pieces have no cost"
+            elif mine != average:
+                fill, recost = mine, average
+                reason = "pre-S4 walk-in latest price: re-averaged from its held pieces (ruling b)"
         rows.append({
             "product_id": pid, "sku": prod.get("sku"), "pieces": pieces, "average": average or None,
             "value_s4": stock_value.value(pieces, prod), "value_before": round(old_value, 2),
-            "fill": fill, "reason": reason, "check": _suspect(db, prod),
+            "fill": fill, "recost": recost, "reason": reason, "check": check or _suspect(db, prod),
         })
     return rows
+
+
+def _from_pieces(units: List[dict], pieces: float) -> Optional[float]:
+    """The held pieces' weighted average of their own costs (rulings (a), (b)),
+    None when any has none."""
+    if not pieces or not all(own_cost(u) for u in units):
+        return None
+    total = sum(Decimal(str(stock_value._pieces(u))) * Decimal(str(own_cost(u))) for u in units)
+    return float((total / Decimal(str(pieces))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _source_bill(db, prod: dict) -> dict:
+    sid = prod.get("cost_source_id")
+    if not sid:
+        return {}
+    return db["vendor_bills"].find_one({"$or": [{"bill_id": sid}, {"invoice_id": sid}]}, {"_id": 0}) or {}
+
+
+def _walk_in_latest_price(db, prod: dict) -> bool:
+    """Its average came from a pre-S4 walk-in (no-PO) bill: from 2026-10-12
+    main costed one at the LATEST price, not averaged (ruling (b) reverses it)."""
+    if prod.get("cost_source") != "PURCHASE_INVOICE":
+        return False
+    gid = _source_bill(db, prod).get("grn_id")
+    receipt = db["grns"].find_one({"grn_id": gid}, {"_id": 0, "grn_subtype": 1}) if gid else None
+    return (receipt or {}).get("grn_subtype") == GRN_SUBTYPE_NO_PO
+
+
+def billed_before_s4(db, units: List[dict]) -> bool:
+    """A held piece's receipt carries an ACCEPTED pre-S4 bill (no cost_state):
+    before S4 a GST-claiming header bill on a PO receipt left the PO rate as
+    the cost (no true-up), so that provisional-looking cost IS billed."""
+    ids = list({product_cost._receipt_of(u) for u in units} - {None})
+    if not ids:
+        return False
+    return any(
+        b.get("cost_state") is None and product_cost.bill_accepted(b)
+        for b in db["vendor_bills"].find({"$or": [{"grn_id": {"$in": ids}}, {"linked_dc_ids": {"$in": ids}}]},
+                                         {"_id": 0})
+    )
 
 
 def _suspect(db, prod: dict) -> Optional[str]:
@@ -123,9 +178,7 @@ def _suspect(db, prod: dict) -> Optional[str]:
     None: it came from a bill still on hold, or from a delivery-challan bill
     (the old rule counted a challan's pieces twice)."""
     bill_id = prod.get("cost_source_id")
-    if not bill_id:
-        return None
-    bill = db["vendor_bills"].find_one({"bill_id": bill_id}, {"_id": 0}) or {}
+    bill = _source_bill(db, prod)
     if bill.get("match_status") == "ON_HOLD_EXCEPTION":
         return f"average from bill {bill.get('bill_number') or bill_id}, still on hold"
     if bill.get("linked_dc_ids"):
@@ -135,11 +188,16 @@ def _suspect(db, prod: dict) -> Optional[str]:
 
 def carry_over_candidates(db) -> List[dict]:
     """Products with an average but no cost history (an average from before
-    S4)."""
-    return [
-        p for p in db["products"].find({"cost_price": {"$gt": 0}}, {"_id": 0})
-        if product_cost.average(p) and not p.get("cost_history")
-    ]
+    S4) -- a provisional-source one too when a pre-S4 bill priced it
+    (billed_before_s4)."""
+    out = []
+    for p in db["products"].find({"cost_price": {"$gt": 0}}, {"_id": 0}):
+        if p.get("cost_history"):
+            continue
+        if product_cost.average(p) or (product_cost.provisional(p) and billed_before_s4(db, [
+                u for u in db["stock_units"].find({"product_id": p.get("product_id")}) if product_cost._held(u)])):
+            out.append(p)
+    return out
 
 
 def legacy_receipts(db) -> List[str]:
@@ -188,6 +246,17 @@ def carry_over(db, prod: dict, key: str) -> Optional[dict]:
     return row if done.modified_count else None
 
 
+def _recost(db, pid: str, cost: float, expected: float, key: str) -> Optional[dict]:
+    """Re-average a pre-S4 walk-in latest price (one guarded write, only while
+    the average is still the one the dry run read)."""
+    return product_cost._move(
+        db, pid, key,
+        lambda _prod, old: (cost, {}) if product_cost._paise(product_cost._d(old)) == expected else None,
+        {"kind": "BACKFILL", "source": "BACKFILL", "by": ACTOR,
+         "reason": "pre-S4 walk-in latest price re-averaged (owner 2026-11-01 (b))"},
+    )
+
+
 def apply(db, rows: List[dict], run_id: str) -> int:
     key = f"backfill:{run_id}"
     done = 0
@@ -195,7 +264,10 @@ def apply(db, rows: List[dict], run_id: str) -> int:
         if row["fill"] is None:
             continue
         _backup(db, run_id, row["product_id"])
-        written = product_cost.seed(db, row["product_id"], row["fill"], key=key, kind="BACKFILL", actor=ACTOR)
+        if row.get("recost") is not None:
+            written = _recost(db, row["product_id"], row["fill"], row["recost"], key)
+        else:
+            written = product_cost.seed(db, row["product_id"], row["fill"], key=key, kind="BACKFILL", actor=ACTOR)
         if written:
             db[BACKUPS].update_one({"run_id": run_id, "product_id": row["product_id"]},
                                    {"$set": {"written": written["new_cost"]}})
@@ -278,7 +350,7 @@ def main(argv: Optional[List[str]] = None) -> int:
           "(b) walk-in pieces averaged in like any receipt's")
     print(f"total value S4 {sum(r['value_s4'] for r in rows):.2f}, "
           f"before {sum(r['value_before'] for r in rows):.2f}; "
-          f"{sum(1 for r in rows if r['fill'] is not None)} product(s) to fill; "
+          f"{sum(1 for r in rows if r['fill'] is not None)} product(s) to fill or re-average; "
           f"{len(carry_over_candidates(db))} average(s) to carry over into the history; "
           f"{len(legacy_receipts(db))} receipt(s) to mark as costed before S4; "
           f"{sum(1 for r in rows if r.get('check'))} product(s) for accounts to check by hand")

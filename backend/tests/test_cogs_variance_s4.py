@@ -14,6 +14,7 @@ import copy
 from datetime import timedelta
 
 import mongomock
+import pytest
 
 from api.routers import purchase_invoices as pi
 from api.services import product_cost
@@ -134,8 +135,9 @@ def test_a_variance_row_a_crash_lost_is_written_by_the_sweeper_once():
 
 
 def _variances():
+    split = [{"key": "FR", "amount": 60.0}]
     return [{"variance_id": "B:P", "amount": 60.0, "store_id": "S1", "category": "FR",
-             "day": ist_today().isoformat()}]
+             "by_item_type": split, "by_category": split, "day": ist_today().isoformat()}]
 
 
 def test_finance_pnl_readers_include_the_variance(monkeypatch):
@@ -186,3 +188,155 @@ def test_reports_margin_readers_include_the_variance(monkeypatch):
     assert cats["total_profit"] == 740.0
     stores = asyncio.run(growth.profit_by_store(from_date=f, to_date=t, current_user=SU))
     assert (stores["data"][0]["cost"], stores["total_profit"]) == (1260.0, 740.0)
+
+
+# --------------------------------------------------------------------------
+# Fix round 2 (S4).
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("first", ([100.0, 100.0], [None, None]))
+def test_a_receipt_billed_in_two_parts_trues_up_its_own_pieces(first):
+    """Receipt G: 4 pieces, all sold, the lines froze `first` then 90, 90
+    (oldest first). B1 prices 2 at 100 (no variance: 0, or no frozen cost);
+    B2 prices 2 at 120. B1 still CLAIMS its two pieces, so B2 trues up its
+    own: 2 x (120 - 90) = 60 -- never the oldest two again."""
+    db = _db(100.0)
+    _receipt(db, "G", 4)
+    _sold(db, "G", first + [90.0, 90.0])
+    _accept(db, _bill("B1", 2, 100, grn_id="G", bill_date="2026-10-31"))
+    _accept(db, _bill("B2", 2, 120, grn_id="G", bill_date="2026-10-31"))
+    (var,) = db.cogs_variances.find({})
+    assert (var["bill_id"], var["amount"], sorted(var["stock_ids"])) == ("B2", 60.0, ["SG2", "SG3"])
+
+
+@pytest.mark.parametrize("status", ("QUARANTINED", "DAMAGED"))
+def test_a_billed_piece_still_ours_but_off_the_shelf_averages_in(status):
+    """10 old pieces at 100; receipt G brought 5: 3 on the shelf, 1 `status`
+    (still ours, not sold), 1 sold at a frozen 100. Bill 5 x 130 = 650, all
+    of it booked: 4 x 130 averaged in ((1000 + 520) / 14 = 108.57), the sold
+    piece 100 + its variance 30."""
+    db = _db(100.0)
+    _pieces(db, 10)
+    _receipt(db, "G", 5)
+    _pieces(db, 3, "G")
+    _pieces(db, 1, "G", status=status, prefix="Q")
+    _sold(db, "G", [100.0])
+    _accept(db, _bill("B", 5, 130, grn_id="G", bill_date="2026-10-31"))
+    assert _avg(db) == 108.57
+    (row,) = db.products.find_one({})["cost_history"]
+    assert (row["held"], row["variance"]["amount"]) == (4.0, 30.0)
+
+
+def test_a_billed_piece_written_off_before_its_bill_is_trued_up():
+    """As above, but the odd piece was WRITTEN OFF (stock count: VOID) at the
+    then average 100. Bill 650 = 3 x 130 averaged in + the sold piece (100 +
+    30) + the written-off piece (100 + 30): the variance is 60, its write-off
+    part named."""
+    db = _db(100.0)
+    _pieces(db, 10)
+    _receipt(db, "G", 5)
+    _pieces(db, 3, "G")
+    db.stock_units.insert_one({"stock_id": "W1", "product_id": "P", "store_id": "S1", "status": "VOID",
+                               "quantity": 1, "grn_id": "G", "voided_at": "2026-10-25T10:00:00+00:00"})
+    _sold(db, "G", [100.0])
+    _accept(db, _bill("B", 5, 130, grn_id="G", bill_date="2026-10-31"))
+    assert _avg(db) == 106.92
+    (var,) = db.cogs_variances.find({})
+    assert (var["amount"], var["pieces"], var["written_off"], sorted(var["stock_ids"])) == (60.0, 2, 1, ["SG0", "W1"])
+    assert 3 * 130 + (100 + 100) + var["amount"] == 650
+
+
+def test_the_variance_lands_in_the_category_each_reader_groups_by():
+    """A till line carries item_type LENS (billQuote mapCategory) and
+    category OPTICAL_LENS: /finance/pnl/by-category groups by item_type,
+    growth.profit_by_category by category -- the variance follows each."""
+    from api.routers.finance._shared import pnl_by_category
+
+    db = _db(500.0, category="OPTICAL_LENS")
+    _receipt(db, "G", 1)
+    db.stock_units.insert_one({"stock_id": "L1", "product_id": "P", "store_id": "S1", "status": "SOLD",
+                               "quantity": 1, "grn_id": "G", "order_id": "OL", "sold_at": "2026-10-20"})
+    db.orders.insert_one({"order_id": "OL", "items": [{"product_id": "P", "quantity": 1, "cost_at_sale": 500.0,
+                                                       "item_type": "LENS", "category": "OPTICAL_LENS"}]})
+    _accept(db, _bill("B", 1, 560, grn_id="G", bill_date="2026-10-31"))
+    assert product_cost.variance_by(db, "item_type") == {"LENS": 60.0}
+    assert product_cost.variance_by(db, "category") == {"OPTICAL_LENS": 60.0}
+    line = {"product_id": "P", "item_type": "LENS", "category": "OPTICAL_LENS", "quantity": 1,
+            "taxable_value": 1000.0, "cost_at_sale": 500.0}
+    (cat,) = pnl_by_category([{"items": [line]}], {}, product_cost.variance_by(db, "item_type"))
+    assert (cat["category"], cat["cogs"]) == ("LENS", 560.0)
+
+
+# The readers keep to their own shop and dates: one variance in scope (S1,
+# today), one last month, one at another shop. The frame line is till-shaped
+# (item_type FRAME, category FR): each reader takes the variance on its key.
+
+
+def _till_orders():
+    orders = _orders()
+    orders[0]["items"][0]["item_type"] = "FRAME"
+    return orders
+
+
+def _scoped_variances():
+    today = ist_today()
+    rows = []
+    for vid, amount, store, day in (("IN", 60.0, "S1", today), ("OLD", 7.0, "S1", today - timedelta(days=40)),
+                                    ("S2", 11.0, "S2", today)):
+        rows.append({"variance_id": vid, "amount": amount, "store_id": store, "category": "FR",
+                     "by_item_type": [{"key": "FRAME", "amount": amount}],
+                     "by_category": [{"key": "FR", "amount": amount}], "day": day.isoformat()})
+    return rows
+
+
+class _VarDb(_Db):
+    """_Db, with cogs_variances in mongomock (it honours the reader's filter)."""
+
+    def __init__(self, **colls):
+        super().__init__(**colls)
+        self.var = mongomock.MongoClient().v.cogs_variances
+        self.var.insert_many(_scoped_variances())
+
+    def get_collection(self, name):
+        return self.var if name == "cogs_variances" else super().get_collection(name)
+
+
+def test_every_reader_keeps_the_variance_to_its_shop_and_dates(monkeypatch):
+    from api.routers.finance import pnl as pnl_mod
+    from api.routers.finance import pnl_breakdown as pb
+    from api.routers.reports import customers as rc
+    from api.routers.reports import growth
+
+    f, t = (d.isoformat() for d in _period())
+    db = _VarDb(orders=_till_orders())
+    for mod in (pnl_mod, pb):
+        monkeypatch.setattr(mod, "_get_db", lambda: db)
+        monkeypatch.setattr(mod, "_cost_by_product", lambda _db: {})
+    monkeypatch.setattr(pnl_mod, "_payroll_cost", lambda *_a, **_k: 0.0)
+    monkeypatch.setattr(pnl_mod.je_service, "pnl_adjustments", lambda *_a, **_k: {})
+    pnl = asyncio.run(pnl_mod.get_pnl(store_id="S1", from_date=f, to_date=t, current_user=SU))
+    assert pnl["cogs_variance"] == 60.0
+
+    monkeypatch.setattr(pb, "_store_maps", lambda _db: ({"S1": "E1", "S2": "E2"}, {}))
+    monkeypatch.setattr(pb, "_payroll_by_store", lambda *_a, **_k: {})
+    monkeypatch.setattr(pb, "_store_name_map", lambda _db: {"S1": "Shop", "S2": "Two"})
+    stores = {r["store_id"]: r for r in asyncio.run(pb.get_pnl_by_store(
+        from_date=f, to_date=t, entity_id="E1", current_user=SU))["stores"]}
+    assert stores["S1"]["cogs"] == 1260.0 and "S2" not in stores
+    cats = {c["category"]: c for c in asyncio.run(pb.get_pnl_by_category(
+        from_date=f, to_date=t, store_id="S1", entity_id=None, current_user=SU))["categories"]}
+    assert cats["FRAME"]["cogs"] == 660.0 and "FR" not in cats
+
+    mdb = mongomock.MongoClient().r2
+    mdb.cogs_variances.insert_many(_scoped_variances())
+    for mod in (rc, growth):
+        monkeypatch.setattr(mod, "get_order_repository", lambda: _Repo(_till_orders()))
+        monkeypatch.setattr(mod, "get_db", lambda: mdb)
+    f, t = _period()
+    assert asyncio.run(rc.expense_vs_revenue(store_id="S1", from_date=f, to_date=t, current_user=SU))["cost"] == 1260.0
+    by_cat = asyncio.run(growth.profit_by_category(store_id="S1", from_date=f, to_date=t, current_user=SU))
+    assert {r["category"]: r["cost"] for r in by_cat["data"]} == {"FR": 660.0, "SG": 600.0}
+    acc = {"user_id": "a", "roles": ["ACCOUNTANT"], "active_store_id": "S1", "store_ids": ["S1"]}
+    by_store = asyncio.run(growth.profit_by_store(from_date=f, to_date=t, current_user=acc))
+    assert {r["store_id"]: r["cost"] for r in by_store["data"]} == {"S1": 1260.0}

@@ -505,7 +505,8 @@ def pnl_by_category(orders, cost_by_product: dict, variance_by_category: Optiona
     a product's cost is unknown. Includes cogs_is_estimated flag per category
     so the UI can mark estimates (SYSTEM_INTENT: never show fabricated numbers
     without flagging them). `variance_by_category`: the cost-of-goods
-    variance of pieces sold before their bill (product_cost.variance_by),
+    variance of pieces sold before their bill (product_cost.variance_by
+    keyed "item_type": the sold lines' item_type-or-category, as here),
     added to each category's COGS."""
     acc: dict = {}
     for cat, v in (variance_by_category or {}).items():

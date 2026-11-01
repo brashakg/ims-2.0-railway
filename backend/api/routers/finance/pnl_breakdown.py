@@ -181,7 +181,7 @@ async def get_pnl_by_category(
 
     orders = list(db.get_collection("orders").find(match, {"_id": 0, "items": 1}))
     cats = pnl_by_category(orders, _cost_by_product(db), product_cost.variance_by(
-        db, "category", store_ids=store_ids, from_day=from_date, to_day=to_date))
+        db, "item_type", store_ids=store_ids, from_day=from_date, to_day=to_date))
     # COGS and gross profit are worked out from product cost: the accounts
     # roles' only, as on GET /pnl and /reports/profit/by-category (owner ruling
     # 2026-10-12). The managers keep the revenue.

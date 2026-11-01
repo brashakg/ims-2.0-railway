@@ -11,7 +11,8 @@ The average moves only here:
   * a vendor bill is ACCEPTED (booked with no hold, or its hold approved):
         new = (basis x old average + value of the good pieces billed)
               / (basis + good pieces billed)
-    `basis` = the pieces we hold (shelf, reserved, on the way between shops)
+    `basis` = the pieces we hold (shelf, reserved, on the way between shops,
+    or off the shelf but still ours: quarantined, damaged, under a count)
     that a bill has already costed. Pieces of a receipt that still has
     unbilled pieces -- this bill's own receipt or delivery challans among
     them -- are left out: they carry the average only provisionally until
@@ -27,7 +28,10 @@ The average moves only here:
     sold, (bill price - the cost their sale line froze) x pieces is a
     COST-OF-GOODS VARIANCE, recorded once in the bill's history row and in
     `cogs_variances` (variance_by is THE reader the P&L / margin reports add
-    to their COGS).
+    to their COGS). A piece WRITTEN OFF before its bill is trued up the same
+    way, at (bill price - the average its write-off loss was taken at). Each
+    bill CLAIMS the gone pieces it took (history row `claimed`), even at no
+    variance, so a second bill on the same receipt takes the next ones.
   * accounts correct it, with a reason (correct()) -- the one correction
     door: the product and catalogue editors only type a FIRST cost
     (refuse_editor_cost).
@@ -113,10 +117,22 @@ def average(product: Optional[dict]) -> float:
     return 0.0 if provisional(product) else stock_value.average_cost(product)
 
 
+# Still ours, not sold (owner 2026-11-01: "still held"): off the shelf too --
+# quarantined, damaged, under audit or count -- it carries the average.
+_STILL_OURS = {StockState.QUARANTINED, StockState.DAMAGED, StockState.UNDER_AUDIT, StockState.BLIND_COUNT,
+               StockState.TRANSFERRED}
+
+
 def _held(unit: dict) -> bool:
-    """A piece we still hold: on the shelf, reserved, or on the way."""
+    """A piece we still hold: on the shelf, reserved, on the way, or off the
+    shelf but still ours (_STILL_OURS)."""
     raw = unit.get("status")
-    return is_on_hand(raw, include_reserved=True) or canonical_state(raw) is StockState.TRANSFERRED
+    return is_on_hand(raw, include_reserved=True) or canonical_state(raw) in _STILL_OURS
+
+
+def _written_off(unit: dict) -> bool:
+    """A piece written off (a stock count's shrinkage: VOID)."""
+    return canonical_state(unit.get("status")) is StockState.VOID
 
 
 def _receipt_of(unit: dict) -> Optional[str]:
@@ -304,7 +320,9 @@ def apply_bill(
             else:  # no average yet, only a provisional one, or nothing held at all
                 new = price
             if held < qty:
-                var = _variance(db, prod, pid, receipts, int(qty - held), val / qty)
+                claimed, var = _variance(db, prod, pid, receipts, int(qty - held), val / qty)
+                if claimed:  # even at no variance: a later bill on the receipt takes the next ones
+                    extra["claimed"] = claimed
                 if var:
                     extra["variance"] = var
             return new, extra
@@ -327,37 +345,77 @@ def apply_bill(
     return rows
 
 
-def _variance(db, prod: dict, pid: str, receipts, sold: int, unit: Decimal) -> Optional[dict]:
-    """The cost-of-goods variance of `sold` billed pieces no longer held, or
-    None: the bill's receipts' pieces of `pid` that left on a sale (oldest
-    sale first, none an earlier bill's variance took), each at (bill unit
-    price - its sale line's cost_at_sale). A sale line with no frozen cost is
-    read at the product's live cost by the COGS readers: no variance for it."""
+def _average_at(prod: dict, at) -> float:
+    """The average in force at instant `at` (it moves only at a history row)."""
+    rows = sorted(prod.get("cost_history") or [], key=lambda r: str(r.get("at") or ""))
+    before = [r for r in rows if str(r.get("at") or "") <= str(at or "")]
+    if before:
+        return pmatch._f(before[-1].get("new_cost"))
+    after = rows[0].get("old_cost") if rows else None
+    return pmatch._f(after) or stock_value.average_cost(prod)
+
+
+def _split(acc: Dict[str, Decimal], amount: float) -> List[dict]:
+    """Per-key paisa amounts that add up to `amount` exactly (the rounding
+    remainder goes to the largest)."""
+    out = {k: v.quantize(_PAISA, rounding=ROUND_HALF_UP) for k, v in acc.items()}
+    big = max(acc, key=lambda k: abs(acc[k]))
+    out[big] += Decimal(str(amount)) - sum(out.values())
+    return [{"key": k, "amount": float(v)} for k, v in out.items() if v]
+
+
+def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> Tuple[List[str], Optional[dict]]:
+    """The `gone` billed pieces no longer held -- the bill's receipts' pieces
+    of `pid` that left on a sale or were written off, oldest first, none an
+    earlier bill claimed -- as (every piece claimed, variance or None). Each
+    is trued up at (bill unit price - the cost it left at): its sale line's
+    cost_at_sale, or the average in force when it was written off. A sale
+    line with no frozen cost is read at the product's live cost by the COGS
+    readers: claimed, no variance. The variance carries its split per order
+    line item_type and category (by_item_type / by_category: the keys the
+    P&L readers group on)."""
     ids = [g["grn_id"] for g in receipts or [] if g.get("grn_id")]
-    if not ids or sold <= 0:
-        return None
-    counted = {s for r in history(prod) for s in (r.get("variance") or {}).get("stock_ids") or []}
+    if not ids or gone <= 0:
+        return [], None
+    taken = {s for r in history(prod) for s in r.get("claimed") or []}
     units = sorted(
         (u for u in db.get_collection("stock_units").find({"product_id": pid})
-         if _receipt_of(u) in ids and not _held(u) and u.get("order_id") and u.get("stock_id") not in counted),
-        key=lambda u: str(u.get("sold_at") or ""),
-    )[:sold]
+         if _receipt_of(u) in ids and u.get("stock_id") not in taken
+         and ((u.get("order_id") and not _held(u)) or _written_off(u))),
+        key=lambda u: str(u.get("sold_at") or u.get("voided_at") or ""),
+    )[:gone]
     orders = {
         o["order_id"]: o for o in db.get_collection("orders").find(
-            {"order_id": {"$in": [u["order_id"] for u in units]}}, {"_id": 0, "order_id": 1, "items": 1})
+            {"order_id": {"$in": [u["order_id"] for u in units if u.get("order_id")]}},
+            {"_id": 0, "order_id": 1, "items": 1})
     }
-    stock_ids, at_sale = [], Decimal(0)
+    stock_ids, at_sale, written_off = [], Decimal(0), 0
+    by_type: Dict[str, Decimal] = {}
+    by_cat: Dict[str, Decimal] = {}
     for u in units:
-        cost = next((it["cost_at_sale"] for it in (orders.get(u["order_id"]) or {}).get("items") or []
-                     if it.get("product_id") == pid and it.get("cost_at_sale") is not None), None)
-        if cost is not None:
-            stock_ids.append(u["stock_id"])
-            at_sale += _d(cost)
+        if _written_off(u):
+            # ponytail: no sale line -- the product's category for both keys.
+            cost, kt = _average_at(prod, u.get("voided_at")), prod.get("category")
+            kc = kt
+            written_off += 1
+        else:
+            line = next((it for it in (orders.get(u["order_id"]) or {}).get("items") or []
+                         if it.get("product_id") == pid and it.get("cost_at_sale") is not None), None)
+            if line is None:
+                continue
+            cost, kt, kc = line["cost_at_sale"], line.get("item_type") or line.get("category"), line.get("category")
+        stock_ids.append(u["stock_id"])
+        at_sale += _d(cost)
+        by_type[kt or "OTHER"] = by_type.get(kt or "OTHER", Decimal(0)) + unit - _d(cost)
+        by_cat[kc or "Other"] = by_cat.get(kc or "Other", Decimal(0)) + unit - _d(cost)
+    claimed = [u["stock_id"] for u in units]
     amount = _paise(unit * len(stock_ids) - at_sale)
     if not stock_ids or not amount:
-        return None
-    return {"pieces": len(stock_ids), "stock_ids": stock_ids, "receipt_ids": ids,
-            "bill_price": _paise(unit), "sold_at_cost": _paise(at_sale), "amount": amount}
+        return claimed, None
+    return claimed, {"pieces": len(stock_ids), "stock_ids": stock_ids, "receipt_ids": ids,
+                     "bill_price": _paise(unit), "sold_at_cost": _paise(at_sale), "amount": amount,
+                     "written_off": written_off,
+                     "by_item_type": _split(by_type, amount), "by_category": _split(by_cat, amount)}
 
 
 def _record_variance(db, pid: str, bill: dict, key: str, row: Optional[dict]) -> None:
@@ -390,9 +448,10 @@ def _record_variance(db, pid: str, bill: dict, key: str, row: Optional[dict]) ->
 def variance_by(db, field: Optional[str] = None, *, store_ids=None, from_day=None, to_day=None) -> Dict:
     """THE cost-of-goods variance reader (owner 2026-11-01 (a)): the bill
     true-up of pieces sold before their bill, which every P&L / margin report
-    adds to its COGS. Summed per `field` ("store_id", "category"; None: one
-    total under the key None), bills dated (IST day) within the range, to the
-    paisa."""
+    adds to its COGS. Summed per `field` (None: one total under the key None;
+    "store_id"; "item_type" / "category": the sold lines' own keys, as
+    /finance/pnl/by-category and growth.profit_by_category group them), bills
+    dated (IST day) within the range, to the paisa."""
     q: dict = {}
     if store_ids is not None:
         q["store_id"] = {"$in": list(store_ids)}
@@ -404,8 +463,10 @@ def variance_by(db, field: Optional[str] = None, *, store_ids=None, from_day=Non
     if db is None:
         return out
     for v in db.get_collection(VARIANCES).find(q):
-        k = v.get(field) if field else None
-        out[k] = out.get(k, Decimal(0)) + _d(v.get("amount"))
+        split = v.get(f"by_{field}") if field else None
+        for k, amount in ([(s["key"], s["amount"]) for s in split] if split is not None
+                          else [(v.get(field) if field else None, v.get("amount"))]):
+            out[k] = out.get(k, Decimal(0)) + _d(amount)
     return {k: _paise(v) for k, v in out.items()}
 
 
