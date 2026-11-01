@@ -315,8 +315,9 @@ class TestContactLensExpiryStatusEndpoint:
         assert data["summary"]["expired_count"] == 1
         assert data["summary"]["expiring_soon_count"] == 1  # BA1 @ 40 days
         assert data["near_expiry_days"] == 90
-        # FEFO pick lists dated, in-stock batches earliest-first.
-        assert data["fefo_pick"][0]["batch_code"] == "BB1"
+        # FEFO pick lists SELLABLE dated, in-stock batches earliest-first: the
+        # expired BB1 is never suggested (the till refuses it).
+        assert [p["batch_code"] for p in data["fefo_pick"]] == ["BA1", "BB2"]
 
     def test_fail_soft_empty_buckets_when_no_db(self, monkeypatch):
         app = FastAPI()

@@ -387,7 +387,7 @@ def test_added_line_is_blocked_when_every_unit_is_expired(wired):
     detail = str(exc.value.detail)
     assert exc.value.status_code == 409
     # The expired bucket is NAMED, not silently reported as "0 available".
-    assert "PAST THEIR EXPIRY DATE" in detail.upper()
+    assert "EXPIRED (EXPIRY DATE TODAY OR EARLIER)" in detail.upper()
     assert "quarantine" in detail.lower()
 
 

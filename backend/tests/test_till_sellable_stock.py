@@ -250,7 +250,7 @@ def test_asking_the_guard_logs_nothing(client, staff_headers, till, caplog):
         _assert_serialized_stock_available(
             [{"product_id": "CL-1", "item_type": "CONTACT_LENS", "quantity": 1}], STORE
         )
-    assert "PAST THEIR EXPIRY" in exc.value.detail
+    assert "EXPIRED (expiry date today or earlier)" in exc.value.detail
     assert [rec for rec in caplog.records if "expired unit(s) held back" in rec.getMessage()]
 
 

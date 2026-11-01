@@ -10,6 +10,7 @@ from ._shared import (
     datetime,
     is_online_store,
 )
+from ...utils.expiry import is_expired
 from ...utils.ist import ist_today
 
 # ============================================================================
@@ -206,11 +207,12 @@ def _shelf_by_product(stock_coll, store_id: Optional[str]) -> Dict[str, dict]:
 
 
 def compute_days_until_expiry(expiry, now: Optional[datetime] = None) -> Optional[int]:
-    """Calendar days from today (IST) until `expiry` (negative = expired).
+    """Calendar days from today (IST) until `expiry`.
 
     An expiry date is a calendar date, so this counts calendar days against
-    the IST business day: a batch expiring today is 0 (still sellable, the
-    till's rule) at every hour of that day. `now` overrides "today" in tests.
+    the IST business day: a batch expiring today is 0 at every hour of that
+    day -- and day 0 is EXPIRED (utils.expiry.is_expired, owner ruling
+    2026-11-01). `now` overrides "today" in tests.
     Returns None when the expiry is missing/unparseable. Pure + testable.
     """
     parsed = _parse_expiry(expiry)
@@ -245,8 +247,8 @@ def partition_by_expiry(
 
     `near_days` is the configurable near-expiry alert window. Each returned row
     is annotated with `days_until_expiry`. Pure helper. Bucketing rule:
-      - days < 0            -> expired
-      - 0 <= days <= near   -> near_expiry
+      - is_expired(days)    -> expired (the expiry date itself, and after)
+      - days <= near        -> near_expiry (days 1..near)
       - days > near         -> safe
       - no parseable expiry -> undated
     """
@@ -261,7 +263,7 @@ def partition_by_expiry(
         annotated["days_until_expiry"] = days
         if days is None:
             undated.append(annotated)
-        elif days < 0:
+        elif is_expired(days):
             expired.append(annotated)
         elif days <= near_days:
             near.append(annotated)

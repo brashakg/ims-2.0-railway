@@ -327,8 +327,8 @@ def _assert_serialized_stock_available(
                     store_id,
                 )
                 hint = (
-                    f" {expired} unit(s) are PAST THEIR EXPIRY DATE and cannot "
-                    f"be sold -- quarantine them."
+                    f" {expired} unit(s) are EXPIRED (expiry date today or "
+                    f"earlier) and cannot be sold -- quarantine them."
                 )
             raise _not_in_stock(labels.get(pid) or pid, avail, qty, hint)
 
@@ -428,7 +428,6 @@ def _assert_explicit_unit_sellable(
     if expiry not in (None, ""):
         try:
             from database.repositories.product_repository import StockRepository
-            from ...utils.ist import ist_today
 
             if not StockRepository.is_iso_expiry(expiry):
                 logger.warning(
@@ -437,7 +436,9 @@ def _assert_explicit_unit_sellable(
                     stock_id,
                     expiry,
                 )
-            elif expiry[:10] < ist_today().isoformat():
+            # THE floor (utils.expiry via the repo): the expiry date itself
+            # is expired, so only an expiry on/after IST tomorrow sells.
+            elif expiry[:10] < StockRepository._expiry_floor_iso():
                 raise HTTPException(
                     status_code=409,
                     detail=(
