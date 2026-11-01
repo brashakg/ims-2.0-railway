@@ -468,9 +468,10 @@ def test_the_17_5_tick_reaches_only_the_callers_own_shops(world):
 def test_goods_bought_without_a_po_may_carry_the_tick_a_po_stock_bill_may_not(world):
     """LOW 13: a walk-in goods bill ticked when booked claims no credit, its
     GST in 4(B)(1) and in the goods' cost; a PO receipt's stock bill keeps its
-    credit switch. Round 2: the booked tick may be UNticked -- the GST leaves
-    the product's one average cost (S4: every piece carries it) and is
-    credit again; it is never ticked after booking."""
+    credit switch. Round 2: the booked tick may be UNticked -- the GST is
+    credit again; it is never ticked after booking. The walk-in bill AVERAGED
+    its GST in like any bill (owner 2026-11-01 (b)), so unticking leaves the
+    average as it is and raises the accounts task, as for every bill."""
     db = world["db"]
     from tests.test_receipt_without_po import _on_the_shelf
 
@@ -488,8 +489,10 @@ def test_goods_bought_without_a_po_may_carry_the_tick_a_po_stock_bill_may_not(wo
     assert _tick(booked, False)["itc_eligible"] is True
     ret = r3b._compute_gstr3b(MONTH, STORE)
     assert (_heads(ret["itcAvailable"]), _heads(ret["itcBlocked"])) == (373.0, 0.0)
-    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
-    assert _shelf_value(db) == round(pieces * 3100.0, 2)
+    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3255.0
+    assert _shelf_value(db) == round(pieces * 3255.0, 2)
+    (task,) = list(db.tasks.find({"source_ref": f"bill_credit_claimed:{booked['bill_id']}"}))
+    assert task["payload"]["gst"] == 373.0
     with pytest.raises(HTTPException) as refused:  # never ticked after booking
         _tick(booked, True)
     assert refused.value.status_code == 422

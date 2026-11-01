@@ -26,8 +26,9 @@ THE CONTRACT THESE TESTS PIN:
     line is dropped: that receipt is costed at the order's price.
   * POST /vendors/grn/{id}/accept is the ONE minting door: units are
     source_type GRN, carry the line's unit_price (the price paid, before
-    GST) as unit_cost/cost_price (cost_source GRN_WALKIN, which becomes the
-    product's cost: the latest price paid wins) and the line's expiry;
+    GST) as unit_cost/cost_price (cost_source GRN_WALKIN, a provisional cost
+    until the bill, which averages in like every other bill -- owner
+    2026-11-01) and the line's expiry;
     accounts get a "book the bill" task.
   * A bill booked against it -- line-detail purchase-invoice door OR the
     header-only AP bill door -- claims credit only when its supplier has a
@@ -569,7 +570,6 @@ def test_c7_a_manager_receives_without_prices_and_accounts_enters_them(world, ta
     assert world["db"].products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
     last = world["as_"](ADMIN).get("/vendors/last-cost", params={"vendor_id": DEALER, "product_ids": FRAME})
     assert last.json()["costs"][FRAME]["unit_price"] == 3100.0
-    assert pi._bought_since(world["db"], FRAME, "2020-01-01T00:00:00") is True
 
 
 def test_c7_a_cost_must_be_a_real_price(world):
@@ -1096,12 +1096,12 @@ def test_c7_accept_puts_units_on_the_shelf_at_what_was_paid(world):
     assert {u.get("cost_source") for u in units} == {"GRN_WALKIN"}
 
 
-def test_c7_the_latest_price_paid_is_the_product_cost(world):
-    """Owner ruling 2026-10-12 (the LATEST PRICE PAID WINS) under S4
-    (2026-10-23: the cost moves only when a bill is accepted). Receiving a
-    walk-in buy fills only an EMPTY cost (labelled GRN_WALKIN, never GRN_PO);
-    a product that has a cost keeps it until the walk-in's BILL, the one
-    average writer, puts the price paid on it with a cost-history row."""
+def test_c7_a_walk_in_bill_averages_into_the_product_cost(world):
+    """Owner ruling 2026-11-01 (b), replacing 2026-10-12's "latest price paid
+    wins": receiving a walk-in buy fills only an EMPTY cost (labelled
+    GRN_WALKIN, provisional); a product that has a cost keeps it until the
+    walk-in's BILL averages in like every other bill. Two frames at 3000 on
+    the shelf + the walk-in's 2 at 3100 -> 3050."""
     db = world["db"]
 
     def cost(pid):
@@ -1109,13 +1109,17 @@ def test_c7_the_latest_price_paid_is_the_product_cost(world):
         return prod["cost_price"], prod.get("cost_source")
 
     db.products.update_one({"product_id": LENS}, {"$set": {"cost_price": None}})
+    db.stock_units.insert_many([{"stock_id": f"SU-ON-SHELF-{i}", "product_id": FRAME, "store_id": STORE,
+                                 "status": "AVAILABLE", "quantity": 1} for i in range(2)])
     grn = _on_the_shelf(world)
     assert cost(FRAME) == (3000.0, None)  # receiving never overwrites a cost
-    assert cost(LENS) == (420.0, "GRN_WALKIN")  # an empty one it fills
+    assert cost(LENS) == (420.0, "GRN_WALKIN")  # an empty one it fills (provisional)
     _book_as_drafted(grn)
     frame = db.products.find_one({"product_id": FRAME})
-    assert frame["cost_price"] == 3100.0
-    assert (frame["cost_history"][-1]["method"], frame["cost_history"][-1]["new_cost"]) == ("LATEST_PRICE_PAID", 3100.0)
+    assert frame["cost_price"] == 3050.0
+    assert (frame["cost_history"][-1]["method"], frame["cost_history"][-1]["new_cost"]) == ("AVERAGE", 3050.0)
+    # The lens's provisional receipt rate is replaced by its bill, not blended.
+    assert cost(LENS) == (420.0, "PURCHASE_INVOICE")
 
 
 def test_c7_accept_sends_the_bill_to_accounts(world):
@@ -2358,8 +2362,8 @@ def test_g1_the_header_bill_door_trues_the_cost_up_too(world):
     the header-only door (Cash Flow 'Record bill', which lists walk-in
     receipts) ran none, so a bill whose GST cannot be claimed left the cost
     before GST there. Booked on that door, the bill's GST share is cost when
-    the bill claims no credit, and the cost stays the price paid when it
-    claims credit."""
+    the bill claims no credit, and the price paid alone when it claims
+    credit -- averaged in with the pieces already billed (owner 2026-11-01)."""
     db = world["db"]
 
     def header_bill(grn_id, vendor, number, tax):
@@ -2380,10 +2384,12 @@ def test_g1_the_header_bill_door_trues_the_cost_up_too(world):
     sharma = _on_the_shelf(world, vendor_id=SHARMA, vendor_invoice_no="2")
     assert header_bill(sharma, SHARMA, "2", 373.0)["itc_eligible"] is False
     assert costs() == {FRAME: 3255.0, LENS: 441.0}
-    # V-DEALER (valid GSTIN): the credit comes back, the cost is the price.
+    # V-DEALER (valid GSTIN): the credit comes back, its pieces come in at
+    # the price, averaged with Sharma's: (2 x 3255 + 2 x 3100) / 4, (3 x 441
+    # + 3 x 420) / 6.
     dealer = _on_the_shelf(world, vendor_invoice_no="CASH-61")
     assert header_bill(dealer, DEALER, "CASH-61", 373.0)["itc_eligible"] is True
-    assert costs() == {FRAME: 3100.0, LENS: 420.0}
+    assert costs() == {FRAME: 3177.5, LENS: 430.5}
 
 
 def test_g1_a_walk_in_bill_booked_without_credit_costs_its_gst(world):
@@ -2399,19 +2405,18 @@ def test_g1_a_walk_in_bill_booked_without_credit_costs_its_gst(world):
     frame = db.products.find_one({"product_id": FRAME})
     assert (frame["cost_price"], frame["cost_source"]) == (3255.0, "PURCHASE_INVOICE")
 
+    # Booked with credit, the next one's 2 frames come in at 3100, averaged
+    # with the first's: (2 x 3255 + 2 x 3100) / 4 (owner 2026-11-01).
     other = _on_the_shelf(world, vendor_invoice_no="CASH-78")
     _run(pi.create_purchase_invoice(_invoice_body(other, "CASH-78"), current_user=ACCOUNTANT))
-    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3100.0
+    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3177.5
 
 
-def test_g1_a_walk_in_bill_costs_the_latest_price_paid_never_a_blend(world):
-    """Panel probe (round 9): receiving set a walk-in product's cost to the
-    latest price paid, but booking its bill blended a moving average over that
-    just-overwritten cost and whatever was on hand -- a second walk-in at 3100
-    booked with credit off at 5% left 3177.50 (two frames from the first buy
-    still on the shelf), not 3100 + 5%. One rule at both steps: the latest
-    price paid, plus the GST of a bill claiming no credit; with credit, the
-    price before GST -- whatever else is on hand, at whatever price."""
+def test_g1_walk_in_bills_average_in_with_the_gst_they_cannot_claim(world):
+    """Owner ruling 2026-11-01 (b): a walk-in bill averages in like every
+    other bill -- each one's 2 frames at the price paid, plus the GST of a
+    bill claiming no credit (G1), blended with the pieces already billed;
+    old PO frames on the shelf weigh in at their average."""
     db = world["db"]
 
     def frame_cost():
@@ -2424,9 +2429,9 @@ def test_g1_a_walk_in_bill_costs_the_latest_price_paid_never_a_blend(world):
         _run(pi.create_purchase_invoice(body, current_user=ACCOUNTANT))
         return frame_cost()
 
-    assert booked("CASH-81", True) == 3100.0
-    assert booked("CASH-82", False) == 3255.0
-    assert booked("CASH-83", True) == 3100.0
+    assert booked("CASH-81", True) == 3100.0  # nothing billed on the shelf yet
+    assert booked("CASH-82", False) == 3177.5  # (2 x 3100 + 2 x 3255) / 4
+    assert booked("CASH-83", True) == 3151.67  # (4 x 3177.50 + 2 x 3100) / 6
     # Five frames from an old PO delivery at Rs 2000 are on the shelf too.
     db.stock_units.insert_many(
         [
@@ -2435,18 +2440,17 @@ def test_g1_a_walk_in_bill_costs_the_latest_price_paid_never_a_blend(world):
         ]
     )
     db.products.update_one({"product_id": FRAME}, {"$set": {"cost_price": 2000.0, "cost_source": "PURCHASE_INVOICE"}})
-    assert booked("CASH-84", False) == 3255.0
-    assert booked("CASH-85", True) == 3100.0
+    assert booked("CASH-84", False) == 2193.08  # (11 x 2000 + 2 x 3255) / 13
+    assert booked("CASH-85", True) == 2314.0  # (13 x 2193.08 + 2 x 3100) / 15
 
 
-def test_g1_a_late_walk_in_bill_never_puts_back_an_older_price(world):
-    """Panel probe (round 10): walk-in receipt dated 09-01 at 3100; a PO
-    receipt dated 09-20, billed at 2000, set the cost to 2000; the 09-01
-    walk-in's bill (CASH-E) booked after it put 3100 back (3255 with credit
-    off) -- the figure the stock, overview and margin reports read. The latest
-    price paid is the newest ACCEPTED receipt's, dated by its acceptance (as
-    /vendors/last-cost dates it), never the newest booking: an older receipt's
-    late bill does not stop a newer walk-in from costing what it paid."""
+def test_g1_a_late_walk_in_bill_averages_in_like_any_bill(world):
+    """Owner ruling 2026-11-01 (b): walk-in receipt dated 09-01 at 3100; a PO
+    receipt dated 09-20 minted 2 frames at 2000 whose bill has not come. The
+    09-01 walk-in's bill (CASH-E, credit off) booked late averages in like
+    any bill: the PO receipt's pieces still wait for their own bill (not in
+    the basis), so nothing billed is on the shelf and it takes 3255; a newer
+    walk-in's bill (credit on) blends with it: (2 x 3255 + 2 x 3100) / 4."""
     db = world["db"]
 
     def frame_cost():
@@ -2463,7 +2467,7 @@ def test_g1_a_late_walk_in_bill_never_puts_back_an_older_price(world):
     late = _invoice_body(early, "CASH-E")
     late.itc_eligible = False
     _run(pi.create_purchase_invoice(late, current_user=ACCOUNTANT))
-    assert frame_cost() == 2000.0
+    assert frame_cost() == 3255.0
     # A later receipt that accepted none of the frame, or was voided, paid
     # no price for it.
     _seed_receipt(db, grn_id="GRN-PO-1001", subtype="STANDARD", po_id="PO-1001", accepted_at="2026-10-01T10:00:00", items=[{**po_line[0], "accepted_qty": 0, "rejected_qty": 2}])
@@ -2471,14 +2475,11 @@ def test_g1_a_late_walk_in_bill_never_puts_back_an_older_price(world):
     _minted(db, "GRN-PO-1002", 2000.0)
     newest = _on_the_shelf(world, vendor_invoice_no="CASH-N")
     db.grns.update_one({"grn_id": newest}, {"$set": {"accepted_at": "2026-09-25T10:00:00"}})
-    # Accepting it leaves the average (S4: only a bill moves it); its bill,
-    # booked with credit off, puts the price paid + the GST it cannot claim
-    # back on it.
-    assert frame_cost() == 2000.0
-    off = _invoice_body(newest, "CASH-N")
-    off.itc_eligible = False
-    _run(pi.create_purchase_invoice(off, current_user=ACCOUNTANT))
+    # Accepting it leaves the average (S4: only a bill moves it); its bill
+    # averages in.
     assert frame_cost() == 3255.0
+    _run(pi.create_purchase_invoice(_invoice_body(newest, "CASH-N"), current_user=ACCOUNTANT))
+    assert frame_cost() == 3177.5
 
 
 def _minted(db, grn_id, cost, n=2):
@@ -2517,7 +2518,6 @@ def test_unpriced_receipt_last_paid_uses_only_one_verified_booked_price(world):
     assert _receipt_price_paid(db.stock_units, grn, FRAME, db=db) is None
     db.vendor_bills.insert_one(bill("booked"))
     assert _receipt_price_paid(db.stock_units, grn, FRAME, db=db) == 3200
-    assert pi._bought_since(db, FRAME, "2026-09-01T00:00:00") is True
     # Held stock has no paid receipt, even if a legacy bill claims it did.
     db.stock_units.delete_many({"grn_id": grn["grn_id"]})
     assert _receipt_price_paid(db.stock_units, grn, FRAME, db=db) is None
@@ -2525,15 +2525,15 @@ def test_unpriced_receipt_last_paid_uses_only_one_verified_booked_price(world):
     db.vendor_bills.insert_one(bill("conflict", price=3300, status="PAID"))
     with pytest.raises(ValueError, match="conflicting booked"):
         _receipt_price_paid(db.stock_units, grn, FRAME, db=db)
-    with pytest.raises(ValueError, match="conflicting booked"):
-        pi._bought_since(db, FRAME, "2026-09-01T00:00:00")
     quoted = world["as_"](ADMIN).get("/vendors/last-cost", params={"vendor_id": DEALER, "product_ids": FRAME})
     assert quoted.json()["costs"] == {}
     _seed_receipt(db, grn_id="G-OLDER", subtype="NO_PO", accepted_at="2026-09-01T10:00:00")
     _minted(db, "G-OLDER", 3100)
     db.products.update_one({"product_id": FRAME}, {"$set": {"cost_price": 3300}})
     _run(pi.create_purchase_invoice(_invoice_body("G-OLDER", "OLDER-LATE"), current_user=ACCOUNTANT))
-    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3300
+    # Averaged in (owner 2026-11-01): the 2 billed pieces of G-PRICE-LATER at
+    # 3300 + G-OLDER's 2 at 3100.
+    assert db.products.find_one({"product_id": FRAME})["cost_price"] == 3200
 
 
 def test_g1_a_later_receipt_that_paid_no_price_leaves_the_walk_in_the_latest(world):

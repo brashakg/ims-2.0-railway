@@ -191,8 +191,7 @@ def last_paid_prices(vendor_id, wanted, may_see_store) -> dict:
     The cost of this vendor's newest accepted goods-receipt line for the
     product, dated by that receipt's acceptance. It is READ BACK from the units
     the receipt minted (goods-receipt accept stamps each one with unit_cost;
-    grn_accept_lock._receipt_price_paid, which the walk-in bill's cost true-up
-    asks too), never re-derived here. If the units arrived unpriced, that helper
+    grn_accept_lock._receipt_price_paid), never re-derived here. If the units arrived unpriced, that helper
     can use a unique live invoice price entered later by Accounts. A line that
     accepted nothing, was held or is still unpriced never answers.
 

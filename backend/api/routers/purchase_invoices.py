@@ -1030,44 +1030,16 @@ def _cost_lines(bill: dict, lines: list) -> list:
     return out
 
 
-def _bought_since(db, product_id, accepted_at) -> bool:
-    """Whether a receipt accepted after `accepted_at` paid a price for this
-    product -- the question /vendors/last-cost asks of each receipt, through
-    the same helper (grn_accept_lock._receipt_price_paid): a receipt that
-    minted no unit of it (accepted none, held the line), is still unpriced
-    at acceptance and billing, or is voided paid none."""
-    from .vendors.grn_accept_lock import (
-        _GRN_TERMINAL_ACCEPT_STATUSES,
-        _receipt_price_paid,
-    )
-
-    if not accepted_at:
-        return False
-    stock = db.get_collection("stock_units")
-    return any(
-        _receipt_price_paid(stock, g, product_id, db=db)
-        for g in db.get_collection("grns").find(
-            {
-                "status": {"$in": list(_GRN_TERMINAL_ACCEPT_STATUSES)},
-                "accepted_at": {"$gt": accepted_at},
-                "items.product_id": product_id,
-            },
-            {"_id": 0, "grn_id": 1, "grn_number": 1, "vendor_id": 1},
-        )
-    )
-
-
-def _apply_valuation_trueup(db, invoice_doc, computed, *, key=None, actor=None) -> Optional[list]:
+def _apply_valuation_trueup(db, invoice_doc, computed, *, actor=None) -> Optional[list]:
     """S4: an ACCEPTED bill re-averages the one cost of each product it bills
-    (services/product_cost.apply_bill -- the module doc has the rule). Called
-    only for an accepted bill: at booking when it is not on hold, at
+    (services/product_cost.apply_bill -- the module doc has the rule; a
+    walk-in bill averages in like any other, owner 2026-11-01). Called only
+    for an accepted bill: at booking when it is not on hold, at
     approve-exception, from the header-bill door, and by
-    finish_accepted_bills. A walk-in buy keeps the latest price paid (owner
-    2026-10-12), dated by its receipt's acceptance (_bought_since). Every
-    bill adds the GST it cannot claim back (_cost_lines). Exactly once per
-    (product, `key`, default the bill id). Returns the history rows written,
-    or None. STRICTLY fail-soft: a cost update never rolls back or blocks a
-    booking (a crash is finished by finish_accepted_bills)."""
+    finish_accepted_bills. Every bill adds the GST it cannot claim back
+    (_cost_lines). Exactly once per (product, bill). Returns the history rows
+    written, or None. STRICTLY fail-soft: a cost update never rolls back or
+    blocks a booking (a crash is finished by finish_accepted_bills)."""
     try:
         lines = [ln for ln in computed.get("lines") or [] if ln.get("product_id")]
         if db is None or not lines:
@@ -1076,21 +1048,11 @@ def _apply_valuation_trueup(db, invoice_doc, computed, *, key=None, actor=None) 
         grn = grns.find_one({"grn_id": invoice_doc["grn_id"]}, {"_id": 0}) if invoice_doc.get("grn_id") else None
         receipts = [grn] if grn else list(grns.find(
             {"grn_id": {"$in": list(invoice_doc.get("linked_dc_ids") or [])}}, {"_id": 0}))
-        walk_in = (grn or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
-        keep = set()
-        if walk_in:
-            # The latest price paid is the newest ACCEPTED receipt's, dated by
-            # its acceptance (as /vendors/last-cost dates it), never the newest
-            # booking: a walk-in bill booked late puts no older price back
-            # over a product a later receipt has bought (its key still lands).
-            keep = {ln.get("product_id") for ln in lines
-                    if _bought_since(db, ln.get("product_id"), grn.get("accepted_at"))}
-            lines = [ln for ln in lines if ln.get("product_id") not in keep]
         rows = product_cost.apply_bill(
             db, invoice_doc, _cost_lines(invoice_doc, lines),
-            key=key or invoice_doc.get("invoice_id") or invoice_doc.get("bill_id"),
+            key=invoice_doc.get("invoice_id") or invoice_doc.get("bill_id"),
             actor=actor or invoice_doc.get("created_by"),
-            latest_price=walk_in, receipts=receipts or None, keep=keep,
+            receipts=receipts or None,
         )
         # Rulings 11/12: the bill brings the cost, so it may be a draft's
         # last gap. It finishes the product through the editor's own path

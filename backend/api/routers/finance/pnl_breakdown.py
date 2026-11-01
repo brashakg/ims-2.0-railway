@@ -9,6 +9,7 @@ from typing import Optional
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
 from ...dependencies import resolve_store_scope
+from ...services import product_cost
 from ...services.cost_mask import mask_cost
 from ...services.salary_visibility import SALARY_RESTRICTED_MESSAGE, is_salary_admin
 from ._shared import (
@@ -87,6 +88,11 @@ async def get_pnl_by_store(
         cogs_by_store[sid] = cogs_by_store.get(sid, 0) + _c
         if _est > 0:
             cogs_estimated_by_store[sid] = True
+    # Pieces sold before their supplier bill (owner 2026-11-01 (a)).
+    for sid, v in product_cost.variance_by(
+        db, "store_id", store_ids=store_ids, from_day=from_date, to_day=to_date
+    ).items():
+        cogs_by_store[sid] = cogs_by_store.get(sid, 0) + v
 
     # Expenses are dated on `expense_date` (ISO 'YYYY-MM-DD' string), not
     # `date`; the old field name silently dropped every expense for any
@@ -174,7 +180,8 @@ async def get_pnl_by_category(
     _apply_created_at_range(match, from_date, to_date)
 
     orders = list(db.get_collection("orders").find(match, {"_id": 0, "items": 1}))
-    cats = pnl_by_category(orders, _cost_by_product(db))
+    cats = pnl_by_category(orders, _cost_by_product(db), product_cost.variance_by(
+        db, "category", store_ids=store_ids, from_day=from_date, to_day=to_date))
     # COGS and gross profit are worked out from product cost: the accounts
     # roles' only, as on GET /pnl and /reports/profit/by-category (owner ruling
     # 2026-10-12). The managers keep the revenue.

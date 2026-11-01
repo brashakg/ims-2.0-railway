@@ -97,3 +97,18 @@ def test_inventory_intelligence_values_only_the_shelf_at_the_average(world):
     assert intel["total_inventory"]["value"] == summary["total_value"], intel["total_inventory"]
     assert intel["total_inventory"]["uncosted_units"] == summary["uncosted_units"] == 2
     assert intel["dead_stock"]["total_value"] <= summary["total_value"]
+
+
+def test_inventory_intelligence_low_stock_total_is_pieces_times_the_average(world):
+    """S4 review (fix round 1): the low-stock block's total_value reads THE
+    rule -- on-hand pieces x the product's average. At Dhanbad P-FRAME (1
+    piece, level 2) and P-OWNER (given a level of 2 here: 1 piece) are low;
+    P-FRAME's price is catalogue-only, so it is no cost: 1 x 4000 + 0 = 4000
+    (the shelf price would say 8000)."""
+    world.products.update_one({"product_id": "P-OWNER"}, {"$set": {"reorder_levels": {DHN: 2}}})
+    world.products.update_one({"product_id": "P-FRAME"}, {"$set": {"cost_price_is_catalogue_only": True}})
+    intel = _client(_ADMIN).get("/api/v1/analytics/inventory-intelligence", params={"store_id": DHN}).json()
+    assert intel["low_stock"]["count"] == 2
+    assert intel["low_stock"]["total_value"] == 4000.0
+    mgr = _client(_DHN_MGR).get("/api/v1/analytics/inventory-intelligence", params={"store_id": DHN}).json()
+    assert "total_value" not in mgr["low_stock"]

@@ -499,13 +499,17 @@ def _customer_state_map(db, *, strict=False) -> dict:
     return out
 
 
-def pnl_by_category(orders, cost_by_product: dict) -> list:
+def pnl_by_category(orders, cost_by_product: dict, variance_by_category: Optional[dict] = None) -> list:
     """Revenue + COGS per product category (item_type), from order line items.
     Pure. Prefers item.cost_at_sale snapshot; 60%-of-line COGS fallback when
     a product's cost is unknown. Includes cogs_is_estimated flag per category
     so the UI can mark estimates (SYSTEM_INTENT: never show fabricated numbers
-    without flagging them)."""
+    without flagging them). `variance_by_category`: the cost-of-goods
+    variance of pieces sold before their bill (product_cost.variance_by),
+    added to each category's COGS."""
     acc: dict = {}
+    for cat, v in (variance_by_category or {}).items():
+        acc.setdefault(cat or "OTHER", {"revenue": 0.0, "cogs": 0.0, "estimated_lines": 0})["cogs"] += v
     for o in orders:
         for it in o.get("items") or []:
             cat = it.get("item_type") or it.get("category") or "OTHER"

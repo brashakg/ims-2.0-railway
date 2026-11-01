@@ -1,5 +1,6 @@
 """Purchase-order GST engine: party resolution, line rates, PO tax build."""
 
+from ...services.product_cost import PROVISIONAL_RANK
 from ._shared import _get_db, _pm, get_store_repository, get_vendor_repository, logger, ov
 
 
@@ -11,13 +12,14 @@ from ._shared import _get_db, _pm, get_store_repository, get_vendor_repository, 
 # source at all -- is NEVER overwritten by this helper, only by an explicit
 # edit. The rule lives on the SOURCES, not on the caller, so there is no wiring
 # at a call site that could silently be passed the wrong thing.
+# The ranks live with the one average writer (services/product_cost: a
+# provisional cost is no average -- the first real bill replaces it).
 _PO_PROVISIONAL_COST_SOURCE = "PO_RATE"
-_COST_SOURCE_RANK = {_PO_PROVISIONAL_COST_SOURCE: 1, "GRN_PO": 2}
+_COST_SOURCE_RANK = PROVISIONAL_RANK
 # A walk-in buy (a "Bought without PO" receipt, D14) at acceptance, labelled
-# as itself, never as a PO price. It fills only an EMPTY cost: the latest
-# price paid (owner 2026-10-12) reaches a product that has a cost through the
-# walk-in's BILL, the one average writer (services/product_cost, S4
-# 2026-10-23: the cost moves only when a bill is accepted), with its history row.
+# as itself, never as a PO price: a receipt rate like a PO receipt's (same
+# rank), provisional until the walk-in's BILL averages in like any bill
+# (owner 2026-11-01; services/product_cost).
 WALK_IN_COST_SOURCE = "GRN_WALKIN"
 
 

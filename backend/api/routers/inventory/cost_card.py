@@ -20,6 +20,8 @@ from ._shared import (
     require_roles,
     router,
 )
+from typing import Optional
+
 from .helpers import _get_db
 from ...services import product_cost, stock_value
 from ...services.cost_mask import AP_ROLES
@@ -70,8 +72,19 @@ async def get_product_cost(
     return _cost_card(_product_or_404(product_id))
 
 
+COST_CHANGED = (
+    "The average cost changed since you opened this page (a vendor bill was accepted meanwhile). "
+    "Refresh, check the new average and correct it again if it is still wrong."
+)
+COST_ALREADY = "The average cost is already that figure: nothing to correct."
+
+
 class CostCorrection(BaseModel):
     average_cost: float = Field(..., gt=0, le=10_000_000)
+    # The average the person read on the card (null: it had none): a bill
+    # accepted since then refuses the correction (409) instead of being
+    # silently overwritten.
+    expected_average_cost: Optional[float] = Field(..., ge=0, le=10_000_000)
     reason: str = Field(..., min_length=3, max_length=300)
 
 
@@ -91,12 +104,17 @@ async def correct_product_cost(
     db = _get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Costs are unavailable; please retry.")
-    row = product_cost.correct(db, product_id, body.average_cost, reason, current_user.get("user_id"))
+    try:
+        row = product_cost.correct(db, product_id, body.average_cost, reason, current_user.get("user_id"),
+                                   expected=body.expected_average_cost)
+    except product_cost.CostChanged:
+        raise HTTPException(status_code=409, detail=COST_CHANGED) from None
     if row is None:
-        raise HTTPException(
-            status_code=409,
-            detail="The average cost is already that, or it changed meanwhile. Refresh and try again.",
-        )
+        # Nothing written: the average already is that figure -- or it moved
+        # again while being saved (re-read to say which).
+        now = stock_value.average_cost(_product_or_404(product_id))
+        same = round(now, 2) == round(body.average_cost, 2)
+        raise HTTPException(status_code=409, detail=COST_ALREADY if same else COST_CHANGED)
     try:
         audit = get_audit_repository()
         if audit is not None:

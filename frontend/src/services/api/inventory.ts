@@ -488,9 +488,12 @@ export const inventoryApi = {
     return response.data as ProductCostCard;
   },
 
-  correctProductCost: async (productId: string, averageCost: number, reason: string) => {
+  /** `expectedAverageCost`: the average the card showed (null: none) -- a
+   *  bill accepted since then refuses the correction (409). */
+  correctProductCost: async (productId: string, averageCost: number, expectedAverageCost: number | null, reason: string) => {
     const response = await api.post(`/inventory/products/${encodeURIComponent(productId)}/cost-correction`, {
       average_cost: averageCost,
+      expected_average_cost: expectedAverageCost,
       reason,
     });
     return response.data as ProductCostCard;
@@ -509,7 +512,10 @@ export interface CostHistoryRow {
   vendor_name?: string | null;
   qty?: number;
   price?: number;
-  method?: 'AVERAGE' | 'LATEST_PRICE_PAID';
+  method?: 'AVERAGE';
+  /** Pieces of the bill sold before it arrived (owner 2026-11-01): their
+   *  bill-price true-up went to cost of goods, not into the average. */
+  variance?: { pieces: number; amount: number } | null;
   old_cost: number | null;
   new_cost: number;
   reason?: string;

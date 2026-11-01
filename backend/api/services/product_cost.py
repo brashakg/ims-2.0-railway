@@ -17,8 +17,17 @@ The average moves only here:
     them -- are left out: they carry the average only provisionally until
     their own bill, so a challan's pieces are never counted twice. Rejected
     pieces never count (no more pieces than the receipts accepted). A product
-    with no average yet takes the bill's price. A walk-in buy keeps the
-    latest price paid (owner 2026-10-12).
+    with no average yet -- or only a PROVISIONAL cost (a PO or receipt rate,
+    no history row) -- takes the bill's price: the first real bill REPLACES a
+    provisional cost, never blends with it. A walk-in (no-PO) bill averages
+    in like every other bill (owner 2026-11-01 (b); this replaced the
+    2026-10-12 "latest price paid" rule).
+  * PIECES SOLD BEFORE THEIR BILL (owner 2026-11-01 (a)): only the billed
+    pieces we still HOLD are averaged in at the bill price; for those already
+    sold, (bill price - the cost their sale line froze) x pieces is a
+    COST-OF-GOODS VARIANCE, recorded once in the bill's history row and in
+    `cogs_variances` (variance_by is THE reader the P&L / margin reports add
+    to their COGS).
   * accounts correct it, with a reason (correct()) -- the one correction
     door: the product and catalogue editors only type a FIRST cost
     (refuse_editor_cost).
@@ -45,7 +54,9 @@ No emoji (Windows cp1252).
 import logging
 import uuid
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
+
+from pymongo.errors import DuplicateKeyError
 
 from api.utils.event_time import utc_now_iso
 
@@ -60,6 +71,11 @@ logger = logging.getLogger(__name__)
 # finishes one a crash left half-done). APPLIED: done. A bill booked before S4
 # has none: its cost went in when it was booked.
 HELD, PENDING, APPLIED = "HELD", "PENDING", "APPLIED"
+# A cost a purchase step fills before any bill (vendors/gst._promote_cost_from_rate):
+# a later step may replace an earlier one (the rank), and the first real bill
+# replaces any of them -- a provisional cost is no average.
+PROVISIONAL_RANK = {"PO_RATE": 1, "GRN_PO": 2, "GRN_WALKIN": 2}
+VARIANCES = "cogs_variances"
 _BOOKED = {"OUTSTANDING", "PARTIAL", "PAID"}
 _PAISA = Decimal("0.01")
 
@@ -78,6 +94,23 @@ def _d(v) -> Decimal:
 
 def _paise(v: Decimal) -> float:
     return float(v.quantize(_PAISA, rounding=ROUND_HALF_UP))
+
+
+def provisional(product: Optional[dict]) -> bool:
+    """A cost only a PO or receipt rate filled (no history row): replaced by
+    the first real bill, opening stock or a first cost -- never averaged."""
+    product = product or {}
+    return (
+        bool(stock_value.average_cost(product))
+        and not product.get("cost_history")
+        and str(product.get("cost_source") or "") in PROVISIONAL_RANK
+    )
+
+
+def average(product: Optional[dict]) -> float:
+    """THE average a bill blends with (and a first cost may not replace):
+    stock_value.average_cost, 0.0 for a provisional cost."""
+    return 0.0 if provisional(product) else stock_value.average_cost(product)
 
 
 def _held(unit: dict) -> bool:
@@ -219,19 +252,15 @@ def apply_bill(
     *,
     key: str,
     actor: Optional[str],
-    latest_price: bool = False,
     receipts: Optional[List[dict]] = None,
-    keep: Iterable[str] = (),
 ) -> List[dict]:
     """Re-average every product an accepted bill's goods lines name. `lines`
     are its COST lines (GST it cannot claim already added:
-    purchase_invoices._cost_lines). `keep`: products the bill names whose
-    average it must leave as it is (a walk-in buy a later receipt has
-    outpriced). Every product the bill names ends up holding its key, moved
-    or not (mark), so its receipt's pieces join the basis. Returns the
-    history rows written."""
-    for pid in keep:
-        mark(db, pid, key)
+    purchase_invoices._cost_lines). Only the billed pieces we still hold are
+    averaged in; the sold ones give a cost-of-goods variance (module doc).
+    Every product the bill names ends up holding its key, moved or not
+    (mark), so its receipt's pieces join the basis. Returns the history rows
+    written."""
     billed: Dict[str, List[Decimal]] = {}
     for ln in lines or []:
         pid, qty = ln.get("product_id"), _d(ln.get("qty"))
@@ -259,13 +288,26 @@ def apply_bill(
         price = _paise(val / qty)
 
         def work(prod, old, pid=pid, qty=qty, val=val, price=price):
-            if latest_price or not old:
-                return price, {"qty": float(qty), "price": price, "basis": None}
-            basis = Decimal(str(basis_pieces(db, pid, prod.get("cost_keys") or ())))
-            if basis <= 0:
-                return price, {"qty": float(qty), "price": price, "basis": 0.0}
-            new = (basis * Decimal(str(old)) + val) / (basis + qty)
-            return _paise(new), {"qty": float(qty), "price": price, "basis": float(basis)}
+            keys = list(prod.get("cost_keys") or ())
+            basis = Decimal(str(basis_pieces(db, pid, keys)))
+            held = qty
+            if receipts:
+                # The billed pieces still held = what this bill adds to the
+                # basis (a receipt's sold pieces are taken as billed first).
+                after = Decimal(str(basis_pieces(db, pid, keys + [key])))
+                held = min(qty, max(Decimal(0), after - basis))
+            avg = Decimal(str(average(prod)))
+            extra = {"qty": float(qty), "price": price, "held": float(held),
+                     "basis": float(basis) if avg else None}
+            if avg and basis + held > 0:
+                new = _paise((basis * avg + val * held / qty) / (basis + held))
+            else:  # no average yet, only a provisional one, or nothing held at all
+                new = price
+            if held < qty:
+                var = _variance(db, prod, pid, receipts, int(qty - held), val / qty)
+                if var:
+                    extra["variance"] = var
+            return new, extra
 
         row = _move(db, pid, key, work, {
             "kind": "BILL",
@@ -273,12 +315,98 @@ def apply_bill(
             "bill_id": bill.get("invoice_id") or bill.get("bill_id"),
             "bill_number": bill.get("invoice_number") or bill.get("bill_number"),
             "vendor_name": bill.get("vendor_name"),
-            "method": "LATEST_PRICE_PAID" if latest_price else "AVERAGE",
+            "method": "AVERAGE",
             "by": actor,
         })
         if row:
             rows.append({**row, "product_id": pid})
+        else:  # applied before (a retry, a crash re-run): its history row says what
+            prod = db.get_collection("products").find_one({"product_id": pid}) or {}
+            row = next((r for r in prod.get("cost_history") or [] if r.get("key") == key), None)
+        _record_variance(db, pid, bill, key, row)
     return rows
+
+
+def _variance(db, prod: dict, pid: str, receipts, sold: int, unit: Decimal) -> Optional[dict]:
+    """The cost-of-goods variance of `sold` billed pieces no longer held, or
+    None: the bill's receipts' pieces of `pid` that left on a sale (oldest
+    sale first, none an earlier bill's variance took), each at (bill unit
+    price - its sale line's cost_at_sale). A sale line with no frozen cost is
+    read at the product's live cost by the COGS readers: no variance for it."""
+    ids = [g["grn_id"] for g in receipts or [] if g.get("grn_id")]
+    if not ids or sold <= 0:
+        return None
+    counted = {s for r in history(prod) for s in (r.get("variance") or {}).get("stock_ids") or []}
+    units = sorted(
+        (u for u in db.get_collection("stock_units").find({"product_id": pid})
+         if _receipt_of(u) in ids and not _held(u) and u.get("order_id") and u.get("stock_id") not in counted),
+        key=lambda u: str(u.get("sold_at") or ""),
+    )[:sold]
+    orders = {
+        o["order_id"]: o for o in db.get_collection("orders").find(
+            {"order_id": {"$in": [u["order_id"] for u in units]}}, {"_id": 0, "order_id": 1, "items": 1})
+    }
+    stock_ids, at_sale = [], Decimal(0)
+    for u in units:
+        cost = next((it["cost_at_sale"] for it in (orders.get(u["order_id"]) or {}).get("items") or []
+                     if it.get("product_id") == pid and it.get("cost_at_sale") is not None), None)
+        if cost is not None:
+            stock_ids.append(u["stock_id"])
+            at_sale += _d(cost)
+    amount = _paise(unit * len(stock_ids) - at_sale)
+    if not stock_ids or not amount:
+        return None
+    return {"pieces": len(stock_ids), "stock_ids": stock_ids, "receipt_ids": ids,
+            "bill_price": _paise(unit), "sold_at_cost": _paise(at_sale), "amount": amount}
+
+
+def _record_variance(db, pid: str, bill: dict, key: str, row: Optional[dict]) -> None:
+    """The bill's row in `cogs_variances`, from its history row: one per
+    (bill, product), never doubled (an upsert on its id; a crash re-run
+    writes it from the history row). Dated by the bill's IST day."""
+    var = (row or {}).get("variance")
+    if not var:
+        return
+    from api.utils.ist import ist_date_str_from_stored
+
+    day = ist_date_str_from_stored(bill.get("bill_date") or bill.get("invoice_date") or bill.get("created_at"))
+    prod = db.get_collection("products").find_one({"product_id": pid}, {"_id": 0, "category": 1}) or {}
+    vid = f"{key}:{pid}"
+    try:
+        db.get_collection(VARIANCES).update_one(
+            {"variance_id": vid},
+            {"$setOnInsert": {
+                **var, "variance_id": vid, "bill_id": row.get("bill_id") or key,
+                "bill_number": row.get("bill_number"), "vendor_name": row.get("vendor_name"),
+                "product_id": pid, "category": prod.get("category"), "store_id": bill.get("store_id"),
+                "day": day, "period": day[:7], "at": row.get("at"), "by": row.get("by"),
+            }},
+            upsert=True,
+        )
+    except DuplicateKeyError:  # a twin run inserted it first (unique variance_id)
+        pass
+
+
+def variance_by(db, field: Optional[str] = None, *, store_ids=None, from_day=None, to_day=None) -> Dict:
+    """THE cost-of-goods variance reader (owner 2026-11-01 (a)): the bill
+    true-up of pieces sold before their bill, which every P&L / margin report
+    adds to its COGS. Summed per `field` ("store_id", "category"; None: one
+    total under the key None), bills dated (IST day) within the range, to the
+    paisa."""
+    q: dict = {}
+    if store_ids is not None:
+        q["store_id"] = {"$in": list(store_ids)}
+    if from_day:
+        q.setdefault("day", {})["$gte"] = str(from_day)[:10]
+    if to_day:
+        q.setdefault("day", {})["$lte"] = str(to_day)[:10]
+    out: Dict = {}
+    if db is None:
+        return out
+    for v in db.get_collection(VARIANCES).find(q):
+        k = v.get(field) if field else None
+        out[k] = out.get(k, Decimal(0)) + _d(v.get("amount"))
+    return {k: _paise(v) for k, v in out.items()}
 
 
 def mark(db, product_id: str, key: str) -> None:
@@ -297,36 +425,53 @@ def billed_products(lines) -> List[str]:
 
 def applied(db, lines, key: str) -> bool:
     """Whether bill `key` is in the average of every product its lines name
-    (a product that no longer exists counts as done) -- THE test before a
-    bill is marked APPLIED, so a failed or half-done apply stays PENDING for
-    the sweeper."""
+    (a product that no longer exists counts as done), its cost-of-goods
+    variance rows written -- THE test before a bill is marked APPLIED, so a
+    failed or half-done apply stays PENDING for the sweeper."""
     pids = billed_products(lines)
     if not pids:
         return True
-    found = {
-        p["product_id"]: p.get("cost_keys") or []
-        for p in db.get_collection("products").find({"product_id": {"$in": pids}}, {"product_id": 1, "cost_keys": 1})
-    }
-    return all(key in keys for keys in found.values())
+    found = list(db.get_collection("products").find(
+        {"product_id": {"$in": pids}}, {"product_id": 1, "cost_keys": 1, "cost_history": 1}))
+    if not all(key in (p.get("cost_keys") or []) for p in found):
+        return False
+    owed = [f"{key}:{p['product_id']}" for p in found
+            if any(r.get("key") == key and r.get("variance") for r in p.get("cost_history") or [])]
+    return not owed or db.get_collection(VARIANCES).count_documents({"variance_id": {"$in": owed}}) == len(owed)
 
 
-def correct(db, product_id: str, new_cost: float, reason: str, actor: Optional[str]) -> Optional[dict]:
-    """An accounts correction of a product's average, with its reason."""
+class CostChanged(Exception):
+    """The average is no longer the one a correction was typed against."""
+
+
+def correct(
+    db, product_id: str, new_cost: float, reason: str, actor: Optional[str], *, expected
+) -> Optional[dict]:
+    """An accounts correction of a product's average, with its reason.
+    `expected`: the average the person read (None: it had none). Raises
+    CostChanged when the stored average is no longer that (a bill landed
+    meanwhile) -- re-checked on every re-read of the guarded write. None when
+    the average already is `new_cost`."""
     new = _paise(_d(new_cost))
+
+    def work(_prod, old):
+        if _paise(_d(old)) != _paise(_d(expected)):
+            raise CostChanged(old)
+        return None if new == old else (new, {})
+
     return _move(
-        db, product_id, f"correction:{uuid.uuid4().hex}",
-        lambda _prod, old: None if new == old else (new, {}),
+        db, product_id, f"correction:{uuid.uuid4().hex}", work,
         {"kind": "CORRECTION", "source": "CORRECTION", "reason": reason, "by": actor},
     )
 
 
 def seed(db, product_id: str, cost: float, *, key: str, kind: str, actor: Optional[str]) -> Optional[dict]:
     """A product's FIRST cost (opening stock; the backfill): written only
-    while it has none."""
+    while it has none -- a provisional cost is none (average())."""
     first = _paise(_d(cost))
     return _move(
         db, product_id, key,
-        lambda _prod, old: None if old or first <= 0 else (first, {}),
+        lambda prod, _old: None if average(prod) or first <= 0 else (first, {}),
         {"kind": kind, "source": kind, "by": actor},
     )
 

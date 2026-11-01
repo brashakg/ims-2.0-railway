@@ -892,6 +892,10 @@ class DatabaseConnection:
         _idx("vendor_bills", "grn_id", sparse=True, background=True)
         _idx("vendor_bills", "status", background=True)
         _idx("vendor_bills", [("bill_date", -1)], background=True)
+        # S4 (owner 2026-11-01 (a)): one cost-of-goods variance per (bill,
+        # product) -- the atomic backstop of product_cost._record_variance.
+        _idx("cogs_variances", "variance_id", unique=True, background=True)
+        _idx("cogs_variances", [("day", 1), ("store_id", 1)], background=True)
 
         # GST cross-check sign-offs are keyed (year, month, entity_id) and
         # written via update_one(..., upsert=True). Without a UNIQUE index two

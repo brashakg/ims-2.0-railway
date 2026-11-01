@@ -50,7 +50,7 @@ vi.mock('../../../context/AuthContext', () => ({
   }),
 }));
 
-import { ProductStockPage } from '../ProductStockPage';
+import { ProductStockPage, historyLine } from '../ProductStockPage';
 
 function renderAt() {
   return render(
@@ -123,7 +123,8 @@ describe('a product page under one average cost', () => {
     expect(box.correct).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText('Reason (required)'), { target: { value: 'scheme credit note' } });
     fireEvent.click(screen.getByRole('button', { name: /save correction/i }));
-    await waitFor(() => expect(box.correct).toHaveBeenCalledWith('P1', 3400, 'scheme credit note'));
+    // The average the card showed goes along: a bill landing meanwhile is a 409.
+    await waitFor(() => expect(box.correct).toHaveBeenCalledWith('P1', 3400, 3395, 'scheme credit note'));
     expect(await screen.findByText('₹17,000')).toBeInTheDocument();
   });
 
@@ -135,5 +136,13 @@ describe('a product page under one average cost', () => {
     expect(screen.queryByText('₹3,395')).not.toBeInTheDocument();
     expect(screen.queryByText('Cost history')).not.toBeInTheDocument();
     expect(screen.queryByText('Correct the average cost')).not.toBeInTheDocument();
+  });
+});
+
+describe('a bill row in the cost history', () => {
+  it('names the pieces sold before the bill and their true-up to cost of goods (owner 2026-11-01)', () => {
+    const row = { ...CARD.history[0], variance: { pieces: 2, amount: 60 } } as Parameters<typeof historyLine>[0];
+    expect(historyLine(row).text).toContain('2 already sold: ₹60 to cost of goods');
+    expect(historyLine(CARD.history[0] as Parameters<typeof historyLine>[0]).text).not.toContain('already sold');
   });
 });

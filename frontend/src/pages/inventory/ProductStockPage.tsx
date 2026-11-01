@@ -38,8 +38,13 @@ export function historyLine(row: CostHistoryRow): { label: string; text: string 
   if (row.kind === 'BILL') {
     const pcs = `${row.qty} piece${row.qty === 1 ? '' : 's'} at ${money(row.price)}`;
     const bill = row.bill_number ? `bill ${row.bill_number}` : 'a bill';
-    const how = row.method === 'LATEST_PRICE_PAID' ? 'bought without an order (latest price paid)' : `average ${money(row.new_cost)}`;
-    return { label: 'Bill', text: `${bill}${row.vendor_name ? ` (${row.vendor_name})` : ''} accepted by ${who}: ${pcs} → ${how}` };
+    const sold = row.variance
+      ? ` · ${row.variance.pieces} already sold: ${money(row.variance.amount)} to cost of goods`
+      : '';
+    return {
+      label: 'Bill',
+      text: `${bill}${row.vendor_name ? ` (${row.vendor_name})` : ''} accepted by ${who}: ${pcs} → average ${money(row.new_cost)}${sold}`,
+    };
   }
   if (row.kind === 'CORRECTION') {
     return { label: 'Correction', text: `${who}: average ${move} · reason "${row.reason || ''}"` };
@@ -111,12 +116,13 @@ export function ProductStockPage() {
     }
     setSaving(true);
     try {
-      setCard(await inventoryApi.correctProductCost(productId, value, reason.trim()));
+      setCard(await inventoryApi.correctProductCost(productId, value, card?.average_cost ?? null, reason.trim()));
       setNewCost('');
       setReason('');
       toast.success('Average cost corrected. It is in the cost history.');
     } catch (err) {
       toast.error(getErrorMessage(err, 'Could not save the correction.'));
+      void loadCost(); // a bill may have moved the average meanwhile: show the new one
     } finally {
       setSaving(false);
     }

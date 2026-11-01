@@ -253,7 +253,7 @@ def test_a_bill_landing_after_the_editor_check_is_kept(
 
     def check_then_a_bill(product, cost):
         real(product, cost)
-        product_cost.correct(shop, "P1", 5000.0, "a bill lands", "u-accounts")
+        product_cost.correct(shop, "P1", 5000.0, "a bill lands", "u-accounts", expected=before)
 
     monkeypatch.setattr(product_cost, "refuse_editor_cost", check_then_a_bill)
     r = client.put(path, json=body(sent), headers=_headers("ADMIN"))

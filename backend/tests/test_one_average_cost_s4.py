@@ -299,17 +299,19 @@ def test_the_cost_card_and_a_correction(monkeypatch):
     assert (card["pieces"], card["average_cost"], card["stock_value"], card["uncosted_pieces"]) == (
         5, 3340.0, 16700.0, 0)
     r = cli.post("/inventory/products/P/cost-correction",
-                 json={"average_cost": 3395, "reason": "Safilo credit note for scheme discount"})
+                 json={"average_cost": 3395, "expected_average_cost": 3340,
+                       "reason": "Safilo credit note for scheme discount"})
     assert r.status_code == 200, r.text
     card = r.json()
     assert card["stock_value"] == 16975.0
     (row,) = card["history"]
     assert (row["kind"], row["old_cost"], row["new_cost"], row["by"]) == ("CORRECTION", 3340.0, 3395.0, "u-ACCOUNTANT")
     assert row["reason"].startswith("Safilo")
+    same = cli.post("/inventory/products/P/cost-correction",
+                    json={"average_cost": 3395, "expected_average_cost": 3395, "reason": "same again"})
+    assert same.status_code == 409 and "already that figure" in same.json()["detail"]
     assert cli.post("/inventory/products/P/cost-correction",
-                    json={"average_cost": 3395, "reason": "same again"}).status_code == 409
-    assert cli.post("/inventory/products/P/cost-correction",
-                    json={"average_cost": 3395, "reason": "  "}).status_code == 422
+                    json={"average_cost": 3395, "expected_average_cost": 3395, "reason": "  "}).status_code == 422
 
 
 @pytest.mark.parametrize("twin_id,link", [("TWIN", {"pim_product_id": "TWIN"}), ("P", {})])
@@ -321,7 +323,7 @@ def test_the_catalogue_copy_follows_the_average(twin_id, link):
     db.catalog_products.insert_one({"id": twin_id, "pricing": {"cost_price": 1.0}})
     product_cost.seed(db, "P", 800, key="opening:1", kind="OPENING_STOCK", actor="m")
     assert db.catalog_products.find_one({"id": twin_id})["pricing"]["cost_price"] == 800.0
-    product_cost.correct(db, "P", 812.5, "credit note", "acc")
+    product_cost.correct(db, "P", 812.5, "credit note", "acc", expected=800)
     assert db.catalog_products.find_one({"id": twin_id})["pricing"]["cost_price"] == 812.5
 
 
@@ -338,7 +340,7 @@ def test_what_we_pay_is_accounts_only(monkeypatch, role):
     cli = _card_app(db, monkeypatch, role)
     assert cli.get("/inventory/products/P/cost").status_code == 403
     assert cli.post("/inventory/products/P/cost-correction",
-                    json={"average_cost": 1, "reason": "nope"}).status_code == 403
+                    json={"average_cost": 1, "expected_average_cost": 3340, "reason": "nope"}).status_code == 403
     doc = {"product_id": "P", "cost_history": [{"price": 1}], "cost_keys": ["B"]}
     assert cost_mask.mask_cost(doc, {"roles": [role]}, "product") == {"product_id": "P"}
 
@@ -414,8 +416,8 @@ def test_the_backfill_fills_backs_up_and_reverts():
 
 def _walk_in_booked_late(db):
     """Walk-in receipt W (5 at 100) accepted, then PO receipt R (5, minted at
-    200) accepted; W's bill is booked only after R -- the latest price paid
-    is R's, so W's bill must leave the average where it is."""
+    200) accepted; W's bill (at the average, 100) is booked only after R and
+    leaves the average where it is."""
     _receipt(db, "W", 5, grn_subtype="NO_PO", accepted_at="2026-10-01T10:00:00+00:00")
     _pieces(db, 5, "W", prefix="W")
     _receipt(db, "R", 5, accepted_at="2026-10-02T10:00:00+00:00", po_id="PO1")
@@ -514,12 +516,13 @@ def test_legacy_receipt_pieces_blend_with_the_first_s4_bill():
 def test_the_backfill_carries_an_old_average_into_the_history_and_reverts_it():
     from scripts import backfill_average_cost as bf
 
-    db = _db(3340.0, cost_source="GRN_PO")
+    db = _db(3340.0, cost_source="PURCHASE_INVOICE")  # a pre-S4 bill's average
     _pieces(db, 2)
     assert bf.apply(db, bf.plan(db), "RUN2") == 1
     product = db.products.find_one({})
     (row,) = product["cost_history"]
-    assert (row["kind"], row["old_cost"], row["new_cost"], row["source"]) == ("CARRIED_OVER", None, 3340.0, "GRN_PO")
+    assert (row["kind"], row["old_cost"], row["new_cost"], row["source"]) == (
+        "CARRIED_OVER", None, 3340.0, "PURCHASE_INVOICE")
     assert product["cost_price"] == 3340.0
     assert bf.apply(db, bf.plan(db), "RUN3") == 0  # nothing left to carry over
     assert bf.revert(db, "RUN2") == 1
@@ -551,3 +554,129 @@ def test_the_dry_run_flags_an_average_from_a_held_or_challan_bill():
     db.vendor_bills.update_one({"bill_id": "HB"}, {"$set": {"match_status": "MATCHED", "linked_dc_ids": ["DC1"]}})
     assert "delivery-challan" in bf.plan(db)[0]["check"]
     assert _avg(db) == 120.0  # flagged, never changed
+
+
+# --------------------------------------------------------------------------
+# Fix round 1 (S4): owner rulings 2026-11-01 and review items 1-3.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("source", ("PO_RATE", "GRN_PO", "GRN_WALKIN"))
+def test_a_provisional_cost_is_replaced_by_the_first_real_bill_never_averaged(source):
+    """Review 1: 3 cost-less opening pieces, a rate fill of 400 (no history
+    row), then a bill of 500 for 2 received pieces: the average is 500 --
+    never (3 x 400 + 2 x 500) / 5 = 440."""
+    from api.routers.vendors.gst import _promote_cost_from_rate
+    from database.repositories.product_repository import ProductRepository
+
+    db = _db(None)
+    _pieces(db, 3)
+    assert _promote_cost_from_rate("P", db.products.find_one({}), 400, source, ProductRepository(db.products))
+    assert product_cost.provisional(db.products.find_one({}))
+    _receipt(db, "G", 2)
+    _pieces(db, 2, "G")
+    _accept(db, _bill("B", 2, 500, grn_id="G"))
+    assert _avg(db) == 500.0
+    assert not product_cost.provisional(db.products.find_one({}))
+
+
+def test_opening_stock_replaces_a_provisional_cost():
+    """Review 1: opening stock (seed) and its preview (_opening_cost) treat a
+    provisional cost as no average: the typed cost becomes the first one."""
+    from api.routers.inventory.opening_stock import _opening_cost
+
+    db = _db(400.0, cost_source="PO_RATE")
+    assert _opening_cost(db.products.find_one({}), 450.0) == (450.0, None)
+    assert product_cost.seed(db, "P", 450, key="opening:1", kind="OPENING_STOCK", actor="m")
+    assert _avg(db) == 450.0
+    # A real average still wins over a typed opening cost.
+    assert product_cost.seed(db, "P", 999, key="opening:2", kind="OPENING_STOCK", actor="m") is None
+
+
+def test_a_correction_typed_against_a_stale_average_is_refused(monkeypatch):
+    """Review 2: the card showed 3340; a bill moved the average to 3395
+    before the correction was saved -- 409, saying so, nothing written."""
+    db = _db(3340.0)
+    _pieces(db, 5)
+    cli = _card_app(db, monkeypatch, "ACCOUNTANT")
+    product_cost.correct(db, "P", 3395, "a bill landed", "acc", expected=3340)
+    r = cli.post("/inventory/products/P/cost-correction",
+                 json={"average_cost": 3300, "expected_average_cost": 3340, "reason": "credit note"})
+    assert r.status_code == 409 and "changed since you opened" in r.json()["detail"]
+    assert _avg(db) == 3395.0
+    assert [h["new_cost"] for h in db.products.find_one({})["cost_history"]] == [3395.0]
+
+
+def test_a_bill_landing_between_a_corrections_read_and_write_refuses_it(monkeypatch):
+    """Review 2: the bill lands after the correction checked the average but
+    before its guarded write: the write misses, the re-read sees the new
+    average, and the correction is refused (CostChanged) -- never written
+    over the bill."""
+    db = _db(3340.0)
+    real = product_cost.utc_now_iso
+    fired = []
+
+    def racing():
+        if not fired:
+            fired.append(1)
+            db.products.update_one({"product_id": "P"}, {"$set": {"cost_price": 3395.0},
+                                                         "$push": {"cost_keys": "BILL-X"}})
+        return real()
+
+    monkeypatch.setattr(product_cost, "utc_now_iso", racing)
+    with pytest.raises(product_cost.CostChanged):
+        product_cost.correct(db, "P", 3300, "credit note", "acc", expected=3340)
+    product = db.products.find_one({})
+    assert product["cost_price"] == 3395.0 and not product.get("cost_history")
+
+
+def test_a_walk_in_bill_averages_in_like_every_other_bill():
+    """Owner 2026-11-01 (b): 5 pieces at 100 on the shelf; a walk-in (no-PO)
+    receipt's bill, 5 at 200, averages in: (5 x 100 + 5 x 200) / 10 = 150 --
+    the latest price paid (200) no longer replaces the cost."""
+    db = _db(100.0)
+    _pieces(db, 5)
+    _receipt(db, "W", 5, grn_subtype="NO_PO")
+    _pieces(db, 5, "W")
+    _accept(db, _bill("BW", 5, 200, grn_id="W"))
+    product = db.products.find_one({})
+    assert product["cost_price"] == 150.0
+    assert product["cost_history"][-1]["method"] == "AVERAGE"
+
+
+def test_the_blind_count_values_a_piece_with_no_product_as_uncosted(monkeypatch):
+    """Review 3: the blind count's cost resolver reads the one cost rule --
+    an id with no products doc is uncosted, never its catalogue copy's
+    price."""
+    from api.routers import blind_stock_take as r
+
+    db = _db(250.0)
+    db.catalog_products.insert_one({"id": "CAT-ONLY", "pricing": {"cost_price": 1000.0}})
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    assert r._cost_resolver(["P", "CAT-ONLY"]) == {"P": 25000}
+
+
+def test_the_backfill_averages_held_pieces_only_walk_ins_included_and_leaves_provisional_costs():
+    """Owner 2026-11-01 under the backfill: (a) a sold piece never weighs in;
+    (b) a walk-in receipt's piece is averaged in at its price like any
+    receipt's; a provisional cost is not carried over (its first bill
+    replaces it)."""
+    from scripts import backfill_average_cost as bf
+
+    db = mongomock.MongoClient().bf2
+    db.products.insert_many([
+        {"product_id": "NONE", "cost_price": None},
+        {"product_id": "PROV", "cost_price": 400.0, "cost_source": "PO_RATE"},
+    ])
+    db.stock_units.insert_many([
+        {"product_id": "NONE", "status": "AVAILABLE", "unit_cost": 100, "grn_id": "PO-REC"},
+        {"product_id": "NONE", "status": "AVAILABLE", "unit_cost": 200, "grn_id": "WALK-IN"},
+        {"product_id": "NONE", "status": "SOLD", "unit_cost": 999, "grn_id": "WALK-IN"},
+        {"product_id": "PROV", "status": "AVAILABLE", "unit_cost": 400},
+    ])
+    rows = {r["product_id"]: r for r in bf.plan(db)}
+    assert rows["NONE"]["fill"] == 150.0
+    assert rows["PROV"]["fill"] is None and "provisional" in rows["PROV"]["reason"]
+    assert bf.carry_over_candidates(db) == []
+    assert bf.apply(db, list(rows.values()), "RUN9") == 1
+    assert db.products.find_one({"product_id": "PROV"}).get("cost_history") is None

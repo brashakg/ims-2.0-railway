@@ -141,8 +141,9 @@ def _cost_resolver(product_ids):
     programmer error (bad helper, bad shape) must FAIL LOUDLY, never masquerade
     as 'no costs found' and silently zero out a real shrinkage figure.
 
-    Falls back to catalog_products for ids not found in the products spine so
-    catalog-only products are included in the shrinkage valuation (not zeroed).
+    THE one cost reader (stock_value.average_cost): an id with no products
+    doc is uncosted, as on every other reader -- never its catalogue copy's
+    price (a second cost rule).
     """
     db = _get_db()
     out: Dict[str, int] = {}
@@ -157,27 +158,10 @@ def _cost_resolver(product_ids):
         return {}
     # THE cost (stock_value.average_cost, S4), in RUPEES -> integer paise
     # once, at the boundary.
-    found_ids = set()
     for p in rows:
         pid = p.get("product_id")
         if pid:
             out[pid] = rupees_to_paise(stock_value.average_cost(p))
-            found_ids.add(pid)
-    # Catalog-only fallback for any ids that were not in the products spine.
-    missing = [i for i in ids if i not in found_ids]
-    if missing:
-        try:
-            cat_rows = list(db.get_collection("catalog_products").find(
-                {"id": {"$in": missing}},
-                {"id": 1, "pricing.cost_price": 1},
-            ))
-            for p in cat_rows:
-                pid = p.get("id")
-                if pid:
-                    cost = (p.get("pricing") or {}).get("cost_price")
-                    out[pid] = rupees_to_paise(cost)
-        except PyMongoError:
-            pass  # fail-soft: catalog miss -> zero paise for those ids
     return out
 
 

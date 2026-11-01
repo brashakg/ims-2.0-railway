@@ -18,11 +18,20 @@ WHAT IT DOES
     own gets their weighted average as its first average (to the paisa), a
     'BACKFILL' row in its cost history. Pieces without a cost of their own,
     or a product that already has an average, are listed and left alone.
+  * The averages follow the owner's rulings of 2026-11-01:
+      (a) only the pieces still HELD are averaged -- a sold piece never
+          weighs in (it left at the cost its sale line froze, so no
+          cost-of-goods variance is owed for a sale before S4);
+      (b) a walk-in (no-PO) receipt's pieces are averaged in at their price
+          like every other receipt's -- no "latest price paid" replaces the
+          average.
   * A product that already has an average but an EMPTY cost history (its
     average is from before S4) gets one 'Carried over' row (kind
     CARRIED_OVER: old none, new = its average, source = its cost_source) so
     the product page never shows an average with "no bill yet". The average
-    itself is not changed.
+    itself is not changed. A PROVISIONAL cost (a PO or receipt rate,
+    product_cost.provisional) is NOT carried over: it stays provisional, so
+    its first real bill replaces it instead of blending with it.
   * Every accepted goods receipt that no S4 bill has costed is stamped
     `costed_before_s4: <run id>` (product_cost.PRE_S4_STAMP; only receipts
     accepted before the first S4 bill -- run it right after the deploy): its pieces
@@ -92,7 +101,9 @@ def plan(db) -> List[dict]:
         old_value = sum(stock_value._pieces(u) * (own_cost(u) or average) for u in units)
         fill = None
         reason = "has an average" if average else ""
-        if not average:
+        if product_cost.provisional(prod):
+            reason = "provisional (a PO / receipt rate): its first bill replaces it"
+        elif not average:
             if all(own_cost(u) for u in units):
                 total = sum(Decimal(str(stock_value._pieces(u))) * Decimal(str(own_cost(u))) for u in units)
                 fill = float((total / Decimal(str(pieces))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
@@ -127,7 +138,7 @@ def carry_over_candidates(db) -> List[dict]:
     S4)."""
     return [
         p for p in db["products"].find({"cost_price": {"$gt": 0}}, {"_id": 0})
-        if stock_value.average_cost(p) and not p.get("cost_history")
+        if product_cost.average(p) and not p.get("cost_history")
     ]
 
 
@@ -263,6 +274,8 @@ def main(argv: Optional[List[str]] = None) -> int:
               f"value S4 {r['value_s4']:.2f} (before {r['value_before']:.2f}) - {r['reason']}"
               + (f" -> {r['fill']:.2f}" if r["fill"] is not None else "")
               + (f"  CHECK BY HAND: {r['check']}" if r.get("check") else ""))
+    print("averages under the owner's 2026-11-01 rulings: (a) held pieces only, never sold ones; "
+          "(b) walk-in pieces averaged in like any receipt's")
     print(f"total value S4 {sum(r['value_s4'] for r in rows):.2f}, "
           f"before {sum(r['value_before'] for r in rows):.2f}; "
           f"{sum(1 for r in rows if r['fill'] is not None)} product(s) to fill; "

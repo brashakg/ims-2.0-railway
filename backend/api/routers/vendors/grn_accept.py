@@ -1139,9 +1139,8 @@ def _accept_grn_claimed(
                 line_cost = po_unit_price.get(product_id, 0.0)
             cost_fields = {}
             if line_cost and line_cost > 0:
-                # A walk-in buy's price is labelled as one (and, as that
-                # source, is the product's cost from now on -- the latest price
-                # paid wins); a PO receipt's is the PO price.
+                # A walk-in buy's price is labelled as one; a PO receipt's is
+                # the PO price. Either is provisional until the bill.
                 source = (
                     WALK_IN_COST_SOURCE
                     if grn.get("grn_subtype") == GRN_SUBTYPE_NO_PO

@@ -23,7 +23,7 @@ from ._shared import (
     uuid,
 )
 from ...services.cost_mask import mask_cost, refuse_cost_write
-from ...services import product_cost, stock_value
+from ...services import product_cost
 from .helpers import (
     _get_db,
     _reject_stock_mint_on_online_store,
@@ -104,8 +104,10 @@ def _opening_cost(product: dict, typed: Optional[float]) -> tuple:
     """(the cost the pieces carry, a note when the typed cost is not used).
     THE stock value rule: every piece carries the product's one average cost
     (stock_value.average_cost). A typed cost only gives a product with no
-    average its first one (product_cost.seed); a product that has one keeps it."""
-    average = stock_value.average_cost(product)
+    average its first one (product_cost.seed); a product that has one keeps it.
+    A provisional cost (a PO / receipt rate, product_cost.average) is no
+    average: the typed cost replaces it."""
+    average = product_cost.average(product)
     if average:
         note = (f"Valued at the product's average cost Rs {average:.2f}; the cost typed here is not used."
                 if typed and round(float(typed), 2) != average else None)
