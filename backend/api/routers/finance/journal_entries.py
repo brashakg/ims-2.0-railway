@@ -376,8 +376,9 @@ async def get_tally_journal_jv(
     _require_roles_for(current_user, _JE_READER_ROLES, _JE_READ_REFUSED)
     db = _get_db()
     store_id = resolve_store_scope(store_id, current_user)
-    # entry_date is a calendar-midnight accounting day, not a stored instant:
-    # bound it by calendar day, never by the IST-shifted created_at bounds.
+    # entry_date is an IST accounting date (calendar midnight for manual JEs,
+    # the IST wall clock for reversals), not a naive-UTC stored instant: bound
+    # it by calendar day, never by the IST-shifted created_at bounds.
     from_dt = _je_cal_day(from_date)
     to_dt = _je_cal_day(to_date, end=True)
     rows = je_service.list_jes(

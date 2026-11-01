@@ -88,15 +88,41 @@ def test_monthly_export_window_buckets_by_ist_day(stored, month):
     assert (in_oct, in_nov) == ((1, 0) if month == "oct" else (0, 1))
 
 
-def test_journal_jv_export_keeps_calendar_entry_dates():
-    """entry_date is a calendar-midnight accounting day, not a stored instant:
-    the JV export must bound it by calendar day (_je_cal_day), not by the
-    IST-shifted created_at bounds."""
-    from api.routers.finance import _shared
+@pytest.mark.parametrize(
+    "entry_date",
+    [
+        datetime(2026, 10, 31, 20, 0),  # NIGHT: reversal at 20:00 IST 31 Oct (je_service._now() is IST wall clock)
+        datetime(2026, 10, 31, 10, 0),  # DAY control: reversal at 10:00 IST 31 Oct
+    ],
+)
+def test_journal_jv_export_keeps_the_entry_in_its_ist_month(monkeypatch, entry_date):
+    """entry_date is an IST accounting date (calendar midnight for manual JEs,
+    the IST wall clock for reversals), not a naive-UTC stored instant: the JV
+    export must bound it by calendar day (_je_cal_day), never by the
+    IST-shifted created_at bounds, or a 20:00 IST reversal on 31 Oct drops out
+    of October's Tally export and into November's."""
+    import asyncio
 
-    lo, hi = _shared._je_cal_day("2026-10-01"), _shared._je_cal_day("2026-10-31", end=True)
-    assert lo <= datetime(2026, 10, 31) <= hi
-    assert not (lo <= datetime(2026, 11, 1) <= hi)
+    from api.routers.finance import journal_entries as je_mod
+
+    db = mongomock.MongoClient()["jv_ist"]
+    db["journal_entries"].insert_one({
+        "je_id": "JE-REV", "je_number": "JV-REV-0001", "store_id": None,
+        "status": "POSTED", "entry_date": entry_date, "created_at": entry_date,
+        "description": "Reversal", "lines": [
+            {"account_name": "Cash", "debit": 10000, "credit": 0},
+            {"account_name": "Sales", "debit": 0, "credit": 10000},
+        ],
+    })
+    monkeypatch.setattr(je_mod, "_get_db", lambda: db)
+    admin = {"user_id": "u1", "roles": ["ADMIN"], "active_role": "ADMIN"}
+
+    def export(frm, to):
+        r = asyncio.run(je_mod.get_tally_journal_jv(from_date=frm, to_date=to, current_user=admin))
+        return r.body.decode()
+
+    assert "JV-REV-0001" in export("2026-10-01", "2026-10-31")
+    assert "JV-REV-0001" not in export("2026-11-01", "2026-11-30")
 
 
 # ---------------------------------------------------------------- CLK-P03
