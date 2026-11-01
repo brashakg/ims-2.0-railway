@@ -38,7 +38,9 @@ ONE rule for every write-off door:
     bill's month; a later part bill of a receipt tops its lost pieces' rows
     up to their slice of every bill (_true_up). A piece lost after a
     GSTIN-crossing transfer delivered it (on any later move too), before the
-    mirror bill is booked, reverses when the mirror lands.
+    mirror bill is booked, reverses when the mirror lands. A transfer credit
+    note trues up the invoice rows of kept pieces written off before it to
+    the line net of the note (_true_up_note).
   - undo_writeoff(db, unit): a written-off piece back in play (re-quarantined,
     restocked) drops its reversal -- deleted while its month is open, else a
     re-claim row in the first open month.
@@ -215,10 +217,13 @@ def _pieces(unit: dict) -> float:
 
 def _recorded(db, query: dict, count: str) -> tuple:
     """(sum of `count`, heads) over the live reversal rows matching `query`,
-    net of what was re-claimed off a filed top-up row (it stays live)."""
+    net of what was re-claimed off a filed row trimmed by _true_up (it stays
+    live)."""
     done, heads = 0.0, dict.fromkeys(_HEADS, 0.0)
     for r in db.get_collection(COLLECTION).find({**query, "$or": [
-            {"kind": "REVERSAL", "superseded": {"$ne": True}}, {"kind": "RECLAIM", "topup": True}]}):
+            {"kind": "REVERSAL", "superseded": {"$ne": True}},
+            {"kind": "RECLAIM", "topup": True},
+            {"kind": "RECLAIM", "trim": True, "superseded": {"$ne": True}}]}):
         done += _f(r.get(count))
         for h in _HEADS:
             heads[h] += _f(r.get(h))
@@ -419,13 +424,14 @@ def record_writeoff(db, units: Iterable[dict], *, source_type: str, source_id: s
 
 
 def _true_up(db, bills: list, pid, gstin_of, bill: Optional[dict] = None, when=None,
-             actor_id: str = "") -> Optional[dict]:
+             actor_id: str = "", source: Optional[tuple] = None) -> Optional[dict]:
     """Hold the receipt's rows for `pid` to exactly the lost pieces' slice of
     every bill's heads. A part bill booked after pieces were lost (`bill`):
     their rows were cut to the bills before it (a piece past the billed
     quantity got a nil row), so the rest goes on a top-up row of this bill in
-    the open month of `when`. A piece back (no `bill`): top-ups give back
-    what the rows now hold over that slice -- an open-month one shrinks; a
+    the open month of `when`. A piece back, or a transfer credit note that
+    shrank the kept pieces' slice (no `bill`): the rows -- top-ups first --
+    give back what they hold over that slice -- an open-month one shrinks; a
     filed one stands and the rest is re-claimed in the first open month."""
     line_bills, heads, qty, claimed = _line_heads(bills, pid, gstin_of)
     if claimed is None or qty <= 0:
@@ -435,12 +441,14 @@ def _true_up(db, bills: list, pid, gstin_of, bill: Optional[dict] = None, when=N
     target = {h: round(heads[h] * min(lost, qty) / qty, 2) for h in _HEADS}
     if bill is None:
         over = {h: round(have[h] - target[h], 2) for h in _HEADS}
-        for row in coll.find({"topup": True, "kind": "REVERSAL", "product_id": pid,
-                              "bill_id": {"$in": line_bills}}).sort("period", -1):
+        rows = coll.find({"kind": "REVERSAL", "superseded": {"$ne": True}, "product_id": pid,
+                          "bill_id": {"$in": line_bills}})
+        for row in sorted(rows, key=lambda r: (bool(r.get("topup")), r["period"]), reverse=True):
             # A held (no-GSTIN) row was never filed, whatever its month's lock.
             locked = _locked(db, row["period"]) and not row.get("unallocated")
             net = {h: _f(row.get(h)) for h in _HEADS}
-            for r in coll.find({"kind": "RECLAIM", "reclaims": row["_id"]}) if locked else []:
+            for r in coll.find({"kind": "RECLAIM", "reclaims": row["_id"],
+                                "superseded": {"$ne": True}}) if locked else []:
                 net = {h: net[h] + _f(r.get(h)) for h in _HEADS}
             cut = {h: round(min(net[h], max(0.0, over[h])), 2) for h in _HEADS}
             if not any(cut.values()):
@@ -449,9 +457,15 @@ def _true_up(db, bills: list, pid, gstin_of, bill: Optional[dict] = None, when=N
                 # The filed return stands, as undo_writeoff keeps a filed row.
                 period = _open_period(db, _now())
                 body = {k: v for k, v in row.items() if k not in ("_id", *_HEADS)}
-                coll.update_one({"_id": f"{row['_id']}:reclaim:{period}"}, {
+                # A piece's row: a `trim` re-claim (no pieces), keyed by when
+                # the row was written, so undo_writeoff nets it and a later
+                # write-off of the piece never adds to the old one.
+                rid = (f"{row['_id']}:reclaim:{period}" if row.get("topup") else
+                       f"{row['_id']}:{row.get('recorded_at')}:trim:{period}")
+                coll.update_one({"_id": rid}, {
                     "$inc": {h: -cut[h] for h in _HEADS},
                     "$setOnInsert": {**body, "kind": "RECLAIM", "reclaims": row["_id"],
+                                     **({} if row.get("topup") else {"trim": True, "pieces": 0.0}),
                                      "period": period, "recorded_at": _now()}}, upsert=True)
             else:
                 coll.update_one({"_id": row["_id"]}, {"$set": {h: round(net[h] - cut[h], 2)
@@ -464,12 +478,13 @@ def _true_up(db, bills: list, pid, gstin_of, bill: Optional[dict] = None, when=N
         return None
     period = _open_period(db, when)
     rid = f"{bill['bill_id']}:{pid}:topup:{period}"
+    source_type, source_id = source or ("PART_BILL", bill["bill_id"])
     coll.update_one({"_id": rid}, {"$inc": add, "$setOnInsert": {
         "kind": "REVERSAL", "topup": True, "stock_id": None, "product_id": pid,
         "store_id": bill.get("to_store_id") or bill.get("store_id"), "pieces": 0.0,
         "bill_id": bill["bill_id"], "gstin": g or None, "unallocated": not g,
         "entity_id": bill.get("recipient_entity_id") or bill.get("entity_id"), "period": period,
-        "source_type": "PART_BILL", "source_id": bill["bill_id"],
+        "source_type": source_type, "source_id": source_id,
         "recorded_by": actor_id, "recorded_at": datetime.utcnow(),
     }}, upsert=True)
     return {**add, "unallocated": not g}
@@ -572,9 +587,15 @@ def reverse_on_new_bill(db, bill: dict, actor_id: str = "") -> dict:
     the loss -- or the bill's month when the loss came first (credit is never
     reversed before it is claimed). Once per piece, so safe to repeat. Every
     bill door calls this after storing the bill. A transfer credit note is no
-    bill of the pieces: it claims nothing on them."""
+    bill of the pieces (it reverses none), but it changes the kept pieces'
+    slice of the invoice line: _true_up_note."""
+    day = str(bill.get("invoice_date") or bill.get("bill_date") or "")[:10]
+    try:
+        billed = datetime.fromisoformat(day) + timedelta(hours=6)  # 11:30 IST that day
+    except ValueError:
+        billed = datetime.utcnow()
     if _is_note(bill):
-        return totals([])
+        return _true_up_note(db, bill, billed, actor_id)
     if bill.get("source_transfer_id"):
         whose = _transfer_units(db, bill["source_transfer_id"])
     else:
@@ -584,11 +605,6 @@ def reverse_on_new_bill(db, bill: dict, actor_id: str = "") -> dict:
         whose = {"$or": [{"grn_id": {"$in": rids}}, {"source_type": "GRN", "source_id": {"$in": rids}}]}
     gone = {"$or": [{"void_reason": {"$regex": "^" + COUNT_VOID_PREFIX}},
                     {"void_reason": {"$regex": "^" + TRANSFER_MISSING_PREFIX}}, {"status": "DAMAGED"}]}
-    day = str(bill.get("invoice_date") or bill.get("bill_date") or "")[:10]
-    try:
-        billed = datetime.fromisoformat(day) + timedelta(hours=6)  # 11:30 IST that day
-    except ValueError:
-        billed = datetime.utcnow()
     rows, latest = [], billed
     for unit in db.get_collection("stock_units").find({"$and": [whose, gone]}):
         source_type, source_id = writeoff_source(unit)
@@ -603,6 +619,26 @@ def reverse_on_new_bill(db, bill: dict, actor_id: str = "") -> dict:
         gstin_of, receipt = _gstin_lookup(db), _receipt_bills(db, rids)
         for pid in {ln.get("product_id") for ln in bill.get("lines") or []} - {None}:
             rows.append(_true_up(db, receipt, pid, gstin_of, bill, latest, actor_id) or {})
+    return totals(rows)
+
+
+def _true_up_note(db, note: dict, when: datetime, actor_id: str = "") -> dict:
+    """A transfer credit note books: the invoice rows of kept pieces written
+    off BEFORE it reversed slices of the gross line. Hold them to the slice
+    of the line net of every note (the _bills_for shape): the excess given
+    back (_true_up, no bill), the shortfall a top-up on the invoice in the
+    note's open month. Idempotent, so safe to repeat."""
+    same = list(db.get_collection("vendor_bills").find({
+        "status": {"$nin": _gst_itc()._DEAD_BILL}, "source_transfer_id": note.get("source_transfer_id")}))
+    invoice = next((b for b in same if not _is_note(b)), None)
+    if not invoice:
+        return totals([])
+    gstin_of, bills = _gstin_lookup(db), [invoice, *(b for b in same if _is_note(b))]
+    rows = []
+    for pid in {ln.get("product_id") for ln in note.get("lines") or []} - {None}:
+        _true_up(db, bills, pid, gstin_of)
+        rows.append(_true_up(db, bills, pid, gstin_of, invoice, when, actor_id,
+                             source=(_gst_itc().TRANSFER_CREDIT_NOTE, note.get("bill_id"))) or {})
     return totals(rows)
 
 
@@ -633,13 +669,18 @@ def undo_writeoff(db, unit: dict) -> None:
         return
     kept = f"{sid}:{row['period']}"
     body = {k: v for k, v in row.items() if k != "_id"}
+    # What a credit note's true-up already re-claimed off this row (_true_up)
+    # is not re-claimed twice: the row goes back net of it.
+    trims = {"kind": "RECLAIM", "trim": True, "reclaims": sid, "superseded": {"$ne": True}}
+    net = {h: _f(row.get(h)) + sum(_f(r.get(h)) for r in coll.find(trims)) for h in _HEADS}
     coll.update_one({"_id": kept}, {"$setOnInsert": {**body, "superseded": True}}, upsert=True)
     coll.update_one({"_id": f"{kept}:reclaim"}, {"$setOnInsert": {
         **body, "kind": "RECLAIM", "reclaims": kept,
         "period": _open_period(db, _now()),
-        **{h: -_f(row.get(h)) for h in _HEADS},
+        **{h: -round(net[h], 2) for h in _HEADS},
         "recorded_at": _now(),
     }}, upsert=True)
+    coll.update_many(trims, {"$set": {"superseded": True}})
     coll.delete_one({"_id": sid})
     _trim_top_up(db, unit, row)
 

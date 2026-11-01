@@ -1556,3 +1556,100 @@ def test_a_kept_piece_back_after_its_write_off_reclaims_exactly_what_it_reversed
     _write_off(world, kept)
     row = world["itc_writeoff_reversals"].find_one({"_id": kept})
     assert (row["cgst"], row["sgst"]) == (75.0, 75.0)
+
+
+# ---------------------------------------------------------------------------
+# Review round 6: a kept piece written off BEFORE the credit note is trued up
+# ---------------------------------------------------------------------------
+
+
+def _kept_first_box(world, lost):
+    """_unequal_box, but the kept (damaged) piece is written off from
+    quarantine BEFORE the admin writes the missing one off: its row reverses
+    the gross 50/50, the credit note comes after."""
+    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"unit_cost": 3000.0}})
+    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"unit_cost": 1000.0}})
+    t = _shipped_box(world, codes=("BVQX001", "BVQX002"))
+    kept = "SU-2" if lost == "SU-1" else "SU-1"
+    _scan_in(t["id"], f"BVQX00{kept[-1]}", user=MGR_BOK, damaged=True, reason="Cracked rim")
+    _complete(t["id"], user=MGR_BOK)
+    _write_off(world, kept)
+    assert world["itc_writeoff_reversals"].find_one({"_id": kept})["cgst"] == 50.0
+    (invoice,) = [b for b in _bills(world, t["id"]) if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
+    return t, kept, invoice
+
+
+def _on_invoice(world, invoice, kind="REVERSAL"):
+    rows = list(world["itc_writeoff_reversals"].find({"bill_id": invoice["bill_id"], "kind": kind}))
+    return tuple(round(sum(r.get(h) or 0 for r in rows), 2) for h in ("cgst", "sgst", "igst"))
+
+
+@pytest.mark.parametrize("lost, share", [("SU-1", 25.0), ("SU-2", 75.0)])  # expensive / cheap lost
+def test_a_kept_piece_written_off_before_the_credit_note_is_trued_up_to_it(world, lost, share):
+    """Bokaro writes the damaged piece off first (50/50 of the gross line),
+    then the admin writes the missing one off: the credit note trues the
+    invoice's reversal up to what Bokaro kept -- 25/25 when the 3000 piece is
+    lost, 75/75 when the 1000 piece is -- and the month's 4(B)(1) says so."""
+    from api.routers import transfers
+    from api.services import writeoff_itc
+
+    t, _kept, invoice = _kept_first_box(world, lost)
+    _run(transfers.write_off_missing_piece(t["id"], lost, ADMIN))
+    assert _on_invoice(world, invoice) == (share, share, 0.0)
+    period = writeoff_itc._period(datetime.utcnow())
+    assert writeoff_itc.month_reversal(world, GSTIN_Y_JH, period)["total"] == 2 * share
+    # The true-up run again (a retried hook) books nothing more.
+    (note,) = _notes(world, t["id"])
+    writeoff_itc.reverse_on_new_bill(world, note)
+    assert _on_invoice(world, invoice) == (share, share, 0.0)
+
+
+@pytest.mark.parametrize("lost, share", [("SU-1", 25.0), ("SU-2", 75.0)])
+def test_found_at_the_sender_after_a_kept_write_off_trues_it_up(world, lost, share):
+    """The missing piece turns up back at Dhanbad after Bokaro wrote the
+    damaged one off: the credit note for it trues the reversal up the same
+    way."""
+    from api.routers import transfers
+
+    t, _kept, invoice = _kept_first_box(world, lost)
+    _run(transfers.found_missing_piece(t["id"], lost, transfers.MissingFound(at="source"), MGR_DHN))
+    assert len(_notes(world, t["id"])) == 1
+    assert _on_invoice(world, invoice) == (share, share, 0.0)
+
+
+def test_an_equal_cost_kept_piece_is_the_same_in_either_order(world):
+    """Three equal pieces: the damaged one written off before the lost one's
+    credit note still reverses 46.25/46.25 -- the note leaves it alone."""
+    from api.routers import transfers
+
+    t = _shipped_box(world)
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _scan_in(t["id"], "BVQX002", user=MGR_BOK, damaged=True, reason="Cracked rim")
+    _complete(t["id"], user=MGR_BOK)
+    _write_off(world, "SU-2")
+    _run(transfers.write_off_missing_piece(t["id"], "SU-3", ADMIN))
+    (invoice,) = [b for b in _bills(world, t["id"]) if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
+    assert _on_invoice(world, invoice) == (46.25, 46.25, 0.0)
+
+
+def test_a_filed_kept_write_off_gives_the_excess_back_and_its_undo_nets_it(world, monkeypatch):
+    """The 3000 piece is lost; the 1000 piece was written off at 50/50 and
+    that month FILED. The note re-claims the 25/25 excess in the first open
+    month (the filed row stands). The piece then comes back: only the 25/25
+    still reversed is re-claimed -- 50/50 in all, never 75/75."""
+    from api.routers import transfers
+    from api.services import writeoff_itc
+
+    t, kept, invoice = _kept_first_box(world, "SU-1")
+    filed = world["itc_writeoff_reversals"].find_one({"_id": kept})["period"]
+    monkeypatch.setattr(writeoff_itc, "_locked", lambda db, period: period == filed)
+    _run(transfers.write_off_missing_piece(t["id"], "SU-1", ADMIN))
+    assert world["itc_writeoff_reversals"].find_one({"_id": kept})["cgst"] == 50.0
+    nxt = writeoff_itc._next_month(filed)
+    assert writeoff_itc.month_reclaim(world, GSTIN_Y_JH, nxt)["cgst"] == 25.0
+    done, heads = writeoff_itc._recorded(world, {"bill_id": invoice["bill_id"]}, "pieces")
+    assert (done, heads["cgst"]) == (1.0, 25.0)
+    writeoff_itc.undo_writeoff(world, _unit(world, kept))
+    assert writeoff_itc.month_reclaim(world, GSTIN_Y_JH, nxt)["cgst"] == 50.0
+    done, heads = writeoff_itc._recorded(world, {"bill_id": invoice["bill_id"]}, "pieces")
+    assert (done, heads["cgst"]) == (0.0, 0.0)

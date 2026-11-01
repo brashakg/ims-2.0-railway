@@ -1202,6 +1202,7 @@ def _short_credit_note(transfer: Dict, stock_ids: List[str], reason: str) -> Opt
     on the way FIRST, so a refused door books no note. One note per piece
     (note_key, unique): pressing twice books one."""
     from ..services.purchase_invoice_engine import split_line_gst
+    from ..services.writeoff_itc import after_bill_booked
 
     db = _get_db()
     if db is None:
@@ -1215,10 +1216,10 @@ def _short_credit_note(transfer: Dict, stock_ids: List[str], reason: str) -> Opt
     credited = {str(s) for n in notes for s in n.get("credited_stock_ids") or []}
     todo = [str(s) for s in stock_ids if str(s) not in credited]
     if not todo:
-        return next(
-            (n.get("bill_number") for n in notes if str(stock_ids[0]) in (n.get("credited_stock_ids") or [])),
-            None,
-        )
+        hit = next((n for n in notes if str(stock_ids[0]) in (n.get("credited_stock_ids") or [])), None)
+        if hit:
+            after_bill_booked(db, hit)  # a press again finishes a true-up that failed
+        return hit.get("bill_number") if hit else None
     _book_mirror_purchase(transfer)
     invoice = bills.find_one(
         {"source_transfer_id": tid, "doc_type": {"$ne": TRANSFER_CREDIT_NOTE}}, {"_id": 0}
@@ -1333,6 +1334,9 @@ def _short_credit_note(transfer: Dict, stock_ids: List[str], reason: str) -> Opt
         if not landed:
             raise
         return landed.get("bill_number")
+    # Kept pieces written off BEFORE this note reversed slices of the gross
+    # invoice line: true them up to the line net of the note (writeoff_itc).
+    after_bill_booked(db, doc)
     return number
 
 
