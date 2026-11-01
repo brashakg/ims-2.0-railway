@@ -2027,11 +2027,16 @@ def _website_needs(db, product_id: str) -> Dict[str, Any]:
             # What its model's press holds it back on -- the sync screen's own
             # per-SKU reason. Dropped only when it repeats the colour's OWN
             # refusal (its own waiting row, its own archived row, or the same
-            # words -- a shared brand/lock): the model's photo, price, clash or
-            # block is a different fact and is listed now, not after the
-            # colour is finished (review of #1305).
+            # words for a fact the two truly share -- the brand refusal or a
+            # push-lock): the model's photo, price, clash or block is a
+            # different fact and is listed now, not after the colour is
+            # finished (review of #1305). A readiness refusal ("not put on the
+            # website: ...", product_push_refusal's one wrap) never names its
+            # product, so the same words from the model are the MODEL's own
+            # draft/review/archive and stay listed.
             hold = model_hold(db, doc, spine)
-            if hold and why and (hold.startswith("not ready - ") or hold == "archived" or why in hold):
+            shared = why and why in (hold or "") and not why.startswith("not put on the website: ")
+            if hold and why and (hold.startswith("not ready - ") or hold == "archived" or shared):
                 hold = None
             if hold:
                 needs.append("its model's page: " + hold)

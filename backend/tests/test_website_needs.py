@@ -342,3 +342,23 @@ def test_a_draft_colour_still_names_its_models_own_blocker(monkeypatch):
     why = product_push_refusal(db, _twin(db, black))
     assert why and "draft" in why, why
     assert _model_needs(monkeypatch, db, black) == [why, diag.PUSH_THE_MODEL, "its model's page: " + reason]
+
+
+@pytest.mark.usefixtures("brand_is_for_the_website")
+def test_a_draft_colour_of_a_draft_model_names_the_models_draft_too(monkeypatch):
+    """Colour AND model are both catalogue drafts: the readiness refusal never
+    names its product, so the model's identical words are the MODEL's own
+    blocker, not a repeat -- listed, never hidden (review of #1305)."""
+    from api.services import online_content_diagnostics as diag
+    from api.services.shopify_push import product_push_refusal
+    from test_shopify_model_listings import _family, _twin, _world
+
+    db = _world()
+    lead, black = _family(db, [("Gold", "001"), ("Black", "002")])
+    for pid in (lead, black):
+        db["products"].update_one({"product_id": pid}, {"$set": {"catalog_status": "DRAFT"}})
+    why = product_push_refusal(db, _twin(db, black))
+    assert why == "not put on the website: a catalogue draft -- finish it first", why
+    assert _model_needs(monkeypatch, db, black) == [
+        why, diag.PUSH_THE_MODEL,
+        "its model's page: not for the website - not put on the website: a catalogue draft -- finish it first"]
