@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 867 |
-| **Total `/api/v1` (method x path)** | **1307** |
+| Role-gated (one or more roles) | 868 |
+| **Total `/api/v1` (method x path)** | **1308** |
 | ...of which `store_scoped` | 236 |
 | ...of which `self_enforced` | 47 |
 
@@ -1557,6 +1557,7 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/users/{user_id}/reset-password` | ADMIN, SUPERADMIN |  |  |
 | `DELETE` | `/api/v1/users/{user_id}/roles/{role}` | ADMIN, SUPERADMIN |  |  |
 | `POST` | `/api/v1/users/{user_id}/roles/{role}` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/users/{user_id}/set-password` | SUPERADMIN |  |  |
 | `DELETE` | `/api/v1/users/{user_id}/stores/{store_id}` | ADMIN, SUPERADMIN |  |  |
 | `POST` | `/api/v1/users/{user_id}/stores/{store_id}` | ADMIN, SUPERADMIN |  |  |
 

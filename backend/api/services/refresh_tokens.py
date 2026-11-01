@@ -263,6 +263,28 @@ class RefreshTokenStore:
         except Exception as e:  # noqa: BLE001
             logger.warning("refresh_tokens: family revoke failed: %s", e)
 
+    def revoke_user_families(
+        self, user_id: str, reason: str, keep_family_id: Optional[str] = None
+    ) -> None:
+        """Revoke every chain of ``user_id`` except ``keep_family_id``.
+        NOT fail-soft: a password set that cannot sign the user out must say so."""
+        now = _utcnow()
+        update = {"revoked": True, "revoked_at": now, "revoked_reason": reason}
+        flt = {"user_id": user_id, "revoked": False}
+        if keep_family_id:
+            flt["family_id"] = {"$ne": keep_family_id}
+        coll = self._coll()
+        if coll is not None:
+            coll.update_many(flt, {"$set": dict(update)})
+        with self._mem_lock:
+            for doc in self._mem.values():
+                if (
+                    doc.get("user_id") == user_id
+                    and not doc.get("revoked")
+                    and doc.get("family_id") != keep_family_id
+                ):
+                    doc.update(update)
+
 
 # Process-wide singleton (mirrors auth.py's _token_blacklist pattern).
 refresh_token_store = RefreshTokenStore()

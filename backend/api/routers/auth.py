@@ -591,6 +591,23 @@ def _account_is_disabled(payload: dict) -> bool:
     return False
 
 
+def token_superseded(payload: dict, record: Optional[dict]) -> bool:
+    """True when a SUPERADMIN set this user's password after the token was minted.
+
+    Setting a password bumps the user's ``token_version``; every token carries the
+    version it was minted at (``tv``, 0 when absent). An older token is dead --
+    except the one session the actor asked to keep (``token_version_kept_sid``,
+    set only when a SUPERADMIN sets their OWN password). No record = no verdict.
+    """
+    if not record:
+        return False
+    current = int(record.get("token_version") or 0)
+    if int(payload.get("tv") or 0) >= current:
+        return False
+    kept = record.get("token_version_kept_sid")
+    return not (kept and payload.get("sid") == kept)
+
+
 def current_authority(payload: dict, request: Request = None) -> dict:
     """Re-evaluate role/shop claims against the current account, once per request.
 
@@ -613,7 +630,8 @@ def current_authority(payload: dict, request: Request = None) -> dict:
         record = None if repo is None else repo.collection.find_one(
             {"user_id": user_id},
             {"roles": 1, "store_ids": 1, "is_active": 1,
-             "module_access": 1, "must_change_password": 1},
+             "module_access": 1, "must_change_password": 1,
+             "token_version": 1, "token_version_kept_sid": 1},
         )
     except Exception as exc:  # noqa: BLE001 - preserve the existing outage policy
         logger.warning("Live authority check unavailable: %s", exc)
@@ -621,6 +639,10 @@ def current_authority(payload: dict, request: Request = None) -> dict:
 
     if record is not None and record.get("is_active", True) is False:
         raise HTTPException(status_code=401, detail="Account is disabled")
+    if token_superseded(payload, record):
+        raise HTTPException(
+            status_code=401, detail="Your password was changed. Please log in again."
+        )
     claims = _resolve_refresh_claims(payload, record) if record is not None else {}
     if request is not None:
         request.state._current_authority = {"user_id": user_id, "claims": claims}
@@ -1095,6 +1117,9 @@ async def login(request: LoginRequest, req: Request = None):
         ),
         "must_change_password": must_change_password,
         "module_access": module_access,
+        # Session generation: a SUPERADMIN password set bumps the user's
+        # token_version and every token minted before it stops working.
+        "tv": int(user.get("token_version") or 0),
     }
 
     # Rotating refresh session (2026-07 token hardening): the access token is
@@ -1363,11 +1388,13 @@ def _resolve_refresh_claims(payload: dict, db_user: Optional[dict]) -> dict:
         store_ids = db_user.get("store_ids", payload.get("store_ids", [])) or []
         module_access = db_user.get("module_access") or {}
         must_change = bool(db_user.get("must_change_password", False))
+        tv = int(db_user.get("token_version") or 0)
     else:
         roles = payload.get("roles", [])
         store_ids = payload.get("store_ids", [])
         module_access = payload.get("module_access") or {}
         must_change = bool(payload.get("must_change_password", False))
+        tv = int(payload.get("tv") or 0)
 
     # Normalize deprecated role aliases on the LIVE-record roles too (the DB doc
     # may still carry SALES_CASHIER pre-migration). backlog #12.
@@ -1399,6 +1426,7 @@ def _resolve_refresh_claims(payload: dict, db_user: Optional[dict]) -> dict:
         "active_store_id": active_store,
         "must_change_password": must_change,
         "module_access": module_access,
+        "tv": tv,
     }
 
 
@@ -1515,9 +1543,12 @@ async def refresh_token(request: RefreshTokenRequest):
         )
 
     payload = decode_token(request.token)  # still-valid access token, as before
-    token_data = _resolve_refresh_claims(payload, _lookup_live_user(
-        payload.get("user_id"), payload.get("username")
-    ))
+    live = _lookup_live_user(payload.get("user_id"), payload.get("username"))
+    if token_superseded(payload, live):
+        raise HTTPException(
+            status_code=401, detail="Your password was changed. Please log in again."
+        )
+    token_data = _resolve_refresh_claims(payload, live)
 
     # Anchor the absolute cap. Pre-deploy tokens carry no sess_start; derive it
     # from their 8h exp so the chain dies exactly when the old token would have.
@@ -1640,6 +1671,7 @@ async def switch_store(store_id: str, current_user: dict = Depends(get_current_u
         "active_store_id": store_id,
         "must_change_password": bool(current_user.get("must_change_password", False)),
         "module_access": current_user.get("module_access") or {},
+        "tv": int(current_user.get("tv") or 0),
     }
 
     # Preserve the session anchors (2026-07 token hardening): sess_start keeps
