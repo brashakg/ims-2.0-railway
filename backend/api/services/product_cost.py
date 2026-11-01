@@ -463,9 +463,10 @@ def variance_by(db, field: Optional[str] = None, *, store_ids=None, from_day=Non
     if db is None:
         return out
     for v in db.get_collection(VARIANCES).find(q):
-        split = v.get(f"by_{field}") if field else None
-        for k, amount in ([(s["key"], s["amount"]) for s in split] if split is not None
-                          else [(v.get(field) if field else None, v.get("amount"))]):
+        parts = [(v.get(field) if field else None, v.get("amount"))]
+        if field and isinstance(v.get(f"by_{field}"), list):
+            parts = [(s["key"], s["amount"]) for s in v[f"by_{field}"]]
+        for k, amount in parts:
             out[k] = out.get(k, Decimal(0)) + _d(amount)
     return {k: _paise(v) for k, v in out.items()}
 
