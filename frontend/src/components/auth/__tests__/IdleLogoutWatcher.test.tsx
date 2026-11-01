@@ -22,7 +22,13 @@ vi.mock('../../../context/AuthContext', () => ({
   }),
 }));
 
-const parkSpy = vi.fn(() => null);
+const parkSpy = vi.fn((_opts?: { auto?: boolean; heldBy?: string }) => null);
+
+/** The POS cart must be parked BEFORE logout clears it (cart-loss guard). */
+function expectParkedBeforeLogout() {
+  expect(parkSpy).toHaveBeenCalledWith({ auto: true, heldBy: 'u1' });
+  expect(parkSpy.mock.invocationCallOrder[0]).toBeLessThan(logoutSpy.mock.invocationCallOrder[0]);
+}
 vi.mock('../../../stores/posStore', () => ({
   usePOSStore: {
     getState: () => ({ parkCurrentSale: parkSpy, clearAllOnLogout: vi.fn() }),
@@ -120,6 +126,7 @@ describe('IdleLogoutWatcher end-to-end (fake timers)', () => {
 
     // The REPORTED BUG: popup shown but logout never fires. Assert it DOES.
     expect(logoutSpy).toHaveBeenCalledTimes(1);
+    expectParkedBeforeLogout();
     // Watcher must navigate to the login route with the idle reason.
     expect(screen.getByTestId('loc').textContent).toBe('/login?reason=idle');
     // Modal is gone after logout.
@@ -136,6 +143,7 @@ describe('IdleLogoutWatcher end-to-end (fake timers)', () => {
       btn.click();
     });
     expect(logoutSpy).toHaveBeenCalledTimes(1);
+    expectParkedBeforeLogout();
     expect(screen.getByTestId('loc').textContent).toBe('/login?reason=idle');
   });
 
@@ -175,5 +183,6 @@ describe('IdleLogoutWatcher end-to-end (fake timers)', () => {
       vi.advanceTimersByTime(30_000); // well past the original expiry
     });
     expect(logoutSpy).not.toHaveBeenCalled();
+    expect(parkSpy).not.toHaveBeenCalled();
   });
 });
