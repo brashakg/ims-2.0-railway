@@ -290,8 +290,11 @@ class _November(datetime):
 def _to_november(monkeypatch):
     from api.services import writeoff_itc as wo
 
-    for mod in (scr, iev, wo):
+    for mod in (scr, iev):
         monkeypatch.setattr(mod, "datetime", _November)
+    # Only the service's clock: a datetime subclass there would fail
+    # _lost_at's isinstance check on real stored stamps.
+    monkeypatch.setattr(wo, "_now", _November.utcnow)
     monkeypatch.setattr(iev.ie, "_now", lambda: _November.utcnow().replace(tzinfo=timezone.utc))
 
 
@@ -1008,3 +1011,92 @@ def test_a_backdated_bill_booked_after_a_later_loss_reverses_in_the_loss_month(w
     assert db.vendor_bills.find_one({"grn_id": "GRN-WO-0067"})["bill_date"][:7] == MONTH
     assert db.itc_writeoff_reversals.find_one({"_id": sid})["period"] == OCTOBER
     assert _written_off(r3b._compute_gstr3b(OCTOBER, STORE)) == 155.0
+
+
+# ---------------------------------------------------------------------------
+# Fix round 6 (round-5 review): the newest crossing by when the piece moved,
+# not by mirror date; a top-up in a filed month gives a found piece's share
+# back as a re-claim; a top-up never lands in a filed month
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("order", ["next_day", "same_day"])
+def test_two_transfers_completed_out_of_order_reverse_against_the_one_that_delivered_it(
+        two_gstins, october, order):
+    """JH -> MH on TRF-A (received, not completed), back MH -> JH on TRF-B
+    (received and completed: its mirror on JH). TRF-A completes after that,
+    so its mirror on MH is the later bill. Damaged at JH: TRF-B delivered
+    the piece here, so Jharkhand reverses against MB-TRF-B."""
+    db = two_gstins["db"]
+    _stocked(db, "GRN-WO-0071")
+    _line_bill("GRN-WO-0071", "TAX-WO-71")
+    sid = "SU-GRN-WO-0071-0"
+    _rehomed(db, sid, "TRF-A", MH_STORE)
+    db.stock_transfers.update_one({"id": "TRF-A"}, {"$set": {"received_at": "2026-10-01T05:00:00"}})
+    _rehomed(db, sid, "TRF-B", STORE)
+    db.stock_transfers.update_one({"id": "TRF-B"}, {"$set": {"received_at": "2026-10-02T05:00:00"}})
+    _mirror(db, "TRF-B", gstin=SHOP_GSTIN, to_store=STORE, day="2026-10-03")
+    _mirror(db, "TRF-A", day="2026-10-04" if order == "next_day" else "2026-10-03")
+    db.vendor_bills.update_one({"bill_id": "MB-TRF-B"}, {"$set": {"created_at": "2026-10-03T01:00:00"}})
+    db.vendor_bills.update_one({"bill_id": "MB-TRF-A"}, {"$set": {"created_at": "2026-10-03T02:00:00"}})
+    assert _damage(db, sid, MH_ADMIN)["itc_reversed"]["total"] == 155.0
+    row = db.itc_writeoff_reversals.find_one({"_id": sid})
+    assert (row["gstin"], row["bill_id"], row["igst"]) == (SHOP_GSTIN, "MB-TRF-B", 155.0)
+    assert _written_off(r3b._compute_gstr3b(OCTOBER, MH_STORE)) == 0.0
+
+
+@pytest.mark.parametrize("lost,found,net", [
+    (3, 0, 20.0),   # all three lost, a piece with a slice found
+    (3, 2, 20.0),   # all three lost, the nil-row piece found
+    (2, 0, 10.0),   # two lost, one found
+])
+def test_a_piece_found_after_its_top_up_month_is_filed_reclaims_its_share(
+        world, october, monkeypatch, lost, found, net):
+    """Bill A (two pieces, Rs 10 + 10) then bill B (one piece, Rs 20 + 20)
+    tops up the lost pieces' rows in October. October is filed; in November
+    a piece is found: November re-claims its whole slice of Rs 30 -- its own
+    row and its share of the filed top-up -- so the net reversal is exactly
+    the still-lost pieces' slice."""
+    from api.services import writeoff_itc as wo
+
+    db = world["db"]
+    _three_frames(db, "GRN-WO-0072", 0)
+    _part_bill(db, "GRN-WO-0072", "BA-72", 2, 10.0)
+    for i in range(lost):
+        _damage(db, f"SU-GRN-WO-0072-{i}")
+    _part_bill(db, "GRN-WO-0072", "BB-72", 1, 20.0)
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "BB-72"}))
+    assert r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]["centralTax"] == 10.0 * lost
+    db.period_locks.insert_one({"month": 10, "year": 2026})
+    _to_november(monkeypatch)
+    _requarantine(f"SU-GRN-WO-0072-{found}")
+    wo._trim_top_up(db, db.stock_units.find_one({"stock_id": f"SU-GRN-WO-0072-{found}"}),
+                    {"product_id": FRAME})  # a repeat re-claims nothing more
+    assert r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]["centralTax"] == 10.0 * lost
+    nov = r3b._compute_gstr3b("2026-11", STORE)
+    back = nov["itcWriteOffReclaimed"]
+    assert (back["centralTax"], back["stateTax"]) == (10.0 * lost - net, 10.0 * lost - net)
+    # The next bill door sees the re-claim: no fresh top-up for what came back.
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "BB-72"}))
+    assert r3b._compute_gstr3b("2026-11", STORE)["itcWriteOffReversed"]["centralTax"] == 0.0
+
+
+def test_a_part_bill_after_the_loss_month_is_filed_tops_up_in_the_open_month(
+        world, october, monkeypatch):
+    """Two pieces lost under bill A in October, October filed, bill B booked
+    in November: the top-up is November's -- a filed return is never
+    re-read."""
+    from api.services import writeoff_itc as wo
+
+    db = world["db"]
+    _three_frames(db, "GRN-WO-0073", 0)
+    _part_bill(db, "GRN-WO-0073", "BA-73", 2, 10.0)
+    _damage(db, "SU-GRN-WO-0073-0")
+    _damage(db, "SU-GRN-WO-0073-1")
+    db.period_locks.insert_one({"month": 10, "year": 2026})
+    _to_november(monkeypatch)
+    _part_bill(db, "GRN-WO-0073", "BB-73", 1, 20.0)
+    wo.after_bill_booked(db, db.vendor_bills.find_one({"bill_id": "BB-73"}))
+    top = db.itc_writeoff_reversals.find_one({"topup": True})
+    assert (top["period"], top["cgst"], top["sgst"]) == ("2026-11", 10.0, 10.0)
+    assert r3b._compute_gstr3b(OCTOBER, STORE)["itcWriteOffReversed"]["centralTax"] == 10.0
+    assert r3b._compute_gstr3b("2026-11", STORE)["itcWriteOffReversed"]["centralTax"] == 10.0
