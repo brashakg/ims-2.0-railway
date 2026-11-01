@@ -140,6 +140,7 @@ export default function CollectionNewPage() {
   const [previewState, setPreviewState] = useState<'idle' | 'loading' | 'ready' | 'unavailable'>(
     'idle',
   );
+  const [previewKey, setPreviewKey] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const previewSeq = useRef(0);
 
@@ -281,14 +282,19 @@ export default function CollectionNewPage() {
         setPreviewState('unavailable');
       } else {
         setPreview(res);
+        setPreviewKey(rulesKey);
         setPreviewState('ready');
       }
     });
   }, [rulesKey]);
 
+  // Ready only when the preview is of the rules Create would send: for the
+  // debounce window after a chip changes, the old preview never counts.
+  const previewReady = previewState === 'ready' && previewKey === JSON.stringify(rules);
+
   // Rules the website cannot read (the collection would show 0 products
   // there): shown, and Create stays off until they change.
-  const notEvaluable = previewState === 'ready' ? preview?.not_evaluable ?? null : null;
+  const notEvaluable = previewReady ? preview?.not_evaluable ?? null : null;
 
   // ---- Save -------------------------------------------------------------------
   const onSave = useCallback(async () => {
@@ -309,7 +315,7 @@ export default function CollectionNewPage() {
       toast.error(`The website cannot read these rules: ${notEvaluable}`);
       return;
     }
-    if (previewState !== 'ready') {
+    if (!previewReady) {
       toast.error('Wait for the preview to check the rules, then create');
       return;
     }
@@ -327,7 +333,7 @@ export default function CollectionNewPage() {
     } finally {
       setSaving(false);
     }
-  }, [title, rules, multi, notEvaluable, previewState, toast, navigate]);
+  }, [title, rules, multi, notEvaluable, previewReady, toast, navigate]);
 
   const sample = (preview?.sample ?? []).slice(0, 12);
 
@@ -545,7 +551,7 @@ export default function CollectionNewPage() {
                 rules.length === 0 ||
                 multi.length > 0 ||
                 !!notEvaluable ||
-                previewState !== 'ready' ||
+                !previewReady ||
                 !title.trim()
               }
               className="btn-primary w-full inline-flex items-center justify-center gap-2 disabled:opacity-50"
