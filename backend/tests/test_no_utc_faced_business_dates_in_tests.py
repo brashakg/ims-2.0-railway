@@ -187,15 +187,6 @@ ALLOWED = {
         "test_unification_customer_guards.py",
         "CustomerUpdate(dob=date.today() + timedelta(days=1))",
     ): _REL,
-    (
-        "test_marketing_correctness.py",
-        "yesterday = (date.today() - timedelta(days=1)).isoformat()",
-    ): _REL,
-    ("test_marketing_correctness.py", "today = date.today().isoformat()"): _REL,
-    (
-        "test_marketing_correctness.py",
-        "future_date = (date.today() + timedelta(days=7)).isoformat()",
-    ): _REL,
     # -- leave notice: a DIFFERENCE in days, both ends off one clock ---------
     (
         "test_f26_remote_approval.py",
