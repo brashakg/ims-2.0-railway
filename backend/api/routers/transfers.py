@@ -2859,6 +2859,12 @@ def _book_mirror_purchase(transfer: Dict) -> None:
             transfer.get("id"),
             exc,
         )
+        return
+    # Pieces of this transfer written off before its bill landed (damaged on
+    # arrival) reverse the credit the bill just claimed (services/writeoff_itc).
+    from ..services.writeoff_itc import after_bill_booked
+
+    after_bill_booked(db, doc)
 
 
 # ============================================================================

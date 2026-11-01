@@ -202,6 +202,12 @@ async def quarantine_stock_unit(
 
     if not stock_repo.update_if(stock_id, _quarantine_snapshot(unit), update):
         raise _stock_changed()
+    if current_status == "DAMAGED":
+        # Back from its write-off: the GST credit it reversed is claimed again
+        # (services/writeoff_itc) -- written off again later, it reverses again.
+        from ...services.writeoff_itc import undo_writeoff
+
+        undo_writeoff(_get_db(), unit)
 
     # Per-store online stock (owner ruling 2026-09-06): an AVAILABLE unit just
     # left this shop's shelf, so its Shopify location goes down now, like a
@@ -330,6 +336,10 @@ async def lift_quarantine_stock_unit(
         update["rtv_vendor_id"] = None
     if not stock_repo.update_if(stock_id, _quarantine_snapshot(unit), update):
         raise _stock_changed()
+    # Back on sale: no write-off reversal may stand for it (services/writeoff_itc).
+    from ...services.writeoff_itc import undo_writeoff
+
+    undo_writeoff(_get_db(), unit)
 
     _quarantine_audit(
         "QUARANTINE_LIFTED",

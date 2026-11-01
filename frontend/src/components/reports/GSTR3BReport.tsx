@@ -37,6 +37,9 @@ interface GSTR3BITCAvailable {
 
 interface GSTR3BData {
   unallocatedLegacyBills?: { count: number; tax: number; bill_numbers: string[]; failed?: boolean };
+  // Section 17(5)(h) write-off reversals whose bill no GSTIN's return places
+  // yet: held off every return until the bill's GSTIN is settled.
+  unallocatedWriteOffs?: { count: number; tax: number; bill_numbers: string[]; failed?: boolean };
   period: string;
   gstin: string;
   legalName: string;
@@ -61,6 +64,12 @@ interface GSTR3BData {
   // Table 4(B)(1): GST on bills ticked 'credit not claimable, section 17(5)'
   // -- never inside itcAvailable. Accounts roles only, like the rest of 4.
   itcBlocked?: GSTR3BITCAvailable;
+  // Table 4(B)(1), section 17(5)(h): credit claimed earlier on stock written
+  // off this month -- already taken off itcAvailable.
+  itcWriteOffReversed?: GSTR3BITCAvailable;
+  // Re-claimed this month on written-off pieces that came back after their
+  // month was filed -- already inside itcAvailable (Table 4(A)(5)).
+  itcWriteOffReclaimed?: GSTR3BITCAvailable;
 
   // Table 5: Exempt, Nil rated and Non-GST supplies
   exemptSupplies: number;
@@ -147,6 +156,8 @@ export function GSTR3BReport() {
 
   const itcAvailable = canSeeInputTax ? reportData?.itcAvailable : undefined;
   const itcBlocked = canSeeInputTax ? reportData?.itcBlocked : undefined;
+  const itcWriteOffReversed = canSeeInputTax ? reportData?.itcWriteOffReversed : undefined;
+  const itcWriteOffReclaimed = canSeeInputTax ? reportData?.itcWriteOffReclaimed : undefined;
   const itcUtilized = canSeeInputTax ? reportData?.itcUtilized : undefined;
   const taxPaidCash = canSeeInputTax ? reportData?.taxPaidCash : undefined;
 
@@ -279,6 +290,15 @@ export function GSTR3BReport() {
               <p className="text-sm">{reportData.unallocatedLegacyBills.bill_numbers.join(', ') || 'Bill allocation could not be verified. Retry or open the GST cross-check.'}</p>
             </div>
           ) : null}
+          {(reportData.unallocatedWriteOffs?.count || reportData.unallocatedWriteOffs?.failed) ? (
+            <div className="card border border-amber-300 bg-amber-50 text-amber-900" role="alert">
+              <p className="font-semibold">Written-off stock needs its bill's GSTIN</p>
+              <p className="text-sm">
+                GST input credit to reverse on {reportData.unallocatedWriteOffs.count} written-off piece{reportData.unallocatedWriteOffs.count === 1 ? '' : 's'} (₹{reportData.unallocatedWriteOffs.tax.toLocaleString('en-IN')}) is held off every return: no GSTIN's return carries the purchase bill yet. Settle the bill's GSTIN and the reversal follows.
+              </p>
+              <p className="text-sm">{reportData.unallocatedWriteOffs.bill_numbers.join(', ') || 'Write-off reversals could not be read. Retry.'}</p>
+            </div>
+          ) : null}
           {/* Summary Cards */}
           <div
             className={`grid grid-cols-1 ${itcAvailable && taxPaidCash ? 'tablet:grid-cols-4' : 'tablet:grid-cols-2'} gap-4`}
@@ -395,6 +415,10 @@ export function GSTR3BReport() {
                   {renderTaxLiabilityRow('ITC Available', itcAvailable, true)}
                   {itcBlocked && getTotalTax(itcBlocked) > 0 &&
                     renderTaxLiabilityRow('Not claimable, section 17(5) - Table 4(B)(1), not in the ITC above', itcBlocked)}
+                  {itcWriteOffReversed && getTotalTax(itcWriteOffReversed) > 0 &&
+                    renderTaxLiabilityRow('Reversed on stock written off, section 17(5)(h) - Table 4(B)(1), already taken off the ITC above', itcWriteOffReversed)}
+                  {itcWriteOffReclaimed && getTotalTax(itcWriteOffReclaimed) > 0 &&
+                    renderTaxLiabilityRow('Re-claimed on written-off stock back in use after its month was filed - Table 4(A)(5), already in the ITC above', itcWriteOffReclaimed)}
                 </tbody>
               </table>
             </div>

@@ -244,6 +244,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/vendors/ap-aging",
         "allowed": ACCOUNTS,
     },
+    # Section 17(5): the expense types and their default tick, for the
+    # accounts' bill form (ap_engine.EXPENSE_TYPES). A read; adds no write.
+    {
+        "method": "GET",
+        "path": "/api/v1/vendors/expense-types",
+        "allowed": ACCOUNTS,
+    },
     # F60: a GRN carries the supplier bill number / date + bill-scan id ->
     # the receiving roles, store-scoped in the handler.
     {
