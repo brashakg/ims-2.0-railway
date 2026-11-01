@@ -1,6 +1,13 @@
 # IMS 2.0 — live plan status
 
-Updated **2026-11-01** (06:50): **POS fix 1 #1264, money review 12: BLOCK** (the deploy-scripts reviewer approved). The round-11 fixes are in (all checks green, 20,739 tests). Review 12 confirmed 15 more problems; nearly all are one kind - a money action whose answer is lost and is then pressed again:
+Updated **2026-11-01** (07:15): **#1299 merged and live** (build 48001dfa, healthy) - stock redesign **S2b, the Receive follow-ups**:
+- a delivery-challan receipt needs its photo (refused without it, and the photo is now kept);
+- a cash memo with no number is fine but its photo is required;
+- a damaged piece marked 'Credit' closes that much of the purchase order short;
+- each damaged piece gets a photo, kept on the receipt, the quarantined piece and the supplier-return draft;
+- managers can print red DO NOT SHELVE labels for the quarantined pieces right from Receive.
+
+Still in build: **GST 17(5) #1302** - third fix round: pieces refused at the receipt were counted when splitting a walk-in bill's tax, and one rule needed a test. **S4 #1303**, one average cost: fix round after review. **S5 #1309**, one Reorder list: opened. **Website menu #1280**: fix round 3. **POS fix 1 #1264**: round-12 fixes. Earlier, 2026-11-01 (06:50): **POS fix 1 #1264, money review 12: BLOCK** (the deploy-scripts reviewer approved). The round-11 fixes are in (all checks green, 20,739 tests). Review 12 confirmed 15 more problems; nearly all are one kind - a money action whose answer is lost and is then pressed again:
 - the Returns screen sent no repeat-protection key, so a re-press after a lost answer paid twice on a multi-piece line;
 - the manual credit screen's key was not tied to the amount;
 - a voided superadmin credit note could never be issued again;
@@ -653,7 +660,7 @@ Still in wave 2: GST 17(5) #1302 (blocked input credit on section 17(5) expense 
 | B | S2b: challan photo required at receipt; cash-memo bill number optional (photo still required); a supplier credit closes a PO line short; damaged-piece photo; red DO NOT SHELVE label | S5: one Reorder list (shop minimum level if set, else 30-day sales); Buy Desk, Replenishment and Low stock forward to it |
 | C | S7: "Stock today" page for each shop | S6: the Stock & supply menu cut from about 19 links to about 10; stock reports move to Analysis (same addresses); old addresses keep working |
 
-**Wave 3 paused 2026-10-31 20:40** (the PC's memory reached 96.9%, owner ceiling 94%) and **resumed 20:48** with at most two lanes at a time (A and B first, then C). Draft PRs: S7 Stock today #1297 (built), S2b receive follow-ups #1299 (review found 2 blocking + several should-fix items, being re-checked), S4 one average cost #1303 (opened, checks running).
+**Wave 3 paused 2026-10-31 20:40** (the PC's memory reached 96.9%, owner ceiling 94%) and **resumed 20:48** with at most two lanes at a time (A and B first, then C). **DONE #1299** (merged 2026-11-01, 48001dfa): S2b receive follow-ups - challan photo required and kept, cash memo number optional with photo, a 'Credit' damaged piece closes the order line short, a damaged-piece photo, red DO NOT SHELVE labels from Receive. Draft PRs: S7 Stock today #1297 (built), S2b receive follow-ups #1299 (review found 2 blocking + several should-fix items, being re-checked), S4 one average cost #1303 (opened, checks running).
 
 POS 2 (invoice number at the moment of sale, HSN from the product) waits for POS fix 1 #1264 to merge (same invoice code). Returns (lower) waits for #1264 too.
 
