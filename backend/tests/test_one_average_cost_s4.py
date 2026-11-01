@@ -1354,7 +1354,7 @@ def test_apply_refuses_while_a_run_is_applied():
     bf.revert(db, "RUN1")
     assert bf.apply(db, bf.plan(db), "RUN2") == 3  # nothing of RUN1 left: a fresh run
     # A run a revert could only partly undo (S4 bill B1 moved P since) stays
-    # applied: --apply keeps refusing (restore the backup instead).
+    # applied: --apply keeps refusing (never --apply again; hand-correct what it reported).
     db = _g0_with_walk_in_q()
     bf.apply(db, bf.plan(db), "RUN1")
     db.grns.insert_one({"grn_id": "G1", "status": "ACCEPTED", "accepted_at": "2026-11-01T10:00:00+00:00",
@@ -1467,3 +1467,106 @@ def test_revert_of_the_latest_run_restores_the_exact_state_and_only_the_latest()
         bf.revert(db, "RUN1")
     bf.revert(db, "RUN2")
     assert _snapshot(db) == before
+
+
+# --------------------------------------------------------------------------
+# Fix round 10 (S4): a hand correction re-values the stamped pieces too.
+# --------------------------------------------------------------------------
+
+
+def _stamped_g0_at_100(db):
+    """Average 100 (a pre-S4 bill's); receipt G0 (10 pieces) accepted before
+    S4, its bill not in yet: the backfill stamps it at 100."""
+    from scripts import backfill_average_cost as bf
+
+    _receipt(db, "G0", 10, po_id="PO0", accepted_at="2026-10-20T10:00:00+00:00")
+    _pieces(db, 10, "G0", prefix="G0-")
+    bf.apply(db, bf.plan(db), "RUN1")
+    assert db.grns.find_one({"grn_id": "G0"})[product_cost.PRE_S4_AVERAGES] == {"P": 100.0}
+
+
+@pytest.mark.parametrize("corrected", (50, 40))
+def test_a_correction_re_values_the_stamped_pieces_for_their_own_bill(corrected):
+    """Stamp 100, accounts correct the average to 50 (or 40): every piece we
+    hold -- G0's stamped ones too -- is now in the pool at that figure. G0's
+    own bill, 10 at 50, trues them up from it: 50.00 either way (never 0.00
+    or -10.00 from the stale stamp: a double true-up)."""
+    db = _db(100.0, cost_source="PURCHASE_INVOICE")
+    _stamped_g0_at_100(db)
+    assert product_cost.correct(db, "P", corrected, "credit note", "acc", expected=100.0)
+    _accept(db, _bill("B0", 10, 50, grn_id="G0", created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == 50.0
+
+
+def test_a_stamped_piece_sold_after_a_correction_is_trued_up_from_the_corrected_figure():
+    """Stamp 100, corrected to 50; a G0 piece then sells at 50. G0's bill at
+    50: that piece left the pool at 50, so it owes no variance (never
+    50 - 100 = -50 from the stale stamp)."""
+    db = _db(100.0, cost_source="PURCHASE_INVOICE")
+    _stamped_g0_at_100(db)
+    product_cost.correct(db, "P", 50, "credit note", "acc", expected=100.0)
+    sold_at = (utc_now() + timedelta(minutes=1)).replace(tzinfo=None)
+    db.stock_units.update_one({"stock_id": "G0-0"}, {"$set": {"status": "SOLD", "order_id": "O1",
+                                                             "sold_at": sold_at}})
+    db.orders.insert_one({"order_id": "O1", "items": [{"product_id": "P", "quantity": 1, "cost_at_sale": 50.0}]})
+    _accept(db, _bill("B0", 10, 50, grn_id="G0", bill_date="2026-11-01",
+                      created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == 50.0
+    assert db.cogs_variances.count_documents({}) == 0
+
+
+class _Tasks:
+    def __init__(self):
+        self.collection = mongomock.MongoClient().t.tasks
+
+    def create(self, task, **_kw):
+        self.collection.insert_one(dict(task))
+        return task
+
+
+def test_an_average_below_zero_is_refused_with_a_p1_task(monkeypatch):
+    """A stamped figure far above the average (10) and a bill at 1: the
+    true-up would store (10 x 10 + 10 x (1 - 1000)) / 10 < 0. Refused --
+    the average stays, the bill stays PENDING for the sweeper, accounts get
+    ONE P1 task however often it retries; never silently clamped to 0."""
+    from api import dependencies
+
+    tasks = _Tasks()
+    monkeypatch.setattr(dependencies, "get_task_repository", lambda: tasks)
+    db = _db(10.0, cost_keys=["bill:OLD"], cost_history=[
+        {"kind": "BILL", "key": "bill:OLD", "at": "2026-09-01T10:00:00+00:00", "old_cost": None, "new_cost": 10.0}])
+    _receipt(db, "G0", 10, costed_before_s4="RUN1", costed_before_s4_at="2026-10-30T10:00:00+00:00",
+             costed_before_s4_averages={"P": 1000.0})
+    _pieces(db, 10, "G0")
+    bill = _bill("B0", 10, 1, grn_id="G0", created_at="2026-11-01T00:00:00+00:00")
+    _accept(db, bill)
+    pi._apply_accepted_bill(db, bill, actor="sweeper")
+    assert _avg(db) == 10.0
+    assert "B0" not in db.products.find_one({})["cost_keys"]
+    assert db.vendor_bills.find_one({"bill_id": "B0"})["cost_state"] == product_cost.PENDING
+    (task,) = tasks.collection.find()
+    assert (task["priority"], task["category"]) == ("P1", "Accounts")
+    assert "P" in task["title"] and "B0" in task["description"]
+
+
+def test_revert_after_a_bill_then_hand_correct_the_moved_product(capsys):
+    """The runbook after a bill: RUN1 stamps G0 at 100; S4 bill B1 (5 at 100)
+    moves P; --revert puts back what nothing moved, REPORTS P as moved and
+    keeps G0's stamp for it (the run stays live: --apply keeps refusing).
+    Accounts hand-correct P (the moved one) to 50. G0's own bill at 50 then
+    gives 50.00 (never 16.67 from the stale stamp)."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(100.0, cost_source="PURCHASE_INVOICE")
+    _stamped_g0_at_100(db)
+    _receipt(db, "G1", 5, accepted_at="2026-11-01T10:00:00+00:00")
+    _pieces(db, 5, "G1", prefix="G1-")
+    _accept(db, _bill("B1", 5, 100, grn_id="G1", created_at="2026-11-01T00:00:00+00:00"))
+    assert bf.revert(db, "RUN1") == 0
+    assert "P: changed since the run" in capsys.readouterr().out
+    assert bf.live_runs(db) == ["RUN1"]
+    with pytest.raises(SystemExit):
+        bf.apply(db, bf.plan(db), "RUN2")
+    product_cost.correct(db, "P", 50, "pre-S4 average was wrong", "acc", expected=100.0)
+    _accept(db, _bill("B0", 10, 50, grn_id="G0", created_at="2026-11-02T00:00:00+00:00"))
+    assert _avg(db) == 50.0

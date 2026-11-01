@@ -73,25 +73,33 @@ ONE LIVE RUN AT A TIME
     figure and time -- so the data is exactly as before the run. It works on
     a run a crash cut short (it undoes whatever was written). The one thing
     it never undoes: a product a bill or correction moved since the run
-    (reported), and the stamped figure of that product on its receipts (its
-    pieces are in that average at it). Such a run stays in the data and
-    --apply keeps refusing; leave it there. Once any S4 bill or correction
-    has landed since the run, NEVER restore the backup (it would delete that
-    bill's average move, its history row and every sale and receipt since)
-    and do not revert: accounts correct any product still wrong one by one
-    in the product page's correction box. A backup restore is allowed only
-    when nothing has been booked since the run -- in practice, right after
-    --apply.
+    (it prints each one: "<product>: changed since the run"), and the
+    stamped figure of that product on its receipts (its pieces are in that
+    average at it). Such a run stays in the data for good and --apply keeps
+    refusing: NEVER --apply again.
+  * AFTER A BILL: revert is still the tool. Run --revert --run-id <id>: it
+    puts back every product nothing moved and prints the moved ones. Then
+    accounts hand-correct ONLY the products revert reported as moved, in the
+    product page's correction box (a correction re-values their stamped
+    pieces too: product_cost._pool_figure, so their own bill trues up from
+    the corrected figure, never twice).
+  * NEVER restore the backup once anything is booked (an S4 bill, a
+    correction, a sale or a receipt since the run): it would delete that
+    bill's average move, its history row and every sale and receipt since.
+    A backup restore is allowed only when nothing has been booked since the
+    run -- in practice, right after --apply.
 
 RUNBOOK (prod, the lead only, owner's go-ahead)
 -----------------------------------------------
   1. dry run (the default; nothing written) -- read the list;
   2. take a Mongo backup;
   3. --apply -- note the run id it prints first;
-  4. on ANY failure (a crash, a wrong figure): --revert --run-id <that id>,
-     then --apply again. Never re-run --apply on top of a run. Once an S4
-     bill or correction has landed since the run: no revert, no backup
-     restore -- correct products by hand (see ONE LIVE RUN AT A TIME).
+  4. on ANY failure (a crash, a wrong figure): --revert --run-id <that id>.
+     Nothing booked since the run: --apply again (never on top of a run).
+     A bill or correction landed since: the revert still runs -- it puts
+     back what nothing moved and prints the moved products; the run stays
+     live, so NEVER --apply again; accounts hand-correct only the products
+     it printed. Never restore the backup once anything is booked.
 
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" backend/scripts/backfill_average_cost.py
     railway run --service MongoDB -- ".venv\\Scripts\\python.exe" backend/scripts/backfill_average_cost.py --apply

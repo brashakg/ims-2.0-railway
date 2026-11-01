@@ -176,6 +176,11 @@ def _receipt_of(unit: dict) -> Optional[str]:
 # average) to the pool; a stamped piece that left after the stamp is trued up
 # from the stamped average too (it entered the pool at it). A product with no
 # real average at the stamp is not in the map: its pieces wait for their bill.
+# An accounts CORRECTION after the stamp re-values every piece we hold, the
+# stamped ones too: from then on they are in the pool at the corrected figure
+# (_pool_figure reads it from the product's own history row -- written in the
+# correction's one single-document update -- so no receipt is re-written and
+# nothing can fall out of step; a stale stamp would true them up twice).
 PRE_S4_STAMP = "costed_before_s4"
 PRE_S4_AVERAGES = "costed_before_s4_averages"
 PRE_S4_AT = "costed_before_s4_at"
@@ -190,6 +195,23 @@ def _stamped_average(receipt: Optional[dict], product_id: str) -> Optional[float
         return None
     avg = (receipt.get(PRE_S4_AVERAGES) or {}).get(product_id)
     return pmatch._f(avg) if avg else None
+
+
+def _pool_figure(prod: dict, receipt: Optional[dict], product_id: str, at: Optional[str] = None) -> Optional[float]:
+    """THE figure a stamped receipt's pieces of `product_id` are in the pool
+    at, at instant `at` (None: now): the latest CORRECTION's new average made
+    after they entered the pool (and by `at`), else their stamped average.
+    None: not stamped for this product (PRE_S4_STAMP)."""
+    stamped = _stamped_average(receipt, product_id)
+    if stamped is None:
+        return None
+    since = _utc_iso((receipt.get(PRE_S4_AT_BY) or {}).get(product_id) or receipt.get(PRE_S4_AT))
+    fixes = sorted(
+        (_utc_iso(r.get("at")), r.get("new_cost")) for r in (prod or {}).get("cost_history") or []
+        if r.get("kind") == "CORRECTION" and _utc_iso(r.get("at")) >= since
+        and (at is None or _utc_iso(r.get("at")) <= at)
+    )
+    return pmatch._f(fixes[-1][1]) if fixes else stamped
 
 
 def _costs_its_receipt(bill: dict, cost_keys) -> bool:
@@ -244,14 +266,14 @@ def basis_pieces(db, product_id: str, cost_keys=()) -> float:
     return total - sum(n for r, n in waiting.items() if _stamped_average(receipts[r], product_id) is None)
 
 
-def _pre_s4_trueup(db, product_id: str, cost_keys, key: str, unit: Decimal) -> Tuple[Decimal, Decimal]:
+def _pre_s4_trueup(db, prod: dict, product_id: str, cost_keys, key: str, unit: Decimal) -> Tuple[Decimal, Decimal]:
     """(held stamped pieces bill `key` prices, what it adds to the pool:
-    n x (bill unit price - their stamped average)) -- PRE_S4_STAMP."""
+    n x (bill unit price - the figure they are in it at: _pool_figure))."""
     _, before, receipts = _waiting(db, product_id, cost_keys)
     _, after, _ = _waiting(db, product_id, list(cost_keys) + [key])
     n, add = Decimal(0), Decimal(0)
     for r, waited in before.items():
-        stamped = _stamped_average(receipts[r], product_id)
+        stamped = _pool_figure(prod, receipts[r], product_id)
         priced = Decimal(str(waited - after.get(r, 0.0)))
         if stamped is not None and priced > 0:
             n += priced
@@ -280,6 +302,9 @@ def _move(
         if worked is None:
             return None
         new, extra = worked
+        if new < 0:
+            _refuse_below_zero(product_id, key, new, entry)
+            return None
         at = utc_now_iso()
         row = {**entry, **extra, "key": key, "at": at, "old_cost": old or None, "new_cost": new}
         done = products.update_one(
@@ -317,6 +342,36 @@ def _move(
             return row
     logger.error("[COST] could not move the average of %s for %s: it kept changing", product_id, key)
     return None
+
+
+def _refuse_below_zero(product_id: str, key: str, new: float, entry: dict) -> None:
+    """An average cost is never stored below 0 -- and never silently clamped
+    (a money figure): the change is refused (a bill stays PENDING for the
+    sweeper) and accounts get ONE P1 task, deduped per (product, change)."""
+    logger.error("[COST] refused %s on %s: the average would be %s (below zero)", key, product_id, new)
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import create_system_task
+
+        what = entry.get("bill_number") or entry.get("bill_id") or key
+        create_system_task(
+            get_task_repository(),
+            title=f"Average cost of {product_id} would go below zero - check it",
+            description=(
+                f"{entry.get('kind') or 'A change'} {what} would set the average cost of {product_id} "
+                f"to Rs {new:.2f}, below zero, so it was NOT applied (a bill stays waiting). "
+                "Check the product's cost history and its stamped pre-S4 receipts, correct the average "
+                "on its stock page (Correct the average cost), and the bill applies on the next sweep."
+            ),
+            priority="P1",
+            category="Accounts",
+            store_id=None,
+            assigned_to="ACCOUNTANT",
+            dedupe_ref=f"average_below_zero:{product_id}:{key}",
+            extra={"payload": {"product_id": product_id, "key": key, "would_be": new}},
+        )
+    except Exception:  # noqa: BLE001 - the refusal stands; the log line names it
+        logger.warning("[COST] below-zero task for %s not raised", product_id, exc_info=True)
 
 
 def apply_bill(
@@ -371,7 +426,7 @@ def apply_bill(
                 # plus the stamped pre-S4 pieces it prices (already in it).
                 after = Decimal(str(basis_pieces(db, pid, keys + [key])))
                 held = min(qty, max(Decimal(0), after - basis))
-                stamped, add = _pre_s4_trueup(db, pid, keys, key, val / qty)
+                stamped, add = _pre_s4_trueup(db, prod, pid, keys, key, val / qty)
                 if stamped > qty - held:  # never more pieces than billed
                     add, stamped = add * (qty - held) / stamped, qty - held
             avg = Decimal(str(average(prod)))
@@ -443,7 +498,7 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
     readers: claimed, no variance. The variance carries its split per order
     line item_type and category (by_item_type / by_category: the keys the
     P&L readers group on). A stamped pre-S4 receipt's piece that left after
-    the stamp is trued up from its stamped average (PRE_S4_STAMP)."""
+    the stamp is trued up from the figure it left the pool at (_pool_figure)."""
     by_id = {g["grn_id"]: g for g in receipts or [] if g.get("grn_id")}
     ids = list(by_id)
     if not ids or gone <= 0:
@@ -466,7 +521,7 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
     by_cat: Dict[str, Decimal] = {}
     for at, u in left:
         receipt = by_id[_receipt_of(u)]
-        stamped = _stamped_average(receipt, pid)
+        stamped = _pool_figure(prod, receipt, pid, at)
         if stamped is not None and at < _utc_iso((receipt.get(PRE_S4_AT_BY) or {}).get(pid)
                                                  or receipt.get(PRE_S4_AT)):
             stamped = None  # left before the stamp: never in the pool
