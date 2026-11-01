@@ -316,16 +316,6 @@ def _build_product_master_map(stock_rows: list) -> dict:
     return out
 
 
-def _stock_unit_value(row: dict, master: dict) -> float:
-    """Per-row inventory value: THE stock value rule (stock_value.value --
-    pieces x the product's one average cost; 0 when it has none yet). The
-    master map's cost_price IS stock_value.average_cost."""
-    pid = str(row.get("product_id")) if row.get("product_id") is not None else ""
-    return stock_value.value(
-        stock_value._pieces(row), {"cost_price": (master.get(pid) or {}).get("cost_price")}
-    )
-
-
 # ============================================================================
 # Types
 # ============================================================================
@@ -936,15 +926,17 @@ async def get_inventory_intelligence(
             )
 
         stock_repo = get_stock_repository()
+        # THE stock value rule: the pieces on this shop's shelf, each carrying
+        # cost_value = pieces x its product's average (stock_value.shelf_units).
         inventory = (
-            stock_repo.find_many({"store_id": store_id}, limit=0)
+            stock_value.shelf_units(stock_repo, get_product_repository(), store_id)
             if stock_repo is not None
             else []
         )
+        unit_cost = {pid: row["unit_cost"] or 0.0
+                     for pid, row in stock_value.by_product(inventory).items()}
 
-        # [RPT-2] sku / name / value live on the product master, not the stock
-        # doc. Build the join once so every item + every total below reads real
-        # values instead of "" / 0.0. Mirrors /reports/inventory/valuation.
+        # [RPT-2] sku / name live on the product master, not the stock doc.
         master = _build_product_master_map(inventory)
 
         def _sku(row: dict) -> str:
@@ -956,7 +948,10 @@ async def get_inventory_intelligence(
             return (master.get(pid) or {}).get("name") or row.get("name") or ""
 
         def _value(row: dict) -> float:
-            return _stock_unit_value(row, master)
+            if "cost_value" in row:  # a shelf unit
+                return row["cost_value"]
+            # a low-stock row: its on-hand pieces x the product's average
+            return stock_value.value(row.get("quantity"), {"cost_price": unit_cost.get(row.get("product_id"))})
 
         # Categorize items
         # Low stock: THIS shop's low-stock list by its own levels (D12).
@@ -999,7 +994,7 @@ async def get_inventory_intelligence(
             and _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point")) * 1.5
         ]
 
-        # Stock values here are at cost (_stock_unit_value): the accounts
+        # Stock values here are at cost (stock_value): the accounts
         # roles' only (owner ruling 2026-10-12); the counts stay.
         return mask_cost(
             {
@@ -1043,12 +1038,13 @@ async def get_inventory_intelligence(
                 },
                 "total_inventory": {
                     "items": len(inventory),
-                    "value": sum(_value(i) for i in inventory),
+                    "value": stock_value.total(inventory),
+                    "uncosted_units": stock_value.uncosted(inventory),
                 },
             },
             current_user,
             "product",
-            extra=("value", "total_value"),
+            extra=("value", "total_value", "uncosted_units"),
         )
 
     except HTTPException:

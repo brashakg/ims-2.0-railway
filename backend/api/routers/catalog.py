@@ -2459,8 +2459,7 @@ async def update_catalog_product(
         # spine sync below writes through (a create-door twin's spine is
         # linked by pim_product_id, not by this id).
         from ..dependencies import get_product_repository as _spine_repo
-        from ..services.product_cost import refuse_editor_cost
-        from ..services.stock_value import average_cost
+        from ..services.product_cost import editor_first_cost, refuse_editor_cost
 
         try:
             _cost_spine = _spine_of(_spine_repo(), existing)
@@ -2472,8 +2471,9 @@ async def update_catalog_product(
             # below (they would overwrite a bill landing between this check and
             # them; the check proved a sent figure equals the average). A first
             # cost is seeded after the save, which mirrors it onto this twin.
-            if not average_cost(_cost_spine):
-                _editor_first_cost = (_cost_spine["product_id"], product.pricing.cost_price)
+            _first = editor_first_cost(_cost_spine, product.pricing.cost_price)
+            if _first is not None:
+                _editor_first_cost = (_cost_spine["product_id"], _first)
             product.pricing.cost_price = None
     # Work on a COPY: in no-DB mode _get_catalog_product returns the LIVE
     # in-memory dict, so mutating it mid-handler would leak partial edits into

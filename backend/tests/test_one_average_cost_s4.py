@@ -355,6 +355,28 @@ def test_opening_stock_gives_a_product_with_no_average_its_first_one():
     assert _avg(db) == 800.0
 
 
+@pytest.mark.parametrize("source", ("PO_RATE", "GRN_PO", "GRN_WALKIN"))
+def test_a_rate_fill_never_overwrites_a_cost_that_landed_after_its_read(source):
+    """S4 review round 3: the PO / receipt rate fill checks the copy its
+    caller read; a first cost (or bill) landing after that read is kept."""
+    from api.routers.vendors.gst import _promote_cost_from_rate
+    from database.repositories.product_repository import ProductRepository
+
+    db = _db(None)
+    stale = db.products.find_one({"product_id": "P"})
+    product_cost.seed(db, "P", 500, key="opening:x", kind="OPENING_STOCK", actor="m")
+    assert not _promote_cost_from_rate("P", stale, 450, source, ProductRepository(db.products))
+    doc = db.products.find_one({"product_id": "P"})
+    assert doc["cost_price"] == 500.0 == doc["moving_avg_cost"]
+    assert [r["new_cost"] for r in doc["cost_history"]] == [500.0]
+    assert doc.get("cost_source") != source
+    # With nothing landing in between, the fill still fills.
+    db = _db(None)
+    fresh = db.products.find_one({"product_id": "P"})
+    assert _promote_cost_from_rate("P", fresh, 450, source, ProductRepository(db.products))
+    assert _avg(db) == 450.0
+
+
 def test_the_backfill_fills_backs_up_and_reverts():
     from scripts import backfill_average_cost as bf
 

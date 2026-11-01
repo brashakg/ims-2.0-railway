@@ -55,8 +55,16 @@ def _promote_cost_from_rate(
         mine = _COST_SOURCE_RANK.get(str(source or ""))
         if held is None or mine is None or mine <= held:
             return False
+    # Lands only while the product is still as checked above: a first cost or
+    # bill (services/product_cost) landing since `prod` was read is kept.
     try:
-        product_repo.update(product_id, {"cost_price": cost, "cost_source": source})
+        if not product_repo.update_if(
+            product_id,
+            {"cost_history": {"$in": [None, []]}, "cost_price": prod.get("cost_price"),
+             "cost_source": prod.get("cost_source")},
+            {"cost_price": cost, "cost_source": source},
+        ):
+            return False
     except Exception as exc:  # noqa: BLE001 - a cost promote never blocks the PO/GRN
         logger.warning("[VENDOR] cost promote skipped for %s: %s", product_id, exc)
         return False

@@ -342,6 +342,19 @@ def seed_editor_cost(db, product_id: str, cost, actor: Optional[str]) -> Optiona
     return seed(db, product_id, cost, key=f"editor:{uuid.uuid4().hex}", kind="EDITOR_FIRST_COST", actor=actor)
 
 
+def editor_first_cost(product: Optional[dict], sent) -> Optional[float]:
+    """The first cost an editor save seeds (seed_editor_cost), or None: no
+    figure sent, the product already has an average, or the figure is its
+    catalogue-only price sent back unchanged (the editor sends the stored
+    price on every save -- a price typed only to finish cataloguing stays one)."""
+    product = product or {}
+    if sent is None or stock_value.average_cost(product):
+        return None
+    if product.get("cost_price_is_catalogue_only") and _paise(_d(sent)) == _paise(_d(product.get("cost_price"))):
+        return None
+    return sent
+
+
 def born_with_cost(doc: dict, *, source: str, actor: Optional[str]) -> None:
     """A product CREATED with a cost (the create doors, clone-vary, promote):
     that cost is its first average, its history row written into the insert

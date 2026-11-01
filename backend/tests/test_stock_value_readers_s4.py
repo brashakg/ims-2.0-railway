@@ -76,3 +76,24 @@ def test_a_ledger_row_carries_the_average_never_a_catalogue_only_price():
     assert row({"cost_price": 3340.0}) == 3340.0
     assert row({"cost_price": 999.0, "cost_price_is_catalogue_only": True}) is None
     assert row({"cost_price": "junk"}) is None
+
+
+def test_inventory_intelligence_values_only_the_shelf_at_the_average(world):
+    """S4 review round 3: inventory-intelligence reads THE rule -- sold and
+    transferred pieces add nothing, and a piece whose product has no products
+    doc is uncosted, never valued at its catalogue copy's price."""
+    _with_uncosted(world)
+    world.stock_units.insert_many(_units("P-FRAME", DHN, 1, status="SOLD"))
+    world.stock_units.insert_one({"stock_id": "U-GONE", "product_id": "P-FRAME", "store_id": DHN,
+                                  "status": "TRANSFERRED"})
+    world.stock_units.insert_one({"stock_id": "U-ORPHAN", "product_id": "CAT-ONLY", "store_id": DHN,
+                                  "status": "AVAILABLE", "quantity": 1})
+    world.catalog_products.insert_one({"id": "CAT-ONLY", "sku": "CAT-ONLY", "title": "Twin",
+                                       "pricing": {"cost_price": 1000.0}})
+    cli = _client(_ADMIN)
+    summary = cli.get("/api/v1/reports/inventory/summary", params={"store_id": DHN}).json()["summary"]
+    intel = cli.get("/api/v1/analytics/inventory-intelligence", params={"store_id": DHN}).json()
+    assert summary["total_value"] == 8000.0
+    assert intel["total_inventory"]["value"] == summary["total_value"], intel["total_inventory"]
+    assert intel["total_inventory"]["uncosted_units"] == summary["uncosted_units"] == 2
+    assert intel["dead_stock"]["total_value"] <= summary["total_value"]

@@ -3336,6 +3336,10 @@ def clone_and_vary(
     for f in _CLONE_CATALOG_FIELDS:
         if src.get(f) is not None:
             base_payload[f] = src.get(f)
+    from .stock_value import average_cost
+
+    if not average_cost(src):  # S4: a catalogue-only price is no cost to clone
+        base_payload.pop("cost_price", None)
 
     created: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []

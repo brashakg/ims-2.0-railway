@@ -279,6 +279,40 @@ def test_a_first_cost_typed_in_an_editor_has_its_history_row(client, shop, path,
     assert rows[0]["new_cost"] == 1234.0 and rows[0]["key"] in spine["cost_keys"]
 
 
+@pytest.mark.parametrize("path,twin_id,body", _EDITOR_DOORS_BY_TWIN)
+def test_a_catalogue_only_price_sent_back_unchanged_is_no_first_cost(client, shop, path, twin_id, body):
+    """S4 review round 3: the editor sends the stored price back on every
+    save; a price that was only a catalogue price stays one (no average, no
+    history row naming someone who never typed a cost)."""
+    shop.products.update_one({"product_id": "P1"},
+                             {"$set": {"cost_price": 777.0, "cost_price_is_catalogue_only": True}})
+    _twin(shop, twin_id, 777.0)
+    sent = body(777.0)
+    sent["name"] = "Aviator II"
+    r = client.put(path, json=sent, headers=_headers("ADMIN"))
+    assert r.status_code == 200, (path, r.status_code, r.text[:300])
+    spine = shop.products.find_one({"product_id": "P1"})
+    assert spine["cost_price_is_catalogue_only"] is True, (path, twin_id)
+    assert not spine.get("cost_history"), spine.get("cost_history")
+
+
+def test_a_first_cost_turns_a_draft_whose_only_gap_is_the_cost_active(client, shop):
+    """S4 review round 3: the restamp after an editor's first cost reads the
+    product WITH that cost (the cost is never in the plain write)."""
+    shop.products.update_one({"product_id": "P1"}, {"$set": {
+        "category": "FRAME", "brand": "Ray-Ban",
+        "attributes": {"brand_name": "Ray-Ban", "model_no": "RB1", "colour_code": "C1"},
+        "mrp": 5000.0, "offer_price": 4000.0, "hsn_code": "9003", "gst_rate": 5.0,
+        "cost_price": None, "catalog_status": "DRAFT", "done_gaps": ["cost_price"],
+    }})
+    r = client.put("/api/v1/products/P1", json={"cost_price": 1234.0}, headers=_headers("ADMIN"))
+    assert r.status_code == 200, r.text[:300]
+    spine = shop.products.find_one({"product_id": "P1"})
+    assert spine["cost_price"] == 1234.0
+    assert "cost_price" not in (spine.get("done_gaps") or []), spine.get("done_gaps")
+    assert spine["catalog_status"] == "ACTIVE", (spine["catalog_status"], spine.get("done_gaps"))
+
+
 def test_a_product_created_with_a_cost_has_its_history_row(client, shop):
     """Every create door (the form, clone-vary, promote) goes through
     product_master.create_product: a cost it is born with is its first

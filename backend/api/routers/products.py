@@ -3550,7 +3550,7 @@ async def update_product(
         if existing is None:
             raise HTTPException(status_code=404, detail="Product not found")
         # S4: an average is corrected only through its correction box.
-        from ..services import product_cost, stock_value
+        from ..services import product_cost
         from ..services.product_cost import refuse_editor_cost
 
         refuse_editor_cost(existing, product.cost_price)
@@ -3562,7 +3562,7 @@ async def update_product(
         update_data = product.model_dump(
             exclude_unset=True, exclude=product_cost.NOT_IN_EDITOR_WRITES
         )
-        _first_cost = None if stock_value.average_cost(existing) else product.cost_price
+        _first_cost = product_cost.editor_first_cost(existing, product.cost_price)
 
         # Hub Phase 0 hardening: drop explicit-null values before any persist.
         # ProductUpdate fields are Optional, so a client can send mrp:null /

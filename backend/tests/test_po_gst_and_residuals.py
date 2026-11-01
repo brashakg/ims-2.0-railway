@@ -55,6 +55,16 @@ class _FakeProductRepo:
     def find_by_id(self, pid):
         return self.prods.get(pid)
 
+    def update_if(self, pid, expected, fields):
+        """The fill's guarded write: lands only while the stored doc matches."""
+        doc = self.prods.get(pid) or {}
+        for key, want in expected.items():
+            have = doc.get(key)
+            if not (have in want["$in"] if isinstance(want, dict) else have == want):
+                return False
+        self.update(pid, fields)
+        return True
+
 
 def _patch(mp, po_repo, prod_repo=None):
     mp.setattr(v, "get_purchase_order_repository", lambda: po_repo)
@@ -641,16 +651,18 @@ def test_goods_receipt_outranks_the_provisional_po_rate_but_not_a_typed_cost():
         ("MANUAL", "PO_RATE"): False,
         ("", "GRN_PO"): False,  # legacy row, no source recorded
     }
+    def promote(prod, step):  # the product as stored is the product checked
+        repo.prods["P1"] = dict(prod)
+        return v._promote_cost_from_rate("P1", prod, 940, step, repo)
+
     got = {
-        pair: v._promote_cost_from_rate(
-            "P1", _frame_product(cost_price=1000, cost_source=pair[0]), 940, pair[1], repo
-        )
+        pair: promote(_frame_product(cost_price=1000, cost_source=pair[0]), pair[1])
         for pair in cases
     }
     assert got == cases
     # And an EMPTY cost is always fillable, whichever step gets there first.
     for step in ("PO_RATE", "GRN_PO"):
-        assert v._promote_cost_from_rate("P1", _frame_product(), 940, step, repo) is True
+        assert promote(_frame_product(), step) is True
 
 
 def test_a_product_with_no_cost_can_be_ordered_and_the_po_still_sent(monkeypatch):

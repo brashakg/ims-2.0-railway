@@ -728,6 +728,16 @@ class _ProductRepo:
         self.prods[pid].update(copy.deepcopy(fields))
         return True
 
+    def update_if(self, pid, expected, fields):
+        """The fill's guarded write: lands only while the stored doc matches."""
+        doc = self.prods.get(pid) or {}
+        for key, want in expected.items():
+            have = doc.get(key)
+            if not (have in want["$in"] if isinstance(want, dict) else have == want):
+                return False
+        self.update(pid, fields)
+        return True
+
 
 def _rate_777_body():
     return _edit_body(
