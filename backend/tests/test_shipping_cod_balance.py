@@ -7,10 +7,11 @@ deposit at the counter and owed only the balance. The courier then asked for
 the deposit a second time at the door.
 
 Shiprocket's create-adhoc body has NO separate COD-collectable field:
-``sub_total`` (we send none of the shipping / giftwrap / transaction /
-discount add-ons) IS the order total the courier collects on a COD parcel.
-So a COD booking must put the order's SERVER-side ``balance_due`` there, and
-refuse when there is nothing to collect or the balance is above the bill.
+``sub_total`` plus ``shipping_charges`` (we send none of the giftwrap /
+transaction / discount add-ons) IS the order total the courier collects on a
+COD parcel. So a COD booking must put the order's SERVER-side
+``balance_due`` there, and refuse when there is nothing to collect or the
+balance is above the bill.
 
 DISCRIMINATING POWER was MEASURED: the pre-fix copies of
 services/shiprocket.py, services/delivery_gate.py and routers/shipping.py
@@ -375,3 +376,73 @@ def test_book_cod_mismatch_below_shopify_still_books_the_balance(monkeypatch):
     )
     assert resp.status_code == 201, resp.text
     assert coll.docs[0]["cod_amount"] == 950.0
+
+
+# ============================================================================
+# 4. The shipping line (#1294) is a charge, not a product in the box
+# ============================================================================
+
+
+def _web_order(paid=0.0):
+    """A Rs 1,098 web order as ingest books it since #1294: a Rs 999 frame
+    plus Rs 99 shipping, as the REAL shipping invoice line."""
+    from api.services.shopify_ingest import _shipping_line
+
+    goods = [{"product_name": "Frame", "sku": "F-1", "quantity": 1,
+              "item_total": 999.0, "gst_rate": 5.0, "hsn_code": "9003"}]
+    ship = _shipping_line({"shipping_lines": [{"title": "Standard", "price": "99.00"}]}, goods)
+    return _partly_paid(
+        order_id="ORD-WEB-1", order_number="ONL-7001", grand_total=1098.0,
+        amount_paid=paid, balance_due=round(1098.0 - paid, 2),
+        payment_status="PAID" if paid >= 1098.0 else ("PARTIAL" if paid else "UNPAID"),
+        items=goods + [ship],
+    )
+
+
+@pytest.mark.parametrize("paid", [0.0, 500.0, 1050.0])
+def test_cod_shipping_line_is_shipping_charges_and_the_balance_is_unchanged(paid):
+    """Shiprocket adds shipping_charges to sub_total, so the courier still
+    collects exactly the balance; a balance below the shipping (Rs 48) owes
+    only that much of it, and sub_total never goes negative."""
+    from api.services.delivery_gate import cod_collectable
+
+    order = _web_order(paid)
+    p = shiprocket.build_shipment_payload(order, {**_ADDR, "payment_method": "COD"})
+    assert [i["sku"] for i in p["order_items"]] == ["F-1"]  # no shipping "product"
+    assert p["sub_total"] + p["shipping_charges"] == cod_collectable(order)
+    assert p["shipping_charges"] == min(99.0, order["balance_due"])
+    assert p["sub_total"] >= 0
+
+
+def test_prepaid_shipping_line_is_shipping_charges_and_totals_the_bill():
+    p = shiprocket.build_shipment_payload(_web_order(1098.0), dict(_ADDR))
+    assert [i["sku"] for i in p["order_items"]] == ["F-1"]
+    assert p["shipping_charges"] == 99.0
+    assert p["sub_total"] == 999.0  # Rs 999 + Rs 99 = the Rs 1,098 charged
+
+
+def test_book_cod_web_order_records_what_the_courier_totals(monkeypatch):
+    """Through the door: the shipment's cod_amount is the courier's own total
+    (sub_total + shipping_charges), and shipping is not listed as a product."""
+    seen = []
+    real = shiprocket.create_shipment
+
+    async def _capture(order, address, db=None, **kw):
+        res = await real(order, address, db=db, **kw)
+        seen.append(res.raw.get("payload"))
+        return res
+
+    monkeypatch.setattr(shiprocket, "create_shipment", _capture)
+    client, coll = _ship_client(monkeypatch, _web_order(500.0))
+    resp = client.post(
+        "/api/v1/shipping/shipments",
+        json=_cod_body("ORD-WEB-1"),
+        headers={"Authorization": f"Bearer {_ship_token(['STORE_MANAGER'])}"},
+    )
+    assert resp.status_code == 201, resp.text
+    (doc,) = coll.docs
+    (payload,) = seen
+    assert doc["cod_amount"] == 598.0
+    assert payload["sub_total"] + payload["shipping_charges"] == 598.0
+    assert payload["shipping_charges"] == 99.0
+    assert [i["sku"] for i in payload["order_items"]] == ["F-1"]

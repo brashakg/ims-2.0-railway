@@ -880,9 +880,10 @@ def _sync_existing_order_status(
     lines / the GST invoice (those are immutable once minted) -- only
     payment_status, fulfillment_status, balance_due + amount_paid on a
     paid/partial transition (plus the ingest-synthesized gateway payment row kept
-    coherent with amount_paid), shopify_cancelled_at, and the lifecycle status
-    through the ONE transition table (online_order_status.apply_fact, which also
-    stamps cancelled_at on a real move to CANCELLED). Returns True on a write.
+    coherent with amount_paid), shopify_cancelled_at, the totals check on an
+    edit before dispatch, and the lifecycle status through the ONE transition
+    table (online_order_status.apply_fact, which also stamps cancelled_at on a
+    real move to CANCELLED). Returns True on a write.
     `verdict`, when given, gets the table's terminal_withheld -- decided HERE,
     on the doc as it is now, so the pull sweep reports the handler's own
     answer. Fail-soft.
@@ -948,7 +949,7 @@ def _sync_existing_order_status(
     # one fact or none, and the transition table decides what it does to the
     # status IMS holds (never backwards; DELIVERED is the courier's; a
     # finished order stays finished).
-    from .online_order_status import CANCEL, apply_fact, order_fact
+    from .online_order_status import BOOKED_STATUSES, CANCEL, GOODS_OUT, apply_fact, order_fact
     from .shopify_fulfillment import fulfilment_body_stale
 
     # The body's fulfilments run on the reconcile's clock, not the order's: a
@@ -981,6 +982,33 @@ def _sync_existing_order_status(
     # DELIVERED order): the hourly sweep reads it, so it feeds the cancel once.
     if st["cancelled"]:
         lifecycle_update["shopify_cancelled_at"] = _norm(payload.get("cancelled_at"))
+    # An order edit before dispatch (a body stating no lifecycle fact, on an
+    # order still to ship) re-reads the totals check from Shopify's
+    # current_total_price, as one of this event's markers: the COD courier
+    # gate reads it (delivery_gate.cod_collectable). Shopify's current total
+    # also nets refunds. Only the MONEY Shopify sent back is added back (IMS
+    # answers it with a credit note and never edits grand_total): a refund on
+    # an unpaid COD order moves no money, the buyer simply owes less, so it
+    # stays a MISMATCH and the courier never collects the old, higher IMS
+    # balance. Once the goods are out (returns) there is no re-check.
+    check = None
+    status_now = _norm(existing.get("status")).upper()
+    if fact is None and status_now in BOOKED_STATUSES and status_now not in GOODS_OUT:
+        from .shopify_ingest import _totals_check
+        from .shopify_refund import _money_back_on_shopify
+
+        refunded = sum(
+            _money_back_on_shopify(r)[0]
+            for r in payload.get("refunds") or [] if isinstance(r, dict))
+        check = _totals_check(
+            payload, _f(existing.get("grand_total")), current=True, refunded=refunded)
+        if check["status"] == "UNCHECKED":
+            check = None
+        else:
+            old = existing.get("shopify_totals_check")
+            if isinstance(old, dict) and old.get("task_raised"):
+                check["task_raised"] = True  # one task per order, as at booking
+            lifecycle_update["shopify_totals_check"] = check
 
     try:
         moved = apply_fact(
@@ -997,6 +1025,10 @@ def _sync_existing_order_status(
             # Nothing landed -- not the status, not one marker -- so the next
             # sweep (or a replay) sees the same facts still to apply.
             return failed("the status claim did not land")
+        if check is not None:
+            from .shopify_ingest import _raise_total_mismatch_task
+
+            _raise_total_mismatch_task(db, {**existing, "shopify_totals_check": check})
         # Decided HERE, on the doc as it is now, so the pull sweep reports the
         # handler's own answer (status_skipped_terminal).
         if verdict is not None:
