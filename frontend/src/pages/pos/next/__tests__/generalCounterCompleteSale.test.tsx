@@ -437,3 +437,54 @@ describe('a discount a manager must approve', () => {
     expect(submitPosOrder.mock.calls[2][2]).toBeNull();
   });
 });
+
+// Money review 14: the till's bill key lives beside the cart (localStorage)
+// and ends with the sale -- a success, a reset or a hold drops it.
+describe('the bill key ends with the sale', () => {
+  const keyOf = (call: number) => submitPosOrder.mock.calls[call][1] as string;
+
+  it('a lost answer re-presses with the same key; a success drops it and the next identical cart gets a new one', async () => {
+    submitPosOrder.mockResolvedValueOnce({ ok: false, error: 'lost' });
+    submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-1', orderNumber: 'ORD-1' });
+    putSomethingInTheCart();
+    const view = renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(1));
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
+    expect(keyOf(1)).toBe(keyOf(0));
+    expect(localStorage.getItem('ims_pos_bill_key')).toBeNull(); // the success dropped it
+    view.unmount();
+    usePOSStore.getState().resetTransaction();
+    submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-2', orderNumber: 'ORD-2' });
+    putSomethingInTheCart(); // the very same cart again: a new sale
+    renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(3));
+    expect(keyOf(2)).not.toBe(keyOf(0));
+  });
+
+  it('a reset or a hold drops the key', () => {
+    localStorage.setItem('ims_pos_bill_key', JSON.stringify({ key: 'k', fp: 'x', at: Date.now() }));
+    usePOSStore.getState().resetTransaction();
+    expect(localStorage.getItem('ims_pos_bill_key')).toBeNull();
+    putSomethingInTheCart();
+    localStorage.setItem('ims_pos_bill_key', JSON.stringify({ key: 'k', fp: 'x', at: Date.now() }));
+    usePOSStore.getState().parkCurrentSale({ heldBy: 'u-1' });
+    expect(localStorage.getItem('ims_pos_bill_key')).toBeNull();
+  });
+});
+
+describe('the till stops promising once the cart changes', () => {
+  it('swaps the safe-re-press words for the check-the-Orders words when the cart changes', async () => {
+    const { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } = await import('../../../../components/pos/posBillKey');
+    submitPosOrder.mockResolvedValueOnce({ ok: false, error: TILL_SALE_UNCONFIRMED });
+    putSomethingInTheCart();
+    renderCounter();
+    fireEvent.click(completeButton());
+    expect(await screen.findByText(TILL_SALE_UNCONFIRMED)).toBeTruthy();
+    putSomethingInTheCart(); // the cart changed (one more unit)
+    expect(await screen.findByText(TILL_SALE_UNCONFIRMED_CHECK)).toBeTruthy();
+    expect(screen.queryByText(TILL_SALE_UNCONFIRMED)).toBeNull();
+  });
+});

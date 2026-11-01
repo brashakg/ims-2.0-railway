@@ -200,7 +200,7 @@ async def test_a_burn_on_another_order_cannot_pay_this_one(till):
         ("STORE_MANAGER", True),
         ("OPTOMETRIST", True),
         ("ACCOUNTANT", True),  # owner 2026-10-23: accounts collect credit bills
-        ("WORKSHOP_STAFF", False),
+        ("WORKSHOP_STAFF", True),  # money review 14: as on main (an owner question)
         ("CATALOG_MANAGER", False),
         ("DESIGN_MANAGER", False),
     ],

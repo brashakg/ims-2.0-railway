@@ -28,12 +28,14 @@
 // INSIDE the product grid and the cart -- the page itself never scrolls
 // (spec 11b).
 
-import { useState, useRef } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertTriangle, X, Glasses, ShoppingBag, Home } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
-import { billKeyFor, cartFingerprint, clearBillKey } from '../../../components/pos/posBillKey';
+import {
+  TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK, billKeyFor, cartFingerprint, clearBillKey,
+} from '../../../components/pos/posBillKey';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import { useProducts, useSellableStock } from '../../../hooks/usePOSQueries';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
@@ -133,6 +135,12 @@ export function GeneralCounterSurface() {
     delivered?: boolean;
   } | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
+  // A lost sale's promise ("press again - not charged twice") holds only for
+  // the SAME cart: once the cart changes, the till stops promising.
+  const cartFp = cartFingerprint(store);
+  useEffect(() => {
+    setErrorMsg((m) => (m === TILL_SALE_UNCONFIRMED ? TILL_SALE_UNCONFIRMED_CHECK : m));
+  }, [cartFp]);
   // A discount over the seller's limit: the server's refusal (shown as the
   // ask-a-manager panel) and, once approved, the E4 request id the retry carries.
   const [approvalNeed, setApprovalNeed] = useState<DiscountApprovalNeed | null>(null);

@@ -2,6 +2,21 @@
 // Idempotency-Key (`<bill key>:leg:<i>`), so a leg whose answer was lost is
 // sent ONCE more safely, and anything that is not a refusal says "could not
 // be confirmed - check the order's payments", never "did NOT record".
+// jsdom's localStorage in this runner has no working setItem: a Map-backed
+// stand-in (the repo's established answer), installed before any import.
+(() => {
+  const m = new Map<string, string>();
+  const ls = {
+    getItem: (k: string) => (m.has(k) ? m.get(k)! : null),
+    setItem: (k: string, v: string) => { m.set(k, String(v)); },
+    removeItem: (k: string) => { m.delete(k); },
+    clear: () => { m.clear(); },
+    key: (i: number) => Array.from(m.keys())[i] ?? null,
+    get length() { return m.size; },
+  };
+  Object.defineProperty(globalThis, 'localStorage', { value: ls, configurable: true, writable: true });
+})();
+
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
 vi.mock('../../../services/api', async (importOriginal) => {
@@ -22,7 +37,7 @@ vi.mock('../../../services/api', async (importOriginal) => {
 import { orderApi } from '../../../services/api';
 import { buildApiError } from '../../../services/api/client';
 import { usePOSStore } from '../../../stores/posStore';
-import { submitPosOrder, TILL_SALE_UNCONFIRMED } from '../submitOrder';
+import { submitPosOrder, TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from '../submitOrder';
 import { billKeyFor, cartFingerprint, clearBillKey } from '../posBillKey';
 
 const mockedCreate = vi.mocked(orderApi.createOrder);
@@ -85,19 +100,24 @@ describe('money review 13 at the till', () => {
     expect(res.warning).toMatch(/STORE_CREDIT ₹1,000 could not be confirmed - check the order's payments/);
   });
 
-  it('a sale whose answer was lost says to press Complete Sale again, without the failure prefix', async () => {
-    seed();
-    mockedCreate.mockRejectedValueOnce(apiErr(undefined));
-    const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-4');
-    expect(res.ok).toBe(false);
-    expect(res.error).toBe(TILL_SALE_UNCONFIRMED);
-    expect(res.error).not.toMatch(/^Failed to create order/);
+  it('a lost sale promises a safe re-press ONLY while the server guarantees the replay', async () => {
+    const quote = vi.mocked(orderApi.quoteBill);
+    for (const [guaranteed, words] of [[true, TILL_SALE_UNCONFIRMED], [false, TILL_SALE_UNCONFIRMED_CHECK]] as const) {
+      seed();
+      quote.mockResolvedValueOnce({ subtotal: 1000, taxable: 952.38, tax: 47.62, total_discount: 0,
+                                    grand_total: 1000, round_off: 0, replay_guaranteed: guaranteed } as any);
+      mockedCreate.mockRejectedValueOnce(apiErr(undefined));
+      const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-4');
+      expect(res.ok).toBe(false);
+      expect(res.error).toBe(words);
+      expect(res.error).not.toMatch(/^Failed to create order/);
+    }
   });
 });
 
 describe('the bill key lives with the cart', () => {
-  it('survives a reload for the same cart, changes with the cart, and clears on success', () => {
-    sessionStorage.clear();
+  it('survives a reload for the same cart, changes with the cart, expires, and clears on success', () => {
+    localStorage.clear();
     const fp = cartFingerprint({ cart: [{ product_id: 'p', quantity: 1, unit_price: 100 }], customer: { id: 'c' } });
     const k1 = billKeyFor(fp);
     expect(billKeyFor(fp)).toBe(k1); // a reload reads the same key back
@@ -105,6 +125,8 @@ describe('the bill key lives with the cart', () => {
     const k2 = billKeyFor(other);
     expect(k2).not.toBe(k1);
     clearBillKey();
-    expect(billKeyFor(other)).not.toBe(k2);
+    const k3 = billKeyFor(other);
+    expect(k3).not.toBe(k2);
+    expect(billKeyFor(other, Date.now() + 16 * 60_000)).not.toBe(k3); // older than 15 minutes: a new key
   });
 });

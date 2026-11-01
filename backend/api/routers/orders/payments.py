@@ -108,6 +108,27 @@ def _release_twin_claim(order_id: str, idem_key: str, twin_payment_id: str) -> N
                                      "tender_payment_id": twin_payment_id})
     if twin:
         _release_loyalty_redemption(twin["txn_id"], twin_payment_id)
+        # Accepted narrow race (money review 14): a same-key press still
+        # recording would leave its payment with this burn unclaimed. A person
+        # checks the bill's LOYALTY payments.
+        try:
+            from ...dependencies import get_task_repository
+            from ...services.task_triggers import create_system_task
+
+            create_system_task(
+                get_task_repository(),
+                title=f"Order {order_id}: check its loyalty payments",
+                description=(f"A loyalty payment press on order {order_id} freed the points an earlier press of "
+                             "the same payment had claimed but not recorded. If that earlier press recorded its "
+                             "payment after all, the bill holds two LOYALTY payments for one burn - remove one."),
+                priority="P1",
+                category="Accounts",
+                store_id=None,
+                dedupe_ref=f"loyalty_twin_freed:{order_id}:{idem_key}",
+                extra={"payload": {"order_id": order_id, "txn_id": twin["txn_id"]}},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[ORDERS] loyalty twin task not raised for %s: %s", order_id, exc)
 
 
 def _release_loyalty_redemption(txn_id: str, payment_id: str) -> None:

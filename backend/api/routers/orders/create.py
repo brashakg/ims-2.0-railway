@@ -1102,6 +1102,13 @@ async def create_order(
                 pass
             if isinstance(create_exc, HTTPException):
                 raise  # the claim's 409 (unit sold on another bill)
+            # Two presses of one bill (same Idempotency-Key) at once: the
+            # unique (store_id, idempotency_key) index refused the second --
+            # it answers with the order the first one saved.
+            if idem_key and _is_idempotency_duplicate(create_exc):
+                twin = order_repo.find_one({"idempotency_key": idem_key, "store_id": store_id})
+                if twin:
+                    return _order_create_response(twin)
             raise HTTPException(
                 status_code=500,
                 detail="Failed to create order: {0}".format(create_exc),
@@ -1247,6 +1254,12 @@ class BillQuoteRequest(BaseModel):
     order_id: Optional[str] = None
 
 
+def _is_idempotency_duplicate(exc: Exception) -> bool:
+    """A duplicate-key error raised by the (store_id, idempotency_key) index."""
+    text = str(exc).lower()
+    return ("e11000" in text or "duplicate key" in text) and "idempotency_key" in text
+
+
 @router.post("/quote")
 async def quote_bill(
     body: BillQuoteRequest,
@@ -1293,7 +1306,11 @@ async def quote_bill(
         from ...services.order_superadmin_edit import rebuild_edited_line
         lines = [rebuild_edited_line(item.model_dump()) for item in body.items]
     gst = _compute_per_category_gst(lines, body.cart_discount_percent, rounded=rounded)
+    from database import connection as _dbc
+
     return {
-        k: gst[k]
-        for k in ("subtotal", "taxable", "tax", "total_discount", "grand_total", "round_off")
+        **{k: gst[k] for k in ("subtotal", "taxable", "tax", "total_discount", "grand_total", "round_off")},
+        # The till promises "press again - it will not be charged twice" only
+        # while the unique (store_id, idempotency_key) index is in place.
+        "replay_guaranteed": bool(_dbc.ORDER_REPLAY_GUARANTEED),
     }

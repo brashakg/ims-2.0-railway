@@ -14,12 +14,13 @@ import { useToast } from '../../context/ToastContext';
 import { getErrorMessage } from '../../utils/errorHandler';
 import { formatDateTimeIST } from '../../utils/datetime';
 
-type Answer = 'YES' | 'NO' | 'NOTHING';
+type Answer = 'YES' | 'NO' | 'NOTHING' | 'COMPLETE';
 
 const ANSWER_LABEL: Record<Answer, string> = {
   YES: 'Yes - the cash part was paid',
   NO: 'No - the cash part was NOT paid',
   NOTHING: 'Nothing was paid',
+  COMPLETE: 'Complete the record',
 };
 
 const rs = (n?: number) => `Rs ${(Number(n) || 0).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -58,7 +59,7 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
     setBusy(item.return_id);
     try {
       const res = await returnsApi.completeRecord(item.return_id,
-        answer === 'NOTHING' ? { nothing_paid: true } : { cash_leg_paid: answer === 'YES' });
+        answer === 'NOTHING' ? { nothing_paid: true } : { cash_leg_paid: answer !== 'NO' });
       toast.success(res?.message || 'Done.');
       setPicked((p) => { const n = { ...p }; delete n[item.return_id]; return n; });
       await load();
@@ -99,10 +100,14 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
             </thead>
             <tbody>
               {items.map((item) => {
-                const answers: Answer[] = item.money_known ? ['YES', 'NO'] : ['NOTHING'];
+                // Exactly what the server accepts: money moved -> was the cash
+                // part paid (or, with no cash part, just complete it); nothing
+                // moved -> nothing was paid.
+                const answers: Answer[] = !item.money_known ? ['NOTHING'] : item.cash_leg ? ['YES', 'NO'] : ['COMPLETE'];
                 const chosen = picked[item.return_id];
                 return (
                   <tr key={item.return_id}
+                    ref={focus === item.return_id ? (el) => el?.scrollIntoView?.({ block: 'center' }) : undefined}
                     className={'border-b border-gray-50 align-top' + (focus === item.return_id ? ' bg-amber-50' : '')}>
                     <td className="py-2 pr-3">{item.store_id || '-'}</td>
                     <td className="py-2 pr-3">

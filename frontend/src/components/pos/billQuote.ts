@@ -55,6 +55,12 @@ export function orderLinesOf(cart: any[]) {
 /** Ask the server for the live cart's bill and keep it on the store. Throws
  *  when the server cannot be asked; a cart edited while the call was in
  *  flight is left for the next call (its quote would be stale). */
+// Whether the server guarantees a re-pressed sale replays (its unique
+// idempotency index is in place) -- read from the last quote. Only then may
+// the till promise "it will not be charged twice".
+let lastReplayGuaranteed = false;
+export const replayGuaranteed = (): boolean => lastReplayGuaranteed;
+
 export async function refreshBillQuote(): Promise<void> {
   const s = usePOSStore.getState();
   const key = billQuoteKey(s);
@@ -66,6 +72,7 @@ export async function refreshBillQuote(): Promise<void> {
     items: orderLinesOf(s.cart),
     cart_discount_percent: s.cart_discount_percent || 0,
   });
+  lastReplayGuaranteed = Boolean((q as any)?.replay_guaranteed);
   if (billQuoteKey(usePOSStore.getState()) === key) {
     usePOSStore.getState().setBillQuote({
       key,

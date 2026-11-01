@@ -284,8 +284,10 @@ def test_complete_record_writes_the_missing_doc_once_and_frees_the_bill(till, ta
     assert "gave store credit" in before.value.detail
     doc = _complete("RET-U", paid=False)
     assert doc["status"] == "COMPLETED" and doc["credit_note_number"] == "TST01/C2627/0007"
-    # Round 13: the unpaid cash part stays on the doc as OWED (the note covers the whole return).
-    assert [(t["method"], t.get("status")) for t in doc["refund_tenders"]] == [("CASH", "OWED"), ("STORE_CREDIT", None)]
+    # Round 13/14: the unpaid cash part stays on the doc as OWED (the note covers
+    # the whole return) -- kept OFF the drawer legs, so no Day-End reader nets it.
+    assert [t["method"] for t in doc["refund_tenders"]] == ["STORE_CREDIT"]
+    assert [(t["method"], t["status"]) for t in doc["owed_tenders"]] == [("CASH", "OWED")]
     assert doc["net_refund"] == 1800.0 and doc["owed_amount"] == 600.0
     again = _complete("RET-U", paid=True)
     assert again.get("replayed") is True and till["db"].get_collection("returns").count_documents({}) == 1
@@ -304,6 +306,14 @@ def test_a_doc_that_could_not_be_saved_raises_a_task_and_is_completed_from_the_h
     rid = r.json()["return_id"]
     assert [t["dedupe_ref"] for t in tasks] == [f"return_doc_missing:{rid}"]
     assert tasks[0]["priority"] == "P1" and tasks[0]["extra"]["payload"]["doc"]["return_id"] == rid
+    # Round 14: a hold younger than the reconciler's timeout may be a press
+    # still running -- refused; this one is past it.
+    with pytest.raises(HTTPException) as young:
+        _complete(rid, paid=True)
+    assert young.value.status_code == 409
+    holds = _stored(till)["refund_holds"]
+    holds[rid]["at"] = _ago(30)
+    till["db"].get_collection("orders").update_one({"order_id": "ORD-1"}, {"$set": {"refund_holds": holds}})
     doc = _complete(rid, paid=True)
     assert doc["status"] == "COMPLETED" and doc["net_refund"] == 1800.0
     assert returns.count_documents({"return_id": rid}) == 1

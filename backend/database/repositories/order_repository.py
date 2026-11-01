@@ -727,7 +727,9 @@ class OrderRepository(BaseRepository):
                     "e11000" in str(exc).lower()
                     or "duplicate key" in str(exc).lower()
                 )
-                if not is_dup:
+                if not is_dup or "idempotency_key" in str(exc).lower():
+                    # Another press of the same bill (the idempotency index):
+                    # never a number clash to retry -- the caller replays it.
                     raise
                 last_exc = exc
                 # Only the human-facing number collided -- regenerate it and

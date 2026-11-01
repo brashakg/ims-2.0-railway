@@ -16,6 +16,9 @@ const ITEMS = [
     record_not_saved: false, money_known: true, at: '2026-10-30T10:00:00+00:00' },
   { return_id: 'RET-B', order_id: 'ORD-2', order_number: 'BV/0002', store_id: 'BV-PUN-01', amount: 900,
     credit_line: null, cash_leg: 0, record_not_saved: false, money_known: false },
+  { return_id: 'RET-C', order_id: 'ORD-3', order_number: 'BV/0003', store_id: 'BV-PUN-01', amount: 500,
+    credit_line: { type: 'ISSUED', amount: 500, note_number: 'TST01/C2627/0008' }, cash_leg: 0,
+    record_not_saved: false, money_known: true },
 ];
 const needsCompleting = vi.fn(async () => ({ items: ITEMS }));
 const completeRecord = vi.fn(async () => ({ message: 'Done' }));
@@ -54,7 +57,14 @@ describe('Needs completing panel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Nothing was paid' }));
     fireEvent.click(screen.getByRole('button', { name: /Confirm: Nothing was paid/ }));
     await waitFor(() => expect(completeRecord).toHaveBeenCalledWith('RET-B', { nothing_paid: true }));
-    expect(needsCompleting).toHaveBeenCalledTimes(3); // reloaded after each answer
+    // No cash part: one answer, "Complete the record" (sent as cash paid).
+    const rowC = screen.getByText('BV/0003').closest('tr')!;
+    expect(rowC.textContent).not.toMatch(/the cash part was/);
+    expect(rowC.textContent).not.toMatch(/Nothing was paid/);
+    fireEvent.click(screen.getByRole('button', { name: 'Complete the record' }));
+    fireEvent.click(screen.getByRole('button', { name: /Confirm: Complete the record/ }));
+    await waitFor(() => expect(completeRecord).toHaveBeenCalledWith('RET-C', { cash_leg_paid: true }));
+    expect(needsCompleting).toHaveBeenCalledTimes(4); // reloaded after each answer
   });
 
   it('gives Accounts the panel only, never the return desk', async () => {

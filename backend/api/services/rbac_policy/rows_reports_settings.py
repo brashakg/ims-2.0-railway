@@ -286,6 +286,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/returns/{return_id}/complete-record",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # "Cash owed - now paid" on a completed return (money review 14): the
+    # same audience and capability as Complete record.
+    {
+        "method": "POST",
+        "path": "/api/v1/returns/{return_id}/owed-paid",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     # Its list (Returns > Needs completing panel). returns:read is already
     # AUTHENTICATED-broad, so it broadens nothing.
     {

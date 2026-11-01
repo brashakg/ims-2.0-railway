@@ -13,12 +13,14 @@
 // PHASE A (walking skeleton): functional end-to-end billing. Mockup-fidelity
 // styling, widgets and the delivery surface land in the next phases.
 
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useSellableStock } from '../../../hooks/usePOSQueries';
 import { AlertTriangle, X } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
-import { billKeyFor, cartFingerprint, clearBillKey } from '../../../components/pos/posBillKey';
+import {
+  TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK, billKeyFor, cartFingerprint, clearBillKey,
+} from '../../../components/pos/posBillKey';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
@@ -79,6 +81,12 @@ export function BillingSurface() {
     fittingCoating?: string;
   } | null>(null);
   const idempotencyKeyRef = useRef<string | null>(null);
+  // A lost sale's promise ("press again - not charged twice") holds only for
+  // the SAME cart: once the cart changes, the till stops promising.
+  const cartFp = cartFingerprint(store);
+  useEffect(() => {
+    setErrorMsg((m) => (m === TILL_SALE_UNCONFIRMED ? TILL_SALE_UNCONFIRMED_CHECK : m));
+  }, [cartFp]);
   // A discount over the seller's limit: the server's refusal (shown as the
   // ask-a-manager panel) and, once approved, the E4 request id the retry carries.
   const [approvalNeed, setApprovalNeed] = useState<DiscountApprovalNeed | null>(null);

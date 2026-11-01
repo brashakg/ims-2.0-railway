@@ -405,6 +405,9 @@ async def agents_diagnostic(user: dict = Depends(require_superadmin)):
                     if aps is not None
                     else False,
                     "job_count": len(aps.get_jobs()) if aps is not None else 0,
+                    # The system jobs by id (e.g. store_credit_reconcile), so a
+                    # deploy check can see the money reconciler is live.
+                    "job_ids": sorted(str(getattr(j, "id", "")) for j in aps.get_jobs()) if aps is not None else [],
                 }
             )
         except Exception as e:

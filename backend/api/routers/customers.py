@@ -1746,6 +1746,7 @@ def redeem_store_credit_atomic(
     source: str = "MANUAL_REDEEM",
 ) -> dict:
     """THE one store-credit spend door: atomic guarded decrement + ledger row.
+    Every Mongo call inside is bounded to MONEY_WRITE_TIMEOUT_S.
 
     ``guard_ref`` (the manual door's per-form key, money review 12): the
     debit lands at most once -- guarded by the ref in the customer's
@@ -1779,6 +1780,14 @@ def redeem_store_credit_atomic(
     vouchers.redeem_voucher_atomic); the returned balance is read from the
     POST-update document, never a snapshot.
     """
+    import pymongo
+
+    with pymongo.timeout(MONEY_WRITE_TIMEOUT_S):
+        return _redeem_store_credit_atomic(customer_id, amount, reason=reason, ref=ref, store_id=store_id,
+                                           user_id=user_id, guard_ref=guard_ref, source=source)
+
+
+def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, user_id, guard_ref, source) -> dict:
     from ..services import store_credit_ledger as scl
 
     repo = get_customer_repository()
@@ -2152,7 +2161,14 @@ def _heal_voided_row(ledger, row: Dict[str, Any], why: str, *, unrecorded: bool 
     if unrecorded and row.get("undo_on_void"):
         _audit_credit_event("RETURN_CREDIT_SETTLED_WITHOUT_RECORD", row)
         _task_credit_settled_without_record(row)
-        _keep_return_hold(row)
+        if row.get("claims_released"):
+            # A partial undo gave the units back before the move was seen to
+            # land: take them (and the hold) again.
+            from .returns import _reassert_return_claims
+
+            _reassert_return_claims(row)
+        else:
+            _keep_return_hold(row)
 
 
 def _void_credit_row(repo, ledger, row: Dict[str, Any], why: str, *, undo: bool = False) -> bool:
@@ -2197,37 +2213,60 @@ def _void_credit_row(repo, ledger, row: Dict[str, Any], why: str, *, undo: bool 
     return True
 
 
-def _finish_void(ledger, row: Dict[str, Any], why: str, *, undo: bool) -> None:
-    """A VOID that stands: its number written off once, (``undo``) the
-    return's claims and hold given back once -- each step marked on the row,
-    so the reconciler's sweep of an unsettled VOID never repeats one -- then
-    the VOID is settled."""
-    eid = row["entry_id"]
-
-    def _mark(**fields):
-        try:
-            ledger.update_one({"entry_id": eid, "type": VOID}, {"$set": fields})
-            row.update(fields)
-        except Exception as exc:  # noqa: BLE001 -- the sweep finishes it
-            logger.error("[CUSTOMERS] voided row %s not marked %s: %s", eid, list(fields), exc)
-            raise
-
+def claim_step(coll, flt: Dict[str, Any], step: str) -> bool:
+    """THE mark-then-act gate of a once-only step (money review 14): set
+    ``step`` on the document matched by ``flt`` only where it is not set yet,
+    and act ONLY when this call set it (modified_count == 1). Two reconcilers,
+    a sweep racing Needs completing, a replay: exactly one of them acts. A
+    step whose act is lost after its mark is left for a person (the hold and
+    the units stay held -- never released twice)."""
     try:
-        if row.get("note_number") and not row.get("number_written_off"):
+        res = coll.update_one({**flt, step: {"$ne": True}}, {"$set": {step: True}})
+    except Exception as exc:  # noqa: BLE001 -- unknown: never act on a guess
+        logger.error("[CUSTOMERS] step %s on %s not claimed: %s", step, flt, exc)
+        return False
+    return int(getattr(res, "modified_count", 0) or 0) == 1
+
+
+def _finish_void(ledger, row: Dict[str, Any], why: str, *, undo: bool) -> None:
+    """A VOID that stands: its number written off once and (``undo``) the
+    return's claims and hold given back once -- each step claimed on the row
+    BEFORE it acts (claim_step), so two reconcilers or the unsettled-VOID
+    sweep racing Needs completing never repeat one -- then the VOID is
+    settled. A return whose record is already finished (COMPLETED, or
+    NOTHING_PAID) has its claims and hold owned by that record: skipped."""
+    eid = row["entry_id"]
+    flt = {"entry_id": eid, "type": VOID}
+    try:
+        if row.get("note_number") and claim_step(ledger, flt, "number_written_off"):
             from .returns import _record_unused_credit_note
 
             _record_unused_credit_note(row["note_number"],
                                        {"order_id": row.get("order_id"), "store_id": row.get("store_id")},
                                        row.get("ref") or eid, {"user_id": "system"}, why)
-            _mark(number_written_off=True)
         spec = row.get("undo_on_void") or {}
-        if undo and spec:
+        if undo and spec and not _return_record_finished(spec.get("return_id")):
             from .returns import _undo_return_claims
 
-            _undo_return_claims(spec, row=row, mark=_mark)
-        _mark(void_settled=True)
-    except Exception:  # noqa: BLE001 -- left unsettled: the reconciler's sweep resumes it
-        return
+            _undo_return_claims(spec, step=lambda name: claim_step(ledger, flt, name))
+        ledger.update_one(flt, {"$set": {"void_settled": True}})
+    except Exception as exc:  # noqa: BLE001 -- left unsettled: the reconciler's sweep resumes it
+        logger.error("[CUSTOMERS] voided row %s not settled: %s", eid, exc)
+
+
+def _return_record_finished(return_id: Optional[str]) -> bool:
+    """A counter return's record exists already (COMPLETED, or a person said
+    nothing was paid). Unreadable reads as finished: never release on a guess."""
+    if not return_id:
+        return False
+    try:
+        from .returns import _NO_MONEY_DOC_STATUSES, _returns_coll
+
+        coll = _returns_coll()
+        return coll is not None and coll.find_one(
+            {"return_id": return_id, "status": {"$in": list(_NO_MONEY_DOC_STATUSES)}}) is not None
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _settle_credit_row(repo, ledger, row: Dict[str, Any]) -> str:
@@ -2295,7 +2334,23 @@ def _settle_credit_row(repo, ledger, row: Dict[str, Any]) -> str:
     return UNCLEAR
 
 
+# The money doors bound their own writes (pymongo's client-side operation
+# timeout), so a reply that never comes is resolved by the guard within this
+# -- well inside the reconciler's half-timeout -- while reports, exports,
+# syncs and scripts keep the app-wide defaults (database/connection.py).
+MONEY_WRITE_TIMEOUT_S = 30
+
+
 def post_ledger_credit(repo, entry: Dict[str, Any], *, ledger=None) -> str:
+    """See _post_ledger_credit; every Mongo call inside is bounded to
+    MONEY_WRITE_TIMEOUT_S."""
+    import pymongo
+
+    with pymongo.timeout(MONEY_WRITE_TIMEOUT_S):
+        return _post_ledger_credit(repo, entry, ledger=ledger)
+
+
+def _post_ledger_credit(repo, entry: Dict[str, Any], *, ledger=None) -> str:
     """THE posting door for every balance-moving ledger row (returns, the
     manual credit door, the advance refund, the superadmin credit note, the
     Shopify refund re-drive, referral rewards). Resumable and idempotent on

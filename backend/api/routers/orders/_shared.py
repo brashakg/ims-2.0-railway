@@ -115,8 +115,10 @@ HANDOVER_ROLES = POS_WRITE_ROLES + ("CASHIER", "WORKSHOP_STAFF")
 # (POS_WRITE_ROLES), so nobody can create a bill they cannot tender, plus
 # ACCOUNTANT (owner 2026-10-23: accounts collect credit bills). Before this,
 # ANY logged-in role (workshop, catalogue) could mark a bill paid. Keep the
-# policy row for /orders/{order_id}/payments in sync.
-PAYMENT_ROLES = POS_WRITE_ROLES + ("CASHIER", "OPTOMETRIST", "ACCOUNTANT")
+# policy row for /orders/{order_id}/payments in sync. WORKSHOP_STAFF keeps the
+# payment at handover it has on main (money review 14: no unrequested change;
+# an owner question in the PR).
+PAYMENT_ROLES = POS_WRITE_ROLES + ("CASHIER", "OPTOMETRIST", "ACCOUNTANT", "WORKSHOP_STAFF")
 
 
 def refuse_if_advance_refunded(order: dict, action: str) -> None:

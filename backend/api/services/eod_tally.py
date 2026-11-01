@@ -491,7 +491,7 @@ def compute_face_ledger(
         except Exception:  # noqa: BLE001
             read_ok = False
         try:
-            ret_match = tr.window_match(store_id, window_start, window_end)
+            ret_match = tr.returns_window_match(store_id, window_start, window_end)
             ret_match["status"] = "COMPLETED"
             ret_match["historical"] = {"$ne": True}
             for ret in db.get_collection("returns").find(

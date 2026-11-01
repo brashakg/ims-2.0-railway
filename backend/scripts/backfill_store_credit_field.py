@@ -176,11 +176,23 @@ def revert(db, backup_path: str) -> int:
     """Undo --apply for the customers in the backup, only where the balance
     still equals what the script set (a live move since means fix forward)."""
     with open(backup_path, encoding="utf-8") as f:
-        ids = [r.get("customer_id") for r in json.load(f) if r.get("customer_id")]
+        rows = [r for r in json.load(f) if r.get("customer_id")]
+    ids = [r.get("customer_id") for r in rows]
+    before = {r.get("customer_id"): r.get("store_credit") for r in rows}
     done = 0
     for cust in db["customers"].find({"customer_id": {"$in": ids}, "store_credit_backfilled_at": {"$ne": None}}):
         if cust.get("store_credit_refs"):
             continue  # a live credit moved this balance since: fix forward, never revert
+        if cust.get("store_credit_hand_set"):
+            # A hand fix (--set) goes back to the value it replaced, never to
+            # an unset field.
+            res = db["customers"].update_one(
+                {"customer_id": cust["customer_id"], "store_credit": cust.get("store_credit_backfill_value")},
+                {"$set": {"store_credit": before.get(cust["customer_id"])},
+                 "$unset": {"store_credit_backfill_value": "", "store_credit_backfilled_at": "",
+                            "store_credit_hand_set": ""}})
+            done += int(getattr(res, "modified_count", 0) or 0)
+            continue
         res = db["customers"].update_one(
             {"customer_id": cust["customer_id"], "store_credit": cust.get("store_credit_backfill_value")},
             {"$unset": {"store_credit": "", "store_credit_backfill_value": "", "store_credit_backfilled_at": ""}})
@@ -203,6 +215,9 @@ def main() -> int:
         hand = [(c.strip(), round(_num(float(a)), 2)) for c, a in (x.split("=", 1) for x in args.set)]
     except (ValueError, TypeError):
         print("[USAGE] --set takes CUSTOMER_ID=AMOUNT with a number")
+        return 1
+    if any(amount < 0 for _, amount in hand):
+        print("[USAGE] --set refuses a negative balance - decide it with the owner first")
         return 1
     url = os.getenv("MONGO_PUBLIC_URL") or os.getenv("MONGO_URL") or os.getenv("MONGODB_URL")
     print(f"[MONGO] connection string: {'SET' if url else 'NOT SET'}")

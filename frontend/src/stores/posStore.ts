@@ -6,6 +6,7 @@
 // Persists draft cart to localStorage so sales aren't lost on browser crash.
 
 import { create } from 'zustand';
+import { clearBillKey } from '../components/pos/posBillKey';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Customer, Patient, Prescription } from '../types';
 import type { DenomRow } from '../utils/denominations';
@@ -578,6 +579,7 @@ export const usePOSStore = create<POSState>()(
       // --- Reset ---
       resetTransaction: () => {
         const { store_id, salesperson_id, salesperson_name } = get();
+        clearBillKey(); // a new sale is a new press
         set({ ...initialState, store_id, salesperson_id, salesperson_name });
       },
 
@@ -589,6 +591,7 @@ export const usePOSStore = create<POSState>()(
       // to reset the transaction afterward (manual hold does; auto-park lets the
       // subsequent logout clear it).
       parkCurrentSale: (meta?: { auto?: boolean; heldBy?: string }) => {
+        clearBillKey(); // a held bill is pressed again later as a new press
         const state = get();
         const cart = state.cart || [];
         if (cart.length === 0) return null; // nothing to park
@@ -647,6 +650,7 @@ export const usePOSStore = create<POSState>()(
       // discount_amount/reason intact), cart-discount recomputed
       // from the restored cart, delivery + advance flags restored.
       restoreHeldSale: (snapshot: any) => {
+        clearBillKey();
         const { store_id, salesperson_id, salesperson_name } = get();
         const snap = snapshot || {};
         const cart: CartLineItem[] = (Array.isArray(snap.cart) ? snap.cart : []).map(migrateLegacyItemNote);
@@ -682,6 +686,7 @@ export const usePOSStore = create<POSState>()(
       // (POSLayout filters held bills by held_by === current user), not by
       // wiping every parked cart on logout.
       clearAllOnLogout: () => {
+        clearBillKey();
         set(initialState);
         try {
           localStorage.removeItem('ims-pos-draft');

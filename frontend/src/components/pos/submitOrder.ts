@@ -14,7 +14,8 @@ import { orderApi, loyaltyApi, workshopApi } from '../../services/api';
 import { canonicalCategory } from '../../utils/categoryNormalize';
 import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
-import { orderLinesOf, refreshBillQuote } from './billQuote';
+import { orderLinesOf, refreshBillQuote, replayGuaranteed } from './billQuote';
+import { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from './posBillKey';
 import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
 import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 import { WRITE_UNCONFIRMED_MESSAGE } from '../../services/api/client';
@@ -127,10 +128,7 @@ const DEAD_APPROVAL_CODES = new Set([
 // key is safe. Store credit, vouchers and loyalty debit an account.
 const RECORD_ONLY_TENDERS = new Set(['CASH', 'CARD', 'UPI']);
 
-/** The till's own words for a sale whose answer was lost: the bill key is
-    kept with the cart, so pressing again replays it, never charges twice. */
-export const TILL_SALE_UNCONFIRMED =
-  'The server did not confirm this sale. Press Complete Sale again - it will not be charged twice.';
+export { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from './posBillKey';
 
 function serverReason(e: unknown): string {
   const d = getErrorDetail(e) as { reason?: unknown } | undefined;
@@ -444,7 +442,9 @@ export async function submitPosOrder(
     if (code && DEAD_APPROVAL_CODES.has(code)) {
       return { ok: false, error: msg, discountApprovalRejected: true };
     }
-    if (msg === WRITE_UNCONFIRMED_MESSAGE) return { ok: false, error: TILL_SALE_UNCONFIRMED };
+    if (msg === WRITE_UNCONFIRMED_MESSAGE) {
+      return { ok: false, error: replayGuaranteed() ? TILL_SALE_UNCONFIRMED : TILL_SALE_UNCONFIRMED_CHECK };
+    }
     return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error') };
   }
 }

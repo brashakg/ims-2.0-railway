@@ -137,7 +137,7 @@ def test_nothing_paid_is_refused_once_store_credit_landed(till):
                                   undo_on_void=_spec("RET-L")))
     with pytest.raises(HTTPException) as e:
         _complete("RET-L", nothing_paid=True)
-    assert e.value.status_code == 409 and "Store credit was given" in e.value.detail
+    assert e.value.status_code == 409 and "Money moved on this return" in e.value.detail
 
 
 def test_a_void_line_held_bill_is_finished_without_releasing_twice(till, monkeypatch):
@@ -263,7 +263,7 @@ def test_complete_record_refuses_a_caller_from_another_store(till):
     _bill_with_hold(till, "RET-O", store_id="BV-OTHER-09")
     with pytest.raises(HTTPException) as e:
         _complete("RET-O", nothing_paid=True)
-    assert e.value.status_code == 403
+    assert e.value.status_code == 404  # round 14: in_reach_or_404 (no leak of another shop's return)
 
 
 def test_an_unpaid_cash_part_is_owed_and_raises_a_pay_task(till, tasks):
@@ -273,7 +273,8 @@ def test_an_unpaid_cash_part_is_owed_and_raises_a_pay_task(till, tasks):
                                   undo_on_void=_spec("RET-P"), store_id=STORE))
     doc = _complete("RET-P", cash_leg_paid=False)
     assert doc["owed_amount"] == 600.0 and doc["net_refund"] == 1800.0
-    assert [(t["method"], t.get("status")) for t in doc["refund_tenders"]] == [("CASH", "OWED"), ("STORE_CREDIT", None)]
+    assert [t["method"] for t in doc["refund_tenders"]] == ["STORE_CREDIT"]
+    assert [(t["method"], t["status"]) for t in doc["owed_tenders"]] == [("CASH", "OWED")]
     assert round(doc["gst_breakup"]["taxable"] + doc["gst_breakup"]["tax"], 2) == doc["net_refund"]
     assert [t["dedupe_ref"] for t in tasks] == ["return_cash_owed:RET-P"]
     assert "Pay customer Rs 600.00 for return RET-P" in tasks[0]["title"]
@@ -298,10 +299,8 @@ def test_an_unsettled_void_is_finished_by_the_sweep_without_repeating_a_step(til
         state["n"] += 1
         if state["n"] == 1:
             raise RuntimeError("worker died mid-undo")
-        undone.append(spec["return_id"])
-        if k.get("mark"):
-            k["mark"](claims_released=True)
-            k["mark"](hold_released=True)
+        if k["step"]("claims_released") and k["step"]("hold_released"):
+            undone.append(spec["return_id"])
 
     monkeypatch.setattr(returns_router, "_undo_return_claims", _undo)
     _customer(till)
@@ -346,7 +345,9 @@ def test_the_mongo_client_has_bounded_timeouts(monkeypatch):
     monkeypatch.setattr(conn, "_config", type("Cfg", (), {"get_uri": lambda self: "mongodb://x",
                                                           "database": "ims_2_0"})(), raising=False)
     conn.connect()
-    assert seen.get("socketTimeoutMS") == 30_000 and seen.get("waitQueueTimeoutMS") == 30_000
+    # Round 14: no app-wide socket timeout (the money doors bound their own
+    # writes); only the pool wait is bounded.
+    assert "socketTimeoutMS" not in seen and seen.get("waitQueueTimeoutMS") == 30_000
 
 
 def test_a_double_clicked_redeem_whose_row_exists_returns_it(till, monkeypatch):
@@ -529,10 +530,10 @@ def test_a_resumed_undo_never_gives_claims_back_twice(till, monkeypatch):
     released, holds = [], []
     monkeypatch.setattr(returns_router, "_release_returnable_qty", lambda *a, **k: released.append(a))
     monkeypatch.setattr(returns_router, "_release_order_refund", lambda *a, **k: holds.append(a))
-    marks = {}
-    row = {"claims_released": True}
-    returns_router._undo_return_claims(_spec("RET-Z"), row=row, mark=lambda **f: marks.update(f))
-    assert released == [] and len(holds) == 1 and marks == {"hold_released": True}
+    # Round 14: each step acts only when its claim was won (claims already done).
+    claimed = {"claims_released": False, "hold_released": True}
+    returns_router._undo_return_claims(_spec("RET-Z"), step=lambda name: claimed[name])
+    assert released == [] and len(holds) == 1
 
 
 @pytest.mark.asyncio
