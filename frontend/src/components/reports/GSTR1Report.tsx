@@ -18,6 +18,7 @@ import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
 import { reportsApi } from '../../services/api';
 import { neutralizeFormula } from '../../utils/exportUtils';
+import { istDayString } from '../../utils/datetime';
 
 interface GSTR1Invoice {
   invoiceNumber: string;
@@ -100,7 +101,7 @@ export function GSTR1Report() {
 
   const [isLoading, setIsLoading] = useState(false);
   const [reportData, setReportData] = useState<GSTR1Data | null>(null);
-  const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [selectedMonth, setSelectedMonth] = useState(() => istDayString(new Date())!.slice(0, 7)); // YYYY-MM, IST
   const [activeSection, setActiveSection] = useState<'b2b' | 'b2cl' | 'b2cs' | 'cdnr'>('b2b');
 
   useEffect(() => {

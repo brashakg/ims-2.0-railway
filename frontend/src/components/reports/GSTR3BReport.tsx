@@ -19,6 +19,7 @@ import { useAuth } from '../../context/AuthContext';
 import { reportsApi } from '../../services/api';
 import { COST_ROLES } from '../common/CostCell';
 import { NoShopNotice, hasNoShop } from '../common/NoShopNotice';
+import { istDayString } from '../../utils/datetime';
 
 interface GSTR3BTaxLiability {
   integratedTax: number;
@@ -90,7 +91,7 @@ export function GSTR3BReport() {
 
   const [isLoading, setIsLoading] = useState(false);
   const [reportData, setReportData] = useState<GSTR3BData | null>(null);
-  const [selectedMonth, setSelectedMonth] = useState(new Date().toISOString().slice(0, 7)); // YYYY-MM
+  const [selectedMonth, setSelectedMonth] = useState(() => istDayString(new Date())!.slice(0, 7)); // YYYY-MM, IST
 
   useEffect(() => {
     if (selectedMonth && !noShop) {

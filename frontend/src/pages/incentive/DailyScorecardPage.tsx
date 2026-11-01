@@ -25,6 +25,7 @@ import type {
   WalkinStatusResponse,
 } from '../../types';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { istDayString } from '../../utils/datetime';
 
 const CATEGORIES: Array<{ key: keyof DailyScores; label: string; max: number; auto?: boolean }> = [
   { key: 'attendance', label: 'Attendance', max: 10 },
@@ -86,7 +87,7 @@ export function DailyScorecardPage() {
   const canSeePayout = (userRoles || []).some(r => r === 'ADMIN' || r === 'SUPERADMIN')
     || activeRole === 'ADMIN' || activeRole === 'SUPERADMIN';
 
-  const [date, setDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(() => istDayString(new Date())!);
   const [staffList, setStaffList] = useState<Array<{ user_id: string; name: string }>>([]);
   const [rows, setRows] = useState<StaffRow[]>([]);
   const [savedByStaff, setSavedByStaff] = useState<Record<string, PointsLog>>({});
@@ -103,7 +104,7 @@ export function DailyScorecardPage() {
   const [dayVisibility, setDayVisibility] = useState<'all' | 'self'>('all');
 
   const isToday = useMemo(
-    () => date === new Date().toISOString().slice(0, 10),
+    () => date === istDayString(new Date()),
     [date],
   );
   const bands = settings?.eligibility_bands || [];

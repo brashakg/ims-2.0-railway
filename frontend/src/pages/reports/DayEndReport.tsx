@@ -47,7 +47,7 @@ interface DaySummary {
 export default function DayEndReport() {
   const { user } = useAuth();
   const toast = useToast();
-  const [reportDate, setReportDate] = useState(new Date().toISOString().split('T')[0]);
+  const [reportDate, setReportDate] = useState(() => istDayString(new Date())!);
   const [orders, setOrders] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [showDetails, setShowDetails] = useState(false);
@@ -260,7 +260,7 @@ export default function DayEndReport() {
           <p className="text-sm text-gray-500 mt-1">Daily sales summary and cash reconciliation</p>
         </div>
         <div className="flex items-center gap-3">
-          <input type="date" value={reportDate} onChange={e => setReportDate(e.target.value)} max={new Date().toISOString().split('T')[0]}
+          <input type="date" value={reportDate} onChange={e => setReportDate(e.target.value)} max={istDayString(new Date())!}
             className="px-3 py-2 border border-gray-300 rounded-lg text-sm" />
           <button onClick={handlePrint} className="flex items-center gap-1.5 px-4 py-2 text-sm border border-gray-300 rounded-lg hover:bg-gray-50">
             <Printer className="w-4 h-4" /> Print
