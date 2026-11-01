@@ -470,6 +470,8 @@ def test_reject_blocks_post_and_records_note(db):
 
 
 def test_reversal_nets_pnl_to_zero(db):
+    from api.utils.ist import ist_today
+
     _seed_user(db, "user_A", pin="1111", roles=["ADMIN"])
     _seed_user(db, "user_B", pin="2222", roles=["ADMIN"])
     je_id = _draft(db, "user_A", amount=5000.0)
@@ -492,10 +494,12 @@ def test_reversal_nets_pnl_to_zero(db):
     assert reversal["total_debit"] == original["total_credit"]
     assert reversal["total_credit"] == original["total_debit"]
 
-    # Net P&L effect of original + reversal = zero (the reversal entry dates
-    # today, FY 2026-27, so widen the window to include both).
+    # Net P&L effect of original + reversal = zero. The original dates
+    # _entry_date() and the reversal dates today (IST), so the window runs from
+    # the original's FY start to the end of today - a fixed FY end went stale.
     adj = je_service.pnl_adjustments(db, store_id=None, from_dt=datetime(2026, 4, 1),
-                                     to_dt=datetime(2027, 3, 31))
+                                     to_dt=datetime.combine(ist_today() + timedelta(days=1),
+                                                            datetime.min.time()))
     assert adj["je_expense_adjustment"] == 0.0
 
     # Double reverse blocked.
