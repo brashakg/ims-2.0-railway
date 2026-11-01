@@ -30,7 +30,7 @@ from api.routers import purchase_invoices as pi
 from api.routers.auth import get_current_user
 from api.services import cost_mask, product_cost, stock_value
 from api.utils.event_time import utc_now
-from tests.test_purchase_match import _GRN_DOC, _PO_DOC, _FakeDB, _app, _body
+from tests.test_purchase_match import _GRN_DOC, _PO_DOC, _FakeDB, _app, _body, _restore_router  # noqa: F401 (autouse: undoes _app's router patches)
 
 
 @pytest.fixture(autouse=True)
