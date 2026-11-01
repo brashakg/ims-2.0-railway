@@ -9,7 +9,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { MemoryRouter } from 'react-router-dom';
+import { MemoryRouter, useNavigate } from 'react-router-dom';
 
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
@@ -292,6 +292,75 @@ describe('the strip answer reaches the next save', () => {
     await user.click(screen.getByRole('button', { name: /Save \+ New/ }));
     await waitFor(() => expect(api.createProduct).toHaveBeenCalledTimes(2));
     expect(api.createProduct.mock.calls[1][0]).not.toHaveProperty('distinct_from');
+  });
+
+  it('Skip: an answer given on this product is not sent with the next one (a new ?edit= id)', async () => {
+    hint.real = true;
+    window.sessionStorage.clear();
+    writeReviewQueue(
+      { ids: ['P-ME', 'P-NEXT'], index: 0, offset: 0, total: 2, filters: {},
+        list: { path: '/catalog', params: {}, pageSize: 50 } },
+      EDIT_QUEUE_KEY,
+    );
+    api.getProduct.mockImplementation(async (id: string) => ({
+      product_id: id, sku: `SG-RAYBAN-4340-${id}`, category: 'SG', brand: 'Ray-Ban', model: '4340',
+      attributes: { brand_name: 'Ray-Ban', model_no: '4340', colour_code: '601/M3', lens_size: '50' },
+      mrp: 8100, offer_price: 8100, hsn_code: '900410', gst_rate: 18, images: [],
+    }));
+    api.updateProduct.mockResolvedValue({});
+    const user = userEvent.setup();
+    renderAt('/catalog/add?edit=P-ME&from=list');
+    await screen.findByRole('button', { name: "It's a different product" }, { timeout: 5000 });
+    await answerDifferent(user);
+    await user.click(await screen.findByRole('button', { name: /^Skip/ }));
+    await waitFor(() => expect(api.getProduct).toHaveBeenCalledWith('P-NEXT'));
+    // P-NEXT asks again: the old answer does not hide its strip.
+    await screen.findByRole('button', { name: "It's a different product" });
+    await user.click(screen.getByRole('button', { name: /Save changes/ }));
+    await waitFor(() => expect(api.updateProduct).toHaveBeenCalledTimes(1));
+    expect(api.updateProduct.mock.calls[0][0]).toBe('P-NEXT');
+    expect(api.updateProduct.mock.calls[0][1]).not.toHaveProperty('distinct_from');
+  });
+
+  it("an answer on the blank form is dropped when a variant starts and 'New model' leaves it", async () => {
+    // Variant mode offers no answer itself (the strip hides same-model rows
+    // there), so the leak is an answer given BEFORE it: + Variant, then New model.
+    hint.real = true;
+    api.getProduct.mockResolvedValue({
+      product_id: 'P-SRC', sku: 'SG-RAYBAN-4340-710/51', category: 'SG', brand: 'Ray-Ban', model: '4340',
+      attributes: { brand_name: 'Ray-Ban', model_no: '4340', colour_code: '710/51', lens_size: '50' },
+      mrp: 8100, offer_price: 8100, hsn_code: '900410', gst_rate: 18, images: [],
+    });
+    api.createProduct.mockResolvedValue({ product_id: 'P-NEW', sku: 'SG-RAYBAN-4340-601/M3' });
+    const GoVariant = () => {
+      const nav = useNavigate();
+      return <button type="button" onClick={() => nav('/catalog/add?variant=P-SRC')}>go-variant</button>;
+    };
+    const user = userEvent.setup();
+    render(
+      <MemoryRouter initialEntries={['/catalog/add']}>
+        <GoVariant />
+        <QuickAddPage />
+      </MemoryRouter>,
+    );
+    await loadCategoryRegistry();
+    const typeIn = async () => {
+      await user.click(await screen.findByText('Sunglasses'));
+      fill(screen.getByLabelText(/^Brand Name/), 'Ray-Ban');
+      fill(screen.getByLabelText(/^Model No/), '4340');
+      fill(screen.getByLabelText(/^Colour Code/), '601/M3');
+      fill(screen.getByLabelText(/^MRP/), '8100');
+    };
+    await typeIn();
+    await answerDifferent(user);
+    await user.click(screen.getByRole('button', { name: 'go-variant' }));
+    await user.click(await screen.findByRole('button', { name: /New model/ }));
+    await typeIn();
+    // Asked again: the old answer does not hide the strip.
+    await screen.findByRole('button', { name: "It's a different product" });
+    await user.click(screen.getByRole('button', { name: /Save \+ New/ }));
+    await waitFor(() => expect(api.createProduct).toHaveBeenCalledTimes(1));
+    expect(api.createProduct.mock.calls[0][0]).not.toHaveProperty('distinct_from');
   });
 
   it('review mode (?review=) offers no "different product" answer: its save never sends one', async () => {

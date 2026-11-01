@@ -1898,12 +1898,19 @@ def near_duplicate_conflict(products_collection, spine: Dict[str, Any], *, me: O
 
 
 def stamp_distinct_from(
-    answers: Any, product_repo, *, actor: Any, actor_name: Any, stored: Any = None
+    answers: Any, product_repo, *, actor: Any, actor_name: Any, stored: Any = None,
+    me: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """The "It's a different product" answers as stored: each named product
-    must exist and carry a reason; WHO and WHEN are the server's, never the
-    browser's. A product answered again replaces its earlier answer."""
+    must exist, carry a reason and be a near-twin of `me` (the product being
+    saved: same brand + model core, similar_model_rows' rule) -- a stale answer
+    left over from another product is refused, never stored. WHO and WHEN are
+    the server's, never the browser's. A product answered again replaces its
+    earlier answer."""
     out = [d for d in (stored or []) if isinstance(d, dict)]
+    me = me or {}
+    my_category = me.get("category")
+    my_brand, my_model, _, _ = identity_parts(_identity_attributes(me), my_category)
     for a in answers or []:
         a = a if isinstance(a, dict) else dict(a)
         pid = str(a.get("product_id") or "").strip()
@@ -1917,6 +1924,15 @@ def stamp_distinct_from(
             raise ProductMasterError(
                 "The product it was marked different from was not found.",
                 status=422,
+                field="distinct_from",
+            )
+        mine = {str(x) for x in (me.get("product_id"), me.get("id")) if x}
+        if pid in mine or not same_model_spelling(
+            my_category, my_brand, my_model, other.get("identity_key") or identity_key_of(other)
+        ):
+            raise ProductMasterError(
+                "It was marked different from a product that is not this model.",
+                status=400,
                 field="distinct_from",
             )
         out = [d for d in out if d.get("product_id") != pid] + [

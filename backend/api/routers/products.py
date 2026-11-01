@@ -1221,7 +1221,7 @@ async def list_products(
     return {"products": [], "total": 0, "total_count": 0}
 
 
-def _stamped_distinct_from(answers, repo, current_user: dict, stored=None) -> Optional[list]:
+def _stamped_distinct_from(answers, repo, current_user: dict, *, me: dict, stored=None) -> Optional[list]:
     """The save's 'It's a different product' answers, stamped by the server
     (product_master.stamp_distinct_from); None when there are none."""
     if not answers:
@@ -1233,6 +1233,7 @@ def _stamped_distinct_from(answers, repo, current_user: dict, stored=None) -> Op
             actor=current_user.get("user_id"),
             actor_name=current_user.get("username"),
             stored=stored,
+            me=me,
         )
     except _pm.ProductMasterError as err:
         raise HTTPException(status_code=err.status, detail=_pm_error_detail(err)) from err
@@ -1315,7 +1316,7 @@ async def create_product(
     repo = get_product_repository()
 
     if repo is not None:
-        distinct = _stamped_distinct_from(product.distinct_from, repo, current_user)
+        distinct = _stamped_distinct_from(product.distinct_from, repo, current_user, me=probe)
         if product.check_near_duplicates:
             # The minted SKU is a guess here (no catalogue read): only a typed
             # one may name an exact twin.
@@ -3768,7 +3769,8 @@ async def update_product(
         # same-model check runs only when this edit moved the identity (a
         # price edit on the older twin never asks).
         _distinct = _stamped_distinct_from(
-            product.distinct_from, repo, current_user, stored=existing.get("distinct_from")
+            product.distinct_from, repo, current_user, stored=existing.get("distinct_from"),
+            me={**existing, **update_data},
         )
         if _distinct is not None:
             update_data["distinct_from"] = _distinct

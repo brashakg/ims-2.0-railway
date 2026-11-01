@@ -202,6 +202,15 @@ export function useQuickAddForm() {
   // submit fork (handleReviewSave/handleReviewApprove) + the ReviewQueueBar.
   const [editMode, setEditMode] = useState<EditMode>(null);
   const isReviewMode = editMode?.kind === 'catalog';
+  // "It's a different product" answers belong to the product being worked on:
+  // every switch of it (another ?edit= id, Skip / next, review, a variant or
+  // 'New model') drops them, so one product's answer is never sent with
+  // another's save.
+  const editKey = editMode ? `${editMode.kind}:${editMode.id}` : '';
+  const variantKey = variantCtx?.sourceProductId ?? '';
+  useEffect(() => {
+    clearDifferent();
+  }, [editKey, variantKey, clearDifferent]);
 
   // ---- Review-mode state (?review=<id>) -------------------------------------
   // The loaded doc + the form values as loaded/last-saved — the diff base for
@@ -482,8 +491,9 @@ export function useQuickAddForm() {
       setErrors({});
       setDisplayName('');
       setReviewTags([]);
+      clearDifferent();
     },
-    [attributes.brand_name]
+    [attributes.brand_name, clearDifferent]
   );
 
   // Apply a ProductFormValues blob to every form field. The inverse of

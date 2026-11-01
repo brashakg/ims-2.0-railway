@@ -493,3 +493,27 @@ def test_replay_of_the_prod_catalogue_catches_the_8_twins_and_nothing_else():
             if pm.same_colour_and_size(r["identity_key"], hit["identity_key"]):
                 red.add(tuple(sorted((r["model"], hit["model"]))))
     assert red == {tuple(sorted(p)) for p in _EXPECTED_PROD_TWINS}
+
+
+def test_an_answer_naming_a_product_of_another_model_is_refused(door):
+    """A stale 'different product' answer (given on another product in the
+    browser) can never be stored: the named product must be a near-twin."""
+    first = door("RB4340")
+    stranger = door("RB2140")
+    with pytest.raises(HTTPException) as exc:
+        door("4340", distinct_from=[{"product_id": stranger["product_id"], "reason": "Different lens"}])
+    assert exc.value.status_code == 400
+    other = door("4340", colour="710/51")
+    with pytest.raises(HTTPException) as exc:
+        _put(other["product_id"], mrp=9500.0,
+             distinct_from=[{"product_id": stranger["product_id"], "reason": "Different lens"}])
+    assert exc.value.status_code == 400
+    with pytest.raises(HTTPException) as exc:  # never itself
+        _put(other["product_id"], mrp=9500.0,
+             distinct_from=[{"product_id": other["product_id"], "reason": "Different lens"}])
+    assert exc.value.status_code == 400
+    assert "distinct_from" not in door.repo.find_by_id(other["product_id"])
+    # The real twin is still accepted.
+    _put(other["product_id"], mrp=9500.0,
+         distinct_from=[{"product_id": first["product_id"], "reason": "Different lens"}])
+    assert door.repo.find_by_id(other["product_id"])["distinct_from"][0]["product_id"] == first["product_id"]
