@@ -131,7 +131,10 @@ export function StockTransferManagement() {
   const canPack = (t: Transfer) => gates.canPack(actor, t);
   const canReceive = (t: Transfer) => gates.canReceive(actor, t);
   const canComplete = (t: Transfer) => gates.canComplete(actor, t);
-  const canOpenBox = (t: Transfer) => canPack(t) || canReceive(t) || canComplete(t);
+  // The sending side also opens the box while it is on the way: the e-way
+  // bill no. can only be typed after Ship (it needs the tax invoice number).
+  const canOpenBox = (t: Transfer) =>
+    canPack(t) || canReceive(t) || canComplete(t) || gates.canEditEway(actor, t);
   const canCancel = (t: Transfer) => gates.canCancel(actor, t);
 
   useEffect(() => {

@@ -7,6 +7,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const packTransfer = vi.fn();
 const scanInPiece = vi.fn();
+const shipTransfer = vi.fn();
 const toastError = vi.fn();
 
 vi.mock('../../../context/ToastContext', () => ({
@@ -16,6 +17,7 @@ vi.mock('../../../services/api', () => ({
   inventoryApi: {
     packTransfer: (...a: unknown[]) => packTransfer(...a),
     scanInPiece: (...a: unknown[]) => scanInPiece(...a),
+    shipTransfer: (...a: unknown[]) => shipTransfer(...a),
   },
 }));
 
@@ -71,6 +73,62 @@ describe('TransferBox', () => {
   it('the receiving shop cannot pack and the sending shop cannot scan in', () => {
     render(<TransferBox transfer={box({})} actor={receiver} onChanged={() => {}} onDone={() => {}} />);
     expect(screen.queryByLabelText(/Scan a piece/)).toBeNull();
+  });
+
+  it('a scan made while the last one is still saving is queued, never dropped', async () => {
+    const t = box({
+      status: 'in_transit',
+      items: [{ id: 'l1', product_id: 'P1', product_name: 'Carrera', shipped_stock_ids: ['S1', 'S2'], shipped_barcodes: ['BV1', 'BV2'] }],
+    });
+    let release: (v: unknown) => void = () => {};
+    scanInPiece.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    render(<TransferBox transfer={t} actor={receiver} onChanged={() => {}} onDone={() => {}} />);
+    const input = screen.getByLabelText('Scan a piece in') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'BV1' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    // The gun's next code lands in an empty field while BV1 is still saving.
+    expect(input.value).toBe('');
+    fireEvent.change(input, { target: { value: 'BV2' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(scanInPiece).toHaveBeenCalledTimes(1);
+    release({ transfer: t });
+    await waitFor(() => expect(scanInPiece).toHaveBeenCalledTimes(2));
+    expect(scanInPiece.mock.calls.map((c) => c[1].barcode)).toEqual(['BV1', 'BV2']);
+  });
+
+  it('queued scans out each re-send the box as the server last answered it', async () => {
+    let release: (v: unknown) => void = () => {};
+    const afterFirst = box({
+      items: [{ id: 'l1', product_id: 'P1', product_name: 'Carrera', quantity_requested: 3, packed_barcodes: ['BV1', 'BV2'] }],
+    });
+    packTransfer.mockImplementationOnce(() => new Promise((r) => (release = r)));
+    render(<TransferBox transfer={box({})} actor={sender} onChanged={() => {}} onDone={() => {}} />);
+    const input = screen.getByLabelText('Scan a piece out');
+    fireEvent.change(input, { target: { value: 'BV2' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    fireEvent.change(input, { target: { value: 'BV3' } });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    release({ transfer: afterFirst });
+    await waitFor(() => expect(packTransfer).toHaveBeenCalledTimes(2));
+    expect(packTransfer.mock.calls[1][1]).toEqual(['BV1', 'BV2', 'BV3']);
+  });
+
+  it('Accept names how many pieces will be reported missing', () => {
+    const t = box({
+      status: 'partially_received',
+      items: [{ id: 'l1', product_id: 'P1', product_name: 'Carrera', shipped_stock_ids: ['S1', 'S2', 'S3'],
+                shipped_barcodes: ['BV1', 'BV2', 'BV3'], received_stock_ids: ['S1'] }],
+    });
+    render(<TransferBox transfer={t} actor={receiver} onChanged={() => {}} onDone={() => {}} />);
+    expect(screen.getByRole('button', { name: /Accept 1, report 2 missing/ })).toBeInTheDocument();
+  });
+
+  it('a box does not ship without the courier and the tracking no.', () => {
+    render(<TransferBox transfer={box({ status: 'packed' })} actor={sender} onChanged={() => {}} onDone={() => {}} />);
+    fireEvent.change(screen.getByLabelText('Courier'), { target: { value: 'DTDC' } });
+    fireEvent.click(screen.getByRole('button', { name: /Ship 1 pieces/ }));
+    expect(shipTransfer).not.toHaveBeenCalled();
+    expect(toastError).toHaveBeenCalledWith(expect.stringContaining('tracking no.'));
   });
 
   it('each shipped piece shows where it stands', () => {

@@ -13,7 +13,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi, productApi } from '../../services/api';
 import { storeApi } from '../../services/api/stores';
-import { isOnlineStore } from '../../utils/storeMode';
+import { isOnlineStore, isOnlineStoreId } from '../../utils/storeMode';
 import { getErrorMessage } from '../../utils/errorHandler';
 import * as gates from './transferPermissions';
 
@@ -28,6 +28,7 @@ export function AskForStock({ onAsked }: { onAsked: () => void }) {
   const toast = useToast();
   const [shops, setShops] = useState<{ id: string; name: string }[]>([]);
   const [here, setHere] = useState('');
+  const [hereOnline, setHereOnline] = useState(false);
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<Hit[]>([]);
   const [product, setProduct] = useState<Hit | null>(null);
@@ -45,7 +46,9 @@ export function AskForStock({ onAsked }: { onAsked: () => void }) {
           name: s.store_name || s.name || '',
           store_type: s.store_type || '',
         }));
-        setHere(list.find((s: any) => s.id === user?.activeStoreId)?.name || user?.activeStoreId || '');
+        const mine = list.find((s: any) => s.id === user?.activeStoreId);
+        setHere(mine?.name || user?.activeStoreId || '');
+        setHereOnline(isOnlineStore(mine));
         setShops(list.filter((s: any) => s.id !== user?.activeStoreId && !isOnlineStore(s)));
       })
       .catch(() => setShops([]));
@@ -115,6 +118,10 @@ export function AskForStock({ onAsked }: { onAsked: () => void }) {
       setBusy(false);
     }
   };
+
+  // Stock is asked FOR the active shop: with no shop chosen, or the online shop
+  // (it holds no stock of its own), there is nowhere for it to go.
+  if (!user?.activeStoreId || isOnlineStoreId(user.activeStoreId) || hereOnline) return null;
 
   return (
     <div className="card space-y-3">
@@ -258,6 +265,13 @@ export function MissingOnTheWay({ actor, refreshKey }: { actor: gates.TransferAc
                   key={at}
                   disabled={busy}
                   onClick={() =>
+                    // Found back at the sender = never delivered: between two
+                    // GSTINs that raises a credit note, so it is confirmed.
+                    (at === 'destination' ||
+                      window.confirm(
+                        `Found ${p.barcode} back at ${p.from_location_name}? It goes back on that shelf and, ` +
+                          'between two GSTINs, a credit note is raised. This cannot be undone.',
+                      )) &&
                     act(() => inventoryApi.foundMissingPiece(p.transfer_id, p.stock_id, at), 'Marked found')
                   }
                   className="btn-outline text-sm"
@@ -268,7 +282,12 @@ export function MissingOnTheWay({ actor, refreshKey }: { actor: gates.TransferAc
             {gates.canWriteOff(actor) ? (
               <button
                 disabled={busy}
-                onClick={() => act(() => inventoryApi.writeOffMissingPiece(p.transfer_id, p.stock_id), 'Written off')}
+                onClick={() =>
+                  window.confirm(
+                    `Write off ${p.barcode}? It is removed from ${p.from_location_name}'s stock and, between two ` +
+                      'GSTINs, a credit note is raised. This cannot be undone.',
+                  ) && act(() => inventoryApi.writeOffMissingPiece(p.transfer_id, p.stock_id), 'Written off')
+                }
                 className="btn-outline text-sm text-red-600 border-red-200"
               >
                 Write off

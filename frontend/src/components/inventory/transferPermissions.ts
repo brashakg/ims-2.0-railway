@@ -90,6 +90,13 @@ export const canPack = (actor: TransferActor, t: TransferLike): boolean =>
 export const canShip = (actor: TransferActor, t: TransferLike): boolean =>
   hasRole(actor, SHIP_ROLES) && norm(t.status) === 'packed' && isSourceSide(actor, t);
 
+// The e-way bill no. and vehicle no. (PUT /transfers/{id}: the sending side's
+// managers). The e-way bill is raised against the tax invoice number minted at
+// Ship, so the sending side must reach it while the box is on the way.
+export const EWAY_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER'];
+export const canEditEway = (actor: TransferActor, t: TransferLike): boolean =>
+  hasRole(actor, EWAY_ROLES) && ['packed', 'in_transit'].includes(norm(t.status)) && isSourceSide(actor, t);
+
 export const canReceive = (actor: TransferActor, t: TransferLike): boolean =>
   hasRole(actor, RECEIVE_ROLES) &&
   ['in_transit', 'partially_received'].includes(norm(t.status)) &&

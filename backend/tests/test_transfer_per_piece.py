@@ -497,9 +497,9 @@ def test_short_delivery_is_value_received_plus_a_credit_note(world):
     assert note["invoice_number"] == note["bill_number"] == "DHN01/C2627/0001"
     assert note["original_invoice_number"] == invoice["invoice_number"]
     assert note["recipient_gstin"] == GSTIN_Y_JH and note["vendor_gstin"] == GSTIN_Z_JH
-    # Value actually received: two pieces at the line's own rate, to the paisa.
-    unit_cost = transfers._get_transfer(t["id"])["items"][0]["unit_cost"]
-    received = split_line_gst(transfers._line_value(2, unit_cost), 5.0, False)
+    # Value actually received: the two pieces received, each at its own
+    # cost (1850 + 1850), to the paisa -- not two at the line's average.
+    received = split_line_gst(3700.0, 5.0, False)
     for head, inv_key in (("taxable", "taxable_amount"), ("cgst", "cgst_total"),
                           ("sgst", "sgst_total"), ("igst", "igst_total")):
         assert round(invoice[inv_key] + note[inv_key], 2) == received[head], head
@@ -537,10 +537,12 @@ def test_gstr1_files_the_transfer_credit_note_in_cdnr_not_b2b(world):
     (cn,) = [c for c in rep["cdnr"] if c.get("documentType") == "STOCK_TRANSFER"]
     assert cn["refReference"] == "DHN01/C2627/0001"
     assert cn["customerGSTIN"] == GSTIN_Y_JH
-    assert cn["taxableValue"] == 1850.0
+    # SU-3's own cost, the figure its shrinkage row books.
+    assert cn["taxableValue"] == 1850.01
+    assert world["stock_shrinkage"].find_one({"transfer_id": t["id"]})["shrinkage_value"] == 1850.01
     # HSN summary is net of the note.
     (hsn,) = [h for h in rep["hsnSummary"] if h["hsnCode"] == "900311"]
-    assert hsn["taxableValue"] == round(5550.01 - 1850.0, 2)
+    assert hsn["taxableValue"] == round(5550.01 - 1850.01, 2)
     # No "files the RECEIVED value" warning any more: the bill is the invoice.
     assert not [i for i in rep["validation"]["issues"] if "RECEIVED value" in i["issue"]]
 
@@ -560,8 +562,7 @@ def test_gstr3b_sender_outward_and_receiver_credit_both_net_the_note(world):
     month = world["vendor_bills"].find_one({})["bill_date"][:7]
     sender = reports._compute_gstr3b(month, "ST-DHN-1")
     receiver = reports._compute_gstr3b(month, "ST-PUN-1")
-    unit_cost = transfers._get_transfer(t["id"])["items"][0]["unit_cost"]
-    want = split_line_gst(transfers._line_value(2, unit_cost), 5.0, True)
+    want = split_line_gst(3700.0, 5.0, True)  # SU-1 + SU-2, each at its own cost
     assert sender["outwardTaxableSupplies"]["integratedTax"] == want["igst"]
     assert sender["outwardTaxableValue"] == want["taxable"]
     assert receiver["itcAvailable"]["integratedTax"] == want["igst"]
@@ -646,6 +647,272 @@ def test_a_piece_already_credited_is_never_credited_twice(world):
     notes = [b for b in bills if b.get("doc_type") == "TRANSFER_CREDIT_NOTE"]
     assert sorted(s for n in notes for s in n["credited_stock_ids"]) == ["SU-1", "SU-2"]
     (invoice,) = [b for b in bills if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
-    left = split_line_gst(transfers._line_value(1, stored["items"][0]["unit_cost"]), 5.0, False)
+    left = split_line_gst(1850.01, 5.0, False)  # SU-3, at its own cost
     assert round(invoice["taxable_amount"] + sum(n["taxable_amount"] for n in notes), 2) == left["taxable"]
     assert round(invoice["cgst_total"] + sum(n["cgst_total"] for n in notes), 2) == left["cgst"]
+
+
+# ---------------------------------------------------------------------------
+# Fix round 1 (S3 review): per-piece cost, unit checked before a note,
+# compare-and-set saves, a ship that died part-way, either-end gates
+# ---------------------------------------------------------------------------
+
+
+def _notes(world, tid):
+    return [b for b in _bills(world, tid) if b.get("doc_type") == "TRANSFER_CREDIT_NOTE"]
+
+
+def _stale_once(monkeypatch, transfers, snapshot, at=1):
+    """Transfer read number `at` answers `snapshot` (a press on another
+    worker that read the box before the save that landed meanwhile); at=2 is
+    the read a retrying door saves from (_update_transfer)."""
+    real = transfers._get_transfer
+    calls = {"n": 0}
+
+    def _read(tid):
+        calls["n"] += 1
+        return dict(snapshot) if calls["n"] == at else real(tid)
+
+    monkeypatch.setattr(transfers, "_get_transfer", _read)
+
+
+def test_a_lost_piece_is_credited_at_its_own_cost_not_the_line_average(world):
+    """SU-1 costs 1500, SU-2 costs 2000; SU-1 arrives, SU-2 is lost. The note
+    credits 2000 (the lost piece's own cost, the figure its shrinkage books),
+    so invoice + note = the tax on the 1500 actually received."""
+    from api.routers import transfers
+    from api.services.purchase_invoice_engine import split_line_gst
+
+    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"unit_cost": 1500.0}})
+    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"unit_cost": 2000.0}})
+    t = _shipped_box(world, codes=("BVQX001", "BVQX002"))
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _complete(t["id"], user=MGR_BOK)
+    _run(transfers.write_off_missing_piece(t["id"], "SU-2", ADMIN))
+    (note,) = _notes(world, t["id"])
+    (invoice,) = [b for b in _bills(world, t["id"]) if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
+    assert invoice["taxable_amount"] == 3500.0
+    received = split_line_gst(1500.0, 5.0, False)
+    for head, key in (("taxable", "taxable_amount"), ("cgst", "cgst_total"),
+                      ("sgst", "sgst_total"), ("igst", "igst_total")):
+        assert round(invoice[key] + note[key], 2) == received[head], head
+    shrink = world["stock_shrinkage"].find_one({"transfer_id": t["id"]})
+    assert shrink["shrinkage_value"] == 2000.0 == -note["taxable_amount"]
+
+
+def test_a_piece_that_landed_gets_no_credit_note_from_write_off_or_found(world):
+    """BVQX001 was scanned in at Bokaro (on its shelf) but the box lost the
+    scan, so Complete lists it missing. Write-off and found-at-the-sender
+    refuse BEFORE any note; found-at-the-receiver resolves it, still with
+    no note."""
+    from api.routers import transfers
+
+    t = _shipped_box(world)
+    stored = transfers._get_transfer(t["id"])
+    world["stock_units"].update_one(
+        {"stock_id": "SU-1"}, {"$set": transfers._rehome_patch(stored, "AVAILABLE")}
+    )
+    done = _complete(t["id"], user=MGR_BOK)
+    assert "SU-1" in [p["stock_id"] for p in done["missing_pieces"]]
+    with pytest.raises(HTTPException) as exc:
+        _run(transfers.write_off_missing_piece(t["id"], "SU-1", ADMIN))
+    assert _status(exc) == 409
+    with pytest.raises(HTTPException) as exc:
+        _run(transfers.found_missing_piece(t["id"], "SU-1", transfers.MissingFound(at="source"), MGR_DHN))
+    assert _status(exc) == 409
+    assert _notes(world, t["id"]) == []
+    _run(transfers.found_missing_piece(t["id"], "SU-1", transfers.MissingFound(at="destination"), MGR_BOK))
+    assert _notes(world, t["id"]) == []
+    assert (_unit(world, "SU-1")["store_id"], _unit(world, "SU-1")["status"]) == ("ST-BOK-1", "AVAILABLE")
+
+
+def test_an_eway_bill_saved_from_a_stale_read_keeps_the_scan(world, monkeypatch):
+    """The sending manager's e-way PUT read the box before Bokaro scanned
+    BVQX001 in and saves after it: the scan stays, and so does the e-way no."""
+    from api.routers import transfers
+
+    t = _shipped_box(world)
+    snapshot = transfers._get_transfer(t["id"])
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _stale_once(monkeypatch, transfers, snapshot, at=2)
+    _run(transfers.update_transfer(
+        t["id"], transfers.TransferUpdate(eway_bill_number="391000123456"), MGR_DHN))
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["items"][0]["received_stock_ids"] == ["SU-1"]
+    assert stored["status"] == "partially_received"
+    assert stored["eway_bill_number"] == "391000123456"
+
+
+def test_two_tablets_scanning_one_box_both_land(world, monkeypatch):
+    """Two receiving tablets read the box, then each scans a different piece:
+    the second save is retried on a fresh read, so neither scan is lost."""
+    from api.routers import transfers
+
+    t = _shipped_box(world)
+    snapshot = transfers._get_transfer(t["id"])
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _stale_once(monkeypatch, transfers, snapshot, at=2)
+    _scan_in(t["id"], "BVQX002", user=MGR_BOK)
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["items"][0]["received_stock_ids"] == ["SU-1", "SU-2"]
+
+
+@pytest.mark.parametrize("door", ["pack", "cancel"])
+def test_a_stale_pack_or_cancel_never_undoes_a_ship(world, monkeypatch, door):
+    from api.routers import transfers
+
+    t = _ask(2, to="ST-DHN-2")
+    _pack(t["id"], ["BVQX004", "BVQX005"])
+    snapshot = transfers._get_transfer(t["id"])
+    _ship(t["id"])
+    _stale_once(monkeypatch, transfers, snapshot)
+    with pytest.raises(HTTPException) as exc:
+        if door == "pack":
+            _pack(t["id"], ["BVQX006"])
+        else:
+            # Cancel checked the units before ship claimed them.
+            monkeypatch.setattr(transfers, "_transfer_has_moved_stock", lambda t: False)
+            _run(transfers.cancel_transfer(t["id"], "not needed", ADMIN))
+    assert _status(exc) == 409
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["status"] == "in_transit"
+    assert stored["items"][0]["shipped_stock_ids"] == ["SU-4", "SU-5"]
+    assert _unit(world, "SU-4")["status"] == "TRANSFERRED"
+    assert _unit(world, "SU-6")["status"] == "AVAILABLE"
+
+
+def test_a_ship_that_loses_to_a_repack_puts_its_pieces_back(world, monkeypatch):
+    """Ship read the box (004, 005); a re-pack (006, 007) saved before ship
+    did. Ship's save is refused and the pieces it claimed go back."""
+    from api.routers import transfers
+
+    t = _ask(2, to="ST-DHN-2")
+    _pack(t["id"], ["BVQX004", "BVQX005"])
+    snapshot = transfers._get_transfer(t["id"])
+    _pack(t["id"], ["BVQX006", "BVQX007"])
+    _stale_once(monkeypatch, transfers, snapshot)
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"])
+    assert _status(exc) == 409
+    for sid in ("SU-4", "SU-5", "SU-6", "SU-7"):
+        assert (_unit(world, sid)["status"], _unit(world, sid).get("transfer_id")) == ("AVAILABLE", None), sid
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["status"] == "packed" and stored["items"][0]["packed_stock_ids"] == ["SU-6", "SU-7"]
+
+
+def test_a_repack_after_a_ship_that_died_part_way_strands_nothing(world):
+    """A ship died after claiming SU-1 and SU-2. The packer re-scans the box
+    as 001, 004, 005: SU-1 may go in again, SU-2 (left out) goes back on
+    the shelf, and the next ship sends exactly 001, 004, 005."""
+    from api.routers import transfers
+
+    t = _ask(3, to="ST-DHN-2")
+    _pack(t["id"], ["BVQX001", "BVQX002", "BVQX003"])
+    world["stock_units"].update_many(
+        {"stock_id": {"$in": ["SU-1", "SU-2"]}},
+        {"$set": {"status": "TRANSFERRED", "transfer_id": t["id"], "transfer_to_store_id": "ST-DHN-2"}},
+    )
+    _pack(t["id"], ["BVQX001", "BVQX004", "BVQX005"])
+    assert (_unit(world, "SU-2")["status"], _unit(world, "SU-2").get("transfer_id")) == ("AVAILABLE", None)
+    shipped = _ship(t["id"])
+    assert shipped["items"][0]["shipped_stock_ids"] == ["SU-1", "SU-4", "SU-5"]
+    for code in ("BVQX001", "BVQX004", "BVQX005"):
+        _scan_in(t["id"], code, user=MGR_DHN2)
+    _complete(t["id"], user=MGR_DHN2)
+    assert list(world["stock_units"].find({"status": "TRANSFERRED"})) == []
+    assert _run(transfers.list_missing(ADMIN))["pieces"] == []
+
+
+def test_a_sale_between_the_check_and_the_claim_ships_nothing_and_takes_no_invoice_number(
+    world, monkeypatch
+):
+    """Dhanbad -> Bokaro (two GSTINs). SU-5 is sold after ship's re-check but
+    before its claim: 409, SU-4 (claimed first) is back on the shelf, the box
+    is still packed, and no tax invoice number was taken."""
+    from api.routers import transfers
+
+    real = transfers._packed_units
+
+    def _then_sold(transfer):
+        found = real(transfer)
+        world["stock_units"].update_one({"stock_id": "SU-5"}, {"$set": {"status": "SOLD"}})
+        return found
+
+    t = _ask(2)
+    _pack(t["id"], ["BVQX004", "BVQX005"])
+    monkeypatch.setattr(transfers, "_packed_units", _then_sold)
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"])
+    assert _status(exc) == 409 and "BVQX005" in str(exc.value.detail)
+    assert (_unit(world, "SU-4")["status"], _unit(world, "SU-4").get("transfer_id")) == ("AVAILABLE", None)
+    stored = world["stock_transfers"].find_one({"id": t["id"]})
+    assert stored["status"] == "packed"
+    assert not stored.get("tax_invoice_number") and _bills(world, t["id"]) == []
+
+
+def test_a_crossing_box_with_sold_pieces_names_them_all_and_takes_no_number(world):
+    t = _ask(3)
+    _pack(t["id"], ["BVQX004", "BVQX005", "BVQX006"])
+    world["stock_units"].update_many({"stock_id": {"$in": ["SU-5", "SU-6"]}}, {"$set": {"status": "SOLD"}})
+    with pytest.raises(HTTPException) as exc:
+        _ship(t["id"])
+    assert _status(exc) == 409
+    assert "since it was packed: BVQX005, BVQX006" in str(exc.value.detail)
+    assert _unit(world, "SU-4")["status"] == "AVAILABLE"
+    assert not world["stock_transfers"].find_one({"id": t["id"]}).get("tax_invoice_number")
+
+
+def test_the_asking_shop_may_cancel_its_request_with_a_reason(world):
+    from api.routers import transfers
+
+    t = _ask(1, user=MGR_BOK)  # Bokaro asks Dhanbad: pending approval
+    for blank in ("", "   "):
+        with pytest.raises(HTTPException) as exc:
+            _run(transfers.cancel_transfer(t["id"], blank, MGR_BOK))
+        assert _status(exc) == 400
+    assert transfers._get_transfer(t["id"])["status"] == "pending_approval"
+    with pytest.raises(HTTPException) as exc:
+        _run(transfers.cancel_transfer(t["id"], "not needed", MGR_DHN2))  # at neither end
+    assert _status(exc) == 403
+    done = _run(transfers.cancel_transfer(t["id"], "not needed", MGR_BOK))
+    assert done["transfer"]["status"] == "cancelled"
+
+
+def test_the_receiving_manager_cannot_pack_the_senders_box(world):
+    from api.routers import transfers
+
+    t = _ask(1)  # Dhanbad -> Bokaro, approved
+    with pytest.raises(HTTPException) as exc:
+        _pack(t["id"], ["BVQX001"], user=MGR_BOK)
+    assert _status(exc) == 403
+    assert not transfers._get_transfer(t["id"])["items"][0].get("packed_stock_ids")
+
+
+@pytest.mark.parametrize("to", ["   ", "	"])
+def test_a_transfer_to_no_shop_is_refused(world, to):
+    from api.routers import transfers
+
+    body = transfers.TransferInput(
+        transfer_type="store_to_store", from_location_id="ST-BOK-1", from_location_name="Bokaro",
+        to_location_id=to, to_location_name="",
+        items=[transfers.TransferItemInput(product_id="P-1", sku="FR-1", product_name="Carrera Frame",
+                                           quantity_requested=1)],
+    )
+    with pytest.raises(HTTPException) as exc:
+        _run(transfers.create_transfer(body, ADMIN))
+    assert _status(exc) == 400
+    assert world["stock_transfers"].count_documents({}) == 0
+
+
+def test_a_blank_destination_fails_validation(world):
+    from pydantic import ValidationError
+
+    from api.routers import transfers
+
+    with pytest.raises(ValidationError):
+        transfers.TransferInput(
+            transfer_type="store_to_store", from_location_id="ST-BOK-1", from_location_name="Bokaro",
+            to_location_id="", to_location_name="",
+            items=[transfers.TransferItemInput(product_id="P-1", sku="FR-1", product_name="Carrera Frame",
+                                           quantity_requested=1)],
+        )

@@ -8,7 +8,7 @@
 // A piece never scanned in goes on "Missing on the way". Every rule lives on
 // the server (routers/transfers.py); this panel only shows its answers.
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Loader2, ScanLine, Send, Trash2, CheckCircle } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { inventoryApi } from '../../services/api';
@@ -106,25 +106,59 @@ export function TransferBox({
 
   const pack = (codes: string[]) => act(() => inventoryApi.packTransfer(transfer.id, codes));
 
-  const onScan = async () => {
-    const c = code.trim();
-    if (!c || busy) return;
-    if (packing) {
-      if (await pack([...packed, c])) setCode('');
-      return;
+  // A barcode gun types the next code and presses Enter while the last scan is
+  // still saving: every Enter joins a queue sent one by one, so no scan is ever
+  // dropped. Each pack re-sends the box as the server last answered it.
+  type Scan = { code: string; damaged: boolean; reason: string };
+  const queue = useRef<Scan[]>([]);
+  const draining = useRef(false);
+  const latest = useRef(transfer);
+  useEffect(() => {
+    latest.current = transfer;
+  }, [transfer]);
+
+  const sendScan = async (s: Scan) => {
+    try {
+      const res = packing
+        ? await inventoryApi.packTransfer(transfer.id, [
+            ...latest.current.items.flatMap((l) => l.packed_barcodes || []),
+            s.code,
+          ])
+        : await inventoryApi.scanInPiece(transfer.id, { barcode: s.code, damaged: s.damaged, damageReason: s.reason });
+      if (res?.transfer) {
+        latest.current = res.transfer;
+        onChanged(res.transfer);
+      }
+      if (res?.message) toast.success(String(res.message));
+    } catch (e) {
+      toast.error(`${s.code}: ${errMsg(e)}`);
     }
-    if (damaged && !reason.trim()) {
+  };
+
+  const drain = async () => {
+    if (draining.current) return;
+    draining.current = true;
+    setBusy(true);
+    try {
+      while (queue.current.length) await sendScan(queue.current.shift() as Scan);
+    } finally {
+      draining.current = false;
+      setBusy(false);
+    }
+  };
+
+  const onScan = () => {
+    const c = code.trim();
+    if (!c) return;
+    if (!packing && damaged && !reason.trim()) {
       toast.error('Say what is wrong with the damaged piece.');
       return;
     }
-    const done = await act(() =>
-      inventoryApi.scanInPiece(transfer.id, { barcode: c, damaged, damageReason: reason.trim() }),
-    );
-    if (done) {
-      setCode('');
-      setDamaged(false);
-      setReason('');
-    }
+    queue.current.push({ code: c, damaged: !packing && damaged, reason: reason.trim() });
+    setCode('');
+    setDamaged(false);
+    setReason('');
+    void drain();
   };
 
   const ship = () => {
@@ -158,7 +192,7 @@ export function TransferBox({
           className="input-field flex-1 min-w-[180px] font-mono"
           aria-label={packing ? 'Scan a piece out' : 'Scan a piece in'}
         />
-        <button onClick={onScan} disabled={busy} className="btn-primary flex items-center gap-2">
+        <button onClick={onScan} className="btn-primary flex items-center gap-2">
           {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <ScanLine className="w-4 h-4" />}
           {packing ? 'Add to box' : 'Scan in'}
         </button>
@@ -256,7 +290,7 @@ export function TransferBox({
         </div>
       )}
 
-      {gates.isSourceSide(actor, transfer) && ['packed', 'in_transit'].includes(transfer.status) && (
+      {gates.canEditEway(actor, transfer) && (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {transfer.status === 'packed' && (
             <>
