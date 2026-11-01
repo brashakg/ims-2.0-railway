@@ -57,11 +57,15 @@ export function MultiSelect({
     const esc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') close();
     };
+    // The side it opens to was measured for this width; a resize closes it.
+    const shut = () => setOpen(false);
     document.addEventListener('mousedown', away);
     document.addEventListener('keydown', esc);
+    window.addEventListener('resize', shut);
     return () => {
       document.removeEventListener('mousedown', away);
       document.removeEventListener('keydown', esc);
+      window.removeEventListener('resize', shut);
     };
   }, [open]);
 
