@@ -273,19 +273,23 @@ def test_entry_date_is_calendar_day_not_ist_shifted():
     datetime, bypassing the router parser)."""
     from datetime import date as _date
     from api.routers import finance as fin
+    from api.utils.ist import fy_start_year_ist
 
-    # Non-SUPERADMIN accountant entering 1-April (the FY 2026-27 start). With the
-    # bug this RAISED 400 (2026-03-31 18:30 < datetime(2026,4,1)); fixed it returns
-    # the calendar midnight.
+    # The guard refuses a non-SUPERADMIN date before the CURRENT IST FY, so use
+    # 1 April of the current FY (a literal year goes stale on the next FY night).
+    fy = fy_start_year_ist()
+    # Non-SUPERADMIN accountant entering 1-April (the FY start). With the bug
+    # this RAISED 400 (31-Mar 18:30 < datetime(fy,4,1)); fixed it returns the
+    # calendar midnight.
     user = {"roles": ["ACCOUNTANT"], "active_store_id": "S1", "store_ids": ["S1"]}
-    dt = fin._je_parse_entry_date("2026-04-01", user)
-    assert (dt.year, dt.month, dt.day) == (2026, 4, 1)   # NOT 2026-03-31
-    assert dt.date() == _date(2026, 4, 1)
-    # FY serial bucket is 2026-27 (month >= 4), not 2025-26.
-    assert je_service._fy_start_for(dt) == 2026
+    dt = fin._je_parse_entry_date(f"{fy}-04-01", user)
+    assert (dt.year, dt.month, dt.day) == (fy, 4, 1)   # NOT 31 March
+    assert dt.date() == _date(fy, 4, 1)
+    # FY serial bucket is this FY (month >= 4), not the previous one.
+    assert je_service._fy_start_for(dt) == fy
     # An ISO datetime string also collapses to the calendar day.
-    dt2 = fin._je_parse_entry_date("2026-04-01T09:30:00", user)
-    assert (dt2.year, dt2.month, dt2.day) == (2026, 4, 1)
+    dt2 = fin._je_parse_entry_date(f"{fy}-04-01T09:30:00", user)
+    assert (dt2.year, dt2.month, dt2.day) == (fy, 4, 1)
 
 
 def _draft(db, maker_id: str, amount: float = 5000.0, store_id: Optional[str] = None) -> str:
