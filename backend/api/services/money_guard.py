@@ -362,6 +362,8 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
             update.setdefault("$set", {}).update(set_extra)
         if entry:
             update["$push"] = {"money_ledger": entry}
+        if push_extra:
+            update.setdefault("$push", {}).update(push_extra)
         try:
             res = coll.update_one(filt, update)
         except Exception:  # noqa: BLE001

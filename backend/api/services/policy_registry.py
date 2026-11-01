@@ -119,7 +119,8 @@ _REGISTRY_LIST: List[PolicySpec] = [
         write_roles=("SUPERADMIN", "ADMIN"),
         group="Refunds & Returns",
         label="Refund auto-approve below",
-        help="Refunds strictly below this amount are auto-approved (no manager).",
+        help="Approval amount band for other approval types (e.g. supplier returns). Customer "
+        "refunds follow the Rs 2,000 manager rule (refund approval matrix), not this.",
         minimum=0,
     ),
     _spec(
@@ -130,7 +131,8 @@ _REGISTRY_LIST: List[PolicySpec] = [
         write_roles=("SUPERADMIN", "ADMIN"),
         group="Refunds & Returns",
         label="Refund needs ADMIN above",
-        help="Refunds at/above this amount require ADMIN approval.",
+        help="Approval amount band for other approval types (e.g. supplier returns). Customer "
+        "refunds follow the Rs 2,000 manager rule (refund approval matrix), not this.",
         minimum=0,
     ),
     _spec(
@@ -141,27 +143,29 @@ _REGISTRY_LIST: List[PolicySpec] = [
         write_roles=("SUPERADMIN",),
         group="Refunds & Returns",
         label="Refund needs SUPERADMIN above",
-        help="Refunds at/above this amount require SUPERADMIN approval.",
+        help="Approval amount band for other approval types (e.g. supplier returns). Customer "
+        "refunds follow the Rs 2,000 manager rule (refund approval matrix), not this.",
         minimum=0,
     ),
-    # F27 refund approval matrix. DARK by default (matrix_enabled=False) so a
-    # fresh deploy behaves exactly as today -- the refund path adds NO gate until
-    # the owner enables it per scope (like Fcostfloor). The matrix itself is a
-    # JSON doc keyed on amount bands x reason x role; see
-    # api/services/refund_approval_matrix.py (DEFAULT_MATRIX) for the shape. When
-    # ON, a refund whose resolved tier is >0 must carry a CONSUMED E4 approval
-    # token bound to that refund before it is recorded; money math is unchanged.
+    # F27 refund approval matrix. ON by default -- OWNER RULING 2026-10-23: a
+    # refund ABOVE Rs 2,000 needs a manager's (STORE_MANAGER+) approval; the code
+    # DEFAULT_MATRIX in api/services/refund_approval_matrix.py carries exactly
+    # that rule. A refund whose resolved tier is >0 must carry a CONSUMED E4
+    # approval token bound to that refund before it is recorded; money math is
+    # unchanged. The gate fails CLOSED (an error refuses the refund).
     _spec(
         key="refund.matrix_enabled",
         type="bool",
-        default=False,
+        default=True,
         scopes=("global", "entity", "store"),
-        write_roles=("SUPERADMIN", "ADMIN"),
+        # The owner's rule: only a Superadmin may switch it (an Admin may only
+        # make the matrix STRICTER -- refund.approval_matrix, max'd with it).
+        write_roles=("SUPERADMIN",),
         group="Refunds & Returns",
-        label="Refund approval matrix enabled",
-        help="Require a tiered approval (per the refund approval matrix) before "
-        "a refund is recorded. OFF (default) keeps the refund path "
-        "byte-identical to today; enable per scope to roll out.",
+        label="Apply the saved stricter refund matrix",
+        help="The owner's rule always applies: a bill's refunds above Rs 2,000 by "
+        "sales or cashier staff need a store manager's approval. ON (default) also "
+        "applies a saved, stricter refund matrix; OFF never loosens the owner's rule.",
     ),
     _spec(
         key="refund.approval_matrix",

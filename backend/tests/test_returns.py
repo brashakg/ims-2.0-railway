@@ -206,6 +206,9 @@ class _FakeOrdersColl:
                         return False
                     if op == "$exists" and (bool(operand) != (key in elem)):
                         return False
+            elif isinstance(val, list):
+                if c not in val:  # Mongo array membership (a claim token)
+                    return False
             elif val != c:
                 return False
         return True
@@ -222,6 +225,13 @@ class _FakeOrdersColl:
                     for field, delta in inc.items():
                         leaf = field.split(".")[-1]
                         line[leaf] = (line.get(leaf) or 0) + delta
+                    # The claim token rides in the same write (round 17: a
+                    # release matches by it and pulls it).
+                    for field, tok in ((update or {}).get("$addToSet") or {}).items():
+                        line.setdefault(field.split(".")[-1], []).append(tok)
+                    for field, tok in ((update or {}).get("$pull") or {}).items():
+                        leaf = field.split(".")[-1]
+                        line[leaf] = [t for t in line.get(leaf) or [] if t != tok]
                     out = dict(d)
                     out.pop("_id", None)
                     return out
@@ -300,6 +310,14 @@ class _FakeColl:
     def insert_one(self, doc):
         self.docs.append(dict(doc))
         return _FakeResult(1)
+
+    def update_one(self, query, update, upsert=False):
+        # $set only: a credit row is marked applied once its balance moved (#1264).
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in (query or {}).items()):
+                d.update((update or {}).get("$set") or {})
+                return type("R", (), {"matched_count": 1, "modified_count": 1})()
+        return type("R", (), {"matched_count": 0, "modified_count": 0})()
 
     def find(self, query=None, projection=None):
         q = query or {}

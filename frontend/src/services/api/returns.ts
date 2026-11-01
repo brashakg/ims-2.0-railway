@@ -91,6 +91,20 @@ export interface CreateReturnPayload {
 // prefill the refund-tender picker from `net_refund` rather than computing an
 // amount client-side — a client-side GST gross-up drifted from the server on
 // every inclusive-priced sale and 400'd the refund with no way to recover.
+export interface NeedsCompletingItem {
+  return_id: string;
+  order_id?: string;
+  order_number?: string;
+  store_id?: string;
+  amount: number;
+  at?: string;
+  credit_line: { type: string; amount?: number; note_number?: string } | null;
+  cash_leg: number;
+  record_not_saved: boolean;
+  /** IMS knows money moved (a credit landed, or the counter recorded it). */
+  money_known: boolean;
+}
+
 export interface ReturnQuote {
   order_id?: string;
   return_type: ReturnType;
@@ -115,9 +129,82 @@ export interface ReturnQuote {
   tenders_unverifiable: boolean;
 }
 
+/** What 'Refund advance and cancel' would give back, or why it cannot. */
+export interface AdvanceRefundPlan {
+  ok: boolean;
+  reason?: string;
+  total?: number;
+  credit?: number;
+  /** paid_from: 'HQ' on a cash leg HQ pays (an unfinished refund's record). */
+  refund_tenders?: { method: string; amount: number; paid_from?: string }[];
+  invoice_number?: string | null;
+  /** 'finish_cancel' once the advance is refunded but the order not cancelled. */
+  action?: 'refund_and_cancel' | 'finish_cancel' | 'finish_refund';
+  /** A cash part is refunded: say whether from the shop drawer or HQ. */
+  has_cash?: boolean;
+}
+
+export type CashPaidFrom = 'STORE_DRAWER' | 'HQ';
+
+/** A completed return whose cash part is still owed to the customer. */
+export interface OwedReturn {
+  return_id: string;
+  order_id?: string;
+  order_number?: string;
+  store_id?: string;
+  owed_amount: number;
+  owed_tenders?: { method?: string; amount?: number }[];
+}
+
+export type OwedPaidMethod = 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER';
+
 export const returnsApi = {
-  create: async (payload: CreateReturnPayload) => {
-    const response = await api.post('/returns', payload);
+  advanceRefundPreview: async (orderId: string): Promise<AdvanceRefundPlan> => {
+    const response = await api.get(`/returns/advance-refund/${encodeURIComponent(orderId)}`);
+    return response.data;
+  },
+
+  /** Refund the advance (back the way it was paid; store credit for a
+   *  store-credit / voucher / EMI part) and cancel the order. */
+  refundAdvanceAndCancel: async (orderId: string, reason: string, cashPaidFrom?: CashPaidFrom) => {
+    const response = await api.post('/returns/advance-refund', {
+      order_id: orderId,
+      reason,
+      ...(cashPaidFrom ? { cash_paid_from: cashPaidFrom } : {}),
+    });
+    return response.data;
+  },
+
+  // `idempotencyKey`: one per press of the Returns screen, reused by every
+  // re-press of the same return -- a lost answer is never a second refund.
+  create: async (payload: CreateReturnPayload, idempotencyKey?: string) => {
+    const response = await api.post('/returns', payload,
+      idempotencyKey ? { headers: { 'Idempotency-Key': idempotencyKey } } : undefined);
+    return response.data;
+  },
+
+  /** Returns > Needs completing: unfinished counter returns (Accounts / Admin). */
+  needsCompleting: async (): Promise<{ items: NeedsCompletingItem[]; owed?: OwedReturn[] }> => {
+    const response = await api.get('/returns/needs-completing');
+    return response.data;
+  },
+
+  /** Finish one: was the cash part paid (yes / no), or was nothing paid? */
+  completeRecord: async (
+    returnId: string,
+    answer: { cash_leg_paid?: boolean; nothing_paid?: boolean; note?: string },
+  ) => {
+    const response = await api.post(`/returns/${encodeURIComponent(returnId)}/complete-record`, answer);
+    return response.data;
+  },
+
+  /** "Cash owed - now paid": the owed part was paid to the customer today.
+   *  CASH says where it came from (the shop drawer, or HQ). */
+  owedPaid: async (
+    returnId: string,
+    body: { method: OwedPaidMethod; cash_paid_from?: CashPaidFrom; note?: string },
+  ) => {
+    const response = await api.post(`/returns/${encodeURIComponent(returnId)}/owed-paid`, body);
     return response.data;
   },
 

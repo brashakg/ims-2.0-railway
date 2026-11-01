@@ -6,6 +6,8 @@
 // Persists draft cart to localStorage so sales aren't lost on browser crash.
 
 import { create } from 'zustand';
+import { billKeyEntry, clearBillKey, putBillKey } from '../components/pos/posBillKey';
+import { billFingerprint } from '../components/pos/orderPayload';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Customer, Patient, Prescription } from '../types';
 import type { DenomRow } from '../utils/denominations';
@@ -115,6 +117,9 @@ export interface PaymentEntry {
   amount: number;
   reference?: string;            // UPI ref, card last 4, voucher code, etc.
   timestamp: string;
+  /** LOYALTY: the points behind this line were burned (amount and reference
+      are the redeem's own) -- a re-press re-sends it, never burns again. */
+  burned?: boolean;
   voucherCode?: string;
   voucherAmount?: number;
   
@@ -253,6 +258,7 @@ export interface POSState {
   // POS-3: store a deferred redemption intent without debiting points yet.
   setPendingLoyaltyRedeem: (intent: { points: number; rupeeValue: number; orderValue: number } | null) => void;
   clearPendingLoyaltyRedeem: () => void;
+  markLoyaltyBurned: (leg: { amount: number; reference: string }) => void;
   // Reset
   resetTransaction: () => void;
   clearAllOnLogout: () => void;
@@ -267,7 +273,7 @@ export interface POSState {
   // Park/Hold: atomically REPLACE the current transaction with a previously
   // held one (no merge into the existing cart, per-item discounts preserved,
   // cart-level discount + delivery fields restored).
-  restoreHeldSale: (snapshot: any) => void;
+  restoreHeldSale: (snapshot: any, billKey?: { key?: string } | null) => void;
 
   // Computed getters
   getSubtotal: () => number;
@@ -574,10 +580,15 @@ export const usePOSStore = create<POSState>()(
       // POS-3: deferred loyalty redemption (points debited AFTER order create)
       setPendingLoyaltyRedeem: (intent) => set({ pendingLoyaltyRedeem: intent }),
       clearPendingLoyaltyRedeem: () => set({ pendingLoyaltyRedeem: null }),
+      markLoyaltyBurned: (leg) => set((state: POSState) => ({
+        payments: (state.payments || []).map((p: PaymentEntry) => (p.method === 'LOYALTY' && !p.burned
+          ? { ...p, amount: leg.amount, reference: leg.reference, burned: true } : p)),
+      })),
 
       // --- Reset ---
       resetTransaction: () => {
         const { store_id, salesperson_id, salesperson_name } = get();
+        clearBillKey(billFingerprint(get())); // a new sale is a new press (only THIS bill's key)
         set({ ...initialState, store_id, salesperson_id, salesperson_name });
       },
 
@@ -601,8 +612,13 @@ export const usePOSStore = create<POSState>()(
         } catch {
           bills = [];
         }
+        // The bill's key travels WITH the held bill (manual hold and
+        // auto-park alike): an unconfirmed sale parked and recalled is
+        // pressed again with the same key, never rung twice.
+        const billKey = billKeyEntry(billFingerprint(state));
         bills.push({
           id,
+          bill_key: billKey,
           customer: state.customer?.name || 'Walk-in',
           items: cart.length,
           total: get().getGrandTotal(),
@@ -646,7 +662,8 @@ export const usePOSStore = create<POSState>()(
       // This sets everything in ONE atomic write: cart verbatim (per-item
       // discount_amount/reason intact), cart-discount recomputed
       // from the restored cart, delivery + advance flags restored.
-      restoreHeldSale: (snapshot: any) => {
+      restoreHeldSale: (snapshot: any, billKey?: { key?: string } | null) => {
+        clearBillKey(billFingerprint(get())); // the bill being replaced
         const { store_id, salesperson_id, salesperson_name } = get();
         const snap = snapshot || {};
         const cart: CartLineItem[] = (Array.isArray(snap.cart) ? snap.cart : []).map(migrateLegacyItemNote);
@@ -672,6 +689,8 @@ export const usePOSStore = create<POSState>()(
           cart_discount_reason: snap.cart_discount_reason ?? null,
           current_step: cart.length > 0 ? 'review' : 'customer',
         });
+        // The held bill's key comes back with it, freshly stamped.
+        if (billKey?.key) putBillKey(billFingerprint(get()), billKey.key);
       },
 
       // --- Full clear (for logout) ---
@@ -682,6 +701,7 @@ export const usePOSStore = create<POSState>()(
       // (POSLayout filters held bills by held_by === current user), not by
       // wiping every parked cart on logout.
       clearAllOnLogout: () => {
+        clearBillKey(billFingerprint(get()));
         set(initialState);
         try {
           localStorage.removeItem('ims-pos-draft');
@@ -816,10 +836,14 @@ export const usePOSStore = create<POSState>()(
       // they contain no identity data and the cashier needs them on refresh.
       partialize: (state: POSState) => ({
         ...state,
-        // Strip PII / sensitive clinical data
-        customer: null,
-        patient: null,
-        prescription: null,
+        // Strip PII / sensitive clinical data -- except while an unconfirmed
+        // press of THIS bill is pending (its bill key is kept): then the
+        // customer, member and Rx stay with the draft, so a reload presses
+        // the SAME bill (same key: the server replays it, and the Rx sale
+        // gets its workshop job) instead of a second sale (money review 17).
+        ...(billKeyEntry(billFingerprint(state))?.pending
+          ? {}
+          : { customer: null, patient: null, prescription: null }),
         customerLoyaltyPoints: 0,
         appliedVoucher: undefined,
         pendingLoyaltyRedeem: null,

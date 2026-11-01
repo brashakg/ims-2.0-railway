@@ -186,6 +186,14 @@ class _FakeColl:
         q = query or {}
         return sum(1 for d in self.docs if all(d.get(k) == v for k, v in q.items()))
 
+    def update_one(self, query, update, upsert=False):
+        # $set only: a credit row is marked applied once its balance moved (#1264).
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in (query or {}).items()):
+                d.update((update or {}).get("$set") or {})
+                return _FakeResult(1)
+        return _FakeResult(0)
+
 
 def _staff_token(roles, store_id="BV-PUN-01", uid="u1"):
     return jwt.encode(

@@ -68,9 +68,9 @@ manager gets 404).
 | Gate type | Count |
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
-| AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 868 |
-| **Total `/api/v1` (method x path)** | **1308** |
+| AUTHENTICATED | 393 |
+| Role-gated (one or more roles) | 874 |
+| **Total `/api/v1` (method x path)** | **1313** |
 | ...of which `store_scoped` | 236 |
 | ...of which `self_enforced` | 47 |
 
@@ -1099,7 +1099,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/orders/{order_id}/invoice.pdf` | AUTH |  |  |
 | `POST` | `/api/v1/orders/{order_id}/items` | AUTH |  |  |
 | `DELETE` | `/api/v1/orders/{order_id}/items/{item_id}` | AUTH |  |  |
-| `POST` | `/api/v1/orders/{order_id}/payments` | AUTH |  |  |
+| `POST` | `/api/v1/orders/{order_id}/payments` | SUPERADMIN, ADMIN, AREA_MANAGER, STORE_MANAGER, SALES_CASHIER, SALES_STAFF, CASHIER, OPTOMETRIST, ACCOUNTANT |  |  |
 | `POST` | `/api/v1/orders/{order_id}/ready` | AUTH |  |  |
 | `PUT` | `/api/v1/orders/{order_id}/superadmin-edit` | AUTH |  |  |
 | `PUT` | `/api/v1/orders/{order_id}/superadmin-invoice-change` | AUTH |  |  |
@@ -1339,8 +1339,13 @@ entry exactly; see the manual interpretation notes above.
 | `POST` | `/api/v1/returns` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/returns/` | AUTH |  |  |
 | `POST` | `/api/v1/returns/` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/returns/advance-refund` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/returns/advance-refund/{order_id}` | ACCOUNTANT, ADMIN |  |  |
+| `GET` | `/api/v1/returns/needs-completing` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/returns/quote` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
 | `GET` | `/api/v1/returns/{return_id}` | AUTH |  |  |
+| `POST` | `/api/v1/returns/{return_id}/complete-record` | ACCOUNTANT, ADMIN |  |  |
+| `POST` | `/api/v1/returns/{return_id}/owed-paid` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/returns/{return_id}/restock` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
 
 ### `/api/v1/rtv-debit-notes`

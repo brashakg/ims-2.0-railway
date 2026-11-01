@@ -482,7 +482,15 @@ class ApprovalEngine:
             logger.debug("[APPROVALS] tier policy read failed; using defaults", exc_info=True)
 
         amt = float(amount or 0.0)
-        if amt >= super_above_rs:
+        if action_type == "REFUND_APPROVAL_MATRIX":
+            # The refund matrix owns this action's amount ladder (owner ruling
+            # 2026-10-23: above Rs 2,000 -> a STORE_MANAGER may approve), so the
+            # generic refund.tier.* bands must not push it to ADMIN. The maker
+            # passes the matrix tier the refund door named (it may only RAISE
+            # this), and consume re-checks it via min_tier, so a lower-tier
+            # token can never clear a refund the matrix gates higher.
+            amount_tier = "auto"
+        elif amt >= super_above_rs:
             amount_tier = "super"
         elif amt >= admin_above_rs:
             amount_tier = "admin"
@@ -532,11 +540,42 @@ class ApprovalEngine:
         if action_type not in ACTION_TYPES:
             return {"ok": False, "error": "unknown_action_type"}
 
+        if action_type == "REFUND_APPROVAL_MATRIX":
+            # A refund approval is bound to ONE bill and ONE amount: an
+            # amount-less request cleared a refund of any size on the bill.
+            # The approver card shows the bill's own number and customer, read
+            # here -- never what the requester typed.
+            ctx = dict(context or {})
+            if not amount or float(amount) <= 0 or not ctx.get("order_id"):
+                return {"ok": False, "error": "amount_and_order_required"}
+            try:
+                order = self._db.get_collection("orders").find_one({"order_id": ctx["order_id"]})
+            except Exception:  # noqa: BLE001
+                order = None
+            if not order:
+                return {"ok": False, "error": "order_not_found"}
+            try:
+                already = round(sum(
+                    float(r.get("net_refund") or 0)
+                    for r in self._db.get_collection("returns").find(
+                        {"order_id": ctx["order_id"], "status": "COMPLETED"})
+                ), 2)
+            except Exception:  # noqa: BLE001
+                already = None
+            # First keys = what the approver card shows: the bill, the
+            # customer, and what the bill has ALREADY refunded (split refunds).
+            for k in ("order_number", "customer_name", "already_refunded", "prior_refunds", "running_total"):
+                ctx.pop(k, None)
+            context = {"order_number": order.get("order_number") or ctx["order_id"],
+                       "customer_name": order.get("customer_name") or "",
+                       "already_refunded": already, **ctx}
+
         # Dedupe: an identical live request returns the existing one.
         if dedupe_key:
             try:
                 existing = coll.find_one(
-                    {"dedupe_key": dedupe_key, "status": ApprovalStatus.REQUESTED.value},
+                    {"dedupe_key": dedupe_key, "status": ApprovalStatus.REQUESTED.value,
+                     "expires_at": {"$gt": _now()}},
                     {"_id": 0},
                 )
                 if existing:
@@ -985,8 +1024,11 @@ class ApprovalEngine:
         mismatch: Optional[str] = None
         if updated.get("action_type") != action_type:
             mismatch = "action_mismatch"
+        if mismatch is None and amount is not None and updated.get("amount") is None                 and action_type == "REFUND_APPROVAL_MATRIX":
+            mismatch = "amount_exceeded"  # an amount-less refund approval binds nothing
         if mismatch is None and amount is not None and updated.get("amount") is not None:
-            if float(amount) > float(updated.get("amount")):
+            # Compared in paise: float rupees drift by a fraction of a paisa.
+            if int(round(float(amount) * 100)) > int(round(float(updated.get("amount")) * 100)):
                 mismatch = "amount_exceeded"
         if mismatch is None and expected_store_id is not None \
                 and updated.get("store_id") != expected_store_id:

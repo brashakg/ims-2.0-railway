@@ -105,6 +105,9 @@ class _FakeOrdersColl:
                         return False
                     if op == "$exists" and (bool(operand) != (key in elem)):
                         return False
+            elif isinstance(val, list):
+                if c not in val:  # Mongo array membership (a claim token)
+                    return False
             elif val != c:
                 return False
         return True
@@ -121,6 +124,13 @@ class _FakeOrdersColl:
                     for field, delta in inc.items():
                         leaf = field.split(".")[-1]
                         line[leaf] = (line.get(leaf) or 0) + delta
+                    # The claim token rides in the same write (round 17: a
+                    # release matches by it and pulls it).
+                    for field, tok in ((update or {}).get("$addToSet") or {}).items():
+                        line.setdefault(field.split(".")[-1], []).append(tok)
+                    for field, tok in ((update or {}).get("$pull") or {}).items():
+                        leaf = field.split(".")[-1]
+                        line[leaf] = [t for t in line.get(leaf) or [] if t != tok]
                     return copy.deepcopy(d)
             return None
         return None
@@ -271,7 +281,10 @@ class TestReturnsOverRefund:
                 {"quantity": 3, "taxable_value": 4500, "tax_amount": 810}
             )
         body = _ret_body(items=[_ret_line(return_qty=2)])
-        out = await returns_module.create_return(body, current_user=_cashier())
+        # Rs 3,540 is above Rs 2,000, which needs a manager (owner ruling
+        # 2026-10-23), so a store manager records it.
+        manager = {**_cashier(), "roles": ["STORE_MANAGER"]}
+        out = await returns_module.create_return(body, current_user=manager)
         assert out["return_type"] == "RETURN"
         # 2 units * 1770 per-unit billed gross = 3540.
         assert out["returned_value"] == 3540.0
@@ -731,6 +744,17 @@ def store_credit_ctx(monkeypatch):
                 if all(d.get(k) == v for k, v in q.items())
             )
 
+        # THE posting door reads and settles its row (PR #1264 round 9).
+        def find_one(self, query=None, projection=None):
+            return next(self.find(query), None)
+
+        def update_one(self, query, update, upsert=False):
+            for d in self.docs:
+                if all(d.get(k) == v for k, v in (query or {}).items()):
+                    d.update((update or {}).get("$set") or {})
+                    return type("R", (), {"matched_count": 1, "modified_count": 1})()
+            return type("R", (), {"matched_count": 0, "modified_count": 0})()
+
     ledger = _LedgerColl()
     monkeypatch.setattr(customers_module, "get_customer_repository", lambda: repo)
     monkeypatch.setattr(customers_module, "_ledger_coll", lambda: ledger)
@@ -761,8 +785,9 @@ class TestStoreCreditRedeemEndpoint:
             customers_module._post_credit_entry("CUST-1", "REDEEMED", body, _admin())
         assert ei.value.status_code == 400
         assert "insufficient" in str(ei.value.detail).lower()
-        # No ledger row + balance untouched.
-        assert store_credit_ctx["ledger"].docs == []
+        # No row that moves money (money review 16: the row is written first,
+        # so a refused redeem leaves one VOID row with no delta) + balance untouched.
+        assert [(d["type"], d["delta"]) for d in store_credit_ctx["ledger"].docs] == [("VOID", 0.0)]
         assert store_credit_ctx["coll"].find_one(
             {"customer_id": "CUST-1"}
         )["store_credit"] == 500.0
@@ -781,15 +806,16 @@ class TestStoreCreditRedeemEndpoint:
         assert store_credit_ctx["coll"].find_one(
             {"customer_id": "CUST-1"}
         )["store_credit"] == 100.0
-        # Exactly one redeem ledger row.
-        assert len(store_credit_ctx["ledger"].docs) == 1
+        # Exactly one redeem ledger row that moved money (the refused one is VOID, no delta).
+        assert [d["type"] for d in store_credit_ctx["ledger"].docs if d["type"] != "VOID"] == ["REDEEMED"]
+        assert all(d["delta"] == 0.0 for d in store_credit_ctx["ledger"].docs if d["type"] == "VOID")
 
     def test_issue_credit_still_works_via_snapshot(self, store_credit_ctx):
         # A credit (ISSUE) is not a double-spend risk -> still goes through the
         # snapshot path and bumps the balance.
         body = customers_module.StoreCreditEntryRequest(amount=250.0, reason="note")
         out = customers_module._post_credit_entry("CUST-1", "ISSUED", body, _admin())
-        assert out["entry"]["type"] == "ISSUED"
+        assert out["entry"]["type"] == "ADJUSTED"  # money given, never a GST credit note (#1264 r10)
         assert out["entry"]["delta"] == 250.0
         assert out["balance"] == 750.0
 
@@ -840,6 +866,9 @@ class TestStoreCreditRedeemEndpoint:
         with pytest.raises(HTTPException) as ei:
             customers_module._post_credit_entry("CUST-1", "REDEEMED", body, _admin())
         assert ei.value.status_code == 503
-        # No ledger row written; balance never touched (no non-atomic decrement).
-        assert ledger.docs == []
+        # No row that counts: the row is written first (money review 16) and
+        # never applied -- this fake cannot update it, so it stays ISSUING for
+        # the reconciler to void (its guard never landed). Balance untouched.
+        assert len(ledger.docs) == 1 and ledger.docs[0]["applied"] is False
+        assert ledger.docs[0]["type"] in ("ISSUING", "VOID")
         assert coll.docs[0]["store_credit"] == 500.0

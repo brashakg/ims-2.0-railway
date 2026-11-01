@@ -42,20 +42,26 @@ const RETRY_DELAY_MS = 1000;
 // Helper function for delay
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Check if error is retryable (only 5xx server errors and rate limiting)
-// Do NOT retry network/CORS errors - they won't be fixed by retrying
-const isRetryableError = (error: AxiosError): boolean => {
+// Methods that only READ: replaying one can never move money twice.
+const SAFE_METHODS = ['get', 'head', 'options'];
+
+// Check if error is retryable. Do NOT retry network/CORS errors - they won't
+// be fixed by retrying. A 5xx is retried ONLY for a read: a write that failed
+// with a 5xx may already have landed (PR #1264: an "unclear" store credit
+// answers 503 "do NOT redo" -- an automatic replay redid it). A 429 means the
+// server refused the request before doing anything, so any method retries.
+export const isRetryableError = (error: AxiosError): boolean => {
   // CORS errors have no response - don't retry these
   if (!error.response) {
     return false;
   }
-  // Server errors (5xx) - these might be temporary
-  if (error.response.status >= 500 && error.response.status < 600) {
-    return true;
-  }
   // Rate limiting (429) - retry with backoff
   if (error.response.status === 429) {
     return true;
+  }
+  // Server errors (5xx) - these might be temporary; reads only
+  if (error.response.status >= 500 && error.response.status < 600) {
+    return SAFE_METHODS.includes(String(error.config?.method || 'get').toLowerCase());
   }
   // Don't retry other errors (401, 403, 404, CORS, etc.)
   return false;
@@ -300,6 +306,17 @@ const isPushTimeout = (error: AxiosError): boolean =>
 const isPurgeTimeout = (error: AxiosError): boolean =>
   isTimeout(error) && String(error.config?.url || '').includes('/catalog/products/bulk-purge');
 
+// A write (anything but GET/HEAD/OPTIONS) whose answer was lost -- a 5xx that
+// is not a deliberate 503 stop, or no response at all -- may already have
+// landed: "try again" is the second press that does it twice (money review 12).
+export const WRITE_UNCONFIRMED_MESSAGE =
+  'The server did not confirm this - it may already be saved. Reload and check before pressing again.';
+// POSTs that only READ (a price quote) or sign in: nothing to have "saved".
+const READ_LIKE_POSTS = [/\/auth\//, /\/orders\/quote(\?|$)/, /\/returns\/quote(\?|$)/];
+const isWrite = (error: AxiosError): boolean =>
+  !SAFE_METHODS.includes(String(error.config?.method || 'get').toLowerCase())
+  && !READ_LIKE_POSTS.some((re) => re.test(String(error.config?.url || '')));
+
 // Pure transform: axios error -> the ApiError components actually receive.
 // Exported so tests reject fixtures through the REAL production transform
 // instead of hand-built axios shapes the client never delivers (the
@@ -319,7 +336,9 @@ export function buildApiError(
       ? PUSH_TIMEOUT_MESSAGE
       : isPurgeTimeout(error)
         ? PURGE_TIMEOUT_MESSAGE
-        : 'Network error. Please check your internet connection and try again.';
+        : isWrite(error)
+          ? WRITE_UNCONFIRMED_MESSAGE
+          : 'Network error. Please check your internet connection and try again.';
   } else if (error.response.status >= 500) {
     // 503 is the only 5xx this API raises DELIBERATELY: it is a safety stop, not
     // a crash. Goods-receipt acceptance uses it to say "N units were received
@@ -340,7 +359,9 @@ export function buildApiError(
     message =
       typeof safeStopDetail === 'string' && safeStopDetail.trim()
         ? safeStopDetail
-        : 'Server error. Please try again in a moment.';
+        : isWrite(error)
+          ? WRITE_UNCONFIRMED_MESSAGE
+          : 'Server error. Please try again in a moment.';
   } else {
     // Handle various API error formats (detail can be string or array)
     const rawDetail = error.response?.data?.detail;

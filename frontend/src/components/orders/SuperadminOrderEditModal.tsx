@@ -17,6 +17,7 @@ import { XCircle, AlertTriangle } from 'lucide-react';
 import type { Order } from '../../types';
 import { orderApi } from '../../services/api/sales';
 import { useToast } from '../../context/ToastContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
 interface EditLine {
   item_id?: string;
@@ -178,10 +179,10 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
       onSaved();
       onClose();
     } catch (e) {
-      const detail =
-        (e as { response?: { data?: { detail?: string } } })?.response?.data
-          ?.detail || 'Failed to save the order change.';
-      toast.error(detail);
+      // The shared helper (#1274): the client rejects with an ApiError, so the
+      // server's sentence -- e.g. "could not be confirmed ... do NOT issue it
+      // again" -- reaches the superadmin.
+      toast.error(getErrorMessage(e, 'Failed to save the order change.'));
     } finally {
       setSaving(false);
     }

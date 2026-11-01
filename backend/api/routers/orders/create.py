@@ -865,8 +865,19 @@ async def create_order(
         precomputed_order_id = str(uuid.uuid4())
 
         # BUG-097: block serialized non-lens oversell BEFORE reserving any lens
-        # cells, so a 409 here leaks no reservation.
-        _assert_serialized_stock_available(items_data, store_id)
+        # cells, so a 409 here leaks no reservation. A second press of the
+        # SAME bill (its first still saving holds the unit) replays the first
+        # order instead of a stock refusal (money review 15).
+        try:
+            _assert_serialized_stock_available(items_data, store_id)
+        except HTTPException:
+            twin = _twin_of(order_repo, idem_key, store_id)
+            if twin:
+                return _order_create_response(twin)
+            saving = _still_saving(order_repo, idem_key)
+            if saving is not None:
+                raise saving
+            raise
 
         lens_reserve_failed = False
         lens_reservations: List[Dict[str, Any]] = []
@@ -929,6 +940,9 @@ async def create_order(
                         "[LENS_HOOK] rollback outer error: %s",
                         rb_exc,
                     )
+            twin = _twin_of(order_repo, idem_key, store_id)
+            if twin:
+                return _order_create_response(twin)
             raise
         except Exception as exc:  # noqa: BLE001
             # Non-blocking soft failure (mongo blip, etc.). Tag the
@@ -1048,6 +1062,7 @@ async def create_order(
             claimed_units = _claim_units(
                 precomputed_order_id, items_data, store_id
             )
+            _stamp_claim_key(claimed_units, precomputed_order_id, idem_key)
             # The manager's discount approval (when one lifted the seller's
             # limit) is spent HERE, last thing before the save: one atomic
             # compare-and-set, so two tills racing one approval -> one sale;
@@ -1100,7 +1115,18 @@ async def create_order(
                         pass  # fail-soft compensating action
             except Exception:  # noqa: BLE001
                 pass
+            # Two presses of one bill (same Idempotency-Key) at once: the
+            # first holds the units / the approval (a 409 here), or the unique
+            # (store_id, idempotency_key) index refused this insert -- either
+            # way this press answers with the order the first one saved.
+            if idem_key and (isinstance(create_exc, HTTPException) or _is_idempotency_duplicate(create_exc)):
+                twin = _twin_of(order_repo, idem_key, store_id)
+                if twin:
+                    return _order_create_response(twin)
             if isinstance(create_exc, HTTPException):
+                saving = _still_saving(order_repo, idem_key)
+                if saving is not None:
+                    raise saving
                 raise  # the claim's 409 (unit sold on another bill)
             raise HTTPException(
                 status_code=500,
@@ -1247,6 +1273,65 @@ class BillQuoteRequest(BaseModel):
     order_id: Optional[str] = None
 
 
+SALE_STILL_SAVING = "SALE_STILL_SAVING"
+
+
+def _stamp_claim_key(stock_ids, order_id: str, idem_key: Optional[str]) -> None:
+    """Mark the units this press claimed with its Idempotency-Key, so a
+    same-key press arriving before this one's bill is written is told the sale
+    is still saving -- never "unit no longer available". Fail-soft.
+    ponytail: a press landing between the claim and this stamp still gets the
+    stock refusal (milliseconds)."""
+    if not idem_key or not stock_ids:
+        return
+    try:
+        from ...dependencies import get_stock_repository
+
+        coll = getattr(get_stock_repository(), "collection", None)
+        if coll is not None:
+            coll.update_many({"stock_id": {"$in": list(stock_ids)}, "order_id": order_id},
+                             {"$set": {"claim_key": idem_key}})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ORDERS] claim key not stamped on %s: %s", order_id, exc)
+
+
+def _still_saving(order_repo, idem_key: Optional[str]) -> Optional[HTTPException]:
+    """The 409 for a same-key press whose first press holds the units but has
+    not written its bill yet: "still saving -- do not change the bill"."""
+    if not idem_key:
+        return None
+    try:
+        from ...dependencies import get_stock_repository
+
+        coll = getattr(get_stock_repository(), "collection", None)
+        unit = coll.find_one({"claim_key": idem_key, "status": "SOLD"}) if coll is not None else None
+        if unit is None or (order_repo is not None and order_repo.find_one({"order_id": unit.get("order_id")})):
+            return None
+    except Exception:  # noqa: BLE001
+        return None
+    return HTTPException(status_code=409, detail={
+        "code": SALE_STILL_SAVING,
+        "message": ("The first press of this sale is still being saved. Do not change the bill - wait a "
+                    "moment and press Complete Sale again.")})
+
+
+def _twin_of(order_repo, idem_key: Optional[str], store_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The order an earlier press of the same bill saved (same key, same
+    shop), or None. Never raises."""
+    if not idem_key or order_repo is None:
+        return None
+    try:
+        return order_repo.find_one({"idempotency_key": idem_key, "store_id": store_id})
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_idempotency_duplicate(exc: Exception) -> bool:
+    """A duplicate-key error raised by the (store_id, idempotency_key) index."""
+    text = str(exc).lower()
+    return ("e11000" in text or "duplicate key" in text) and "idempotency_key" in text
+
+
 @router.post("/quote")
 async def quote_bill(
     body: BillQuoteRequest,
@@ -1293,7 +1378,11 @@ async def quote_bill(
         from ...services.order_superadmin_edit import rebuild_edited_line
         lines = [rebuild_edited_line(item.model_dump()) for item in body.items]
     gst = _compute_per_category_gst(lines, body.cart_discount_percent, rounded=rounded)
+    from database import connection as _dbc
+
     return {
-        k: gst[k]
-        for k in ("subtotal", "taxable", "tax", "total_discount", "grand_total", "round_off")
+        **{k: gst[k] for k in ("subtotal", "taxable", "tax", "total_discount", "grand_total", "round_off")},
+        # The till promises "press again - it will not be charged twice" only
+        # while the unique (store_id, idempotency_key) index is in place.
+        "replay_guaranteed": bool(_dbc.ORDER_REPLAY_GUARANTEED),
     }

@@ -126,7 +126,9 @@ def test_concurrent_double_redeem_spends_the_credit_once(monkeypatch):
     losses = [o for o in outcomes if o[0] == "http"]
     # Exactly ONE spend: 500 - 400 leaves 100, which cannot cover another 400.
     assert len(wins) == 1, f"expected exactly one winner, got {outcomes}"
-    assert len(losses) == 1 and losses[0][1] == 400
+    # 400 insufficient once the winner finished; 409 while its line is still being
+    # confirmed (money review 19: no new debit beside an unresolved one).
+    assert len(losses) == 1 and losses[0][1] in (400, 409)
     assert wins[0][1] == 100.0
     # The document agrees, and exactly one REDEEMED audit row was written.
     assert coll.docs[0]["store_credit"] == 100.0
@@ -145,7 +147,9 @@ def test_insufficient_redeem_is_refused_and_writes_nothing(monkeypatch):
     assert exc.value.status_code == 400
     assert "insufficient store credit" in str(exc.value.detail)
     assert coll.docs[0]["store_credit"] == 100.0
-    assert ledger.docs == []
+    # Money review 16: the row is written FIRST, so a refused redeem leaves
+    # only a VOID row that moves nothing (no balance, no ledger sum).
+    assert [(d["type"], d["delta"]) for d in ledger.docs] == [("VOID", 0.0)]
 
 
 def test_no_atomic_collection_rejects_503_never_snapshot_spends(monkeypatch):
@@ -176,7 +180,7 @@ def test_no_atomic_collection_rejects_503_never_snapshot_spends(monkeypatch):
         customers.redeem_store_credit_atomic("C1", 50.0)
     assert exc.value.status_code == 503
     assert coll.docs[0]["store_credit"] == 500.0
-    assert ledger.docs == []
+    assert [(d["type"], d["delta"]) for d in ledger.docs] == [("VOID", 0.0)]  # row first; it moved nothing
 
 
 # ---------------------------------------------------------------------------
@@ -279,5 +283,8 @@ def test_legacy_add_door_now_writes_a_ledger_row(monkeypatch):
     out = asyncio.run(customers.add_store_credit("C1", 60.0, _admin()))
     assert out["new_total"] == 100.0
     assert coll.docs[0]["store_credit"] == 100.0
-    issued = [e for e in ledger.docs if e["type"] == "ISSUED"]
+    # A manual / goodwill credit is money given, not a credit note: ADJUSTED,
+    # which the GST returns never file (round 10 of #1264).
+    issued = [e for e in ledger.docs if e["type"] == "ADJUSTED"]
     assert len(issued) == 1 and issued[0]["delta"] == 60.0
+    assert not [e for e in ledger.docs if e["type"] == "ISSUED"]

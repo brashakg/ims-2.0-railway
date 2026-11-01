@@ -108,6 +108,52 @@ def _unfinished_claim(db, refund_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _raise_s34_task(order: Dict[str, Any], return_id: Optional[str], refund_id: Any, why: str) -> None:
+    """The CA's task for a Shopify refund past the credit-note window. Fail-soft."""
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import create_system_task
+
+        ref = order.get("order_number") or order.get("order_id")
+        create_system_task(
+            get_task_repository(),
+            title=f"Shopify refund on order {ref}: past the credit-note deadline - for the CA",
+            description=(f"{why} The refund was recorded with NO credit note (any store credit is "
+                         f"booked as a plain adjustment). Return {return_id}, Shopify refund {refund_id}."),
+            priority="P2",
+            category="Accounts",
+            store_id=order.get("store_id"),
+            dedupe_ref=f"shopify_refund_s34:{refund_id}",
+            extra={"payload": {"order_id": order.get("order_id"), "return_id": return_id}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[SHOPIFY_REFUND] section 34 task not raised for %s: %s", refund_id, exc)
+
+
+def _raise_unreadable_date_task(order: Dict[str, Any], refund_id: Any) -> None:
+    """An admin's task to fix an order whose invoice date cannot be read (its
+    Shopify refund posts no credit until it is). Deduped per order. Fail-soft."""
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import create_system_task
+
+        ref = order.get("order_number") or order.get("order_id")
+        create_system_task(
+            get_task_repository(),
+            title=f"Order {ref}: invoice date cannot be read - fix it",
+            description=(f"Shopify refund {refund_id} on order {ref} posted no store credit: the order's "
+                         "invoice date cannot be read, so its credit-note deadline (section 34) cannot be "
+                         "checked. Correct the order's invoice date, then confirm the refund again."),
+            priority="P2",
+            category="Accounts",
+            store_id=order.get("store_id"),
+            dedupe_ref=f"order_invoice_date_unreadable:{order.get('order_id')}",
+            extra={"payload": {"order_id": order.get("order_id"), "refund_id": refund_id}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[SHOPIFY_REFUND] unreadable-date task not raised for %s: %s", refund_id, exc)
+
+
 def _posted_credit(db, return_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """The credit-note ledger row an earlier attempt of this return already
     wrote (its ref is the return id), so a re-drive never posts it twice.
@@ -116,7 +162,9 @@ def _posted_credit(db, return_id: Optional[str]) -> Optional[Dict[str, Any]]:
         return None
     try:
         ledger = db.get_collection("credit_note_ledger")
-        row = ledger.find_one({"ref": return_id, "type": "ISSUED"}) if ledger is not None else None
+        from . import store_credit_ledger as scl
+
+        row = ledger.find_one({"ref": return_id, "type": scl.CREDIT_NOTE_TYPE}) if ledger is not None else None
     except Exception:  # noqa: BLE001
         return None
     if row:
@@ -870,9 +918,12 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
     return_ids = set()
     doc_entries = set()
     own_return = None
+    completed = set()
     try:
         for doc in db.get_collection(_RETURNS_COLLECTION).find({"order_id": order_id}):
             return_ids.add(_norm(doc.get("return_id")))
+            if _norm(doc.get("status")).upper() == "COMPLETED":
+                completed.add(_norm(doc.get("return_id")))
             # The doc's OWN credit row is counted through the doc below.
             own_entry = _norm((doc.get("credit_entry") or {}).get("entry_id"))
             if own_entry:
@@ -906,6 +957,14 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
                 shopify_back += _f(back)
             elif _norm(doc.get("status")).upper() not in _RETURN_NO_MONEY:
                 total += _f(doc.get("net_refund"))
+        # A counter return whose money went out but whose doc is not
+        # COMPLETED yet: its KEPT refund hold is its record (the same rule as
+        # returns._live_refund_holds) -- counted at its amount, and its own
+        # credit line through it, never twice.
+        for hrid, hold in (order.get("refund_holds") or {}).items():
+            if (hold or {}).get("kept") and _norm(hrid) not in completed:
+                total += _f((hold or {}).get("amount"))
+                doc_entries.add(_norm(f"{hrid}:credit"))
         for row in db.get_collection(_REVIEW_COLLECTION).find({"order_id": order_id}):
             rid = _norm(row.get("shopify_refund_id"))
             if rid and rid not in seen:
@@ -921,20 +980,27 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
                if customer_id else {"order_id": order_id})
         for row in db.get_collection("credit_note_ledger").find(flt):
             kind = _norm(row.get("type")).upper()
+            if kind == "ISSUING":
+                # In flight: its balance may already have moved -- counted as
+                # given (fail safe) under the type it becomes.
+                kind = _norm(row.get("final_type")).upper()
             delta = _f(row.get("delta"))
             ref = _norm(row.get("ref")).upper()
             tied = (row.get("order_id") == order_id
                     or bool(keys & (_ref_tokens(row.get("ref")) | _ref_tokens(row.get("reason")))))
             if not tied:
-                if delta > 0 and (kind == "ADJUSTED" or (
-                        kind == "ISSUED" and not row.get("order_id")
-                        and not ref.startswith(_DOOR_REFS))):
+                # Hand credit that names no order: a door's own row (an
+                # advance refund, a referral reward) or one tied to another
+                # order never is.
+                if (delta > 0 and not row.get("order_id")
+                        and _norm(row.get("source")).upper() not in ("ADVANCE_REFUND", "REFERRAL_REWARD")
+                        and (kind == "ADJUSTED" or (kind == "ISSUED" and not ref.startswith(_DOOR_REFS)))):
                     untied += delta
-            elif kind == "ADJUSTED":
-                total += delta
-            elif (kind == "ISSUED" and _norm(row.get("entry_id")) not in doc_entries
+            elif (kind in ("ADJUSTED", "ISSUED") and _norm(row.get("entry_id")) not in doc_entries
                   and not (own_return and _norm(row.get("ref")) == own_return
                            and row.get("order_id") == order_id)):
+                # A doc's own credit (ISSUED, or ADJUSTED past section 34) is
+                # counted through the doc above, never twice.
                 total += delta
     except Exception:  # noqa: BLE001 -- unreadable is no answer, never "nothing"
         logger.warning("[SHOPIFY_REFUND] earlier refunds unreadable for order=%s", order_id,
@@ -990,7 +1056,18 @@ def _store_credit_allowance(
                        exc_info=True)
         return None, ("IMS could not read this order just now, so no store credit is given "
                       "yet."), None, False
-    paid = (order or {}).get("amount_paid")
+    # THE refundable ceiling: what was paid, and never above Shopify's own
+    # total on a MISMATCH order (returns.refundable_ceiling).
+    from ..routers.returns import refundable_ceiling
+
+    from ..routers.returns import CeilingUnreadable
+
+    try:
+        # This door's given-back total counts the credit notes itself.
+        paid = (refundable_ceiling(order, include_credit_notes=False)
+                if (order or {}).get("amount_paid") is not None else None)
+    except CeilingUnreadable:
+        paid = 0.0
     paid = _f(paid, float("nan")) if paid is not None else float("nan")
     if not math.isfinite(paid):
         return 0.0, ("IMS cannot tell how much was paid for this order, so no store credit "
@@ -1718,10 +1795,37 @@ def _post_locked(
     credit_entry = _posted_credit(db, return_id) if prior_doc is not None else None
     money_back = credit_note.get("money_back")
     store_credit, credit_why, settlement, _ = allowance
+    s34_unreadable = False
     try:
-        from ..routers.returns import _issue_store_credit
+        from ..routers.returns import S34_UNREADABLE, _credit_note_window_closed, _issue_store_credit
 
-        if credit_entry is None and customer_id and gross_refund > 0 and store_credit is not None:
+        # Section 34 (THE rule, every credit-note door): past the window the
+        # money Shopify sent back is recorded with NO credit note -- store
+        # credit, if any, as ADJUSTED -- and the CA gets a task. The REAL
+        # order's dates decide (this door's order carries none of them); an
+        # unreadable date refuses the credit (CREDIT_FAILED, retried), it is
+        # never read as "past the deadline".
+        s34_closed = None
+        s34_unreadable = False
+        if credit_entry is None:
+            try:
+                _dated = db.get_collection("orders").find_one(
+                    {"order_id": order_id}, {"invoice_date": 1, "created_at": 1}) or {}
+            except Exception:  # noqa: BLE001
+                _dated = {"created_at": "unreadable"}
+            s34_closed = _credit_note_window_closed({**order, **{k: _dated[k] for k in ("invoice_date", "created_at")
+                                                                 if _dated.get(k)}})
+            if s34_closed == S34_UNREADABLE:
+                s34_closed, s34_unreadable = None, True
+                logger.error("[SHOPIFY_REFUND] refund=%s order=%s: the invoice date cannot be read; "
+                             "no credit posted (section 34 unchecked)", refund_id, order_id)
+                _raise_unreadable_date_task(order, refund_id)
+        if s34_closed:
+            _raise_s34_task(order, return_id, refund_id, s34_closed)
+            # The return doc files no tax reversal either (GSTR reads its breakup).
+            gst_view = {**gst_view, "taxable": 0.0, "tax": 0.0, "by_rate": {}, "section34_closed": True}
+        if (credit_entry is None and customer_id and gross_refund > 0 and store_credit is not None
+                and not s34_unreadable):
             credit_entry = _issue_store_credit(
                 customer_id,
                 gross_refund,
@@ -1746,6 +1850,7 @@ def _post_locked(
                     if isinstance(order.get("interstate"), bool)
                     else None
                 ),
+                credit_note=not s34_closed,
             )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] credit note post failed: %s", exc)
@@ -1906,6 +2011,9 @@ def _post_locked(
     if gross_refund > 0 and not credit_ok:
         result_status = "credit_failed"
         final_status = "CREDIT_FAILED"
+    from ..routers.returns import S34_UNREADABLE as _S34_UNREADABLE
+
+    fail_reason = _S34_UNREADABLE if s34_unreadable and not credit_ok else None
 
     restock_applied = bool(restock_result.get("applied"))
     # A re-drive MERGES its restock into the doc's: an earlier attempt's units
@@ -1921,6 +2029,8 @@ def _post_locked(
         "status": final_status,
         "credit_amount": gross_refund if credit_ok else None,
         "credit_entry": credit_entry,
+        # Zeroed past the section 34 window: the doc files no tax reversal.
+        "gst_breakup": gst_view,
         "credit_note_issued": credit_ok,
         "settled_externally": bool(settled_externally),
         "money_back": money_back,
@@ -1971,6 +2081,7 @@ def _post_locked(
     )
     return {
         "status": result_status,
+        **({"reason": fail_reason} if fail_reason else {}),
         "refund_id": refund_id,
         "shopify_order_id": _norm(order.get("shopify_order_id")),
         "order_id": order_id,

@@ -342,7 +342,7 @@ def _net_returns_into_by_mode(
             d["refunded"] += refunded
             d["collected"] += collected
 
-        ret_match = _window_match(store_id, window_start, window_end)
+        ret_match = returns_window_match(store_id, window_start, window_end)
         ret_match["status"] = "COMPLETED"
         ret_match["historical"] = {"$ne": True}
         cursor = db.get_collection("returns").find(
@@ -432,6 +432,30 @@ def _window_match(store_id: str, start: Any, end: Any) -> Dict[str, Any]:
     match: Dict[str, Any] = {"store_id": store_id}
     if or_clauses:
         match["$or"] = or_clauses
+    return match
+
+
+def drawer_day_clauses(clauses: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """THE drawer day of a returns doc (money review 14): its ``drawer_at``
+    (when the cash really moved -- a recovered record's money time, a payout's
+    pay day), else its ``created_at``. Turns a created_at window's clauses into
+    the drawer-day window every Day-End refund reader uses."""
+    out: List[Dict[str, Any]] = []
+    for c in clauses:
+        win = c.get("created_at")
+        if win is None:
+            out.append(c)
+            continue
+        out.append({"drawer_at": win})
+        out.append({"drawer_at": None, "created_at": win})
+    return out
+
+
+def returns_window_match(store_id: str, start: Any, end: Any) -> Dict[str, Any]:
+    """The returns match for a Day-End window, by drawer day."""
+    match = _window_match(store_id, start, end)
+    if match.get("$or"):
+        match["$or"] = drawer_day_clauses(match["$or"])
     return match
 
 

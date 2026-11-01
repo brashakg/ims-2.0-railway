@@ -269,6 +269,44 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/returns/{return_id}/restock",
         "allowed": ["ADMIN", "CASHIER", "SALES_STAFF", "STORE_MANAGER"],
     },
+    # Refund an advance + cancel the order: ACCOUNTANT / ADMIN / SUPERADMIN
+    # (owner 2026-10-23; returns.py _ADVANCE_REFUND_ROLES). Its own capability
+    # key (returns:advance-refund, services/capabilities) so ACCOUNTANT never
+    # joins the returns:write union.
+    {
+        "method": "POST",
+        "path": "/api/v1/returns/advance-refund",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    # Returns > Complete record (money review 12): the record of a counter
+    # return whose money went out without its doc. Its own capability key
+    # (returns:complete-record) so ACCOUNTANT never joins returns:write.
+    {
+        "method": "POST",
+        "path": "/api/v1/returns/{return_id}/complete-record",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    # "Cash owed - now paid" on a completed return (money review 14): the
+    # same audience and capability as Complete record.
+    {
+        "method": "POST",
+        "path": "/api/v1/returns/{return_id}/owed-paid",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    # Its list (Returns > Needs completing panel). returns:read is already
+    # AUTHENTICATED-broad, so it broadens nothing.
+    {
+        "method": "GET",
+        "path": "/api/v1/returns/needs-completing",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
+    # Its read-only preview for the Orders screen's confirm dialog (same roles;
+    # returns:read is already AUTHENTICATED-broad, so it broadens nothing).
+    {
+        "method": "GET",
+        "path": "/api/v1/returns/advance-refund/{order_id}",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     # --- /api/v1/settings ---
     {"method": "GET", "path": "/api/v1/settings", "allowed": "PUBLIC"},
     {"method": "GET", "path": "/api/v1/settings/", "allowed": "PUBLIC"},

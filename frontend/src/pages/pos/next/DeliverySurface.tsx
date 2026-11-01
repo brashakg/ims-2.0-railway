@@ -36,6 +36,7 @@ import { usePOSStore, type CashTenderCapture, type PaymentEntry } from '../../..
 import type { Order } from '../../../types';
 import DeliveryCompleteScreen from './DeliveryCompleteScreen';
 import { PosWidgets } from './PosWidgets';
+import { getErrorMessage } from '../../../utils/errorHandler';
 
 const money = (v: number) => `₹${Math.round(v || 0).toLocaleString('en-IN')}`;
 
@@ -279,12 +280,10 @@ export function DeliverySurface() {
       setCleaned(false);
       resetTender();
     } catch (err: any) {
-      // The server owns the refusal (credit gate, QC gate, Rx hold, status).
-      // A 422 detail is an ARRAY of objects — rendering that straight into JSX
-      // white-screens the counter, so anything that is not a plain string
-      // falls back to the generic line.
-      const detail = err?.response?.data?.detail;
-      const reason = typeof detail === 'string' ? detail : 'Could not complete the handover.';
+      // The server owns the refusal (credit gate, QC gate, Rx hold, status),
+      // read through the shared helper (the client strips .response, so the
+      // old read never showed it). It always returns a plain string.
+      const reason = getErrorMessage(err, 'Could not complete the handover.');
 
       // RESYNC, because the deliver door is not atomic: it records the payment
       // and THEN runs the credit gate, so a refusal can leave money already

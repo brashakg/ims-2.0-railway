@@ -584,6 +584,19 @@ async def superadmin_invoice_change(
     # mode == CREDIT_NOTE  -> issue a credit (reduction) / debit (increase) note
     # for the DELTA, linked to the ORIGINAL invoice. The original invoice +
     # order totals are LEFT INTACT.
+    # A cancelled order, or one whose advance the refund door holds, takes no
+    # delta note: the door's whole-invoice note already reverses it. Claim the
+    # order (compare-and-set on the door's claim) BEFORE the note: the door's
+    # own claim requires this marker unset, so of the two exactly one wins.
+    if order.get("advance_refund_id"):
+        from ..returns import release_stale_advance_claim as _free
+
+        order = _free(order)
+    if str(order.get("status") or "").upper() in ("CANCELLED", "CANCELED") or order.get("advance_refund_id"):
+        raise HTTPException(
+            status_code=409,
+            detail="This order is cancelled or its advance was refunded, so no credit note can be issued on it.",
+        )
     delta = compute_invoice_delta(before, after)
     if delta["direction"] == "NONE":
         raise HTTPException(
@@ -593,6 +606,63 @@ async def superadmin_invoice_change(
                 "there is no delta to issue a credit/debit note for."
             ),
         )
+
+    from ..returns import (
+        CreditNotConfirmed,
+        _credit_note_window_closed,
+        _issue_store_credit,
+        _record_unused_credit_note,
+    )
+
+    is_cn = delta["note_type"] == "CREDIT_NOTE"
+    # One credit line per order and correction: a re-press (or a replay) of
+    # the SAME delta resumes that line, never a second note and credit.
+    sacn_id = (f"{order_id}:sacn:{int(round(abs(float(delta.get('abs_delta') or 0)) * 100))}"
+               f":{int(round(float(after.get('grand_total') or 0) * 100))}")
+    if is_cn:
+        closed = _credit_note_window_closed(order)
+        if closed:
+            raise HTTPException(status_code=400, detail=closed)
+        from ..returns import _ledger_coll as _rlc
+
+        _ledger = _rlc()
+        try:
+            in_flight = _ledger is not None and _ledger.find_one(
+                {"order_id": order_id, "type": "ISSUING"}) is not None
+            # Every attempt at this correction: the fixed id and its retries
+            # (<id>:r<n>), read over the WHOLE prefix.
+            attempts = [r for r in (_ledger.find({"order_id": order_id}) if _ledger is not None else [])
+                        if str(r.get("entry_id") or "") == sacn_id
+                        or str(r.get("entry_id") or "").startswith(f"{sacn_id}:r")]
+            done = any(r.get("type") in ("ISSUED", "ADJUSTED") for r in attempts)
+            voided = sum(1 for r in attempts if r.get("type") == "VOID")
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail="Could not check this order's credit notes - try again.") from exc
+        # A VOIDed attempt (its credit never landed, its number written off)
+        # never blocks the correction: the next press posts a new attempt.
+        if voided:
+            sacn_id = f"{sacn_id}:r{voided}"
+        if in_flight:
+            raise HTTPException(status_code=409, detail=(
+                "A credit on this order is still being confirmed - it settles by itself within 10 "
+                "minutes. Do NOT issue another note; check the customer's balance then."))
+        if done:
+            raise HTTPException(status_code=409, detail=(
+                "This exact correction was already issued as a credit note on this order - nothing "
+                "was issued again."))
+    marker = utc_now_iso()
+    if is_cn and not repo.update_if(
+        order_id, {"advance_refund_id": None, "status": order.get("status")},
+        {"post_invoice_credit_note_at": marker},
+    ):
+        raise HTTPException(status_code=409, detail="This order changed - reload it and check.")
+
+    def _release_marker():
+        # Every failure before the credit lands gives the order back
+        # (compare-and-set on THIS press's own stamp).
+        if is_cn:
+            repo.update_if(order_id, {"post_invoice_credit_note_at": marker},
+                           {"post_invoice_credit_note_at": None})
 
     # Rule 53 (owner 2026-10-18): the note's number from the sale shop's
     # credit-note (C) or debit-note (D) series -- refused, never guessed,
@@ -605,9 +675,13 @@ async def superadmin_invoice_change(
             store_doc=store_doc,
         )
     except InvoiceNumberError as exc:
+        _release_marker()
         raise HTTPException(
             status_code=400, detail=f"Cannot issue the note: {exc}"
         ) from exc
+    except Exception:
+        _release_marker()
+        raise
     note_doc = build_credit_note_doc(
         order=order,
         delta=delta,
@@ -632,57 +706,103 @@ async def superadmin_invoice_change(
         },
     )
 
-    # Persist the note. A CREDIT note also bumps the customer's store-credit
-    # ledger balance (reuse returns.py machinery) so POS-redeem / the customer
-    # card see the credit; a DEBIT note (customer owes more) is recorded for the
-    # accountant but is NOT store credit. Both fail-soft.
-    if db is not None:
+    # A CREDIT note IS its store-credit ledger row (the one GSTR-1 files),
+    # posted through THE posting door FIRST: the note is only reported issued
+    # once the credit landed. A refusal gives the order back and writes the
+    # number off (unless a ledger row owns it: then that row's own lifecycle
+    # does). A DEBIT note (customer owes more) is recorded for the accountant
+    # but is NOT store credit.
+    _outcome: dict = {}
+    if is_cn:
         try:
-            coll_name = (
-                "credit_note_ledger"
-                if note_doc["note_type"] == "CREDIT_NOTE"
-                else "debit_note_ledger"
-            )
-            db.get_collection(coll_name).insert_one(dict(note_doc))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[ORDERS] note ledger insert failed: %s", exc)
-
-    if note_doc["note_type"] == "CREDIT_NOTE":
-        try:
-            from ..returns import _issue_store_credit
-
-            _issue_store_credit(
+            credit = _issue_store_credit(
                 order.get("customer_id"),
                 note_doc["amount"],
                 reason=f"Credit note {note_doc['note_number']} "
                 f"(order edit on invoice {original_invoice})",
                 ref=note_doc["note_number"],
                 current_user=current_user,
-                # GSTR-1 CDNR tax reversal (PR #945 P3): pass the note's ALREADY-
-                # COMPUTED taxable / tax split through so this fee-less credit
-                # note (gross == net) reports its true output-tax reversal in the
-                # CDNR loop instead of deriving 0 from gross-minus-net. Reuse the
-                # existing figures -- never recompute tax here.
+                # GSTR-1 CDNR tax reversal (PR #945 P3): the note's ALREADY-
+                # COMPUTED taxable / tax split -- never recomputed here.
                 taxable=note_doc["taxable_amount"],
                 tax=note_doc["tax_amount"],
-                # GSTR-1 CDNR head consistency (money-panel round 2): this
-                # type=ISSUED ledger row reaches the CDNR loop, so it must
-                # reverse under the SAME CGST/SGST-vs-IGST head its parent
-                # invoice filed under. Online parents persist `interstate`;
-                # bool-gated -- POS parents carry no flag and keep the legacy
-                # state-compare fallback.
+                # GSTR-1 CDNR head consistency: reverse under the SAME head the
+                # parent invoice filed under (bool-gated; POS parents carry no
+                # flag and keep the legacy state-compare fallback).
                 interstate=(
                     order.get("interstate")
                     if isinstance(order.get("interstate"), bool)
                     else None
                 ),
-                # No returns doc behind this note: the row names its parent,
-                # so the GST returns hold it with a held sale (never filed).
+                # No returns doc behind this note: the row names its parent.
                 order_id=order.get("order_id"),
                 note_number=note_doc["note_number"],
+                entry_id=sacn_id,
+                outcome=_outcome,
+            )
+        except CreditNotConfirmed:
+            # It may already be on the balance: the order stays claimed (its
+            # marker heals once the line settles), the number stays with the
+            # line, and the reconciler settles it. Never 'nothing given'.
+            raise HTTPException(
+                status_code=503,
+                detail=("The credit note could not be confirmed just now - the credit may already be on "
+                        "the customer's balance. Do NOT issue it again: it settles by itself within 10 "
+                        "minutes. Check the customer's store-credit balance then."),
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[ORDERS] store-credit bump skipped: %s", exc)
+            logger.error("[ORDERS] credit note %s not posted: %s", note_doc["note_number"], exc)
+            # No line written: a refusal. A line (or no answer): its owner is
+            # the reconciler -- never 'nothing given'.
+            try:
+                _line = _ledger.find_one({"entry_id": sacn_id}) if _ledger is not None else None
+            except Exception:  # noqa: BLE001
+                _line = True
+            if _line is not None:
+                raise HTTPException(status_code=503, detail=(
+                    "The credit note could not be confirmed just now - the credit may already be on "
+                    "the customer's balance. Do NOT issue it again: it settles by itself within 10 "
+                    "minutes. Check the customer's store-credit balance then.")) from exc
+            credit, _outcome["not_written"] = None, True
+        if credit is None:
+            _release_marker()
+            # Written off only when no line carrying it was written (a VOID
+            # that stood wrote its own number off).
+            if _outcome.get("not_written"):
+                _record_unused_credit_note(note_doc["note_number"], order, note_doc["note_number"],
+                                           current_user, "superadmin credit note not posted")
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "The credit note could not be issued - the customer's store credit could not "
+                    "take it, so nothing was given. Check the customer record, then try again."
+                ),
+            )
+    if is_cn and credit.get("resumed"):
+        # Another press issued this correction first: its line, as stored, is
+        # the note (this press's number was written off). No second note doc.
+        # This press's own number was written off: never reported as issued.
+        number = credit.get("note_number")
+        return {
+            "order_id": order_id,
+            "mode": "CREDIT_NOTE",
+            "message": (f"CREDIT_NOTE {number} was already issued for this correction; nothing was issued again."
+                        if number else
+                        "This correction was already issued by another press; its note number could not be "
+                        "read just now - check the customer's credit notes. Nothing was issued again."),
+            "note_number": number,
+            "note_type": "CREDIT_NOTE",
+            "amount": credit.get("net_refund") or credit.get("amount"),
+            "original_invoice_number": original_invoice,
+            "delta": delta,
+            "audit_note": "An immutable audit entry recording this change was written.",
+        }
+    if db is not None:
+        try:
+            coll_name = "credit_note_ledger" if is_cn else "debit_note_ledger"
+            db.get_collection(coll_name).insert_one(dict(note_doc))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ORDERS] note document insert failed: %s", exc)
 
     return {
         "order_id": order_id,

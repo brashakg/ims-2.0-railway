@@ -33,6 +33,10 @@ import { Link } from 'react-router-dom';
 import { AlertTriangle, X, Glasses, ShoppingBag, Home } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
+import {
+  billKeyFor, clearBillKey, settleBillKey, useUnconfirmedWording,
+} from '../../../components/pos/posBillKey';
+import { billFingerprint } from '../../../components/pos/orderPayload';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import { useProducts, useSellableStock } from '../../../hooks/usePOSQueries';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
@@ -131,7 +135,13 @@ export function GeneralCounterSurface() {
     /** The server took the sale to DELIVERED (see handleCompleteSale). */
     delivered?: boolean;
   } | null>(null);
+  // The bill key of the last press and the bill it was for (THE fingerprint:
+  // the order body the sale sends). A re-press of the same bill prefers it.
   const idempotencyKeyRef = useRef<string | null>(null);
+  const billFpRef = useRef<string | null>(null);
+  // A lost sale's promise ("press again - not charged twice") holds only for
+  // the SAME bill while its key is kept.
+  useUnconfirmedWording(billFingerprint(store), errorMsg, setErrorMsg);
   // A discount over the seller's limit: the server's refusal (shown as the
   // ask-a-manager panel) and, once approved, the E4 request id the retry carries.
   const [approvalNeed, setApprovalNeed] = useState<DiscountApprovalNeed | null>(null);
@@ -208,12 +218,6 @@ export function GeneralCounterSurface() {
     if (store.is_processing) return;
     setErrorMsg(null);
     store.setProcessing(true);
-    if (!idempotencyKeyRef.current) {
-      idempotencyKeyRef.current =
-        typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    }
     try {
       // This counter only ever rings a QUICK SALE. A 'prescription_order' left
       // in the store by the optical POS would be refused by the shared submit
@@ -228,6 +232,13 @@ export function GeneralCounterSurface() {
       store.setDeliveryDate(istDayString(new Date()));
       store.setDeliveryTimeSlot(null);
       store.setCartNote(withFulfilmentTag(store.cart_note, homeDelivery));
+      // The bill key is kept with the cart (localStorage), so a reload after a
+      // lost answer presses the SAME bill again -- never a second sale. Taken
+      // AFTER the writes above: the fingerprint is the body the sale sends.
+      const fp = billFingerprint(usePOSStore.getState());
+      idempotencyKeyRef.current = billKeyFor(fp, Date.now(),
+        billFpRef.current === fp ? idempotencyKeyRef.current : null);
+      billFpRef.current = fp;
       // Read the LIVE store, not this render's snapshot — the writes above
       // landed in the store, while `store` is the value from render time.
       const res = await submitPosOrder(
@@ -236,6 +247,9 @@ export function GeneralCounterSurface() {
         approvalIdRef.current,
       );
       if (!res.ok) {
+        // A definite refusal: nothing is pending, so the saved draft keeps no
+        // customer, member or Rx.
+        if (!res.pending) settleBillKey(fp);
         if (res.discountApproval) {
           setApprovalNeed(res.discountApproval);
           return;
@@ -245,7 +259,9 @@ export function GeneralCounterSurface() {
         setErrorMsg(res.error || 'Failed to create order');
         return;
       }
+      clearBillKey(billFpRef.current || '');
       idempotencyKeyRef.current = null;
+      billFpRef.current = null;
       approvalIdRef.current = null;
       setApprovalNeed(null);
       // Owner ruling 2026-09-04: a completed take-away counter sale IS the

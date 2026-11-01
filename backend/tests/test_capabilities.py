@@ -55,14 +55,15 @@ def test_every_non_public_route_maps_to_exactly_one_capability():
 def test_capability_universe_nonempty_and_verb_shaped():
     """Every key is ``<module>:read|write`` or a curated key
     (approvals:approve, products:qc, online-store:rx-clear, catalog:flag,
-    catalog:purge, users:set-password, vendor-returns:create and supplier
-    confirm-credit)."""
+    catalog:purge, users:set-password, vendor-returns:create, supplier
+    confirm-credit, returns:advance-refund and returns:complete-record)."""
     assert C.VALID_CAPABILITY_KEYS
     for key in C.VALID_CAPABILITY_KEYS:
         assert ":" in key, key
         verb = key.rsplit(":", 1)[1]
         assert verb in ("read", "write", "approve", "qc", "rx-clear", "flag", "purge", "create",
-                        "confirm-credit", "set-password"), key
+                        "confirm-credit", "set-password", "advance-refund",
+                        "complete-record"), key
 
 
 def test_set_password_is_carved_out_and_ungrantable():

@@ -14,47 +14,22 @@
 
 import { useEffect } from 'react';
 import { orderApi } from '../../services/api';
-import { canonicalCategory } from '../../utils/categoryNormalize';
 import { billQuoteKey, usePOSStore } from '../../stores/posStore';
+import { orderLinesOf } from './orderPayload';
 
-export function mapCategory(cat: string): string {
-  // item_type vocabulary for the order payload (drives backend GST item_type-
-  // wins). Canonicalise the input first so EVERY category spelling (short code,
-  // plural, canonical) resolves; outputs are unchanged from the legacy map.
-  const canonical = canonicalCategory(cat);
-  const map: Record<string, string> = {
-    FRAME: 'FRAME', SUNGLASS: 'SUNGLASS', OPTICAL_LENS: 'LENS',
-    CONTACT_LENS: 'CONTACT_LENS', COLORED_CONTACT_LENS: 'CONTACT_LENS',
-    ACCESSORIES: 'ACCESSORY', WATCH: 'WATCH', SMARTWATCH: 'SMARTWATCH', SERVICES: 'SERVICE',
-  };
-  return map[canonical] || canonical || cat;
-}
-
-/** THE order lines the till sends -- to create the order AND to price it, so
- *  the quote is always for exactly the lines the order will carry. */
-export function orderLinesOf(cart: any[]) {
-  return (cart || []).map((item: any) => ({
-    item_type: mapCategory(item.category),
-    product_id: item.product_id,
-    stock_id: item.stock_id,
-    product_name: item.name,
-    sku: item.sku,
-    brand: item.brand,
-    subbrand: item.subbrand,
-    category: item.category,
-    quantity: item.quantity,
-    unit_price: item.unit_price,
-    discount_percent: item.discount_percent,
-    discount_reason: item.discount_reason || undefined,
-    prescription_id: item.linked_prescription_id,
-    lens_details: item.lens_details,
-    item_note: item.item_note || undefined,
-  }));
-}
+// The order-line vocabulary and builder live in orderPayload (pure: posStore
+// reads the bill's fingerprint from it without importing this file).
+export { mapCategory, orderLinesOf } from './orderPayload';
 
 /** Ask the server for the live cart's bill and keep it on the store. Throws
  *  when the server cannot be asked; a cart edited while the call was in
  *  flight is left for the next call (its quote would be stale). */
+// Whether the server guarantees a re-pressed sale replays (its unique
+// idempotency index is in place) -- read from the last quote. Only then may
+// the till promise "it will not be charged twice".
+let lastReplayGuaranteed = false;
+export const replayGuaranteed = (): boolean => lastReplayGuaranteed;
+
 export async function refreshBillQuote(): Promise<void> {
   const s = usePOSStore.getState();
   const key = billQuoteKey(s);
@@ -66,6 +41,7 @@ export async function refreshBillQuote(): Promise<void> {
     items: orderLinesOf(s.cart),
     cart_discount_percent: s.cart_discount_percent || 0,
   });
+  lastReplayGuaranteed = Boolean((q as any)?.replay_guaranteed);
   if (billQuoteKey(usePOSStore.getState()) === key) {
     usePOSStore.getState().setBillQuote({
       key,

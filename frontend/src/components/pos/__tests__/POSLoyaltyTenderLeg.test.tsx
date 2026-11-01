@@ -168,12 +168,13 @@ describe('POS loyalty tender leg', () => {
 
   it('a FAILED burn posts NO loyalty leg and warns loudly — points untouched, balance honestly due', async () => {
     seedStore(300);
-    mockedRedeem.mockRejectedValueOnce(new Error('409 insufficient balance'));
+    // The shared client's ApiError: the server REFUSED the burn (a 4xx).
+    mockedRedeem.mockRejectedValueOnce({ status: 409, detail: 'insufficient balance' });
 
     const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-4');
     // Order still exists (fail-soft), but never silently.
     expect(res.ok).toBe(true);
-    expect(res.warning).toMatch(/NOT debited/);
+    expect(res.warning).toMatch(/took NO points/);
     expect(res.warning).toMatch(/300/);
 
     // No burn -> no leg. Recording one would gift the discount without
@@ -183,6 +184,45 @@ describe('POS loyalty tender leg', () => {
     expect(postedBodies().filter((b) => b.method === 'CASH')).toHaveLength(1);
     // The pending intent is consumed either way.
     expect(usePOSStore.getState().pendingLoyaltyRedeem).toBeNull();
+  });
+
+  it('a redeem the server refuses for want of points says so in plain words', async () => {
+    seedStore(300);
+    mockedRedeem.mockRejectedValueOnce({
+      response: { status: 400, data: { detail: { ok: false, reason: 'insufficient_balance' } } },
+    });
+
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-6');
+    expect(res.warning).toMatch(/Not enough loyalty points/);
+    expect(loyaltyBodies()).toHaveLength(0);
+  });
+
+  it("a tender the server refuses carries the server's reason into the warning", async () => {
+    seedStore(300);
+    mockedAddPayment.mockImplementation(async (_id: string, body: any) => {
+      if (body.method === 'LOYALTY') {
+        throw { response: { status: 400, data: { detail: 'Not enough loyalty points: no points worth Rs 300.00 were redeemed' } } };
+      }
+      return { payment_id: 'pmt-1' } as any;
+    });
+
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-7');
+    expect(res.warning).toMatch(/did NOT record/);
+    expect(res.warning).toMatch(/Not enough loyalty points/);
+    // The Orders screen takes no loyalty tender: never send staff there for one.
+    expect(res.warning).toMatch(/Loyalty points cannot be added there/);
+  });
+
+  it('a failed burn never points staff at an Orders-screen loyalty action that does not exist', async () => {
+    seedStore(300);
+    mockedRedeem.mockRejectedValueOnce(new Error('network'));
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'idem-8');
+    // Round 10: no refusal came back, so the burn may have landed -- never
+    // claim "NOT debited"; tell staff to check the points first.
+    expect(res.warning).not.toMatch(/took NO points/);
+    expect(res.warning).toMatch(/could not be confirmed/);
+    expect(res.warning).toMatch(/check the customer's points/);
+    expect(res.warning).not.toMatch(/re-apply the points/);
   });
 
   it('a LOYALTY line with no pending intent behind it burns nothing, posts nothing, and is flagged', async () => {
@@ -197,5 +237,37 @@ describe('POS loyalty tender leg', () => {
     // The cash leg is untouched by the drift.
     const cash = postedBodies().filter((b) => b.method === 'CASH');
     expect(cash[0].amount).toBeCloseTo(total - 300, 2);
+  });
+});
+
+
+describe('money review 18: a re-press after a lost debit leg', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockedCreate.mockResolvedValue({ order_id: 'ord-1', order_number: 'BV-001' } as any);
+    mockedRedeem.mockResolvedValue({ redeemed_points: 200, rupee_value: 200, was_capped: false,
+                                      txn_id: 'txn-1' } as any);
+  });
+
+  it('re-sends the burned LOYALTY leg with its own key and never says it did NOT record', async () => {
+    const total = seedStore(200);
+    usePOSStore.setState({ payments: [
+      { method: 'LOYALTY', amount: 200, reference: 'PENDING:200pts', timestamp: '' },
+      { method: 'STORE_CREDIT', amount: Math.round((total - 200) * 100) / 100, timestamp: '' },
+    ] } as any);
+    const lost = Object.assign(new Error('no answer'), {}) as any;
+    mockedAddPayment
+      .mockResolvedValueOnce({ payment_id: 'pl' } as any) // b:leg:0 LOYALTY
+      .mockRejectedValueOnce(lost) // b:leg:1 STORE_CREDIT: the answer is lost
+      .mockResolvedValue({ payment_id: 'px' } as any);
+    const first = await submitPosOrder(usePOSStore.getState() as any, 'b');
+    expect(first.ok).toBe(false);
+    const second = await submitPosOrder(usePOSStore.getState() as any, 'b');
+    expect(second.ok).toBe(true);
+    expect(second.warning || '').not.toMatch(/LOYALTY .* did NOT record/);
+    expect(mockedRedeem).toHaveBeenCalledTimes(1); // never burned again
+    expect(mockedAddPayment.mock.calls.map((c) => [c[2], (c[1] as any).method])).toEqual([
+      ['b:leg:0', 'LOYALTY'], ['b:leg:1', 'STORE_CREDIT'], ['b:leg:0', 'LOYALTY'], ['b:leg:1', 'STORE_CREDIT']]);
+    expect((mockedAddPayment.mock.calls[2][1] as any).reference).toBe('200pts txn txn-1');
   });
 });

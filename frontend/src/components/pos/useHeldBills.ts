@@ -33,6 +33,8 @@ export interface HeldBill {
   auto?: boolean;
   reason?: string;
   state: unknown;
+  /** The bill key of an unconfirmed sale, carried so a recall replays it. */
+  bill_key?: { key: string; at: number } | null;
 }
 
 function readAll(): HeldBill[] {
@@ -94,7 +96,7 @@ export function useHeldBills(store: any, currentUserId: string) {
       if (!bill) return false;
       // Atomic REPLACE, not a merge into the current cart: restores the cart
       // verbatim plus the bill-level discount and delivery fields.
-      store.restoreHeldSale(bill.state);
+      store.restoreHeldSale(bill.state, bill.bill_key);
       removeFromStorage(billId);
       refresh();
       return true;

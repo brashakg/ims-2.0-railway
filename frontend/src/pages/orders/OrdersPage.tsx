@@ -3,7 +3,7 @@
 // ============================================================================
 // NO MOCK DATA - All data from API
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Search,
@@ -30,7 +30,7 @@ import { marketingApi } from '../../services/api/marketing';
 import { printDocumentsApi } from '../../services/api/printDocuments';
 import { formatDateIST, formatTimeIST } from '../../utils/datetime';
 import { useAuth } from '../../context/AuthContext';
-import { canCloseHandover, canMarkDelivered } from './handoverRoles';
+import { canCloseHandover, canMarkDelivered, canTakePayment } from './handoverRoles';
 import { useToast } from '../../context/ToastContext';
 import { Pagination } from '../../components/common/Pagination';
 import clsx from 'clsx';
@@ -41,6 +41,7 @@ import { OnlineOrderFacts } from '../../components/orders/OnlineOrderFacts';
 import { OrderTrackingQR } from '../../components/orders/OrderTrackingQR';
 import { SuperadminOrderEditModal } from '../../components/orders/SuperadminOrderEditModal';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { RefundAdvanceButton, canRefundAdvance } from '../../components/orders/RefundAdvanceButton';
 
 // Status configurations
 const ORDER_STATUS_CONFIG: Record<OrderStatus, { label: string; color: string; bgColor: string; icon: typeof Clock }> = {
@@ -169,6 +170,9 @@ export function OrdersPage() {
 
   // Payment modal state
   const [showPaymentModal, setShowPaymentModal] = useState(false);
+  // One Idempotency-Key per open payment modal: a re-press after a lost
+  // answer replays the same payment, never records it twice.
+  const paymentKeyRef = useRef('');
   const [paymentOrder, setPaymentOrder] = useState<Order | null>(null);
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'CARD' | 'UPI' | 'BANK_TRANSFER'>('CASH');
@@ -347,6 +351,8 @@ export function OrdersPage() {
     setPaymentAmount(String(Math.round((order.balanceDue || 0) * 100) / 100));
     setPaymentMethod('CASH');
     setPaymentReference('');
+    paymentKeyRef.current = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     setShowPaymentModal(true);
   };
 
@@ -376,7 +382,7 @@ export function OrdersPage() {
         method: paymentMethod,
         mode: paymentMethod,
         reference: paymentReference || undefined,
-      } as any);
+      } as any, paymentKeyRef.current || undefined);
 
       toast.success(`Payment of ${formatCurrency(amount)} received`);
       setShowPaymentModal(false);
@@ -629,7 +635,7 @@ export function OrdersPage() {
                       <Printer className="w-3 h-3" />
                       Print
                     </button>
-                    {order.paymentStatus !== 'PAID' && (
+                    {order.paymentStatus !== 'PAID' && canTakePayment(user) && (
                       <button
                         onMouseDown={(e) => { e.preventDefault(); (document.activeElement as HTMLElement)?.blur?.(); }}
                         onClick={(e) => { e.stopPropagation(); openPaymentModal(order); }}
@@ -879,7 +885,7 @@ export function OrdersPage() {
                       Mark Delivered
                     </button>
                   )}
-                  {selectedOrder.balanceDue > 0 && (
+                  {selectedOrder.balanceDue > 0 && canTakePayment(user) && (
                     <button
                       onClick={() => openPaymentModal(selectedOrder)}
                       className="btn-outline flex-1 flex items-center justify-center gap-2 min-w-[150px]"
@@ -887,6 +893,16 @@ export function OrdersPage() {
                       <CreditCard className="w-4 h-4" />
                       Collect Payment
                     </button>
+                  )}
+                  {canRefundAdvance(user) && selectedOrder.orderStatus !== 'CANCELLED' && (
+                    <RefundAdvanceButton
+                      key={selectedOrder.id}
+                      orderId={selectedOrder.id}
+                      onDone={() => {
+                        setSelectedOrder(null);
+                        loadOrders();
+                      }}
+                    />
                   )}
                 </div>
               </div>

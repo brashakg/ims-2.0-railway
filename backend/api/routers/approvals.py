@@ -379,8 +379,14 @@ async def consume_request(
     the engine's shop rule over the caller's shops). Anyone else gets the 404
     a missing request gets here, and the approval is left unspent: a request
     id alone never spends another shop's approval."""
+    if body.action_type == "REFUND_APPROVAL_MATRIX":
+        # Only the refund door spends a refund approval: it binds the bill,
+        # the store, the amount and the tier. Spent here it would bind nothing.
+        raise HTTPException(status_code=400, detail="A refund approval is used by the refund itself.")
     eng = _engine()
     doc = eng.get(request_id)
+    if doc is not None and doc.get("action_type") == "REFUND_APPROVAL_MATRIX":
+        raise HTTPException(status_code=400, detail="A refund approval is used by the refund itself.")
     if doc is not None and not _request_in_reach(eng, doc, current_user):
         raise HTTPException(status_code=404, detail="not_found")
     res = eng.consume_approval(

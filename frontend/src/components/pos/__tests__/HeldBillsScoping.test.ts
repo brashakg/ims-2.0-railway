@@ -93,13 +93,14 @@ describe('held bills are scoped to the cashier', () => {
   it('recalls my own bill and removes ONLY that one', () => {
     // The negative control for the two refusals above: without this, a hook
     // that refused everything would pass them both.
-    seed(bill('mine', ME), bill('theirs', THEM), bill('mine2', ME));
+    // The held bill's key (money review 15) goes back with it.
+    seed({ ...bill('mine', ME), bill_key: { key: 'K-mine', at: 1 } }, bill('theirs', THEM), bill('mine2', ME));
     const store = fakeStore();
     const { result } = renderHook(() => useHeldBills(store, ME));
     let ok = false;
     act(() => { ok = result.current.recallBill('mine') as boolean; });
     expect(ok).toBe(true);
-    expect(store.restoreHeldSale).toHaveBeenCalledWith({ id: 'mine' });
+    expect(store.restoreHeldSale).toHaveBeenCalledWith({ id: 'mine' }, { key: 'K-mine', at: 1 });
     expect(stored().map((b) => b.id).sort()).toEqual(['mine2', 'theirs']);
   });
 

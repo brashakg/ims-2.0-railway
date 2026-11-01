@@ -738,6 +738,21 @@ async def redeem_referral(
         raise HTTPException(status_code=404, detail="Referral not found")
 
     reward = referral.get("reward_amount", 500)
+    referrer_id = referral["referrer_customer_id"]
+    # THE balance rule (customers.post_ledger_credit): a legacy customer whose
+    # balance lives only in the ledger is refused BEFORE the claim is spent.
+    from .customers import post_ledger_credit, store_credit_balance_unready
+    from ..dependencies import get_customer_repository
+    from ..services import store_credit_ledger as scl
+
+    cust_repo = get_customer_repository()
+    if cust_repo is None or cust_repo.find_by_id(referrer_id) is None:
+        raise HTTPException(status_code=404, detail="Referrer customer not found")
+    if store_credit_balance_unready(cust_repo, referrer_id):
+        raise HTTPException(
+            status_code=503,
+            detail="The referrer's store-credit balance has not been set up yet - nothing was credited. Ask an admin.",
+        )
 
     # Atomic claim: only the caller that flips it to REWARD_CREDITED proceeds to
     # credit the wallet. A concurrent / repeat call matches nothing and is a
@@ -752,6 +767,9 @@ async def redeem_referral(
                     "status": "REWARD_CREDITED",
                     "reward_credited_at": utc_now_iso(),
                     "reward_credited_by": current_user.get("user_id"),
+                    # Names its ledger row: a press that died before the
+                    # credit is resumed by the next one (and only such a one).
+                    "reward_ledger_entry": f"REFERRAL:{referral_id}",
                 }
             },
             return_document=ReturnDocument.AFTER,
@@ -766,26 +784,66 @@ async def redeem_referral(
                     "status": "REWARD_CREDITED",
                     "reward_credited_at": utc_now_iso(),
                     "reward_credited_by": current_user.get("user_id"),
+                    # Names its ledger row: a press that died before the
+                    # credit is resumed by the next one (and only such a one).
+                    "reward_ledger_entry": f"REFERRAL:{referral_id}",
                 }
             },
         )
         claimed = referral if getattr(res, "modified_count", 0) else None
 
     if not claimed:
-        # Someone (or an earlier call) already credited this referral.
+        # Someone (or an earlier call) already credited this referral -- unless
+        # its press died between the claim and the credit: its fixed-id row is
+        # then missing / unfinished / voided, and THE posting door resumes it
+        # (applied at most once by its guard).
+        from .customers import POSTED as _POSTED, _ledger_coll as _lc
+
+        _row = (_lc().find_one({"entry_id": f"REFERRAL:{referral_id}"}) or {}) if _lc() is not None else {"applied": True}
+        if not _row.get("applied") and referral.get("reward_ledger_entry") == f"REFERRAL:{referral_id}":
+            from .customers import _current_credit_balance as _ccb
+
+            _entry = scl.make_entry(
+                customer_id=referrer_id, entry_type=scl.ADJUSTED, amount=float(reward),
+                current_balance=_ccb(referrer_id, cust_repo.find_by_id(referrer_id)),
+                reason=f"Referral reward {referral_id}", ref=referral_id,
+                store_id=referral.get("store_id") or current_user.get("active_store_id"),
+                user_id=current_user.get("user_id"))
+            _entry.update(source="REFERRAL_REWARD", entry_id=f"REFERRAL:{referral_id}")
+            if post_ledger_credit(cust_repo, _entry) != _POSTED:
+                raise HTTPException(status_code=503, detail=("The reward could not be confirmed - it may already be credited. "
+                                                         "Check the referrer's balance before pressing again."))
+            return {"message": "Referral reward credited", "referral_id": referral_id, "resumed": True}
         return {
             "message": "Referral already credited",
             "referral_id": referral_id,
             "already_credited": True,
         }
 
-    # We hold the claim — credit the referrer exactly once.
-    referrer_id = referral["referrer_customer_id"]
-    # 1. Store credit: lives on the customers doc (correct canonical field).
-    db.get_collection("customers").update_one(
-        {"customer_id": referrer_id},
-        {"$inc": {"store_credit": reward}},
+    # We hold the claim — credit the referrer exactly once, with a ledger row
+    # (the audit trail every other credit has). ADJUSTED, never ISSUED: a
+    # reward is money given, not a supply reversed, and the GST returns file
+    # every ISSUED row as a credit note. The row id is fixed per referral, so
+    # a refused or unclear credit gives the claim back and the next press
+    # resumes the SAME row (THE posting door's guard: never credited twice).
+    from .customers import POSTED, _current_credit_balance
+
+    entry = scl.make_entry(
+        customer_id=referrer_id,
+        entry_type=scl.ADJUSTED,
+        amount=float(reward),
+        current_balance=_current_credit_balance(referrer_id, cust_repo.find_by_id(referrer_id)),
+        reason=f"Referral reward {referral_id}",
+        ref=referral_id,
+        store_id=referral.get("store_id") or current_user.get("active_store_id"),
+        user_id=current_user.get("user_id"),
     )
+    entry.update(source="REFERRAL_REWARD", entry_id=f"REFERRAL:{referral_id}")
+    if post_ledger_credit(cust_repo, entry) != POSTED:
+        coll.update_one({"referral_id": referral_id, "status": "REWARD_CREDITED"},
+                        {"$set": {"status": referral.get("status")}})
+        raise HTTPException(status_code=503, detail=("The reward could not be confirmed - it may already be credited. "
+                                                         "Check the referrer's balance before pressing again."))
     # 2. Loyalty points: must go through the loyalty_accounts ledger, not the
     #    customers doc (which has a phantom loyalty_points field the real engine
     #    never reads — fixed CRM-1). Route via adjust_balance so the balance +

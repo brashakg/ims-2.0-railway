@@ -67,8 +67,13 @@ class MockCollection:
         return SimpleNamespace(inserted_id="fake_id")
 
     def update_one(self, filt, update, **kwargs):
+        def _ok(actual, want):  # equality, or {"$ne": x} (the reconcile's compare-and-set)
+            if isinstance(want, dict) and "$ne" in want:
+                return actual != want["$ne"]
+            return actual == want
+
         for doc in self._docs:
-            if all(doc.get(k) == v for k, v in filt.items()):
+            if all(_ok(doc.get(k), v) for k, v in filt.items()):
                 set_vals = (update.get("$set") or {})
                 push_vals = (update.get("$push") or {})
                 doc.update(set_vals)

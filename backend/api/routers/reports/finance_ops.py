@@ -251,7 +251,8 @@ async def _gst_report(from_date: date, to_date: date, store_id: Optional[str], c
             # Datetime objects, NOT .isoformat() strings -- created_at is a
             # BSON datetime and a string comparison never matches.
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            # THE GST-return order rule (gst_base), as GSTR-1 / GSTR-3B.
+            # The BOOKS order rule (real_sale_match default), as /finance/gst-summary;
+            # only GSTR-1 / GSTR-3B read the GST-document view (gst_documents=True).
             **real_sale_match(_get_raw_db()),
         },
         limit=0,  # 0 -> no cap: a GST report must include every invoice.
