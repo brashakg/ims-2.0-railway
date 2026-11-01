@@ -1490,3 +1490,69 @@ def test_found_at_the_sender_after_a_failed_note_and_a_sale_still_books_the_note
     assert note["credited_stock_ids"] == ["SU-2"]
     assert _run(transfers.list_missing(ADMIN))["pieces"] == []
     assert _unit(world, "SU-2")["status"] == "SOLD"
+
+
+# ---------------------------------------------------------------------------
+# Review round 5: a kept piece shares the invoice line NET of its credit note
+# ---------------------------------------------------------------------------
+
+
+def _unequal_box(world, lost):
+    """Dhanbad (Z) ships BVQX001 (3000) and BVQX002 (1000) to Bokaro (Y):
+    the invoice line is 4000 + 100/100. The kept piece lands damaged; the
+    other (`lost`) is written off on the way, its credit note at its own
+    cost."""
+    from api.routers import transfers
+
+    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"unit_cost": 3000.0}})
+    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"unit_cost": 1000.0}})
+    t = _shipped_box(world, codes=("BVQX001", "BVQX002"))
+    kept = "SU-2" if lost == "SU-1" else "SU-1"
+    _scan_in(t["id"], f"BVQX00{kept[-1]}", user=MGR_BOK, damaged=True, reason="Cracked rim")
+    _complete(t["id"], user=MGR_BOK)
+    _run(transfers.write_off_missing_piece(t["id"], lost, ADMIN))
+    (invoice,) = [b for b in _bills(world, t["id"]) if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
+    assert (invoice["taxable_amount"], invoice["cgst_total"], invoice["sgst_total"]) == (4000.0, 100.0, 100.0)
+    assert len(_notes(world, t["id"])) == 1
+    return kept, invoice
+
+
+def _write_off(world, sid):
+    from datetime import datetime as _dt
+
+    from api.services import writeoff_itc
+
+    return writeoff_itc.record_writeoff(world, [_unit(world, sid)], source_type="QUARANTINE_DAMAGE",
+                                        source_id=sid, when=_dt.utcnow(), actor_id="u-admin")
+
+
+@pytest.mark.parametrize("lost, share", [("SU-1", 25.0), ("SU-2", 75.0)])  # expensive / cheap lost
+def test_a_kept_piece_reverses_what_the_receiver_kept_net_of_the_credit_note(world, lost, share):
+    """Expensive piece (3000) lost: Bokaro keeps 25/25 of credit, so writing
+    the 1000 piece off takes back 25/25 -- not half the gross line (50/50).
+    Cheap piece lost: Bokaro keeps 75/75, and that is what goes back."""
+    kept, invoice = _unequal_box(world, lost)
+    out = _write_off(world, kept)
+    row = world["itc_writeoff_reversals"].find_one({"_id": kept})
+    assert (row["bill_id"], row["gstin"]) == (invoice["bill_id"], GSTIN_Y_JH)
+    assert (row["cgst"], row["sgst"], row["igst"]) == (share, share, 0.0)
+    assert out["total"] == 2 * share
+
+
+def test_a_kept_piece_back_after_its_write_off_reclaims_exactly_what_it_reversed(world, monkeypatch):
+    """Cheap piece lost, the 3000 piece written off (75/75), its month filed,
+    then it comes back: the re-claim is exactly 75/75, and writing it off
+    again reverses 75/75 once more."""
+    from api.services import writeoff_itc
+
+    kept, _invoice = _unequal_box(world, "SU-2")
+    _write_off(world, kept)
+    filed = world["itc_writeoff_reversals"].find_one({"_id": kept})["period"]
+    monkeypatch.setattr(writeoff_itc, "_locked", lambda db, period: period == filed)
+    writeoff_itc.undo_writeoff(world, _unit(world, kept))
+    (back,) = world["itc_writeoff_reversals"].find({"kind": "RECLAIM"})
+    assert (back["cgst"], back["sgst"], back["igst"]) == (-75.0, -75.0, 0.0)
+    monkeypatch.setattr(writeoff_itc, "_locked", lambda db, period: False)
+    _write_off(world, kept)
+    row = world["itc_writeoff_reversals"].find_one({"_id": kept})
+    assert (row["cgst"], row["sgst"]) == (75.0, 75.0)

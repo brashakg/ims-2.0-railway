@@ -11,7 +11,8 @@ ONE rule for every write-off door:
     unit off twice, or a retry after a crash, never reverses twice. Returns
     the totals to show on the write-off record.
   - the bill: the one that brought the piece onto the GSTIN it is on now --
-    the mirror bill of the newest inter-GSTIN crossing by ship time (every transfer the piece
+    the mirror bill of the newest inter-GSTIN crossing by ship time, net of
+    its credit notes for pieces that never arrived (every transfer the piece
     rode, so a later move inside one GSTIN keeps it; a crossing is a mirror,
     ship's stamp, else two shop GSTINs), its goods receipt's bills only when
     it rode no crossing; none while the newest crossing has no mirror booked
@@ -135,12 +136,17 @@ def _bills_for(db, unit: dict, gstin_of) -> list:
         # no return places yet is still that shop's, held unallocated.
         return here in {gstin_of(b) or None, gstins.get(b.get("to_store_id") or b.get("store_id"))}
 
-    # The transfer's tax invoice only: its credit note (same source_transfer_id)
-    # covers pieces that never arrived, and its negative heads would clamp a
-    # landed piece's reversal to 0 for good.
-    mirrors = {b.get("source_transfer_id"): b for b in db.get_collection("vendor_bills").find({
-        "status": {"$nin": _gst_itc()._DEAD_BILL}, "source_transfer_id": {"$in": tids},
-        "doc_type": {"$ne": _gst_itc().TRANSFER_CREDIT_NOTE}})}
+    # The transfer's tax invoice, and its credit notes (same
+    # source_transfer_id) for pieces that never arrived: _line_heads nets a
+    # note off the invoice line, so a kept piece shares only what the kept
+    # pieces still claim (each piece shipped at its own cost).
+    mirrors, notes = {}, {}
+    for b in db.get_collection("vendor_bills").find({
+            "status": {"$nin": _gst_itc()._DEAD_BILL}, "source_transfer_id": {"$in": tids}}):
+        if _is_note(b):
+            notes.setdefault(b.get("source_transfer_id"), []).append(b)
+        else:
+            mirrors[b.get("source_transfer_id")] = b
     moved = {t.get("id"): t for t in db.get_collection("stock_transfers").find(
         {"id": {"$in": tids}}, {"id": 1, "shipped_at": 1, "received_at": 1, "gst_registrations": 1,
                                 "from_location_id": 1, "to_location_id": 1})}
@@ -162,8 +168,14 @@ def _bills_for(db, unit: dict, gstin_of) -> list:
                                str(m.get("bill_date") or ""), str(m.get("created_at") or "")), tid))
     if not crossings:
         return [b for b in _receipt_bills(db, rids) if landed_here(b)] if rids else []
-    latest = mirrors.get(max(crossings)[1])
-    return [latest] if latest and landed_here(latest) else []
+    tid = max(crossings)[1]
+    latest = mirrors.get(tid)
+    # The invoice FIRST: it is the claimed bill a reversal row names.
+    return [latest, *notes.get(tid, [])] if latest and landed_here(latest) else []
+
+
+def _is_note(bill: dict) -> bool:
+    return bill.get("doc_type") == _gst_itc().TRANSFER_CREDIT_NOTE
 
 
 def _transfer_units(db, tid: str) -> dict:
@@ -222,22 +234,26 @@ def _cumulative(heads: dict, recorded: dict, hi: float, whole: float = 1.0) -> d
 
 def _line_heads(bills: list, pid, gstin_of) -> tuple:
     """(ids of the bills with lines for pid, their claimed heads, their
-    quantity, (first claiming bill, its GSTIN) or None)."""
+    quantity, (first claiming bill, its GSTIN) or None). A transfer credit
+    note's line (positive qty, negative heads) takes its pieces off: the
+    heads and quantity left are the pieces kept -- never the claimed bill."""
     heads = dict.fromkeys(_HEADS, 0.0)
     qty, claimed, line_bills = 0.0, None, []
     for bill in bills:
         lines = [ln for ln in bill.get("lines") or [] if ln.get("product_id") == pid]
         if not lines:
             continue
+        note = _is_note(bill)
         line_bills.append(bill.get("bill_id"))
-        qty += sum(_f(ln.get("qty")) for ln in lines)
+        qty += (-1 if note else 1) * sum(_f(ln.get("qty")) for ln in lines)
         g = gstin_of(bill)
-        if g is None:
+        if g is None and not note:
             continue
         for ln in lines:
             for h in _HEADS:
                 heads[h] += _f(ln.get(h))
-        claimed = claimed or (bill, g)
+        if not note:
+            claimed = claimed or (bill, g)
     return line_bills, heads, qty, claimed
 
 
@@ -557,7 +573,7 @@ def reverse_on_new_bill(db, bill: dict, actor_id: str = "") -> dict:
     reversed before it is claimed). Once per piece, so safe to repeat. Every
     bill door calls this after storing the bill. A transfer credit note is no
     bill of the pieces: it claims nothing on them."""
-    if bill.get("doc_type") == _gst_itc().TRANSFER_CREDIT_NOTE:
+    if _is_note(bill):
         return totals([])
     if bill.get("source_transfer_id"):
         whose = _transfer_units(db, bill["source_transfer_id"])
