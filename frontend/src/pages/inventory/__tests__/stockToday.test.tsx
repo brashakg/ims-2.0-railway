@@ -167,4 +167,24 @@ describe('Stock today: the page', () => {
     expect(screen.queryByText(/Nothing here is at or under/)).not.toBeInTheDocument();
     expect(screen.queryByText(/No box is on its way/)).not.toBeInTheDocument();
   });
+
+  it('a count, quarantine or stock value the server could not read is said, never shown as nothing to do', async () => {
+    roles = ['ACCOUNTANT'];
+    // What the server sends when those reads fail: the defaults, plus their keys.
+    getStockToday.mockResolvedValue({
+      ...DATA,
+      count: { in_progress: [], counted_today: 0 },
+      quarantine: { pieces: 0, unlabeled: 0 },
+      stock_value: null,
+      unavailable: ['count', 'quarantine', 'stock_value'],
+    });
+    renderPage();
+    await screen.findByText('What needs you today');
+    expect(screen.getAllByText(/Could not be read just now/)).toHaveLength(3);
+    expect(screen.getByText(/Stock value: Could not be read just now/)).toBeInTheDocument();
+    expect(screen.queryByText('Due tonight')).not.toBeInTheDocument();
+    expect(screen.queryByText('Quarantine empty')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Nothing is waiting for a red label/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/₹/)).not.toBeInTheDocument();
+  });
 });

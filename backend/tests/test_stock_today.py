@@ -520,3 +520,24 @@ def test_deliveries_that_cannot_be_read_are_not_read_never_nothing_waiting(get, 
     body = _ok(get(_user("STORE_MANAGER")))
     assert "deliveries" in body["unavailable"]
     assert body["deliveries"] == []
+
+
+@pytest.mark.parametrize("coll_name,method,section", [
+    ("stock_transfers", "find", "transfers"),
+    ("stock_counts", "find", "count"),
+    ("stock_units", "count_documents", "quarantine"),
+])
+def test_each_other_section_that_cannot_be_read_is_not_read_and_alone(
+        get, mongo_db, monkeypatch, coll_name, method, section):
+    _break(monkeypatch, mongo_db, coll_name, method)
+    body = _ok(get(_user("STORE_MANAGER")))
+    assert body["unavailable"] == [section]
+
+
+def test_stock_value_that_cannot_be_read_is_not_read_and_alone(get, monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("shelf_units failed")
+    monkeypatch.setattr(stock_value, "shelf_units", boom)
+    body = _ok(get(_user("ACCOUNTANT")))
+    assert body["unavailable"] == ["stock_value"]
+    assert body["stock_value"] is None
