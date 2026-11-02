@@ -187,6 +187,19 @@ describe('the Transfers page', () => {
     expect(await screen.findByText('Ask another shop for stock')).toBeInTheDocument();
   });
 
+  it.each(['incoming', 'outgoing'])('opens on ?direction=%s (the Stock today buttons)', async (dir) => {
+    getMissingPieces.mockResolvedValue({ pieces: [] });
+    getTransfers.mockResolvedValue({ transfers: [] });
+    window.history.pushState({}, '', `/inventory/transfers?direction=${dir}`);
+    try {
+      render(<StockTransferManagement />);
+      await waitFor(() => expect(getTransfers).toHaveBeenCalledWith('ST-DHN-1', dir));
+      expect(getTransfers).not.toHaveBeenCalledWith('ST-DHN-1', 'all');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
   it('lets the sending manager open an in-transit box to type the e-way bill no.', async () => {
     getMissingPieces.mockResolvedValue({ pieces: [] });
     getTransfers.mockResolvedValue({

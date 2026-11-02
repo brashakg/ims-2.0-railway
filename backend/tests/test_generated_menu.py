@@ -279,6 +279,15 @@ LIVE_ITEMS = [
 ]
 
 
+# The shop's pages and the hand-made menu's "all brands" collection: a
+# template link to /pages/<h> or /collections/<h> is sent as a PAGE /
+# COLLECTION item with its gid (shopify_push/menus.item_form).
+SHOP_PAGES = ["about-us", "our-story", "about-better-vision", "sunglasses", "book-eye-test-at-better-vision",
+              "pune-gangadham", "bokaro-city-centre", "dhanbad-bank-more", "how-to-check-authentic-ray-ban",
+              "contact-us"]
+SHOP_ALL_BRANDS = {"id": "gid://shopify/Collection/999", "handle": "all-brands", "productsCount": {"count": 3}}
+
+
 class _Shop:
     """Fake Shopify: one hand-made main-menu (on page 2 when ``pages=2``)
     and a productsCount for every IMS collection. read_fails / push_error."""
@@ -307,12 +316,17 @@ class _Shop:
                                            "pageInfo": {"hasNextPage": True, "endCursor": "c1"}}}}
             return {"data": {"menus": {"nodes": self.menus, "pageInfo": {"hasNextPage": False}}}}
         if name == "imsCollectionsRead":
+            handles = {r["shopify_collection_id"]: r["handle"] for r in ROWS}
             body = {"data": {"collections": {"nodes": [
-                {"id": g, "handle": "x", "productsCount": None if n is None else {"count": n}}
-                for g, n in self.products.items()], "pageInfo": {"hasNextPage": False}}}}
+                {"id": g, "handle": handles.get(g, "x"), "productsCount": None if n is None else {"count": n}}
+                for g, n in self.products.items()] + [SHOP_ALL_BRANDS], "pageInfo": {"hasNextPage": False}}}}
             if self.coll_errors:
                 body["errors"] = self.coll_errors
             return body
+        if name == "imsPagesRead":
+            return {"data": {"pages": {"nodes": [{"id": f"gid://shopify/Page/{i}", "handle": h}
+                                                 for i, h in enumerate(SHOP_PAGES, 1)],
+                                       "pageInfo": {"hasNextPage": False}}}}
         if name == "imsMenuUpdate":
             if self.push_error:
                 return {"data": {"menuUpdate": {"menu": None, "userErrors": [{"field": "items", "message": self.push_error}]}}}
@@ -459,6 +473,9 @@ def test_adoption_keeps_the_live_heading_urls_and_item_ids(world, monkeypatch):
     sent = {i["title"]: i for i in shop.updates[0]["items"]}
     assert sent["Shop by Brand"]["id"] == "gid://shopify/MenuItem/1"
     assert sent["Shop by Brand"]["url"] == "/collections/all-brands"
+    # In Shopify's own form (an HTTP store path is stored as http://<handle>).
+    assert sent["Shop by Brand"]["type"] == "COLLECTION" and sent["Shop by Brand"]["resourceId"] == SHOP_ALL_BRANDS["id"]
+    assert sent["About Us"]["type"] == "PAGE" and sent["About Us"]["resourceId"] == "gid://shopify/Page/2"
     brands = sent["Shop by Brand"]["items"][0]
     assert brands["id"] == "gid://shopify/MenuItem/2"
     by_title = {c["title"]: c for c in brands["items"]}
@@ -797,7 +814,7 @@ def routed(monkeypatch):
     doc = gm.make_template_doc()
     db["ecom_menus"].insert_one(dict(doc))
     db["ecom_menus"].insert_one({"menu_id": "footer-1", "handle": "footer", "title": "Footer",
-                                 "items": [{"id": "n1", "title": "Contact", "item_type": "HTTP", "url": "/c",
+                                 "items": [{"id": "n1", "title": "Contact", "item_type": "HTTP", "url": "/pages/contact-us",
                                             "children": []}]})
     for r in ROWS:
         db["ecom_collections"].insert_one(dict(r, collection_id=r["handle"]))

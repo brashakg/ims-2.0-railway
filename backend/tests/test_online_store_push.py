@@ -360,7 +360,7 @@ def test_push_menu_live_writes_back_gid(monkeypatch):
     db = _EngineDB()
     db["ecom_menus"].insert_one(
         {"menu_id": "M1", "title": "Main", "handle": "main-menu",
-         "items": [{"id": "n1", "title": "Shop", "item_type": "HTTP", "url": "/shop", "children": []}],
+         "items": [{"id": "n1", "title": "Shop", "item_type": "HTTP", "url": "/search", "children": []}],
          "locally_modified": True}
     )
     menu = db["ecom_menus"].find_one({"menu_id": "M1"})
