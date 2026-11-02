@@ -1566,6 +1566,22 @@ def test_a_prepaid_refund_with_shipping_is_not_a_mismatch(wired, monkeypatch):
     assert not _mismatch_tasks(task_repo, order)
 
 
+def test_a_prepaid_shipping_only_refund_is_not_a_mismatch(wired, monkeypatch):
+    """Only the Rs 99 shipping is refunded (no refund line): Shopify's current
+    total drops to Rs 999 and Rs 99 goes back, which IMS credits on the
+    SHIPPING line -- so it is added back, still MATCH, no task."""
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7131, financial_status="paid")
+    refund = {"id": 99007, "refund_line_items": [],
+              "refund_shipping_lines": [{"subtotal": 83.90, "total_tax": 15.10}],
+              "transactions": _money_back("99.00")}
+    order = _edit(wired, payload, "999.00", minute=1,
+                  financial_status="partially_refunded", refunds=[refund])
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MATCH"
+    assert check["shopify_total"] == 1098.0
+    assert not _mismatch_tasks(task_repo, order)
+
+
 def test_a_cod_refund_before_dispatch_never_over_collects(wired, monkeypatch):
     """An unpaid COD order: an item is cancelled on Shopify (a refund line,
     no money moved, Shopify's current total Rs 698). Nothing came back to
