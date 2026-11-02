@@ -2347,7 +2347,7 @@ def _give_back_in_cash(key, leg, voucher, order, label, task_ref, cash_paid_from
             # that never reached the bill, so no reader of "the returns of
             # this bill" (the refund cap, the has-a-return checks) may see it;
             # the Day-End readers select by store and time and still net it.
-            "_id": pid, "return_id": f"GIVEBACK-{leg['order_id']}-{voucher.get('code')}", "payout_of": key,
+            "_id": pid, "return_id": f"GIVEBACK-{key}", "payout_of": key,  # one per LEG (unique return_id index)
             "payout_kind": GIVEBACK_PAYOUT, "give_back_order_id": leg["order_id"], "store_id": store_id,
             "return_type": "RETURN", "status": "COMPLETED", "net_refund": 0.0, "refund_amount": 0.0,
             "credit_amount": 0.0, "items": [], "refund_tenders": legs, "paid_outside_drawer": outside or None,

@@ -161,3 +161,33 @@ def test_a_booked_payout_wins_even_when_the_decision_was_never_stored(till, monk
     _set_customer(till, "CUST-1")
     cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "STORE_DRAWER")
     assert len(_payouts(till)) == 1 and _credits(till) == [] and _balance(till) == 0.0
+
+
+# =========================================================================== #
+# The cash payout is one record per LEG (the returns unique return_id index)
+# =========================================================================== #
+def test_two_legs_of_one_voucher_on_one_bill_are_each_paid_back_once(till, monkeypatch, tasks):
+    from pymongo.errors import DuplicateKeyError
+
+    from tests.test_pos_money_doors_r9 import _ago
+
+    vouchers = _walk_in_dead(till, monkeypatch)
+    vkey2 = "POSPAY:O7:k7:leg:1"
+    vouchers.update_one({"code": "GV7"}, {"$push": {"money_ledger": {
+        "idempotency_key": vkey2, "delta": -50.0, "created_at": _ago(30)}}})
+    rcoll = till["db"].get_collection("returns")
+    real = rcoll.insert_one
+
+    def _unique_return_id(doc, *a, **k):  # prod: uniq_returns_return_id
+        if doc.get("return_id") and rcoll.find_one({"return_id": doc["return_id"]}):
+            raise DuplicateKeyError(f"E11000 duplicate key return_id {doc['return_id']!r}")
+        return real(doc, *a, **k)
+
+    monkeypatch.setattr(rcoll, "insert_one", _unique_return_id)
+    cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "STORE_DRAWER")
+    cust_router.give_back_unbilled_leg(vkey2, _user("ADMIN"), "STORE_DRAWER")
+    cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "STORE_DRAWER")  # re-presses pay nothing more
+    cust_router.give_back_unbilled_leg(vkey2, _user("ADMIN"), "STORE_DRAWER")
+    paid = sorted((p["payout_of"], p["refund_tenders"][0]["amount"]) for p in rcoll.find({"payout_kind": "GIVEBACK_PAYOUT"}))
+    assert paid == [(VKEY, 80.0), (vkey2, 50.0)]
+    assert set(vouchers.find_one({"code": "GV7"})["pos_given_back"]) == {VKEY, vkey2}
