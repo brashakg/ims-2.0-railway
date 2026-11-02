@@ -151,6 +151,17 @@ mutation imsMenuUpdate($id: ID!, $title: String!, $handle: String!, $items: [Men
 }
 """
 
+# Every Online Store page's handle -> gid: a menu link to /pages/<h> is sent
+# as a PAGE item with its resourceId (shopify_push/menus.item_form).
+_PAGES_READ = """
+query imsPagesRead($after: String) {
+  pages(first: 250, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { id handle }
+  }
+}
+"""
+
 _PRODUCT_CREATE_MEDIA = """
 mutation imsProductCreateMedia($productId: ID!, $media: [CreateMediaInput!]!) {
   productCreateMedia(productId: $productId, media: $media) {

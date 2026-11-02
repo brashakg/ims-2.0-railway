@@ -57,7 +57,10 @@ lose more than half of the last pushed collection links. The listings are
 read STRICTLY: an unreadable catalogue skips the run and the last pushed
 menu stands. DARK / SIMULATED vs LIVE is decided once per push
 (``_live_or_reason``); every attempt writes the same chained audit row as
-the other pushes. A failed or refused push is recorded on the doc
+the other pushes. The items keep their template addresses; the push sends
+each link in Shopify's own form (shopify_push.menus.item_form: /pages/<h>
+as a PAGE, /collections/<h> as a COLLECTION, by the shop's gid) and refuses
+the whole push when one cannot be resolved. A failed or refused push is recorded on the doc
 (``last_push``) and retried on the next run.
 
 The confirm a person sees is the IMS-only tree: when Shopify's counts would
