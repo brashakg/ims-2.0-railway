@@ -507,3 +507,26 @@ describe('money review 18: a definite refusal at the surface', () => {
     expect(entry?.pending).toBe(false);
   });
 });
+
+describe('money review 23: the counter bill keeps its key across IST midnight', () => {
+  it('a re-press on the next IST day uses the SAME bill key (never a second sale)', async () => {
+    const { TILL_SALE_UNCONFIRMED } = await import('../../../../components/pos/posBillKey');
+    const keyOf = (call: number) => submitPosOrder.mock.calls[call][1] as string;
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      vi.setSystemTime(new Date('2026-11-02T18:25:00Z')); // 23:55 IST
+      submitPosOrder.mockResolvedValueOnce({ ok: false, error: TILL_SALE_UNCONFIRMED, pending: true });
+      submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-9', orderNumber: 'ORD-9' });
+      putSomethingInTheCart();
+      renderCounter();
+      fireEvent.click(completeButton());
+      await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(1));
+      vi.setSystemTime(new Date('2026-11-02T18:40:00Z')); // 00:10 IST, the next business day
+      fireEvent.click(completeButton());
+      await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
+      expect(keyOf(1)).toBe(keyOf(0));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

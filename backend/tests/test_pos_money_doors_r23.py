@@ -117,3 +117,47 @@ def test_the_cash_payout_is_not_a_return_of_the_bill(till, monkeypatch, tasks):
     assert payout["payout_kind"] == "GIVEBACK_PAYOUT" and payout["give_back_order_id"] == "O7"
     assert returns_router._prior_refund_tenders("O7") == {}  # the refund cap
     assert till["db"].get_collection("returns").count_documents({"order_id": "O7"}) == 0  # has-a-return
+
+
+def _lose_the_payout_once(till, monkeypatch):
+    rcoll = till["db"].get_collection("returns")
+    real = rcoll.insert_one
+    state = {"n": 0}
+
+    def _lost(doc, *a, **k):
+        if str(doc.get("_id", "")).startswith("payout:") and state["n"] == 0:
+            state["n"] += 1
+            raise RuntimeError("the payout write was lost before it landed")
+        return real(doc, *a, **k)
+
+    monkeypatch.setattr(rcoll, "insert_one", _lost)
+
+
+def test_a_re_press_replays_the_stored_cash_source_without_asking_again(till, monkeypatch, tasks):
+    _walk_in_dead(till, monkeypatch)
+    _lose_the_payout_once(till, monkeypatch)
+    with pytest.raises(HTTPException):
+        cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "HQ")
+    cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"))  # no source sent: the stored one stands
+    [payout] = _payouts(till)
+    assert payout["cash_paid_from"] == "HQ"
+
+
+def test_a_booked_payout_wins_even_when_the_decision_was_never_stored(till, monkeypatch, tasks):
+    """The decision's write did not land, yet the payout was booked: the
+    re-press finds the payout by its fixed id -- never a store credit."""
+    vouchers = _walk_in_dead(till, monkeypatch)
+    real = vouchers.update_one
+
+    def _plan_write_drops(flt, upd, *a, **k):
+        if any(f.startswith("pos_give_back_plan.") for f in (upd.get("$set") or {})):
+            return type("R", (), {"matched_count": 0, "modified_count": 0})()
+        return real(flt, upd, *a, **k)
+
+    monkeypatch.setattr(vouchers, "update_one", _plan_write_drops)
+    _lose_the_mark_once(vouchers, monkeypatch)
+    with pytest.raises(RuntimeError):
+        cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "STORE_DRAWER")
+    _set_customer(till, "CUST-1")
+    cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "STORE_DRAWER")
+    assert len(_payouts(till)) == 1 and _credits(till) == [] and _balance(till) == 0.0
