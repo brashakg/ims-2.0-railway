@@ -2689,14 +2689,15 @@ async def write_off_missing_piece(
     if not shrink.find_one({"transfer_id": tid, "voided_stock_ids": stock_id}):
         line = _line_of_piece(transfer, stock_id)
         # The loss is valued like every other write-off (a count's VOID, a
-        # DAMAGED release): at the average in force NOW -- the figure the
-        # piece leaves the stock-value pool at and the one a later bill trues
-        # it up from (product_cost._average_at). Only the GST papers (the tax
-        # invoice and this credit note) keep the cost frozen at ship.
-        from .inventory.stock_count import _product_costs
+        # DAMAGED release): at the average in force when the piece was VOIDed
+        # (product_cost.written_off_cost) -- never at a later press's (a
+        # retry after the average moved): the figure a later bill trues it up
+        # from. Only the GST papers (the tax invoice and this credit note)
+        # keep the cost frozen at ship.
+        from ..services.product_cost import written_off_cost
 
         pid = piece.get("product_id")
-        piece_cost = round(_product_costs(db, [pid]).get(pid, 0.0), 2)
+        piece_cost = written_off_cost(db, [units.find_one({"stock_id": stock_id}) or {}]).get(str(pid), 0.0)
         shrink.insert_one({
             "shrinkage_id": str(uuid.uuid4()),
             "source": "TRANSFER_MISSING",

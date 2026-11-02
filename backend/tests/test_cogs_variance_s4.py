@@ -444,3 +444,53 @@ def test_the_variance_split_adds_up_to_the_variance_to_the_paisa():
     split = product_cost.variance_by(db, "item_type")
     assert set(split) == {"FRAME", "LENS", "SUNGLASS"}
     assert round(sum(split.values()), 2) == product_cost.variance_by(db)[None] == 10.0
+
+
+# --------------------------------------------------------------------------
+# Fix round 14 (S4): a stuck count finished after the average moved.
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("moved_by", ("correction", "bill"))
+def test_a_stuck_count_finished_after_the_average_moved_books_the_loss_at_the_write_off(
+    monkeypatch, moved_by
+):
+    """A count VOIDed W0, W1 (receipt G, unbilled) on 10-25 at the average
+    then (100) and lost its shrinkage write. The average then moves (a
+    correction to 200, or bill BH blending it to 200); the admin finishes
+    the count: the loss is 2 x 100 -- the average at the write-off, the figure
+    G's bill (2 at 300) trues them up from. Loss + true-up = the 600 billed
+    (never 400 + 400 = 800)."""
+    from api.routers.inventory import stock_count_reconcile as scr
+
+    db = _db(None)
+    product_cost.seed(db, "P", 100.0, key="open", kind="OPENING_STOCK", actor="acc")
+    hist = db.products.find_one({})["cost_history"]
+    hist[0]["at"] = "2026-10-20T10:00:00+00:00"
+    db.products.update_one({}, {"$set": {"cost_history": hist}})
+    _pieces(db, 10)
+    _receipt(db, "G", 2)
+    _pieces(db, 2, "G", status="VOID", prefix="W")
+    db.stock_units.update_many({"status": "VOID"}, {"$set": {
+        "void_reason": "cycle-count-reconcile:C1", "voided_at": "2026-10-25T10:00:00+00:00"}})
+    db.stock_counts.insert_one({"count_id": "C1", "status": "reconciling", "store_id": "S1", "variances": [
+        {"product_id": "P", "product_name": "Frame", "sku": "F", "system_quantity": 12, "physical_quantity": 10}]})
+    if moved_by == "correction":
+        product_cost.correct(db, "P", 200.0, "price fix", "acc", expected=100.0)
+    else:
+        _receipt(db, "H", 10)
+        _pieces(db, 10, "H", prefix="H")
+        _accept(db, _bill("BH", 10, 300, grn_id="H"))
+    assert _avg(db) == 200.0
+
+    monkeypatch.setattr(scr, "_get_db", lambda: db)
+    admin = {"user_id": "a", "roles": ["ADMIN"], "store_ids": ["S1"], "active_store_id": "S1"}
+    out = asyncio.run(scr.finish_stuck_stock_count_reconcile("C1", None, admin))
+    assert out["shrinkage_value_written_off"] == 200.0
+    _accept(db, _bill("B", 2, 300, grn_id="G", bill_date="2026-11-01"))
+
+    (shrink,) = db.stock_shrinkage.find({"count_id": "C1"})
+    assert (shrink["unit_cost"], shrink["shrinkage_value"]) == (100.0, 200.0)
+    row = db.products.find_one({})["cost_history"][-1]
+    assert sorted(row["claimed"]) == ["W10", "W11"] and row["variance"]["amount"] == 400.0
+    assert round(shrink["shrinkage_value"] + row["variance"]["amount"], 2) == 600.0

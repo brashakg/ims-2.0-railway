@@ -439,7 +439,8 @@ def apply_bill(
             else:  # no average yet, only a provisional one, or nothing held at all
                 new = price
             if held + stamped < qty:
-                claimed, var = _variance(db, prod, pid, receipts, int(qty - held - stamped), val / qty)
+                claimed, var = _variance(db, prod, pid, receipts, int(qty - held - stamped), val / qty,
+                                         bill.get("store_id"))
                 if claimed:  # even at no variance: a later bill on the receipt takes the next ones
                     extra["claimed"] = claimed
                 if var:
@@ -479,6 +480,47 @@ def _average_at(prod: dict, at) -> float:
     return pmatch._f(first.get("new_cost") if first.get("kind") == "CARRIED_OVER" else first.get("old_cost"))
 
 
+def written_off_cost(db, units) -> Dict[str, float]:
+    """THE cost written-off pieces leave the books at, summed per product (a
+    product keyed by its _id or product_id, as the pieces name it): each at
+    the average in force when it was written off (_average_at at _left_at) --
+    the exact figure a later bill trues it up from (_variance), so the loss
+    plus the true-up is the bill price however late the loss is booked (a
+    write-off pressed again, a stuck count finished)."""
+    units = list(units)
+    ids = list({str(u.get("product_id")) for u in units if u.get("product_id")})
+    prods: Dict[str, dict] = {}
+    if ids:
+        for p in db.get_collection("products").find({"$or": [{"_id": {"$in": ids}}, {"product_id": {"$in": ids}}]}):
+            for k in (p.get("_id"), p.get("product_id")):
+                if k:
+                    prods[str(k)] = p
+    out: Dict[str, Decimal] = {}
+    for u in units:
+        pid = str(u.get("product_id") or "")
+        if pid in prods:
+            out[pid] = out.get(pid, Decimal(0)) + _d(_average_at(prods[pid], _left_at(db, u)))
+    return {k: _paise(v) for k, v in out.items()}
+
+
+def crossed_gstin(db, stock_ids) -> set:
+    """The pieces (of `stock_ids`) that ever left on a transfer between two
+    GSTINs (S3: ship stamps gst_registrations.crosses). Such a piece's cost at
+    the receiving GSTIN was fixed by the transfer's tax invoice at cost, so a
+    later supplier-bill true-up stays with the shop that took the bill."""
+    ids = [str(s) for s in stock_ids or [] if s]
+    if not ids:
+        return set()
+    out = set()
+    for t in db.get_collection("stock_transfers").find(
+        {"items.shipped_stock_ids": {"$in": ids}, "gst_registrations.crosses": True},
+        {"_id": 0, "items.shipped_stock_ids": 1},
+    ):
+        for ln in t.get("items") or []:
+            out.update(str(s) for s in ln.get("shipped_stock_ids") or [])
+    return out & set(ids)
+
+
 def _split(acc: Dict[str, Decimal], amount: float) -> List[dict]:
     """Per-key paisa amounts that add up to `amount` exactly (the rounding
     remainder goes to the largest)."""
@@ -488,7 +530,9 @@ def _split(acc: Dict[str, Decimal], amount: float) -> List[dict]:
     return [{"key": k, "amount": float(v)} for k, v in out.items() if v]
 
 
-def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> Tuple[List[str], Optional[dict]]:
+def _variance(
+    db, prod: dict, pid: str, receipts, gone: int, unit: Decimal, store: Optional[str] = None
+) -> Tuple[List[str], Optional[dict]]:
     """The `gone` billed pieces no longer held -- the bill's receipts' pieces
     of `pid` that left on a sale or were written off, oldest first, none an
     earlier bill claimed -- as (every piece claimed, variance or None). Each
@@ -497,8 +541,14 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
     line with no frozen cost is read at the product's live cost by the COGS
     readers: claimed, no variance. The variance carries its split per order
     line item_type and category (by_item_type / by_category: the keys the
-    P&L readers group on). A stamped pre-S4 receipt's piece that left after
-    the stamp is trued up from the figure it left the pool at (_pool_figure)."""
+    P&L readers group on), and per piece (`lines`: its shop, item_type,
+    category, amount -- what a shop-scoped reader sums). A piece's shop (lead
+    ruling 2026-11-02, to confirm with the CA): the shop it left from (sold or
+    written off there) -- moved inside one GSTIN, the receiving shop's cost --
+    unless it ever crossed a GSTIN (crossed_gstin), when it stays with
+    `store`, the shop that took the supplier bill. A stamped pre-S4 receipt's
+    piece that left after the stamp is trued up from the figure it left the
+    pool at (_pool_figure)."""
     by_id = {g["grn_id"]: g for g in receipts or [] if g.get("grn_id")}
     ids = list(by_id)
     if not ids or gone <= 0:
@@ -519,6 +569,9 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
     stock_ids, at_sale, written_off = [], Decimal(0), 0
     by_type: Dict[str, Decimal] = {}
     by_cat: Dict[str, Decimal] = {}
+    per_piece: Dict[str, Decimal] = {}
+    keys: Dict[str, dict] = {}
+    crossed = crossed_gstin(db, [u["stock_id"] for u in units])
     for at, u in left:
         receipt = by_id[_receipt_of(u)]
         stamped = _pool_figure(prod, receipt, pid, at)
@@ -542,6 +595,9 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
         at_sale += _d(cost)
         by_type[kt or "OTHER"] = by_type.get(kt or "OTHER", Decimal(0)) + unit - _d(cost)
         by_cat[kc or "Other"] = by_cat.get(kc or "Other", Decimal(0)) + unit - _d(cost)
+        per_piece[u["stock_id"]] = unit - _d(cost)
+        keys[u["stock_id"]] = {"store_id": store if u["stock_id"] in crossed else (u.get("store_id") or store),
+                               "item_type": kt or "OTHER", "category": kc or "Other"}
     claimed = [u["stock_id"] for u in units]
     amount = _paise(unit * len(stock_ids) - at_sale)
     if not stock_ids or not amount:
@@ -549,7 +605,9 @@ def _variance(db, prod: dict, pid: str, receipts, gone: int, unit: Decimal) -> T
     return claimed, {"pieces": len(stock_ids), "stock_ids": stock_ids, "receipt_ids": ids,
                      "bill_price": _paise(unit), "sold_at_cost": _paise(at_sale), "amount": amount,
                      "written_off": written_off,
-                     "by_item_type": _split(by_type, amount), "by_category": _split(by_cat, amount)}
+                     "by_item_type": _split(by_type, amount), "by_category": _split(by_cat, amount),
+                     "lines": [{"stock_id": s["key"], **keys[s["key"]], "amount": s["amount"]}
+                               for s in _split(per_piece, amount)]}
 
 
 def _record_variance(db, pid: str, bill: dict, key: str, row: Optional[dict]) -> None:
@@ -585,10 +643,13 @@ def variance_by(db, field: Optional[str] = None, *, store_ids=None, from_day=Non
     adds to its COGS. Summed per `field` (None: one total under the key None;
     "store_id"; "item_type" / "category": the sold lines' own keys, as
     /finance/pnl/by-category and growth.profit_by_category group them), bills
-    dated (IST day) within the range, to the paisa."""
+    dated (IST day) within the range, to the paisa. A row with per-piece
+    `lines` is read from them (each piece's own shop: _variance), so a
+    shop-scoped read takes only its shop's pieces."""
     q: dict = {}
     if store_ids is not None:
-        q["store_id"] = {"$in": list(store_ids)}
+        stores = list(store_ids)
+        q["$or"] = [{"store_id": {"$in": stores}}, {"lines.store_id": {"$in": stores}}]
     if from_day:
         q.setdefault("day", {})["$gte"] = str(from_day)[:10]
     if to_day:
@@ -598,7 +659,10 @@ def variance_by(db, field: Optional[str] = None, *, store_ids=None, from_day=Non
         return out
     for v in db.get_collection(VARIANCES).find(q):
         parts = [(v.get(field) if field else None, v.get("amount"))]
-        if field and isinstance(v.get(f"by_{field}"), list):
+        if isinstance(v.get("lines"), list):
+            parts = [(ln.get(field, v.get(field)) if field else None, ln["amount"]) for ln in v["lines"]
+                     if store_ids is None or ln.get("store_id") in stores]
+        elif field and isinstance(v.get(f"by_{field}"), list):
             parts = [(s["key"], s["amount"]) for s in v[f"by_{field}"]]
         for k, amount in parts:
             out[k] = out.get(k, Decimal(0)) + _d(amount)
