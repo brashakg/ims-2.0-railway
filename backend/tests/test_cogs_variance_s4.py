@@ -494,3 +494,56 @@ def test_a_stuck_count_finished_after_the_average_moved_books_the_loss_at_the_wr
     row = db.products.find_one({})["cost_history"][-1]
     assert sorted(row["claimed"]) == ["W10", "W11"] and row["variance"]["amount"] == 400.0
     assert round(shrink["shrinkage_value"] + row["variance"]["amount"], 2) == 600.0
+
+
+class _SkuRepo:
+    def __init__(self, db):
+        self.db = db
+
+    def find_by_sku(self, sku):
+        return self.db.products.find_one({"sku": sku}, {"_id": 0})
+
+
+def test_an_online_piece_sold_before_its_bill_is_trued_up_and_books_balance():
+    """9 old pieces at 100; receipt G brought 2 -- 1 held, 1 sold ONLINE
+    before its bill. The Shopify line (shopify_ingest._map_line_items) names
+    the Shopify product id and keeps the IMS one in ims_product_id; it
+    freezes the average at sale, 100. Bill B, 2 at 160: the held piece
+    averages in, (900 + 160) / 10 = 106.00; the online piece is trued up by
+    160 - 100 = 60. Stock + the line's COGS + the variance is exactly what
+    was paid -- the bill's 160 for the online piece never drops out."""
+    from api.services import margin_basis, shopify_ingest, stock_value
+
+    db = _db(100.0, category="FRAME", sku="SKU-P")
+    _pieces(db, 9)
+    _receipt(db, "G", 2)
+    _pieces(db, 1, "G")
+    (line,) = shopify_ingest._map_line_items(
+        {"line_items": [{"product_id": 8812345, "sku": "SKU-P", "price": "500.00", "quantity": 1}]},
+        _SkuRepo(db))
+    assert (line["product_id"], line["ims_product_id"], line["cost_at_sale"]) == ("8812345", "P", 100.0)
+    db.stock_units.insert_one({"stock_id": "SG9", "product_id": "P", "store_id": "S1", "status": "SOLD",
+                               "quantity": 1, "grn_id": "G", "order_id": "OWEB",
+                               "sold_at": "2026-10-20T10:00:00"})
+    db.orders.insert_one({"order_id": "OWEB", "items": [line]})
+    _accept(db, _bill("B", 2, 160, grn_id="G", bill_date="2026-10-31", store_id="S1"))
+    assert _avg(db) == 106.0
+    (var,) = db.cogs_variances.find({})
+    assert (var["stock_ids"], var["sold_at_cost"], var["amount"]) == (["SG9"], 100.0, 60.0)
+    assert product_cost.variance_by(db) == {None: 60.0}
+    stock = stock_value.value(10, db.products.find_one({}))
+    cogs = margin_basis.line_unit_cost(line, margin_basis.cost_by_product(db))
+    assert round(stock + cogs + product_cost.variance_by(db)[None], 2) == 9 * 100 + 2 * 160
+
+
+def test_an_online_line_freezes_no_cost_for_a_product_without_one():
+    """A product with no cost yet (or only a cataloguing price) freezes None,
+    never 0: the readers then estimate, they never book Rs 0 COGS."""
+    from api.services import shopify_ingest
+
+    for extra in ({"cost_price": None}, {"cost_price": 250.0, "cost_price_is_catalogue_only": True}):
+        db = mongomock.MongoClient().s4
+        db.products.insert_one({"product_id": "P", "sku": "SKU-P", **extra})
+        (line,) = shopify_ingest._map_line_items(
+            {"line_items": [{"product_id": 1, "sku": "SKU-P", "price": "500.00", "quantity": 1}]}, _SkuRepo(db))
+        assert line["ims_product_id"] == "P" and line["cost_at_sale"] is None

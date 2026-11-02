@@ -546,8 +546,13 @@ def _variance(
     earlier bill claimed -- as (every piece claimed, variance or None). Each
     is trued up at (bill unit price - the cost it left at): its sale line's
     cost_at_sale, or the average in force when it was written off. A sale
-    line with no frozen cost is read at the product's live cost by the COGS
-    readers: claimed, no variance. The variance carries its split per order
+    line is matched on its IMS product (an online line: ims_product_id; its
+    product_id is Shopify's), and every line freezes its cost at sale (POS:
+    orders/create; online: shopify_ingest._map_line_items). A line with no
+    frozen cost (a product with no cost when sold, or a line from before
+    freezing) is claimed with no variance: the COGS readers price it at the
+    product's live cost when its product_id finds one, else they estimate --
+    the bill's price for it is not trued up. The variance carries its split per order
     line item_type and category (by_item_type / by_category: the keys the
     P&L readers group on), and per piece (`lines`: its shop, item_type,
     category, amount -- what a shop-scoped reader sums). A piece's shop (lead
@@ -593,7 +598,8 @@ def _variance(
             written_off += 1
         else:
             line = next((it for it in (orders.get(u["order_id"]) or {}).get("items") or []
-                         if it.get("product_id") == pid and it.get("cost_at_sale") is not None), None)
+                         if (it.get("ims_product_id") or it.get("product_id")) == pid
+                         and it.get("cost_at_sale") is not None), None)
             if line is None:
                 continue
             cost, kt, kc = line["cost_at_sale"], line.get("item_type") or line.get("category"), line.get("category")
