@@ -677,10 +677,10 @@ def unsell(db, stock_ids, at) -> List[dict]:
             # product this call has not averaged back in yet (this one
             # included) -- else a sibling still waiting would sit in the
             # pool at the old average.
-            keys = prod.get("cost_keys") or []
             pending = {ln2["stock_id"]: Decimal(str(stock_value._pieces(held[ln2["stock_id"]]))) for v, ln2, k in todo
-                       if v["product_id"] == pid and k not in keys}
-            before = max(Decimal(0), Decimal(str(basis_pieces(db, pid, keys))) - sum(pending.values()))
+                       if v["product_id"] == pid and k not in (prod.get("cost_keys") or [])}
+            basis = Decimal(str(basis_pieces(db, pid, prod.get("cost_keys") or [])))
+            before = max(Decimal(0), basis - sum(pending.values()))
             avg = Decimal(str(average(prod)))
             new = (before * avg + n * back) / (before + n) if avg and before else back
             return _paise(new), {"stock_id": sid, "reverses": vid, "returned_at": _paise(back),
