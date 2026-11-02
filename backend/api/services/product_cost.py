@@ -268,13 +268,12 @@ def _waiting_unsell(db, product_id: str, cost_keys) -> float:
     stock (a cancel, a return, a write-off undone, even one whose unsell
     failed or is running now), not averaged back in yet: THE one rule every
     basis reader (apply_bill, unsell) leaves them out by."""
-    keys = set(cost_keys or ())
     sids = {
         ln["stock_id"]
         for var in db.get_collection(VARIANCES).find({"product_id": product_id, "reverses": None},
                                                      {"_id": 0, "variance_id": 1, "lines": 1})
         for ln in var.get("lines") or []
-        if ln.get("cost") is not None and f"UNSELL:{ln['stock_id']}:{var['variance_id']}" not in keys
+        if ln.get("cost") is not None and f"UNSELL:{ln['stock_id']}:{var['variance_id']}" not in (cost_keys or ())
     }
     if not sids:
         return 0.0
