@@ -547,3 +547,138 @@ def test_an_online_line_freezes_no_cost_for_a_product_without_one():
         (line,) = shopify_ingest._map_line_items(
             {"line_items": [{"product_id": 1, "sku": "SKU-P", "price": "500.00", "quantity": 1}]}, _SkuRepo(db))
         assert line["ims_product_id"] == "P" and line["cost_at_sale"] is None
+
+
+# --------------------------------------------------------------------------
+# Round 19: ONE 'which receipt did this piece come in on' rule, and a sale
+# undone after its bill trued it up.
+# --------------------------------------------------------------------------
+
+
+def _legacy(db, sid, status="AVAILABLE", **extra):
+    """A piece received before #1165 (no grn_id), then TRANSFERRED: the move
+    rewrote its source to the transfer; only its grn_number names the receipt."""
+    db.stock_units.insert_one({"stock_id": sid, "product_id": "P", "store_id": "S2", "status": status,
+                               "quantity": 1, "source_type": "TRANSFER", "source_id": "T1",
+                               "grn_number": "BV-1", **extra})
+
+
+def test_an_older_piece_transferred_before_its_bill_keeps_its_receipt():
+    """10 billed pieces at 100; receipt G (BV-1, before #1165: its pieces have
+    no grn_id) brought 11, all transferred before the bill -- 10 held, 1 sold
+    at the frozen 100. Bill B, 11 at 120: the 10 held average in,
+    (1000 + 1200) / 20 = 110.00, and the sold one is trued up by 20. Stock +
+    the sale's COGS + the variance is exactly what was paid."""
+    from api.services import stock_value
+
+    db = _db(100.0)
+    _pieces(db, 10)
+    _receipt(db, "G", 11, grn_number="BV-1")
+    for i in range(10):
+        _legacy(db, f"L{i}")
+    _legacy(db, "LS", status="SOLD", order_id="O1", sold_at="2026-10-20T10:00:00")
+    db.orders.insert_one({"order_id": "O1", "items": [{"product_id": "P", "quantity": 1, "cost_at_sale": 100.0}]})
+    _accept(db, _bill("B", 11, 120, grn_id="G", bill_date="2026-10-31", store_id="S1"))
+    assert _avg(db) == 110.0
+    (var,) = db.cogs_variances.find({})
+    assert (var["stock_ids"], var["amount"]) == (["LS"], 20.0)
+    stock = stock_value.value(20, db.products.find_one({}))
+    assert round(stock + 100.0 + product_cost.variance_by(db)[None], 2) == 10 * 100 + 11 * 120
+
+
+def test_the_receipt_rule_is_the_receipt_count_rule():
+    """receipt_of(unit) names exactly the receipt whose origin filters (the
+    receipt count's) match the unit -- one rule, read both ways. A number two
+    receipts share names neither."""
+    from api.services import receipt_origin
+
+    db = mongomock.MongoClient().s4
+    db.grns.insert_many([{"grn_id": "G1", "grn_number": "BV-1"}, {"grn_id": "G2", "grn_number": "BV-2"},
+                         {"grn_id": "G3", "grn_number": "BV-D"}, {"grn_id": "G4", "grn_number": "BV-D"}])
+    db.stock_units.insert_many([
+        {"stock_id": "a", "grn_id": "G1", "source_type": "TRANSFER", "source_id": "T", "grn_number": "BV-2"},
+        {"stock_id": "b", "source_type": "GRN", "source_id": "G2"},
+        {"stock_id": "c", "source_type": "TRANSFER", "source_id": "T", "grn_number": "BV-1"},
+        {"stock_id": "d", "source_type": "TRANSFER", "source_id": "T", "grn_number": "BV-D"},
+        {"stock_id": "e", "source_type": "OPENING_STOCK", "source_id": "X"},
+    ])
+    by_filter = {}
+    for g in db.grns.find({}, {"_id": 0}):
+        unique = receipt_origin.number_is_unique(db.grns, g["grn_number"])
+        for flt in receipt_origin.origin_filters(g, unique):
+            for u in db.stock_units.find(flt):
+                by_filter.setdefault(u["stock_id"], []).append(g["grn_id"])
+    by_unit = {u["stock_id"]: receipt_origin.receipt_of(db, u) for u in db.stock_units.find({})}
+    assert by_unit == {"a": "G1", "b": "G2", "c": "G1", "d": None, "e": None}
+    assert {s: [r] for s, r in by_unit.items() if r} == by_filter
+
+
+def test_the_backfill_finds_a_transferred_older_pieces_bill():
+    """The backfill's 'billed before S4' reads the same rule: a held piece
+    moved before #1165 still finds its receipt's pre-S4 bill."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(100.0, cost_source="PO_RATE")
+    _receipt(db, "G", 1, grn_number="BV-1")
+    _legacy(db, "L0")
+    db.vendor_bills.insert_one({"bill_id": "OLD", "grn_id": "G", "status": "PAID"})
+    assert bf.billed_before_s4(db, list(db.stock_units.find({})))
+
+
+def _release(db, order_id):
+    from database.repositories.product_repository import StockRepository
+
+    return StockRepository(db.stock_units).release_sold_units_for_order(order_id)
+
+
+def test_an_online_sale_cancelled_after_its_bill_comes_back_at_its_billed_cost():
+    """The round-18 online sale (9 at 100, 1 held of G, 1 sold online at the
+    frozen 100; bill 2 at 160 -> 106.00, variance 60) is CANCELLED after the
+    bill: the piece comes back at 100 + 60 = 160, (10 x 106 + 160) / 11 =
+    110.91, its 60 is reversed on the cancel's day (net variance 0), and the
+    history says UNSOLD. Releasing again writes nothing."""
+    from api.services import shopify_ingest, stock_value
+
+    db = _db(100.0, category="FRAME", sku="SKU-P")
+    _pieces(db, 9)
+    _receipt(db, "G", 2)
+    _pieces(db, 1, "G")
+    (line,) = shopify_ingest._map_line_items(
+        {"line_items": [{"product_id": 8812345, "sku": "SKU-P", "price": "500.00", "quantity": 1}]},
+        _SkuRepo(db))
+    db.stock_units.insert_one({"stock_id": "SG9", "product_id": "P", "store_id": "S1", "status": "SOLD",
+                               "quantity": 1, "grn_id": "G", "order_id": "OWEB",
+                               "sold_at": "2026-10-20T10:00:00"})
+    db.orders.insert_one({"order_id": "OWEB", "items": [line]})
+    _accept(db, _bill("B", 2, 160, grn_id="G", bill_date="2026-10-31", store_id="S1"))
+    assert _avg(db) == 106.0
+    assert _release(db, "OWEB").released == ["SG9"]
+    assert _avg(db) == 110.91
+    assert product_cost.variance_by(db) == {None: 0.0}
+    assert product_cost.variance_by(db, "store_id") == {"S1": 0.0}
+    rev = db.cogs_variances.find_one({"variance_id": "UNSELL:SG9:B:P"}, {"_id": 0})
+    assert (rev["amount"], rev["reverses"], rev["day"]) == (-60.0, "B:P", ist_today().isoformat())
+    row = db.products.find_one({})["cost_history"][-1]
+    assert (row["kind"], row["key"], row["old_cost"], row["new_cost"]) == ("UNSOLD", "UNSELL:SG9:B:P", 106.0, 110.91)
+    # 11 x 110.91: the pool is 1060 + 160 = 1220.00, the average kept to the paisa.
+    assert stock_value.value(11, db.products.find_one({})) == 1220.01
+    snap = (list(db.cogs_variances.find({}, {"_id": 0})), db.products.find_one({}, {"_id": 0}))
+    _release(db, "OWEB")
+    product_cost.unsell(db, ["SG9"], utc_now().isoformat())
+    assert (list(db.cogs_variances.find({}, {"_id": 0})), db.products.find_one({}, {"_id": 0})) == snap
+
+
+def test_a_till_sale_cancelled_after_its_bill_books_what_was_paid():
+    """One piece of G sold at the till at the frozen 100 before its bill; bill
+    B, 1 at 160 (nothing held: average 160, variance 60). The sale is
+    cancelled: stock 160 + net variance 0 == the 160 paid (not 160 + 60)."""
+    from api.services import stock_value
+
+    db = _db(100.0)
+    _receipt(db, "G", 1)
+    _sold(db, "G", [100.0])
+    _accept(db, _bill("B", 1, 160, grn_id="G", bill_date="2026-10-31", store_id="S1"))
+    assert _release(db, "OG0").released == ["SG0"]
+    stock = stock_value.value(1, db.products.find_one({}))
+    assert (stock, product_cost.variance_by(db)) == (160.0, {None: 0.0})
+    assert round(stock + product_cost.variance_by(db)[None], 2) == 160.0

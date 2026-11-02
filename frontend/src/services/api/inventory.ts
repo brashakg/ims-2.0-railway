@@ -545,7 +545,7 @@ export const inventoryApi = {
  *  accounts correction, opening stock or the backfill. */
 export interface CostHistoryRow {
   key: string;
-  kind: 'BILL' | 'CORRECTION' | 'OPENING_STOCK' | 'BACKFILL' | 'CARRIED_OVER';
+  kind: 'BILL' | 'CORRECTION' | 'OPENING_STOCK' | 'BACKFILL' | 'CARRIED_OVER' | 'UNSOLD';
   at: string;
   by?: string | null;
   by_name?: string;
@@ -560,6 +560,8 @@ export interface CostHistoryRow {
   old_cost: number | null;
   new_cost: number;
   reason?: string;
+  /** UNSOLD: what a piece sold before its bill came back at (owner-paid cost). */
+  returned_at?: number;
 }
 
 /** GET /inventory/products/{id}/cost: pieces held in every shop, the one

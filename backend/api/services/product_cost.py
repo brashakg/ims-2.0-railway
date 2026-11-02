@@ -68,6 +68,7 @@ from api.utils.event_time import utc_now_iso
 from . import purchase_match as pmatch
 from . import stock_value
 from .item_events import StockState, canonical_state, is_on_hand
+from .receipt_origin import receipt_of
 
 logger = logging.getLogger(__name__)
 
@@ -157,14 +158,6 @@ def _left_at(db, unit: dict) -> str:
     return _utc_iso(_lost_at(db, unit))
 
 
-def _receipt_of(unit: dict) -> Optional[str]:
-    """The goods receipt (or delivery challan) a piece came in on -- it
-    survives a transfer."""
-    if unit.get("grn_id"):
-        return unit["grn_id"]
-    return unit.get("source_id") if unit.get("source_type") == "GRN" else None
-
-
 # A receipt accepted before S4 that no bill has costed under S4 (the backfill
 # stamps it with its run id, the time, and per product the figure its held
 # pieces are in the pool at: the product's average then, or -- for a product
@@ -226,7 +219,7 @@ def _waiting(db, product_id: str, cost_keys) -> Tuple[float, Dict[str, float], D
     held: Dict[Optional[str], float] = {}
     for unit in db.get_collection("stock_units").find({"product_id": product_id}):
         if _held(unit):
-            r = _receipt_of(unit)
+            r = receipt_of(db, unit)
             held[r] = held.get(r, 0.0) + stock_value._pieces(unit)
     total = sum(held.values())
     ids = [r for r in held if r]
@@ -555,7 +548,8 @@ def _variance(
     the bill's price for it is not trued up. The variance carries its split per order
     line item_type and category (by_item_type / by_category: the keys the
     P&L readers group on), and per piece (`lines`: its shop, item_type,
-    category, amount -- what a shop-scoped reader sums). A piece's shop (lead
+    category, the cost it left at, amount -- what a shop-scoped reader sums;
+    unsell reads it back). A piece's shop (lead
     ruling 2026-11-02, to confirm with the CA): the shop it left from (sold or
     written off there) -- moved inside one GSTIN, the receiving shop's cost --
     unless it ever crossed a GSTIN (crossed_gstin), when it stays with
@@ -567,10 +561,11 @@ def _variance(
     if not ids or gone <= 0:
         return [], None
     taken = {s for r in history(prod) for s in r.get("claimed") or []}
+    gone_units = [u for u in db.get_collection("stock_units").find({"product_id": pid})
+                  if u.get("stock_id") not in taken and ((u.get("order_id") and not _held(u)) or _written_off(u))]
+    origin = {id(u): receipt_of(db, u) for u in gone_units}
     left = sorted(
-        ((_left_at(db, u), u) for u in db.get_collection("stock_units").find({"product_id": pid})
-         if _receipt_of(u) in ids and u.get("stock_id") not in taken
-         and ((u.get("order_id") and not _held(u)) or _written_off(u))),
+        ((_left_at(db, u), u) for u in gone_units if origin[id(u)] in ids),
         key=lambda p: p[0],
     )[:gone]
     units = [u for _, u in left]
@@ -586,7 +581,7 @@ def _variance(
     keys: Dict[str, dict] = {}
     crossed = crossed_gstin(db, units)
     for at, u in left:
-        receipt = by_id[_receipt_of(u)]
+        receipt = by_id[origin[id(u)]]
         stamped = _pool_figure(prod, receipt, pid, at)
         if stamped is not None and at < _utc_iso((receipt.get(PRE_S4_AT_BY) or {}).get(pid)
                                                  or receipt.get(PRE_S4_AT)):
@@ -611,7 +606,7 @@ def _variance(
         by_cat[kc or "Other"] = by_cat.get(kc or "Other", Decimal(0)) + unit - _d(cost)
         per_piece[u["stock_id"]] = unit - _d(cost)
         keys[u["stock_id"]] = {"store_id": store if u["stock_id"] in crossed else (u.get("store_id") or store),
-                               "item_type": kt or "OTHER", "category": kc or "Other"}
+                               "item_type": kt or "OTHER", "category": kc or "Other", "cost": _paise(_d(cost))}
     claimed = [u["stock_id"] for u in units]
     amount = _paise(unit * len(stock_ids) - at_sale)
     if not stock_ids or not amount:
@@ -644,6 +639,73 @@ def _record_variance(db, pid: str, bill: dict, key: str, row: Optional[dict]) ->
                 "bill_number": row.get("bill_number"), "vendor_name": row.get("vendor_name"),
                 "product_id": pid, "category": prod.get("category"), "store_id": bill.get("store_id"),
                 "day": day, "period": day[:7], "at": row.get("at"), "by": row.get("by"),
+            }},
+            upsert=True,
+        )
+    except DuplicateKeyError:  # a twin run inserted it first (unique variance_id)
+        pass
+
+
+def unsell(db, stock_ids, at) -> List[dict]:
+    """A sale undone (cancelled, released) AFTER a bill trued its piece up:
+    the piece is ours again at what it was paid -- the cost it left at plus
+    its variance -- so it averages back in at that figure (an UNSOLD history
+    row) and its variance is reversed by a row dated the undo's IST day
+    (`at`). Exactly once per (piece, variance row): the key
+    UNSELL:<stock_id>:<variance_id> guards both, so a repeated release
+    writes nothing. Called once, by the one release door
+    (StockRepository.release_sold_units_for_order). Returns the rows written."""
+    ids = [str(s) for s in stock_ids or [] if s]
+    held = {u["stock_id"]: u for u in db.get_collection("stock_units").find({"stock_id": {"$in": ids}})
+            if _held(u)} if ids else {}
+    rows = []
+    for var in list(db.get_collection(VARIANCES).find({"stock_ids": {"$in": list(held)}, "reverses": None})) if held else []:
+        pid = var["product_id"]
+        for ln in var.get("lines") or []:
+            sid = ln.get("stock_id")
+            if sid not in held or ln.get("cost") is None:
+                continue
+            key = f"UNSELL:{sid}:{var['variance_id']}"
+            n, back = Decimal(str(stock_value._pieces(held[sid]))), _d(ln["cost"]) + _d(ln["amount"])
+
+            def work(prod, _old, n=n, back=back, pid=pid, sid=sid, vid=var["variance_id"]):
+                # The pieces in the pool before this one came back.
+                before = max(Decimal(0), Decimal(str(basis_pieces(db, pid, prod.get("cost_keys") or []))) - n)
+                avg = Decimal(str(average(prod)))
+                new = (before * avg + n * back) / (before + n) if avg and before else back
+                return _paise(new), {"stock_id": sid, "reverses": vid, "returned_at": _paise(back),
+                                     "basis": float(before)}
+
+            row = _move(db, pid, key, work, {"kind": "UNSOLD", "source": "SALE_UNDONE", "by": None})
+            if row:
+                rows.append({**row, "product_id": pid})
+            else:  # applied before (a crash re-run): its history row says when
+                prod = db.get_collection("products").find_one({"product_id": pid}) or {}
+                row = next((r for r in prod.get("cost_history") or [] if r.get("key") == key), None)
+            if row:
+                _record_unsell(db, var, ln, key, at)
+    return rows
+
+
+def _record_unsell(db, var: dict, ln: dict, key: str, at) -> None:
+    """The reversing variance row of one piece: its line negated, same shop
+    and keys, dated the undo's IST day; never doubled (upsert on its key)."""
+    from api.utils.ist import ist_date_str_from_stored
+
+    day = ist_date_str_from_stored(at)
+    minus = -pmatch._f(ln["amount"])
+    try:
+        db.get_collection(VARIANCES).update_one(
+            {"variance_id": key},
+            {"$setOnInsert": {
+                "variance_id": key, "reverses": var["variance_id"], "bill_id": var.get("bill_id"),
+                "bill_number": var.get("bill_number"), "vendor_name": var.get("vendor_name"),
+                "product_id": var["product_id"], "category": var.get("category"), "store_id": var.get("store_id"),
+                "pieces": -1, "stock_ids": [ln["stock_id"]], "receipt_ids": var.get("receipt_ids"),
+                "amount": minus, "lines": [{**ln, "amount": minus}],
+                "by_item_type": [{"key": ln.get("item_type"), "amount": minus}],
+                "by_category": [{"key": ln.get("category"), "amount": minus}],
+                "day": day, "period": day[:7], "at": at,
             }},
             upsert=True,
         )

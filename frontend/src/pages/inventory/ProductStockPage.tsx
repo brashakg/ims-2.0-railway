@@ -49,6 +49,9 @@ export function historyLine(row: CostHistoryRow): { label: string; text: string 
   if (row.kind === 'CORRECTION') {
     return { label: 'Correction', text: `${who}: average ${move} · reason "${row.reason || ''}"` };
   }
+  if (row.kind === 'UNSOLD') {
+    return { label: 'Sale undone', text: `a sold piece came back at its billed cost ${money(row.returned_at)}: average ${move}` };
+  }
   if (row.kind === 'CARRIED_OVER') {
     return { label: 'Carried over', text: `average ${money(row.new_cost)} as it stood before bill-by-bill averaging began` };
   }

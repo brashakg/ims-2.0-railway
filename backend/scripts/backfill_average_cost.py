@@ -122,6 +122,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.services import product_cost, stock_value  # noqa: E402
 from api.services.ap_engine import GRN_SUBTYPE_NO_PO  # noqa: E402
+from api.services.receipt_origin import receipt_of  # noqa: E402
 from api.utils.event_time import utc_now_iso  # noqa: E402
 
 BACKUPS = "backfill_average_cost_backups"
@@ -177,7 +178,7 @@ def plan(db) -> List[dict]:
             "product_id": pid, "sku": prod.get("sku"), "pieces": pieces, "average": average or None,
             "value_s4": stock_value.value(pieces, prod), "value_before": round(old_value, 2),
             "fill": fill, "recost": recost, "reason": reason, "check": check or _suspect(db, prod),
-            "own": _own_by_receipt(units) if fill is not None else {},
+            "own": _own_by_receipt(db, units) if fill is not None else {},
         })
     return rows
 
@@ -191,14 +192,15 @@ def _from_pieces(units: List[dict], pieces: float) -> Optional[float]:
     return float((total / Decimal(str(pieces))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
 
 
-def _own_by_receipt(units: List[dict]) -> Dict[str, float]:
+def _own_by_receipt(db, units: List[dict]) -> Dict[str, float]:
     """{receipt: its held pieces' own average} -- the very pieces a fill
     averages, so each receipt's pieces are stamped at the cost they went
     into the new average at."""
     by: Dict[str, List[dict]] = {}
     for u in units:
-        if product_cost._receipt_of(u):
-            by.setdefault(product_cost._receipt_of(u), []).append(u)
+        r = receipt_of(db, u)
+        if r:
+            by.setdefault(r, []).append(u)
     return {r: _from_pieces(us, sum(stock_value._pieces(u) for u in us)) for r, us in by.items()}
 
 
@@ -255,7 +257,7 @@ def billed_before_s4(db, units: List[dict]) -> bool:
     """A held piece's receipt carries an ACCEPTED pre-S4 bill (no cost_state):
     before S4 a GST-claiming header bill on a PO receipt left the PO rate as
     the cost (no true-up), so that provisional-looking cost IS billed."""
-    ids = list({product_cost._receipt_of(u) for u in units} - {None})
+    ids = list({receipt_of(db, u) for u in units} - {None})
     if not ids:
         return False
     return any(

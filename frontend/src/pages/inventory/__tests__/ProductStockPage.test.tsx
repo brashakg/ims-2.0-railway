@@ -145,4 +145,10 @@ describe('a bill row in the cost history', () => {
     expect(historyLine(row).text).toContain('2 already sold: ₹60 to cost of goods');
     expect(historyLine(CARD.history[0] as Parameters<typeof historyLine>[0]).text).not.toContain('already sold');
   });
+
+  it('names a cancelled sale coming back at its billed cost, not as a first cost', () => {
+    const row = { key: 'UNSELL:S1:B:P', kind: 'UNSOLD', at: '', old_cost: 106, new_cost: 110.91, returned_at: 160 } as Parameters<typeof historyLine>[0];
+    expect(historyLine(row)).toEqual(expect.objectContaining({ label: 'Sale undone' }));
+    expect(historyLine(row).text).toContain('₹160');
+  });
 });
