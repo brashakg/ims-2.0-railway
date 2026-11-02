@@ -61,6 +61,15 @@ class _ProductRepo:
             return True
         return False
 
+    def update_if(self, pid, expected, fields):
+        """The cost fill's guarded write: lands only while the stored doc matches."""
+        doc = self.products.get(pid) or {}
+        for key, want in expected.items():
+            have = doc.get(key)
+            if not (have in want["$in"] if isinstance(want, dict) else have == want):
+                return False
+        return self.update(pid, fields)
+
 
 class _PORepo:
     def __init__(self):

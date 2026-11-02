@@ -39,6 +39,32 @@ from ..utils.ist import (
 )
 from ..services.online_order_status import BOOKED_STATUSES
 
+
+def _shelf_at_cost() -> list:
+    """Every shop's units on the shelf, each valued by THE stock value rule
+    (stock_value.shelf_units: pieces x the product's one average cost).
+    Jarvis is SUPERADMIN-only, so cost may show. Fail-soft: []."""
+    try:
+        from ..dependencies import get_product_repository, get_stock_repository
+        from ..services import stock_value
+
+        stock_repo = get_stock_repository()
+        if stock_repo is None:
+            return []
+        return stock_value.shelf_units(stock_repo, get_product_repository(), None)
+    except Exception:  # noqa: BLE001
+        logger.warning("JARVIS stock value at cost failed", exc_info=True)
+        return []
+
+
+def _stock_value_at_cost() -> tuple:
+    """(every shop's stock value at cost, pieces with no cost yet -- the
+    figure is too low by those)."""
+    from ..services import stock_value
+
+    units = _shelf_at_cost()
+    return stock_value.total(units), stock_value.uncosted(units)
+
 logger = logging.getLogger(__name__)
 
 # Anthropic Claude Configuration
@@ -194,13 +220,11 @@ class JarvisAnalyticsEngine:
             # Inventory
             products_col = get_db_collection("products")
             total_products = low_stock = out_of_stock = 0
-            inv_value = 0.0
+            inv_value, inv_uncosted = _stock_value_at_cost()
             if products_col is not None:
                 for p in products_col.find({}):
                     total_products += 1
                     qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-                    price = float(p.get("offer_price") or p.get("mrp") or 0)
-                    inv_value += qty * price
                     if qty <= 0:
                         out_of_stock += 1
                 # Every shop judged by its own level (D12).
@@ -252,6 +276,7 @@ class JarvisAnalyticsEngine:
                     "low_stock_items": low_stock,
                     "out_of_stock": out_of_stock,
                     "inventory_value": round(inv_value, 2),
+                    "inventory_uncosted_units": inv_uncosted,
                     "fast_moving_count": 0,
                     "slow_moving_count": 0,
                     "expiring_soon": 0,
@@ -437,7 +462,7 @@ class JarvisAnalyticsEngine:
             critical_alerts = []
             reorder_recs = []
             total = oos = 0
-            total_value = 0.0
+            total_value, uncosted_units = _stock_value_at_cost()
             by_id: Dict[str, Dict] = {}
             for p in products_col.find({}):
                 if p.get("is_active") is False:
@@ -445,10 +470,6 @@ class JarvisAnalyticsEngine:
                 total += 1
                 by_id[str(p.get("product_id"))] = p
                 qty = int(p.get("stock_quantity") or p.get("quantity") or 0)
-                price = float(
-                    p.get("offer_price") or p.get("mrp") or p.get("cost_price") or 0
-                )
-                total_value += qty * price
                 name = p.get("name") or p.get("product_name") or "Unknown"
                 sku = p.get("sku") or p.get("product_id") or ""
                 if qty <= 0:
@@ -520,6 +541,7 @@ class JarvisAnalyticsEngine:
                     "low_stock": low,
                     "out_of_stock": oos,
                     "inventory_value": round(total_value, 2),
+                    "inventory_uncosted_units": uncosted_units,
                 },
             }
         except Exception as e:
@@ -1128,41 +1150,34 @@ class JarvisAnalyticsEngine:
                 )
                 ctx["top_products_by_price"] = top_by_price
 
-                # Top 20 by stock value (price * quantity_on_hand) —
-                # surfaces "which SKUs hold the most working capital".
-                top_by_value = list(
-                    prod_col.aggregate(
-                        [
-                            {"$match": {"is_active": {"$ne": False}}},
-                            {
-                                "$addFields": {
-                                    "_price": {"$ifNull": ["$offer_price", "$mrp"]},
-                                    "_qty": {"$ifNull": ["$stock_quantity", 0]},
-                                }
-                            },
-                            {
-                                "$addFields": {
-                                    "_stock_value": {"$multiply": ["$_price", "$_qty"]},
-                                }
-                            },
-                            {"$match": {"_stock_value": {"$gt": 0}}},
-                            {"$sort": {"_stock_value": -1}},
-                            {"$limit": 20},
-                            {
-                                "$project": {
-                                    "_id": 0,
-                                    "name": 1,
-                                    "brand": 1,
-                                    "category": 1,
-                                    "store_id": 1,
-                                    "price": "$_price",
-                                    "stock_quantity": "$_qty",
-                                    "stock_value": "$_stock_value",
-                                }
-                            },
-                        ]
+                # Top 20 by stock value at cost (THE stock value rule:
+                # pieces on the shelf x the product's one average cost) --
+                # "which SKUs hold the most working capital". Pieces with no
+                # cost yet are counted beside it, never priced at the offer.
+                from ..services import stock_value as _sv
+
+                shelf = _shelf_at_cost()
+                held = _sv.by_product(shelf)
+                ranked = sorted(held.items(), key=lambda kv: -(kv[1]["cost"] or 0))[:20]
+                names = {
+                    str(p.get("product_id")): p
+                    for p in prod_col.find(
+                        {"product_id": {"$in": [pid for pid, _ in ranked]}},
+                        {"_id": 0, "product_id": 1, "name": 1, "brand": 1, "category": 1},
                     )
-                )
+                } if ranked else {}
+                top_by_value = [
+                    {
+                        "name": (names.get(str(pid)) or {}).get("name"),
+                        "brand": (names.get(str(pid)) or {}).get("brand"),
+                        "category": (names.get(str(pid)) or {}).get("category"),
+                        "pieces": row["units"],
+                        "average_cost": row["unit_cost"],
+                        "stock_value": row["cost"],
+                        "uncosted_pieces": row["uncosted_units"],
+                    }
+                    for pid, row in ranked
+                ]
                 ctx["top_stock_value"] = top_by_value
 
                 # Catalog summary by category + brand, plus a per-store
@@ -1244,43 +1259,31 @@ class JarvisAnalyticsEngine:
 
                 # Per-store catalog roll-up — answers "how many SKUs in
                 # Pune?" without JARVIS having to count.
-                by_store = list(
-                    prod_col.aggregate(
-                        [
-                            {"$match": {"is_active": {"$ne": False}}},
-                            {
-                                "$group": {
-                                    "_id": "$store_id",
-                                    "sku_count": {"$sum": 1},
-                                    "total_stock_value": {
-                                        "$sum": {
-                                            "$multiply": [
-                                                {
-                                                    "$ifNull": [
-                                                        "$offer_price",
-                                                        "$mrp",
-                                                        0,
-                                                    ]
-                                                },
-                                                {"$ifNull": ["$stock_quantity", 0]},
-                                            ],
-                                        }
-                                    },
-                                    "max_price_sku_name": {"$first": "$name"},
-                                }
-                            },
-                        ]
-                    )
-                )
+                skus = {
+                    str(r.get("_id") or "UNASSIGNED"): int(r.get("sku_count") or 0)
+                    for r in prod_col.aggregate([
+                        {"$match": {"is_active": {"$ne": False}}},
+                        {"$group": {"_id": "$store_id", "sku_count": {"$sum": 1}}},
+                    ])
+                }
+                at_cost: Dict[str, Dict] = {}
+                for u in shelf:
+                    row = at_cost.setdefault(str(u.get("store_id") or "UNASSIGNED"),
+                                             {"pieces": 0.0, "value": 0.0, "uncosted": 0.0})
+                    row["pieces"] += _sv._pieces(u)
+                    row["value"] += u["cost_value"]
+                    if not u.get("cost_known"):
+                        row["uncosted"] += _sv._pieces(u)
                 ctx["catalog_by_store"] = [
                     {
-                        "store_id": str(r.get("_id") or "UNASSIGNED"),
-                        "sku_count": int(r.get("sku_count") or 0),
-                        "total_stock_value": round(
-                            float(r.get("total_stock_value") or 0), 2
-                        ),
+                        "store_id": sid,
+                        "sku_count": skus.get(sid, 0),
+                        "pieces": (at_cost.get(sid) or {}).get("pieces", 0.0),
+                        # At cost (pieces x average), never offer x quantity.
+                        "total_stock_value": round((at_cost.get(sid) or {}).get("value", 0.0), 2),
+                        "uncosted_pieces": (at_cost.get(sid) or {}).get("uncosted", 0.0),
                     }
-                    for r in by_store
+                    for sid in sorted(set(skus) | set(at_cost))
                 ]
 
                 # Low-stock items, sorted by value at risk (price * gap).
@@ -2223,10 +2226,10 @@ You have **full read access to the entire IMS 2.0 database** as the Superadmin's
 **Inventory + procurement**
 - `inventory_insights` — critical alerts, reorder list, slow movers
 - `top_products_by_price` — **20 most-expensive SKUs** with brand, category, MRP, stock, store_id. Use this to answer "what's our most expensive product" / "most expensive in Pune" — filter by store_id when the user names a store.
-- `top_stock_value` — 20 SKUs holding the most working capital (price × on-hand). Useful for "where's our cash tied up".
+- `top_stock_value` — 20 SKUs holding the most working capital at COST (pieces on the shelf × the product's one average cost; `uncosted_pieces` have no cost yet, so the value is too low by them). Useful for "where's our cash tied up".
 - `catalog_by_category` — SKU count + total units + avg/max price per category (top 30). Answers "how many frame SKUs do we have" / "which category has the most expensive items".
 - `catalog_by_brand` — SKU count + total units + avg price per brand (top 30). Answers "how many Ray-Ban SKUs" / "which brand have we stocked the most of".
-- `catalog_by_store` — per-store SKU count + total stock value. Answers "how many products in Pune" / "which store has the highest inventory value".
+- `catalog_by_store` — per-store SKU count + total stock value at COST (pieces × average cost; `uncosted_pieces` have no cost yet). Answers "how many products in Pune" / "which store has the highest inventory value".
 - `low_stock_value_at_risk` — SKUs at/below reorder point, ranked by revenue at risk (price × stock gap). Answers "what are our most urgent reorders".
 - `vendors` — supplier roster (name, GSTIN, city, category)
 - `purchases.open_pos_sample` — open POs by vendor

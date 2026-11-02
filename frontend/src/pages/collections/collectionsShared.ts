@@ -5,7 +5,7 @@
 // pages so the three screens can never drift on how money, percentages and
 // the stock-value basis are rendered.
 
-import type { InsightRule, ValueBasis } from '../../services/api/collectionsInsights';
+import type { InsightRule } from '../../services/api/collectionsInsights';
 
 /** Indian-locale rupees, no paise. null/undefined/NaN -> em dash. */
 export function rupee(n?: number | null): string {
@@ -19,11 +19,11 @@ export function fmtInt(n?: number | null): string {
   return Number(n).toLocaleString('en-IN', { maximumFractionDigits: 0 });
 }
 
-/** Qualifier shown next to a stock value when it is NOT at cost basis. */
-export function basisLabel(basis?: ValueBasis | string | null): string | null {
-  if (basis === 'offer') return 'at selling price';
-  if (basis === 'mixed') return 'mixed basis';
-  return null; // 'cost' (or unknown) -> no qualifier
+/** Note beside a stock value (always at cost: pieces x average cost, S4)
+ *  when some pieces have no cost yet, so the figure is too low. */
+export function basisLabel(uncostedUnits?: number | null): string | null {
+  const n = Number(uncostedUnits || 0);
+  return n > 0 ? `${fmtInt(n)} pc${n === 1 ? '' : 's'} no cost` : null;
 }
 
 /** Percentage display tolerant of both a 0..1 fraction and a 0..100 number

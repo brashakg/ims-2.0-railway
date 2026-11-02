@@ -45,6 +45,13 @@ import api.routers.purchase_recon as recon_mod
 # ---------------------------------------------------------------------------
 
 
+class _Result:
+    """pymongo's UpdateResult, as much as the routers read of it."""
+
+    def __init__(self, n):
+        self.matched_count = self.modified_count = n
+
+
 class _FakeCollection:
     """Minimal pymongo collection stand-in."""
 
@@ -68,11 +75,12 @@ class _FakeCollection:
                 if "$set" in update:
                     doc.update(update["$set"])
                 self.updated.append(dict(doc))
-                return
+                return _Result(1)
         if upsert:
             new_doc = {**q, **(update.get("$set", {}))}
             self._docs.append(new_doc)
             self.updated.append(new_doc)
+        return _Result(0)
 
     def count_documents(self, q):
         return len([d for d in self._docs if self._matches(d, q)])

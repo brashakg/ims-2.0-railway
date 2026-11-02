@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, List
 
+from ._core import ACCOUNTS
 from ._core import PURCHASE
 
 ROWS: List[Dict[str, object]] = [
@@ -210,6 +211,20 @@ ROWS: List[Dict[str, object]] = [
         "method": "GET",
         "path": "/api/v1/inventory/lenses/power-grid",
         "allowed": "AUTHENTICATED",
+    },
+    # S4: a product's one average cost, its stock value and cost history,
+    # and the accounts correction of it -- what we pay is the accounts roles'
+    # only (owner ruling 2026-10-12; SUPERADMIN passes every gate). The POST
+    # has its own capability key (capabilities.capability_for).
+    {
+        "method": "GET",
+        "path": "/api/v1/inventory/products/{product_id}/cost",
+        "allowed": ACCOUNTS,
+    },
+    {
+        "method": "POST",
+        "path": "/api/v1/inventory/products/{product_id}/cost-correction",
+        "allowed": ACCOUNTS,
     },
     {
         "method": "GET",

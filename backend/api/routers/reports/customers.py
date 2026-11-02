@@ -9,6 +9,7 @@ from ...utils.ist import (
 )
 from ..auth import get_current_user, require_roles
 from ...dependencies import store_in_view
+from ...services import product_cost
 from ...services.cost_mask import mask_cost
 from ...services.margin_basis import (
     cost_by_product,
@@ -83,6 +84,10 @@ async def expense_vs_revenue(
             except (TypeError, ValueError):
                 continue
             cost += (line_unit_cost(item, cost_map) or 0.0) * qty
+    # Pieces sold before their supplier bill (owner 2026-11-01 (a)).
+    cost += product_cost.variance_by(
+        get_db(), store_ids=[active_store] if active_store else None, from_day=from_date, to_day=to_date
+    ).get(None, 0.0)
 
     profit = revenue - cost
     margin_percent = (profit / revenue * 100) if revenue > 0 else 0

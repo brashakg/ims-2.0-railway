@@ -166,10 +166,168 @@ def test_catalog_manager_cannot_set_cost_on_any_door(client, shop, method, path,
 
 
 @pytest.mark.parametrize("role", ("ADMIN", "SUPERADMIN"))
-def test_accounts_still_set_cost(client, shop, role):
+def test_accounts_still_set_a_first_cost(client, shop, role):
+    """A product with no cost yet takes its first one from the editor."""
+    shop.products.update_one({"product_id": "P1"}, {"$set": {"cost_price": None}})
     r = client.put("/api/v1/products/P1", json={"cost_price": 1234.0}, headers=_headers(role))
     assert r.status_code == 200, r.text[:300]
     assert shop.products.find_one({"product_id": "P1"})["cost_price"] == 1234.0
+
+
+# S4 review: once a product has an average, the editor doors refuse a
+# different cost (409 pointing to the correction box, which asks a reason and
+# writes the cost history); the same figure sent back unchanged passes.
+_EDITOR_COST_DOORS = [
+    ("/api/v1/products/P1", lambda c: {"cost_price": c}),
+    ("/api/v1/catalog/products/P1", lambda c: {"pricing": {"cost_price": c}}),
+]
+
+
+@pytest.mark.parametrize("path,body", _EDITOR_COST_DOORS)
+@pytest.mark.parametrize("role", ("ADMIN", "SUPERADMIN"))
+def test_the_editor_doors_never_change_an_average(client, shop, path, body, role):
+    from api.services.product_cost import EDITOR_COST_REFUSED
+
+    shop.catalog_products.insert_one({"id": "P1", "name": "Aviator", "category": "FR",
+                                      "pricing": {"mrp": 9999.0, "cost_price": COST}})
+    r = client.put(path, json=body(1234.0), headers=_headers(role))
+    assert r.status_code == 409, (path, r.status_code, r.text[:300])
+    assert r.json()["detail"] == EDITOR_COST_REFUSED
+    assert shop.products.find_one({"product_id": "P1"})["cost_price"] == COST
+    assert not shop.products.find_one({"product_id": "P1"}).get("cost_history")
+    r = client.put(path, json=body(COST), headers=_headers(role))
+    assert r.status_code != 409, (path, r.status_code, r.text[:300])
+
+
+@pytest.mark.parametrize("role", ("ADMIN", "SUPERADMIN"))
+def test_the_catalogue_editor_finds_a_create_door_spine(client, shop, role):
+    """A product made through the create door links spine and twin through
+    the spine's pim_product_id (a different uuid): the guard reads that
+    spine, not a spine sharing the twin's id."""
+    from api.services.product_cost import EDITOR_COST_REFUSED
+
+    shop.products.update_one({"product_id": "P1"}, {"$set": {"pim_product_id": "TWIN1"}})
+    shop.catalog_products.insert_one({"id": "TWIN1", "name": "Aviator", "category": "FR",
+                                      "pricing": {"mrp": 9999.0, "cost_price": COST}})
+    path = "/api/v1/catalog/products/TWIN1"
+    r = client.put(path, json={"pricing": {"cost_price": 1234.0}}, headers=_headers(role))
+    assert r.status_code == 409, (r.status_code, r.text[:300])
+    assert r.json()["detail"] == EDITOR_COST_REFUSED
+    spine = shop.products.find_one({"product_id": "P1"})
+    assert spine["cost_price"] == COST and not spine.get("cost_history")
+    r = client.put(path, json={"pricing": {"cost_price": COST}}, headers=_headers(role))
+    assert r.status_code == 200, (r.status_code, r.text[:300])
+    assert shop.products.find_one({"product_id": "P1"})["cost_price"] == COST
+
+
+# S4 review round 2: the editor doors never write the cost with a plain update
+# (it overwrites a bill landing between the check and the write); a first cost
+# is seeded (written only while there is no average, with a history row).
+# (door path, twin id, body): both editors, with a twin that shares the spine
+# id and a create-door twin linked by the spine's pim_product_id.
+_EDITOR_DOORS_BY_TWIN = [
+    ("/api/v1/products/P1", "P1", lambda c: {"cost_price": c}),
+    ("/api/v1/products/P1", "TWIN1", lambda c: {"cost_price": c}),
+    ("/api/v1/catalog/products/P1", "P1", lambda c: {"pricing": {"cost_price": c}}),
+    ("/api/v1/catalog/products/TWIN1", "TWIN1", lambda c: {"pricing": {"cost_price": c}}),
+]
+
+
+def _twin(shop, twin_id, cost):
+    if twin_id != "P1":
+        shop.products.update_one({"product_id": "P1"}, {"$set": {"pim_product_id": twin_id}})
+    shop.catalog_products.insert_one({"id": twin_id, "name": "Aviator", "category": "FR",
+                                      "pricing": {"mrp": 9999.0, "cost_price": cost}})
+
+
+@pytest.mark.parametrize("path,twin_id,body", _EDITOR_DOORS_BY_TWIN)
+@pytest.mark.parametrize("before,sent", ((COST, COST), (None, 1234.0)))
+def test_a_bill_landing_after_the_editor_check_is_kept(
+    client, shop, monkeypatch, path, twin_id, body, before, sent
+):
+    from api.services import product_cost
+
+    shop.products.update_one({"product_id": "P1"}, {"$set": {"cost_price": before}})
+    _twin(shop, twin_id, before)
+    real = product_cost.refuse_editor_cost
+
+    def check_then_a_bill(product, cost):
+        real(product, cost)
+        product_cost.correct(shop, "P1", 5000.0, "a bill lands", "u-accounts", expected=before)
+
+    monkeypatch.setattr(product_cost, "refuse_editor_cost", check_then_a_bill)
+    r = client.put(path, json=body(sent), headers=_headers("ADMIN"))
+    assert r.status_code == 200, (path, r.status_code, r.text[:300])
+    spine = shop.products.find_one({"product_id": "P1"})
+    assert spine["cost_price"] == 5000.0 == spine["moving_avg_cost"], (path, twin_id)
+    assert [row["new_cost"] for row in spine["cost_history"]] == [5000.0]
+
+
+@pytest.mark.parametrize("path,twin_id,body", _EDITOR_DOORS_BY_TWIN)
+@pytest.mark.parametrize("role", ("ADMIN", "SUPERADMIN"))
+def test_a_first_cost_typed_in_an_editor_has_its_history_row(client, shop, path, twin_id, body, role):
+    shop.products.update_one({"product_id": "P1"}, {"$set": {"cost_price": None}})
+    _twin(shop, twin_id, None)
+    r = client.put(path, json=body(1234.0), headers=_headers(role))
+    assert r.status_code == 200, (path, r.status_code, r.text[:300])
+    spine = shop.products.find_one({"product_id": "P1"})
+    assert spine["cost_price"] == 1234.0
+    rows = spine.get("cost_history") or []
+    assert len(rows) == 1, rows
+    assert rows[0]["kind"] == "EDITOR_FIRST_COST"
+    assert rows[0]["by"] == _user(role)["user_id"]
+    assert rows[0]["new_cost"] == 1234.0 and rows[0]["key"] in spine["cost_keys"]
+
+
+@pytest.mark.parametrize("path,twin_id,body", _EDITOR_DOORS_BY_TWIN)
+def test_a_catalogue_only_price_sent_back_unchanged_is_no_first_cost(client, shop, path, twin_id, body):
+    """S4 review round 3: the editor sends the stored price back on every
+    save; a price that was only a catalogue price stays one (no average, no
+    history row naming someone who never typed a cost)."""
+    shop.products.update_one({"product_id": "P1"},
+                             {"$set": {"cost_price": 777.0, "cost_price_is_catalogue_only": True}})
+    _twin(shop, twin_id, 777.0)
+    sent = body(777.0)
+    sent["name"] = "Aviator II"
+    r = client.put(path, json=sent, headers=_headers("ADMIN"))
+    assert r.status_code == 200, (path, r.status_code, r.text[:300])
+    spine = shop.products.find_one({"product_id": "P1"})
+    assert spine["cost_price_is_catalogue_only"] is True, (path, twin_id)
+    assert not spine.get("cost_history"), spine.get("cost_history")
+
+
+def test_a_first_cost_turns_a_draft_whose_only_gap_is_the_cost_active(client, shop):
+    """S4 review round 3: the restamp after an editor's first cost reads the
+    product WITH that cost (the cost is never in the plain write)."""
+    shop.products.update_one({"product_id": "P1"}, {"$set": {
+        "category": "FRAME", "brand": "Ray-Ban",
+        "attributes": {"brand_name": "Ray-Ban", "model_no": "RB1", "colour_code": "C1"},
+        "mrp": 5000.0, "offer_price": 4000.0, "hsn_code": "9003", "gst_rate": 5.0,
+        "cost_price": None, "catalog_status": "DRAFT", "done_gaps": ["cost_price"],
+    }})
+    r = client.put("/api/v1/products/P1", json={"cost_price": 1234.0}, headers=_headers("ADMIN"))
+    assert r.status_code == 200, r.text[:300]
+    spine = shop.products.find_one({"product_id": "P1"})
+    assert spine["cost_price"] == 1234.0
+    assert "cost_price" not in (spine.get("done_gaps") or []), spine.get("done_gaps")
+    assert spine["catalog_status"] == "ACTIVE", (spine["catalog_status"], spine.get("done_gaps"))
+
+
+def test_a_product_created_with_a_cost_has_its_history_row(client, shop):
+    """Every create door (the form, clone-vary, promote) goes through
+    product_master.create_product: a cost it is born with is its first
+    average, with its history row."""
+    r = client.post("/api/v1/products", json={**_PROD_CREATE, "offer_price": 5000.0, "color": "C1", "cost_price": 900.0},
+                    headers=_headers("ADMIN"))
+    assert r.status_code in (200, 201), r.text[:300]
+    made = shop.products.find_one({"model": "RB2"}) or shop.products.find_one(
+        {"attributes.model_no": "RB2"})
+    assert made is not None
+    assert made["cost_price"] == 900.0
+    rows = made.get("cost_history") or []
+    assert len(rows) == 1, rows
+    assert rows[0]["kind"] == "FIRST_COST" and rows[0]["by"] == "u-admin"
+    assert rows[0]["key"] in made["cost_keys"]
 
 
 # ---------------------------------------------------------------------------

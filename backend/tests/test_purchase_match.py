@@ -8,20 +8,19 @@ invoice:
     * three_way_match: MATCHED when ordered/received/invoiced qty + price all
       within tolerance; ON_HOLD_EXCEPTION on a qty short/over, a price gap, a
       product not on the PO, or invoiced-but-not-received -- each with a reason.
-    * config: resolve_config defaults (MOVING_AVERAGE + 5%) + normalisers
-      (valuation method / tolerance clamp).
-    * moving_average_cost + valuation_trueup_for_invoice (blend on receipt;
-      FIFO records the latest layer).
+    * config: resolve_config defaults (5%) + the tolerance clamp. (No
+      valuation method: one average cost per product, services/product_cost,
+      tested in test_one_average_cost_s4.py.)
 
   ROUTER (standalone FastAPI + fake DB, no Mongo):
     * POST / with po_id+grn_id stores match_status + match_detail; a clean match
       -> MATCHED, an out-of-tolerance price -> ON_HOLD_EXCEPTION (still booked).
-    * booking trues up the product moving-average cost_price.
+    * booking an accepted bill re-averages the product's one cost.
     * GET /{id}/match returns the detail (and lazily recomputes for an older
       invoice without a stored detail).
     * POST /{id}/approve-exception flips ON_HOLD -> MATCHED_OVERRIDE + audits;
       400 on a non-held invoice; role-gated to ACCOUNTANT/ADMIN.
-    * GET/PUT /config: default surfaced; override persisted + normalised.
+    * GET/PUT /config: default surfaced; override persisted + clamped.
 
 Run: JWT_SECRET_KEY=test python -m pytest backend/tests/test_purchase_match.py -q
 """
@@ -37,6 +36,9 @@ os.environ.setdefault("MONGODB_URI", "")
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import uuid  # noqa: E402
+
+import mongomock  # noqa: E402
 import pytest  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -168,25 +170,15 @@ class TestThreeWayMatchExceptions:
 
 class TestConfig:
     def test_resolve_config_defaults_when_none(self):
-        cfg = pmatch.resolve_config(None)
-        assert cfg["valuation_method"] == pmatch.VALUATION_MOVING_AVERAGE
-        assert cfg["match_tolerance_pct"] == 5.0
+        assert pmatch.resolve_config(None) == {"match_tolerance_pct": 5.0}
 
-    def test_resolve_config_override(self):
+    def test_resolve_config_override_ignores_a_stored_valuation_method(self):
+        # S4: one average cost per product -- a FIFO setting stored before it
+        # has nothing left to choose.
         cfg = pmatch.resolve_config(
             {"valuation_method": "fifo", "match_tolerance_pct": 2.5}
         )
-        assert cfg["valuation_method"] == pmatch.VALUATION_FIFO
-        assert cfg["match_tolerance_pct"] == 2.5
-
-    def test_normalize_method_falls_back(self):
-        assert pmatch.normalize_valuation_method("garbage") == (
-            pmatch.VALUATION_MOVING_AVERAGE
-        )
-        assert pmatch.normalize_valuation_method("moving-average") == (
-            pmatch.VALUATION_MOVING_AVERAGE
-        )
-        assert pmatch.normalize_valuation_method("FIFO") == pmatch.VALUATION_FIFO
+        assert cfg == {"match_tolerance_pct": 2.5}
 
     def test_normalize_tolerance_clamps(self):
         assert pmatch.normalize_tolerance_pct(-3) == 5.0  # negative -> default
@@ -196,113 +188,39 @@ class TestConfig:
 
 
 # ===========================================================================
-# ENGINE - moving-average valuation
-# ===========================================================================
-
-
-class TestMovingAverage:
-    def test_blends_old_and_new(self):
-        # 10 @100 + 10 @120 -> 20 @110.
-        assert pmatch.moving_average_cost(10, 100, 10, 120) == 110.0
-
-    def test_first_receipt_takes_receipt_cost(self):
-        # No prior stock -> cost becomes the receipt cost.
-        assert pmatch.moving_average_cost(0, 0, 5, 250) == 250.0
-
-    def test_zero_receipt_qty_keeps_old_cost(self):
-        assert pmatch.moving_average_cost(10, 100, 0, 999) == 100.0
-
-    def test_trueup_moving_average(self):
-        lines = [_inv_line("P1", 10, 120.0)]
-        state = {"P1": {"on_hand_qty": 10, "cost_price": 100.0}}
-        updates = pmatch.valuation_trueup_for_invoice(
-            lines, state, pmatch.VALUATION_MOVING_AVERAGE
-        )
-        assert len(updates) == 1
-        assert updates[0]["new_cost"] == 110.0
-        assert updates[0]["old_cost"] == 100.0
-
-    def test_trueup_fifo_records_latest_layer(self):
-        lines = [_inv_line("P1", 10, 120.0)]
-        state = {"P1": {"on_hand_qty": 10, "cost_price": 100.0}}
-        updates = pmatch.valuation_trueup_for_invoice(
-            lines, state, pmatch.VALUATION_FIFO
-        )
-        # FIFO does not blend the product-level cost: latest layer = 120.
-        assert updates[0]["new_cost"] == 120.0
-
-
-# ===========================================================================
 # ROUTER - fake DB with update_one + count_documents
 # ===========================================================================
 
 
-class _FakeCollection:
-    def __init__(self, store):
-        self._store = store  # list of dicts
+class _Rows(list):
+    """A collection's rows; append/extend write through to it."""
 
-    def find_one(self, flt, projection=None):
-        for d in self._store:
-            if all(d.get(k) == v for k, v in flt.items()):
-                return dict(d)
-        return None
+    def __init__(self, coll):
+        super().__init__(coll.find({}, {"_id": 0}))
+        self._coll = coll
 
-    def find(self, flt=None, projection=None):
-        flt = flt or {}
+    def append(self, doc):
+        self._coll.insert_one(dict(doc))
+        super().append(doc)
 
-        def _match(d):
-            for k, v in flt.items():
-                if isinstance(v, dict) and "$in" in v:
-                    if d.get(k) not in v["$in"]:
-                        return False
-                elif d.get(k) != v:
-                    return False
-            return True
-
-        return _FakeCursor([dict(d) for d in self._store if _match(d)])
-
-    def insert_one(self, doc):
-        self._store.append(dict(doc))
-        return type("R", (), {"inserted_id": doc.get("_id")})()
-
-    def update_one(self, flt, update, upsert=False):
-        for d in self._store:
-            if all(d.get(k) == v for k, v in flt.items()):
-                d.update(update.get("$set", {}))
-                return type("R", (), {"modified_count": 1, "matched_count": 1})()
-        if upsert:
-            newdoc = dict(flt)
-            newdoc.update(update.get("$set", {}))
-            self._store.append(newdoc)
-            return type(
-                "R",
-                (),
-                {
-                    "modified_count": 0,
-                    "matched_count": 0,
-                    "upserted_id": flt.get("_id"),
-                },
-            )()
-        return type("R", (), {"modified_count": 0, "matched_count": 0})()
-
-    def count_documents(self, flt):
-        return len(list(self.find(flt)))
+    def extend(self, docs):
+        for doc in docs:
+            self.append(doc)
 
 
-class _FakeCursor:
-    def __init__(self, rows):
-        self._rows = rows
+class _Collections:
+    def __init__(self, db):
+        self._db = db
 
-    def limit(self, n):
-        return _FakeCursor(self._rows[:n])
-
-    def __iter__(self):
-        return iter(self._rows)
+    def __getitem__(self, name):
+        return _Rows(self._db[name])
 
 
 class _FakeDB:
+    """mongomock, seeded as the hand-made fake this file used to carry."""
+
     def __init__(self):
-        self.collections = {
+        seed = {
             "vendor_bills": [],
             "vendors": [
                 {
@@ -361,9 +279,14 @@ class _FakeDB:
             "grns": [],
             "purchase_settings": [],
         }
+        self._db = mongomock.MongoClient()[f"pm_{uuid.uuid4().hex[:8]}"]
+        for name, rows in seed.items():
+            if rows:
+                self._db[name].insert_many([dict(r) for r in rows])
+        self.collections = _Collections(self._db)
 
     def get_collection(self, name):
-        return _FakeCollection(self.collections.setdefault(name, []))
+        return self._db[name]
 
 
 class _Repo:
@@ -392,6 +315,10 @@ def _app(db, roles=("ACCOUNTANT",), uid="u1", po=None, grn=None):
         }
 
     app.dependency_overrides[get_current_user] = _u
+    # The receipt lives where the real accept path keeps it (the one-average
+    # rule reads which pieces it brought in).
+    if grn and not db.get_collection("grns").find_one({"grn_id": grn["grn_id"]}):
+        db.get_collection("grns").insert_one(dict(grn))
     pi_router._get_db = lambda: db
     pi_router.get_vendor_repository = lambda: _Repo(db.collections["vendors"][0])
     pi_router.get_purchase_order_repository = lambda: _Repo(po) if po else None
@@ -528,6 +455,17 @@ class TestCreateRunsMatch:
         assert r.json()["match_status"] is None
 
 
+def _approve_hold(cli, created):
+    """120 on a PO at 100 is 20% over the 5% tolerance: the bill books ON
+    HOLD and (S4) moves no cost until its hold is approved."""
+    assert created["match_status"] == pmatch.MATCH_ON_HOLD
+    r = cli.post(
+        f"/api/v1/vendors/purchase-invoices/{created['invoice_id']}/approve-exception",
+        json={"reason": "Supplier price rise agreed"},
+    )
+    assert r.status_code == 200, r.text
+
+
 class TestValuationTrueUp:
     def test_invoice_cost_is_not_blended_with_its_own_delivery(self):
         """S9: the ONLY stock on hand is the 10 units this GRN just minted, so
@@ -546,6 +484,7 @@ class TestValuationTrueUp:
         )
         r = cli.post("/api/v1/vendors/purchase-invoices", json=body)
         assert r.status_code == 201, r.text
+        _approve_hold(cli, r.json())
         prod = [p for p in db.collections["products"] if p["product_id"] == "P1"][0]
         assert prod["cost_price"] == 120.0
         assert prod["moving_avg_cost"] == 120.0
@@ -575,6 +514,7 @@ class TestValuationTrueUp:
         )
         r = cli.post("/api/v1/vendors/purchase-invoices", json=body)
         assert r.status_code == 201, r.text
+        _approve_hold(cli, r.json())
         prod = [p for p in db.collections["products"] if p["product_id"] == "P1"][0]
         assert prod["cost_price"] == 110.0
 
@@ -649,9 +589,7 @@ class TestConfigEndpoint:
         cli = _app(db)
         r = cli.get("/api/v1/vendors/purchase-invoices/config")
         assert r.status_code == 200, r.text
-        cfg = r.json()["config"]
-        assert cfg["valuation_method"] == pmatch.VALUATION_MOVING_AVERAGE
-        assert cfg["match_tolerance_pct"] == 5.0
+        assert r.json()["config"] == {"match_tolerance_pct": 5.0}
 
     def test_put_config_override_persists_and_normalises(self):
         db = _FakeDB()
@@ -661,12 +599,10 @@ class TestConfigEndpoint:
             json={"valuation_method": "fifo", "match_tolerance_pct": 2.5},
         )
         assert r.status_code == 200, r.text
-        out = r.json()["config"]
-        assert out["valuation_method"] == pmatch.VALUATION_FIFO  # normalised
-        assert out["match_tolerance_pct"] == 2.5
+        assert r.json()["config"] == {"match_tolerance_pct": 2.5}
         # And a subsequent GET reflects the stored override.
         cfg = cli.get("/api/v1/vendors/purchase-invoices/config").json()["config"]
-        assert cfg["valuation_method"] == pmatch.VALUATION_FIFO
+        assert cfg == {"match_tolerance_pct": 2.5}
 
     def test_put_config_rejects_out_of_range_tolerance(self):
         # The schema bound (0..100) rejects an absurd tolerance LOUDLY (422)

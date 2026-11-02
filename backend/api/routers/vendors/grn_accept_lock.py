@@ -1,6 +1,7 @@
 """GRN accept concurrency: claim, heartbeat, guarded writes, unit mint."""
 
 from ._shared import HTTPException, Optional, datetime, logger, timedelta, uuid
+from api.services.receipt_origin import number_is_unique, origin_filters
 from api.utils.event_time import parse_event_utc, utc_now
 
 
@@ -507,7 +508,7 @@ def _number_is_this_receipts_alone(number) -> bool:
             return False
         coll = getattr(repo, "collection", None)
         if coll is not None and callable(getattr(coll, "count_documents", None)):
-            return int(coll.count_documents({"grn_number": number}) or 0) == 1
+            return number_is_unique(coll, number)
         return len(repo.find_many({"grn_number": number}) or []) == 1
     except Exception:  # noqa: BLE001
         logger.error("[VENDOR] receipt-number uniqueness check failed for %s", number, exc_info=True)
@@ -536,23 +537,6 @@ def _grn_already_minted(stock_repo, flt: dict) -> int:
     raise RuntimeError("stock repository exposes no way to count minted units")
 
 
-def _receipt_origin_filters(grn: dict, number_unique: bool, **match) -> list:
-    """Disjoint origin filters for units minted by one receipt.
-
-    The immutable id is authoritative. Only units missing it can use their
-    old GRN source, or a globally unique receipt number after a transfer.
-    Callers decide how a failed uniqueness read must be handled.
-    """
-    grn_id = grn.get("grn_id")
-    origin = [{"source_type": "GRN", "source_id": grn_id}]
-    if grn.get("grn_number") and number_unique:
-        origin.append({"grn_number": grn["grn_number"]})
-    return [
-        {**match, "grn_id": grn_id},
-        {**match, "grn_id": None, "$or": origin},
-    ]
-
-
 def _receipt_unit_filters(grn, *, include_rejected=False, **match):
     """The units goods receipt `grn_id` minted (narrowed by `match`), WHEREVER
     THEY ARE NOW: a stock transfer rewrites a unit's source_type and source_id
@@ -564,7 +548,7 @@ def _receipt_unit_filters(grn, *, include_rejected=False, **match):
     if not include_rejected:
         match["receipt_disposition"] = {"$ne": "REJECTED"}
     number = grn.get("grn_number")
-    return _receipt_origin_filters(
+    return origin_filters(
         grn, bool(number and _number_is_this_receipts_alone(number)), **match
     )
 
@@ -573,9 +557,8 @@ def _receipt_price_paid(stock, grn, product_id, db=None) -> Optional[float]:
     """THE price goods receipt `grn_id` paid for `product_id`: the cost at
     acceptance its mint stamped on a unit of it (wherever that unit is now),
     or a unique booked invoice price when the units arrived unpriced. A held
-    line with no minted unit never answers. /vendors/last-cost and the
-    walk-in bill's cost true-up (purchase_invoices._bought_since) both ask
-    this, so "the latest price paid" is one rule. `stock` is the stock
+    line with no minted unit never answers. /vendors/last-cost asks this
+    (a last price paid to show; the cost is the average). `stock` is the stock
     repository or the raw collection -- anything with find_one(filter)."""
     for flt in _receipt_unit_filters(
         grn, product_id=product_id, unit_cost={"$gt": 0}

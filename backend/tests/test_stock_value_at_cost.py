@@ -112,6 +112,16 @@ def _user(role: str) -> dict:
     }
 
 
+class _Products:
+    """A product repository answering find_by_id from a dict."""
+
+    def __init__(self, docs):
+        self._docs = docs
+
+    def find_by_id(self, pid):
+        return self._docs.get(pid)
+
+
 @pytest.fixture(scope="module")
 def mongo_db():
     from pymongo import MongoClient
@@ -407,7 +417,9 @@ def test_f47_a_reserved_unit_is_still_stock_at_cost():
         def find_many(self, flt, limit=0):
             return list(coll.find(flt, {"_id": 0}))
 
-    units = stock_value.shelf_units(Repo(), None, "S1")
+    # S4: every piece carries the product's one average cost (3150), not
+    # the price it was received at.
+    units = stock_value.shelf_units(Repo(), _Products({"P": {"cost_price": 3150}}), "S1")
     assert sorted(u["stock_id"] for u in units) == ["A", "R"]
     assert stock_value.total(units) == 6300.0
     # uncosted_units / unit_cost joined the shape with the "no cost" fix below.
@@ -427,17 +439,20 @@ def test_f47_a_reserved_unit_is_still_stock_at_cost():
 # add nothing to the value, the ledger row says unit_cost None and
 # uncosted_units N, and the tile can say "N units have no cost".
 #
-# The world (its own database, one shop):
-#   P-NOCOST  2 on the shelf, no cost anywhere          -> unit_cost None, 2 uncosted
-#   P-MIXED   1 at 4000 + 1 with unit_cost 0 / no price -> unit_cost 4000 (not 2000), 1 uncosted
-#   P-MASTER  1 with no own cost, product cost 2500     -> 2500 from the product, costed
-#   P-HELD    3 on the shelf + 1 reserved, 1000 each    -> stock 3, reserved 1, cost 4000
+# The world (its own database, one shop). S4 (owner 2026-10-23): every piece
+# carries its product's ONE average cost -- a piece's own receipt price is not
+# its value, and a price typed only to finish cataloguing is no cost:
+#   P-NOCOST  2 on the shelf, no cost anywhere              -> unit_cost None, 2 uncosted
+#   P-MIXED   pieces received at 4000 / no price, product
+#             priced only to finish cataloguing (3000)      -> unit_cost None, 2 uncosted
+#   P-MASTER  1 piece, product average 2500                 -> 2500, costed
+#   P-HELD    3 on the shelf + 1 reserved, average 1000     -> stock 3, reserved 1, cost 4000
 
 _UNCOSTED_PRODUCTS = {
     "P-NOCOST": None,
-    "P-MIXED": None,
+    "P-MIXED": 3000.0,
     "P-MASTER": 2500.0,
-    "P-HELD": None,
+    "P-HELD": 1000.0,
 }
 
 
@@ -451,6 +466,8 @@ def _seed_uncosted(db) -> None:
         }
         if master_cost is not None:
             doc["cost_price"] = master_cost
+        if pid == "P-MIXED":
+            doc["cost_price_is_catalogue_only"] = True
         db["products"].insert_one(doc)
 
     def unit(sid, pid, status="AVAILABLE", **cost):
@@ -541,13 +558,14 @@ def test_r1_34_a_frame_nobody_priced_has_no_unit_cost_not_rs_0(uncosted_world):
     assert row["cost_value"] == 0
 
 
-def test_r1_34_an_unpriced_unit_does_not_halve_the_unit_cost(uncosted_world):
-    """1 unit at 4000 + 1 with no price: the per-unit cost is 4000 (the costed
-    unit), and the other unit is counted as having no cost -- not 2000."""
+def test_s4_a_pieces_own_receipt_price_is_not_its_value(uncosted_world):
+    """S4: a piece received at 4000 is worth its product's average -- and a
+    product with only a catalogue-finishing price has none, so both pieces are
+    counted as having no cost (never valued at what one piece came in at)."""
     row = _rows_by_pid(uncosted_world, "ACCOUNTANT")["P-MIXED"]
-    assert row["cost_value"] == pytest.approx(4000.0)
-    assert row["unit_cost"] == pytest.approx(4000.0)
-    assert row["uncosted_units"] == 1
+    assert row["cost_value"] == 0
+    assert row["unit_cost"] is None
+    assert row["uncosted_units"] == 2
 
 
 def test_r1_34_the_product_cost_still_prices_a_unit_without_its_own(uncosted_world):
@@ -575,8 +593,8 @@ def test_r1_34_the_rows_add_up_to_the_one_rule_with_the_uncosted_count(
         STORE,
     )
     assert sum(r["cost_value"] for r in rows) == pytest.approx(stock_value.total(units))
-    assert stock_value.total(units) == pytest.approx(4000.0 + 2500.0 + 4000.0)
-    assert sum(r["uncosted_units"] for r in rows) == stock_value.uncosted(units) == 3
+    assert stock_value.total(units) == pytest.approx(2500.0 + 4000.0)
+    assert sum(r["uncosted_units"] for r in rows) == stock_value.uncosted(units) == 4
 
 
 @pytest.mark.parametrize("role", (*COUNTER, *MANAGERS))
@@ -604,12 +622,12 @@ def test_f47_stock_aging_counts_the_units_with_no_cost(uncosted_world):
     body = uncosted_world.get("/inventory/aging", "ACCOUNTANT").json()
     rows = {p["id"]: p for p in body["products"]}
     assert (rows["P-NOCOST"]["costValue"], rows["P-NOCOST"]["uncostedUnits"]) == (0.0, 2)
-    assert (rows["P-MIXED"]["costValue"], rows["P-MIXED"]["uncostedUnits"]) == (4000.0, 1)
+    assert (rows["P-MIXED"]["costValue"], rows["P-MIXED"]["uncostedUnits"]) == (0.0, 2)
     assert rows["P-MASTER"]["uncostedUnits"] == 0
     slow = [p for p in body["products"] if p["classification"] == "C"]
     assert body["summary"]["slowMovingUncostedUnits"] == sum(
         p["uncostedUnits"] for p in slow
-    ) == 3
+    ) == 4
 
 
 @pytest.mark.parametrize("role", (*COUNTER, *MANAGERS))
@@ -637,21 +655,22 @@ def test_f47_every_stock_value_report_counts_the_units_with_no_cost(
 ):
     resp = uncosted_reports.get(path, "ADMIN", **params)
     assert resp.status_code == 200, resp.text
-    assert count(resp.json()) == 3
+    assert count(resp.json()) == 4
 
 
 def test_r1_34_the_one_rule_counts_uncosted_pieces():
-    """stock_value itself: a zero / blank / junk cost is no price; such a unit
-    adds 0, is flagged cost_known False and counted by uncosted()."""
+    """stock_value itself: a zero / blank / junk average is no price; such a
+    product's pieces add 0, are flagged cost_known False and counted by
+    uncosted(). A piece's own price never stands in (S4)."""
     mongomock = pytest.importorskip("mongomock")
     from api.services import stock_value
 
     coll = mongomock.MongoClient().db.stock_units
     coll.insert_many(
         [
-            {"stock_id": "A", "product_id": "P", "store_id": "S1", "status": "AVAILABLE", "unit_cost": 3100},
-            {"stock_id": "Z", "product_id": "P", "store_id": "S1", "status": "AVAILABLE", "unit_cost": 0},
-            {"stock_id": "J", "product_id": "P", "store_id": "S1", "status": "RESERVED", "unit_cost": "n/a", "quantity": 2},
+            {"stock_id": "A", "product_id": "P", "store_id": "S1", "status": "AVAILABLE", "unit_cost": 99},
+            {"stock_id": "Z", "product_id": "Q", "store_id": "S1", "status": "AVAILABLE", "unit_cost": 3100},
+            {"stock_id": "J", "product_id": "R", "store_id": "S1", "status": "RESERVED", "unit_cost": 3100, "quantity": 2},
         ]
     )
 
@@ -659,13 +678,15 @@ def test_r1_34_the_one_rule_counts_uncosted_pieces():
         def find_many(self, flt, limit=0):
             return list(coll.find(flt, {"_id": 0}))
 
-    units = stock_value.shelf_units(Repo(), None, "S1")
+    products = _Products({"P": {"cost_price": 3100}, "Q": {"cost_price": 0}, "R": {"cost_price": "n/a"}})
+    units = stock_value.shelf_units(Repo(), products, "S1")
     assert {u["stock_id"]: u["cost_known"] for u in units} == {"A": True, "Z": False, "J": False}
     assert stock_value.total(units) == 3100.0
     assert stock_value.uncosted(units) == 3
     assert stock_value.by_product(units)["P"] == {
-        "units": 4.0, "cost": 3100.0, "uncosted_units": 3.0, "unit_cost": 3100.0,
+        "units": 1.0, "cost": 3100.0, "uncosted_units": 0.0, "unit_cost": 3100.0,
     }
+    assert stock_value.by_product(units)["R"]["unit_cost"] is None
 
 
 # ============================================================================
@@ -681,7 +702,7 @@ def test_r1_34_the_one_rule_counts_uncosted_pieces():
 # The world (its own database):
 #   P-ACT   active,      1 on the shelf + 1 reserved, 800 each   -> 1600
 #   P-OLD   deactivated, 1 reserved at 1200 (Dhanbad)             -> 1200
-#           + 1 reserved at 5000 at ANOTHER shop                   -> not Dhanbad's
+#           + 1 reserved at ANOTHER shop                           -> not Dhanbad's
 #   P-GONE  deactivated, its only unit here SOLD                   -> no row
 #   Dhanbad's stock at cost = 1600 + 1200 = 2800
 
@@ -690,12 +711,13 @@ _R3_HELD_AT_COST = 2800.0
 
 def _seed_reserved_only(db) -> None:
     now = datetime.utcnow()
-    for pid, active in (("P-ACT", True), ("P-OLD", False), ("P-GONE", False)):
+    for pid, active, cost in (("P-ACT", True, 800.0), ("P-OLD", False, 1200.0), ("P-GONE", False, 700.0)):
         db["products"].insert_one(
             {
                 "_id": pid, "product_id": pid, "sku": f"FR-{pid}", "brand": "Test",
                 "model": pid, "name": f"Frame {pid}", "category": "FRAME",
                 "mrp": 3000.0, "offer_price": 2500.0, "is_active": active,
+                "cost_price": cost,
             }
         )
 
@@ -802,7 +824,7 @@ def test_r3_6_the_reserved_only_row_obeys_the_category_filter(reserved_only_worl
 # /reports/stock/count, /reports/inventory/summary and /valuation took their
 # shop from `validate_store_access(...) or active_store_id` -- None for a
 # non-admin with no shop -- so that login read every shop's stock at cost
-# (Dhanbad 3 x 1000 + Pune 5 x 2000 = 13000). The one shop rule
+# (Dhanbad 3 + Pune 5 pieces x the average 1000 = 8000). The one shop rule
 # (resolve_store_scope) refuses it.
 
 _R3_READS = (
@@ -818,7 +840,7 @@ def two_shop_db():
     db = mongomock.MongoClient()[f"ims_test_two_shop_{uuid.uuid4().hex[:8]}"]
     db["products"].insert_one(
         {"_id": "P", "product_id": "P", "sku": "FR-P", "name": "Frame P",
-         "category": "FRAME", "mrp": 9000.0, "is_active": True}
+         "category": "FRAME", "mrp": 9000.0, "is_active": True, "cost_price": 1000.0}
     )
     db["stock_units"].insert_many(
         [
@@ -875,7 +897,7 @@ def test_r4_a_login_with_no_shop_reads_no_shops_stock(two_shop_reports, path, pa
     resp = two_shop_reports(path, _shopless(role), **params)
     assert resp.status_code == 200, resp.text
     assert not _stock_value(resp.json()), resp.json()
-    assert "13000" not in resp.text and "3000" not in resp.text
+    assert "8000" not in resp.text and "3000" not in resp.text
     asked = two_shop_reports(path, _shopless(role), store_id=STORE, **params)
     assert asked.status_code == 403, asked.text
     assert asked.json()["detail"] == NO_SHOP_DETAIL
@@ -886,7 +908,7 @@ def test_r4_the_counter_with_no_shop_gets_no_counts_either(two_shop_reports, pat
     resp = two_shop_reports(path, _shopless("SALES_STAFF"), **params)
     assert resp.status_code == 200, resp.text
     assert '"total_units":8' not in resp.text.replace(" ", ""), resp.text
-    assert "13000" not in resp.text
+    assert "8000" not in resp.text
 
 
 @pytest.mark.parametrize("path,params", _R3_READS)
@@ -894,7 +916,7 @@ def test_r3_shops_and_admins_still_read_their_stock(two_shop_reports, path, para
     dhn = {"user_id": "u-ac", "roles": ["ACCOUNTANT"], "store_ids": [STORE], "active_store_id": STORE}
     assert _stock_value(two_shop_reports(path, dhn, **params).json()) == 3000.0
     # An admin with no shop asked reads every shop (admins see all shops).
-    assert _stock_value(two_shop_reports(path, _shopless("ADMIN"), **params).json()) == 13000.0
+    assert _stock_value(two_shop_reports(path, _shopless("ADMIN"), **params).json()) == 8000.0
 
 
 # Stock aging on the same shop rule (panel 2026-10-08). It took its shop from
@@ -915,7 +937,7 @@ def aging_two_shops(monkeypatch):
     db = mongomock.MongoClient()[f"ims_test_aging_{uuid.uuid4().hex[:8]}"]
     db["products"].insert_one(
         {"_id": "P1", "product_id": "P1", "sku": "FR-P1", "name": "Frame P1",
-         "category": "FRAME", "mrp": 9000.0, "is_active": True}
+         "category": "FRAME", "mrp": 9000.0, "is_active": True, "cost_price": 4441.0}
     )
     old = datetime.utcnow() - timedelta(days=120)
     db["stock_units"].insert_many(
@@ -947,7 +969,7 @@ def test_r4_stock_aging_gives_a_login_with_no_shop_no_shops_stock(aging_two_shop
     resp = aging_two_shops(_shopless(role))
     assert resp.status_code == 200, resp.text
     assert resp.json()["products"] == [], resp.json()
-    assert "9993" not in resp.text and "8882" not in resp.text and "1111" not in resp.text
+    assert "13323" not in resp.text and "8882" not in resp.text and "4441" not in resp.text
 
 
 def test_stock_aging_values_exactly_the_units_it_counts(aging_two_shops):
@@ -957,7 +979,7 @@ def test_stock_aging_values_exactly_the_units_it_counts(aging_two_shops):
     # An admin with no shop asked reads every shop -- every unit counted is
     # every unit valued, never one unit at three units' cost.
     (row,) = aging_two_shops(_shopless("ADMIN")).json()["products"]
-    assert (row["quantity"], row["costValue"]) == (3, 9993.0)
+    assert (row["quantity"], row["costValue"]) == (3, 13323.0)
 
 
 # ============================================================================

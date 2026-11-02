@@ -63,7 +63,7 @@ from ._shared import (
 )
 from ...services import purchase_invoice_engine as pinv
 from ...utils.ist import ist_date_str_from_stored, now_ist_naive
-from .grn_accept_lock import _receipt_origin_filters
+from api.services.receipt_origin import origin_filters
 
 _MONTH = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _FIGURES = ("ordered", "received", "billed", "paid", "owed")
@@ -189,7 +189,7 @@ def _minted_units(db, grns: list, uncertain: Optional[set] = None, month: str = 
     }
     if not ids or not products:
         return {}
-    named = [flt for g in grns if g.get("grn_id") for flt in _receipt_origin_filters(
+    named = [flt for g in grns if g.get("grn_id") for flt in origin_filters(
         g, counts[g.get("grn_number")] == 1,
     )]
     units: dict = {}

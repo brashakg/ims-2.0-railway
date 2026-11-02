@@ -187,6 +187,13 @@ def capability_for(method: str, path: str) -> Optional[str]:
                 "/api/v1/returns/{return_id}/owed-paid",
                 "/api/v1/returns/unbilled-payments/give-back"):
         return "returns:complete-record"
+    # Curated finer capability: an accounts correction of a product's average
+    # cost (S4). Its roles are the accounts roles (ACCOUNTANT among them); on
+    # the generic inventory:write key the accountant would join the union the
+    # grant guard reasons from and could hand out stock editing. A deny or
+    # grant stored on inventory:write still answers it: PARENT_CAPABILITY.
+    if tmpl == "/api/v1/inventory/products/{product_id}/cost-correction":
+        return "inventory:cost-correction"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"
 
@@ -206,6 +213,7 @@ PARENT_CAPABILITY: Dict[str, str] = {
     "users:set-password": "users:write",
     "returns:advance-refund": "returns:write",
     "returns:complete-record": "returns:write",
+    "inventory:cost-correction": "inventory:write",
 }
 
 

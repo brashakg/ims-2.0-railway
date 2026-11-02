@@ -32,7 +32,7 @@ const brandInsights = vi.fn(async () => ({
     {
       brand: 'Carrera',
       units_on_hand: 2,
-      stock_value: 10000,
+      selling_value: 10000,
       units_sold: 1,
       revenue: 5000,
       sell_through_percent: 33.3,

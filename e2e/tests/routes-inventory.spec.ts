@@ -17,8 +17,9 @@ import {
 } from '../fixtures/routes';
 
 const inventory = new Map<string, 'probed' | 'excluded'>([
-  // A query string is the same route in another state (see ROUTES).
-  ...ROUTES.map((r) => [r.path.split('?')[0], 'probed'] as const),
+  // A query string is the same route in another state; a parameterised
+  // screen names the route its seeded URL stands for (see ROUTES).
+  ...ROUTES.map((r) => [r.route ?? r.path.split('?')[0], 'probed'] as const),
   ...EXCLUSIONS.map((e) => [e.path, 'excluded'] as const),
 ]);
 
@@ -84,7 +85,7 @@ test('coverage has not silently shrunk', () => {
       'seed_e2e.py does not create; +1 for the redirect-only forecast catch-all ' +
       '/reports/forecast/*; +1 for the stock-count result /inventory/audit/:countId, ' +
       'which needs a finished count -- ROUTES compares paths literally, so a ' +
-      'parameterised screen cannot be probed without a seeded id AND a url field; ' +
+      'parameterised screen is probed only on a seeded id, through its `route` field; ' +
       '+3 redirect-only addresses retired into the one Reorder list (stock ' +
       'redesign S5): /catalog/buy-desk, /inventory/replenishment and ' +
       '/inventory/low-stock, each a Navigate to /inventory/reorders). ' +

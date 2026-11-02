@@ -43,6 +43,8 @@ export interface CollectionInsights {
   units_on_hand: number;
   stock_value: number;
   value_basis: ValueBasis;
+  // Pieces with no cost yet (stock_value is at cost, too low by them).
+  uncosted_units?: number;
   stock_value_mrp: number;
   sold: { d7: number; d30: number; d90: number };
   revenue_30d: number;
@@ -60,6 +62,8 @@ export interface CollectionStoreInsight {
   on_hand: number;
   stock_value: number;
   value_basis: ValueBasis;
+  // Pieces with no cost yet (stock_value is at cost, too low by them).
+  uncosted_units?: number;
   sold_30d: number;
   sell_through: number | null;
   days_of_cover: number | null;
@@ -74,6 +78,8 @@ export interface CollectionSummaryRow {
   on_hand: number;
   stock_value: number;
   value_basis: ValueBasis;
+  // Pieces with no cost yet (stock_value is at cost, too low by them).
+  uncosted_units?: number;
   sold_30d: number;
 }
 

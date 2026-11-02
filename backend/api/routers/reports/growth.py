@@ -9,6 +9,7 @@ from ...utils.ist import (
 )
 from ..auth import get_current_user, require_roles
 from ...dependencies import store_in_view
+from ...services import product_cost
 from ...services.cost_mask import mask_cost
 from ...services.margin_basis import (
     cost_by_product,
@@ -253,6 +254,16 @@ async def profit_by_category(
             profit_by_cat[category]["cost"] += cost_price
             profit_by_cat[category]["profit"] += profit
 
+    # Pieces sold before their supplier bill (owner 2026-11-01 (a)).
+    for category, v in product_cost.variance_by(
+        get_db(), "category", store_ids=[active_store] if active_store else None,
+        from_day=from_date, to_day=to_date,
+    ).items():
+        row = profit_by_cat.setdefault(category or "Other", {
+            "category": category or "Other", "revenue": 0, "cost": 0, "profit": 0, "margin_percent": 0})
+        row["cost"] += v
+        row["profit"] -= v
+
     # Calculate margin percentages
     for cat in profit_by_cat.values():
         if cat["revenue"] > 0:
@@ -332,6 +343,15 @@ async def profit_by_store(
         )
         profit_by_st[store]["cost"] += cost
         profit_by_st[store]["profit"] += order_amount - cost
+
+    # Pieces sold before their supplier bill (owner 2026-11-01 (a)).
+    for store, v in product_cost.variance_by(
+        get_db(), "store_id", store_ids=None if is_cross else list(allowed_stores),
+        from_day=from_date, to_day=to_date,
+    ).items():
+        row = profit_by_st.setdefault(store, {"store_id": store, "revenue": 0, "cost": 0, "profit": 0, "orders": 0})
+        row["cost"] += v
+        row["profit"] -= v
 
     total_profit = sum(s["profit"] for s in profit_by_st.values())
 

@@ -2483,11 +2483,28 @@ def _reactivate_original_unit(
             continue
         if ok:
             used_ids.add(sid)
+            _unsell(stock_repo, sid)
             return str(sid)
         # No longer SOLD: another return flipped it first -- try the next one.
     if failed:
         raise RuntimeError("stock reactivate failed: the SOLD unit stays SOLD")
     return None
+
+
+def _unsell(stock_repo: Any, sid: Any) -> None:
+    """S4: a returned piece a supplier bill trued up while it was sold comes
+    back at what was paid, its variance reversed (product_cost.unsell, as the
+    release door). Fail-soft: the restock stands; the log names what was not
+    re-costed."""
+    db = getattr(getattr(stock_repo, "collection", None), "database", None)
+    if db is None:
+        return
+    try:
+        from api.services import product_cost
+
+        product_cost.unsell(db, [str(sid)], utc_now_iso())
+    except Exception:  # noqa: BLE001
+        logger.error("[RETURNS] %s restocked, its cost NOT re-averaged (product_cost.unsell)", sid, exc_info=True)
 
 
 def _flip_sold_unit(
