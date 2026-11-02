@@ -58,6 +58,29 @@ async def test_a_till_write_stalled_past_the_lease_cannot_bill_a_given_back_leg(
 
 
 @pytest.mark.asyncio
+async def test_the_door_fencing_inside_the_order_writes_read_and_write_is_refused(lost_leg, monkeypatch):
+    """The fence lands between the order write's read and its write: the
+    write's compare-and-set misses (and every retry), so nothing is billed."""
+    await _lose_first_press(lost_leg)
+    _age(lost_leg)
+    orders = lost_leg["db"].get_collection("orders")
+    real = orders.update_one
+    state = {"n": 0}
+
+    def _fence_first(flt, upd, *a, **k):
+        if "$push" in upd and state["n"] == 0:
+            state["n"] += 1
+            _age(lost_leg, minutes=11)
+            cust_router.give_back_unbilled_leg(LEG, _user("ADMIN"))
+        return real(flt, upd, *a, **k)
+
+    monkeypatch.setattr(orders, "update_one", _fence_first)
+    with pytest.raises(HTTPException) as e:
+        await _press()
+    assert e.value.status_code == 409 and _balance(lost_leg) == 1000.0 and _paid(lost_leg) == []
+
+
+@pytest.mark.asyncio
 async def test_a_payment_that_reached_the_order_first_stops_the_door_at_the_fence(lost_leg, monkeypatch):
     """The other side: the till's late write lands after the door won the
     leg but before it fenced the order -- the fence misses, nothing is
@@ -129,6 +152,27 @@ def test_a_lost_mark_after_the_cash_payout_replays_the_stored_payout(till, monke
     [payout] = _payouts(till)
     assert payout["cash_paid_from"] == "HQ" and payout["paid_outside_drawer"][0]["amount"] == 80.0
     assert VKEY in vouchers.find_one({"code": "GV7"})["pos_given_back"]
+
+
+def test_a_re_press_after_day_end_replays_the_stored_payout(till, monkeypatch, tasks):
+    """The payout is read FIRST: a re-press after the drawer was counted
+    replays the stored payout, never refused by today's Day-End."""
+    vouchers = _walk_in_dead(till, monkeypatch)
+    real = vouchers.update_one
+    state = {"n": 0}
+
+    def _mark(flt, upd, *a, **k):
+        if "pos_given_back" in (upd.get("$addToSet") or {}) and state["n"] == 0:
+            state["n"] += 1
+            raise RuntimeError("the mark write was lost")
+        return real(flt, upd, *a, **k)
+
+    monkeypatch.setattr(vouchers, "update_one", _mark)
+    with pytest.raises(RuntimeError):
+        cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "STORE_DRAWER")
+    monkeypatch.setattr(returns_router, "_drawer_closed_today", lambda store_id: True)  # Day-End counted
+    out = cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "STORE_DRAWER")
+    assert out["given_back"] is True and len(_payouts(till)) == 1
 
 
 def test_the_cash_source_is_required_and_the_leg_is_never_let_go(till, monkeypatch):

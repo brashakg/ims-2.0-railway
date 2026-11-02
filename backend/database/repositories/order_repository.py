@@ -539,11 +539,6 @@ class OrderRepository(BaseRepository):
                 key = payment.get("idempotency_key")
                 if key and any(p.get("idempotency_key") == key for p in order.get("payments") or []):
                     return True
-                # PR #1264 (money review 22): a till leg given back is fenced on
-                # the order -- its payment never goes on (the write's
-                # compare-and-set carries the same condition).
-                if key and key in (order.get("given_back_legs") or []):
-                    return False
 
                 def _is_credit(p):
                     return str((p or {}).get("method", "")).upper() == "CREDIT"
@@ -604,6 +599,8 @@ class OrderRepository(BaseRepository):
                 # approval must retain its exact reserved snapshot instead.
                 from api.services.credit_limit import _snapshot
                 result = self.collection.update_one(
+                    # PR #1264 (money review 22): a till leg given back is
+                    # fenced on the order -- its payment never goes on.
                     {"order_id": order_id, **_snapshot(order),
                      **({"given_back_legs": {"$ne": key}} if key else {})},
                     {"$push": {"payments": payment}, "$set": {
