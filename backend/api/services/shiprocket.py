@@ -285,10 +285,11 @@ def build_shipment_payload(
                    courier collect the whole bill from a customer who had
                    already paid a deposit at the counter.
     The SHIPPING invoice line (online orders, #1294) is that shipping_charges,
-    never an order item; a part-paid COD balance below the shipping owes only
-    that much of it, so sub_total never goes negative.
+    never an order item; a part-paid COD balance no bigger than the shipping
+    is all sub_total, so Shiprocket is never sent a sub_total of 0.
     order_items[].selling_price stay at goods value in both cases - they
-    describe what is in the box, not what is owed.
+    describe what is in the box, not what is owed - and are the price of ONE
+    piece: Shiprocket multiplies them by units.
     """
     items = order.get("items") or []
     line_items: List[Dict[str, Any]] = []
@@ -297,13 +298,18 @@ def build_shipment_payload(
         if it.get("item_type") == "SHIPPING":
             shipping += float(it.get("item_total") or 0.0)
             continue
+        units = max(int(it.get("quantity") or 1), 1)
+        line_total = it.get("item_total")
         line_items.append(
             {
                 "name": (it.get("product_name") or it.get("sku") or "Item")[:100],
                 "sku": (it.get("sku") or it.get("product_id") or "SKU")[:50],
-                "units": int(it.get("quantity") or 1),
-                "selling_price": float(
-                    it.get("item_total") or it.get("unit_price") or 0.0
+                "units": units,
+                "selling_price": round(
+                    float(line_total) / units
+                    if line_total
+                    else float(it.get("unit_price") or 0.0),
+                    2,
                 ),
             }
         )
@@ -331,7 +337,7 @@ def build_shipment_payload(
         total = cod_collectable(order)
     else:
         total = float(order.get("grand_total") or order.get("subtotal") or 0.0)
-    shipping_charges = round(min(shipping, total), 2)
+    shipping_charges = round(shipping, 2) if shipping < total else 0.0
     sub_total = round(total - shipping_charges, 2)
 
     return {

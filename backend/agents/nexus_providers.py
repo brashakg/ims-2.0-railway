@@ -407,9 +407,11 @@ async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) ->
     from api.routers.webhooks import record_pulled_order
     from api.services.online_order_mapper import (
         _derive_statuses,
+        _edit_recheck,
         _recompute_money,
         _shopify_payload_stale,
     )
+    from api.services.online_order_status import order_fact
     from api.services.online_fulfillment_route import map_routed_order
     from api.services.shopify_fulfillment import (
         FULFILLMENT_WATERMARK,
@@ -512,6 +514,16 @@ async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) ->
                 [p for p in (existing.get("payments") or []) if isinstance(p, dict)],
             )
             topic = _order_topic(st, money, existing, ful_stale)
+            if not topic:
+                # An edit alone moves no payment or fulfilment fact: it is fed
+                # when the mapper's own re-check would change the stored
+                # check (a lost orders/updated must still reach the COD gate).
+                check = _edit_recheck(existing, raw, order_fact(raw, ful_stale=ful_stale))
+                stored = existing.get("shopify_totals_check") or {}
+                if check and (check["status"], check["shopify_total"]) != (
+                    stored.get("status"), stored.get("shopify_total")
+                ):
+                    topic = "orders/updated"
             if topic:
                 res = await feed(topic, raw, lambda: map_routed_order(order, db, webhook_id=None, topic=topic))
                 # The transition table kept a finished status while the

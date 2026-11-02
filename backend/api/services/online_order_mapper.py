@@ -735,6 +735,35 @@ def _shopify_money_withheld(existing_payment_status: Any, derived_payment_status
     return False
 
 
+def _edit_recheck(
+    existing: Dict[str, Any], payload: Dict[str, Any], fact: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """ONE rule for the webhook drain AND the hourly pull sweep: the totals
+    check an order edit before dispatch re-reads, or None. An edit is a body
+    stating no lifecycle fact (`fact`, online_order_status.order_fact) on an
+    order still to ship; the check is the booking's own rule
+    (shopify_ingest._totals_check: Shopify's current_total_price, refund money
+    added back) and the COD courier gate reads it
+    (delivery_gate.cod_collectable). A refund on an unpaid COD order moves no
+    money, the buyer simply owes less, so it stays a MISMATCH and the courier
+    never collects the old, higher IMS balance. Once the goods are out
+    (returns) there is no re-check. One task per order, as at booking:
+    task_raised carries over."""
+    from .online_order_status import BOOKED_STATUSES, GOODS_OUT
+    from .shopify_ingest import _totals_check
+
+    status_now = _norm(existing.get("status")).upper()
+    if fact is not None or status_now not in BOOKED_STATUSES or status_now in GOODS_OUT:
+        return None
+    check = _totals_check(payload, _f(existing.get("grand_total")), current=True)
+    if check["status"] == "UNCHECKED":
+        return None
+    old = existing.get("shopify_totals_check")
+    if isinstance(old, dict) and old.get("task_raised"):
+        check["task_raised"] = True
+    return check
+
+
 def _recompute_money(
     existing: Dict[str, Any],
     st: Dict[str, Any],
@@ -949,7 +978,7 @@ def _sync_existing_order_status(
     # one fact or none, and the transition table decides what it does to the
     # status IMS holds (never backwards; DELIVERED is the courier's; a
     # finished order stays finished).
-    from .online_order_status import BOOKED_STATUSES, CANCEL, GOODS_OUT, apply_fact, order_fact
+    from .online_order_status import CANCEL, apply_fact, order_fact
     from .shopify_fulfillment import fulfilment_body_stale
 
     # The body's fulfilments run on the reconcile's clock, not the order's: a
@@ -982,33 +1011,11 @@ def _sync_existing_order_status(
     # DELIVERED order): the hourly sweep reads it, so it feeds the cancel once.
     if st["cancelled"]:
         lifecycle_update["shopify_cancelled_at"] = _norm(payload.get("cancelled_at"))
-    # An order edit before dispatch (a body stating no lifecycle fact, on an
-    # order still to ship) re-reads the totals check from Shopify's
-    # current_total_price, as one of this event's markers: the COD courier
-    # gate reads it (delivery_gate.cod_collectable). Shopify's current total
-    # also nets refunds. Only the MONEY Shopify sent back is added back (IMS
-    # answers it with a credit note and never edits grand_total): a refund on
-    # an unpaid COD order moves no money, the buyer simply owes less, so it
-    # stays a MISMATCH and the courier never collects the old, higher IMS
-    # balance. Once the goods are out (returns) there is no re-check.
-    check = None
-    status_now = _norm(existing.get("status")).upper()
-    if fact is None and status_now in BOOKED_STATUSES and status_now not in GOODS_OUT:
-        from .shopify_ingest import _totals_check
-        from .shopify_refund import _money_back_on_shopify
-
-        refunded = sum(
-            _money_back_on_shopify(r)[0]
-            for r in payload.get("refunds") or [] if isinstance(r, dict))
-        check = _totals_check(
-            payload, _f(existing.get("grand_total")), current=True, refunded=refunded)
-        if check["status"] == "UNCHECKED":
-            check = None
-        else:
-            old = existing.get("shopify_totals_check")
-            if isinstance(old, dict) and old.get("task_raised"):
-                check["task_raised"] = True  # one task per order, as at booking
-            lifecycle_update["shopify_totals_check"] = check
+    # An order edit before dispatch re-reads the totals check
+    # (_edit_recheck), as one of this event's markers.
+    check = _edit_recheck(existing, payload, fact)
+    if check is not None:
+        lifecycle_update["shopify_totals_check"] = check
 
     try:
         moved = apply_fact(

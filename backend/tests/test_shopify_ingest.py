@@ -1603,3 +1603,36 @@ def test_an_edit_after_a_refund_still_mismatches(wired, monkeypatch):
     assert check["status"] == "MISMATCH"
     assert check["difference"] == -100.0
     assert len(_mismatch_tasks(task_repo, order)) == 1
+
+
+@pytest.mark.parametrize("topic", ["orders/updated", "orders/create"])
+def test_an_order_first_seen_after_an_edit_books_a_mismatch(wired, monkeypatch, topic):
+    """The create webhook was missed: the order is first booked from an edited
+    body -- an orders/updated delivery, or the hourly missed-order pull, which
+    books it as orders/create. Ingest bills Shopify's original quantities, so
+    the invoice is Rs 1,098 while the buyer now owes Rs 600: a MISMATCH, one
+    task, and the COD gate refuses the old balance."""
+    import api.dependencies as deps
+    from fastapi import HTTPException
+
+    from api.services.delivery_gate import cod_collectable
+
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: None)
+    body = {
+        **_charged(7127, total="1098.00", shipping=[{"title": "Standard", "price": "99.00"}]),
+        "financial_status": "pending",
+        "current_total_price": "600.00",
+        "updated_at": "2026-11-01T10:01:00+05:30",
+    }
+    online_order_mapper.map_shopify_order(body, wired["db"], topic=topic)
+    order = wired["orders"].find_one({"shopify_order_id": "7127"})
+    assert order["grand_total"] == 1098.0
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MISMATCH"
+    assert check["shopify_total"] == 600.0
+    with pytest.raises(HTTPException) as exc:
+        cod_collectable(order)
+    assert exc.value.detail["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
+    assert len(_mismatch_tasks(task_repo, order)) == 1

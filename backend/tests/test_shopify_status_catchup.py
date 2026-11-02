@@ -1529,3 +1529,31 @@ def test_historical_import_orders_are_left_alone(swept):
     assert p["status_synced"] == [] and p["status_failed"] == []
     assert swept["seen"] == []
     assert _snap(_doc(swept, 30014)) == before
+
+
+def test_an_edit_whose_webhook_was_lost_reaches_the_cod_gate_through_the_sweep(swept):
+    """An edit alone moves no payment or fulfilment fact. When its
+    orders/updated webhook is lost, the sweep still feeds it -- the mapper's
+    own re-check would change the stored totals check -- so the COD gate
+    reads what the buyer now owes. The same body swept again feeds nothing."""
+    from fastapi import HTTPException
+
+    from api.services.delivery_gate import cod_collectable
+
+    money = {"financial_status": "pending", "total_price": "999.00"}
+    doc = _book(swept, 30090, current_total_price="999.00", **money)
+    assert doc["shopify_totals_check"]["status"] == "MATCH"
+
+    swept["state"]["orders"] = [_pulled(30090, current_total_price="600.00",
+                                        updated_at="2026-09-06T02:00:00Z", **money)]
+    assert swept["run"]().payload["status_synced"] == ["30090"]
+    doc = _doc(swept, 30090)
+    assert doc["shopify_totals_check"]["status"] == "MISMATCH"
+    assert doc["shopify_totals_check"]["shopify_total"] == 600.0
+    with pytest.raises(HTTPException) as exc:
+        cod_collectable(doc)
+    assert exc.value.detail["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
+
+    swept["seen"].clear()
+    assert swept["run"]().payload["status_synced"] == []
+    assert swept["seen"] == []
