@@ -13,6 +13,15 @@
 // ponytail: exported as arrays, not a policy engine. A role list is a list.
 
 import type { UserRole } from '../../types';
+import { PURCHASE_ROLES } from '../purchase/purchaseRoles';
+
+/**
+ * S7 Stock today (/inventory/today): the purchase roles - managers and the
+ * accountant. The SAME list as the server's gate on GET /inventory/today
+ * (cost_mask.PURCHASE_ROLES + SUPERADMIN, pinned by test_stock_today.py and
+ * stockToday.test.tsx). The stock value inside it is the accounts roles' only.
+ */
+export const STOCK_TODAY_ROLES: UserRole[] = PURCHASE_ROLES;
 
 /**
  * Who may open the Inventory module at all (the layout + every section that

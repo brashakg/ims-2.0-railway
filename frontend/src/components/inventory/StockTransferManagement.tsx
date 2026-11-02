@@ -107,7 +107,13 @@ export function StockTransferManagement() {
   const { user } = useAuth();
   const toast = useToast();
 
-  const [direction, setDirection] = useState<TransferDirection>('all');
+  // ?direction=incoming|outgoing opens the list on that side (the Stock today
+  // page's "Scan in" / "Pack and scan out"). window.location, not a router
+  // hook: the page is also rendered outside a router.
+  const [direction, setDirection] = useState<TransferDirection>(() => {
+    const want = new URLSearchParams(window.location.search).get('direction');
+    return want === 'incoming' || want === 'outgoing' ? want : 'all';
+  });
   const [transfers, setTransfers] = useState<Transfer[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [selectedTransfer, setSelectedTransfer] = useState<Transfer | null>(null);

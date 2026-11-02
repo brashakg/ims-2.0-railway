@@ -156,6 +156,7 @@ export const ROUTES: ReadonlyArray<{ path: string; route?: string; ready?: strin
   { path: '/inventory/overstock' },
   { path: '/inventory/brand-insights' },
   { path: '/inventory/collection-insights' },
+  { path: '/inventory/today' },
   { path: '/inventory/audit' },
   { path: '/inventory/opening-stock' },
   { path: '/inventory/power-grid' },

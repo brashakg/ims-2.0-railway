@@ -419,7 +419,7 @@ def out_of_stock_count(
 
 
 def low_stock_rows(
-    products, stock_units, *, store_id: Optional[str]
+    products, stock_units, *, store_id: Optional[str], strict: bool = False
 ) -> List[Dict[str, Any]]:
     """THE low-stock list: one row per (product, shop) at or under that
     shop's own level -- a shop that has sold out (0 units) included.
@@ -428,7 +428,8 @@ def low_stock_rows(
     name}. How many to buy is buy_qty's (the Reorder list), not this list's.
     `products` / `stock_units`: repositories or raw collections. A missing
     collection or a failed read -> [] (never alert on a level we could not
-    read)."""
+    read). strict: a failed read raises instead, so the caller can say
+    "could not be read" rather than "nothing low" or "sold out"."""
     # ponytail: reads every product that has ANY level, then filters in
     # Python; move the shop filter into the query if the catalogue reaches
     # tens of thousands of levelled products.
@@ -450,12 +451,17 @@ def low_stock_rows(
             )
         )
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return []
     docs = [d for d in docs if d.get("product_id")]
     if not docs:
         return []
     counts = on_hand(
-        stock_units, store_id=store_id, product_ids=[str(d["product_id"]) for d in docs]
+        stock_units,
+        store_id=store_id,
+        product_ids=[str(d["product_id"]) for d in docs],
+        strict=strict,
     )
     rows: List[Dict[str, Any]] = []
     for p in docs:

@@ -121,6 +121,18 @@ CANCELLABLE_TRANSFER_STATUSES = frozenset(
 )
 
 
+# The statuses a box can be packed (scanned out) in -- pack_transfer's gate,
+# and the "asked you for stock" job on Stock today (S7). A request still
+# waiting for the area manager is not packable yet.
+PACKABLE_TRANSFER_STATUSES = frozenset(
+    {
+        TransferStatus.APPROVED.value,
+        TransferStatus.PICKING.value,
+        TransferStatus.PACKED.value,
+    }
+)
+
+
 class TransferType(str, Enum):
     STORE_TO_STORE = "store_to_store"
     WAREHOUSE_TO_STORE = "warehouse_to_store"
@@ -1138,6 +1150,14 @@ def _line_of_piece(transfer: Dict, stock_id: str) -> Dict:
     return {}
 
 
+def _pieces_on_the_way(line: Dict) -> List[str]:
+    """The line's pieces still on the way: shipped in the box and not yet
+    scanned in (received or damaged). THE rule -- Accept lists these as
+    missing, Stock today (S7) counts them as coming."""
+    settled = {str(s) for s in (line.get("received_stock_ids") or []) + (line.get("damaged_stock_ids") or [])}
+    return [str(s) for s in line.get("shipped_stock_ids") or [] if str(s) not in settled]
+
+
 def _landed(unit: Dict, transfer: Dict) -> bool:
     """The piece already landed at the RECEIVING shop from this transfer: the
     write a scan in or a found at the receiver makes (_rehome_patch, the only
@@ -1839,9 +1859,7 @@ async def pack_transfer(
             status_code=400,
             detail="An area manager approves this request before it is packed.",
         )
-    if status not in (
-        TransferStatus.APPROVED.value, TransferStatus.PICKING.value, TransferStatus.PACKED.value
-    ):
+    if status not in PACKABLE_TRANSFER_STATUSES:
         raise HTTPException(
             status_code=400, detail="Only an approved box that has not shipped can be packed."
         )
@@ -2266,10 +2284,9 @@ async def complete_transfer(
         known = {str(p.get("stock_id")) for p in t.get("missing_pieces") or []}
         gone.clear()
         for line in t.get("items") or []:
-            settled = {str(s) for s in (line.get("received_stock_ids") or []) + (line.get("damaged_stock_ids") or [])}
-            for sid in line.get("shipped_stock_ids") or []:
-                if str(sid) not in settled and str(sid) not in known:
-                    gone.append((str(sid), line))
+            for sid in _pieces_on_the_way(line):
+                if sid not in known:
+                    gone.append((sid, line))
         found_units: Dict[str, Dict] = {}
         if gone:
             found_units = {

@@ -500,6 +500,7 @@ def movement_summary(
     store_id: Optional[str] = None,
     days: int = 90,
     by_store: bool = False,
+    strict: bool = False,
 ) -> Dict:
     """ONE orders aggregation over the last `days` (default 90) IST days for
     the membership, day-sub-grouped in Mongo ($dateTrunc, tz Asia/Kolkata) and
@@ -512,7 +513,7 @@ def movement_summary(
         "totals": {same keys aggregated},
         "per_store": {store_id: {"units_d30": int, "units_d90": int}},  # by_store only
     }
-    Fail-soft -> zeros."""
+    Fail-soft -> zeros (strict: a failed orders read is raised)."""
     pids = list((members or {}).get("product_ids") or [])
     per_product: Dict[str, Dict] = {}
     per_store: Dict[Optional[str], Dict] = {}
@@ -536,6 +537,8 @@ def movement_summary(
         try:
             rows = list(coll.aggregate(pipeline))
         except Exception as exc:  # noqa: BLE001
+            if strict:
+                raise
             logger.warning("[COLL-INSIGHTS] movement aggregation failed: %s", exc)
             continue
         for r in rows:
