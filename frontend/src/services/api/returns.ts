@@ -166,6 +166,8 @@ export interface UnbilledPayment {
   store_id?: string;
   customer_id?: string;
   voucher_code?: string | null;
+  /** Paid back in cash (a dead voucher on a walk-in bill): say where the cash comes from. */
+  cash_payout?: boolean;
 }
 
 export type OwedPaidMethod = 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER';
@@ -223,8 +225,9 @@ export const returnsApi = {
   /** "Give back this unbilled payment": the one door for a till payment that
    *  was taken but never reached its bill (gives back once; refuses a
    *  payment that is on its bill). */
-  giveBackUnbilled: async (key: string) => {
-    const response = await api.post('/returns/unbilled-payments/give-back', { key });
+  giveBackUnbilled: async (key: string, cashPaidFrom?: CashPaidFrom) => {
+    const response = await api.post('/returns/unbilled-payments/give-back',
+      { key, ...(cashPaidFrom ? { cash_paid_from: cashPaidFrom } : {}) });
     return response.data;
   },
 

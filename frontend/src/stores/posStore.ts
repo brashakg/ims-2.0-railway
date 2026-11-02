@@ -120,6 +120,11 @@ export interface PaymentEntry {
   /** LOYALTY: the points behind this line were burned (amount and reference
       are the redeem's own) -- a re-press re-sends it, never burns again. */
   burned?: boolean;
+  /** The line's stable id, given when it is added (what it is, never where it
+      sits): the till's leg key is built from it, so moving, removing or
+      re-adding a line never re-sends a recorded leg under a new key
+      (money review 22). */
+  line_id?: string;
   voucherCode?: string;
   voucherAmount?: number;
   
@@ -261,7 +266,7 @@ export interface POSState {
   markLoyaltyBurned: (leg: { amount: number; reference: string }) => void;
   // Reset
   resetTransaction: () => void;
-  clearAllOnLogout: () => void;
+  clearAllOnLogout: (userId?: string) => void;
   // Park/Hold: push the CURRENT cart onto the held-bills queue
   // (`ims-held-bills`) as a snapshot, tagged with the owning user/store so a
   // shared terminal never leaks one cashier's cart to another. Used both by
@@ -516,12 +521,14 @@ export const usePOSStore = create<POSState>()(
 
       // --- Payment ---
       addPayment: (payment: Omit<PaymentEntry, 'timestamp'>) => {
-        set((state: POSState) => ({
-          payments: [
-            ...(state.payments || []),
-            { ...payment, timestamp: new Date().toISOString() },
-          ],
-        }));
+        set((state: POSState) => {
+          const list = state.payments || [];
+          const base = `${payment.method}:${String(payment.voucherCode || '').trim().toUpperCase()}`
+            + `:${Math.round(Number(payment.amount || 0) * 100)}`;
+          let n = 0;
+          while (list.some((p: PaymentEntry) => p.line_id === `${base}#${n}`)) n += 1;
+          return { payments: [...list, { ...payment, line_id: `${base}#${n}`, timestamp: new Date().toISOString() }] };
+        });
       },
 
       setCashTender: (capture: CashTenderCapture | null) => set({ cash_tender: capture }),
@@ -700,7 +707,18 @@ export const usePOSStore = create<POSState>()(
       // re-login. Cross-user leakage is prevented at the recall layer
       // (POSLayout filters held bills by held_by === current user), not by
       // wiping every parked cart on logout.
-      clearAllOnLogout: () => {
+      clearAllOnLogout: (userId?: string) => {
+        // A press still pending keeps its promise ("press again, it finishes
+        // once"): the bill is parked first, with its key, unless it already
+        // is (the idle sign-out parks before it clears) (money review 22).
+        const pending = billKeyEntry(billFingerprint(get()));
+        if (pending?.pending) {
+          let held: any[] = [];
+          try { held = JSON.parse(localStorage.getItem('ims-held-bills') || '[]'); } catch { held = []; }
+          if (!(Array.isArray(held) && held.some((b) => b?.bill_key?.key === pending.key))) {
+            get().parkCurrentSale({ auto: true, heldBy: userId });
+          }
+        }
         clearBillKey(billFingerprint(get()));
         set(initialState);
         try {

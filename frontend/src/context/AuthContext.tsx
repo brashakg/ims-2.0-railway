@@ -343,7 +343,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       localStorage.removeItem('ims_login_time');
       localStorage.removeItem('ims_active_module');
       // Clear POS state to prevent data leaking between users
-      try { usePOSStore.getState().clearAllOnLogout(); } catch { /* ignore if store not ready */ }
+      try { usePOSStore.getState().clearAllOnLogout(state.user?.id); } catch { /* ignore if store not ready */ }
       dispatch({ type: 'LOGOUT' });
       // Every screen's cached server data goes too, so the next person on a
       // shared tablet is never shown the last person's (tasks or anything

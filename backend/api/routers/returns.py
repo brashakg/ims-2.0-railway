@@ -5330,7 +5330,7 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
     # unbilled payment" (money review 20).
     from datetime import timedelta
 
-    from .customers import PENDING_TIMEOUT_SECONDS, unbilled_legs
+    from .customers import PENDING_TIMEOUT_SECONDS, unbilled_legs, voucher_leg_needs_cash
 
     unbilled: List[Dict[str, Any]] = []
     try:
@@ -5344,7 +5344,10 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                              "order_id": leg["order_id"], "order_number": order.get("order_number"),
                              "store_id": order.get("store_id") or leg.get("store_id"),
                              "customer_id": leg.get("customer_id") or order.get("customer_id"),
-                             "voucher_code": leg.get("voucher_code")})
+                             "voucher_code": leg.get("voucher_code"),
+                             # Paid back in cash: the row asks where the cash comes from.
+                             "cash_payout": leg["kind"] == "GIFT_VOUCHER" and voucher_leg_needs_cash(
+                                 leg.get("voucher"), order, leg["key"])})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the unbilled payments - try again.") from exc
     return {"items": sorted(out, key=lambda r: str(r.get("at") or "")), "owed": owed, "unbilled": unbilled}
@@ -5352,6 +5355,9 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
 
 class GiveBackBody(BaseModel):
     key: str  # the leg's id, POSPAY:<order>:<leg>
+    # Only for a voucher leg paid back in cash (an expired or cancelled voucher
+    # on a walk-in bill): THE cash rule (_place_cash_legs).
+    cash_paid_from: Optional[Literal["STORE_DRAWER", "HQ"]] = None
 
 
 @router.post("/unbilled-payments/give-back")
@@ -5365,7 +5371,7 @@ async def give_back_unbilled_payment(
     then marks it given back. Accounts / Admin; store-scoped; audited."""
     from .customers import give_back_unbilled_leg
 
-    return give_back_unbilled_leg(body.key.strip(), current_user)
+    return give_back_unbilled_leg(body.key.strip(), current_user, body.cash_paid_from)
 
 
 @router.get("")

@@ -254,14 +254,16 @@ def test_an_expired_voucher_is_given_back_as_store_credit(till, monkeypatch, tas
     assert _balance(till) == 80.0
 
 
-def test_a_cancelled_voucher_on_a_walk_in_bill_is_refused(till, monkeypatch):
+def test_a_cancelled_voucher_on_a_walk_in_bill_asks_where_the_cash_comes_from(till, monkeypatch):
+    """Money review 22 replaced "refuse and let go": the cash source is
+    required, and the leg is never let go (the till can never bill it)."""
     vouchers = _dead_voucher(till, monkeypatch, status="CANCELLED", balance=20.0)
     till["db"].get_collection("orders").update_one({"order_id": "O7"}, {"$set": {"customer_id": "walkin-1"}})
     with pytest.raises(HTTPException) as e:
         cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"))
-    assert e.value.status_code == 409 and "cash" in e.value.detail
+    assert e.value.status_code == 400 and "drawer" in e.value.detail
     v = vouchers.find_one({"code": "GV7"})
-    assert v["balance"] == 20.0 and not (v.get("pos_leg_owner") or {})  # the take was let go
+    assert v["balance"] == 20.0 and (v.get("pos_leg_owner") or {}).get(VKEY) == "GIVEBACK"
 
 
 # =========================================================================== #

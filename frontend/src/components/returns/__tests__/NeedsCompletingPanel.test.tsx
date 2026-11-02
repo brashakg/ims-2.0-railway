@@ -137,3 +137,21 @@ describe('NeedsCompletingPanel - Unbilled payments (money review 20)', () => {
     expect(giveBack.mock.calls[0]).toEqual(['POSPAY:O1:k:leg:0']);
   });
 });
+
+describe('money review 22: a dead voucher on a walk-in bill is paid back in cash', () => {
+  it('asks where the cash comes from before it can be confirmed, and sends it', async () => {
+    needsCompleting.mockResolvedValue({ items: [], owed: [], unbilled: [
+      { key: 'POSPAY:O7:k7:leg:0', kind: 'GIFT_VOUCHER', amount: 80, order_id: 'O7', order_number: 'BV/0707',
+        store_id: 'BV-PUN-01', voucher_code: 'GV7', cash_payout: true },
+    ] });
+    giveBack.mockClear();
+    render(<NeedsCompletingPanel />);
+    expect(await screen.findByText('BV/0707')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Give back this unbilled payment' })).toBeNull();
+    fireEvent.change(screen.getByLabelText('Cash from'), { target: { value: 'HQ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Give back this unbilled payment' }));
+    fireEvent.click(screen.getByRole('button', { name: /Confirm: Rs 80.00 paid back in cash/ }));
+    await waitFor(() => expect(giveBack).toHaveBeenCalledTimes(1));
+    expect(giveBack.mock.calls[0]).toEqual(['POSPAY:O7:k7:leg:0', 'HQ']);
+  });
+});

@@ -230,3 +230,26 @@ describe('money review 21: the leg key names its tender', () => {
     expect(keys.slice(-2)).toEqual(['bill-9:leg:0:STORE_CREDIT', 'bill-9:leg:0:GIFT_VOUCHER:GV1']);
   });
 });
+
+describe('money review 22: a leg key is the line, not its position', () => {
+  it('removing and re-adding a recorded cash line after a lost debit leg re-sends it under the SAME key', async () => {
+    mockedCreate.mockResolvedValue({ order_id: 'ord-1', order_number: 'BV-001' } as any);
+    seed();
+    usePOSStore.setState({ payments: [] } as any);
+    const st = () => usePOSStore.getState();
+    st().addPayment({ method: 'CASH', amount: 400 } as any);
+    st().addPayment({ method: 'STORE_CREDIT', amount: 600 } as any);
+    mockedAddPayment.mockResolvedValueOnce({ payment_id: 'c' } as any) // CASH recorded
+      .mockRejectedValueOnce(apiErr(undefined)) // STORE_CREDIT: the answer is lost
+      .mockResolvedValue({ payment_id: 'p' } as any);
+    await submitPosOrder(st() as any, 'bill-r');
+    st().removePayment(0); // the cashier moves the cash line to the end
+    st().addPayment({ method: 'CASH', amount: 400 } as any);
+    await submitPosOrder(st() as any, 'bill-r');
+    const sent = mockedAddPayment.mock.calls.map((c) => [(c[1] as any).method, c[2]]);
+    const cashKeys = new Set(sent.filter(([m]) => m === 'CASH').map(([, k]) => k));
+    const creditKeys = new Set(sent.filter(([m]) => m === 'STORE_CREDIT').map(([, k]) => k));
+    expect(cashKeys.size).toBe(1);
+    expect(creditKeys.size).toBe(1);
+  });
+});

@@ -2028,8 +2028,9 @@ def _own_leg(kind: str, key: str, owner: str, voucher_code: Optional[str] = None
     whose last press is older than the reconciler timeout -- by compare-and-set
     on that exact stamp, so a till press in between always wins. Raises on a
     read/write error.
-    ponytail: the lease assumes a till press never stalls 10 minutes between its
-    claim and its order write (the same bound the reconciler relies on)."""
+    The lease only decides WHEN the door may try: the money itself is fenced on
+    the ORDER (give_back_legs, below), so a till write that lands late after a
+    takeover is refused there -- no timing assumption (money review 22)."""
     coll, flt, field, at_field = _owner_fields(kind, key, voucher_code)
     if coll is None:
         raise RuntimeError("no collection for the leg's owner")
@@ -2245,7 +2246,70 @@ def _parse_at(value: Any):
 GIVE_BACK_ROLES = ("ACCOUNTANT", "ADMIN")  # SUPERADMIN passes
 
 
-def give_back_unbilled_leg(key: str, current_user: dict) -> Dict[str, Any]:
+def voucher_leg_needs_cash(voucher: Optional[Dict[str, Any]], order: Optional[Dict[str, Any]], key: str) -> bool:
+    """A voucher leg that can only be given back in cash: the voucher can no
+    longer be spent (expired or cancelled) and the bill has no account."""
+    from ..services.money_guard import _is_expired_iso
+
+    if not voucher or any(e.get("idempotency_key") == f"GIVEBACK:{key}" for e in voucher.get("money_ledger") or []):
+        return False
+    dead = str(voucher.get("status") or "").upper() not in ("ACTIVE", "REDEEMED") or _is_expired_iso(
+        voucher.get("expiry_date"))
+    cust = str((order or {}).get("customer_id") or "")
+    return dead and (not cust or cust.startswith("walkin-"))
+
+
+def _give_back_in_cash(key, leg, voucher, order, label, task_ref, cash_paid_from, current_user) -> Dict[str, Any]:
+    """The cash payout of an unbilled voucher leg, booked ONCE as a payout
+    record (THE rule of the owed-paid door: drawer -- refused once Day-End is
+    counted -- or HQ), written FIRST under a fixed _id: a re-press replays
+    the STORED payout. Then the leg is marked given back."""
+    from .returns import _close_task, _place_cash_legs, _returns_coll
+
+    coll = _returns_coll()
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available - nothing was recorded.")
+    pid = f"payout:{key}"
+    try:
+        payout = coll.find_one({"_id": pid})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the payout - try again.") from exc
+    store_id = (order or {}).get("store_id") or leg.get("store_id")
+    if payout is None:
+        legs, outside = _place_cash_legs([{"method": "CASH", "amount": leg["amount"]}], cash_paid_from, store_id)
+        now = utc_now_iso()
+        payout = {
+            "_id": pid, "return_id": f"GIVEBACK-{leg['order_id']}-{voucher.get('code')}", "payout_of": key,
+            "payout_kind": "UNBILLED_GIVE_BACK", "order_id": leg["order_id"], "store_id": store_id,
+            "return_type": "RETURN", "status": "COMPLETED", "net_refund": 0.0, "refund_amount": 0.0,
+            "credit_amount": 0.0, "items": [], "refund_tenders": legs, "paid_outside_drawer": outside or None,
+            "method": "CASH", "cash_paid_from": cash_paid_from, "drawer_auto_netted": bool(legs),
+            "gst_breakup": None, "credit_note_number": None, "created_at": now, "drawer_at": now,
+            "created_by": current_user.get("user_id"),
+            "note": f"Unbilled voucher {voucher.get('code')} payment given back in cash",
+        }
+        try:
+            coll.insert_one(dict(payout))
+        except Exception as exc:  # noqa: BLE001 -- another press wrote it first (or a lost answer)
+            try:
+                payout = coll.find_one({"_id": pid})
+            except Exception:  # noqa: BLE001
+                payout = None
+            if payout is None:
+                raise HTTPException(status_code=503, detail=(
+                    "The payout could not be booked - press again (it is booked once).")) from exc
+    _vouchers_coll().update_one({"code": voucher.get("code")}, {"$addToSet": {"pos_given_back": key}})
+    _audit_credit_event("UNBILLED_PAYMENT_GIVEN_BACK", {"entry_id": key, "order_id": leg["order_id"],
+                                                        "delta": leg["amount"], "store_id": store_id},
+                        user_id=current_user.get("user_id"))
+    _close_task(task_ref, current_user, f"Paid back Rs {leg['amount']:.2f} in cash.")
+    src = "from the shop's drawer" if payout.get("cash_paid_from") == "STORE_DRAWER" else "by HQ"
+    return {"key": key, "given_back": True, "amount": leg["amount"], "cash_paid_from": payout.get("cash_paid_from"),
+            "message": (f"Voucher {voucher.get('code')} is expired or cancelled and order {label} has no customer "
+                        f"account: Rs {leg['amount']:.2f} booked as paid back in cash {src}.")}
+
+
+def give_back_unbilled_leg(key: str, current_user: dict, cash_paid_from: Optional[str] = None) -> Dict[str, Any]:
     """THE one door that gives back a till debit leg that never reached its
     bill (money review 20). It CLAIMS the leg first (compare-and-set: not
     billed, not given back, not claimed), refuses (409) a leg on its bill,
@@ -2304,9 +2368,18 @@ def give_back_unbilled_leg(key: str, current_user: dict) -> Dict[str, Any]:
         raise HTTPException(status_code=409, detail=(
             f"This payment belongs to order {label}'s bill: a till press is finishing it. Press Complete Sale "
             "again on that bill, or try again in a few minutes. Nothing was credited."))
-    # 2. On its bill after all (a press that landed meanwhile): never given back.
-    order = ocoll.find_one({"order_id": leg["order_id"]})
-    if _leg_billed(order, _leg_of(key, leg["order_id"]), leg["kind"], leg["amount"]):
+    # 2. FENCE THE ORDER (money review 22): the leg is marked given back on the
+    # order itself, by compare-and-set on "this leg's payment is not on it";
+    # the till's order write carries the opposite condition, so on that one
+    # document exactly one of the two wins -- whatever the timing.
+    leg_part = _leg_of(key, leg["order_id"])
+    try:
+        fenced = ocoll.update_one({"order_id": leg["order_id"], "payments.idempotency_key": {"$ne": leg_part}},
+                                  {"$addToSet": {"given_back_legs": leg_part}})
+        order = ocoll.find_one({"order_id": leg["order_id"]})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the payment - try again.") from exc
+    if order is not None and int(getattr(fenced, "matched_count", 0) or 0) != 1:
         _give_leg_back_to(leg["kind"], key, vcode, prior)
         raise HTTPException(status_code=409, detail=on_bill)
     # 3. Credit exactly once, under a fixed id per leg. A voucher that can no
@@ -2321,11 +2394,11 @@ def give_back_unbilled_leg(key: str, current_user: dict) -> Dict[str, Any]:
             voucher.get("expiry_date"))
         if dead and not on_voucher:
             cust = str((order or {}).get("customer_id") or "")
-            if not cust or cust.startswith("walkin-"):
-                _give_leg_back_to(leg["kind"], key, vcode, prior)
-                raise HTTPException(status_code=409, detail=(
-                    f"Voucher {voucher.get('code')} is expired or cancelled and order {label} has no customer "
-                    f"account - give the Rs {leg['amount']:.2f} back in cash (Accounts). Nothing was credited."))
+            if voucher_leg_needs_cash(voucher, order, key):
+                # No account to credit: paid back in CASH, booked by THE cash
+                # rule (the owed-paid door's). The leg stays the give-back's
+                # (never released): it can never be billed (money review 22).
+                return _give_back_in_cash(key, leg, voucher, order, label, task_ref, cash_paid_from, current_user)
             leg = {**leg, "customer_id": cust}
             to_credit = True
     if to_credit:

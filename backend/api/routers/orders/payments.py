@@ -456,7 +456,13 @@ async def add_payment(
             _release_loyalty_redemption(loyalty_txn_id, payment_id)
         if not recorded:
             # A refund-advance claim that landed mid-write: say so, not "failed".
-            refuse_if_advance_refunded(repo.find_by_id(order_id) or {}, "take a payment")
+            now_order = repo.find_by_id(order_id) or {}
+            refuse_if_advance_refunded(now_order, "take a payment")
+            if idem_key and idem_key in (now_order.get("given_back_legs") or []):
+                from ..customers import GIVEN_BACK_STORE_CREDIT, GIVEN_BACK_VOUCHER
+
+                raise HTTPException(status_code=409, detail=(
+                    GIVEN_BACK_VOUCHER if payment.method == PaymentMethod.GIFT_VOUCHER else GIVEN_BACK_STORE_CREDIT))
         if recorded:
             # Auto-confirm DRAFT orders when first payment is received
             # This fixes the "stuck in DRAFT+PARTIAL" lifecycle issue

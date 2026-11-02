@@ -47,6 +47,7 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
   // Till payments taken but never on their bill (money review 20).
   const [unbilled, setUnbilled] = useState<UnbilledPayment[]>([]);
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  const [cashFrom, setCashFrom] = useState<Record<string, CashPaidFrom>>({});
   const focusUnbilled = typeof window !== 'undefined'
     ? new URLSearchParams(window.location.search).get('unbilled') : null;
   const [payPick, setPayPick] = useState<Record<string, { method: OwedPaidMethod; from?: CashPaidFrom; confirm?: boolean }>>({});
@@ -104,7 +105,9 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
   const giveBack = async (row: UnbilledPayment) => {
     setBusy(row.key);
     try {
-      const res = await returnsApi.giveBackUnbilled(row.key);
+      const res = row.cash_payout
+        ? await returnsApi.giveBackUnbilled(row.key, cashFrom[row.key])
+        : await returnsApi.giveBackUnbilled(row.key);
       toast.success(res?.message || 'Given back.');
       setConfirmKey(null);
       await load();
@@ -211,7 +214,15 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
                   {row.store_id ? ` - ${row.store_id}` : ''}
                 </span>
                 <span className="ml-auto font-medium">{rs(row.amount)}</span>
-                {confirmKey !== row.key ? (
+                {row.cash_payout && (
+                  <select aria-label="Cash from" className="input-field w-auto text-xs" value={cashFrom[row.key] || ''}
+                    onChange={(e) => { setCashFrom((c) => ({ ...c, [row.key]: e.target.value as CashPaidFrom })); setConfirmKey(null); }}>
+                    <option value="" disabled>Paid back in cash from...</option>
+                    <option value="STORE_DRAWER">The shop drawer</option>
+                    <option value="HQ">HQ</option>
+                  </select>
+                )}
+                {row.cash_payout && !cashFrom[row.key] ? null : confirmKey !== row.key ? (
                   <button type="button" onClick={() => setConfirmKey(row.key)}
                     className="px-3 py-1 text-xs rounded-md border border-gray-300 hover:bg-gray-50">
                     Give back this unbilled payment
@@ -219,7 +230,7 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
                 ) : (
                   <button type="button" onClick={() => giveBack(row)} disabled={busy === row.key}
                     className="px-3 py-1 text-xs rounded-md bg-bv-red-600 text-white disabled:opacity-50">
-                    {busy === row.key ? 'Saving...' : `Confirm: give back ${rs(row.amount)}`}
+                    {busy === row.key ? 'Saving...' : row.cash_payout ? `Confirm: ${rs(row.amount)} paid back in cash` : `Confirm: give back ${rs(row.amount)}`}
                   </button>
                 )}
               </li>

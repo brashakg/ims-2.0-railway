@@ -285,7 +285,10 @@ export async function submitPosOrder(
       // applies to it (money review 21).
       const tender = String(leg.method || '').toUpperCase();
       const voucher = tender === 'GIFT_VOUCHER' ? String(leg.voucherCode || leg.reference || '').trim().toUpperCase() : '';
-      const legKey = idempotencyKey ? `${idempotencyKey}:leg:${legIndex}:${tender}${voucher ? `:${voucher}` : ''}` : undefined;
+      // A line's stable id (money review 22) names the leg; a line from before
+      // it existed falls back to its position.
+      const legId = leg.line_id || `${legIndex}:${tender}${voucher ? `:${voucher}` : ''}`;
+      const legKey = idempotencyKey ? `${idempotencyKey}:leg:${legId}` : undefined;
       const autoRetry = Boolean(legKey) && RECORD_ONLY_TENDERS.has(String(leg.method || '').toUpperCase());
       const body = buildPaymentBody(leg, leg.method === 'CASH' ? cashCapture : null);
       if (leg.method === 'CASH') cashCapture = null;

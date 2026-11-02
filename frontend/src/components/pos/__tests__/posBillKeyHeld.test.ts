@@ -171,3 +171,38 @@ describe('money review 20: the promise of a lost debit leg ends with its key', (
     expect(msg).toBe(TILL_DEBIT_CHECK);
   });
 });
+
+describe('money review 22: a manual logout keeps a pending press', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    usePOSStore.setState({ store_id: 'S1', salesperson_id: 'u1' } as any);
+    usePOSStore.getState().resetTransaction();
+  });
+
+  it('parks the bill WITH its key when a press is pending, once (the idle park is not repeated)', () => {
+    putCart();
+    const fp = billFingerprint(usePOSStore.getState());
+    const key = billKeyFor(fp); // a press is pending
+    usePOSStore.getState().clearAllOnLogout('u1');
+    expect(heldBills().map((b: any) => [b.bill_key?.key, b.held_by])).toEqual([[key, 'u1']]);
+    expect(usePOSStore.getState().cart).toEqual([]);
+
+    localStorage.clear();
+    usePOSStore.getState().resetTransaction();
+    putCart();
+    const fp2 = billFingerprint(usePOSStore.getState());
+    billKeyFor(fp2);
+    usePOSStore.getState().parkCurrentSale({ auto: true, heldBy: 'u1' }); // the idle sign-out parks first
+    usePOSStore.getState().clearAllOnLogout('u1');
+    expect(heldBills()).toHaveLength(1);
+  });
+
+  it('a bill with nothing pending is not parked by a manual logout', () => {
+    putCart();
+    const fp = billFingerprint(usePOSStore.getState());
+    billKeyFor(fp);
+    settleBillKey(fp);
+    usePOSStore.getState().clearAllOnLogout('u1');
+    expect(heldBills()).toEqual([]);
+  });
+});
