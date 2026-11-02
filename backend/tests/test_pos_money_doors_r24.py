@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import date, timedelta
+from datetime import timedelta
 
 import pytest
 
@@ -24,6 +24,7 @@ os.environ.setdefault("MONGODB_URI", "")
 from fastapi import HTTPException  # noqa: E402
 
 from api.routers import customers as cust_router  # noqa: E402
+from api.utils.ist import ist_today  # noqa: E402
 from api.routers import returns as returns_router  # noqa: E402
 from tests.test_orders_hardening import _draft_orders, _frame_item, _post_order_idem, hardening_orders  # noqa: E402,F401
 from tests.test_pos_money_doors import _user, till  # noqa: E402,F401
@@ -52,7 +53,7 @@ def test_an_edited_bill_under_the_same_key_is_refused(client, auth_headers, hard
 def test_the_same_bill_pressed_again_replays_even_with_a_new_date_or_note(client, auth_headers, hardening_orders):
     r1 = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="K-S", notes="a")
     r2 = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="K-S", notes="b",
-                          delivery_date=(date.today() + timedelta(days=10)).isoformat())
+                          delivery_date=(ist_today() + timedelta(days=10)).isoformat())
     assert r2.status_code in (200, 201), r2.text
     assert r2.json()["order_id"] == r1.json()["order_id"]
     assert len(_draft_orders(hardening_orders)) == 1
