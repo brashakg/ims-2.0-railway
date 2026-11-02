@@ -357,7 +357,8 @@ def _shipping_address(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def _totals_check(
-    payload: Dict[str, Any], grand_total: float, *, current: bool = False
+    payload: Dict[str, Any], grand_total: float, *, current: bool = False,
+    historical: bool = False,
 ) -> Dict[str, Any]:
     """THE check that the IMS invoice is what Shopify charged: Shopify's total
     against the booked grand_total, to the paisa. MISMATCH is flagged on the
@@ -371,9 +372,12 @@ def _totals_check(
     (IMS answers it with a credit note, shopify_refund) and a refund is never
     read as an edit; a refund that moved no money is not added back. A body
     without current_total_price is checked on total_price, except by the
-    re-check (`current`): such a body says nothing about edits."""
+    re-check (`current`): such a body says nothing about edits. So is a
+    cancelled body or a history import (`historical`): their current figures
+    net the cancel or the refunds, which IMS answers with credit notes, not
+    edits."""
     pre, raw, refunded = "current_", payload.get("current_total_price"), 0.0
-    if raw is None or str(raw).strip() == "":
+    if historical or payload.get("cancelled_at") or raw is None or str(raw).strip() == "":
         if current:
             return {"status": "UNCHECKED"}
         pre, raw = "", payload.get("total_price")
@@ -2400,7 +2404,7 @@ def ingest_shopify_order(
         # Website 1: the delivery address from checkout, and THE check that
         # this invoice is what Shopify charged (MISMATCH -> admin task below).
         "shipping_address": _shipping_address(payload),
-        "shopify_totals_check": _totals_check(payload, grand_total),
+        "shopify_totals_check": _totals_check(payload, grand_total, historical=historical),
         # Online prices are GST-inclusive (Shopify shows the all-in price paid).
         "pricing_model": "inclusive",
         # Shopify confirmation is the RECEIPT; the IMS invoice is the tax doc.

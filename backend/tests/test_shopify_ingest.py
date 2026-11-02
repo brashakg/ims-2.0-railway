@@ -1636,3 +1636,28 @@ def test_an_order_first_seen_after_an_edit_books_a_mismatch(wired, monkeypatch, 
         cod_collectable(order)
     assert exc.value.detail["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
     assert len(_mismatch_tasks(task_repo, order)) == 1
+
+
+@pytest.mark.parametrize("topic", ["orders/cancelled", "orders/create"])
+def test_an_order_first_seen_already_cancelled_raises_no_mismatch_task(wired, monkeypatch, topic):
+    """A COD order cancelled on Shopify before IMS saw it: the cancel restocks
+    every line, so current_total_price is 0.00, and an unpaid order's refund
+    moves no money. Never a sale: it is checked on what checkout charged,
+    MATCH, and no P1 task -- the same as an order cancelled after booking."""
+    import api.dependencies as deps
+
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: None)
+    body = {
+        **_charged(7128, total="1098.00", shipping=[{"title": "Standard", "price": "99.00"}]),
+        "financial_status": "voided",
+        "cancelled_at": "2026-11-01T10:01:00+05:30",
+        "current_total_price": "0.00",
+        "refunds": [{"id": 99010, "transactions": []}],
+        "updated_at": "2026-11-01T10:01:00+05:30",
+    }
+    online_order_mapper.map_shopify_order(body, wired["db"], topic=topic)
+    order = wired["orders"].find_one({"shopify_order_id": "7128"})
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+    assert not _mismatch_tasks(task_repo, order)
