@@ -1123,7 +1123,10 @@ def mark_cost_applied(db, bill_id, lines) -> bool:
 def finish_accepted_bills(db) -> int:
     """The sweeper: every accepted bill whose cost a crash left half-applied
     (cost_state PENDING for over 5 minutes) is applied again -- exactly once
-    per product, so nothing doubles. Returns how many."""
+    per product, so nothing doubles. It also averages back in every trued-up
+    piece back in stock whose door's re-cost failed (product_cost.unsell:
+    exactly once per piece and variance row; a piece not held is skipped).
+    Returns how many bills."""
     from datetime import timedelta
 
     from api.utils.event_time import utc_now
@@ -1137,6 +1140,12 @@ def finish_accepted_bills(db) -> int:
             continue
         _apply_accepted_bill(db, bill, actor="system")
         done += 1
+    # ponytail: scans every variance row each sweep; mark rows fully unsold if it grows.
+    for row in db.get_collection(product_cost.VARIANCES).find({"reverses": None}, {"_id": 0, "stock_ids": 1}):
+        try:
+            product_cost.unsell(db, row.get("stock_ids") or [], utc_now_iso())
+        except Exception:  # noqa: BLE001 - the next sweep re-runs it
+            logger.warning("[PI] re-costing unsold pieces %s failed", row.get("stock_ids"), exc_info=True)
     return done
 
 

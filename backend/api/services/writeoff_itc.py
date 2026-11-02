@@ -678,8 +678,10 @@ def undo_writeoff(db, unit: dict) -> None:
     safe to repeat. A piece a supplier bill trued up after it was written off
     also comes back at what was paid, its variance reversed
     (product_cost.unsell; a piece that left for good, RTV, is not held, so
-    skipped). Fail-soft: the undo stands; the log names what was not re-costed."""
-    coll = db.get_collection(COLLECTION)
+    skipped), AFTER the GST steps: a cost failure never skips them.
+    Fail-soft: the undo stands; the log names what was not re-costed (the
+    PENDING-bill sweeper re-runs it)."""
+    _undo_reversal(db, unit)
     sid = _sid(unit)
     try:
         from . import product_cost
@@ -689,6 +691,13 @@ def undo_writeoff(db, unit: dict) -> None:
     except Exception:  # noqa: BLE001
         logger.error("[WRITEOFF_ITC] %s back from its write-off, its cost NOT re-averaged (product_cost.unsell)",
                      sid, exc_info=True)
+
+
+def _undo_reversal(db, unit: dict) -> None:
+    """undo_writeoff's GST steps: the piece's reversal row deleted, or kept
+    and re-claimed once its month is filed."""
+    coll = db.get_collection(COLLECTION)
+    sid = _sid(unit)
     row = coll.find_one({"_id": sid})
     if not row:
         return

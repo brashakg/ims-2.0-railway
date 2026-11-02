@@ -254,9 +254,32 @@ def _waiting(db, product_id: str, cost_keys) -> Tuple[float, Dict[str, float], D
 def basis_pieces(db, product_id: str, cost_keys=()) -> float:
     """The pieces of a product we hold that a bill has already costed (see
     the module doc); `cost_keys`: the bills already in its average. A
-    stamped pre-S4 receipt's pieces are in it while they wait (PRE_S4_STAMP)."""
+    stamped pre-S4 receipt's pieces are in it while they wait (PRE_S4_STAMP).
+    A piece a bill trued up while it was gone and now held again is out of it
+    until unsell averages it back in at what was paid (_waiting_unsell)."""
     total, waiting, receipts = _waiting(db, product_id, cost_keys)
-    return total - sum(n for r, n in waiting.items() if _stamped_average(receipts[r], product_id) is None)
+    waits = sum(n for r, n in waiting.items() if _stamped_average(receipts[r], product_id) is None)
+    return max(0.0, total - waits - _waiting_unsell(db, product_id, cost_keys))
+
+
+def _waiting_unsell(db, product_id: str, cost_keys) -> float:
+    """Held pieces of a product named, with a cost, in a variance row whose
+    UNSELL:<stock_id>:<variance_id> key is not yet in its average -- back in
+    stock (a cancel, a return, a write-off undone, even one whose unsell
+    failed or is running now), not averaged back in yet: THE one rule every
+    basis reader (apply_bill, unsell) leaves them out by."""
+    keys = set(cost_keys or ())
+    sids = {
+        ln["stock_id"]
+        for var in db.get_collection(VARIANCES).find({"product_id": product_id, "reverses": None},
+                                                     {"_id": 0, "variance_id": 1, "lines": 1})
+        for ln in var.get("lines") or []
+        if ln.get("cost") is not None and f"UNSELL:{ln['stock_id']}:{var['variance_id']}" not in keys
+    }
+    if not sids:
+        return 0.0
+    return sum(stock_value._pieces(u) for u in db.get_collection("stock_units").find({"stock_id": {"$in": list(sids)}})
+               if _held(u))
 
 
 def _pre_s4_trueup(db, prod: dict, product_id: str, cost_keys, key: str, unit: Decimal) -> Tuple[Decimal, Decimal]:
@@ -673,14 +696,9 @@ def unsell(db, stock_ids, at) -> List[dict]:
 
         def work(prod, _old, n=n, back=back, pid=pid, sid=sid, vid=var["variance_id"]):
             # The pieces in the pool before this one came back: the basis
-            # counts every held piece, so take out each piece of this
-            # product this call has not averaged back in yet (this one
-            # included) -- else a sibling still waiting would sit in the
-            # pool at the old average.
-            pending = {ln2["stock_id"]: Decimal(str(stock_value._pieces(held[ln2["stock_id"]]))) for v, ln2, k in todo
-                       if v["product_id"] == pid and k not in (prod.get("cost_keys") or [])}
-            basis = Decimal(str(basis_pieces(db, pid, prod.get("cost_keys") or [])))
-            before = max(Decimal(0), basis - sum(pending.values()))
+            # leaves out every piece still waiting to be unsold, this one
+            # and its siblings (_waiting_unsell).
+            before = Decimal(str(basis_pieces(db, pid, prod.get("cost_keys") or [])))
             avg = Decimal(str(average(prod)))
             new = (before * avg + n * back) / (before + n) if avg and before else back
             return _paise(new), {"stock_id": sid, "reverses": vid, "returned_at": _paise(back),
