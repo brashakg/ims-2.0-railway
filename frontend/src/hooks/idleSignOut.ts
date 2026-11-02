@@ -5,8 +5,7 @@
 
 import { usePOSStore } from '../stores/posStore';
 
-/** Where every idle sign-out lands (in-session watcher and page-load check). */
-export const IDLE_LOGIN_PATH = '/login?reason=idle';
+export { IDLE_LOGIN_PATH } from './useIdleLogout';
 
 /**
  * The one idle sign-out step before logout(): AUTO-PARK any in-progress POS

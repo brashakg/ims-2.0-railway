@@ -16,7 +16,7 @@ Model (Mongo collection `refresh_tokens`; one doc per issued refresh token):
     absolute_session_start  datetime (UTC) of the FIRST login of this session
     rotated_from            token_hash of the token this one replaced (None for the first)
     revoked                 bool + revoked_at/revoked_reason ("rotated" | "logout" |
-                            "reuse_detected" | "account_disabled")
+                            "reuse_detected" | "account_disabled" | "idle")
 
 Security semantics:
   * SINGLE-USE: consume() atomically marks a token rotated; the caller then
@@ -172,18 +172,41 @@ class RefreshTokenStore:
     # consume (single-use rotation + reuse canary)
     # ------------------------------------------------------------------
 
-    def consume(self, token: str) -> Tuple[str, Optional[dict]]:
+    def consume(
+        self, token: str, idle_limit_seconds: Optional[float] = None
+    ) -> Tuple[str, Optional[dict]]:
         """Atomically spend a refresh token for rotation.
+
+        ``idle_limit_seconds``: a token unused (issued_at = its last use) for
+        longer than this is refused as "idle" and its chain revoked. None = no
+        idle limit (idle sign-out disabled).
 
         Returns (status, doc):
           "ok"      -- token was live (or an in-grace multi-tab re-present);
                        caller issues the replacement in the same family.
           "expired" -- past the absolute session cap. Plain 401, no canary.
+          "idle"    -- unused past ``idle_limit_seconds``; chain revoked ("idle").
           "reused"  -- token was ALREADY spent/revoked outside the grace window.
                        The WHOLE family has been revoked (stolen-token canary);
                        caller must 401.
           "invalid" -- unknown token.
         """
+        status, doc = self._consume(token)
+        # Idle is measured at FIRST spend: an in-grace multi-tab re-present
+        # (doc already rotated) is judged at its rotation time, so a second tab
+        # can never revoke the chain the first tab just rotated legitimately.
+        spent_at = doc.get("revoked_at") if doc and doc.get("revoked") else None
+        if (
+            status == "ok"
+            and idle_limit_seconds is not None
+            and ((spent_at or _utcnow()) - doc["issued_at"]).total_seconds()
+            > idle_limit_seconds
+        ):
+            self.revoke_family(doc.get("family_id"), reason="idle")
+            return "idle", doc
+        return status, doc
+
+    def _consume(self, token: str) -> Tuple[str, Optional[dict]]:
         h = hash_refresh_token(token)
         now = _utcnow()
         coll = self._coll()
@@ -226,6 +249,11 @@ class RefreshTokenStore:
         if prior["expires_at"] <= now:
             return "expired", prior
 
+        # A chain already ended for idleness stays idle: never the reuse
+        # canary, which would overwrite the audit reason and the 401 code.
+        if prior.get("revoked_reason") == "idle":
+            return "idle", prior
+
         # Already-revoked token presented again. Two tabs racing the SAME
         # rotation within the grace window is legitimate; anything else is the
         # stolen-token canary -> revoke the entire chain.
@@ -260,9 +288,10 @@ class RefreshTokenStore:
             coll = self._coll()
             if coll is not None:
                 coll.update_many({"family_id": family_id}, {"$set": dict(update)})
+            # Every doc, spent ones too - same as the Mongo update_many above.
             with self._mem_lock:
                 for doc in self._mem.values():
-                    if doc.get("family_id") == family_id and not doc.get("revoked"):
+                    if doc.get("family_id") == family_id:
                         doc.update(update)
         except Exception as e:  # noqa: BLE001
             logger.warning("refresh_tokens: family revoke failed: %s", e)

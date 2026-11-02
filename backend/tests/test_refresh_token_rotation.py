@@ -473,3 +473,157 @@ def test_switch_store_preserves_session_anchors(client, patched_repo):
     assert switched["active_store_id"] == "BV-TEST-02"
     assert switched["sess_start"] == orig["sess_start"]
     assert switched["sid"] == orig["sid"]
+
+
+# ============================================================================
+# 10. Server-side idle limit (follow-up to #1335)
+# ============================================================================
+# A refresh token unused for longer than the idle sign-out policy allows (the
+# auto_logout minutes the /health policy serves + the access-token lifetime as
+# grace) is refused with reason "idle". One policy source: api.main's resolver.
+
+
+def _policy(monkeypatch, enabled=True, minutes=15):
+    monkeypatch.setattr(
+        "api.main._get_auto_logout_policy",
+        lambda: {"enabled": enabled, "minutes": minutes, "warn_seconds": 60},
+    )
+
+
+def _backdate_issue(refresh_token_plain: str, minutes: float) -> None:
+    """Pretend the refresh token was minted `minutes` ago (its last use)."""
+    h = hash_refresh_token(refresh_token_plain)
+    update = {"issued_at": datetime.utcnow() - timedelta(minutes=minutes)}
+    coll = refresh_token_store._coll()
+    if coll is not None:
+        coll.update_many({"token_hash": h}, {"$set": dict(update)})
+    doc = refresh_token_store._mem.get(h)
+    if doc is not None:
+        doc.update(update)
+
+
+def _stored(refresh_token_plain: str) -> dict:
+    h = hash_refresh_token(refresh_token_plain)
+    coll = refresh_token_store._coll()
+    if coll is not None:
+        return coll.find_one({"token_hash": h}) or {}
+    return refresh_token_store._mem.get(h) or {}
+
+
+def test_refresh_idle_past_limit_is_refused_with_reason_idle(
+    client, patched_repo, monkeypatch
+):
+    _policy(monkeypatch, minutes=15)
+    patched_repo([_make_user()])
+    body = _login(client)
+    limit = 15 + auth_module.ACCESS_TOKEN_EXPIRE_MINUTES
+    _backdate_issue(body["refresh_token"], limit + 2)
+
+    r = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": body["refresh_token"]}
+    )
+    assert r.status_code == 401, r.text
+    assert r.json()["detail"]["code"] == "SESSION_IDLE"
+    assert _stored(body["refresh_token"])["revoked_reason"] == "idle"
+
+
+def test_refresh_used_within_idle_limit_rotates(client, patched_repo, monkeypatch):
+    # 70 min unused with a 30-min policy: inside 30 + 45 grace -> rotates. Red
+    # if the limit ignores the policy minutes or drops the access-token grace.
+    _policy(monkeypatch, minutes=30)
+    patched_repo([_make_user()])
+    body = _login(client)
+    _backdate_issue(body["refresh_token"], 70)
+
+    r = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": body["refresh_token"]}
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["refresh_mode"] == "rotating"
+
+
+def test_disabled_idle_policy_never_refuses(client, patched_repo, monkeypatch):
+    _policy(monkeypatch, enabled=False, minutes=15)
+    patched_repo([_make_user()])
+    body = _login(client)
+    _backdate_issue(body["refresh_token"], 5 * 60)  # 5h, still inside the 8h cap
+
+    r = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": body["refresh_token"]}
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_idle_refused_token_presented_again_stays_idle(
+    client, patched_repo, monkeypatch
+):
+    # A second present of an idle-refused token is idle again: not the reuse
+    # canary (which would overwrite the audit reason and drop SESSION_IDLE).
+    _policy(monkeypatch, minutes=15)
+    patched_repo([_make_user()])
+    body = _login(client)
+    _backdate_issue(body["refresh_token"], 15 + auth_module.ACCESS_TOKEN_EXPIRE_MINUTES + 2)
+
+    for _ in range(2):
+        r = client.post(
+            "/api/v1/auth/refresh", json={"refresh_token": body["refresh_token"]}
+        )
+        assert r.status_code == 401, r.text
+        assert r.json()["detail"]["code"] == "SESSION_IDLE"
+    assert _stored(body["refresh_token"])["revoked_reason"] == "idle"
+
+
+def test_in_grace_second_tab_judged_at_first_spend_not_now(
+    client, patched_repo, monkeypatch
+):
+    # Tab A rotates just inside the limit; Tab B re-presents the same token 40s
+    # later (inside the reuse grace, past the limit if measured from "now").
+    # Tab B must be judged at Tab A's spend, so the chain survives.
+    _policy(monkeypatch, minutes=15)
+    patched_repo([_make_user()])
+    body = _login(client)
+    _backdate_issue(body["refresh_token"], 15 + auth_module.ACCESS_TOKEN_EXPIRE_MINUTES - 0.5)
+
+    r1 = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": body["refresh_token"]}
+    )
+    assert r1.status_code == 200, r1.text
+
+    real_now = rt_module._utcnow
+    monkeypatch.setattr(rt_module, "_utcnow", lambda: real_now() + timedelta(seconds=40))
+    r2 = client.post(
+        "/api/v1/auth/refresh", json={"refresh_token": body["refresh_token"]}
+    )
+    assert r2.status_code == 200, r2.text
+    assert _stored(r1.json()["refresh_token"]).get("revoked") is False
+
+
+def test_switch_store_keeps_the_access_token_expiry(client, patched_repo, monkeypatch):
+    # Store switch 35 min after the last rotation: the old access token has 10
+    # min left. The switched token must not outlive it, or the client's
+    # proactive refresh (exp - 5 min) fires after the idle limit and signs an
+    # ACTIVE user out.
+    _policy(monkeypatch, minutes=15)
+    patched_repo([_make_user()])
+    body = _login(client)
+    _backdate_issue(body["refresh_token"], 35)
+    old_access = create_access_token(
+        decode_token(body["access_token"]), timedelta(minutes=10)
+    )
+    old_exp = decode_token(old_access)["exp"]
+
+    sw = client.post(
+        "/api/v1/auth/switch-store/BV-TEST-02",
+        headers={"Authorization": f"Bearer {old_access}"},
+    )
+    assert sw.status_code == 200, sw.text
+    new_exp = decode_token(sw.json()["access_token"])["exp"]
+    assert new_exp <= old_exp
+
+    # The client's proactive refresh fires at new_exp - 5 min: still inside.
+    _backdate_issue(body["refresh_token"], 35 + (new_exp - old_exp + 5 * 60) / 60)
+    r = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": body["refresh_token"], "token": sw.json()["access_token"]},
+    )
+    assert r.status_code == 200, r.text

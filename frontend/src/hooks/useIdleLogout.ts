@@ -38,6 +38,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 export const LAST_ACTIVITY_KEY = 'ims_last_activity';
 
+/** Where every idle sign-out lands (in-session watcher, page-load check, and a
+ *  refresh the server refuses as idle). Lives here, not in idleSignOut.ts,
+ *  because services/api/client imports this file (idleSignOut -> posStore ->
+ *  client would be an import cycle). */
+export const IDLE_LOGIN_PATH = '/login?reason=idle';
+
 // Write to localStorage at most this often, so a stream of mousemove/scroll
 // events can't thrash the storage (and the cross-tab `storage` event).
 const ACTIVITY_WRITE_THROTTLE_MS = 5_000;
@@ -101,7 +107,9 @@ function _now(): number {
   return Date.now();
 }
 
-function _storedActivity(): number | null {
+/** The one parse of `ims_last_activity` (epoch ms), or null. Shared with the
+ *  api client's refresh check - never re-implement it. */
+export function _storedActivity(): number | null {
   try {
     const n = parseInt(localStorage.getItem(LAST_ACTIVITY_KEY) || '', 10);
     return Number.isFinite(n) && n > 0 ? n : null;

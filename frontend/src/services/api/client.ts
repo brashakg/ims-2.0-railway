@@ -4,7 +4,7 @@
 
 import axios from 'axios';
 import type { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
-import { LAST_ACTIVITY_KEY } from '../../hooks/useIdleLogout';
+import { _storedActivity, IDLE_LOGIN_PATH } from '../../hooks/useIdleLogout';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? 'https://ims-20-railway-production.up.railway.app/api/v1' : '/api/v1');
@@ -134,20 +134,15 @@ export function shouldProactivelyRefresh(
   return expMs - nowMs <= PROACTIVE_REFRESH_WINDOW_MS;
 }
 
-function readLastActivityMs(): number | null {
-  try {
-    const raw = localStorage.getItem(LAST_ACTIVITY_KEY);
-    const n = raw ? parseInt(raw, 10) : NaN;
-    return Number.isFinite(n) && n > 0 ? n : null;
-  } catch {
-    return null;
-  }
-}
 
 // Single-flight: concurrent callers (proactive tick + several 401 retries)
 // share ONE network refresh so the single-use rotating token isn't raced
 // within this tab (cross-tab races are absorbed by the server's grace window).
 let refreshInFlight: Promise<string | null> | null = null;
+// Set when the server refused a refresh as idle (SESSION_IDLE): the sign-out
+// then lands on /login?reason=idle like the browser's own idle check. Sticky
+// until a refresh succeeds (a fresh login stores a new refresh token).
+let refreshRefusedIdle = false;
 
 export function refreshAccessToken(): Promise<string | null> {
   if (!refreshInFlight) {
@@ -168,6 +163,9 @@ async function performRefresh(): Promise<string | null> {
     return null;
   }
   if (!access && !refresh) return null;
+  // The session ended idle: never re-present the dead chain, and never fall
+  // back to the legacy access-token refresh, which would start a new chain.
+  if (refreshRefusedIdle && !refresh) return null;
   const body: Record<string, string> = {};
   // Preferred: the rotating refresh token. The access token rides along for
   // claim continuity (active store), and doubles as the DEPRECATED legacy
@@ -188,8 +186,18 @@ async function performRefresh(): Promise<string | null> {
       localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, resp.data.refresh_token);
     }
     syncCachedUserShops(newAccess);
+    refreshRefusedIdle = false;
     return newAccess;
-  } catch {
+  } catch (e) {
+    const detail = axios.isAxiosError(e) ? e.response?.data?.detail : undefined;
+    if (detail?.code === 'SESSION_IDLE') {
+      refreshRefusedIdle = true;
+      try {
+        localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+      } catch {
+        /* storage unavailable: performRefresh cannot read the token either */
+      }
+    }
     return null;
   }
 }
@@ -231,7 +239,7 @@ function maybeProactiveRefresh(): void {
     return;
   }
   if (!token) return;
-  if (shouldProactivelyRefresh(decodeJwtExpMs(token), Date.now(), readLastActivityMs())) {
+  if (shouldProactivelyRefresh(decodeJwtExpMs(token), Date.now(), _storedActivity())) {
     void refreshAccessToken();
   }
 }
@@ -387,7 +395,7 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
     localStorage.removeItem(TOKEN_STORAGE_KEY);
     localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
     localStorage.removeItem('ims_user');
-    window.location.href = '/login';
+    window.location.href = refreshRefusedIdle ? IDLE_LOGIN_PATH : '/login';
   }
 
   return Promise.reject(buildApiError(error));
