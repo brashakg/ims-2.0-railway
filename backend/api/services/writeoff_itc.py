@@ -97,9 +97,11 @@ def _receipt_ids(unit: dict) -> list:
 
 
 def _transfer_ids(db, unit: dict) -> list:
-    """Every transfer this piece rode: the one holding it, the one that
-    delivered it (_rehome clears transfer_id and stamps source_id), and every
-    earlier one whose lines list it."""
+    """THE transfers this piece rode (here and product_cost.crossed_gstin):
+    the one holding it, the one that delivered it (_rehome clears
+    transfer_id and stamps source_id), and every earlier one whose lines
+    list it as LANDED (received or damaged) -- never one it was only
+    shipped on and came back from or was lost on."""
     ids = {unit.get("transfer_id")}
     if unit.get("source_type") == "TRANSFER":
         ids.add(unit.get("source_id"))

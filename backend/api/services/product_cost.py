@@ -503,35 +503,30 @@ def written_off_cost(db, units) -> Dict[str, float]:
     return {k: _paise(v) for k, v in out.items()}
 
 
-def crossed_gstin(db, stock_ids) -> set:
-    """The pieces (of `stock_ids`) that ever left on a transfer between two
-    GSTINs (writeoff_itc.transfer_crosses, the one rule: mirror bill, ship's
-    stamp, else -- shipped before #1185 -- the two shops' GSTINs; 'cannot
-    tell' counts as crossed). Such a piece's cost at the receiving GSTIN was
-    fixed by the transfer's tax invoice at cost, so a later supplier-bill
-    true-up stays with the shop that took the bill."""
-    ids = [str(s) for s in stock_ids or [] if s]
-    if not ids:
-        return set()
-    moves = list(db.get_collection("stock_transfers").find(
-        {"items.shipped_stock_ids": {"$in": ids}},
-        {"_id": 0, "id": 1, "gst_registrations": 1, "from_location_id": 1, "to_location_id": 1,
-         "items.shipped_stock_ids": 1},
-    ))
-    if not moves:
-        return set()
-    from .writeoff_itc import _gst_itc, _is_note, transfer_crosses
+def crossed_gstin(db, units) -> set:
+    """The stock_ids of `units` that ever crossed a GSTIN: rode
+    (writeoff_itc._transfer_ids, the transfers it LANDED on -- never one it
+    came back from or was lost on) a transfer between two GSTINs
+    (writeoff_itc.transfer_crosses, the one rule: live mirror bill, ship's
+    stamp, else the two shops' GSTINs; 'cannot tell' counts as crossed).
+    Such a piece's cost at the receiving GSTIN was fixed by the transfer's
+    tax invoice at cost, so a later supplier-bill true-up stays with the shop
+    that took the bill."""
+    from .writeoff_itc import _gst_itc, _is_note, _transfer_ids, transfer_crosses
 
+    # ponytail: one transfers read per piece (a bill's sold/lost pieces, a handful); batch if bills grow large.
+    rode = {str(u["stock_id"]): set(_transfer_ids(db, u)) for u in units or [] if u.get("stock_id")}
+    tids = list(set().union(*rode.values())) if rode else []
+    if not tids:
+        return set()
+    moves = {t.get("id"): t for t in db.get_collection("stock_transfers").find(
+        {"id": {"$in": tids}},
+        {"_id": 0, "id": 1, "gst_registrations": 1, "from_location_id": 1, "to_location_id": 1})}
     mirrored = {b.get("source_transfer_id") for b in db.get_collection("vendor_bills").find({
-        "status": {"$nin": _gst_itc()._DEAD_BILL},
-        "source_transfer_id": {"$in": [t.get("id") for t in moves]}}) if not _is_note(b)}
+        "status": {"$nin": _gst_itc()._DEAD_BILL}, "source_transfer_id": {"$in": tids}}) if not _is_note(b)}
     gstins = _gst_itc().shop_gstins(db)
-    out = set()
-    for t in moves:
-        if transfer_crosses(t, gstins, t.get("id") in mirrored):
-            for ln in t.get("items") or []:
-                out.update(str(s) for s in ln.get("shipped_stock_ids") or [])
-    return out & set(ids)
+    crossed = {tid for tid in tids if transfer_crosses(moves.get(tid) or {}, gstins, tid in mirrored)}
+    return {sid for sid, ts in rode.items() if ts & crossed}
 
 
 def _split(acc: Dict[str, Decimal], amount: float) -> List[dict]:
@@ -584,7 +579,7 @@ def _variance(
     by_cat: Dict[str, Decimal] = {}
     per_piece: Dict[str, Decimal] = {}
     keys: Dict[str, dict] = {}
-    crossed = crossed_gstin(db, [u["stock_id"] for u in units])
+    crossed = crossed_gstin(db, units)
     for at, u in left:
         receipt = by_id[_receipt_of(u)]
         stamped = _pool_figure(prod, receipt, pid, at)

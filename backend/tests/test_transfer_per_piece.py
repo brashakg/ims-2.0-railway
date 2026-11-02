@@ -784,6 +784,10 @@ def test_a_write_off_pressed_again_after_the_average_moved_books_the_loss_at_the
     ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "cannot tell"),
     ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "pre-1185"),
     ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "unstamped"),
+    ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "mirror only"),  # only the live mirror bill says it crossed
+    ("ST-BOK-1", MGR_BOK, "ST-BOK-1", "dead mirror"),  # a cancelled mirror says nothing
+    ("ST-DHN-2", MGR_DHN2, "ST-DHN-2", "found back"),  # shipped on to Bokaro, never landed: back, sold
+    ("ST-DHN-2", MGR_DHN2, "ST-DHN-2", "lost"),  # shipped on to Bokaro, lost, written off
 ))
 def test_a_moved_piece_sold_before_its_bill_owes_its_true_up_to_the_right_shop(
     world, monkeypatch, to, user, owner, shipped
@@ -797,9 +801,15 @@ def test_a_moved_piece_sold_before_its_bill_owes_its_true_up_to_the_right_shop(
     read agrees. Round 15: the crossing is the ONE rule
     (writeoff_itc.transfer_crosses) -- a stamp of crosses=None ('cannot
     tell', no live mirror), a box shipped before #1185 stamped it
-    ('pre-1185': no stamp, its mirror bill), or no stamp and no mirror
-    ('unstamped': the two shops' GSTINs) -- and the product-keyed read (collection insights' 30-day COGS)
-    finds the per-piece row's true-up too."""
+    ('pre-1185': no stamp, its mirror bill -- the shops' GSTINs differ too),
+    or no stamp and no mirror ('unstamped': the two shops' GSTINs) -- and
+    the product-keyed read (collection insights' 30-day COGS) finds the
+    per-piece row's true-up too. Round 16: the live mirror alone decides
+    ('mirror only': no stamp, no shop GSTINs known; 'dead mirror': it was
+    cancelled), and only a transfer the piece LANDED on counts
+    (writeoff_itc._transfer_ids): a piece shipped on to Bokaro that came
+    back to Bank More ('found back', then sold there) or was lost on the
+    way ('lost', written off at Bank More) never crossed."""
     from datetime import datetime
 
     from api.services import collection_insights, product_cost
@@ -821,8 +831,30 @@ def test_a_moved_piece_sold_before_its_bill_owes_its_true_up_to_the_right_shop(
         world["stock_transfers"].update_one({"id": t["id"]}, {"$unset": {"gst_registrations": ""}})
     if shipped in ("cannot tell", "unstamped"):  # the stamp (or GSTINs) alone decides
         world["vendor_bills"].delete_many({"source_transfer_id": t["id"]})
-    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {
-        "status": "SOLD", "order_id": "O1", "sold_at": utc_now_iso()}})
+    if shipped in ("mirror only", "dead mirror"):
+        from api.routers.reports import gst_itc
+
+        world["stock_transfers"].update_one({"id": t["id"]}, {"$unset": {"gst_registrations": ""}})
+        monkeypatch.setattr(gst_itc, "shop_gstins", lambda db: {})
+        if shipped == "dead mirror":
+            assert world["vendor_bills"].update_many(
+                {"source_transfer_id": t["id"]}, {"$set": {"status": "CANCELLED"}}).modified_count
+    if shipped in ("found back", "lost"):  # on to Bokaro (a crossing, its mirror booked), never landed
+        from api.routers import transfers
+
+        on = _ask(1, frm="ST-DHN-2", to="ST-BOK-1")
+        _pack(on["id"], ["BVQX001"])
+        _ship(on["id"])
+        assert world["vendor_bills"].count_documents({"source_transfer_id": on["id"]})
+        _complete(on["id"], user=MGR_BOK)  # nothing scanned in: missing
+        if shipped == "lost":
+            _run(transfers.write_off_missing_piece(on["id"], "SU-1", ADMIN))
+        else:
+            _run(transfers.found_missing_piece(on["id"], "SU-1", transfers.MissingFound(at="source"), MGR_DHN2))
+        assert _unit(world, "SU-1")["store_id"] == "ST-DHN-2"
+    if shipped != "lost":
+        world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {
+            "status": "SOLD", "order_id": "O1", "sold_at": utc_now_iso()}})
     world["orders"].insert_one({"order_id": "O1", "items": [
         {"product_id": "P-1", "quantity": 1, "cost_at_sale": 1850.0, "category": "FRAME"}]})
     _s4_bill(world, "B-NEW", "G-NEW", 1, 1910.0, store_id="ST-DHN-1", bill_date="2026-11-01",
