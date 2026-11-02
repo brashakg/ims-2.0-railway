@@ -271,11 +271,14 @@ async def add_payment(
                     detail="Voucher: a voucher code is required for GIFT_VOUCHER payments",
                 )
             from ...dependencies import get_seeded_db
-            from ..customers import refuse_unresolved_debit
+            from ..customers import refuse_given_back_voucher_leg, refuse_unresolved_debit
 
-            # THE one rule: no new gift-voucher debit while this customer has
-            # an unresolved store-credit or voucher debit on another bill.
-            refuse_unresolved_debit(str(order.get("customer_id") or ""), order_id)
+            # THE one rule: no new gift-voucher debit while this customer --
+            # or this voucher -- has another unresolved debit; only the same
+            # leg (key) resumes. A leg given back is never taken again.
+            leg_key = f"POSPAY:{order_id}:{idem_key}" if idem_key else None
+            refuse_unresolved_debit(str(order.get("customer_id") or ""), leg_key, voucher_code)
+            refuse_given_back_voucher_leg(voucher_code, leg_key)
             result = redeem_voucher_atomic(
                 get_seeded_db(),
                 voucher_code,

@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   returnsApi, type CashPaidFrom, type NeedsCompletingItem, type OwedPaidMethod, type OwedReturn,
+  type UnbilledPayment,
 } from '../../services/api/returns';
 import { useToast } from '../../context/ToastContext';
 import { getErrorMessage } from '../../utils/errorHandler';
@@ -43,6 +44,11 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
   const [busy, setBusy] = useState<string | null>(null);
   // Owed to customer: completed returns whose cash part is still unpaid.
   const [owed, setOwed] = useState<OwedReturn[]>([]);
+  // Till payments taken but never on their bill (money review 20).
+  const [unbilled, setUnbilled] = useState<UnbilledPayment[]>([]);
+  const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  const focusUnbilled = typeof window !== 'undefined'
+    ? new URLSearchParams(window.location.search).get('unbilled') : null;
   const [payPick, setPayPick] = useState<Record<string, { method: OwedPaidMethod; from?: CashPaidFrom; confirm?: boolean }>>({});
   const focus = typeof window !== 'undefined' ? new URLSearchParams(window.location.search).get('return') : null;
 
@@ -51,6 +57,7 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
       const r = await returnsApi.needsCompleting();
       setItems(r.items || []);
       setOwed(r.owed || []);
+      setUnbilled(r.unbilled || []);
       setError(null);
     } catch (e) {
       setError(getErrorMessage(e, 'Could not load the returns that need completing.'));
@@ -94,7 +101,23 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
     }
   };
 
-  if (!standalone && (!items || items.length === 0) && owed.length === 0 && !error) return null;
+  const giveBack = async (row: UnbilledPayment) => {
+    setBusy(row.key);
+    try {
+      const res = await returnsApi.giveBackUnbilled(row.key);
+      toast.success(res?.message || 'Given back.');
+      setConfirmKey(null);
+      await load();
+    } catch (e) {
+      toast.error(getErrorMessage(e, 'Could not give it back.'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  if (!standalone && (!items || items.length === 0) && owed.length === 0 && unbilled.length === 0 && !error) {
+    return null;
+  }
 
   return (
     <section aria-label="Needs completing" className="bg-white border border-amber-300 rounded-lg p-4 mb-4">
@@ -168,6 +191,40 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
               })}
             </tbody>
           </table>
+        </div>
+      )}
+      {unbilled.length > 0 && (
+        <div aria-label="Unbilled payments" className="mt-4">
+          <h3 className="text-sm font-semibold text-gray-900 mb-1">Unbilled payments</h3>
+          <p className="text-xs text-gray-500 mb-2">
+            Store credit or a gift voucher was taken at the till, but the payment never reached its bill. First press
+            Complete Sale again on that bill; if the customer has left, give it back here (once).
+          </p>
+          <ul className="divide-y divide-gray-100">
+            {unbilled.map((row) => (
+              <li key={row.key}
+                ref={focusUnbilled === row.key ? (el) => el?.scrollIntoView?.({ block: 'center' }) : undefined}
+                className={'py-2 flex flex-wrap items-center gap-2 text-sm' + (focusUnbilled === row.key ? ' bg-amber-50' : '')}>
+                <span className="font-medium">{row.order_number || row.order_id || '-'}</span>
+                <span className="text-xs text-gray-400">
+                  {row.kind === 'GIFT_VOUCHER' ? `Gift voucher ${row.voucher_code || ''}` : 'Store credit'}
+                  {row.store_id ? ` - ${row.store_id}` : ''}
+                </span>
+                <span className="ml-auto font-medium">{rs(row.amount)}</span>
+                {confirmKey !== row.key ? (
+                  <button type="button" onClick={() => setConfirmKey(row.key)}
+                    className="px-3 py-1 text-xs rounded-md border border-gray-300 hover:bg-gray-50">
+                    Give back this unbilled payment
+                  </button>
+                ) : (
+                  <button type="button" onClick={() => giveBack(row)} disabled={busy === row.key}
+                    className="px-3 py-1 text-xs rounded-md bg-bv-red-600 text-white disabled:opacity-50">
+                    {busy === row.key ? 'Saving...' : `Confirm: give back ${rs(row.amount)}`}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {owed.length > 0 && (

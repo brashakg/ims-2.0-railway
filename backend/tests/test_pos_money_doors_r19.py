@@ -140,15 +140,16 @@ def test_a_recorded_give_back_blocks_the_legs_replay_and_closes_the_task(till, r
     _bill_and_unbilled_leg(till, redeem_env, monkeypatch)
     cust_router.reconcile_pending_credits(redeem_env, ledger=_ledger(till))
     assert _refs(tasks) == [f"store_credit_unbilled:{KEY}"]
-    # The customer left: Accounts give it back through the card's Issue, quoting the line.
-    cust_router._post_credit_entry("CUST-1", "ISSUED", cust_router.StoreCreditEntryRequest(
-        amount=100.0, reason=f"give back {KEY}"), _user("ADMIN"))
+    # The customer left: Accounts give it back through THE one door (round 20).
+    cust_router.give_back_unbilled_leg(KEY, _user("ADMIN"))
+    assert closed == [f"store_credit_unbilled:{KEY}"]  # the door closes its task
     assert _balance(till) == 500.0 and _ledger(till).find_one({"entry_id": KEY})["given_back"] is True
     with pytest.raises(HTTPException) as e:  # a later re-press of the old bill
         _redeem()
     assert e.value.status_code == 409 and "given back" in e.value.detail and _balance(till) == 500.0
     cust_router.reconcile_pending_credits(redeem_env, ledger=_ledger(till))
-    assert closed == [f"store_credit_unbilled:{KEY}"]
+    assert set(closed) == {f"store_credit_unbilled:{KEY}"}  # (the scan's close is the same, idempotent)
+    assert _ledger(till).find_one({"entry_id": KEY})["bill_checked"] is True
 
 
 def test_the_task_is_stamped_only_once_it_exists(till, redeem_env, monkeypatch):

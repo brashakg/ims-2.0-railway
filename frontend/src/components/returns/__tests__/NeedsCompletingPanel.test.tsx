@@ -22,12 +22,14 @@ const ITEMS = [
 ];
 const needsCompleting = vi.fn(async (): Promise<any> => ({ items: ITEMS }));
 const owedPaid = vi.fn(async (..._a: unknown[]) => ({ message: 'Booked' }));
+const giveBack = vi.fn(async (..._a: unknown[]) => ({ message: 'Given back' }));
 const completeRecord = vi.fn(async () => ({ message: 'Done' }));
 vi.mock('../../../services/api/returns', () => ({
   returnsApi: {
     needsCompleting: () => needsCompleting(),
     completeRecord: (...a: unknown[]) => (completeRecord as any)(...a),
     owedPaid: (...a: unknown[]) => owedPaid(...a),
+    giveBackUnbilled: (...a: unknown[]) => giveBack(...a),
     quote: vi.fn(), create: vi.fn(), list: vi.fn(async () => ({ returns: [] })),
   },
 }));
@@ -115,5 +117,23 @@ describe('NeedsCompletingPanel - Owed to customer (money review 15)', () => {
     fireEvent.click(screen.getByRole('button', { name: /Confirm: Rs 300.00 paid today/ }));
     await waitFor(() => expect(owedPaid).toHaveBeenCalledTimes(1));
     expect(owedPaid.mock.calls[0]).toEqual(['RET-U', { method: 'UPI' }]);
+  });
+});
+
+
+describe('NeedsCompletingPanel - Unbilled payments (money review 20)', () => {
+  it('gives back an unbilled till payment through the one door, after a confirm step', async () => {
+    needsCompleting.mockResolvedValue({ items: [], owed: [], unbilled: [
+      { key: 'POSPAY:O1:k:leg:0', kind: 'STORE_CREDIT', amount: 100, order_id: 'O1', order_number: 'BV/0101',
+        store_id: 'BV-PUN-01', customer_id: 'C1' },
+    ] });
+    giveBack.mockClear();
+    render(<NeedsCompletingPanel />);
+    expect(await screen.findByText('BV/0101')).toBeTruthy(); // the human order number
+    fireEvent.click(screen.getByRole('button', { name: 'Give back this unbilled payment' }));
+    expect(giveBack).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: /Confirm: give back Rs 100.00/ }));
+    await waitFor(() => expect(giveBack).toHaveBeenCalledTimes(1));
+    expect(giveBack.mock.calls[0]).toEqual(['POSPAY:O1:k:leg:0']);
   });
 });

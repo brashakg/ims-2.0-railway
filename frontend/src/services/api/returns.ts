@@ -156,6 +156,18 @@ export interface OwedReturn {
   owed_tenders?: { method?: string; amount?: number }[];
 }
 
+/** A till store-credit / gift-voucher payment taken but never on its bill. */
+export interface UnbilledPayment {
+  key: string;
+  kind: 'STORE_CREDIT' | 'GIFT_VOUCHER';
+  amount: number;
+  order_id?: string;
+  order_number?: string;
+  store_id?: string;
+  customer_id?: string;
+  voucher_code?: string | null;
+}
+
 export type OwedPaidMethod = 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER';
 
 export const returnsApi = {
@@ -184,7 +196,7 @@ export const returnsApi = {
   },
 
   /** Returns > Needs completing: unfinished counter returns (Accounts / Admin). */
-  needsCompleting: async (): Promise<{ items: NeedsCompletingItem[]; owed?: OwedReturn[] }> => {
+  needsCompleting: async (): Promise<{ items: NeedsCompletingItem[]; owed?: OwedReturn[]; unbilled?: UnbilledPayment[] }> => {
     const response = await api.get('/returns/needs-completing');
     return response.data;
   },
@@ -205,6 +217,14 @@ export const returnsApi = {
     body: { method: OwedPaidMethod; cash_paid_from?: CashPaidFrom; note?: string },
   ) => {
     const response = await api.post(`/returns/${encodeURIComponent(returnId)}/owed-paid`, body);
+    return response.data;
+  },
+
+  /** "Give back this unbilled payment": the one door for a till payment that
+   *  was taken but never reached its bill (gives back once; refuses a
+   *  payment that is on its bill). */
+  giveBackUnbilled: async (key: string) => {
+    const response = await api.post('/returns/unbilled-payments/give-back', { key });
     return response.data;
   },
 

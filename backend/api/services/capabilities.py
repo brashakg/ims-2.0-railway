@@ -184,7 +184,8 @@ def capability_for(method: str, path: str) -> Optional[str]:
     # SUPERADMIN finish a counter return whose money went out without its
     # record. Carved out for the same reason as the advance refund.
     if tmpl in ("/api/v1/returns/{return_id}/complete-record",
-                "/api/v1/returns/{return_id}/owed-paid"):
+                "/api/v1/returns/{return_id}/owed-paid",
+                "/api/v1/returns/unbilled-payments/give-back"):
         return "returns:complete-record"
     verb = "read" if method.upper() in _READ_METHODS else "write"
     return f"{mod}:{verb}"

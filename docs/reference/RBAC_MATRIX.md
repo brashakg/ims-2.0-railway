@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 393 |
-| Role-gated (one or more roles) | 878 |
-| **Total `/api/v1` (method x path)** | **1317** |
+| Role-gated (one or more roles) | 879 |
+| **Total `/api/v1` (method x path)** | **1318** |
 | ...of which `store_scoped` | 236 |
 | ...of which `self_enforced` | 47 |
 
@@ -1343,6 +1343,7 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/returns/advance-refund/{order_id}` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/returns/needs-completing` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/returns/quote` | ADMIN, CASHIER, SALES_STAFF, STORE_MANAGER |  |  |
+| `POST` | `/api/v1/returns/unbilled-payments/give-back` | ACCOUNTANT, ADMIN |  |  |
 | `GET` | `/api/v1/returns/{return_id}` | AUTH |  |  |
 | `POST` | `/api/v1/returns/{return_id}/complete-record` | ACCOUNTANT, ADMIN |  |  |
 | `POST` | `/api/v1/returns/{return_id}/owed-paid` | ACCOUNTANT, ADMIN |  |  |

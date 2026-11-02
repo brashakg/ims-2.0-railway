@@ -293,6 +293,14 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/returns/{return_id}/owed-paid",
         "allowed": ["ACCOUNTANT", "ADMIN"],
     },
+    # "Give back this unbilled payment" (money review 20): the one door for a
+    # till store-credit / voucher payment taken but never on its bill. The
+    # same audience and capability as Complete record.
+    {
+        "method": "POST",
+        "path": "/api/v1/returns/unbilled-payments/give-back",
+        "allowed": ["ACCOUNTANT", "ADMIN"],
+    },
     # Its list (Returns > Needs completing panel). returns:read is already
     # AUTHENTICATED-broad, so it broadens nothing.
     {

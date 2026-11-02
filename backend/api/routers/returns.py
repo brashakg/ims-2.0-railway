@@ -5325,7 +5325,47 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                          "owed_tenders": doc.get("owed_tenders") or []})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the owed returns - try again.") from exc
-    return {"items": sorted(out, key=lambda r: str(r.get("at") or "")), "owed": owed}
+    # Till store-credit / gift-voucher payments taken but never on their bill
+    # (the unbilled tasks' list): each has one action, "Give back this
+    # unbilled payment" (money review 20).
+    from datetime import timedelta
+
+    from .customers import PENDING_TIMEOUT_SECONDS, unbilled_legs
+
+    unbilled: List[Dict[str, Any]] = []
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=PENDING_TIMEOUT_SECONDS)).isoformat()
+        for leg in unbilled_legs(cutoff):
+            order = leg.get("order") or {}
+            if not leg["unresolved"] or not can_access_store_scoped(order.get("store_id") or leg.get("store_id"),
+                                                                    current_user):
+                continue
+            unbilled.append({"key": leg["key"], "kind": leg["kind"], "amount": round(leg["amount"], 2),
+                             "order_id": leg["order_id"], "order_number": order.get("order_number"),
+                             "store_id": order.get("store_id") or leg.get("store_id"),
+                             "customer_id": leg.get("customer_id") or order.get("customer_id"),
+                             "voucher_code": leg.get("voucher_code")})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the unbilled payments - try again.") from exc
+    return {"items": sorted(out, key=lambda r: str(r.get("at") or "")), "owed": owed, "unbilled": unbilled}
+
+
+class GiveBackBody(BaseModel):
+    key: str  # the leg's id, POSPAY:<order>:<leg>
+
+
+@router.post("/unbilled-payments/give-back")
+async def give_back_unbilled_payment(
+    body: GiveBackBody = Body(...),
+    current_user: dict = Depends(require_roles(*_COMPLETE_RECORD_ROLES)),
+):
+    """"Give back this unbilled payment" (money review 20): THE one door for a
+    till store-credit or gift-voucher payment that was taken but never reached
+    its bill. Claims the leg first, refuses a leg on its bill, credits once,
+    then marks it given back. Accounts / Admin; store-scoped; audited."""
+    from .customers import give_back_unbilled_leg
+
+    return give_back_unbilled_leg(body.key.strip(), current_user)
 
 
 @router.get("")

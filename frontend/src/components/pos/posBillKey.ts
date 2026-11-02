@@ -26,6 +26,23 @@ export const TILL_SALE_STILL_SAVING =
   'The first press of this sale is still being saved. Do not change the bill - wait a moment and press Complete Sale again.';
 export const BILL_KEY_TTL_MS = 15 * 60_000;
 
+// The promise a lost DEBIT leg makes ("press again - it finishes this
+// payment once") holds only while its bill key is kept: once the bill
+// changes or the key expires, the next press is a new sale (money review 20).
+const DEBIT_PROMISE = 'press Complete Sale again: it finishes this payment once, on this same bill.';
+
+/** The till's words when a debit leg's answer was lost. */
+export function tillDebitLegUnconfirmed(labels: string[]): string {
+  return `The ${labels.join(' and ')} payment could not be confirmed. Do NOT take another tender for this `
+    + `amount - ${DEBIT_PROMISE} (The server refuses any new store-credit or voucher payment for this `
+    + 'customer until this one is resolved.)';
+}
+
+/** The words once that promise has lapsed. */
+export const TILL_DEBIT_CHECK =
+  'A store-credit or voucher payment on this bill could not be confirmed. Check the order payments on the '
+  + 'Orders screen before taking another tender - pressing Complete Sale now would be a new sale.';
+
 export interface BillKeyEntry { key: string; at: number; pending?: boolean }
 
 function readAll(now: number): Record<string, BillKeyEntry> {
@@ -95,7 +112,8 @@ export function clearBillKey(fingerprint: string): void {
   writeAll(map);
 }
 
-/** The lost-sale promise ("press again - not charged twice") holds only while
+/** The lost-sale promise ("press again - not charged twice"), and a lost
+ *  debit leg's ("it finishes this payment once"), hold only while
  *  THIS bill's key is kept: once the bill changes, or its key is dropped or
  *  older than the TTL, the surface's message swaps to the CHECK words. */
 export function useUnconfirmedWording(
@@ -104,8 +122,12 @@ export function useUnconfirmedWording(
   setErrorMsg: (f: (m: string | null) => string | null) => void,
 ): void {
   useEffect(() => {
-    if (errorMsg !== TILL_SALE_UNCONFIRMED) return undefined;
-    const toCheck = () => setErrorMsg((m) => (m === TILL_SALE_UNCONFIRMED ? TILL_SALE_UNCONFIRMED_CHECK : m));
+    const debit = !!errorMsg && errorMsg.includes(DEBIT_PROMISE);
+    if (errorMsg !== TILL_SALE_UNCONFIRMED && !debit) return undefined;
+    const toCheck = () => setErrorMsg((m) => {
+      if (m === TILL_SALE_UNCONFIRMED) return TILL_SALE_UNCONFIRMED_CHECK;
+      return m && m.includes(DEBIT_PROMISE) ? TILL_DEBIT_CHECK : m;
+    });
     const entry = billKeyEntry(billFp);
     if (!entry) {
       toCheck();

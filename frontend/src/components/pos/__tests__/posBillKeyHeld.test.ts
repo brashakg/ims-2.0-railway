@@ -154,3 +154,20 @@ describe('money review 18: the draft keeps PII only while a press is pending', (
     expect(draft).not.toContain('rx7');
   });
 });
+
+
+describe('money review 20: the promise of a lost debit leg ends with its key', () => {
+  it('swaps to the check-the-Orders words once the bill changes or its key is gone', async () => {
+    const { renderHook } = await import('@testing-library/react');
+    const { TILL_DEBIT_CHECK, tillDebitLegUnconfirmed, useUnconfirmedWording } = await import('../posBillKey');
+    localStorage.clear();
+    billKeyFor('bill-D');
+    const words = tillDebitLegUnconfirmed(['STORE_CREDIT Rs 100']);
+    let msg: string | null = words;
+    const set = (f: (m: string | null) => string | null) => { msg = f(msg); };
+    renderHook(() => useUnconfirmedWording('bill-D', words, set));
+    expect(msg).toBe(words); // its key is kept: the promise stands
+    renderHook(() => useUnconfirmedWording('bill-CHANGED', words, set));
+    expect(msg).toBe(TILL_DEBIT_CHECK);
+  });
+});

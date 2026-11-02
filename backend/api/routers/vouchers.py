@@ -314,6 +314,10 @@ def redeem_voucher_atomic(
         idempotency_key=idempotency_key,
     )
 
+    if not res.ok and res.reason == "amount_mismatch":
+        return {"ok": False, "balance": float(res.balance or 0.0), "status": None,
+                "reason": "this payment was already taken from the voucher for a different amount - "
+                          "check the order's payments"}
     if not res.ok:
         # Disambiguate the failure with a follow-up read so the caller can
         # show a precise message. This read is purely for messaging — the

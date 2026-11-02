@@ -16,7 +16,9 @@ import type { CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
 import { refreshBillQuote, replayGuaranteed } from './billQuote';
 import { orderPayloadOf } from './orderPayload';
-import { TILL_SALE_STILL_SAVING, TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from './posBillKey';
+import {
+  TILL_SALE_STILL_SAVING, TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK, tillDebitLegUnconfirmed,
+} from './posBillKey';
 import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
 import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 import { WRITE_UNCONFIRMED_MESSAGE } from '../../services/api/client';
@@ -95,12 +97,7 @@ const RECORD_ONLY_TENDERS = new Set(['CASH', 'CARD', 'UPI']);
 // guard): a lost answer is finished by re-sending the SAME leg, never another.
 const DEBIT_TENDERS = new Set(['STORE_CREDIT', 'GIFT_VOUCHER']);
 
-/** The till's words when a debit leg's answer was lost. */
-export function tillDebitLegUnconfirmed(labels: string[]): string {
-  return `The ${labels.join(' and ')} payment could not be confirmed. Do NOT take another tender for this `
-    + 'amount - press Complete Sale again: it finishes this payment once, on this same bill. (The server '
-    + 'refuses any new store-credit or voucher payment for this customer until this one is resolved.)';
-}
+export { tillDebitLegUnconfirmed } from './posBillKey';
 
 export { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from './posBillKey';
 
