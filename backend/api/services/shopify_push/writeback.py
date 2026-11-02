@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from ..catalog_ecom import EDIT_REV, dirty_marks, update_ecom
+from ..catalog_ecom import EDIT_REV, queue_in, update_ecom
 from ._shared import logger
 from .transport import _now
 
@@ -146,10 +146,11 @@ def _requeue_unpublished(db, product_id: str) -> None:
     drains the queue (the control test), and the batch cap bounds how often a
     stubbornly-unpublishable row can be retried per press.
 
-    Compare-and-set of the ecom sub-doc (catalog_ecom.update_ecom).
+    Compare-and-set of the ecom sub-doc (catalog_ecom.queue_in: never an
+    archived row).
     Fail-soft: any error is logged, never raised."""
     try:
-        update_ecom(db, product_id, lambda ecom: {**ecom, **dirty_marks()})
+        queue_in(db["catalog_products"], product_id)
     except Exception as e:  # noqa: BLE001
         logger.warning(f"[SHOPIFY_PUSH] re-queue failed {product_id}: {e}")
 

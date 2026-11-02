@@ -219,6 +219,13 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/products/generate-description",
         "allowed": ["ADMIN", "CATALOG_MANAGER"],
     },
+    # Suggested colour name from the product's own photo 1 (owner 2026-10-23).
+    # Read-only (never writes); same catalog write roles; SUPERADMIN auto-passes.
+    {
+        "method": "POST",
+        "path": "/api/v1/products/suggest-colour-name",
+        "allowed": ["ADMIN", "CATALOG_MANAGER"],
+    },
     {
         # Hub Phase 4 clone-and-vary -> N DRAFT variants.
         "method": "POST",

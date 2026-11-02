@@ -76,4 +76,15 @@ describe('OnlineStoreSyncBanner dark reasons', () => {
       await screen.findByText(/dispatch mode is "off" \(needs "live"\)/i),
     ).toBeInTheDocument();
   });
+
+  it('says in plain words that writes are off on the server, not an owner cutover', async () => {
+    // Review of #1295: the Shopify page says an automatic sync runs on a
+    // schedule; the banner must not still say the owner arms it at cutover.
+    await renderDark('off');
+
+    expect(
+      await screen.findByText(/website writes are switched off on the server; a press is only a preview/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/cutover/i)).toBeNull();
+  });
 });

@@ -143,7 +143,7 @@ class _Repo:
 
 @pytest.fixture
 def world(monkeypatch):
-    from api.routers import buy_desk, customers, expenses, returns, transfers
+    from api.routers import customers, expenses, inventory_router, returns, transfers
     from api.routers.inventory import stock as stock_mod
     from api.routers.workshop import jobs as jobs_mod
     from database.repositories.customer_repository import CustomerRepository
@@ -185,7 +185,7 @@ def world(monkeypatch):
     app.include_router(expenses.router, prefix="/expenses")
     app.include_router(customers.router, prefix="/customers")
     app.include_router(transfers.router, prefix="/transfers")
-    app.include_router(buy_desk.router, prefix="/buy-desk")
+    app.include_router(inventory_router, prefix="/inventory")
     who = {}
 
     async def _current():
@@ -250,10 +250,11 @@ def test_a_login_that_holds_a_shop_keeps_its_list(world):
     assert _ids(world(am, "/transfers").json()) == [PUN]
 
 
-def test_the_buy_desk_is_empty_for_a_login_with_no_shop(world):
-    r = world(_user("STORE_MANAGER"), "/buy-desk/rows")
+def test_the_reorder_list_is_empty_for_a_login_with_no_shop(world):
+    # The Buy Desk's place (stock redesign S5): the one Reorder list.
+    r = world(_user("STORE_MANAGER"), "/inventory/reorder-list")
     assert r.status_code == 200, r.text
-    assert r.json() == {"rows": [], "total": 0, "store_id": None}
+    assert r.json() == {"store_id": None, "rows": [], "skipped": [], "auto_reorder_off": 0}
 
 
 # ============================================================================

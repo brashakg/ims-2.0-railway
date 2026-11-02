@@ -175,13 +175,14 @@ class TestHistoricalStatusExcluded:
 
 
 class TestParseRangeDt:
-    def test_date_only_start_is_midnight(self):
+    def test_date_only_start_is_ist_midnight(self):
+        # IST midnight on 1 Mar is 18:30 UTC on 28 Feb (stored frame).
         dt = finance._parse_range_dt("2026-03-01", end=False)
-        assert dt == datetime(2026, 3, 1, 0, 0, 0, 0)
+        assert dt == datetime(2026, 2, 28, 18, 30, 0, 0)
 
-    def test_date_only_end_is_end_of_day(self):
+    def test_date_only_end_is_end_of_ist_day(self):
         dt = finance._parse_range_dt("2026-03-31", end=True)
-        assert dt == datetime(2026, 3, 31, 23, 59, 59, 999999)
+        assert dt == datetime(2026, 3, 31, 18, 29, 59, 999999)
 
     def test_returns_datetime_not_string(self):
         # The whole bug: a string bound never matches a BSON datetime field.
@@ -192,10 +193,10 @@ class TestParseRangeDt:
         assert finance._parse_range_dt("") is None
         assert finance._parse_range_dt("   ") is None
 
-    def test_full_iso_with_tz_is_made_naive(self):
+    def test_full_iso_with_tz_is_converted_to_naive_utc(self):
         dt = finance._parse_range_dt("2026-03-01T10:30:00+05:30")
         assert dt.tzinfo is None
-        assert (dt.year, dt.month, dt.day, dt.hour) == (2026, 3, 1, 10)
+        assert (dt.year, dt.month, dt.day, dt.hour) == (2026, 3, 1, 5)
 
     def test_apply_range_uses_datetimes(self):
         match: dict = {}

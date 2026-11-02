@@ -133,7 +133,7 @@ def test_endpoint_reports_this_shops_count_per_tile(client, staff_headers, till)
     assert body["sellable"] == {
         "FR-HAVANA": 0,
         "FR-BLACK": 8,
-        "FR-NEW": None,  # untracked: the guard never blocks it
+        "FR-NEW": 0,  # never stocked here: the guard refuses it (POS 4)
         "FRCARRERA8895BLK": 8,  # a SKU resolves like order-create resolves it
     }
     # The id the guard sums the line under, so the cart can add up a SKU line
@@ -250,7 +250,7 @@ def test_asking_the_guard_logs_nothing(client, staff_headers, till, caplog):
         _assert_serialized_stock_available(
             [{"product_id": "CL-1", "item_type": "CONTACT_LENS", "quantity": 1}], STORE
         )
-    assert "PAST THEIR EXPIRY" in exc.value.detail
+    assert "EXPIRED (expiry date today or earlier)" in exc.value.detail
     assert [rec for rec in caplog.records if "expired unit(s) held back" in rec.getMessage()]
 
 

@@ -31,6 +31,9 @@ export interface SimilarQueryInput {
   category: string;
   /** The form's attributes, as typed. */
   attributes: Record<string, string>;
+  /** The product the editor has open: the server leaves it, and any product
+   *  it was marked different from, out of the answer. */
+  selfId?: string | null;
 }
 
 /** ARM rule: a category (the registry the key is read in) and a brand. */
@@ -80,7 +83,10 @@ export function useSimilarProducts(
       abortRef.current = controller;
       const asked = { category: q.category, typed: JSON.parse(attrsKey) as Record<string, string> };
       productApi
-        .getSimilarProducts({ category: asked.category, ...asked.typed }, controller.signal)
+        .getSimilarProducts(
+          { category: asked.category, ...asked.typed, ...(q.selfId ? { self_id: q.selfId } : {}) },
+          controller.signal,
+        )
         .then((res) => {
           if (!controller.signal.aborted) setAnswer(res ? { ...asked, data: res } : null);
         })
@@ -96,7 +102,7 @@ export function useSimilarProducts(
       abortRef.current?.abort();
       abortRef.current = null;
     };
-  }, [q.category, attrsKey, armed]);
+  }, [q.category, attrsKey, armed, q.selfId]);
 
   return { data, armed };
 }

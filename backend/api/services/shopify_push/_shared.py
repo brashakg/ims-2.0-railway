@@ -408,6 +408,24 @@ def product_push_refusal(db, product: Dict[str, Any]) -> Optional[str]:
     lock = push_lock_reason(db, "product", product)
     if lock:
         return lock
+    from .. import product_master as pm
+
+    # NEVER an ARCHIVED product, on the website or not (Website 2): a push
+    # sends every status but ARCHIVED as ACTIVE, so a re-push of a listing
+    # the archive took down would put it back on sale. Taking it down is its
+    # own door (push_product_delist), which does not ask this gate. A listed
+    # copy whose billing product is archived too (a never-published one is
+    # judged by first_publish_not_ready below). Fail-closed on a read error.
+    archived = pm._is_archived(product)
+    if not archived and (product.get("ecom") or {}).get("shopify_product_id"):
+        from . import listing
+
+        try:
+            archived = pm._is_archived(listing.lead_spine(db, product))
+        except Exception as exc:  # noqa: BLE001
+            return f"not put on the website: its product row could not be read ({exc})"
+    if archived:
+        return "not put on the website: archived"
     # A FIRST publish only of a finished, live-in-IMS product: never an
     # archived one, a draft, a switched-off one or one in Needs review
     # (listing.first_publish_not_ready -- the rule a new colour is held to).

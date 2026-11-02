@@ -189,7 +189,14 @@ async def delivery_challan_for_order(
         or "Walk-in Customer"
     )
     addr = customer.get("billing_address") or customer.get("address") or {}
-    if isinstance(addr, dict):
+    from ..services.invoice_pdf import ship_to_lines
+
+    ship_to = ship_to_lines(order)
+    if ship_to:
+        # The goods travel to the order's own delivery address (an online
+        # order's checkout address), not the customer record's.
+        consignee_address = ", ".join(ship_to)
+    elif isinstance(addr, dict):
         consignee_address = ", ".join(
             str(p)
             for p in [
@@ -205,7 +212,8 @@ async def delivery_challan_for_order(
 
     items: List[Dict[str, Any]] = []
     for it in order.get("items", []) or []:
-        if not isinstance(it, dict):
+        # Shipping is billed on the invoice; it is not goods in the parcel.
+        if not isinstance(it, dict) or it.get("item_type") == "SHIPPING":
             continue
         items.append(
             {
@@ -356,6 +364,8 @@ async def delivery_challan_for_transfer(
             copy_marker=copy,
             overrides=load_overrides(entity, "tax_invoice"),
             auto_print=bool(auto_print),
+            eway_bill_number=str(transfer.get("eway_bill_number") or ""),
+            vehicle_number=str(transfer.get("vehicle_number") or ""),
         )
         return HTMLResponse(content=html)
 

@@ -267,8 +267,8 @@ export default function DiscountRulesPage() {
           Example: a <strong>Frames &rarr; 20% off</strong> rule shows every frame online at 20%
           below MRP (never below cost). A product with a hand-set online offer keeps that price.
           Saving reprices matching products and <strong>queues the changed ones as pending</strong> —
-          they reach the website when an admin runs the push on the Shopify sync page (and only
-          writes live once the owner has armed the push gates).
+          they reach the website on the next automatic sync, or sooner when an admin presses Push
+          on the Shopify sync page.
         </span>
       </div>
 

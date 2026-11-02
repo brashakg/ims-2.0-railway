@@ -16,6 +16,7 @@
 
 import { useQuery } from '@tanstack/react-query';
 import { reportsApi } from '../../services/api';
+import { istDayString } from '../../utils/datetime';
 
 export type ReportSection = 'sales' | 'inventory' | 'customers' | 'gst' | 'forecast';
 export type DateRange = 'today' | 'week' | 'month' | 'quarter' | 'custom';
@@ -41,39 +42,35 @@ export interface DailyTrend {
   sales: number;
 }
 
-/** Verbatim from the old ReportsPage.getDateRange(). */
+/** The Reports window on the IST business day: "today" is the IST date, and
+ * the start is counted back from it on the calendar (a month back from 31 Mar
+ * is 28 Feb, clamped, never 3 Mar). */
 export function resolveDateRange(dateRange: DateRange): { startDate: string; endDate: string } {
-  const now = new Date();
-  const endDate = now.toISOString().split('T')[0];
-  let startDate: string;
+  const endDate = istDayString(new Date()) ?? '';
+  // Calendar arithmetic on the IST date itself (UTC fields, so no zone shift).
+  const back = (days: number, months: number): string => {
+    const d = new Date(`${endDate}T00:00:00Z`);
+    if (months) {
+      const day = d.getUTCDate();
+      d.setUTCDate(1);
+      d.setUTCMonth(d.getUTCMonth() - months);
+      const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+      d.setUTCDate(Math.min(day, last));
+    }
+    d.setUTCDate(d.getUTCDate() - days);
+    return d.toISOString().slice(0, 10);
+  };
 
   switch (dateRange) {
-    case 'today':
-      startDate = endDate;
-      break;
-    case 'week': {
-      const weekAgo = new Date(now);
-      weekAgo.setDate(weekAgo.getDate() - 7);
-      startDate = weekAgo.toISOString().split('T')[0];
-      break;
-    }
-    case 'month': {
-      const monthAgo = new Date(now);
-      monthAgo.setMonth(monthAgo.getMonth() - 1);
-      startDate = monthAgo.toISOString().split('T')[0];
-      break;
-    }
-    case 'quarter': {
-      const quarterAgo = new Date(now);
-      quarterAgo.setMonth(quarterAgo.getMonth() - 3);
-      startDate = quarterAgo.toISOString().split('T')[0];
-      break;
-    }
+    case 'week':
+      return { startDate: back(7, 0), endDate };
+    case 'month':
+      return { startDate: back(0, 1), endDate };
+    case 'quarter':
+      return { startDate: back(0, 3), endDate };
     default:
-      startDate = endDate;
+      return { startDate: endDate, endDate };
   }
-
-  return { startDate, endDate };
 }
 
 type Period = { storeId: string | undefined; startDate: string; endDate: string };

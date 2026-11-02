@@ -10,7 +10,7 @@
 //   POST   /admin/lens/pricing-ranges
 //   PUT    /admin/lens/pricing-ranges/{id}
 //   DELETE /admin/lens/pricing-ranges/{id}        (soft — flips is_active)
-//   POST   /admin/lens/pricing-ranges/quote       (used by POS, not here)
+//   POST   /admin/lens/pricing-ranges/quote       (not called anywhere yet)
 
 import { useEffect, useMemo, useState } from 'react';
 import { Loader2, Plus, Trash2, Save, RefreshCw } from 'lucide-react';

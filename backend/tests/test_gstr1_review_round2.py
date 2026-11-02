@@ -31,6 +31,7 @@ from fastapi import HTTPException  # noqa: E402
 
 import api.routers.reports as r  # noqa: E402
 from api.services import gstn_export  # noqa: E402
+from api.utils.ist import ist_date_str  # noqa: E402
 from strict_fakes import StrictCollection, StrictDB, matches  # noqa: E402
 
 from test_gstr1_review_round1 import (  # noqa: E402
@@ -89,6 +90,9 @@ def test_billing_address_buyer_note_files_the_sales_place_of_supply(monkeypatch)
 # ===========================================================================
 
 NOW = datetime.utcnow() - timedelta(minutes=5)
+# The reports read IST days and months: between 00:00 and 05:30 IST, NOW's UTC
+# date is the day before, so a period taken off the UTC clock missed NOW's orders.
+NOW_IST_DAY = date.fromisoformat(ist_date_str(NOW))
 
 
 def _supply_world():
@@ -133,7 +137,7 @@ def test_tally_sales_voucher_splits_as_the_returns_file(monkeypatch):
     tally = {o["order_id"]: _heads(o) for o in seen["orders"]}
 
     _use(monkeypatch, db)
-    month = NOW.strftime("%Y-%m")
+    month = NOW_IST_DAY.strftime("%Y-%m")
     rep = r._compute_gstr1(month, "S1")
     returns = {}
     for sec in ("b2b", "b2cl", "b2cs"):
@@ -157,8 +161,8 @@ def test_cross_check_books_have_no_gap_with_the_return(monkeypatch):
     from api.utils.ist import ist_month_window_utc
 
     db = _use(monkeypatch, _supply_world())
-    g3 = r._compute_gstr3b(NOW.strftime("%Y-%m"), "S1")["outwardTaxableSupplies"]
-    _books, tally = _books_and_tally_for_stores(db, ["S1"], *ist_month_window_utc(NOW.year, NOW.month))
+    g3 = r._compute_gstr3b(NOW_IST_DAY.strftime("%Y-%m"), "S1")["outwardTaxableSupplies"]
+    _books, tally = _books_and_tally_for_stores(db, ["S1"], *ist_month_window_utc(NOW_IST_DAY.year, NOW_IST_DAY.month))
     assert (tally["igst"], tally["cgst"], tally["sgst"]) == (
         g3["integratedTax"], g3["centralTax"], g3["stateTax"]), (tally, g3)
 
@@ -229,8 +233,8 @@ def _reader_world():
     return db, seen
 
 
-TODAY = NOW.date().isoformat()
-FROM = (NOW.date() - timedelta(days=1)).isoformat()
+TODAY = NOW_IST_DAY.isoformat()
+FROM = (NOW_IST_DAY - timedelta(days=1)).isoformat()
 
 
 def _call(reader, db, monkeypatch):

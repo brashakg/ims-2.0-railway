@@ -14,13 +14,14 @@ from ...dependencies import (
 )
 from ...services.cost_mask import mask_cost, mask_cost_list
 from ...services.margin_basis import price_ex_gst, product_gst_rate
-from ...services.reorder_policy import auto_reorder_disabled as _auto_reorder_disabled
 from ...services.reorder_policy import (
+    buy_qty,
     is_low_stock,
     on_hand,
+    open_orders,
     reorder_level,
+    sold_by_shop,
     stock_status,
-    top_up,
 )
 from ._shared import router
 
@@ -28,16 +29,10 @@ from ._shared import router
 # R2 — Purchase Recommendations (TechCherry port)
 #
 # Spec: docs/TECHCHERRY_PORT_SCOPE.md §6.
-# Algo:  per-SKU velocity over the last 90 days × current stock × reorder
-# point → suggested order qty + ranked revenue/margin impact.
+# Algo:  the SKUs that sold in the lookback window, each with THE buy rule's
+# number (reorder_policy.buy_qty: the shop's level if set, else its 30-day
+# sales; S5) + ranked revenue/margin impact.
 # ----------------------------------------------------------------------------
-
-# Optical retail buying cycle defaults — tunable via query params.
-# Lead time + reorder cycle = 60 days of cover the buyer wants on shelf.
-_DEFAULT_LEAD_TIME_DAYS = 30  # typical for frame imports / vendor cycles
-_DEFAULT_REORDER_CYCLE_DAYS = 30  # monthly purchase cadence
-_DEFAULT_SAFETY_BUFFER_DAYS = 7  # ~1 week extra to absorb demand spikes
-
 
 def _confidence_for(velocity_90d: int) -> str:
     """High/Medium/Low confidence band based on demand signal strength.
@@ -55,24 +50,6 @@ async def purchase_recommendations(
         None, description="Defaults to current user's active store"
     ),
     lookback_days: int = Query(90, ge=14, le=365, description="Sales velocity window"),
-    lead_time_days: int = Query(
-        _DEFAULT_LEAD_TIME_DAYS,
-        ge=0,
-        le=180,
-        description="Vendor lead time used in suggested-qty math",
-    ),
-    reorder_cycle_days: int = Query(
-        _DEFAULT_REORDER_CYCLE_DAYS,
-        ge=7,
-        le=180,
-        description="How often the buyer re-evaluates purchases",
-    ),
-    safety_buffer_days: int = Query(
-        _DEFAULT_SAFETY_BUFFER_DAYS,
-        ge=0,
-        le=30,
-        description="Extra cover above lead+cycle to absorb spikes",
-    ),
     min_velocity: int = Query(
         2,
         ge=0,
@@ -84,18 +61,19 @@ async def purchase_recommendations(
 ):
     """Ranked list of products the buyer should reorder.
 
-    Combines per-SKU sales velocity (last `lookback_days`) with current
-    stock and reorder point. For each SKU the algo computes the desired
-    cover (lead time + cycle + safety buffer days × daily velocity) and
-    suggests an order qty if current stock is below that.
+    The SKUs that sold at least `min_velocity` in the last `lookback_days`,
+    each with THE buy rule's number (reorder_policy.buy_qty, owner S5: the
+    shop's level if set, else its last 30 days' sales, minus stock and sent
+    orders) -- the same number the Reorder list shows.
 
-    Ranking key is `gap_units × avg_selling_price` so the highest
+    Ranking key is `suggested_order_qty × avg_selling_price` so the highest
     revenue-at-risk SKUs surface first — that's where the buyer's time
     matters most.
 
     Spec: docs/TECHCHERRY_PORT_SCOPE.md §6.
     """
     active_store = store_in_view(store_id, current_user, one_shop=True) or "store-001"
+    params = {"store_id": active_store, "lookback_days": lookback_days, "min_velocity": min_velocity}
     db = get_db()
     if db is None:
         return {
@@ -110,23 +88,12 @@ async def purchase_recommendations(
                 current_user,
                 "product",
             ),
-            "params": {
-                "store_id": active_store,
-                "lookback_days": lookback_days,
-                "lead_time_days": lead_time_days,
-                "reorder_cycle_days": reorder_cycle_days,
-                "safety_buffer_days": safety_buffer_days,
-                "cover_days_total": lead_time_days
-                + reorder_cycle_days
-                + safety_buffer_days,
-                "min_velocity": min_velocity,
-            },
+            "params": params,
             "as_of": datetime.now().isoformat(),
         }
 
     now = now_ist_naive()
     cutoff = now - timedelta(days=lookback_days)
-    cover_days = lead_time_days + reorder_cycle_days + safety_buffer_days
 
     # 1. Sales velocity per product over the lookback window.
     sku_stats: dict = {}
@@ -183,15 +150,7 @@ async def purchase_recommendations(
                 current_user,
                 "product",
             ),
-            "params": {
-                "store_id": active_store,
-                "lookback_days": lookback_days,
-                "lead_time_days": lead_time_days,
-                "reorder_cycle_days": reorder_cycle_days,
-                "safety_buffer_days": safety_buffer_days,
-                "cover_days_total": cover_days,
-                "min_velocity": min_velocity,
-            },
+            "params": params,
             "error": f"aggregation failed: {type(e).__name__}",
             "as_of": now.isoformat(),
         }
@@ -209,15 +168,7 @@ async def purchase_recommendations(
                 current_user,
                 "product",
             ),
-            "params": {
-                "store_id": active_store,
-                "lookback_days": lookback_days,
-                "lead_time_days": lead_time_days,
-                "reorder_cycle_days": reorder_cycle_days,
-                "safety_buffer_days": safety_buffer_days,
-                "cover_days_total": cover_days,
-                "min_velocity": min_velocity,
-            },
+            "params": params,
             "as_of": now.isoformat(),
         }
 
@@ -266,33 +217,25 @@ async def purchase_recommendations(
             product_ids=product_ids,
         ).items()
     }
+    # THE buy rule's other inputs: 30-day sales and sent orders at this shop.
+    sold_30d = sold_by_shop(db.get_collection("orders"), store_id=active_store)
+    sent, _drafts = open_orders(db.get_collection("purchase_orders"), product_ids)
 
     # 3. Build per-SKU recommendation rows.
     recs: list = []
     for pid, stats in sku_stats.items():
         prod = products.get(pid, {})
-        # Owner decision (2026-07-04): reorder_quantity <= 0 (the new -1
-        # default) disables auto-reorder for the product -- it never appears
-        # in the purchase recommendations (api/services/reorder_policy.py).
-        if _auto_reorder_disabled(prod):
-            continue
         velocity_90d = stats["units_sold"]
         daily_v = velocity_90d / float(lookback_days) if lookback_days else 0.0
-        desired_cover = round(daily_v * cover_days)
         current_stock = stock_here.get(pid, 0)
-        # None = no level at this shop: velocity alone decides.
+        # None = no level at this shop: its 30-day sales decide.
         reorder_point = reorder_level(prod, store_id=active_store)
-        gap_units = max(0, desired_cover - current_stock)
-        # If the shop's level is breached (reorder_policy.is_low_stock: at or
-        # under it, the same verdict as the low-stock list) even when
-        # desired_cover would tolerate current stock, still recommend a top-up
-        # back above the level.
-        top_up_units = (
-            top_up(reorder_point, current_stock)
-            if is_low_stock(prod, current_stock, store_id=active_store)
-            else 0
+        # THE buy rule (0 when auto-reorder is off, discontinued or covered).
+        suggested_qty, basis = buy_qty(
+            prod, store_id=active_store, on_hand=current_stock,
+            on_order=sent.get((pid, active_store), 0),
+            sold_30d=sold_30d.get((pid, active_store), 0),
         )
-        suggested_qty = max(gap_units, top_up_units)
         if suggested_qty <= 0:
             continue
 
@@ -328,8 +271,7 @@ async def purchase_recommendations(
                 # The server's verdict for this shop; the screen only renders it.
                 "low_stock": is_low_stock(prod, current_stock, store_id=active_store),
                 "stock_status": stock_status(reorder_point, current_stock),
-                "desired_cover": desired_cover,
-                "gap_units": gap_units,
+                "basis": basis,
                 "suggested_order_qty": suggested_qty,
                 "avg_selling_price": round(avg_price, 2),
                 "cost_price": round(cost_price, 2),
@@ -343,8 +285,9 @@ async def purchase_recommendations(
                     f"(~{round(daily_v, 1)}/day). Stock {current_stock}, "
                     + (f"reorder at {reorder_point}. " if reorder_point is not None
                        else "reorder level not set. ")
-                    + f"Buy {suggested_qty} to cover "
-                    f"{cover_days} days."
+                    + f"Buy {suggested_qty}: "
+                    + ("back above the shop's level." if basis == "level"
+                       else "the last 30 days' sales.")
                 ),
             }
         )
@@ -402,15 +345,7 @@ async def purchase_recommendations(
         "recommendations": mask_cost_list(recs, current_user, "product"),
         "by_category": by_category_list,
         "summary": mask_cost(summary, current_user, "product"),
-        "params": {
-            "store_id": active_store,
-            "lookback_days": lookback_days,
-            "lead_time_days": lead_time_days,
-            "reorder_cycle_days": reorder_cycle_days,
-            "safety_buffer_days": safety_buffer_days,
-            "cover_days_total": cover_days,
-            "min_velocity": min_velocity,
-        },
+        "params": params,
         "as_of": now.isoformat(),
     }
 

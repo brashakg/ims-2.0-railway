@@ -305,3 +305,64 @@ describe('round 4: rows in every address, a chip removes only its own filter', (
     expect(removeChip(f, 'brand')).toEqual({ ...f, brand: '' });
   });
 });
+
+describe('every option filter is a tick-box multi-select (owner 2026-11-01)', () => {
+  it('ticks round-trip through the address as comma lists; an old single-value link still reads', () => {
+    const f = readFilters(
+      sp(
+        'brand=Carrera,Oakley&frame_color=Black,Gold&added_by=u-mansi,u-durga' +
+          '&edited_by=u-ak,none&category=SUNGLASS,FRAME&flag=any,price_check'
+      )
+    );
+    expect([f.brand, f.frame_color, f.added_by, f.edited_by, f.category, f.flag]).toEqual([
+      'Carrera,Oakley', 'Black,Gold', 'u-mansi,u-durga', 'u-ak,none', 'SUNGLASS,FRAME', 'any,price_check',
+    ]);
+    const out = writeFilters(f, sp(''));
+    expect(out.get('added_by')).toBe('u-mansi,u-durga');
+    expect(readFilters(out)).toEqual(f);
+    expect(toProductParams(f)).toMatchObject({
+      brand: 'Carrera,Oakley', created_by: 'u-mansi,u-durga', updated_by: 'u-ak,none',
+      frame_color: 'Black,Gold', category: 'SUNGLASS,FRAME', flag: 'any,price_check',
+    });
+    // An old single-value link.
+    expect(readFilters(sp('added_by=u-mansi&edited_by=none')).added_by).toBe('u-mansi');
+    expect(toProductParams(readFilters(sp('added_by=u-mansi'))).created_by).toBe('u-mansi');
+  });
+
+  it('cleans ticks the way the server does: trimmed, no blanks or repeats, at most 50', () => {
+    expect(readFilters(sp('frame_color= Black ,,Black,Gold,')).frame_color).toBe('Black,Gold');
+    const many = Array.from({ length: 60 }, (_, i) => `u${i}`).join(',');
+    expect(readFilters(sp(`added_by=${many}`)).added_by.split(',')).toHaveLength(50);
+    // Flags: unknown ticks dropped, Archived only for an admin.
+    expect(readFilters(sp('flag=any,burn,archived')).flag).toBe('any');
+    expect(readFilters(sp('flag=any,burn,archived'), null, 'catalog', true).flag).toBe('any,archived');
+  });
+
+  it('one chip per filter naming every tick', () => {
+    const people = {
+      added: [
+        { value: 'u-mansi', label: 'Mansi', count: 3 },
+        { value: 'u-durga', label: 'Durga', count: 2 },
+      ],
+      edited: [{ value: 'u-ak', label: 'Akshay', count: 2 }],
+    };
+    const f = readFilters(
+      sp(
+        'added_by=u-mansi,u-durga&edited_by=u-ak,none&frame_color=Black,Gold&flag=any,price_check' +
+          '&category=SUNGLASS,FRAME'
+      )
+    );
+    expect(activeChips(f, people, (v) => v.toLowerCase(), NOW).map((c) => c.label)).toEqual([
+      'Category: sunglass, frame',
+      'Frame colour: Black, Gold',
+      'Added by: Mansi, Durga',
+      'Last edited by: Akshay, Never edited',
+      'Flags: Any flag open, Price check',
+    ]);
+    expect(removeChip(f, 'added_by')).toEqual({ ...f, added_by: '' });
+  });
+
+  it('Last edited by sits on the main row, so it no longer counts on More filters', () => {
+    expect(moreFiltersCount(readFilters(sp('edited_by=u-ak,none')))).toBe(0);
+  });
+});

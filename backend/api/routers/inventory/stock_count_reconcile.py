@@ -22,6 +22,7 @@ from .helpers import (
     _get_db,
 )
 from ...services.cost_mask import mask_cost
+from ...services.writeoff_itc import record_writeoff, totals as itc_totals
 from .stock_count import (
     _on_hand_units,
     _product_costs,
@@ -273,6 +274,7 @@ async def reconcile_stock_count(
         shrinkage_value_total = 0.0
         lines_skipped_moved = 0
         voided_pids: list = []
+        itc_lines: list = []  # section 17(5)(h) reversal per written-off line
 
         for v in variances:
             pid = v.get("product_id", "")
@@ -321,6 +323,7 @@ async def reconcile_stock_count(
                 # between reads as unmoved; add a per-unit event-sequence check
                 # if that ever matters.
                 voided_ids = []
+                voided_units = []
                 for m in missing:
                     raw = live.get(str(m.get("unit_id")))
                     if raw is None:
@@ -338,7 +341,16 @@ async def reconcile_stock_count(
                     if int(getattr(res, "modified_count", 0) or 0):
                         unit = stock_coll.find_one({"_id": raw}) or {"_id": raw}
                         voided_ids.append(str(unit.get("stock_id") or raw))
+                        voided_units.append(unit)
                         _ledger_void(db, unit, count_id, current_user.get("user_id", ""))
+                # Section 17(5)(h): the input credit claimed on these pieces is
+                # reversed in this month's GSTR-3B (once per piece; the stuck
+                # Finish below redoes it safely).
+                itc = record_writeoff(
+                    db, voided_units, source_type="STOCK_COUNT", source_id=count_id,
+                    when=now, actor_id=current_user.get("user_id", ""),
+                )
+                itc_lines.append(itc)
                 voided = len(voided_ids)
                 not_voided = len(missing) - voided
                 units_voided_total += voided
@@ -371,6 +383,9 @@ async def reconcile_stock_count(
                         # act on: this is what the row is worth at cost.
                         "unit_cost": round(unit_cost, 2),
                         "shrinkage_value": shrinkage_value,
+                        # GST input credit taken back on these pieces (GSTR-3B
+                        # Table 4(B)(1) of this month).
+                        "itc_reversed": itc,
                         "system_quantity": system_qty,
                         "counted_quantity": counted_qty,
                         "none_found": bool(v.get("none_found")),
@@ -421,6 +436,7 @@ async def reconcile_stock_count(
             shrinkage_coll.insert_many(shrinkage_records)
 
         shrinkage_value_total = round(shrinkage_value_total, 2)
+        itc_reversed = itc_totals(itc_lines)
 
         # Mark count as reconciled
         counts_coll.update_one(
@@ -442,6 +458,7 @@ async def reconcile_stock_count(
                     "units_not_identified": units_not_identified_total,
                     "lines_skipped_moved": lines_skipped_moved,
                     "shrinkage_value_written_off": shrinkage_value_total,
+                    "itc_reversed": itc_reversed,
                 }
             },
         )
@@ -458,6 +475,7 @@ async def reconcile_stock_count(
             "units_not_identified": units_not_identified_total,
             "lines_skipped_moved": lines_skipped_moved,
             "shrinkage_value_written_off": shrinkage_value_total,
+            "itc_reversed": itc_reversed,
             "overages_pending_review": overage_records,
             "reconciled_at": utc_event_iso(now),
         }
@@ -516,10 +534,18 @@ async def finish_stuck_stock_count_reconcile(
 
         void_reason = f"cycle-count-reconcile:{count_id}"
         voided_by_product: Dict[str, int] = {}
-        for unit in stock_coll.find({"void_reason": void_reason}, {"product_id": 1}):
+        itc_by_product: Dict[str, list] = {}
+        for unit in stock_coll.find({"void_reason": void_reason}):
             pid = str(unit.get("product_id") or "")
             if pid:
                 voided_by_product[pid] = voided_by_product.get(pid, 0) + 1
+                # The reversal the write-off may not have reached: once per
+                # piece, in the month the piece was written off.
+                itc_by_product.setdefault(pid, []).append(record_writeoff(
+                    db, [unit], source_type="STOCK_COUNT", source_id=count_id,
+                    when=unit.get("voided_at") or datetime.utcnow(),
+                    actor_id=current_user.get("user_id", ""),
+                ))
 
         # NOTHING WAS TAKEN, yet pieces are still named missing: closing this
         # as "reconciled" would read as a finished write-off of a loss nobody
@@ -600,6 +626,7 @@ async def finish_stuck_stock_count_reconcile(
                     "units_not_voided": 0,
                     "unit_cost": round(unit_cost, 2),
                     "shrinkage_value": value,
+                    "itc_reversed": itc_totals(itc_by_product.get(pid) or []),
                     "system_quantity": int(v.get("system_quantity", 0) or 0),
                     "accepted_quantity": int(v.get("physical_quantity", 0) or 0),
                     "recorded_at": utc_event_iso(now),
@@ -633,6 +660,7 @@ async def finish_stuck_stock_count_reconcile(
                     "units_voided": units_total,
                     "units_not_voided": 0,
                     "shrinkage_value_written_off": value_total,
+                    "itc_reversed": itc_totals(r for rows_ in itc_by_product.values() for r in rows_),
                     "recovered_from_stuck_write_off": True,
                     "closed_without_write_off": bool(
                         not voided_by_product and request and request.close_without_write_off

@@ -274,23 +274,29 @@ def build_shipment_payload(
     caller). Money is in Rupees. Quantities default to 1.
 
     MONEY. Shiprocket's create-adhoc body has NO separate COD-collectable
-    field: `sub_total` (plus shipping/giftwrap/transaction charges minus
-    total_discount, none of which we send) IS the order total the courier
-    collects on a COD parcel, and the same field is the order value on a
-    Prepaid one (Shiprocket's own MCP sends exactly `payment_method` +
-    `sub_total` and nothing else money-wise). So:
-      * Prepaid -> sub_total = grand_total (order value; nothing collected).
-      * COD     -> sub_total = balance_due (what is still OWED, the server
-                   figure via delivery_gate.cod_collectable - which refuses a
-                   zero or over-bill balance). Sending grand_total here made
-                   the courier collect the whole bill from a customer who had
+    field: `sub_total` plus `shipping_charges` (we send no giftwrap /
+    transaction charges or total_discount) IS the order total the courier
+    collects on a COD parcel, and the same sum is the order value on a
+    Prepaid one. So that sum is:
+      * Prepaid -> grand_total (order value; nothing collected).
+      * COD     -> balance_due (what is still OWED, the server figure via
+                   delivery_gate.cod_collectable - which refuses a zero or
+                   over-bill balance). Sending grand_total here made the
+                   courier collect the whole bill from a customer who had
                    already paid a deposit at the counter.
+    The SHIPPING invoice line (online orders, #1294) is that shipping_charges,
+    never an order item; a part-paid COD balance below the shipping owes only
+    that much of it, so sub_total never goes negative.
     order_items[].selling_price stay at goods value in both cases - they
     describe what is in the box, not what is owed.
     """
     items = order.get("items") or []
     line_items: List[Dict[str, Any]] = []
+    shipping = 0.0
     for it in items:
+        if it.get("item_type") == "SHIPPING":
+            shipping += float(it.get("item_total") or 0.0)
+            continue
         line_items.append(
             {
                 "name": (it.get("product_name") or it.get("sku") or "Item")[:100],
@@ -322,9 +328,11 @@ def build_shipment_payload(
     order_date = ist_date_str(order.get("created_at")) or ist_today().isoformat()
     method = payment_kind(address.get("payment_method"))
     if method == "COD":
-        sub_total = cod_collectable(order)
+        total = cod_collectable(order)
     else:
-        sub_total = float(order.get("grand_total") or order.get("subtotal") or 0.0)
+        total = float(order.get("grand_total") or order.get("subtotal") or 0.0)
+    shipping_charges = round(min(shipping, total), 2)
+    sub_total = round(total - shipping_charges, 2)
 
     return {
         "order_id": str(order.get("order_number") or order.get("order_id") or ""),
@@ -345,6 +353,7 @@ def build_shipment_payload(
         "order_items": line_items,
         "payment_method": method,
         "sub_total": sub_total,
+        "shipping_charges": shipping_charges,
         # Default parcel dims (cm / kg) - small optical parcel. Overridable.
         "length": float(address.get("length") or 15),
         "breadth": float(address.get("breadth") or 10),

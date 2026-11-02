@@ -775,3 +775,19 @@ def test_attach_order_stats_skipped_for_store_pinned_roles(monkeypatch):
     # HQ caller: full lifetime figures.
     assert rows[0]["orders_count"] == 2
     assert rows[0]["total_spent"] == 150.0
+
+
+def test_list_rows_carry_the_shopify_totals_check(ctx):
+    """Website 1: the screen flags an order whose IMS total differs from what
+    Shopify charged, so the list projection must fetch the check (the fake
+    find ignores projections -- the projection itself is pinned too)."""
+    assert orders_router._LIST_PROJECTION.get("shopify_totals_check") == 1
+    _seed_booked(ctx, "1001", shopify_totals_check={"status": "MISMATCH", "difference": -49.0})
+    row = ctx["client"].get(BASE, headers=_hdr(["ADMIN"])).json()["orders"][0]
+    assert row["shopify_totals_check"]["status"] == "MISMATCH"
+
+
+def test_list_item_count_skips_the_shipping_line(ctx):
+    _seed_booked(ctx, "1001", items=[{"sku": "A"}, {"item_type": "SHIPPING"}])
+    row = ctx["client"].get(BASE, headers=_hdr(["ADMIN"])).json()["orders"][0]
+    assert row["items_count"] == 1

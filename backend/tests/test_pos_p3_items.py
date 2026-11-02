@@ -87,6 +87,9 @@ def payment_order(monkeypatch):
     coll = StrictCollection("orders", [order])
     repo = OrderRepository(coll)
     monkeypatch.setattr(orders_module, "get_order_repository", lambda: repo)
+    # No stock in this suite: POS 4 refuses a stock line with no unit,
+    # so the gate must not read a real (empty) stock_units collection.
+    monkeypatch.setattr(orders_module, "get_stock_repository", lambda: None)
     # The order is a walk-in, so the credit-limit path is never entered; keep
     # the customer repo absent so nothing silently reaches for a real DB.
     monkeypatch.setattr(orders_module, "get_customer_repository", lambda: None)
@@ -130,6 +133,9 @@ def order_create_env(monkeypatch):
     order_repo = OrderRepository(db.get_collection("orders"))
     customer_repo = CustomerRepository(db.get_collection("customers"))
     monkeypatch.setattr(orders_module, "get_order_repository", lambda: order_repo)
+    # No stock in this suite: POS 4 refuses a stock line with no unit,
+    # so the gate must not read a real (empty) stock_units collection.
+    monkeypatch.setattr(orders_module, "get_stock_repository", lambda: None)
     monkeypatch.setattr(orders_module, "get_customer_repository", lambda: customer_repo)
     monkeypatch.setattr(orders_module, "get_product_repository", lambda: None)
     monkeypatch.setattr(orders_module, "get_walkin_counter_repository", lambda: None)

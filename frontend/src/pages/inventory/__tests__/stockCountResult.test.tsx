@@ -89,6 +89,33 @@ describe('stock count result', () => {
   });
 });
 
+describe('section 17(5)(h) on the written-off count', () => {
+  it('shows the GST input credit the write-off took back', async () => {
+    auth.role = 'ADMIN';
+    box.doc = { ...DOC, status: 'reconciled', units_voided: 1, shrinkage_value_written_off: 3100,
+      itc_reversed: { igst: 0, cgst: 77.5, sgst: 77.5, total: 155 } };
+    renderAt();
+    expect(await screen.findByTestId('count-itc-reversed')).toHaveTextContent('GST input credit reversed: ₹155 (GSTR-3B 4(B)(1))');
+  });
+
+  it('a reversal held for want of a GSTIN is said, not counted as reversed', async () => {
+    auth.role = 'ADMIN';
+    box.doc = { ...DOC, status: 'reconciled', units_voided: 1, shrinkage_value_written_off: 3100,
+      itc_reversed: { igst: 0, cgst: 0, sgst: 0, total: 0, unallocated_total: 155 } };
+    renderAt();
+    expect(await screen.findByTestId('count-itc-held')).toHaveTextContent('GST input credit held: ₹155');
+    expect(screen.queryByTestId('count-itc-reversed')).toBeNull();
+  });
+
+  it('no line when the server sent none (a manager, or nothing claimed)', async () => {
+    auth.role = 'STORE_MANAGER';
+    box.doc = { ...DOC, status: 'reconciled', units_voided: 1 };
+    renderAt();
+    expect(await screen.findByText(/Written off: 1 piece/)).toBeInTheDocument();
+    expect(screen.queryByTestId('count-itc-reversed')).toBeNull();
+  });
+});
+
 describe('review round 1', () => {
   it('a zone count offers no write-off to anyone', async () => {
     auth.role = 'ADMIN';

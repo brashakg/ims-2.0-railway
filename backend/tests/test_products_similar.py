@@ -139,7 +139,7 @@ def _coll_raybans():
 
 # One shape for every answer: eye_size_needed (PR #1171) rides the empty one too.
 EMPTY = {"exact_match": None, "eye_size_needed": [], "siblings": [], "model_colour_count": 0,
-         "brand_in_model": False}
+         "brand_in_model": False, "similar_models": []}
 
 
 def _similar(coll, category="FRAME", brand="Ray-Ban", model="RB-2140", colour=None, size=None):
@@ -304,7 +304,7 @@ def test_endpoint_hands_every_typed_attribute_on(client, staff_headers, monkeypa
     resp = client.get("/api/v1/products/similar", params={"category": "CCL", **params},
                       headers=staff_headers)
     assert resp.status_code == 200, resp.text
-    assert seen == {"category": "CCL", "attributes": params}
+    assert seen == {"category": "CCL", "attributes": params, "self_id": None}
 
 
 def test_category_filters_siblings():
@@ -410,6 +410,8 @@ def test_endpoint_returns_shape_for_any_authenticated_role(client, staff_headers
         "exact_match": None,
         "eye_size_needed": [],
         "siblings": [],
+        # 11-01: the same model under another spelling -- none here.
+        "similar_models": [],
         "model_colour_count": 0,
         "identity_fields": ["brand_name", "colour_code", "lens_size", "model_no"],
         # G1: the model the item would join on Save -- none here.

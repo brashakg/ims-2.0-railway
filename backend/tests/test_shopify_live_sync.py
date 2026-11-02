@@ -564,10 +564,11 @@ def test_a_refused_product_is_not_first_published_and_is_named(world, live_engin
     assert row["ecom"]["locally_modified"] is True and not row["ecom"].get("shopify_product_id")
 
 
-def test_an_archived_listing_still_on_the_website_keeps_syncing(world, live_engine):
-    """Only a NEVER-published archived row leaves the queue. One still live
-    (its take-down failed, so no taken_down_at) keeps its re-push -- the
-    same line the product gate draws (listing.first_publish_not_ready)."""
+def test_an_archived_listing_is_never_re_pushed(world, live_engine):
+    """Website 2: an archived row with a Shopify id (taken down, kept; or a
+    take-down that failed) leaves the queue too. A re-push sends every status
+    but ARCHIVED as ACTIVE, so it would put the product back on sale; the
+    product gate refuses it as well (shopify_push.product_push_refusal)."""
     db, _ = world
     db.seed("catalog_products", [
         {"id": "A-live", "sku": "AS1", "title": "Archived, still live", "brand": "RB", "mrp": 1000,
@@ -575,7 +576,8 @@ def test_an_archived_listing_still_on_the_website_keeps_syncing(world, live_engi
          "ecom": {"shopify_product_id": "gid://shopify/Product/9", "locally_modified": True}},
     ])
     run = _run(ls.sync_live_products(db, trigger="manual", actor="u"))
-    assert live_engine == [("A-live", "update")] and run["archived_skipped"] == 0
+    assert live_engine == [] and run["archived_skipped"] == 1
+    assert "A-live" not in {f.get("product_id") for f in run["failures"]}
 
 
 def test_the_scheduled_first_publish_cap_is_100_and_the_rest_stay_queued(world, live_engine):

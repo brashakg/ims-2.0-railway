@@ -245,6 +245,23 @@ async def quarantine_release(
         from .inventory._shared import refuse_write_off_unless_admin
 
         refuse_write_off_unless_admin(current_user, "write off a damaged piece")
+        if ie.canonical_state(unit.get("status")) == ie.StockState.DAMAGED:
+            # Already written off (a write-off from before the reversal was
+            # recorded first): finish its GST reversal -- once per piece --
+            # dated when the piece was damaged, and stop.
+            return {"message": "Already written off as damaged",
+                    "itc_reversed": _reverse_damaged(db, unit, current_user,
+                                                     when=_damaged_at(db, stock_id))}
+    from ..services import writeoff_itc
+
+    reversal_first = had_row = None
+    if disp == "DAMAGE":
+        # Section 17(5)(h): the reversal is written BEFORE the move, keyed by
+        # the unit, so a crash between the two never loses it; a move that
+        # loses its race drops the row it wrote (a piece left quarantined
+        # with a row is cleared by its restock / supplier return below).
+        had_row = db.get_collection(writeoff_itc.COLLECTION).find_one({"_id": str(unit.get("stock_id"))})
+        reversal_first = _reverse_damaged(db, unit, current_user, when=datetime.utcnow())
     target = {
         "RESTOCK": ie.StockState.AVAILABLE,
         "DAMAGE": ie.StockState.DAMAGED,
@@ -263,13 +280,47 @@ async def quarantine_release(
         payload={"disposition": disp, "notes": (req.notes or "")[:200]},
     )
     if not ok:
+        # Drop only a row this request wrote for a move that never happened:
+        # a concurrent DAMAGE that won the move owns the same row.
+        now = (db.get_collection("stock_units").find_one(
+            {"stock_id": unit.get("stock_id")}, {"status": 1}) or {}).get("status")
+        if (disp == "DAMAGE" and not had_row
+                and ie.canonical_state(now) != ie.StockState.DAMAGED):
+            writeoff_itc.forget(db, unit)
         raise HTTPException(
             status_code=409,
             detail={"code": "not_quarantined",
                     "message": "Unit is not quarantined (or the disposition is illegal)."},
         )
     _clear_stale_claim_link(db, unit)
-    return {"event": ev, "message": f"Quarantine released ({disp})"}
+    out = {"event": ev, "message": f"Quarantine released ({disp})"}
+    if disp == "DAMAGE":
+        out["itc_reversed"] = reversal_first
+    else:
+        writeoff_itc.undo_writeoff(db, unit)
+    return out
+
+
+def _reverse_damaged(db, unit, current_user, *, when) -> dict:
+    """Section 17(5)(h): the input credit claimed on a piece written off as
+    damaged is reversed in GSTR-3B (services/writeoff_itc). Admin-only door,
+    so the figure is the admin's to see."""
+    from ..services.writeoff_itc import record_writeoff
+
+    return record_writeoff(
+        db, [unit], source_type="QUARANTINE_DAMAGE", source_id=str(unit.get("stock_id")),
+        when=when, actor_id=current_user.get("user_id", ""),
+    )
+
+
+def _damaged_at(db, stock_id):
+    """When the piece was written off as damaged (its QUARANTINE_OUT ->
+    DAMAGED event); now when the ledger has none."""
+    ev = db.get_collection("item_events").find_one(
+        {"stock_id": stock_id, "to_state": ie.StockState.DAMAGED.value},
+        sort=[("at", -1)],
+    )
+    return (ev or {}).get("at") or datetime.utcnow()
 
 
 def _clear_stale_claim_link(db, unit) -> None:

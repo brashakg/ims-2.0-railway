@@ -13,7 +13,7 @@ import {
   type PettyCashSettlementPosition,
   type PettyCashSettlementRecord,
 } from '../../../services/api/expenses';
-import { formatDateIST } from '../../../utils/datetime';
+import { formatDateIST, istDayString } from '../../../utils/datetime';
 import { fc, useExpensesContext, type ApiError } from './expenseShared';
 import { Card, Row, Labeled } from './expenseWidgets';
 
@@ -23,7 +23,7 @@ export function DaySettlementSection() {
   const { canManageFloat } = useExpensesContext();
 
   // F17 EOD settlement (per store/day)
-  const todayISO = new Date().toISOString().split('T')[0];
+  const todayISO = istDayString(new Date())!;
   const [settleDate, setSettleDate] = useState(todayISO);
   const [settlePos, setSettlePos] = useState<PettyCashSettlementPosition | null>(null);
   const [settleHistory, setSettleHistory] = useState<PettyCashSettlementRecord[]>([]);

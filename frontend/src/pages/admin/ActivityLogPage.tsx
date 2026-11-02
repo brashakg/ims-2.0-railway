@@ -25,6 +25,7 @@ import { adminUserApi, orgStoreApi } from '../../services/api/stores';
 import { entitiesApi } from '../../services/api/entities';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { istDayString } from '../../utils/datetime';
 
 interface AuditRow {
   log_id?: string;
@@ -87,7 +88,8 @@ const ACTION_TONE: Record<string, string> = {
   REJECT: 'bg-red-100 text-red-700',
 };
 
-const ymd = (d: Date): string => d.toISOString().slice(0, 10);
+// The IST business day of an instant (now, or now minus N days).
+const ymd = (d: Date): string => istDayString(d) ?? d.toISOString().slice(0, 10);
 
 function toneFor(action?: string): string {
   if (!action) return 'bg-gray-100 text-gray-600';

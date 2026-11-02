@@ -35,7 +35,9 @@ router = APIRouter()
 
 # The Catalog page's Flags filter: any open flag, open flags on MY entries,
 # one flag type, or the archived (deleted) products -- admins only.
-_FLAG_FILTER_PATTERN = "^(any|mine|archived|" + "|".join(_FLAG_TYPES) + ")$"
+_FLAG_ONE = "(any|mine|archived|" + "|".join(_FLAG_TYPES) + ")"
+# Flags is a tick-box multi-select too (owner 2026-11-01): 'any,price_check'.
+_FLAG_FILTER_PATTERN = f"^{_FLAG_ONE}(,{_FLAG_ONE})*$"
 _ARCHIVE_VIEW_ROLES = {"ADMIN", "SUPERADMIN"}
 
 logger = logging.getLogger("ims.products")
@@ -370,22 +372,6 @@ from ..services.gtin import MANUFACTURER_BARCODE_ATTRIBUTES
 _FORM_EXTRA_FIELDS = ("variant",) + _OPTIONAL_PRODUCT_FIELDS
 
 
-def _refresh_collections_after_product(created_or_updated) -> None:
-    """Recompute SMART collection membership after a product create/update
-    (step-13). The new/edited product's tags/category/brand may change which
-    SMART collections it belongs to. FULLY fail-soft: never raises into the
-    create/update path; a no-op when there is no live DB."""
-    try:
-        from ..dependencies import get_db as _get_db_dep
-        from ..services import collection_materializer as _mat
-
-        conn = _get_db_dep()
-        if conn is not None and getattr(conn, "is_connected", False):
-            _mat.refresh_for_product(conn.db, created_or_updated)
-    except Exception:  # noqa: BLE001 - membership refresh must never block a write
-        pass
-
-
 def _canonical_door_payload(
     product: "ProductCreate", *, as_draft: bool = False
 ) -> dict:
@@ -434,7 +420,12 @@ def _form_extra_fields(product: "ProductCreate") -> dict:
 
 
 def _create_via_canonical_door(
-    product: "ProductCreate", current_user: dict, *, source: str, as_draft: bool = False
+    product: "ProductCreate",
+    current_user: dict,
+    *,
+    source: str,
+    as_draft: bool = False,
+    distinct_from: Optional[list] = None,
 ) -> dict:
     """Delegate a FORM/BULK create to the ONE canonical product_master door.
 
@@ -465,6 +456,8 @@ def _create_via_canonical_door(
     # Additive door columns. (No website flag: the brand default decides it
     # live at push time -- owner D6.)
     extra = _form_extra_fields(product)
+    if distinct_from:
+        extra["distinct_from"] = distinct_from
 
     try:
         return _pm.create_via_door(
@@ -569,6 +562,14 @@ def _build_product_data(product: "ProductCreate", created_by, created_by_name=No
     return product_data
 
 
+class DistinctFromAnswer(BaseModel):
+    """'It's a different product' (owner 2026-11-01): the product it is not,
+    and why. Who and when are stamped by the server."""
+
+    product_id: str = Field(..., min_length=1, max_length=120)
+    reason: str = Field(..., min_length=1, max_length=300)
+
+
 class ProductCreate(BaseModel):
     # SKU is AUTO-MINTED by the canonical door (product_master.mint_unique_sku)
     # when not supplied, so it is OPTIONAL. A supplied (legacy/imported) SKU is
@@ -584,6 +585,12 @@ class ProductCreate(BaseModel):
     # 'This is a different model' (no automatic link).
     variant_of: Optional[str] = Field(None, max_length=120)
     family_opt_out: bool = False
+    # "Same model, written differently" (owner 2026-11-01): ONLY the Add
+    # Product form and its edit form send it -- CSV import, clone and PO
+    # lines never do. A same colour + size twin under another spelling
+    # (RB4340 / 4340) not answered in distinct_from -> 409 NEAR_DUPLICATE.
+    check_near_duplicates: bool = False
+    distinct_from: Optional[List[DistinctFromAnswer]] = Field(None, max_length=20)
     color: Optional[str] = None
     size: Optional[str] = None
     mrp: float = Field(..., gt=0)
@@ -668,6 +675,10 @@ class ProductUpdate(BaseModel):
     brand: Optional[str] = None
     model: Optional[str] = None
     color: Optional[str] = None
+    # The Add Product edit form's "same model, written differently" check
+    # (ProductCreate); never stored as sent.
+    check_near_duplicates: bool = False
+    distinct_from: Optional[List[DistinctFromAnswer]] = Field(None, max_length=20)
     # Hub Phase 0: a partial attributes patch. This is the ONLY spine-restamp
     # door, and several categories carry their catalog-done required fields IN
     # attributes, not in the flat brand/model/color columns the overlay covers --
@@ -884,16 +895,16 @@ async def list_products(
     # one of them routes through services/catalog_list (one query for the
     # page AND its count, sorted on the server across the whole result).
     sort: Optional[str] = Query(None, pattern=_catalog_list.SORT_PATTERN),
-    frame_color: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
-    lens_colour: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
-    gender: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
-    shape: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
-    frame_type: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
-    frame_material: Optional[str] = Query(None, max_length=_catalog_list.VALUE_MAX),
+    frame_color: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
+    lens_colour: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
+    gender: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
+    shape: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
+    frame_type: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
+    frame_material: Optional[str] = Query(None, max_length=_catalog_list.LIST_MAX),
     updated_by: Optional[str] = Query(
         None,
-        max_length=_catalog_list.VALUE_MAX,
-        description="Last edited by this user_id; 'none' = never edited.",
+        max_length=_catalog_list.LIST_MAX,
+        description="Last edited by any of these user_ids (comma-separated); 'none' = never edited.",
     ),
     date_on: Optional[str] = Query(None, pattern="^(added|edited)$"),
     date_from: Optional[str] = Query(
@@ -935,35 +946,55 @@ async def list_products(
     def _opt(v):
         return v.strip() if isinstance(v, str) and v.strip() else None
 
-    new = {
-        "sort": _opt(sort),
-        "updated_by": _opt(updated_by),
-        "date_on": _opt(date_on),
-        "date_from": _opt(date_from),
-        "date_to": _opt(date_to),
-        "flag": _opt(flag),
-        "group": _opt(group),
-        "attributes": {
-            k: _opt(v)
-            for k, v in (
-                ("frame_color", frame_color),
-                ("lens_colour", lens_colour),
-                ("gender", gender),
-                ("shape", shape),
-                ("frame_type", frame_type),
-                ("frame_material", frame_material),
-            )
-            if _opt(v)
-        },
-    }
-    use_catalog_list = any(new.values())
-    if new["flag"] == "archived" and not (
+    # Every option filter is a tick-box multi-select (owner 2026-11-01):
+    # 'a,b' = a OR b, one value = an old single-value link; validated and
+    # capped (catalog_list.choices).
+    _many = _catalog_list.choices
+    try:
+        new = {
+            "sort": _opt(sort),
+            "updated_by": _many(updated_by),
+            "date_on": _opt(date_on),
+            "date_from": _opt(date_from),
+            "date_to": _opt(date_to),
+            "flag": _many(flag),
+            "group": _opt(group),
+            "attributes": {
+                k: _many(v)
+                for k, v in (
+                    ("frame_color", frame_color),
+                    ("lens_colour", lens_colour),
+                    ("gender", gender),
+                    ("shape", shape),
+                    ("frame_type", frame_type),
+                    ("frame_material", frame_material),
+                )
+                if _many(v)
+            },
+        }
+        ticked = {
+            "category": _many(category),
+            "brand": _many(brand),
+            "created_by": _many(created_by),
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    # One ticked value keeps the legacy path (old links, the till search);
+    # two or more need the list path, which reads them as OR.
+    use_catalog_list = any(new.values()) or any(len(v) > 1 for v in ticked.values())
+    if "archived" in new["flag"] and not (
         set(current_user.get("roles") or []) & _ARCHIVE_VIEW_ROLES
     ):
         raise HTTPException(
             status_code=403, detail="Only an admin can see archived products"
         )
-    if new["flag"] == "mine":
+    if "archived" in new["flag"] and len(new["flag"]) > 1:
+        # Archived is a view of its own: mixed with live flags the page would
+        # give deleted rows live-row actions.
+        raise HTTPException(
+            status_code=400, detail="Archived cannot be combined with other flags"
+        )
+    if "mine" in new["flag"]:
         # "Flagged on my entries" depends on who asks: part of the cache key.
         new["me"] = current_user.get("user_id")
     if use_catalog_list:
@@ -1070,10 +1101,10 @@ async def list_products(
             # till's own word rule (or the wide one with match=anywhere) --
             # reused, never changed.
             query = _catalog_list.list_query(
-                category=category,
-                brand=brand,
+                category=[resolve_category(c) or c for c in ticked["category"]],
+                brand=ticked["brand"],
                 is_active=filtered_active,
-                created_by=created_by,
+                created_by=ticked["created_by"],
                 updated_by=new["updated_by"],
                 attributes=new["attributes"],
                 date_on=new["date_on"],
@@ -1091,7 +1122,7 @@ async def list_products(
             if new["group"]:
                 products, total_count = _catalog_list.group_page(
                     repo.collection, query, new["sort"] or "edited", _skip, _limit,
-                    archived=new["flag"] == "archived",
+                    archived=new["flag"] == ["archived"],
                 )
             else:
                 products = _catalog_list.page(
@@ -1212,6 +1243,35 @@ async def list_products(
     return {"products": [], "total": 0, "total_count": 0}
 
 
+def _stamped_distinct_from(answers, repo, current_user: dict, *, me: dict, stored=None) -> Optional[list]:
+    """The save's 'It's a different product' answers, stamped by the server
+    (product_master.stamp_distinct_from); None when there are none."""
+    if not answers:
+        return None
+    try:
+        return _pm.stamp_distinct_from(
+            [a.model_dump() for a in answers],
+            repo,
+            actor=current_user.get("user_id"),
+            actor_name=current_user.get("username"),
+            stored=stored,
+            me=me,
+        )
+    except _pm.ProductMasterError as err:
+        raise HTTPException(status_code=err.status, detail=_pm_error_detail(err)) from err
+
+
+def _refuse_near_duplicate(repo, spine: dict, me: Optional[dict] = None) -> None:
+    """409 NEAR_DUPLICATE for an unanswered same colour + size twin of this
+    model under another spelling. An exact twin is the create door's own 409,
+    so it is left to the door."""
+    if _pm.identity_conflict(spine, repo, self_id=(me or {}).get("product_id")) is not None:
+        return
+    err = _pm.near_duplicate_conflict(getattr(repo, "collection", None), spine, me=me)
+    if err is not None:
+        raise HTTPException(status_code=409, detail=_pm_error_detail(err))
+
+
 @router.post("", status_code=201)
 async def create_product(
     product: ProductCreate,
@@ -1267,7 +1327,7 @@ async def create_product(
     # via the same core; this is the early loud 422 with the offending field.
     # With as_draft the gate relaxes to the DRAFT floor (brand+model+category).
     try:
-        _pm.build_canonical_product(
+        probe = _pm.build_canonical_product(
             _canonical_door_payload(product, as_draft=as_draft), source="FORM"
         )
     except _pm.ProductMasterError as err:
@@ -1278,16 +1338,19 @@ async def create_product(
     repo = get_product_repository()
 
     if repo is not None:
+        distinct = _stamped_distinct_from(product.distinct_from, repo, current_user, me=probe)
+        if product.check_near_duplicates:
+            # The minted SKU is a guess here (no catalogue read): only a typed
+            # one may name an exact twin.
+            _refuse_near_duplicate(repo, {**probe, "sku": product.sku, "distinct_from": distinct})
         created = _create_via_canonical_door(
-            product, current_user, source="FORM", as_draft=as_draft
+            product, current_user, source="FORM", as_draft=as_draft, distinct_from=distinct
         )
         if created:
             # A new product is shared by every shop.
             from ..services.cache import invalidate_product_lists
 
             invalidate_product_lists()
-            # Step-13: recompute SMART collections (fail-soft, never blocks).
-            _refresh_collections_after_product(created)
             return {
                 "product_id": created["product_id"],
                 "sku": created["sku"],
@@ -1431,6 +1494,30 @@ def _audit_bulk(
         logger.warning("[BULK-PRICING] audit log skipped: %s", exc)
 
 
+def _price_reaches_website(row: dict, pid: str, product: dict, price_patch: dict) -> bool:
+    """A committed bulk price takes THE spine -> website-twin rule a single
+    product edit takes (product_master.mirror_update_to_catalog_twin): the
+    twin's price moves, the twin is queued with a fresh edit revision, a size's
+    row and its model's listing follow, and a moved MRP re-derives the
+    discount rule's online price. Stamps row['website_synced']: False tells
+    the operator the billing price saved but the website copy did not (save
+    that product again). Never raises.
+
+    ponytail: the discount engine loads the rules once PER ROW; load them once
+    per bulk call if the catalogue grows past a few thousand rows."""
+    try:
+        from ..dependencies import get_db as _bulk_db
+
+        ok = _pm.mirror_update_to_catalog_twin(
+            product_id=pid, current=product, patch=price_patch, db=_bulk_db()
+        ) is True
+    except Exception as exc:  # noqa: BLE001 -- the billing price stands
+        logger.warning("[BULK-PRICING] website copy failed for %s: %s", pid, exc)
+        ok = False
+    row["website_synced"] = ok
+    return ok
+
+
 class CloneVaryRequest(BaseModel):
     """Hub Phase 4 clone-and-vary: clone `source_id` across N attribute
     variations into N DRAFT variants. Each variation is a dict of attribute
@@ -1502,6 +1589,7 @@ async def bulk_price_update(
 
     rows: List[dict] = []
     committed: List[dict] = []
+    website_failed = 0
     counts = {"total": len(products), "valid": 0, "violations": 0, "unchanged": 0}
 
     repo = get_product_repository()
@@ -1566,11 +1654,14 @@ async def bulk_price_update(
         # Commit path: only valid + actually-changed rows are written.
         if body.apply and verdict["ok"] and changed and repo is not None and pid:
             try:
+                price_patch = {
+                    "mrp": _round_money(new_mrp),
+                    "offer_price": _round_money(new_offer),
+                }
                 ok = repo.update(
                     pid,
                     {
-                        "mrp": _round_money(new_mrp),
-                        "offer_price": _round_money(new_offer),
+                        **price_patch,
                         "price_updated_at": datetime.utcnow(),
                         "price_updated_by": current_user.get("user_id"),
                         # A price change by a person IS a catalogue edit.
@@ -1592,6 +1683,8 @@ async def bulk_price_update(
                             ],
                         }
                     )
+                    if not _price_reaches_website(row, pid, p, price_patch):
+                        website_failed += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[BULK-PRICING] update failed for %s: %s", pid, exc)
                 row["applied"] = False
@@ -1609,6 +1702,9 @@ async def bulk_price_update(
         "applied": body.apply,
         "counts": counts,
         "committed": len(committed),
+        # Saved for billing, but the website copy was not updated: those
+        # rows carry website_synced False -- save them again one by one.
+        "website_failed": website_failed,
     }
 
     if body.apply and committed:
@@ -1649,6 +1745,7 @@ async def bulk_offer_update(
 
     rows: List[dict] = []
     committed: List[dict] = []
+    website_failed = 0
     counts = {"total": len(products), "valid": 0, "violations": 0, "unchanged": 0}
 
     repo = get_product_repository()
@@ -1708,10 +1805,11 @@ async def bulk_offer_update(
 
         if body.apply and verdict["ok"] and changed and repo is not None and pid:
             try:
+                price_patch = {"offer_price": _round_money(new_offer)}
                 ok = repo.update(
                     pid,
                     {
-                        "offer_price": _round_money(new_offer),
+                        **price_patch,
                         "price_updated_at": datetime.utcnow(),
                         "price_updated_by": current_user.get("user_id"),
                         # A price change by a person IS a catalogue edit.
@@ -1732,6 +1830,8 @@ async def bulk_offer_update(
                             ],
                         }
                     )
+                    if not _price_reaches_website(row, pid, p, price_patch):
+                        website_failed += 1
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[BULK-OFFER] update failed for %s: %s", pid, exc)
                 row["applied"] = False
@@ -1749,6 +1849,9 @@ async def bulk_offer_update(
         "applied": body.apply,
         "counts": counts,
         "committed": len(committed),
+        # Saved for billing, but the website copy was not updated: those
+        # rows carry website_synced False -- save them again one by one.
+        "website_failed": website_failed,
     }
 
     if body.apply and committed:
@@ -1988,16 +2091,20 @@ async def get_website_verdict(
 def _website_needs(db, product_id: str) -> Dict[str, Any]:
     """What keeps a SAVED product off the website, asked of the push's own
     rules (never worked out again here): product_push_refusal (lock, first-
-    publish readiness, brand), the photo rule (product_photo_urls -- "no
-    photo, no publish") and the one price rule (unpriced_size_names). `gaps`
+    publish readiness, brand), then the press's own gates (press_gates: block
+    status, the family plan's refusals, the photo rule and the price rule on
+    the LISTING VIEW) -- the very function the sync screen's _press_verdict
+    asks, one rule, never two (reviews of #1295 / #1305). A colour/size of another model
+    owns no page (push_product refuses its press): it gets the sync screen's
+    own sentence, plus what its model's press holds it back on
+    (model_hold -- the sync screen's per-SKU reason). `gaps`
     are the catalogue fields the first-publish rule waits on
     (gaps_before_cost -- NEVER the cost price: the purchase brings it and a
     catalogue manager cannot fill it). {"needs": None} when it could not be
     read; [] / [] = nothing missing."""
-    from ..services.shopify_live_sync import variants_for_product
+    from ..services.online_content_diagnostics import PUSH_THE_MODEL, model_hold, press_gates
     from ..services.shopify_push import product_push_refusal
-    from ..services.shopify_push.media import product_photo_urls
-    from ..services.shopify_push.product_input import unpriced_size_names
+    from ..services.shopify_push._shared import is_variant_of
 
     if db is None:
         return {"needs": None, "gaps": []}
@@ -2013,11 +2120,31 @@ def _website_needs(db, product_id: str) -> Dict[str, Any]:
         why = product_push_refusal(db, doc)
         if why:
             needs.append(why)
-        if not product_photo_urls(doc):
-            needs.append("a photo")
-        unpriced = unpriced_size_names(doc, variants_for_product(db, twin) if twin else [])
-        if unpriced:
-            needs.append("a selling price (" + ", ".join(unpriced) + ")")
+        # The press's own gates past its refusal (press_gates -- the sync
+        # screen's _press_verdict asks the same function): block status, the
+        # family plan's refusals, photo, price. A colour/size of another
+        # model fails them as "variant_of".
+        gates = [] if is_variant_of(doc) else press_gates(db, doc)[0]
+        if is_variant_of(doc) or any(code == "variant_of" for code, _r, _n in gates):
+            needs.append(PUSH_THE_MODEL)  # its photo and price ride its model's page
+            # What its model's press holds it back on -- the sync screen's own
+            # per-SKU reason. Dropped only when it repeats the colour's OWN
+            # refusal (its own waiting row, its own archived row, or the same
+            # words for a fact the two truly share -- the brand refusal or a
+            # push-lock): the model's photo, price, clash or block is a
+            # different fact and is listed now, not after the colour is
+            # finished (review of #1305). A readiness refusal ("not put on the
+            # website: ...", product_push_refusal's one wrap) never names its
+            # product, so the same words from the model are the MODEL's own
+            # draft/review/archive and stay listed.
+            hold = model_hold(db, doc, spine)
+            shared = why and why in (hold or "") and not why.startswith("not put on the website: ")
+            if hold and why and (hold.startswith("not ready - ") or hold == "archived" or shared):
+                hold = None
+            if hold:
+                needs.append("its model's page: " + hold)
+        else:
+            needs.extend(need for _c, _r, need in gates)
         first_publish = not ((doc.get("ecom") or {}).get("shopify_product_id"))
         gaps = (_pm.gaps_before_cost(spine)
                 if first_publish and _pm.effective_catalog_status(spine) != "ACTIVE" else [])
@@ -2063,10 +2190,15 @@ async def get_similar_products(
         logger.warning("[SIMILAR] lookup failed: %s", e)
     # One empty answer: the service's, which it gives when there is no
     # collection (a second copy here drifted once already -- eye_size_needed).
+    # self_id: the product the editor has open -- never "similar" to itself,
+    # nor to a product it was marked different from.
     return _pm.find_similar_products(
         coll,
         category=category,
-        attributes={k: v for k, v in request.query_params.items() if k != "category"},
+        attributes={
+            k: v for k, v in request.query_params.items() if k not in ("category", "self_id")
+        },
+        self_id=request.query_params.get("self_id") or None,
     )
 
 
@@ -2181,6 +2313,58 @@ async def generate_product_description(
         "model_line": model_line,
         "status": "GENERATED",
     }
+
+
+class ColourSuggestRequest(BaseModel):
+    """Edit screen: the saved product (`product_id`). Review screen: the
+    catalog draft (`catalog_id`). Add product (nothing saved yet): the form's
+    photo 1 (`image_url`, an IMS-uploaded photo). All send the form's photo
+    1, so a photo changed but not yet saved is the one read."""
+
+    product_id: Optional[str] = None
+    catalog_id: Optional[str] = None
+    image_url: Optional[str] = None
+    # Add product only: what is typed so far (brand, model, polarization).
+    category: Optional[str] = None
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/suggest-colour-name")
+async def suggest_colour_name(
+    body: ColourSuggestRequest,
+    current_user: dict = Depends(require_roles(*_CATALOG_ROLES)),
+):
+    """Suggest a colour name from the product's OWN photo 1 (owner
+    2026-10-23). Returns the suggestion only -- never writes; Accept on the
+    form saves it through the normal product save. 200 with a `status`
+    (SUGGESTED / NO_PHOTO / FAILED_NO_KEY / FAILED_GENERATION) and a plain
+    `message`; 404 unknown product; 429 over the per-user cap (charged only
+    when the paid call is about to be made)."""
+    from ..services.colour_suggest import suggest_colour_name as _suggest
+
+    if not body.product_id and not body.catalog_id and not (body.image_url or "").strip():
+        raise HTTPException(status_code=422, detail="Send the product or its photo.")
+    uid = str(current_user.get("user_id") or current_user.get("username") or "unknown")
+    if body.product_id:
+        conn = _family_db_or_503()
+        product = conn.get_collection("products").find_one({"product_id": body.product_id})
+    elif body.catalog_id:
+        from ..dependencies import get_db as _gdb
+        from .catalog import _get_catalog_product
+
+        conn = _gdb()
+        product = _get_catalog_product(body.catalog_id)
+    else:
+        from ..dependencies import get_db as _gdb
+
+        conn = _gdb()
+        product = {"category": body.category, "attributes": body.attributes or {}}
+    if product is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+    out = await _suggest(product=product, image_url=body.image_url, user_id=uid, db=conn, limit_key=uid)
+    if out.get("status") == "RATE_LIMITED":
+        raise HTTPException(status_code=429, detail=out["message"])
+    return out
 
 
 @router.get("/categories/list")
@@ -3431,6 +3615,9 @@ async def update_product(
             raise HTTPException(status_code=404, detail="Product not found")
 
         update_data = product.model_dump(exclude_unset=True)
+        # The save check's own fields: never stored as sent.
+        _check_near = bool(update_data.pop("check_near_duplicates", False))
+        update_data.pop("distinct_from", None)
 
         # Hub Phase 0 hardening: drop explicit-null values before any persist.
         # ProductUpdate fields are Optional, so a client can send mrp:null /
@@ -3624,6 +3811,19 @@ async def update_product(
                 status_code=err.status, detail=_pm_error_detail(err)
             ) from err
 
+        # 'It's a different product' answers join the stored ones; the
+        # same-model check runs only when this edit moved the identity (a
+        # price edit on the older twin never asks).
+        _distinct = _stamped_distinct_from(
+            product.distinct_from, repo, current_user, stored=existing.get("distinct_from"),
+            me={**existing, **update_data},
+        )
+        if _distinct is not None:
+            update_data["distinct_from"] = _distinct
+        if _check_near and update_data.get("identity_key") not in (None, existing.get("identity_key")):
+            _merged = {**existing, **update_data}
+            _refuse_near_duplicate(repo, {**_pm.identity_spine(_merged), "attributes": _pm._identity_attributes(_merged)}, me=_merged)
+
         # Cataloguer attribution: THE edit stamp (catalog_list.edit_stamp) --
         # who (id + display name, the JWT's username, falling back to the raw
         # id so a stale previous editor's name can never survive next to a
@@ -3756,10 +3956,6 @@ async def update_product(
                     now_active=update_data["is_active"],
                     actor=current_user,
                 )
-            # Step-13: recompute SMART collections (fail-soft). Use the merged doc
-            # so the resolver sees the post-update tags/category/brand + status.
-            merged = {**existing, **update_data, **status_fields}
-            _refresh_collections_after_product(merged)
             # Manage Barcode: spine and twin hold ONE code (the twin's is the
             # one the push sends). A twin that kept the old one is a failed
             # save, never a success -- LAST, so the take-down above still ran.

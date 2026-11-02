@@ -1360,7 +1360,14 @@ def _mark_online_dirty(product: Dict) -> None:
     would stay blind. Queuing is not yet publishing: the next press or the
     scheduled sync sends it (a FIRST publish too, owner ruling 2026-10-20),
     through the product gate, and only a SUCCESSFUL Shopify write clears the
-    flag again (shopify_push._writeback_product)."""
+    flag again (shopify_push._writeback_product).
+
+    Never an ARCHIVED product (catalog_ecom.queue_marks, Website 2)."""
+    from api.services.catalog_ecom import queue_marks
+
+    marks = queue_marks(product)
+    if not marks:
+        return
     ecom = product.get("ecom")
     if not isinstance(ecom, dict):
         ecom = {}
@@ -1374,9 +1381,7 @@ def _mark_online_dirty(product: Dict) -> None:
     ecom.setdefault("status", "DRAFT")
     # Flag + a fresh edit revision (SF-04): a push already holding the older
     # payload can then never take this edit off the queue.
-    from api.services.catalog_ecom import dirty_marks
-
-    ecom.update(dirty_marks())
+    ecom.update(marks)
 
 
 # The ecom keys a catalogue edit OWNS (review of PR #1227). Everything else
@@ -2031,6 +2036,13 @@ async def list_catalog_products(
     current_user: dict = Depends(get_current_user),
 ):
     """List all products in catalog"""
+
+    def _ticked(raw):
+        try:
+            return _catalog_list.choices(raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     products = _all_catalog_products()
     # Direct-call safety (unit suites call this handler as a plain function):
     # an unsupplied `photo` arrives as its Query default object, not None.
@@ -2061,15 +2073,17 @@ async def list_catalog_products(
         # and the shared browse vocabulary sends canonical values. Fail-open to
         # a raw match when either side is unresolvable -- this can only ADD
         # matches for legacy callers sending short codes.
-        want = _pm.resolve_category(category) or category
+        # Tick-box multi-select (owner 2026-11-01): 'a,b' = a OR b.
+        want = {_pm.resolve_category(c) or c for c in _ticked(category)}
         products = [
             p
             for p in products
-            if (_pm.resolve_category(p.get("category")) or p.get("category")) == want
+            if (_pm.resolve_category(p.get("category")) or p.get("category")) in want
         ]
     if brand:
+        brands = set(_ticked(brand))
         products = [
-            p for p in products if p.get("attributes", {}).get("brand_name") == brand
+            p for p in products if p.get("attributes", {}).get("brand_name") in brands
         ]
     if search:
         search_lower = search.lower()
@@ -3176,25 +3190,48 @@ def _promote_duplicate_warnings(repo, doc: Dict) -> List[Dict[str, Any]]:
     if not or_terms:
         return []
     warnings: List[Dict[str, Any]] = []
+
+    def _warn(match: Dict[str, Any], reason: str) -> None:
+        warnings.append(
+            {
+                "product_id": match.get("product_id") or match.get("id"),
+                "sku": match.get("sku"),
+                "brand": match.get("brand"),
+                "model": match.get("model"),
+                "name": match.get("name"),
+                "reason": reason,
+            }
+        )
+
+    seen = set()
     try:
         for match in repo.find_many({"$or": or_terms}, limit=5):
-            reason = (
+            if _pm.marked_distinct(doc, match):
+                continue
+            seen.add(match.get("product_id"))
+            _warn(
+                match,
                 "same barcode"
                 if barcode and match.get("barcode") == barcode
-                else "same brand + model"
-            )
-            warnings.append(
-                {
-                    "product_id": match.get("product_id") or match.get("id"),
-                    "sku": match.get("sku"),
-                    "brand": match.get("brand"),
-                    "model": match.get("model"),
-                    "name": match.get("name"),
-                    "reason": reason,
-                }
+                else "same brand + model",
             )
     except Exception:  # noqa: BLE001 - warnings are best-effort, never block
         logger.warning("[CATALOG] promote duplicate-warning query failed", exc_info=True)
+    # The same model written differently (RB4340 / 4340): its OWN read, so the
+    # five rows above can never crowd it out; a pair someone marked "It's a
+    # different product" is skipped (similar_model_rows).
+    if brand and model:
+        try:
+            rows = _pm.similar_model_rows(
+                getattr(repo, "collection", None), doc.get("category"), brand, model, me=doc
+            )
+            for match in rows[:5]:
+                if match.get("product_id") in seen:
+                    continue
+                stored = match.get("model") or (match.get("attributes") or {}).get("model_no")
+                _warn(match, f"same model written differently: {stored} / {model}")
+        except Exception:  # noqa: BLE001
+            logger.warning("[CATALOG] promote same-model warning query failed", exc_info=True)
     return warnings
 
 
@@ -3631,15 +3668,14 @@ async def _archive_product(
         # on the storefront. Removing a live listing has its own path
         # (shopify_push.push_product_delist).
         _save_catalog_product(product, mark_dirty=False)
-        # NEVER PUBLISHED -> OUT OF THE WEBSITE QUEUE (owner 2026-10-29): an
-        # archived product is never first-published (listing.
-        # first_publish_not_ready), so a queued one only printed a red
-        # "archived -- stays queued" line on every sync. The edit_rev rule
-        # (catalog_ecom.unqueue_in). A listing on the website is left to the
-        # take-down below, whose write-back owns its flag.
+        # OUT OF THE WEBSITE QUEUE (owner 2026-10-29; Website 2 for a listing
+        # on the website): an archived product is never pushed (shopify_push.
+        # product_push_refusal), so a queued one was only counted as skipped
+        # on every sync. The edit_rev rule (catalog_ecom.unqueue_in). Taking a
+        # listing down is the take-down below, which needs no flag.
         ecom = product.get("ecom") or {}
         coll = _catalog_coll()
-        if coll is not None and ecom.get("locally_modified") and not ecom.get("shopify_product_id"):
+        if coll is not None and ecom.get("locally_modified"):
             from api.services.catalog_ecom import EDIT_REV, unqueue_in
 
             unqueue_in(coll, product["id"], ecom.get(EDIT_REV))
@@ -3841,6 +3877,13 @@ def _restore_barcode_refusal(repo, spine: Optional[Dict], twin: Optional[Dict]) 
         for doc in (spine or {}, twin or {}):
             attrs = doc.get("attributes") if isinstance(doc.get("attributes"), dict) else {}
             for value in (doc.get("barcode"), attrs.get("gtin"), doc.get("gtin")):
+                # An INT that lost a UPC/EAN's leading zero(s) (036000291452
+                # -> 36000291452, 9-11 digits) is read zero-padded. Ints
+                # only, never 8 digits: a padded GTIN-8 in 20-29 would pass
+                # as a public code (review of #1284). isinstance, not type():
+                # a real MongoDB hands an 11-digit number back as bson Int64.
+                if isinstance(value, int) and not isinstance(value, bool) and 9 <= len(str(int(value))) <= 11:
+                    value = str(int(value)).zfill(12)
                 code = sanitise_gtin(value)
                 if code and code not in codes:
                     codes.append(code)

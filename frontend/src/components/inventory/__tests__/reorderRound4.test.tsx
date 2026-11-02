@@ -3,19 +3,17 @@
 // ============================================================================
 // 3.  The Reorder modal shows the SERVER's band for the saved level, no bands
 //     of its own.
-// 5.  The Reorder dashboard shows the server's on-hand quantity, not a re-sum.
 // 11. Each screen refuses an invalid typed level: toast, no PUT.
 // 12. ShopReorderLevel controls keep the 36px min height.
-// 14. The dashboard sends the level only when it changed and a shop is active.
 // R5. ShopReorderLevel: blank on an unset shop sends nothing; the draft never
-//     moves to another shop. The dashboard level field is locked for a role that
-//     cannot set it and with no active shop.
+//     moves to another shop.
+// (The dashboard's items moved with the screen to the one Reorder list, S5:
+// pages/inventory/__tests__/ReorderListPage.test.tsx.)
 // 15. Malformed number text (validity.badInput) is invalid, never a blank that
 //     clears the level.
 
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { MemoryRouter } from 'react-router-dom';
 
 const auth = vi.hoisted(() => ({ store: 'BV-DHN-02' as string | undefined, role: 'ADMIN' }));
 const toast = vi.hoisted(() => ({
@@ -52,7 +50,6 @@ vi.mock('../../../services/api/client', async (importOriginal) => ({
   default: http,
 }));
 
-import { ReorderDashboard } from '../ReorderDashboard';
 import { ReorderPointModal } from '../ReorderPointModal';
 import { ShopReorderLevel } from '../../../pages/inventory/ShopReorderLevel';
 
@@ -77,7 +74,7 @@ beforeEach(() => {
   for (const fn of [...Object.values(http), ...Object.values(toast)]) fn.mockClear();
   auth.store = 'BV-DHN-02';
   auth.role = 'ADMIN';
-  feed.rows = [{ _id: 'P-FRAME', quantity: 1, reorder_point: 2, stock_status: 'low', top_up_qty: 2 }];
+  feed.rows = [{ _id: 'P-FRAME', quantity: 1, reorder_point: 2, stock_status: 'low' }];
   feed.ledger = [{
     product_id: 'P-FRAME', sku: 'S', name: 'Carrera CA8895', brand: 'Carrera', category: 'FR',
     quantity: 1, status: 'AVAILABLE', reorder_quantity: 3,
@@ -97,20 +94,6 @@ describe('3. modal band is the server band', () => {
     fireEvent.change(screen.getByPlaceholderText('not set'), { target: { value: '9' } });
     expect(screen.queryByText('Critical', { selector: 'span' })).toBeNull();
     expect(screen.queryByText('Low', { selector: 'span' })).toBeNull();
-  });
-});
-
-describe('5. dashboard shows the server on-hand', () => {
-  it('feed says 3 on hand, ledger units sum to 5: the screen shows 3', async () => {
-    feed.rows = [{ _id: 'P-FRAME', quantity: 3, reorder_point: 6, stock_status: 'low', top_up_qty: 4 }];
-    feed.ledger = Array.from({ length: 5 }, () => ({
-      product_id: 'P-FRAME', sku: 'SKU-P-FRAME', name: 'Carrera CA8895', brand: 'Carrera',
-      category: 'FR', quantity: 1, status: 'AVAILABLE',
-    }));
-    render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
-    await screen.findByText('Carrera CA8895');
-    expect(screen.getAllByText('3', { selector: 'span.font-medium' }).length).toBeGreaterThan(0);
-    expect(screen.queryByText('5', { selector: 'span.font-medium' })).toBeNull();
   });
 });
 
@@ -142,41 +125,6 @@ describe('12. ShopReorderLevel keeps the 36px control height', () => {
     fireEvent.click(screen.getByRole('button', { name: /change it/i }));
     expect(screen.getByLabelText('Reorder level').className).toContain('min-h-[36px]');
     view.unmount();
-  });
-});
-
-describe('14. the dashboard sends the level only when it changed and a shop is active', () => {
-  const openModalWithNoShop = async () => {
-    const view = render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
-    fireEvent.click(await screen.findByTitle('Configure reorder point'));
-    auth.store = undefined; // the admin switches to "no shop"
-    view.rerender(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
-    await screen.findByRole('alert');
-  };
-
-  it('no shop, level untouched: the product-wide save goes through with no Pick-a-shop error', async () => {
-    await openModalWithNoShop();
-    fireEvent.click(screen.getByRole('button', { name: /save/i }));
-    await waitFor(() => expect(putUrls()).toContain('/products/P-FRAME'));
-    await waitFor(() => expect(toast.success).toHaveBeenCalled());
-    expect(levelPuts()).toEqual([]);
-    expect(toast.error).not.toHaveBeenCalled();
-  });
-
-  it('an untouched level is not re-sent even with a shop', async () => {
-    render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
-    fireEvent.click(await screen.findByTitle('Configure reorder point'));
-    fireEvent.click(await screen.findByRole('button', { name: /save/i }));
-    await waitFor(() => expect(putUrls()).toContain('/products/P-FRAME'));
-    expect(levelPuts()).toEqual([]);
-  });
-
-  it('a changed level with a shop is sent', async () => {
-    render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
-    fireEvent.click(await screen.findByTitle('Configure reorder point'));
-    fireEvent.change(await screen.findByPlaceholderText('not set'), { target: { value: '4' } });
-    fireEvent.click(screen.getByRole('button', { name: /save/i }));
-    await waitFor(() => expect(levelPuts().length).toBe(1));
   });
 });
 
@@ -219,27 +167,5 @@ describe('round 5', () => {
     expect(screen.queryByLabelText('Reorder level')).toBeNull();
     expect(levelPuts()).toEqual([]);
     expect(screen.getByRole('button', { name: /change it/i }).textContent).toContain('7');
-  });
-
-  it('5. the dashboard level field is disabled for CATALOG_MANAGER', async () => {
-    auth.role = 'CATALOG_MANAGER';
-    render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
-    fireEvent.click(await screen.findByTitle('Configure reorder point'));
-    expect(await screen.findByPlaceholderText('not set')).toBeDisabled();
-  });
-
-  it('5. the dashboard level field is disabled with no active shop', async () => {
-    const view = render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
-    fireEvent.click(await screen.findByTitle('Configure reorder point'));
-    auth.store = undefined; // the admin switches to "no shop"
-    view.rerender(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
-    await screen.findByRole('alert');
-    expect(screen.getByPlaceholderText('not set')).toBeDisabled();
-  });
-
-  it('5 (control). an ADMIN with a shop can type the level', async () => {
-    render(<MemoryRouter><ReorderDashboard /></MemoryRouter>);
-    fireEvent.click(await screen.findByTitle('Configure reorder point'));
-    expect(await screen.findByPlaceholderText('not set')).not.toBeDisabled();
   });
 });

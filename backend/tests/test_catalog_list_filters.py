@@ -161,3 +161,24 @@ def test_total_is_pre_slice_with_pagination(monkeypatch):
     assert out["total"] == 4
     assert len(out["products"]) == 2
     assert out["total_pages"] == 2
+
+
+def test_brand_and_category_are_tick_box_multi_selects(monkeypatch):
+    """Owner 2026-11-01: 'a,b' = a OR b inside a filter; filters AND-ed; one
+    value (an old single-value link) still works."""
+    out = _call(monkeypatch, is_active="all", brand="Vogue,Prada")
+    assert {p["id"] for p in out["products"]} == {"cuid_active", "cuid_inactive"}
+    out = _call(monkeypatch, is_active="all", brand="Vogue,Prada", category="SG")
+    assert {p["id"] for p in out["products"]} == {"cuid_inactive"}
+    out = _call(monkeypatch, is_active="all", category="FR,SUNGLASS")
+    assert {p["id"] for p in out["products"]} == set(d["id"] for d in _DOCS)
+    out = _call(monkeypatch, is_active="all", brand="Vogue")
+    assert {p["id"] for p in out["products"]} == {"cuid_active"}
+
+
+def test_too_many_ticks_are_refused_in_plain_words(monkeypatch):
+    from fastapi import HTTPException
+
+    with __import__("pytest").raises(HTTPException) as exc:
+        _call(monkeypatch, brand=",".join(f"b{i}" for i in range(51)))
+    assert exc.value.status_code == 400

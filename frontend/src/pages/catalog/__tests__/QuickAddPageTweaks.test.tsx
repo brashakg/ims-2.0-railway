@@ -263,8 +263,10 @@ describe('5 - GST rate is text, and the value still posts', () => {
     expect(payload.gst_rate).toBe(18);
     expect(payload.hsn_code).toBe('900410');
     // The posted shape: no 'shopify' block (POST /products never stored it).
+    // check_near_duplicates: only this form asks about the same model
+    // written differently (owner 2026-11-01).
     expect(Object.keys(payload).sort()).toEqual([
-      'attributes', 'brand', 'category', 'cost_price', 'description', 'gst_rate',
+      'attributes', 'brand', 'category', 'check_near_duplicates', 'cost_price', 'description', 'gst_rate',
       'hsn_code', 'images', 'model', 'mrp', 'offer_price', 'weight',
     ]);
   });

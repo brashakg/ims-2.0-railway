@@ -6,7 +6,6 @@ from ...dependencies import store_in_view
 from ._shared import (
     BaseModel,
     Depends,
-    Dict,
     HTTPException,
     Optional,
     Query,
@@ -24,7 +23,6 @@ from .helpers import (
     _get_db,
 )
 from .lookup import sellable_by_product_shop
-from ...services.reorder_policy import low_stock_rows, on_hand
 
 # ============================================================================
 # INVENTORY INTELLIGENCE: transfer recommendations + staff accountability
@@ -43,44 +41,35 @@ class AccountabilityAssign(BaseModel):
 @router.get("/transfer-recommendations")
 async def transfer_recommendations(
     store_id: Optional[str] = Query(None),
-    threshold: int = Query(5, ge=0, le=1000),
     current_user: dict = Depends(require_roles(*_INVENTORY_ROLES)),
 ):
-    """Suggest inter-store transfers to refill the active store's low/out
-    products from other stores that hold a surplus. Fail-soft."""
-    from ...services.inventory_intel import recommend_transfers
+    """Rebalance: the Reorder list's transfer hints for the active shop --
+    other shops' spare pieces shared out over the short rows (services/
+    reorder_list, reorder_policy.share_spares). One rule for 'spare', never a
+    refill formula of this screen's own. Fail-soft."""
+    from ...services import reorder_list
 
-    stock_repo = get_stock_repository()
     active_store = store_in_view(store_id, current_user, one_shop=True)
-    if stock_repo is None or not active_store:
+    if not active_store:
         return {"recommendations": [], "store_id": active_store}
 
     try:
-        # Low at THIS shop by its own level (D12); a shop with no level is
-        # never refilled. `threshold` only sizes the refill (to threshold*2).
-        low = low_stock_rows(get_product_repository(), stock_repo, store_id=active_store)
-        low_ids = [r["_id"] for r in low]
-        if not low_ids:
-            return {"recommendations": [], "store_id": active_store}
-
-        # Every shop's on-hand of just the deficit products (the same count).
-        store_levels: Dict[str, Dict[str, int]] = {}
-        for (pid, sid), qty in on_hand(stock_repo, store_id=None, product_ids=low_ids).items():
-            store_levels.setdefault(pid, {})[sid] = qty
-
-        low_products = [
-            {"product_id": r["_id"], "quantity": r["quantity"], "product_name": r["name"]}
-            for r in low
+        rows = reorder_list.build(_get_db(), store_id=active_store)["rows"]
+        recs = [
+            {
+                "product_id": r["product_id"],
+                "product_name": r["name"],
+                "sku": r["sku"],
+                "from_store": t["store_id"],
+                "from_store_name": t["store_name"],
+                "to_store": active_store,
+                "quantity": t["qty"],
+                "to_store_qty": r["on_hand"],
+            }
+            for r in rows
+            for t in r["transfer_from"]
         ]
-        recs = recommend_transfers(
-            active_store, low_products, store_levels, threshold=threshold
-        )
-        return {
-            "store_id": active_store,
-            "threshold": threshold,
-            "recommendations": recs,
-            "count": len(recs),
-        }
+        return {"store_id": active_store, "recommendations": recs, "count": len(recs)}
     except Exception as e:  # noqa: BLE001
         logger.warning(f"transfer_recommendations error: {e}")
         return {"recommendations": [], "store_id": active_store}

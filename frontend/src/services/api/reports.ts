@@ -401,9 +401,6 @@ export const reportsApi = {
     storeId?: string,
     opts?: {
       lookback_days?: number;
-      lead_time_days?: number;
-      reorder_cycle_days?: number;
-      safety_buffer_days?: number;
       min_velocity?: number;
       limit?: number;
     }
@@ -426,8 +423,8 @@ export const reportsApi = {
         reorder_point: number | null; // null = not set
         low_stock: boolean; // the server's verdict (reorder_policy)
         stock_status: 'not-set' | 'out-of-stock' | 'critical' | 'low' | 'healthy';
-        desired_cover: number;
-        gap_units: number;
+        /** What THE buy rule went by: the shop's level, or its 30-day sales. */
+        basis: 'level' | 'sales' | null;
         suggested_order_qty: number;
         avg_selling_price: number;
         // Cost figures: absent for roles outside the product-cost rule
@@ -456,10 +453,6 @@ export const reportsApi = {
       params: {
         store_id: string;
         lookback_days: number;
-        lead_time_days: number;
-        reorder_cycle_days: number;
-        safety_buffer_days: number;
-        cover_days_total: number;
         min_velocity: number;
       };
       as_of: string;

@@ -655,18 +655,17 @@ def test_historical_refund_scaled_to_actual_shopify_amount(wired):
 
 
 def test_historical_refund_clamped_when_actual_exceeds_billed(wired):
-    # Shopify's refunded total INCLUDES shipping/goodwill the import never books
-    # as sale revenue (line items only), so actual > billed is SYSTEMATIC for
-    # shipping-charged orders. A credit note can never exceed the original
-    # invoice value: the CN is CLAMPED at the billed gross (full reversal of
-    # what was booked) and the excess is surfaced as an unreconciled residual.
+    # Shopify refunded MORE than the refund's billed lines (a goodwill amount
+    # on top). A credit note can never exceed the original invoice value: the
+    # CN is CLAMPED at the billed gross (full reversal of what was booked) and
+    # the excess is surfaced as an unreconciled residual.
     payload = _hist_order(21044, financial="partially_refunded")
     payload["refunds"] = [
         {
             "id": 88044,
             "created_at": "2023-06-03T10:00:00Z",
             "refund_line_items": [_refund_line()],
-            # Rs 999 goods + Rs 151 shipping refunded via the gateway.
+            # Rs 999 goods + a Rs 151 goodwill amount refunded via the gateway.
             "transactions": [
                 {"kind": "refund", "status": "success", "amount": "1150.00"}
             ],
@@ -682,8 +681,71 @@ def test_historical_refund_clamped_when_actual_exceeds_billed(wired):
     assert cn["gross_refund"] == 999.0, "CN never exceeds the billed gross"
     assert cn["billed_gross"] == 999.0
     assert cn["reconciliation"] == "CLAMPED_AT_BILLED_GROSS"
-    assert cn["unreconciled_excess"] == 151.0, "shipping/goodwill excess surfaced"
+    assert cn["unreconciled_excess"] == 151.0, "goodwill excess surfaced"
     assert round(cn["taxable"] + cn["tax"], 2) == 999.0, "split NOT scaled up"
+
+
+def _shipped_hist_order(order_id, **kw):
+    """Rs 999 frame + Rs 151 shipping: the invoice (and Shopify) total 1150."""
+    payload = _hist_order(order_id, **kw)
+    payload["shipping_lines"] = [{"title": "Standard", "price": "151.00"}]
+    payload["total_price"] = "1150.00"
+    return payload
+
+
+def _hist_cn(wired, refund_id):
+    ledger = wired["db"].get_collection("credit_note_ledger").docs
+    mine = [d for d in ledger if d.get("shopify_refund_id") == refund_id]
+    assert len(mine) == 1
+    return mine[0]
+
+
+def test_historical_full_refund_with_shipping_credits_the_whole_invoice(wired):
+    # Shipping is on the invoice, so a refund of goods + shipping reverses all
+    # of it: CN gross == grand_total (1150), nothing clamped or left standing.
+    payload = _shipped_hist_order(21045, financial="refunded")
+    payload["refunds"] = [{
+        "id": 88045, "created_at": "2023-06-03T10:00:00Z",
+        "refund_line_items": [_refund_line()],
+        "refund_shipping_lines": [{
+            "subtotal_amount_set": {"shop_money": {"amount": "151.00"}},
+            "total_tax_amount_set": {"shop_money": {"amount": "0.00"}},
+        }],
+        "transactions": [{"kind": "refund", "status": "success", "amount": "1150.00"}],
+    }]
+    online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    order = wired["orders"].find_one({"shopify_order_id": "21045"})
+    assert order["grand_total"] == 1150.0
+    cn = _hist_cn(wired, "88045")
+    assert cn["gross_refund"] == 1150.0
+    assert "reconciliation" not in cn and "unreconciled_excess" not in cn
+    assert round(cn["taxable"] + cn["tax"], 2) == 1150.0
+
+
+def test_historical_shipping_only_refund_reverses_the_shipping_line(wired):
+    # A shipping-only refund (Shopify: order_adjustments kind shipping_refund,
+    # no refund_line_items) credits Rs 151 at the shipping line's own rate --
+    # the principal goods line's rate it was billed at.
+    payload = _shipped_hist_order(21046, financial="partially_refunded")
+    payload["refunds"] = [{
+        "id": 88046, "created_at": "2023-06-03T10:00:00Z",
+        "refund_line_items": [],
+        "order_adjustments": [
+            {"kind": "shipping_refund", "amount": "-151.00", "tax_amount": "0.00"}
+        ],
+        "transactions": [{"kind": "refund", "status": "success", "amount": "151.00"}],
+    }]
+    online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    order = wired["orders"].find_one({"shopify_order_id": "21046"})
+    ship = [i for i in order["items"] if i.get("item_type") == "SHIPPING"][0]
+    cn = _hist_cn(wired, "88046")
+    assert cn["gross_refund"] == 151.0
+    assert cn["gst_rate"] == ship["gst_rate"] == order["items"][0]["gst_rate"]
+    assert cn["tax"] == ship["tax_amount"]
 
 
 def test_cn_failure_reported_and_healed_on_rerun(wired):

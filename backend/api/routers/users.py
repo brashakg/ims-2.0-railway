@@ -6,6 +6,7 @@ User management endpoints
 
 from api.utils.event_time import utc_now_iso
 
+import logging
 import re
 
 from fastapi import APIRouter, HTTPException, Depends, Query
@@ -37,6 +38,9 @@ from ..services.user_roles import (
     validate_roles,
 )
 from ..services import permission_audit as _perm_audit
+
+logger = logging.getLogger(__name__)
+
 # The statutory identity fields answer to the SAME role tier as pay -- ADMIN /
 # SUPERADMIN, per the owner ruling. Reusing the one shared predicate (rather
 # than a second local tuple that says "SUPERADMIN", "ADMIN") is the whole point
@@ -1259,7 +1263,9 @@ class ResetPasswordBody(BaseModel):
     )
 
 
-def _write_password_reset_audit(actor: dict, target: dict) -> None:
+def _write_password_reset_audit(
+    actor: dict, target: dict, action: str = "PASSWORD_RESET"
+) -> None:
     """Append ONE fail-soft ``PASSWORD_RESET`` audit row.
 
     Records WHO reset WHOSE password and when -- but NEVER the temporary password
@@ -1275,7 +1281,7 @@ def _write_password_reset_audit(actor: dict, target: dict) -> None:
             return
         audit_repo.create(
             {
-                "action": "PASSWORD_RESET",
+                "action": action,
                 "entity_type": "user",
                 "entity_id": target.get("user_id"),
                 "user_id": actor.get("user_id"),
@@ -1377,6 +1383,78 @@ async def reset_password(
     if server_generated:
         response["temporary_password"] = temp
     return response
+
+
+class SetPasswordBody(BaseModel):
+    # Plain str on purpose: a Field(min_length=...) failure 422s with the
+    # submitted value echoed back. The rules are checked in the route instead.
+    new_password: str
+
+
+@router.post("/{user_id}/set-password")
+async def set_password(
+    user_id: str,
+    body: SetPasswordBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """SUPERADMIN sets a chosen password for ANY user (owner ask 2026-11-01).
+
+    The user keeps it (no forced change). Every other open login of theirs is
+    signed out: token_version is bumped (old access tokens 401 on their next
+    request, see auth.token_superseded) and their refresh chains are revoked.
+    The actor's current session survives, also when setting their own password.
+    The password is never stored in plaintext, echoed, logged or audited.
+    """
+    if "SUPERADMIN" not in set(current_user.get("roles", [])):
+        raise HTTPException(status_code=403, detail="Only a SUPERADMIN can set passwords")
+    password = body.new_password
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+    new_hash = hash_password(password)  # 400s past the bcrypt 72-byte ceiling
+
+    repo = get_user_repository()
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+    existing = repo.find_by_id(user_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    keep_sid = current_user.get("sid") if current_user.get("user_id") == user_id else None
+    saved = repo.update(
+        user_id,
+        {
+            "password_hash": new_hash,
+            "must_change_password": False,
+            "password_changed_at": utc_now_iso(),
+            "password_set_by": current_user.get("user_id"),
+            "token_version": int(existing.get("token_version") or 0) + 1,
+            "token_version_kept_sid": keep_sid,
+        },
+    )
+    if not saved:  # BaseRepository.update swallows DB errors -> False
+        raise HTTPException(status_code=500, detail="Password was not saved. Try again.")
+    # Saved = a real credential change: audit it before anything else can fail.
+    _write_password_reset_audit(current_user, existing, action="PASSWORD_SET")
+
+    # The token_version bump above already signs every other login out: old
+    # access tokens and refresh docs carry an older tv (absent = 0) and are
+    # refused (auth.token_superseded). Revoking the chains is belt-and-braces
+    # for a refresh whose live-user lookup fails, so a failure here only logs.
+    from ..services.refresh_tokens import refresh_token_store
+
+    try:
+        refresh_token_store.revoke_user_families(
+            user_id, reason="password_set", keep_family_id=keep_sid
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("set-password: refresh chain revoke failed for %s: %s", user_id, e)
+
+    return {
+        "user_id": user_id,
+        "username": existing.get("username"),
+        "must_change_password": False,
+        "message": "Password set. Their other logins are signed out.",
+    }
 
 
 class AssignStoreBody(BaseModel):

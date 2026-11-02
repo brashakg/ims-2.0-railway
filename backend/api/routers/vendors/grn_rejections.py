@@ -115,6 +115,8 @@ def handoff_rejected_units(db, grn_repo, stock_repo, grn, current_user,
                     for field in ("batch_code", "lot_number", "expiry_date"):
                         if item.get(field):
                             doc[field] = item[field]
+                    if item.get("rejection_photo_file_id"):
+                        doc["quarantine_photo_file_id"] = item["rejection_photo_file_id"]
                     existing, inserted = _insert_once(stock, doc)
                     if inserted:
                         _audit_unit(db, existing, actor)
@@ -138,7 +140,8 @@ def handoff_rejected_units(db, grn_repo, stock_repo, grn, current_user,
                 "debit_note_draft_id": "DRAFT-" + return_id,
                 "items": [{"product_id": item.get("product_id"),
                            "product_name": product.get("name") or item.get("product_name") or item.get("product_id"),
-                           "quantity": quantity, "reason": reason, "unit_price": None}],
+                           "quantity": quantity, "reason": reason, "unit_price": None,
+                           "photo_file_id": item.get("rejection_photo_file_id")}],
                 "total_value": None, "credit_note_number": None, "credit_note_amount": None,
                 "notes": "Rejected at receiving. Confirm credit or replacement; Accounts review prices before issuing a note.",
                 "created_by": actor, "created_at": now.isoformat(),

@@ -598,11 +598,13 @@ def skus_on_shopify(db, skus: List[str]) -> Set[str]:
 def is_archived_row(*docs: Any) -> bool:
     """THE archived test the online diagnostics share (sync parity, Store
     Health): any of the given docs -- a catalog twin, its spine, its ecom
-    sub-doc -- soft-deleted (``deleted_at``, product_master's archive mark),
+    sub-doc -- soft-deleted (THE archived rule, catalog_ecom.is_archived),
     flagged ``is_archived`` or carrying status ARCHIVED."""
+    from .catalog_ecom import is_archived
+
     return any(
         isinstance(d, dict) and (
-            d.get("deleted_at") or d.get("is_archived") or str(d.get("status") or "").upper() == "ARCHIVED"
+            is_archived(d) or d.get("is_archived") or str(d.get("status") or "").upper() == "ARCHIVED"
         )
         for d in docs
     )
@@ -817,6 +819,10 @@ def product_online_state(doc: Dict[str, Any], refusal: Optional[str]) -> Dict[st
                    BLOCKED  not live and no usable photo: the push refuses it
                    QUEUED   has a photo, waiting for a human to press push
                    OFF      not live, not queued
+                   (DELIBERATELY not collection_registry.listing_facts:
+                   LIVE here includes a Shopify Draft -- it still syncs
+                   stock; "can a shopper see it in a collection" there
+                   leaves a Draft out. Each docstring names the other.)
       note      -- the gate's own reason, whenever it refuses: a LIVE listing
                    still sells (stock keeps syncing) but its price and images
                    no longer sync; a NOT_FOR_WEBSITE row says which (a brand

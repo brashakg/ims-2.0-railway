@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import { AlertTriangle, Loader2, ShieldCheck, Download } from 'lucide-react';
 import { reportsApi } from '../../../services/api';
 import { getErrorMessage } from '../../../utils/errorHandler';
+import { istDayString } from '../../../utils/datetime';
 
 type Data = Awaited<ReturnType<typeof reportsApi.getTaxCodeAudit>>;
 
@@ -32,7 +33,7 @@ function downloadCsv(rows: Data['data']) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `tax-code-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+  a.download = `tax-code-audit-${istDayString(new Date()) ?? ''}.csv`;
   a.click();
   URL.revokeObjectURL(url);
 }

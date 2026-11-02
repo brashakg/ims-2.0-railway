@@ -160,7 +160,13 @@ async def generate_catalogue_pdf(
     products: List[Dict] = []
     default_title = "Product Catalogue"
     if payload.collection_id:
-        resolved = pdf.resolve_collection_products(db, payload.collection_id)
+        try:
+            resolved = pdf.resolve_collection_products(db, payload.collection_id)
+        except Exception as exc:  # noqa: BLE001 -- reported, never an empty PDF
+            raise HTTPException(
+                status_code=503,
+                detail="The catalogue could not be read just now, so the PDF was not made. Try again in a minute.",
+            ) from exc
         if resolved is None:
             raise HTTPException(status_code=404, detail="Collection not found")
         products = resolved
@@ -241,7 +247,9 @@ def _temp_public(doc: Dict) -> Dict:
         "name": doc.get("title"),
         "handle": doc.get("handle"),
         "is_temporary": True,
-        "products_count": doc.get("products_count", len(doc.get("products") or [])),
+        # A hand-picked set's count is its own list -- never the website
+        # rule's (collection_materializer.products_count counts listings online).
+        "products_count": len(doc.get("products") or []),
         "expires_at": expires_iso,
         "created_by": doc.get("created_by"),
         "created_at": (

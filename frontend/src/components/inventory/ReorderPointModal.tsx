@@ -1,18 +1,13 @@
 // ============================================================================
-// IMS 2.0 - Reorder Point Configuration Modal
+// IMS 2.0 - Reorder settings modal (opened from each row of the Reorder list)
 // ============================================================================
-// Set and manage reorder points for products
+// No formula of its own (stock redesign S5 review): the level is typed in by a
+// person, the buy number is the server's (reorder_policy.buy_qty), and the
+// 30-day sales are shown exactly as the server counted them. A blank field is
+// "not set"; only what the person changed is saved.
 
-import { useState, useEffect } from 'react';
-import {
-  X,
-  TrendingDown,
-  AlertTriangle,
-  Save,
-  Loader2,
-  BarChart3,
-  Calculator,
-} from 'lucide-react';
+import { useId, useState } from 'react';
+import { X, TrendingDown, Save, Loader2 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { typedLevel, levelText, isLevelInputValid, isBadInput, LEVEL_INPUT_ERROR } from '../../utils/reorderLevel';
 
@@ -29,128 +24,100 @@ interface ReorderPointModalProps {
     reorderPoint?: number | null;
     /** The server's band for the saved level (reorder_policy.stock_status). */
     stockStatus?: string;
-    // Real value from the product master: null/undefined = never configured;
+    // From the product master: null/undefined = never configured;
     // <= 0 (the -1 sentinel) = auto-reorder explicitly DISABLED.
     reorderQuantity?: number | null;
-    maxStock?: number;
-    averageSalesPerDay?: number;
-    leadTimeDays?: number;
+    /** null/undefined/0 = not set (no cap). */
+    maxStock?: number | null;
+    /** null/undefined/0 = not set. */
+    leadTimeDays?: number | null;
+    /** The server's count of pieces sold at this shop in the last 30 days. */
+    soldLast30Days?: number;
   };
   onSave: (data: ReorderPointData) => Promise<void>;
-  /** The reorder LEVEL is this shop's (owner ruling D12). The quantity / max
-   *  stock / lead time are product-wide: read-only for a role that cannot
-   *  edit the product (they are not saved for it). */
+  /** The quantity / max stock / lead time are product-wide: read-only for a
+   *  role that cannot edit the product (never sent for it). */
   productWideLocked?: boolean;
-  /** True for a role that may not set a shop's level (a catalogue manager):
-   *  the level field is read-only and no level is sent for it. */
+  /** True for a role that may not set a shop's level (a catalogue manager). */
   shopLevelLocked?: boolean;
   /** Why the level is locked, when it is (e.g. no active shop). */
   shopLevelNotice?: string;
 }
 
+/** Only what changed is in `product` (PUT /products/{id} drops nulls, so a
+ *  cleared max stock / lead time is sent as 0 = not set). */
 export interface ReorderPointData {
   productId: string;
-  /** null = not set (clears this shop's level). */
+  /** null = not set (clears this shop's level). The caller sends it only when
+   *  it differs from the saved level. */
   reorderPoint: number | null;
-  // -1 = auto-reorder disabled (backend sentinel); otherwise >= 1.
-  reorderQuantity: number;
-  maxStock: number;
-  leadTimeDays: number;
+  product: { reorder_quantity?: number; max_stock?: number; lead_time_days?: number };
 }
+
+/** '' for not set (null, undefined, 0 or less). */
+const shown = (n: number | null | undefined) => (n != null && n > 0 ? String(n) : '');
+/** The whole number typed, or null for blank / not a whole number >= 0. */
+const whole = (text: string) => (/^\d+$/.test(text.trim()) ? Number(text.trim()) : null);
 
 export function ReorderPointModal({ isOpen, onClose, product, onSave, productWideLocked = false, shopLevelLocked = false, shopLevelNotice }: ReorderPointModalProps) {
   const toast = useToast();
+  const ids = useId();
 
-  // Seed from the REAL master value only. <= 0 (the -1 sentinel) means the
-  // owner disabled auto-reorder -> start in the disabled state; null means
-  // never configured -> empty field. NEVER a fabricated 50: an untouched
-  // save must not silently flip a disabled product back on.
   const startDisabled = product.reorderQuantity != null && product.reorderQuantity <= 0;
-
   const [isSaving, setIsSaving] = useState(false);
   const [reorderPoint, setReorderPoint] = useState(levelText(product.reorderPoint));
-  const [autoReorderOff, setAutoReorderOff] = useState(startDisabled);
-  const [reorderQuantity, setReorderQuantity] = useState<number | ''>(
-    product.reorderQuantity != null && product.reorderQuantity >= 1
-      ? product.reorderQuantity
-      : ''
-  );
-  const [maxStock, setMaxStock] = useState(product.maxStock || 100);
-  const [leadTimeDays, setLeadTimeDays] = useState(product.leadTimeDays || 7);
-  const [autoCalculate, setAutoCalculate] = useState(false);
-  // The browser's own verdict on malformed number text (value reads as '').
   const [levelBadInput, setLevelBadInput] = useState(false);
-
-  // Sales velocity calculation
-  const avgSalesPerDay = product.averageSalesPerDay || 2;
-  const safetyStock = Math.ceil(avgSalesPerDay * 3); // 3 days buffer
-  const leadTimeStock = Math.ceil(avgSalesPerDay * leadTimeDays);
-
-  useEffect(() => {
-    if (autoCalculate && avgSalesPerDay > 0) {
-      // Reorder Point = (Average Daily Sales × Lead Time) + Safety Stock
-      const calculatedReorderPoint = leadTimeStock + safetyStock;
-      setReorderPoint(String(calculatedReorderPoint));
-      setLevelBadInput(false);
-
-      // Reorder Quantity = Average Daily Sales × (Lead Time + Review Period)
-      // Using 30-day review period. Never overrides an explicit
-      // "auto-reorder disabled" choice.
-      const reviewPeriod = 30;
-      const calculatedReorderQty = Math.ceil(avgSalesPerDay * (leadTimeDays + reviewPeriod));
-      if (!autoReorderOff) {
-        setReorderQuantity(calculatedReorderQty);
-      }
-
-      // Max Stock = Reorder Point + Reorder Quantity
-      const calculatedMaxStock = calculatedReorderPoint + calculatedReorderQty;
-      setMaxStock(calculatedMaxStock);
-    }
-  }, [autoCalculate, autoReorderOff, avgSalesPerDay, leadTimeDays, leadTimeStock, safetyStock]);
+  const [autoReorderOff, setAutoReorderOff] = useState(startDisabled);
+  const [pack, setPack] = useState(shown(product.reorderQuantity));
+  const [maxStock, setMaxStock] = useState(shown(product.maxStock));
+  const [leadTime, setLeadTime] = useState(shown(product.leadTimeDays));
 
   const handleSubmit = async () => {
-    // Validation (blank = not set; 0 is a real level: alert once this shop runs out)
+    // Blank = not set; 0 is a real level (alert once this shop runs out).
     if (levelBadInput || !isLevelInputValid(reorderPoint)) {
       toast.error(LEVEL_INPUT_ERROR);
       return;
     }
     const level = typedLevel(reorderPoint);
-    // Resolve the quantity to persist: -1 (the backend's "auto-reorder off"
-    // sentinel) when disabled, otherwise a real qty >= 1. An untouched save
-    // on a disabled product therefore KEEPS it disabled. (Not saved at all
-    // when the product-wide fields are locked.)
-    let reorderQuantityToSave: number;
-    if (autoReorderOff || productWideLocked) {
-      reorderQuantityToSave = -1;
-    } else {
-      if (typeof reorderQuantity !== 'number' || reorderQuantity < 1) {
-        toast.error('Reorder quantity must be at least 1 (or tick "Auto-reorder disabled")');
+    const changed: ReorderPointData['product'] = {};
+    if (!productWideLocked) {
+      if (autoReorderOff !== startDisabled || pack !== shown(product.reorderQuantity)) {
+        if (autoReorderOff) {
+          changed.reorder_quantity = -1; // the server's "auto-reorder off"
+        } else {
+          const n = whole(pack);
+          if (n == null || n < 1) {
+            toast.error('Order in packs of must be at least 1 (or tick "Auto-reorder disabled")');
+            return;
+          }
+          changed.reorder_quantity = n;
+        }
+      }
+      for (const [key, text, saved] of [
+        ['max_stock', maxStock, product.maxStock],
+        ['lead_time_days', leadTime, product.leadTimeDays],
+      ] as const) {
+        if (text === shown(saved)) continue;
+        const n = text.trim() === '' ? 0 : whole(text);
+        if (n == null) {
+          toast.error('Max stock and lead time are whole numbers (blank = not set)');
+          return;
+        }
+        changed[key] = n;
+      }
+      const cap = changed.max_stock ?? (product.maxStock || 0);
+      if (level !== null && cap > 0 && cap < level) {
+        toast.error('Max stock must be at least the reorder level');
         return;
       }
-      reorderQuantityToSave = reorderQuantity;
-    }
-    if (!productWideLocked && level !== null && maxStock < level) {
-      toast.error('Max stock must be greater than or equal to reorder point');
-      return;
-    }
-    if (!productWideLocked && leadTimeDays <= 0) {
-      toast.error('Lead time must be greater than 0');
-      return;
     }
 
     setIsSaving(true);
     try {
-      await onSave({
-        productId: product.id,
-        reorderPoint: level,
-        reorderQuantity: reorderQuantityToSave,
-        maxStock,
-        leadTimeDays,
-      });
-      toast.success('Reorder point configured successfully');
+      await onSave({ productId: product.id, reorderPoint: level, product: changed });
       onClose();
-    } catch (error: any) {
-      toast.error(error?.message || 'Failed to save reorder point');
+    } catch (error: unknown) {
+      toast.error((error as Error)?.message || 'Could not save the reorder settings');
     } finally {
       setIsSaving(false);
     }
@@ -158,46 +125,36 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
 
   if (!isOpen) return null;
 
-  const shownLevel = typedLevel(reorderPoint);
   // The band is the SERVER's, for the saved level only: a level being typed has
   // no verdict until it is saved (the client never decides low stock).
   const serverStatus =
-    shownLevel === (product.reorderPoint ?? null) ? product.stockStatus : undefined;
-  const stockStatus =
-    serverStatus === 'critical' || serverStatus === 'out-of-stock'
-      ? 'critical'
-      : serverStatus === 'low'
-        ? 'warning'
-        : serverStatus === 'healthy'
-          ? 'healthy'
-          : 'unknown';
+    typedLevel(reorderPoint) === (product.reorderPoint ?? null) ? product.stockStatus : undefined;
+  const lockedWide = isSaving || productWideLocked;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
       <div className="bg-white rounded-lg shadow-xl w-full max-w-2xl max-h-[90dvh] overflow-hidden">
-        {/* Header */}
         <div className="flex items-center justify-between p-6 border-b border-gray-200">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-gray-100 rounded-lg">
               <TrendingDown className="w-6 h-6 text-gray-500" />
             </div>
             <div>
-              <h2 className="text-xl font-bold text-gray-900">Configure Reorder Point</h2>
+              <h2 className="text-xl font-bold text-gray-900">Reorder settings</h2>
               <p className="text-sm text-gray-500">{product.name}</p>
             </div>
           </div>
           <button
             onClick={onClose}
             disabled={isSaving}
+            aria-label="Close"
             className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
           >
             <X className="w-5 h-5 text-gray-500" />
           </button>
         </div>
 
-        {/* Content */}
         <div className="p-6 overflow-y-auto" style={{ maxHeight: 'calc(90vh - 200px)' }}>
-          {/* Product Info */}
           <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 mb-6">
             <div className="grid grid-cols-2 gap-4">
               <div>
@@ -209,82 +166,37 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
                 <p className="font-medium text-gray-900">{product.brand}</p>
               </div>
               <div>
-                <p className="text-sm text-gray-600 mb-1">Current Stock</p>
+                <p className="text-sm text-gray-600 mb-1">In stock here</p>
                 <div className="flex items-center gap-2">
-                  <p className="font-medium text-gray-900">{product.currentStock} units</p>
-                  {stockStatus === 'critical' && (
-                    <span className="px-2 py-1 bg-red-50 text-red-700 text-xs font-medium rounded-full">
-                      Critical
-                    </span>
+                  <p className="font-medium text-gray-900">{product.currentStock}</p>
+                  {(serverStatus === 'critical' || serverStatus === 'out-of-stock') && (
+                    <span className="px-2 py-1 bg-red-50 text-red-700 text-xs font-medium rounded-full">Critical</span>
                   )}
-                  {stockStatus === 'warning' && (
-                    <span className="px-2 py-1 bg-amber-50 text-amber-700 text-xs font-medium rounded-full">
-                      Low
-                    </span>
+                  {serverStatus === 'low' && (
+                    <span className="px-2 py-1 bg-amber-50 text-amber-700 text-xs font-medium rounded-full">Low</span>
                   )}
                 </div>
               </div>
               <div>
-                <p className="text-sm text-gray-600 mb-1">Avg. Sales/Day</p>
-                <p className="font-medium text-gray-900">{avgSalesPerDay.toFixed(1)} units</p>
+                <p className="text-sm text-gray-600 mb-1">Sold in the last 30 days</p>
+                <p className="font-medium text-gray-900">{product.soldLast30Days ?? 0}</p>
               </div>
             </div>
           </div>
 
-          {/* Auto-calculate Toggle */}
-          <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-            <label className="flex items-center gap-3 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={autoCalculate}
-                onChange={(e) => setAutoCalculate(e.target.checked)}
-                className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
-              />
-              <div className="flex items-center gap-2">
-                <Calculator className="w-5 h-5 text-blue-600" />
-                <div>
-                  <p className="font-medium text-blue-900">Auto-calculate optimal values</p>
-                  <p className="text-sm text-blue-700">
-                    Based on sales velocity and lead time
-                  </p>
-                </div>
-              </div>
-            </label>
-          </div>
-
-          {/* Configuration Fields */}
           {productWideLocked && (
             <p className="mb-4 text-xs text-gray-600">
-              You set this shop&apos;s reorder level. The quantity, maximum stock and lead
-              time apply to every shop and are set by the catalogue team.
+              You set this shop&apos;s reorder level. The pack size, maximum stock and lead time apply
+              to every shop and are set by the catalogue team.
             </p>
           )}
           <div className="space-y-6">
-            {/* Lead Time */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Supplier Lead Time (Days) *
+              <label htmlFor={`${ids}-level`} className="block text-sm font-medium text-gray-700 mb-2">
+                Reorder level at this shop (pieces)
               </label>
               <input
-                type="number"
-                min="1"
-                max="365"
-                value={leadTimeDays}
-                onChange={(e) => setLeadTimeDays(parseInt(e.target.value) || 1)}
-                disabled={(autoCalculate && isSaving) || productWideLocked}
-                className="input-field w-full"
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Time taken for supplier to deliver after ordering
-              </p>
-            </div>
-
-            {/* Reorder Point */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Reorder level at this shop (units)
-              </label>
-              <input
+                id={`${ids}-level`}
                 type="number"
                 min="0"
                 value={reorderPoint}
@@ -293,146 +205,87 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
                   setReorderPoint(e.target.value);
                   setLevelBadInput(isBadInput(e.target));
                 }}
-                disabled={autoCalculate || isSaving || shopLevelLocked}
+                disabled={isSaving || shopLevelLocked}
                 className="input-field w-full"
               />
               <p className="text-xs text-gray-500 mt-1">
                 {shopLevelNotice ? (
                   <span role="alert" className="text-red-600">{shopLevelNotice}</span>
-                ) : autoCalculate ? (
-                  <>Calculated: {leadTimeStock} (lead time stock) + {safetyStock} (safety stock)</>
                 ) : (
-                  'Alert will trigger when stock falls to this level'
+                  'Set: the list buys back to one above it. Not set: it buys the last 30 days’ sales.'
                 )}
               </p>
             </div>
 
-            {/* Reorder Quantity + explicit auto-reorder off toggle */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Reorder Quantity (Units) *
+              <label htmlFor={`${ids}-pack`} className="block text-sm font-medium text-gray-700 mb-2">
+                Order in packs of
               </label>
               <label className="flex items-center gap-2 mb-2 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={autoReorderOff}
                   onChange={(e) => setAutoReorderOff(e.target.checked)}
-                  disabled={isSaving || productWideLocked}
-                  className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
+                  disabled={lockedWide}
+                  className="w-4 h-4 rounded"
                 />
                 <span className="text-sm text-gray-700">Auto-reorder disabled</span>
               </label>
               <input
+                id={`${ids}-pack`}
                 type="number"
                 min="1"
-                value={reorderQuantity}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value, 10);
-                  setReorderQuantity(Number.isNaN(v) ? '' : v);
-                }}
-                disabled={autoReorderOff || autoCalculate || isSaving || productWideLocked}
+                value={pack}
+                onChange={(e) => setPack(e.target.value)}
+                disabled={autoReorderOff || lockedWide}
                 className="input-field w-full disabled:bg-gray-100 disabled:text-gray-400"
               />
               <p className="text-xs text-gray-500 mt-1">
-                {autoReorderOff ? (
-                  'This product will never be auto-suggested or auto-ordered (saved as -1)'
-                ) : autoCalculate ? (
-                  <>Optimized for 30-day inventory cycle</>
-                ) : (
-                  'Quantity to order when reorder point is reached'
-                )}
+                {autoReorderOff
+                  ? 'This product is never suggested on the Reorder list.'
+                  : 'The suggested buy is rounded up to a whole number of packs.'}
               </p>
             </div>
 
-            {/* Max Stock */}
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Maximum Stock Level (Units) *
+              <label htmlFor={`${ids}-max`} className="block text-sm font-medium text-gray-700 mb-2">
+                Maximum stock
               </label>
               <input
+                id={`${ids}-max`}
                 type="number"
-                min={shownLevel ?? 0}
+                min="0"
                 value={maxStock}
-                onChange={(e) => setMaxStock(parseInt(e.target.value) || maxStock)}
-                disabled={autoCalculate || isSaving || productWideLocked}
+                onChange={(e) => setMaxStock(e.target.value)}
+                disabled={lockedWide}
                 className="input-field w-full"
               />
-              <p className="text-xs text-gray-500 mt-1">
-                {autoCalculate ? (
-                  <>Prevents overstocking: Reorder Point + Reorder Quantity</>
-                ) : (
-                  'Maximum inventory level to maintain'
-                )}
-              </p>
+              <p className="text-xs text-gray-500 mt-1">The suggested buy never takes a shop above this. Blank = no cap.</p>
             </div>
-          </div>
 
-          {/* Visual Indicator */}
-          <div className="mt-6 p-4 bg-gray-50 border border-gray-200 rounded-lg">
-            <div className="flex items-center gap-3 mb-3">
-              <BarChart3 className="w-5 h-5 text-gray-500" />
-              <p className="font-medium text-gray-900">Stock Level Visualization</p>
-            </div>
-            <div className="space-y-2">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-600">Current Stock</span>
-                <span className="font-medium">{product.currentStock} units</span>
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-3">
-                <div
-                  className={`h-3 rounded-full transition-all ${
-                    stockStatus === 'critical'
-                      ? 'bg-red-500'
-                      : stockStatus === 'warning'
-                      ? 'bg-amber-500'
-                      : stockStatus === 'healthy'
-                      ? 'bg-green-500'
-                      : 'bg-gray-400'
-                  }`}
-                  style={{ width: `${Math.min((product.currentStock / maxStock) * 100, 100)}%` }}
-                />
-              </div>
-              <div className="flex items-center justify-between text-xs text-gray-500">
-                <span>0</span>
-                <span className="text-amber-600 font-medium">
-                  Reorder: {shownLevel ?? 'not set'}
-                </span>
-                <span>Max: {maxStock}</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Info Box */}
-          <div className="mt-6 bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <div className="flex gap-3">
-              <AlertTriangle className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-              <div className="text-sm text-blue-900">
-                <p className="font-medium mb-1">Reorder Point Guidelines</p>
-                <ul className="list-disc list-inside space-y-1 text-blue-800">
-                  <li>Set reorder point above lead time demand to avoid stockouts</li>
-                  <li>Include safety stock buffer for demand variability</li>
-                  <li>Review and adjust based on seasonal trends</li>
-                  <li>System will alert when stock reaches reorder point</li>
-                </ul>
-              </div>
+            <div>
+              <label htmlFor={`${ids}-lead`} className="block text-sm font-medium text-gray-700 mb-2">
+                Supplier lead time (days)
+              </label>
+              <input
+                id={`${ids}-lead`}
+                type="number"
+                min="0"
+                max="365"
+                value={leadTime}
+                onChange={(e) => setLeadTime(e.target.value)}
+                disabled={lockedWide}
+                className="input-field w-full"
+              />
             </div>
           </div>
         </div>
 
-        {/* Footer */}
         <div className="flex items-center justify-between p-6 border-t border-gray-200 bg-gray-50">
-          <button
-            onClick={onClose}
-            disabled={isSaving}
-            className="btn-outline"
-          >
+          <button onClick={onClose} disabled={isSaving} className="btn-outline">
             Cancel
           </button>
-          <button
-            onClick={handleSubmit}
-            disabled={isSaving}
-            className="btn-primary flex items-center gap-2"
-          >
+          <button onClick={handleSubmit} disabled={isSaving} className="btn-primary flex items-center gap-2">
             {isSaving ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -441,7 +294,7 @@ export function ReorderPointModal({ isOpen, onClose, product, onSave, productWid
             ) : (
               <>
                 <Save className="w-4 h-4" />
-                Save Configuration
+                Save settings
               </>
             )}
           </button>

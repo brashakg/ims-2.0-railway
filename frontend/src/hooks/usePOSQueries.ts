@@ -71,8 +71,8 @@ export function useProducts(params?: { category?: string; brand?: string; search
 /** F46: this shop's sellable count for a set of till rows (tiles or cart
  *  lines). `sellable[id]` is the oversell guard's OWN number (GET
  *  /inventory/sellable asks _assert_serialized_stock_available): a number, or
- *  null when the guard does not gate that row (not unit-tracked here, lens,
- *  service). `canonical[id]` is the id the guard adds that line up under.
+ *  null when the guard does not gate that row (a lens or a service).
+ *  `canonical[id]` is the id the guard adds that line up under.
  *
  *  Only THIS screen's shop (`storeId`) is ever shown. The server answers for
  *  the store in the sign-in token -- the one Complete sale checks -- and names

@@ -452,7 +452,8 @@ def test_child_push_is_refused_with_zero_network_even_live(monkeypatch):
 
     res = _run(shopify_push.push_product(db, _twin(db, "tw-child"), []))
     assert (res.reason, res.action, res.ok, res.mode) == ("variant_of", "skip", False, "BLOCKED")
-    assert PARENT_SKU in res.error and "push the parent" in res.error
+    assert f"Send {PARENT_SKU} to the website instead" in res.error, res.error
+    assert "push the parent" not in res.error  # plain words (owner 10-23)
     assert spy.calls == [], "no productCreate / anything for a size variant"
 
     # the product-page door ("Send to website") by sku: same refusal, one audit row

@@ -13,6 +13,7 @@ import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { hrApi } from '../../services/api';
 import { Clock, MapPin, LogIn, LogOut, CheckCircle, AlertTriangle } from 'lucide-react';
+import { istDayString } from '../../utils/datetime';
 
 interface AttendanceRecord {
   date: string;
@@ -25,7 +26,7 @@ interface AttendanceRecord {
 }
 
 function todayIso(): string {
-  return new Date().toISOString().split('T')[0];
+  return istDayString(new Date())!;
 }
 
 export function AttendanceWidget() {

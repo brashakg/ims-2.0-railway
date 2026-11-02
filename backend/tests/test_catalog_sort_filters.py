@@ -702,3 +702,94 @@ def test_a_flag_on_an_inactive_product_reaches_its_cataloguer(db):
     # The other filters keep Include inactive's meaning.
     assert _facets(user=akshay)["total"] == 5
     assert "P05" not in _ids(_list(sort="name_asc", is_active="true", gender="men"))
+
+
+# ---------------------------------------------------------------------------
+# Every option filter is a tick-box multi-select (owner 2026-11-01): the ticks
+# inside one filter OR together, the filters AND together, one value is an
+# old single-value link.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "param,value,expected",
+    [
+        ("frame_color", "Gold,havana", ["P03", "P04"]),
+        ("brand", "carrera,OAKLEY", ["P01", "P03"]),
+        ("gender", "Women,Unisex", ["P02", "P04"]),
+        ("created_by", "u-mansi,u-akshay", ["P01", "P02", "P03", "P04", "P07"]),
+        ("updated_by", "u-akshay,none", ["P01", "P02", "P03", "P04", "P07"]),
+        ("category", "FRAME,SG", ["P01", "P02", "P03", "P04", "P07"]),
+        ("flag", "price_check,photo_redo", ["P03", "P04"]),
+    ],
+)
+def test_ticks_inside_one_filter_or_together(db, param, value, expected):
+    out = _list(sort="oldest", is_active="true", **{param: value})
+    assert sorted(_ids(out)) == expected
+    assert out["total_count"] == len(expected)
+
+
+def test_added_by_and_edited_by_and_together(db):
+    # Added by Mansi OR Akshay AND last edited by Akshay: only P02.
+    out = _list(sort="oldest", is_active="all", created_by="u-mansi,u-akshay", updated_by="u-akshay")
+    assert _ids(out) == ["P02"]
+    # Added by Akshay AND (edited by Mansi OR never edited): P03, P07 + inactive P05.
+    out = _list(sort="oldest", is_active="all", created_by="u-akshay", updated_by="u-mansi,none")
+    assert sorted(_ids(out)) == ["P03", "P05", "P07"]
+    # ... AND frame colour Gold: P03, P05.
+    out = _list(sort="oldest", is_active="all", created_by="u-akshay",
+                updated_by="u-mansi,none", frame_color="gold")
+    assert sorted(_ids(out)) == ["P03", "P05"]
+    assert out["total_count"] == 2
+
+
+def test_archived_is_never_ticked_beside_another_flag(db):
+    # Archived is a view of its own: mixed with live flags, deleted rows would
+    # get live-row actions on the page.
+    for flag in ("archived,photo_redo", "any,archived"):
+        with pytest.raises(HTTPException) as exc:
+            _list(sort="oldest", is_active="true", flag=flag)
+        assert exc.value.status_code == 400
+    assert _ids(_list(sort="oldest", flag="archived")) == ["P06"]
+    with pytest.raises(HTTPException) as exc:
+        _list(user=CATALOGUER, sort="name_asc", flag="any,archived")
+    assert exc.value.status_code == 403
+
+
+def test_ticks_are_capped_and_each_value_bounded(db):
+    with pytest.raises(HTTPException) as exc:
+        _list(sort="oldest", created_by=",".join(f"u{i}" for i in range(51)))
+    assert exc.value.status_code == 400
+    with pytest.raises(HTTPException) as exc:
+        _list(sort="oldest", frame_color="Black," + "x" * 121)
+    assert exc.value.status_code == 400
+    # Blanks and repeats are dropped, not counted.
+    out = _list(sort="oldest", is_active="true", frame_color=" Gold ,,Gold,")
+    assert _ids(out) == ["P03"]
+
+
+def test_two_tick_sets_never_share_a_cached_page(db, cache):
+    a = _ids(_list(sort="oldest", is_active="true", frame_color="Gold"))
+    b = _ids(_list(sort="oldest", is_active="true", frame_color="Gold,Havana"))
+    assert a == ["P03"] and sorted(b) == ["P03", "P04"]
+
+
+@pytest.mark.parametrize(
+    "param,value,expected",
+    [
+        ("created_by", "u-mansi,u-akshay", ["P01", "P02", "P03", "P04", "P07"]),
+        ("brand", "Carrera,Ray-Ban", ["P01", "P02"]),
+        ("category", "FRAME,SUNGLASS", ["P01", "P02", "P03", "P04", "P07"]),
+    ],
+)
+def test_several_ticks_without_a_sort_still_filter(db, param, value, expected):
+    # No sort or other new parameter: the ticks alone must take the list path,
+    # not the legacy one that matched the comma string literally (0 rows).
+    assert sorted(_ids(_list(**{param: value}))) == expected
+
+
+def test_a_value_with_a_comma_is_no_option(db):
+    # A tick joins on ',' and the server splits on it: 'Black, Gold' would
+    # come back as Black OR Gold, so it is never offered.
+    db["products"].insert_one(_extra("P08", frame_color="Black, Gold"))
+    assert "Black, Gold" not in [o["value"] for o in _facets()["frame_color"]]

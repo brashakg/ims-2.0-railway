@@ -113,7 +113,11 @@ class FakeCollection:
         for d in self.docs:
             if _match(d, filter_):
                 for k, v in (update.get("$set") or {}).items():
-                    d[k] = v
+                    *path, leaf = k.split(".")
+                    tgt = d
+                    for part in path:
+                        tgt = tgt.setdefault(part, {})
+                    tgt[leaf] = v
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         return type("R", (), {"modified_count": 0, "matched_count": 0})()
 
@@ -1164,3 +1168,438 @@ def test_cancelled_after_fulfilment_keeps_its_invoice_serial(wired):
                "cancelled_at": "2026-10-19T10:00:00+05:30", "fulfillment_status": "fulfilled"}
     res = shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
     assert res["invoice_number"]
+
+
+# ---------------------------------------------------------------------------
+# Website 1 (PLAN_STATUS 4ac): the IMS invoice is what Shopify CHARGED --
+# discount codes, shipping, tax Shopify added on top, to the paisa -- and a
+# total that still differs is flagged for an admin, never silently accepted.
+# The shipping address rides on the order.
+# ---------------------------------------------------------------------------
+
+
+def _charged(order_id, *, total, price="999.00", qty=1, allocations=None,
+             shipping=None, taxes_included=True, line_tax=None):
+    payload = _frame_order(order_id, buyer_state="20", price=price)
+    line = payload["line_items"][0]
+    line["quantity"] = qty
+    line["discount_allocations"] = [{"amount": a} for a in (allocations or [])]
+    if line_tax is not None:
+        line["tax_lines"] = [{"price": line_tax, "rate": 0.05, "title": "IGST"}]
+    payload["shipping_lines"] = shipping or []
+    payload["taxes_included"] = taxes_included
+    payload["total_price"] = total
+    payload["shipping_address"] = {
+        "name": "Ravi Kumar", "address1": "12 MG Road", "address2": "Flat 3",
+        "city": "Bokaro", "province": "Jharkhand", "province_code": "JH",
+        "zip": "827001", "country": "India", "phone": "+919800000000",
+    }
+    return payload
+
+
+def _book(wired, payload):
+    res = shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    assert res["status"] == "created"
+    return wired["orders"].find_one({"shopify_order_id": str(payload["id"])})
+
+
+def test_discount_code_allocation_bills_what_shopify_charged(wired):
+    """A discount code reaches the line as discount_allocations (total_discount
+    stays 0.00): the invoice must be Rs 899, not the Rs 999 list price."""
+    order = _book(wired, _charged(7101, total="899.00", allocations=["100.00"]))
+    assert order["grand_total"] == 899.0
+    assert order["total_discount"] == 100.0
+    assert order["items"][0]["item_total"] == 899.0
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+
+
+def test_paid_shipping_is_billed_at_the_goods_rate(wired):
+    """Rs 99 shipping is part of the supply: billed as its own line, at the
+    principal goods line's GST rate, and the total matches Shopify's."""
+    order = _book(wired, _charged(
+        7102, total="1098.00", shipping=[{"title": "Standard", "price": "99.00"}]
+    ))
+    assert order["grand_total"] == 1098.0
+    ship = [i for i in order["items"] if i["item_type"] == "SHIPPING"]
+    assert len(ship) == 1
+    assert ship[0]["item_total"] == 99.0
+    assert ship[0]["gst_rate"] == order["items"][0]["gst_rate"]
+    assert round(ship[0]["taxable_value"] + ship[0]["tax_amount"], 2) == 99.0
+    assert order["shipping_charge"] == 99.0
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+    # The GST split carries the shipping too (tax_totals reconcile to the bill).
+    totals = order["tax_totals"]
+    assert round(totals["taxable"] + totals["tax"], 2) == 1098.0
+
+
+def test_free_shipping_code_bills_no_shipping(wired):
+    order = _book(wired, _charged(
+        7103, total="999.00",
+        shipping=[{"title": "Standard", "price": "99.00",
+                   "discount_allocations": [{"amount": "99.00"}]}],
+    ))
+    assert order["grand_total"] == 999.0
+    assert not [i for i in order["items"] if i["item_type"] == "SHIPPING"]
+    assert order["shipping_charge"] == 0.0
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+    # No invoice line carries the free-shipping discount, so it is not part of
+    # the invoice's discount either (the lines and the total must agree).
+    assert order["total_discount"] == 0.0
+
+
+def test_part_discounted_shipping_bills_what_was_left(wired):
+    """Rs 99 shipping with a Rs 50 shipping discount: a Rs 49 shipping line
+    carrying the Rs 50 discount, and the total matches what Shopify charged."""
+    order = _book(wired, _charged(
+        7109, total="1048.00",
+        shipping=[{"title": "Standard", "price": "99.00",
+                   "discount_allocations": [{"amount": "50.00"}]}],
+    ))
+    ship = [i for i in order["items"] if i["item_type"] == "SHIPPING"]
+    assert len(ship) == 1
+    assert ship[0]["item_total"] == 49.0
+    assert ship[0]["discount_amount"] == 50.0
+    assert order["grand_total"] == 1048.0
+    assert order["total_discount"] == 50.0
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+
+
+def _shipped_lens_order(order_id, *, with_rx=None):
+    payload = _lens_order(order_id, with_rx=with_rx)
+    payload["shipping_lines"] = [{"title": "Standard", "price": "99.00"}]
+    payload["total_price"] = "1599.00"
+    return payload
+
+
+def test_shipping_on_a_lens_order_is_not_a_lens(wired, monkeypatch):
+    """The shipping line is never a spectacle lens: a lens order with paid
+    shipping and a valid explicit Rx is not held, and shipping is not counted
+    as frame/lens revenue (its own category)."""
+    import api.dependencies as deps
+
+    monkeypatch.setenv("ONLINE_FULFILLMENT_STORE_ID", "ST-MAIN-1")
+    repo = _RxRepo(by_id={"RX-1": _valid_rx("RX-1", "555")})
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: repo)
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _shipped_lens_order(8020, with_rx="RX-1"), topic="orders/create"
+    )
+    assert res["rx_pending"] is False
+    order = wired["orders"].find_one({"shopify_order_id": "8020"})
+    assert order["fulfillment_hold"] is False
+    ship = [i for i in order["items"] if i["item_type"] == "SHIPPING"][0]
+    assert ship["category"] == "SHIPPING"
+    assert ship["gst_rate"] == order["items"][0]["gst_rate"]
+
+
+def test_rx_hold_on_a_shipped_lens_order_names_only_the_lens(wired, monkeypatch):
+    import api.dependencies as deps
+    import api.services.online_rx_hold as rx_mod
+
+    monkeypatch.setattr(deps, "get_prescription_repository", lambda: _RxRepo())
+    seen = {}
+    real = rx_mod.evaluate_rx_hold
+
+    def _spy(db, items, customer_id):
+        seen["eval"] = real(db, items, customer_id)
+        return seen["eval"]
+
+    monkeypatch.setattr(rx_mod, "evaluate_rx_hold", _spy)
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], _shipped_lens_order(8021), topic="orders/create"
+    )
+    assert res["rx_pending"] is True
+    labels = [ln["label"] for ln in seen["eval"]["lines"]]
+    assert len(labels) == 1
+    assert not [lb for lb in labels if "Shipping charges" in lb]
+
+
+def test_tax_shopify_added_on_top_is_part_of_what_was_paid(wired):
+    """A store not set to 'prices include tax' adds tax on top: the buyer paid
+    1050, so the invoice is 1050 (IMS extracts its own GST from it)."""
+    order = _book(wired, _charged(
+        7104, total="1050.00", price="1000.00", taxes_included=False, line_tax="50.00"
+    ))
+    assert order["grand_total"] == 1050.0
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+
+
+def test_totals_exact_to_the_paisa(wired):
+    order = _book(wired, _charged(7105, total="999.99", price="333.33", qty=3))
+    assert order["grand_total"] == 999.99
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+    assert order["shopify_totals_check"]["difference"] == 0.0
+
+
+def test_a_total_that_differs_is_flagged_and_an_admin_tasked(wired, monkeypatch):
+    import api.dependencies as deps
+
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    order = _book(wired, _charged(7106, total="950.00"))
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MISMATCH"
+    assert check["shopify_total"] == 950.0
+    assert check["ims_total"] == 999.0
+    assert check["difference"] == -49.0
+    tasks = [t for t in task_repo.created
+             if t["source_ref"] == f"online_total_mismatch:{order['order_id']}"]
+    assert len(tasks) == 1
+    assert tasks[0]["priority"] == "P1"
+
+
+def test_matching_total_raises_no_mismatch_task(wired, monkeypatch):
+    import api.dependencies as deps
+
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    _book(wired, _charged(7107, total="999.00"))
+    assert not [t for t in task_repo.created
+                if str(t.get("source_ref", "")).startswith("online_total_mismatch:")]
+
+
+def test_shipping_address_is_stored_on_the_order(wired):
+    order = _book(wired, _charged(7108, total="999.00"))
+    addr = order["shipping_address"]
+    assert addr["address1"] == "12 MG Road"
+    assert addr["address2"] == "Flat 3"
+    assert addr["city"] == "Bokaro"
+    assert addr["province"] == "Jharkhand"
+    assert addr["zip"] == "827001"
+    assert addr["phone"] == "+919800000000"
+    assert addr["name"] == "Ravi Kumar"
+
+
+def test_mismatch_task_raised_again_when_the_first_attempt_was_lost(wired, monkeypatch):
+    """The order insert and the admin task are two writes: a crash between
+    them must not lose the task -- a replay of the booked order raises it
+    (create_system_task dedupes on the same ref, so never twice)."""
+    import api.dependencies as deps
+
+    payload = _charged(7110, total="950.00")
+    real_raise = shopify_ingest._raise_total_mismatch_task
+    monkeypatch.setattr(shopify_ingest, "_raise_total_mismatch_task", lambda *a, **k: None)
+    order = _book(wired, payload)  # "crashed" before the task
+    monkeypatch.setattr(shopify_ingest, "_raise_total_mismatch_task", real_raise)
+
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    res = shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    assert res["status"] == "duplicate"
+    tasks = [t for t in task_repo.created
+             if t["source_ref"] == f"online_total_mismatch:{order['order_id']}"]
+    assert len(tasks) == 1
+    # Raised once: an admin closing it does not bring it back on the next
+    # replay (the fake repo reports no active task, as after a close).
+    shopify_ingest.ingest_shopify_order(wired["db"], payload, topic="orders/create")
+    assert len(task_repo.created) == 1
+
+
+# ---------------------------------------------------------------------------
+# A Shopify order edit before dispatch (orders/updated) re-reads the check
+# from current_total_price, which follows the edit, and the COD courier gate
+# reads the stored check.
+# ---------------------------------------------------------------------------
+
+
+def _cod_booked(wired, monkeypatch, order_id, financial_status="pending"):
+    """A Rs 1,098 COD web order (Rs 99 of it shipping), booked MATCH, plus
+    the admin task repo. financial_status="paid" books it prepaid instead."""
+    import api.dependencies as deps
+
+    task_repo = _FakeTaskRepo()
+    monkeypatch.setattr(deps, "get_task_repository", lambda: task_repo)
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: None)
+    payload = {
+        **_charged(order_id, total="1098.00", shipping=[{"title": "Standard", "price": "99.00"}]),
+        "financial_status": financial_status,
+        "current_total_price": "1098.00",
+        "updated_at": "2026-11-01T10:00:00+05:30",
+    }
+    order = _book(wired, payload)
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+    return payload, order, task_repo
+
+
+def _edit(wired, payload, current_total, minute, **over):
+    """Deliver the orders/updated body Shopify sends after an order edit."""
+    body = {**payload, "current_total_price": current_total,
+            "updated_at": f"2026-11-01T10:{minute:02d}:00+05:30", **over}
+    online_order_mapper.map_shopify_order(body, wired["db"], topic="orders/updated")
+    return wired["orders"].find_one({"shopify_order_id": str(payload["id"])})
+
+
+def _mismatch_tasks(task_repo, order):
+    return [t for t in task_repo.created
+            if t["source_ref"] == f"online_total_mismatch:{order['order_id']}"]
+
+
+def test_an_edit_before_dispatch_refreshes_the_check_and_the_cod_gate(wired, monkeypatch):
+    from fastapi import HTTPException
+
+    from api.services.delivery_gate import cod_collectable
+
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7120)
+    assert cod_collectable(order) == 1098.0
+
+    order = _edit(wired, payload, "600.00", minute=1)  # the buyer now owes Rs 600
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MISMATCH"
+    assert check["shopify_total"] == 600.0
+    assert check["ims_total"] == 1098.0
+    with pytest.raises(HTTPException) as exc:
+        cod_collectable(order)  # never collect Rs 1,098 for a Rs 600 order
+    assert exc.value.detail["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
+    tasks = _mismatch_tasks(task_repo, order)
+    assert len(tasks) == 1
+    assert tasks[0]["priority"] == "P1"
+
+
+def test_more_edits_keep_one_task_and_an_edit_back_clears_the_gate(wired, monkeypatch):
+    from api.services.delivery_gate import cod_collectable
+
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7121)
+    _edit(wired, payload, "600.00", minute=1)
+    order = _edit(wired, payload, "650.00", minute=2)
+    assert order["shopify_totals_check"]["shopify_total"] == 650.0
+    # The existing dedupe: one task per order (the fake repo reports no
+    # active task, as after an admin closed it).
+    assert len(_mismatch_tasks(task_repo, order)) == 1
+
+    order = _edit(wired, payload, "1098.00", minute=3)
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+    assert cod_collectable(order) == 1098.0
+    assert len(_mismatch_tasks(task_repo, order)) == 1
+
+
+@pytest.mark.parametrize("status,over", [
+    ("SHIPPED", {}),  # dispatched: the courier already holds the amount
+    ("CONFIRMED", {"cancelled_at": "2026-11-01T10:01:00+05:30"}),  # a cancel, not an edit
+    ("CONFIRMED", {"updated_at": "2026-11-01T09:59:00+05:30"}),  # an older body
+])
+def test_no_refresh_once_dispatched_or_for_a_cancel_or_stale_body(wired, monkeypatch, status, over):
+    """After dispatch Shopify's current total also nets refunds and returns,
+    which IMS answers with credit notes, not invoice edits: no re-check and
+    no task. A cancel body or an older body never re-checks either."""
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7122)
+    wired["orders"].update_one({"order_id": order["order_id"]}, {"$set": {"status": status}})
+    order = _edit(wired, payload, "600.00", minute=1, **over)
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+    assert order["shopify_totals_check"]["shopify_total"] == 1098.0
+    assert not _mismatch_tasks(task_repo, order)
+
+
+@pytest.mark.parametrize("status", ["CANCELLED", "VOID", "REFUNDED"])
+def test_no_refresh_on_an_order_ims_already_closed(wired, monkeypatch, status):
+    """A dead IMS order (cancelled / voided / refunded on the IMS side, the
+    Shopify body stating no cancel) is never re-checked: no MISMATCH and no
+    P1 task on an order nobody will ship."""
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7123)
+    wired["orders"].update_one({"order_id": order["order_id"]}, {"$set": {"status": status}})
+    order = _edit(wired, payload, "600.00", minute=1)
+    assert order["shopify_totals_check"]["status"] == "MATCH"
+    assert order["shopify_totals_check"]["shopify_total"] == 1098.0
+    assert not _mismatch_tasks(task_repo, order)
+
+
+def test_a_body_without_current_total_keeps_the_stored_mismatch(wired, monkeypatch):
+    """A replayed / trimmed orders/updated body with no current_total_price
+    is UNCHECKED and never overwrites a stored MISMATCH: the COD gate keeps
+    refusing the old, higher IMS total."""
+    from fastapi import HTTPException
+
+    from api.services.delivery_gate import cod_collectable
+
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7124)
+    _edit(wired, payload, "600.00", minute=1)
+    body = {**payload, "updated_at": "2026-11-01T10:02:00+05:30"}
+    body.pop("current_total_price")
+    online_order_mapper.map_shopify_order(body, wired["db"], topic="orders/updated")
+    order = wired["orders"].find_one({"shopify_order_id": str(payload["id"])})
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MISMATCH"
+    assert check["shopify_total"] == 600.0
+    with pytest.raises(HTTPException) as exc:
+        cod_collectable(order)
+    assert exc.value.detail["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
+    assert len(_mismatch_tasks(task_repo, order)) == 1
+
+
+_LINE_400 = {"quantity": 1, "restock_type": "cancel", "subtotal": 338.98, "total_tax": 61.02}
+
+
+def _money_back(amount):
+    return [{"kind": "refund", "status": "success", "gateway": "razorpay", "amount": amount}]
+
+
+def test_a_prepaid_refund_before_dispatch_is_not_a_mismatch(wired, monkeypatch):
+    """A prepaid order still to ship: the merchant removes an item on Shopify
+    and refunds Rs 400 to the card. Shopify's current_total_price nets the
+    refund (Rs 698), but IMS answers that money with a credit note
+    (shopify_refund) and never edits grand_total, so the re-check adds the
+    money sent back: MATCH, no task."""
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7125, financial_status="paid")
+    assert order["balance_due"] == 0.0
+    refund = {"id": 99001, "refund_line_items": [_LINE_400], "refund_shipping_lines": [],
+              "order_adjustments": [], "transactions": _money_back("400.00")}
+    order = _edit(wired, payload, "698.00", minute=1,
+                  financial_status="partially_refunded", refunds=[refund])
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MATCH"
+    assert check["shopify_total"] == 1098.0
+    assert check["ims_total"] == 1098.0
+    assert not _mismatch_tasks(task_repo, order)
+
+
+def test_a_prepaid_refund_with_shipping_is_not_a_mismatch(wired, monkeypatch):
+    """The refund also gives back the Rs 99 shipping: Shopify's current total
+    drops by Rs 499 and the money sent back is Rs 499, so still MATCH."""
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7127, financial_status="paid")
+    refund = {"id": 99003, "refund_line_items": [_LINE_400],
+              "refund_shipping_lines": [{"subtotal": 83.90, "total_tax": 15.10}],
+              "transactions": _money_back("499.00")}
+    order = _edit(wired, payload, "599.00", minute=1,
+                  financial_status="partially_refunded", refunds=[refund])
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MATCH"
+    assert check["shopify_total"] == 1098.0
+    assert not _mismatch_tasks(task_repo, order)
+
+
+def test_a_cod_refund_before_dispatch_never_over_collects(wired, monkeypatch):
+    """An unpaid COD order: an item is cancelled on Shopify (a refund line,
+    no money moved, Shopify's current total Rs 698). Nothing came back to
+    add, and IMS's balance_due stays Rs 1,098 (a credit note never lowers
+    it), so the check is a MISMATCH and the COD gate refuses to send the
+    courier for Rs 1,098 from a buyer who owes Rs 698."""
+    from fastapi import HTTPException
+
+    from api.services.delivery_gate import cod_collectable
+
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7128)
+    refund = {"id": 99004, "refund_line_items": [_LINE_400], "refund_shipping_lines": [],
+              "order_adjustments": [], "transactions": []}
+    order = _edit(wired, payload, "698.00", minute=1,
+                  financial_status="partially_refunded", refunds=[refund])
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MISMATCH"
+    assert check["shopify_total"] == 698.0
+    assert order["balance_due"] == 1098.0
+    with pytest.raises(HTTPException) as exc:
+        cod_collectable(order)
+    assert exc.value.detail["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
+    assert len(_mismatch_tasks(task_repo, order)) == 1
+
+
+def test_an_edit_after_a_refund_still_mismatches(wired, monkeypatch):
+    """The add-back covers only the refunded money: an edit on top of a
+    Rs 400 card refund that lowers the total by another Rs 100 still flags."""
+    payload, order, task_repo = _cod_booked(wired, monkeypatch, 7126, financial_status="paid")
+    refund = {"id": 99002, "refund_line_items": [_LINE_400],
+              "transactions": _money_back("400.00")}
+    order = _edit(wired, payload, "598.00", minute=1,
+                  financial_status="partially_refunded", refunds=[refund])
+    check = order["shopify_totals_check"]
+    assert check["status"] == "MISMATCH"
+    assert check["difference"] == -100.0
+    assert len(_mismatch_tasks(task_repo, order)) == 1

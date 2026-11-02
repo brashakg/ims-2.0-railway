@@ -10,8 +10,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 from .auth import get_current_user, require_roles
-from ..utils.dates import to_date_str
-from ..utils.ist import ist_date_str
+from ..utils.ist import ist_date_str, ist_date_str_from_stored, ist_day_start_utc
 from ..dependencies import store_in_view
 from ..dependencies import (
     get_order_repository,
@@ -346,25 +345,20 @@ class KPIData:
 
 
 def get_date_range(period: str) -> tuple[datetime, datetime]:
-    """Get start and end date for a given period.
+    """Start and end of a period, as NAIVE-UTC instants (the frame `created_at`
+    is stored in), so both can be Mongo range bounds directly.
 
-    BUG-104 RULING -- deliberately still the NAIVE BOX CLOCK (UTC on Railway),
-    the same frame `created_at` is stored in. Do NOT "fix" the new-vs-returning
-    customer split below by wrapping the STORED side in ``ist_date_str``: the
-    bound it is compared against (``start_date.date()``) is derived from THIS
-    function, so converting only one side does not remove the boundary error,
-    it just moves it. The same `start_date`/`end_date` pair is ALSO handed to
-    `_fetch_orders_in_window` / `calculate_metrics_for_period` as Mongo range
-    bounds on naive-UTC `created_at` -- and those must move the OPPOSITE way
-    (`ist_day_start_utc`, keeping the stored side raw). Making this IST-aware
-    is therefore a scoped change across the whole analytics window, not a
-    one-line swap, and half-doing it would anchor the revenue figures and the
-    customer split on the same screen to two different midnights.
+    'today' is the IST business day: it starts at IST midnight, expressed in
+    the stored naive-UTC frame (``ist_day_start_utc``). The rolling periods are
+    pure elapsed time, nothing to shift. The new-vs-returning customer split
+    compares IST days on BOTH sides (``ist_date_str_from_stored`` on the stored
+    side, ``ist_date_str`` on this bound), so revenue and the split share one
+    midnight.
     """
     end_date = datetime.now()
 
     if period == "today":
-        start_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_date = ist_day_start_utc()
     elif period == "week":
         start_date = end_date - timedelta(days=7)
     elif period == "month":
@@ -571,7 +565,7 @@ async def get_dashboard_summary(
             [
                 c
                 for c in customers
-                if to_date_str(c.get("created_at")) >= start_date.date().isoformat()
+                if ist_date_str_from_stored(c.get("created_at")) >= ist_date_str(start_date)
             ]
         )
 
@@ -1114,12 +1108,12 @@ async def get_customer_insights(
         new_customers = [
             c
             for c in all_customers
-            if to_date_str(c.get("created_at")) >= start_date.date().isoformat()
+            if ist_date_str_from_stored(c.get("created_at")) >= ist_date_str(start_date)
         ]
         returning_customers = [
             c
             for c in all_customers
-            if to_date_str(c.get("created_at")) < start_date.date().isoformat()
+            if ist_date_str_from_stored(c.get("created_at")) < ist_date_str(start_date)
         ]
 
         # Top customers by spend — use the unbounded date-pushed helper

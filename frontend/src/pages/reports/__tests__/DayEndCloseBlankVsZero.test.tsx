@@ -49,7 +49,11 @@ vi.mock('../../../hooks/useStorePrintInfo', () => ({
   useStorePrintInfo: () => ({ name: 'Better Vision', address: '', phone: '', gstin: '' }),
 }));
 vi.mock('../../../hooks/useIsOnlineStore', () => ({ useIsOnlineStore: () => false }));
-vi.mock('../../../utils/datetime', () => ({ istDayString: () => null }));
+// "Today" is a fixed IST day; an order's own day reads as unknown, so the
+// day filter keeps the fixture order.
+vi.mock('../../../utils/datetime', () => ({
+  istDayString: (v: unknown) => (v instanceof Date ? '2026-08-24' : null),
+}));
 
 import { orderApi, reportsApi } from '../../../services/api';
 import DayEndReport from '../DayEndReport';

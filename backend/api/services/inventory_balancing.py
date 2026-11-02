@@ -260,13 +260,13 @@ def _coerce_dt(value: Any) -> Optional[datetime]:
 
 
 def _on_hand_by_product_store(
-    db, product_ids: Optional[List[str]], store_id: Optional[str] = None
+    db, product_ids: Optional[List[str]], store_id: Optional[str] = None, *, strict: bool = False
 ) -> Dict[Tuple[str, str], int]:
     """Per-(product, store) on-hand from the serialized `stock_units` collection,
     using the SAME available-status definition as inventory._on_hand_by_product
     (the canonical on-hand allowlist + the explicit non-sellable exclusion list).
     `product_ids` None = every product (an empty list = nothing);
-    `store_id` None = every shop. Fail-soft -> {}."""
+    `store_id` None = every shop. Fail-soft -> {} (strict: the read error is raised)."""
     out: Dict[Tuple[str, str], int] = {}
     if db is None or (product_ids is not None and not product_ids):
         return out
@@ -284,6 +284,8 @@ def _on_hand_by_product_store(
             flt, {"product_id": 1, "store_id": 1, "status": 1, "quantity": 1})
         rows = list(cur)
     except Exception:  # noqa: BLE001
+        if strict:
+            raise
         return {}
     for row in rows:
         # Same rule as the $match readers: item_events decides, this loop does

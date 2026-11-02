@@ -5,7 +5,7 @@ Menus: the MenuItem*Input tree builder and `push_menu`.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from agents.nexus_providers import _as_shopify_gid
 
@@ -14,23 +14,30 @@ from .transport import _graphql, _user_errors
 from .queries import _MENU_CREATE, _MENU_UPDATE
 from .writeback import _writeback_simple
 
-def build_menu_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def build_menu_items(items: List[Dict[str, Any]], with_ids: bool = False) -> List[Dict[str, Any]]:
     """Recursively map the IMS ecom_menus item tree -> Shopify MenuItem*Input.
     Each node carries title + type (+ url/resourceId) and its children. Used for
-    BOTH create + update (the input shapes are field-compatible for our subset)."""
+    BOTH create + update (the input shapes are field-compatible for our subset).
+    ``with_ids`` (an update only -- MenuItemCreateInput has no id) sends a
+    node's ``shopify_item_id`` so Shopify keeps that item instead of a new one,
+    with the live item's tags (``shopify_item_tags``) so they are not dropped."""
     out: List[Dict[str, Any]] = []
     for node in items or []:
         item: Dict[str, Any] = {
             "title": node.get("title") or "",
             "type": str(node.get("item_type") or "HTTP").upper(),
         }
+        if with_ids and node.get("shopify_item_id"):
+            item["id"] = node["shopify_item_id"]
+            if node.get("shopify_item_tags"):
+                item["tags"] = list(node["shopify_item_tags"])
         if node.get("url"):
             item["url"] = node["url"]
         if node.get("resource_id"):
             item["resourceId"] = _as_shopify_gid(node["resource_id"], "Collection")
         kids = node.get("children") or []
         if kids:
-            item["items"] = build_menu_items(kids)
+            item["items"] = build_menu_items(kids, with_ids)
         out.append(item)
     return out
 
@@ -38,13 +45,15 @@ def build_menu_items(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # The path the in-app uploader (routers/products.py upload_product_image)
 # stores; served public by GET /products/image/{file_id}.
 
-async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
+async def push_menu(db, menu: Dict[str, Any], live: Optional[bool] = None) -> PushResult:
     """Push an ecom_menus doc (the Online Store nav / mega-menu) to Shopify
     (menuCreate / menuUpdate) mapping the nested item tree. DARK by default; LIVE
-    behind the gates with gid write-back. Never raises."""
+    behind the gates with gid write-back. Never raises. ``live``: the caller
+    already decided the gates (generated_menu decides ONCE per push and has
+    read / backed up the shop on that decision); None checks them here."""
     mid = menu.get("menu_id")
     existing_gid = menu.get("shopify_menu_id")
-    items = build_menu_items(menu.get("items") or [])
+    items = build_menu_items(menu.get("items") or [], with_ids=bool(existing_gid))
     title = menu.get("title") or menu.get("handle")
     handle = menu.get("handle")
     action = "update" if existing_gid else "create"
@@ -52,7 +61,9 @@ async def push_menu(db, menu: Dict[str, Any]) -> PushResult:
     if existing_gid:
         payload["id"] = _as_shopify_gid(existing_gid, "Menu")
 
-    live, reason = _live_or_reason(db)
+    reason = None
+    if live is None:
+        live, reason = _live_or_reason(db)
     if not live:
         return PushResult(
             mode=MODE_SIMULATED,

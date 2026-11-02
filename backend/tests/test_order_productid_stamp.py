@@ -40,6 +40,9 @@ def _setup(monkeypatch, catalog_docs):
     audit_repo = AuditRepository(fake_db.get_collection("audit_logs"))
     rx_repo = PrescriptionRepository(fake_db.get_collection("prescriptions"))
     monkeypatch.setattr(om, "get_order_repository", lambda: order_repo)
+    # No stock in this suite: POS 4 refuses a stock line with no unit,
+    # so the gate must not read a real (empty) stock_units collection.
+    monkeypatch.setattr(om, "get_stock_repository", lambda: None)
     monkeypatch.setattr(om, "get_customer_repository", lambda: customer_repo)
     monkeypatch.setattr(om, "get_product_repository", lambda: None)  # live catalog path
     monkeypatch.setattr(om, "get_walkin_counter_repository", lambda: None)

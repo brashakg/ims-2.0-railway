@@ -18,7 +18,7 @@ const TAB_TO_PATH: Record<string, string> = {
   alerts: 'alerts',
   catalog: 'stock',
   'display-layout': 'display-layout',
-  'low-stock': 'low-stock',
+  'low-stock': 'reorders', // S5: Low stock is part of the one Reorder list
   reorders: 'reorders',
   'serial-numbers': 'serial-numbers',
   aging: 'aging',
@@ -45,4 +45,13 @@ export function legacyTabTarget(search: string | URLSearchParams): string {
   params.delete('tab');
   const rest = params.toString();
   return `/inventory/${section}${rest ? `?${rest}` : ''}`;
+}
+
+/** /catalog/buy-desk was retired (stock redesign S5): what to buy is THE
+ *  Reorder list. An "order this product" link (?add_product=<id>, as old
+ *  bookmarks carry) opens a new purchase order with that product on it --
+ *  the one PO form. */
+export function buyDeskForward(search: string | URLSearchParams): string {
+  const pid = new URLSearchParams(search).get('add_product');
+  return pid ? `/purchase/orders?new=1&product=${encodeURIComponent(pid)}` : '/inventory/reorders';
 }

@@ -39,7 +39,7 @@ const SEGMENT_LABELS: Record<string, string> = {
   prescriptions: 'Prescriptions',
   inventory: 'Inventory',
   lookup: 'Stock Lookup',
-  replenishment: 'Replenishment',
+  reorders: 'Reorder',
   audit: 'Stock Audit',
   purchase: 'Purchase',
   vendors: 'Vendors',

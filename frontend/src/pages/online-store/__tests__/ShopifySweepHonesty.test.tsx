@@ -145,6 +145,17 @@ describe('the bulk press reports what it refused', () => {
     expect(toastCalls.some((t) => t.kind === 'warning' && /incomplete options/.test(t.msg))).toBe(true);
   });
 
+  it('gives a colour held for a catalogue reason its own line, never "NO stock written"', async () => {
+    // Review of #1276.
+    (pushApi.pushAllPending as any).mockResolvedValue(
+      sweep({ pushed: 1, failed: 0, noop: 0, catalogue_held: 1 }, 1),
+    );
+    await pressProducts();
+    expect(await screen.findByText(/1 with a colour\/size held/)).toBeTruthy();
+    expect(screen.queryByText(/NO stock written/)).toBeNull();
+    expect(toastCalls.some((t) => t.kind === 'warning' && /colour\/size held back/.test(t.msg))).toBe(true);
+  });
+
   it('shows the photo refusals and does not fold them into "processed"', async () => {
     // 25 went to Shopify; 10 were refused for having no photograph.
     (pushApi.pushAllPending as any).mockResolvedValue(

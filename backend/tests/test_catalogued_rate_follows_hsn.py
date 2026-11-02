@@ -224,9 +224,6 @@ def test_editing_a_products_hsn_moves_its_rate_with_it(monkeypatch):
     )
     monkeypatch.setattr(products_mod, "get_product_repository", lambda: repo)
     monkeypatch.setattr(products_mod._pm, "apply_restamp_atomic", lambda *a, **k: {})
-    monkeypatch.setattr(
-        products_mod, "_refresh_collections_after_product", lambda *a, **k: None
-    )
 
     asyncio.run(
         products_mod.update_product(

@@ -17,10 +17,11 @@
 //        -- only for a role whose save writes a level, a catalogue manager's
 //        Review says 'not set' -- and is at least the 36px control height.
 // (F73 reorder levels are per shop, owner D12: perShopReorderLevel*.test.tsx.)
-// F92    menu labels say what each buying door is for; Buy Desk does not claim
-//        '0 products' while it is still loading.
-// 10-08  Buy Desk 'Create draft PO' is hidden from a catalogue manager: the
-//        page asks the server's PO create gate (PURCHASE_ROLES).
+// F92    menu labels say what each buying door is for (S5: the Buy Desk door
+//        is now the one Reorder list).
+// 10-08  'Order this now' after a save is offered only to a role the server
+//        lets raise a PO (PURCHASE_ROLES), never a catalogue manager alone; the
+//        Reorder list's own drafts gate: ReorderListPage.test.tsx.
 
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -125,14 +126,9 @@ vi.mock('../../../constants/gstRuntime', () => ({
   resolveHsn: (c?: string | null) => (c === 'SG' ? '900410' : ''),
   resolveGstRate: () => 18,
 }));
-const getRows = vi.fn();
-vi.mock('../../../services/api/buyDesk', () => ({
-  buyDeskApi: { getRows: (...a: unknown[]) => getRows(...a) },
-}));
 
 import { QuickAddPage } from '../QuickAddPage';
 import { DuplicateProductError } from '../../../services/api/products';
-import BuyDeskPage from '../BuyDeskPage';
 import { useSimilarProducts } from '../useSimilarProducts';
 import { NAV_GROUPS } from '../../../components/shell/navConfig';
 import { PURCHASE_ROLES } from '../../purchase/purchaseRoles';
@@ -579,61 +575,18 @@ describe('F92 - two buying doors, each says what it is for', () => {
   const item = (id: string) => NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === id)!;
 
   it('menu labels', () => {
-    expect(item('buy-desk').label).toMatch(/^Buy Desk\s*[-–—]\s*what to reorder$/);
+    expect(item('reorder').label).toMatch(/^Reorder\s*[-–—]\s*what to buy$/);
     expect(item('purchase').label).toMatch(/^Purchase\s*[-–—]\s*orders, receiving, bills$/);
   });
 
-  it('both doors stay (guard)', () => {
-    expect(item('buy-desk').to).toBe('/catalog/buy-desk');
+  it('both doors stay (guard); the Buy Desk is gone into the Reorder list (S5)', () => {
+    expect(item('reorder').to).toBe('/inventory/reorders');
     expect(item('purchase').to).toBe('/purchase');
+    expect(NAV_GROUPS.flatMap((g) => g.items).find((i) => i.id === 'buy-desk')).toBeUndefined();
   });
 
-  it('Buy Desk does not say 0 products while it is still loading', async () => {
-    getRows.mockReturnValue(new Promise(() => {}));
-    render(
-      <MemoryRouter initialEntries={['/catalog/buy-desk']}>
-        <BuyDeskPage />
-      </MemoryRouter>,
-    );
-    expect(await screen.findByText(/Loading/)).toBeInTheDocument();
-    expect(screen.queryByText(/\b0 products\b/)).toBeNull();
-  });
-});
-
-describe('Owner 2026-10-08 - a catalogue manager raises no PO from the Buy Desk', () => {
-  const ROW = {
-    product_id: 'P1', sku: 'SG-RAYBAN-RB4165-601', name: 'Ray-Ban RB4165 601', brand: 'Ray-Ban',
-    category: 'SG', catalog_status: 'COMPLETE',
-    readiness: { complete: true, missing: [], blockers: [], purchasable: true },
-    ecom_state: 'NOT_LISTED', on_hand: 0, on_order: 0, buy_signal: 2, purchasable: true,
-  };
-  // ?add_product= preselects the row, as Quick Add's 'Order this now' does.
-  const renderBuyDesk = () => {
-    getRows.mockResolvedValue({ rows: [ROW], total: 1, store_id: 'S1' });
-    render(
-      <MemoryRouter initialEntries={['/catalog/buy-desk?add_product=P1']}>
-        <BuyDeskPage />
-      </MemoryRouter>,
-    );
-  };
-
-  it('hides Create draft PO, and the row picks that lead to it', async () => {
-    auth.roles = ['CATALOG_MANAGER'];
-    renderBuyDesk();
-    expect(await screen.findByText('Ray-Ban RB4165 601')).toBeInTheDocument();
-    expect(screen.queryByRole('checkbox')).toBeNull();
-    // Not even once the ?add_product= preselect has run.
-    await expect(
-      screen.findByRole('button', { name: /Create draft PO/ }, { timeout: 500 }),
-    ).rejects.toThrow();
-  });
-
-  // The server's PO create gate, shared (pinned to the server by
-  // test_add_product_owner_rulings.py): every role in it still drafts.
-  it.each(PURCHASE_ROLES)('%s still drafts a PO (guard)', async (role) => {
-    auth.roles = [role];
-    renderBuyDesk();
-    expect(await screen.findByRole('button', { name: /Create draft PO/ })).toBeInTheDocument();
-    expect(screen.getByRole('checkbox', { name: 'Select Ray-Ban RB4165 601' })).toBeChecked();
+  it('every purchase role is in the Reorder door, and the PO gate is unchanged (guard)', () => {
+    for (const role of PURCHASE_ROLES) expect(item('reorder').requireRoles).toContain(role);
+    expect(PURCHASE_ROLES).not.toContain('CATALOG_MANAGER');
   });
 });

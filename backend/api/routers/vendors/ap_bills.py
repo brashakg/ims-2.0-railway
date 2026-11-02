@@ -85,9 +85,17 @@ class VendorBillCreate(BaseModel):
     # services / expense bill (food, motor vehicles, club fees ...; owner and
     # CA 2026-10-18). Ticked, the bill's GST is never input credit (GSTR-3B
     # Table 4, the Finance GST tab, the ITC register) -- it stays in what the
-    # bill costs. Default unticked; changeable later through
+    # bill costs. Not sent: the expense type's default (ap_engine.
+    # EXPENSE_TYPES), unticked when no type is named; changeable later through
     # PUT /{vendor_id}/bills/{bill_id}/itc-blocked until the month is locked.
-    itc_blocked: bool = False
+    itc_blocked: Optional[bool] = None
+    # What the expense is for (ap_engine.EXPENSE_TYPES): sets the default tick.
+    expense_type: Optional[str] = None
+
+    @field_validator("expense_type", mode="before")
+    @classmethod
+    def _known_expense_type(cls, v):
+        return ap_engine.normalize_expense_type(v)
 
     @field_validator("bill_kind", mode="before")
     @classmethod
@@ -245,6 +253,16 @@ def _recompute_bill_status(db, bill_id: Optional[str]) -> None:
         pass
 
 
+@router.get("/expense-types")
+async def expense_types(current_user: dict = Depends(require_roles(*_AP_ROLES))):
+    """THE expense types and their section 17(5) default (ap_engine.
+    EXPENSE_TYPES), for the bill form's tick. Accounts roles: the bill's own."""
+    return {"types": [
+        {"value": key, "label": label, "blocked_by_default": blocked}
+        for key, label, blocked in ap_engine.EXPENSE_TYPES
+    ]}
+
+
 @router.get("/ap-aging")
 async def ap_aging(
     as_of: Optional[str] = Query(None, description="ISO date; defaults to today"),
@@ -394,7 +412,8 @@ async def create_vendor_bill(
                 },
             )
 
-    if bill.itc_blocked and not bill.grn_id and bill.bill_kind != ap_engine.BILL_KIND_SERVICES:
+    itc_blocked = ap_engine.expense_itc_blocked(bill.expense_type, bill.itc_blocked)
+    if itc_blocked and not bill.grn_id and bill.bill_kind != ap_engine.BILL_KIND_SERVICES:
         raise HTTPException(status_code=422, detail=_ITC_BLOCKED_SERVICES_ONLY)
 
     linked = None  # the goods receipt this bill names, read below
@@ -453,7 +472,7 @@ async def create_vendor_bill(
             raise unnamed from None
         # LOW 13: goods bought without a PO may carry the 17(5) tick; a PO
         # receipt's stock bill may not.
-        if bill.itc_blocked and ((linked or {}).get("po_id") or (linked or {}).get("grn_subtype") not in (
+        if itc_blocked and ((linked or {}).get("po_id") or (linked or {}).get("grn_subtype") not in (
             ap_engine.GRN_SUBTYPE_NO_PO, GRN_SUBTYPE_DC,
         )):
             raise HTTPException(status_code=422, detail=_ITC_BLOCKED_SERVICES_ONLY)
@@ -564,8 +583,9 @@ async def create_vendor_bill(
         # without a PO, G2, the same) -- purchase_invoices does the same on
         # its doors: one rule, org_validation.itc_claimable. A 17(5) tick
         # switches it off too, and says why (itc_blocked).
-        "itc_eligible": itc_claimable(supplier_gstin, False, not bill.itc_blocked),
-        "itc_blocked": bool(bill.itc_blocked),
+        "itc_eligible": itc_claimable(supplier_gstin, False, not itc_blocked),
+        "itc_blocked": itc_blocked,
+        "expense_type": bill.expense_type,
         "po_id": bill.po_id,
         "grn_id": bill.grn_id,
         # A receipt-linked bill IS a goods bill whatever the caller declared;
@@ -646,6 +666,12 @@ async def create_vendor_bill(
     walk_in = (linked or {}).get("grn_subtype") == ap_engine.GRN_SUBTYPE_NO_PO
     if db is not None and linked and (walk_in or doc["itc_eligible"] is False):
         _true_up_header_bill(db, {**doc, "invoice_id": bill_id}, linked)
+    if db is not None:
+        # Pieces of this receipt written off before the bill came reverse the
+        # credit it just claimed on them (services/writeoff_itc).
+        from ...services.writeoff_itc import after_bill_booked
+
+        after_bill_booked(db, doc, current_user.get("user_id", ""))
     return _clean(doc)
 
 
@@ -821,6 +847,13 @@ async def set_vendor_bill_itc_blocked(
             # ponytail: a challan bill's moving average keeps the GST until
             # its next bill (logged by the review: DC moving-average blend).
             _true_up_header_bill(db, {**bill, **update, "invoice_id": bill_id}, linked)
+        # The bill now claims credit on pieces written off while it was
+        # ticked (they reversed nothing then): reverse them, in the bill's
+        # month -- the month the credit lands. Once per piece, so repeat-safe.
+        from ...services.writeoff_itc import after_bill_booked
+
+        after_bill_booked(db, bills.find_one({"bill_id": bill_id}) or {**bill, **update},
+                          current_user.get("user_id") or "")
     try:
         repo = get_audit_repository()
         if repo is not None:

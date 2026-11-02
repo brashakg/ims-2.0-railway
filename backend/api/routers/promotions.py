@@ -33,6 +33,7 @@ Mounted at /api/v1/promotions (see api/main.py).
 from __future__ import annotations
 
 from api.utils.event_time import utc_now_iso
+from api.utils.ist import ist_today
 
 import logging
 import os
@@ -266,10 +267,13 @@ def _validate_rule(promo_type: str, reward_value: float,
 
 
 def _rule_active_now(rule: Dict[str, Any], today: Optional[date] = None) -> bool:
-    """Is the rule active + within its schedule window today?"""
+    """Is the rule active + within its schedule window today?
+
+    valid_from / valid_until are IST business dates, so "today" is the IST day
+    (the box runs UTC; 00:00-05:30 IST is still yesterday in UTC)."""
     if not rule.get("active", True):
         return False
-    today = today or date.today()
+    today = today or ist_today()
     vf = rule.get("valid_from")
     vu = rule.get("valid_until")
     try:

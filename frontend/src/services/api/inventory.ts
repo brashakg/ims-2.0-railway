@@ -107,7 +107,8 @@ export const inventoryApi = {
   //   * approve  -> JSON body TransferApproval { approved, rejection_reason }
   //   * ship / complete / cancel -> the backend declares scalar function args,
   //     i.e. QUERY parameters (NOT a JSON body) — sent via `params`.
-  //   * receive  -> a bare JSON LIST of TransferItemReceive.
+  //   * pack     -> JSON { barcodes } -- the WHOLE box each time (S3).
+  //   * receive  -> JSON { barcode, damaged, damage_reason } -- ONE piece.
   // --------------------------------------------------------------------------
 
   // Approve (or reject) a PENDING_APPROVAL transfer. Source-side AM/Admin only
@@ -147,34 +148,74 @@ export const inventoryApi = {
     return response.data;
   },
 
-  // Receive an IN_TRANSIT / PARTIALLY_RECEIVED transfer at the destination.
-  // The backend body is a bare list of TransferItemReceive: each line needs the
-  // transfer LINE id (item.id, NOT product_id) + quantity_received. Damaged
-  // units are auto-quarantined at the destination by the backend.
-  receiveTransfer: async (
+  // S3: pack the box -- the pieces scanned OUT at the sending shop. The WHOLE
+  // list every time (a retry or a second tablet never double-packs); an empty
+  // list empties the box. Nothing moves until ship. `rev`: the box revision
+  // the list was built from -- a list built from an older box is refused (409).
+  packTransfer: async (transferId: string, barcodes: string[], rev?: number) => {
+    const response = await api.post(`/transfers/${transferId}/pack`, { barcodes, rev });
+    return response.data;
+  },
+
+  // S3: scan ONE piece IN at the receiving shop. Damaged in the box -> it goes
+  // to quarantine there, and the reason is required.
+  scanInPiece: async (
     transferId: string,
-    items: Array<{
-      transfer_item_id: string;
-      quantity_received: number;
-      quantity_damaged?: number;
-      damage_notes?: string;
-    }>,
+    piece: { barcode: string; damaged?: boolean; damageReason?: string },
   ) => {
+    const response = await api.post(`/transfers/${transferId}/receive`, {
+      barcode: piece.barcode,
+      damaged: Boolean(piece.damaged),
+      ...(piece.damaged ? { damage_reason: piece.damageReason ?? '' } : {}),
+    });
+    return response.data;
+  },
+
+  // E-way bill no. / vehicle no. typed on the box page (they print on the
+  // transfer's tax invoice e-way data page).
+  updateTransfer: async (
+    transferId: string,
+    data: { eway_bill_number?: string; vehicle_number?: string },
+  ) => {
+    const response = await api.put(`/transfers/${transferId}`, data);
+    return response.data;
+  },
+
+  // How many pieces another shop can be asked for: {free, reserved} (counts only).
+  getFreeStock: async (productId: string, storeId: string) => {
+    const response = await api.get('/transfers/free', {
+      params: { product_id: productId, store_id: storeId },
+    });
+    return response.data as { free: number; reserved: number };
+  },
+
+  // "Missing on the way": pieces scanned out and never in, until found or
+  // written off. {pieces: [...]}
+  getMissingPieces: async () => {
+    const response = await api.get('/transfers/missing');
+    return response.data;
+  },
+
+  foundMissingPiece: async (transferId: string, stockId: string, at: 'source' | 'destination') => {
+    const response = await api.post(`/transfers/${transferId}/missing/${stockId}/found`, { at });
+    return response.data;
+  },
+
+  requestMissingWriteOff: async (transferId: string, stockId: string) => {
     const response = await api.post(
-      `/transfers/${transferId}/receive`,
-      items.map(i => ({
-        transfer_item_id: i.transfer_item_id,
-        quantity_received: i.quantity_received,
-        quantity_damaged: i.quantity_damaged ?? 0,
-        ...(i.damage_notes ? { damage_notes: i.damage_notes } : {}),
-      })),
+      `/transfers/${transferId}/missing/${stockId}/write-off-request`,
     );
     return response.data;
   },
 
-  // Complete a RECEIVED / PARTIALLY_RECEIVED transfer (destination sign-off).
-  // NOTE: for an inter-entity or inter-state move this is where the backend
-  // auto-books the GST deemed-supply mirror invoice. `notes` is a query param.
+  writeOffMissingPiece: async (transferId: string, stockId: string) => {
+    const response = await api.post(`/transfers/${transferId}/missing/${stockId}/write-off`);
+    return response.data;
+  },
+
+  // Accept the box (destination sign-off): every piece not scanned in goes on
+  // "Missing on the way". The tax invoice was booked at ship. `notes` is a
+  // query param.
   completeTransfer: async (transferId: string, notes?: string) => {
     const response = await api.post(`/transfers/${transferId}/complete`, null, {
       params: notes ? { notes } : {},
@@ -476,7 +517,8 @@ export const inventoryApi = {
   },
 
   // F27: every serialised unit of one product -- or one goods receipt -- at a shop.
-  getUnits: async (params: { store_id?: string; product_id?: string; grn_id?: string }) => {
+  // `rejected` (with grn_id): the receipt's quarantined pieces instead (S2b).
+  getUnits: async (params: { store_id?: string; product_id?: string; grn_id?: string; rejected?: boolean }) => {
     const response = await api.get('/inventory/units', { params });
     return response.data as { units: StockUnit[]; total: number };
   },
@@ -506,6 +548,8 @@ export interface StockUnit {
   /** IST day it arrived at THIS shop (a transfer's receipt day, else minting). */
   received_on: string;
   barcode_printed: boolean;
+  /** The red DO NOT SHELVE label was produced for this (quarantined) piece. */
+  quarantine_label_printed?: boolean;
   location_code: string;
   name: string;
   brand: string;
@@ -672,6 +716,8 @@ export interface CLInventoryLine {
   location_code: string | null;
   on_hand: number;
   days_until_expiry: number | null;
+  /** Server expiry rule: true from the expiry date itself (owner 2026-11-01). */
+  expired: boolean;
 }
 
 export interface CLInventoryResponse {
@@ -1166,7 +1212,70 @@ export interface VarianceLine {
 // Reorder Settings API (per-product reorder configuration)
 // ============================================================================
 
+/** The product-wide settings + this shop's level, carried on every row. */
+interface ReorderSettingsFields {
+  product_id: string;
+  sku: string;
+  name: string;
+  store_id: string;
+  store_name: string;
+  /** This shop's level; null = not set. */
+  level: number | null;
+  reorder_quantity: number | null;
+  max_stock: number | null;
+  lead_time_days: number | null;
+}
+
+/** One line of THE Reorder list (GET /inventory/reorder-list, S5). Every
+ *  number is the server's: `buy` is THE buy rule (reorder_policy.buy_qty). */
+export interface ReorderRow extends ReorderSettingsFields {
+  brand: string;
+  /** The preferred vendor, else the vendor of the last PO / receipt
+   *  (vendor_source says which); null = choose one before drafting. */
+  vendor_id: string | null;
+  vendor_name: string;
+  vendor_source: 'preferred' | 'last order' | null;
+  basis: 'level' | 'sales';
+  sold_30d: number;
+  on_hand: number;
+  /** On SENT orders: already taken off `buy`. */
+  on_order: number;
+  /** On drafts nobody sent: shown, never taken off (owner D11). */
+  in_draft: number;
+  runs_out_days: number | null;
+  band: 'out-of-stock' | 'critical' | 'low' | 'healthy' | 'not-set';
+  /** 0 = tracked and healthy (or covered by sent orders): nothing to buy. */
+  buy: number;
+  /** Other shops' spare pieces SHARED OUT to this row (never offered twice). */
+  transfer_from: Array<{ store_id: string; store_name: string; qty: number }>;
+  transfer_qty: number;
+  /** The shared-out pieces cover the whole buy: a transfer instead. */
+  transfer_instead: boolean;
+  /** At cost; sent to the cost roles only. */
+  unit_cost?: number | null;
+  est_value?: number | null;
+}
+
+export interface ReorderSkipped extends ReorderSettingsFields {
+  reason: 'discontinued' | 'auto-reorder off' | 'catalogue incomplete';
+  missing?: string[];
+}
+
 export const reorderApi = {
+  /** THE Reorder list for one shop, or every shop (admins, storeId empty). */
+  getList: async (storeId?: string) => {
+    const response = await api.get('/inventory/reorder-list', {
+      params: storeId ? { store_id: storeId } : {},
+    });
+    return response.data as {
+      store_id: string | null;
+      rows: ReorderRow[];
+      skipped: ReorderSkipped[];
+      /** Products (not discontinued) with auto-reorder off: never suggested. */
+      auto_reorder_off: number;
+    };
+  },
+
   /** ONE shop's reorder level (owner ruling D12: levels are per shop).
    *  null clears it = not set = no low-stock alert. */
   setShopLevel: async (productId: string, storeId: string, level: number | null) => {
@@ -1179,11 +1288,8 @@ export const reorderApi = {
 
   updateReorderSettings: async (
     productId: string,
-    settings: {
-      reorder_quantity: number;
-      max_stock: number;
-      lead_time_days: number;
-    }
+    // Only the fields the person changed (0 = not set for the last two).
+    settings: { reorder_quantity?: number; max_stock?: number; lead_time_days?: number }
   ) => {
     // Persist the product's chain-wide reorder settings via the SINGLE
     // validated product-update path (`PUT /products/{id}` in

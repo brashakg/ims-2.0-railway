@@ -11,6 +11,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { reportsApi } from '../../services/api/reports';
 import api from '../../services/api/client';
+import { istDayString } from '../../utils/datetime';
 
 interface LLMModel {
   id: string;
@@ -227,7 +228,7 @@ export function GrowthBlueprintPage() {
           <Sparkles className="w-5 h-5" />
           <span className="text-xs uppercase tracking-widest font-medium">Growth Blueprint · JARVIS Synthesis</span>
         </div>
-        <h1 className="text-4xl font-bold text-gray-900">Strategic Plan · {blueprint?.month ?? new Date().toISOString().slice(0, 7)}</h1>
+        <h1 className="text-4xl font-bold text-gray-900">Strategic Plan · {blueprint?.month ?? (istDayString(new Date()) ?? '').slice(0, 7)}</h1>
         <p className="text-sm text-gray-500 mt-2">
           {blueprint ? (
             <>

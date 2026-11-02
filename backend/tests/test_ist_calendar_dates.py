@@ -324,23 +324,17 @@ def test_recon_row_age_days_is_NOT_shifted():
 
 
 def test_analytics_period_window_stays_in_the_stored_naive_frame():
-    """Site 5 ruling: the new-vs-returning split is LEFT ALONE ON PURPOSE.
-
-    Both sides of that comparison come from the box clock -- the stored
-    `created_at` and the `start_date` bound this builds -- so the split is at
-    least self-consistent. Wrapping only the STORED side in ``ist_date_str``
-    would leave the bound on UTC midnight and the customers on IST midnight.
-    This pins the FRAME (naive, box-clock), so anyone making the window
-    IST-aware has to come here, read the note, and move the Mongo range bounds
-    with it instead of shipping the half-fix.
-    """
+    """The window is NAIVE-UTC (the frame created_at is stored in) so it can be
+    a Mongo bound directly; 'today' starts at IST midnight in that frame, and
+    the customer split compares IST days on both sides (lane B, CLK-P08)."""
     from api.routers.analytics import get_date_range
+    from api.utils.ist import ist_day_start_utc
 
     start, end = get_date_range("today")
     assert start.tzinfo is None and end.tzinfo is None
     # IST would be 19,800s away; a slow host is not.
     assert abs((end - datetime.now()).total_seconds()) < 120
-    assert start == end.replace(hour=0, minute=0, second=0, microsecond=0)
+    assert start == ist_day_start_utc()
 
 
 def test_reports_dashboard_day_bucketing_still_ist():

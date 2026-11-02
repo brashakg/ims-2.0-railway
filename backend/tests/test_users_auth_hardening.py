@@ -1866,9 +1866,10 @@ def test_delivery_challan_subtype_does_not_bypass_the_attachment_gate(monkeypatc
     assert getattr(exc.value, "detail", {}).get("code") == "ATTACHMENT_INVALID"
 
 
-def test_delivery_challan_without_an_attachment_still_creates(monkeypatch):
-    """Positive control for MF1: a DC is exempt from the REQUIREMENT to attach,
-    and tightening the gate must not break that."""
+def test_delivery_challan_with_its_own_photo_creates(monkeypatch):
+    """Positive control for MF1: tightening the store bind must not refuse a
+    DC carrying a photo from the caller's own store. (S2b, owner 2026-10-23: a
+    DC is no longer exempt from attaching -- test_grn_attachment_gate.)"""
     import asyncio
 
     from api.routers import vendors as vendors_router
@@ -1881,6 +1882,10 @@ def test_delivery_challan_without_an_attachment_still_creates(monkeypatch):
         "store_ids": ["WO-JSR-01"],
         "active_store_id": "WO-JSR-01",
     }
+    own = store.put(
+        content=b"PNG challan", filename="dc.png", mime_type="image/png",
+        metadata={"kind": "grn_document", "store_id": "WO-JSR-01", "uploaded_by": "sm-jsr"},
+    )
     repo = _grn_create_ok(monkeypatch, store, actor)
     body = vendors_router.GRNCreate(
         po_id="PO1",
@@ -1889,10 +1894,11 @@ def test_delivery_challan_without_an_attachment_still_creates(monkeypatch):
         grn_subtype="DELIVERY_CHALLAN",
         dc_number="DC-2",
         dc_date="2026-08-01",
+        attachment_file_id=own,
     )
     asyncio.run(vendors_router._create_grn_impl(body, actor))
-    assert repo.created is not None, "a DC with no attachment must still create"
-    assert repo.created.get("attachment_file_id") is None
+    assert repo.created is not None, "a DC with its own photo must create"
+    assert repo.created.get("attachment_file_id") == own
 
 
 @pytest.mark.parametrize(

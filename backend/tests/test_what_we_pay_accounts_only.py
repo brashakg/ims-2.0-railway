@@ -732,6 +732,14 @@ def test_a_collection_rule_cannot_search_on_cost(client, buying, role):
     buying.products.update_one(
         {"product_id": "P1"}, {"$set": {"pricing": {"cost_price": COST, "offer_price": 9999.0}}}
     )
+    # The preview reads THE website membership rule (services/
+    # collection_membership): the listings ON the website, over what the push
+    # sends -- so the "real rule" needs a live listing, carrying the cost too.
+    buying.catalog_products.insert_one(
+        {"id": "P1", "product_id": "P1", "sku": "SKU-P1", "brand": "Ray-Ban", "category": "SUNGLASS",
+         "mrp": 9999.0, "pricing": {"cost_price": COST, "offer_price": 9999.0},
+         "ecom": {"shopify_product_id": "gid://shopify/Product/1"}}
+    )
 
     def count(rules):
         r = client.post("/api/v1/collections/preview", json={"rules": rules}, headers=_headers(role))
@@ -782,26 +790,6 @@ def test_sending_a_draft_with_an_unpriced_line_raises_the_accounts_task(client, 
     r = client.post("/api/v1/vendors/purchase-orders/PO-CL/send", headers=_headers("STORE_MANAGER"))
     assert r.status_code == 200, r.text
     assert [t["source_ref"] for t in _price_tasks(catalogue)] == ["po-price:PO-CL"]
-
-
-def test_the_forecast_drafts_price_their_lines_by_the_one_rule(client, catalogue):
-    # P1 was last paid COST to V1 (its catalogue says 1234.5); P3 has no price
-    # anywhere. The forecast door stores what create_po stores: COST and None.
-    catalogue.products.update_many(
-        {"product_id": {"$in": ["P1", "P3"]}}, {"$set": {"preferred_vendor_id": "V1"}}
-    )
-    catalogue.orders.insert_one(
-        {"order_id": "O9", "store_id": STORE, "status": "DELIVERED", "created_at": datetime.now(),
-         "items": [{"product_id": "P3", "product_name": "P3", "quantity": 5}]}
-    )
-    r = client.post(
-        "/api/v1/vendors/purchase-orders/from-forecast",
-        json={"store_id": STORE}, headers=_headers("STORE_MANAGER"),
-    )
-    assert r.status_code == 201, r.text
-    assert not _leaks(r.json(), _PRICE_KEYS + ("estimated_unit_price",)), r.json()
-    (po,) = list(catalogue.purchase_orders.find({"source": "demand_forecast"}))
-    assert {it["product_id"]: it["unit_price"] for it in po["items"]} == {"P1": COST, "P3": None}
 
 
 @pytest.mark.parametrize("role", ("ADMIN", "STORE_MANAGER", "AREA_MANAGER"))

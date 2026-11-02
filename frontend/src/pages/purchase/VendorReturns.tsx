@@ -20,6 +20,7 @@ import { useAuth } from '../../context/AuthContext';
 import { usePurchaseShop } from './purchaseShop';
 import { RowShop } from './invoices/pickers';
 import api from '../../services/api/client';
+import { grnCockpitApi } from '../../services/api/grnCockpit';
 import { rtvDebitNotesApi, type DebitNote } from '../../services/api/rtvDebitNotes';
 import { COST_ROLES } from '../../components/common/CostCell';
 import { PURCHASE_ROLES } from './purchaseRoles';
@@ -38,6 +39,8 @@ interface ReturnItem {
   quantity: number;
   reason: string;
   unit_price?: number | null;
+  /** S2b: the damaged piece's photo, kept from receiving (accounts roles). */
+  photo_file_id?: string | null;
 }
 
 type ReturnLine = ReturnItem;
@@ -107,6 +110,9 @@ interface VendorReturn {
   status: string;
   total_value?: number | null;
   receipt_rejection?: boolean;
+  /** A receiving rejection's receipt and line (its damage photo lives there). */
+  grn_id?: string;
+  grn_line_index?: number;
   debit_note_draft_status?: string;
   issued_debit_note_id?: string;
   credit_note_number?: string | null;
@@ -221,6 +227,22 @@ export function VendorReturns() {
   // vendor -- is the purchase roles' (the server's _VENDOR_RETURN_ROLES), and
   // its price is the accounts roles' (canSeePayables, above).
   const canMoveGoods = (user?.roles || []).some((r) => PURCHASE_ROLES.includes(r));
+
+  // S2b: the damaged piece's photo from receiving -- the debit note's
+  // evidence. The window opens on the click (a pop-up opened after the fetch
+  // is blocked), then shows the photo.
+  const openDamagePhoto = async (grnId: string, line: number) => {
+    const win = window.open('', '_blank');
+    try {
+      const blob = await grnCockpitApi.getDocument(grnId, line);
+      const url = URL.createObjectURL(blob);
+      if (win) win.location.href = url;
+      else window.open(url, '_blank');
+    } catch (err) {
+      win?.close();
+      toast.error(getErrorMessage(err, 'Could not open the damage photo.'));
+    }
+  };
 
   const [activeTab, setActiveTab] = useState<'active' | 'history'>('active');
   const [isLoading, setIsLoading] = useState(true);
@@ -829,6 +851,15 @@ export function VendorReturns() {
                               {rupees(item.unit_price == null ? null : item.quantity * item.unit_price)}
                             </p>
                             <p className="text-gray-500 text-xs">{RETURN_REASONS.find(r => r.value === item.reason)?.label || item.reason}</p>
+                            {item.photo_file_id && ret.grn_id && ret.grn_line_index != null && (
+                              <button
+                                type="button"
+                                className="text-xs underline text-gray-600 hover:text-gray-900"
+                                onClick={() => void openDamagePhoto(ret.grn_id!, ret.grn_line_index!)}
+                              >
+                                Damage photo
+                              </button>
+                            )}
                           </div>
                         </div>
                       ))}

@@ -118,6 +118,38 @@ def only_missing_options(result: Optional[Dict[str, Any]]) -> bool:
     )
 
 
+def catalogue_holds(result: Optional[Dict[str, Any]]) -> bool:
+    """A live press that held a colour/size back for a catalogue reason (any
+    listing hold but a missing option, or a seeding hold), WHATEVER code won
+    the press -- the sweep's catalogue_held count (review of #1295)."""
+    r = result or {}
+    held = (r.get("listing") or {}).get("held") or []
+    return bool(
+        r.get("ok")
+        and (
+            any(not h.get(MISSING_OPTION) for h in held)
+            or (r.get("variants_seeded") or {}).get("held_data")
+        )
+    )
+
+
+def held_for_catalogue(result: Optional[Dict[str, Any]]) -> bool:
+    """A live press whose code is a colour/size held back for a catalogue
+    reason (its listing or seeding hold), not a stock code (review of
+    #1276). The stock code wins in push_product when both are true."""
+    r = result or {}
+    code = r.get("code")
+    seeded = r.get("variants_seeded") or {}
+    return bool(
+        r.get("ok")
+        and code
+        and (
+            any(h.get("code") == code for h in (r.get("listing") or {}).get("held") or [])
+            or (seeded.get("held_data") and seeded.get("code") == code)
+        )
+    )
+
+
 def _metafield_key(key: Any) -> str:
     """The ims.* metafield key build_product_metafields derives from an
     attribute key."""
@@ -451,21 +483,22 @@ def first_publish_not_ready(db, product: Dict[str, Any]) -> Optional[str]:
     """Why this listing (a model's lead or a single product) may not go on the
     website for the FIRST time, or None -- the SAME rule a colour joining a
     listing is held to (_not_ready). A listing already on Shopify keeps
-    syncing whatever its state (it is taken down by its own door). Raises on
-    a read failure."""
+    syncing whatever its state (it is taken down by its own door) -- except
+    an ARCHIVED one, which its caller product_push_refusal refuses first,
+    listed or not (Website 2). Raises on a read failure."""
     if (product.get("ecom") or {}).get("shopify_product_id"):
         return None
     from .. import product_master as pm
 
-    if pm._is_archived(product):
-        return "archived"
+    # (An archived product itself never gets here: product_push_refusal
+    # refuses it first, listed or not.)
     # A caller holding the product row itself (product_id, no twin id) asks
     # about it directly; a catalogue twin reads its product.
     is_spine = bool(product.get("product_id")) and not product.get("id")
     spine = product if is_spine else lead_spine(db, product)
     if spine is None:
         # No product row (none on prod, 2026-10-19): the twin is judged as
-        # before this gate -- its archived check above.
+        # before this gate -- the archived check in product_push_refusal.
         return None
     return _not_ready(pm, spine, None if is_spine else product)
 

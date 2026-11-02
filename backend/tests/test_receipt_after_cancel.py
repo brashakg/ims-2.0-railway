@@ -763,6 +763,8 @@ def test_cancelled_items_rejected_on_delivery_log_on_an_order_the_cancel_closed(
     dc = vendors_mod.GRNCreate(
         po_id="PO-1", grn_subtype="DELIVERY_CHALLAN", dc_number="DC-77",
         dc_date="2026-07-01", items=[{**i, "tallied": True} for i in rejected],
+        # S2b: a challan is received only with its photo.
+        attachment_file_id="FILE-1",
     )
     before = len(grn_repo.docs)
     with pytest.raises(HTTPException) as e:

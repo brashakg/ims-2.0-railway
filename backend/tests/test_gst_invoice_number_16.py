@@ -443,7 +443,7 @@ def test_double_tap_set_invoice_keeps_the_first_number():
     assert db.get_collection("orders").find_one({"order_id": "O-TAP"})["invoice_number"] == first
 
 
-def test_double_tap_on_the_door_prints_one_number(door, monkeypatch):
+def test_double_tap_on_the_door_prints_one_number(door, monkeypatch, this_fy):
     """Two taps at once: both mint (the barrier holds them until both have a
     serial), one write lands, both screens get THAT number. The other serial
     is a gap, never a second printed number."""

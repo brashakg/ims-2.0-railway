@@ -45,6 +45,7 @@ export function QuickAddPage() {
     editMode, isReviewMode, reviewSnapshot, handleBackToQueue, editListPath,
     variantCtx, exitVariantMode, leaveFamily, familyHint, optedOutLeadId,
     dupInfo, setDupInfo, dupBusy, handleDupAddVariant, handleDupOpenExisting,
+    dupMaybe, handleDupDifferent, attributes,
   } = form;
 
   if (!canAddProduct) {
@@ -328,6 +329,13 @@ export function QuickAddPage() {
           onAddVariant={() => { void handleDupAddVariant(); }}
           onOpenExisting={handleDupOpenExisting}
           onClose={() => setDupInfo(null)}
+          maybe={dupMaybe}
+          typed={{
+            model: attributes.model_no || attributes.model_name,
+            colour: attributes.colour_code || attributes.colour_name,
+            size: attributes.lens_size || attributes.size,
+          }}
+          onDifferent={handleDupDifferent}
         />
       )}
     </div>

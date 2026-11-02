@@ -221,7 +221,8 @@ def patched(monkeypatch):
     monkeypatch.setattr(workshop_module, "get_order_repository", lambda: order_repo, raising=False)
 
     # Reset rate-limit bucket between tests so we don't false-trigger 429s
-    vp_module._portal_request_log.clear()
+    from api.services.cache import cache
+    cache.delete_pattern("rl:*")
 
     # Seed two vendors
     vendor_repo.create({

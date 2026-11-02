@@ -24,11 +24,9 @@ from __future__ import annotations
 
 from api.utils.event_time import utc_event_iso, utc_now
 
-from collections import defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 import logging
-import time
 
 from fastapi import APIRouter, HTTPException, Path
 from pydantic import AliasChoices, BaseModel, Field
@@ -52,21 +50,17 @@ router = APIRouter()
 # IP — each lab gets their own bucket so one busy lab can't squeeze another.
 _PORTAL_RATE_LIMIT_PER_MIN = 60
 _PORTAL_RATE_WINDOW = 60.0
-_portal_request_log: dict = defaultdict(list)
 
 
 def _check_portal_rate(token_id: str) -> None:
-    """Raise 429 when token_id has spent its bucket. Sliding window."""
-    now = time.time()
-    cutoff = now - _PORTAL_RATE_WINDOW
-    bucket = [t for t in _portal_request_log[token_id] if t > cutoff]
-    if len(bucket) >= _PORTAL_RATE_LIMIT_PER_MIN:
+    """Raise 429 when token_id has spent its bucket (THE shared window)."""
+    from ..utils.rate_limit import allow
+
+    if not allow(f"vendor_portal:{token_id}", _PORTAL_RATE_LIMIT_PER_MIN, _PORTAL_RATE_WINDOW):
         raise HTTPException(
             status_code=429,
             detail=f"Vendor portal rate limit exceeded ({_PORTAL_RATE_LIMIT_PER_MIN}/min)",
         )
-    bucket.append(now)
-    _portal_request_log[token_id] = bucket
 
 
 # ============================================================================

@@ -106,11 +106,6 @@ def test_fitting_confirmation_does_not_move_calendar_defaults_at_local_midnight(
     from api.routers.workshop import jobs
     from api.routers.workshop.models import FittingDetailsUpdate
 
-    class LocalClock(datetime):
-        @classmethod
-        def now(cls):
-            return datetime(2026, 4, 1, 1, 30)
-
     saved = {}
     def update(_key, patch):
         saved.update(patch)
@@ -118,13 +113,15 @@ def test_fitting_confirmation_does_not_move_calendar_defaults_at_local_midnight(
     repo = SimpleNamespace(find_by_id=lambda _key: {"job_id": "J1", "store_id": "S1"}, update=update)
     monkeypatch.setattr(jobs, "get_workshop_repository", lambda: repo)
     monkeypatch.setattr(jobs, "_assert_job_store_access", lambda *_args: None)
-    monkeypatch.setattr(jobs, "datetime", LocalClock)
     monkeypatch.setattr(jobs, "utc_now_iso", lambda: INSTANT.isoformat())
     details = {"confirmed_by_sales": True, "expected_lens_receive_date": "2026-04-05"}
     if supplied:
         details.update(order_date="2026-03-29", order_time="18:07")
-    asyncio.run(jobs.update_fitting_details("J1", FittingDetailsUpdate(fitting_details=details),
-        {"user_id": "U1", "username": "Sales"}))
+    from freezegun import freeze_time
+    # 2026-04-01 01:30 IST: the defaults are the IST calendar day and clock.
+    with freeze_time("2026-03-31T20:00:00Z", tick=True):
+        asyncio.run(jobs.update_fitting_details("J1", FittingDetailsUpdate(fitting_details=details),
+            {"user_id": "U1", "username": "Sales"}))
     fd = saved["fitting_details"]
     assert fd["order_date"] == ("2026-03-29" if supplied else "2026-04-01")
     assert fd["order_time"] == ("18:07" if supplied else "01:30")

@@ -24,12 +24,19 @@ import httpx
 import logging
 
 from .auth import get_current_user
-from ..services.reorder_policy import auto_reorder_disabled as _reorder_disabled
-from ..services.reorder_policy import low_stock_rows, top_up
+from ..services.reorder_policy import buy_qty, low_stock_rows, open_orders, top_up
 
 # IST (TZ-P3): the server clock is UTC; every business "today" key below must be
 # the IST calendar day or the 00:00-05:30 IST window reads the PREVIOUS day.
-from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
+from ..utils.ist import (
+    instant_in_window_query,
+    ist_date_str,
+    ist_date_str_from_stored,
+    ist_day_start_utc,
+    ist_month_window_utc,
+    ist_today,
+    now_ist,
+)
 from ..services.online_order_status import BOOKED_STATUSES
 
 logger = logging.getLogger(__name__)
@@ -146,9 +153,8 @@ class JarvisAnalyticsEngine:
         if orders_col is None:
             return None
         try:
-            from datetime import datetime as _dt, timedelta as _td
-
-            now = _dt.now()
+            # IST business day / month; each order read as its IST day.
+            now = now_ist()
             today = now.strftime("%Y-%m-%d")
             month_start = now.strftime("%Y-%m-01")
             ly_month_start = f"{now.year - 1:04d}-{now.month:02d}-01"
@@ -160,7 +166,7 @@ class JarvisAnalyticsEngine:
             pending = in_progress = ready = 0
             for o in orders_col.find({}):
                 status = (o.get("status") or "").upper()
-                created = str(o.get("created_at") or "")[:10]
+                created = ist_date_str_from_stored(o.get("created_at"))
                 gt = float(o.get("grand_total") or 0)
                 if status in counted:
                     if created >= month_start:
@@ -208,7 +214,9 @@ class JarvisAnalyticsEngine:
             if customers_col is not None:
                 total_cust = customers_col.count_documents({})
                 new_cust = customers_col.count_documents(
-                    {"created_at": {"$gte": month_start}}
+                    instant_in_window_query(
+                        "created_at", *ist_month_window_utc(now.year, now.month)
+                    )
                 )
 
             # Staff
@@ -459,6 +467,8 @@ class JarvisAnalyticsEngine:
                 products_col, get_db_collection("stock_units"), store_id=None
             )
             low = len(lows)
+            # THE buy rule (S5): sent orders are taken off what to buy.
+            sent, _drafts = open_orders(get_db_collection("purchase_orders"))
             for r in lows:
                 p = by_id.get(r["product_id"]) or {}
                 name = r["name"] or p.get("product_name") or "Unknown"
@@ -473,19 +483,21 @@ class JarvisAnalyticsEngine:
                         "reorder_point": r["reorder_point"],
                     }
                 )
-                # Owner decision: reorder_quantity <= 0 (default -1) means
-                # "no auto-reorder" -- keep the low-stock ALERT but never
-                # SUGGEST an order for a disabled product.
-                if p and not _reorder_disabled(p):
+                # The one buy rule (reorder_policy.buy_qty, S5): 0 when
+                # auto-reorder is off or sent orders already cover it -- keep
+                # the low-stock ALERT, suggest no order.
+                buy, _basis = buy_qty(
+                    p, store_id=r["store_id"], on_hand=r["quantity"],
+                    on_order=sent.get((r["product_id"], r["store_id"]), 0),
+                )
+                if p and buy > 0:
                     reorder_recs.append(
                         {
                             "sku": sku,
                             "product": name,
                             "store_id": r["store_id"],
                             "current": r["quantity"],
-                            "recommended_order": top_up(
-                                r["reorder_point"], r["quantity"]
-                            ),
+                            "recommended_order": buy,
                             "supplier": p.get("vendor") or p.get("brand") or "—",
                         }
                     )
@@ -1480,9 +1492,10 @@ class JarvisAnalyticsEngine:
                         {"status": {"$in": ["OPEN", "PENDING"]}}
                     ),
                     "this_month": col.count_documents(
-                        {
-                            "created_at": {"$gte": datetime.now().strftime("%Y-%m-01")},
-                        }
+                        instant_in_window_query(
+                            "created_at",
+                            *ist_month_window_utc(now_ist().year, now_ist().month),
+                        )
                     ),
                 }
         except Exception:
@@ -1929,7 +1942,7 @@ class JarvisAnalyticsEngine:
                             ),
                             "action": "Close vendor returns or escalate",
                             "impact": "Frees working capital",
-                            "link": "/inventory/vendor-returns",
+                            "link": "/purchase/vendor-returns",
                         }
                     )
         except Exception:

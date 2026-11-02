@@ -42,6 +42,9 @@ def draft_orders(monkeypatch):
     order_repo = OrderRepository(fake_db.get_collection("orders"))
     audit_repo = AuditRepository(fake_db.get_collection("audit_logs"))
     monkeypatch.setattr(orders_module, "get_order_repository", lambda: order_repo)
+    # No stock in this suite: POS 4 refuses a stock line with no unit,
+    # so the gate must not read a real (empty) stock_units collection.
+    monkeypatch.setattr(orders_module, "get_stock_repository", lambda: None)
     monkeypatch.setattr(deps_module, "get_audit_repository", lambda: audit_repo)
     return {"db": fake_db, "order_repo": order_repo, "monkeypatch": monkeypatch}
 

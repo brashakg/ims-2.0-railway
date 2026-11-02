@@ -266,9 +266,9 @@ async def upload_grn_doc(
     PDF) and get back a file_id to attach to the GRN.
 
     The ops user (Superadmin/Admin/Store Manager) uploads the receipt FIRST,
-    then submits the GRN with the returned file_id. create_grn rejects a
-    STANDARD GRN that has no attachment_file_id (ATTACHMENT_REQUIRED), so this
-    is the only way to clear the gate. Persists the bytes durably in the
+    then submits the GRN with the returned file_id. create_grn rejects any
+    receipt (bill, cash memo or challan) with no attachment_file_id
+    (ATTACHMENT_REQUIRED), so this is the only way to clear the gate. Persists the bytes durably in the
     GridFS-backed file store (Railway disk is ephemeral) -- mirrors the
     expenses upload-bill pattern: size + MIME validation, then store.put(...).
     """
@@ -343,6 +343,7 @@ async def upload_grn_doc(
 @router.get("/grn/{grn_id}/document")
 async def download_grn_doc(
     grn_id: str,
+    line: Optional[int] = Query(None, ge=0),
     current_user: dict = Depends(require_roles(*_AP_ROLES)),
 ):
     """F-S3: stream the goods-receipt document attached to a GRN.
@@ -352,7 +353,9 @@ async def download_grn_doc(
     pay, so reading it back is the accounts roles' only (owner decision
     2026-10-18, audit FU-02); the managers still UPLOAD it at receiving
     (POST /grn/upload-doc). Store-scoped: a GRN outside the caller's store
-    scope reads as 404 (no cross-store document leak)."""
+    scope reads as 404 (no cross-store document leak). `line` (S2b) streams
+    that receipt line's damaged-piece photo instead -- the debit note's
+    evidence -- behind the same gate."""
     grn_repo = get_grn_repository()
     if grn_repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -368,7 +371,11 @@ async def download_grn_doc(
     if not can_access_store_scoped(grn.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="GRN not found")
 
-    file_id = grn.get("attachment_file_id")
+    if line is None:
+        file_id = grn.get("attachment_file_id")
+    else:
+        items = grn.get("items") or []
+        file_id = (items[line] or {}).get("rejection_photo_file_id") if 0 <= line < len(items) else None
     if not file_id:
         raise HTTPException(status_code=404, detail="No document attached to this GRN")
 

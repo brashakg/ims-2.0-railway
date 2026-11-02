@@ -20,7 +20,14 @@ vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ error: () => {}, success: () => {}, warning: () => {}, info: () => {} }),
 }));
 vi.mock('../../../services/api', () => ({
-  inventoryApi: { getTransfers: (...a: unknown[]) => getTransfers(...a) },
+  inventoryApi: {
+    getTransfers: (...a: unknown[]) => getTransfers(...a),
+    getMissingPieces: () => Promise.resolve({ pieces: [] }),
+  },
+  productApi: { searchProducts: () => Promise.resolve([]) },
+}));
+vi.mock('../../../services/api/stores', () => ({
+  storeApi: { getStores: () => Promise.resolve([]) },
 }));
 const openTransferChallan = vi.fn();
 const openTransferInvoice = vi.fn();

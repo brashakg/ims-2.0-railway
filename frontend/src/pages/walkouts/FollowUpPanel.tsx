@@ -39,6 +39,7 @@ import {
   type FollowUpApprovalDecision,
 } from '../../types';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { istDayString } from '../../utils/datetime';
 
 type RoundNum = 1 | 2 | 3;
 
@@ -472,7 +473,7 @@ function ScheduleRow({
   onSubmit: (payload: CreateFollowUpRequest) => void;
   busy: boolean;
 }) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = istDayString(new Date()) ?? '';
   const [scheduledDate, setScheduledDate] = useState(today);
   const [scheduledTime, setScheduledTime] = useState('10:00');
   const [mode, setMode] = useState<FollowUpMode>('WHATSAPP');

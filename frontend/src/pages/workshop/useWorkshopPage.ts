@@ -22,6 +22,7 @@ import { resolveItemPrescriptionId, dcHardlockMessage } from './qcHandover';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import type { Job, LensStatus } from './shared';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { istDayString } from '../../utils/datetime';
 
 export function useWorkshopPage() {
   const { user } = useAuth();
@@ -216,7 +217,7 @@ const loadJobs = async () => {
   const [createFitting, setCreateFitting] = useState('');
   const [createNotes, setCreateNotes] = useState('');
   const [createPriority, setCreatePriority] = useState<'NORMAL' | 'EXPRESS' | 'URGENT'>('NORMAL');
-  const [createExpectedDate, setCreateExpectedDate] = useState(new Date(Date.now() + 3 * 86400000).toISOString().split('T')[0]);
+  const [createExpectedDate, setCreateExpectedDate] = useState(istDayString(new Date(Date.now() + 3 * 86400000)) ?? '');
   const [createLoading, setCreateLoading] = useState(false);
   // F9 — DC hardlock: when the backend returns 422 DC_HARDLOCK, show a banner
   // in the create-job modal. ADMIN+ may enter an override reason and resubmit.

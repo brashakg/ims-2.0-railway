@@ -201,9 +201,9 @@ def test_vendor_list_names_only_outside_purchase_roles(
     assert resp.status_code == 200
     rows = resp.json()["vendors"]
     # Equality, not a subset: no hidden key leaks AND no key the pickers need
-    # goes missing (WorkshopJobDetail's VendorCaptureBlock, VendorReturns,
-    # BuyDeskDraftPOModal and StockReplenishment all key the picker on
-    # vendor_id; dropping it would empty them behind a green suite).
+    # goes missing (WorkshopJobDetail's VendorCaptureBlock and VendorReturns
+    # key the picker on vendor_id; dropping it would empty them behind a
+    # green suite).
     assert rows and all(set(r) == _NAME_KEYS for r in rows), rows
     assert rows[0]["legal_name"] == "Acme Optics Pvt Ltd"
     # ...and it is cost_mask's vendor by name, not a list the route keeps.
@@ -520,6 +520,7 @@ def test_rbac_matrix_doc_matches_the_rows_f60_moved():
 # the debit note (vendor GSTIN + address) and the return (unit cost) read
 # around the names-only vendor list. One rule: services/cost_mask.
 import copy  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
 
 from api.routers import rtv_debit_notes as dn_router  # noqa: E402
 from api.routers import vendor_returns as vr_router  # noqa: E402
@@ -1185,8 +1186,9 @@ _COST_CELL = os.path.join(
 _FRONTEND_SRC = os.path.dirname(os.path.dirname(os.path.dirname(_COST_CELL)))
 # Every frontend check on what we pay outside CostCell itself reads the one
 # list (owner ruling 2026-10-12): the Add/Edit-product cost field and margin,
-# the PO form, detail, list and analytics, the Buy Desk's draft PO, stock
-# counts, replenishment, stock alerts and vendor returns. On screen the vitest
+# the PO form, detail, list and analytics, the Reorder list (S5: it replaced
+# the Buy Desk and Replenishment), stock counts, stock alerts and vendor
+# returns. On screen the vitest
 # suites whatWePayManagers, PurchaseOrderForm.byQuantity, stockAuditCostGate
 # and VendorPaymentsAccess render them per role.
 _PRODUCT_COST_SCREENS = (
@@ -1195,9 +1197,8 @@ _PRODUCT_COST_SCREENS = (
     "pages/purchase/PurchaseOrderDetail.tsx",
     "pages/purchase/PurchaseTable.tsx",
     "pages/purchase/PurchaseAnalytics.tsx",
-    "pages/catalog/BuyDeskDraftPOModal.tsx",
+    "pages/inventory/ReorderListPage.tsx",
     "pages/inventory/StockAudit.tsx",
-    "pages/inventory/StockReplenishment.tsx",
     "components/inventory/StockAlertsOverview.tsx",
     "pages/purchase/VendorReturns.tsx",
 )
@@ -1293,27 +1294,34 @@ _SALES = {"_id": "P1", "units_sold": 6, "revenue": 27000.0, "avg_price": 4500.0,
           "sample_name": "RB Frame"}
 _RECS_PRODUCT = {"_id": "P1", "product_id": "P1", "name": "RB Frame",
                  "offer_price": 4500, "cost_price": 1111.11, "stock_quantity": 0,
-                 "reorder_point": 2, "reorder_quantity": 5}
+                 "reorder_point": 2, "reorder_quantity": 1}
+# The last 30 days' sales THE buy rule reads (S5: no shop level -> 30-day sales).
+_RECS_ORDERS = [{"store_id": "BV-TEST-01", "status": "DELIVERED",
+                 "created_at": datetime.utcnow() - timedelta(days=3),
+                 "items": [{"product_id": "P1", "quantity": 4}]}]
 _REC_COST_KEYS = {"cost_price", "unit_margin", "estimated_purchase_cost", "estimated_margin"}
 
 
 class _RecsColl:
-    def __init__(self, rows):
+    def __init__(self, rows, docs=None):
         self.rows = rows
+        self.docs = rows if docs is None else docs
 
     def aggregate(self, _pipeline):
         return copy.deepcopy(self.rows)
 
-    def find(self, _flt):
-        return copy.deepcopy(self.rows)
+    def find(self, *_a, **_k):
+        return copy.deepcopy(self.docs)
 
 
 class _RecsDb:
     def get_collection(self, name):
         # stock_units: the shop's on-hand count (reorder_policy.on_hand, #1179);
-        # none on hand and no shop level, so the buy is the velocity cover alone.
+        # none on hand and no shop level, so the buy is the 30-day sales (4).
+        if name == "orders":
+            return _RecsColl([_SALES], _RECS_ORDERS)
         return _RecsColl(
-            {"orders": [_SALES], "products": [_RECS_PRODUCT], "stock_units": []}[name]
+            {"products": [_RECS_PRODUCT], "stock_units": [], "purchase_orders": []}[name]
         )
 
 

@@ -596,7 +596,8 @@ describe('a page past the end is never a dead end', () => {
     );
     renderAt('');
     await screen.findByText('Black (179)');
-    fireEvent.change(screen.getByLabelText('Frame colour'), { target: { value: 'Black' } });
+    fireEvent.click(screen.getByLabelText('Frame colour'));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Black (179)' }));
     await screen.findByText('Ray-Ban 3025 Black');
     // The older, unfiltered requests answer last.
     expect(late.length).toBeGreaterThan(0);
@@ -774,5 +775,137 @@ describe('Save & next: the Catalog list hands the edit page its products', () =>
     expect(back.get('sort')).toBe('name_asc');
     expect(back.get('page')).toBe('2');
     expect(back.get('focus')).toBe('P-A');
+  });
+});
+
+describe('Added by and Last edited by: tick boxes on the main row (owner 2026-11-01)', () => {
+  const PEOPLE_FACETS = {
+    ...FACETS,
+    created_by: [
+      { value: 'u-mansi', label: 'Mansi Kumari', count: 319 },
+      { value: 'u-durga', label: 'Durga Devi', count: 41 },
+    ],
+    updated_by: [
+      { value: 'u-ak', label: 'Akshay Ovhal', count: 2 },
+      { value: 'none', label: 'Never edited', count: 356 },
+    ],
+  };
+
+  it('ticks people in both, asks the server for exactly them, and names them in one chip each', async () => {
+    getFacets.mockResolvedValue(PEOPLE_FACETS);
+    renderAt('?page=3');
+    await screen.findByTestId('catalog-table');
+    // Both visible without opening More filters.
+    expect(screen.queryByTestId('more-filters')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Added by' }));
+    fireEvent.click(await screen.findByRole('checkbox', { name: 'Mansi Kumari (319)' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Durga Devi (41)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Last edited by' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Akshay Ovhal (2)' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Never edited (356)' }));
+    await waitFor(() => expect(where().get('edited_by')).toBe('u-ak,none'));
+    expect(where().get('added_by')).toBe('u-mansi,u-durga');
+    expect(where().get('page')).toBeNull();
+    await waitFor(() =>
+      expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({
+        created_by: 'u-mansi,u-durga',
+        updated_by: 'u-ak,none',
+        skip: 0,
+      })
+    );
+    const chips = screen.getByTestId('filter-chips');
+    expect(within(chips).getByText('Added by: Mansi Kumari, Durga Devi')).toBeTruthy();
+    expect(within(chips).getByText('Last edited by: Akshay Ovhal, Never edited')).toBeTruthy();
+  });
+
+  it('an old single-value link still ticks its one person', async () => {
+    getFacets.mockResolvedValue(PEOPLE_FACETS);
+    renderAt('?added_by=u-durga');
+    await screen.findByTestId('catalog-table');
+    expect(getProducts.mock.calls.at(-1)?.[0].created_by).toBe('u-durga');
+    fireEvent.click(screen.getByRole('button', { name: 'Added by' }));
+    const durga = (await screen.findByRole('checkbox', { name: 'Durga Devi (41)' })) as HTMLInputElement;
+    expect(durga.checked).toBe(true);
+    expect(within(screen.getByTestId('filter-chips')).getByText('Added by: Durga Devi')).toBeTruthy();
+  });
+
+  it('category chips tick several at once', async () => {
+    renderAt('');
+    await screen.findByTestId('catalog-table');
+    const chipRow = screen.getByRole('button', { name: 'All' }).parentElement as HTMLElement;
+    const [first, second] = within(chipRow).getAllByRole('button').slice(1);
+    fireEvent.click(first);
+    fireEvent.click(second);
+    await waitFor(() => expect(where().get('category')?.split(',')).toHaveLength(2));
+    expect(first.getAttribute('aria-pressed')).toBe('true');
+    expect(second.getAttribute('aria-pressed')).toBe('true');
+  });
+});
+
+describe('every tick-box filter keeps all its ticks (fix round 1)', () => {
+  it('two Flags and two shapes reach the address and the server whole', async () => {
+    getFacets.mockResolvedValue({
+      ...FACETS,
+      shape: [
+        { value: 'Round', count: 4 },
+        { value: 'Square', count: 3 },
+      ],
+    });
+    renderAt('');
+    await screen.findByTestId('catalog-table');
+    fireEvent.click(screen.getByRole('button', { name: 'Flags - needs work' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Any flag open (14)' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Price check (5)' }));
+    await waitFor(() => expect(where().get('flag')).toBe('any,price_check'));
+    fireEvent.click(screen.getByRole('button', { name: /More filters/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'Shape' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Round (4)' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Square (3)' }));
+    await waitFor(() => expect(where().get('shape')).toBe('Round,Square'));
+    await waitFor(() =>
+      expect(getProducts.mock.calls.at(-1)?.[0]).toMatchObject({
+        flag: 'any,price_check',
+        shape: 'Round,Square',
+      })
+    );
+  });
+
+  it('Archived is a view of its own: ticking it clears the other flags, and the bar offers Restore', async () => {
+    auth.roles = ['ADMIN'];
+    renderAt('');
+    await screen.findByTestId('catalog-table');
+    fireEvent.click(screen.getByRole('button', { name: 'Flags - needs work' }));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Any flag open (14)' }));
+    await waitFor(() => expect(where().get('flag')).toBe('any'));
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Archived (deleted) (3)' }));
+    await waitFor(() => expect(where().get('flag')).toBe('archived'));
+    fireEvent.click(await screen.findByLabelText('Select Carrera 8035 Black'));
+    const bar = await screen.findByTestId('selection-bar');
+    expect(within(bar).getByText('Restore')).toBeTruthy();
+    // Ticking another flag leaves the archived view.
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Price check (5)' }));
+    await waitFor(() => expect(where().get('flag')).toBe('price_check'));
+  });
+
+  it('Needs review asks for every brand when several categories are ticked', async () => {
+    const getBrandOptions = productApi.getBrandOptions as unknown as ReturnType<typeof vi.fn>;
+    const at = async (search: string) => {
+      getBrandOptions.mockClear();
+      reviewList.mockReset();
+      reviewList.mockResolvedValue({ products: [], total: 0 });
+      const view = render(
+        <MemoryRouter initialEntries={[`/catalog/review${search}`]}>
+          <Routes>
+            <Route path="/catalog/review" element={<CatalogManagerPage segment="review" />} />
+          </Routes>
+        </MemoryRouter>
+      );
+      await waitFor(() => expect(getBrandOptions).toHaveBeenCalled());
+      const arg = getBrandOptions.mock.calls.at(-1)?.[0];
+      view.unmount();
+      return arg;
+    };
+    expect(await at('?category=SUNGLASS,FRAME')).toBeUndefined();
+    expect(await at('?category=SUNGLASS')).toBe('SUNGLASS');
   });
 });

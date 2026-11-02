@@ -5,7 +5,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
   Plus, Edit2, Trash2, X, Search, ShieldCheck, Building2, Mail, Phone, BadgeCheck,
-  KeyRound, Copy, Check,
+  KeyRound, Copy, Check, Lock, Eye, EyeOff,
 } from 'lucide-react';
 import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
@@ -22,7 +22,7 @@ import {
   getHighestRoleLevel,
   CATEGORY_DEFINITIONS,
 } from './settingsTypes';
-import { getErrorStatus } from '../../utils/errorHandler';
+import { getErrorStatus, getErrorMessage } from '../../utils/errorHandler';
 
 // ============================================================================
 // Transform helpers
@@ -91,6 +91,9 @@ export function UserManagementSection() {
   // server returned exactly ONCE; cleared (and forgotten) when the modal closes.
   const [resetResult, setResetResult] = useState<{ user: UserData; temp: string } | null>(null);
   const [resettingId, setResettingId] = useState<string | null>(null);
+  // SUPERADMIN-only "Set password" (owner ask 2026-11-01); the server re-checks.
+  const isSuperAdmin = (user?.roles || []).includes('SUPERADMIN');
+  const [setPwUser, setSetPwUser] = useState<UserData | null>(null);
   // Search + filters (backlog #14).
   const [search, setSearch] = useState('');
   const [roleFilter, setRoleFilter] = useState('');
@@ -451,6 +454,15 @@ export function UserManagementSection() {
                               <KeyRound className="w-4 h-4" />
                             </span>
                           )}
+                          {isSuperAdmin && (
+                            <button
+                              onClick={() => setSetPwUser(u)}
+                              className="text-gray-500 hover:text-bv-red-600"
+                              title="Set password"
+                            >
+                              <Lock className="w-4 h-4" />
+                            </button>
+                          )}
                           {canDelete ? (
                             <button
                               onClick={() => handleDeleteUser(u.id)}
@@ -510,6 +522,14 @@ export function UserManagementSection() {
           user={permUser}
           stores={stores}
           onClose={() => setPermUser(null)}
+        />
+      )}
+
+      {setPwUser && (
+        <SetPasswordModal
+          userId={setPwUser.id}
+          userName={setPwUser.fullName || setPwUser.username}
+          onClose={() => setSetPwUser(null)}
         />
       )}
 
@@ -600,6 +620,104 @@ function TempPasswordModal({
 
         <div className="p-4 border-t border-gray-200 flex justify-end">
           <button onClick={onClose} className="btn-primary">Done</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// SUPERADMIN "Set password" modal
+// ============================================================================
+// The values live only in this component's state, so closing (unmounting) the
+// modal clears them; nothing is stored client-side.
+
+function SetPasswordModal({
+  userId,
+  userName,
+  onClose,
+}: {
+  userId: string;
+  userName: string;
+  onClose: () => void;
+}) {
+  const toast = useToast();
+  const [pw, setPw] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [show, setShow] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const mismatch = confirm.length > 0 && pw !== confirm;
+  const canSave = pw.length >= 8 && pw === confirm && !saving;
+
+  const handleSave = async () => {
+    try {
+      setSaving(true);
+      await adminUserApi.setPassword(userId, pw);
+      toast.success(`Password set for ${userName}.`);
+      onClose();
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Could not set the password'));
+      setSaving(false);
+    }
+  };
+
+  const inputType = show ? 'text' : 'password';
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white border border-gray-200 rounded-xl w-full max-w-md overflow-hidden">
+        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+          <div className="flex items-center gap-2">
+            <Lock className="w-5 h-5 text-bv-red-600" />
+            <h2 className="text-lg font-semibold text-gray-900">Set password for {userName}</h2>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-lg" title="Close">
+            <X className="w-5 h-5 text-gray-500" />
+          </button>
+        </div>
+
+        <div className="p-4 space-y-3">
+          <p className="text-sm text-gray-600">
+            They can log in with this password straight away. Any logins they have open now are signed out.
+          </p>
+          <div>
+            <label htmlFor="set-pw-new" className="block text-sm font-medium text-gray-700 mb-1">New password</label>
+            <input
+              id="set-pw-new"
+              type={inputType}
+              autoComplete="new-password"
+              className="input-field w-full"
+              value={pw}
+              onChange={(e) => setPw(e.target.value)}
+            />
+            <p className="text-xs text-gray-500 mt-1">At least 8 characters.</p>
+          </div>
+          <div>
+            <label htmlFor="set-pw-confirm" className="block text-sm font-medium text-gray-700 mb-1">Confirm password</label>
+            <input
+              id="set-pw-confirm"
+              type={inputType}
+              autoComplete="new-password"
+              className="input-field w-full"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+            />
+            {mismatch && <p className="text-xs text-red-600 mt-1">The two passwords don't match.</p>}
+          </div>
+          <button
+            type="button"
+            onClick={() => setShow((v) => !v)}
+            className="flex items-center gap-1.5 text-sm text-gray-600 hover:text-gray-900"
+          >
+            {show ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+            {show ? 'Hide passwords' : 'Show passwords'}
+          </button>
+        </div>
+
+        <div className="p-4 border-t border-gray-200 flex justify-end gap-2">
+          <button onClick={onClose} className="btn-outline">Cancel</button>
+          <button onClick={handleSave} disabled={!canSave} className="btn-primary disabled:opacity-50">
+            Save password
+          </button>
         </div>
       </div>
     </div>

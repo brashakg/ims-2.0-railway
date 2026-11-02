@@ -28,6 +28,7 @@ from ...utils.ist import (
     ist_today,
     ist_day_start_utc,
     fy_start_year_ist,
+    to_utc_naive,
 )
 from ...utils.online_gst import order_interstate_flag
 from typing import Any, Optional, List, Dict, NamedTuple
@@ -161,13 +162,17 @@ def _parse_range_dt(s, *, end: bool = False) -> Optional[datetime]:
     never matches -- a string-vs-datetime comparison in Mongo silently returns
     nothing. This was the bug behind every date-ranged finance figure reading
     zero. We convert to a datetime so the comparison is apples-to-apples; an
-    `end` date-only bound expands to 23:59:59.999999 so the whole final day is
-    inclusive. Returns None when the input is empty / unparseable (caller then
+    `end` date-only bound covers the whole final IST day. Returns None when the input is empty / unparseable (caller then
     omits that bound).
 
-    For date-only inputs (YYYY-MM-DD), treats them as IST business days
-    (matching the other IST-swept paths in this router). Converts IST midnight
-    to the equivalent naive-UTC instant for comparison with created_at.
+    A date-only input ('YYYY-MM-DD') is an IST business day: the bound is IST
+    midnight as the naive-UTC instant (ist_day_start_utc), and an ``end`` bound
+    is the last microsecond before the NEXT IST midnight. The date-only shape is
+    checked FIRST -- on Python 3.11+ datetime.fromisoformat accepts a bare date,
+    which once made the IST branch dead and turned every bound into a UTC day
+    (an order at 02:00 IST on 1 Nov landed in October's Tally export). An
+    offset-bearing ISO input is CONVERTED to naive UTC, never just stripped.
+    A naive full ISO datetime is taken as already in the stored frame.
     """
     if s is None:
         return None
@@ -176,27 +181,19 @@ def _parse_range_dt(s, *, end: bool = False) -> Optional[datetime]:
     txt = str(s).strip()
     if not txt:
         return None
-    try:
-        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
-        # Drop tz so it compares with the naive datetimes orders are stored as.
-        if dt.tzinfo is not None:
-            dt = dt.replace(tzinfo=None)
-    except ValueError:
+    if len(txt) <= 10:
         try:
-            # Date-only input: parse as an IST business day and convert to UTC.
-            # ist_day_start_utc gives us IST midnight as a naive-UTC instant,
-            # which is the correct >= bound for range-filtering created_at.
-            parsed_date = datetime.fromisoformat(txt[:10]).date()
-            dt = ist_day_start_utc(parsed_date)
+            d = date.fromisoformat(txt)
         except ValueError:
             return None
-    # A date-only end bound covers the entire day in IST.
-    # ist_day_start_utc already gives IST midnight in UTC; for the end bound,
-    # add 23:59:59.999999 in IST time (which is 23:59:59.999999 in UTC, since
-    # ist_day_start_utc is already the UTC equivalent of IST midnight).
-    if len(txt) <= 10 and end:
-        return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
-    return dt
+        if end:
+            return ist_day_start_utc(d + timedelta(days=1)) - timedelta(microseconds=1)
+        return ist_day_start_utc(d)
+    try:
+        dt = datetime.fromisoformat(txt.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return to_utc_naive(dt) if dt.tzinfo is not None else dt
 
 
 def _apply_created_at_range(match: dict, from_date, to_date) -> dict:

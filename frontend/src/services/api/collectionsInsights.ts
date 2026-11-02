@@ -90,6 +90,9 @@ export interface CollectionPreview {
   match_count: number;
   units_on_hand: number;
   sample: PreviewSample[];
+  /** Why the website cannot read these rules (the collection would show 0
+   *  products there) -- null when it can. */
+  not_evaluable: string | null;
 }
 
 /** Slim read of one admin collection that PRESERVES array rule values (the
@@ -173,11 +176,13 @@ export const collectionsInsightsApi = {
     try {
       const res = await api.post(`${BASE}/preview`, { rules, disjunctive });
       const data = res?.data;
-      if (!data || typeof data !== 'object') return null;
+      // No body, or the listings could not be read: "unavailable", never "0".
+      if (!data || typeof data !== 'object' || data.unreadable) return null;
       return {
         match_count: Number(data.match_count ?? 0),
         units_on_hand: Number(data.units_on_hand ?? 0),
         sample: (Array.isArray(data.sample) ? data.sample : []) as PreviewSample[],
+        not_evaluable: data.not_evaluable ? String(data.not_evaluable) : null,
       };
     } catch {
       return null;

@@ -37,6 +37,7 @@ import {
   hasCopyableCustomerFields,
   copyWouldOverwrite,
 } from '../../utils/patientFromCustomer';
+import { istDayString } from '../../utils/datetime';
 
 // ============================================================================
 // Constants (shared across every door)
@@ -378,7 +379,7 @@ export function CustomerIdentityFields({
               type="date"
               value={formData.dateOfBirth}
               onChange={(e) => patch({ dateOfBirth: e.target.value })}
-              max={new Date().toISOString().slice(0, 10)}
+              max={istDayString(new Date()) ?? undefined}
               title="Date of Birth"
               placeholder="Date of Birth"
               className="input-field"
@@ -595,7 +596,7 @@ export function CustomerIdentityFields({
                   type="date"
                   value={newPatient.dateOfBirth}
                   onChange={(e) => setNewPatient((prev) => ({ ...prev, dateOfBirth: e.target.value }))}
-                  max={new Date().toISOString().slice(0, 10)}
+                  max={istDayString(new Date()) ?? undefined}
                   title="Patient Date of Birth"
                   placeholder="Patient Date of Birth"
                   className={clsx('input-field', newPatient.relation === 'Self' && 'bg-gray-100 cursor-not-allowed text-gray-500')}

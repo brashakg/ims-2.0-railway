@@ -103,6 +103,8 @@ interface OrderRow {
   remap_hold: boolean;
   rx_hold_cleared: boolean;
   rx_hold_reasons: string[];
+  /** Website 1: the IMS invoice total is not what Shopify charged. */
+  totals_mismatch: { shopify: number; ims: number } | null;
 }
 
 function toRow(o: Record<string, any>): OrderRow {
@@ -147,6 +149,13 @@ function toRow(o: Record<string, any>): OrderRow {
     remap_hold: !!o.remap_hold,
     rx_hold_cleared: !!o.rx_hold_cleared,
     rx_hold_reasons: reasons,
+    totals_mismatch:
+      o.shopify_totals_check?.status === 'MISMATCH'
+        ? {
+            shopify: Number(o.shopify_totals_check.shopify_total) || 0,
+            ims: Number(o.shopify_totals_check.ims_total) || 0,
+          }
+        : null,
   };
 }
 
@@ -760,6 +769,14 @@ export default function OnlineOrdersPage() {
                           : 'Rx HOLD'}
                       </span>
                     )}
+                    {order.totals_mismatch && (
+                      <span
+                        className="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold bg-red-50 text-red-700 border-red-200"
+                        title={`Shopify charged ${fmtMoney(order.totals_mismatch.shopify, order.currency)}; the IMS invoice is ${fmtMoney(order.totals_mismatch.ims, order.currency)}. An admin is asked to check it.`}
+                      >
+                        TOTAL DIFFERS FROM SHOPIFY
+                      </span>
+                    )}
                     {payLabel && (
                       <span
                         className={
@@ -813,7 +830,7 @@ export default function OnlineOrdersPage() {
                       return (
                         <span
                           className="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium bg-gray-100 text-gray-500 border-gray-200"
-                          title="IMS has not sent a fulfillment update to the website (not shipped yet, or the live gates are dark)"
+                          title="IMS has not sent a fulfilment update to the website yet (not shipped yet, or website writes are switched off on the server)"
                         >
                           Website · —
                         </span>

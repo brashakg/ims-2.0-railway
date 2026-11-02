@@ -24,6 +24,7 @@ import { moduleForPath } from '../../context/ModuleContext';
 import { filterVisibleGroups, hasAnyRole } from './navConfig';
 import { Icon } from './Icon';
 import { RETURN_READERS } from '../../pages/purchase/purchaseRoles';
+import { INVENTORY_MANAGE_ROLES, POWER_GRID_ROLES } from '../../pages/inventory/inventoryRoles';
 import type { UserRole } from '../../types';
 
 // ----------------------------------------------------------------------------
@@ -123,6 +124,20 @@ const EXTRA_JUMPS: ExtraJump[] = [
     route: '/purchase/vendor-returns',
     hint: 'Stock & supply',
     requireRoles: RETURN_READERS,
+  },
+  // Off the menu since 2026-11-01 (now inside Inventory / Stock Lookup);
+  // kept here so search still finds them.
+  {
+    label: 'Online Stock',
+    route: '/inventory/online-sync',
+    hint: 'Stock & supply',
+    requireRoles: INVENTORY_MANAGE_ROLES,
+  },
+  {
+    label: 'Power Grid',
+    route: '/inventory/power-grid',
+    hint: 'Stock & supply',
+    requireRoles: POWER_GRID_ROLES,
   },
 ];
 

@@ -44,6 +44,7 @@ from api.services import purchase_match as pmatch  # noqa: E402
 from api.routers import vendors as vendors_router  # noqa: E402
 from api.routers import purchase_invoices as pi_router  # noqa: E402
 from api.routers import workshop as workshop_router  # noqa: E402
+from api.services.file_store import InMemoryFileStore  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 
 
@@ -305,6 +306,7 @@ def _restore_globals():
         vendors_router.get_audit_repository,
         vendors_router.validate_store_access,
         vendors_router.get_vendor_repository,
+        vendors_router.get_file_store,
     )
     saved_pi = (
         pi_router._get_db,
@@ -327,6 +329,7 @@ def _restore_globals():
         vendors_router.get_audit_repository,
         vendors_router.validate_store_access,
         vendors_router.get_vendor_repository,
+        vendors_router.get_file_store,
     ) = saved_v
     (
         pi_router._get_db,
@@ -357,7 +360,13 @@ def _vendors_client(db, grn_repo, po=None, audit=None, roles=("STORE_MANAGER",))
     vendors_router.get_audit_repository = lambda: audit
     vendors_router.validate_store_access = lambda sid, u: sid or u.get("active_store_id")
     vendors_router.get_vendor_repository = lambda: _KnownVendors()
-    return TestClient(app)
+    # S2b: every receipt -- a challan too -- is received only with its photo,
+    # so the client carries a file store _log_dc puts a challan photo into.
+    files = InMemoryFileStore()
+    vendors_router.get_file_store = lambda: files
+    client = TestClient(app)
+    client.files = files
+    return client
 
 
 def _pi_client(db, grn_repo, audit=None, roles=("ACCOUNTANT",)):
@@ -466,6 +475,16 @@ def _grn_item(product_id, qty):
     }
 
 
+def _challan_photo(client):
+    """A real grn_document photo in the client's store (S2b: no paper, no
+    stock -- a challan without its photo is refused before anything else)."""
+    fid = client.files.put(
+        content=b"PNG challan", filename="challan.png", mime_type="image/png",
+        metadata={"kind": "grn_document", "uploaded_by": "u1", "store_id": "S1"},
+    )
+    return {"attachment_file_id": fid, "attachment_filename": "challan.png", "attachment_mime": "image/png"}
+
+
 def _log_dc(client, dc_number, items, vendor_id="V1", dc_date="2026-05-10", **over):
     body = {
         "grn_subtype": "DELIVERY_CHALLAN",
@@ -473,6 +492,7 @@ def _log_dc(client, dc_number, items, vendor_id="V1", dc_date="2026-05-10", **ov
         "dc_date": dc_date,
         "vendor_id": vendor_id,
         "items": items,
+        **_challan_photo(client),
     }
     body.update(over)
     return client.post("/api/v1/vendors/grn", json=body)
@@ -577,24 +597,13 @@ class TestDcLogging:
         # A different dc_number -> 201.
         assert _log_dc(c, "DC-OTHER", [_grn_item("L1", 5)]).status_code == 201
 
-    def test_legacy_grn_without_subtype_reads_as_standard(self, monkeypatch):
+    def test_legacy_grn_without_subtype_reads_as_standard(self):
         # Acceptance #12: a GRN with no grn_subtype + a PO + invoice books as a
         # STANDARD GRN (backward-compatible). P1/S3: a STANDARD GRN now also
         # requires the receipt document (attachment_file_id) -- the ops user
         # attaches the vendor invoice/challan before creating it. BUG-010: that
-        # id must resolve to a REAL stored file, so seed one and reference it.
-        from api.services.file_store import InMemoryFileStore
-
-        store = InMemoryFileStore()
-        fid = store.put(
-            content=b"%PDF-1.4 invoice", filename="inv.pdf",
-            mime_type="application/pdf",
-            # store_id must match what upload-doc stamps -- the create path
-            # authorises the blob against the caller's reachable stores.
-            metadata={"kind": "grn_document", "uploaded_by": "u1",
-                      "store_id": "S1"},
-        )
-        monkeypatch.setattr(vendors_router, "get_file_store", lambda: store)
+        # id must resolve to a REAL stored file, so seed one (in the client's
+        # store) and reference it.
         db = _FakeDB()
         po = {
             "po_id": "PO1",
@@ -605,6 +614,14 @@ class TestDcLogging:
             "items": [{"product_id": "L1", "quantity": 5, "unit_price": 100}],
         }
         c = _vendors_client(db, _GRNRepo(db), po=po)
+        fid = c.files.put(
+            content=b"%PDF-1.4 invoice", filename="inv.pdf",
+            mime_type="application/pdf",
+            # store_id must match what upload-doc stamps -- the create path
+            # authorises the blob against the caller's reachable stores.
+            metadata={"kind": "grn_document", "uploaded_by": "u1",
+                      "store_id": "S1"},
+        )
         r = c.post(
             "/api/v1/vendors/grn",
             json={

@@ -112,6 +112,50 @@ NO_RECEIPT_WAY_OUT = (
 )
 
 
+# Section 17(5): what an expense / services bill is FOR, and whether its GST
+# is "credit not claimable" BY DEFAULT (owner 2026-10-24 "check yourself"; CA
+# 2026-10-23: every type may carry the tick). THE table: the bill door applies
+# the default when the caller sends no tick, and the bill form reads it from
+# GET /vendors/expense-types; the accountant can still change the tick per bill.
+# (key, label, blocked by default)
+EXPENSE_TYPES = (
+    ("RENT", "Rent / lease", False),
+    ("UTILITIES", "Utilities (power, water, phone, internet)", False),
+    ("SUPPLIES", "Shop supplies and stationery", False),
+    ("MARKETING", "Marketing and advertising", False),
+    ("REPAIRS", "Repairs and maintenance", False),
+    ("STOCK", "Stock purchases", False),
+    ("BUSINESS_TRAVEL", "Business travel", False),
+    ("FREIGHT", "Freight, courier and job-work", False),
+    ("OTHER", "Other business expense", False),
+    ("FOOD", "Food and drinks", True),
+    ("MOTOR_VEHICLE", "Motor vehicles (incl. fuel, repairs, insurance)", True),
+    ("GIFTS", "Gifts and free samples", True),
+    ("CLUB_PERSONAL", "Club, gym or personal use", True),
+    ("CONSTRUCTION", "Construction or fit-out of the shop", True),
+    ("STAFF_BENEFITS", "Staff holiday / travel benefits", True),
+)
+_EXPENSE_BLOCKED = {key: blocked for key, _label, blocked in EXPENSE_TYPES}
+
+
+def normalize_expense_type(value):
+    """None when absent; the table's key; ValueError for anything else."""
+    if value is None or str(value).strip() == "":
+        return None
+    key = str(value).strip().upper().replace("-", "_").replace(" ", "_")
+    if key not in _EXPENSE_BLOCKED:
+        raise ValueError("expense_type must be one of " + ", ".join(_EXPENSE_BLOCKED))
+    return key
+
+
+def expense_itc_blocked(expense_type, ticked=None) -> bool:
+    """The 17(5) tick a bill is booked with: the caller's when sent, else the
+    expense type's default (not blocked when no type is named)."""
+    if ticked is not None:
+        return bool(ticked)
+    return _EXPENSE_BLOCKED.get(expense_type or "", False)
+
+
 def normalize_bill_kind(value):
     """None when absent/blank (a legacy client or stored row); the canonical
     'GOODS' / 'SERVICES' for a recognized declaration; ValueError otherwise

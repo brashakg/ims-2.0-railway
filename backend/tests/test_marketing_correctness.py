@@ -49,6 +49,8 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("MONGODB_URI", "")
 
 import jwt  # noqa: E402
+
+from tests.ist_business_day import business_day, business_now  # noqa: E402
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -728,7 +730,7 @@ def test_follow_up_create_rejects_past_date(monkeypatch):
 
     client = _mk_fu_client(_Wrapper(), monkeypatch=monkeypatch)
     tok = _tok(["STORE_MANAGER"])
-    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    yesterday = (business_now().date() - timedelta(days=1)).isoformat()
     r = client.post(
         "/api/v1/follow-ups/",
         json={
@@ -764,7 +766,7 @@ def test_follow_up_create_accepts_today(monkeypatch):
 
     client = _mk_fu_client(_Wrapper(), monkeypatch=monkeypatch)
     tok = _tok(["STORE_MANAGER"])
-    today = date.today().isoformat()
+    today = business_day()  # the IST day follow_ups.py validates against
     r = client.post(
         "/api/v1/follow-ups/",
         json={
@@ -799,7 +801,7 @@ def test_follow_up_create_accepts_future_date(monkeypatch):
 
     client = _mk_fu_client(_Wrapper(), monkeypatch=monkeypatch)
     tok = _tok(["STORE_MANAGER"])
-    future_date = (date.today() + timedelta(days=7)).isoformat()
+    future_date = (business_now().date() + timedelta(days=7)).isoformat()
     r = client.post(
         "/api/v1/follow-ups/",
         json={

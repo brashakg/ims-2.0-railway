@@ -629,6 +629,66 @@ def _never_shipped(payload: Dict[str, Any], order: Dict[str, Any]) -> bool:
         _norm(rl.get("restock_type")).lower() == "cancel" for rl in rows)
 
 
+def _money_set(row: Dict[str, Any], *keys: str) -> float:
+    """The first of `keys` present on a Shopify money row, as a positive
+    amount: a MoneyBag (`<key>` -> shop_money.amount) or a plain figure.
+    Shopify signs adjustments negative."""
+    for key in keys:
+        val = row.get(key)
+        if isinstance(val, dict):
+            val = (val.get("shop_money") or {}).get("amount")
+        if val not in (None, ""):
+            return abs(_f(val))
+    return 0.0
+
+
+def _shipping_refunded(payload: Dict[str, Any]) -> float:
+    """The shipping money this refund gives back, tax included: Shopify's
+    refund_shipping_lines (subtotal + tax), else its order_adjustments of kind
+    shipping_refund (amount + the tax added to it). One source, never both:
+    Shopify may report the same money in each."""
+    rows = [r for r in payload.get("refund_shipping_lines") or [] if isinstance(r, dict)]
+    if rows:
+        return round(sum(
+            _money_set(r, "subtotal_amount_set", "subtotal", "amount")
+            + _money_set(r, "total_tax_amount_set", "total_tax", "tax_amount")
+            for r in rows), 2)
+    return round(sum(
+        _money_set(a, "amount_set", "amount") + _money_set(a, "tax_amount_set", "tax_amount")
+        for a in payload.get("order_adjustments") or []
+        if isinstance(a, dict) and _norm(a.get("kind")).lower() == "shipping_refund"), 2)
+
+
+def _shipping_return_line(payload: Dict[str, Any], order_items: List[Dict[str, Any]]) -> Any:
+    """The refund's shipping as a return line on the order's SHIPPING item
+    (Website 1 bills shipping on the invoice, so its refund is credited like
+    any line, at that line's own rate). The share returned is the refunded
+    amount over the billed shipping, never above all of it. None when the
+    refund gives no shipping back or the order billed none (then the money
+    is a goodwill amount: MONEY_ONLY). ponytail: two partial shipping refunds
+    above the billed shipping are not capped across refunds; the amount
+    reconciliation (DISCREPANCY) catches that."""
+    from ..routers.returns import ReturnLine
+
+    refunded = _shipping_refunded(payload)
+    ship = next((i for i in order_items if i.get("item_type") == "SHIPPING"), None)
+    if refunded <= 0 or ship is None:
+        return None
+    billed = _f(ship.get("taxable_value")) + _f(ship.get("tax_amount"))
+    if billed <= 0:
+        return None
+    share = 1.0 if refunded >= billed - 0.01 else round(refunded / billed, 6)
+    return ReturnLine(
+        order_item_id=_norm(ship.get("item_id")) or None,
+        product_name=_norm(ship.get("product_name")),
+        return_qty=share,
+        unit_price=0.0,  # _priced_return_lines prices it from the billed line
+        condition="GOOD",
+        restock=False,
+        reason="Shopify shipping refund",
+    )
+
+
 def _build_return_lines(
     payload: Dict[str, Any], order: Dict[str, Any]
 ) -> List[Any]:
@@ -690,6 +750,9 @@ def _build_return_lines(
                 reason="Shopify refund",
             )
         )
+    shipping = _shipping_return_line(payload, order_items)
+    if shipping is not None:
+        lines.append(shipping)
     return lines
 
 
@@ -714,7 +777,8 @@ def _return_lines_from_proposed(proposed: List[Dict[str, Any]]) -> List[Any]:
 def _shopify_refunded_amount(payload: Dict[str, Any]) -> Optional[float]:
     """The amount Shopify ACTUALLY refunded, read from the payload:
       1. sum of `transactions` with kind=='refund' and status=='success';
-      2. fallback: sum of `refund_line_items` (subtotal + total_tax).
+      2. fallback: sum of `refund_line_items` (subtotal + total_tax) plus the
+         shipping it gives back (_shipping_refunded).
     Returns None when neither is derivable (the caller then cannot reconcile and
     does not force a discrepancy on missing data)."""
     if not isinstance(payload, dict):
@@ -735,18 +799,13 @@ def _shopify_refunded_amount(payload: Dict[str, Any]) -> Optional[float]:
             found = True
         if found:
             return round(total, 2)
-    rlis = payload.get("refund_line_items")
-    if isinstance(rlis, list) and rlis:
-        total = 0.0
-        found = False
-        for rli in rlis:
-            if not isinstance(rli, dict):
-                continue
+    total = _shipping_refunded(payload)
+    found = total > 0
+    for rli in payload.get("refund_line_items") or []:
+        if isinstance(rli, dict):
             total += _f(rli.get("subtotal")) + _f(rli.get("total_tax"))
             found = True
-        if found:
-            return round(total, 2)
-    return None
+    return round(total, 2) if found else None
 
 
 def _money_back_on_shopify(payload: Dict[str, Any]) -> Tuple[float, float]:
@@ -1134,10 +1193,11 @@ def handle_shopify_refund(
 
         # The money this refund sends back on Shopify (any gateway, "manual"
         # included), asked before the line mapping: a refund that moved money
-        # with no item line IMS can map (a goodwill custom amount, a shipping-
-        # only refund) books nothing, but it is still money given back on this
-        # order -- recorded as a MONEY_ONLY review row, so the store-credit
-        # rule (_given_back_elsewhere) counts it.
+        # with no line IMS can map (a goodwill custom amount; shipping on an
+        # order whose invoice billed none) books nothing, but it is still money
+        # given back on this order -- recorded as a MONEY_ONLY review row, so
+        # the store-credit rule (_given_back_elsewhere) counts it. Shipping the
+        # invoice billed maps to its SHIPPING line and is credited.
         money_back, money_pending = _money_back_on_shopify(payload)
         return_lines = _build_return_lines(payload, order)
         if not return_lines and money_back > 0:
@@ -1170,8 +1230,9 @@ def handle_shopify_refund(
                 restock_lines=[],
                 restock_store=None,
                 status="MONEY_ONLY",
-                note=(f"{said} on this order with no items IMS can match (a goodwill or "
-                      "shipping refund). Nothing is booked in IMS: no credit note, no stock, "
+                note=(f"{said} on this order with no line IMS can match (a goodwill amount, "
+                      "or shipping the invoice never billed). Nothing is booked in IMS: no "
+                      "credit note, no stock, "
                       "no store credit. It counts as money already given back on this order."
                       f"{over}"),
             )
@@ -1276,7 +1337,8 @@ def handle_shopify_refund(
         # status alone: an orders/updated (refunded / cancelled) drained before
         # this refund moves SHIPPED on to REFUNDED / CANCELLED, while Shopify's
         # own fulfillment_status (and any parcel) still says the goods left.
-        goods_out = bool(
+        # A shipping-only refund returns no goods (its line has no product).
+        goods_out = any(ln.product_id for ln in return_lines) and bool(
             str(order.get("status") or "").strip().upper() in GOODS_OUT
             or str(order.get("fulfillment_status") or "").strip().upper() in ("FULFILLED", "PARTIAL")
             or order.get("awb")

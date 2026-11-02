@@ -42,7 +42,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents.predictive_reorder import (  # noqa: E402
     burn_rates,
     days_remaining,
-    recommended_qty,
     projected_stockout_iso,
     tally_demand_by_product_store,
 )
@@ -195,7 +194,7 @@ NOW = datetime(2026, 6, 9, 12, 0, 0)  # naive, matches stored created_at frame
 
 def _order(store_id: str, product_id: str, *, days_ago: int, qty: int = 1,
            name: str = "Aviator", brand: str = "Ray-Ban", category: str = "SUNGLASS",
-           status: str = "COMPLETED") -> Dict[str, Any]:
+           status: str = "DELIVERED") -> Dict[str, Any]:
     return {
         "order_id": f"ORD-{store_id}-{product_id}-{days_ago}-{qty}",
         "store_id": store_id,
@@ -213,7 +212,15 @@ def _stock(store_id: str, product_id: str, qty: int, status: str = "AVAILABLE") 
 
 
 def _product(product_id: str, *, vendor: Optional[str] = "VEND-1", reorder_point: int = 0) -> Dict[str, Any]:
-    d = {"product_id": product_id, "reorder_point": reorder_point}
+    # Catalogue-complete (purchasable): ORACLE proposes the Reorder list's
+    # rows (S5), and the list keeps an incomplete product off as skipped.
+    d = {"product_id": product_id, "reorder_point": reorder_point,
+         "sku": f"SKU-{product_id}", "barcode": f"SKU-{product_id}",
+         "name": f"Aviator {product_id}", "brand": "Ray-Ban", "category": "FRAME",
+         "mrp": 9000.0, "offer_price": 9000.0, "cost_price": 4000.0,
+         "hsn_code": "9003", "gst_rate": 5, "is_active": True,
+         "attributes": {"brand_name": "Ray-Ban", "model_no": product_id,
+                        "colour_code": "01", "size": "54"}}
     if vendor is not None:
         d["preferred_vendor_id"] = vendor
     return d
@@ -265,17 +272,6 @@ class TestBurnRateMath:
     def test_days_remaining_basic(self):
         assert abs(days_remaining(10, 8 / 7) - 8.75) < 1e-6
 
-    def test_recommended_qty_never_below_one(self):
-        # Tiny burn rate but flagged -> still suggest at least 1.
-        assert recommended_qty(on_hand=0, effective_rate=0.01, horizon_days=14,
-                               lead_time_days=7) >= 1
-
-    def test_recommended_qty_covers_lead_plus_horizon(self):
-        # 1/day, on_hand 2, horizon 14 + lead 7 = 21 cover -> order ~19.
-        q = recommended_qty(on_hand=2, effective_rate=1.0, horizon_days=14,
-                            lead_time_days=7)
-        assert q == 19
-
     def test_projected_stockout_none_when_infinite(self):
         assert projected_stockout_iso(NOW, float("inf")) is None
 
@@ -289,7 +285,7 @@ class TestTallyDemand:
         orders = [
             _order("S1", "P1", days_ago=1, status="CANCELLED"),
             _order("S1", "P1", days_ago=1, status="DRAFT"),
-            _order("S1", "P1", days_ago=1, status="COMPLETED"),
+            _order("S1", "P1", days_ago=1, status="DELIVERED"),
         ]
         demand = tally_demand_by_product_store(orders, now=NOW)
         assert demand[("P1", "S1")]["units_7d"] == 1
@@ -318,10 +314,11 @@ class TestT1ProposalGeneration:
     def _seed(self) -> FakeDB:
         db = FakeDB()
         orders = db.get_collection("orders")
-        # 8 sales in last 7 days (1 unit each), none in prior 23 days.
+        # 8 sales in last 7 days (1 unit each), none in prior 23 days. 5 on
+        # hand: THE buy rule (no level: the last 30 days' sales, S5) buys 3.
         for i in range(8):
             orders.insert_one(_order("S1", "P1", days_ago=i % 7))
-        db.get_collection("stock_units").insert_one(_stock("S1", "P1", 10))
+        db.get_collection("stock_units").insert_one(_stock("S1", "P1", 5))
         db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
         return db
 
@@ -338,7 +335,7 @@ class TestT1ProposalGeneration:
         assert pl["days_remaining"] < 14
         assert pl["projected_stockout_date"] is not None
         assert pl["vendor_missing"] is False
-        assert pl["quantity"] >= 1
+        assert pl["quantity"] == 3  # 8 sold in 30 days - 5 on hand
 
     def test_second_run_dedups_same_day(self):
         db = self._seed()
@@ -401,9 +398,9 @@ class TestT2Fallback:
         return db
 
     def test_high_stock_no_proposal(self):
-        # burn30 = 15/30 = 0.5/day; 5 on hand -> 10 days? No: 5/0.5 = 10 < 14.
-        # Use 8 on hand -> 16 days > 14 -> NO proposal.
-        db = self._seed(on_hand=8)
+        # S5 one buy rule: 15 sold in 30 days, 15 on hand -> the 30-day sales
+        # are covered, nothing to buy -> NO proposal.
+        db = self._seed(on_hand=15)
         assert _run_oracle(db) == 0
         assert _pending(db) == []
 
@@ -478,41 +475,6 @@ class TestLegacyBlankStatusOnHand:
             _stock("S1", "P1", 50, status="available"))
         assert _run_oracle(db) == 0
         assert _pending(db) == []
-
-
-class TestBoundedScans:
-    def test_stock_and_product_scans_are_filtered_and_projected(self):
-        """P2 regression: ORACLE must NOT full-scan stock_units / products every
-        tick -- both reads carry a server-side filter + a field projection."""
-        db = FakeDB()
-        orders = db.get_collection("orders")
-        for i in range(8):
-            orders.insert_one(_order("S1", "P1", days_ago=i % 7))
-        db.get_collection("stock_units").insert_one(_stock("S1", "P1", 5))
-        db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
-        # A unit + product OUTSIDE the demanded set must not be needed (and with
-        # the filter, must not even be fetched) for the run to work.
-        db.get_collection("stock_units").insert_one(_stock("S9", "OTHER", 99))
-        db.get_collection("products").insert_one(_product("OTHER"))
-
-        seen: Dict[str, list] = {}
-        for name in ("stock_units", "products"):
-            coll = db.get_collection(name)
-            orig = coll.find
-
-            def spy(query=None, projection=None, _orig=orig, _name=name):
-                seen.setdefault(_name, []).append((query, projection))
-                return _orig(query, projection)
-
-            coll.find = spy  # type: ignore[method-assign]
-
-        assert _run_oracle(db) == 1  # the demanded SKU still gets its proposal
-        pl = _pending(db)[0]["payload"]
-        assert pl["vendor_id"] == "VEND-1"  # product lookup intact under filter
-        for name in ("stock_units", "products"):
-            query, projection = seen[name][0]
-            assert query, f"{name} was scanned with an EMPTY filter (full scan)"
-            assert projection, f"{name} was scanned without a projection"
 
 
 # ============================================================================

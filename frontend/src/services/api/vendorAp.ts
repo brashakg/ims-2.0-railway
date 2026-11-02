@@ -46,6 +46,16 @@ export interface VendorBill {
   // (itc_eligible false) and its GST stays in what it costs.
   itc_blocked?: boolean;
   itc_eligible?: boolean;
+  // What the expense is for (server table ap_engine.EXPENSE_TYPES); it sets
+  // the 17(5) tick's default.
+  expense_type?: string | null;
+}
+
+/** One row of THE expense-type table: its section 17(5) default tick. */
+export interface ExpenseType {
+  value: string;
+  label: string;
+  blocked_by_default: boolean;
 }
 
 // A goods receipt row (STANDARD GRN or Delivery Challan) as returned by
@@ -453,6 +463,12 @@ export const vendorApApi = {
   createBill: async (vendorId: string, payload: Partial<VendorBill>) => {
     const res = await api.post(`/vendors/${vendorId}/bills`, payload);
     return res.data as VendorBill;
+  },
+  // The expense types and their 17(5) default (accounts roles; the server's
+  // one table, never a copy here).
+  listExpenseTypes: async () => {
+    const res = await api.get('/vendors/expense-types');
+    return (res.data?.types ?? []) as ExpenseType[];
   },
   // Tick / untick 'credit not claimable (section 17(5))' on a booked services
   // bill. The server refuses a goods bill (422) and a locked month (423).

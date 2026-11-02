@@ -1290,3 +1290,77 @@ def test_refund_drain_stopped_mid_post_is_finished_on_a_later_retry(wired, monke
     assert wired["ledger"].count_documents({"customer_id": "CUST-1"}) == 1, "never a second credit note"
     assert len(calls) == 1, "the finish found the posted note instead of posting again"
     assert wired["stock_repo"].units[0]["status"] == "AVAILABLE"
+
+
+# ===========================================================================
+# Website 1: shipping is billed on the online invoice, so a refund of it is
+# credited back at the shipping line's own rate (the same machinery as goods)
+# ===========================================================================
+
+
+def _seed_order_with_shipping(wired):
+    order = _seed_online_order(wired)
+    ship = {
+        "item_id": "it-ship", "item_type": "SHIPPING", "product_id": None,
+        "ims_product_id": None, "sku": "", "product_name": "Shipping charges",
+        "quantity": 1, "gst_rate": 5.0, "hsn_code": "9004", "category": "SHIPPING",
+        "item_total": 98.0, "taxable_value": 93.33, "tax_amount": 4.67,
+    }
+    wired["orders"].update_one(
+        {"order_id": order["order_id"]},
+        {"$set": {"items": order["items"] + [ship], "grand_total": 1098.0,
+                  "amount_paid": 1098.0}},
+    )
+    wired["customer_repo"].create(
+        {"customer_id": "CUST-1", "name": "Ravi", "mobile": "9876543210", "store_credit": 0.0}
+    )
+
+
+def test_refund_full_with_shipping_credits_the_shipping_too(wired, monkeypatch):
+    """Goods Rs 1000 + shipping Rs 98 refunded in full: the credit note is the
+    whole Rs 1098 invoice (no DISCREPANCY), the shipping reversed at its rate."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _seed_order_with_shipping(wired)
+    from api.services.shopify_refund import handle_shopify_refund
+
+    payload = _refund_payload_with_txn(amount="1098.00", gateway="razorpay")
+    payload["refund_shipping_lines"] = [{
+        "shipping_line_id": 1,
+        "subtotal_amount_set": {"shop_money": {"amount": "93.33"}},
+        "total_tax_amount_set": {"shop_money": {"amount": "4.67"}},
+    }]
+    res = handle_shopify_refund(wired["db"], payload, topic="refunds/create")
+
+    assert res["status"] == "credited", res
+    rows = list(wired["ledger"].find({"customer_id": "CUST-1"}))
+    assert len(rows) == 1
+    assert rows[0]["gross_refund"] == 1098.0
+    assert rows[0]["tax"] == round(47.62 + 4.67, 2)
+
+
+def test_refund_shipping_only_books_a_credit_note_not_money_only(wired, monkeypatch):
+    """A shipping-only refund (no item lines, Shopify's order_adjustments) is
+    a refund of a billed line: a Rs 98 credit note at the shipping line's
+    rate, proposed for the accountant -- never a MONEY_ONLY 'nothing booked'."""
+    monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
+    _seed_order_with_shipping(wired)
+    from api.services.shopify_refund import handle_shopify_refund
+
+    payload = {
+        "id": 700098, "order_id": 5001, "restock": False, "refund_line_items": [],
+        "order_adjustments": [
+            {"kind": "shipping_refund", "amount": "-93.33", "tax_amount": "-4.67"}
+        ],
+        "transactions": [{"kind": "refund", "status": "success", "amount": "98.00"}],
+    }
+    res = handle_shopify_refund(wired["db"], payload, topic="refunds/create")
+
+    assert res["status"] == "queued", res
+    assert res["queue_status"] == "PENDING"
+    assert res["gross_refund"] == 98.0
+    assert res["gst_breakup"]["by_rate"]["5.0"]["tax"] == 4.67
+    row = wired["review"].find_one({"shopify_refund_id": "700098"})
+    assert row["status"] == "PENDING"
+    assert [ln["order_item_id"] for ln in row["credit_note"]["lines"]] == ["it-ship"]
+    # Nothing restocks for shipping.
+    assert all(not ln["restock"] for ln in row["credit_note"]["lines"])

@@ -38,6 +38,7 @@ import {
 } from './expenseShared';
 import { Card, Labeled } from './expenseWidgets';
 import { getErrorMessage } from '../../../utils/errorHandler';
+import { istDayString } from '../../../utils/datetime';
 
 type TabType =
   | 'my' | 'approvals' | 'entry' | 'aging' | 'duplicates' | 'summary'
@@ -68,7 +69,7 @@ export function ExpensesLayout() {
   const [formCategory, setFormCategory] = useState('utilities');
   const [formAmount, setFormAmount] = useState('');
   const [formDescription, setFormDescription] = useState('');
-  const [formDate, setFormDate] = useState(new Date().toISOString().split('T')[0]);
+  const [formDate, setFormDate] = useState(() => istDayString(new Date())!);
   const [formPaymentMode, setFormPaymentMode] = useState('CASH');
   const [formBill, setFormBill] = useState<File | null>(null);
   const [saving, setSaving] = useState(false);
@@ -124,7 +125,7 @@ export function ExpensesLayout() {
 
   const resetForm = () => {
     setFormCategory('utilities'); setFormAmount(''); setFormDescription('');
-    setFormDate(new Date().toISOString().split('T')[0]); setFormPaymentMode('CASH'); setFormBill(null);
+    setFormDate(istDayString(new Date())!); setFormPaymentMode('CASH'); setFormBill(null);
   };
 
   const handleSubmit = async () => {

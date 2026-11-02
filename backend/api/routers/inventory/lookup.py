@@ -23,15 +23,12 @@ Every rule is reused, not re-typed:
   * sellable    -- StockRepository.sellable_filter, the filter find_available
                    and the sale guard count (AVAILABLE and in date), one unit
                    per stock_units row -- so this shop's figure is the till's;
-  * tracked     -- the sale guard's `tracked` question
-                   (orders/stock._assert_serialized_stock_available): does the
-                   shop hold a stock_units row of it, whatever its status. The
-                   guard asks it inline in a till file, so this re-states its
-                   match; the real guard is the oracle for one shop per
-                   lifecycle state and stored shape, each its sole row
-                   (test_d7b3_a_shop_the_till_does_not_count_is_not_tracked). The
-                   guard counts a line only there AND when the line's item_type
-                   takes serialized stock. That item_type is the till's
+  * counted     -- the sale guard (orders/stock._assert_serialized_stock_available)
+                   limits every line whose item_type takes serialized stock to
+                   the shop's sellable figure, a shop holding none included
+                   (POS 4: nothing sells from an empty shelf); the real guard
+                   is the oracle (test_d7b3_the_screen_counts_where_the_till_does).
+                   That item_type is the till's
                    (POS mapCategory, TypeScript), so the SCREEN puts it on each
                    product -- importing mapCategory -- and checks it against
                    the guard's own lists, sent here as they are
@@ -189,9 +186,6 @@ async def stock_lookup(
     shop_ids = [str(s["store_id"]) for s in shops]
     available = sellable_by_product_shop(stock_repo, pids)
     in_transit = _in_transit_by_product_shop(stock_repo, pids, shop_ids)
-    # The guard's `tracked` match: any stock_units row of it at the shop, any
-    # status -- never filter this by status (pinned per state against the guard).
-    tracked = set(_units_by_product_shop(stock_repo, {"product_id": {"$in": pids}}))
     not_counted, lens_grid = _guard_lists()
 
     items, seen = [], set()
@@ -211,8 +205,6 @@ async def stock_lookup(
                 "store_name": s.get("store_name") or s.get("store_code") or sid,
                 "available": available.get((pid, sid), 0),
                 "in_transit": in_transit.get((pid, sid), 0),
-                # False: no unit of it here, so the till's guard sells any quantity.
-                "tracked": (pid, sid) in tracked,
             }
             for sid, s in zip(shop_ids, shops)
         ]

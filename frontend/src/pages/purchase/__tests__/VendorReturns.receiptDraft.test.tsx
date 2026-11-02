@@ -113,3 +113,35 @@ describe('receipt rejection draft handoff', () => {
     expect(await screen.findByText('Damaged packaging and scratched lens')).toBeInTheDocument();
   });
 });
+
+describe('the damaged piece photo (S2b: the debit note evidence)', () => {
+  const withPhoto = {
+    ...draft, grn_id: 'G1', grn_line_index: 0,
+    items: [{ ...draft.items[0], photo_file_id: 'F-DMG' }],
+  };
+
+  it('accounts open the photo kept from receiving', async () => {
+    auth.role = 'ACCOUNTANT';
+    const win = { location: { href: '' }, close: vi.fn() };
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(win as unknown as Window);
+    const blob = new Blob(['png'], { type: 'image/png' });
+    URL.createObjectURL = vi.fn(() => 'blob:dmg');
+    api.get.mockImplementation((url: string) => Promise.resolve({ data:
+      url === '/vendor-returns/' ? { returns: [withPhoto] } :
+        url === '/vendors/grn/G1/document' ? blob : { vendors: [] },
+    }));
+    open();
+    fireEvent.click(await screen.findByText('Acme'));
+    fireEvent.click(screen.getByRole('button', { name: 'Damage photo' }));
+    await waitFor(() => expect(win.location.href).toBe('blob:dmg'));
+    expect(api.get).toHaveBeenCalledWith('/vendors/grn/G1/document', { params: { line: 0 }, responseType: 'blob' });
+    openSpy.mockRestore();
+  });
+
+  it('a line with no photo offers none', async () => {
+    auth.role = 'ACCOUNTANT';
+    open();
+    fireEvent.click(await screen.findByText('Acme'));
+    expect(screen.queryByRole('button', { name: 'Damage photo' })).toBeNull();
+  });
+});

@@ -117,9 +117,6 @@ async def _r3_assemble_inputs(
         inputs["purchase_recommendations"] = await purchase_recommendations(  # type: ignore[arg-type]
             store_id=store_id,
             lookback_days=90,
-            lead_time_days=30,
-            reorder_cycle_days=30,
-            safety_buffer_days=7,
             min_velocity=2,
             limit=50,
             current_user=current_user,

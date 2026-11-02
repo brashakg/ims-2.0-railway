@@ -7,8 +7,8 @@ always has the source document to reconcile against. The owner's words:
 image/pdf at this screen before proceeding."
 
 Enforced as a LOUD 400 ({code: ATTACHMENT_REQUIRED}) in create_grn for a
-STANDARD GRN with no attachment_file_id. A DELIVERY_CHALLAN is exempt at
-receipt (its tax invoice arrives later and is attached at reconciliation).
+GRN with no attachment_file_id -- a DELIVERY_CHALLAN too since S2b (owner
+2026-10-23): its own photo at receipt, its tax invoice later on the bill.
 
 The endpoint functions are driven directly with monkeypatched repos -- no
 Mongo, no HTTP -- mirroring test_po_gst_and_residuals.py (S1).
@@ -223,28 +223,19 @@ def test_standard_grn_attachment_storage_down_is_503(monkeypatch):
     assert grn_repo.created is None
 
 
-def test_delivery_challan_skips_attachment_existence_check(monkeypatch):
-    """A DC is exempt from BOTH the presence gate and the existence check -- it
-    must log even with no attachment and no file store configured."""
-    grn_repo = _FakeGRNRepo()
-    _patch_grn(monkeypatch, grn_repo, _FakePORepo())
-    # No file store at all -> a STANDARD GRN would 503, but a DC must still log.
-    monkeypatch.setattr(v, "get_file_store", lambda: None)
-    grn = GRNCreate(
-        grn_subtype="DELIVERY_CHALLAN",
-        vendor_id="V1",
-        dc_number="DC-88",
-        dc_date="2026-06-16",
-        items=_std_items(),
+def _challan_photo(mp):
+    store = InMemoryFileStore()
+    fid = store.put(
+        content=b"PNG challan", filename="challan.png", mime_type="image/png",
+        metadata={"kind": "grn_document", "uploaded_by": "u1"},
     )
-    res = asyncio.run(create_grn(grn, current_user=_user()))
-    assert res["grn_subtype"] == "DELIVERY_CHALLAN"
-    assert grn_repo.created is not None
+    mp.setattr(v, "get_file_store", lambda: store)
+    return {"attachment_file_id": fid, "attachment_filename": "challan.png", "attachment_mime": "image/png"}
 
 
-def test_delivery_challan_without_attachment_is_exempt(monkeypatch):
-    # A DC's tax invoice arrives later, so receipt-time attachment is NOT
-    # required -- the DC must still be loggable.
+def test_delivery_challan_without_its_photo_is_refused(monkeypatch):
+    # S2b (owner 2026-10-23): no paper, no stock -- a challan is no longer
+    # exempt; its own photo goes in at receipt (the tax invoice comes later).
     grn_repo = _FakeGRNRepo()
     _patch_grn(monkeypatch, grn_repo, _FakePORepo())
     grn = GRNCreate(
@@ -253,13 +244,29 @@ def test_delivery_challan_without_attachment_is_exempt(monkeypatch):
         dc_number="DC-77",
         dc_date="2026-06-16",
         items=_std_items(),
-        # no attachment_file_id -- exempt
+    )
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(create_grn(grn, current_user=_user()))
+    assert exc.value.status_code == 400
+    assert exc.value.detail["code"] == "ATTACHMENT_REQUIRED"
+    assert grn_repo.created is None
+
+
+def test_delivery_challan_keeps_its_photo(monkeypatch):
+    grn_repo = _FakeGRNRepo()
+    _patch_grn(monkeypatch, grn_repo, _FakePORepo())
+    photo = _challan_photo(monkeypatch)
+    grn = GRNCreate(
+        grn_subtype="DELIVERY_CHALLAN",
+        vendor_id="V1",
+        dc_number="DC-77",
+        dc_date="2026-06-16",
+        items=_std_items(),
+        **photo,
     )
     res = asyncio.run(create_grn(grn, current_user=_user()))
     assert res["grn_subtype"] == "DELIVERY_CHALLAN"
-    assert grn_repo.created is not None
-    # DC attachment is None at receipt (attached later at reconciliation).
-    assert grn_repo.created["attachment_file_id"] is None
+    assert grn_repo.created["attachment_file_id"] == photo["attachment_file_id"]
 
 
 # ---------------------------------------------------------------------------
@@ -315,6 +322,7 @@ def test_download_doc_streams_in_scope(monkeypatch):
     res = asyncio.run(
         download_grn_doc(
             "G1",
+            line=None,
             current_user=_user(store="BV-TEST-01", roles=("STORE_MANAGER",)),
         )
     )
@@ -335,6 +343,7 @@ def test_download_doc_cross_store_is_404(monkeypatch):
         asyncio.run(
             download_grn_doc(
                 "G1",
+                line=None,
                 current_user=_user(store="BV-TEST-01", roles=("STORE_MANAGER",)),
             )
         )
@@ -353,6 +362,7 @@ def test_delivery_challan_names_a_supplier_on_file(monkeypatch):
         dc_number="DC-99",
         dc_date="2026-06-16",
         items=_std_items(),
+        **_challan_photo(monkeypatch),
     )
     with pytest.raises(HTTPException) as exc:
         asyncio.run(create_grn(grn, current_user=_user()))

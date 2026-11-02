@@ -36,7 +36,10 @@ from .po_detail import (
     _received_by_product,
     _received_per_line,
     _refresh_received,
+    _reprice,
+    audit_change,
     beyond_open_quantity,
+    close_credited_short,
     puts_nothing_in_stock,
 )
 from .numbering import (
@@ -671,22 +674,53 @@ def refresh_po_received(po_repo, po_id, grn_id=None) -> tuple:
             # Each line's received qty + residual status (drives the
             # receiving cockpit's "open POs" / "pending not-received" panels).
             updated_items = [dict(it) for it in po.get("items") or []]
-            _refresh_received(
-                updated_items, _received_per_line(po, received_by_product)
+            received = _received_per_line(po, received_by_product)
+            # D9: a credited damaged piece closes its line short (once per
+            # receipt; a missed one is caught up here by the next refresh).
+            credit_grns, credit_events, credit_units = close_credited_short(
+                po, updated_items, received
             )
+            _refresh_received(updated_items, received)
             state = compute_po_receipt_state(updated_items, received_by_product)
-            if po_repo.update_if(
-                po_id,
-                _as_read(po),
-                {
-                    "status": state,
-                    "items": updated_items,
-                    "received_qty_by_product": received_by_product,
-                    "total_received_qty": sum(received_by_product.values()),
-                    "last_received_at": utc_now_iso(),
-                },
-            ):
+            patch = {
+                "status": state,
+                "items": updated_items,
+                "received_qty_by_product": received_by_product,
+                "total_received_qty": sum(received_by_product.values()),
+                "last_received_at": utc_now_iso(),
+            }
+            if credit_grns:
+                now = utc_now_iso()
+                patch["credit_closed_grns"] = [
+                    *(po.get("credit_closed_grns") or []),
+                    *credit_grns,
+                ]
+                if credit_units:
+                    # The cancel's own re-pricing: the money follows the units.
+                    patch.update(_reprice(po, updated_items))
+                    patch["history"] = [
+                        *(po.get("history") or []),
+                        *({**ev, "at": now} for ev in credit_events),
+                    ]
+            if po_repo.update_if(po_id, _as_read(po), patch):
                 po_status = state
+                if credit_units:
+                    # The cancel's audit row too (fail-soft, after the write).
+                    audit_change(
+                        po,
+                        "purchase_order.credit_close",
+                        credit_events[0].get("actor"),
+                        before={
+                            "quantities": [it.get("quantity") for it in po.get("items") or []],
+                            "total_amount": po.get("total_amount"),
+                        },
+                        after={
+                            "quantities": [it.get("quantity") for it in updated_items],
+                            "total_amount": patch.get("total_amount"),
+                            "units": credit_units,
+                            "grn_ids": credit_grns,
+                        },
+                    )
                 break
         else:
             logger.warning(

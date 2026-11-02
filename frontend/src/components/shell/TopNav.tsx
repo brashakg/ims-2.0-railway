@@ -18,6 +18,7 @@
 
 import { NavLink, useLocation } from 'react-router-dom';
 import {
+  Fragment,
   useCallback,
   useEffect,
   useMemo,
@@ -298,8 +299,16 @@ export function TopNav({ brand = 'bv' }: { brand?: 'bv' | 'wizopt' }) {
                   // unreachable while the box itself believed it fit.
                   style={ddPos ? { position: 'fixed', left: ddPos.left, top: ddPos.top, margin: 0, maxHeight: `calc(100dvh - ${ddPos.top}px - 12px)` } : undefined}
                 >
-                  {group.items.map((item) => (
-                    <DropdownItem key={item.id} item={item} onNavigate={closeAll} />
+                  {/* Section headings only on a long list (6+ rows for this
+                      role). aria-hidden: a role=menu may only hold menuitems,
+                      and the rows already say what they are. */}
+                  {group.items.map((item, i) => (
+                    <Fragment key={item.id}>
+                      {group.items.length >= 6 && item.section && item.section !== group.items[i - 1]?.section && (
+                        <div className="top-nav-dd-heading" aria-hidden="true">{item.section}</div>
+                      )}
+                      <DropdownItem item={item} onNavigate={closeAll} />
+                    </Fragment>
                   ))}
                 </div>
               )}

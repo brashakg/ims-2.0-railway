@@ -2936,6 +2936,12 @@ async def create_purchase_invoice(
     except Exception:
         pass
 
+    if db is not None:
+        # Pieces of this receipt written off before the bill came (a count,
+        # a damage) reverse the credit the bill just claimed on them.
+        from ..services.writeoff_itc import after_bill_booked
+
+        after_bill_booked(db, doc, current_user.get("user_id", ""))
     return _clean(doc)
 
 

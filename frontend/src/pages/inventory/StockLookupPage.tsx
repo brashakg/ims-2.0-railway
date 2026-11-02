@@ -7,11 +7,13 @@
 // server sends MRP and selling price only (GET /inventory/lookup builds its
 // answer from an allow-list), so there is no cost to hide here. The price
 // shown is the till's own (posPriceGuard), never a re-typed chain. Where the
-// till does not count a product a 0 would be a limit the till does not keep,
-// so the cell says 'Not stocked here' instead: the till's own line type
-// (mapCategory, imported) checked against the sale guard's own lists (the
-// server sends them) and the shop's `tracked` (it holds a unit of it). A lens is counted
-// by power in the Power Grid; only a role that may open it is sent there.
+// till does not count a product (a service) a 0 would be a limit the till does
+// not keep, so the cell says 'Not stocked here' instead: the till's own line
+// type (mapCategory, imported) checked against the sale guard's own lists (the
+// server sends them). Every other line the till limits to the shop's count, a
+// shop holding none included (POS 4: it refuses to sell from an empty shelf).
+// A lens is counted by power in the Power Grid; only a role that may open it
+// is sent there.
 
 import { useRef, useState, type FormEvent } from 'react';
 import { useQuery } from '@tanstack/react-query';
@@ -24,7 +26,7 @@ import { mapCategory } from '../../components/pos/submitOrder';
 import { useAuth } from '../../context/AuthContext';
 import { POWER_GRID_ROLES } from './inventoryRoles';
 
-interface ShopCount { store_id: string; store_name: string; available: number; in_transit: number; tracked: boolean }
+interface ShopCount { store_id: string; store_name: string; available: number; in_transit: number }
 interface LookupItem {
   product_id: string; sku?: string; name?: string; brand?: string; model?: string;
   category?: string; colour_code?: string; size?: string | number; mrp?: number; offer_price?: number;
@@ -85,7 +87,13 @@ export default function StockLookupPage() {
 
   return (
     <div className="p-4 md:p-6 max-w-6xl mx-auto">
-      <h1 className="text-xl font-semibold text-gray-900">Stock lookup</h1>
+      <div className="flex items-center justify-between gap-2">
+        <h1 className="text-xl font-semibold text-gray-900">Stock lookup</h1>
+        {/* The optometrist's door to Power Grid (no menu row since 2026-11-01). */}
+        {canOpenGrid && (
+          <Link to="/inventory/power-grid" className="text-sm text-blue-700 underline">Power Grid</Link>
+        )}
+      </div>
       <p className="text-sm text-gray-500 mb-4">
         Search by brand, model or SKU, or scan the barcode. Shows what the till can sell now at every shop.
       </p>
@@ -168,7 +176,7 @@ export default function StockLookupPage() {
                       const n = c?.available ?? 0;
                       return (
                         <td key={s.store_id} className={`px-3 py-2 text-center ${s.store_id === here ? 'bg-blue-50' : ''}`}>
-                          {c?.tracked && !notCounted.includes(lineType) ? (
+                          {!notCounted.includes(lineType) ? (
                             <span className={n > 0 ? 'font-semibold text-gray-900' : 'text-gray-400'}>{n}</span>
                           ) : (
                             <span className="text-xs text-gray-400">Not stocked here</span>

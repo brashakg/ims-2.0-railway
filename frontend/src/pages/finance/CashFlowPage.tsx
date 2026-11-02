@@ -15,7 +15,7 @@ import {
 import {
   cashFlowApi, vendorApApi,
   type OwnerDashboard, type CashFlowForecast, type ApAgingByVendor, type VendorLedger,
-  type VendorReceiptRow, type VendorBill, type VendorPayment,
+  type VendorReceiptRow, type VendorBill, type VendorPayment, type ExpenseType,
 } from '../../services/api/vendorAp';
 import { useToast } from '../../context/ToastContext';
 import { PurchaseShopName, usePurchaseShop } from '../purchase/purchaseShop';
@@ -487,8 +487,16 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
   // ACCEPTED receipts (a PO-backed GRN or a no-PO Delivery Challan).
   const [billKind, setBillKind] = useState<'' | 'GOODS' | 'SERVICES'>('');
   // Section 17(5) (owner + CA 2026-10-18): a services bill whose GST cannot be
-  // claimed (food, vehicles, club fees). Unticked by default.
+  // claimed (food, vehicles, club fees). Picking what the expense is for sets
+  // the tick to that type's default (the server's one table, owner 2026-10-24);
+  // the accountant can still change it.
   const [itcBlocked, setItcBlocked] = useState(false);
+  const [expenseTypes, setExpenseTypes] = useState<ExpenseType[] | null>(null);
+  const [expenseType, setExpenseType] = useState('');
+  const pickExpenseType = (value: string) => {
+    setExpenseType(value);
+    setItcBlocked(!!(expenseTypes ?? []).find((t) => t.value === value)?.blocked_by_default);
+  };
   // null = not loaded yet / load failed (distinct from a real empty list).
   const [receipts, setReceipts] = useState<VendorReceiptRow[] | null>(null);
   const [receiptsFailed, setReceiptsFailed] = useState(false);
@@ -513,6 +521,17 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
   // PO stock bill keeps its credit switch (Purchase > Invoices).
   const canTick175 = billKind === 'SERVICES' || (billKind === 'GOODS' && !!pickedReceipt && !pickedReceipt.po_id
     && (pickedReceipt.grn_subtype === 'NO_PO' || pickedReceipt.grn_subtype === 'DELIVERY_CHALLAN'));
+
+  useEffect(() => {
+    if (kind !== 'bill') return;
+    let cancelled = false;
+    // A failed load leaves no types: the tick stays the accountant's, unticked.
+    Promise.resolve()
+      .then(() => vendorApApi.listExpenseTypes())
+      .then((rows) => { if (!cancelled) setExpenseTypes(rows); })
+      .catch(() => { if (!cancelled) setExpenseTypes([]); });
+    return () => { cancelled = true; };
+  }, [kind]);
 
   useEffect(() => {
     if (kind !== 'bill' || billKind !== 'GOODS') return;
@@ -577,6 +596,10 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
       toast.error('Pick the goods receipt this bill settles — no receipt, no goods bill');
       return;
     }
+    if (kind === 'bill' && billKind === 'SERVICES' && !expenseType && (expenseTypes ?? []).length > 0) {
+      toast.error('Say what this expense is for');
+      return;
+    }
     if (kind === 'bill' && sendBillShop && !billShop) {
       toast.error('Pick the shop this bill is for');
       return;
@@ -593,6 +616,7 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
           grn_id: billKind === 'GOODS' ? receiptId : undefined,
           store_id: sendBillShop ? billShop : undefined,
           itc_blocked: canTick175 && itcBlocked,
+          expense_type: canTick175 && expenseType ? expenseType : undefined,
         });
         toast.success(bookedTo('Bill', saved, shopName));
       } else if (kind === 'payment') {
@@ -673,6 +697,20 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
           <input className={cls} type="date" defaultValue={today} onChange={(e) => set('bill_date', e.target.value)} />
           <input className={cls} type="number" placeholder="Taxable amount" onChange={(e) => set('taxable_amount', e.target.value)} />
           <input className={cls} type="number" placeholder="Tax (GST)" onChange={(e) => set('tax_amount', e.target.value)} />
+          {canTick175 && (
+            <select
+              className={`${cls} col-span-2`}
+              value={expenseType}
+              onChange={(e) => pickExpenseType(e.target.value)}
+              aria-label="What this expense is for"
+              data-testid="bill-expense-type"
+            >
+              <option value="">What is this expense for…</option>
+              {(expenseTypes ?? []).map((t) => (
+                <option key={t.value} value={t.value}>{t.label}{t.blocked_by_default ? ' (credit not claimable)' : ''}</option>
+              ))}
+            </select>
+          )}
           {canTick175 && (
             <label className="col-span-2 flex items-start gap-2 text-sm text-gray-700">
               <input type="checkbox" className="mt-1" checked={itcBlocked} onChange={(e) => setItcBlocked(e.target.checked)} data-testid="bill-itc-blocked" />

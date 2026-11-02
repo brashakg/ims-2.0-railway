@@ -110,6 +110,9 @@ _MARGIN_FIELDS = {
 _COST_DERIVED_FIELDS = {
     "variance_value", "shrinkage_value", "overage_value",
     "shrinkage_value_written_off",
+    # The GST input credit taken back on written-off stock (section 17(5)(h),
+    # services/writeoff_itc) -- a fraction of what we paid.
+    "itc_reversed",
     "costImpact", "deadStockValue", "recommendedRestockValue",
     "cost_paise", "spoilage_cost_paise", "spoilage_cost_mtd_paise",
     "variance_value_paise", "net_variance_value_paise",

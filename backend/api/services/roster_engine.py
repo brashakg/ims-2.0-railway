@@ -365,10 +365,12 @@ def coverage_for_roster(
 
 
 def _today_iso() -> str:
-    """Today's date as an ISO yyyy-mm-dd string (UTC), for the >= comparison
-    against a roster entry's `date`. Wrapped so callers can inject a fixed
-    `today` in tests."""
-    return datetime.now(timezone.utc).date().isoformat()
+    """Today's IST date as an ISO yyyy-mm-dd string, for the >= comparison
+    against a roster entry's `date` (the store's IST working day). Wrapped so
+    callers can inject a fixed `today` in tests."""
+    from ..utils.ist import ist_today
+
+    return ist_today().isoformat()
 
 
 def published_coverage_breaches(

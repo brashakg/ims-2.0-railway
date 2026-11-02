@@ -96,7 +96,6 @@ vi.mock('../../../constants/gstRuntime', () => ({
   resolveHsn: (c?: string | null) => (c === 'SG' ? '900410' : ''),
   resolveGstRate: () => 18,
 }));
-vi.mock('../../../services/api/buyDesk', () => ({ buyDeskApi: { getRows: vi.fn() } }));
 
 import { QuickAddPage } from '../QuickAddPage';
 import { loadCategoryRegistry } from '../../../domain/catalog/productAdd';

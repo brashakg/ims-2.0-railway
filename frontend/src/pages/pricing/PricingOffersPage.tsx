@@ -55,6 +55,17 @@ function CapChip({ row }: { row: BulkRowResult }) {
   if (!row.changed) {
     return <span className="inline-flex items-center rounded px-2 py-0.5 text-[11px] text-gray-400">Unchanged</span>;
   }
+  if (row.website_synced === false) {
+    return (
+      <span
+        title="The price is saved for billing, but the website copy was not updated. Save this product again."
+        className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium bg-amber-100 text-amber-800"
+      >
+        <AlertTriangle className="w-3 h-3" />
+        Website not updated
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-medium bg-green-100 text-green-800">
       <CheckCircle2 className="w-3 h-3" />
@@ -251,6 +262,9 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
       if (apply) {
         toast.success(`Applied ${res.summary.committed} price change${res.summary.committed === 1 ? '' : 's'}` +
           (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : ''));
+        if (res.summary.website_failed) {
+          toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
+        }
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Bulk price operation failed');
@@ -358,6 +372,9 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
       if (apply) {
         toast.success(`Applied ${res.summary.committed} offer change${res.summary.committed === 1 ? '' : 's'}` +
           (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : ''));
+        if (res.summary.website_failed) {
+          toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
+        }
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Bulk offer operation failed');

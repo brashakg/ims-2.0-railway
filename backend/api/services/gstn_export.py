@@ -536,13 +536,22 @@ def to_gstr3b_json(
     # ponytail: a blocked reverse-charge bill lands in 4(A)(5), not 4(A)(3);
     # same net, split it out if one is ever booked.
     blocked = {k: _num((data.get("itcBlocked") or {}).get(src)) for k, src in keys.items()}
+    # Section 17(5)(h): credit claimed earlier on stock written off this month.
+    # Already off itcAvailable (the net), so 4(A)(5) adds it back and 4(B)(1)
+    # reverses it, like a supplier note's reversal in 4(B)(2). A re-claim
+    # (itcWriteOffReclaimed) is already in itcAvailable, so 4(A)(5) carries it
+    # and 4(B)(1) holds reversals only -- never negative.
+    written_off = {k: _num((data.get("itcWriteOffReversed") or {}).get(src)) for k, src in keys.items()}
     itc_elg = {
         "itc_avl": [
-            {"ty": "OTH", **{k: round(itc_block[k] + reversal[k] + blocked[k] - isrc[k], 2) for k in keys}},
+            {"ty": "OTH", **{k: round(itc_block[k] + reversal[k] + blocked[k] + written_off[k] - isrc[k], 2) for k in keys}},
             {"ty": "ISRC", **isrc},
         ],
         "itc_net": dict(itc_block),
-        "itc_rev": [{"ty": "OTH", **reversal}, {"ty": "RUL", **blocked}],
+        "itc_rev": [
+            {"ty": "OTH", **reversal},
+            {"ty": "RUL", **{k: round(blocked[k] + written_off[k], 2) for k in keys}},
+        ],
         # 4(D) Ineligible ITC: (1) reclaimed credit (none here), (2) others --
         # the GST paid on purchase bills that claim no input credit (G3).
         # Section 17(5) blocked credit is 4(B)(1) above, never here.

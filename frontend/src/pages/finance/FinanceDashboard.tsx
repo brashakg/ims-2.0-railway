@@ -22,6 +22,7 @@ import type {
   VendorPaymentData,
 } from './financeTypes';
 import { financeApi } from '../../services/api/finance';
+import { istDayString } from '../../utils/datetime';
 import { NoShopNotice, hasNoShop } from '../../components/common/NoShopNotice';
 import { PurchaseShopLabel, PurchaseShopPicker, usePurchaseShop } from '../purchase/purchaseShop';
 import { mapGst, mapRevenue } from './financeUtils';
@@ -128,7 +129,7 @@ function mapVendorPayments(d: any): VendorPaymentData[] {
 // fabricated money). The Reconciliation tab + the Cash Flow "Bank Reconciliation
 // Status" block that consumed it are gone too.
 
-import FinanceFilters, { currentFyLabelIST } from './FinanceFilters';
+import FinanceFilters, { currentFyLabelIST, currentFyStartYearIST } from './FinanceFilters';
 import FinanceSummary from './FinanceSummary';
 import GSTPanel from './GSTPanel';
 import OutstandingPanel from './OutstandingPanel';
@@ -168,10 +169,9 @@ export default function FinanceDashboard() {
   const [activeTab, setActiveTab] = useState<TabType>('revenue-pl');
 
   // Date filters
-  const [dateFrom, setDateFrom] = useState(
-    new Date(new Date().getFullYear(), 3, 1).toISOString().split('T')[0] // Financial year start: April 1
-  );
-  const [dateTo, setDateTo] = useState(new Date().toISOString().split('T')[0]);
+  // IST financial year to date: 1 April of the current IST FY .. IST today.
+  const [dateFrom, setDateFrom] = useState(() => `${currentFyStartYearIST()}-04-01`);
+  const [dateTo, setDateTo] = useState(() => istDayString(new Date())!);
 
   // Data states
   const [revenueData, setRevenueData] = useState<RevenueData[]>([]);
@@ -277,8 +277,8 @@ export default function FinanceDashboard() {
 
       // Reflect the real period-lock state for the selected month.
       try {
-        const d = new Date(dateTo);
-        const ps = await financeApi.getPeriodStatus(d.getMonth() + 1, d.getFullYear());
+        const [y, m] = dateTo.split('-').map(Number);
+        const ps = await financeApi.getPeriodStatus(m, y);
         setPeriodLocked(!!ps?.locked);
       } catch {
         /* non-fatal */
@@ -286,7 +286,7 @@ export default function FinanceDashboard() {
 
       // P&L breakdowns + GST reconciliation (Phase 2/3 endpoints, fail-soft).
       try {
-        const d = new Date(dateTo);
+        const [y, m] = dateTo.split('-').map(Number);
         const [ps2, pc2, gr2] = await Promise.allSettled([
           // Not requested at all for a non-admin: the endpoint would 403, and
           // firing a call we know will be refused just to discard the answer
@@ -296,7 +296,7 @@ export default function FinanceDashboard() {
             : Promise.resolve({ stores: [] }),
           financeApi.getPnlByCategory({ from_date: dateFrom, to_date: dateTo, store_id: storeId }),
           canSeeWhatWePay
-            ? financeApi.getGstReconciliation({ month: d.getMonth() + 1, year: d.getFullYear() })
+            ? financeApi.getGstReconciliation({ month: m, year: y })
             : Promise.resolve({ registrations: [] }),
         ]);
         setPnlByStore(ps2.status === 'fulfilled' ? (ps2.value?.stores || []) : []);
@@ -370,11 +370,11 @@ export default function FinanceDashboard() {
       toast.error('Only accountants and admins can lock periods');
       return;
     }
-    const d = new Date(dateTo);
+    const [y, m] = dateTo.split('-').map(Number);
     try {
-      await financeApi.lockPeriod(d.getMonth() + 1, d.getFullYear());
+      await financeApi.lockPeriod(m, y);
       setPeriodLocked(true);
-      toast.success(`Period ${d.getMonth() + 1}/${d.getFullYear()} locked`);
+      toast.success(`Period ${m}/${y} locked`);
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Failed to lock period');
     }

@@ -229,8 +229,10 @@ class AgentScheduler:
                 if enabled:
                     self._add_fallback_task(agent, schedule_type, schedule_value)
 
-        # System job (not an agent): the twice-daily Shopify live-product sync.
+        # System jobs (not agents): the twice-daily Shopify live-product sync,
+        # and the sweep that frees till claims for bills never saved.
         self._add_live_sync_job()
+        self._add_claim_sweep_job()
 
         if APSCHEDULER_AVAILABLE and self._scheduler:
             if not getattr(self._scheduler, "running", False):
@@ -270,6 +272,27 @@ class AgentScheduler:
                 )
         except Exception as e:  # noqa: BLE001
             logger.error(f"[SCHEDULER] live-sync job not scheduled: {e}", exc_info=True)
+
+    def _add_claim_sweep_job(self):
+        """Every CLAIM_SWEEP_MINUTES, give back stock units a till claimed for
+        a bill the server died before writing (orders/stock.sweep_unsaved_claims,
+        idempotent). Lazy import and fail-soft, as the live-sync job."""
+        try:
+            from api.routers.orders import stock as _stock
+
+            job_id, minutes = "stock_claim_sweep", _stock.CLAIM_SWEEP_MINUTES
+            if APSCHEDULER_AVAILABLE and self._scheduler:
+                self._scheduler.add_job(
+                    _stock.scheduled_claim_sweep,
+                    trigger=IntervalTrigger(minutes=minutes),
+                    id=job_id,
+                    name="Unsaved-bill stock claim sweep",
+                    replace_existing=True,
+                )
+            else:
+                self._add_fallback_loop(job_id, _stock.scheduled_claim_sweep, minutes * 60)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"[SCHEDULER] claim-sweep job not scheduled: {e}", exc_info=True)
 
     def _start_leader_wait_loop(self):
         """Spawn the background leadership-retry task (idempotent)."""

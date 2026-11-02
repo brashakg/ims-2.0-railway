@@ -282,11 +282,11 @@ export default function OnlineProductsPage() {
     if (!canPush || pushingId) return;
     const ok = window.confirm(
       `Publish "${row.title}" to the website?\n\n` +
-        'When the live gates are armed this puts the product IN FRONT OF CUSTOMERS on ' +
-        'bettervision.in immediately. A product with no photograph is refused. ' +
+        'This puts the product IN FRONT OF CUSTOMERS on bettervision.in immediately. ' +
+        'A product with no photograph is refused. ' +
         'You can pull it back with "Take off website".\n\n' +
-        'If the live gates are off this runs as a dry-run (SIMULATED) and nothing reaches ' +
-        'the storefront.',
+        '(Only while website writes are switched off on the server is this a preview that ' +
+        'sends nothing - the banner above says which.)',
     );
     if (!ok) return;
     setPushingId(row.product_id);
@@ -494,7 +494,7 @@ export default function OnlineProductsPage() {
                               className="inline-flex items-center gap-1 rounded-lg border border-gray-300 bg-white px-2 py-1 text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-60"
                               title={
                                 r.staged
-                                  ? 'Send this product to the website (a dry-run unless the live gates are armed)'
+                                  ? 'Send this product to the website (bettervision.in) now'
                                   : 'Stage this product for the online store first — it has no ecom sub-doc'
                               }
                             >
@@ -541,8 +541,8 @@ export default function OnlineProductsPage() {
 
       <p className="mt-6 text-xs text-gray-400">
         Online Store module · Products / PIM. The catalog as it appears online. Sending to the
-        website is a dry-run (SIMULATED) unless the owner has armed the live gates — see the banner
-        above and the Shopify sync page.
+        website puts the product on bettervision.in; the banner above says if website writes are
+        switched off (then a send is only a preview).
       </p>
     </div>
   );

@@ -13,6 +13,7 @@ import { Link } from 'react-router-dom';
 import { Layers, ArrowLeft, RefreshCw, Loader2, Sparkles, ListChecks } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 import {
   collectionBrowseApi,
   type BrowseCollection,
@@ -77,13 +78,14 @@ export default function CollectionBrowsePage() {
       toast.success(`Recomputed membership: ${res.products_count} products`);
       loadPage(active, 0);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : 'Refresh failed';
-      toast.error(msg);
+      toast.error(getErrorMessage(e, 'Refresh failed'));
     } finally {
       setRefreshing(false);
     }
   };
 
+  // total null = the membership could not be read -- never shown as 0.
+  const unreadable = !!page && (page.unreadable === true || page.total == null);
   const total = page?.total ?? 0;
   const showingTo = Math.min(skip + PAGE_SIZE, total);
 
@@ -167,7 +169,9 @@ export default function CollectionBrowsePage() {
             <>
               <div className="flex items-center justify-between mb-3">
                 <p className="text-sm text-gray-500">
-                  {total === 0
+                  {unreadable
+                    ? 'The products in this collection could not be read just now - the last membership stands. Try again shortly.'
+                    : total === 0
                     ? 'No products in this collection.'
                     : `Showing ${skip + 1}–${showingTo} of ${total}`}
                 </p>
@@ -176,7 +180,7 @@ export default function CollectionBrowsePage() {
                 <div className="card p-10 text-center text-gray-400">
                   <Loader2 size={20} className="animate-spin mx-auto" />
                 </div>
-              ) : !page || page.products.length === 0 ? (
+              ) : unreadable ? null : !page || page.products.length === 0 ? (
                 <div className="card p-10 text-center text-gray-400">Empty collection.</div>
               ) : (
                 <>

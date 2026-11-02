@@ -68,6 +68,16 @@ export interface ExpressReceiveResult {
 // ---- API -------------------------------------------------------------------
 
 export const grnCockpitApi = {
+  /** A receipt's document -- or, with `line`, that line's damaged-piece photo
+   *  (the debit note's evidence). The accounts roles' (GET /grn/{id}/document). */
+  getDocument: async (grnId: string, line?: number): Promise<Blob> => {
+    const res = await api.get(`/vendors/grn/${encodeURIComponent(grnId)}/document`, {
+      params: line == null ? undefined : { line },
+      responseType: 'blob',
+    });
+    return res.data as Blob;
+  },
+
   /**
    * Upload a vendor invoice / delivery challan image or PDF.
    * MUST be called before a STANDARD or bought-without-PO receipt.

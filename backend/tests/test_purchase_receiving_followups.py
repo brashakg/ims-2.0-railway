@@ -29,6 +29,8 @@ def test_manager_receives_extra_after_full_receipt_with_unit_audit(world, delive
             dc_date="2026-10-18", items=[vd.GRNItemCreate(
                 product_id=pid, received_qty=1, accepted_qty=1, tallied=True,
             )],
+            # S2b: a challan is received only with its photo.
+            attachment_file_id="F-RECEIPT-PHOTO",
         ), MANAGER))
         accepted = _run(vd.accept_grn(receipt["grn_id"], MANAGER))
     else:

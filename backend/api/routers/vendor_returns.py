@@ -505,18 +505,26 @@ def _not_ready_to_ship(db, return_doc) -> Optional[str]:
 
 def _ship_pieces(db, return_doc, actor_id) -> List[str]:
     """Every piece the return names leaves stock for good: QUARANTINED -> RTV
-    through the ledger. Returns the labels of the pieces that did not move."""
+    through the ledger. Returns the labels of the pieces that did not move.
+    A piece that left drops any write-off reversal still on it (a damage cut
+    off after its reversal): the supplier's credit note takes that credit
+    back, so it must not be reversed twice (services/writeoff_itc)."""
+    from ..services.writeoff_itc import undo_writeoff
+
     rid = return_doc.get("return_id")
     units = _named_units(db, return_doc)
     stuck = []
     for sid in return_doc.get("stock_ids") or []:
         unit = units.get(sid)
         if unit is not None and _ie.canonical_state(unit.get("status")) is _STATE.RTV:
+            undo_writeoff(db, unit)
             continue
         if unit is None or not _ledger_move(db, unit, _STATE.QUARANTINED, _STATE.RTV,
                                             _ie.ItemEventType.QUARANTINE_OUT, rid, actor_id,
                                             {"disposition": "RTV"}):
             stuck.append(_label(unit, sid))
+        else:
+            undo_writeoff(db, unit)
     if stuck:
         logger.error("[VENDOR_RETURN] %s: pieces did not move to RTV: %s", rid, stuck)
     return stuck

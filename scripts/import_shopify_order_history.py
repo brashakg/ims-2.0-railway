@@ -192,7 +192,8 @@ def is_real_order(o: Dict[str, Any]) -> bool:
 def _map_for_report(payload: Dict[str, Any], db) -> Dict[str, Any]:
     """Compute the tax-accurate figures for the dry-run report by REUSING the exact
     mapping the ingest would run (variant->sku enrich, then _map_line_items's
-    inclusive-GST split) -- WITHOUT writing anything. Returns grand_total, the
+    inclusive-GST split + the shipping line, _with_shipping) -- WITHOUT writing
+    anything. Returns grand_total, the
     per-GST-rate breakdown and the mapped-item count."""
     from api.services import online_order_mapper, shopify_ingest
 
@@ -207,7 +208,9 @@ def _map_for_report(payload: Dict[str, Any], db) -> Dict[str, Any]:
     except Exception:  # noqa: BLE001
         product_repo = None
 
-    items = shopify_ingest._map_line_items(payload, product_repo)
+    items, _ = shopify_ingest._with_shipping(
+        payload, shopify_ingest._map_line_items(payload, product_repo)
+    )
     taxable = round(sum(shopify_ingest._f(i.get("taxable_value")) for i in items), 2)
     tax = round(sum(shopify_ingest._f(i.get("tax_amount")) for i in items), 2)
     grand_total = round(taxable + tax, 2)
@@ -314,22 +317,6 @@ def _is_bvi_shadow(doc: Optional[Dict[str, Any]]) -> bool:
     return False
 
 
-def _shipping_total(o: Dict[str, Any]) -> float:
-    """Sum of a Shopify order's shipping_lines (the shipping the buyer paid).
-    IMS's line-items-only grand_total deliberately does NOT map shipping (the live
-    ingest path doesn't either -- adding it would change the tax math), so this is
-    reported as a known UNDERSHOOT vs the Shopify-collected total, never booked."""
-    total = 0.0
-    for sl in o.get("shipping_lines") or []:
-        if not isinstance(sl, dict):
-            continue
-        try:
-            total += float(sl.get("price") or 0)
-        except (TypeError, ValueError):
-            continue
-    return total
-
-
 def _match_customer_readonly(db, payload: Dict[str, Any]) -> Optional[str]:
     from api.services import online_order_mapper
 
@@ -402,7 +389,6 @@ def run(
     unmatched_customer = 0
     matched_customer = 0
     grand_total_sum = 0.0
-    shipping_undershoot = 0.0
     refunded_orders = 0
     partially_refunded_orders = 0
     refunds_mappable = 0
@@ -439,7 +425,6 @@ def run(
         else:
             would_insert += 1
         grand_total_sum += report["grand_total"]
-        shipping_undershoot += _shipping_total(o)
         fin = str(o.get("financial_status") or "").strip().lower()
         if fin == "refunded":
             refunded_orders += 1
@@ -508,12 +493,6 @@ def run(
             f"{preview}{more}"
         )
     print("")
-    # P3: shipping is NOT mapped into grand_total (the live ingest path doesn't map
-    # it either; adding it would change the tax math). Report the undershoot so the
-    # Rs 23,14,013 sanity target is compared like-for-like (line-items-only).
-    print(
-        f"  shipping NOT booked (line-items-only undershoot): Rs {shipping_undershoot:,.2f}"
-    )
     if refunded_orders or partially_refunded_orders:
         # SIMULATED line-mapping (same mapper the ingest uses) -- an honest CDNR
         # forecast, not an unconditional claim. Amount-only refunds on a
@@ -579,7 +558,6 @@ def run(
         "residual_refund_order_ids": residual_refund_order_ids,
         "partially_paid_orders": partially_paid_orders,
         "partially_paid_outstanding": round(partially_paid_outstanding, 2),
-        "shipping_undershoot": round(shipping_undershoot, 2),
         "grand_total_sum": round(grand_total_sum, 2),
         "applied": apply,
     }

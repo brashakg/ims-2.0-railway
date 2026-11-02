@@ -192,6 +192,6 @@ describe('SimilarProductsHint asks with the form as typed', () => {
     mockHook.mockReturnValue({ armed: false, data: null });
     const attributes = { brand_name: 'Acuvue', colour_name: 'Hazel', pack: '6' };
     renderHint({ category: 'CCL', attributes });
-    expect(mockHook).toHaveBeenCalledWith({ category: 'CCL', attributes });
+    expect(mockHook).toHaveBeenCalledWith({ category: 'CCL', attributes, selfId: null });
   });
 });

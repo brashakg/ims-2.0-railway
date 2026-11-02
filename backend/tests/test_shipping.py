@@ -551,3 +551,26 @@ def test_track_unknown_shipment_404(ctx):
         headers={"Authorization": f"Bearer {tok}"},
     )
     assert r.status_code == 404
+
+
+def test_book_ships_to_the_orders_own_shipping_address(ctx):
+    """An online order carries the address the buyer typed at checkout: the
+    courier gets THAT, not whatever the customer record says."""
+    ctx["order_repo"]._order["shipping_address"] = {
+        "name": "Ravi Kumar", "address1": "12 MG Road", "address2": "Flat 3",
+        "city": "Pune", "province": "Maharashtra", "zip": "411001",
+        "phone": "+919800000000",
+    }
+    tok = _staff_token(["STORE_MANAGER"])
+    r = ctx["client"].post(
+        "/api/v1/shipping/shipments",
+        json={"order_id": "ORD-1"},
+        headers={"Authorization": f"Bearer {tok}"},
+    )
+    assert r.status_code == 201
+    ship_to = ctx["shipments_coll"].docs[0]["ship_to"]
+    assert ship_to["pincode"] == "411001"
+    assert ship_to["city"] == "Pune"
+    assert ship_to["state"] == "Maharashtra"
+    assert ship_to["address"] == "12 MG Road, Flat 3"
+    assert ship_to["phone"] == "+919800000000"

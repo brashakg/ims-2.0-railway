@@ -587,9 +587,12 @@ async def list_units(
     store_id: Optional[str] = Query(None),
     product_id: Optional[str] = Query(None),
     grn_id: Optional[str] = Query(None),
+    rejected: bool = Query(False),
     current_user: dict = Depends(get_current_user),
 ):
     """Every serialised unit of one product -- or of one goods receipt -- at a shop.
+    With `rejected` (S2b), a receipt's REJECTED pieces instead: the ones in
+    quarantine that take the red DO NOT SHELVE label.
 
     The ledger is one row per product; receiving mints one stock_unit, with its
     own barcode, per physical piece. This is where those pieces are listed and
@@ -599,6 +602,8 @@ async def list_units(
     """
     if not product_id and not grn_id:
         raise HTTPException(status_code=400, detail="Provide product_id or grn_id")
+    if rejected and not grn_id:
+        raise HTTPException(status_code=400, detail="rejected lists one receipt's pieces: provide grn_id")
     flt: Dict = {}
     # A receipt's units sit at the shop it was received into, which need not be
     # the caller's active store (an admin receiving for another shop). Without
@@ -620,7 +625,7 @@ async def list_units(
         flt["source_id"] = grn_id
         # Receipt labels cover accepted goods. Rejected physical custody has
         # its own quarantine label and must not inflate this receipt list.
-        flt["receipt_disposition"] = {"$ne": "REJECTED"}
+        flt["receipt_disposition"] = "REJECTED" if rejected else {"$ne": "REJECTED"}
     # "In the shop" (the only units a label is for) is the ONE physical rule,
     # item_events.on_hand_match / is_on_hand with include_reserved=True: on the
     # shelf or reserved for an order. The ledger's "N units" (stock + reserved)
@@ -675,6 +680,7 @@ async def list_units(
                 d.get("received_at") or d.get("created_at")
             ),
             "barcode_printed": bool(d.get("barcode_printed")),
+            "quarantine_label_printed": bool(d.get("quarantine_label_printed")),
             # The supplier-return form picks from these: a piece rejected at
             # receiving belongs to its own return draft; dated stock goes
             # earliest expiry first.

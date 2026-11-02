@@ -237,6 +237,19 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/online-store/menus",
         "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
     },
+    # The GENERATED website menu (owner 2026-10-29, services/generated_menu):
+    # read its template + live preview with the menus role set; only ADMIN /
+    # SUPERADMIN edit the template. Pushing it is push/menu/{menu_id} below.
+    {
+        "method": "GET",
+        "path": "/api/v1/online-store/menus/generated",
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "DESIGN_MANAGER", "SUPERADMIN"],
+    },
+    {
+        "method": "PUT",
+        "path": "/api/v1/online-store/menus/generated/{menu_id}/template",
+        "allowed": ["ADMIN", "SUPERADMIN"],
+    },
     {
         "method": "GET",
         "path": "/api/v1/online-store/menus/{menu_id}",

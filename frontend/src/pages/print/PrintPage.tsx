@@ -139,7 +139,7 @@ const TEMPLATES: PrintTemplate[] = [
       ['eway.number', 'GST portal'],
       ['transport.vehicle', 'logistics'],
     ],
-    trigger: { type: 'route', to: '/inventory/replenishment', label: 'Open Inventory → Transfers → Print challan' },
+    trigger: { type: 'route', to: '/inventory/transfers', label: 'Open Inventory → Transfers → Print challan' },
   },
   {
     id: 'credit',

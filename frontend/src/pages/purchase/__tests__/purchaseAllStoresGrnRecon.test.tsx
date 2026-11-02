@@ -151,6 +151,13 @@ const openCard = async (po: string) => {
   await screen.findByText(/What arrived/);
 };
 const receive = () => fireEvent.click(screen.getByRole('button', { name: /^Receive \d+ piece/ }));
+/** S2b: a challan is received only with its photo (no paper, no stock). */
+const attachChallan = async () => {
+  fireEvent.change(document.querySelector('input[type="file"]') as HTMLInputElement, {
+    target: { files: [new File(['jpg'], 'challan.jpg', { type: 'image/jpeg' })] },
+  });
+  await screen.findByText('bill.pdf');
+};
 
 describe('F63: Receive goods on All stores -- the inbox reads what the history reads', () => {
   it("an admin on All stores sees every shop's open orders, each naming the shop it delivers to", async () => {
@@ -204,6 +211,7 @@ describe('F63: Receive goods on All stores -- the inbox reads what the history r
     fireEvent.click(screen.getByLabelText(/Delivery challan, invoice comes later/));
     fireEvent.change(screen.getByLabelText('Challan no. *'), { target: { value: 'DC/26/09/4' } });
     fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    await attachChallan();
     receive();
     await waitFor(() =>
       expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('This order delivers to another shop')),
@@ -216,6 +224,7 @@ describe('F63: Receive goods on All stores -- the inbox reads what the history r
     fireEvent.click(screen.getByLabelText(/Delivery challan, invoice comes later/));
     fireEvent.change(screen.getByLabelText('Challan no. *'), { target: { value: 'DC/26/09/4' } });
     fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    await attachChallan();
     receive();
     await waitFor(() => expect(http.post).toHaveBeenCalledWith('/vendors/grn', expect.anything()));
     expect((http.post.mock.calls[0][1] as { po_id: string }).po_id).toBe('po-dhn-3');
@@ -241,6 +250,7 @@ describe('F63: Receive goods on All stores -- the inbox reads what the history r
     fireEvent.change(screen.getByPlaceholderText(/Search a product to add/i), { target: { value: 'frame' } });
     fireEvent.click(await screen.findByText('Acme Aviator', {}, { timeout: 3000 }));
     fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    await attachChallan();
     receive();
     await waitFor(() => expect(http.post).toHaveBeenCalledWith('/vendors/grn', expect.anything()));
     expect(toast.error).not.toHaveBeenCalled();
@@ -265,6 +275,7 @@ describe('F63: Receive goods on All stores -- the inbox reads what the history r
     fireEvent.change(screen.getByPlaceholderText(/Search a product to add/i), { target: { value: 'frame' } });
     fireEvent.click(await screen.findByText('Acme Aviator', {}, { timeout: 3000 }));
     fireEvent.click(screen.getByLabelText(/I counted line 1/));
+    await attachChallan();
     receive();
     await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringContaining('recorded at your own shop')));
     expect(http.post).not.toHaveBeenCalled();

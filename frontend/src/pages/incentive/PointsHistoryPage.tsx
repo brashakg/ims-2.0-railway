@@ -11,6 +11,7 @@ import { useToast } from '../../context/ToastContext';
 import type { PointsLog } from '../../types';
 import { EligibilityChip } from './DailyScorecardPage';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { istDayString } from '../../utils/datetime';
 
 const CATEGORY_KEYS = [
   'attendance', 'conversion', 'task', 'visufit', 'punctuality',
@@ -21,7 +22,7 @@ export function PointsHistoryPage() {
   const { staffId = '' } = useParams<{ staffId: string }>();
   const toast = useToast();
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = istDayString(new Date())!;
   const monthStart = today.slice(0, 7) + '-01';
 
   const [dateFrom, setDateFrom] = useState(monthStart);

@@ -529,9 +529,6 @@ class TestSpinePutCorrectionsClassification:
         monkeypatch.setattr(
             products_mod._pm, "apply_restamp_atomic", lambda *a, **k: {}
         )
-        monkeypatch.setattr(
-            products_mod, "_refresh_collections_after_product", lambda *a, **k: None
-        )
         recorder = _RecorderAuditRepo()
         monkeypatch.setattr(deps_mod, "get_audit_repository", lambda: recorder)
         monkeypatch.setattr(deps_mod, "get_db", lambda: None)

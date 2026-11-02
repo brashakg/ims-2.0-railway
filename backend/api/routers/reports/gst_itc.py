@@ -263,6 +263,56 @@ def _itc_match(shops, entity_id, store_gstin, year, mon, last_day, db=None) -> d
     return match
 
 
+def _filings(db):
+    """Every GSTR-3B filing as (entity_id, gstin, shops): once per company and
+    GSTIN (one GSTIN, one filing), a shop with no GSTIN alone; a shop with no
+    company files nothing. _itc_unplaced and bill_return_gstin walk it."""
+    gstins = shop_gstins(db)
+    by_gstin: dict = {}
+    for sid, g in gstins.items():
+        if g:
+            by_gstin.setdefault(g, []).append(sid)
+    seen = set()
+    for st in db["stores"].find({}, {"_id": 0, "store_id": 1, "entity_id": 1}):
+        eid = st.get("entity_id")
+        if not eid:
+            continue
+        g = gstins.get(st.get("store_id"), "")
+        if (eid, g or st.get("store_id")) in seen:
+            continue
+        seen.add((eid, g or st.get("store_id")))
+        yield eid, g, by_gstin.get(g) or [st.get("store_id")]
+
+
+def bill_return_gstin(db, bill):
+    """THE GSTIN whose GSTR-3B Table 4 counts this bill's input credit: the one
+    filing whose _itc_match, for the bill's own month, holds the bill -- so
+    _placement's rule exactly (recipient_gstin, else a transfer mirror's
+    receiving shop's GSTIN, else a legacy bill's inferred one).
+    '' when the bill carries credit yet no return places it (an ambiguous
+    legacy bill, a mirror into a shop with no GSTIN): the unallocated-credit
+    checks list it. None when Table 4 never counts it (cancelled, credit off,
+    a 17(5) tick, an invalid supplier GSTIN -- _itc_match's own filters)."""
+    import calendar
+
+    months = sorted({d[:7] for d in (bill.get("invoice_date"), bill.get("bill_date")) if _dated(d)})
+    for ym in months:
+        year, mon = int(ym[:4]), int(ym[5:7])
+        last_day = calendar.monthrange(year, mon)[1]
+        for eid, g, filing_shops in _filings(db):
+            if not g:
+                continue  # a shop with no GSTIN files no return: places nothing
+            match = _itc_match(filing_shops, eid, g, year, mon, last_day, db)
+            if db["vendor_bills"].find_one({**match, "_id": bill.get("_id")}, {"_id": 1}):
+                return g
+    if (bill.get("status") in _DEAD_BILL or bill.get("itc_eligible") is False
+            or bill.get("itc_blocked") is True
+            or ("vendor_gstin" in bill
+                and not itc_claimable(bill.get("vendor_gstin"), bill.get("reverse_charge")))):
+        return None
+    return ""
+
+
 def _gstin_bound(shops, store_gstin) -> dict:
     """The GSTIN-BOUND part of a return (R1): bills received on this GSTIN,
     plus GSTIN-less transfer mirrors received at any shop carrying it. The
@@ -448,25 +498,9 @@ def _itc_unplaced(db, year, mon, last_day, entity_id=None, shops=None) -> dict:
 
     days = set(_month_days(year, mon, last_day))
     try:
-        gstins = shop_gstins(db)
-        by_gstin: dict = {}
-        for sid, g in gstins.items():
-            if g:
-                by_gstin.setdefault(g, []).append(sid)
         placed = set()
-        filings = set()
-        for st in db["stores"].find({}, {"_id": 0, "store_id": 1, "entity_id": 1}):
-            eid = st.get("entity_id")
-            if not eid:
-                continue
-            g = gstins.get(st.get("store_id"), "")
-            filing = (eid, g or st.get("store_id"))
-            if filing in filings:
-                continue  # one GSTIN, one filing: same placement
-            filings.add(filing)
-            match = _itc_match(
-                by_gstin.get(g) or [st.get("store_id")], eid, g, year, mon, last_day, db
-            )
+        for eid, g, filing_shops in _filings(db):
+            match = _itc_match(filing_shops, eid, g, year, mon, last_day, db)
             placed.update(
                 b.get("bill_id")
                 for b in db["vendor_bills"].find(match, {"_id": 0, "bill_id": 1})
@@ -687,6 +721,74 @@ def _transfer_b2b_rows(bills):
                 }
             )
     return rows, hsn_lines
+
+
+# S3 (CA answers 2026-10-23): a short delivery on an inter-GSTIN transfer is
+# the value received + a CREDIT NOTE on the transfer's tax invoice. The note
+# sits in vendor_bills beside the invoice (doc_type below, negative amounts),
+# so _transfer_outward_bills returns both; GSTR-1 files the invoice under B2B
+# and the note under CDNR, GSTR-3B nets the note like any credit note.
+TRANSFER_CREDIT_NOTE = "TRANSFER_CREDIT_NOTE"
+
+
+def _split_transfer_bills(bills):
+    """(invoices, credit notes) of the sender-side transfer bills. Pure."""
+    notes = [b for b in bills if isinstance(b, dict) and b.get("doc_type") == TRANSFER_CREDIT_NOTE]
+    invoices = [b for b in bills if isinstance(b, dict) and b.get("doc_type") != TRANSFER_CREDIT_NOTE]
+    return invoices, notes
+
+
+def _transfer_cdnr_rows(notes):
+    """GSTR-1 CDNR rows of the sender's transfer credit notes. Pure.
+
+    The stored note is negative (so sums over vendor_bills net it); a CDNR
+    row states the note's amounts as positives, like every other credit note
+    (reports gstr1 subtracts each row's hsnLines from the HSN summary)."""
+    rows = []
+    for b in notes:
+        mag = {k: round(-float(b.get(f) or 0), 2) for k, f in (
+            ("taxable", "taxable_amount"), ("cgst", "cgst_total"),
+            ("sgst", "sgst_total"), ("igst", "igst_total"))}
+        tax = round(mag["cgst"] + mag["sgst"] + mag["igst"], 2)
+        gstin = str(b.get("recipient_gstin") or "").strip()
+        state = str(b.get("supply_place_recipient") or "").strip() or gstin[:2]
+        hsn_lines = [
+            {
+                "hsn": str(ln.get("hsn") or "9004"),
+                "gst_rate": float(ln.get("gst_rate") or 0),
+                "taxable": round(-float(ln.get("taxable") or 0), 2),
+                "cgst": round(-float(ln.get("cgst") or 0), 2),
+                "sgst": round(-float(ln.get("sgst") or 0), 2),
+                "igst": round(-float(ln.get("igst") or 0), 2),
+            }
+            for ln in b.get("lines") or []
+            if isinstance(ln, dict)
+        ]
+        first = hsn_lines[0] if hsn_lines else {}
+        rows.append({
+            "refReference": str(b.get("invoice_number") or b.get("bill_number") or ""),
+            "creditNoteDate": str(b.get("invoice_date") or b.get("bill_date") or "")[:10],
+            "noteType": "C",
+            "customerName": str(b.get("recipient_name") or ""),
+            "customerGSTIN": gstin,
+            "customerState": state,
+            "placeOfSupply": state,
+            "placeOfSupplyCode": state,
+            "grossValue": round(mag["taxable"] + tax, 2),
+            "taxableValue": mag["taxable"],
+            "cgst": mag["cgst"],
+            "sgst": mag["sgst"],
+            "igst": mag["igst"],
+            "taxValue": tax,
+            "hsnCode": first.get("hsn", ""),
+            "gstRate": first.get("gst_rate", 0),
+            "hsnLines": hsn_lines,
+            "documentType": "STOCK_TRANSFER",
+            "originalInvoiceNumber": b.get("original_invoice_number"),
+            "originalInvoiceDate": str(b.get("original_invoice_date") or "")[:10],
+            "sourceTransferId": b.get("source_transfer_id"),
+        })
+    return rows
 
 
 def _return_supply(db, ret, store, cache) -> tuple:

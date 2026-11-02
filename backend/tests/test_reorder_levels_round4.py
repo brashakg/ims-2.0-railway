@@ -64,39 +64,38 @@ def test_owner_digest_counts_out_of_stock_by_the_on_hand_rule(world):
 # ---------------------------------------------------------------------------
 
 
-def test_one_top_up_for_oracle_report_feed_and_jarvis(world):
-    from agents.predictive_reorder import recommended_qty
+def test_one_buy_for_the_list_report_and_jarvis(world):
+    """S5 (owner 2026-10-22/23): ONE buy rule, reorder_policy.buy_qty -- the
+    Reorder list, the purchase report and Jarvis all say the same number. The
+    low-stock feed is a list of low products, not a second buy number."""
     from api.routers import jarvis
-    from api.services.reorder_policy import top_up
+    from api.services.reorder_policy import buy_qty
 
     world.products.insert_one(_product("P-TOP5", **_levels({DHN: 5})))
     world.stock_units.insert_many(_units("P-TOP5", DHN, 2))
     world.orders.insert_many(_orders("P-TOP5", DHN, 2))  # slow: only the level recommends
-    want = top_up(5, 2)
-    assert want == 4
-    # ORACLE's order floor: a negligible burn rate leaves only the level's gap.
-    assert recommended_qty(on_hand=2, effective_rate=0.01, horizon_days=14,
-                           lead_time_days=7, reorder_point=5) == want
+    doc = world.products.find_one({"product_id": "P-TOP5"})
+    want, basis = buy_qty(doc, store_id=DHN, on_hand=2, sold_30d=2)
+    assert (want, basis) == (4, "level")  # back to one above the level
     body = _get("/api/v1/reports/purchase/recommendations", store_id=DHN, min_velocity=2)
     assert [r["suggested_order_qty"] for r in body["recommendations"]
             if r["product_id"] == "P-TOP5"] == [want]
     feed = _get("/api/v1/inventory/low-stock", store_id=DHN)["items"]
-    assert [i["top_up_qty"] for i in feed if i["product_id"] == "P-TOP5"] == [want]
+    assert [i for i in feed if i["product_id"] == "P-TOP5"]
+    assert all("top_up_qty" not in i for i in feed)
     inv = jarvis.JarvisAnalyticsEngine._compute_inventory_live() or {}
     recs = [r for r in inv.get("reorder_recommendations") or []
             if r.get("sku") == "SKU-P-TOP5"]
     assert [r["recommended_order"] for r in recs] == [want]
 
 
-def test_oracle_floor_is_the_level_only_when_a_level_is_set():
-    from agents.predictive_reorder import recommended_qty
+def test_the_buy_rule_reads_a_level_of_zero_as_real():
+    from api.services.reorder_policy import buy_qty
 
-    # Not set: velocity only, never a floor from a fake 0 level.
-    assert recommended_qty(on_hand=0, effective_rate=0.0, horizon_days=14,
-                           lead_time_days=7, reorder_point=None) == 1
-    # Level 0 is real: alert once sold out, order one above it.
-    assert recommended_qty(on_hand=0, effective_rate=0.0, horizon_days=14,
-                           lead_time_days=7, reorder_point=0) == 1
+    # Not set and nothing sold: nothing to go by, nothing to buy.
+    assert buy_qty(_product("P"), store_id=DHN, on_hand=0) == (0, None)
+    # Level 0 is real: sold out -> order one above it (pack of 2 rounds up).
+    assert buy_qty(_product("P", **_levels({DHN: 0})), store_id=DHN, on_hand=0) == (2, "level")
 
 
 def test_jarvis_value_at_risk_uses_the_top_up(world):
