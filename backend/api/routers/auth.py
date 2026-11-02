@@ -452,18 +452,26 @@ def _derive_session_start(payload: dict) -> Optional[int]:
     return None
 
 
-def _mint_access_token(token_data: dict) -> Tuple[str, int]:
+def _mint_access_token(
+    token_data: dict, not_after: Optional[float] = None
+) -> Tuple[str, int]:
     """Mint an access token whose exp NEVER crosses the absolute session cap
-    (sess_start + REFRESH_ABSOLUTE_HOURS). Returns (token, lifetime_seconds).
+    (sess_start + REFRESH_ABSOLUTE_HOURS), nor ``not_after`` (epoch seconds)
+    when given. Returns (token, lifetime_seconds).
     Raises 401 when the cap has already passed. Claims without sess_start
     (pre-deploy tokens, direct test mints) get the plain 45-min lifetime."""
     lifetime = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     sess_start = token_data.get("sess_start")
+    caps = []
     if sess_start:
-        cap_at = datetime.utcfromtimestamp(float(sess_start)) + timedelta(
-            hours=REFRESH_ABSOLUTE_HOURS
+        caps.append(
+            datetime.utcfromtimestamp(float(sess_start))
+            + timedelta(hours=REFRESH_ABSOLUTE_HOURS)
         )
-        remaining = cap_at - datetime.utcnow()
+    if not_after:
+        caps.append(datetime.utcfromtimestamp(float(not_after)))
+    if caps:
+        remaining = min(caps) - datetime.utcnow()
         if remaining.total_seconds() <= 0:
             raise HTTPException(
                 status_code=401, detail="Session expired. Please log in again."
@@ -1723,7 +1731,14 @@ async def switch_store(store_id: str, current_user: dict = Depends(get_current_u
     if current_user.get("sid"):
         token_data["sid"] = current_user["sid"]
 
-    new_token, _expires_in = _mint_access_token(token_data)
+    # Keep the current token's exp: the refresh token is NOT rotated here, so
+    # the client's proactive refresh (exp - 5 min) must still fire inside the
+    # server's idle limit, which runs from the refresh token's last rotation.
+    # A fresh 45 min would push that refresh past the limit and sign out an
+    # ACTIVE user who switched store mid-session.
+    new_token, _expires_in = _mint_access_token(
+        token_data, not_after=current_user.get("exp")
+    )
 
     return {"access_token": new_token, "active_store_id": store_id}
 

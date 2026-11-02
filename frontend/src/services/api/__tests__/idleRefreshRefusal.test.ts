@@ -76,4 +76,39 @@ describe('api client refresh check', () => {
     expect(window.location.href).toBe('/login?reason=idle');
     expect(mem.has('ims_refresh_token')).toBe(false);
   });
+
+  it('an idle-refused refresh token is never presented again', async () => {
+    // Proactive path: the access token is still valid when the server says
+    // SESSION_IDLE. Re-presenting the dead token would trip the reuse canary
+    // (plain-string 401) and lose the idle landing.
+    mem.set('ims_token', fakeJwt({ exp: Math.floor(Date.now() / 1000) + 120 }));
+    mem.set('ims_refresh_token', 'r');
+    stored.value = Date.now();
+    const refusal = (detail: unknown) =>
+      new AxiosError('401', '401', undefined, undefined, {
+        data: { detail },
+        status: 401,
+        statusText: '401',
+        headers: {},
+        config: {} as InternalAxiosRequestConfig,
+      });
+    const post = vi
+      .spyOn(axios, 'post')
+      .mockRejectedValueOnce(refusal({ code: 'SESSION_IDLE', message: 'idle' }))
+      .mockRejectedValue(refusal('Refresh token already used; session revoked.'));
+
+    await api.get('/x', { adapter: async (c) => respond(c, 200, {}) });
+    await vi.waitFor(() => expect(post).toHaveBeenCalledTimes(1));
+    await new Promise((r) => setTimeout(r, 0));
+
+    // The access token then dies: the 401 must not re-present 'r'.
+    mem.set('ims_token', fakeJwt({ exp: Math.floor(Date.now() / 1000) - 60 }));
+    const unauthorized = async (c: InternalAxiosRequestConfig) => {
+      throw new AxiosError('401', '401', c, undefined, respond(c, 401, { detail: 'expired' }));
+    };
+    await expect(api.get('/y', { adapter: unauthorized })).rejects.toBeTruthy();
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(window.location.href).toBe('/login?reason=idle');
+  });
 });

@@ -139,8 +139,9 @@ export function shouldProactivelyRefresh(
 // share ONE network refresh so the single-use rotating token isn't raced
 // within this tab (cross-tab races are absorbed by the server's grace window).
 let refreshInFlight: Promise<string | null> | null = null;
-// Set when the server refused the last refresh as idle (SESSION_IDLE): the
-// sign-out then lands on /login?reason=idle like the browser's own idle check.
+// Set when the server refused a refresh as idle (SESSION_IDLE): the sign-out
+// then lands on /login?reason=idle like the browser's own idle check. Sticky
+// until a refresh succeeds (a fresh login stores a new refresh token).
 let refreshRefusedIdle = false;
 
 export function refreshAccessToken(): Promise<string | null> {
@@ -162,6 +163,9 @@ async function performRefresh(): Promise<string | null> {
     return null;
   }
   if (!access && !refresh) return null;
+  // The session ended idle: never re-present the dead chain, and never fall
+  // back to the legacy access-token refresh, which would start a new chain.
+  if (refreshRefusedIdle && !refresh) return null;
   const body: Record<string, string> = {};
   // Preferred: the rotating refresh token. The access token rides along for
   // claim continuity (active store), and doubles as the DEPRECATED legacy
@@ -186,7 +190,14 @@ async function performRefresh(): Promise<string | null> {
     return newAccess;
   } catch (e) {
     const detail = axios.isAxiosError(e) ? e.response?.data?.detail : undefined;
-    refreshRefusedIdle = detail?.code === 'SESSION_IDLE';
+    if (detail?.code === 'SESSION_IDLE') {
+      refreshRefusedIdle = true;
+      try {
+        localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
+      } catch {
+        /* storage unavailable: performRefresh cannot read the token either */
+      }
+    }
     return null;
   }
 }

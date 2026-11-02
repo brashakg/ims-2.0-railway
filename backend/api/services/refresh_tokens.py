@@ -249,6 +249,11 @@ class RefreshTokenStore:
         if prior["expires_at"] <= now:
             return "expired", prior
 
+        # A chain already ended for idleness stays idle: never the reuse
+        # canary, which would overwrite the audit reason and the 401 code.
+        if prior.get("revoked_reason") == "idle":
+            return "idle", prior
+
         # Already-revoked token presented again. Two tabs racing the SAME
         # rotation within the grace window is legitimate; anything else is the
         # stolen-token canary -> revoke the entire chain.
