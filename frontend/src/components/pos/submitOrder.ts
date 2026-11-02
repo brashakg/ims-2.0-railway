@@ -453,11 +453,6 @@ export async function submitPosOrder(
     if (code === 'DISCOUNT_NEEDS_APPROVAL') {
       return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed };
     }
-    if (code === 'IDEMPOTENCY_BODY_MISMATCH') {
-      // The bill was saved earlier with other items: no payment is posted,
-      // the bill stays, and the till never says the sale is complete.
-      return { ok: false, error: msg };
-    }
     if (code === 'SALE_STILL_SAVING') {
       return { ok: false, error: TILL_SALE_STILL_SAVING, pending: true };
     }
