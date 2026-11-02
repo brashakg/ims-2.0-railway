@@ -1813,9 +1813,9 @@ def _redeem_store_credit_atomic(customer_id, amount, *, reason, ref, store_id, u
     # A read that fails is "could not be confirmed" (503), never "not found":
     # the repository's find_by_id swallows errors into None (money review 19).
     try:
-        _ccoll = getattr(repo, "collection", None)
-        existing = (_ccoll.find_one({"customer_id": customer_id}) if _ccoll is not None
-                    else repo.find_by_id(customer_id))
+        _find = getattr(getattr(repo, "collection", None), "find_one", None)
+        existing = (getattr(repo, "_clean_id", lambda d: d)(_find({getattr(repo, "id_field", "customer_id"): customer_id}))
+                    if callable(_find) else repo.find_by_id(customer_id))
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=REDEEM_UNCONFIRMED_MESSAGE) from exc
     if existing is None:

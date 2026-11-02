@@ -214,9 +214,10 @@ async def add_payment(
         # 4xx as "did NOT record" -- for a debit leg that may have landed
         # (money review 19).
         try:
-            _ocoll = getattr(repo, "collection", None)
-            order = (_ocoll.find_one({"order_id": order_id}) if _ocoll is not None
-                     else repo.find_by_id(order_id))
+            _find = getattr(getattr(repo, "collection", None), "find_one", None)
+            # Same shape as find_by_id (its _clean_id), minus the swallowing.
+            order = (getattr(repo, "_clean_id", lambda d: d)(_find({getattr(repo, "id_field", "order_id"): order_id}))
+                     if callable(_find) else repo.find_by_id(order_id))
         except Exception as exc:  # noqa: BLE001
             raise HTTPException(status_code=503, detail=(
                 "The order could not be read just now - the payment could not be confirmed. Check the "
