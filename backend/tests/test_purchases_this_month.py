@@ -84,6 +84,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import transfer_box as box  # noqa: E402
 
 from api.routers import finance as finance_pkg  # noqa: E402
 from api.routers import purchase_invoices as pinv_mod  # noqa: E402
@@ -1540,8 +1541,8 @@ def _seed_moving(db) -> None:
 @pytest.fixture
 def moving(monkeypatch):
     """The real accept engine and the real transfer stock moves
-    (transfers._apply_ship_stock_move / _apply_receive_stock_move, whose
-    _rehome rewrites a unit's source_type / source_id) over one Mongo."""
+    (transfers._apply_ship_stock_move, then the re-home write _rehome_patch,
+    which rewrites a unit's source_type / source_id) over one Mongo."""
     from database.repositories.product_repository import StockRepository
 
     from api.routers import transfers as transfers_mod
@@ -1579,10 +1580,7 @@ def _move(product_id: str, units: int, transfer_id: str) -> list:
         "id": transfer_id, "transfer_number": transfer_id, "from_location_id": DHN, "to_location_id": PUN,
         "items": [{"product_id": product_id, "quantity_requested": units}],
     }
-    transfers_mod._apply_ship_stock_move(transfer)
-    for line in transfer["items"]:
-        line["quantity_received"] = line["quantity_shipped"]
-    transfers_mod._apply_receive_stock_move(transfer)
+    box.move_units(transfers_mod, transfer)
     return [sid for line in transfer["items"] for sid in line.get("received_stock_ids") or []]
 
 

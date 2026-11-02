@@ -1743,9 +1743,12 @@ def model_family_query(category: Any, brand: Any, model: Any) -> Optional[Dict[s
     }
 
 
-# "Same model, written differently" (owner 2026-11-01): RB4345, 4345 and
-# XL OO9417 / OO9417. Only frame and sunglass codes follow the letters-then-
-# number shape; a lens's model slot holds its sub-brand or index ("156").
+# "Same model, written differently" (owner 2026-11-01): RB4345 / 4345.
+# Owner 2026-11-02: XL OO9417 (Oakley Holbrook XL) is a DIFFERENT model from
+# OO9417 -- a leading XL size marker never fits (_prefixes_fit). Carrera
+# CARDUC 3016/S vs 3016/S still matches (not ruled). Only frame and sunglass
+# codes follow the letters-then-number shape; a lens's model slot holds its
+# sub-brand or index ("156").
 _SAME_MODEL_CATEGORIES = ("FRAME", "SUNGLASS")
 _MODEL_SHAPE = re.compile(r"^([a-z]*)(\d[a-z0-9]*)$")
 
@@ -1764,12 +1767,15 @@ def _model_shape(category: str, model_part: str) -> Optional[Tuple[str, str]]:
 
 def _prefixes_fit(a: str, b: str) -> bool:
     """Two letter prefixes name one model: equal, one empty (RB4345 / 4345),
-    or the shorter (2+ letters) ends the longer (XLOO / OO, RAYBANRB / RB).
-    RJ / RB, MARC / MJ and SPLL / SPLN stay apart."""
-    if a == b or not a or not b:
+    or the shorter (2+ letters) ends the longer (RAYBANRB / RB).
+    RJ / RB, MARC / MJ and SPLL / SPLN stay apart, and so does an XL
+    size marker (XLOO / OO, XL / bare digits: owner 2026-11-02)."""
+    if a == b:
         return True
     short, long_ = sorted((a, b), key=len)
-    return len(short) >= 2 and long_.endswith(short)
+    if long_.endswith("xl" + short):  # OAKLEYXLOO glues the brand on
+        return False
+    return not short or (len(short) >= 2 and long_.endswith(short))
 
 
 def similar_model_query(category: Any, brand: Any, model: Any) -> Optional[Dict[str, Any]]:

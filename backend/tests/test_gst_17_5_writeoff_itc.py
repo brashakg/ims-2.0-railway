@@ -1387,3 +1387,37 @@ def test_a_held_piece_found_in_november_settled_in_december_files_nothing_in_eit
     assert (_written_off(nov), _heads(nov["itcWriteOffReclaimed"])) == (0.0, 0.0)
     assert (_written_off(dec), _heads(dec["itcWriteOffReclaimed"])) == (0.0, 0.0)
     assert db.itc_writeoff_reversals.count_documents({}) == 0
+
+
+# ---------------------------------------------------------------------------
+# Review round 10: an undo's top-up on a capped line (an under-billed receipt)
+# is dated by the pieces still lost, never by the undone row's own stamp
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("filed", [False, True], ids=["open", "loss-month-filed"])
+def test_an_undo_on_a_capped_line_tops_up_in_the_still_lost_pieces_month(
+        world, october, monkeypatch, filed):
+    """Only bill A (two pieces, Rs 10 + 10) is booked on a three-piece
+    receipt, so the line is capped at Rs 10. P0 lost in December, P1 and P2
+    in January: rows 5 / 5 / 0. P0 found: the Rs 5 top-up is January's --
+    the month of the pieces still lost -- not P0's December, and the first
+    open month after January when January is filed."""
+    from api.services import writeoff_itc as wo
+
+    db = world["db"]
+    _three_frames(db, "GRN-WO-0101", 0)
+    _part_bill(db, "GRN-WO-0101", "BA-101", 2, 10.0)
+    monkeypatch.setattr(wo, "_locked", lambda _db, p: False)
+    unit = lambda i: db.stock_units.find_one({"stock_id": f"SU-GRN-WO-0101-{i}"})  # noqa: E731
+    for i, day in enumerate([datetime(2026, 12, 10, 6), datetime(2027, 1, 10, 6), datetime(2027, 1, 12, 6)]):
+        wo.record_writeoff(db, [unit(i)], source_type="QUARANTINE_DAMAGE", source_id=f"D{i}", when=day)
+    # As live: the row is stamped when the piece was written off.
+    db.itc_writeoff_reversals.update_one({"_id": "SU-GRN-WO-0101-0"},
+                                         {"$set": {"recorded_at": datetime(2026, 12, 10, 6)}})
+    assert _rows_of(db, "GRN-WO-0101") == [(5.0, 5.0), (5.0, 5.0), (0.0, 0.0)]
+    monkeypatch.setattr(wo, "_locked", lambda _db, p: filed and p == "2027-01")
+    wo.undo_writeoff(db, unit(0))
+    top = db.itc_writeoff_reversals.find_one({"topup": True})
+    assert (top["period"], top["cgst"], top["sgst"]) == ("2027-02" if filed else "2027-01", 5.0, 5.0)
+    live = db.itc_writeoff_reversals.find({"kind": "REVERSAL", "superseded": {"$ne": True}})
+    assert round(sum(r["cgst"] for r in live), 2) == 10.0

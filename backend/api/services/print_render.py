@@ -627,6 +627,8 @@ def render_transfer_tax_invoice(
     copy_marker: str = "ORIGINAL",
     overrides: Optional[Dict[str, Any]] = None,
     auto_print: bool = False,
+    eway_bill_number: str = "",
+    vehicle_number: str = "",
 ) -> str:
     """The tax invoice a stock move between two GST registrations travels on
     (owner / CA 2026-10-18), then the data the GST portal's e-way bill form
@@ -779,6 +781,7 @@ def render_transfer_tax_invoice(
         "Transport mode", "Transporter name", "Transporter ID", "Vehicle No.",
         "Transport doc No. / Date", "Approx. distance (km)", "E-way bill No. / Date",
     )
+    typed = {"Vehicle No.": vehicle_number, "E-way bill No. / Date": eway_bill_number}
     eway = (
         '<div style="page-break-before:always"></div>'
         '<div class="title-band"><h2>E-way Bill Data</h2></div>'
@@ -790,7 +793,13 @@ def render_transfer_tax_invoice(
         '<th class="num">Tax rate</th></tr></thead><tbody>'
         + goods
         + '</tbody></table><h3>Part B (fill in at dispatch)</h3><table class="kv">'
-        + "".join('<tr><td class="k">' + _e(k) + "</td><td>" + blank + "</td></tr>" for k in part_b)
+        + "".join(
+            '<tr><td class="k">' + _e(k) + "</td><td>"
+            # S3: the two the box page records print; the rest by hand.
+            + (_e(typed[k]) if typed.get(k) else blank)
+            + "</td></tr>"
+            for k in part_b
+        )
         + "</table>"
     )
     body = head + party + table + words + declaration + signs + footer + eway

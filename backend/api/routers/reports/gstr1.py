@@ -46,7 +46,9 @@ from .gst_itc import (
     _ledger_row_return_doc,
     _order_held_off_returns,
     _return_supply,
+    _split_transfer_bills,
     _transfer_b2b_rows,
+    _transfer_cdnr_rows,
     _transfer_outward_bills,
 )
 
@@ -108,6 +110,8 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     # deemed-supply bills (filled below; merged into the HSN summary instead of
     # the row-level dominant HSN so mixed 5%/18% transfers stay exact).
     transfer_hsn_lines: list = []
+    # S3: the sender's transfer credit notes (short delivery), filed in CDNR.
+    transfer_note_rows: list = []
     # The same per-line HSN detail of the B2B / B2CL sales (one per line and
     # rate, _order_rate_lines), so a mixed-rate invoice is rate-exact there too.
     sale_hsn_lines: list = []
@@ -378,9 +382,11 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         # flagged deemedSupply=True; the HSN summary uses their PER-LINE detail
         # (merged below) so a mixed 5%/18% transfer stays rate-exact.
         try:
-            _t_bills = _transfer_outward_bills(
+            _t_bills, _t_notes = _split_transfer_bills(_transfer_outward_bills(
                 db, active_store, year, mon, monthrange(year, mon)[1]
-            )
+            ))
+            # S3: a transfer's credit notes (short delivery) go to CDNR below.
+            transfer_note_rows = _transfer_cdnr_rows(_t_notes)
             _t_rows, transfer_hsn_lines = _transfer_b2b_rows(_t_bills)
             # The transfer tax invoice a bill carries (minted at ship): its
             # row files the date printed on it, and what it was issued for
@@ -447,7 +453,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     ]
 
     # CDNR (Credit/Debit Notes Register) and HSN summary
-    cdnr: list = []
+    cdnr: list = list(transfer_note_rows)
     hsn_by_rate: dict = {}
     # Per-report order->interstate cache, shared by the ledger pass and the
     # in-store returns pass so one refund can never resolve two heads.

@@ -343,7 +343,7 @@ class DatabaseConnection:
         )
         # Transfer guards: the cancel stock-move guard (transfers.py
         # _transfer_has_moved_stock) and the receive-pool fallback
-        # (_transferred_pool) both look up stock_units by
+        # (_line_of_piece) both look up stock_units by
         # {transfer_id, status: "TRANSFERRED"}. Without this the common legitimate
         # pre-ship cancel (zero matching units) can't short-circuit and full-scans
         # the whole (large) collection. PARTIAL on status == "TRANSFERRED" (NOT

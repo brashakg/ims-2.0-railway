@@ -91,28 +91,38 @@ describe('inventoryApi.createTransfer — create payload', () => {
   });
 });
 
-describe('inventoryApi.receiveTransfer — receive payload', () => {
-  it('posts a bare LIST keyed on the transfer LINE id with the real receive fields', async () => {
-    await inventoryApi.receiveTransfer('trf_1', [
-      { transfer_item_id: 'trfi_abc', quantity_received: 2, quantity_damaged: 1 },
-      { transfer_item_id: 'trfi_def', quantity_received: 5 },
-    ]);
+describe('inventoryApi — S3 per-piece box contracts', () => {
+  it('pack posts the WHOLE box as { barcodes }', async () => {
+    await inventoryApi.packTransfer('trf_1', ['BV1', 'BV2']);
+    expect(mockPost).toHaveBeenCalledWith('/transfers/trf_1/pack', { barcodes: ['BV1', 'BV2'] });
+  });
 
-    const [url, body] = mockPost.mock.calls[0];
-    expect(url).toBe('/transfers/trf_1/receive');
-    // Body is a top-level array (List[TransferItemReceive]).
-    expect(Array.isArray(body)).toBe(true);
-    expect(body[0]).toEqual({
-      transfer_item_id: 'trfi_abc',
-      quantity_received: 2,
-      quantity_damaged: 1,
+  it('scan-in posts ONE piece; a damaged piece carries its reason', async () => {
+    await inventoryApi.scanInPiece('trf_1', { barcode: 'BV1' });
+    expect(mockPost).toHaveBeenLastCalledWith('/transfers/trf_1/receive', {
+      barcode: 'BV1',
+      damaged: false,
     });
-    // quantity_damaged defaults to 0 when not supplied.
-    expect(body[1]).toEqual({
-      transfer_item_id: 'trfi_def',
-      quantity_received: 5,
-      quantity_damaged: 0,
+    await inventoryApi.scanInPiece('trf_1', { barcode: 'BV2', damaged: true, damageReason: 'Broken hinge' });
+    expect(mockPost).toHaveBeenLastCalledWith('/transfers/trf_1/receive', {
+      barcode: 'BV2',
+      damaged: true,
+      damage_reason: 'Broken hinge',
     });
+  });
+
+  it('missing on the way: found says where; write-off is its own door', async () => {
+    await inventoryApi.foundMissingPiece('trf_1', 'SU-3', 'source');
+    expect(mockPost).toHaveBeenLastCalledWith('/transfers/trf_1/missing/SU-3/found', { at: 'source' });
+    await inventoryApi.writeOffMissingPiece('trf_1', 'SU-3');
+    expect(mockPost).toHaveBeenLastCalledWith('/transfers/trf_1/missing/SU-3/write-off');
+  });
+
+  it('free stock asks by product and shop', async () => {
+    mockGet.mockResolvedValue({ data: { free: 2, reserved: 1 } });
+    const got = await inventoryApi.getFreeStock('P-1', 'BOK');
+    expect(mockGet).toHaveBeenCalledWith('/transfers/free', { params: { product_id: 'P-1', store_id: 'BOK' } });
+    expect(got).toEqual({ free: 2, reserved: 1 });
   });
 });
 

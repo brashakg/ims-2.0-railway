@@ -2,7 +2,7 @@
 IMS 2.0 - Transfers object-level IDOR guard
 ===========================================
 Before this fix, every object-level transfer endpoint (PUT /{id}, /approve,
-/start-picking, /complete-picking, /ship, /receive, /complete, /cancel,
+/pack, /ship, /receive, /complete, /cancel,
 /bulk-approve, /create-shiprocket-shipment, GET /{id}, GET /{id}/tracking)
 fetched the transfer by id with ZERO store-membership check, so any
 STORE_MANAGER / WORKSHOP_STAFF / AREA_MANAGER could drive ANOTHER pair of
@@ -122,12 +122,53 @@ def coll(monkeypatch):
     """Isolate ALL persistence: fake transfers collection, no db (audit/
     ledger/mirror-purchase skip fail-soft), no stock repo (lifecycle still
     advances; the stock-move test installs its own fake repo)."""
+    import mongomock
+
     fake = _FakeColl()
+    # S3: per-piece moves read stock_units, so the pieces live in a mongomock
+    # database (empty stores / entities: no GST paper on these moves).
+    fake.mdb = mongomock.MongoClient()["idor_transfers"]
     monkeypatch.setattr(transfers, "_transfers_coll", lambda: fake)
-    monkeypatch.setattr(transfers, "_get_db", lambda: None)
+    monkeypatch.setattr(transfers, "_get_db", lambda: fake.mdb)
     monkeypatch.setattr(transfers, "get_stock_repository", lambda: None)
+    monkeypatch.setattr(transfers, "_writeback_units_left", lambda *a, **k: None)
     transfers.STOCK_TRANSFERS.clear()
     return fake
+
+
+def _seed_box(coll, tid, frm, to, status):
+    """A transfer whose two pieces are packed (approved) or on the way
+    (in_transit), with the pieces in stock_units."""
+    sids = [f"{tid}-u1", f"{tid}-u2"]
+    shipped = status not in ("approved", "packed")
+    coll.mdb["stock_units"].insert_many([
+        {"stock_id": sid, "barcode": sid.upper(), "product_id": "P1", "unit_cost": 100.0,
+         "store_id": frm, "status": "TRANSFERRED" if shipped else "AVAILABLE",
+         **({"transfer_id": tid} if shipped else {})}
+        for sid in sids
+    ])
+    line = {"packed_stock_ids": sids, "packed_barcodes": [x.upper() for x in sids]}
+    if shipped:
+        line["shipped_stock_ids"] = sids
+    doc = _seed_transfer(tid, frm, to, status)
+    doc["items"][0].update(line)
+    transfers._save_transfer(doc)
+    return sids
+
+
+def _scan_all_in(tid, sids, user):
+    res = None
+    for sid in sids:
+        res = asyncio.run(transfers.receive_transfer(
+            tid, transfers.TransferPieceReceive(barcode=sid.upper()), current_user=user
+        ))
+    return res
+
+
+def _ship_box(tid, user):
+    return asyncio.run(transfers.ship_transfer(
+        tid, tracking_number="AWB1", courier_name="DTDC", current_user=user
+    ))
 
 
 def _user(role, stores):
@@ -216,7 +257,9 @@ def test_foreign_workshop_staff_cannot_ship(coll):
 def test_foreign_manager_cannot_receive(coll):
     _seed_transfer("t2", "B", "C", "in_transit")
     err = _expect_403(
-        transfers.receive_transfer("t2", items_received=[], current_user=MGR_A)
+        transfers.receive_transfer(
+            "t2", transfers.TransferPieceReceive(barcode="X"), current_user=MGR_A
+        )
     )
     assert err.detail == "No access to this transfer's store"
     assert coll.docs["t2"]["status"] == "in_transit"
@@ -256,16 +299,10 @@ def test_foreign_manager_cannot_update(coll):
     assert coll.docs["t5"]["notes"] == "original"
 
 
-def test_foreign_manager_cannot_start_or_complete_picking(coll):
+def test_foreign_manager_cannot_pack(coll):
     _seed_transfer("t6", "B", "C", "approved")
-    _expect_403(transfers.start_picking("t6", current_user=MGR_A))
+    _expect_403(transfers.pack_transfer("t6", transfers.TransferPack(barcodes=[]), current_user=MGR_A))
     assert coll.docs["t6"]["status"] == "approved"
-
-    _seed_transfer("t7", "B", "C", "picking")
-    _expect_403(
-        transfers.complete_picking("t7", items_picked=[], current_user=MGR_A)
-    )
-    assert coll.docs["t7"]["status"] == "picking"
 
 
 def test_foreign_manager_cannot_complete(coll):
@@ -298,23 +335,15 @@ def test_foreign_manager_cannot_read_single_or_tracking(coll):
 def test_source_manager_can_ship_and_stock_moves(coll, monkeypatch):
     """The guard is purely additive: the source-store manager still ships and
     the REAL stock move still happens (units flip AVAILABLE -> TRANSFERRED)."""
-    repo = _FakeStockRepo(
-        [
-            {"stock_id": "u1", "product_id": "P1", "store_id": "B",
-             "status": "AVAILABLE"},
-            {"stock_id": "u2", "product_id": "P1", "store_id": "B",
-             "status": "AVAILABLE"},
-        ]
-    )
-    monkeypatch.setattr(transfers, "get_stock_repository", lambda: repo)
-    _seed_transfer("t11", "B", "C", "approved")
+    u1, u2 = _seed_box(coll, "t11", "B", "C", "approved")
 
-    res = asyncio.run(transfers.ship_transfer("t11", current_user=MGR_B))
+    res = _ship_box("t11", MGR_B)
     assert res["transfer"]["status"] == transfers.TransferStatus.IN_TRANSIT
     assert res["transfer"]["stock_shipped"] is True
     assert res["transfer"]["stock_units_moved_out"] == 2
-    assert repo.units["u1"]["status"] == "TRANSFERRED"
-    assert repo.units["u2"]["status"] == "TRANSFERRED"
+    units = coll.mdb["stock_units"]
+    assert units.find_one({"stock_id": u1})["status"] == "TRANSFERRED"
+    assert units.find_one({"stock_id": u2})["status"] == "TRANSFERRED"
     assert coll.docs["t11"]["status"] == "in_transit"
 
 
@@ -325,28 +354,20 @@ def test_dest_manager_cannot_ship(coll):
 
 
 def test_dest_manager_can_receive(coll):
-    _seed_transfer("t13", "B", "C", "in_transit")
-    res = asyncio.run(
-        transfers.receive_transfer(
-            "t13",
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id="t13-line-1", quantity_received=2
-                )
-            ],
-            current_user=MGR_C,
-        )
-    )
+    sids = _seed_box(coll, "t13", "B", "C", "in_transit")
+    res = _scan_all_in("t13", sids, MGR_C)
     assert res["transfer"]["status"] == transfers.TransferStatus.RECEIVED
     assert res["transfer"]["received_by"] == MGR_C["user_id"]
-    assert res["summary"]["received"] == 2
+    assert res["transfer"]["total_received"] == 2
     assert coll.docs["t13"]["status"] == "received"
 
 
 def test_source_manager_cannot_receive(coll):
     _seed_transfer("t14", "B", "C", "in_transit")
     _expect_403(
-        transfers.receive_transfer("t14", items_received=[], current_user=MGR_B)
+        transfers.receive_transfer(
+            "t14", transfers.TransferPieceReceive(barcode="X"), current_user=MGR_B
+        )
     )
     assert coll.docs["t14"]["status"] == "in_transit"
 
@@ -395,19 +416,17 @@ def test_source_area_manager_can_approve(coll):
     assert coll.docs["t17"]["approved_by"] == AM_B["user_id"]
 
 
-def test_source_manager_picking_flow_still_works(coll):
+def test_source_manager_packing_works(coll):
     _seed_transfer("t18", "B", "C", "approved")
-    res = asyncio.run(transfers.start_picking("t18", current_user=MGR_B))
-    assert res["transfer"]["status"] == transfers.TransferStatus.PICKING
-    res = asyncio.run(
-        transfers.complete_picking(
-            "t18",
-            items_picked=[{"item_id": "t18-line-1", "quantity_picked": 2}],
-            current_user=MGR_B,
-        )
-    )
+    coll.mdb["stock_units"].insert_many([
+        {"stock_id": f"t18-u{n}", "barcode": f"T18-U{n}", "product_id": "P1",
+         "store_id": "B", "status": "AVAILABLE"} for n in (1, 2)
+    ])
+    res = asyncio.run(transfers.pack_transfer(
+        "t18", transfers.TransferPack(barcodes=["T18-U1", "T18-U2"]), current_user=MGR_B
+    ))
     assert res["transfer"]["status"] == transfers.TransferStatus.PACKED
-    assert coll.docs["t18"]["items"][0]["quantity_shipped"] == 2
+    assert coll.docs["t18"]["items"][0]["packed_stock_ids"] == ["t18-u1", "t18-u2"]
 
 
 def test_either_side_can_read_single_and_tracking(coll):
@@ -429,22 +448,12 @@ def test_either_side_can_read_single_and_tracking(coll):
 @pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN"])
 def test_admin_roles_bypass_all_sides(coll, role):
     hq = _user(role, [])
-    _seed_transfer("t20", "B", "C", "approved")
-    res = asyncio.run(transfers.ship_transfer("t20", current_user=hq))
+    _seed_box(coll, "t20", "B", "C", "approved")
+    res = _ship_box("t20", hq)
     assert res["transfer"]["status"] == transfers.TransferStatus.IN_TRANSIT
 
-    _seed_transfer("t21", "B", "C", "in_transit")
-    res = asyncio.run(
-        transfers.receive_transfer(
-            "t21",
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id="t21-line-1", quantity_received=2
-                )
-            ],
-            current_user=hq,
-        )
-    )
+    sids = _seed_box(coll, "t21", "B", "C", "in_transit")
+    res = _scan_all_in("t21", sids, hq)
     assert res["transfer"]["status"] == transfers.TransferStatus.RECEIVED
 
     _seed_transfer("t22", "D", "E", "pending_approval")
@@ -485,17 +494,31 @@ def _transfer_input(frm, to):
     )
 
 
-def test_create_with_foreign_source_store_403(coll):
+def test_create_by_a_shop_at_neither_end_403(coll):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(
             transfers.create_transfer(_transfer_input("B", "C"), current_user=MGR_A)
         )
     assert exc.value.status_code == 403
-    assert exc.value.detail == "No access to store B"
     assert coll.docs == {}  # nothing persisted
 
 
+def test_the_receiving_shop_may_ask_and_it_waits_for_approval(coll):
+    """S3 (board Transfer): a shop asks ANOTHER shop for stock. Nothing moves
+    until the sending side's area manager approves and that shop packs."""
+    coll.mdb["stock_units"].insert_one(
+        {"stock_id": "b1", "product_id": "P1", "store_id": "B", "status": "AVAILABLE"}
+    )
+    res = asyncio.run(
+        transfers.create_transfer(_transfer_input("B", "C"), current_user=MGR_C)
+    )
+    assert res["transfer"]["status"] == transfers.TransferStatus.PENDING_APPROVAL
+
+
 def test_create_from_own_store_ok(coll):
+    coll.mdb["stock_units"].insert_one(
+        {"stock_id": "a1", "product_id": "P1", "store_id": "A", "status": "AVAILABLE"}
+    )
     res = asyncio.run(
         transfers.create_transfer(_transfer_input("A", "B"), current_user=MGR_A)
     )
@@ -506,6 +529,9 @@ def test_create_from_own_store_ok(coll):
 
 def test_admin_can_create_from_any_store(coll):
     hq = _user("ADMIN", [])
+    coll.mdb["stock_units"].insert_one(
+        {"stock_id": "b1", "product_id": "P1", "store_id": "B", "status": "AVAILABLE"}
+    )
     res = asyncio.run(
         transfers.create_transfer(_transfer_input("B", "C"), current_user=hq)
     )
@@ -623,13 +649,7 @@ def test_receive_online_destination_400_no_stock_landed(coll):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(
             transfers.receive_transfer(
-                "t-on-1",
-                items_received=[
-                    transfers.TransferItemReceive(
-                        transfer_item_id="t-on-1-line-1", quantity_received=2
-                    )
-                ],
-                current_user=mgr_online,
+                "t-on-1", transfers.TransferPieceReceive(barcode="X"), current_user=mgr_online,
             )
         )
     assert exc.value.status_code == 400
@@ -641,17 +661,7 @@ def test_receive_online_destination_400_no_stock_landed(coll):
 def test_receive_physical_destination_unaffected(coll):
     """Control: the SAME receive against a physical destination still completes
     (the guard is destination-ONLINE-only, never false-blocks a physical shop)."""
-    _seed_transfer("t-phys-1", "B", "C", "in_transit")
-    res = asyncio.run(
-        transfers.receive_transfer(
-            "t-phys-1",
-            items_received=[
-                transfers.TransferItemReceive(
-                    transfer_item_id="t-phys-1-line-1", quantity_received=2
-                )
-            ],
-            current_user=MGR_C,
-        )
-    )
+    sids = _seed_box(coll, "t-phys-1", "B", "C", "in_transit")
+    res = _scan_all_in("t-phys-1", sids, MGR_C)
     assert res["transfer"]["status"] == transfers.TransferStatus.RECEIVED
     assert coll.docs["t-phys-1"]["status"] == "received"
