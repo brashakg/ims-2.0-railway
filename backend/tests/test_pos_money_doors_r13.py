@@ -194,7 +194,9 @@ async def test_a_re_sent_voucher_leg_takes_the_card_once(till, monkeypatch):
     from api.routers.orders import PaymentCreate, add_payment
 
     till["db"].get_collection("orders").insert_one(_order())
-    vouchers = till["db"].get_collection("gift_vouchers")
+    # The real collection name: the till's leg owner (money review 21) lives
+    # on the same voucher document the debit writes.
+    vouchers = till["db"].get_collection("vouchers")
     vouchers.insert_one({"code": "GV1", "balance": 1000.0, "status": "ACTIVE", "expiry_date": None})
     monkeypatch.setattr("api.dependencies.get_seeded_db", lambda: till["db"], raising=False)
     from api.routers import vouchers as V

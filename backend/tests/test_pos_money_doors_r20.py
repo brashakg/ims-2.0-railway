@@ -59,7 +59,7 @@ def test_the_door_refuses_a_leg_that_is_on_its_bill(till, redeem_env):
         cust_router.give_back_unbilled_leg(KEY, _user("ADMIN"))
     assert e.value.status_code == 409 and "BV/0101" in e.value.detail and _balance(till) == 400.0
     row = _ledger(till).find_one({"entry_id": KEY})
-    assert not row.get("given_back") and not row.get("given_back_claim")  # the claim was let go
+    assert not row.get("given_back") and row.get("leg_owner") != "GIVEBACK"  # never taken
 
 
 def test_the_door_gives_back_once_and_a_re_press_replays(till, redeem_env, tasks):

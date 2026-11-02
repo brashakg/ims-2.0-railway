@@ -979,6 +979,8 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
         flt = ({"$or": [{"order_id": order_id}, {"customer_id": customer_id}]}
                if customer_id else {"order_id": order_id})
         for row in db.get_collection("credit_note_ledger").find(flt):
+            if _norm(row.get("source")).upper() == "UNBILLED_GIVE_BACK":
+                continue  # a till payment that never reached a bill, given back: not a refund (review 21)
             kind = _norm(row.get("type")).upper()
             if kind == "ISSUING":
                 # In flight: its balance may already have moved -- counted as

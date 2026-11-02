@@ -325,6 +325,14 @@ async def add_payment(
                 source="POS_PAYMENT",
             )
 
+        # ONE owner per debit leg (money review 21): the bill wins the leg
+        # before the payment goes on the order, or the give-back owns it (409).
+        if idem_key and payment.method in (PaymentMethod.STORE_CREDIT, PaymentMethod.GIFT_VOUCHER):
+            from ..customers import claim_leg_for_bill
+
+            claim_leg_for_bill(payment.method.value, f"POSPAY:{order_id}:{idem_key}",
+                               (payment.voucher_code or payment.reference or "").strip().upper() or None)
+
         # Loyalty: the points must have been really redeemed for THIS bill.
         payment_id = str(uuid.uuid4())
         loyalty_txn_id = None

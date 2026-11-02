@@ -267,7 +267,8 @@ describe('money review 18: a re-press after a lost debit leg', () => {
     expect(second.warning || '').not.toMatch(/LOYALTY .* did NOT record/);
     expect(mockedRedeem).toHaveBeenCalledTimes(1); // never burned again
     expect(mockedAddPayment.mock.calls.map((c) => [c[2], (c[1] as any).method])).toEqual([
-      ['b:leg:0', 'LOYALTY'], ['b:leg:1', 'STORE_CREDIT'], ['b:leg:0', 'LOYALTY'], ['b:leg:1', 'STORE_CREDIT']]);
+      ['b:leg:0:LOYALTY', 'LOYALTY'], ['b:leg:1:STORE_CREDIT', 'STORE_CREDIT'],
+      ['b:leg:0:LOYALTY', 'LOYALTY'], ['b:leg:1:STORE_CREDIT', 'STORE_CREDIT']]);
     expect((mockedAddPayment.mock.calls[2][1] as any).reference).toBe('200pts txn txn-1');
   });
 });

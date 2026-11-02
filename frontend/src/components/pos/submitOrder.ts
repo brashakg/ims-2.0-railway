@@ -280,7 +280,12 @@ export async function submitPosOrder(
       // record-only tender (cash, card, UPI) whose answer was lost is sent
       // ONCE more automatically; a leg that DEBITS something (store credit, a
       // gift voucher, loyalty points) never is -- the till says to check.
-      const legKey = idempotencyKey ? `${idempotencyKey}:leg:${legIndex}` : undefined;
+      // The key names the TENDER (and the voucher): swapping the tender on a
+      // leg whose answer was lost is a NEW leg, so the server's one rule
+      // applies to it (money review 21).
+      const tender = String(leg.method || '').toUpperCase();
+      const voucher = tender === 'GIFT_VOUCHER' ? String(leg.voucherCode || leg.reference || '').trim().toUpperCase() : '';
+      const legKey = idempotencyKey ? `${idempotencyKey}:leg:${legIndex}:${tender}${voucher ? `:${voucher}` : ''}` : undefined;
       const autoRetry = Boolean(legKey) && RECORD_ONLY_TENDERS.has(String(leg.method || '').toUpperCase());
       const body = buildPaymentBody(leg, leg.method === 'CASH' ? cashCapture : null);
       if (leg.method === 'CASH') cashCapture = null;

@@ -71,7 +71,7 @@ describe('till payment legs', () => {
     const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-1');
     expect(res.ok).toBe(true);
     expect(res.warning).toBeUndefined();
-    expect(mockedAddPayment.mock.calls.map((c) => c[2])).toEqual(['bill-1:leg:0', 'bill-1:leg:0', 'bill-1:leg:1']);
+    expect(mockedAddPayment.mock.calls.map((c) => c[2])).toEqual(['bill-1:leg:0:UPI', 'bill-1:leg:0:UPI', 'bill-1:leg:1:CASH']);
   });
 
   it('says a twice-lost leg could not be confirmed; a refusal is never re-sent', async () => {
@@ -111,7 +111,7 @@ describe('money review 13 at the till', () => {
     mockedAddPayment.mockRejectedValueOnce(apiErr(undefined)).mockResolvedValue({ payment_id: 'p' } as any);
     expect((await submitPosOrder(usePOSStore.getState() as any, 'bill-7')).ok).toBe(false);
     expect((await submitPosOrder(usePOSStore.getState() as any, 'bill-7')).ok).toBe(true);
-    expect(mockedAddPayment.mock.calls.map((c) => c[2])).toEqual(['bill-7:leg:0', 'bill-7:leg:0']);
+    expect(mockedAddPayment.mock.calls.map((c) => c[2])).toEqual(['bill-7:leg:0:STORE_CREDIT', 'bill-7:leg:0:STORE_CREDIT']);
   });
 
   it('a lost sale promises a safe re-press ONLY while the server guarantees the replay', async () => {
@@ -214,5 +214,19 @@ describe('money review 17: a replayed Rx sale gets its workshop job', () => {
     expect(res.error).toBeUndefined();
     expect(res.ok).toBe(true);
     expect(vi.mocked(workshopApi.createJob)).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('money review 21: the leg key names its tender', () => {
+  it('swapping the tender on a lost debit leg is a new leg (the server rule then applies)', async () => {
+    mockedCreate.mockResolvedValue({ order_id: 'ord-1', order_number: 'BV-001' } as any);
+    seed();
+    usePOSStore.setState({ payments: [{ method: 'STORE_CREDIT', amount: 1000, timestamp: '' }] } as any);
+    mockedAddPayment.mockRejectedValueOnce(apiErr(undefined)).mockResolvedValue({ payment_id: 'p' } as any);
+    await submitPosOrder(usePOSStore.getState() as any, 'bill-9');
+    usePOSStore.setState({ payments: [{ method: 'GIFT_VOUCHER', amount: 1000, voucherCode: 'gv1', timestamp: '' }] } as any);
+    await submitPosOrder(usePOSStore.getState() as any, 'bill-9');
+    const keys = mockedAddPayment.mock.calls.map((c) => c[2]);
+    expect(keys.slice(-2)).toEqual(['bill-9:leg:0:STORE_CREDIT', 'bill-9:leg:0:GIFT_VOUCHER:GV1']);
   });
 });
