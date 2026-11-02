@@ -74,9 +74,9 @@ export default function StockTodayPage() {
   // ---- the four job cards ---------------------------------------------------
   const inPieces = d.incoming.reduce((n, t) => n + t.pieces, 0);
   const senders = [...new Set(d.incoming.map((t) => t.from_store_name).filter(Boolean))].join(', ');
-  const outPieces = d.requests.reduce((n, t) => n + t.pieces, 0);
+  const outPieces = d.requests.reduce((n, t) => n + Math.max(0, t.pieces - (t.packed ?? 0)), 0);
   const asks = d.requests
-    .flatMap((t) => t.lines.map((l) => `${t.to_store_name ?? 'A shop'} wants ${l.quantity} × ${l.product_name}`))
+    .flatMap((t) => t.lines.map((l) => `${t.to_store_name ?? 'A shop'} wants ${l.quantity} × ${l.product_name}${l.packed ? ` (${l.packed} in the box)` : ''}`))
     .slice(0, 3).join(' · ');
   const open = d.count.in_progress[0];
   const scope = (c: typeof open) => c?.zone || c?.category || 'whole shop';

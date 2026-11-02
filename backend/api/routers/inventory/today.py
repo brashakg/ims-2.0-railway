@@ -5,10 +5,12 @@ Nothing here writes and nothing here keeps a rule of its own: every section
 asks the rule main already has.
 
   incoming     transfers TO the shop that have left the sender (in_transit,
-               partially_received); pieces = what was shipped
-               (transfers._line_expected_qty) minus what is scanned in.
-  requests     transfers FROM the shop not shipped yet: the pre-ship statuses
-               (transfers.CANCELLABLE_TRANSFER_STATUSES) minus draft/rejected.
+               partially_received); pieces = the shipped pieces not yet
+               scanned in (S3: transfers._pieces_on_the_way, the same rule
+               Accept lists as missing).
+  requests     transfers FROM the shop to pack and send: the statuses pack
+               accepts (S3: transfers.PACKABLE_TRANSFER_STATUSES), with the
+               pieces already scanned out into the box (packed_stock_ids).
   count        the shop's stock counts (/inventory/audit, stock_counts): any
                still open, and how many finished today (IST day).
   quarantine   QUARANTINED pieces here and how many have no red label yet
@@ -23,12 +25,8 @@ asks the rule main already has.
                and units sold here in 30 days (collection_insights.
                movement_summary), fastest sellers first.
 
-TODO(S3): transfers become piece-by-piece (scan out / scan in); incoming and
-requests then read the scanned pieces instead of line quantities.
 TODO(S4): one average cost per product; the stock value then reads it
 through stock_value, with no change here.
-TODO(S5): one Reorder list (shop level if set, else 30-day sales); running_low
-then reads that rule instead of low_stock_rows.
 
 The shop is store_in_view(one_shop=True): a manager's own shop; an admin's
 top-bar shop, or every shop when none is picked (owner ruling 2026-10-18).
@@ -64,24 +62,17 @@ def _at(field: str, shop: Optional[str]) -> Dict:
 
 def _transfers(db, shop: Optional[str]) -> Dict[str, List[Dict]]:
     from ..transfers import (
-        CANCELLABLE_TRANSFER_STATUSES,
+        PACKABLE_TRANSFER_STATUSES,
         TransferStatus,
-        _line_expected_qty,
+        _pieces_on_the_way,
         _qty,
     )
 
     on_the_way = {TransferStatus.IN_TRANSIT.value, TransferStatus.PARTIALLY_RECEIVED.value}
-    to_pack = set(CANCELLABLE_TRANSFER_STATUSES) - {
-        TransferStatus.DRAFT.value,
-        TransferStatus.REJECTED.value,
-    }
     coll = db.get_collection("stock_transfers")
     incoming, requests = [], []
     for t in coll.find({**_at("to_location_id", shop), "status": {"$in": sorted(on_the_way)}}, {"_id": 0}):
-        pieces = sum(
-            max(0, _line_expected_qty(ln) - _qty(ln.get("quantity_received")))
-            for ln in t.get("items") or []
-        )
+        pieces = sum(len(_pieces_on_the_way(ln)) for ln in t.get("items") or [])
         incoming.append({
             "transfer_id": t.get("id"),
             "transfer_number": t.get("transfer_number"),
@@ -91,9 +82,13 @@ def _transfers(db, shop: Optional[str]) -> Dict[str, List[Dict]]:
             "pieces": pieces,
             "shipped_at": t.get("shipped_at"),
         })
-    for t in coll.find({**_at("from_location_id", shop), "status": {"$in": sorted(to_pack)}}, {"_id": 0}):
+    for t in coll.find({**_at("from_location_id", shop), "status": {"$in": sorted(PACKABLE_TRANSFER_STATUSES)}}, {"_id": 0}):
         lines = [
-            {"product_name": ln.get("product_name") or ln.get("sku") or "", "quantity": _qty(ln.get("quantity_requested"))}
+            {
+                "product_name": ln.get("product_name") or ln.get("sku") or "",
+                "quantity": _qty(ln.get("quantity_requested")),
+                "packed": len(ln.get("packed_stock_ids") or []),
+            }
             for ln in t.get("items") or []
         ]
         requests.append({
@@ -104,6 +99,7 @@ def _transfers(db, shop: Optional[str]) -> Dict[str, List[Dict]]:
             "to_store_name": t.get("to_location_name"),
             "status": t.get("status"),
             "pieces": sum(ln["quantity"] for ln in lines),
+            "packed": sum(ln["packed"] for ln in lines),
             "lines": lines,
         })
     incoming.sort(key=lambda r: str(r.get("shipped_at") or ""))

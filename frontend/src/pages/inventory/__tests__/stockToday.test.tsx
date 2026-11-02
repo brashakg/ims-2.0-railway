@@ -35,7 +35,7 @@ const DATA = {
   store_id: 'S1',
   store_name: 'Dhanbad',
   incoming: [{ transfer_id: 't1', from_store_name: 'Bokaro', pieces: 6, shipped_at: '2026-10-30T10:00:00Z' }],
-  requests: [{ transfer_id: 't2', to_store_name: 'Pune', status: 'approved', pieces: 2, lines: [{ product_name: 'Ray-Ban RB3025', quantity: 2 }] }],
+  requests: [{ transfer_id: 't2', to_store_name: 'Pune', status: 'approved', pieces: 2, packed: 0, lines: [{ product_name: 'Ray-Ban RB3025', quantity: 2, packed: 0 }] }],
   count: { in_progress: [], counted_today: 0 },
   quarantine: { pieces: 3, unlabeled: 2 },
   deliveries: [
@@ -65,6 +65,11 @@ describe('Stock today: reachable', () => {
     expect([...(group.items[0].requireRoles ?? [])].sort()).toEqual([...STOCK_TODAY_ROLES].sort());
     const src = read('../../../routes/inventoryRoutes.tsx');
     expect(src).toMatch(/path="inventory\/today"[\s\S]*?allowedRoles=\{STOCK_TODAY_ROLES\}/);
+  });
+
+  it("sits in the menu's 'Stock and buying' section (#1336)", () => {
+    const group = NAV_GROUPS.find((g) => g.title === 'Stock & supply')!;
+    expect(group.items.find((i) => i.id === 'stock-today')?.section).toBe('Stock and buying');
   });
 
   it('admits the purchase roles - the server gate on GET /inventory/today', () => {
@@ -97,6 +102,16 @@ describe('Stock today: the page', () => {
     expect(screen.getByText('2 pieces waiting, print red labels')).toBeInTheDocument();
     const row = screen.getByText('Ray-Ban RB3025 Aviator').closest('tr')!;
     expect(within(row).getAllByRole('cell').map((c) => c.textContent)).toEqual(['Ray-Ban RB3025 Aviator', '0', '3', '7']);
+  });
+
+  it('a request says how many pieces are already scanned out into the box (S3)', async () => {
+    getStockToday.mockResolvedValue({
+      ...DATA,
+      requests: [{ transfer_id: 't2', to_store_name: 'Pune', status: 'packed', pieces: 3, packed: 2,
+        lines: [{ product_name: 'Ray-Ban RB3025', quantity: 3, packed: 2 }] }],
+    });
+    renderPage();
+    expect(await screen.findByText(/Pune wants 3 × Ray-Ban RB3025 \(2 in the box\)/)).toBeInTheDocument();
   });
 
   it('a manager gets no stock value card and a Receive button per order', async () => {

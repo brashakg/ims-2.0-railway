@@ -33,17 +33,18 @@ const PRODUCTS_ALL = ['catalog', 'catalog-review', 'catalog-missing-photos', 'ca
 
 // Before -> after (Power Grid / Online Stock rows gone): SA/AD 17 -> 15,
 // SM 14 -> 12, CM 13 -> 11, AM 12 -> 10, OPTOMETRIST 3 -> 2, others unchanged.
+// S7 (#1297): Stock today heads the list for the purchase roles (its route gate).
 const EXPECTED: Record<string, string[]> = {
-  SUPERADMIN: [...STOCK, 'workshop', ...PRODUCTS_ALL],
-  ADMIN: [...STOCK, 'workshop', ...PRODUCTS_ALL],
-  STORE_MANAGER: [...STOCK, 'workshop', 'catalog', 'catalog-scorecard', 'collections', 'quick-share'],
+  SUPERADMIN: ['stock-today', ...STOCK, 'workshop', ...PRODUCTS_ALL],
+  ADMIN: ['stock-today', ...STOCK, 'workshop', ...PRODUCTS_ALL],
+  STORE_MANAGER: ['stock-today', ...STOCK, 'workshop', 'catalog', 'catalog-scorecard', 'collections', 'quick-share'],
   CATALOG_MANAGER: ['inventory', 'stock-count', 'reorder', 'opening-stock', ...PRODUCTS_ALL],
-  AREA_MANAGER: [...STOCK, 'catalog-scorecard', 'collections', 'quick-share'],
+  AREA_MANAGER: ['stock-today', ...STOCK, 'catalog-scorecard', 'collections', 'quick-share'],
   WORKSHOP_STAFF: ['inventory', 'vendor-returns', 'workshop'],
   OPTOMETRIST: ['stock-lookup', 'quick-share'],
   CASHIER: ['stock-lookup', 'quick-share'],
   SALES_STAFF: ['stock-lookup', 'quick-share'],
-  ACCOUNTANT: ['reorder', 'purchase'],
+  ACCOUNTANT: ['stock-today', 'reorder', 'purchase'],
 };
 
 describe('Stock & supply rows per role', () => {
@@ -94,7 +95,7 @@ describe('TopNav section headings', () => {
       expect(h.getAttribute('role')).toBeNull();
     });
     expect(screen.queryByRole('menuitem', { name: /Stock and buying|^Products$/ })).not.toBeInTheDocument();
-    expect(screen.getAllByRole('menuitem')).toHaveLength(15);
+    expect(screen.getAllByRole('menuitem')).toHaveLength(16);
   });
 
   it('CASHIER (2 rows) sees no headings', async () => {

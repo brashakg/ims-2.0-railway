@@ -4,11 +4,12 @@ GET /api/v1/inventory/today is READ-ONLY. It writes nothing and decides
 nothing of its own: each section asks the rule that already exists on main.
 
     incoming     -- stock_transfers TO this shop that left the other shop
-                    (in_transit / partially_received), pieces still to scan in
-                    (routers/transfers._line_expected_qty minus received);
-    requests     -- transfers FROM this shop not yet shipped (the pre-ship
-                    statuses transfers.CANCELLABLE_TRANSFER_STATUSES lists,
-                    minus draft and rejected);
+                    (in_transit / partially_received), the pieces still on
+                    the way (S3: transfers._pieces_on_the_way, the shipped
+                    pieces not yet scanned in -- what Accept lists missing);
+    requests     -- transfers FROM this shop waiting to be packed and sent
+                    (S3: transfers.PACKABLE_TRANSFER_STATUSES, the statuses
+                    pack accepts), with the pieces already scanned out;
     count        -- this shop's stock counts (/inventory/audit): any still in
                     progress, and how many finished today (IST);
     quarantine   -- QUARANTINED pieces here, and how many still have no red
@@ -164,11 +165,21 @@ def _transfer(db, tid, frm, to, status, lines, **extra):
     })
 
 
-def _line(name, requested, shipped=None, received=0):
-    line = {"product_id": f"P-{name}", "product_name": name,
-            "quantity_requested": requested, "quantity_received": received}
+def _line(name, requested, shipped=None, received=0, damaged=0, packed=0):
+    """A transfer line in S3's per-piece shape: the pieces scanned out
+    (packed_stock_ids), shipped (shipped_stock_ids), and scanned in
+    (received_stock_ids / damaged_stock_ids); the counts derived from them."""
+    line = {"id": f"L-{name}", "product_id": f"P-{name}", "product_name": name,
+            "quantity_requested": requested, "quantity_received": received + damaged}
+    if packed:
+        line["packed_stock_ids"] = [f"{name}-{i}" for i in range(packed)]
+        line["quantity_packed"] = packed
     if shipped is not None:
+        ids = [f"{name}-{i}" for i in range(shipped)]
+        line["shipped_stock_ids"] = ids
         line["quantity_shipped"] = shipped
+        line["received_stock_ids"] = ids[:received]
+        line["damaged_stock_ids"] = ids[received:received + damaged]
     return line
 
 
@@ -221,6 +232,25 @@ def test_pieces_coming_in_are_the_ones_shipped_to_this_shop_and_not_yet_scanned(
     assert got["b"]["pieces"] == 2  # 5 shipped, 3 already scanned in
 
 
+def test_pieces_coming_are_the_shipped_pieces_not_yet_scanned_in_s3(get, mongo_db):
+    # S3: a piece is coming until it is scanned in, as received or damaged.
+    # A line with no pieces in the box (shipped before S3, counts only)
+    # has nothing to scan in -- S3's receive refuses every code on it.
+    legacy = {"id": "L-OLD", "product_id": "P-OLD", "product_name": "OLD",
+              "quantity_requested": 4, "quantity_shipped": 4, "quantity_received": 0}
+    _transfer(mongo_db, "a", S2, S1, "partially_received",
+              [_line("RB3025", 4, shipped=4, received=1, damaged=1), legacy])
+    got = _ok(get(_user("STORE_MANAGER")))["incoming"]
+    assert [(t["transfer_id"], t["pieces"]) for t in got] == [("a", 2)]
+
+
+def test_coming_and_accept_are_one_rule():
+    from api.routers import transfers
+
+    line = _line("RB3025", 3, shipped=3, received=1)
+    assert transfers._pieces_on_the_way(line) == ["RB3025-1", "RB3025-2"]
+
+
 def test_requests_are_this_shops_transfers_out_that_have_not_shipped(get, mongo_db):
     for tid, status in [("p1", "pending_approval"), ("p2", "approved"), ("p3", "picking"),
                         ("p4", "packed"), ("p5", "pending"), ("x1", "draft"), ("x2", "rejected"),
@@ -229,10 +259,26 @@ def test_requests_are_this_shops_transfers_out_that_have_not_shipped(get, mongo_
     _transfer(mongo_db, "x5", S2, S1, "approved", [_line("RB3025", 2)])  # asked OF Bokaro
     body = _ok(get(_user("STORE_MANAGER")))
     got = {t["transfer_id"]: t for t in body["requests"]}
-    assert set(got) == {"p1", "p2", "p3", "p4", "p5"}
-    assert got["p1"]["to_store_name"] == "Bokaro"
-    assert got["p1"]["pieces"] == 2
-    assert got["p1"]["lines"] == [{"product_name": "RB3025", "quantity": 2}]
+    # S3: only what pack accepts is a job here. A request still waiting for
+    # the area manager (pending_approval, legacy pending) cannot be packed.
+    assert set(got) == {"p2", "p3", "p4"}
+    assert got["p2"]["to_store_name"] == "Bokaro"
+    assert got["p2"]["pieces"] == 2 and got["p2"]["packed"] == 0
+    assert got["p2"]["lines"] == [{"product_name": "RB3025", "quantity": 2, "packed": 0}]
+
+
+def test_a_request_counts_the_pieces_already_scanned_out_into_the_box(get, mongo_db):
+    _transfer(mongo_db, "p", S1, S2, "packed", [_line("RB3025", 3, packed=2), _line("VO5286", 1, packed=1)])
+    req = _ok(get(_user("STORE_MANAGER")))["requests"][0]
+    assert req["pieces"] == 4 and req["packed"] == 3
+    assert req["lines"] == [{"product_name": "RB3025", "quantity": 3, "packed": 2},
+                            {"product_name": "VO5286", "quantity": 1, "packed": 1}]
+
+
+def test_the_requests_card_and_pack_agree_on_what_can_be_packed():
+    from api.routers import transfers
+
+    assert transfers.PACKABLE_TRANSFER_STATUSES == {"approved", "picking", "packed"}
 
 
 # ---------------------------------------------------------------------------
