@@ -55,6 +55,9 @@ export function orderPayloadOf(store: any, discountApprovalId?: string | null) {
     // synthesizes a Primary for the synthetic account).
     patient_id: store.patient?.id || undefined,
     store_id: store.store_id,
+    // The store the bill was made at: the server refuses a press in another
+    // store's session (money review 25).
+    bill_store_id: store.bill_store_id || undefined,
     order_type: store.sale_type,
     salesperson_id: store.salesperson_id,
     salesperson_name: store.salesperson_name,

@@ -34,7 +34,7 @@ import { AlertTriangle, X, Glasses, ShoppingBag, Home } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import {
-  billKeyFor, clearBillKey, settleBillKey, useUnconfirmedWording,
+  billKeyEntry, billKeyFor, clearBillKey, settleAfterPress, useUnconfirmedWording,
 } from '../../../components/pos/posBillKey';
 import { billIdOf } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
@@ -239,6 +239,7 @@ export function GeneralCounterSurface() {
       // or the date): a reload, a recall or the next IST day presses the SAME
       // bill again -- never a second sale (money review 23).
       const fp = usePOSStore.getState().ensureBillId();
+      const wasPending = !!billKeyEntry(fp)?.pending;
       idempotencyKeyRef.current = billKeyFor(fp, Date.now(),
         billFpRef.current === fp ? idempotencyKeyRef.current : null);
       billFpRef.current = fp;
@@ -252,7 +253,7 @@ export function GeneralCounterSurface() {
       if (!res.ok) {
         // A definite refusal: nothing is pending, so the saved draft keeps no
         // customer, member or Rx.
-        if (!res.pending) settleBillKey(fp);
+        settleAfterPress(fp, wasPending, res);
         if (res.discountApproval) {
           setApprovalNeed(res.discountApproval);
           return;

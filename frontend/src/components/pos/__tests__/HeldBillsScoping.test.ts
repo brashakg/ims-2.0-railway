@@ -143,3 +143,19 @@ describe('money review 23: a parked bill stays at its store', () => {
     expect(store.parkCurrentSale).toHaveBeenCalledWith({ heldBy: ME, storeId: 'S2' });
   });
 });
+
+describe('money review 25: a recall never drops a live pending bill', () => {
+  it('parks the live bill (if its press is pending) before it recalls', () => {
+    seed(bill('b1', ME));
+    const calls: string[] = [];
+    const store = {
+      ...fakeStore(),
+      parkIfPending: vi.fn(() => { calls.push('park'); return true; }),
+      restoreHeldSale: vi.fn(() => { calls.push('restore'); }),
+    };
+    const { result } = renderHook(() => useHeldBills(store, ME, 'S1'));
+    act(() => { result.current.recallBill('b1'); });
+    expect(store.parkIfPending).toHaveBeenCalledWith(ME, 'S1');
+    expect(calls).toEqual(['park', 'restore']);
+  });
+});

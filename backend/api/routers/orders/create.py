@@ -231,6 +231,14 @@ async def create_order(
         # Fail-soft: any lookup error falls through to a normal create.
         idem_key = (idempotency_key or "").strip()
         body_fp = order_body_fingerprint(order)
+        # The bill's key replays only at the store it was made at: pressed in
+        # another store's session it would ring a second sale there. Refused
+        # before anything is looked up or written (money review 25).
+        if order.bill_store_id and order.bill_store_id != store_id:
+            raise HTTPException(status_code=409, detail={
+                "code": BILL_STORE_MISMATCH,
+                "message": (f"This bill was started at {order.bill_store_id} - switch back to that store to finish "
+                            "it. Nothing was charged.")})
         if idem_key:
             try:
                 existing = order_repo.find_one(
@@ -1322,6 +1330,8 @@ def _still_saving(order_repo, idem_key: Optional[str]) -> Optional[HTTPException
 
 
 IDEMPOTENCY_BODY_MISMATCH = "IDEMPOTENCY_BODY_MISMATCH"
+ORDER_NOT_LIVE = "ORDER_NOT_LIVE"
+BILL_STORE_MISMATCH = "BILL_STORE_MISMATCH"
 
 
 def order_body_fingerprint(order: OrderCreate) -> str:
@@ -1350,12 +1360,18 @@ def _replay_same_bill(order: Dict[str, Any], body_fp: str) -> Dict[str, Any]:
     bill. Another body under the key is refused (409): the till then posts
     no payment and never says the sale is complete. An order saved before
     the fingerprint existed replays as before."""
+    number = order.get("order_number") or order.get("order_id")
+    # A cancelled or void order is never replayed as a sale (money review 25).
+    if str(order.get("status") or "").upper() in ("CANCELLED", "VOID", "VOIDED"):
+        raise HTTPException(status_code=409, detail={
+            "code": ORDER_NOT_LIVE,
+            "message": f"Order {number} was cancelled - start a new bill. Nothing was charged."})
     saved = order.get("body_fingerprint")
     if saved and saved != body_fp:
         raise HTTPException(status_code=409, detail={
             "code": IDEMPOTENCY_BODY_MISMATCH,
-            "message": (f"This bill was already saved as order {order.get('order_number') or order.get('order_id')} "
-                        "with different items - open it on the Orders screen; nothing new was charged.")})
+            "message": (f"This bill was already saved as order {number} with different items. Open it on the "
+                        "Orders screen to finish or cancel it. To sell these items, start a new bill.")})
     return _order_create_response(order)
 
 

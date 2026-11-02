@@ -46,7 +46,7 @@ def test_an_edited_bill_under_the_same_key_is_refused(client, auth_headers, hard
     assert r2.status_code == 409, r2.text
     detail = r2.json()["detail"]
     assert detail["code"] == "IDEMPOTENCY_BODY_MISMATCH"
-    assert r1.json()["order_number"] in detail["message"] and "nothing new was charged" in detail["message"]
+    assert r1.json()["order_number"] in detail["message"] and "start a new bill" in detail["message"]
     assert len(_draft_orders(hardening_orders)) == 1
 
 

@@ -530,3 +530,15 @@ describe('money review 23: the counter bill keeps its key across IST midnight', 
     }
   });
 });
+
+describe('money review 25: a pre-create refusal never settles a pending bill (the surface)', () => {
+  it('keeps the key pending when a pending bill is refused before the order door', async () => {
+    putSomethingInTheCart();
+    billKeyFor(usePOSStore.getState().ensureBillId()); // an earlier press lost its answer
+    submitPosOrder.mockResolvedValueOnce({ ok: false, error: 'Could not get the bill total from the server: x' });
+    renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(1));
+    expect(billKeyEntry(usePOSStore.getState().ensureBillId())?.pending).toBe(true);
+  });
+});

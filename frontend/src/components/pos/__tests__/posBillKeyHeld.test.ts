@@ -16,7 +16,7 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { usePOSStore } from '../../../stores/posStore';
-import { BILL_KEY_TTL_MS, billKeyEntry, billKeyFor, settleBillKey } from '../posBillKey';
+import { BILL_KEY_TTL_MS, billKeyEntry, billKeyFor, settleAfterPress, settleBillKey } from '../posBillKey';
 
 const putCart = () => usePOSStore.getState().addToCart({
   id: 'p-1', product_id: 'p-1', name: 'Frame', category: 'FRAME', quantity: 1,
@@ -291,5 +291,36 @@ describe('money review 24: a pending key never expires, and the bill keeps its s
     localStorage.setItem('ims_user', JSON.stringify({ id: 'u1', activeStoreId: 'S2' })); // switched
     usePOSStore.getState().parkCurrentSale({ heldBy: 'u1', storeId: 'S2' });
     expect(heldBills()[0].store_id).toBe('S1');
+  });
+});
+
+describe('money review 25: THE one settle rule after a press', () => {
+  beforeEach(() => localStorage.clear());
+
+  it('a refusal before the order door keeps a PENDING key pending', () => {
+    billKeyFor('b-p'); // an earlier press lost its answer
+    settleAfterPress('b-p', true, { sent: false }); // e.g. the store guard, a failed quote
+    expect(billKeyEntry('b-p')?.pending).toBe(true);
+  });
+
+  it('a refusal at the order door that says nothing about the key keeps it pending', () => {
+    billKeyFor('b-s');
+    settleAfterPress('b-s', true, { sent: true, definite: false }); // e.g. BILL_STORE_MISMATCH
+    expect(billKeyEntry('b-s')?.pending).toBe(true);
+  });
+
+  it('a definite refusal at the order door settles it; a never-sent first press settles too', () => {
+    billKeyFor('b-d');
+    settleAfterPress('b-d', true, { sent: true, definite: true });
+    expect(billKeyEntry('b-d')?.pending).toBe(false);
+    billKeyFor('b-n'); // this press only
+    settleAfterPress('b-n', false, { sent: false });
+    expect(billKeyEntry('b-n')?.pending).toBe(false);
+  });
+
+  it('an order known to exist under the key keeps it pending', () => {
+    billKeyFor('b-o');
+    settleAfterPress('b-o', false, { sent: true, pending: true });
+    expect(billKeyEntry('b-o')?.pending).toBe(true);
   });
 });

@@ -272,7 +272,7 @@ describe('money review 24: a press never pays onto another bill', () => {
     } as any));
     const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-e');
     expect(res.ok).toBe(false);
-    expect(res.pending).toBeFalsy();
+    expect(res.pending).toBe(true); // an order exists under the key: it stays pending (money review 25)
     expect(res.error).toMatch(/already saved as order BV-001 with different items/);
     expect(mockedAddPayment).not.toHaveBeenCalled();
   });
@@ -294,6 +294,38 @@ describe('money review 24: a press never pays onto another bill', () => {
     expect(res.ok).toBe(false);
     expect(res.error).toMatch(/started at S1/);
     expect(mockedCreate).not.toHaveBeenCalled();
+    usePOSStore.setState({ bill_store_id: null } as any);
+  });
+});
+
+describe('money review 25: what a press tells the key', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.removeItem('ims_user');
+  });
+  const refused = (status: number, detail: unknown) => buildApiError({
+    isAxiosError: true, message: 'x', config: { method: 'post' },
+    response: { status, data: { detail } },
+  } as any);
+
+  it('a plain refusal at the order door is definite; the store refusal is not', async () => {
+    seed();
+    mockedCreate.mockRejectedValueOnce(refused(400, 'Order must have at least one item'));
+    const a = await submitPosOrder(usePOSStore.getState() as any, 'k-a');
+    expect([a.sent, a.definite]).toEqual([true, true]);
+    mockedCreate.mockRejectedValueOnce(refused(409, { code: 'BILL_STORE_MISMATCH', message: 'started at S1' }));
+    const b = await submitPosOrder(usePOSStore.getState() as any, 'k-b');
+    expect([b.sent, b.definite]).toEqual([true, false]);
+  });
+
+  it('a total that is not this bill keeps the key pending; the bill names its store to the server', async () => {
+    seed();
+    usePOSStore.setState({ bill_store_id: 'S1' } as any);
+    mockedCreate.mockResolvedValueOnce({ order_id: 'ord-1', order_number: 'BV-001', grand_total: 700 } as any);
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'k-t');
+    expect(res.pending).toBe(true);
+    expect(res.error).toMatch(/start a new bill/);
+    expect((mockedCreate.mock.calls[0][0] as any).bill_store_id).toBe('S1');
     usePOSStore.setState({ bill_store_id: null } as any);
   });
 });

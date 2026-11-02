@@ -45,10 +45,19 @@ export interface SubmitPosOrderResult {
   /** Fatal: the approval sent with this try cannot be used (already spent,
       expired, or for another bill) -- the caller drops it. */
   discountApprovalRejected?: boolean;
-  /** The outcome is NOT known (the sale or a leg may have landed): the bill
-      key stays pending. Any other !ok is a definite refusal. */
+  /** The outcome is NOT known (the sale or a leg may have landed), or an
+      order is known to exist under the key: the bill key stays pending. */
   pending?: boolean;
+  /** The press reached the order door (POST /orders was sent). */
+  sent?: boolean;
+  /** The order door refused and that refusal PROVES no order exists under
+      this key (money review 25): only this settles a key that was pending. */
+  definite?: boolean;
 }
+
+/** Order-door refusals that say nothing about an earlier press under the
+    key (an order exists, may exist, or the press was at the wrong store). */
+const NOT_ABOUT_THE_KEY = new Set(['IDEMPOTENCY_BODY_MISMATCH', 'SALE_STILL_SAVING', 'BILL_STORE_MISMATCH']);
 
 /** The cart lines a workshop job is built from. ONE predicate: the job
  *  creator below and BillingSurface's sale_type derivation both read it, so
@@ -115,6 +124,17 @@ export async function submitPosOrder(
   /** The request id of a manager-approved discount_override approval, when a
       refused sale is retried after one (owner 2026-10-18). */
   discountApprovalId?: string | null,
+): Promise<SubmitPosOrderResult> {
+  const mark = { sent: false };
+  const res = await pressOnce(store, idempotencyKey, discountApprovalId, mark);
+  return { ...res, sent: mark.sent };
+}
+
+async function pressOnce(
+  store: any,
+  idempotencyKey: string,
+  discountApprovalId: string | null | undefined,
+  mark: { sent: boolean },
 ): Promise<SubmitPosOrderResult> {
   if (store.sale_type === 'prescription_order') {
     const hasLens = (store.cart || []).some((i: any) =>
@@ -187,12 +207,15 @@ export async function submitPosOrder(
     return { ok: false, error: `This bill was started at ${store.bill_store_id} - switch back to that store to finish it.` };
   }
 
+  let created = false;
   try {
+    mark.sent = true;
     const result = await orderApi.createOrder(
       orderPayloadOf(store, discountApprovalId) as any,
       idempotencyKey || undefined,
     );
 
+    created = true;
     if (!result?.order_id) {
       return { ok: false, error: 'Order created but no ID returned. Check order list.' };
     }
@@ -201,11 +224,13 @@ export async function submitPosOrder(
     // total is not this bill's (a replayed order the server did not refuse).
     const quoted = store.getGrandTotal();
     if (typeof result.grand_total === 'number' && Math.abs(result.grand_total - quoted) > 0.01) {
+      // An order exists under this key: the key stays pending, bound to it.
       return {
         ok: false,
+        pending: true,
         error: `Order ${result.order_number || result.order_id} was saved with a total of ₹${result.grand_total}, `
-          + `not the ₹${quoted} this bill shows - open it on the Orders screen before taking any payment. `
-          + 'Nothing was charged.',
+          + `not the ₹${quoted} this bill shows. Open it on the Orders screen to finish or cancel it. `
+          + 'To sell these items, start a new bill. Nothing was charged.',
       };
     }
 
@@ -450,19 +475,27 @@ export async function submitPosOrder(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const { code, detail } = (err || {}) as { code?: string; detail?: unknown };
+    const status = getErrorStatus(err);
+    const definite = !created && status !== undefined && status >= 400 && status < 500
+      && !NOT_ABOUT_THE_KEY.has(code || '');
     if (code === 'DISCOUNT_NEEDS_APPROVAL') {
-      return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed };
+      return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed, definite };
+    }
+    if (code === 'IDEMPOTENCY_BODY_MISMATCH') {
+      // An order exists under this key (other items): no payment, and the key
+      // stays pending, bound to it (money review 25).
+      return { ok: false, error: msg, pending: true };
     }
     if (code === 'SALE_STILL_SAVING') {
       return { ok: false, error: TILL_SALE_STILL_SAVING, pending: true };
     }
     if (code && DEAD_APPROVAL_CODES.has(code)) {
-      return { ok: false, error: msg, discountApprovalRejected: true };
+      return { ok: false, error: msg, discountApprovalRejected: true, definite };
     }
     if (msg === WRITE_UNCONFIRMED_MESSAGE) {
       return { ok: false, error: replayGuaranteed() ? TILL_SALE_UNCONFIRMED : TILL_SALE_UNCONFIRMED_CHECK,
                pending: true };
     }
-    return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error') };
+    return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error'), definite };
   }
 }

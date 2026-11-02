@@ -2297,15 +2297,11 @@ def _voucher_give_back_plan(vcoll, voucher: Dict[str, Any], key: str, order: Opt
         return booked
     stored = (fresh.get("pos_give_back_plan") or {}).get(k)
     field = "pos_give_back_plan." + k
-    plan = stored
-    decided = _decide_voucher_give_back(fresh, order)
-    # A stored VOUCHER decision is re-checked (money review 24): a voucher
-    # that died since, with nothing booked, follows the dead-voucher rule.
-    if not stored or (stored.get("dest") == "VOUCHER" and decided["dest"] != "VOUCHER"):
-        plan = {**decided, "amount": abs(float(
-            next((e.get("delta") for e in fresh.get("money_ledger") or [] if e.get("idempotency_key") == key), 0)
-            or 0))}
-        vcoll.update_one({"code": voucher.get("code"), "$or": [{field: {"$exists": False}}, {field + ".dest": "VOUCHER"}]},
+    plan = effective_give_back_plan(fresh, order, key)
+    if plan != stored:
+        # The plan changes ONLY by compare-and-set from the exact old plan
+        # (money review 25): of two presses, one changes it; the other reads it.
+        vcoll.update_one({"code": voucher.get("code"), field: stored if stored else {"$exists": False}},
                          {"$set": {field: plan}})
         plan = ((vcoll.find_one({"code": voucher.get("code")}) or {}).get("pos_give_back_plan") or {}).get(k) or plan
     if plan["dest"] == "CASH":
@@ -2319,13 +2315,39 @@ def _voucher_give_back_plan(vcoll, voucher: Dict[str, Any], key: str, order: Opt
     return plan
 
 
+def effective_give_back_plan(voucher: Dict[str, Any], order: Optional[Dict[str, Any]], key: str) -> Dict[str, Any]:
+    """THE decision a voucher leg's give-back follows now (money review 25: one
+    function for the door and Needs completing): the stored decision, except
+    a stored VOUCHER whose voucher has died since (then the dead-voucher rule);
+    with nothing stored, what would be decided now."""
+    stored = (voucher.get("pos_give_back_plan") or {}).get(key.replace(".", "_"))
+    decided = _decide_voucher_give_back(voucher, order)
+    if stored and not (stored.get("dest") == "VOUCHER" and decided["dest"] != "VOUCHER"):
+        return stored
+    return {**decided, "amount": abs(float(
+        next((e.get("delta") for e in voucher.get("money_ledger") or [] if e.get("idempotency_key") == key), 0)
+        or 0))}
+
+
+def _refuse_second_destination(vcoll, voucher: Dict[str, Any], key: str, dest: str) -> None:
+    """Before booking a voucher leg's give-back, BOTH fixed ids are checked
+    (and the cash payout's): a leg already given back one way is never
+    booked another way (money review 25). Raises on a read error."""
+    try:
+        booked = _booked_give_back(vcoll.find_one({"code": voucher.get("code")}) or voucher, key)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the payment - try again.") from exc
+    if booked and booked["dest"] != dest:
+        raise HTTPException(status_code=409, detail=(
+            "This payment was already given back another way - nothing more was given."))
+
+
 def voucher_leg_needs_cash(voucher: Optional[Dict[str, Any]], order: Optional[Dict[str, Any]], key: str) -> bool:
     """A voucher leg given back in cash (Needs completing asks where the cash
-    comes from): its stored decision, else what would be decided now."""
+    comes from): by THE effective decision (the door's own)."""
     if not voucher or any(e.get("idempotency_key") == f"GIVEBACK:{key}" for e in voucher.get("money_ledger") or []):
         return False
-    stored = (voucher.get("pos_give_back_plan") or {}).get(key.replace(".", "_"))
-    return (stored or _decide_voucher_give_back(voucher, order))["dest"] == "CASH"
+    return effective_give_back_plan(voucher, order, key)["dest"] == "CASH"
 
 
 GIVEBACK_PAYOUT = "GIVEBACK_PAYOUT"
@@ -2466,6 +2488,7 @@ def give_back_unbilled_leg(key: str, current_user: dict, cash_paid_from: Optiona
         # ONE decision per leg (money review 23): the first winning press
         # stores where the money goes; every later press replays it.
         plan = _voucher_give_back_plan(vcoll, voucher, key, order, cash_paid_from)
+        _refuse_second_destination(vcoll, voucher, key, plan["dest"])
         if plan["dest"] == "CASH":
             # No account to credit: paid back in CASH, booked by THE cash
             # rule (the owed-paid door's). The leg stays the give-back's
@@ -2495,9 +2518,13 @@ def give_back_unbilled_leg(key: str, current_user: dict, cash_paid_from: Optiona
     else:
         from ..services import money_guard
 
+        # The restore lands only while the stored decision is still VOUCHER,
+        # in the same guarded write (money review 25): a press that changed it
+        # first wins, and this one books nothing.
         got = money_guard.credit(vcoll, "GIFT_VOUCHER", voucher.get("code"), leg["amount"],
                                  reason="unbilled till payment given back", actor=claimed_by, ref=leg["order_id"],
-                                 idempotency_key=f"GIVEBACK:{key}")
+                                 idempotency_key=f"GIVEBACK:{key}",
+                                 guard_extra={f"pos_give_back_plan.{key.replace('.', '_')}.dest": "VOUCHER"})
         if not got.ok:
             raise HTTPException(status_code=503, detail=(
                 "The give-back could not be confirmed - press again (it is given once)."))

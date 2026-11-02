@@ -100,6 +100,9 @@ export function useHeldBills(store: any, currentUserId: string, currentStoreId?:
         window.alert(`This bill was rung at ${bill.store_id} - sign in there to finish it.`);
         return false;
       }
+      // The live bill, if its press is pending, is parked first with its key
+      // -- a recall never drops it (money review 25).
+      store.parkIfPending?.(currentUserId, currentStoreId);
       // Atomic REPLACE, not a merge into the current cart: restores the cart
       // verbatim plus the bill-level discount and delivery fields.
       store.restoreHeldSale(bill.state, bill.bill_key);
