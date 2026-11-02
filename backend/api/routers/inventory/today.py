@@ -8,6 +8,8 @@ asks the rule main already has.
                partially_received); pieces = the shipped pieces not yet
                scanned in (S3: transfers._pieces_on_the_way, the same rule
                Accept lists as missing).
+  to_accept    transfers TO the shop with every piece scanned in (RECEIVED),
+               waiting for someone to press Accept (complete_transfer).
   requests     transfers FROM the shop to pack and send: the statuses pack
                accepts (S3: transfers.PACKABLE_TRANSFER_STATUSES), with the
                pieces already scanned out into the box (packed_stock_ids).
@@ -69,19 +71,22 @@ def _transfers(db, shop: Optional[str]) -> Dict[str, List[Dict]]:
     )
 
     on_the_way = {TransferStatus.IN_TRANSIT.value, TransferStatus.PARTIALLY_RECEIVED.value}
+    received = TransferStatus.RECEIVED.value
     coll = db.get_collection("stock_transfers")
-    incoming, requests = [], []
-    for t in coll.find({**_at("to_location_id", shop), "status": {"$in": sorted(on_the_way)}}, {"_id": 0}):
-        pieces = sum(len(_pieces_on_the_way(ln)) for ln in t.get("items") or [])
-        incoming.append({
+    incoming, to_accept, requests = [], [], []
+    for t in coll.find({**_at("to_location_id", shop), "status": {"$in": sorted(on_the_way | {received})}}, {"_id": 0}):
+        row = {
             "transfer_id": t.get("id"),
             "transfer_number": t.get("transfer_number"),
             "from_store_id": t.get("from_location_id"),
             "from_store_name": t.get("from_location_name"),
             "to_store_id": t.get("to_location_id"),
-            "pieces": pieces,
+            "status": t.get("status"),
+            "pieces": sum(len(_pieces_on_the_way(ln)) for ln in t.get("items") or []),
             "shipped_at": t.get("shipped_at"),
-        })
+        }
+        # Every piece scanned in: the box waits for Accept (complete_transfer).
+        (to_accept if t.get("status") == received else incoming).append(row)
     for t in coll.find({**_at("from_location_id", shop), "status": {"$in": sorted(PACKABLE_TRANSFER_STATUSES)}}, {"_id": 0}):
         lines = [
             {
@@ -103,8 +108,9 @@ def _transfers(db, shop: Optional[str]) -> Dict[str, List[Dict]]:
             "lines": lines,
         })
     incoming.sort(key=lambda r: str(r.get("shipped_at") or ""))
+    to_accept.sort(key=lambda r: str(r.get("shipped_at") or ""))
     requests.sort(key=lambda r: str(r.get("transfer_number") or ""))
-    return {"incoming": incoming, "requests": requests}
+    return {"incoming": incoming, "to_accept": to_accept, "requests": requests}
 
 
 def _count(db, shop: Optional[str]) -> Dict:
@@ -206,6 +212,7 @@ async def stock_today(
         "store_id": shop,
         "store_name": None,
         "incoming": [],
+        "to_accept": [],
         "requests": [],
         "count": {"in_progress": [], "counted_today": 0},
         "quarantine": {"pieces": 0, "unlabeled": 0},

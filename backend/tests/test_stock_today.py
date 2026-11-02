@@ -208,6 +208,7 @@ def test_no_database_is_an_empty_page_not_a_500(get, monkeypatch):
     monkeypatch.setattr(inv_mod, "_get_db", lambda: None)
     body = _ok(get(_user("STORE_MANAGER")))
     assert body["incoming"] == [] and body["requests"] == [] and body["deliveries"] == []
+    assert body["to_accept"] == []
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +243,18 @@ def test_pieces_coming_are_the_shipped_pieces_not_yet_scanned_in_s3(get, mongo_d
               [_line("RB3025", 4, shipped=4, received=1, damaged=1), legacy])
     got = _ok(get(_user("STORE_MANAGER")))["incoming"]
     assert [(t["transfer_id"], t["pieces"]) for t in got] == [("a", 2)]
+
+
+def test_a_box_fully_scanned_in_waits_for_accept_not_dropped(get, mongo_db):
+    # Every piece scanned in -> RECEIVED; it stays on the page until someone
+    # presses Accept (complete_transfer), on its own list.
+    _transfer(mongo_db, "r", S2, S1, "received", [_line("RB3025", 2, shipped=2, received=2)])
+    _transfer(mongo_db, "p", S2, S1, "partially_received", [_line("VO5286", 3, shipped=3, received=1)])
+    _transfer(mongo_db, "c", S2, S1, "completed", [_line("Y", 1, shipped=1, received=1)])
+    _transfer(mongo_db, "o", S1, S2, "received", [_line("Z", 1, shipped=1, received=1)])  # the other end's job
+    body = _ok(get(_user("STORE_MANAGER")))
+    assert [(t["transfer_id"], t["from_store_name"]) for t in body["to_accept"]] == [("r", "Bokaro")]
+    assert [(t["transfer_id"], t["status"], t["pieces"]) for t in body["incoming"]] == [("p", "partially_received", 2)]
 
 
 def test_coming_and_accept_are_one_rule():

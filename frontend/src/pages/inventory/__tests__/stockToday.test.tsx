@@ -122,7 +122,8 @@ describe('Stock today: the page', () => {
     expect(btn).toHaveAttribute('href', '/purchase/receive?vendor_id=V1&po_id=po1');
     expect(screen.getByText(/late · was/)).toBeInTheDocument();
     expect(screen.getByText('due today')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Scan in' })).toHaveAttribute('href', '/inventory/transfers');
+    expect(screen.getByRole('link', { name: 'Scan in' })).toHaveAttribute('href', '/inventory/transfers?direction=incoming');
+    expect(screen.getByRole('link', { name: 'Pack and scan out' })).toHaveAttribute('href', '/inventory/transfers?direction=outgoing');
     expect(screen.getByRole('link', { name: 'Start counting' })).toHaveAttribute('href', '/inventory/audit');
   });
 
@@ -147,6 +148,38 @@ describe('Stock today: the page', () => {
     expect(screen.queryByRole('link', { name: 'Reorder these' })).not.toBeInTheDocument();
   });
 
+  it('the area manager gets no Scan in / Pack and scan out: transfers.py does not let them receive or ship', async () => {
+    roles = ['AREA_MANAGER'];
+    renderPage();
+    await screen.findByText('Pieces coming from Bokaro');
+    expect(screen.queryByRole('link', { name: 'Scan in' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Pack and scan out' })).not.toBeInTheDocument();
+  });
+
+  it('a box scanned in waits for Accept; a part-scanned box says what is left', async () => {
+    getStockToday.mockResolvedValue({
+      ...DATA,
+      incoming: [{ transfer_id: 'p', from_store_name: 'Bokaro', status: 'partially_received', pieces: 2 }],
+      to_accept: [{ transfer_id: 'r', from_store_name: 'Bokaro', status: 'received', pieces: 0 }],
+    });
+    renderPage();
+    expect(await screen.findByText(/2 pieces not scanned in yet: scan them in, or press Accept to report them missing\./)).toBeInTheDocument();
+    expect(screen.getByText(/1 box scanned in - press Accept\./)).toBeInTheDocument();
+    expect(screen.queryByText(/Scan them in when the box arrives/)).not.toBeInTheDocument();
+  });
+
+  it('only boxes scanned in: the card says press Accept, for the roles that may', async () => {
+    getStockToday.mockResolvedValue({
+      ...DATA,
+      incoming: [],
+      to_accept: [{ transfer_id: 'r', from_store_name: 'Bokaro', status: 'received', pieces: 0 }],
+    });
+    renderPage();
+    expect(await screen.findByText('1 box scanned in - press Accept.')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Press Accept' })).toHaveAttribute('href', '/inventory/transfers?direction=incoming');
+    expect(screen.queryByText(/No box is on its way/)).not.toBeInTheDocument();
+  });
+
   it('an open count is continued, not started again', async () => {
     getStockToday.mockResolvedValue({
       ...DATA,
@@ -159,10 +192,14 @@ describe('Stock today: the page', () => {
   });
 
   it('a section the server could not read is said, never shown as nothing to do', async () => {
-    getStockToday.mockResolvedValue({ ...DATA, deliveries: [], running_low: [], unavailable: ['deliveries', 'running_low', 'transfers'] });
+    // What the server sends when transfers fail: empty lists, plus the key.
+    getStockToday.mockResolvedValue({ ...DATA, incoming: [], to_accept: [], requests: [], deliveries: [], running_low: [], unavailable: ['deliveries', 'running_low', 'transfers'] });
     renderPage();
     await screen.findByText('What needs you today');
     expect(screen.getAllByText(/Could not be read just now/)).toHaveLength(4);
+    expect(screen.getAllByText('Other shops asked you for stock')).toHaveLength(1);
+    expect(screen.queryByText('No requests')).not.toBeInTheDocument();
+    expect(screen.queryByText('No shop is waiting on you.')).not.toBeInTheDocument();
     expect(screen.queryByText(/No purchase order is waiting/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Nothing here is at or under/)).not.toBeInTheDocument();
     expect(screen.queryByText(/No box is on its way/)).not.toBeInTheDocument();

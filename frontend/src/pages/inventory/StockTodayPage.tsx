@@ -10,8 +10,8 @@
 //
 // Each card links to the screen that does the job, and only for a role that
 // screen's own route admits (the same lists, imported).
-// TODO(S3): "Scan in" / "Pack and scan out" open the piece-by-piece transfer
-// box once S3 lands; today they open the Transfers list.
+// "Scan in" / "Pack and scan out" open the Transfers list on that direction,
+// for the roles transfers.py lets receive / ship (transferPermissions, one rule).
 // TODO(S6): "See them" opens Find a product once S6 lands; today the ledger.
 
 import type { ReactNode } from 'react';
@@ -23,7 +23,9 @@ import { inventoryApi } from '../../services/api';
 import type { StockToday } from '../../services/api/inventory';
 import { formatDateIST, istDayString } from '../../utils/datetime';
 import { getErrorMessage } from '../../utils/errorHandler';
+import type { UserRole } from '../../types';
 import { RECEIVING_MANAGER_ROLES } from '../purchase/purchaseTypes';
+import { COMPLETE_ROLES, RECEIVE_ROLES, SHIP_ROLES } from '../../components/inventory/transferPermissions';
 import { INVENTORY_MANAGE_ROLES, INVENTORY_MODULE_ROLES, REORDER_LIST_ROLES } from './inventoryRoles';
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -66,14 +68,18 @@ export default function StockTodayPage() {
   const allShops = !d.store_id;
   const shopLabel = d.store_name || (allShops ? 'All shops' : d.store_id);
   const today = istDayString(new Date()) ?? '';
-  const can = { module: hasRole(INVENTORY_MODULE_ROLES), count: hasRole(INVENTORY_MANAGE_ROLES), receive: hasRole([...RECEIVING_MANAGER_ROLES]), reorder: hasRole(REORDER_LIST_ROLES) };
+  const can = { module: hasRole(INVENTORY_MODULE_ROLES), ship: hasRole(SHIP_ROLES as UserRole[]), scanIn: hasRole(RECEIVE_ROLES as UserRole[]), accept: hasRole(COMPLETE_ROLES as UserRole[]), count: hasRole(INVENTORY_MANAGE_ROLES), receive: hasRole([...RECEIVING_MANAGER_ROLES]), reorder: hasRole(REORDER_LIST_ROLES) };
   const failed = new Set(d.unavailable ?? []);
   // A section the server could not read says so; it never reads as "nothing to do".
   const notRead = 'Could not be read just now. Refresh to try again.';
 
   // ---- the four job cards ---------------------------------------------------
-  const inPieces = d.incoming.reduce((n, t) => n + t.pieces, 0);
-  const senders = [...new Set(d.incoming.map((t) => t.from_store_name).filter(Boolean))].join(', ');
+  const toAccept = d.to_accept ?? [];
+  const sent = d.incoming.filter((t) => t.status !== 'partially_received');
+  const sentPieces = sent.reduce((n, t) => n + t.pieces, 0);
+  const notScanned = d.incoming.filter((t) => t.status === 'partially_received').reduce((n, t) => n + t.pieces, 0);
+  const boxesIn = [...d.incoming, ...toAccept];
+  const senders = [...new Set(boxesIn.map((t) => t.from_store_name).filter(Boolean))].join(', ');
   const outPieces = d.requests.reduce((n, t) => n + Math.max(0, t.pieces - (t.packed ?? 0)), 0);
   const asks = d.requests
     .flatMap((t) => t.lines.map((l) => `${t.to_store_name ?? 'A shop'} wants ${l.quantity} × ${l.product_name}${l.packed ? ` (${l.packed} in the box)` : ''}`))
@@ -108,10 +114,14 @@ export default function StockTodayPage() {
             <JobCard chip="Not read" chipTone="warn" title="Pieces coming from other shops" action="">{notRead}</JobCard>
             <JobCard chip="Not read" chipTone="warn" title="Other shops asked you for stock" action="">{notRead}</JobCard>
           </>
-        ) : d.incoming.length > 0 ? (
-          <JobCard chip={`${d.incoming.length} on the way`} chipTone="info" title={`Pieces coming from ${senders || 'another shop'}`}
-            to={can.module ? '/inventory/transfers' : null} action="Scan in">
-            {plural(inPieces, 'piece')} sent{d.incoming[0].shipped_at ? ` ${formatDateIST(d.incoming[0].shipped_at)}` : ''}. Scan them in when the box arrives.
+        ) : boxesIn.length > 0 ? (
+          <JobCard chip={d.incoming.length ? `${d.incoming.length} on the way` : plural(toAccept.length, 'box', 'boxes')} chipTone="info" title={`Pieces coming from ${senders || 'another shop'}`}
+            to={(d.incoming.length ? can.scanIn : can.accept) ? '/inventory/transfers?direction=incoming' : null} action={d.incoming.length ? 'Scan in' : 'Press Accept'}>
+            {[
+              sent.length > 0 && `${plural(sentPieces, 'piece')} sent${sent[0].shipped_at ? ` ${formatDateIST(sent[0].shipped_at)}` : ''}. Scan them in when the box arrives.`,
+              notScanned > 0 && `${plural(notScanned, 'piece')} not scanned in yet: scan them in, or press Accept to report them missing.`,
+              toAccept.length > 0 && `${plural(toAccept.length, 'box', 'boxes')} scanned in - press Accept.`,
+            ].filter(Boolean).join(' ')}
           </JobCard>
         ) : (
           <JobCard chip="Nothing on the way" title="Pieces coming from other shops" action="">
@@ -121,7 +131,7 @@ export default function StockTodayPage() {
 
         {failed.has('transfers') ? null : d.requests.length > 0 ? (
           <JobCard chip={plural(d.requests.length, 'request')} chipTone="err" title="Other shops asked you for stock"
-            to={can.module ? '/inventory/transfers' : null} action="Pack and scan out">
+            to={can.ship ? '/inventory/transfers?direction=outgoing' : null} action="Pack and scan out">
             {asks || `${plural(outPieces, 'piece')} to pack`}
           </JobCard>
         ) : (

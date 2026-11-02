@@ -1303,7 +1303,9 @@ export const reorderApi = {
 export interface StockToday {
   store_id: string | null;
   store_name: string | null;
-  incoming: Array<{ transfer_id: string; transfer_number?: string; from_store_name?: string; pieces: number; shipped_at?: string | null }>;
+  incoming: Array<{ transfer_id: string; transfer_number?: string; from_store_name?: string; status?: string; pieces: number; shipped_at?: string | null }>;
+  /** Boxes with every piece scanned in (RECEIVED), waiting for Accept. */
+  to_accept?: StockToday['incoming'];
   requests: Array<{ transfer_id: string; transfer_number?: string; to_store_name?: string; status: string; pieces: number; /** S3: pieces already scanned out into the box. */ packed: number; lines: Array<{ product_name: string; quantity: number; packed: number }> }>;
   count: { in_progress: Array<{ count_id: string; audit_number?: string; zone?: string | null; category?: string | null; started_at?: string }>; counted_today: number };
   quarantine: { pieces: number; unlabeled: number };
