@@ -125,3 +125,27 @@ def test_needs_completing_follows_a_stored_voucher_decision_whose_voucher_died(t
     with pytest.raises(HTTPException) as e:  # the door agrees: cash, so it asks where from
         cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"))
     assert e.value.status_code == 400 and "drawer" in e.value.detail
+
+
+def test_a_stale_press_never_overwrites_a_changed_decision(till, monkeypatch, tasks):
+    """Press B changed the decision to store credit (the voucher died); press
+    A read the voucher before that and decided VOUCHER. A's write is a
+    compare-and-set from the exact old decision (none), so it misses and A
+    follows the stored decision."""
+    vouchers = _live_voucher_on_a_customers_bill(till, monkeypatch)
+    order = till["db"].get_collection("orders").find_one({"order_id": "O7"})
+    stale = vouchers.find_one({"code": "GV7"})  # A's read: alive, nothing stored
+    vouchers.update_one({"code": "GV7"}, {"$set": {"status": "CANCELLED"}})
+    b = cust_router._voucher_give_back_plan(vouchers, stale, VKEY, order, None)  # press B
+    assert b["dest"] == "CREDIT"
+    real = vouchers.find_one
+    state = {"n": 0}
+
+    def _stale_first(*a, **k):
+        state["n"] += 1
+        return dict(stale) if state["n"] == 1 else real(*a, **k)
+
+    monkeypatch.setattr(vouchers, "find_one", _stale_first)
+    a = cust_router._voucher_give_back_plan(vouchers, stale, VKEY, order, None)  # press A
+    assert a["dest"] == "CREDIT"
+    assert real({"code": "GV7"})["pos_give_back_plan"][VKEY]["dest"] == "CREDIT"
