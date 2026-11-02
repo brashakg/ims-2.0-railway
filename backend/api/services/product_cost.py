@@ -653,37 +653,47 @@ def unsell(db, stock_ids, at) -> List[dict]:
     row) and its variance is reversed by a row dated the undo's IST day
     (`at`). Exactly once per (piece, variance row): the key
     UNSELL:<stock_id>:<variance_id> guards both, so a repeated release
-    writes nothing. Called once, by the one release door
-    (StockRepository.release_sold_units_for_order). Returns the rows written."""
+    writes nothing. Called by every door that puts a gone piece back in
+    play: the release door (StockRepository.release_sold_units_for_order),
+    a customer return's restock (returns._reactivate_original_unit) and a
+    write-off undone (writeoff_itc.undo_writeoff). Pieces no longer held are
+    skipped, so a caller may pass any piece. Returns the rows written."""
     ids = [str(s) for s in stock_ids or [] if s]
     held = {u["stock_id"]: u for u in db.get_collection("stock_units").find({"stock_id": {"$in": ids}})
             if _held(u)} if ids else {}
-    rows = []
+    todo = []  # (variance row, its line, UNSELL key), every piece this call brings back
     for var in list(db.get_collection(VARIANCES).find({"stock_ids": {"$in": list(held)}, "reverses": None})) if held else []:
-        pid = var["product_id"]
         for ln in var.get("lines") or []:
-            sid = ln.get("stock_id")
-            if sid not in held or ln.get("cost") is None:
-                continue
-            key = f"UNSELL:{sid}:{var['variance_id']}"
-            n, back = Decimal(str(stock_value._pieces(held[sid]))), _d(ln["cost"]) + _d(ln["amount"])
+            if ln.get("stock_id") in held and ln.get("cost") is not None:
+                todo.append((var, ln, f"UNSELL:{ln['stock_id']}:{var['variance_id']}"))
+    rows = []
+    for var, ln, key in todo:
+        pid, sid = var["product_id"], ln["stock_id"]
+        n, back = Decimal(str(stock_value._pieces(held[sid]))), _d(ln["cost"]) + _d(ln["amount"])
 
-            def work(prod, _old, n=n, back=back, pid=pid, sid=sid, vid=var["variance_id"]):
-                # The pieces in the pool before this one came back.
-                before = max(Decimal(0), Decimal(str(basis_pieces(db, pid, prod.get("cost_keys") or []))) - n)
-                avg = Decimal(str(average(prod)))
-                new = (before * avg + n * back) / (before + n) if avg and before else back
-                return _paise(new), {"stock_id": sid, "reverses": vid, "returned_at": _paise(back),
-                                     "basis": float(before)}
+        def work(prod, _old, n=n, back=back, pid=pid, sid=sid, vid=var["variance_id"]):
+            # The pieces in the pool before this one came back: the basis
+            # counts every held piece, so take out each piece of this
+            # product this call has not averaged back in yet (this one
+            # included) -- else a sibling still waiting would sit in the
+            # pool at the old average.
+            keys = prod.get("cost_keys") or []
+            pending = {ln2["stock_id"]: Decimal(str(stock_value._pieces(held[ln2["stock_id"]]))) for v, ln2, k in todo
+                       if v["product_id"] == pid and k not in keys}
+            before = max(Decimal(0), Decimal(str(basis_pieces(db, pid, keys))) - sum(pending.values()))
+            avg = Decimal(str(average(prod)))
+            new = (before * avg + n * back) / (before + n) if avg and before else back
+            return _paise(new), {"stock_id": sid, "reverses": vid, "returned_at": _paise(back),
+                                 "basis": float(before)}
 
-            row = _move(db, pid, key, work, {"kind": "UNSOLD", "source": "SALE_UNDONE", "by": None})
-            if row:
-                rows.append({**row, "product_id": pid})
-            else:  # applied before (a crash re-run): its history row says when
-                prod = db.get_collection("products").find_one({"product_id": pid}) or {}
-                row = next((r for r in prod.get("cost_history") or [] if r.get("key") == key), None)
-            if row:
-                _record_unsell(db, var, ln, key, at)
+        row = _move(db, pid, key, work, {"kind": "UNSOLD", "source": "SALE_UNDONE", "by": None})
+        if row:
+            rows.append({**row, "product_id": pid})
+        else:  # applied before (a crash re-run): its history row says when
+            prod = db.get_collection("products").find_one({"product_id": pid}) or {}
+            row = next((r for r in prod.get("cost_history") or [] if r.get("key") == key), None)
+        if row:
+            _record_unsell(db, var, ln, key, at)
     return rows
 
 

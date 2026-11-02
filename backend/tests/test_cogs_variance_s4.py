@@ -682,3 +682,148 @@ def test_a_till_sale_cancelled_after_its_bill_books_what_was_paid():
     stock = stock_value.value(1, db.products.find_one({}))
     assert (stock, product_cost.variance_by(db)) == (160.0, {None: 0.0})
     assert round(stock + product_cost.variance_by(db)[None], 2) == 160.0
+
+
+@pytest.mark.parametrize("held, price, avg", ((8, 120, 104.0), (1, 160, 140.0)))
+def test_one_cancel_bringing_back_two_trued_up_pieces_books_what_was_paid(held, price, avg):
+    """`held` pieces at 100; receipt G's 2 pieces sold on ONE order at the
+    frozen 100; bill B, 2 at `price` (average stays 100). The cancel brings
+    both back at `price`: each step leaves the sibling still waiting out of
+    the pool, so the average is (held x 100 + 2 x price) / (held + 2) and
+    stock + net variance is what was paid (8 at 100 + 2 at 120 = 1040.00;
+    1 at 100 + 2 at 160 = 420.00)."""
+    from api.services import stock_value
+
+    db = _db(100.0)
+    _pieces(db, held)
+    _receipt(db, "G", 2)
+    for sid in ("SG0", "SG1"):
+        db.stock_units.insert_one({"stock_id": sid, "product_id": "P", "store_id": "S1", "status": "SOLD",
+                                   "quantity": 1, "grn_id": "G", "order_id": "OX",
+                                   "sold_at": "2026-10-20T10:00:00"})
+    db.orders.insert_one({"order_id": "OX", "items": [{"product_id": "P", "quantity": 2, "cost_at_sale": 100.0}]})
+    _accept(db, _bill("B", 2, price, grn_id="G", bill_date="2026-10-31", store_id="S1"))
+    assert (_avg(db), product_cost.variance_by(db)) == (100.0, {None: 2 * (price - 100.0)})
+    assert sorted(_release(db, "OX").released) == ["SG0", "SG1"]
+    assert (_avg(db), product_cost.variance_by(db)) == (avg, {None: 0.0})
+    paid = held * 100 + 2 * price
+    assert stock_value.value(held + 2, db.products.find_one({})) + product_cost.variance_by(db)[None] == paid
+
+
+def _till_g(db):
+    """1 old piece at 100; G's one piece SG0 sold on OG0 at the frozen 100;
+    bill B, 1 at 160 (average stays 100, variance 60). Cancelled, SG0 comes
+    back at 160: (100 + 160) / 2 = 130.00."""
+    _pieces(db, 1)
+    _receipt(db, "G", 1)
+    _sold(db, "G", [100.0])
+    _accept(db, _bill("B", 1, 160, grn_id="G", bill_date="2026-10-31", store_id="S1"))
+    assert (_avg(db), product_cost.variance_by(db)) == (100.0, {None: 60.0})
+
+
+def test_a_failed_recost_never_undoes_the_release_and_a_re_run_finishes_it(monkeypatch):
+    """The release door's re-cost fails once: the release stands (no raise,
+    the piece AVAILABLE) and the cost is untouched; releasing again -- nothing
+    left to release -- still re-costs every piece the order ever released."""
+    db = _db(100.0)
+    _till_g(db)
+    real, calls = product_cost.unsell, []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return real(*a, **k)
+
+    monkeypatch.setattr(product_cost, "unsell", flaky)
+    first = _release(db, "OG0")
+    assert (first.released, first.incomplete) == (["SG0"], False)
+    assert db.stock_units.find_one({"stock_id": "SG0"})["status"] == "AVAILABLE"
+    assert (_avg(db), product_cost.variance_by(db)) == (100.0, {None: 60.0})
+    assert _release(db, "OG0").released == []
+    assert (_avg(db), product_cost.variance_by(db)) == (130.0, {None: 0.0})
+
+
+def test_a_reversal_row_a_crash_lost_is_written_by_the_re_run_once(monkeypatch):
+    """The piece averaged back in (its UNSOLD history row) but the reversal
+    row was lost: the next release finds the history row and writes the
+    reversal, exactly once."""
+    db = _db(100.0)
+    _till_g(db)
+    real, calls = product_cost._record_unsell, []
+
+    def flaky(*a, **k):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("boom")
+        return real(*a, **k)
+
+    monkeypatch.setattr(product_cost, "_record_unsell", flaky)
+    _release(db, "OG0")
+    assert (_avg(db), product_cost.variance_by(db)) == (130.0, {None: 60.0})
+    _release(db, "OG0")
+    _release(db, "OG0")
+    assert (_avg(db), product_cost.variance_by(db)) == (130.0, {None: 0.0})
+    assert db.cogs_variances.count_documents({"variance_id": "UNSELL:SG0:B:P"}) == 1
+
+
+def test_an_old_orders_door_re_run_never_unsells_a_piece_sold_again():
+    """SG0 is released from OG0 before any bill, then sold again on OB at
+    the frozen 100; bill B (1 at 160) trues the OB sale up (average 160,
+    variance 60). OG0's door runs again: SG0 is SOLD, not ours -- no UNSOLD
+    row, no reversal; the OB sale's variance stands."""
+    db = _db(100.0)
+    _receipt(db, "G", 1)
+    _sold(db, "G", [100.0])
+    assert _release(db, "OG0").released == ["SG0"]
+    db.stock_units.update_one({"stock_id": "SG0"}, {"$set": {"status": "SOLD", "order_id": "OB",
+                                                             "sold_at": "2026-10-22T10:00:00"}})
+    db.orders.insert_one({"order_id": "OB", "items": [{"product_id": "P", "quantity": 1, "cost_at_sale": 100.0}]})
+    _accept(db, _bill("B", 1, 160, grn_id="G", bill_date="2026-10-31", store_id="S1"))
+    assert (_avg(db), product_cost.variance_by(db)) == (160.0, {None: 60.0})
+    _release(db, "OG0")
+    assert (_avg(db), product_cost.variance_by(db)) == (160.0, {None: 60.0})
+    assert db.stock_units.find_one({"stock_id": "SG0"})["status"] == "SOLD"
+    assert not [r for r in db.products.find_one({})["cost_history"] if r["kind"] == "UNSOLD"]
+
+
+def test_a_written_off_piece_back_in_play_after_its_bill_books_what_was_paid():
+    """W1 (receipt G) written off DAMAGED at 100; bill B, 1 at 160 (nothing
+    held: average 160, variance 60). Re-quarantined -- the write-off undone
+    (writeoff_itc.undo_writeoff, as quarantine does it): W1 is ours again at
+    160, its 60 reversed -- stock + loss + variance == the 160 paid. A
+    repeated undo writes nothing."""
+    from api.services import stock_value, writeoff_itc
+
+    db = _db(100.0)
+    _receipt(db, "G", 1)
+    db.stock_units.insert_one({"stock_id": "W1", "product_id": "P", "store_id": "S1", "status": "DAMAGED",
+                               "quantity": 1, "grn_id": "G"})
+    db.item_events.insert_one({"stock_id": "W1", "to_state": "DAMAGED", "at": "2026-10-25T10:00:00+00:00"})
+    _accept(db, _bill("B", 1, 160, grn_id="G", bill_date="2026-10-31", store_id="S1"))
+    assert (_avg(db), product_cost.variance_by(db)) == (160.0, {None: 60.0})
+    db.stock_units.update_one({"stock_id": "W1"}, {"$set": {"status": "QUARANTINED"}})
+    unit = db.stock_units.find_one({"stock_id": "W1"})
+    writeoff_itc.undo_writeoff(db, unit)
+    stock = stock_value.value(1, db.products.find_one({}))
+    loss = sum(product_cost.written_off_cost(db, db.stock_units.find({"status": "DAMAGED"})).values())
+    assert (stock, loss, product_cost.variance_by(db)) == (160.0, 0, {None: 0.0})
+    snap = (list(db.cogs_variances.find({}, {"_id": 0})), db.products.find_one({}, {"_id": 0}))
+    writeoff_itc.undo_writeoff(db, unit)
+    assert (list(db.cogs_variances.find({}, {"_id": 0})), db.products.find_one({}, {"_id": 0})) == snap
+
+
+def test_a_till_sale_returned_after_its_bill_books_what_was_paid():
+    """The till case above, handled as a customer RETURN (the restock flips
+    the SOLD piece back): stock 160 + net variance 0 == the 160 paid."""
+    from api.routers import returns
+    from api.services import stock_value
+    from database.repositories.product_repository import StockRepository
+
+    db = _db(100.0)
+    _receipt(db, "G", 1)
+    _sold(db, "G", [100.0])
+    _accept(db, _bill("B", 1, 160, grn_id="G", bill_date="2026-10-31", store_id="S1"))
+    assert returns._reactivate_original_unit(StockRepository(db.stock_units), "P", "S1", "OG0", set()) == "SG0"
+    stock = stock_value.value(1, db.products.find_one({}))
+    assert (stock, product_cost.variance_by(db)) == (160.0, {None: 0.0})

@@ -675,9 +675,20 @@ def undo_writeoff(db, unit: dict) -> None:
     stays there and a re-claim row in the first open month adds the credit
     back. A held (no-GSTIN) row was filed on no return, so it is deleted
     whatever its month's lock. Each step is idempotent, so a cut-off run is
-    safe to repeat."""
+    safe to repeat. A piece a supplier bill trued up after it was written off
+    also comes back at what was paid, its variance reversed
+    (product_cost.unsell; a piece that left for good, RTV, is not held, so
+    skipped). Fail-soft: the undo stands; the log names what was not re-costed."""
     coll = db.get_collection(COLLECTION)
     sid = _sid(unit)
+    try:
+        from . import product_cost
+        from ..utils.event_time import utc_now_iso
+
+        product_cost.unsell(db, [sid], utc_now_iso())
+    except Exception:  # noqa: BLE001
+        logger.error("[WRITEOFF_ITC] %s back from its write-off, its cost NOT re-averaged (product_cost.unsell)",
+                     sid, exc_info=True)
     row = coll.find_one({"_id": sid})
     if not row:
         return
