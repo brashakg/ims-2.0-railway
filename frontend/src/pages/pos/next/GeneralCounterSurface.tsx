@@ -36,7 +36,7 @@ import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import {
   billKeyFor, clearBillKey, settleBillKey, useUnconfirmedWording,
 } from '../../../components/pos/posBillKey';
-import { billFingerprint } from '../../../components/pos/orderPayload';
+import { billIdOf } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import { useProducts, useSellableStock } from '../../../hooks/usePOSQueries';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
@@ -141,7 +141,7 @@ export function GeneralCounterSurface() {
   const billFpRef = useRef<string | null>(null);
   // A lost sale's promise ("press again - not charged twice") holds only for
   // the SAME bill while its key is kept.
-  useUnconfirmedWording(billFingerprint(store), errorMsg, setErrorMsg);
+  useUnconfirmedWording(billIdOf(store), errorMsg, setErrorMsg);
   // A discount over the seller's limit: the server's refusal (shown as the
   // ask-a-manager panel) and, once approved, the E4 request id the retry carries.
   const [approvalNeed, setApprovalNeed] = useState<DiscountApprovalNeed | null>(null);
@@ -235,7 +235,10 @@ export function GeneralCounterSurface() {
       // The bill key is kept with the cart (localStorage), so a reload after a
       // lost answer presses the SAME bill again -- never a second sale. Taken
       // AFTER the writes above: the fingerprint is the body the sale sends.
-      const fp = billFingerprint(usePOSStore.getState());
+      // Filed under the bill's own id (made once, never derived from the bill
+      // or the date): a reload, a recall or the next IST day presses the SAME
+      // bill again -- never a second sale (money review 23).
+      const fp = usePOSStore.getState().ensureBillId();
       idempotencyKeyRef.current = billKeyFor(fp, Date.now(),
         billFpRef.current === fp ? idempotencyKeyRef.current : null);
       billFpRef.current = fp;

@@ -16,7 +16,6 @@
 
 import { describe, it, expect, beforeEach } from 'vitest';
 import { usePOSStore } from '../../../stores/posStore';
-import { billFingerprint } from '../orderPayload';
 import { BILL_KEY_TTL_MS, billKeyEntry, billKeyFor, settleBillKey } from '../posBillKey';
 
 const putCart = () => usePOSStore.getState().addToCart({
@@ -35,7 +34,7 @@ describe('the bill key and held bills', () => {
   for (const auto of [false, true]) {
     it(`a ${auto ? 'auto-park' : 'manual hold'} carries the key in the held bill and does not clear it`, () => {
       putCart();
-      const fp = billFingerprint(usePOSStore.getState());
+      const fp = usePOSStore.getState().ensureBillId();
       const key = billKeyFor(fp);
       usePOSStore.getState().parkCurrentSale({ auto, heldBy: 'u1' });
       expect(heldBills()[0].bill_key.key).toBe(key);
@@ -45,21 +44,21 @@ describe('the bill key and held bills', () => {
 
   it('a recall restores the held key, freshly stamped, for the recalled bill', () => {
     putCart();
-    const key = billKeyFor(billFingerprint(usePOSStore.getState()));
+    const key = billKeyFor(usePOSStore.getState().ensureBillId());
     usePOSStore.getState().parkCurrentSale({ heldBy: 'u1' });
     const held = heldBills()[0];
     usePOSStore.getState().resetTransaction();
     localStorage.removeItem('ims_pos_bill_keys'); // e.g. another tab, or long gone
     const before = Date.now();
     usePOSStore.getState().restoreHeldSale(held.state, { ...held.bill_key, at: before - BILL_KEY_TTL_MS + 1 });
-    const entry = billKeyEntry(billFingerprint(usePOSStore.getState()));
+    const entry = billKeyEntry(usePOSStore.getState().ensureBillId());
     expect(entry?.key).toBe(key);
     expect(entry!.at).toBeGreaterThanOrEqual(before);
   });
 
   it('a logout drops only this bill key, never another bill key', () => {
     putCart();
-    const fp = billFingerprint(usePOSStore.getState());
+    const fp = usePOSStore.getState().ensureBillId();
     billKeyFor(fp);
     const other = billKeyFor('another-tab-bill');
     usePOSStore.getState().clearAllOnLogout();
@@ -101,23 +100,27 @@ describe('money review 17: the member is part of the bill; a reload keeps member
   });
 
   it('another family member with the same cart is another bill (a NEW key)', () => {
+    // Money review 23: the key is filed under the bill's own id, so the
+    // son's bill after the mother's sale is a new bill (a new id, a new key).
     putCart();
     usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'MOTHER' } } as any);
-    const key = billKeyFor(billFingerprint(usePOSStore.getState()));
-    usePOSStore.setState({ patient: { id: 'SON' } } as any);
-    expect(billKeyFor(billFingerprint(usePOSStore.getState()))).not.toBe(key);
+    const key = billKeyFor(usePOSStore.getState().ensureBillId());
+    usePOSStore.getState().resetTransaction();
+    putCart();
+    usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'SON' } } as any);
+    expect(billKeyFor(usePOSStore.getState().ensureBillId())).not.toBe(key);
   });
 
   it('a reload after an unconfirmed press restores the customer, member and Rx, and keeps the key', () => {
     putCart();
     usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'P2' },
                            prescription: { id: 'RX1' }, sale_type: 'prescription_order' } as any);
-    const key = billKeyFor(billFingerprint(usePOSStore.getState()));
+    const key = billKeyFor(usePOSStore.getState().ensureBillId());
     const saved = (usePOSStore as any).persist.getOptions().partialize(usePOSStore.getState());
     usePOSStore.setState(JSON.parse(JSON.stringify(saved)));
     const s = usePOSStore.getState() as any;
     expect([s.customer?.id, s.patient?.id, s.prescription?.id]).toEqual(['C1', 'P2', 'RX1']);
-    expect(billKeyFor(billFingerprint(usePOSStore.getState()))).toBe(key);
+    expect(billKeyFor(usePOSStore.getState().ensureBillId())).toBe(key);
   });
 
   it('with no press pending, the draft keeps no customer, member or Rx', () => {
@@ -141,7 +144,7 @@ describe('money review 18: the draft keeps PII only while a press is pending', (
     putCart();
     usePOSStore.setState({ customer: { id: 'C1', name: 'Meena' }, patient: { id: 'P1' },
                            prescription: { id: 'rx7' } } as any);
-    const fp = billFingerprint(usePOSStore.getState());
+    const fp = usePOSStore.getState().ensureBillId();
     billKeyFor(fp); // the press
     usePOSStore.getState().setProcessing(true);
     await new Promise((r) => setTimeout(r, 650));
@@ -181,7 +184,7 @@ describe('money review 22: a manual logout keeps a pending press', () => {
 
   it('parks the bill WITH its key when a press is pending, once (the idle park is not repeated)', () => {
     putCart();
-    const fp = billFingerprint(usePOSStore.getState());
+    const fp = usePOSStore.getState().ensureBillId();
     const key = billKeyFor(fp); // a press is pending
     usePOSStore.getState().clearAllOnLogout('u1');
     expect(heldBills().map((b: any) => [b.bill_key?.key, b.held_by])).toEqual([[key, 'u1']]);
@@ -190,7 +193,7 @@ describe('money review 22: a manual logout keeps a pending press', () => {
     localStorage.clear();
     usePOSStore.getState().resetTransaction();
     putCart();
-    const fp2 = billFingerprint(usePOSStore.getState());
+    const fp2 = usePOSStore.getState().ensureBillId();
     billKeyFor(fp2);
     usePOSStore.getState().parkCurrentSale({ auto: true, heldBy: 'u1' }); // the idle sign-out parks first
     usePOSStore.getState().clearAllOnLogout('u1');
@@ -199,10 +202,47 @@ describe('money review 22: a manual logout keeps a pending press', () => {
 
   it('a bill with nothing pending is not parked by a manual logout', () => {
     putCart();
-    const fp = billFingerprint(usePOSStore.getState());
+    const fp = usePOSStore.getState().ensureBillId();
     billKeyFor(fp);
     settleBillKey(fp);
     usePOSStore.getState().clearAllOnLogout('u1');
     expect(heldBills()).toEqual([]);
+  });
+});
+
+describe('money review 23: the key belongs to the bill, wherever and whenever it is pressed', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    usePOSStore.setState({ store_id: '', salesperson_id: 'u1' } as any);
+    usePOSStore.getState().resetTransaction();
+  });
+
+  it('a pending bill parked at sign-out and recalled the next IST day presses with the SAME key', () => {
+    putCart();
+    usePOSStore.getState().setDeliveryDate('2026-11-02');
+    const key = billKeyFor(usePOSStore.getState().ensureBillId()); // pressed, answer lost
+    usePOSStore.getState().clearAllOnLogout('u1', 'S1');
+    const [held] = heldBills();
+    expect(held.bill_key).toMatchObject({ key, pending: true });
+    usePOSStore.getState().restoreHeldSale(held.state, held.bill_key);
+    usePOSStore.getState().setDeliveryDate('2026-11-03'); // the counter stamps today
+    expect(billKeyEntry(usePOSStore.getState().ensureBillId())?.pending).toBe(true);
+    expect(billKeyFor(usePOSStore.getState().ensureBillId())).toBe(key);
+  });
+
+  it('the parked bill names its store', () => {
+    putCart();
+    billKeyFor(usePOSStore.getState().ensureBillId());
+    usePOSStore.getState().clearAllOnLogout('u1', 'S1');
+    expect(heldBills()[0].store_id).toBe('S1');
+  });
+
+  it('a forced sign-out (a 401) runs the same step: the pending bill is parked, then cleared', async () => {
+    const { SIGNED_OUT_EVENT } = await import('../../../services/api/signOutEvent');
+    putCart();
+    const key = billKeyFor(usePOSStore.getState().ensureBillId());
+    window.dispatchEvent(new CustomEvent(SIGNED_OUT_EVENT, { detail: { userId: 'u1', storeId: 'S1' } }));
+    expect(heldBills().map((b: any) => [b.bill_key?.key, b.held_by])).toEqual([[key, 'u1']]);
+    expect(usePOSStore.getState().cart).toEqual([]);
   });
 });

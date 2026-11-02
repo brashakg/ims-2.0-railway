@@ -2246,17 +2246,81 @@ def _parse_at(value: Any):
 GIVE_BACK_ROLES = ("ACCOUNTANT", "ADMIN")  # SUPERADMIN passes
 
 
-def voucher_leg_needs_cash(voucher: Optional[Dict[str, Any]], order: Optional[Dict[str, Any]], key: str) -> bool:
-    """A voucher leg that can only be given back in cash: the voucher can no
-    longer be spent (expired or cancelled) and the bill has no account."""
+def _decide_voucher_give_back(voucher: Dict[str, Any], order: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Where a voucher leg's money goes, decided from the voucher and bill as
+    they are: back onto a live voucher; an expired or cancelled one to the
+    bill customer's store credit; or, on a walk-in bill, in cash."""
     from ..services.money_guard import _is_expired_iso
 
-    if not voucher or any(e.get("idempotency_key") == f"GIVEBACK:{key}" for e in voucher.get("money_ledger") or []):
-        return False
     dead = str(voucher.get("status") or "").upper() not in ("ACTIVE", "REDEEMED") or _is_expired_iso(
         voucher.get("expiry_date"))
     cust = str((order or {}).get("customer_id") or "")
-    return dead and (not cust or cust.startswith("walkin-"))
+    if not dead:
+        return {"dest": "VOUCHER"}
+    if not cust or cust.startswith("walkin-"):
+        return {"dest": "CASH"}
+    return {"dest": "CREDIT", "customer_id": cust}
+
+
+def _booked_give_back(voucher: Dict[str, Any], key: str) -> Optional[Dict[str, Any]]:
+    """A give-back already BOOKED for this leg, found by its fixed id -- before
+    anything else is decided. Raises on a read error."""
+    from .returns import _returns_coll
+
+    rcoll = _returns_coll()
+    payout = rcoll.find_one({"_id": f"payout:{key}"}) if rcoll is not None else None
+    if payout:
+        return {"dest": "CASH", "cash_paid_from": payout.get("cash_paid_from")}
+    ledger = _ledger_coll()
+    row = ledger.find_one({"entry_id": f"GIVEBACK:{key}"}) if ledger is not None else None
+    if row:
+        return {"dest": "CREDIT", "customer_id": row.get("customer_id")}
+    if any(e.get("idempotency_key") == f"GIVEBACK:{key}" for e in voucher.get("money_ledger") or []):
+        return {"dest": "VOUCHER"}
+    return None
+
+
+def _voucher_give_back_plan(vcoll, voucher: Dict[str, Any], key: str, order: Optional[Dict[str, Any]],
+                            cash_paid_from: Optional[str]) -> Dict[str, Any]:
+    """THE decision for a voucher leg's give-back (money review 23): a booked
+    payout or credit first (by its fixed id); else the decision the first
+    winning press STORED on the claim (destination, amount, cash source);
+    else decide now and store it -- compare-and-set, only where none is
+    stored -- and replay whatever is stored. Never re-decided."""
+    k = key.replace(".", "_")
+    try:
+        booked = _booked_give_back(voucher, key)
+        fresh = vcoll.find_one({"code": voucher.get("code")}) or voucher
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the payment - try again.") from exc
+    if booked:
+        return booked
+    stored = (fresh.get("pos_give_back_plan") or {}).get(k)
+    if stored:
+        return stored
+    plan = {**_decide_voucher_give_back(fresh, order), "amount": abs(float(
+        next((e.get("delta") for e in fresh.get("money_ledger") or [] if e.get("idempotency_key") == key), 0)
+        or 0))}
+    if plan["dest"] == "CASH":
+        if not cash_paid_from:
+            raise HTTPException(status_code=400, detail=(
+                "Say whether the cash is paid from the shop's drawer or by HQ. Nothing was recorded."))
+        plan["cash_paid_from"] = cash_paid_from
+    field = "pos_give_back_plan." + k
+    vcoll.update_one({"code": voucher.get("code"), field: {"$exists": False}}, {"$set": {field: plan}})
+    return ((vcoll.find_one({"code": voucher.get("code")}) or {}).get("pos_give_back_plan") or {}).get(k) or plan
+
+
+def voucher_leg_needs_cash(voucher: Optional[Dict[str, Any]], order: Optional[Dict[str, Any]], key: str) -> bool:
+    """A voucher leg given back in cash (Needs completing asks where the cash
+    comes from): its stored decision, else what would be decided now."""
+    if not voucher or any(e.get("idempotency_key") == f"GIVEBACK:{key}" for e in voucher.get("money_ledger") or []):
+        return False
+    stored = (voucher.get("pos_give_back_plan") or {}).get(key.replace(".", "_"))
+    return (stored or _decide_voucher_give_back(voucher, order))["dest"] == "CASH"
+
+
+GIVEBACK_PAYOUT = "GIVEBACK_PAYOUT"
 
 
 def _give_back_in_cash(key, leg, voucher, order, label, task_ref, cash_paid_from, current_user) -> Dict[str, Any]:
@@ -2279,8 +2343,12 @@ def _give_back_in_cash(key, leg, voucher, order, label, task_ref, cash_paid_from
         legs, outside = _place_cash_legs([{"method": "CASH", "amount": leg["amount"]}], cash_paid_from, store_id)
         now = utc_now_iso()
         payout = {
+            # NOT order_id (money review 23): this pays back a voucher debit
+            # that never reached the bill, so no reader of "the returns of
+            # this bill" (the refund cap, the has-a-return checks) may see it;
+            # the Day-End readers select by store and time and still net it.
             "_id": pid, "return_id": f"GIVEBACK-{leg['order_id']}-{voucher.get('code')}", "payout_of": key,
-            "payout_kind": "UNBILLED_GIVE_BACK", "order_id": leg["order_id"], "store_id": store_id,
+            "payout_kind": GIVEBACK_PAYOUT, "give_back_order_id": leg["order_id"], "store_id": store_id,
             "return_type": "RETURN", "status": "COMPLETED", "net_refund": 0.0, "refund_amount": 0.0,
             "credit_amount": 0.0, "items": [], "refund_tenders": legs, "paid_outside_drawer": outside or None,
             "method": "CASH", "cash_paid_from": cash_paid_from, "drawer_auto_netted": bool(legs),
@@ -2387,19 +2455,17 @@ def give_back_unbilled_leg(key: str, current_user: dict, cash_paid_from: Optiona
     # to the order customer's store credit instead (money review 21).
     to_credit = row is not None
     if row is None:
-        from ..services.money_guard import _is_expired_iso
-
-        on_voucher = any(e.get("idempotency_key") == f"GIVEBACK:{key}" for e in voucher.get("money_ledger") or [])
-        dead = str(voucher.get("status") or "").upper() not in ("ACTIVE", "REDEEMED") or _is_expired_iso(
-            voucher.get("expiry_date"))
-        if dead and not on_voucher:
-            cust = str((order or {}).get("customer_id") or "")
-            if voucher_leg_needs_cash(voucher, order, key):
-                # No account to credit: paid back in CASH, booked by THE cash
-                # rule (the owed-paid door's). The leg stays the give-back's
-                # (never released): it can never be billed (money review 22).
-                return _give_back_in_cash(key, leg, voucher, order, label, task_ref, cash_paid_from, current_user)
-            leg = {**leg, "customer_id": cust}
+        # ONE decision per leg (money review 23): the first winning press
+        # stores where the money goes; every later press replays it.
+        plan = _voucher_give_back_plan(vcoll, voucher, key, order, cash_paid_from)
+        if plan["dest"] == "CASH":
+            # No account to credit: paid back in CASH, booked by THE cash
+            # rule (the owed-paid door's). The leg stays the give-back's
+            # (never released): it can never be billed (money review 22).
+            return _give_back_in_cash(key, leg, voucher, order, label, task_ref, plan["cash_paid_from"],
+                                      current_user)
+        if plan["dest"] == "CREDIT":
+            leg = {**leg, "customer_id": plan["customer_id"]}
             to_credit = True
     if to_credit:
         from ..services import store_credit_ledger as scl

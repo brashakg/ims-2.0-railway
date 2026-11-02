@@ -1,8 +1,9 @@
 // The till's bill key (Idempotency-Key of the sale) is kept in localStorage
 // beside the cart draft: after a lost answer the cashier may reload, and a
 // fresh key would ring the same bill again as a second sale. Keys are kept
-// per bill -- a map {fingerprint: {key, at}} (THE fingerprint: orderPayload's
-// billFingerprint, the body the sale sends) -- so two tabs, or a held bill and
+// per bill -- a map {bill id: {key, at}} (THE bill id: posStore's bill_id,
+// made once for the bill, never derived from its content or the date --
+// money review 23; parameters below keep the old name "fingerprint") -- so two tabs, or a held bill and
 // the live one, never overwrite or wipe each other's key. Each press of the
 // same bill refreshes its `at`; an entry untouched for 15 minutes is dropped.
 // A success, a reset, a recall or a logout drops ONLY that bill's entry; a
@@ -72,9 +73,10 @@ export function billKeyEntry(fingerprint: string, now: number = Date.now()): Bil
   return readAll(now)[fingerprint] || null;
 }
 
-/** Keep `entry` as this bill's key (a recalled held bill), stamped now. */
-export function putBillKey(fingerprint: string, key: string, now: number = Date.now()): void {
-  writeAll({ ...readAll(now), [fingerprint]: { key, at: now } });
+/** Keep `entry` as this bill's key (a recalled held bill), stamped now --
+    still pending if its press was (money review 23). */
+export function putBillKey(fingerprint: string, key: string, now: number = Date.now(), pending = false): void {
+  writeAll({ ...readAll(now), [fingerprint]: { key, at: now, ...(pending ? { pending: true } : {}) } });
 }
 
 /** The key a press of THIS bill uses: `preferred` (the surface's in-memory

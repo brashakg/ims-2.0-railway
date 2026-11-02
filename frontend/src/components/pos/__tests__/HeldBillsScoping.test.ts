@@ -120,3 +120,26 @@ describe('held bills are scoped to the cashier', () => {
     expect(result.current.heldBills).toEqual([]);
   });
 });
+
+describe('money review 23: a parked bill stays at its store', () => {
+  it('a bill parked at another store is not recalled here', () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    seed(bill('b1', ME, { store_id: 'S1' }));
+    const store = fakeStore();
+    const { result } = renderHook(() => useHeldBills(store, ME, 'S2'));
+    let ok = true;
+    act(() => { ok = result.current.recallBill('b1'); });
+    expect(ok).toBe(false);
+    expect(store.restoreHeldSale).not.toHaveBeenCalled();
+    expect(alert).toHaveBeenCalledWith(expect.stringContaining('S1'));
+    expect(stored().map((b) => b.id)).toEqual(['b1']);
+    alert.mockRestore();
+  });
+
+  it('a hold names the signed-in store', () => {
+    const store = fakeStore();
+    const { result } = renderHook(() => useHeldBills(store, ME, 'S2'));
+    act(() => { result.current.holdCurrentBill(); });
+    expect(store.parkCurrentSale).toHaveBeenCalledWith({ heldBy: ME, storeId: 'S2' });
+  });
+});

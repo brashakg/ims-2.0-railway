@@ -37,7 +37,7 @@
   Object.defineProperty(globalThis, 'localStorage', { value: ls, configurable: true, writable: true });
 })();
 
-import { render, screen, waitFor, fireEvent } from '@testing-library/react';
+import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 vi.mock('../../../../context/AuthContext', () => ({
@@ -141,7 +141,6 @@ import { MemoryRouter } from 'react-router-dom';
 import { GeneralCounterSurface } from '../GeneralCounterSurface';
 import { MAX_PRODUCT_RESULTS } from '../ProductResultsStrip';
 import { billKeyEntry, billKeyFor } from '../../../../components/pos/posBillKey';
-import { billFingerprint } from '../../../../components/pos/orderPayload';
 import { usePOSStore } from '../../../../stores/posStore';
 
 function renderCounter() {
@@ -455,7 +454,7 @@ describe('the bill key ends with the sale', () => {
     fireEvent.click(completeButton());
     await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
     expect(keyOf(1)).toBe(keyOf(0));
-    expect(billKeyEntry(billFingerprint(usePOSStore.getState()))).toBeNull(); // the success dropped it
+    expect(billKeyEntry(usePOSStore.getState().ensureBillId())).toBeNull(); // the success dropped it
     view.unmount();
     usePOSStore.getState().resetTransaction();
     submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-2', orderNumber: 'ORD-2' });
@@ -468,7 +467,7 @@ describe('the bill key ends with the sale', () => {
 
   it('a reset drops only THIS bill key, never another bill key', () => {
     putSomethingInTheCart();
-    const fp = billFingerprint(usePOSStore.getState());
+    const fp = usePOSStore.getState().ensureBillId();
     const k = billKeyFor(fp);
     const other = billKeyFor('another-tab-bill');
     usePOSStore.getState().resetTransaction();
@@ -479,16 +478,20 @@ describe('the bill key ends with the sale', () => {
 });
 
 describe('the till stops promising once the cart changes', () => {
-  it('swaps the safe-re-press words for the check-the-Orders words when the cart changes', async () => {
-    const { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } = await import('../../../../components/pos/posBillKey');
+  it('swaps the safe-re-press words for the check-the-Orders words once the bill key is gone', async () => {
+    // Money review 23: the key belongs to the BILL (its own id), so a cart
+    // change keeps it -- the promise ends only when the bill's key does.
+    const { TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } =
+      await import('../../../../components/pos/posBillKey');
     submitPosOrder.mockResolvedValueOnce({ ok: false, error: TILL_SALE_UNCONFIRMED });
     putSomethingInTheCart();
     renderCounter();
     fireEvent.click(completeButton());
     expect(await screen.findByText(TILL_SALE_UNCONFIRMED)).toBeTruthy();
-    putSomethingInTheCart(); // the cart changed (one more unit)
+    putSomethingInTheCart(); // the cart changed (one more unit): the same bill, the same key
+    expect(screen.queryByText(TILL_SALE_UNCONFIRMED)).toBeTruthy();
+    act(() => { usePOSStore.getState().resetTransaction(); }); // the bill (and its key) is gone
     expect(await screen.findByText(TILL_SALE_UNCONFIRMED_CHECK)).toBeTruthy();
-    expect(screen.queryByText(TILL_SALE_UNCONFIRMED)).toBeNull();
   });
 });
 
@@ -500,7 +503,7 @@ describe('money review 18: a definite refusal at the surface', () => {
     renderCounter();
     fireEvent.click(completeButton());
     await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(1));
-    const entry = billKeyEntry(billFingerprint(usePOSStore.getState()));
+    const entry = billKeyEntry(usePOSStore.getState().ensureBillId());
     expect(entry?.pending).toBe(false);
   });
 });

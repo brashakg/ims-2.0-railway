@@ -7,7 +7,19 @@
 
 import { create } from 'zustand';
 import { billKeyEntry, clearBillKey, putBillKey } from '../components/pos/posBillKey';
-import { billFingerprint } from '../components/pos/orderPayload';
+import { SIGNED_OUT_EVENT } from '../services/api/signOutEvent';
+
+/** The bill's own id (money review 23): made ONCE for the bill, kept with it
+    (draft, park, recall, sign-out), never derived from its content or the
+    date -- the till's bill key is filed under it. */
+const newBillId = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto
+  ? crypto.randomUUID() : `bill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+export const billIdOf = (s: any): string => (s && s.bill_id) || '';
+
+/** The signed-in store (the parked bill names it; recall elsewhere is refused). */
+export function sessionStoreId(): string | null {
+  try { return JSON.parse(localStorage.getItem('ims_user') || 'null')?.activeStoreId || null; } catch { return null; }
+}
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Customer, Patient, Prescription } from '../types';
 import type { DenomRow } from '../utils/denominations';
@@ -186,6 +198,8 @@ export interface POSState {
   // Order result
   order_id: string | null;
   order_number: string | null;
+  /** The bill's own id (see newBillId). */
+  bill_id: string | null;
 
   // Customer loyalty
   customerLoyaltyPoints: number;
@@ -266,7 +280,9 @@ export interface POSState {
   markLoyaltyBurned: (leg: { amount: number; reference: string }) => void;
   // Reset
   resetTransaction: () => void;
-  clearAllOnLogout: (userId?: string) => void;
+  /** This bill's id, made now if it has none yet. */
+  ensureBillId: () => string;
+  clearAllOnLogout: (userId?: string, storeId?: string | null) => void;
   // Park/Hold: push the CURRENT cart onto the held-bills queue
   // (`ims-held-bills`) as a snapshot, tagged with the owning user/store so a
   // shared terminal never leaks one cashier's cart to another. Used both by
@@ -274,7 +290,7 @@ export interface POSState {
   // (auto:true). Returns the held bill id, or null if the cart is empty.
   // Does NOT reset the transaction — the caller decides (manual hold resets,
   // auto-park lets logout clear).
-  parkCurrentSale: (meta?: { auto?: boolean; heldBy?: string }) => string | null;
+  parkCurrentSale: (meta?: { auto?: boolean; heldBy?: string; storeId?: string | null }) => string | null;
   // Park/Hold: atomically REPLACE the current transaction with a previously
   // held one (no merge into the existing cart, per-item discounts preserved,
   // cart-level discount + delivery fields restored).
@@ -397,6 +413,7 @@ const initialState = {
   cart_discount_reason: null,
   order_id: null,
   order_number: null,
+  bill_id: null,
   is_processing: false,
   customerLoyaltyPoints: 0,
   appliedVoucher: undefined,
@@ -595,7 +612,7 @@ export const usePOSStore = create<POSState>()(
       // --- Reset ---
       resetTransaction: () => {
         const { store_id, salesperson_id, salesperson_name } = get();
-        clearBillKey(billFingerprint(get())); // a new sale is a new press (only THIS bill's key)
+        clearBillKey(billIdOf(get())); // a new sale is a new press (only THIS bill's key)
         set({ ...initialState, store_id, salesperson_id, salesperson_name });
       },
 
@@ -606,7 +623,7 @@ export const usePOSStore = create<POSState>()(
       // terminal can scope recall to the owning cashier. Caller decides whether
       // to reset the transaction afterward (manual hold does; auto-park lets the
       // subsequent logout clear it).
-      parkCurrentSale: (meta?: { auto?: boolean; heldBy?: string }) => {
+      parkCurrentSale: (meta?: { auto?: boolean; heldBy?: string; storeId?: string | null }) => {
         const state = get();
         const cart = state.cart || [];
         if (cart.length === 0) return null; // nothing to park
@@ -622,7 +639,7 @@ export const usePOSStore = create<POSState>()(
         // The bill's key travels WITH the held bill (manual hold and
         // auto-park alike): an unconfirmed sale parked and recalled is
         // pressed again with the same key, never rung twice.
-        const billKey = billKeyEntry(billFingerprint(state));
+        const billKey = billKeyEntry(billIdOf(state));
         bills.push({
           id,
           bill_key: billKey,
@@ -634,7 +651,7 @@ export const usePOSStore = create<POSState>()(
           // belongs to. recall/list filter on held_by so cashier B never
           // sees cashier A's cart on a shared terminal.
           held_by: meta?.heldBy ?? state.salesperson_id ?? null,
-          store_id: state.store_id ?? null,
+          store_id: meta?.storeId || state.store_id || sessionStoreId(),
           auto,
           reason: auto ? 'Auto-saved on inactivity logout' : 'Held by cashier',
           state: {
@@ -652,6 +669,7 @@ export const usePOSStore = create<POSState>()(
             delivery_date: state.delivery_date,
             delivery_time_slot: state.delivery_time_slot,
             delivery_priority: state.delivery_priority,
+            bill_id: state.bill_id,
           },
         });
         try {
@@ -669,8 +687,14 @@ export const usePOSStore = create<POSState>()(
       // This sets everything in ONE atomic write: cart verbatim (per-item
       // discount_amount/reason intact), cart-discount recomputed
       // from the restored cart, delivery + advance flags restored.
-      restoreHeldSale: (snapshot: any, billKey?: { key?: string } | null) => {
-        clearBillKey(billFingerprint(get())); // the bill being replaced
+      ensureBillId: () => {
+        const id = get().bill_id || newBillId();
+        if (id !== get().bill_id) set({ bill_id: id });
+        return id;
+      },
+
+      restoreHeldSale: (snapshot: any, billKey?: { key?: string; pending?: boolean } | null) => {
+        clearBillKey(billIdOf(get())); // the bill being replaced
         const { store_id, salesperson_id, salesperson_name } = get();
         const snap = snapshot || {};
         const cart: CartLineItem[] = (Array.isArray(snap.cart) ? snap.cart : []).map(migrateLegacyItemNote);
@@ -695,9 +719,11 @@ export const usePOSStore = create<POSState>()(
           cart_discount_amount: recalcCartDiscountAmount(cart, percent),
           cart_discount_reason: snap.cart_discount_reason ?? null,
           current_step: cart.length > 0 ? 'review' : 'customer',
+          bill_id: snap.bill_id || newBillId(),
         });
-        // The held bill's key comes back with it, freshly stamped.
-        if (billKey?.key) putBillKey(billFingerprint(get()), billKey.key);
+        // The held bill's key comes back with it, freshly stamped -- and still
+        // pending if its press was (money review 23).
+        if (billKey?.key) putBillKey(billIdOf(get()), billKey.key, Date.now(), !!billKey.pending);
       },
 
       // --- Full clear (for logout) ---
@@ -707,19 +733,19 @@ export const usePOSStore = create<POSState>()(
       // re-login. Cross-user leakage is prevented at the recall layer
       // (POSLayout filters held bills by held_by === current user), not by
       // wiping every parked cart on logout.
-      clearAllOnLogout: (userId?: string) => {
+      clearAllOnLogout: (userId?: string, storeId?: string | null) => {
         // A press still pending keeps its promise ("press again, it finishes
         // once"): the bill is parked first, with its key, unless it already
         // is (the idle sign-out parks before it clears) (money review 22).
-        const pending = billKeyEntry(billFingerprint(get()));
+        const pending = billKeyEntry(billIdOf(get()));
         if (pending?.pending) {
           let held: any[] = [];
           try { held = JSON.parse(localStorage.getItem('ims-held-bills') || '[]'); } catch { held = []; }
           if (!(Array.isArray(held) && held.some((b) => b?.bill_key?.key === pending.key))) {
-            get().parkCurrentSale({ auto: true, heldBy: userId });
+            get().parkCurrentSale({ auto: true, heldBy: userId, storeId });
           }
         }
-        clearBillKey(billFingerprint(get()));
+        clearBillKey(billIdOf(get()));
         set(initialState);
         try {
           localStorage.removeItem('ims-pos-draft');
@@ -859,7 +885,7 @@ export const usePOSStore = create<POSState>()(
         // customer, member and Rx stay with the draft, so a reload presses
         // the SAME bill (same key: the server replays it, and the Rx sale
         // gets its workshop job) instead of a second sale (money review 17).
-        ...(billKeyEntry(billFingerprint(state))?.pending
+        ...(billKeyEntry(billIdOf(state))?.pending
           ? {}
           : { customer: null, patient: null, prescription: null }),
         customerLoyaltyPoints: 0,
@@ -895,3 +921,13 @@ export const usePOSStore = create<POSState>()(
     }
   )
 );
+
+// A forced sign-out (a 401 the client could not refresh) runs THE same
+// sign-out step as the menu and idle sign-outs: a pending bill is parked
+// with its key, then the draft is cleared (money review 23).
+if (typeof window !== 'undefined') {
+  window.addEventListener(SIGNED_OUT_EVENT, (e) => {
+    const d = ((e as CustomEvent).detail || {}) as { userId?: string; storeId?: string | null };
+    try { usePOSStore.getState().clearAllOnLogout(d.userId, d.storeId); } catch { /* never block a sign-out */ }
+  });
+}

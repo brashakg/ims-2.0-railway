@@ -34,7 +34,7 @@ export interface HeldBill {
   reason?: string;
   state: unknown;
   /** The bill key of an unconfirmed sale, carried so a recall replays it. */
-  bill_key?: { key: string; at: number } | null;
+  bill_key?: { key: string; at: number; pending?: boolean } | null;
 }
 
 function readAll(): HeldBill[] {
@@ -65,7 +65,7 @@ function removeFromStorage(billId: string) {
  * signed-in user's id, never a store id, or two cashiers on one terminal share
  * a parked cart.
  */
-export function useHeldBills(store: any, currentUserId: string) {
+export function useHeldBills(store: any, currentUserId: string, currentStoreId?: string | null) {
   const [heldBills, setHeldBills] = useState<HeldBill[]>([]);
 
   const refresh = useCallback(() => {
@@ -82,10 +82,10 @@ export function useHeldBills(store: any, currentUserId: string) {
   const holdCurrentBill = useCallback(() => {
     // ONE code path with the idle auto-park: the store builds and tags the
     // snapshot (held_by, store_id, auto=false) and pushes it to storage.
-    store.parkCurrentSale({ heldBy: currentUserId });
+    store.parkCurrentSale({ heldBy: currentUserId, storeId: currentStoreId });
     refresh();
     store.resetTransaction();
-  }, [store, currentUserId, refresh]);
+  }, [store, currentUserId, currentStoreId, refresh]);
 
   /** Restore a parked bill. Only ever one of this user's own. */
   const recallBill = useCallback(
@@ -94,6 +94,12 @@ export function useHeldBills(store: any, currentUserId: string) {
         (b) => b?.id === billId && b?.held_by && b.held_by === currentUserId,
       );
       if (!bill) return false;
+      // A bill rung at another store is finished there, never here: its key
+      // replays only at its own store (money review 23).
+      if (bill.store_id && currentStoreId && bill.store_id !== currentStoreId) {
+        window.alert(`This bill was rung at ${bill.store_id} - sign in there to finish it.`);
+        return false;
+      }
       // Atomic REPLACE, not a merge into the current cart: restores the cart
       // verbatim plus the bill-level discount and delivery fields.
       store.restoreHeldSale(bill.state, bill.bill_key);
@@ -101,7 +107,7 @@ export function useHeldBills(store: any, currentUserId: string) {
       refresh();
       return true;
     },
-    [store, currentUserId, refresh],
+    [store, currentUserId, currentStoreId, refresh],
   );
 
   /** Throw a parked bill away. Ownership is re-checked against storage, not

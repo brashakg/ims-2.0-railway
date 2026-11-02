@@ -5,6 +5,7 @@
 import axios from 'axios';
 import type { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { LAST_ACTIVITY_KEY } from '../../hooks/useIdleLogout';
+import { SIGNED_OUT_EVENT } from './signOutEvent';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? 'https://ims-20-railway-production.up.railway.app/api/v1' : '/api/v1');
@@ -405,6 +406,13 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
   if (error.response?.status === 401) {
     // Clear auth state on unauthorized (refresh already failed or was not
     // possible by the time we get here -> same logout flow as before).
+    // The POS goes through THE one sign-out step (a pending bill is parked,
+    // then the draft cleared) -- by event, as the store cannot be imported
+    // here without an import cycle (money review 23).
+    try {
+      const u = JSON.parse(localStorage.getItem('ims_user') || 'null');
+      window.dispatchEvent(new CustomEvent(SIGNED_OUT_EVENT, { detail: { userId: u?.id, storeId: u?.activeStoreId } }));
+    } catch { /* never block the sign-out */ }
     localStorage.removeItem(TOKEN_STORAGE_KEY);
     localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
     localStorage.removeItem('ims_user');
