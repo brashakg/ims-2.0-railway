@@ -69,8 +69,8 @@ manager gets 404).
 |---|---|
 | PUBLIC (no IMS role gate) | 46 |
 | AUTHENTICATED | 394 |
-| Role-gated (one or more roles) | 868 |
-| **Total `/api/v1` (method x path)** | **1308** |
+| Role-gated (one or more roles) | 872 |
+| **Total `/api/v1` (method x path)** | **1312** |
 | ...of which `store_scoped` | 236 |
 | ...of which `self_enforced` | 47 |
 
@@ -1520,17 +1520,21 @@ entry exactly; see the manual interpretation notes above.
 | `GET` | `/api/v1/transfers/analytics/location/{location_id}` | AUTH |  |  |
 | `GET` | `/api/v1/transfers/analytics/summary` | AUTH |  |  |
 | `POST` | `/api/v1/transfers/bulk-approve` | ADMIN, AREA_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/transfers/free` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `GET` | `/api/v1/transfers/missing` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
 | `GET` | `/api/v1/transfers/pending` | AUTH |  |  |
 | `GET` | `/api/v1/transfers/{transfer_id}` | AUTH |  |  |
 | `PUT` | `/api/v1/transfers/{transfer_id}` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/transfers/{transfer_id}/approve` | ADMIN, AREA_MANAGER, SUPERADMIN |  |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/cancel` | ADMIN, AREA_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/cancel` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
 | `POST` | `/api/v1/transfers/{transfer_id}/complete` | ADMIN, STORE_MANAGER, SUPERADMIN |  |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/complete-picking` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
 | `POST` | `/api/v1/transfers/{transfer_id}/create-shiprocket-shipment` | ADMIN, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/missing/{stock_id}/found` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/missing/{stock_id}/write-off` | ADMIN, SUPERADMIN |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/missing/{stock_id}/write-off-request` | ADMIN, AREA_MANAGER, STORE_MANAGER, SUPERADMIN |  |  |
+| `POST` | `/api/v1/transfers/{transfer_id}/pack` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
 | `POST` | `/api/v1/transfers/{transfer_id}/receive` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
 | `POST` | `/api/v1/transfers/{transfer_id}/ship` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
-| `POST` | `/api/v1/transfers/{transfer_id}/start-picking` | ADMIN, STORE_MANAGER, SUPERADMIN, WORKSHOP_STAFF |  |  |
 | `GET` | `/api/v1/transfers/{transfer_id}/tracking` | AUTH |  |  |
 
 ### `/api/v1/users`

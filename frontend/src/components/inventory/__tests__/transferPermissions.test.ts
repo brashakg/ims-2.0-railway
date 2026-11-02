@@ -14,6 +14,10 @@ import {
   canReceive,
   canComplete,
   canCancel,
+  canPack,
+  canMarkFound,
+  canRequestWriteOff,
+  canWriteOff,
   canPrintChallan,
   isSourceSide,
   isDestSide,
@@ -65,16 +69,16 @@ describe('canCancel — P0: pre-ship statuses ONLY', () => {
     }
   });
 
-  it('requires a cancel role and the source side', () => {
-    // Right status, wrong role.
-    expect(canCancel(storeMgrA, t({ status: 'approved' }))).toBe(false);
-    // Right role + status, but the actor only reaches the DESTINATION store.
-    const areaMgrB: TransferActor = {
-      roles: ['AREA_MANAGER'],
-      storeIds: ['STORE-B'],
-      activeStoreId: 'STORE-B',
-    };
-    expect(canCancel(areaMgrB, t({ status: 'approved' }))).toBe(false);
+  it('S3: either end may call off a box that has not shipped', () => {
+    expect(canCancel(storeMgrA, t({ status: 'packed' }))).toBe(true);
+    expect(canCancel(storeMgrB, t({ status: 'pending_approval' }))).toBe(true);
+  });
+
+  it('requires a cancel role and one end of the move', () => {
+    const workshopA: TransferActor = { roles: ['WORKSHOP_STAFF'], storeIds: ['STORE-A'], activeStoreId: 'STORE-A' };
+    expect(canCancel(workshopA, t({ status: 'approved' }))).toBe(false);
+    const areaMgrC: TransferActor = { roles: ['AREA_MANAGER'], storeIds: ['STORE-C'], activeStoreId: 'STORE-C' };
+    expect(canCancel(areaMgrC, t({ status: 'approved' }))).toBe(false);
   });
 });
 
@@ -114,8 +118,16 @@ describe('multi-store side-check uses the full store_ids set', () => {
 });
 
 describe('ship / receive / complete gates match backend status windows', () => {
-  it('ship: source-side ship role on approved|packed only', () => {
-    expect(canShip(storeMgrA, t({ status: 'approved' }))).toBe(true);
+  it('pack: source-side ship role from approval until the box ships', () => {
+    expect(canPack(storeMgrA, t({ status: 'approved' }))).toBe(true);
+    expect(canPack(storeMgrA, t({ status: 'packed' }))).toBe(true);
+    expect(canPack(storeMgrA, t({ status: 'pending_approval' }))).toBe(false);
+    expect(canPack(storeMgrA, t({ status: 'in_transit' }))).toBe(false);
+    expect(canPack(storeMgrB, t({ status: 'approved' }))).toBe(false);
+  });
+
+  it('ship: source-side ship role on a packed box only (S3: pieces scanned first)', () => {
+    expect(canShip(storeMgrA, t({ status: 'approved' }))).toBe(false);
     expect(canShip(storeMgrA, t({ status: 'packed' }))).toBe(true);
     expect(canShip(storeMgrA, t({ status: 'pending_approval' }))).toBe(false);
     expect(canShip(storeMgrA, t({ status: 'in_transit' }))).toBe(false);
@@ -129,10 +141,13 @@ describe('ship / receive / complete gates match backend status windows', () => {
     expect(canReceive(storeMgrA, t({ status: 'in_transit' }))).toBe(false);
   });
 
-  it('complete: dest-side complete role on received|partially_received only', () => {
+  it('complete: dest-side complete role once the box is on the way', () => {
     expect(canComplete(storeMgrB, t({ status: 'received' }))).toBe(true);
     expect(canComplete(storeMgrB, t({ status: 'partially_received' }))).toBe(true);
-    expect(canComplete(storeMgrB, t({ status: 'in_transit' }))).toBe(false);
+    // S3: accepting a box with nothing scanned reports every piece missing.
+    expect(canComplete(storeMgrB, t({ status: 'in_transit' }))).toBe(true);
+    expect(canComplete(storeMgrB, t({ status: 'packed' }))).toBe(false);
+    expect(canComplete(storeMgrA, t({ status: 'received' }))).toBe(false);
     // WORKSHOP_STAFF is not a complete role.
     const workshopB: TransferActor = {
       roles: ['WORKSHOP_STAFF'],
@@ -151,5 +166,20 @@ describe("canPrintChallan — the server's own answer, never a role list", () =>
 
   it('offers nothing when the reply does not say (an older server)', () => {
     expect(canPrintChallan({})).toBe(false);
+  });
+});
+
+describe('missing on the way', () => {
+  it('found is marked by a manager of the shop where the piece turned up', () => {
+    expect(canMarkFound(storeMgrA, t({}), 'source')).toBe(true);
+    expect(canMarkFound(storeMgrA, t({}), 'destination')).toBe(false);
+    expect(canMarkFound(storeMgrB, t({}), 'destination')).toBe(true);
+  });
+
+  it('either shop may send it to the admin; only an admin writes it off', () => {
+    expect(canRequestWriteOff(storeMgrB, t({}))).toBe(true);
+    expect(canWriteOff(storeMgrA)).toBe(false);
+    expect(canWriteOff(areaMgrJharkhand)).toBe(false);
+    expect(canWriteOff(admin)).toBe(true);
   });
 });

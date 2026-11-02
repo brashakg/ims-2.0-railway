@@ -100,7 +100,8 @@ export const inventoryApi = {
   //   * approve  -> JSON body TransferApproval { approved, rejection_reason }
   //   * ship / complete / cancel -> the backend declares scalar function args,
   //     i.e. QUERY parameters (NOT a JSON body) — sent via `params`.
-  //   * receive  -> a bare JSON LIST of TransferItemReceive.
+  //   * pack     -> JSON { barcodes } -- the WHOLE box each time (S3).
+  //   * receive  -> JSON { barcode, damaged, damage_reason } -- ONE piece.
   // --------------------------------------------------------------------------
 
   // Approve (or reject) a PENDING_APPROVAL transfer. Source-side AM/Admin only
@@ -140,34 +141,74 @@ export const inventoryApi = {
     return response.data;
   },
 
-  // Receive an IN_TRANSIT / PARTIALLY_RECEIVED transfer at the destination.
-  // The backend body is a bare list of TransferItemReceive: each line needs the
-  // transfer LINE id (item.id, NOT product_id) + quantity_received. Damaged
-  // units are auto-quarantined at the destination by the backend.
-  receiveTransfer: async (
+  // S3: pack the box -- the pieces scanned OUT at the sending shop. The WHOLE
+  // list every time (a retry or a second tablet never double-packs); an empty
+  // list empties the box. Nothing moves until ship. `rev`: the box revision
+  // the list was built from -- a list built from an older box is refused (409).
+  packTransfer: async (transferId: string, barcodes: string[], rev?: number) => {
+    const response = await api.post(`/transfers/${transferId}/pack`, { barcodes, rev });
+    return response.data;
+  },
+
+  // S3: scan ONE piece IN at the receiving shop. Damaged in the box -> it goes
+  // to quarantine there, and the reason is required.
+  scanInPiece: async (
     transferId: string,
-    items: Array<{
-      transfer_item_id: string;
-      quantity_received: number;
-      quantity_damaged?: number;
-      damage_notes?: string;
-    }>,
+    piece: { barcode: string; damaged?: boolean; damageReason?: string },
   ) => {
+    const response = await api.post(`/transfers/${transferId}/receive`, {
+      barcode: piece.barcode,
+      damaged: Boolean(piece.damaged),
+      ...(piece.damaged ? { damage_reason: piece.damageReason ?? '' } : {}),
+    });
+    return response.data;
+  },
+
+  // E-way bill no. / vehicle no. typed on the box page (they print on the
+  // transfer's tax invoice e-way data page).
+  updateTransfer: async (
+    transferId: string,
+    data: { eway_bill_number?: string; vehicle_number?: string },
+  ) => {
+    const response = await api.put(`/transfers/${transferId}`, data);
+    return response.data;
+  },
+
+  // How many pieces another shop can be asked for: {free, reserved} (counts only).
+  getFreeStock: async (productId: string, storeId: string) => {
+    const response = await api.get('/transfers/free', {
+      params: { product_id: productId, store_id: storeId },
+    });
+    return response.data as { free: number; reserved: number };
+  },
+
+  // "Missing on the way": pieces scanned out and never in, until found or
+  // written off. {pieces: [...]}
+  getMissingPieces: async () => {
+    const response = await api.get('/transfers/missing');
+    return response.data;
+  },
+
+  foundMissingPiece: async (transferId: string, stockId: string, at: 'source' | 'destination') => {
+    const response = await api.post(`/transfers/${transferId}/missing/${stockId}/found`, { at });
+    return response.data;
+  },
+
+  requestMissingWriteOff: async (transferId: string, stockId: string) => {
     const response = await api.post(
-      `/transfers/${transferId}/receive`,
-      items.map(i => ({
-        transfer_item_id: i.transfer_item_id,
-        quantity_received: i.quantity_received,
-        quantity_damaged: i.quantity_damaged ?? 0,
-        ...(i.damage_notes ? { damage_notes: i.damage_notes } : {}),
-      })),
+      `/transfers/${transferId}/missing/${stockId}/write-off-request`,
     );
     return response.data;
   },
 
-  // Complete a RECEIVED / PARTIALLY_RECEIVED transfer (destination sign-off).
-  // NOTE: for an inter-entity or inter-state move this is where the backend
-  // auto-books the GST deemed-supply mirror invoice. `notes` is a query param.
+  writeOffMissingPiece: async (transferId: string, stockId: string) => {
+    const response = await api.post(`/transfers/${transferId}/missing/${stockId}/write-off`);
+    return response.data;
+  },
+
+  // Accept the box (destination sign-off): every piece not scanned in goes on
+  // "Missing on the way". The tax invoice was booked at ship. `notes` is a
+  // query param.
   completeTransfer: async (transferId: string, notes?: string) => {
     const response = await api.post(`/transfers/${transferId}/complete`, null, {
       params: notes ? { notes } : {},
