@@ -1353,3 +1353,17 @@ def test_hist_cn_note_number_and_cdnr_resolver_are_gstn_legal():
     assert legacy == "SHOPIFY-HIST-REFUND-8804212345678"
     assert _cdnr_note_number({"ref": "RET-250415-ABC123"}, issues) == "RET-250415-ABC123"
     assert len(issues) == 1 and issues[0]["count"] == 2
+
+
+def test_a_history_import_is_checked_on_what_checkout_charged(wired):
+    """A settled order with a refund that moved no money (a restock only):
+    Shopify's current total nets the line, but the buyer paid in full. A
+    history import is checked on total_price, so it shows no MISMATCH."""
+    payload = _hist_order(20090)
+    payload["current_total_price"] = "0.00"
+    payload["refunds"] = [{"id": 88090, "refund_line_items": [_refund_line()], "transactions": []}]
+    online_order_mapper.map_shopify_order(
+        payload, wired["db"], topic="orders/create", historical=True
+    )
+    order = wired["orders"].find_one({"shopify_order_id": "20090"})
+    assert order["shopify_totals_check"]["status"] == "MATCH"
