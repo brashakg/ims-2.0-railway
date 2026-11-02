@@ -156,13 +156,7 @@ def _bills_for(db, unit: dict, gstin_of) -> list:
     crossings = []
     for tid in tids:
         t, m = moved.get(tid) or {}, mirrors.get(tid) or {}
-        stamp = t.get("gst_registrations")
-        # Ship's stamp (None -- cannot tell -- books a mirror too), else the
-        # two shops' GSTINs: the rule of transfers._transfer_registrations.
-        crosses = bool(m) or (stamp.get("crosses") is not False if isinstance(stamp, dict) else
-                              (gstins.get(t.get("from_location_id")) or "")
-                              != (gstins.get(t.get("to_location_id")) or ""))
-        if crosses:
+        if transfer_crosses(t, gstins, bool(m)):
             # Newest by when the transfer SHIPPED (stamped once; the piece can
             # only ship on B after it arrived on A). Never by the mirror's date
             # first (booked at COMPLETE, maybe after a later move) nor by
@@ -175,6 +169,20 @@ def _bills_for(db, unit: dict, gstin_of) -> list:
     latest = mirrors.get(tid)
     # The invoice FIRST: it is the claimed bill a reversal row names.
     return [latest, *notes.get(tid, [])] if latest and landed_here(latest) else []
+
+
+def transfer_crosses(t: dict, gstins: dict, mirrored: bool) -> bool:
+    """THE 'did this transfer cross a GSTIN' rule for a shipped transfer (ITC
+    reversal here, the S4 true-up's shop in product_cost.crossed_gstin): its
+    mirror bill is booked, or ship's stamp says so (None -- cannot tell --
+    books a mirror too, so it counts), or -- shipped before #1185 stamped it
+    -- the two shops' GSTINs differ (transfers._transfer_registrations)."""
+    stamp = t.get("gst_registrations")
+    if mirrored:
+        return True
+    if isinstance(stamp, dict):
+        return stamp.get("crosses") is not False
+    return (gstins.get(t.get("from_location_id")) or "") != (gstins.get(t.get("to_location_id")) or "")
 
 
 def _is_note(bill: dict) -> bool:

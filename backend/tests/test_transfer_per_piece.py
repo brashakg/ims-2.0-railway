@@ -777,19 +777,32 @@ def test_a_write_off_pressed_again_after_the_average_moved_books_the_loss_at_the
     assert round(shrink["shrinkage_value"] + row["variance"]["amount"], 2) == 3000.0
 
 
-@pytest.mark.parametrize("to, user, owner", (
-    ("ST-DHN-2", MGR_DHN2, "ST-DHN-2"),  # one GSTIN: the shop it was sold from
-    ("ST-BOK-1", MGR_BOK, "ST-DHN-1"),  # two GSTINs: the shop that took the supplier bill
+@pytest.mark.parametrize("to, user, owner, shipped", (
+    ("ST-DHN-2", MGR_DHN2, "ST-DHN-2", "stamped"),  # one GSTIN: the shop it was sold from
+    ("ST-DHN-2", MGR_DHN2, "ST-DHN-2", "unstamped"),
+    ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "stamped"),  # two GSTINs: the shop that took the supplier bill
+    ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "cannot tell"),
+    ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "pre-1185"),
+    ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "unstamped"),
 ))
-def test_a_moved_piece_sold_before_its_bill_owes_its_true_up_to_the_right_shop(world, to, user, owner):
+def test_a_moved_piece_sold_before_its_bill_owes_its_true_up_to_the_right_shop(
+    world, monkeypatch, to, user, owner, shipped
+):
     """S4 fix round 14 (lead ruling 2026-11-02, to confirm with the CA): SU-1
     (receipt G-NEW, unbilled) moves out of Hirapur and is sold at its new shop
     at 1850; its bill (Hirapur's, 1 at 1910) trues it up by 60. Inside one
     GSTIN (Bank More) the 60 is the cost of the shop it was sold from. Across
     two GSTINs (Bokaro: the tax invoice at cost fixed Bokaro's cost at ship)
     it stays with Hirapur, which took the supplier bill. Every store-scoped
-    read agrees."""
-    from api.services import product_cost
+    read agrees. Round 15: the crossing is the ONE rule
+    (writeoff_itc.transfer_crosses) -- a stamp of crosses=None ('cannot
+    tell', no live mirror), a box shipped before #1185 stamped it
+    ('pre-1185': no stamp, its mirror bill), or no stamp and no mirror
+    ('unstamped': the two shops' GSTINs) -- and the product-keyed read (collection insights' 30-day COGS)
+    finds the per-piece row's true-up too."""
+    from datetime import datetime
+
+    from api.services import collection_insights, product_cost
     from api.utils.event_time import utc_now_iso
 
     others = [f"SU-{n}" for n in range(2, 11)] + ["SU-R"]
@@ -802,6 +815,12 @@ def test_a_moved_piece_sold_before_its_bill_owes_its_true_up_to_the_right_shop(w
     _scan_in(t["id"], "BVQX001", user=user)
     _complete(t["id"], user=user)
     assert _unit(world, "SU-1")["store_id"] == to
+    if shipped == "cannot tell":
+        world["stock_transfers"].update_one({"id": t["id"]}, {"$set": {"gst_registrations.crosses": None}})
+    elif shipped != "stamped":
+        world["stock_transfers"].update_one({"id": t["id"]}, {"$unset": {"gst_registrations": ""}})
+    if shipped in ("cannot tell", "unstamped"):  # the stamp (or GSTINs) alone decides
+        world["vendor_bills"].delete_many({"source_transfer_id": t["id"]})
     world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {
         "status": "SOLD", "order_id": "O1", "sold_at": utc_now_iso()}})
     world["orders"].insert_one({"order_id": "O1", "items": [
@@ -815,6 +834,11 @@ def test_a_moved_piece_sold_before_its_bill_owes_its_true_up_to_the_right_shop(w
     elsewhere = "ST-DHN-1" if owner == to else to
     assert product_cost.variance_by(world, store_ids=[elsewhere]) == {}
     assert product_cost.variance_by(world, "category", store_ids=[elsewhere]) == {}
+    assert product_cost.variance_by(world, "product_id", store_ids=[owner]) == {"P-1": 60.0}
+    monkeypatch.setattr(collection_insights, "_utcnow", lambda: datetime(2026, 11, 2, 6, 0))
+    for shop, cogs in ((owner, 60.0), (elsewhere, 0.0)):
+        mv = collection_insights.movement_summary(world, {"product_ids": ["P-1"]}, store_id=shop)
+        assert mv["totals"]["cogs_d30"] == cogs
 
 
 def test_a_catalogue_only_price_is_no_cost_for_the_invoice(world):

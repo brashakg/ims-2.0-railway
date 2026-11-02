@@ -505,19 +505,32 @@ def written_off_cost(db, units) -> Dict[str, float]:
 
 def crossed_gstin(db, stock_ids) -> set:
     """The pieces (of `stock_ids`) that ever left on a transfer between two
-    GSTINs (S3: ship stamps gst_registrations.crosses). Such a piece's cost at
-    the receiving GSTIN was fixed by the transfer's tax invoice at cost, so a
-    later supplier-bill true-up stays with the shop that took the bill."""
+    GSTINs (writeoff_itc.transfer_crosses, the one rule: mirror bill, ship's
+    stamp, else -- shipped before #1185 -- the two shops' GSTINs; 'cannot
+    tell' counts as crossed). Such a piece's cost at the receiving GSTIN was
+    fixed by the transfer's tax invoice at cost, so a later supplier-bill
+    true-up stays with the shop that took the bill."""
     ids = [str(s) for s in stock_ids or [] if s]
     if not ids:
         return set()
+    moves = list(db.get_collection("stock_transfers").find(
+        {"items.shipped_stock_ids": {"$in": ids}},
+        {"_id": 0, "id": 1, "gst_registrations": 1, "from_location_id": 1, "to_location_id": 1,
+         "items.shipped_stock_ids": 1},
+    ))
+    if not moves:
+        return set()
+    from .writeoff_itc import _gst_itc, _is_note, transfer_crosses
+
+    mirrored = {b.get("source_transfer_id") for b in db.get_collection("vendor_bills").find({
+        "status": {"$nin": _gst_itc()._DEAD_BILL},
+        "source_transfer_id": {"$in": [t.get("id") for t in moves]}}) if not _is_note(b)}
+    gstins = _gst_itc().shop_gstins(db)
     out = set()
-    for t in db.get_collection("stock_transfers").find(
-        {"items.shipped_stock_ids": {"$in": ids}, "gst_registrations.crosses": True},
-        {"_id": 0, "items.shipped_stock_ids": 1},
-    ):
-        for ln in t.get("items") or []:
-            out.update(str(s) for s in ln.get("shipped_stock_ids") or [])
+    for t in moves:
+        if transfer_crosses(t, gstins, t.get("id") in mirrored):
+            for ln in t.get("items") or []:
+                out.update(str(s) for s in ln.get("shipped_stock_ids") or [])
     return out & set(ids)
 
 
