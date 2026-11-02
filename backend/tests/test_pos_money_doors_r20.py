@@ -224,3 +224,28 @@ def test_an_unclear_give_back_credit_resumes_once_on_the_re_press(till, redeem_e
     assert e.value.status_code == 503 and _balance(till) == 500.0
     out = cust_router.give_back_unbilled_leg(KEY, _user("ADMIN"))
     assert out["given_back"] is True and _balance(till) == 500.0
+
+
+def test_a_lost_voucher_mark_resumes_without_a_second_restore(till, monkeypatch, tasks):
+    import mongomock
+
+    seed = _voucher(till).find_one({"code": "GV7"})
+    vouchers = mongomock.MongoClient().db.vouchers
+    vouchers.insert_one(dict(seed))
+    monkeypatch.setattr(cust_router, "_vouchers_coll", lambda: vouchers)
+    real = vouchers.update_one
+    state = {"n": 0}
+
+    def _mark(flt, upd, *a, **k):
+        if "pos_given_back" in (upd.get("$addToSet") or {}) and state["n"] == 0:
+            state["n"] += 1
+            raise RuntimeError("the mark write was lost")
+        return real(flt, upd, *a, **k)
+
+    monkeypatch.setattr(vouchers, "update_one", _mark)
+    with pytest.raises(RuntimeError):
+        cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"))
+    assert vouchers.find_one({"code": "GV7"})["balance"] == 80.0
+    cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"))  # the re-press resumes from the claim
+    v = vouchers.find_one({"code": "GV7"})
+    assert v["balance"] == 80.0 and VKEY in v["pos_given_back"]
