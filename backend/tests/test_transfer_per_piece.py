@@ -615,9 +615,10 @@ def test_transfer_value_reads_the_one_stock_cost_rule(world):
 def test_a_note_after_the_average_moves_credits_the_cost_frozen_at_ship(world):
     """S4 + S3: three pieces ship at the average then (1850 each); a vendor
     bill moves the average to 2400 before SU-3 is written off. Its credit
-    note, its shrinkage row and invoice + note all stay at the 1850 the tax
-    invoice charged -- never today's 2400 (the CA: a transfer is a tax
-    invoice at cost, dispatch month; the note reverses what it charged)."""
+    note and invoice + note stay at the 1850 the tax invoice charged -- never
+    today's 2400 (the CA: a transfer is a tax invoice at cost, dispatch
+    month; the note reverses what it charged). The shrinkage row is no GST
+    paper: the loss is at the average now (2400), like every write-off."""
     from api.routers import transfers
     from api.services.purchase_invoice_engine import split_line_gst
 
@@ -633,7 +634,68 @@ def test_a_note_after_the_average_moves_credits_the_cost_frozen_at_ship(world):
     received = split_line_gst(3700.0, 5.0, False)
     assert round(invoice["taxable_amount"] + note["taxable_amount"], 2) == received["taxable"]
     shrink = world["stock_shrinkage"].find_one({"transfer_id": t["id"]})
-    assert shrink["shrinkage_value"] == 1850.0
+    assert shrink["unit_cost"] == shrink["shrinkage_value"] == 2400.0
+
+
+@pytest.mark.parametrize("moved_by", ("correction", "bill"))
+def test_a_lost_piece_is_expensed_at_exactly_what_its_bill_says(world, moved_by):
+    """S4 + S3: receipt G-OLD (8 pieces) is billed; G-NEW (SU-1..3) is not.
+    SU-1..3 ship DHN -> BOK at 1850. While they are on the way (still in the
+    basis) accounts correct the average to 2400, or bill BH on receipt H
+    blends it to 2070. SU-1, SU-2 land; SU-3 is written off. G-NEW's bill
+    (3 at 3000) then trues SU-3 up from the average at its write-off: its
+    loss plus that true-up is the 3000 paid, never the 1850 frozen at ship."""
+    from api.routers import transfers
+    from api.services import product_cost
+
+    held_old = ["SU-4", "SU-5", "SU-6", "SU-7", "SU-8", "SU-9", "SU-10", "SU-R"]
+    world["stock_units"].update_many({"stock_id": {"$in": held_old}}, {"$set": {"grn_id": "G-OLD"}})
+    world["stock_units"].update_many({"stock_id": {"$in": ["SU-1", "SU-2", "SU-3"]}},
+                                     {"$set": {"grn_id": "G-NEW"}})
+
+    def receipt(gid, n):
+        world["grns"].insert_one({"grn_id": gid, "status": "ACCEPTED", "vendor_id": "V",
+                                  "items": [{"product_id": "P-1", "accepted_qty": n}]})
+
+    def bill(bid, gid, n, price, **extra):
+        doc = {"bill_id": bid, "invoice_id": bid, "status": "OUTSTANDING", "grn_id": gid,
+               "lines": [{"product_id": "P-1", "qty": n, "unit_price": price,
+                          "taxable": n * price}], **extra}
+        world["vendor_bills"].insert_one(dict(doc))
+        return doc
+
+    def accept(doc, gid):
+        product_cost.apply_bill(world, doc, doc["lines"], key=doc["bill_id"], actor="acc",
+                                receipts=[world["grns"].find_one({"grn_id": gid}, {"_id": 0})])
+
+    receipt("G-OLD", 8)
+    receipt("G-NEW", 3)
+    bill("B-OLD", "G-OLD", 8, 1850.0)  # booked before S4: already in the average
+    t = _shipped_box(world)
+    if moved_by == "correction":
+        product_cost.correct(world, "P-1", 2400.0, "price fix", "acc", expected=1850.0)
+        at_loss, after = 2400.0, 2520.0  # (8 x 2400 + 2 x 3000) / 10
+    else:
+        world["stock_units"].insert_many([
+            {"stock_id": f"SU-H{n}", "product_id": "P-1", "store_id": "ST-DHN-1",
+             "status": "AVAILABLE", "barcode": f"BVQXH{n}", "grn_id": "H"} for n in (1, 2)])
+        receipt("H", 2)
+        accept(bill("BH", "H", 2, 2950.0, cost_state=product_cost.PENDING), "H")
+        at_loss, after = 2070.0, 2225.0  # (8x1850 + 2x2950)/10; (10x2070 + 2x3000)/12
+    assert world["products"].find_one({"product_id": "P-1"})["cost_price"] == at_loss
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _scan_in(t["id"], "BVQX002", user=MGR_BOK)
+    _complete(t["id"], user=MGR_BOK)
+    _run(transfers.write_off_missing_piece(t["id"], "SU-3", ADMIN))
+    accept(bill("B-NEW", "G-NEW", 3, 3000.0, cost_state=product_cost.PENDING), "G-NEW")
+
+    prod = world["products"].find_one({"product_id": "P-1"})
+    row = next(r for r in prod["cost_history"] if r.get("key") == "B-NEW")
+    assert row["claimed"] == ["SU-3"]
+    shrink = world["stock_shrinkage"].find_one({"transfer_id": t["id"]})
+    assert shrink["shrinkage_value"] == at_loss
+    assert round(shrink["shrinkage_value"] + row["variance"]["amount"], 2) == 3000.0
+    assert prod["cost_price"] == after
 
 
 def test_a_catalogue_only_price_is_no_cost_for_the_invoice(world):
@@ -714,8 +776,9 @@ def _stale_once(monkeypatch, transfers, snapshot, at=1):
 
 def test_a_lost_piece_is_credited_at_its_own_cost_not_the_line_average(world):
     """SU-1 frozen at 1500, SU-2 at 2000; SU-1 arrives, SU-2 is lost. The note
-    credits 2000 (the lost piece's own cost, the figure its shrinkage books),
-    so invoice + note = the tax on the 1500 actually received."""
+    credits 2000 (the lost piece's own cost, what the invoice charged), so
+    invoice + note = the tax on the 1500 actually received. The shrinkage
+    row is no GST paper: the loss is at the product's average now (1850)."""
     from api.routers import transfers
     from api.services.purchase_invoice_engine import split_line_gst
 
@@ -733,7 +796,8 @@ def test_a_lost_piece_is_credited_at_its_own_cost_not_the_line_average(world):
                       ("sgst", "sgst_total"), ("igst", "igst_total")):
         assert round(invoice[key] + note[key], 2) == received[head], head
     shrink = world["stock_shrinkage"].find_one({"transfer_id": t["id"]})
-    assert shrink["shrinkage_value"] == 2000.0 == -note["taxable_amount"]
+    assert note["taxable_amount"] == -2000.0
+    assert shrink["shrinkage_value"] == 1850.0
 
 
 def test_a_piece_that_landed_gets_no_credit_note_from_write_off_or_found(world):
