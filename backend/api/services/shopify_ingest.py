@@ -368,9 +368,12 @@ def _totals_check(
     Shopify's total is its current_total_price, which follows edits: the
     booking (an order first seen after an edit, when the create webhook was
     missed) and an edit's re-check (online_order_mapper) read the same rule.
-    It also nets refunds, so the refund money Shopify sent back is added back
-    (IMS answers it with a credit note, shopify_refund) and a refund is never
-    read as an edit; a refund that moved no money is not added back. A body
+    It also nets refunds of lines or shipping, so the money such a refund sent
+    back is added back (IMS answers it with a credit note, shopify_refund) and
+    it is never read as an edit; a refund that moved no money is not added
+    back. Nor is a refund with no line or shipping (an edit's refund owed, a
+    goodwill amount): IMS books no credit note for it and current_total_price
+    does not net it, so the edit it pays back still reads a MISMATCH. A body
     without current_total_price is checked on total_price, except by the
     re-check (`current`): such a body says nothing about edits. So is a
     cancelled body or a history import (`historical`): their current figures
@@ -382,11 +385,14 @@ def _totals_check(
             return {"status": "UNCHECKED"}
         pre, raw = "", payload.get("total_price")
     else:
-        from .shopify_refund import _money_back_on_shopify
+        from .shopify_refund import _money_back_on_shopify, _shipping_refunded
 
         refunded = sum(
             _money_back_on_shopify(r)[0]
-            for r in payload.get("refunds") or [] if isinstance(r, dict))
+            for r in payload.get("refunds") or [] if isinstance(r, dict) and (
+                any(isinstance(rl, dict) and _f(rl.get("quantity")) > 0
+                    for rl in r.get("refund_line_items") or [])
+                or _shipping_refunded(r) > 0))
     if raw is None or str(raw).strip() == "":
         return {"status": "UNCHECKED"}
     shopify_p = _paise(raw) + _paise(refunded)
