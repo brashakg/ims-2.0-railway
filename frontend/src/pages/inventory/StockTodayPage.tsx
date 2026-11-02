@@ -24,7 +24,7 @@ import type { StockToday } from '../../services/api/inventory';
 import { formatDateIST, istDayString } from '../../utils/datetime';
 import { getErrorMessage } from '../../utils/errorHandler';
 import { RECEIVING_MANAGER_ROLES } from '../purchase/purchaseTypes';
-import { INVENTORY_MANAGE_ROLES, INVENTORY_MODULE_ROLES } from './inventoryRoles';
+import { INVENTORY_MANAGE_ROLES, INVENTORY_MODULE_ROLES, REORDER_LIST_ROLES } from './inventoryRoles';
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 const money = (n: number) => `₹${Math.round(n).toLocaleString('en-IN')}`;
@@ -66,7 +66,7 @@ export default function StockTodayPage() {
   const allShops = !d.store_id;
   const shopLabel = d.store_name || (allShops ? 'All shops' : d.store_id);
   const today = istDayString(new Date()) ?? '';
-  const can = { module: hasRole(INVENTORY_MODULE_ROLES), count: hasRole(INVENTORY_MANAGE_ROLES), receive: hasRole([...RECEIVING_MANAGER_ROLES]) };
+  const can = { module: hasRole(INVENTORY_MODULE_ROLES), count: hasRole(INVENTORY_MANAGE_ROLES), receive: hasRole([...RECEIVING_MANAGER_ROLES]), reorder: hasRole(REORDER_LIST_ROLES) };
   const failed = new Set(d.unavailable ?? []);
   // A section the server could not read says so; it never reads as "nothing to do".
   const notRead = 'Could not be read just now. Refresh to try again.';
@@ -231,7 +231,7 @@ export default function StockTodayPage() {
           <span className="font-semibold">Running low</span>
           <span className="chip">sold fast, few left</span>
           <span style={{ flex: 1 }} />
-          {can.module && d.running_low.length > 0 && <Link to="/inventory/reorders" className="btn">Reorder these</Link>}
+          {can.reorder && d.running_low.length > 0 && <Link to="/inventory/reorders" className="btn">Reorder these</Link>}
         </div>
         {d.running_low.length === 0 ? (
           <p className="text-sm px-4 py-3" style={{ color: failed.has('running_low') ? 'var(--warn)' : 'var(--ink-4)' }}>

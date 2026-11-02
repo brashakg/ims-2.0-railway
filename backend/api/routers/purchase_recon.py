@@ -249,9 +249,10 @@ def _safe_list(db, collection: str, query: dict, limit: int = 200) -> list:
         return []
 
 
-def _stock_yet_to_receive(db, store_id: Optional[str]) -> list:
+def _stock_yet_to_receive(db, store_id: Optional[str], strict: bool = False) -> list:
     """Open POs with at least one unreceived line.  Mirrors the residual logic
-    in vendors.py::goods_receipt_cockpit, summarised per PO (not per-vendor)."""
+    in vendors.py::goods_receipt_cockpit, summarised per PO (not per-vendor).
+    Fail-soft -> [] (strict: the read error is raised)."""
     if db is None:
         return []
     flt: dict = {"status": {"$in": list(_RECEIVABLE_PO_STATUSES)}}
@@ -265,6 +266,8 @@ def _stock_yet_to_receive(db, store_id: Optional[str]) -> list:
             .limit(300)
         )
     except Exception as exc:  # noqa: BLE001
+        if strict:
+            raise
         logger.warning("[RECON] fail-soft query on purchase_orders: %s", exc)
         return []
 

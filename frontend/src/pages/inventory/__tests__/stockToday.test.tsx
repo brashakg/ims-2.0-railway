@@ -135,6 +135,15 @@ describe('Stock today: the page', () => {
     expect(screen.queryByRole('link', { name: 'Receive this box' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Scan in' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'Start counting' })).not.toBeInTheDocument();
+    // The Reorder list's own route admits the accountant (REORDER_LIST_ROLES).
+    expect(screen.getByRole('link', { name: 'Reorder these' })).toHaveAttribute('href', '/inventory/reorders');
+  });
+
+  it('Reorder these follows the Reorder list route gate, not the Inventory module', async () => {
+    // WORKSHOP_STAFF is in the Inventory module roles but not REORDER_LIST_ROLES.
+    roles = ['WORKSHOP_STAFF'];
+    renderPage();
+    await screen.findByText('Ray-Ban RB3025 Aviator');
     expect(screen.queryByRole('link', { name: 'Reorder these' })).not.toBeInTheDocument();
   });
 

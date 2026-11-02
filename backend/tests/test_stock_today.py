@@ -109,7 +109,7 @@ def sold(monkeypatch):
     table: Dict[tuple, int] = {}
     calls = []
 
-    def fake(db, members, store_id=None, days=90, by_store=False):
+    def fake(db, members, store_id=None, days=90, by_store=False, strict=False):
         calls.append({"store_id": store_id, "days": days, "pids": list(members["product_ids"])})
         per = {
             pid: {"units_d30": table.get((store_id, pid), 0)}
@@ -465,3 +465,58 @@ def test_an_admin_with_no_shop_sees_every_shop(get, mongo_db, sold):
     assert {t["transfer_id"] for t in body["incoming"]} == {"a", "b"}
     low = {(r["product_id"], r["store_id"]) for r in body["running_low"]}
     assert ("NS", S2) in low and ("RB", S1) in low
+
+
+# ---------------------------------------------------------------------------
+# A read that fails reads "could not be read", never "nothing to do"
+# ---------------------------------------------------------------------------
+
+
+class _Broken:
+    """A collection whose one read method raises; everything else is real."""
+
+    def __init__(self, coll, method):
+        self._coll, self._method = coll, method
+
+    def __getattr__(self, name):
+        if name == self._method:
+            def boom(*a, **k):
+                raise RuntimeError(f"{name} failed")
+            return boom
+        return getattr(self._coll, name)
+
+
+def _break(monkeypatch, mongo_db, coll_name, method):
+    class _Proxy(_DBProxy):
+        def get_collection(self, name):
+            c = self._db[name]
+            return _Broken(c, method) if name == coll_name else c
+
+        __getitem__ = get_collection
+
+    monkeypatch.setattr(inv_mod, "_get_db", lambda: _Proxy(mongo_db))
+
+
+@pytest.mark.parametrize("coll_name,method", [("products", "find"), ("stock_units", "find")])
+def test_running_low_that_cannot_be_read_is_not_read_never_empty_or_sold_out(
+        get, mongo_db, sold, monkeypatch, coll_name, method):
+    _low_shelf(mongo_db)
+    _break(monkeypatch, mongo_db, coll_name, method)
+    body = _ok(get(_user("STORE_MANAGER")))
+    assert "running_low" in body["unavailable"]
+    assert body["running_low"] == [] and body["running_low_total"] == 0
+
+
+def test_running_low_with_sales_that_cannot_be_read_is_not_read(get, mongo_db, monkeypatch):
+    _low_shelf(mongo_db)
+    _break(monkeypatch, mongo_db, "orders", "aggregate")
+    body = _ok(get(_user("STORE_MANAGER")))
+    assert "running_low" in body["unavailable"]
+    assert body["running_low"] == []
+
+
+def test_deliveries_that_cannot_be_read_are_not_read_never_nothing_waiting(get, mongo_db, monkeypatch):
+    _break(monkeypatch, mongo_db, "purchase_orders", "find")
+    body = _ok(get(_user("STORE_MANAGER")))
+    assert "deliveries" in body["unavailable"]
+    assert body["deliveries"] == []

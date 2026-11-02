@@ -137,7 +137,7 @@ def _quarantine(db, shop: Optional[str]) -> Dict[str, int]:
 def _deliveries(db, shop: Optional[str]) -> List[Dict]:
     from ..purchase_recon import _stock_yet_to_receive
 
-    pos = _stock_yet_to_receive(db, shop)
+    pos = _stock_yet_to_receive(db, shop, strict=True)
     names = vendor_name_map(db, [p.get("vendor_id") for p in pos])
     rows = [
         {
@@ -157,11 +157,11 @@ def _deliveries(db, shop: Optional[str]) -> List[Dict]:
 
 def _running_low(db, shop: Optional[str]) -> Dict:
     products, units = db.get_collection("products"), db.get_collection("stock_units")
-    rows = reorder_policy.low_stock_rows(products, units, store_id=shop)
+    rows = reorder_policy.low_stock_rows(products, units, store_id=shop, strict=True)
     if not rows:
         return {"rows": [], "total": 0}
     pids = sorted({r["product_id"] for r in rows})
-    everywhere = reorder_policy.on_hand(units, store_id=None, product_ids=pids)
+    everywhere = reorder_policy.on_hand(units, store_id=None, product_ids=pids, strict=True)
     held = defaultdict(int)
     for (pid, _s), n in everywhere.items():
         held[pid] += n
@@ -170,7 +170,9 @@ def _running_low(db, shop: Optional[str]) -> Dict:
     for r in rows:
         by_shop[r["store_id"]].append(r["product_id"])
     for s, ids in by_shop.items():
-        per = collection_insights.movement_summary(db, {"product_ids": ids}, store_id=s, days=30)["per_product"]
+        per = collection_insights.movement_summary(
+            db, {"product_ids": ids}, store_id=s, days=30, strict=True
+        )["per_product"]
         for pid in ids:
             sold[(s, pid)] = int((per.get(pid) or {}).get("units_d30") or 0)
     shops = store_name_map(db, list(by_shop))
