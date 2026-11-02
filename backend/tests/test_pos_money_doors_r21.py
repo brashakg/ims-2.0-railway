@@ -146,6 +146,27 @@ async def test_a_fresh_bill_lease_is_never_taken_over(lost_leg):
     assert len(_paid(lost_leg)) == 1
 
 
+@pytest.mark.asyncio
+async def test_a_till_press_between_the_doors_read_and_its_takeover_wins(lost_leg, monkeypatch):
+    """The door read a stale lease; a till press renews it before the door's
+    takeover lands -- the takeover (keyed on the stamp it read) misses."""
+    await _lose_first_press(lost_leg)
+    _age(lost_leg)
+    ledger = _ledger(lost_leg)
+    real = ledger.update_one
+
+    def _renew_first(flt, upd, *a, **k):
+        if flt.get("leg_owner") == "BILL" and (upd.get("$set") or {}).get("leg_owner") == "GIVEBACK":
+            cust_router.claim_leg_for_bill("STORE_CREDIT", LEG)  # the till's press renews the lease
+        return real(flt, upd, *a, **k)
+
+    monkeypatch.setattr(ledger, "update_one", _renew_first)
+    with pytest.raises(HTTPException) as e:
+        cust_router.give_back_unbilled_leg(LEG, _user("ADMIN"))
+    assert e.value.status_code == 409 and _balance(lost_leg) == 700.0
+    assert ledger.find_one({"entry_id": LEG})["leg_owner"] == "BILL"
+
+
 def test_a_crash_after_the_doors_claim_resumes_and_the_till_stays_out(till, redeem_env, monkeypatch):
     _unbilled_leg(till)
     real = cust_router.post_ledger_credit
