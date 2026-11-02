@@ -399,19 +399,31 @@ def _web_order(paid=0.0):
     )
 
 
-@pytest.mark.parametrize("paid", [0.0, 500.0, 1050.0])
+@pytest.mark.parametrize("paid", [0.0, 500.0, 999.0, 1050.0])
 def test_cod_shipping_line_is_shipping_charges_and_the_balance_is_unchanged(paid):
     """Shiprocket adds shipping_charges to sub_total, so the courier still
-    collects exactly the balance; a balance below the shipping (Rs 48) owes
-    only that much of it, and sub_total never goes negative."""
+    collects exactly the balance. A balance no bigger than the shipping
+    (Rs 99, Rs 48) is all sub_total: a sub_total of 0 is never sent."""
     from api.services.delivery_gate import cod_collectable
 
     order = _web_order(paid)
     p = shiprocket.build_shipment_payload(order, {**_ADDR, "payment_method": "COD"})
     assert [i["sku"] for i in p["order_items"]] == ["F-1"]  # no shipping "product"
     assert p["sub_total"] + p["shipping_charges"] == cod_collectable(order)
-    assert p["shipping_charges"] == min(99.0, order["balance_due"])
-    assert p["sub_total"] >= 0
+    assert p["shipping_charges"] == (99.0 if order["balance_due"] > 99.0 else 0.0)
+    assert p["sub_total"] > 0
+
+
+def test_each_item_is_declared_at_its_unit_price():
+    """Shiprocket multiplies selling_price by units: a 2-piece Rs 1,000 line
+    is declared at Rs 500 a piece, so the goods add up to the sub_total."""
+    order = _partly_paid(amount_paid=0.0, balance_due=3000.0, payment_status="UNPAID", items=[
+        {"product_name": "Solution", "sku": "S-1", "quantity": 2, "item_total": 1000},
+        {"product_name": "Frame", "sku": "F-1", "quantity": 1, "item_total": 2000},
+    ])
+    p = shiprocket.build_shipment_payload(order, dict(_ADDR))
+    assert [(i["units"], i["selling_price"]) for i in p["order_items"]] == [(2, 500.0), (1, 2000.0)]
+    assert sum(i["selling_price"] * i["units"] for i in p["order_items"]) == p["sub_total"] == 3000.0
 
 
 def test_prepaid_shipping_line_is_shipping_charges_and_totals_the_bill():
