@@ -197,11 +197,13 @@ def _resolve_line_tax_basis(line: Dict[str, Any], product_repo) -> Dict[str, Any
     resolve_gst_rate() layers the SUPERADMIN-editable HSN->GST master over the
     static GST 2.0 table and never raises.
     """
+    from . import stock_value
     from .gst_rates import resolve_gst_rate
 
     hsn: Optional[str] = None
     category = ""
     ims_product_id: Optional[str] = None
+    cost_at_sale: Optional[float] = None
 
     sku = str(line.get("sku") or "").strip()
     if sku and product_repo is not None:
@@ -213,6 +215,10 @@ def _resolve_line_tax_basis(line: Dict[str, Any], product_repo) -> Dict[str, Any
                 # Capture the IMS product_id (join via SKU) so the online-sale
                 # stock decrement can FIFO-claim the right serialized units.
                 ims_product_id = prod.get("product_id") or prod.get("id")
+                # S4: freeze the cost the piece leaves the books at (THE
+                # average), as POS does -- the COGS readers and a later
+                # bill's true-up (product_cost._variance) read it.
+                cost_at_sale = stock_value.average_cost(prod) or None
         except Exception:  # noqa: BLE001 - product lookup is best-effort
             pass
 
@@ -225,6 +231,7 @@ def _resolve_line_tax_basis(line: Dict[str, Any], product_repo) -> Dict[str, Any
         "category": category,
         "gst_rate": rate,
         "ims_product_id": ims_product_id,
+        "cost_at_sale": cost_at_sale,
     }
 
 
@@ -535,6 +542,8 @@ def _map_line_items(payload: Dict[str, Any], product_repo) -> List[Dict[str, Any
                 # stock decrement claims serialized units by (the Shopify
                 # product_id below is NOT the IMS one).
                 "ims_product_id": basis.get("ims_product_id"),
+                # S4: the IMS product's average at sale (None: no cost yet).
+                "cost_at_sale": basis.get("cost_at_sale"),
                 # Shopify identifiers kept for traceability / future reconcile.
                 "shopify_product_id": str(line.get("product_id") or "") or None,
                 "shopify_line_item_id": line.get("id"),

@@ -1,26 +1,30 @@
-"""IMS 2.0 - THE stock value rule (audit F47, owner ruling 2026-09-28).
+"""IMS 2.0 - THE stock value rule (audit F47, owner rulings 2026-09-28 and
+S4 2026-10-23).
 
 The stock at a shop is worth what it COST: every unit physically there (on the
-shelf or reserved -- the PHYSICAL half of item_events.on_hand_match) at the
-cost stamped on it at goods receipt (unit_cost, else cost_price), else its
-product's cost_price. Newly invoice-priced layers carry their inventory cost
-in landed_cost while unit_cost retains the supplier base price. An explicitly
-pending layer cannot inherit a later product price. Sold, transferred-out and
-written-off units are not stock. Selling value (offer price / MRP) is a
-different figure and is labelled as such wherever it is shown.
+shelf or reserved -- the PHYSICAL half of item_events.on_hand_match) times its
+product's ONE average cost (average_cost; services/product_cost moves it, only
+when a vendor bill is accepted or accounts correct it). Every piece of a
+product carries that same cost -- what a single piece was received at is not
+its value (owner 2026-10-23: "one average cost; every shelf piece carries
+it"). Sold, transferred-out and written-off units are not stock. Selling value
+(offer price / MRP) is a different figure and is labelled as such wherever it
+is shown.
 
-A unit with none of those prices (a zero or blank cost is no price) is
-UNCOSTED: it adds nothing to the value, but it is counted (`cost_known`
-False, by_product's `uncosted_units`, uncosted()) so a reader can say "N units
-have no cost" instead of a headline that looks complete, and it never drags a
-per-unit cost towards Rs 0 (unit_cost averages the costed units only, and is
-None when none is).
+A unit whose product has no average cost yet (none, zero, junk, or a price
+typed only to finish cataloguing) is UNCOSTED: it adds nothing to the value,
+but it is counted (`cost_known` False, by_product's `uncosted_units`,
+uncosted()) so a reader can say "N pieces have no cost yet, so this figure is
+too low" instead of a headline that looks complete.
 
 Readers: the stock ledger rows (cost_value / unit_cost / uncosted_units),
-Stock aging (costValue), and the report 'stock value' figures
-(/reports/inventory, /inventory/summary, /inventory/valuation, /stock/count).
-Who may see it: COST_CONTEXT below -- every reader asks cost_mask with it,
-never a role list of its own.
+Stock aging (costValue), the report 'stock value' figures (/reports/inventory,
+/inventory/summary, /inventory/valuation, /stock/count, the overview and
+workshop reports), analytics' inventory figures, the dead-stock values, a
+count's variance and a write-off's value, a transfer's valued challan, and
+the product page (GET /inventory/products/{id}/cost). Who may see it:
+COST_CONTEXT below -- every reader asks cost_mask with it, never a role list
+of its own.
 No DB import; takes the repositories the caller already holds.
 """
 
@@ -51,26 +55,18 @@ def _price(v) -> float:
     return c if math.isfinite(c) and c > 0 else 0.0
 
 
-def _own_cost(unit: dict) -> float:
-    # Late-priced invoice layers keep supplier base price for last-paid quotes
-    # and inventory landed cost separately (including non-recoverable tax).
-    if unit.get("cost_source") == "PURCHASE_INVOICE" and _price(unit.get("landed_cost")):
-        return _price(unit.get("landed_cost"))
-    return _price(unit.get("unit_cost")) or _price(unit.get("cost_price"))
-
-
-def resolved_cost(unit: dict, product_cost=None) -> float:
-    """A recorded unit cost wins; an unresolved layer cannot inherit a later bill's price."""
-    own = _own_cost(unit)
-    if own or unit.get("valuation_cost_pending"):
-        return own
-    return _price(product_cost)
-
-
-def master_fallback_cost(product: dict) -> float:
-    """A price supplied only to finish cataloguing is not stock-cost evidence."""
+def average_cost(product: Optional[dict]) -> float:
+    """THE cost of every piece of `product`: its one average cost (excl. GST
+    it can claim back), or 0.0 when it has none yet. A price supplied only to
+    finish cataloguing is not a cost."""
     product = product or {}
     return 0.0 if product.get("cost_price_is_catalogue_only") else _price(product.get("cost_price"))
+
+
+def value(pieces, product: Optional[dict]) -> float:
+    """THE stock value of `pieces` of `product`: pieces x its average cost,
+    to the paisa (0.0 when it has no cost yet -- count those apart)."""
+    return round(_f(pieces) * average_cost(product), 2)
 
 
 def _pieces(unit: dict) -> float:
@@ -87,11 +83,11 @@ def shelf_units(stock_repo, product_repo, store_id: Optional[str]) -> List[dict]
         flt["store_id"] = store_id
     units = stock_repo.find_many(flt, limit=0) or []
     product_cost: Dict[str, float] = {}
-    for pid in {u.get("product_id") for u in units if not _own_cost(u)}:
+    for pid in {u.get("product_id") for u in units}:
         doc = product_repo.find_by_id(pid) if product_repo is not None and pid else None
-        product_cost[pid] = master_fallback_cost(doc)
+        product_cost[pid] = average_cost(doc)
     for u in units:
-        cost = resolved_cost(u, product_cost.get(u.get("product_id")))
+        cost = product_cost.get(u.get("product_id")) or 0.0
         u["cost_known"] = cost > 0
         u["cost_value"] = round(_pieces(u) * cost, 2)
     return units
@@ -99,8 +95,8 @@ def shelf_units(stock_repo, product_repo, store_id: Optional[str]) -> List[dict]
 
 def by_product(units: List[dict]) -> Dict[str, Dict[str, Optional[float]]]:
     """{product_id: {"units": pieces, "cost": rupees, "uncosted_units": pieces
-    with no cost, "unit_cost": cost per COSTED piece (None when none is)}} over
-    shelf_units()."""
+    with no cost, "unit_cost": the product's average cost (None when it has
+    none)}} over shelf_units()."""
     out: Dict[str, Dict[str, Optional[float]]] = {}
     for u in units:
         row = out.setdefault(

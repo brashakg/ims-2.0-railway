@@ -144,7 +144,7 @@ export default function CollectionDetailPage() {
     if (!insights) return null;
     return insights.stock_value_mrp ? `MRP ${rupee(insights.stock_value_mrp)}` : null;
   }, [insights]);
-  const basis = basisLabel(insights?.value_basis);
+  const basis = basisLabel(insights?.uncosted_units);
 
   const materializedAt = insights?.materialized_at
     ? new Date(insights.materialized_at).toLocaleString('en-IN', {
@@ -303,7 +303,7 @@ export default function CollectionDetailPage() {
               </thead>
               <tbody className="divide-y divide-gray-50">
                 {storeRows.map((s) => {
-                  const b = basisLabel(s.value_basis);
+                  const b = basisLabel(s.uncosted_units);
                   return (
                     <tr key={s.store_id} className="text-gray-800">
                       <td className="px-4 py-2.5">{s.store_name || s.store_id}</td>

@@ -17,7 +17,7 @@ from ...services.salary_visibility import (
     normalise_expense_category,
 )
 from ...dependencies import resolve_store_scope
-from ...services import je_service
+from ...services import je_service, product_cost
 from ._shared import (
     _DISCOUNT_EXPR,
     real_sale_match,
@@ -163,6 +163,7 @@ async def get_revenue(
 #    deliberately includes ACCOUNTANT (the books need COGS). UNCHANGED.
 COST_ONLY_PNL_FIELDS = (
     "cogs",
+    "cogs_variance",
     "cogs_is_estimated",
     "cogs_estimated_lines",
     "cogs_total_lines",
@@ -283,6 +284,12 @@ async def get_pnl(
     cogs, cogs_est_lines, cogs_total_lines = compute_cogs_with_flag(
         period_orders, cost_map, fallback_rate=0.6
     )
+    # Pieces sold before their supplier bill (owner 2026-11-01 (a)): the
+    # bill's true-up of their cost, dated by the bill (product_cost).
+    cogs_variance = product_cost.variance_by(
+        db, store_ids=[store_id] if store_id else None, from_day=from_date, to_day=to_date
+    ).get(None, 0.0)
+    cogs = round(cogs + cogs_variance, 2)
     cogs_is_estimated = cogs_est_lines > 0
     # Revenue net of GST (the GST is owed to the government): COGS is ex-GST,
     # so gross profit and both margins are measured on the same side of GST.
@@ -319,6 +326,9 @@ async def get_pnl(
         "revenue": revenue,
         "gross_sales_incl_gst": gross_sales,
         "cogs": round(cogs, 2),
+        # Inside cogs: the cost-of-goods variance of pieces sold before
+        # their supplier bill (product_cost.variance_by).
+        "cogs_variance": cogs_variance,
         # When cogs_is_estimated=True, some cost lines used a 60%-of-revenue
         # fallback because the product cost_price is not set. Gross margin shown
         # should be treated as approximate until all products have a cost_price.

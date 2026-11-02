@@ -102,10 +102,11 @@ def world(monkeypatch):
     handle["stores"].insert_many([dict(s) for s in SHOPS])
     handle["products"].insert_one({
         "product_id": "P-1", "sku": "FR-1", "name": "Carrera Frame", "category": "FRAME",
-        "hsn_code": "900311", "cost_price": 2000.0,
+        "hsn_code": "900311", "cost_price": 1850.0,
     })
-    # Three priced pieces whose average is not a whole paisa (1850.00333...),
-    # then seven more at 1850, and one RESERVED for a customer.
+    # S4: every piece carries P-1's ONE average cost (1850); a unit's own
+    # recorded figure (SU-3's 1850.01) is no cost. Ten pieces, and one
+    # RESERVED for a customer.
     costs = [1850.0, 1850.0, 1850.01] + [1850.0] * 7
     handle["stock_units"].insert_many([
         {"stock_id": f"SU-{n}", "product_id": "P-1", "store_id": "ST-DHN-1",
@@ -120,6 +121,15 @@ def world(monkeypatch):
     monkeypatch.setattr(reports, "_get_raw_db", lambda: handle)
     monkeypatch.setattr(transfers, "_writeback_units_left", lambda *a, **k: None)
     monkeypatch.setattr(repo_module, "now_ist", lambda: MAY_2026)
+    # S4: one ship freezes every piece of a line at the product's one average
+    # (_unit_cost), so the pieces' frozen costs are equal. The per-piece
+    # readers downstream (_piece_cost, writeoff_itc's credit-note true-ups)
+    # are general; a test that pins them for pieces frozen at DIFFERENT
+    # figures marks a unit `frozen_cost` (test-only field) -- every other
+    # unit goes through the production rule.
+    real_unit_cost = transfers._unit_cost
+    monkeypatch.setattr(transfers, "_unit_cost",
+                        lambda u, p: float(u.get("frozen_cost") or 0) or real_unit_cost(u, p))
     transfers.STOCK_TRANSFERS.clear()
     return handle
 
@@ -445,7 +455,7 @@ def test_write_off_of_a_missing_piece_is_admin_only(world):
     unit = _unit(world, "SU-3")
     assert unit["status"] == "VOID" and unit["store_id"] == "ST-DHN-1"
     (row,) = world["stock_shrinkage"].find({"transfer_id": t["id"]})
-    assert row["voided_stock_ids"] == ["SU-3"] and row["shrinkage_value"] == 1850.01
+    assert row["voided_stock_ids"] == ["SU-3"] and row["shrinkage_value"] == 1850.0
     # Same-GSTIN move: no GST paper at all.
     assert world["vendor_bills"].count_documents({}) == 0
     rows = _run(transfers.list_missing(ADMIN))["pieces"]
@@ -470,8 +480,9 @@ def test_tax_invoice_is_booked_at_ship_in_the_dispatch_month(world):
     # (tests/ist_business_day), never the code under test's helper.
     ist_day = business_day(stored["tax_invoice_date"].replace("Z", "+00:00"))
     assert bill["bill_date"].split("T")[0] == bill["invoice_date"].split("T")[0] == ist_day
-    # The units SHIPPED, at their own cost: 1850 + 1850 + 1850.01.
-    assert bill["taxable_amount"] == 5550.01
+    # The units SHIPPED, each at P-1's one average cost (S4): 3 x 1850 --
+    # SU-3's own recorded 1850.01 is no cost.
+    assert bill["taxable_amount"] == 5550.0
     assert bill["cgst_total"] + bill["sgst_total"] == 277.50
     # Completing the receipt books nothing more.
     for code in ("BVQX001", "BVQX002", "BVQX003"):
@@ -533,16 +544,16 @@ def test_gstr1_files_the_transfer_credit_note_in_cdnr_not_b2b(world):
     month = world["vendor_bills"].find_one({})["bill_date"][:7]
     rep = reports._compute_gstr1(month, "ST-DHN-1")
     (row,) = rep["b2b"]
-    assert row["taxableValue"] == 5550.01
+    assert row["taxableValue"] == 5550.0
     (cn,) = [c for c in rep["cdnr"] if c.get("documentType") == "STOCK_TRANSFER"]
     assert cn["refReference"] == "DHN01/C2627/0001"
     assert cn["customerGSTIN"] == GSTIN_Y_JH
-    # SU-3's own cost, the figure its shrinkage row books.
-    assert cn["taxableValue"] == 1850.01
-    assert world["stock_shrinkage"].find_one({"transfer_id": t["id"]})["shrinkage_value"] == 1850.01
+    # SU-3's cost frozen at ship (the average), the figure its shrinkage row books.
+    assert cn["taxableValue"] == 1850.0
+    assert world["stock_shrinkage"].find_one({"transfer_id": t["id"]})["shrinkage_value"] == 1850.0
     # HSN summary is net of the note.
     (hsn,) = [h for h in rep["hsnSummary"] if h["hsnCode"] == "900311"]
-    assert hsn["taxableValue"] == round(5550.01 - 1850.01, 2)
+    assert hsn["taxableValue"] == round(5550.0 - 1850.0, 2)
     # No "files the RECEIVED value" warning any more: the bill is the invoice.
     assert not [i for i in rep["validation"]["issues"] if "RECEIVED value" in i["issue"]]
 
@@ -586,18 +597,280 @@ def test_eway_bill_and_vehicle_no_typed_on_the_box_print_on_the_invoice(world):
 
 
 def test_transfer_value_reads_the_one_stock_cost_rule(world):
-    """A late-priced invoice layer is worth its landed cost (stock_value's
-    rule), so the tax invoice is valued at it -- not at the supplier base
-    price a second, inline rule would read. When S4 merges, the same reader
-    answers with the product's one average cost."""
+    """S4: the tax invoice values a piece at its product's ONE average cost
+    (stock_value.average_cost) -- never the piece's own recorded landed or
+    unit cost, which a second, per-piece rule would read."""
     world["stock_units"].update_one(
         {"stock_id": "SU-4"},
-        {"$set": {"cost_source": "PURCHASE_INVOICE", "landed_cost": 1902.5}},
+        {"$set": {"cost_source": "PURCHASE_INVOICE", "landed_cost": 1700.0, "unit_cost": 1650.0}},
     )
+    world["products"].update_one({"product_id": "P-1"}, {"$set": {"cost_price": 1902.5}})
     t = _shipped_box(world, codes=("BVQX004",))
     assert t["items"][0]["unit_cost"] == 1902.5
     (bill,) = _bills(world, t["id"])
     assert bill["taxable_amount"] == 1902.5
+
+
+
+def test_a_note_after_the_average_moves_credits_the_cost_frozen_at_ship(world):
+    """S4 + S3: three pieces ship at the average then (1850 each); a vendor
+    bill moves the average to 2400 before SU-3 is written off. Its credit
+    note and invoice + note stay at the 1850 the tax invoice charged -- never
+    today's 2400 (the CA: a transfer is a tax invoice at cost, dispatch
+    month; the note reverses what it charged). The shrinkage row is no GST
+    paper: the loss is at the average now (2400), like every write-off."""
+    from api.routers import transfers
+    from api.services.purchase_invoice_engine import split_line_gst
+
+    t = _shipped_box(world)
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _scan_in(t["id"], "BVQX002", user=MGR_BOK)
+    _complete(t["id"], user=MGR_BOK)
+    world["products"].update_one({"product_id": "P-1"}, {"$set": {"cost_price": 2400.0}})
+    _run(transfers.write_off_missing_piece(t["id"], "SU-3", ADMIN))
+    (note,) = _notes(world, t["id"])
+    (invoice,) = [b for b in _bills(world, t["id"]) if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
+    assert note["taxable_amount"] == -1850.0
+    received = split_line_gst(3700.0, 5.0, False)
+    assert round(invoice["taxable_amount"] + note["taxable_amount"], 2) == received["taxable"]
+    shrink = world["stock_shrinkage"].find_one({"transfer_id": t["id"]})
+    assert shrink["unit_cost"] == shrink["shrinkage_value"] == 2400.0
+
+
+@pytest.mark.parametrize("moved_by", ("correction", "bill"))
+def test_a_lost_piece_is_expensed_at_exactly_what_its_bill_says(world, moved_by):
+    """S4 + S3: receipt G-OLD (8 pieces) is billed; G-NEW (SU-1..3) is not.
+    SU-1..3 ship DHN -> BOK at 1850. While they are on the way (still in the
+    basis) accounts correct the average to 2400, or bill BH on receipt H
+    blends it to 2070. SU-1, SU-2 land; SU-3 is written off. G-NEW's bill
+    (3 at 3000) then trues SU-3 up from the average at its write-off: its
+    loss plus that true-up is the 3000 paid, never the 1850 frozen at ship."""
+    from api.routers import transfers
+    from api.services import product_cost
+
+    held_old = ["SU-4", "SU-5", "SU-6", "SU-7", "SU-8", "SU-9", "SU-10", "SU-R"]
+    world["stock_units"].update_many({"stock_id": {"$in": held_old}}, {"$set": {"grn_id": "G-OLD"}})
+    world["stock_units"].update_many({"stock_id": {"$in": ["SU-1", "SU-2", "SU-3"]}},
+                                     {"$set": {"grn_id": "G-NEW"}})
+
+    def receipt(gid, n):
+        world["grns"].insert_one({"grn_id": gid, "status": "ACCEPTED", "vendor_id": "V",
+                                  "items": [{"product_id": "P-1", "accepted_qty": n}]})
+
+    def bill(bid, gid, n, price, **extra):
+        doc = {"bill_id": bid, "invoice_id": bid, "status": "OUTSTANDING", "grn_id": gid,
+               "lines": [{"product_id": "P-1", "qty": n, "unit_price": price,
+                          "taxable": n * price}], **extra}
+        world["vendor_bills"].insert_one(dict(doc))
+        return doc
+
+    def accept(doc, gid):
+        product_cost.apply_bill(world, doc, doc["lines"], key=doc["bill_id"], actor="acc",
+                                receipts=[world["grns"].find_one({"grn_id": gid}, {"_id": 0})])
+
+    receipt("G-OLD", 8)
+    receipt("G-NEW", 3)
+    bill("B-OLD", "G-OLD", 8, 1850.0)  # booked before S4: already in the average
+    t = _shipped_box(world)
+    if moved_by == "correction":
+        product_cost.correct(world, "P-1", 2400.0, "price fix", "acc", expected=1850.0)
+        at_loss, after = 2400.0, 2520.0  # (8 x 2400 + 2 x 3000) / 10
+    else:
+        world["stock_units"].insert_many([
+            {"stock_id": f"SU-H{n}", "product_id": "P-1", "store_id": "ST-DHN-1",
+             "status": "AVAILABLE", "barcode": f"BVQXH{n}", "grn_id": "H"} for n in (1, 2)])
+        receipt("H", 2)
+        accept(bill("BH", "H", 2, 2950.0, cost_state=product_cost.PENDING), "H")
+        at_loss, after = 2070.0, 2225.0  # (8x1850 + 2x2950)/10; (10x2070 + 2x3000)/12
+    assert world["products"].find_one({"product_id": "P-1"})["cost_price"] == at_loss
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _scan_in(t["id"], "BVQX002", user=MGR_BOK)
+    _complete(t["id"], user=MGR_BOK)
+    _run(transfers.write_off_missing_piece(t["id"], "SU-3", ADMIN))
+    accept(bill("B-NEW", "G-NEW", 3, 3000.0, cost_state=product_cost.PENDING), "G-NEW")
+
+    prod = world["products"].find_one({"product_id": "P-1"})
+    row = next(r for r in prod["cost_history"] if r.get("key") == "B-NEW")
+    assert row["claimed"] == ["SU-3"]
+    shrink = world["stock_shrinkage"].find_one({"transfer_id": t["id"]})
+    assert shrink["shrinkage_value"] == at_loss
+    assert round(shrink["shrinkage_value"] + row["variance"]["amount"], 2) == 3000.0
+    assert prod["cost_price"] == after
+
+
+def _s4_receipt(world, gid, n):
+    world["grns"].insert_one({"grn_id": gid, "status": "ACCEPTED", "vendor_id": "V",
+                              "items": [{"product_id": "P-1", "accepted_qty": n}]})
+
+
+def _s4_bill(world, bid, gid, n, price, **extra):
+    """A vendor bill on receipt `gid`; with a cost_state it is accepted
+    (product_cost.apply_bill), without one it was booked before S4."""
+    from api.services import product_cost
+
+    doc = {"bill_id": bid, "invoice_id": bid, "status": "OUTSTANDING", "grn_id": gid,
+           "lines": [{"product_id": "P-1", "qty": n, "unit_price": price, "taxable": n * price}], **extra}
+    world["vendor_bills"].insert_one(dict(doc))
+    if doc.get("cost_state"):
+        product_cost.apply_bill(world, doc, doc["lines"], key=bid, actor="acc",
+                                receipts=[world["grns"].find_one({"grn_id": gid}, {"_id": 0})])
+    return doc
+
+
+@pytest.mark.parametrize("moved_by", ("correction", "bill"))
+def test_a_write_off_pressed_again_after_the_average_moved_books_the_loss_at_the_write_off(
+    world, monkeypatch, moved_by
+):
+    """S4 fix round 14: SU-3 (receipt G-NEW, unbilled) is lost on the way.
+    The first press VOIDs it at the average then (1850) and fails before its
+    shrinkage row; the average then moves (a correction to 2400, or bill BH
+    blending it to 2070); the press again books the loss at 1850 -- the
+    average at the write-off, the figure G-NEW's bill trues it up from. Loss
+    + true-up = the 3000 billed (never 2070 + 1150 = 3220)."""
+    from api.routers import transfers
+    from api.services import product_cost
+
+    held_old = ["SU-4", "SU-5", "SU-6", "SU-7", "SU-8", "SU-9", "SU-10", "SU-R"]
+    world["stock_units"].update_many({"stock_id": {"$in": held_old}}, {"$set": {"grn_id": "G-OLD"}})
+    world["stock_units"].update_many({"stock_id": {"$in": ["SU-1", "SU-2", "SU-3"]}},
+                                     {"$set": {"grn_id": "G-NEW"}})
+    _s4_receipt(world, "G-OLD", 8)
+    _s4_receipt(world, "G-NEW", 3)
+    _s4_bill(world, "B-OLD", "G-OLD", 8, 1850.0)  # booked before S4: already in the average
+    t = _shipped_box(world)
+    _scan_in(t["id"], "BVQX001", user=MGR_BOK)
+    _scan_in(t["id"], "BVQX002", user=MGR_BOK)
+    _complete(t["id"], user=MGR_BOK)
+
+    real_note = transfers._short_credit_note
+
+    def note_fails_once(*a, **k):
+        monkeypatch.setattr(transfers, "_short_credit_note", real_note)
+        raise RuntimeError("credit note store down")
+
+    monkeypatch.setattr(transfers, "_short_credit_note", note_fails_once)
+    with pytest.raises(RuntimeError):
+        _run(transfers.write_off_missing_piece(t["id"], "SU-3", ADMIN))
+    assert _unit(world, "SU-3")["status"] == "VOID"
+    assert world["stock_shrinkage"].count_documents({"transfer_id": t["id"]}) == 0
+
+    if moved_by == "correction":
+        product_cost.correct(world, "P-1", 2400.0, "price fix", "acc", expected=1850.0)
+        moved = 2400.0
+    else:
+        world["stock_units"].insert_many([
+            {"stock_id": f"SU-H{n}", "product_id": "P-1", "store_id": "ST-DHN-1",
+             "status": "AVAILABLE", "barcode": f"BVQXH{n}", "grn_id": "H"} for n in (1, 2)])
+        _s4_receipt(world, "H", 2)
+        _s4_bill(world, "BH", "H", 2, 2950.0, cost_state=product_cost.PENDING)
+        moved = 2070.0  # (8 x 1850 + 2 x 2950) / 10
+    assert world["products"].find_one({"product_id": "P-1"})["cost_price"] == moved
+
+    _run(transfers.write_off_missing_piece(t["id"], "SU-3", ADMIN))
+    _s4_bill(world, "B-NEW", "G-NEW", 3, 3000.0, cost_state=product_cost.PENDING)
+
+    prod = world["products"].find_one({"product_id": "P-1"})
+    row = next(r for r in prod["cost_history"] if r.get("key") == "B-NEW")
+    assert row["claimed"] == ["SU-3"] and row["variance"]["amount"] == 1150.0
+    shrink = world["stock_shrinkage"].find_one({"transfer_id": t["id"]})
+    assert shrink["unit_cost"] == shrink["shrinkage_value"] == 1850.0
+    assert round(shrink["shrinkage_value"] + row["variance"]["amount"], 2) == 3000.0
+
+
+@pytest.mark.parametrize("to, user, owner, shipped", (
+    ("ST-DHN-2", MGR_DHN2, "ST-DHN-2", "stamped"),  # one GSTIN: the shop it was sold from
+    ("ST-DHN-2", MGR_DHN2, "ST-DHN-2", "unstamped"),
+    ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "stamped"),  # two GSTINs: the shop that took the supplier bill
+    ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "cannot tell"),
+    ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "pre-1185"),
+    ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "unstamped"),
+    ("ST-BOK-1", MGR_BOK, "ST-DHN-1", "mirror only"),  # only the live mirror bill says it crossed
+    ("ST-BOK-1", MGR_BOK, "ST-BOK-1", "dead mirror"),  # a cancelled mirror says nothing
+    ("ST-DHN-2", MGR_DHN2, "ST-DHN-2", "found back"),  # shipped on to Bokaro, never landed: back, sold
+    ("ST-DHN-2", MGR_DHN2, "ST-DHN-2", "lost"),  # shipped on to Bokaro, lost, written off
+))
+def test_a_moved_piece_sold_before_its_bill_owes_its_true_up_to_the_right_shop(
+    world, monkeypatch, to, user, owner, shipped
+):
+    """S4 fix round 14 (lead ruling 2026-11-02, to confirm with the CA): SU-1
+    (receipt G-NEW, unbilled) moves out of Hirapur and is sold at its new shop
+    at 1850; its bill (Hirapur's, 1 at 1910) trues it up by 60. Inside one
+    GSTIN (Bank More) the 60 is the cost of the shop it was sold from. Across
+    two GSTINs (Bokaro: the tax invoice at cost fixed Bokaro's cost at ship)
+    it stays with Hirapur, which took the supplier bill. Every store-scoped
+    read agrees. Round 15: the crossing is the ONE rule
+    (writeoff_itc.transfer_crosses) -- a stamp of crosses=None ('cannot
+    tell', no live mirror), a box shipped before #1185 stamped it
+    ('pre-1185': no stamp, its mirror bill -- the shops' GSTINs differ too),
+    or no stamp and no mirror ('unstamped': the two shops' GSTINs) -- and
+    the product-keyed read (collection insights' 30-day COGS) finds the
+    per-piece row's true-up too. Round 16: the live mirror alone decides
+    ('mirror only': no stamp, no shop GSTINs known; 'dead mirror': it was
+    cancelled), and only a transfer the piece LANDED on counts
+    (writeoff_itc._transfer_ids): a piece shipped on to Bokaro that came
+    back to Bank More ('found back', then sold there) or was lost on the
+    way ('lost', written off at Bank More) never crossed."""
+    from datetime import datetime
+
+    from api.services import collection_insights, product_cost
+    from api.utils.event_time import utc_now_iso
+
+    others = [f"SU-{n}" for n in range(2, 11)] + ["SU-R"]
+    world["stock_units"].update_many({"stock_id": {"$in": others}}, {"$set": {"grn_id": "G-OLD"}})
+    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"grn_id": "G-NEW"}})
+    _s4_receipt(world, "G-OLD", 10)
+    _s4_receipt(world, "G-NEW", 1)
+    _s4_bill(world, "B-OLD", "G-OLD", 10, 1850.0)  # booked before S4
+    t = _shipped_box(world, to=to, codes=("BVQX001",))
+    _scan_in(t["id"], "BVQX001", user=user)
+    _complete(t["id"], user=user)
+    assert _unit(world, "SU-1")["store_id"] == to
+    if shipped == "cannot tell":
+        world["stock_transfers"].update_one({"id": t["id"]}, {"$set": {"gst_registrations.crosses": None}})
+    elif shipped != "stamped":
+        world["stock_transfers"].update_one({"id": t["id"]}, {"$unset": {"gst_registrations": ""}})
+    if shipped in ("cannot tell", "unstamped"):  # the stamp (or GSTINs) alone decides
+        world["vendor_bills"].delete_many({"source_transfer_id": t["id"]})
+    if shipped in ("mirror only", "dead mirror"):
+        from api.routers.reports import gst_itc
+
+        world["stock_transfers"].update_one({"id": t["id"]}, {"$unset": {"gst_registrations": ""}})
+        monkeypatch.setattr(gst_itc, "shop_gstins", lambda db: {})
+        if shipped == "dead mirror":
+            assert world["vendor_bills"].update_many(
+                {"source_transfer_id": t["id"]}, {"$set": {"status": "CANCELLED"}}).modified_count
+    if shipped in ("found back", "lost"):  # on to Bokaro (a crossing, its mirror booked), never landed
+        from api.routers import transfers
+
+        on = _ask(1, frm="ST-DHN-2", to="ST-BOK-1")
+        _pack(on["id"], ["BVQX001"])
+        _ship(on["id"])
+        assert world["vendor_bills"].count_documents({"source_transfer_id": on["id"]})
+        _complete(on["id"], user=MGR_BOK)  # nothing scanned in: missing
+        if shipped == "lost":
+            _run(transfers.write_off_missing_piece(on["id"], "SU-1", ADMIN))
+        else:
+            _run(transfers.found_missing_piece(on["id"], "SU-1", transfers.MissingFound(at="source"), MGR_DHN2))
+        assert _unit(world, "SU-1")["store_id"] == "ST-DHN-2"
+    if shipped != "lost":
+        world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {
+            "status": "SOLD", "order_id": "O1", "sold_at": utc_now_iso()}})
+    world["orders"].insert_one({"order_id": "O1", "items": [
+        {"product_id": "P-1", "quantity": 1, "cost_at_sale": 1850.0, "category": "FRAME"}]})
+    _s4_bill(world, "B-NEW", "G-NEW", 1, 1910.0, store_id="ST-DHN-1", bill_date="2026-11-01",
+             cost_state=product_cost.PENDING)
+
+    assert product_cost.variance_by(world, "store_id") == {owner: 60.0}
+    assert product_cost.variance_by(world, store_ids=[owner]) == {None: 60.0}
+    assert product_cost.variance_by(world, "category", store_ids=[owner]) == {"FRAME": 60.0}
+    elsewhere = "ST-DHN-1" if owner == to else to
+    assert product_cost.variance_by(world, store_ids=[elsewhere]) == {}
+    assert product_cost.variance_by(world, "category", store_ids=[elsewhere]) == {}
+    assert product_cost.variance_by(world, "product_id", store_ids=[owner]) == {"P-1": 60.0}
+    monkeypatch.setattr(collection_insights, "_utcnow", lambda: datetime(2026, 11, 2, 6, 0))
+    for shop, cogs in ((owner, 60.0), (elsewhere, 0.0)):
+        mv = collection_insights.movement_summary(world, {"product_ids": ["P-1"]}, store_id=shop)
+        assert mv["totals"]["cogs_d30"] == cogs
 
 
 def test_a_catalogue_only_price_is_no_cost_for_the_invoice(world):
@@ -647,7 +920,7 @@ def test_a_piece_already_credited_is_never_credited_twice(world):
     notes = [b for b in bills if b.get("doc_type") == "TRANSFER_CREDIT_NOTE"]
     assert sorted(s for n in notes for s in n["credited_stock_ids"]) == ["SU-1", "SU-2"]
     (invoice,) = [b for b in bills if b.get("doc_type") != "TRANSFER_CREDIT_NOTE"]
-    left = split_line_gst(1850.01, 5.0, False)  # SU-3, at its own cost
+    left = split_line_gst(1850.0, 5.0, False)  # SU-3, at the cost frozen at ship
     assert round(invoice["taxable_amount"] + sum(n["taxable_amount"] for n in notes), 2) == left["taxable"]
     assert round(invoice["cgst_total"] + sum(n["cgst_total"] for n in notes), 2) == left["cgst"]
 
@@ -677,14 +950,15 @@ def _stale_once(monkeypatch, transfers, snapshot, at=1):
 
 
 def test_a_lost_piece_is_credited_at_its_own_cost_not_the_line_average(world):
-    """SU-1 costs 1500, SU-2 costs 2000; SU-1 arrives, SU-2 is lost. The note
-    credits 2000 (the lost piece's own cost, the figure its shrinkage books),
-    so invoice + note = the tax on the 1500 actually received."""
+    """SU-1 frozen at 1500, SU-2 at 2000; SU-1 arrives, SU-2 is lost. The note
+    credits 2000 (the lost piece's own cost, what the invoice charged), so
+    invoice + note = the tax on the 1500 actually received. The shrinkage
+    row is no GST paper: the loss is at the product's average now (1850)."""
     from api.routers import transfers
     from api.services.purchase_invoice_engine import split_line_gst
 
-    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"unit_cost": 1500.0}})
-    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"unit_cost": 2000.0}})
+    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"frozen_cost": 1500.0}})
+    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"frozen_cost": 2000.0}})
     t = _shipped_box(world, codes=("BVQX001", "BVQX002"))
     _scan_in(t["id"], "BVQX001", user=MGR_BOK)
     _complete(t["id"], user=MGR_BOK)
@@ -697,7 +971,8 @@ def test_a_lost_piece_is_credited_at_its_own_cost_not_the_line_average(world):
                       ("sgst", "sgst_total"), ("igst", "igst_total")):
         assert round(invoice[key] + note[key], 2) == received[head], head
     shrink = world["stock_shrinkage"].find_one({"transfer_id": t["id"]})
-    assert shrink["shrinkage_value"] == 2000.0 == -note["taxable_amount"]
+    assert note["taxable_amount"] == -2000.0
+    assert shrink["shrinkage_value"] == 1850.0
 
 
 def test_a_piece_that_landed_gets_no_credit_note_from_write_off_or_found(world):
@@ -1504,8 +1779,8 @@ def _unequal_box(world, lost):
     cost."""
     from api.routers import transfers
 
-    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"unit_cost": 3000.0}})
-    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"unit_cost": 1000.0}})
+    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"frozen_cost": 3000.0}})
+    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"frozen_cost": 1000.0}})
     t = _shipped_box(world, codes=("BVQX001", "BVQX002"))
     kept = "SU-2" if lost == "SU-1" else "SU-1"
     _scan_in(t["id"], f"BVQX00{kept[-1]}", user=MGR_BOK, damaged=True, reason="Cracked rim")
@@ -1567,8 +1842,8 @@ def _kept_first_box(world, lost):
     """_unequal_box, but the kept (damaged) piece is written off from
     quarantine BEFORE the admin writes the missing one off: its row reverses
     the gross 50/50, the credit note comes after."""
-    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"unit_cost": 3000.0}})
-    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"unit_cost": 1000.0}})
+    world["stock_units"].update_one({"stock_id": "SU-1"}, {"$set": {"frozen_cost": 3000.0}})
+    world["stock_units"].update_one({"stock_id": "SU-2"}, {"$set": {"frozen_cost": 1000.0}})
     t = _shipped_box(world, codes=("BVQX001", "BVQX002"))
     kept = "SU-2" if lost == "SU-1" else "SU-1"
     _scan_in(t["id"], f"BVQX00{kept[-1]}", user=MGR_BOK, damaged=True, reason="Cracked rim")
@@ -1668,7 +1943,7 @@ def _three_cost_box(world, su3_at=None):
     from api.routers import transfers
 
     for sid, cost in (("SU-1", 3000.0), ("SU-2", 1000.0), ("SU-3", 2000.0)):
-        world["stock_units"].update_one({"stock_id": sid}, {"$set": {"unit_cost": cost}})
+        world["stock_units"].update_one({"stock_id": sid}, {"$set": {"frozen_cost": cost}})
     t = _shipped_box(world)
     _scan_in(t["id"], "BVQX002", user=MGR_BOK, damaged=True, reason="Cracked rim")
     _scan_in(t["id"], "BVQX003", user=MGR_BOK, damaged=True, reason="Cracked rim")

@@ -967,7 +967,28 @@ class StockRepository(BaseRepository):
             sid = doc.get("stock_id") or doc.get("_id")
             if sid:
                 released.append(str(sid))
+        self._unsell(order_id)
         return StockReleaseResult(released, incomplete)
+
+    def _unsell(self, order_id: str) -> None:
+        """S4: a piece a supplier bill trued up while sold comes back at what
+        was paid (product_cost.unsell). Every piece this order ever released,
+        not only this call's: a re-run after a crash between the release and
+        this finishes it (unsell is exactly-once per piece). Fail-soft: the
+        stock release stands; the log names what was not re-costed."""
+        db = getattr(self.collection, "database", None)
+        if db is None:
+            return
+        try:
+            from api.services import product_cost
+
+            ids = [u["stock_id"] for u in self.collection.find(
+                {"released_from_order_id": order_id}, {"_id": 0, "stock_id": 1}) if u.get("stock_id")]
+            if ids:
+                product_cost.unsell(db, ids, utc_now_iso())
+        except Exception:  # noqa: BLE001
+            logger.error("[STOCK] order %s released, its pieces' cost NOT re-averaged (product_cost.unsell)",
+                         order_id, exc_info=True)
 
     def count_sold_units_for_order(self, order_id: str) -> int:
         """How many units are STILL SOLD against this order. Lets the cancel

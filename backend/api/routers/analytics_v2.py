@@ -27,6 +27,7 @@ from .auth import get_current_user
 from .points import self_only_rows
 from ..dependencies import get_db as _dep_get_db, validate_store_access
 from ..services.cost_mask import mask_cost_list, can_see_cost
+from ..services import stock_value
 from ..services.margin_basis import margin_pct_ex_gst, price_ex_gst, product_gst_rate
 from ..services.notification_service import send_notification
 from ..utils.ist import ist_date_str, ist_day_start_utc, ist_today, now_ist
@@ -515,8 +516,7 @@ async def dead_stock(
         if qty <= 0:
             continue
 
-        cost = float(p.get("cost_price", 0) or 0)
-        value = qty * cost
+        value = stock_value.value(qty, p)  # THE stock value rule (S4)
         total_value += value
 
         # last_sold is a normalized 'YYYY-MM-DD' day-key (see _day_key above).

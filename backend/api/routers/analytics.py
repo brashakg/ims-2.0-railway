@@ -25,6 +25,7 @@ from ..dependencies import (
 )
 
 from ..services.cost_mask import mask_cost
+from ..services import product_cost, stock_value
 from ..services.margin_basis import (
     cost_by_product,
     line_unit_cost,
@@ -219,6 +220,7 @@ def _build_product_master_map(stock_rows: list) -> dict:
                         "model": 1,
                         "category": 1,
                         "cost_price": 1,
+                        "cost_price_is_catalogue_only": 1,
                         "mrp": 1,
                     },
                 ):
@@ -308,24 +310,10 @@ def _build_product_master_map(stock_rows: list) -> dict:
             "sku": product.get("sku") or "",
             "name": product.get("name") or product.get("model") or "",
             "category": product.get("category") or "Other",
-            "cost_price": _safe_float(product.get("cost_price")),
+            "cost_price": stock_value.average_cost(product),
             "mrp": _safe_float(product.get("mrp")),
         }
     return out
-
-
-def _stock_unit_value(row: dict, master: dict) -> float:
-    """Per-row inventory value = quantity * cost_price. cost_price is resolved
-    from the product master (authoritative, mirrors /reports). Falls back to a
-    cost_price stamped on the stock row itself for any legacy doc that carries
-    one, then to unit_price, so the value is never silently 0 when a cost is
-    known somewhere."""
-    qty = _safe_int(row.get("quantity"))
-    pid = str(row.get("product_id")) if row.get("product_id") is not None else ""
-    cost = _safe_float((master.get(pid) or {}).get("cost_price"))
-    if cost <= 0:
-        cost = _safe_float(row.get("cost_price")) or _safe_float(row.get("unit_price"))
-    return qty * cost
 
 
 # ============================================================================
@@ -533,10 +521,10 @@ async def get_dashboard_summary(
             else []
         )
 
-        total_inventory_value = sum(
-            _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price"))
-            for i in inventory
-        )
+        # THE stock value rule (stock_value), at cost: the accounts roles'
+        # only (masked on the way out, owner ruling 2026-10-12).
+        shelf = stock_value.shelf_units(stock_repo, get_product_repository(), store_id) if stock_repo is not None else []
+        total_inventory_value = stock_value.total(shelf)
         # THIS shop's low-stock list by its own levels (D12). A stock_units row
         # is one unit and carries no level, so the old per-row compare was 0.
         low_stock_items = len(
@@ -569,7 +557,7 @@ async def get_dashboard_summary(
             ]
         )
 
-        return {
+        return mask_cost({
             "period": period,
             "timestamp": datetime.now().isoformat(),
             # Revenue metrics
@@ -586,6 +574,7 @@ async def get_dashboard_summary(
             "margin_target": None,
             # Inventory metrics
             "inventory_value": float(total_inventory_value),
+            "inventory_uncosted_units": stock_value.uncosted(shelf),
             "low_stock_items": low_stock_items,
             "out_of_stock_items": out_of_stock,
             "inventory_turnover_ratio": None,  # needs COGS + avg inventory
@@ -597,7 +586,8 @@ async def get_dashboard_summary(
             "prescription_renewals_pending": None,  # not computed yet (no fabricated value)
             # Performance indicators
             "stores_count": 1,
-        }
+        }, current_user, stock_value.COST_CONTEXT,
+            extra=("inventory_value", "inventory_uncosted_units"))
 
     except HTTPException:
         # Propagate validate_store_access's 403 (cross-store) — don't mask it as 500.
@@ -863,17 +853,12 @@ async def get_store_performance(
                 else 0
             )
 
-            # Inventory metrics
-            inventory = (
-                stock_repo.find_many({"store_id": store_id}, limit=0)
-                if stock_repo is not None
-                else []
-            )
-
-            stock_value = sum(
-                _safe_int(i.get("quantity")) * _safe_float(i.get("unit_price"))
-                for i in inventory
-            )
+            # THE stock value rule (stock_value: pieces on the shelf x each
+            # product's one average cost), at cost -- the accounts roles'
+            # only (masked below, owner ruling 2026-10-12).
+            shelf = (stock_value.shelf_units(stock_repo, get_product_repository(), store_id)
+                     if stock_repo is not None else [])
+            store_stock_value = stock_value.total(shelf)
 
             # Metrics calculation. margin_percent / revenue_per_sqft /
             # staff_count are null rather than fabricated — margin needs
@@ -887,14 +872,16 @@ async def get_store_performance(
                     "orders": order_count,
                     "avg_order_value": float(avg_order_value),
                     "margin_percent": None,
-                    "stock_value": float(stock_value),
+                    "stock_value": float(store_stock_value),
+                    # Pieces with no cost yet: the value is too low by them.
+                    "stock_uncosted_units": stock_value.uncosted(shelf),
                     "staff_count": None,
                     "revenue_per_sqft": None,
                     "revenue_trend": float(revenue_change),
                 }
             )
 
-        return {
+        return mask_cost({
             "period": period,
             "timestamp": datetime.now().isoformat(),
             "stores": store_metrics,
@@ -908,7 +895,7 @@ async def get_store_performance(
                 ),
                 "avg_margin": None,  # needs per-item COGS (was fabricated 40.5)
             },
-        }
+        }, current_user, stock_value.COST_CONTEXT, extra=("stock_value", "stock_uncosted_units"))
 
     except HTTPException:
         raise
@@ -939,15 +926,17 @@ async def get_inventory_intelligence(
             )
 
         stock_repo = get_stock_repository()
+        # THE stock value rule: the pieces on this shop's shelf, each carrying
+        # cost_value = pieces x its product's average (stock_value.shelf_units).
         inventory = (
-            stock_repo.find_many({"store_id": store_id}, limit=0)
+            stock_value.shelf_units(stock_repo, get_product_repository(), store_id)
             if stock_repo is not None
             else []
         )
+        unit_cost = {pid: row["unit_cost"] or 0.0
+                     for pid, row in stock_value.by_product(inventory).items()}
 
-        # [RPT-2] sku / name / value live on the product master, not the stock
-        # doc. Build the join once so every item + every total below reads real
-        # values instead of "" / 0.0. Mirrors /reports/inventory/valuation.
+        # [RPT-2] sku / name live on the product master, not the stock doc.
         master = _build_product_master_map(inventory)
 
         def _sku(row: dict) -> str:
@@ -959,7 +948,10 @@ async def get_inventory_intelligence(
             return (master.get(pid) or {}).get("name") or row.get("name") or ""
 
         def _value(row: dict) -> float:
-            return _stock_unit_value(row, master)
+            if "cost_value" in row:  # a shelf unit
+                return row["cost_value"]
+            # a low-stock row: its on-hand pieces x the product's average
+            return stock_value.value(row.get("quantity"), {"cost_price": unit_cost.get(row.get("product_id"))})
 
         # Categorize items
         # Low stock: THIS shop's low-stock list by its own levels (D12).
@@ -1002,7 +994,7 @@ async def get_inventory_intelligence(
             and _safe_int(i.get("quantity")) <= _safe_int(i.get("reorder_point")) * 1.5
         ]
 
-        # Stock values here are at cost (_stock_unit_value): the accounts
+        # Stock values here are at cost (stock_value): the accounts
         # roles' only (owner ruling 2026-10-12); the counts stay.
         return mask_cost(
             {
@@ -1046,12 +1038,13 @@ async def get_inventory_intelligence(
                 },
                 "total_inventory": {
                     "items": len(inventory),
-                    "value": sum(_value(i) for i in inventory),
+                    "value": stock_value.total(inventory),
+                    "uncosted_units": stock_value.uncosted(inventory),
                 },
             },
             current_user,
             "product",
-            extra=("value", "total_value"),
+            extra=("value", "total_value", "uncosted_units"),
         )
 
     except HTTPException:
@@ -1292,7 +1285,12 @@ async def get_enterprise_kpis(
             for order in current_orders
             for item in order.get("items", [])
         )
-        total_cogs = total_cost
+        # Pieces sold before their supplier bill (owner 2026-11-01 (a)): the
+        # bill's true-up of their cost, dated by the bill (product_cost).
+        total_cogs = total_cost + product_cost.variance_by(
+            get_db(), store_ids=[store_id], from_day=ist_date_str_from_stored(start_date),
+            to_day=ist_date_str_from_stored(end_date),
+        ).get(None, 0.0)
         # Ex-GST cost against ex-GST revenue: the GST inside total_revenue is
         # owed to the government, not margin.
         net_revenue = sum(_safe_float(o.get("revenue_ex_gst")) for o in current_orders)

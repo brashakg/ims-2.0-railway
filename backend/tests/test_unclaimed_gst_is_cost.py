@@ -1,5 +1,5 @@
 """H1 (GST review 2026-10-19): the unclaimed GST a bill adds to a unit's cost
-(purchase_invoices._add_unclaimed_gst_to_units) and the bill a cost came from
+(written before S4, still on old units; the one average cost since) and the bill a cost came from
 are cost: no counter role reads either on any route that returns stock units.
 The accounts roles still do (the control that the seed reaches a reader)."""
 

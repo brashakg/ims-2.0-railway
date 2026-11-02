@@ -944,7 +944,7 @@ def _claim_packed(
 
     transfer["stock_shipped"] = True
     transfer["stock_units_moved_out"] = moved_total
-    # F51: the transfer is worth what left the shop, at the units' own cost.
+    # F51: the transfer is worth what left the shop, at the cost frozen at ship.
     transfer["total_value"] = round(
         sum(_shipped_line_value(ln) for ln in transfer.get("items", [])), 2
     )
@@ -988,15 +988,16 @@ def _first_cost(*candidates) -> float:
     return 0.0
 
 
-def _unit_cost(unit: Dict, product: Dict) -> float:
-    """THE cost of one stock unit, read through THE stock cost rule
-    (services/stock_value -- never computed here): the unit's own recorded
-    cost, else its product's (a catalogue-only price is no cost). When S4
-    (#1303) merges, that reader becomes the product's one average cost and
-    this line follows it -- no second rule. One reader for the ship guard
-    (which refuses a crossing move with a unit at 0), the ship stamp (which
-    values the line by it) and a missing piece's write-off. Pure."""
-    return stock_value.resolved_cost(unit, stock_value.master_fallback_cost(product))
+def _unit_cost(unit: Dict, product: Dict) -> float:  # noqa: ARG001 - one call shape
+    """THE cost of one stock unit: its product's one average cost
+    (stock_value.average_cost -- S4, owner 2026-10-23: every piece carries
+    it; what one piece was received at is not its value). One reader for the
+    ship guard (which refuses a crossing move with a unit at 0), the ship
+    stamp (which freezes it per piece in shipped_unit_costs -- the average
+    at dispatch, CA 2026-10-23 "transfers = tax invoice at cost, dispatch
+    month") and so, through _piece_cost, the tax invoice and its credit
+    notes: no second cost rule. Pure."""
+    return stock_value.average_cost(product)
 
 
 def _ship_products(transfer: Dict) -> Dict[str, Dict]:
@@ -1028,12 +1029,10 @@ def _ship_products(transfer: Dict) -> Dict[str, Dict]:
 
 def _stamp_shipped_value(line: Dict, units: List[Dict], product: Dict) -> None:
     """F51 / D13: stamp on a line what LEFT the shop -- the units' barcodes,
-    the product's HSN, and the units' OWN cost (unit_cost / cost_price, stamped
-    on each unit at its goods receipt or opening stock) averaged into the
-    line's unit_cost. The product master's cost_price (`product`, the row
-    _ship_products read before the guard) stands in only for a unit that
-    carries no cost of its own (owner 2026-09-28: shelf units carry the
-    product's cost); a unit with neither leaves the line at 0, so a valued
+    the product's HSN, and the cost every unit carries (_unit_cost: the
+    product's one average cost, `product` being the row _ship_products read
+    before the guard -- owner 2026-09-28 / S4 2026-10-23: shelf units carry
+    the product's cost) as the line's unit_cost; none leaves the line at 0, so a valued
     challan refuses instead of printing a short value (a move between two
     registrations never gets here: _assert_valued_paper stops it). A line that
     shipped nothing keeps no client-typed figure (a BOPIS line carries the SALE
@@ -1045,10 +1044,12 @@ def _stamp_shipped_value(line: Dict, units: List[Dict], product: Dict) -> None:
     of its own, so nothing can fail here after the units moved."""
     line["hsn_code"] = _line_hsn(line, product)
     line["shipped_barcodes"] = [str(u["barcode"]) for u in units if u.get("barcode")]
+    # Each piece's cost, frozen at dispatch beside shipped_stock_ids (same
+    # order): _unit_cost -- under S4 every piece carries the product's one
+    # average -- so the tax invoice line and a credit note value a piece at
+    # exactly the figure the invoice charged (_piece_cost), even
+    # after a later vendor bill moves the average.
     costs = [_unit_cost(u, product) for u in units]
-    # Each piece's own cost, frozen beside shipped_stock_ids (same order): a
-    # credit note and a write-off value a lost piece at exactly this figure
-    # (_piece_cost), never the line's average.
     line["shipped_unit_costs"] = costs
     # ponytail: one average rate per line for the challan / invoice line
     # (n x average == the sum of the pieces' costs, to the paisa).
@@ -1096,10 +1097,12 @@ def _line_value(qty, cost) -> float:
 
 
 def _piece_cost(line: Dict, stock_id: str) -> float:
-    """THE cost of one shipped piece: its own cost frozen at ship
-    (shipped_unit_costs, beside shipped_stock_ids); a line shipped before
-    that was frozen falls back to the line's average. One reader for the
-    credit note and the write-off. Pure."""
+    """THE cost of one shipped piece: the cost _unit_cost gave it at ship --
+    its product's one average cost then (S4), frozen in shipped_unit_costs
+    beside shipped_stock_ids so the tax invoice and its credit notes stay
+    exact to the paisa after the average moves; a line shipped before that
+    was frozen falls back to the line's average. The GST papers' reader only:
+    a write-off's loss is at the average in force then. Pure."""
     ids = [str(s) for s in line.get("shipped_stock_ids") or []]
     costs = line.get("shipped_unit_costs") or []
     if str(stock_id) in ids and len(costs) == len(ids):
@@ -1208,8 +1211,8 @@ def _short_credit_note(transfer: Dict, stock_ids: List[str], reason: str) -> Opt
 
     Exact to the paisa: each line's note is the invoice line's value at the
     pieces still counted as delivered BEFORE, minus its value AFTER -- each
-    piece at its OWN cost frozen at ship (_piece_cost, the figure its
-    write-off books), then split_line_gst at the line's FROZEN rate -- so the
+    piece at its OWN cost frozen at ship (_piece_cost, what the invoice
+    charged), then split_line_gst at the line's FROZEN rate -- so the
     invoice plus all its notes equals the tax on the value received, head by
     head, and the pieces received plus the pieces written off equal what
     shipped.
@@ -2650,8 +2653,10 @@ async def write_off_missing_piece(
     """ADMIN / SUPERADMIN write a missing piece off (owner ruling 2026-08-25:
     every write-off is admin-only). The loss is the SENDING shop's: the piece
     is VOIDed there (it never left its books), with a stock_shrinkage row at
-    the piece's own cost. Between two GSTINs its credit note is booked first
-    (CA 2026-10-23: short delivery = value received + credit note)."""
+    the product's average now (the one write-off cost rule; only the credit
+    note keeps the cost frozen at ship). Between two GSTINs its credit note
+    is booked first (CA 2026-10-23: short delivery = value received + credit
+    note)."""
     from .inventory._shared import is_write_off_admin
 
     if not is_write_off_admin(current_user):
@@ -2700,8 +2705,16 @@ async def write_off_missing_piece(
     shrink = db.get_collection("stock_shrinkage")
     if not shrink.find_one({"transfer_id": tid, "voided_stock_ids": stock_id}):
         line = _line_of_piece(transfer, stock_id)
-        # The same frozen figure the credit note credited (_piece_cost).
-        piece_cost = round(_piece_cost(line, stock_id), 2)
+        # The loss is valued like every other write-off (a count's VOID, a
+        # DAMAGED release): at the average in force when the piece was VOIDed
+        # (product_cost.written_off_cost) -- never at a later press's (a
+        # retry after the average moved): the figure a later bill trues it up
+        # from. Only the GST papers (the tax invoice and this credit note)
+        # keep the cost frozen at ship.
+        from ..services.product_cost import written_off_cost
+
+        pid = piece.get("product_id")
+        piece_cost = written_off_cost(db, [units.find_one({"stock_id": stock_id}) or {}]).get(str(pid), 0.0)
         shrink.insert_one({
             "shrinkage_id": str(uuid.uuid4()),
             "source": "TRANSFER_MISSING",
@@ -3020,10 +3033,10 @@ def _assert_valued_paper(
         if not all(_unit_cost(u, product) for u in packed):
             raise HTTPException(
                 status_code=409,
-                detail=f"{line.get('product_name') or pid} has no cost price and "
-                "some of its packed pieces carry no cost. Enter the product's cost "
-                "price before shipping: a transfer between two GST registrations "
-                "is valued at cost.",
+                detail=f"{line.get('product_name') or pid} has no average cost "
+                "yet. Accept its vendor bill (or have accounts enter its cost) "
+                "before shipping: a transfer between two GST registrations is "
+                "valued at cost.",
             )
     if not in_box:
         raise HTTPException(

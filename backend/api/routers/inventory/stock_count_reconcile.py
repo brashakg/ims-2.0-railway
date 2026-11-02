@@ -22,6 +22,7 @@ from .helpers import (
     _get_db,
 )
 from ...services.cost_mask import mask_cost
+from ...services.product_cost import written_off_cost
 from ...services.writeoff_itc import record_writeoff, totals as itc_totals
 from .stock_count import (
     _on_hand_units,
@@ -535,10 +536,12 @@ async def finish_stuck_stock_count_reconcile(
         void_reason = f"cycle-count-reconcile:{count_id}"
         voided_by_product: Dict[str, int] = {}
         itc_by_product: Dict[str, list] = {}
+        voided_units = []
         for unit in stock_coll.find({"void_reason": void_reason}):
             pid = str(unit.get("product_id") or "")
             if pid:
                 voided_by_product[pid] = voided_by_product.get(pid, 0) + 1
+                voided_units.append(unit)
                 # The reversal the write-off may not have reached: once per
                 # piece, in the month the piece was written off.
                 itc_by_product.setdefault(pid, []).append(record_writeoff(
@@ -584,7 +587,10 @@ async def finish_stuck_stock_count_reconcile(
             for r in shrinkage_coll.find({"count_id": count_id}, {"product_id": 1})
         }
         variances = {v.get("product_id"): v for v in (count_doc.get("variances") or [])}
-        costs = _product_costs(db, list(voided_by_product.keys()))
+        # Each piece at the average in force when it was VOIDed, never the
+        # average now (product_cost.written_off_cost): the figure a later
+        # bill trues it up from, however late this finish runs.
+        values = written_off_cost(db, voided_units)
         now = datetime.utcnow()
         notes = request.notes if request else None
 
@@ -594,8 +600,8 @@ async def finish_stuck_stock_count_reconcile(
         value_total = 0.0
         for pid, voided in voided_by_product.items():
             v = variances.get(pid) or {}
-            unit_cost = float(costs.get(pid, 0.0) or 0.0)
-            value = round(voided * unit_cost, 2)
+            value = values.get(pid, 0.0)
+            unit_cost = value / voided
             units_total += voided
             value_total += value
             reconciled_items.append(

@@ -180,7 +180,12 @@ export function OpeningStockImport() {
         <p className="text-xs text-gray-500">
           First line is the header. Columns: <code>product_id</code> or <code>sku</code> (one
           required), <code>quantity</code>, and optional{' '}
-          {canSeeCost && <><code>unit_cost</code> (per-unit cost, for valuation), </>}
+          {canSeeCost && (
+            <>
+              <code>unit_cost</code> (per-unit cost excl. GST: becomes the product&apos;s first average cost when it has
+              none; a product that already has an average keeps it, and its pieces are valued at it),{' '}
+            </>
+          )}
           <code>location_code</code>, <code>batch_code</code>,{' '}
           <code>expiry_date</code> (YYYY-MM-DD).
         </p>
@@ -285,7 +290,8 @@ export function OpeningStockImport() {
                     <td className="py-1.5 px-2 text-right tabular-nums">{r.added ?? r.quantity ?? '—'}</td>
                     {canSeeCost && (
                       <td className="py-1.5 px-2 text-right tabular-nums text-gray-500">
-                        {r.unit_cost != null ? `₹${r.unit_cost.toLocaleString('en-IN')}` : '—'}
+                        {r.cost_used != null ? `₹${r.cost_used.toLocaleString('en-IN')}` : '—'}
+                        {r.cost_note && <span className="block text-[10px] text-amber-700">{r.cost_note}</span>}
                       </td>
                     )}
                     <td className="py-1.5 px-2">

@@ -97,9 +97,11 @@ def _receipt_ids(unit: dict) -> list:
 
 
 def _transfer_ids(db, unit: dict) -> list:
-    """Every transfer this piece rode: the one holding it, the one that
-    delivered it (_rehome clears transfer_id and stamps source_id), and every
-    earlier one whose lines list it."""
+    """THE transfers this piece rode (here and product_cost.crossed_gstin):
+    the one holding it, the one that delivered it (_rehome clears
+    transfer_id and stamps source_id), and every earlier one whose lines
+    list it as LANDED (received or damaged) -- never one it was only
+    shipped on and came back from or was lost on."""
     ids = {unit.get("transfer_id")}
     if unit.get("source_type") == "TRANSFER":
         ids.add(unit.get("source_id"))
@@ -156,13 +158,7 @@ def _bills_for(db, unit: dict, gstin_of) -> list:
     crossings = []
     for tid in tids:
         t, m = moved.get(tid) or {}, mirrors.get(tid) or {}
-        stamp = t.get("gst_registrations")
-        # Ship's stamp (None -- cannot tell -- books a mirror too), else the
-        # two shops' GSTINs: the rule of transfers._transfer_registrations.
-        crosses = bool(m) or (stamp.get("crosses") is not False if isinstance(stamp, dict) else
-                              (gstins.get(t.get("from_location_id")) or "")
-                              != (gstins.get(t.get("to_location_id")) or ""))
-        if crosses:
+        if transfer_crosses(t, gstins, bool(m)):
             # Newest by when the transfer SHIPPED (stamped once; the piece can
             # only ship on B after it arrived on A). Never by the mirror's date
             # first (booked at COMPLETE, maybe after a later move) nor by
@@ -175,6 +171,20 @@ def _bills_for(db, unit: dict, gstin_of) -> list:
     latest = mirrors.get(tid)
     # The invoice FIRST: it is the claimed bill a reversal row names.
     return [latest, *notes.get(tid, [])] if latest and landed_here(latest) else []
+
+
+def transfer_crosses(t: dict, gstins: dict, mirrored: bool) -> bool:
+    """THE 'did this transfer cross a GSTIN' rule for a shipped transfer (ITC
+    reversal here, the S4 true-up's shop in product_cost.crossed_gstin): its
+    mirror bill is booked, or ship's stamp says so (None -- cannot tell --
+    books a mirror too, so it counts), or -- shipped before #1185 stamped it
+    -- the two shops' GSTINs differ (transfers._transfer_registrations)."""
+    stamp = t.get("gst_registrations")
+    if mirrored:
+        return True
+    if isinstance(stamp, dict):
+        return stamp.get("crosses") is not False
+    return (gstins.get(t.get("from_location_id")) or "") != (gstins.get(t.get("to_location_id")) or "")
 
 
 def _is_note(bill: dict) -> bool:
@@ -665,7 +675,27 @@ def undo_writeoff(db, unit: dict) -> None:
     stays there and a re-claim row in the first open month adds the credit
     back. A held (no-GSTIN) row was filed on no return, so it is deleted
     whatever its month's lock. Each step is idempotent, so a cut-off run is
-    safe to repeat."""
+    safe to repeat. A piece a supplier bill trued up after it was written off
+    also comes back at what was paid, its variance reversed
+    (product_cost.unsell; a piece that left for good, RTV, is not held, so
+    skipped), AFTER the GST steps: a cost failure never skips them.
+    Fail-soft: the undo stands; the log names what was not re-costed (the
+    PENDING-bill sweeper re-runs it)."""
+    _undo_reversal(db, unit)
+    sid = _sid(unit)
+    try:
+        from . import product_cost
+        from ..utils.event_time import utc_now_iso
+
+        product_cost.unsell(db, [sid], utc_now_iso())
+    except Exception:  # noqa: BLE001
+        logger.error("[WRITEOFF_ITC] %s back from its write-off, its cost NOT re-averaged (product_cost.unsell)",
+                     sid, exc_info=True)
+
+
+def _undo_reversal(db, unit: dict) -> None:
+    """undo_writeoff's GST steps: the piece's reversal row deleted, or kept
+    and re-claimed once its month is filed."""
     coll = db.get_collection(COLLECTION)
     sid = _sid(unit)
     row = coll.find_one({"_id": sid})

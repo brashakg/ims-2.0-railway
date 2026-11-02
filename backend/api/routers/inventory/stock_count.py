@@ -30,6 +30,7 @@ from .models import (
     StartStockCountRequest,
 )
 from ...services.cost_mask import mask_cost_list
+from ...services import stock_value
 from .helpers import (
     _get_db,
 )
@@ -175,13 +176,11 @@ async def start_stock_count(
 
 
 def _product_costs(db, product_ids: List[str]) -> Dict[str, float]:
-    """Unit cost per product, for putting a rupee figure on a count variance.
-
-    ``products.cost_price`` is the moving-average purchase cost the rest of the
-    app values stock at (reports, reorder economics), with ``landed_cost`` as
-    the fallback the reorder engine also uses. A product with neither is
-    reported as 0.0 and COUNTED as un-costed by the caller, so a rupee total
-    is never quietly understated into looking like "no loss".
+    """Unit cost per product, for putting a rupee figure on a count variance
+    or a write-off: THE stock value rule's cost (stock_value.average_cost --
+    the product's one average cost, S4). A product with none is reported as
+    0.0 and COUNTED as un-costed by the caller, so a rupee total is never
+    quietly understated into looking like "no loss".
 
     Products are keyed by ``_id``; a few writers also carry ``product_id``, so
     both are matched and both are mapped.
@@ -192,10 +191,10 @@ def _product_costs(db, product_ids: List[str]) -> Dict[str, float]:
         return costs
     cursor = db.get_collection("products").find(
         {"$or": [{"_id": {"$in": ids}}, {"product_id": {"$in": ids}}]},
-        {"_id": 1, "product_id": 1, "cost_price": 1, "landed_cost": 1},
+        {"_id": 1, "product_id": 1, "cost_price": 1, "cost_price_is_catalogue_only": 1},
     )
     for p in cursor:
-        cost = float(p.get("cost_price") or p.get("landed_cost") or 0.0)
+        cost = stock_value.average_cost(p)
         for key in (p.get("_id"), p.get("product_id")):
             if key:
                 costs[str(key)] = cost

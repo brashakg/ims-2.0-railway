@@ -177,7 +177,7 @@ def spoilage_cost_paise(
 
     `lens_cost_resolver(job)` returns the lens cost in RUPEES (typically the
     product's `cost_price`, which IS the weighted-average cost -- maintained
-    by purchase_match.moving_average_cost true-ups at invoice booking) or
+    by services/product_cost when a bill is accepted, S4) or
     None when unresolvable. None-safe + total: a missing resolver, a raising
     resolver, None, or junk all collapse to 0 -- a spoilage record must never
     fail because costing data is incomplete.

@@ -387,11 +387,17 @@ def test_deliveries_due_are_open_orders_for_this_shop_with_pieces_still_due(get,
 
 
 def _priced_shelf(db):
-    db["products"].insert_one({"product_id": "P1", "name": "Frame", "cost_price": 0})
+    # S4: every piece is valued at its product's ONE average cost (cost_price);
+    # a per-piece unit_cost is no longer read (u1+u2 by unit_cost would be
+    # 3000, not 2500). P2 has no cost yet.
+    db["products"].insert_many([
+        {"product_id": "P1", "name": "Frame", "cost_price": 1250},
+        {"product_id": "P2", "name": "Uncosted frame", "cost_price": 0},
+    ])
     db["stock_units"].insert_many([
         {"_id": "u1", "product_id": "P1", "store_id": S1, "status": "AVAILABLE", "unit_cost": 1000},
-        {"_id": "u2", "product_id": "P1", "store_id": S1, "status": "RESERVED", "unit_cost": 1500},
-        {"_id": "u3", "product_id": "P1", "store_id": S1, "status": "AVAILABLE"},  # no cost
+        {"_id": "u2", "product_id": "P1", "store_id": S1, "status": "RESERVED", "unit_cost": 2000},
+        {"_id": "u3", "product_id": "P2", "store_id": S1, "status": "AVAILABLE"},  # no cost
         {"_id": "u4", "product_id": "P1", "store_id": S1, "status": "SOLD", "unit_cost": 9000},
         {"_id": "u5", "product_id": "P1", "store_id": S2, "status": "AVAILABLE", "unit_cost": 7000},
     ])
@@ -414,7 +420,7 @@ def test_managers_get_no_stock_value(get, mongo_db, role):
     _priced_shelf(mongo_db)
     body = _ok(get(_user(role)))
     assert body["stock_value"] is None
-    assert "2500" not in str(body) and "1000" not in str(body)
+    assert "2500" not in str(body) and "1250" not in str(body)
 
 
 # ---------------------------------------------------------------------------
