@@ -52,7 +52,11 @@ function readAll(now: number): Record<string, BillKeyEntry> {
     const out: Record<string, BillKeyEntry> = {};
     for (const [fp, e] of Object.entries(raw || {})) {
       const entry = e as BillKeyEntry;
-      if (entry && entry.key && typeof entry.at === 'number' && now - entry.at <= BILL_KEY_TTL_MS) out[fp] = entry;
+      // A PENDING key never expires (money review 24): its press may have
+      // landed, so only a settled key ages out.
+      if (entry && entry.key && typeof entry.at === 'number' && (entry.pending || now - entry.at <= BILL_KEY_TTL_MS)) {
+        out[fp] = entry;
+      }
     }
     return out;
   } catch {
@@ -135,6 +139,7 @@ export function useUnconfirmedWording(
       toCheck();
       return undefined;
     }
+    if (entry.pending) return undefined; // a pending key is kept: the promise holds
     const t = setTimeout(toCheck, Math.max(0, entry.at + BILL_KEY_TTL_MS - Date.now()));
     return () => clearTimeout(t);
   }, [billFp, errorMsg, setErrorMsg]);

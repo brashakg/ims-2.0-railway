@@ -200,6 +200,8 @@ export interface POSState {
   order_number: string | null;
   /** The bill's own id (see newBillId). */
   bill_id: string | null;
+  /** The store the bill was made at (with its id): its key replays only there. */
+  bill_store_id: string | null;
 
   // Customer loyalty
   customerLoyaltyPoints: number;
@@ -283,6 +285,9 @@ export interface POSState {
   /** This bill's id, made now if it has none yet. */
   ensureBillId: () => string;
   clearAllOnLogout: (userId?: string, storeId?: string | null) => void;
+  /** A bill whose press is pending is parked (once) under its own store;
+   *  true when it was (money review 24: sign-out, 401, store switch). */
+  parkIfPending: (userId?: string, storeId?: string | null) => boolean;
   // Park/Hold: push the CURRENT cart onto the held-bills queue
   // (`ims-held-bills`) as a snapshot, tagged with the owning user/store so a
   // shared terminal never leaks one cashier's cart to another. Used both by
@@ -414,6 +419,7 @@ const initialState = {
   order_id: null,
   order_number: null,
   bill_id: null,
+  bill_store_id: null,
   is_processing: false,
   customerLoyaltyPoints: 0,
   appliedVoucher: undefined,
@@ -651,7 +657,7 @@ export const usePOSStore = create<POSState>()(
           // belongs to. recall/list filter on held_by so cashier B never
           // sees cashier A's cart on a shared terminal.
           held_by: meta?.heldBy ?? state.salesperson_id ?? null,
-          store_id: meta?.storeId || state.store_id || sessionStoreId(),
+          store_id: state.bill_store_id || meta?.storeId || state.store_id || sessionStoreId(),
           auto,
           reason: auto ? 'Auto-saved on inactivity logout' : 'Held by cashier',
           state: {
@@ -670,6 +676,7 @@ export const usePOSStore = create<POSState>()(
             delivery_time_slot: state.delivery_time_slot,
             delivery_priority: state.delivery_priority,
             bill_id: state.bill_id,
+            bill_store_id: state.bill_store_id,
           },
         });
         try {
@@ -689,7 +696,7 @@ export const usePOSStore = create<POSState>()(
       // from the restored cart, delivery + advance flags restored.
       ensureBillId: () => {
         const id = get().bill_id || newBillId();
-        if (id !== get().bill_id) set({ bill_id: id });
+        if (id !== get().bill_id) set({ bill_id: id, bill_store_id: get().bill_store_id || sessionStoreId() });
         return id;
       },
 
@@ -720,6 +727,7 @@ export const usePOSStore = create<POSState>()(
           cart_discount_reason: snap.cart_discount_reason ?? null,
           current_step: cart.length > 0 ? 'review' : 'customer',
           bill_id: snap.bill_id || newBillId(),
+          bill_store_id: snap.bill_store_id || null,
         });
         // The held bill's key comes back with it, freshly stamped -- and still
         // pending if its press was (money review 23).
@@ -733,18 +741,22 @@ export const usePOSStore = create<POSState>()(
       // re-login. Cross-user leakage is prevented at the recall layer
       // (POSLayout filters held bills by held_by === current user), not by
       // wiping every parked cart on logout.
-      clearAllOnLogout: (userId?: string, storeId?: string | null) => {
+      parkIfPending: (userId?: string, storeId?: string | null) => {
         // A press still pending keeps its promise ("press again, it finishes
-        // once"): the bill is parked first, with its key, unless it already
-        // is (the idle sign-out parks before it clears) (money review 22).
+        // once"): the bill is parked with its key, unless it already is (the
+        // idle sign-out parks before it clears) (money review 22).
         const pending = billKeyEntry(billIdOf(get()));
-        if (pending?.pending) {
-          let held: any[] = [];
-          try { held = JSON.parse(localStorage.getItem('ims-held-bills') || '[]'); } catch { held = []; }
-          if (!(Array.isArray(held) && held.some((b) => b?.bill_key?.key === pending.key))) {
-            get().parkCurrentSale({ auto: true, heldBy: userId, storeId });
-          }
+        if (!pending?.pending) return false;
+        let held: any[] = [];
+        try { held = JSON.parse(localStorage.getItem('ims-held-bills') || '[]'); } catch { held = []; }
+        if (!(Array.isArray(held) && held.some((b) => b?.bill_key?.key === pending.key))) {
+          get().parkCurrentSale({ auto: true, heldBy: userId, storeId });
         }
+        return true;
+      },
+
+      clearAllOnLogout: (userId?: string, storeId?: string | null) => {
+        get().parkIfPending(userId, storeId);
         clearBillKey(billIdOf(get()));
         set(initialState);
         try {

@@ -80,3 +80,21 @@ describe('a forced sign-out on a 401', () => {
     expect(usePOSStore.getState().cart).toEqual([]);
   });
 });
+
+describe('money review 24: discarding the LIVE bill', () => {
+  it('asks with the may-already-be-paid words when its press is pending', () => {
+    localStorage.clear();
+    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().addToCart({
+      id: 'p-1', product_id: 'p-1', name: 'Frame', category: 'FRAME', quantity: 1,
+      unit_price: 1000, price: 1000, mrp: 1000, discount_percent: 0,
+    } as any);
+    billKeyFor(usePOSStore.getState().ensureBillId());
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(<HeldBillsControls />);
+    fireEvent.click(screen.getByRole('button', { name: /Discard bill/ }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/may already be paid/));
+    expect(usePOSStore.getState().cart).toHaveLength(1);
+    confirm.mockRestore();
+  });
+});

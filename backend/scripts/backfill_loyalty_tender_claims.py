@@ -130,7 +130,12 @@ def apply(db, links, backup_path: str, legacy=()) -> int:
     rows = list(txns.find({"txn_id": {"$in": ids}},
                           {"_id": 0, "txn_id": 1, "tender_payment_id": 1, "tender_backfilled_at": 1}))
     os.makedirs(os.path.dirname(backup_path) or ".", exist_ok=True)
-    with open(backup_path, "w", encoding="utf-8") as f:
+    try:  # a backup is never overwritten: an earlier run stays undoable (money review 24)
+        f = open(backup_path, "x", encoding="utf-8")
+    except FileExistsError:
+        raise SystemExit(f"[REFUSED] backup {backup_path} already exists - pass a new --backup name. "
+                         "Nothing was changed.") from None
+    with f:
         json.dump(rows, f, default=str, indent=1)
     done = 0
     for txn_id, payment_id in links:

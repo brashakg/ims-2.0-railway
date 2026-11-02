@@ -403,6 +403,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
       return;
     }
 
+    // A bill whose press is pending is parked under ITS store before the
+    // switch (its key replays only there), then the till is cleared
+    // (money review 24).
+    try {
+      const pos = usePOSStore.getState();
+      if (pos.parkIfPending(state.user?.id)) pos.resetTransaction();
+    } catch { /* never block a store switch */ }
+
     // Optimistic local update for a snappy switch.
     dispatch({ type: 'SET_ACTIVE_STORE', payload: storeId });
     const userJson = localStorage.getItem('ims_user');

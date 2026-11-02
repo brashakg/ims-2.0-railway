@@ -83,9 +83,10 @@ def test_a_store_credit_then_the_customer_removed_never_adds_a_cash_payout(till,
 
 
 def test_the_first_presss_stored_decision_is_replayed_before_anything_is_booked(till, monkeypatch, tasks):
-    """The first press stored "cash, by HQ" but its payout never landed; a
-    customer is attached and the next press says the drawer -- the stored
-    decision stands: cash, by HQ, once."""
+    """The first press stored "cash" but its payout never landed; a customer
+    is attached and the next press says the drawer -- the stored DESTINATION
+    stands (cash, never store credit). The cash source binds only when the
+    payout is booked (money review 24), so the drawer named now is used."""
     _walk_in_dead(till, monkeypatch)
     rcoll = till["db"].get_collection("returns")
     real = rcoll.insert_one
@@ -104,7 +105,7 @@ def test_the_first_presss_stored_decision_is_replayed_before_anything_is_booked(
     _set_customer(till, "CUST-1")
     cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "STORE_DRAWER")
     [payout] = _payouts(till)
-    assert payout["cash_paid_from"] == "HQ" and _credits(till) == []
+    assert payout["cash_paid_from"] == "STORE_DRAWER" and _credits(till) == []
 
 
 # =========================================================================== #
@@ -133,12 +134,18 @@ def _lose_the_payout_once(till, monkeypatch):
     monkeypatch.setattr(rcoll, "insert_one", _lost)
 
 
-def test_a_re_press_replays_the_stored_cash_source_without_asking_again(till, monkeypatch, tasks):
+def test_an_unbooked_cash_source_is_asked_again(till, monkeypatch, tasks):
+    """Money review 24 (the lead): the cash source is not part of the stored
+    decision -- a payout that never landed binds nothing, so the next press
+    must say where the cash comes from again."""
     _walk_in_dead(till, monkeypatch)
     _lose_the_payout_once(till, monkeypatch)
     with pytest.raises(HTTPException):
         cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "HQ")
-    cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"))  # no source sent: the stored one stands
+    with pytest.raises(HTTPException) as e:
+        cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"))  # no source sent
+    assert e.value.status_code == 400 and _payouts(till) == []
+    cust_router.give_back_unbilled_leg(VKEY, _user("ADMIN"), "HQ")
     [payout] = _payouts(till)
     assert payout["cash_paid_from"] == "HQ"
 

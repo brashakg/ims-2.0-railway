@@ -230,13 +230,16 @@ async def create_order(
         # Looked up before any work so a retried "Pay now" is a cheap no-op.
         # Fail-soft: any lookup error falls through to a normal create.
         idem_key = (idempotency_key or "").strip()
+        body_fp = order_body_fingerprint(order)
         if idem_key:
             try:
                 existing = order_repo.find_one(
                     {"idempotency_key": idem_key, "store_id": store_id}
                 )
                 if existing:
-                    return _order_create_response(existing)
+                    return _replay_same_bill(existing, body_fp)
+            except HTTPException:
+                raise
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[ORDERS] idempotency lookup skipped: %s", exc)
 
@@ -873,7 +876,7 @@ async def create_order(
         except HTTPException:
             twin = _twin_of(order_repo, idem_key, store_id)
             if twin:
-                return _order_create_response(twin)
+                return _replay_same_bill(twin, body_fp)
             saving = _still_saving(order_repo, idem_key)
             if saving is not None:
                 raise saving
@@ -942,7 +945,7 @@ async def create_order(
                     )
             twin = _twin_of(order_repo, idem_key, store_id)
             if twin:
-                return _order_create_response(twin)
+                return _replay_same_bill(twin, body_fp)
             raise
         except Exception as exc:  # noqa: BLE001
             # Non-blocking soft failure (mongo blip, etc.). Tag the
@@ -1037,6 +1040,9 @@ async def create_order(
             # A repeat POST with the same key returns this order rather than
             # creating a duplicate (store-scoped lookup at the top of create).
             "idempotency_key": (idem_key or None),
+            # THE bill's identity (money review 24): a later press with this
+            # key replays this order only for the SAME bill.
+            "body_fingerprint": body_fp,
             # POS-12: initial status_history entry so the DRAFT create is always
             # the first row in the timeline. Subsequent status changes append via
             # OrderRepository.update_status -> $push {"status_history": {...}}.
@@ -1122,7 +1128,7 @@ async def create_order(
             if idem_key and (isinstance(create_exc, HTTPException) or _is_idempotency_duplicate(create_exc)):
                 twin = _twin_of(order_repo, idem_key, store_id)
                 if twin:
-                    return _order_create_response(twin)
+                    return _replay_same_bill(twin, body_fp)
             if isinstance(create_exc, HTTPException):
                 saving = _still_saving(order_repo, idem_key)
                 if saving is not None:
@@ -1313,6 +1319,44 @@ def _still_saving(order_repo, idem_key: Optional[str]) -> Optional[HTTPException
         "code": SALE_STILL_SAVING,
         "message": ("The first press of this sale is still being saved. Do not change the bill - wait a "
                     "moment and press Complete Sale again.")})
+
+
+IDEMPOTENCY_BODY_MISMATCH = "IDEMPOTENCY_BODY_MISMATCH"
+
+
+def order_body_fingerprint(order: OrderCreate) -> str:
+    """THE identity of a bill (money review 24), from the body the till sends
+    (orderPayload.ts builds it; this is its one definition): the lines (item,
+    unit, quantity, price, discount, Rx), the customer and member, the sale
+    type and the bill discount -- never the dates, notes or salesperson the
+    till may stamp afresh at each press."""
+    import hashlib
+    import json
+
+    lines = sorted(
+        [str(i.item_type or "").upper(), str(i.product_id or ""), str(i.stock_id or ""), int(i.quantity or 0),
+         round(float(i.unit_price or 0), 2), round(float(i.discount_percent or 0), 4), str(i.prescription_id or ""),
+         str(i.lens_line_id or "")]
+        for i in order.items)
+    body = {"customer_id": order.customer_id or "", "patient_id": order.patient_id or "",
+            "order_type": order.order_type or "", "lines": lines,
+            "cart_discount_percent": round(float(order.cart_discount_percent or 0), 4),
+            "cart_discount_amount": round(float(order.cart_discount_amount or 0), 2)}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _replay_same_bill(order: Dict[str, Any], body_fp: str) -> Dict[str, Any]:
+    """A press with an existing key replays its order -- only for the SAME
+    bill. Another body under the key is refused (409): the till then posts
+    no payment and never says the sale is complete. An order saved before
+    the fingerprint existed replays as before."""
+    saved = order.get("body_fingerprint")
+    if saved and saved != body_fp:
+        raise HTTPException(status_code=409, detail={
+            "code": IDEMPOTENCY_BODY_MISMATCH,
+            "message": (f"This bill was already saved as order {order.get('order_number') or order.get('order_id')} "
+                        "with different items - open it on the Orders screen; nothing new was charged.")})
+    return _order_create_response(order)
 
 
 def _twin_of(order_repo, idem_key: Optional[str], store_id: Optional[str]) -> Optional[Dict[str, Any]]:

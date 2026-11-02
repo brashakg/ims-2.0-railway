@@ -15,7 +15,8 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { usePOSStore } from '../../stores/posStore';
+import { billIdOf, usePOSStore } from '../../stores/posStore';
+import { billKeyEntry } from './posBillKey';
 import { useHeldBills } from './useHeldBills';
 
 export function HeldBillsControls() {
@@ -58,7 +59,11 @@ export function HeldBillsControls() {
         type="button"
         onClick={() => {
           if ((store.cart || []).length === 0) return;
-          if (window.confirm('Discard this bill? Items and payments entered so far will be lost.')) {
+          // A bill whose press was never confirmed may already be a sale (money review 24).
+          const pending = billKeyEntry(billIdOf(store))?.pending;
+          if (window.confirm(pending
+            ? 'This bill may already be paid - check Orders first. Discard it anyway?'
+            : 'Discard this bill? Items and payments entered so far will be lost.')) {
             store.resetTransaction();
           }
         }}

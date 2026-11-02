@@ -2296,19 +2296,27 @@ def _voucher_give_back_plan(vcoll, voucher: Dict[str, Any], key: str, order: Opt
     if booked:
         return booked
     stored = (fresh.get("pos_give_back_plan") or {}).get(k)
-    if stored:
-        return stored
-    plan = {**_decide_voucher_give_back(fresh, order), "amount": abs(float(
-        next((e.get("delta") for e in fresh.get("money_ledger") or [] if e.get("idempotency_key") == key), 0)
-        or 0))}
+    field = "pos_give_back_plan." + k
+    plan = stored
+    decided = _decide_voucher_give_back(fresh, order)
+    # A stored VOUCHER decision is re-checked (money review 24): a voucher
+    # that died since, with nothing booked, follows the dead-voucher rule.
+    if not stored or (stored.get("dest") == "VOUCHER" and decided["dest"] != "VOUCHER"):
+        plan = {**decided, "amount": abs(float(
+            next((e.get("delta") for e in fresh.get("money_ledger") or [] if e.get("idempotency_key") == key), 0)
+            or 0))}
+        vcoll.update_one({"code": voucher.get("code"), "$or": [{field: {"$exists": False}}, {field + ".dest": "VOUCHER"}]},
+                         {"$set": {field: plan}})
+        plan = ((vcoll.find_one({"code": voucher.get("code")}) or {}).get("pos_give_back_plan") or {}).get(k) or plan
     if plan["dest"] == "CASH":
+        # The cash source is NOT part of the stored decision: it binds when
+        # the payout is booked (a refused attempt -- e.g. the drawer after
+        # Day-End -- stores nothing, so the next press may choose HQ).
         if not cash_paid_from:
             raise HTTPException(status_code=400, detail=(
                 "Say whether the cash is paid from the shop's drawer or by HQ. Nothing was recorded."))
-        plan["cash_paid_from"] = cash_paid_from
-    field = "pos_give_back_plan." + k
-    vcoll.update_one({"code": voucher.get("code"), field: {"$exists": False}}, {"$set": {field: plan}})
-    return ((vcoll.find_one({"code": voucher.get("code")}) or {}).get("pos_give_back_plan") or {}).get(k) or plan
+        plan = {**plan, "cash_paid_from": cash_paid_from}
+    return plan
 
 
 def voucher_leg_needs_cash(voucher: Optional[Dict[str, Any]], order: Optional[Dict[str, Any]], key: str) -> bool:

@@ -12,7 +12,7 @@
 
 import { orderApi, loyaltyApi, workshopApi } from '../../services/api';
 import { canonicalCategory } from '../../utils/categoryNormalize';
-import type { CashTenderCapture } from '../../stores/posStore';
+import { sessionStoreId, type CashTenderCapture } from '../../stores/posStore';
 import { buildPaymentBody } from './paymentBody';
 import { refreshBillQuote, replayGuaranteed } from './billQuote';
 import { orderPayloadOf } from './orderPayload';
@@ -180,6 +180,13 @@ export async function submitPosOrder(
     };
   }
 
+  // The bill's key replays only at the store it was made at: pressed at
+  // another store it would ring a second sale (money review 24).
+  const here = sessionStoreId();
+  if (store.bill_store_id && here && store.bill_store_id !== here) {
+    return { ok: false, error: `This bill was started at ${store.bill_store_id} - switch back to that store to finish it.` };
+  }
+
   try {
     const result = await orderApi.createOrder(
       orderPayloadOf(store, discountApprovalId) as any,
@@ -188,6 +195,18 @@ export async function submitPosOrder(
 
     if (!result?.order_id) {
       return { ok: false, error: 'Order created but no ID returned. Check order list.' };
+    }
+
+    // Belt and braces (money review 24): no payment goes on an order whose
+    // total is not this bill's (a replayed order the server did not refuse).
+    const quoted = store.getGrandTotal();
+    if (typeof result.grand_total === 'number' && Math.abs(result.grand_total - quoted) > 0.01) {
+      return {
+        ok: false,
+        error: `Order ${result.order_number || result.order_id} was saved with a total of ₹${result.grand_total}, `
+          + `not the ₹${quoted} this bill shows - open it on the Orders screen before taking any payment. `
+          + 'Nothing was charged.',
+      };
     }
 
     // POS-3: loyalty points are only atomically debited AFTER the order
@@ -433,6 +452,11 @@ export async function submitPosOrder(
     const { code, detail } = (err || {}) as { code?: string; detail?: unknown };
     if (code === 'DISCOUNT_NEEDS_APPROVAL') {
       return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed };
+    }
+    if (code === 'IDEMPOTENCY_BODY_MISMATCH') {
+      // The bill was saved earlier with other items: no payment is posted,
+      // the bill stays, and the till never says the sale is complete.
+      return { ok: false, error: msg };
     }
     if (code === 'SALE_STILL_SAVING') {
       return { ok: false, error: TILL_SALE_STILL_SAVING, pending: true };

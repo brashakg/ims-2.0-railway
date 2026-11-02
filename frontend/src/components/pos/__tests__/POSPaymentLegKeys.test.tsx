@@ -39,7 +39,7 @@ import { orderApi } from '../../../services/api';
 import { buildApiError } from '../../../services/api/client';
 import { usePOSStore } from '../../../stores/posStore';
 import { submitPosOrder, TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from '../submitOrder';
-import { billKeyEntry, billKeyFor, clearBillKey } from '../posBillKey';
+import { billKeyEntry, billKeyFor, clearBillKey, settleBillKey } from '../posBillKey';
 import { billFingerprint, orderPayloadOf } from '../orderPayload';
 
 const mockedCreate = vi.mocked(orderApi.createOrder);
@@ -141,7 +141,10 @@ describe('the bill key lives with the bill (money review 15)', () => {
     const k2 = billKeyFor(bill(2));
     expect(k2).not.toBe(k1);
     expect(billKeyFor(bill(1))).toBe(k1); // the other bill's key was never overwritten
-    expect(billKeyFor(bill(2), Date.now() + 16 * 60_000)).not.toBe(k2); // older than 15 minutes: a new key
+    // Money review 24: a PENDING key never expires; a settled one ages out after 15 minutes.
+    expect(billKeyFor(bill(1), Date.now() + 16 * 60_000)).toBe(k1);
+    settleBillKey(bill(2));
+    expect(billKeyFor(bill(2), Date.now() + 16 * 60_000)).not.toBe(k2); // settled, older than 15 minutes
   });
 
   it('each press refreshes the key time, so a bill re-pressed for 20 minutes keeps it', () => {
@@ -251,5 +254,46 @@ describe('money review 22: a leg key is the line, not its position', () => {
     const creditKeys = new Set(sent.filter(([m]) => m === 'STORE_CREDIT').map(([, k]) => k));
     expect(cashKeys.size).toBe(1);
     expect(creditKeys.size).toBe(1);
+  });
+});
+
+describe('money review 24: a press never pays onto another bill', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.removeItem('ims_user');
+  });
+
+  it('a bill saved earlier with other items (409) posts no payment and is not complete', async () => {
+    seed();
+    mockedCreate.mockRejectedValueOnce(buildApiError({
+      isAxiosError: true, message: 'x', config: { method: 'post' },
+      response: { status: 409, data: { detail: { code: 'IDEMPOTENCY_BODY_MISMATCH',
+        message: 'This bill was already saved as order BV-001 with different items - open it on the Orders screen; nothing new was charged.' } } },
+    } as any));
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-e');
+    expect(res.ok).toBe(false);
+    expect(res.pending).toBeFalsy();
+    expect(res.error).toMatch(/already saved as order BV-001 with different items/);
+    expect(mockedAddPayment).not.toHaveBeenCalled();
+  });
+
+  it('a replayed order whose total is not this bill takes no payment', async () => {
+    seed();
+    mockedCreate.mockResolvedValueOnce({ order_id: 'ord-1', order_number: 'BV-001', grand_total: 700 } as any);
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-t');
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/BV-001 was saved with a total of ₹700/);
+    expect(mockedAddPayment).not.toHaveBeenCalled();
+  });
+
+  it('a bill made at another store is not pressed here', async () => {
+    seed();
+    usePOSStore.setState({ bill_store_id: 'S1' } as any);
+    localStorage.setItem('ims_user', JSON.stringify({ id: 'u1', activeStoreId: 'S2' }));
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'bill-s');
+    expect(res.ok).toBe(false);
+    expect(res.error).toMatch(/started at S1/);
+    expect(mockedCreate).not.toHaveBeenCalled();
+    usePOSStore.setState({ bill_store_id: null } as any);
   });
 });

@@ -132,7 +132,12 @@ def apply(db, sets, backup_path: str) -> int:
     ids = [c for c, _ in sets]
     rows = list(db["customers"].find({"customer_id": {"$in": ids}}, {"_id": 0, "customer_id": 1, "store_credit": 1}))
     os.makedirs(os.path.dirname(backup_path) or ".", exist_ok=True)
-    with open(backup_path, "w", encoding="utf-8") as f:
+    try:  # a backup is never overwritten: an earlier run stays undoable (money review 24)
+        f = open(backup_path, "x", encoding="utf-8")
+    except FileExistsError:
+        raise SystemExit(f"[REFUSED] backup {backup_path} already exists - pass a new --backup name. "
+                         "Nothing was changed.") from None
+    with f:
         json.dump(rows, f, default=str, indent=1)
     done = 0
     for cid, balance in sets:
@@ -152,7 +157,12 @@ def hand_set(db, sets, backup_path: str) -> int:
     ids = [c for c, _ in sets]
     rows = list(db["customers"].find({"customer_id": {"$in": ids}}, {"_id": 0, "customer_id": 1, "store_credit": 1}))
     os.makedirs(os.path.dirname(backup_path) or ".", exist_ok=True)
-    with open(backup_path, "w", encoding="utf-8") as f:
+    try:  # a backup is never overwritten: an earlier run stays undoable (money review 24)
+        f = open(backup_path, "x", encoding="utf-8")
+    except FileExistsError:
+        raise SystemExit(f"[REFUSED] backup {backup_path} already exists - pass a new --backup name. "
+                         "Nothing was changed.") from None
+    with f:
         json.dump(rows, f, default=str, indent=1)
     by_id = {r.get("customer_id"): r.get("store_credit") for r in rows}
     done = 0

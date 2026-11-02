@@ -77,6 +77,7 @@ describe('the lost-sale promise ends with its key', () => {
       localStorage.clear();
       const now = Date.now();
       billKeyFor('bill-A', now - BILL_KEY_TTL_MS + 1000); // one second of life left
+      settleBillKey('bill-A'); // a SETTLED key ages out; a pending one never does (money review 24)
       let msg: string | null = TILL_SALE_UNCONFIRMED;
       const set = (f: (m: string | null) => string | null) => { msg = f(msg); };
       renderHook(() => useUnconfirmedWording('bill-A', TILL_SALE_UNCONFIRMED, set));
@@ -86,6 +87,11 @@ describe('the lost-sale promise ends with its key', () => {
       msg = TILL_SALE_UNCONFIRMED;
       renderHook(() => useUnconfirmedWording('bill-gone', TILL_SALE_UNCONFIRMED, set));
       expect(msg).toBe(TILL_SALE_UNCONFIRMED_CHECK);
+      msg = TILL_SALE_UNCONFIRMED;
+      billKeyFor('bill-P', Date.now() - BILL_KEY_TTL_MS + 1000); // pending
+      renderHook(() => useUnconfirmedWording('bill-P', TILL_SALE_UNCONFIRMED, set));
+      vi.advanceTimersByTime(60 * 60_000);
+      expect(msg).toBe(TILL_SALE_UNCONFIRMED); // a pending key keeps its promise
     } finally {
       vi.useRealTimers();
     }
@@ -244,5 +250,46 @@ describe('money review 23: the key belongs to the bill, wherever and whenever it
     window.dispatchEvent(new CustomEvent(SIGNED_OUT_EVENT, { detail: { userId: 'u1', storeId: 'S1' } }));
     expect(heldBills().map((b: any) => [b.bill_key?.key, b.held_by])).toEqual([[key, 'u1']]);
     expect(usePOSStore.getState().cart).toEqual([]);
+  });
+});
+
+describe('money review 24: a pending key never expires, and the bill keeps its store', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    usePOSStore.setState({ store_id: '', salesperson_id: 'u1' } as any);
+    usePOSStore.getState().resetTransaction();
+  });
+  const SIXTEEN_MIN = 16 * 60_000;
+
+  it('a manual hold 16 minutes after a lost answer still carries the key, pending', () => {
+    putCart();
+    const key = billKeyFor(usePOSStore.getState().ensureBillId(), Date.now() - SIXTEEN_MIN);
+    usePOSStore.getState().parkCurrentSale({ heldBy: 'u1' });
+    expect(heldBills()[0].bill_key).toMatchObject({ key, pending: true });
+  });
+
+  it('the idle sign-out 16 minutes later parks it with its key', async () => {
+    const { autoParkForIdleLogout } = await import('../../../hooks/idleSignOut');
+    putCart();
+    const key = billKeyFor(usePOSStore.getState().ensureBillId(), Date.now() - SIXTEEN_MIN);
+    autoParkForIdleLogout('u1');
+    expect(heldBills().map((b: any) => b.bill_key?.key)).toEqual([key]);
+  });
+
+  it('a 401 sign-out 16 minutes later parks it with its key', async () => {
+    const { SIGNED_OUT_EVENT } = await import('../../../services/api/signOutEvent');
+    putCart();
+    const key = billKeyFor(usePOSStore.getState().ensureBillId(), Date.now() - SIXTEEN_MIN);
+    window.dispatchEvent(new CustomEvent(SIGNED_OUT_EVENT, { detail: { userId: 'u1', storeId: 'S1' } }));
+    expect(heldBills().map((b: any) => b.bill_key?.key)).toEqual([key]);
+  });
+
+  it('the bill records its store when it is made, and parks under it', () => {
+    localStorage.setItem('ims_user', JSON.stringify({ id: 'u1', activeStoreId: 'S1' }));
+    putCart();
+    billKeyFor(usePOSStore.getState().ensureBillId());
+    localStorage.setItem('ims_user', JSON.stringify({ id: 'u1', activeStoreId: 'S2' })); // switched
+    usePOSStore.getState().parkCurrentSale({ heldBy: 'u1', storeId: 'S2' });
+    expect(heldBills()[0].store_id).toBe('S1');
   });
 });
