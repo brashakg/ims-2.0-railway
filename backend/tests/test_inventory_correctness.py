@@ -440,33 +440,17 @@ class TestTransferInputValidation:
         with pytest.raises(Exception):
             tr_mod.TransferUpdate(shipping_cost=-10.0)
 
-    # --- F: quantity_received / quantity_damaged >= 0 ---
+    # --- F/G (S3): a receive is ONE scanned piece -- never a typed quantity ---
 
-    def test_negative_quantity_received_rejected(self):
-        """BUG F: negative quantity_received must be rejected."""
+    def test_a_receive_names_a_piece(self):
+        """BUG F (S3): a receive carries a scanned barcode, never a number that
+        could be negative or larger than the box."""
         with pytest.raises(Exception):
-            tr_mod.TransferItemReceive(
-                transfer_item_id="X", quantity_received=-1
-            )
+            tr_mod.TransferPieceReceive(barcode="")
 
-    def test_negative_quantity_damaged_rejected(self):
-        """BUG F: negative quantity_damaged must be rejected."""
-        with pytest.raises(Exception):
-            tr_mod.TransferItemReceive(
-                transfer_item_id="X", quantity_received=5, quantity_damaged=-1
-            )
-
-    # --- G: quantity_damaged <= quantity_received ---
-
-    def test_damaged_exceeds_received_rejected(self, monkeypatch):
-        """BUG G: damaged > received must be rejected at the endpoint level.
-        The endpoint guard raises HTTPException(400)."""
-        # Schema itself only enforces ge=0; the endpoint enforces damaged<=received.
-        item = tr_mod.TransferItemReceive(
-            transfer_item_id="X", quantity_received=2, quantity_damaged=5
-        )
-        assert item.quantity_damaged > item.quantity_received  # schema allows it...
-        # ...but the endpoint rejects it. Use a fake collection so the transfer is found.
+    def test_a_damaged_piece_needs_a_reason(self, monkeypatch):
+        """BUG G (S3): damaged-in-the-box needs a reason (it goes to quarantine
+        with it); the endpoint refuses before anything moves."""
         fake = _FakeColl()
         monkeypatch.setattr(tr_mod, "_transfers_coll", lambda: fake)
         transfer = {
@@ -496,18 +480,12 @@ class TestTransferInputValidation:
             asyncio.run(
                 tr_mod.receive_transfer(
                     "t-dmg",
-                    items_received=[
-                        tr_mod.TransferItemReceive(
-                            transfer_item_id="X",
-                            quantity_received=2,
-                            quantity_damaged=5,
-                        )
-                    ],
+                    tr_mod.TransferPieceReceive(barcode="BC-1", damaged=True),
                     current_user=_ADMIN,
                 )
             )
         assert exc_info.value.status_code == 400
-        assert "quantity_damaged" in exc_info.value.detail
+        assert "damaged" in exc_info.value.detail
 
     # --- H: self-transfer rejected ---
 

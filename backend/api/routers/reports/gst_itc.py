@@ -723,6 +723,74 @@ def _transfer_b2b_rows(bills):
     return rows, hsn_lines
 
 
+# S3 (CA answers 2026-10-23): a short delivery on an inter-GSTIN transfer is
+# the value received + a CREDIT NOTE on the transfer's tax invoice. The note
+# sits in vendor_bills beside the invoice (doc_type below, negative amounts),
+# so _transfer_outward_bills returns both; GSTR-1 files the invoice under B2B
+# and the note under CDNR, GSTR-3B nets the note like any credit note.
+TRANSFER_CREDIT_NOTE = "TRANSFER_CREDIT_NOTE"
+
+
+def _split_transfer_bills(bills):
+    """(invoices, credit notes) of the sender-side transfer bills. Pure."""
+    notes = [b for b in bills if isinstance(b, dict) and b.get("doc_type") == TRANSFER_CREDIT_NOTE]
+    invoices = [b for b in bills if isinstance(b, dict) and b.get("doc_type") != TRANSFER_CREDIT_NOTE]
+    return invoices, notes
+
+
+def _transfer_cdnr_rows(notes):
+    """GSTR-1 CDNR rows of the sender's transfer credit notes. Pure.
+
+    The stored note is negative (so sums over vendor_bills net it); a CDNR
+    row states the note's amounts as positives, like every other credit note
+    (reports gstr1 subtracts each row's hsnLines from the HSN summary)."""
+    rows = []
+    for b in notes:
+        mag = {k: round(-float(b.get(f) or 0), 2) for k, f in (
+            ("taxable", "taxable_amount"), ("cgst", "cgst_total"),
+            ("sgst", "sgst_total"), ("igst", "igst_total"))}
+        tax = round(mag["cgst"] + mag["sgst"] + mag["igst"], 2)
+        gstin = str(b.get("recipient_gstin") or "").strip()
+        state = str(b.get("supply_place_recipient") or "").strip() or gstin[:2]
+        hsn_lines = [
+            {
+                "hsn": str(ln.get("hsn") or "9004"),
+                "gst_rate": float(ln.get("gst_rate") or 0),
+                "taxable": round(-float(ln.get("taxable") or 0), 2),
+                "cgst": round(-float(ln.get("cgst") or 0), 2),
+                "sgst": round(-float(ln.get("sgst") or 0), 2),
+                "igst": round(-float(ln.get("igst") or 0), 2),
+            }
+            for ln in b.get("lines") or []
+            if isinstance(ln, dict)
+        ]
+        first = hsn_lines[0] if hsn_lines else {}
+        rows.append({
+            "refReference": str(b.get("invoice_number") or b.get("bill_number") or ""),
+            "creditNoteDate": str(b.get("invoice_date") or b.get("bill_date") or "")[:10],
+            "noteType": "C",
+            "customerName": str(b.get("recipient_name") or ""),
+            "customerGSTIN": gstin,
+            "customerState": state,
+            "placeOfSupply": state,
+            "placeOfSupplyCode": state,
+            "grossValue": round(mag["taxable"] + tax, 2),
+            "taxableValue": mag["taxable"],
+            "cgst": mag["cgst"],
+            "sgst": mag["sgst"],
+            "igst": mag["igst"],
+            "taxValue": tax,
+            "hsnCode": first.get("hsn", ""),
+            "gstRate": first.get("gst_rate", 0),
+            "hsnLines": hsn_lines,
+            "documentType": "STOCK_TRANSFER",
+            "originalInvoiceNumber": b.get("original_invoice_number"),
+            "originalInvoiceDate": str(b.get("original_invoice_date") or "")[:10],
+            "sourceTransferId": b.get("source_transfer_id"),
+        })
+    return rows
+
+
 def _return_supply(db, ret, store, cache) -> tuple:
     """``(interstate, place_code)`` of a refund: the head AND place of supply
     its SALE was filed under. One answer for both returns.

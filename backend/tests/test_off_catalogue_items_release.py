@@ -42,6 +42,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("MONGODB_URI", "")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import transfer_box as box  # noqa: E402
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pytest  # noqa: E402
@@ -1689,9 +1690,7 @@ def _transfer_out(world, monkeypatch, pid, n):
         "to_location_id": OTHER,
         "items": [{"product_id": pid, "quantity_requested": n}],
     }
-    _tr._apply_ship_stock_move(t)
-    t["items"][0]["quantity_received"] = n
-    _tr._apply_receive_stock_move(t)
+    box.move_units(_tr, t)
     moved = list(world.db.stock_units.find({"product_id": pid, "store_id": OTHER}))
     assert len(moved) == n and {u["source_type"] for u in moved} == {"TRANSFER"}, moved
 

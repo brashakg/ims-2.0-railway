@@ -364,6 +364,8 @@ async def delivery_challan_for_transfer(
             copy_marker=copy,
             overrides=load_overrides(entity, "tax_invoice"),
             auto_print=bool(auto_print),
+            eway_bill_number=str(transfer.get("eway_bill_number") or ""),
+            vehicle_number=str(transfer.get("vehicle_number") or ""),
         )
         return HTMLResponse(content=html)
 
