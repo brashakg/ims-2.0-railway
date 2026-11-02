@@ -1573,6 +1573,31 @@ def test_a_correction_after_a_stamped_piece_left_never_re_values_it():
     assert db.cogs_variances.count_documents({}) == 0
 
 
+
+@pytest.mark.parametrize("b1, b0, want", ((200, 100, 150.0), (90, 90, 90.0)))
+def test_a_correction_made_before_the_stamp_never_re_values_the_stamped_pieces(b1, b0, want):
+    """Round 12: G0 (10, accepted before S4, no bill) is NOT stamped yet when
+    accounts correct the average 100 -> 50; G1's S4 bill, 10 at `b1`, sets the
+    average; THEN the backfill stamps G0 at that average. The correction came
+    before G0's pieces entered the pool, so they are in it at the stamp: G0's
+    own bill at `b0` gives 150.00 (or 90.00) -- never 225.00 (or 110.00) from
+    trueing up from the pre-stamp correction's 50."""
+    from scripts import backfill_average_cost as bf
+
+    db = _db(100.0, cost_source="PURCHASE_INVOICE")
+    _receipt(db, "G0", 10, po_id="PO0", accepted_at="2026-10-20T10:00:00+00:00")
+    _pieces(db, 10, "G0", prefix="G0-")
+    _correct_at(db, 50, 100.0, -5)
+    _receipt(db, "G1", 10, accepted_at="2026-11-01T10:00:00+00:00")
+    _pieces(db, 10, "G1", prefix="G1-")
+    _accept(db, _bill("B1", 10, b1, grn_id="G1", created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == float(b1)
+    bf.apply(db, bf.plan(db), "RUN1")
+    assert db.grns.find_one({"grn_id": "G0"})[product_cost.PRE_S4_AVERAGES] == {"P": float(b1)}
+    _accept(db, _bill("B0", 10, b0, grn_id="G0", created_at="2026-11-01T00:00:00+00:00"))
+    assert _avg(db) == want
+
+
 class _Tasks:
     def __init__(self):
         self.collection = mongomock.MongoClient().t.tasks
