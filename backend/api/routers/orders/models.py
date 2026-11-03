@@ -44,6 +44,9 @@ class OrderCreate(BaseModel):
     # was silently dropped on create. Persist it so reports/audit can distinguish
     # a quick-POS sale from a full workshop-linked order.
     order_type: Optional[str] = Field(None, max_length=50)
+    # The store the till's bill was made at: a press in another store's
+    # session is refused (money review 25). Not part of the bill's identity.
+    bill_store_id: Optional[str] = Field(None, max_length=64)
     expected_delivery_days: int = Field(default=7, ge=1)
     # Phase 6.7 — delivery scheduling + order-level discount
     delivery_date: Optional[date] = None

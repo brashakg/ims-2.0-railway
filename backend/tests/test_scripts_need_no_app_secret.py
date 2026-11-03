@@ -41,6 +41,14 @@ bac.legacy_receipts(db)
 import scripts.backfill_bill_store_id as bbs
 assert bbs.backfill(db)["placed"] == 1
 
+# PR #1264's two backfills: their dry runs (and the loyalty one's balance
+# read through the delivery gate) run without the secret too.
+import scripts.backfill_store_credit_field as bsc
+bsc.plan(db)
+import scripts.backfill_loyalty_tender_claims as blt
+blt.plan(db)
+blt._balance_due({"order_id": "O1", "grand_total": 100.0, "payments": []})
+
 leaked = [m for m in sys.modules if m.startswith("api.routers")]
 assert not leaked, leaked
 print("OK")

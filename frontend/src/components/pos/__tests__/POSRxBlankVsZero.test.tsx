@@ -164,7 +164,7 @@ function renderPOS() {
 async function openRealRxForm() {
   act(() => {
     const s = usePOSStore.getState();
-    s.resetTransaction();
+    s.resetTransaction('discard');
     s.setStoreId('BV-BOK-01');
     s.setSalesperson('sp1', 'Sales Person');
     usePOSStore.setState({ customer: { id: 'c1', name: 'Asha', phone: '9000000001' } as any });
@@ -192,7 +192,7 @@ beforeEach(() => {
   localStorage.clear();
   H.createPrescription.mockReset();
   H.createPrescription.mockResolvedValue({ prescription_id: 'RX-PLANO-1' });
-  act(() => usePOSStore.getState().resetTransaction());
+  act(() => usePOSStore.getState().resetTransaction('discard'));
 });
 
 describe('a BLANK power is never persisted as a claim of zero', () => {

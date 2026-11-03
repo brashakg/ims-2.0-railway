@@ -15,24 +15,29 @@
 import { useState } from 'react';
 import { X } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { usePOSStore } from '../../stores/posStore';
+import { billIdOf, usePOSStore } from '../../stores/posStore';
+import { billKeyEntry } from './posBillKey';
 import { useHeldBills } from './useHeldBills';
 
 export function HeldBillsControls() {
   const { user } = useAuth();
   const store = usePOSStore();
-  const held = useHeldBills(store, user?.id || '');
+  const held = useHeldBills(store, user?.id || '', user?.activeStoreId);
   const [recallOpen, setRecallOpen] = useState(false);
+  // An emptied bill whose press is pending is still a bill: it can be held
+  // or discarded (money review 30).
+  const pendingLive = !!billKeyEntry(billIdOf(store))?.pending;
+  const hasBill = (store.cart || []).length > 0 || pendingLive;
 
   return (
     <>
       <button
         type="button"
         onClick={() => {
-          if ((store.cart || []).length === 0) return;
+          if (!hasBill) return;
           held.holdCurrentBill();
         }}
-        disabled={(store.cart || []).length === 0}
+        disabled={!hasBill}
         title="Put this bill aside and serve the next customer"
         className="inline-flex items-center gap-1.5 px-2.5 min-h-[44px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
       >
@@ -57,12 +62,15 @@ export function HeldBillsControls() {
       <button
         type="button"
         onClick={() => {
-          if ((store.cart || []).length === 0) return;
-          if (window.confirm('Discard this bill? Items and payments entered so far will be lost.')) {
-            store.resetTransaction();
+          if (!hasBill) return;
+          // A bill whose press was never confirmed may already be a sale (money review 24).
+          if (window.confirm(pendingLive
+            ? 'This bill may already be paid - check Orders first. Discard it anyway?'
+            : 'Discard this bill? Items and payments entered so far will be lost.')) {
+            store.resetTransaction('discard');
           }
         }}
-        disabled={(store.cart || []).length === 0}
+        disabled={!hasBill}
         title="Throw this bill away and start a new one"
         className="inline-flex items-center gap-1.5 px-2.5 min-h-[44px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
       >
@@ -104,9 +112,19 @@ export function HeldBillsControls() {
                         {Math.round(b.total || 0).toLocaleString('en-IN')}
                         {b.auto ? ' · parked automatically' : ''}
                       </div>
+                      {b.bill_key?.pending && (
+                        <div className="mt-1 inline-block rounded bg-red-100 px-1.5 py-0.5 text-[11px] font-semibold text-red-700">
+                          May already be paid - check Orders
+                        </div>
+                      )}
                     </div>
                     <button
-                      onClick={() => { held.discardBill(b.id); }}
+                      onClick={() => {
+                        // A bill whose press was never confirmed may already be a sale.
+                        if (b.bill_key?.pending && !window.confirm(
+                          'This bill may already be paid - check Orders first. Discard it anyway?')) return;
+                        held.discardBill(b.id);
+                      }}
                       className="min-h-[44px] px-2.5 rounded-lg border border-gray-200 text-[11px] text-gray-600 hover:bg-gray-50"
                     >
                       Discard

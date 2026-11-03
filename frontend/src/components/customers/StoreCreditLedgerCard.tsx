@@ -12,7 +12,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { formatDateTimeIST } from '../../utils/datetime';
 import clsx from 'clsx';
-import { getErrorMessage } from '../../utils/errorHandler';
+import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 
 interface Entry {
   entry_id: string; type: string; amount: number; delta: number;
@@ -20,6 +20,29 @@ interface Entry {
 }
 
 const CAN_EDIT = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'ACCOUNTANT'];
+// After an UNCLEAR answer the form's key is kept (sessionStorage, per customer
+// and mode) so closing and reopening the form -- or a reload -- resumes the
+// SAME line, never pays twice. Dropped once the ledger shows the line, on a
+// success, or once the server's reconciler window (PENDING_TIMEOUT_SECONDS,
+// 10 minutes) has passed and the line is settled either way.
+const KEEP_MS = 10 * 60_000;
+type Mode = 'issue' | 'redeem';
+interface Kept { key: string; at: number; amount: string; reason: string; note: string }
+const keptSlot = (cid: string, mode: Mode) => `ims_sc_key:${cid}:${mode}`;
+const lineIdOf = (cid: string, mode: Mode, key: string) =>
+  `${mode === 'issue' ? 'MANUAL' : 'MANUAL-REDEEM'}:${cid}:${key.slice(0, 80)}`;
+function readKept(cid: string, mode: Mode): Kept | null {
+  try {
+    const v = JSON.parse(sessionStorage.getItem(keptSlot(cid, mode)) || 'null');
+    if (v && v.key && typeof v.at === 'number' && Date.now() - v.at <= KEEP_MS) return v;
+    sessionStorage.removeItem(keptSlot(cid, mode));
+  } catch { /* storage unavailable: a fresh key */ }
+  return null;
+}
+function dropKept(cid: string, mode: Mode) {
+  try { sessionStorage.removeItem(keptSlot(cid, mode)); } catch { /* nothing kept */ }
+}
+
 const fc = (n: number) => `₹${Math.round(n || 0).toLocaleString('en-IN')}`;
 
 export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
@@ -30,19 +53,51 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
   const [balance, setBalance] = useState(0);
   const [entries, setEntries] = useState<Entry[]>([]);
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState<'issue' | 'redeem' | null>(null);
+  const [mode, setMode] = useState<Mode | null>(null);
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
   const [saving, setSaving] = useState(false);
+  // One Idempotency-Key per open form: pressing again (or a replay) resumes
+  // the same line on the server, never pays or debits twice. New on each
+  // open. Once a press has SENT it, the amount and reason are locked to what
+  // that key carried (the server refuses other content under it): only
+  // Cancel or a success closes the form and drops the key.
+  const [formKey, setFormKey] = useState('');
+  const [sent, setSent] = useState(false);
+  // The server's own sentence after an unconfirmed answer: the ONE
+  // instruction shown (no second, contradicting line of ours).
+  const [unclearNote, setUnclearNote] = useState<string | null>(null);
+  useEffect(() => {
+    const kept = mode ? readKept(customerId, mode) : null;
+    if (kept) {
+      // An earlier press of this form went unanswered: resume it, locked.
+      setFormKey(kept.key); setAmount(kept.amount); setReason(kept.reason);
+      setSent(true); setUnclearNote(kept.note);
+      return;
+    }
+    if (mode) setFormKey(typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    setSent(false);
+    setUnclearNote(null);
+  }, [mode, customerId]);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<Entry[] | null> => {
     setLoading(true);
     try {
       const r = await customerApi.getStoreCreditLedger(customerId);
       setBalance(r.balance || 0);
       setEntries(r.entries || []);
+      // A kept key whose line the ledger shows FINAL (landed, or voided)
+      // is settled: drop it. A line still ISSUING (being confirmed) keeps it.
+      const ids = new Set((r.entries || []).filter((e: Entry) => e.type !== 'ISSUING').map((e: Entry) => e.entry_id));
+      for (const m of ['issue', 'redeem'] as Mode[]) {
+        const kept = readKept(customerId, m);
+        if (kept && ids.has(lineIdOf(customerId, m, kept.key))) dropKept(customerId, m);
+      }
+      return r.entries || [];
     } catch {
       /* fail-soft: leave empty */
+      return null;
     } finally {
       setLoading(false);
     }
@@ -54,14 +109,53 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
     const amt = parseFloat(amount);
     if (!amt || amt <= 0) { toast.error('Enter a valid amount'); return; }
     setSaving(true);
+    setSent(true);
     try {
-      if (mode === 'issue') await customerApi.issueStoreCredit(customerId, amt, reason);
-      else await customerApi.redeemStoreCredit(customerId, amt, reason);
+      if (mode === 'issue') await customerApi.issueStoreCredit(customerId, amt, reason, undefined, formKey);
+      else await customerApi.redeemStoreCredit(customerId, amt, reason, undefined, formKey);
       toast.success(mode === 'issue' ? 'Credit issued' : 'Credit redeemed');
+      if (mode) dropKept(customerId, mode);
       setMode(null); setAmount(''); setReason('');
       await load();
     } catch (e: any) {
-      toast.error(getErrorMessage(e, 'Action failed'));
+      const status = getErrorStatus(e);
+      const msg = getErrorMessage(e, 'Action failed');
+      if (status === 409 && unclearNote && mode) {
+        // A definite answer to the earlier unclear press (money review 18):
+        // the ledger says how it ended. Voided -- nothing was taken: the kept
+        // key is dropped and the form unlocks with a fresh one. Landed: that
+        // press is done, so the form closes. Still settling: stays locked.
+        const line = (await load() || []).find((x) => x.entry_id === lineIdOf(customerId, mode, formKey));
+        if (line?.type === 'VOID') {
+          dropKept(customerId, mode);
+          setFormKey(typeof crypto !== 'undefined' && 'randomUUID' in crypto
+            ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+          setUnclearNote(null);
+          setSent(false);
+          toast.error(msg);
+          return;
+        }
+        if (line && line.type !== 'ISSUING') {
+          dropKept(customerId, mode);
+          toast.error(msg);
+          setMode(null); setAmount(''); setReason('');
+          return;
+        }
+      }
+      if (status !== undefined && status < 500 && !unclearNote) {
+        // A definite refusal: nothing was recorded under this key, so the
+        // form unlocks for a correction.
+        setSent(false);
+        toast.error(msg);
+      } else {
+        setUnclearNote(msg); // it may have landed: locked, the server's words only
+        if (mode) {
+          try {
+            sessionStorage.setItem(keptSlot(customerId, mode), JSON.stringify(
+              { key: formKey, at: readKept(customerId, mode)?.at ?? Date.now(), amount, reason, note: msg } satisfies Kept));
+          } catch { /* storage unavailable: the open form still holds the key */ }
+        }
+      }
     } finally {
       setSaving(false);
     }
@@ -80,8 +174,11 @@ export function StoreCreditLedgerCard({ customerId }: { customerId: string }) {
         mode ? (
           <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200 space-y-2">
             <div className="text-xs font-medium text-gray-600">{mode === 'issue' ? 'Issue credit' : 'Redeem credit'}</div>
-            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Amount" className="input-field" />
-            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (e.g. return CN-123)" className="input-field" />
+            <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} placeholder="Amount"
+              className="input-field" readOnly={sent} aria-readonly={sent} />
+            <input value={reason} onChange={(e) => setReason(e.target.value)} placeholder="Reason (e.g. return CN-123)"
+              className="input-field" readOnly={sent} aria-readonly={sent} />
+            {unclearNote && <p role="status" className="text-xs text-amber-700">{unclearNote}</p>}
             <div className="flex gap-2 justify-end">
               <button onClick={() => { setMode(null); setAmount(''); setReason(''); }} className="px-3 py-1.5 text-xs rounded-md text-gray-600 hover:bg-gray-100">Cancel</button>
               <button onClick={submit} disabled={saving} className="px-3 py-1.5 text-xs rounded-md bg-bv-red-600 text-white disabled:opacity-50">

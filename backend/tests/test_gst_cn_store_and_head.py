@@ -290,6 +290,14 @@ class _FakeColl:
         self.docs.append(dict(doc))
         return type("R", (), {"acknowledged": True})()
 
+    def update_one(self, query, update, upsert=False):
+        # $set only: a credit row is marked applied once its balance moved (#1264).
+        for d in self.docs:
+            if all(d.get(k) == v for k, v in (query or {}).items()):
+                d.update((update or {}).get("$set") or {})
+                return type("R", (), {"matched_count": 1, "modified_count": 1})()
+        return type("R", (), {"matched_count": 0, "modified_count": 0})()
+
     def find(self, query=None, projection=None):
         q = query or {}
         return iter(

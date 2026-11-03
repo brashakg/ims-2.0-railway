@@ -143,7 +143,7 @@ function renderAt(path: string) {
 beforeEach(() => {
   localStorage.clear();
   act(() => {
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     // The surfaces fall back to store.store_id when the user has no active
     // store -- force it empty so every surface takes its no-store guard branch.
     usePOSStore.getState().setStoreId('');

@@ -1,13 +1,16 @@
 // ============================================================================
 // IMS 2.0 - Refund Policy (F27) — Settings section
 // ============================================================================
-// A focused editor for the configurable refund-approval matrix (DECISIONS sec 6):
-//   - three approval-threshold tiers: auto-approve below / needs ADMIN above /
-//     needs SUPERADMIN above (rupee inputs; stored as money_paisa policy keys)
-//   - the refund approval-matrix master switch (gate is DARK by default)
+// The refund approval rule as it really runs (owner ruling 2026-10-23): when a
+// bill's refunds would go above Rs 2,000 in total, cashier / sales staff need a
+// store manager's (or higher) PIN approval. Shown, not edited here:
+//   - the rule's master switch (ON; only a Superadmin may change it -- the
+//     server refuses anyone else, so it is only written when changed)
 //   - the original-tender hard-lock toggle (refunds always go back to the
 //     original payment method)
-// plus the approver's own PIN (reused from ApprovalPinSection).
+// plus the approver's own PIN (reused from ApprovalPinSection). The old
+// refund.tier.* amount bands no longer decide customer refunds and are not
+// shown here (they remain under Policy Matrix for other approval types).
 //
 // REUSE: this is a thin view over the existing E2 policy engine — every value is
 // read/written through policiesApi (/settings/policies/*). It defines NO new
@@ -18,45 +21,42 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import {
-  RotateCcw, Save, Loader2, AlertTriangle, ShieldCheck, Lock, Info,
+  RotateCcw, Save, Loader2, ShieldCheck, Lock, Info,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { policiesApi } from '../../services/api';
 import { ApprovalPinSection } from '../../components/settings/ApprovalPinSection';
+import { useAuth } from '../../context/AuthContext';
+import { getErrorMessage } from '../../utils/errorHandler';
 
-// The five policy keys this page edits (the three money tiers + two flags).
-const K_AUTO = 'refund.tier.auto_below';
-const K_ADMIN = 'refund.tier.admin_above';
-const K_SUPER = 'refund.tier.super_above';
+// The two policy keys this page edits.
 const K_MATRIX = 'refund.matrix_enabled';
 const K_TENDER = 'refund.original_tender_enforce';
 
 interface FormState {
-  autoBelow: number;   // rupees
-  adminAbove: number;  // rupees
-  superAbove: number;  // rupees
   matrixEnabled: boolean;
   tenderEnforce: boolean;
 }
 
 const DEFAULTS: FormState = {
-  autoBelow: 500,
-  adminAbove: 2000,
-  superAbove: 10000,
-  matrixEnabled: false,
+  matrixEnabled: true,
   tenderEnforce: true,
 };
 
-/** money_paisa policy values are integer paise; the UI works in rupees. */
-const paiseToRupees = (v: unknown): number =>
-  typeof v === 'number' && Number.isFinite(v) ? Math.round(v) / 100 : NaN;
-const rupeesToPaise = (rupees: number): number => Math.round(rupees * 100);
-
 export function RefundPolicySection() {
   const toast = useToast();
+  const { user } = useAuth();
+  // The saved-matrix switch is the owner's: the server refuses anyone else.
+  const isSuperadmin = (user?.roles || []).includes('SUPERADMIN');
   const [form, setForm] = useState<FormState>(DEFAULTS);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // True only once the server's current values were read. A Save from a form
+  // that never loaded them would write guesses -- e.g. switch the Rs 2,000
+  // manager-approval rule OFF -- so it is refused.
+  const [loaded, setLoaded] = useState(false);
+  // What the server held: the switch is written only when it was changed.
+  const [initial, setInitial] = useState<FormState>(DEFAULTS);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -65,18 +65,15 @@ export function RefundPolicySection() {
       const res = await policiesApi.getAll('global');
       const pol = res?.policies || {};
       const next: FormState = { ...DEFAULTS };
-      const a = paiseToRupees(pol[K_AUTO]?.value);
-      const ad = paiseToRupees(pol[K_ADMIN]?.value);
-      const su = paiseToRupees(pol[K_SUPER]?.value);
-      if (!Number.isNaN(a)) next.autoBelow = a;
-      if (!Number.isNaN(ad)) next.adminAbove = ad;
-      if (!Number.isNaN(su)) next.superAbove = su;
       if (typeof pol[K_MATRIX]?.value === 'boolean') next.matrixEnabled = pol[K_MATRIX].value;
       if (typeof pol[K_TENDER]?.value === 'boolean') next.tenderEnforce = pol[K_TENDER].value;
       setForm(next);
+      setInitial(next);
+      setLoaded(true);
     } catch {
       // Keep code defaults on a read error (page never blanks out).
       setForm(DEFAULTS);
+      setLoaded(false);
     } finally {
       setLoading(false);
     }
@@ -86,33 +83,23 @@ export function RefundPolicySection() {
     load();
   }, [load]);
 
-  // Ordering invariant mirrors the backend (auto < admin < super) so a save can
-  // never strand a tier; surfaced inline rather than only as a server 400.
-  const ordered =
-    form.autoBelow > 0 &&
-    form.adminAbove > form.autoBelow &&
-    form.superAbove > form.adminAbove;
-
   const save = async () => {
-    if (!ordered) {
-      toast.error('Thresholds must increase: auto-approve < admin < superadmin.');
+    if (!loaded) {
+      toast.error('The current refund policy could not be loaded, so nothing was saved. Reload the page and try again.');
       return;
     }
     setSaving(true);
     try {
       // Write to the GLOBAL scope (scope=null -> global on the backend).
-      await Promise.all([
-        policiesApi.set(K_AUTO, rupeesToPaise(form.autoBelow), null),
-        policiesApi.set(K_ADMIN, rupeesToPaise(form.adminAbove), null),
-        policiesApi.set(K_SUPER, rupeesToPaise(form.superAbove), null),
-        policiesApi.set(K_MATRIX, form.matrixEnabled, null),
-        policiesApi.set(K_TENDER, form.tenderEnforce, null),
-      ]);
+      const writes = [policiesApi.set(K_TENDER, form.tenderEnforce, null)];
+      if (form.matrixEnabled !== initial.matrixEnabled) {
+        writes.push(policiesApi.set(K_MATRIX, form.matrixEnabled, null));
+      }
+      await Promise.all(writes);
       toast.success('Refund policy saved.');
       await load();
     } catch (e) {
-      const msg = (e instanceof Error && e.message) || 'Failed to save refund policy';
-      toast.error(msg);
+      toast.error(getErrorMessage(e, 'Failed to save refund policy'));
     } finally {
       setSaving(false);
     }
@@ -129,46 +116,18 @@ export function RefundPolicySection() {
 
   return (
     <div className="space-y-4">
-      {/* Approval thresholds */}
+      {/* The rule as it runs */}
       <div className="card">
         <div className="flex items-center gap-2 mb-1">
           <RotateCcw className="w-5 h-5 text-gray-500" />
-          <h2 className="text-lg font-semibold text-gray-900">Refund Approval Thresholds</h2>
+          <h2 className="text-lg font-semibold text-gray-900">Refund Approval Rule</h2>
         </div>
-        <p className="text-sm text-gray-500 mb-4">
-          Who can clear a refund depends on its amount. Below the auto-approve
-          floor a cashier/manager can refund without sign-off; above each tier a
-          higher role must PIN-approve. Set at HQ (global); per-store overrides
-          live under <strong>Policy Matrix</strong>.
+        <p className="text-sm text-gray-600">
+          When a bill&apos;s refunds would go above <strong>₹2,000 in total</strong> (everything
+          already refunded on that bill plus this refund), a cashier or sales staff member needs a
+          store manager (or higher) to approve it with their PIN. Store managers and HQ are not
+          gated. The rule is the owner's and always applies - no one can switch it off here.
         </p>
-
-        <div className="grid grid-cols-1 tablet:grid-cols-3 gap-4">
-          <RupeeField
-            label="Auto-approve below (₹)"
-            help="Refunds strictly under this need no approval."
-            value={form.autoBelow}
-            onChange={(v) => setForm((f) => ({ ...f, autoBelow: v }))}
-          />
-          <RupeeField
-            label="Needs ADMIN above (₹)"
-            help="At/above this an Admin (or Area Manager) must approve."
-            value={form.adminAbove}
-            onChange={(v) => setForm((f) => ({ ...f, adminAbove: v }))}
-          />
-          <RupeeField
-            label="Needs SUPERADMIN above (₹)"
-            help="At/above this only a Superadmin can approve."
-            value={form.superAbove}
-            onChange={(v) => setForm((f) => ({ ...f, superAbove: v }))}
-          />
-        </div>
-
-        {!ordered && (
-          <p className="mt-3 text-xs text-red-600 flex items-center gap-1">
-            <AlertTriangle className="w-3.5 h-3.5" />
-            Thresholds must increase: auto-approve &lt; admin &lt; superadmin.
-          </p>
-        )}
       </div>
 
       {/* Master switch + original tender */}
@@ -177,9 +136,14 @@ export function RefundPolicySection() {
         <div className="space-y-3">
           <ToggleRow
             icon={<ShieldCheck className="w-5 h-5 text-gray-500" />}
-            title="Refund approval matrix enabled"
-            desc="When ON, refunds above a tier require a PIN-approved request before they are recorded. When OFF (default), refunds are not gated."
+            title="Apply the saved stricter refund matrix"
+            desc={
+              isSuperadmin
+                ? "ON: a saved, stricter refund matrix applies on top of the owner's ₹2,000 rule. OFF never loosens the owner's rule."
+                : "Only a Superadmin can change this. The owner's ₹2,000 rule applies either way."
+            }
             checked={form.matrixEnabled}
+            disabled={!isSuperadmin}
             onChange={(v) => setForm((f) => ({ ...f, matrixEnabled: v }))}
           />
           <ToggleRow
@@ -194,16 +158,15 @@ export function RefundPolicySection() {
         {!form.matrixEnabled && (
           <p className="mt-3 text-xs text-gray-500 flex items-center gap-1">
             <Info className="w-3.5 h-3.5" />
-            The approval matrix is currently OFF — thresholds are saved but not
-            enforced until you enable it. The original-tender lock applies
-            independently of this switch.
+            No saved stricter matrix applies — the owner&apos;s ₹2,000 rule still does.
+            The original-tender lock applies independently of this switch.
           </p>
         )}
 
         <button
           type="button"
           onClick={save}
-          disabled={saving || !ordered}
+          disabled={saving}
           className="btn-primary mt-4"
         >
           {saving ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
@@ -217,48 +180,20 @@ export function RefundPolicySection() {
   );
 }
 
-function RupeeField({
-  label,
-  help,
-  value,
-  onChange,
-}: {
-  label: string;
-  help: string;
-  value: number;
-  onChange: (v: number) => void;
-}) {
-  return (
-    <div>
-      <label className="block text-sm font-medium text-gray-600 mb-1">{label}</label>
-      <div className="relative">
-        <span className="absolute left-3 top-1/2 -translate-y-1/2 text-sm text-gray-500">₹</span>
-        <input
-          type="number"
-          min={0}
-          step={1}
-          value={Number.isFinite(value) ? value : 0}
-          onChange={(e) => onChange(Math.max(0, Number(e.target.value) || 0))}
-          className="input-field pl-7"
-        />
-      </div>
-      <p className="text-xs text-gray-400 mt-1">{help}</p>
-    </div>
-  );
-}
-
 function ToggleRow({
   icon,
   title,
   desc,
   checked,
   onChange,
+  disabled = false,
 }: {
   icon: React.ReactNode;
   title: string;
   desc: string;
   checked: boolean;
   onChange: (v: boolean) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="flex items-start justify-between gap-4 p-3 bg-gray-50 rounded-lg">
@@ -274,8 +209,9 @@ function ToggleRow({
         role="switch"
         aria-checked={checked}
         aria-label={title}
+        disabled={disabled}
         onClick={() => onChange(!checked)}
-        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
           checked ? 'bg-blue-600' : 'bg-gray-300'
         }`}
       >

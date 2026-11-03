@@ -53,7 +53,7 @@ const answer = (sellable: Record<string, number | null>, store_id = 'BV-BOK-01')
   getSellable.mockResolvedValue({ store_id, sellable, canonical: {} });
 
 beforeEach(() => {
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
   getSellable.mockReset();
   getProducts.mockReset();
 });

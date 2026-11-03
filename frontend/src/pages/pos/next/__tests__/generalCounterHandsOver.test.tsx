@@ -127,7 +127,7 @@ const completionScreen = (delivered: boolean) =>
   screen.getByText(`counter-complete-screen:o-1:delivered=${delivered}`);
 
 beforeEach(() => {
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
   submitPosOrder.mockReset().mockResolvedValue({ ok: true, orderId: 'o-1', orderNumber: 'ORD-1' });
   markReady.mockReset().mockResolvedValue({ order_id: 'o-1', status: 'READY' });
   deliverOrder.mockReset().mockResolvedValue({ order_id: 'o-1', status: 'DELIVERED' });

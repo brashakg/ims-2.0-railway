@@ -5,6 +5,7 @@
 import axios from 'axios';
 import type { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { _storedActivity, IDLE_LOGIN_PATH } from '../../hooks/useIdleLogout';
+import { SIGNED_OUT_EVENT } from './signOutEvent';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? 'https://ims-20-railway-production.up.railway.app/api/v1' : '/api/v1');
@@ -42,20 +43,26 @@ const RETRY_DELAY_MS = 1000;
 // Helper function for delay
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Check if error is retryable (only 5xx server errors and rate limiting)
-// Do NOT retry network/CORS errors - they won't be fixed by retrying
-const isRetryableError = (error: AxiosError): boolean => {
+// Methods that only READ: replaying one can never move money twice.
+const SAFE_METHODS = ['get', 'head', 'options'];
+
+// Check if error is retryable. Do NOT retry network/CORS errors - they won't
+// be fixed by retrying. A 5xx is retried ONLY for a read: a write that failed
+// with a 5xx may already have landed (PR #1264: an "unclear" store credit
+// answers 503 "do NOT redo" -- an automatic replay redid it). A 429 means the
+// server refused the request before doing anything, so any method retries.
+export const isRetryableError = (error: AxiosError): boolean => {
   // CORS errors have no response - don't retry these
   if (!error.response) {
     return false;
   }
-  // Server errors (5xx) - these might be temporary
-  if (error.response.status >= 500 && error.response.status < 600) {
-    return true;
-  }
   // Rate limiting (429) - retry with backoff
   if (error.response.status === 429) {
     return true;
+  }
+  // Server errors (5xx) - these might be temporary; reads only
+  if (error.response.status >= 500 && error.response.status < 600) {
+    return SAFE_METHODS.includes(String(error.config?.method || 'get').toLowerCase());
   }
   // Don't retry other errors (401, 403, 404, CORS, etc.)
   return false;
@@ -308,6 +315,17 @@ const isPushTimeout = (error: AxiosError): boolean =>
 const isPurgeTimeout = (error: AxiosError): boolean =>
   isTimeout(error) && String(error.config?.url || '').includes('/catalog/products/bulk-purge');
 
+// A write (anything but GET/HEAD/OPTIONS) whose answer was lost -- a 5xx that
+// is not a deliberate 503 stop, or no response at all -- may already have
+// landed: "try again" is the second press that does it twice (money review 12).
+export const WRITE_UNCONFIRMED_MESSAGE =
+  'The server did not confirm this - it may already be saved. Reload and check before pressing again.';
+// POSTs that only READ (a price quote) or sign in: nothing to have "saved".
+const READ_LIKE_POSTS = [/\/auth\//, /\/orders\/quote(\?|$)/, /\/returns\/quote(\?|$)/];
+const isWrite = (error: AxiosError): boolean =>
+  !SAFE_METHODS.includes(String(error.config?.method || 'get').toLowerCase())
+  && !READ_LIKE_POSTS.some((re) => re.test(String(error.config?.url || '')));
+
 // Pure transform: axios error -> the ApiError components actually receive.
 // Exported so tests reject fixtures through the REAL production transform
 // instead of hand-built axios shapes the client never delivers (the
@@ -327,7 +345,9 @@ export function buildApiError(
       ? PUSH_TIMEOUT_MESSAGE
       : isPurgeTimeout(error)
         ? PURGE_TIMEOUT_MESSAGE
-        : 'Network error. Please check your internet connection and try again.';
+        : isWrite(error)
+          ? WRITE_UNCONFIRMED_MESSAGE
+          : 'Network error. Please check your internet connection and try again.';
   } else if (error.response.status >= 500) {
     // 503 is the only 5xx this API raises DELIBERATELY: it is a safety stop, not
     // a crash. Goods-receipt acceptance uses it to say "N units were received
@@ -348,7 +368,9 @@ export function buildApiError(
     message =
       typeof safeStopDetail === 'string' && safeStopDetail.trim()
         ? safeStopDetail
-        : 'Server error. Please try again in a moment.';
+        : isWrite(error)
+          ? WRITE_UNCONFIRMED_MESSAGE
+          : 'Server error. Please try again in a moment.';
   } else {
     // Handle various API error formats (detail can be string or array)
     const rawDetail = error.response?.data?.detail;
@@ -392,6 +414,13 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
   if (error.response?.status === 401) {
     // Clear auth state on unauthorized (refresh already failed or was not
     // possible by the time we get here -> same logout flow as before).
+    // The POS goes through THE one sign-out step (a pending bill is parked,
+    // then the draft cleared) -- by event, as the store cannot be imported
+    // here without an import cycle (money review 23).
+    try {
+      const u = JSON.parse(localStorage.getItem('ims_user') || 'null');
+      window.dispatchEvent(new CustomEvent(SIGNED_OUT_EVENT, { detail: { userId: u?.id, storeId: u?.activeStoreId } }));
+    } catch { /* never block the sign-out */ }
     localStorage.removeItem(TOKEN_STORAGE_KEY);
     localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
     localStorage.removeItem('ims_user');

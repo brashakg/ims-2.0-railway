@@ -116,7 +116,7 @@ describe('the delivery counter runs the shared POS till', () => {
     addPayment.mockReset().mockResolvedValue({});
     deliverWithPayment.mockReset().mockResolvedValue({});
     completedProps.mockReset();
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
   });
 
   it('collects a SPLIT tender — two legs, both reaching the server', async () => {

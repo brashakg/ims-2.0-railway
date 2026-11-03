@@ -150,7 +150,7 @@ function renderPOS() {
 function seedPaidSale(methods: Array<{ method: string; amount?: number }>) {
   act(() => {
     const s = usePOSStore.getState();
-    s.resetTransaction();
+    s.resetTransaction('discard');
     s.setStoreId('BV-BOK-01');
     s.setSalesperson('sp1', 'Sales Person');
     usePOSStore.setState({ customer: { id: 'c1', name: 'Asha', phone: '9000000001' } as any });
@@ -177,7 +177,7 @@ beforeEach(() => {
   localStorage.clear();
   createOrderMock.mockClear();
   addPaymentMock.mockClear();
-  act(() => usePOSStore.getState().resetTransaction());
+  act(() => usePOSStore.getState().resetTransaction('discard'));
 });
 
 describe('per-sale cash capture wiring (owner ruling 2026-08-25)', () => {

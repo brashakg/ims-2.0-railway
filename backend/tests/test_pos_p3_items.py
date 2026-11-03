@@ -801,10 +801,12 @@ class TestPOS14ReturnIdempotencyBehaviour:
         Meanwhile ``verified_source`` makes this check fail LOUDLY rather than
         silently degrade if getsource ever hands back another function's body.
         """
-        from api.routers.returns import create_return
+        # create_return is now a thin wrapper (it holds the per-bill refund
+        # reservation, #1264); the body that writes the row is _create_return.
+        from api.routers.returns import _create_return
         from source_guard import verified_source
 
-        src = verified_source(create_return, min_lines=50)
+        src = verified_source(_create_return, min_lines=50)
         assert '"idempotency_key"' in src or "'idempotency_key'" in src, (
             "create_return must persist idempotency_key on the return doc"
         )

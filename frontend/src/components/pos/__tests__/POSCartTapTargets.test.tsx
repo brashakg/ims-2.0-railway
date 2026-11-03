@@ -10,7 +10,7 @@ import { CartSidebar } from '../POSCart';
 import { usePOSStore } from '../../../stores/posStore';
 
 beforeEach(() => {
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
   usePOSStore.getState().addToCart({
     id: 'p-1',
     product_id: 'p-1',

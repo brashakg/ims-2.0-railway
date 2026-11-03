@@ -47,3 +47,33 @@ export const canCloseHandover = (user: {
  */
 export const canMarkDelivered = (status: string | null | undefined): boolean =>
   status === 'READY' || status === 'SHIPPED';
+
+/**
+ * Roles the server lets TAKE MONEY on a bill. MUST mirror `PAYMENT_ROLES` in
+ * backend/api/routers/orders/_shared.py (the till roles, every order creator,
+ * and ACCOUNTANT for credit-bill collection). The Orders screen hides
+ * Collect Payment from everyone else, so it never offers a button that 403s.
+ */
+export const PAYMENT_ROLES = [
+  'SUPERADMIN',
+  'ADMIN',
+  'AREA_MANAGER',
+  'STORE_MANAGER',
+  'SALES_CASHIER',
+  'SALES_STAFF',
+  'CASHIER',
+  'OPTOMETRIST',
+  'ACCOUNTANT',
+] as const;
+
+export const canTakePayment = (user: {
+  roles?: string[] | null;
+  activeRole?: string | null;
+} | null | undefined): boolean => {
+  if (!user) return false;
+  const held = new Set<string>([
+    ...((user.roles as string[] | undefined) ?? []),
+    ...(user.activeRole ? [user.activeRole] : []),
+  ]);
+  return PAYMENT_ROLES.some((r) => held.has(r));
+};

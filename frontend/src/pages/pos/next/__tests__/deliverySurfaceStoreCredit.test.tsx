@@ -79,7 +79,7 @@ const loadOrder = async () => {
 };
 
 beforeEach(() => {
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
   getOrder.mockReset();
   getStoreCreditLedger.mockReset().mockResolvedValue({ customer_id: 'c-1', balance: 750 });
 });

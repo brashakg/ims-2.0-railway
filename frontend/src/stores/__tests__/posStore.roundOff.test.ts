@@ -42,7 +42,7 @@ const rs265Cart = () => {
   usePOSStore.getState().setCartDiscount(2.5, 'festival offer');
 };
 
-beforeEach(() => usePOSStore.getState().resetTransaction());
+beforeEach(() => usePOSStore.getState().resetTransaction('discard'));
 
 describe('the till collects the server-rounded bill and never rounds one itself', () => {
   it('without a quote the total is the unrounded estimate and there is no round off', () => {

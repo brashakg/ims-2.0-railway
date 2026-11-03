@@ -102,7 +102,7 @@ class CustomerRepository(BaseRepository):
     # the result as "insufficient".
     DEBIT_NO_ATOMIC = "__no_atomic__"
 
-    def try_debit_store_credit(self, customer_id: str, amount: float):
+    def try_debit_store_credit(self, customer_id: str, amount: float, guard_ref: str = None):
         """Atomically debit `amount` of store credit, guard-in-the-filter
         (mirrors the voucher redeem). The decrement runs ONLY when the filter
         still sees store_credit >= amount at modify time, so two concurrent
@@ -135,9 +135,14 @@ class CustomerRepository(BaseRepository):
         # so a minimal/mock collection still falls back to the legacy snapshot path.
         from api.services import money_guard
 
+        # guard_ref (a manual redeem form's key): the debit lands at most
+        # once -- the ref rides in the same write, and a second press's filter
+        # no longer matches (customers.redeem_store_credit_atomic).
         res = money_guard.debit(
             self.collection, "STORE_CREDIT", customer_id, amt,
             reason="redeem", record_ledger=False,
+            guard_extra={"store_credit_refs": {"$ne": guard_ref}} if guard_ref else None,
+            push_extra={"store_credit_refs": guard_ref} if guard_ref else None,
         )
         if res.ok:
             return self.find_by_id(customer_id)

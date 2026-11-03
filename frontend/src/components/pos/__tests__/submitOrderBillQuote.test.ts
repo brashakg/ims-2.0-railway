@@ -35,7 +35,7 @@ const SERVER_BILL = {
 /** The panel's cart, with no quote taken yet, and `cash` tendered. */
 function rs265Cart(cash: number) {
   const s = usePOSStore.getState();
-  s.resetTransaction();
+  s.resetTransaction('discard');
   s.addToCart({
     product_id: 'p-frame', name: 'Frame', sku: 'S', category: 'FRAME',
     unit_price: 265, mrp: 265, quantity: 1, is_optical: false,
@@ -118,7 +118,7 @@ describe('Pay checks the tenders against the server-rounded bill', () => {
   it('shows the paise when a payment taken from the estimate is over the rounded bill', async () => {
     // Cash added at the till's estimate (1000.49) before the server's Rs 1000.
     const s = usePOSStore.getState();
-    s.resetTransaction();
+    s.resetTransaction('discard');
     s.addToCart({
       product_id: 'p-frame', name: 'Frame', sku: 'S', category: 'FRAME',
       unit_price: 1000.49, mrp: 1000.49, quantity: 1, is_optical: false,

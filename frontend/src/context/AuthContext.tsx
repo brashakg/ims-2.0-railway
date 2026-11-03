@@ -343,7 +343,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       localStorage.removeItem('ims_login_time');
       localStorage.removeItem('ims_active_module');
       // Clear POS state to prevent data leaking between users
-      try { usePOSStore.getState().clearAllOnLogout(); } catch { /* ignore if store not ready */ }
+      try { usePOSStore.getState().clearAllOnLogout(state.user?.id, state.user?.activeStoreId); } catch { /* ignore if store not ready */ }
       dispatch({ type: 'LOGOUT' });
       // Every screen's cached server data goes too, so the next person on a
       // shared tablet is never shown the last person's (tasks or anything
@@ -402,6 +402,20 @@ export function AuthProvider({ children }: AuthProviderProps) {
     if (!(state.user?.storeIds?.includes(storeId) || userSeesAllStores(state.user?.roles))) {
       return;
     }
+
+    // A bill whose press is pending is parked under ITS store before the
+    // switch (its key replays only there), then the till is cleared
+    // (money review 24).
+    try {
+      const pos = usePOSStore.getState();
+      const reason = pos.parkIfPending(state.user?.id);
+      if (!reason) {
+        // It could not be put aside: the switch is refused, the bill stays.
+        window.alert('Could not put this bill aside - it may already be paid. It stays on the till; check Orders.');
+        return;
+      }
+      if (reason === 'parked') pos.resetTransaction('parked');
+    } catch { /* never block a store switch */ }
 
     // Optimistic local update for a snappy switch.
     dispatch({ type: 'SET_ACTIVE_STORE', payload: storeId });

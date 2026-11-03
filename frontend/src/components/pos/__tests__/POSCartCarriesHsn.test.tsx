@@ -174,7 +174,7 @@ function renderPOS() {
 function seedSale() {
   act(() => {
     const s = usePOSStore.getState();
-    s.resetTransaction();
+    s.resetTransaction('discard');
     s.setStoreId('BV-BOK-01');
     s.setSalesperson('sp1', 'Sales Person');
     usePOSStore.setState({ customer: { id: 'c1', name: 'Asha', phone: '9000000001' } as never });
@@ -187,7 +187,7 @@ beforeEach(async () => {
   scanMock.mockReset();
   apiGet.mockResolvedValue({ data: GST });
   await loadHsnRates();
-  act(() => usePOSStore.getState().resetTransaction());
+  act(() => usePOSStore.getState().resetTransaction('discard'));
 });
 
 describe('POS add-to-cart', () => {

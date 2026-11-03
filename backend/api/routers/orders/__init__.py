@@ -79,6 +79,8 @@ from ._shared import (  # noqa: F401
     _get_db,
     POS_WRITE_ROLES,
     HANDOVER_ROLES,
+    PAYMENT_ROLES,
+    LOYALTY_TENDER_ROLES,
     _gst_rate_for_category,
     is_online_store,
     resolve_gst_rate,

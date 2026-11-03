@@ -70,7 +70,7 @@ describe('POS completion step prints the SERVER invoice', () => {
     vi.spyOn(window, 'open').mockReturnValue({} as Window);
     act(() => {
       const s = usePOSStore.getState();
-      s.resetTransaction();
+      s.resetTransaction('discard');
       s.setOrderResult('o1', 'BV-BOK01-000001');
     });
   });

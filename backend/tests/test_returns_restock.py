@@ -722,7 +722,9 @@ def test_retry_applies_after_stock_recovers(ctx, monkeypatch):
 
 def test_multi_unit_return_reactivates_one_mints_rest(ctx):
     # Return 2 of PRD-1 but only ONE prior SOLD unit exists -> 1 reactivate + 1 mint.
-    tok = _staff_token(["CASHIER"])
+    # Two units are above Rs 2,000: a store manager records it (owner ruling
+    # 2026-10-23 -- a cashier would need a manager's approval first).
+    tok = _staff_token(["STORE_MANAGER"])
     payload = _payload()
     payload["items"][0]["return_qty"] = 2
     r = ctx["client"].post(
@@ -1227,22 +1229,23 @@ def test_minted_return_unit_carries_returned_from_link(ctx):
 
 def test_concurrent_retry_restock_mints_exactly_one_unit(monkeypatch):
     """Two retry_restock calls race on the same return -> exactly ONE restock
-    occurs (on-hand +1), the other is a no-op. Drives real threads through the
-    HTTP handler with a thread-safe fake returns coll whose find_one_and_update
-    serializes + sleeps to widen the window the audit was worried about."""
+    occurs (on-hand +1), the other is a no-op. DETERMINISTIC: the second call
+    is fired from INSIDE the first call's claim (right after its
+    find_one_and_update took the return) and runs to completion before the
+    first continues -- the exact interleaving the audit worried about, with
+    no thread timing or sleeps."""
     import threading
-    import time
 
     app = FastAPI()
     app.include_router(returns_router.router, prefix="/api/v1/returns")
 
     class _ConcReturnsColl:
-        """Thread-safe returns coll: find_one_and_update is mutually exclusive
-        and sleeps inside the lock to maximise the race window."""
+        """Returns coll whose first successful claim runs the SECOND request to
+        completion before handing the claim back to the first."""
 
         def __init__(self):
             self.docs = []
-            self._lock = threading.Lock()
+            self.on_first_claim = None
 
         @staticmethod
         def _match(d, q):
@@ -1267,22 +1270,22 @@ def test_concurrent_retry_restock_mints_exactly_one_unit(monkeypatch):
             return None
 
         def update_one(self, query, update):
-            with self._lock:
-                for d in self.docs:
-                    if self._match(d, query):
-                        d.update(update.get("$set", {}))
-                        return _FakeResult(1)
+            for d in self.docs:
+                if self._match(d, query):
+                    d.update(update.get("$set", {}))
+                    return _FakeResult(1)
             return _FakeResult(0)
 
         def find_one_and_update(self, query, update, return_document=None):
-            with self._lock:
-                for d in self.docs:
-                    if self._match(d, query):
-                        time.sleep(0.05)  # widen the race window
-                        d.update(update.get("$set", {}))
-                        out = dict(d)
-                        out.pop("_id", None)
-                        return out
+            for d in self.docs:
+                if self._match(d, query):
+                    d.update(update.get("$set", {}))
+                    out = dict(d)
+                    out.pop("_id", None)
+                    hook, self.on_first_claim = self.on_first_claim, None
+                    if hook:
+                        hook()  # the second request runs NOW, the claim held
+                    return out
             return None
 
     returns_coll = _ConcReturnsColl()
@@ -1355,11 +1358,16 @@ def test_concurrent_retry_restock_mints_exactly_one_unit(monkeypatch):
             client.post("/api/v1/returns/RET-CONC/restock", headers=hdr).json()
         )
 
-    threads = [threading.Thread(target=_call) for _ in range(2)]
-    for t in threads:
+    def _second_request_inside_the_claim():
+        # A separate thread only because the first request is still inside
+        # its handler; join() makes the ordering fixed, not timed.
+        t = threading.Thread(target=_call)
         t.start()
-    for t in threads:
         t.join()
+
+    returns_coll.on_first_claim = _second_request_inside_the_claim
+    _call()
+    assert len(results) == 2
 
     # Exactly one winner ("Restock applied"); the other bails ("in progress").
     msgs = sorted((x.get("message") or "").lower() for x in results)

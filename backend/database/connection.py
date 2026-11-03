@@ -108,6 +108,18 @@ class DatabaseConfig:
         return uri
 
 
+# App-wide: only a bounded wait for a pooled connection. A socket timeout is
+# NOT set app-wide (reports, exports, syncs and scripts run long reads); the
+# money doors bound their own writes with pymongo.timeout(...)
+# (customers.MONEY_WRITE_TIMEOUT_S). PR #1264 money review 14.
+MONGO_CLIENT_OPTIONS = {"waitQueueTimeoutMS": 30_000}
+
+# True once the unique (store_id, idempotency_key) orders index is in place:
+# only then is a re-press of a lost sale guaranteed to replay, never a second
+# bill (orders/create, the quote's replay_guaranteed).
+ORDER_REPLAY_GUARANTEED = False
+
+
 class DatabaseConnection:
     """
     MongoDB Connection Manager
@@ -145,7 +157,7 @@ class DatabaseConnection:
             self._config = DatabaseConfig.from_env()
 
         try:
-            self._client = MongoClient(self._config.get_uri())
+            self._client = MongoClient(self._config.get_uri(), **MONGO_CLIENT_OPTIONS)
             # Test connection
             self._client.admin.command("ping")
             self._db = self._client[self._config.database]
@@ -204,8 +216,21 @@ class DatabaseConnection:
 
         # Orders -- most queried collection.
         _idx("orders", "order_id", unique=True, background=True)
+        # One bill per press of the till: a second create with the same key in
+        # the same shop is refused by the database and replays the first.
+        # Partial: only rows that carry a key. Non-fatal, logged CRITICAL.
+        global ORDER_REPLAY_GUARANTEED
+        before = len(failures)
+        _backstop("orders", [("store_id", 1), ("idempotency_key", 1)], unique=True,
+                  partialFilterExpression={"idempotency_key": {"$type": "string"}},
+                  name="uniq_store_idempotency_key", background=True)
+        ORDER_REPLAY_GUARANTEED = len(failures) == before
         _idx("orders", "store_id", background=True)
         _idx("orders", "customer_id", background=True)
+        # The store-credit reconciler's scan (customers.reconcile_pending_credits) and
+        # each customer's ledger read (PR #1264).
+        _idx("credit_note_ledger", [("type", 1), ("pending_at", 1)], background=True)
+        _idx("credit_note_ledger", "customer_id", background=True)
         _idx("orders", "salesperson_id", background=True)
         _idx("orders", [("store_id", 1), ("status", 1)], background=True)
         _idx("orders", [("store_id", 1), ("created_at", -1)], background=True)
@@ -315,6 +340,12 @@ class DatabaseConnection:
             background=True,
         )
         _idx("returns", "order_id", background=True)
+        # One doc per return: Needs completing can never write a second
+        # COMPLETED doc beside the counter's (money review 14). Partial on a
+        # string id (money review 15): a doc with an explicit null id never
+        # collides with another (sparse would still index the nulls).
+        _backstop("returns", "return_id", unique=True, name="uniq_returns_return_id",
+                  partialFilterExpression={"return_id": {"$type": "string"}}, background=True)
 
         # Stock units: composite indexes for inventory ledger queries.
         # (store_id, status) supports the $match stage in _build_store_ledger.

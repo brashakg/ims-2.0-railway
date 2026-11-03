@@ -21,13 +21,10 @@ const KNOWN_READERS: Record<string, number> = {
   // The one shared reader: it also accepts raw axios adapters (vendor portal).
   'utils/errorHandler.ts': 3,
   'components/clinical/PatientIntakeModal.tsx': 1,
-  'components/orders/SuperadminOrderEditModal.tsx': 1,
   'components/pos/LoyaltyRedeemControl.tsx': 2,
   'pages/finance/expenses/DaySettlementSection.tsx': 1,
-  'pages/orders/ReturnsPage.tsx': 4,
   'pages/pos/next/BillingSurface.tsx': 1,
   'pages/pos/next/CustomerPanel.tsx': 1,
-  'pages/pos/next/DeliverySurface.tsx': 1,
   'pages/pos/next/GeneralCounterSurface.tsx': 1,
   'pages/purchase/SupplierCreditConfirmation.tsx': 1,
   'pages/purchase/VendorReturns.tsx': 1,

@@ -10,6 +10,7 @@ import { Eye, EyeOff, AlertCircle, RefreshCw } from 'lucide-react';
 import { getBrandAssets } from '../../utils/brandAssets';
 import { storeApi } from '../../services/api';
 import { userSeesAllStores } from '../../utils/storeAccess';
+import { clearCacheKeepingBills } from '../../components/pos/posBillKey';
 
 export function LoginPage() {
   const authContext = useContext(AuthContext);
@@ -44,7 +45,7 @@ export function LoginPage() {
     if (!window.confirm('Are you sure you want to clear all cached data? Your login session and saved preferences will be removed.')) {
       return;
     }
-    localStorage.clear();
+    clearCacheKeepingBills(); // a pending bill key and the held bills survive
     sessionStorage.clear();
     setError('');
     setUsername('');
