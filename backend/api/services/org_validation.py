@@ -359,31 +359,27 @@ def resolve_state_code(*candidates) -> str:
 
     IT IS NOT "the single place a state code is parsed" IN THIS CODEBASE, and
     that sentence must not be written here until the list below is empty and
-    re-measured. Four modules outside that chain still parse one themselves
+    re-measured. Two modules outside that chain still parse one themselves
     and DO answer differently (measured, same inputs; see
     tests/test_state_parser_divergence.py, which pins this table). (The ITC
     register's own parser is gone: it reads each bill's stored heads, and a
     legacy bill without them is split by purchase_invoice_engine. The
-    transfer mirror bill's is gone too: it reads shop_gstin below.)
+    transfer mirror bill's is gone too: it reads shop_gstin below. So are the
+    GSTR export's 38-name table and finance._norm_state: the GST returns'
+    place of supply reads this function, GST batch 3.)
 
-        input               here  print_legal  gstn_export
-        '27-Maharashtra'    27    27           ''
-        'Maharashtra (27)'  ''    27           ''
-        'MH'                27    ''           ''
-        'Maharashtra'       27    ''           27
-        '27AAAAA0000A1Z5'   27    27           ''
+        input               here  print_legal
+        '27-Maharashtra'    27    27
+        'Maharashtra (27)'  ''    27
+        'MH'                27    ''
+        'Maharashtra'       27    ''
+        '27AAAAA0000A1Z5'   27    27
 
       services/print_legal._state_code_of  - printed-invoice HSN tax summary
-      services/gstn_export._state_code     - GSTR export; own 38-name table
       routers/stores._state_code_for       - stamps state_code onto a store
                                              row at birth; reads names and
                                              bare codes but drops the portal
                                              form AND GSTINs (both -> None)
-      routers/finance._norm_state          - GST-summary inter-state check;
-                                             passes unresolvable values
-                                             through UNCHANGED, so '27' vs
-                                             '27-Maharashtra' compares as
-                                             inter-state
     plus two inline ``gstin[:2]`` sites, routers/reports.py:3587 and
     services/einvoice.py:178+276. None is touched by this change.
     """

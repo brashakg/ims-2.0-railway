@@ -44,6 +44,7 @@ from .gst_itc import (
     _cn_bucket_rate,
     _cn_foreign_store,
     _cn_parent_held,
+    _itc_store_scope,
     _ledger_row_return_doc,
     _order_held_off_returns,
     _return_supply,
@@ -53,8 +54,13 @@ from .gst_itc import (
     _transfer_outward_bills,
 )
 
-def _compute_gstr1(month: str, active_store: str) -> dict:
-    """Compute the IMS GSTR-1 report dict for a (month, store).
+def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
+    """Compute the IMS GSTR-1 return for a month: THE return of
+    `active_store`'s GSTIN -- GSTR-1 is filed per GSTIN, so it carries every
+    shop on that GSTIN (gst_itc._itc_store_scope, the scope GSTR-3B files:
+    BV-PUN-01 + BV-ONLINE-01 file one return) and never a shop of another
+    GSTIN. `shops` narrows it to those shops (the Cross-Check of a reader who
+    sees one shop of a shared GSTIN); omitted, the whole GSTIN.
 
     Extracted from the `/gstr1` endpoint so both the JSON-report endpoint
     and the GSTN portal-export endpoint can share the SAME aggregation
@@ -123,17 +129,37 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
     store_state = ""
     store_doc = None
 
+    filing = [active_store]
     db = _get_raw_db()
     if db is not None:
         # A read failure RAISES (the doors answer 503, _gstr1_return) -- never a
         # report short of the orders, credit notes or returns it could not read.
         store_doc = db["stores"].find_one({"store_id": active_store})
+        # THE GSTIN this return files for and every shop on it -- the scope
+        # GSTR-3B reads, so the two returns of one GSTIN cover the same shops.
+        _entity, store_gstin, gstin_shops = _itc_store_scope(db, active_store)
+        filing = sorted(shops) if shops is not None else gstin_shops
+        # Each sale's OWN shop decides its supply (GSTR-3B's rule): a shop
+        # with no GSTIN of its own is in its registration's state.
+        shop_docs = {
+            sd.get("store_id"): {**sd, "gstin": sd.get("gstin") or store_gstin}
+            for sd in db["stores"].find(
+                {"store_id": {"$in": filing}},
+                {"_id": 0, "store_id": 1, "state_code": 1, "state": 1, "gstin": 1},
+            )
+        }
         if store_doc:
-            store_gstin = str(store_doc.get("gstin", "") or "")
+            store_gstin = store_gstin or str(store_doc.get("gstin", "") or "")
             store_legal_name = str(
                 store_doc.get("store_name") or store_doc.get("name", "") or ""
             )
             store_state = str(store_doc.get("state", "") or "")
+        store_state = store_state or next(
+            (str(d["state"]) for d in shop_docs.values() if d.get("state")), ""
+        )
+
+        def _shop_doc(sid):
+            return shop_docs.get(sid) or store_doc
 
         orders_col = db["orders"]
         customers_col = db["customers"]
@@ -157,7 +183,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         # `created_at` as a Date — comparing a Date to an ISO string
         # silently never matches (this was the original GSTR bug).
         query = {
-            "store_id": active_store,
+            "store_id": {"$in": filing},
             # The GST-document view (PR #1264): it also files the credit notes,
             # so an invoice cancelled behind a whole-invoice note stays filed.
             **real_sale_match(db, gst_documents=True),
@@ -207,7 +233,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             # (_order_supply -- the order's own stamp, else the invoice's
             # state-code rule, org_validation.supply_interstate).
             is_inter_state, pos_code, pos_assumed = _order_supply(
-                order, store_doc, cust_docs.get(cust_id)
+                order, _shop_doc(order.get("store_id")), cust_docs.get(cust_id)
             )
             items = order.get("items") or []
             # One item row per GST rate (GSTN `itms[]`), from the tax stamped
@@ -385,9 +411,13 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         # flagged deemedSupply=True; the HSN summary uses their PER-LINE detail
         # (merged below) so a mixed 5%/18% transfer stays rate-exact.
         try:
-            _t_bills, _t_notes = _split_transfer_bills(_transfer_outward_bills(
-                db, active_store, year, mon, monthrange(year, mon)[1]
-            ))
+            _t_bills, _t_notes = _split_transfer_bills([
+                b
+                for _shop in filing
+                for b in _transfer_outward_bills(
+                    db, _shop, year, mon, monthrange(year, mon)[1]
+                )
+            ])
             # S3: a transfer's credit notes (short delivery) go to CDNR below.
             transfer_note_rows = _transfer_cdnr_rows(_t_notes)
             _t_rows, transfer_hsn_lines = _transfer_b2b_rows(_t_bills)
@@ -540,7 +570,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             # '+00:00' since A13); the match also covers a BSON-date row.
             # Half-open [from_dt, to_dt), the same match GSTR-3B uses.
             ledger_query = {
-                "store_id": active_store,
+                "store_id": {"$in": filing},
                 "type": scl.CREDIT_NOTE_TYPE,
                 **instant_in_window_query("created_at", from_dt, to_dt),
             }
@@ -580,7 +610,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 # Reporting them here too filed one credit note under
                 # two GSTINs.
                 _ret_doc = _ledger_row_return_doc(db, entry)
-                if _cn_foreign_store(_ret_doc, active_store):
+                if _cn_foreign_store(_ret_doc, filing):
                     continue
                 # The refund of a sale this report refused to file
                 # (held on the seller check) is not filed either.
@@ -603,7 +633,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 is_inter, cn_code = _return_supply(
                     db,
                     _ret_doc or {"customer_id": cust_id},
-                    store_doc,
+                    _shop_doc((_ret_doc or {}).get("store_id") or entry.get("store_id")),
                     _cdnr_inter_cache,
                 )
                 entry_interstate = entry.get("interstate")
@@ -689,7 +719,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     if _v:
                         seen_returns.add(_v)
             for _row in ledger_col.find(
-                {"store_id": active_store, "type": scl.CREDIT_NOTE_TYPE},
+                {"store_id": {"$in": filing}, "type": scl.CREDIT_NOTE_TYPE},
                 {"ref": 1, "reason": 1},
             ) if ledger_col is not None else []:
                 for _f in ("ref", "reason"):
@@ -700,7 +730,7 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
 
             for ret in returns_col.find(
                 {
-                    "store_id": active_store,
+                    "store_id": {"$in": filing},
                     "status": {"$in": ["COMPLETED", "completed"]},
                 }
             ):
@@ -734,7 +764,9 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 # order's stamp first, the customer's state only as the
                 # fallback. Re-deriving it here is how the two returns
                 # ended up reversing different heads for one refund.
-                is_inter, r_code = _return_supply(db, ret, store_doc, _cdnr_inter_cache)
+                is_inter, r_code = _return_supply(
+                    db, ret, _shop_doc(ret.get("store_id")), _cdnr_inter_cache
+                )
                 r_cgst, r_sgst, r_igst = split_gst(r_tax, is_inter)
 
                 r_rate = _cn_bucket_rate(gb.get("gst_rate"), r_tax, r_taxable)
@@ -877,6 +909,8 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
 
     return {
         "period": month,
+        # The shops this return files for: every shop on the GSTIN.
+        "shops": filing,
         "gstin": store_gstin,
         "legalName": store_legal_name,
         "storeState": store_state,
@@ -902,11 +936,10 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
 
 
 def _gstr1_shop(store_id, current_user) -> str:
-    """The shop whose GSTR-1 is asked for. Stopgap until GSTR-1 is computed
-    per GSTIN (review round 2, item 3): it is still ONE shop's sales, so a
-    reader who cannot see every shop on that shop's GSTIN is refused -- the
-    GSTR-3B door's rule (gstr3b._gstin_return_shop). 503 when the shops
-    cannot be read."""
+    """The shop whose GSTIN's GSTR-1 is asked for. The return files every
+    shop on that GSTIN (_compute_gstr1), so a reader who cannot see every one
+    of them is refused -- the GSTR-3B door's rule (gstr3b._gstin_return_shop).
+    503 when the shops cannot be read."""
     from ...dependencies import user_store_scope
     from .gst_itc import _itc_store_scope
 

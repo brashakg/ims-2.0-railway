@@ -122,7 +122,7 @@ def _fake_gstr3b(period, sid, **_kw):
 @pytest.fixture
 def patch_compute(monkeypatch):
     """Monkeypatch the per-store GST-return computes to fakes (no DB/tax math)."""
-    monkeypatch.setattr(reports, "_compute_gstr1", lambda period, sid: {"period": period})
+    monkeypatch.setattr(reports, "_compute_gstr1", lambda period, sid, shops=None: {"period": period})
     monkeypatch.setattr(reports, "_compute_gstr3b", _fake_gstr3b)
 
 
@@ -154,7 +154,7 @@ def test_run_cross_check_all_entities_no_stores_404(patch_compute):
 
 
 def test_run_cross_check_partial_on_store_compute_failure(monkeypatch):
-    monkeypatch.setattr(reports, "_compute_gstr1", lambda period, sid: {"period": period})
+    monkeypatch.setattr(reports, "_compute_gstr1", lambda period, sid, shops=None: {"period": period})
 
     def _g3(period, sid):
         if sid == "S2":
@@ -307,3 +307,24 @@ def test_signoff_model_rejects_month_13():
 def test_signoff_model_rejects_year_out_of_range():
     with pytest.raises(ValidationError):
         finance.GstCrossCheckSignoff(month=4, year=1999)
+
+
+def test_run_cross_check_computes_gstr1_once_per_gstin(monkeypatch):
+    """GST batch 3: GSTR-1 is the GSTIN's return (every shop on it), so the
+    cross-check asks it once per GSTIN -- once per shop counted a shared
+    GSTIN's sales twice."""
+    calls = []
+    monkeypatch.setattr(
+        reports, "_compute_gstr1",
+        lambda period, sid, shops=None: calls.append(list(shops or [sid])) or {"period": period},
+    )
+    monkeypatch.setattr(reports, "_compute_gstr3b", _fake_gstr3b)
+    cols = _base_collections()
+    cols["stores"] = FakeCollection([
+        {"store_id": "S1", "entity_id": "E1", "gstin": "G1", "state": "Jharkhand"},
+        {"store_id": "S3", "entity_id": "E1", "gstin": "G1", "state": "Jharkhand"},
+    ])
+    cols["entities"] = FakeCollection([{"entity_id": "E1", "name": "Entity One",
+                                        "gstins": [{"gstin": "G1"}]}])
+    finance._run_gst_cross_check(FakeDB(cols), 4, 2026, "E1")
+    assert calls == [["S1", "S3"]]

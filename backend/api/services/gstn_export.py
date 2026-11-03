@@ -27,78 +27,18 @@ never hands a failed report to these mappers and never swallows their
 errors (reports.gstr1._gstr1_return answers 503 "please retry") -- a
 partial upload file is worse than none.
 
-State -> GST state code mapping is best-effort: the IMS order data carries
-free-text state names ("Maharashtra", "Delhi"), while the portal wants the
-2-digit state code that prefixes a GSTIN ("27", "07"). We map the common
-spellings and fall back to deriving the code from a GSTIN when present.
+A row's place of supply is its own `placeOfSupplyCode`; a row without one
+is resolved by THE state-code rule (org_validation.resolve_state_code).
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-# ----------------------------------------------------------------------------
-# State name -> GST state code (first 2 digits of a GSTIN). Lower-cased keys.
-# Not exhaustive of UTs, but covers all mainland states an optical chain bills.
-# ----------------------------------------------------------------------------
-_STATE_CODES: Dict[str, str] = {
-    "jammu and kashmir": "01",
-    "himachal pradesh": "02",
-    "punjab": "03",
-    "chandigarh": "04",
-    "uttarakhand": "05",
-    "haryana": "06",
-    "delhi": "07",
-    "rajasthan": "08",
-    "uttar pradesh": "09",
-    "bihar": "10",
-    "sikkim": "11",
-    "arunachal pradesh": "12",
-    "nagaland": "13",
-    "manipur": "14",
-    "mizoram": "15",
-    "tripura": "16",
-    "meghalaya": "17",
-    "assam": "18",
-    "west bengal": "19",
-    "jharkhand": "20",
-    "odisha": "21",
-    "chhattisgarh": "22",
-    "madhya pradesh": "23",
-    "gujarat": "24",
-    "daman and diu": "25",
-    "dadra and nagar haveli": "26",
-    "maharashtra": "27",
-    "andhra pradesh": "37",
-    "karnataka": "29",
-    "goa": "30",
-    "lakshadweep": "31",
-    "kerala": "32",
-    "tamil nadu": "33",
-    "puducherry": "34",
-    "andaman and nicobar islands": "35",
-    "telangana": "36",
-    "ladakh": "38",
-}
-
-
-def _state_code(state_name: str, gstin: str = "") -> str:
-    """Resolve a 2-digit GST state code from a free-text state name.
-
-    Falls back to the GSTIN prefix when the name is unrecognised, then to
-    an empty string. Never raises.
-    """
-    name = (state_name or "").strip().lower()
-    if name in _STATE_CODES:
-        return _STATE_CODES[name]
-    # Some rows already carry the numeric code as the "state".
-    raw = (state_name or "").strip()
-    if len(raw) == 2 and raw.isdigit():
-        return raw
-    g = (gstin or "").strip()
-    if len(g) >= 2 and g[:2].isdigit():
-        return g[:2]
-    return ""
+# THE state-code rule (org_validation.resolve_state_code: a GSTIN, a 2-digit
+# code, the portal's '27-Maharashtra', an abbreviation or a name) -- the one
+# the tax invoice and the returns' place of supply use; no table of its own.
+from .org_validation import resolve_state_code  # noqa: E402
 
 
 def _num(val: Any) -> float:
@@ -248,7 +188,7 @@ def _build_b2b(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, A
             # B2B rows must carry a counterparty GSTIN. Skip silently —
             # the IMS validation report already flags these.
             continue
-        pos = r.get("placeOfSupplyCode") or _state_code(
+        pos = r.get("placeOfSupplyCode") or resolve_state_code(
             str(r.get("placeOfSupply") or r.get("customerState") or ""), ctin
         )
         inv = {
@@ -273,7 +213,7 @@ def _build_b2cl(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
     for r in rows:
         if not isinstance(r, dict):
             continue
-        pos = r.get("placeOfSupplyCode") or _state_code(
+        pos = r.get("placeOfSupplyCode") or resolve_state_code(
             str(r.get("placeOfSupply") or r.get("customerState") or "")
         )
         inv = {
@@ -294,7 +234,7 @@ def _build_b2cs(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
         if not isinstance(r, dict):
             continue
         igst = _num(r.get("igst"))
-        pos = r.get("placeOfSupplyCode") or _state_code(str(r.get("placeOfSupply") or ""))
+        pos = r.get("placeOfSupplyCode") or resolve_state_code(str(r.get("placeOfSupply") or ""))
         # INTER when IGST present, else INTRA.
         sply_ty = "INTER" if igst > 0 else "INTRA"
         out.append(
@@ -347,7 +287,7 @@ def _build_cdnr(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
         ntty = str(r.get("noteType") or r.get("ntty") or "C").strip().upper()
         if ntty not in ("C", "D"):
             ntty = "C"
-        pos = r.get("placeOfSupplyCode") or _state_code(
+        pos = r.get("placeOfSupplyCode") or resolve_state_code(
             str(r.get("placeOfSupply") or r.get("customerState") or ""), ctin
         )
         nt = {
@@ -572,26 +512,17 @@ def to_gstr3b_json(
         "ret_period": ret_period,
         "sup_details": sup_details,
         "inter_sup": {
-            # 3.2 -- inter-state supplies broken out by counterparty type
-            # (unregistered / composition dealer / UIN holder), keyed by
-            # place-of-supply.
-            #
-            # KNOWN LIMITATION (upstream gap, not wired): reports.py
-            # ::_compute_gstr3b only computes the AGGREGATE inter-state output
-            # tax (out_igst, already reported in 3.1(a) via osup_det.iamt). It
-            # does NOT segregate inter-state supplies by counterparty
-            # registration type, nor key them by place-of-supply. IMS also does
-            # not record whether a customer is a composition dealer or a UIN
-            # holder at all. Populating 3.2 correctly therefore requires an
-            # upstream change to _compute_gstr3b (a place-of-supply-keyed
-            # inter-state B2C aggregation, plus capturing comp/UIN status).
-            #
-            # Per the fix brief we do the SAFE thing: emit empty lists rather
-            # than fabricate a split. 3.2 is a memorandum disclosure that does
-            # NOT change the net tax payable (driven by 3.1 + Table 4), so an
-            # empty 3.2 understates a disclosure but never the liability. The
-            # accountant fills 3.2 in the offline tool before filing.
-            "unreg_details": [],
+            # 3.2 -- inter-state supplies to unregistered persons by place of
+            # supply (_compute_gstr3b `interStateUnregistered`: GSTR-1's B2CL +
+            # inter-state B2CS rows). IMS records no composition dealer or UIN
+            # holder, so those two lists stay empty.
+            "unreg_details": [
+                {"pos": str(u.get("placeOfSupplyCode") or ""),
+                 "txval": _num(u.get("taxableValue")),
+                 "iamt": _num(u.get("integratedTax"))}
+                for u in data.get("interStateUnregistered") or []
+                if isinstance(u, dict)
+            ],
             "comp_details": [],
             "uin_details": [],
         },

@@ -381,6 +381,10 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
     # Credit-note totals + the per-head excess the zero-clamp would otherwise
     # swallow SILENTLY (filled below when a DB is present).
     cn_igst = cn_cgst = cn_sgst = cn_taxable = 0.0
+    # Table 3.2: inter-state supplies to UNREGISTERED buyers, per place of
+    # supply -- GSTR-1's B2CL + inter-state B2CS rows of this GSTIN (the same
+    # orders, head and place code), never a second rule.
+    unreg_by_pos: dict = {}
     cn_carry = {
         "integratedTax": 0.0,
         "centralTax": 0.0,
@@ -460,18 +464,26 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             # The head the tax invoice PRINTED (_order_supply: the order's own
             # stamp, else the invoice's state-code rule), split per rate by
             # the invoice's split rule (_rate_heads) -- exactly GSTR-1's rows.
-            is_inter_state = _order_supply(
+            customer = cust_docs.get(str(order.get("customer_id", "")))
+            is_inter_state, pos_code, _assumed = _order_supply(
                 order,
                 shop_docs.get(order.get("store_id")) or {"gstin": store_gstin},
-                cust_docs.get(str(order.get("customer_id", ""))),
-            )[0]
-            for rl in _rate_heads(
+                customer,
+            )
+            heads = _rate_heads(
                 _order_rate_lines(order.get("items") or [], taxable, tax, order),
                 is_inter_state,
-            ):
+            )
+            for rl in heads:
                 out_igst += rl["igst"]
                 out_cgst += rl["cgst"]
                 out_sgst += rl["sgst"]
+            # GSTR-1 files a buyer with a GSTIN on file as B2B; any other
+            # inter-state sale is B2CL / B2CS -- and Table 3.2 here.
+            if is_inter_state and not str((customer or {}).get("gstin") or ""):
+                u = unreg_by_pos.setdefault(pos_code, [0.0, 0.0])
+                u[0] = round(u[0] + sum(rl["taxable"] for rl in heads), 2)
+                u[1] = round(u[1] + sum(rl["igst"] for rl in heads), 2)
 
         # NEW-GST-TRANSFER-OUTWARD (GAP A): the sender's deemed outward supply
         # on inter-GSTIN stock transfers -> Table 3.1(a). Reads the SAME mirror
@@ -643,6 +655,12 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             "stateTax": _r(t_rcm[2]),
             "taxableValue": _r(t_rcm[3]),
         },
+        # Table 3.2 (unregistered persons), by place-of-supply state code;
+        # gross of credit notes, as GSTR-1 files its B2CL / B2CS rows.
+        "interStateUnregistered": [
+            {"placeOfSupplyCode": pos, "taxableValue": _r(v[0]), "integratedTax": _r(v[1])}
+            for pos, v in sorted(unreg_by_pos.items())
+        ],
         "zeroRatedValue": 0.0,
         "zeroRatedSupplies": {
             "integratedTax": 0.0,

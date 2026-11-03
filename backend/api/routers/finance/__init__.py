@@ -112,7 +112,6 @@ from ._shared import (  # noqa: F401
     _months_in_range,
     _payroll_cost,
     gst_reconciliation,
-    _norm_state,
     _order_is_interstate,
     _split_output_tax,
     _store_maps,

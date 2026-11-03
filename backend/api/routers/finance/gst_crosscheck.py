@@ -468,15 +468,14 @@ def _run_gst_cross_check(
     # tax break, and so sign-off can be blocked.
     g1_reports, g3_reports, g3_entities, g3_gstins = [], [], [], []
     failed: set = set()
-    for sid in store_ids:
-        try:
-            g1_reports.append(_compute_gstr1(period, sid))
-        except Exception:  # noqa: BLE001 -- one bad store must not sink the view
-            logger.exception("cross-check: GSTR-1 compute failed for %s", sid)
-            failed.add(sid)
-    # GSTR-3B is a per-GSTIN return (H2): one per company + GSTIN, over the
-    # shops of that GSTIN this check covers.
+    # GSTR-1 and GSTR-3B are per-GSTIN returns (H2): one each per company +
+    # GSTIN, over the shops of that GSTIN this check covers.
     for (eid, gstin), shops in gstin_groups(store_ids, s2e, s2g).items():
+        try:
+            g1_reports.append(_compute_gstr1(period, shops[0], shops=shops))
+        except Exception:  # noqa: BLE001 -- one bad GSTIN must not sink the view
+            logger.exception("cross-check: GSTR-1 compute failed for %s", gstin or shops)
+            failed.update(shops)
         try:
             g3_reports.append(_compute_gstr3b(period, shops[0], shops=shops, db=db))
             g3_entities.append(eid)
