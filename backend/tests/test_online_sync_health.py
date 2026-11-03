@@ -659,6 +659,45 @@ def test_the_catalog_reconciliation_screen_reads_the_same_on_hand_as_the_tile(mo
     assert row["status"] == stock_allocation.OVERSELL_RISK
 
 
+def test_the_reconciliation_screen_shows_units_on_a_pos_hold(monkeypatch):
+    """One online stock page (the Stock tally retired into Inventory > Online
+    stock): its "Held (POS)" column moved with it. A RESERVED unit at a shop is
+    the row's ``held``, and never counts as in-store on-hand. Drop the
+    ``held`` field -> this fails."""
+    import asyncio
+
+    from api.routers import catalog
+
+    db = _FakeDb(
+        {
+            "products": _FakeColl(
+                [{"product_id": "P5", "sku": "SKU-HELD", "brand": "B", "model": "M", "is_active": True}]
+            ),
+            "stock_units": _StockUnitsColl(
+                [
+                    {"product_id": "P5", "status": "RESERVED", "quantity": 1, "store_id": "BV-DHN-02"},
+                    {"product_id": "P5", "status": "AVAILABLE", "quantity": 1, "store_id": "BV-DHN-02"},
+                ]
+            ),
+            "stores": _shops(),
+        }
+    )
+    monkeypatch.setattr(catalog, "_get_db", lambda: db)
+    _patch_online(monkeypatch, {"SKU-HELD": {"online": True}})
+    monkeypatch.setattr(catalog, "online_mapping_available", lambda db: True)
+
+    async def _listed(db, skus, **kw):  # noqa: ARG001
+        return _live({"SKU-HELD": 1})
+
+    monkeypatch.setattr(sh, "live_listed_qty_for_skus", _listed)
+    out = asyncio.run(
+        catalog.online_stock_reconcile(store_id=None, limit=1000, current_user={"user_id": "u1"})
+    )
+    row = out["items"][0]
+    assert row["held"] == 1, row
+    assert row["in_store"] == 1, "a held unit is never on-hand"
+
+
 def test_a_unit_on_a_real_shop_still_counts(monkeypatch):
     """The other direction: the exclusion is the ONLINE stores, not the shops."""
     _patch_online(monkeypatch, {"SKU-REAL": {"online": True, "online_stock": None}})

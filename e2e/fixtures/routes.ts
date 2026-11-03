@@ -171,7 +171,6 @@ export const ROUTES: ReadonlyArray<{ path: string; route?: string; ready?: strin
   { path: '/online-store/orders' },
   { path: '/online-store/refund-reviews' },
   { path: '/online-store/customers' },
-  { path: '/online-store/stock-tally' },
   { path: '/online-store/store-health' },
   { path: '/online-store/ondc' },
   { path: '/online-store/shopify' },
@@ -298,6 +297,12 @@ export const EXCLUSIONS: ReadonlyArray<{ path: string; reason: string }> = [
     reason:
       'redirect-only: NewEyeTestPage was a screen whose whole job was a 2s '
       + 'auto-redirect to the queue. Deleted; the address now forwards directly.',
+  },
+  {
+    path: '/online-store/stock-tally',
+    reason:
+      'redirect-only: the Stock tally was one of two online-stock pages and was '
+      + 'retired; this address forwards to /inventory/online-sync, which is covered.',
   },
   {
     path: '/prescriptions',

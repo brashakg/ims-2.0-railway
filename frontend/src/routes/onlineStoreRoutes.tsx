@@ -2,7 +2,7 @@
 // from App.tsx (route-registry split); paths, elements and role gates are
 // unchanged.
 import { lazy } from 'react';
-import { Navigate, Route } from 'react-router-dom';
+import { Navigate, Route, useLocation } from 'react-router-dom';
 import { ProtectedRoute } from '../components/layout/ProtectedRoute';
 import { useAuth } from '../context/AuthContext';
 
@@ -19,10 +19,15 @@ const MenusPage = lazy(() => import('../pages/online-store/MenusPage'));
 const DiscountRulesPage = lazy(() => import('../pages/online-store/DiscountRulesPage'));
 const OnlineOrdersPage = lazy(() => import('../pages/online-store/OnlineOrdersPage'));
 const RefundReviewsPage = lazy(() => import('../pages/online-store/RefundReviewsPage'));
-const OnlineStockTallyPage = lazy(() => import('../pages/online-store/OnlineStockPage'));
 const OnlineStoreHealthPage = lazy(() => import('../pages/online-store/OnlineStoreHealthPage'));
 const OndcSellerPage = lazy(() => import('../pages/online-store/OndcSellerPage'));
 const OnlineShopifySyncPage = lazy(() => import('../pages/online-store/OnlineShopifySyncPage'));
+
+/** /online-store/stock-tally -> /inventory/online-sync, query intact. */
+function StockTallyRedirect() {
+  const { search } = useLocation();
+  return <Navigate to={`/inventory/online-sync${search}`} replace />;
+}
 
 /** /catalog for the catalogue roles; a DESIGN_MANAGER-only user (whom the
  *  /catalog gate refuses) lands on the Online Store home instead of a denial.
@@ -183,21 +188,11 @@ export const onlineStoreRoutes = (
       }
     />
 
-    {/* Online Store — Stock tally (BVI Phase 5). READ-ONLY
-        reconciliation of online-listed qty vs real on-hand vs
-        reserved, flagging oversell-risk. No stock is reserved /
-        mutated here (that write-path allocation is a deferred
-        follow-up). Same catalog/design role gate as the shell. */}
-    <Route
-      path="online-store/stock-tally"
-      element={
-        <ProtectedRoute
-          allowedRoles={['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER', 'DESIGN_MANAGER']}
-        >
-          <OnlineStockTallyPage />
-        </ProtectedRoute>
-      }
-    />
+    {/* Stock tally retired: one online-stock page, Inventory > Online stock
+        (it carries the tally's search + Held (POS) column). Old links and
+        bookmarks forward there, query string intact; that route's gate
+        admits the tally's DESIGN_MANAGER too. */}
+    <Route path="online-store/stock-tally" element={<StockTallyRedirect />} />
 
     {/* Online Store — Store health (BVI Phase 5). Read-only
         pre-cutover readiness dashboard: orphan SKUs, attribute

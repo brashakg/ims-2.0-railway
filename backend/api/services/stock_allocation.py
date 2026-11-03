@@ -153,6 +153,8 @@ def reconcile_items(items: List[dict]) -> dict:
             "sku": it.get("sku"),
             "name": it.get("name"),
             "in_store": in_store,
+            # Units on a POS hold: display only, never a classify input.
+            "held": _int(it.get("held")),
             "online": online,
             "recommended": it.get("recommended"),
             "delta": delta,

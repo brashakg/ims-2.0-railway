@@ -216,7 +216,9 @@ export const inventoryRoutes = (
     <Route
       path="inventory/online-sync"
       element={
-        <ProtectedRoute allowedRoles={INVENTORY_MANAGE_ROLES}>
+        // The union of who could open either online-stock page: the stock
+        // managers + the retired Stock tally's DESIGN_MANAGER.
+        <ProtectedRoute allowedRoles={[...INVENTORY_MANAGE_ROLES, 'DESIGN_MANAGER']}>
           <OnlineStockPage />
         </ProtectedRoute>
       }

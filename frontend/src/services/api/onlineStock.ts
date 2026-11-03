@@ -11,6 +11,9 @@ export interface ReconcileItem {
   /** IMS on-hand; null = the shop list or the stock read failed (renders an
    *  em dash, classified ONHAND_UNKNOWN — never a confident 0). */
   in_store: number | null;
+  /** Units on a POS hold (RESERVED) - display only, never an oversell input.
+   *  Online orders claim units as SOLD at ingest and never appear here. */
+  held?: number;
   /** Live Shopify listed qty; null = not covered by the live read (renders an
    *  em dash, classified LISTED_UNKNOWN — never a confident 0). */
   online: number | null;
