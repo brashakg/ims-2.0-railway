@@ -232,7 +232,9 @@ _MASKERS = {
 # Writes that stamp cost onto a sale line under a role-decided discount cap:
 # the cost is stored, never shown. (path under api/, function)
 _COST_WRITES = {
-    ("routers/orders/create.py", "create_order"),
+    # create_order looks the bill key up first and hands the work (with the
+    # cost stamp) to _create_order_after_lookup (money review 26).
+    ("routers/orders/create.py", "_create_order_after_lookup"),
     ("routers/orders/items.py", "add_order_item"),
 }
 
