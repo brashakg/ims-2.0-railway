@@ -159,3 +159,25 @@ def test_a_sister_shop_refund_lands_in_one_month_on_both_returns(gstins):
               round(cn["integratedTax"] + cn["centralTax"] + cn["stateTax"], 2))
         assert g1 == g3, (month, g1, g3)
     assert g1 == (200.0, 10.0)  # October: the ledger row, the credit note
+
+
+def test_an_invoice_cancelled_behind_its_credit_note_stays_filed_per_gstin(gstins):
+    """PR #1264's GST-document view carried into the per-GSTIN queries: the
+    sister shop's invoice the refund-advance door cancelled behind a
+    whole-invoice credit note (booked at STORE) is still filed on the GSTIN's
+    GSTR-1, and its note reverses it once -- the same on GSTR-3B."""
+    _sale(gstins, SISTER, "O-ADV", "C-JH", 2100.0)
+    gstins.orders.update_one({"order_id": "O-ADV"}, {"$set": {
+        "status": "CANCELLED", "advance_refund_status": "COMPLETED",
+        "advance_refund_credit_note": "BOK01/C2627/0001"}})
+    gstins.credit_note_ledger.insert_one({
+        "store_id": STORE, "type": "ISSUED", "ref": "BOK01/C2627/0001", "customer_id": "C-JH",
+        "created_at": SEPT_10.isoformat(), "taxable": 2000.0, "tax": 100.0, "gst_rate": 5,
+        "gross_refund": 2100.0, "net_refund": 2100.0,
+    })
+    g1 = r1._compute_gstr1(MONTH, STORE)
+    assert _b2cs_taxable(g1) == 2000.0  # the invoice is still filed
+    assert [(c["taxableValue"], c["taxValue"]) for c in g1["cdnr"]] == [(2000.0, 100.0)]
+    g3 = r3b._compute_gstr3b(MONTH, SISTER)
+    assert g3["outwardTaxableValue"] == pytest.approx(0.0, abs=0.01)  # invoice met its note
+    assert round(g3["creditNotes"]["taxableValue"], 2) == 2000.0
