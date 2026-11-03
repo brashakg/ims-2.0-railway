@@ -818,3 +818,60 @@ def test_admin_note_refused_when_the_shop_cannot_number_it(client, auth_headers,
     assert wired["db"].get_collection("credit_note_ledger").docs == []
     assert not any(d.get("action") == "ORDER_INVOICE_CREDIT_NOTE"
                    for d in wired["db"].get_collection("audit_logs").docs)
+
+
+# ============================================================================
+# GST batch 2 round 2: the correction's per-rate split reaches both notes
+# ============================================================================
+
+
+def _sun_line(unit_price):
+    return {"item_id": "line-2", "item_type": "SUNGLASS", "category": "SUNGLASS",
+            "product_name": "Test Sunglass", "quantity": 1, "unit_price": unit_price,
+            "discount_percent": 0}
+
+
+def _seed_mixed(order_repo, invoice):
+    """A 5% frame (Rs 1050 incl.) and an 18% sunglass (Rs 1180 incl.)."""
+    items = [
+        {**_edit_item(unit_price=1050.0), "discount_amount": 0, "item_total": 1050.0,
+         "gst_rate": 5.0, "taxable_value": 1000.0, "tax_amount": 50.0},
+        {**_sun_line(1180.0), "discount_amount": 0, "item_total": 1180.0,
+         "gst_rate": 18.0, "taxable_value": 1000.0, "tax_amount": 180.0},
+    ]
+    _seed_order(order_repo, invoice_number=invoice, items=items, subtotal=2230.0,
+                grand_total=2230.0, amount_paid=2230.0, tax_amount=230.0, tax_rate=None,
+                payments=[{"method": "CASH", "amount": 2230.0}])
+
+
+def _assert_split(by_rate, taxable, tax):
+    assert set(by_rate) == {"5", "18"}, by_rate
+    assert all(v["taxable"] > 0 and v["tax"] > 0 for v in by_rate.values()), by_rate
+    assert round(sum(v["taxable"] for v in by_rate.values()), 2) == taxable
+    assert round(sum(v["tax"] for v in by_rate.values()), 2) == tax
+
+
+@pytest.mark.parametrize("frame, sun, coll", [
+    (945.0, 1062.0, "credit_note_ledger"),   # each line lowered 10%
+    (1155.0, 1298.0, "debit_note_ledger"),   # each line raised 10%
+])
+def test_mixed_rate_correction_stamps_its_per_rate_split(client, auth_headers, wired, frame, sun, coll):
+    """REVERT CHECK: without admin_edit's by_rate stamp (or, for the credit
+    note, without _issue_store_credit carrying it) GSTR-1 files the note at
+    the blended 12% / 14%."""
+    _seed_mixed(wired["order_repo"], "INV/BOK-01/26-27/0021")
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={"mode": "CREDIT_NOTE", "reason": "Price corrected",
+              "items": [_edit_item(unit_price=frame), _sun_line(sun)]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    docs = wired["db"].get_collection(coll).docs
+    note = next(d for d in docs if d.get("note_type") in ("CREDIT_NOTE", "DEBIT_NOTE"))
+    _assert_split(note["by_rate"], note["taxable_amount"], note["tax_amount"])
+    if coll == "credit_note_ledger":
+        # The row GSTR-1 files is the store-credit line: it carries the split.
+        [row] = [d for d in docs if d.get("type") == "ISSUED"]
+        assert row["by_rate"] == note["by_rate"]
+        _assert_split(row["by_rate"], row["taxable"], row["tax"])

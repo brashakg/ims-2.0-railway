@@ -304,6 +304,29 @@ def build_revised_invoice_doc(
     }
 
 
+def note_by_rate(before_order: Dict[str, Any], after_order: Dict[str, Any]) -> Dict[str, Any]:
+    """The correction's change PER GST RATE, ``{"5": {"taxable", "tax"}}``
+    (after less before), by THE invoice per-rate rule GSTR-1 files the sale
+    with (reports gst_base._order_rate_lines). Stamped on the debit note so
+    a raise over a 5% frame and an 18% sunglass files at 5% and 18% -- never
+    at the 14% its blended tax / taxable gives. Pure; never raises ({} when
+    the orders cannot be split)."""
+    try:
+        from api.routers.reports.gst_base import _order_rate_lines, _order_taxable_and_tax
+
+        out: Dict[str, Dict[str, float]] = {}
+        for sign, o in ((-1, before_order), (1, after_order)):
+            for rate, _hsn, taxable, tax in _order_rate_lines(
+                o.get("items") or [], *_order_taxable_and_tax(o), o
+            ):
+                b = out.setdefault(f"{rate:g}", {"taxable": 0.0, "tax": 0.0})
+                b["taxable"] = round(b["taxable"] + sign * taxable, 2)
+                b["tax"] = round(b["tax"] + sign * tax, 2)
+        return {k: v for k, v in out.items() if v["taxable"] or v["tax"]}
+    except Exception:  # noqa: BLE001 -- the note files at its derived rate (flagged)
+        return {}
+
+
 def build_credit_note_doc(
     *,
     order: Dict[str, Any],

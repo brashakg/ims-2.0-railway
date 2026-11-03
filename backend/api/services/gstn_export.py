@@ -11,13 +11,17 @@ scope). They produce the offline-utility JSON the accountant uploads on
 gst.gov.in -> Returns -> Offline Tool -> Import.
 
 Schema references (public GSTN offline-tool format):
-- GSTR-1: top-level {gstin, fp, version, hash, b2b, b2cl, b2cs, cdnr, hsn}
+- GSTR-1: top-level {gstin, fp, version, hash, b2b, b2cl, b2cs, cdnr, cdnur, hsn, doc_issue}
     * b2b  : grouped by counterparty GSTIN  -> [{ctin, inv:[...]}]
     * b2cl : grouped by place-of-supply code -> [{pos, inv:[...]}]
     * b2cs : flat rows                       -> [{sply_ty, pos, typ, rt, txval, ...}]
     * cdnr : credit/debit notes to registered persons, grouped by
              counterparty GSTIN -> [{ctin, nt:[{ntty, nt_num, nt_dt, val,
              pos, rchrg, inv_typ, itms:[{num, itm_det:{...}}]}]}]
+    * cdnur: an unregistered buyer's note on a B2CL invoice ->
+             [{typ:"B2CL", ntty, nt_num, nt_dt, val, pos, itms:[...]}]
+      Every other consumer note nets into its B2CS row (owner Option B,
+      2026-08-09): the report tags each note's ``noteSection``.
     * hsn  : {hsn_b2b:[...], hsn_b2c:[...]}, each row {num, hsn_sc, desc, uqc,
              qty, rt, txval, iamt, camt, samt, csamt} (Table 12 in two parts)
     * doc_issue : {doc_det:[{doc_num, doc_typ, docs:[{num, from, to, totnum,
@@ -106,7 +110,7 @@ def to_gstr1_json(
     inside `data` ("gstin" / "period").
 
     Returns a dict with keys: gstin, fp, version, hash, b2b, b2cl, b2cs,
-    cdnr, hsn. Sections with no rows are emitted as empty lists (the offline
+    cdnr, cdnur, hsn, doc_issue. Sections with no rows are emitted as empty lists (the offline
     tool accepts empty arrays and simply imports nothing for that section).
     """
     data = data or {}
@@ -124,12 +128,14 @@ def to_gstr1_json(
         "hash": "hash",
         "b2b": _build_b2b(data.get("b2b") or [], store_state),
         "b2cl": _build_b2cl(data.get("b2cl") or [], store_state),
-        "b2cs": _build_b2cs(data.get("b2cs") or [], store_state),
+        "b2cs": _build_b2cs(data.get("b2cs") or [], store_state, data.get("cdnr") or []),
         # CDNR -- credit/debit notes to REGISTERED persons. Omitting this
         # dropped every credit note from the filed return, overstating the
         # tax liability and mismatching GSTR-2B (Rule 47(1) breach). Built
         # from the `cdnr` list reports.py::_compute_gstr1 produces.
         "cdnr": _build_cdnr(data.get("cdnr") or [], store_state),
+        # CDNUR -- an unregistered buyer's note on a B2CL invoice.
+        "cdnur": _build_cdnur(data.get("cdnr") or []),
         "hsn": _build_hsn(data),
         "doc_issue": _build_doc_issue(data),
     }
@@ -231,100 +237,120 @@ def _build_b2cl(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
     return list(by_pos.values())
 
 
-def _build_b2cs(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, Any]]:
-    """B2CS is a flat list of consolidated rows keyed by (pos, rate)."""
+def _note_section(r: Dict[str, Any]) -> str:
+    """Where a note files (owner Option B, 2026-08-09): the report's own
+    ``noteSection``; a row without one, by its buyer -- a GSTIN -> CDNR, else
+    B2CS netting."""
+    sec = str(r.get("noteSection") or "").upper()
+    if sec in ("CDNR", "CDNUR", "B2CS"):
+        return sec
+    return "CDNR" if str(r.get("customerGSTIN") or r.get("ctin") or "").strip() else "B2CS"
+
+
+def _note_sign(r: Dict[str, Any]) -> int:
+    """+1 for a debit note (adds to the supply), -1 for a credit note."""
+    return 1 if str(r.get("noteType") or r.get("ntty") or "C").strip().upper() == "D" else -1
+
+
+def b2cs_net_rows(rows: List[Dict[str, Any]], notes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """B2CS rows keyed by (supply type, pos, rate), NET of the consumer notes
+    that file there (credit notes less, debit notes more), each note per rate
+    (its ``rateLines``). UNCLAMPED: a row its notes exceed comes out negative
+    -- the export files it at 0 and the report flags the excess (reports
+    gstr1). Pure."""
+    by: Dict[tuple, Dict[str, Any]] = {}
+
+    def add(pos, rate, taxable, igst, cgst, sgst, cess, sign):
+        sply_ty = "INTER" if _num(igst) > 0 else "INTRA"
+        key = (sply_ty, pos, _num(rate))
+        v = by.setdefault(key, {"sply_ty": sply_ty, "pos": pos, "typ": "OE", "rt": _num(rate),
+                                "txval": 0.0, "iamt": 0.0, "camt": 0.0, "samt": 0.0, "csamt": 0.0})
+        for k, x in (("txval", taxable), ("iamt", igst), ("camt", cgst), ("samt", sgst), ("csamt", cess)):
+            v[k] += sign * _num(x)
+
+    for r in rows:
+        if isinstance(r, dict):
+            pos = r.get("placeOfSupplyCode") or resolve_state_code(str(r.get("placeOfSupply") or ""))
+            add(pos, r.get("gstRate"), r.get("taxableValue"), r.get("igst"), r.get("cgst"),
+                r.get("sgst"), r.get("cess"), 1)
+    for n in notes:
+        if not isinstance(n, dict) or _note_section(n) != "B2CS":
+            continue
+        pos = n.get("placeOfSupplyCode") or resolve_state_code(
+            str(n.get("placeOfSupply") or n.get("customerState") or "")
+        )
+        lines = [ln for ln in n.get("rateLines") or [] if isinstance(ln, dict)] or [
+            {"rate": n.get("gstRate"), "taxable": n.get("taxableValue"), "igst": n.get("igst"),
+             "cgst": n.get("cgst"), "sgst": n.get("sgst")}
+        ]
+        for ln in lines:
+            add(pos, ln.get("rate"), ln.get("taxable"), ln.get("igst"), ln.get("cgst"),
+                ln.get("sgst"), 0, _note_sign(n))
+    return [{**v, **{k: round(v[k], 2) for k in ("txval", "iamt", "camt", "samt", "csamt")}}
+            for v in by.values()]
+
+
+def _build_b2cs(
+    rows: List[Dict[str, Any]], store_state: str, notes: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """B2CS: consolidated rows keyed by (supply type, pos, rate), net of the
+    consumer notes (b2cs_net_rows). The portal takes no negative row: one its
+    credit notes exceed files at 0 (the report says so for the CA)."""
+    return [
+        {**v, **{k: max(0.0, v[k]) for k in ("txval", "iamt", "camt", "samt", "csamt")}}
+        for v in b2cs_net_rows(rows, notes or [])
+    ]
+
+
+def _note_nt(r: Dict[str, Any]) -> Dict[str, Any]:
+    """One note's common portal fields: ntty, nt_num, nt_dt, val, itms (one
+    per rate, _invoice_itms over its ``rateLines``)."""
+    return {
+        "ntty": "D" if _note_sign(r) > 0 else "C",
+        "nt_num": str(r.get("refReference") or r.get("noteNumber") or r.get("nt_num") or ""),
+        "nt_dt": _fmt_date(r.get("creditNoteDate") or r.get("noteDate") or r.get("nt_dt") or ""),
+        "val": _num(r.get("grossValue") or r.get("val")),
+        "itms": _invoice_itms(r),
+    }
+
+
+def _build_cdnur(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """CDNUR: an unregistered buyer's credit/debit note on a B2CL invoice
+    (the report's ``noteSection`` CDNUR), typ B2CL, with its place of supply."""
     out: List[Dict[str, Any]] = []
     for r in rows:
-        if not isinstance(r, dict):
+        if not isinstance(r, dict) or _note_section(r) != "CDNUR":
             continue
-        igst = _num(r.get("igst"))
-        pos = r.get("placeOfSupplyCode") or resolve_state_code(str(r.get("placeOfSupply") or ""))
-        # INTER when IGST present, else INTRA.
-        sply_ty = "INTER" if igst > 0 else "INTRA"
-        out.append(
-            {
-                "sply_ty": sply_ty,
-                "pos": pos,
-                "typ": "OE",  # OE = Other than E-commerce
-                "rt": _num(r.get("gstRate")),
-                "txval": _num(r.get("taxableValue")),
-                "iamt": igst,
-                "camt": _num(r.get("cgst")),
-                "samt": _num(r.get("sgst")),
-                "csamt": _num(r.get("cess")),
-            }
+        pos = r.get("placeOfSupplyCode") or resolve_state_code(
+            str(r.get("placeOfSupply") or r.get("customerState") or "")
         )
+        nt = _note_nt(r)
+        out.append({"typ": "B2CL", "ntty": nt["ntty"], "nt_num": nt["nt_num"],
+                    "nt_dt": nt["nt_dt"], "val": nt["val"], "pos": pos, "itms": nt["itms"]})
     return out
 
 
 def _build_cdnr(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, Any]]:
-    """Build the CDNR section: credit/debit notes issued to REGISTERED persons,
-    grouped by counterparty GSTIN (ctin).
-
-    Maps from the cdnr items reports.py::_compute_gstr1 produces. Each IMS
-    cdnr item carries: refReference, creditNoteDate, customerGSTIN,
-    placeOfSupply/customerState, grossValue, taxableValue, cgst, sgst, igst,
-    hsnCode, gstRate.
-
-    Portal schema (offline-tool):
-        [{ctin, nt:[{ntty, nt_num, nt_dt, val, pos, rchrg, inv_typ,
-                     itms:[{num, itm_det:{rt, txval, iamt, camt, samt, csamt}}]}]}]
-
-    `ntty` is "C" (credit note) or "D" (debit note). IMS only issues CREDIT
-    notes today (returns / refunds), so we default to "C" and honour an
-    explicit `noteType`/`ntty` override when a debit note is ever produced.
-
-    Notes WITHOUT a counterparty GSTIN cannot sit in CDNR -- a credit note to
-    an UNREGISTERED consumer belongs in CDNUR, which IMS does not yet compute
-    (see PR limitation note). Such rows are skipped here rather than emitted
-    with an empty ctin, mirroring the B2B handling.
-    """
+    """CDNR: credit/debit notes to REGISTERED buyers (a GSTIN; the report's
+    ``noteSection`` CDNR), document-wise, grouped by counterparty GSTIN:
+        [{ctin, nt:[{ntty, nt_num, nt_dt, val, pos, rchrg, inv_typ, itms}]}]
+    ``ntty`` C or D (the row's ``noteType``); ``itms`` one per GST rate. A
+    consumer's note is CDNUR (B2CL sale) or nets into B2CS -- never here with
+    an empty ctin."""
     by_ctin: Dict[str, Dict[str, Any]] = {}
     for r in rows:
-        if not isinstance(r, dict):
+        if not isinstance(r, dict) or _note_section(r) != "CDNR":
             continue
         ctin = str(r.get("customerGSTIN") or r.get("ctin") or "").strip()
         if not ctin:
-            # Credit note to an unregistered person -> CDNUR, not CDNR. IMS
-            # does not compute CDNUR yet, so skip rather than misfile it.
             continue
-        ntty = str(r.get("noteType") or r.get("ntty") or "C").strip().upper()
-        if ntty not in ("C", "D"):
-            ntty = "C"
         pos = r.get("placeOfSupplyCode") or resolve_state_code(
             str(r.get("placeOfSupply") or r.get("customerState") or ""), ctin
         )
-        nt = {
-            "ntty": ntty,
-            "nt_num": str(
-                r.get("refReference")
-                or r.get("noteNumber")
-                or r.get("nt_num")
-                or ""
-            ),
-            "nt_dt": _fmt_date(
-                r.get("creditNoteDate") or r.get("noteDate") or r.get("nt_dt") or ""
-            ),
-            "val": _num(r.get("grossValue") or r.get("val")),
-            "pos": pos,
-            "rchrg": "N",
-            "inv_typ": "R",  # Regular
-            "itms": [
-                {
-                    "num": 1,
-                    "itm_det": _itm(
-                        r.get("gstRate") or r.get("rt"),
-                        r.get("taxableValue") or r.get("txval"),
-                        r.get("igst") or r.get("iamt"),
-                        r.get("cgst") or r.get("camt"),
-                        r.get("sgst") or r.get("samt"),
-                        r.get("cess") or r.get("csamt"),
-                    ),
-                }
-            ],
-        }
-        bucket = by_ctin.setdefault(ctin, {"ctin": ctin, "nt": []})
-        bucket["nt"].append(nt)
+        nt = _note_nt(r)
+        nt = {"ntty": nt["ntty"], "nt_num": nt["nt_num"], "nt_dt": nt["nt_dt"], "val": nt["val"],
+              "pos": pos, "rchrg": "N", "inv_typ": "R", "itms": nt["itms"]}
+        by_ctin.setdefault(ctin, {"ctin": ctin, "nt": []})["nt"].append(nt)
     return list(by_ctin.values())
 
 

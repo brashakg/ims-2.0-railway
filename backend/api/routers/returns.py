@@ -2059,6 +2059,7 @@ def _issue_store_credit(
     taxable: Optional[float] = None,
     tax: Optional[float] = None,
     gst_rate: Optional[float] = None,
+    by_rate: Optional[Dict[str, Any]] = None,
     bump_balance: bool = True,
     interstate: Optional[bool] = None,
     store_id: Optional[str] = None,
@@ -2197,6 +2198,10 @@ def _issue_store_credit(
         entry["tax"] = round(float(tax), 2)
     if gst_rate is not None:
         entry["gst_rate"] = round(float(gst_rate), 2)
+    # A note with no returns doc behind it (the SUPERADMIN correction): its
+    # own per-rate split, {"5": {taxable, tax}}, which GSTR-1 files it by.
+    if by_rate:
+        entry["by_rate"] = by_rate
     # GSTR-1 CDNR head consistency: the credit note must reverse under the SAME
     # CGST/SGST-vs-IGST head its parent invoice filed under. Online parent
     # orders persist an `interstate` flag (stamped at ingest from the delivery
@@ -2255,7 +2260,7 @@ def _issue_store_credit(
                 try:
                     res = coll.update_one({"entry_id": prior["entry_id"], "type": PENDING, "final_type": scl.ISSUED},
                                           {"$set": {"final_type": scl.ADJUSTED},
-                                           "$unset": {"note_number": "", "taxable": "", "tax": "", "gst_rate": ""}})
+                                           "$unset": {"note_number": "", "taxable": "", "tax": "", "gst_rate": "", "by_rate": ""}})
                     converted = int(getattr(res, "matched_count", getattr(res, "modified_count", 0)) or 0) == 1
                 except Exception as exc:  # noqa: BLE001
                     logger.error("[RETURNS] in-flight credit %s not converted: %s", prior["entry_id"], exc)
@@ -2265,7 +2270,7 @@ def _issue_store_credit(
                         _record_unused_credit_note(prior["note_number"], {"order_id": order_id, "store_id": store_id},
                                                    ref, current_user, "past the section 34 window")
                     prior.update(final_type=scl.ADJUSTED)
-                    for k in ("note_number", "taxable", "tax", "gst_rate"):
+                    for k in ("note_number", "taxable", "tax", "gst_rate", "by_rate"):
                         prior.pop(k, None)
                 else:
                     try:
@@ -2286,7 +2291,7 @@ def _issue_store_credit(
             return {**prior, "type": entry["type"], "applied": True} if status == POSTED else None
     if not credit_note:
         note_number = None
-        for k in ("taxable", "tax", "gst_rate", "interstate"):
+        for k in ("taxable", "tax", "gst_rate", "by_rate", "interstate"):
             entry.pop(k, None)
     elif not note_number:
         try:

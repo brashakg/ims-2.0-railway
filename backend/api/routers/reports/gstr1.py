@@ -42,12 +42,15 @@ from .gst_base import (
     _order_taxable_and_tax,
     _alloc,
     _rate_heads,
+    _GST_SLABS,
+    is_b2cl,
 )
 from ...services.gst_rates import split_gst
 from .gst_itc import (
     _cn_bucket_rate,
     _cn_foreign_store,
     _cn_parent_held,
+    _debit_notes,
     _itc_store_scope,
     _ledger_row_return_doc,
     _order_held_off_returns,
@@ -58,7 +61,7 @@ from .gst_itc import (
     _transfer_outward_bills,
 )
 
-def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
+def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
     """Compute the IMS GSTR-1 return for a month: THE return of
     `active_store`'s GSTIN -- GSTR-1 is filed per GSTIN, so it carries every
     shop on that GSTIN (gst_itc._itc_store_scope, the scope GSTR-3B files:
@@ -134,7 +137,8 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
     store_doc = None
 
     filing = [active_store]
-    db = _get_raw_db()
+    # `db`: the caller's handle (GSTR-3B Table 3.2 reads these notes), else ours.
+    db = db if db is not None else _get_raw_db()
     if db is not None:
         # A read failure RAISES (the doors answer 503, _gstr1_return) -- never a
         # report short of the orders, credit notes or returns it could not read.
@@ -258,11 +262,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
             cgst = round(sum(rl["cgst"] for rl in rate_lines), 2)
             sgst = round(sum(rl["sgst"] for rl in rate_lines), 2)
 
-            is_b2cl = (
-                not customer_gstin
-                and is_inter_state
-                and invoice_value > B2CL_INVOICE_THRESHOLD
-            )
+            sale_is_b2cl = is_b2cl(customer_gstin, is_inter_state, invoice_value)
             bill_number = _gstr1_bill_number(order, validation_issues)
             created_raw = order.get("created_at", "")
             # BUG-104, VALUE rule (move the derived day FORWARD). This is
@@ -349,7 +349,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
                         "customerState": customer_state or store_state,
                     }
                 )
-            elif is_b2cl:
+            elif sale_is_b2cl:
                 # B2CL: an INTER-state consumer invoice above the threshold.
                 # An intra-state one of any value is B2CS (below).
                 b2cl.append(
@@ -599,7 +599,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
                 pieces.append((hsn, rate, part))
         if not pieces:
             return []
-        weights = [p[2] for p in pieces]
+        weights = [p[1] * p[2] for p in pieces]  # heads by each piece's tax (rate x taxable)
         cg, sg, ig = (_alloc(h, weights) for h in heads)
         units = dict(units or {})  # the pieces go on the first line of their (rate, HSN)
         return [
@@ -607,6 +607,69 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
              "taxable": t, "cgst": c, "sgst": g, "igst": i}
             for (h, r, t), c, g, i in zip(pieces, cg, sg, ig)
         ]
+
+    def _note_rate_lines(buckets, heads) -> list:
+        """A note's portal ``itms``: one line per rate, its heads shared pro
+        rata to each bucket's tax (rate x taxable) -- the invoice's rateLines
+        shape, so a 5% + 18% note files two self-consistent items."""
+        w = [r * t for r, t in buckets]
+        cg, sg, ig = (_alloc(h, w) for h in heads)
+        return [
+            {"rate": r, "taxable": t, "cgst": c, "sgst": g, "igst": i}
+            for (r, t), c, g, i in zip(buckets, cg, sg, ig)
+        ]
+
+    def _note_section(gstin, is_inter, oid) -> str:
+        """Where a note files in GSTR-1 (owner Option B, 2026-08-09): CDNR,
+        document-wise, only for a buyer with a GSTIN; an unregistered buyer's
+        note on a B2CL sale (inter-state, above the B2CL limit -- the sale
+        side's own rule) in CDNUR; every other consumer note nets into its
+        B2CS row (state, rate) in the export."""
+        if gstin:
+            return "CDNR"
+        po = _parent(oid)[0]
+        if po and is_b2cl(gstin, is_inter, _money(
+            po.get("grand_total", po.get("total_amount", 0)), po
+        )):
+            return "CDNUR"
+        return "B2CS"
+
+    def _note_buckets(by_rate, base_taxable, rate, taxable) -> tuple:
+        """A note's (rate, taxable) buckets and whether they came from its own
+        per-rate split ``by_rate`` ({rate: {taxable}} -- a return's
+        gst_breakup, a SUPERADMIN correction's stamp)
+        when it reconciles to ``base_taxable``, shared pro rata onto the
+        note's ``taxable`` (a partial or fee'd note); else ONE bucket at
+        ``rate``. A 5% + 18% return never nets whole into one rate's row."""
+        try:
+            b = [
+                (int(round(float(k))), round(float((v or {}).get("taxable") or 0), 2))
+                for k, v in (by_rate.items() if isinstance(by_rate, dict) else ())
+            ]
+        except (TypeError, ValueError, AttributeError):
+            b = []
+        b = [x for x in b if x[1] != 0]
+        if (not b or any(t < 0 for _, t in b)
+                or abs(sum(t for _, t in b) - base_taxable) > 0.05):
+            return [(rate, taxable)], False
+        return [(r, t) for (r, _), t in zip(b, _alloc(taxable, [t for _, t in b]))], True
+
+    def _flag_unsplit(kind, ref, oid, buckets, explicit_rate=None) -> None:
+        """A note filed as ONE bucket at the rate its own tax / taxable gives
+        (no per-rate split) is wrong when its sale has lines of more than one
+        rate -- even at a slab (5% + 18% lowered by 100 each derives 12%):
+        said, never filed silently."""
+        rate = buckets[0][0]
+        if rate not in _GST_SLABS:
+            issue = (f"{kind} files at {rate}%, which is no GST slab (its tax / taxable "
+                     "over lines of two rates); split it by rate with the CA before filing.")
+        elif explicit_rate is None and len({ln[0] for ln in _parent_lines(oid)}) > 1:
+            issue = (f"{kind} files at one derived rate ({rate}%) but its sale has lines of "
+                     "more than one GST rate: it is not split by rate; split it with the CA "
+                     "before filing.")
+        else:
+            return
+        validation_issues.append({"level": "error", "invoice": ref, "issue": issue})
 
     if db is not None:
         # Process credit notes from returns/refunds in credit_note_ledger
@@ -711,10 +774,23 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
                     entry.get("gst_rate"), cn_tax, cn_taxable
                 )
                 _cn_oid = str((_ret_doc or {}).get("order_id") or "")
+                # The return's own per-rate back-out, scaled to this note --
+                # the ledger row's gst_rate is only the return's DOMINANT rate.
+                _gb = (_ret_doc or {}).get("gst_breakup")
+                _gb = _gb if isinstance(_gb, dict) else {}
+                _cbr, _cbase = _gb.get("by_rate"), float(_gb.get("taxable") or 0.0)
+                if not _gb and isinstance(entry.get("by_rate"), dict):
+                    # No returns doc (the SUPERADMIN correction): the row's own
+                    # per-rate split (admin_edit note_by_rate).
+                    _cbr = entry["by_rate"]
+                    _cbase = sum(float((v or {}).get("taxable") or 0) for v in _cbr.values())
+                cn_buckets, _split = _note_buckets(_cbr, round(_cbase, 2), cn_rate, cn_taxable)
+                if not _split:
+                    _flag_unsplit("Credit note", ref, _cn_oid, cn_buckets, entry.get("gst_rate"))
                 cn_hsn_lines = _cn_hsn_lines(
                     ref,
                     _cn_oid,
-                    [(cn_rate, cn_taxable)],
+                    cn_buckets,
                     (cn_cgst, cn_sgst, cn_igst),
                     _returned_units(_ret_doc, _cn_oid),
                 )
@@ -723,6 +799,11 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
 
                 cn_entry = {
                     "refReference": ref,
+                    "noteType": "C",
+                    "noteSection": _note_section(cust_gstin, is_inter, _cn_oid),
+                    "rateLines": _note_rate_lines(
+                        cn_buckets, (cn_cgst, cn_sgst, cn_igst)
+                    ),
                     "creditNoteDate": cn_date,
                     "customerId": cust_id,
                     "customerName": cust_info.get("name", ""),
@@ -826,13 +907,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
                 # The return's own per-rate back-out (returns_engine.
                 # gst_breakup_lines `by_rate`) when it reconciles; else one
                 # bucket at the note's rate.
-                by_rate = gb.get("by_rate") if isinstance(gb.get("by_rate"), dict) else {}
-                r_buckets = [
-                    (int(round(float(k))), round(float((v or {}).get("taxable") or 0), 2))
-                    for k, v in by_rate.items()
-                ]
-                if not r_buckets or abs(sum(t for _, t in r_buckets) - r_taxable) > 0.05:
-                    r_buckets = [(r_rate, r_taxable)]
+                r_buckets, _ = _note_buckets(gb.get("by_rate"), r_taxable, r_rate, r_taxable)
                 r_ref = _cdnr_note_number(
                     {"note_number": ret.get("credit_note_number"), "ref": rid},
                     validation_issues,
@@ -849,6 +924,11 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
                         # The return's credit-note number (its shop's C
                         # series); a return before numbering: its id.
                         "refReference": r_ref,
+                        "noteType": "C",
+                        "noteSection": _note_section(
+                            cust_info.get("gstin", ""), is_inter, r_oid
+                        ),
+                        "rateLines": _note_rate_lines(r_buckets, (r_cgst, r_sgst, r_igst)),
                         "creditNoteDate": (
                             r_when[:10]
                             if isinstance(r_when, str)
@@ -878,6 +958,61 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
                     }
                 )
 
+        # CUSTOMER DEBIT NOTES (a post-invoice change that raised the bill):
+        # filed like a credit note with note type D -- CDNR / CDNUR / B2CS by
+        # the same rule, per GSTIN (_debit_notes: the reader GSTR-3B adds).
+        for dn in _debit_notes(
+            db, filing, from_dt, to_dt, _held_cache, _cdnr_inter_cache, _shop_doc
+        ):
+            d = dn["doc"]
+            if dn["held"]:
+                validation_issues.append(_held_cn_issue(d.get("note_number"), d))
+                continue
+            d_ref = _cdnr_note_number(
+                {"note_number": d.get("note_number"), "ref": d.get("note_number")},
+                validation_issues,
+            )
+            d_oid = str(d.get("order_id") or "")
+            d_cust = cust_map.get(str(d.get("customer_id") or ""), {})
+            d_rate = _cn_bucket_rate(d.get("gst_rate"), dn["tax"], dn["taxable"])
+            d_heads = (dn["cgst"], dn["sgst"], dn["igst"])
+            # The per-rate raise admin_edit stamps (order_superadmin_edit.
+            # note_by_rate); a note without it files at the rate its own
+            # tax / taxable gives -- flagged when that is no GST slab (a
+            # 5% + 18% raise derives 14%, which the portal rejects).
+            _dbr = d.get("by_rate")
+            _dsum = sum(float((v or {}).get("taxable") or 0) for v in _dbr.values())                 if isinstance(_dbr, dict) else 0.0
+            d_buckets, _split = _note_buckets(_dbr, round(_dsum, 2), d_rate, dn["taxable"])
+            if not _split:
+                _flag_unsplit("Debit note", d_ref, d_oid, d_buckets, d.get("gst_rate"))
+            d_hsn_lines = _cn_hsn_lines(d_ref, d_oid, d_buckets, d_heads)
+            d_place = state_name(dn["code"]) or dn["code"] or store_state or "Unknown"
+            cdnr.append(
+                {
+                    "refReference": d_ref,
+                    "noteType": "D",
+                    "noteSection": _note_section(d_cust.get("gstin", ""), dn["inter"], d_oid),
+                    "rateLines": _note_rate_lines(d_buckets, d_heads),
+                    "creditNoteDate": _credit_note_date_ist(d.get("created_at")) or (month + "-01"),
+                    "customerId": str(d.get("customer_id") or ""),
+                    "customerName": d_cust.get("name", "") or str(d.get("customer_name") or ""),
+                    "customerGSTIN": d_cust.get("gstin", ""),
+                    "customerState": d_place,
+                    "placeOfSupply": d_place,
+                    "placeOfSupplyCode": dn["code"],
+                    "grossValue": round(float(d.get("amount") or 0.0), 2),
+                    "taxableValue": dn["taxable"],
+                    "cgst": dn["cgst"],
+                    "sgst": dn["sgst"],
+                    "igst": dn["igst"],
+                    "taxValue": dn["tax"],
+                    "hsnCode": d_hsn_lines[0]["hsn"] if d_hsn_lines else "",
+                    "gstRate": d_rate,
+                    "hsnLines": d_hsn_lines,
+                    "originalInvoiceNumber": d.get("original_invoice_number"),
+                }
+            )
+
     # Build HSN summary by aggregating sales and deducting credit notes.
     # Every sale (B2B, B2CL, B2CS) and transfer deemed supply by its PER-LINE
     # HSN detail, per rate (a 5% frame + an 18% sunglass on one invoice, or one
@@ -893,12 +1028,17 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
         if isinstance(t_line, dict):
             t_line["section"] = "B2B"
     cn_hsn: list = []
+    dn_hsn: list = []  # a debit note ADDS to the rows its sale filed
     for cn in cdnr:
         if not isinstance(cn, dict):
             continue
         section = "B2B" if cn.get("customerGSTIN") else "B2C"
-        cn_hsn.extend({**hl, "section": section} for hl in cn.get("hsnLines") or [])
-    sales_hsn = [ln for ln in sale_hsn_lines + transfer_hsn_lines if isinstance(ln, dict)]
+        (dn_hsn if cn.get("noteType") == "D" else cn_hsn).extend(
+            {**hl, "section": section} for hl in cn.get("hsnLines") or []
+        )
+    sales_hsn = [
+        ln for ln in sale_hsn_lines + transfer_hsn_lines + dn_hsn if isinstance(ln, dict)
+    ]
     hsn_summary = _hsn_rows(sales_hsn, cn_hsn)
     hsn_b2b = _hsn_rows(
         [ln for ln in sales_hsn if ln.get("section") == "B2B"],
@@ -912,6 +1052,25 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
         validation_issues,
         "B2C",
     )
+
+    # B2CS is filed NET of the consumer notes (owner Option B; gstn_export
+    # b2cs_net_rows -- the export's own netting). The portal takes no negative
+    # row: one the notes exceed files at 0, and the excess is said here.
+    from ...services.gstn_export import b2cs_net_rows
+
+    b2cs_net = b2cs_net_rows(b2cs, cdnr)
+    for v in b2cs_net:
+        over = {k: round(-v[k], 2) for k in ("txval", "iamt", "camt", "samt") if v[k] < -0.005}
+        if over:
+            validation_issues.append(
+                {
+                    "level": "error",
+                    "invoice": f"B2CS {v['pos']} @ {v['rt']:g}% ({v['sply_ty']})",
+                    "issue": "Consumer credit notes exceed this month's B2CS sales on this row by "
+                    + ", ".join(f"{k} Rs {a:,.2f}" for k, a in over.items())
+                    + "; the row is filed at 0 -- carry the excess with the CA.",
+                }
+            )
 
     total_invoices = len(b2b) + len(b2cl) + len(b2cs_map)
     total_taxable = (
@@ -938,6 +1097,20 @@ def _compute_gstr1(month: str, active_store: str, shops=None) -> dict:
         "b2b": b2b,
         "b2cl": b2cl,
         "b2cs": b2cs,
+        # B2CS as the portal JSON files it: net of the consumer notes, a row
+        # they exceed at 0 (the screen and CSV show these; `b2cs` is gross).
+        "b2csFiled": [
+            {
+                "placeOfSupply": state_name(v["pos"]) or v["pos"],
+                "placeOfSupplyCode": v["pos"],
+                "supplyType": v["sply_ty"],
+                "gstRate": v["rt"],
+                **{k: max(0.0, v[f]) for k, f in (
+                    ("taxableValue", "txval"), ("cgst", "camt"), ("sgst", "samt"), ("igst", "iamt"))},
+                "totalTax": round(sum(max(0.0, v[f]) for f in ("camt", "samt", "iamt")), 2),
+            }
+            for v in b2cs_net
+        ],
         "cdnr": cdnr,
         "hsnSummary": hsn_summary,
         "hsnB2B": hsn_b2b,
@@ -1089,7 +1262,8 @@ def _docs_issued(db, store_id: str, from_dt, to_dt, cdnr=(), issues=None) -> lis
             if n in state["C"]:
                 state["C"][n] = "cancelled"
     filed = sorted(
-        {str(c.get("refReference") or "") for c in cdnr} - known.get("C", set()) - {""}
+        {str(c.get("refReference") or "") for c in cdnr if c.get("noteType") != "D"}
+        - known.get("C", set()) - {""}
     )
     if filed and issues is not None:
         issues.append({
