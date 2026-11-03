@@ -5,6 +5,7 @@ Order data access operations
 """
 
 from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
+from api.utils.real_sale import EXCLUDED_ORDER_STATUSES
 import logging
 import re
 from typing import Iterable, List, Optional, Dict, Tuple
@@ -60,8 +61,10 @@ def order_mint_problem(order: Optional[Dict]) -> Optional[str]:
       * a historical import (``historical`` / the order-history import) was
         billed before IMS (CGST Rule 46(b));
       * a CANCELLED order is never invoiced (owner 2026-10-19: cancelled test
-        bills must never get numbers). One that already carries a number
-        keeps it -- a door asks this only before minting."""
+        bills must never get numbers);
+      * a Shopify TEST order is never invoiced (owner ruling 27).
+    One that already carries a number keeps it -- a door asks this only
+    before minting."""
     o = order or {}
     if o.get("historical") or o.get("import_source") == "shopify_order_history":
         return (
@@ -70,6 +73,10 @@ def order_mint_problem(order: Optional[Dict]) -> Optional[str]:
         )
     if str(o.get("status") or "").upper() == "CANCELLED":
         return "this order was cancelled"
+    if o.get("is_test") or str(o.get("status") or "").upper() == "TEST":
+        # Owner ruling 27: Shopify's own test checkout is never a sale.
+        return ("this is a Shopify test order -- it never takes a number "
+                "from the live invoice series")
     if o.get("advance_refund_id"):
         # PR #1264: its advance was (or is being) refunded on the way to a
         # cancel -- a number now would file a sale no credit note reverses.
@@ -662,7 +669,8 @@ class OrderRepository(BaseRepository):
             order_id,
             # ...and no refund-advance claim (order_mint_problem's rule, held
             # at the write so a claim landing after the door's read wins).
-            {"invoice_number": {"$in": [None, ""]}, "advance_refund_id": None},
+            {"invoice_number": {"$in": [None, ""]}, "advance_refund_id": None,
+             "is_test": {"$ne": True}},
             {"invoice_number": invoice_number, "invoice_date": datetime.now()},
         ):
             return invoice_number
@@ -789,7 +797,7 @@ class OrderRepository(BaseRepository):
                     "$gte": ist_day_start_utc(from_date),
                     "$lte": ist_day_start_utc(to_date + timedelta(days=1))
                 },
-                "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]}
+                "status": {"$nin": EXCLUDED_ORDER_STATUSES}
             }},
             {"$group": {
                 "_id": None,
@@ -821,7 +829,7 @@ class OrderRepository(BaseRepository):
                     "$gte": ist_day_start_utc(from_date),
                     "$lte": ist_day_start_utc(to_date + timedelta(days=1))
                 },
-                "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]}
+                "status": {"$nin": EXCLUDED_ORDER_STATUSES}
             }},
             {"$group": {
                 "_id": "$salesperson_id",
@@ -842,7 +850,7 @@ class OrderRepository(BaseRepository):
             {"$match": {
                 "store_id": store_id,
                 "created_at": {"$gte": start_date},
-                "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]}
+                "status": {"$nin": EXCLUDED_ORDER_STATUSES}
             }},
             {"$group": {
                 "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$created_at", "timezone": "+05:30"}},

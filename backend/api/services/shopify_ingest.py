@@ -1263,7 +1263,7 @@ def _booking_unsettled(db, existing: Dict[str, Any], historical: bool) -> Dict[s
     {"booking_unsettled": why}, merged into the replay's answer: every caller
     goes on exactly as before (a duplicate mid-claim is normal), and the
     webhook drain reads the flag as NOT DONE, so the inbox retries it."""
-    if historical:
+    if historical or existing.get("is_test"):  # a test order claims nothing (ruling 27)
         return {}
     # A creator that stopped between the order insert and its total-mismatch
     # task: raise it now (a no-op once the order is stamped task_raised).
@@ -2369,7 +2369,13 @@ def ingest_shopify_order(
     never_sold = bool(payload.get("cancelled_at")) and not (
         payload.get("fulfillment_status") or payload.get("fulfillments")
     )
-    if not historical and not never_sold:
+    # A Shopify TEST order (owner ruling 27, 2026-11-03: Shopify's own `test`
+    # flag -- a bogus / test-gateway checkout) is booked for visibility only:
+    # no invoice serial, status TEST (real_sale: never a sale, never on a GST
+    # return), no payment row, no stock claim, no tasks. Past test orders are
+    # left as they are.
+    test_order = not historical and str(payload.get("test")).strip().lower() == "true"
+    if not historical and not never_sold and not test_order:
         try:
             from ..dependencies import get_order_repository
 
@@ -2484,6 +2490,9 @@ def ingest_shopify_order(
     # via `now`; the tax lines / GST split above are reused untouched).
     if historical:
         order_doc.update(_historical_overrides(payload, grand_total))
+    if test_order:
+        order_doc.update({"status": "TEST", "is_test": True, "payments": [],
+                          "fulfillment_hold": True})
 
     try:
         orders_coll.insert_one(dict(order_doc))
@@ -2551,6 +2560,20 @@ def ingest_shopify_order(
             "rx_pending": False,
             "historical": True,
             "refund_credit_notes": refund_cn,
+        }
+
+    if test_order:
+        return {
+            "status": "created",
+            "order_id": order_id,
+            "invoice_number": None,
+            "shopify_order_id": shopify_order_id,
+            "store_id": store_id,
+            "interstate": order_doc.get("interstate"),
+            "place_of_supply": order_doc["place_of_supply"],
+            "grand_total": grand_total,
+            "rx_pending": False,
+            "is_test": True,
         }
 
     _raise_total_mismatch_task(db, order_doc)

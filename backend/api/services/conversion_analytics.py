@@ -27,11 +27,12 @@ from api.utils.event_time import parse_event_utc_naive
 from typing import Dict, List, Optional
 
 from api.utils.ist import ist_day_start_utc
+from api.utils.real_sale import EXCLUDED_ORDER_STATUSES
 
 # Orders in these states never count as a conversion (F24 packet + reports.py
 # _orders_in_window mirror the same exclusion). HISTORICAL = a pre-IMS order
 # imported for customer-360 history only -- it can never convert an eye test.
-_NON_CONVERTING_STATUSES = {"CANCELLED", "DRAFT", "HISTORICAL"}
+_NON_CONVERTING_STATUSES = set(EXCLUDED_ORDER_STATUSES)
 
 
 def _empty() -> Dict:

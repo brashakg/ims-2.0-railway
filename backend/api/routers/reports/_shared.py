@@ -5,6 +5,7 @@ Real database queries for dashboard and reports
 """
 
 import logging
+from ...utils.real_sale import EXCLUDED_ORDER_STATUSES
 import re
 
 from fastapi import APIRouter, Depends, Query
@@ -93,7 +94,7 @@ def _orders_in_window(
     counted in both months."""
     flt: dict = {
         "created_at": {"$gte": start_dt, ("$lt" if end_exclusive else "$lte"): end_dt},
-        "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
+        "status": {"$nin": EXCLUDED_ORDER_STATUSES},
     }
     if store_id:
         flt["store_id"] = store_id

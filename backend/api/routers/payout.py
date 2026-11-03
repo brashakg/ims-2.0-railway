@@ -22,6 +22,7 @@ incentive_settings collection.
 from __future__ import annotations
 
 import csv as _csv
+from api.utils.real_sale import EXCLUDED_ORDER_STATUSES
 import io
 import logging
 from datetime import date as date_type, datetime
@@ -241,7 +242,7 @@ def _aggregate_sales(store_id: str, year: int, month: int) -> Dict[str, float]:
                     {
                         "$match": {
                             "store_id": store_id,
-                            "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
+                            "status": {"$nin": EXCLUDED_ORDER_STATUSES},
                             "created_at": {"$gte": start_dt, "$lt": next_first},
                         }
                     },
@@ -282,7 +283,7 @@ def _aggregate_sales(store_id: str, year: int, month: int) -> Dict[str, float]:
                         continue
                 else:
                     continue
-                if d.get("status") in ("CANCELLED", "DRAFT", "HISTORICAL"):
+                if d.get("status") in EXCLUDED_ORDER_STATUSES:
                     continue
                 out["sales"] += float(d.get("grand_total") or 0)
                 out["discount"] += float(d.get("total_discount") or 0)

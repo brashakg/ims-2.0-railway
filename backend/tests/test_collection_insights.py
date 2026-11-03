@@ -404,8 +404,11 @@ def test_movement_store_filter_reaches_the_match_stage():
     ci.movement_summary(db, {"product_ids": ["P1"]}, store_id="BV-02")
     match = coll.pipelines[0][0]["$match"]
     assert match["store_id"] == "BV-02"
-    # HISTORICAL = pre-IMS imported order (bvi_import) -- never movement/revenue.
-    assert match["status"] == {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]}
+    # THE not-a-sale list (api/utils/real_sale): HISTORICAL = pre-IMS import,
+    # TEST = a Shopify test order -- never movement/revenue.
+    from api.utils.real_sale import EXCLUDED_ORDER_STATUSES
+    assert match["status"] == {"$nin": EXCLUDED_ORDER_STATUSES}
+    assert {"CANCELLED", "DRAFT", "HISTORICAL", "TEST"} <= set(match["status"]["$nin"])
     # the day sub-group is IST-truncated
     gid = coll.pipelines[0][3]["$group"]["_id"]
     assert gid["day"]["$dateTrunc"]["timezone"] == "Asia/Kolkata"

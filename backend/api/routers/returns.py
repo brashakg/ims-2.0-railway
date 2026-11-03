@@ -4416,6 +4416,13 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # already fully refunded. Legacy orders with no status field fall through to
     # the cumulative monetary cap below (the amount_paid guard catches never-paid).
     _ostatus = order.get("status") or order.get("orderStatus")
+    # Owner ruling 27: a Shopify test checkout is never a sale -- no credit
+    # note number, no GST reversal, no Day-End refund leg.
+    if order.get("is_test") or str(_ostatus or "").upper() == "TEST":
+        raise HTTPException(
+            status_code=400,
+            detail="This is a Shopify test order, not a sale, so it cannot be returned or refunded.",
+        )
     if _ostatus in ("CANCELLED", "DRAFT", "REFUNDED", "VOID", "VOIDED"):
         raise HTTPException(
             status_code=400,

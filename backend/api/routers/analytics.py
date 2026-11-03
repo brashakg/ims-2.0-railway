@@ -398,7 +398,10 @@ def _safe_float(val: Any) -> float:
 # fulfilled; DRAFT orders were never confirmed.  Including them inflated the
 # dashboard revenue/order-count metrics (RPT-1).  HISTORICAL = a pre-IMS order
 # imported for customer-360 history only (settled outside IMS books).
-_EXCLUDED_ORDER_STATUSES = frozenset({"CANCELLED", "DRAFT", "HISTORICAL"})
+# TEST = a Shopify test order (owner ruling 27). One list: api/utils/real_sale.
+from ..utils.real_sale import EXCLUDED_ORDER_STATUSES as _SHARED_EXCLUDED  # noqa: E402
+
+_EXCLUDED_ORDER_STATUSES = frozenset(_SHARED_EXCLUDED)
 
 
 def _is_billable(order: dict) -> bool:
