@@ -47,6 +47,7 @@ from .gst_itc import (
     _placement,
     _sum_heads,
     _ledger_row_return_doc,
+    _ledger_row_return_ids,
     _order_held_off_returns,
     net_cash_due,
     _return_interstate_flag,
@@ -130,10 +131,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     for _row in db.get_collection("credit_note_ledger").find(
         {"store_id": {"$in": shops}, "type": scl.CREDIT_NOTE_TYPE}, {"ref": 1, "reason": 1}
     ):
-        for _f in ("ref", "reason"):
-            for _tok in str(_row.get(_f) or "").replace(",", " ").split():
-                if _tok.startswith("RET-"):
-                    seen_returns.add(_tok.strip(".:;"))
+        seen_returns.update(_ledger_row_return_ids(_row))
 
     # ONE head-resolver state for BOTH legs (parent-order stamp first, customer
     # state as the fallback -- _return_interstate_flag). The ledger leg used to
@@ -162,10 +160,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 **instant_in_window_query("created_at", from_dt, to_dt),
             }
         ):
-            for f in ("ref", "reason"):
-                for tok in str(row.get(f) or "").replace(",", " ").split():
-                    if tok.startswith("RET-"):
-                        seen_returns.add(tok.strip(".:;"))
+            seen_returns.update(_ledger_row_return_ids(row))
             t = row.get("tax")
             if t is None:
                 gross = float(row.get("gross_refund") or 0.0)

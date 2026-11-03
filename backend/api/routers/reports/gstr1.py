@@ -53,6 +53,7 @@ from .gst_itc import (
     _debit_notes,
     _itc_store_scope,
     _ledger_row_return_doc,
+    _ledger_row_return_ids,
     _order_held_off_returns,
     _return_supply,
     _split_transfer_bills,
@@ -856,11 +857,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                 {"store_id": {"$in": filing}, "type": scl.CREDIT_NOTE_TYPE},
                 {"ref": 1, "reason": 1},
             ) if ledger_col is not None else []:
-                for _f in ("ref", "reason"):
-                    _v = str(_row.get(_f) or "")
-                    for _tok in _v.replace(",", " ").split():
-                        if _tok.startswith("RET-"):
-                            seen_returns.add(_tok.strip(".:;"))
+                seen_returns.update(_ledger_row_return_ids(_row))
 
             for ret in returns_col.find(
                 {

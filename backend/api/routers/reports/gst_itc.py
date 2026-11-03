@@ -833,6 +833,19 @@ def _return_interstate_flag(db, ret, store, cache):
     return _return_supply(db, ret, store, cache)[0]
 
 
+def _ledger_row_return_ids(row):
+    """The RET- ids a credit-note ledger row names in its ``ref`` / ``reason``
+    ("Return RET-xxx, ..."), in order. THE one copy of the rule that links a
+    note to its return: _ledger_row_return_doc and the GSTR-1 / GSTR-3B
+    returns-leg dedup all read it."""
+    return [
+        tok.strip(".:;")
+        for f in ("ref", "reason")
+        for tok in str(row.get(f) or "").replace(",", " ").split()
+        if tok.startswith("RET-")
+    ]
+
+
 def _ledger_row_return_doc(db, row):
     """The returns doc a credit-note ledger row was minted for -- else the
     row itself when its door stamped the order it reverses (the SUPERADMIN
@@ -846,15 +859,12 @@ def _ledger_row_return_doc(db, row):
     note. A manual note naming no order -> None (it stays attributed where
     booked); a read failure RAISES (the doors answer 503).
     """
-    for f in ("ref", "reason"):
-        for tok in str(row.get(f) or "").replace(",", " ").split():
-            if not tok.startswith("RET-"):
-                continue
-            # A read failure RAISES: a missed return doc files the note
-            # under the wrong GSTIN.
-            ret = db.get_collection("returns").find_one({"return_id": tok.strip(".:;")})
-            if isinstance(ret, dict):
-                return ret
+    for rid in _ledger_row_return_ids(row):
+        # A read failure RAISES: a missed return doc files the note
+        # under the wrong GSTIN.
+        ret = db.get_collection("returns").find_one({"return_id": rid})
+        if isinstance(ret, dict):
+            return ret
     return row if row.get("order_id") else None
 
 
