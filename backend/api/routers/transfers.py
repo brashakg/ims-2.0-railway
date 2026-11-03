@@ -35,7 +35,9 @@ from ..services.purchase_invoice_engine import classify_supply
 from ..services.stores_util import is_online_store
 from database.repositories.order_repository import (
     InvoiceNumberError,
+    log_document_number,
     next_document_number,
+    store_invoice_code,
 )
 
 logger = logging.getLogger(__name__)
@@ -476,13 +478,48 @@ def _caller_view(transfer: Dict, current_user: dict) -> Dict:
     )
 
 
-def generate_transfer_number() -> str:
-    """Generate a unique transfer number — DB-count-based when persistent,
-    else the in-memory counter."""
-    coll = _transfers_coll()
-    if coll is not None:
-        seq = coll.count_documents({}) + 1001
-        return f"TRF-{now_ist().strftime('%Y%m')}-{seq}"
+def generate_transfer_number(from_store_id: Optional[str] = None) -> str:
+    """The transfer's number -- its delivery challan number (Rule 55) for a
+    move inside one GSTIN -- from the SENDING shop's own challan series:
+    ``TRF-{shop code}-NNNNN`` (store_invoice_code; 15 characters), one
+    ``counters`` doc per shop claimed with ONE atomic ``$inc``, so two
+    concurrent transfers never share a number (the old count_documents()+1
+    gave both the same) and each shop's series is its own, the one GSTR-1
+    Table 13 reads (logged in the document register). A shop with no code
+    numbers in the shared ``TRF-X-`` series. DB-less: the in-memory counter.
+    A counter or register failure refuses the transfer (503)."""
+    from pymongo import ReturnDocument
+    from pymongo.errors import DuplicateKeyError
+
+    if _transfers_coll() is not None:
+        db = _get_db()
+        try:
+            store = (
+                db.get_collection("stores").find_one({"store_id": from_store_id})
+                if from_store_id
+                else None
+            )
+            label = store_invoice_code(store) or "X"
+
+            def claim():
+                return db.get_collection("counters").find_one_and_update(
+                    {"_id": f"transfer-challan:{label}"},
+                    {"$inc": {"seq": 1}},
+                    upsert=True,
+                    return_document=ReturnDocument.AFTER,
+                )
+
+            try:
+                doc = claim()
+            except DuplicateKeyError:  # the series doc was opened by a racing claim
+                doc = claim()
+            number = f"TRF-{label}-{int(doc['seq']):05d}"
+            log_document_number(db, number, "TRF", from_store_id)
+        except Exception as exc:  # noqa: BLE001 - fail CLOSED, never a guessed number
+            raise HTTPException(
+                status_code=503, detail="Transfer could not be numbered; please retry."
+            ) from exc
+        return number
     TRANSFER_COUNTER["count"] += 1
     return f"TRF-{now_ist().strftime('%Y%m')}-{TRANSFER_COUNTER['count']}"
 
@@ -1643,7 +1680,7 @@ async def create_transfer(
         raise HTTPException(status_code=400, detail=gap)
 
     transfer_id = f"trf_{uuid.uuid4().hex[:12]}"
-    transfer_number = generate_transfer_number()
+    transfer_number = generate_transfer_number(transfer.from_location_id)
 
     # Calculate totals
     total_items = sum(item.quantity_requested for item in transfer.items)

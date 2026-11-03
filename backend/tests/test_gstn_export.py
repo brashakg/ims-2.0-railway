@@ -258,31 +258,42 @@ class TestToGstr1Json:
         assert row["txval"] == 6000.0
         assert row["rt"] == 18.0
 
-    def test_hsn_synthesised_from_totals_when_absent(self):
+    def test_hsn_never_synthesised_from_totals(self):
+        # Table 12 files only the rows the report carries -- no rt=0 / qty=0
+        # row made up from the totals.
         out = to_gstr1_json(_sample_gstr1())
-        assert "data" in out["hsn"]
-        assert len(out["hsn"]["data"]) == 1
-        assert out["hsn"]["data"][0]["txval"] == 16000.0
+        assert out["hsn"] == {"hsn_b2b": [], "hsn_b2c": []}
 
-    def test_hsn_mapped_when_present(self):
+    def test_hsn_split_b2b_b2c_with_quantity(self):
+        # GSTR-1 Table 12 (CA 2026-10-23): B2B and B2C apart, each row with
+        # its UQC and total quantity.
         data = _sample_gstr1()
-        data["hsn"] = [
-            {
-                "hsnCode": "9003",
-                "description": "Frames",
-                "quantity": 5,
-                "taxableValue": 5000.0,
-                "gstRate": 5,
-                "cgst": 125.0,
-                "sgst": 125.0,
-            }
-        ]
+        row = {"hsnCode": "9003", "uqc": "PCS", "quantity": 5, "taxableValue": 5000.0,
+               "gstRate": 5, "cgst": 125.0, "sgst": 125.0, "igst": 0.0}
+        data["hsnB2B"] = [row]
+        data["hsnB2C"] = [{**row, "hsnCode": "9004", "quantity": 2, "taxableValue": 800.0}]
         out = to_gstr1_json(data)
-        rows = out["hsn"]["data"]
-        assert len(rows) == 1
-        assert rows[0]["hsn_sc"] == "9003"
-        assert rows[0]["qty"] == 5.0
-        assert rows[0]["camt"] == 125.0
+        b2b, b2c = out["hsn"]["hsn_b2b"], out["hsn"]["hsn_b2c"]
+        assert [(r["num"], r["hsn_sc"], r["uqc"], r["qty"], r["rt"], r["txval"], r["camt"]) for r in b2b] == [
+            (1, "9003", "PCS", 5.0, 5.0, 5000.0, 125.0)
+        ]
+        assert [(r["num"], r["hsn_sc"], r["qty"], r["txval"]) for r in b2c] == [(1, "9004", 2.0, 800.0)]
+
+    def test_doc_issue_table_13(self):
+        data = _sample_gstr1()
+        data["docsIssued"] = [
+            {"docNum": 1, "docType": "Invoices for outward supply", "from": "BOK02/2627/00001",
+             "to": "BOK02/2627/00010", "total": 10, "cancelled": 1},
+            {"docNum": 5, "docType": "Credit Note", "from": "BOK02/C2627/0001",
+             "to": "BOK02/C2627/0002", "total": 2, "cancelled": 0},
+            {"docNum": 1, "docType": "Invoices for outward supply", "from": "BOK02/T2627/0001",
+             "to": "BOK02/T2627/0001", "total": 1, "cancelled": 0},
+        ]
+        det = to_gstr1_json(data)["doc_issue"]["doc_det"]
+        assert [(d["doc_num"], len(d["docs"])) for d in det] == [(1, 2), (5, 1)]
+        assert det[0]["docs"][0] == {"num": 1, "from": "BOK02/2627/00001", "to": "BOK02/2627/00010",
+                                     "totnum": 10, "cancel": 1, "net_issue": 9}
+        assert det[0]["docs"][1]["num"] == 2
 
     def test_empty_data_fails_soft(self):
         out = to_gstr1_json({})
@@ -293,13 +304,15 @@ class TestToGstr1Json:
         assert out["b2cs"] == []
         # CDNR present but empty (never missing) when there are no credit notes.
         assert out["cdnr"] == []
-        assert out["hsn"] == {"data": []}
+        assert out["hsn"] == {"hsn_b2b": [], "hsn_b2c": []}
+        assert out["doc_issue"] == {"doc_det": []}
 
     def test_none_data_fails_soft(self):
         out = to_gstr1_json(None)
         assert out["b2b"] == []
         assert out["cdnr"] == []
-        assert out["hsn"] == {"data": []}
+        assert out["hsn"] == {"hsn_b2b": [], "hsn_b2c": []}
+        assert out["doc_issue"] == {"doc_det": []}
 
     def test_cdnr_empty_when_no_credit_notes(self):
         # The sample has no `cdnr` key at all -> emit [], not a missing key.
