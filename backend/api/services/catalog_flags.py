@@ -1,9 +1,11 @@
 """Catalogue flags: 'this product needs work' (owner 2026-10-12, mockup
 artboards Main + FlagDialog).
 
-An ADMIN, SUPERADMIN or STORE_MANAGER flags products from the Catalog page
-(never a counter role, never a CATALOG_MANAGER -- the cataloguers CLEAR flags,
-they do not raise them). The flags live ON THE PRODUCT (the spine `products`
+An ADMIN, SUPERADMIN, STORE_MANAGER or CATALOG_MANAGER flags products from
+the Catalog page (never a counter role). Owner 2026-11-03 superseded the
+10-12 "cataloguers clear flags, never raise them": a cataloguer flags ANY
+product by the same flow, and a cataloguer who flags a product they added
+gets that task themselves (the same one rule, no special case). The flags live ON THE PRODUCT (the spine `products`
 doc) as a list; the person who added each product gets ONE task per flag
 action listing their products, the note and a link to each edit page. The
 cataloguer presses Mark fixed on the edit page.
@@ -48,7 +50,7 @@ BULK_CAP = 200
 
 # Who may raise a flag / mark one fixed. SUPERADMIN passes require_roles on
 # its own; the rbac_policy rows say the same (pinned by test).
-FLAGGER_ROLES = ("ADMIN", "STORE_MANAGER")
+FLAGGER_ROLES = ("ADMIN", "STORE_MANAGER", "CATALOG_MANAGER")
 FIXER_ROLES = ("ADMIN", "CATALOG_MANAGER")
 
 TASK_KIND = "catalog_flag"

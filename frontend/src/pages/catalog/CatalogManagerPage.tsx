@@ -31,7 +31,7 @@
 // page is also remembered on this device.
 //
 // SELECT, FLAG, ARCHIVE (owner 2026-10-12, artboards Main + FlagDialog): tick
-// rows, then Flag (ADMIN / SUPERADMIN / STORE_MANAGER -> one task per person
+// rows, then Flag (catalogListState.FLAGGER_ROLES -> one task per person
 // who added them) or Delete (archive; admins, the existing soft delete);
 // Flags: Archived lists them for Restore. The review segment's bulk Approve
 // uses the SAME selection.
@@ -97,6 +97,7 @@ import { EDIT_QUEUE_KEY, clearReviewQueue, writeReviewQueue } from './reviewQueu
 import { CatalogFiltersBar } from './CatalogFiltersBar';
 import { ArchiveDialog, FlagDialog, PurgeDialog, SelectionBar } from './CatalogBulkActions';
 import {
+  FLAGGER_ROLES,
   PAGE_SIZES,
   PAGE_SIZE_STORAGE_KEY,
   addedColumn,
@@ -258,7 +259,7 @@ export function CatalogManagerPage({
 
   // Who may do what (the server enforces the same; these only hide buttons).
   const canEdit = hasRole(['SUPERADMIN', 'ADMIN', 'CATALOG_MANAGER']);
-  const canFlag = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
+  const canFlag = hasRole([...FLAGGER_ROLES]);
   const isAdmin = hasRole(['SUPERADMIN', 'ADMIN']);
   // Delete permanently (an archived product): SUPERADMIN only, as the server.
   // NOT hasRole: it answers true for every ADMIN (AuthContext.hasRole).

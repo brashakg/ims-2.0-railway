@@ -16,7 +16,8 @@ registry by collapsing every catalogued ``(method, path)`` to a single key:
                                        products:write role union -- see
                                        capability_for)
     /catalog/flags                  -> "catalog:flag"       (curated: STORE_
-                                       MANAGER raises catalogue flags and must
+                                       MANAGER and CATALOG_MANAGER raise
+                                       catalogue flags; STORE_MANAGER must
                                        not broaden catalog:write)
     /online-store/orders/*/clear-rx-hold
                                     -> "online-store:rx-clear"  (curated: the
@@ -137,7 +138,8 @@ def capability_for(method: str, path: str) -> Optional[str]:
     if mod == "online-store" and tmpl.endswith("/clear-rx-hold"):
         return "online-store:rx-clear"
     # Curated finer capability: raising a catalogue flag ("needs work",
-    # owner 2026-10-12). STORE_MANAGER may flag; collapsing it to the generic
+    # owner 2026-10-12; CATALOG_MANAGER too, 2026-11-03). STORE_MANAGER may
+    # flag; collapsing it to the generic
     # catalog:write would let the grant guard treat a store manager as able
     # to hand out catalogue editing. Marking a flag fixed stays catalog:write
     # (its roles already edit the catalogue).

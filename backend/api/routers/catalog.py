@@ -4369,7 +4369,8 @@ async def raise_catalog_flags(
     body: RaiseFlagsRequest,
     current_user: dict = Depends(require_roles(*_flags.FLAGGER_ROLES)),
 ):
-    """Flag products as needing work. ADMIN / SUPERADMIN / STORE_MANAGER only
+    """Flag products as needing work. ADMIN / SUPERADMIN / STORE_MANAGER /
+    CATALOG_MANAGER only
     (its own capability, catalog:flag). One task per person who added the
     products. Flags never block the till or the website. apply=false is the
     dialog's preview of who gets the tasks (the same rule, nothing written)."""
