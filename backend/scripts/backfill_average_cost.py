@@ -122,7 +122,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from api.services import product_cost, stock_value  # noqa: E402
 from api.services.ap_engine import GRN_SUBTYPE_NO_PO  # noqa: E402
-from api.services.receipt_origin import receipt_of  # noqa: E402
+from api.services.receipt_origin import GRN_TERMINAL_ACCEPT_STATUSES, receipt_of  # noqa: E402
 from api.utils.event_time import utc_now_iso  # noqa: E402
 
 BACKUPS = "backfill_average_cost_backups"
@@ -230,8 +230,6 @@ def _walk_in_latest_price(db, prod: dict, pid: str) -> bool:
     may have blended over that price, naming itself instead. Only while the
     average is still pre-S4: any history row (a bill, a correction, a run)
     means S4 already owns it."""
-    from api.routers.vendors.grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
-
     if prod.get("cost_history") or prod.get("cost_source") not in ("PURCHASE_INVOICE", "GRN_WALKIN"):
         return False
     gid = _source_bill(db, prod).get("grn_id")
@@ -241,7 +239,7 @@ def _walk_in_latest_price(db, prod: dict, pid: str) -> bool:
     first = str(_first_s4_bill_at(db) or "")
     walk_ins = list(db["grns"].find({"grn_subtype": GRN_SUBTYPE_NO_PO, "items.product_id": pid},
                                     {"_id": 0, "grn_id": 1, "status": 1, "accepted_at": 1}))
-    if any(g.get("status") in _GRN_TERMINAL_ACCEPT_STATUSES
+    if any(g.get("status") in GRN_TERMINAL_ACCEPT_STATUSES
            and LATEST_PRICE_FROM <= str(g.get("accepted_at") or "") and (not first or str(g["accepted_at"]) < first)
            for g in walk_ins):
         return True
@@ -298,11 +296,9 @@ def legacy_receipts(db) -> List[str]:
     """Accepted goods receipts no S4 bill has costed (and not yet stamped),
     accepted before the first S4 bill was booked (a later one is an S4
     receipt waiting for its bill). Run the backfill right after the deploy."""
-    from api.routers.vendors.grn_accept_lock import _GRN_TERMINAL_ACCEPT_STATUSES
-
     first = _first_s4_bill_at(db)
     out = []
-    for g in db["grns"].find({"status": {"$in": list(_GRN_TERMINAL_ACCEPT_STATUSES)},
+    for g in db["grns"].find({"status": {"$in": list(GRN_TERMINAL_ACCEPT_STATUSES)},
                               product_cost.PRE_S4_STAMP: {"$exists": False}},
                              {"_id": 0, "grn_id": 1, "accepted_at": 1}):
         gid = g.get("grn_id")

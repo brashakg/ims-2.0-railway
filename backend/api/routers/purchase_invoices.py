@@ -58,6 +58,7 @@ Delivery Challan answers the same 404 for a receipt outside it
 """
 
 from api.utils.event_time import utc_now_iso
+from api.services.receipt_origin import receipt_store_id as _receipt_store_id
 
 import logging
 import uuid
@@ -1154,23 +1155,7 @@ def finish_accepted_bills(db) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _receipt_store_id(db, grn_doc, linked_dc_ids) -> Optional[str]:
-    """The shop the goods were DELIVERED to -- for the booking, its preview
-    and the DC draft alike: the linked GRN's store, else the first linked DC
-    that names one (a legacy DC with no store is skipped; two different shops
-    are refused by _assert_dcs_single_vendor_store). Fail-soft: None on a miss."""
-    store_id = (grn_doc or {}).get("store_id")
-    for dc_id in linked_dc_ids or []:
-        if store_id or db is None:
-            break
-        try:
-            dc = db.get_collection("grns").find_one(
-                {"grn_id": dc_id}, {"_id": 0, "store_id": 1}
-            )
-        except Exception:
-            dc = None
-        store_id = (dc or {}).get("store_id")
-    return store_id or None
+# _receipt_store_id: services.receipt_origin.receipt_store_id (imported above).
 
 
 # Owner ruling 2026-10-12 (R9): the refusal when an ADMIN / SUPERADMIN books a
