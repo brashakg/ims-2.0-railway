@@ -179,19 +179,41 @@ def mongo_reachable(url=None, timeout_ms=1500):
 _needs_real_mongo_cache = {}
 
 
+def _source(func):
+    try:
+        import inspect
+
+        return inspect.getsource(func)
+    except (OSError, TypeError):
+        return ""
+
+
+def _src_needs_real_mongo(src):
+    return (
+        "MongoClient(" in src
+        and "serverSelectionTimeoutMS" in src
+        and "mongomock" not in src
+        and "connect=False" not in src  # a lazy client never dials out
+    )
+
+
 def _fixture_needs_real_mongo(func):
+    """The fixture opens a real client itself, or through a module-level helper
+    it calls (one level deep, e.g. `_mongo_db()`)."""
     hit = _needs_real_mongo_cache.get(func)
     if hit is None:
-        try:
-            import inspect
-
-            src = inspect.getsource(func)
-        except (OSError, TypeError):
-            src = ""
-        hit = (
-            "MongoClient(" in src
-            and "serverSelectionTimeoutMS" in src
-            and "mongomock" not in src
+        code = getattr(func, "__code__", None)
+        glb = getattr(func, "__globals__", {})
+        helpers = [
+            glb[n]
+            for n in (code.co_names if code else ())
+            if callable(glb.get(n)) and hasattr(glb.get(n), "__code__")
+        ]
+        own = _source(func)
+        # A mongomock fallback in the fixture itself covers its helpers too.
+        hit = "mongomock" not in own and (
+            _src_needs_real_mongo(own)
+            or any(_src_needs_real_mongo(_source(h)) for h in helpers)
         )
         _needs_real_mongo_cache[func] = hit
     return hit
@@ -199,6 +221,10 @@ def _fixture_needs_real_mongo(func):
 
 def _item_needs_real_mongo(item):
     if item.get_closest_marker("integration"):
+        return True
+    # A test that opens the client itself (or via a helper it calls).
+    fn = getattr(item, "function", None)
+    if fn is not None and _fixture_needs_real_mongo(fn):
         return True
     info = getattr(item, "_fixtureinfo", None)
     for defs in (getattr(info, "name2fixturedefs", None) or {}).values():
