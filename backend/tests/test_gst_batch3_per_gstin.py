@@ -47,6 +47,7 @@ def gstins(world, monkeypatch):
         {"customer_id": "C-JH", "state": "Jharkhand"},
         {"customer_id": "C-MH", "state": "Maharashtra"},
         {"customer_id": "C-MH-B2B", "state": "Maharashtra", "gstin": "27AAACR5055K1Z5"},
+        {"customer_id": "C-WB", "state": "West Bengal"},
     ])
     return db
 
@@ -103,8 +104,60 @@ def test_a_refund_booked_at_the_sister_shop_is_filed_once(gstins):
         "created_at": SEPT_10.isoformat(), "taxable": 200.0, "tax": 10.0, "gst_rate": 5,
         "gross_refund": 210.0, "net_refund": 210.0,
     })
-    cdnr = r1._compute_gstr1(MONTH, STORE)["cdnr"]
-    assert [(c["taxableValue"], c["taxValue"]) for c in cdnr] == [(200.0, 10.0)]
+    for ask in (STORE, SISTER):  # the GSTIN's return, asked through either shop
+        cdnr = r1._compute_gstr1(MONTH, ask)["cdnr"]
+        assert [(c["taxableValue"], c["taxValue"]) for c in cdnr] == [(200.0, 10.0)], ask
+
+
+@pytest.mark.parametrize("return_shop", [STORE, SISTER])
+def test_a_return_without_a_ledger_note_is_filed_once_through_either_shop(gstins, return_shop):
+    """A cash refund (COMPLETED return, no store-credit ledger row) at one shop
+    of the GSTIN: its credit note is on the GSTIN's GSTR-1 CDNR and GSTR-3B
+    credit notes once, whichever shop the return is asked through."""
+    _sale(gstins, return_shop, "O-CASH", "C-JH", 2100.0)
+    gstins.returns.insert_one({
+        "return_id": "RET-B3-3", "store_id": return_shop, "order_id": "O-CASH",
+        "customer_id": "C-JH", "status": "COMPLETED", "created_at": SEPT_10,
+        "gst_breakup": {"gross": 210.0, "taxable": 200.0, "tax": 10.0, "gst_rate": 5},
+    })
+    for ask in (STORE, SISTER):
+        cdnr = r1._compute_gstr1(MONTH, ask)["cdnr"]
+        assert [(c["taxableValue"], c["taxValue"]) for c in cdnr] == [(200.0, 10.0)], ask
+        cn = r3b._compute_gstr3b(MONTH, ask)["creditNotes"]
+        assert (round(cn["taxableValue"], 2),
+                round(cn["integratedTax"] + cn["centralTax"] + cn["stateTax"], 2)) == (200.0, 10.0), ask
+
+
+def test_a_sister_shops_transfer_is_on_the_gstins_gstr1(gstins):
+    """SISTER dispatches stock to the Pune GSTIN (a deemed supply, IGST) and a
+    piece is short-delivered (the transfer credit note). Asked through STORE,
+    the GSTIN's GSTR-1 files the B2B tax invoice, the CDNR note and the net
+    HSN line -- the same net outward supply GSTR-3B 3.1(a) files."""
+    line = {"hsn": "900311", "gst_rate": 5, "taxable": 1000.0, "cgst": 0, "sgst": 0, "igst": 50.0}
+    gstins.vendor_bills.insert_many([
+        {"source_transfer_id": "TRF-B3-1", "from_store_id": SISTER, "to_store_id": MH_STORE,
+         "invoice_number": "BVO01/T2627/0001", "invoice_date": "2026-09-10",
+         "recipient_gstin": MH_GSTIN, "supply_place_recipient": "27",
+         "taxable_amount": 1000.0, "igst_total": 50.0, "cgst_total": 0, "sgst_total": 0,
+         "lines": [line]},
+        {"source_transfer_id": "TRF-B3-1", "from_store_id": SISTER, "to_store_id": MH_STORE,
+         "doc_type": "TRANSFER_CREDIT_NOTE",
+         "invoice_number": "BVO01/C2627/0001", "invoice_date": "2026-09-12",
+         "recipient_gstin": MH_GSTIN, "supply_place_recipient": "27",
+         "taxable_amount": -200.0, "igst_total": -10.0, "cgst_total": 0, "sgst_total": 0,
+         "lines": [{**line, "taxable": -200.0, "igst": -10.0}]},
+    ])
+    g1 = r1._compute_gstr1(MONTH, STORE)
+    assert [(r["taxableValue"], r["igst"], r.get("deemedSupply")) for r in g1["b2b"]] == [
+        (1000.0, 50.0, True)
+    ]
+    (cn,) = [c for c in g1["cdnr"] if c.get("documentType") == "STOCK_TRANSFER"]
+    assert (cn["taxableValue"], cn["refReference"]) == (200.0, "BVO01/C2627/0001")
+    (hsn,) = [h for h in g1["hsnSummary"] if h["hsnCode"] == "900311"]
+    assert hsn["taxableValue"] == 800.0
+    g3 = r3b._compute_gstr3b(MONTH, STORE)
+    assert g3["outwardTaxableValue"] == 800.0
+    assert g3["outwardTaxableSupplies"]["integratedTax"] == 40.0
 
 
 # ---------------------------------------------------------------------------
@@ -118,17 +171,22 @@ def test_table_3_2_is_the_gstins_unregistered_interstate_rows(gstins):
     _sale(gstins, STORE, "O-MH-2", "C-MH")  # inter-state, unregistered
     _sale(gstins, STORE, "O-MH-B2B", "C-MH-B2B")  # registered buyer: B2B, not 3.2
     _sale(gstins, MH_STORE, "O-PUNE", "C-JH", 525.0)  # another GSTIN's sale
+    _sale(gstins, SISTER, "O-WB", "C-WB", 525.0)  # inter-state, unregistered, West Bengal
     g3 = r3b._compute_gstr3b(MONTH, SISTER)
     assert g3["interStateUnregistered"] == [
-        {"placeOfSupplyCode": "27", "taxableValue": 3000.0, "integratedTax": 150.0}
+        {"placeOfSupplyCode": "19", "taxableValue": 500.0, "integratedTax": 25.0},
+        {"placeOfSupplyCode": "27", "taxableValue": 3000.0, "integratedTax": 150.0},
     ]
     g1 = r1._compute_gstr1(MONTH, SISTER)
-    inter = [r for r in g1["b2cl"] + g1["b2cs"] if r["igst"] > 0]
-    assert round(sum(r["taxableValue"] for r in inter), 2) == 3000.0
-    assert round(sum(r["igst"] for r in inter), 2) == 150.0
-    assert {r["placeOfSupplyCode"] for r in inter} == {"27"}
+    by_pos: dict = {}
+    for r in g1["b2cl"] + g1["b2cs"]:
+        if r["igst"] > 0:
+            t = by_pos.setdefault(r["placeOfSupplyCode"], [0.0, 0.0])
+            t[0], t[1] = round(t[0] + r["taxableValue"], 2), round(t[1] + r["igst"], 2)
+    assert by_pos == {"19": [500.0, 25.0], "27": [3000.0, 150.0]}
     assert to_gstr3b_json(g3)["inter_sup"]["unreg_details"] == [
-        {"pos": "27", "txval": 3000.0, "iamt": 150.0}
+        {"pos": "19", "txval": 500.0, "iamt": 25.0},
+        {"pos": "27", "txval": 3000.0, "iamt": 150.0},
     ]
 
 
@@ -150,15 +208,16 @@ def test_a_sister_shop_refund_lands_in_one_month_on_both_returns(gstins):
         "taxable": 200.0, "tax": 10.0, "gst_rate": 5,
         "gross_refund": 210.0, "net_refund": 210.0,
     })
-    for month in ("2026-09", "2026-10"):
-        cdnr = r1._compute_gstr1(month, STORE)["cdnr"]
-        g1 = (round(sum(c["taxableValue"] for c in cdnr), 2),
-              round(sum(c["taxValue"] for c in cdnr), 2))
-        cn = r3b._compute_gstr3b(month, SISTER)["creditNotes"]
-        g3 = (round(cn["taxableValue"], 2),
-              round(cn["integratedTax"] + cn["centralTax"] + cn["stateTax"], 2))
-        assert g1 == g3, (month, g1, g3)
-    assert g1 == (200.0, 10.0)  # October: the ledger row, the credit note
+    want = {"2026-09": (0.0, 0.0), "2026-10": (200.0, 10.0)}  # the ledger row, in October
+    for ask in (STORE, SISTER):  # the GSTIN's returns, asked through either shop
+        for month in ("2026-09", "2026-10"):
+            cdnr = r1._compute_gstr1(month, ask)["cdnr"]
+            g1 = (round(sum(c["taxableValue"] for c in cdnr), 2),
+                  round(sum(c["taxValue"] for c in cdnr), 2))
+            cn = r3b._compute_gstr3b(month, ask)["creditNotes"]
+            g3 = (round(cn["taxableValue"], 2),
+                  round(cn["integratedTax"] + cn["centralTax"] + cn["stateTax"], 2))
+            assert g1 == g3 == want[month], (ask, month, g1, g3)
 
 
 def test_an_invoice_cancelled_behind_its_credit_note_stays_filed_per_gstin(gstins):
