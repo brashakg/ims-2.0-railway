@@ -53,6 +53,9 @@ interface GSTR1Note {
   refReference: string;
   // 'D' = a debit note (the bill was raised after its invoice); else credit.
   noteType?: 'C' | 'D';
+  // Where GSTR-1 files it: CDNR (buyer GSTIN), CDNUR (a B2CL sale's note) or
+  // B2CS (netted into the consumer row of its state and rate).
+  noteSection?: 'CDNR' | 'CDNUR' | 'B2CS';
   creditNoteDate: string;
   customerName: string;
   customerGSTIN?: string;
@@ -87,6 +90,8 @@ interface GSTR1Data {
   b2b: GSTR1Invoice[];
   b2cl: GSTR1Invoice[];
   b2cs: GSTR1B2CSummary[];
+  // B2CS as the portal JSON files it: net of the consumer notes (shown).
+  b2csFiled?: GSTR1B2CSummary[];
   cdnr?: GSTR1Note[];
   period: string;
   gstin: string;
@@ -96,6 +101,11 @@ interface GSTR1Data {
   totalTax: number;
   validation?: GSTR1Validation;
 }
+
+// The B2CS rows the uploaded JSON files (net of consumer notes); an older
+// backend without them: the gross rows.
+const filedB2CS = (d: GSTR1Data): GSTR1B2CSummary[] => d.b2csFiled ?? d.b2cs;
+const noteTypeLabel = (n: GSTR1Note): string => (n.noteType === 'D' ? 'Debit' : 'Credit');
 
 export function GSTR1Report() {
   const toast = useToast();
@@ -193,13 +203,13 @@ export function GSTR1Report() {
         csv += `${inv.invoiceNumber},${inv.invoiceDate},${neutralizeFormula(inv.customerName)},${inv.customerState},${inv.placeOfSupply},${inv.invoiceValue},${inv.taxableValue},${inv.cgst},${inv.sgst},${inv.igst},${inv.totalTax},${inv.hsnCode},${inv.gstRate}%\n`;
       });
     } else if (activeSection === 'cdnr' && (reportData.cdnr ?? []).length > 0) {
-      csv = 'Note Number,Date,Customer Name,GSTIN,Taxable Value,CGST,SGST,IGST,Total Tax\n';
+      csv = 'Note Number,Type,Filed In,Date,Customer Name,GSTIN,Taxable Value,CGST,SGST,IGST,Total Tax\n';
       (reportData.cdnr ?? []).forEach(n => {
-        csv += `${n.refReference},${n.creditNoteDate},${neutralizeFormula(n.customerName)},${n.customerGSTIN ?? ''},${n.taxableValue},${n.cgst},${n.sgst},${n.igst},${n.taxValue}\n`;
+        csv += `${n.refReference},${noteTypeLabel(n)},${n.noteSection ?? ''},${n.creditNoteDate},${neutralizeFormula(n.customerName)},${n.customerGSTIN ?? ''},${n.taxableValue},${n.cgst},${n.sgst},${n.igst},${n.taxValue}\n`;
       });
-    } else if (activeSection === 'b2cs' && reportData.b2cs.length > 0) {
+    } else if (activeSection === 'b2cs' && filedB2CS(reportData).length > 0) {
       csv = 'Place of Supply,GST Rate,Taxable Value,CGST,SGST,IGST,Total Tax\n';
-      reportData.b2cs.forEach(sum => {
+      filedB2CS(reportData).forEach(sum => {
         csv += `${sum.placeOfSupply},${sum.gstRate}%,${sum.taxableValue},${sum.cgst},${sum.sgst},${sum.igst},${sum.totalTax}\n`;
       });
     }
@@ -323,7 +333,8 @@ export function GSTR1Report() {
   };
 
   const renderB2CSTable = () => {
-    if (!reportData || reportData.b2cs.length === 0) {
+    const b2cs = reportData ? filedB2CS(reportData) : [];
+    if (b2cs.length === 0) {
       return (
         <div className="text-center py-12 text-gray-500">
           <FileText className="w-12 h-12 mx-auto mb-2 opacity-50" />
@@ -347,7 +358,7 @@ export function GSTR1Report() {
             </tr>
           </thead>
           <tbody>
-            {reportData.b2cs.map((summary, idx) => (
+            {b2cs.map((summary, idx) => (
               <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
                 <td className="px-4 py-3 text-sm text-gray-900">{summary.placeOfSupply}</td>
                 <td className="px-4 py-3 text-sm text-center text-gray-600">{summary.gstRate}%</td>
@@ -363,19 +374,19 @@ export function GSTR1Report() {
             <tr className="bg-gray-100 font-medium">
               <td colSpan={2} className="px-4 py-3 text-sm text-gray-900">Total</td>
               <td className="px-4 py-3 text-sm text-right text-gray-900">
-                ₹{reportData.b2cs.reduce((sum, s) => sum + s.taxableValue, 0).toLocaleString('en-IN')}
+                ₹{b2cs.reduce((sum, s) => sum + s.taxableValue, 0).toLocaleString('en-IN')}
               </td>
               <td className="px-4 py-3 text-sm text-right text-gray-900">
-                ₹{reportData.b2cs.reduce((sum, s) => sum + s.cgst, 0).toLocaleString('en-IN')}
+                ₹{b2cs.reduce((sum, s) => sum + s.cgst, 0).toLocaleString('en-IN')}
               </td>
               <td className="px-4 py-3 text-sm text-right text-gray-900">
-                ₹{reportData.b2cs.reduce((sum, s) => sum + s.sgst, 0).toLocaleString('en-IN')}
+                ₹{b2cs.reduce((sum, s) => sum + s.sgst, 0).toLocaleString('en-IN')}
               </td>
               <td className="px-4 py-3 text-sm text-right text-gray-900">
-                ₹{reportData.b2cs.reduce((sum, s) => sum + s.igst, 0).toLocaleString('en-IN')}
+                ₹{b2cs.reduce((sum, s) => sum + s.igst, 0).toLocaleString('en-IN')}
               </td>
               <td className="px-4 py-3 text-sm text-right text-gray-900">
-                ₹{reportData.b2cs.reduce((sum, s) => sum + s.totalTax, 0).toLocaleString('en-IN')}
+                ₹{b2cs.reduce((sum, s) => sum + s.totalTax, 0).toLocaleString('en-IN')}
               </td>
             </tr>
           </tfoot>
@@ -400,6 +411,8 @@ export function GSTR1Report() {
           <thead>
             <tr className="bg-gray-100 border-b border-gray-200">
               <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Note No</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Type</th>
+              <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Filed In</th>
               <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Date</th>
               <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">Customer Name</th>
               <th className="px-4 py-3 text-left text-sm font-medium text-gray-700">GSTIN</th>
@@ -410,10 +423,9 @@ export function GSTR1Report() {
           <tbody>
             {notes.map((note, idx) => (
               <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
-                <td className="px-4 py-3 text-sm font-mono text-gray-900">
-                  {note.refReference}
-                  {note.noteType === 'D' && <span className="ml-2 text-xs font-sans text-amber-700">Debit note</span>}
-                </td>
+                <td className="px-4 py-3 text-sm font-mono text-gray-900">{note.refReference}</td>
+                <td className={`px-4 py-3 text-sm ${note.noteType === 'D' ? 'text-amber-700' : 'text-gray-600'}`}>{noteTypeLabel(note)}</td>
+                <td className="px-4 py-3 text-sm text-gray-600">{note.noteSection ?? ''}</td>
                 <td className="px-4 py-3 text-sm text-gray-600">{new Date(note.creditNoteDate).toLocaleDateString('en-IN')}</td>
                 <td className="px-4 py-3 text-sm text-gray-900">{note.customerName}</td>
                 <td className="px-4 py-3 text-sm font-mono text-gray-600">{note.customerGSTIN}</td>
@@ -588,7 +600,7 @@ export function GSTR1Report() {
             }`}
           >
             B2C Small (Summary)
-            {reportData && <span className="ml-2 text-xs bg-gray-100 px-2 py-1 rounded-full">{reportData.b2cs.length}</span>}
+            {reportData && <span className="ml-2 text-xs bg-gray-100 px-2 py-1 rounded-full">{filedB2CS(reportData).length}</span>}
           </button>
           <button
             onClick={() => setActiveSection('cdnr')}

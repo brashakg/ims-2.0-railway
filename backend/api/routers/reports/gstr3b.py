@@ -423,6 +423,7 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
     # supply -- GSTR-1's B2CL + inter-state B2CS rows of this GSTIN (the same
     # orders, head and place code), never a second rule.
     unreg_by_pos: dict = {}
+    unreg_carry: list = []  # 3.2 rows the notes exceed (filed at 0)
     cn_carry = {
         "integratedTax": 0.0,
         "centralTax": 0.0,
@@ -535,6 +536,27 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             out_cgst += t_cgst
             out_sgst += t_sgst
             out_taxable += t_taxable
+
+        # Table 3.2 is NET of the notes GSTR-1 nets: every inter-state note
+        # to an unregistered buyer (filed in B2CS or CDNUR) -- GSTR-1's own
+        # note rows, so the two returns (and the portal's auto-fill of 3.2
+        # from GSTR-1) agree. A credit note less, a debit note more; a row
+        # the notes exceed is filed at 0 and said in interStateUnregisteredCarryForward.
+        from .gstr1 import _compute_gstr1
+
+        for n in _compute_gstr1(month, active_store, shops=shops, db=db)["cdnr"]:
+            if (n.get("customerGSTIN") or n.get("noteSection") not in ("B2CS", "CDNUR")
+                    or not float(n.get("igst") or 0) > 0):
+                continue
+            sign = 1 if n.get("noteType") == "D" else -1
+            u = unreg_by_pos.setdefault(n.get("placeOfSupplyCode") or "", [0.0, 0.0])
+            u[0] = round(u[0] + sign * float(n.get("taxableValue") or 0), 2)
+            u[1] = round(u[1] + sign * float(n.get("igst") or 0), 2)
+        for pos, u in unreg_by_pos.items():
+            if u[0] < 0 or u[1] < 0:
+                unreg_carry.append({"placeOfSupplyCode": pos, "taxableValue": round(max(0.0, -u[0]), 2),
+                                    "integratedTax": round(max(0.0, -u[1]), 2)})
+                u[0], u[1] = max(0.0, u[0]), max(0.0, u[1])
 
         # Customer debit notes (a bill raised after its invoice) ADD to 3.1(a).
         dn_igst, dn_cgst, dn_sgst, dn_taxable = _debit_note_totals(db, filing, year, mon)
@@ -707,11 +729,13 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             "taxableValue": _r(t_rcm[3]),
         },
         # Table 3.2 (unregistered persons), by place-of-supply state code;
-        # gross of credit notes, as GSTR-1 files its B2CL / B2CS rows.
+        # NET of the inter-state consumer notes, as GSTR-1 files its B2CS rows
+        # and CDNUR notes (a row the notes exceed: 0, the excess below).
         "interStateUnregistered": [
             {"placeOfSupplyCode": pos, "taxableValue": _r(v[0]), "integratedTax": _r(v[1])}
             for pos, v in sorted(unreg_by_pos.items())
         ],
+        "interStateUnregisteredCarryForward": unreg_carry,
         "zeroRatedValue": 0.0,
         "zeroRatedSupplies": {
             "integratedTax": 0.0,

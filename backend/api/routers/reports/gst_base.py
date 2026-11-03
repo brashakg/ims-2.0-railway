@@ -36,6 +36,13 @@ from ...utils.real_sale import real_sale_match  # noqa: E402,F401
 B2CL_INVOICE_THRESHOLD = 250000
 
 
+def is_b2cl(gstin, inter: bool, invoice_value: float) -> bool:
+    """THE B2CL rule (GSTR-1 Table 5): no buyer GSTIN, inter-state, invoice
+    value above B2CL_INVOICE_THRESHOLD. The sale's table and its notes' section
+    (CDNUR vs B2CS netting) both ask this, so they can never disagree."""
+    return not gstin and bool(inter) and invoice_value > B2CL_INVOICE_THRESHOLD
+
+
 # The customer fields the place-of-supply rule reads (org_validation.
 # customer_state_code): every return reads customers with this projection.
 CUSTOMER_SUPPLY_FIELDS = {

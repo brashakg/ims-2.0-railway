@@ -364,6 +364,7 @@ async def superadmin_invoice_change(
         order_money_snapshot,
         compute_invoice_delta,
         build_credit_note_doc,
+        note_by_rate,
         build_revised_invoice_doc,
     )
 
@@ -689,6 +690,8 @@ async def superadmin_invoice_change(
         user_id=current_user.get("user_id"),
         note_number=note_number,
     )
+    if not is_cn:  # GSTR-1 files the debit note per rate (gstr1 debit pass)
+        note_doc["by_rate"] = note_by_rate(order, corrected)
 
     # SYNCHRONOUS immutable audit BEFORE issuing the note.
     _write_order_edit_audit(
