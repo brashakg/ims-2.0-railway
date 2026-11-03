@@ -1,6 +1,7 @@
 """Offer tally / promotions report and the non-moving stock report."""
 
 from fastapi import Depends, Query
+from ...utils.real_sale import EXCLUDED_ORDER_STATUSES
 from typing import Dict, Optional
 from datetime import date, datetime, timedelta
 from ...utils.ist import (
@@ -241,7 +242,7 @@ async def non_moving_stock(
             {
                 "$match": {
                     **({"store_id": active_store} if active_store else {}),
-                    "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
+                    "status": {"$nin": EXCLUDED_ORDER_STATUSES},
                 }
             },
             {"$unwind": "$items"},

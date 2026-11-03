@@ -1,6 +1,7 @@
 """Sales comparison, growth, profit and discount analysis reports."""
 
 from fastapi import Depends, Query
+from ...utils.real_sale import EXCLUDED_ORDER_STATUSES
 from typing import Optional
 from datetime import date, timedelta
 from ...utils.ist import (
@@ -221,7 +222,7 @@ async def profit_by_category(
         {
             **({"store_id": active_store} if active_store else {}),
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
+            "status": {"$nin": EXCLUDED_ORDER_STATUSES},
         },
         limit=0,
     )
@@ -305,7 +306,7 @@ async def profit_by_store(
     orders = order_repo.find_many(
         {
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
+            "status": {"$nin": EXCLUDED_ORDER_STATUSES},
         },
         limit=0,
     )

@@ -1270,6 +1270,12 @@ def handle_shopify_refund(
                 "refund_id": refund_id,
             }
 
+        # A Shopify TEST order (owner ruling 27) was never invoiced, never on
+        # a return and claimed no stock: its refund books nothing.
+        if _is_test_order(order):
+            logger.info("[SHOPIFY_REFUND] skip refund for test order=%s", order.get("order_id"))
+            return {"status": "skipped", "reason": "test_order", "refund_id": refund_id}
+
         # The money this refund sends back on Shopify (any gateway, "manual"
         # included), asked before the line mapping: a refund that moved money
         # with no line IMS can map (a goodwill custom amount; shipping on an
@@ -2113,6 +2119,11 @@ def _post_locked(
     }
 
 
+def _is_test_order(order: Dict[str, Any]) -> bool:
+    """A Shopify test checkout (owner ruling 27) -- never a sale."""
+    return bool(order.get("is_test")) or str(order.get("status") or "").upper() == "TEST"
+
+
 _FULFILMENT_CONTEXT_KEYS = (
     "fulfillment_stores",
     "fulfillment_breakdown",
@@ -2128,6 +2139,8 @@ _FULFILMENT_CONTEXT_KEYS = (
     "items",
     # The SOLD-unit cap's exemption (_cap_restock_to_sold_units).
     "historical",
+    # A Shopify test order (ruling 27): post_from_review refuses it.
+    "is_test",
     # The order staff can look up: _stock_in_task names it on every door.
     "order_number",
 )
@@ -2204,6 +2217,8 @@ def post_from_review(db, review: Dict[str, Any]) -> Dict[str, Any]:
     # _merge_fulfilment_context returning False covers it here as well, so this
     # function is safe on its own terms.
     verified = _merge_fulfilment_context(order)
+    if _is_test_order(order):
+        return {"status": "skipped", "reason": "test_order", "refund_id": refund_id}
     return_lines = _return_lines_from_proposed(review.get("proposed_restock") or [])
     settled_externally = bool(
         review.get("settled_externally") or credit_note.get("settled_externally")

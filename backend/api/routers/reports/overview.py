@@ -1,6 +1,7 @@
 """Reports root, the Hub dashboard and the headline sales reports."""
 
 from fastapi import Depends, Query
+from ...utils.real_sale import EXCLUDED_ORDER_STATUSES
 from typing import Optional
 from datetime import date, datetime, timedelta
 from ...utils.ist import (
@@ -333,7 +334,7 @@ async def sales_by_salesperson(
         {
             **({"store_id": active_store} if active_store else {}),
             "created_at": {"$gte": from_dt, "$lte": to_dt},
-            "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
+            "status": {"$nin": EXCLUDED_ORDER_STATUSES},
         },
         limit=0,
     )

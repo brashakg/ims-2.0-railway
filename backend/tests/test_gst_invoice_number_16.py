@@ -422,6 +422,20 @@ def test_door_refuses_a_cancelled_order_without_a_number(door, status):
     assert db.get_collection("orders").find_one({"order_id": "O-CXL"})["invoice_number"] is None
 
 
+def test_door_refuses_a_shopify_test_order(door):
+    """Owner ruling 27: a Shopify test order never takes a number from the
+    live invoice series -- printing it mints nothing."""
+    client, db = door
+    db.get_collection("orders").insert_one(
+        _order("O-TST", status="TEST", invoice_number=None, is_test=True)
+    )
+    r = client.get("/orders/O-TST/invoice")
+    assert r.status_code == 400
+    assert "test order" in r.json()["detail"]
+    assert db.get_collection("counters").docs == []
+    assert db.get_collection("orders").find_one({"order_id": "O-TST"})["invoice_number"] is None
+
+
 def test_door_still_prints_a_cancelled_orders_number(door):
     client, db = door
     db.get_collection("orders").insert_one(

@@ -1,6 +1,7 @@
 """TechCherry R2: purchase recommendations."""
 
 from fastapi import Depends, Query
+from ...utils.real_sale import EXCLUDED_ORDER_STATUSES
 from typing import Optional
 from datetime import datetime, timedelta
 from ...utils.ist import (
@@ -103,7 +104,7 @@ async def purchase_recommendations(
             {
                 "$match": {
                     "store_id": active_store,
-                    "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
+                    "status": {"$nin": EXCLUDED_ORDER_STATUSES},
                     "created_at": {"$gte": cutoff},
                 }
             },
