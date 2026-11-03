@@ -12,6 +12,11 @@ receipt alone carries that number (before #711 shops shared a series).
 
 from typing import Optional
 
+# Statuses that mean "this receipt HAS been accepted" (vendors/grn_accept_lock,
+# grn_void, cockpit, the average-cost backfill). Lives here, not in a router,
+# so a one-off data script can read it without the app's login secret.
+GRN_TERMINAL_ACCEPT_STATUSES = ("ACCEPTED", "PARTIALLY_ACCEPTED")
+
 
 def number_is_unique(grns, number) -> bool:
     """Exactly one receipt in `grns` (the collection) carries `number`. Raises
@@ -46,3 +51,23 @@ def receipt_of(db, unit: dict) -> Optional[str]:
     if not number_is_unique(grns, number):
         return None
     return (grns.find_one({"grn_number": number}, {"_id": 0, "grn_id": 1}) or {}).get("grn_id")
+
+
+def receipt_store_id(db, grn_doc, linked_dc_ids) -> Optional[str]:
+    """The shop the goods were DELIVERED to -- for the booking, its preview
+    and the DC draft alike: the linked GRN's store, else the first linked DC
+    that names one (a legacy DC with no store is skipped; two different shops
+    are refused by purchase_invoices._assert_dcs_single_vendor_store).
+    Fail-soft: None on a miss."""
+    store_id = (grn_doc or {}).get("store_id")
+    for dc_id in linked_dc_ids or []:
+        if store_id or db is None:
+            break
+        try:
+            dc = db.get_collection("grns").find_one(
+                {"grn_id": dc_id}, {"_id": 0, "store_id": 1}
+            )
+        except Exception:
+            dc = None
+        store_id = (dc or {}).get("store_id")
+    return store_id or None

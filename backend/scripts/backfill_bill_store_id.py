@@ -7,7 +7,7 @@ in), stamped at booking since this change. Older bills carry none, so a shop
 filter would hide them. This fills it the way booking does:
 
   * a bill linked to a goods receipt / delivery challans -> that receipt's shop
-    (purchase_invoices._receipt_store_id, the booking's own rule)
+    (receipt_origin.receipt_store_id, the booking's own rule)
   * an inter-company transfer's mirror bill -> its receiving shop (to_store_id)
   * anything else (a services bill with no receipt) is left alone and counted:
     admins still see it under All stores.
@@ -36,13 +36,13 @@ if _BACKEND not in sys.path:
 def backfill(db, commit: bool = False) -> dict:
     """Stamp store_id on every bill that lacks one and can be placed.
     Returns {"placed": n, "unplaced": n, "samples": [...]}; writes only on commit."""
-    from api.routers.purchase_invoices import _receipt_store_id
+    from api.services.receipt_origin import receipt_store_id
 
     bills = db["vendor_bills"]
     placed, unplaced, samples = 0, 0, []
     for b in list(bills.find({"$or": [{"store_id": {"$exists": False}}, {"store_id": None}, {"store_id": ""}]})):
         grn = db["grns"].find_one({"grn_id": b["grn_id"]}) if b.get("grn_id") else None
-        store = _receipt_store_id(db, grn, b.get("linked_dc_ids")) or b.get("to_store_id")
+        store = receipt_store_id(db, grn, b.get("linked_dc_ids")) or b.get("to_store_id")
         if not store:
             unplaced += 1
             continue
