@@ -908,11 +908,14 @@ def _cn_foreign_store(ret_doc, active_store) -> bool:
     the reversal (its returns leg counts the return doc); the booking store
     must skip the row. New rows are booked under the order's store, so this
     only bites the legacy mismatches -- no stored row is ever rewritten.
+    `active_store` is one shop, or the list of shops a per-GSTIN return files
+    (GSTR-1): a return of a shop on that same GSTIN is not foreign.
     """
     if not isinstance(ret_doc, dict):
         return False
     ret_store = str(ret_doc.get("store_id") or "")
-    return bool(ret_store) and ret_store != str(active_store)
+    mine = {str(active_store)} if isinstance(active_store, str) else {str(s) for s in active_store}
+    return bool(ret_store) and ret_store not in mine
 
 
 def _cn_bucket_rate(explicit_rate, tax, taxable) -> int:

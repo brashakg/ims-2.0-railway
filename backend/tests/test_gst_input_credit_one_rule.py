@@ -191,6 +191,7 @@ def test_gstr1_fails_loudly_when_transfers_cannot_be_read(world, monkeypatch):
     def unreadable(*_a, **_k):
         raise RuntimeError("vendor_bills unavailable")
 
+    monkeypatch.setattr(r1, "_get_raw_db", lambda: world["db"])
     monkeypatch.setattr(r1, "_transfer_outward_bills", unreadable)
     with pytest.raises(HTTPException) as refused:
         r1._compute_gstr1(MONTH, STORE)

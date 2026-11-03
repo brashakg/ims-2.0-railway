@@ -31,7 +31,6 @@ from api.services.gstn_export import (  # noqa: E402
     to_gstr1_json,
     to_gstr3b_json,
     _to_fp,
-    _state_code,
 )
 from api.routers import reports, settings  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
@@ -178,16 +177,14 @@ class TestPeriodAndStateHelpers:
         assert _to_fp("garbage") == ""
         assert _to_fp(None) == ""  # type: ignore[arg-type]
 
-    def test_state_code_known_name(self):
-        assert _state_code("Maharashtra") == "27"
-        assert _state_code("delhi") == "07"
-        assert _state_code("Jharkhand") == "20"
+    def test_a_row_without_its_code_reads_the_one_state_code_rule(self):
+        """GST batch 3: the export had its own 38-name table, so the portal's
+        '27-Maharashtra' (what imported rows carry) filed a blank `pos`."""
+        from api.services.gstn_export import _build_b2cs
 
-    def test_state_code_from_gstin_fallback(self):
-        assert _state_code("Unknownland", "27ABCDE1234F1Z5") == "27"
-
-    def test_state_code_unresolvable_is_empty(self):
-        assert _state_code("Atlantis") == ""
+        (row,) = _build_b2cs([{"placeOfSupply": "27-Maharashtra", "gstRate": 5,
+                               "taxableValue": 100.0, "igst": 5.0}], "")
+        assert row["pos"] == "27"
 
 
 # ============================================================================

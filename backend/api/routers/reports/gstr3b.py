@@ -98,11 +98,21 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     once; double-counting here would over-reverse and UNDER-declare, which is
     worse than the bug being fixed. A read failure RAISES (M7): a missed
     refund overstates the tax, a missed dedup understates it.
+
+    `active_store` is one shop, or the list of shops a per-GSTIN return files
+    (GSTR-3B passes `filing`). Scoped per GSTIN like the GSTR-1 CDNR pass --
+    the same ledger scan, the same dedup set, the same foreign-store rule -- so
+    a legacy note booked at one shop of the GSTIN for a sister shop's return
+    lands in the SAME month with the SAME tax on both returns. Per shop, the
+    booking shop skipped it as foreign and the sister's dedup never saw it, so
+    3B netted the return doc in the return's month while GSTR-1 filed the
+    ledger row in the note's month.
     """
     igst = cgst = sgst = taxable = 0.0
     if db is None:
         return 0.0, 0.0, 0.0, 0.0
     from_dt, to_dt = ist_month_window_utc(year, mon)
+    shops = [active_store] if isinstance(active_store, str) else list(active_store)
 
     # Which returns already have a credit-note ledger row -- scanned WITHOUT a
     # date window, deliberately.
@@ -117,7 +127,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     # edge case. Attribution follows the ledger row, which IS the credit note.
     seen_returns = set()
     for _row in db.get_collection("credit_note_ledger").find(
-        {"store_id": active_store, "type": scl.CREDIT_NOTE_TYPE}, {"ref": 1, "reason": 1}
+        {"store_id": {"$in": shops}, "type": scl.CREDIT_NOTE_TYPE}, {"ref": 1, "reason": 1}
     ):
         for _f in ("ref", "reason"):
             for _tok in str(_row.get(_f) or "").replace(",", " ").split():
@@ -132,13 +142,18 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     # max(0, ...) clamp downstream swallowed the CGST/SGST over-reversal.
     order_inter: dict = {}
     held: dict = {}  # order_id -> parent held on the seller check
-    st = db.get_collection("stores").find_one({"store_id": active_store}) or {}
+    shop_docs: dict = {}
+
+    def _st(sid):
+        if sid not in shop_docs:
+            shop_docs[sid] = db.get_collection("stores").find_one({"store_id": sid}) or {}
+        return shop_docs[sid]
 
     ledger = db.get_collection("credit_note_ledger")
     if ledger is not None:
         for row in ledger.find(
             {
-                "store_id": active_store,
+                "store_id": {"$in": shops},
                 "type": scl.CREDIT_NOTE_TYPE,
                 # Half-open [from_dt, to_dt): the month's last microsecond
                 # is IN, next month's first is OUT (audit R03). Rows are
@@ -159,7 +174,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
             tv = row.get("taxable")
             tv = round(float(tv if tv is not None else row.get("amount", 0) or 0.0), 2)
             ret_doc = _ledger_row_return_doc(db, row)
-            if _cn_foreign_store(ret_doc, active_store):
+            if _cn_foreign_store(ret_doc, shops):
                 # Legacy cashier-store booking: the sale store's report
                 # owns this reversal (its returns leg counts the return
                 # doc). Counting it here too reversed one refund under
@@ -175,7 +190,7 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 inter = _return_interstate_flag(
                     db,
                     ret_doc or {"customer_id": row.get("customer_id")},
-                    st,
+                    _st((ret_doc or {}).get("store_id") or row.get("store_id")),
                     order_inter,
                 )
             c, sg, i = split_gst(t, inter)
@@ -191,12 +206,12 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     # `interstate` stamp, exactly as the CDNR rows and Table 3.1(a) do.
     # Caught by mutation testing: hardcoding returns as intra-state reversed
     # CGST/SGST on a sale that sat in IGST, leaving BOTH heads wrong.
-    # (`order_inter` + the shop doc `st` are shared with the ledger leg above.)
+    # (`order_inter` + the shop docs are shared with the ledger leg above.)
     returns_col = db.get_collection("returns")
     if returns_col is not None:
         for ret in returns_col.find(
             {
-                "store_id": active_store,
+                "store_id": {"$in": shops},
                 "status": {"$in": ["COMPLETED", "completed"]},
             }
         ):
@@ -219,7 +234,9 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
                 continue
             if _cn_parent_held(db, ret, held):  # its sale was not filed
                 continue
-            c, sg, i = split_gst(t, _return_interstate_flag(db, ret, st, order_inter))
+            c, sg, i = split_gst(
+                t, _return_interstate_flag(db, ret, _st(ret.get("store_id")), order_inter)
+            )
             igst += i
             cgst += c
             sgst += sg
@@ -381,6 +398,10 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
     # Credit-note totals + the per-head excess the zero-clamp would otherwise
     # swallow SILENTLY (filled below when a DB is present).
     cn_igst = cn_cgst = cn_sgst = cn_taxable = 0.0
+    # Table 3.2: inter-state supplies to UNREGISTERED buyers, per place of
+    # supply -- GSTR-1's B2CL + inter-state B2CS rows of this GSTIN (the same
+    # orders, head and place code), never a second rule.
+    unreg_by_pos: dict = {}
     cn_carry = {
         "integratedTax": 0.0,
         "centralTax": 0.0,
@@ -460,18 +481,26 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             # The head the tax invoice PRINTED (_order_supply: the order's own
             # stamp, else the invoice's state-code rule), split per rate by
             # the invoice's split rule (_rate_heads) -- exactly GSTR-1's rows.
-            is_inter_state = _order_supply(
+            customer = cust_docs.get(str(order.get("customer_id", "")))
+            is_inter_state, pos_code, _assumed = _order_supply(
                 order,
                 shop_docs.get(order.get("store_id")) or {"gstin": store_gstin},
-                cust_docs.get(str(order.get("customer_id", ""))),
-            )[0]
-            for rl in _rate_heads(
+                customer,
+            )
+            heads = _rate_heads(
                 _order_rate_lines(order.get("items") or [], taxable, tax, order),
                 is_inter_state,
-            ):
+            )
+            for rl in heads:
                 out_igst += rl["igst"]
                 out_cgst += rl["cgst"]
                 out_sgst += rl["sgst"]
+            # GSTR-1 files a buyer with a GSTIN on file as B2B; any other
+            # inter-state sale is B2CL / B2CS -- and Table 3.2 here.
+            if is_inter_state and not str((customer or {}).get("gstin") or ""):
+                u = unreg_by_pos.setdefault(pos_code, [0.0, 0.0])
+                u[0] = round(u[0] + sum(rl["taxable"] for rl in heads), 2)
+                u[1] = round(u[1] + sum(rl["igst"] for rl in heads), 2)
 
         # NEW-GST-TRANSFER-OUTWARD (GAP A): the sender's deemed outward supply
         # on inter-GSTIN stock transfers -> Table 3.1(a). Reads the SAME mirror
@@ -495,11 +524,10 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
         # entity paid IGST on refunded goods. Whatever each head cannot absorb
         # is reported in `creditNoteCarryForward` (and logged) for the
         # accountant to carry into the next period's return.
-        # Every shop's credit notes, netted against the return's outward tax.
+        # The GSTIN's credit notes -- ONE per-GSTIN scan, the GSTR-1 CDNR
+        # scope -- netted against the return's outward tax.
+        cn_igst, cn_cgst, cn_sgst, cn_taxable = _credit_note_totals(db, filing, year, mon, last_day)
         for shop in filing:
-            n_i, n_c, n_s, n_t = _credit_note_totals(db, shop, year, mon, last_day)
-            cn_igst, cn_cgst = round(cn_igst + n_i, 2), round(cn_cgst + n_c, 2)
-            cn_sgst, cn_taxable = round(cn_sgst + n_s, 2), round(cn_taxable + n_t, 2)
             t_i, t_c, t_s, t_t = _transfer_note_totals(db, shop, year, mon, last_day)
             cn_igst, cn_cgst = round(cn_igst + t_i, 2), round(cn_cgst + t_c, 2)
             cn_sgst, cn_taxable = round(cn_sgst + t_s, 2), round(cn_taxable + t_t, 2)
@@ -643,6 +671,12 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             "stateTax": _r(t_rcm[2]),
             "taxableValue": _r(t_rcm[3]),
         },
+        # Table 3.2 (unregistered persons), by place-of-supply state code;
+        # gross of credit notes, as GSTR-1 files its B2CL / B2CS rows.
+        "interStateUnregistered": [
+            {"placeOfSupplyCode": pos, "taxableValue": _r(v[0]), "integratedTax": _r(v[1])}
+            for pos, v in sorted(unreg_by_pos.items())
+        ],
         "zeroRatedValue": 0.0,
         "zeroRatedSupplies": {
             "integratedTax": 0.0,

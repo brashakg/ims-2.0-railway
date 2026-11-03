@@ -377,17 +377,6 @@ def gst_reconciliation(
     }
 
 
-def _norm_state(value) -> str:
-    """Canonicalize a state (full name / 2-letter abbr / 2-digit GST code) to the
-    GST numeric code so 'Jharkhand', 'JH' and '20' all compare equal. Without
-    this, an order whose store.state and customer.state are stored in DIFFERENT
-    formats is misclassified inter-state (wrong IGST vs CGST/SGST). Unresolvable
-    values pass through unchanged; empty -> '' (treated as unknown/intra)."""
-    from ...services import org_validation as _ov
-
-    return _ov.normalize_state_code(str(value or "").strip()) or ""
-
-
 def _order_is_interstate(
     order, store_state_by_id: dict, customer_state_by_id: dict
 ) -> bool:
