@@ -77,6 +77,13 @@ describe('THE guard', () => {
     expect(usePOSStore.getState().resetTransaction('discard')).toBe(true);
     expect(usePOSStore.getState().cart).toHaveLength(0);
   });
+
+  it('a recall never replaces a pending live bill without a safe reason', () => {
+    pendingBill();
+    expect(usePOSStore.getState().restoreHeldSale({ cart: [] }, null, 'S1', 'not-pending')).toBe(false);
+    expect(usePOSStore.getState().cart).toHaveLength(1);
+    expect(reachable()).toBe(true);
+  });
 });
 
 describe('every caller keeps a pending bill reachable when its park fails', () => {
