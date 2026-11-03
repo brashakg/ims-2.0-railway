@@ -951,7 +951,9 @@ def _sync_existing_order_status(
     # orders/updated webhook (e.g. the owner archiving an old order) must
     # never flip that status to DELIVERED/CONFIRMED -- that would silently
     # start counting the order as IMS revenue.
-    if existing.get("historical") or existing.get("source") == "bvi_import":
+    # A Shopify TEST order (owner ruling 27) stays TEST: a later fulfil /
+    # paid webhook must not lift it into a sale with no invoice.
+    if existing.get("historical") or existing.get("source") == "bvi_import" or existing.get("is_test"):
         logger.info(
             "[ONLINE_MAP] skip status sync for HISTORICAL import shopify_order=%s",
             shopify_order_id,

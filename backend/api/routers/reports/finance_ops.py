@@ -1,6 +1,7 @@
 """HR attendance, finance outstanding / GST summary and task reports."""
 
 from fastapi import Depends, HTTPException, Query
+from ...utils.real_sale import EXCLUDED_ORDER_STATUSES
 from typing import Optional
 from datetime import date, datetime, timedelta
 from ...utils.ist import (
@@ -101,7 +102,7 @@ async def outstanding_report(
         {
             **({"store_id": active_store} if active_store else {}),
             "balance_due": {"$gt": 0},
-            "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
+            "status": {"$nin": EXCLUDED_ORDER_STATUSES},
         },
         limit=0,
     )

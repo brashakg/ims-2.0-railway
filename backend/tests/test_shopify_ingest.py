@@ -1163,6 +1163,80 @@ def test_cancelled_never_fulfilled_order_takes_no_invoice_serial(wired):
     assert sale["invoice_number"] and sale["invoice_number"].endswith("1")
 
 
+def test_shopify_test_order_books_as_test_with_no_invoice_serial(wired):
+    """Owner ruling 27: a Shopify TEST order is visible but never a sale --
+    no live serial, no payment row, out of the books and the GST returns, and
+    a later fulfil webhook cannot lift it into a sale. A real order still mints."""
+    from api.utils.real_sale import is_real_sale, real_sale_match
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], {**_frame_order(1104, buyer_state="20"), "test": True}, topic="orders/create"
+    )
+    assert res["status"] == "created" and res["invoice_number"] is None
+    doc = wired["orders"].find_one({"shopify_order_id": "1104"})
+    assert doc["status"] == "TEST" and doc["is_test"] is True
+    assert doc["invoice_number"] is None and doc["payments"] == []
+    assert not is_real_sale(doc) and not is_real_sale(doc, gst_documents=True)
+    for gst in (False, True):
+        assert "TEST" in real_sale_match(gst_documents=gst)["status"]["$nin"]
+
+    online_order_mapper._sync_existing_order_status(
+        wired["db"], "1104", {"id": 1104, "financial_status": "paid",
+                              "fulfillment_status": "fulfilled"})
+    after = wired["orders"].find_one({"shopify_order_id": "1104"})
+    assert after["status"] == "TEST" and after["payments"] == []
+
+    sale = shopify_ingest.ingest_shopify_order(
+        wired["db"], {**_frame_order(1105, buyer_state="20"), "test": False}, topic="orders/create"
+    )
+    assert sale["invoice_number"] and sale["invoice_number"].endswith("1")
+
+
+def test_refund_webhook_on_a_shopify_test_order_books_nothing(wired):
+    """Owner ruling 27: refunding a test checkout in Shopify (the usual
+    cleanup) queues no credit note, writes no ledger row, restocks nothing."""
+    from api.services import shopify_refund
+
+    shopify_ingest.ingest_shopify_order(
+        wired["db"], {**_frame_order(1106, buyer_state="20"), "test": True}, topic="orders/create"
+    )
+    res = shopify_refund.handle_shopify_refund(wired["db"], {
+        "id": 99106, "order_id": "1106",
+        "refund_line_items": [{"line_item_id": 9001, "quantity": 1,
+                               "subtotal": "999.00", "total_tax": "0.00"}],
+    }, topic="refunds/create")
+    assert res == {"status": "skipped", "reason": "test_order", "refund_id": "99106"}
+    for coll in ("shopify_refund_review", "credit_note_ledger", "returns"):
+        assert wired["db"].get_collection(coll).find_one({}) is None, coll
+
+
+def test_test_orders_stay_out_of_every_sales_status_filter():
+    """Ruling 27: a TEST order is never counted in sales or receivables. The
+    report feeder asks the shared not-a-sale list, and no hand-rolled copy of
+    the old three-status list is left to forget TEST (one rule, one list)."""
+    import pathlib
+    import re
+    from datetime import datetime
+    from api.routers.reports._shared import _orders_in_window
+
+    seen = {}
+
+    class _Repo:
+        def find_many(self, flt, limit=100):
+            seen.update(flt)
+            return []
+
+    _orders_in_window(_Repo(), store_id=None, start_dt=datetime(2026, 11, 1),
+                      end_dt=datetime(2026, 11, 2))
+    assert "TEST" in seen["status"]["$nin"]
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    old = re.compile(r"""[\[({]\s*["']CANCELLED["'],\s*["']DRAFT["'],\s*["']HISTORICAL["']\s*[\])}]""")
+    stale = [str(f.relative_to(root)) for d in ("api", "database") for f in (root / d).rglob("*.py")
+             if old.search(f.read_text(encoding="utf-8"))]
+    assert stale == []
+
+
 def test_cancelled_after_fulfilment_keeps_its_invoice_serial(wired):
     payload = {**_frame_order(1103, buyer_state="20"),
                "cancelled_at": "2026-10-19T10:00:00+05:30", "fulfillment_status": "fulfilled"}

@@ -1683,6 +1683,7 @@ def finish_crashed_booking(db, order: Dict[str, Any]) -> Optional[str]:
         "fulfillment_breakdown" in order
         or not order.get("fulfillment_route")
         or order.get("historical")
+        or order.get("is_test")  # a Shopify test order claims no stock (ruling 27)
         # Re-map unsets the breakdown while it runs, under its lease; a Re-map
         # (running, or stopped with its lease left stale) is settled by Re-map's
         # own door -- never here. A booking never takes that lease.

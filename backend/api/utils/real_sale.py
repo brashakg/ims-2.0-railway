@@ -9,6 +9,7 @@ Not a sale:
   * DRAFT      -- never booked;
   * CANCELLED  -- reversed before it was a sale;
   * HISTORICAL -- a pre-IMS import, settled outside IMS books;
+  * TEST       -- a Shopify test order (owner ruling 27), never invoiced;
   * a VOID / VOIDED order (deleted in Shopify, services/shopify_order_delete)
     that was NEVER invoiced and never shipped.
 
@@ -33,7 +34,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict
 
-_NOT_SALE = ("CANCELLED", "DRAFT", "HISTORICAL")
+_NOT_SALE = ("CANCELLED", "DRAFT", "HISTORICAL", "TEST")
 _VOID = ("VOID", "VOIDED")
 _CANCELLED = ("CANCELLED", "CANCELED")
 # status_before_void values that mean the goods had left the shop.
@@ -42,11 +43,11 @@ _SHIPPED = ("SHIPPED", "DELIVERED")
 # Kept as a list: tests and older callers read the excluded statuses.
 EXCLUDED_ORDER_STATUSES = [s for st in _NOT_SALE for s in (st, st.lower())]
 _VOID_STATUSES = [s for st in _VOID for s in (st, st.lower(), st.title())]
-_NOT_SALE_RE = re.compile(r"^(cancelled|draft|historical)$", re.IGNORECASE)
+_NOT_SALE_RE = re.compile(r"^(cancelled|draft|historical|test)$", re.IGNORECASE)
 _VOID_RE = re.compile(r"^void(ed)?$", re.IGNORECASE)
 # The GST-document view judges cancelled orders one by one instead.
-_GST_NOT_SALE = ("DRAFT", "HISTORICAL")
-_GST_NOT_SALE_RE = re.compile(r"^(draft|historical)$", re.IGNORECASE)
+_GST_NOT_SALE = ("DRAFT", "HISTORICAL", "TEST")
+_GST_NOT_SALE_RE = re.compile(r"^(draft|historical|test)$", re.IGNORECASE)
 _CANCELLED_STATUSES = [s for st in _CANCELLED for s in (st, st.lower(), st.title())]
 _CANCELLED_RE = re.compile(r"^cancel(l)?ed$", re.IGNORECASE)
 

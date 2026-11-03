@@ -905,7 +905,12 @@ def _cn_parent_held(db, ret_doc, cache) -> bool:
         return False
     if oid not in cache:
         order = db.get_collection("orders").find_one({"order_id": oid})
-        cache[oid] = bool(order) and bool(_order_held_off_returns(db, order))
+        # A Shopify test order (ruling 27) was never invoiced: none of its
+        # credit notes, from any door, is ever filed.
+        is_test = bool(order) and (
+            bool(order.get("is_test")) or str(order.get("status") or "").upper() == "TEST"
+        )
+        cache[oid] = bool(order) and (is_test or bool(_order_held_off_returns(db, order)))
     return cache[oid]
 
 

@@ -425,6 +425,23 @@ def test_confirm_posts_from_stored_doc_and_resolves(ctx):
     assert row["resolved_by"] == "acc-1"
 
 
+def test_confirm_refuses_a_shopify_test_order(ctx, monkeypatch):
+    """A row queued for a Shopify test order (ruling 27) posts no credit note
+    and no restock when confirmed."""
+    _seed_pending_review(ctx)
+    monkeypatch.setattr(
+        returns_router, "_load_order_for_restock",
+        lambda oid: {"order_id": oid, "status": "TEST", "is_test": True},
+    )
+    r = ctx["client"].post(
+        "/api/v1/online-store/refund-reviews/rev-1/confirm",
+        headers={"Authorization": f"Bearer {_token(['ACCOUNTANT'])}"},
+    )
+    assert r.status_code == 422, r.text
+    assert ctx["ledger"].find_one({}) is None
+    assert ctx["returns"].find_one({}) is None
+
+
 def test_confirm_twice_is_conflict(ctx):
     _seed_pending_review(ctx)
     hdr = {"Authorization": f"Bearer {_token(['ADMIN'])}"}

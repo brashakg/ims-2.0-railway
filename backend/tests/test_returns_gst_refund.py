@@ -519,3 +519,42 @@ async def test_inclusive_order_refunds_billed_gross(ctx):
     assert data["gst_breakup"]["tax"] == 47.57
     # NOT the over-refund 999 * 1.05 = 1048.95.
     assert data["refund_amount"] != 1048.95
+
+
+async def test_counter_return_on_a_test_order_is_refused_and_mints_no_cn(ctx):
+    """Owner ruling 27: a Shopify test checkout is never a sale. A counter
+    return on it (a tester trying the return flow) used to answer 201, mint a
+    live credit-note number and file a credit note reversing tax on a supply
+    never invoiced. It is refused; nothing is written."""
+    order = ctx["order_repo"]._order
+    order.update({"status": "TEST", "is_test": True, "channel": "ONLINE", "amount_paid": 1404.20})
+    tok = _staff_token(["CASHIER"])
+    r = ctx["client"].post(
+        "/api/v1/returns", json=_qa_payload(), headers={"Authorization": f"Bearer {tok}"}
+    )
+    assert r.status_code == 400, r.text
+    assert "test" in r.json()["detail"].lower()
+    assert ctx["returns_coll"].docs == [] and ctx["ledger_coll"].docs == []
+
+
+def test_cn_parent_held_for_a_test_order():
+    """Every credit-note door: a return doc whose parent is a TEST order is
+    held off GSTR-1, GSTR-3B and Table 13."""
+    from api.routers.reports.gst_itc import _cn_parent_held
+
+    class _Orders:
+        def __init__(self, doc):
+            self.doc = doc
+
+        def find_one(self, q, *a, **k):
+            return self.doc if self.doc.get("order_id") == q.get("order_id") else None
+
+    class _DB:
+        def __init__(self, doc):
+            self.o = _Orders(doc)
+
+        def get_collection(self, name):
+            return self.o
+
+    assert _cn_parent_held(_DB({"order_id": "O1", "status": "TEST"}), {"order_id": "O1"}, {}) is True
+    assert _cn_parent_held(_DB({"order_id": "O1", "is_test": True}), {"order_id": "O1"}, {}) is True

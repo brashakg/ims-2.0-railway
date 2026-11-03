@@ -46,6 +46,7 @@ CONTRACT
 from __future__ import annotations
 
 import logging
+from api.utils.real_sale import EXCLUDED_ORDER_STATUSES
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -439,7 +440,7 @@ def _movement_pipeline(
 ) -> List[Dict]:
     match: Dict[str, Any] = {
         "created_at": {"$gte": cutoff},
-        "status": {"$nin": ["CANCELLED", "DRAFT", "HISTORICAL"]},
+        "status": {"$nin": EXCLUDED_ORDER_STATUSES},
         "items.product_id": {"$in": chunk},
     }
     if store_id:
