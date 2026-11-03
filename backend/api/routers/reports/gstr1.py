@@ -918,7 +918,8 @@ def _docs_issued(db, store_id: str, from_dt, to_dt) -> list:
         {"invoice_number": {"$in": sorted(by_series.get("", ()))}},
         {"_id": 0, "invoice_number": 1, "status": 1, "status_before_void": 1},
     ):
-        state[o["invoice_number"]] = "issued" if is_real_sale(o) else "cancelled"
+        if o.get("invoice_number") in state:
+            state[o["invoice_number"]] = "issued" if is_real_sale(o) else "cancelled"
     t_nums = sorted(by_series.get("T", ()))
     trf_nums = sorted(by_series.get("TRF", ()))
     for n in t_nums + trf_nums:
