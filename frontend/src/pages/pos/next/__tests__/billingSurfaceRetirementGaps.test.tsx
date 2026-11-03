@@ -326,3 +326,17 @@ describe('money review 31: New Sale after the optical till is left and opened ag
     expect(billKeyEntry(sold)).toBeNull();
   });
 });
+
+describe('orphan bill warning (#1264 follow-up)', () => {
+  it('the optical till shows the warning when a pending key has no bill here', () => {
+    usePOSStore.setState({ orphan_bill_ids: ['bill-gone'] } as any);
+    try {
+      render(<BillingSurface />);
+      expect(
+        screen.getAllByText('A sale may already be paid but is no longer on this till - check Orders'),
+      ).toHaveLength(1);
+    } finally {
+      usePOSStore.setState({ orphan_bill_ids: [] } as any);
+    }
+  });
+});

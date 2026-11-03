@@ -230,3 +230,17 @@ describe('a completed take-away counter sale is handed over', () => {
     expect(text).toMatch(/could NOT be marked delivered/);
   });
 });
+
+describe('orphan bill warning (#1264 follow-up)', () => {
+  it('the counter shows the warning when a pending key has no bill here', () => {
+    usePOSStore.setState({ orphan_bill_ids: ['bill-gone'] } as any);
+    try {
+      renderCounter();
+      expect(
+        screen.getAllByText('A sale may already be paid but is no longer on this till - check Orders'),
+      ).toHaveLength(1);
+    } finally {
+      usePOSStore.setState({ orphan_bill_ids: [] } as any);
+    }
+  });
+});
