@@ -73,7 +73,9 @@ vi.mock('../../../../components/pos/DiscountModal', () => ({
 }));
 vi.mock('../../../../components/pos/BillDiscountCard', () => ({ BillDiscountCard: () => null }));
 vi.mock('../../../../components/pos/POSPayment', () => ({ StepPayment: () => <div>payment</div> }));
-vi.mock('../../../../components/pos/POSInvoice', () => ({ StepComplete: () => null }));
+vi.mock('../../../../components/pos/POSInvoice', () => ({
+  StepComplete: (p: { onReset?: () => void }) => <button type="button" onClick={p.onReset}>New Sale</button>,
+}));
 vi.mock('../../../../components/pos/BarcodeScanner', () => ({ BarcodeScanner: () => null }));
 vi.mock('../../../../components/pos/PrescriptionSelectModal', () => ({
   PrescriptionSelectModal: () => null,
@@ -292,5 +294,35 @@ describe('money review 31: Done on the Rx completion screen drops only the bill 
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(usePOSStore.getState().bill_id).toBe('recalled-pending');
     expect(billKeyEntry('recalled-pending')?.pending).toBe(true);
+  });
+});
+
+describe('money review 31: New Sale after the optical till is left and opened again', () => {
+  beforeEach(() => {
+    const mem = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, String(v)),
+      removeItem: (k: string) => void mem.delete(k),
+      clear: () => mem.clear(),
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('resets the sold bill and clears its key (the ref is gone after a remount)', async () => {
+    seed({ lines: ['FRAME'] });
+    submitPosOrder.mockReset().mockImplementationOnce(async () => {
+      usePOSStore.getState().setStep('complete');
+      return { ok: true, orderId: 'o-6' };
+    });
+    const view = render(<BillingSurface />);
+    await completeSale();
+    const sold = usePOSStore.getState().bill_id || '';
+    expect(billKeyEntry(sold)?.pending).toBe(true);
+    view.unmount();
+    render(<BillingSurface />);
+    fireEvent.click(screen.getByRole('button', { name: 'New Sale' }));
+    expect(usePOSStore.getState().cart).toEqual([]);
+    expect(billKeyEntry(sold)).toBeNull();
   });
 });

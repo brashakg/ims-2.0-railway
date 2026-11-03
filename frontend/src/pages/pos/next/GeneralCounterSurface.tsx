@@ -140,6 +140,11 @@ export function GeneralCounterSurface() {
   const idempotencyKeyRef = useRef<string | null>(null);
   // The bill that sold (its id): Done drops only that bill (money review 31).
   const soldBillIdRef = useRef<string | null>(null);
+  // After a remount on the complete step (the cashier went to another page
+  // and came back) the ref is empty: only a sale's success sets that step,
+  // and a recall moves it back to review, so the live bill IS the sold one.
+  const soldBillId = () => soldBillIdRef.current
+    || (usePOSStore.getState().current_step === 'complete' ? billIdOf(usePOSStore.getState()) : null);
   const billFpRef = useRef<string | null>(null);
   // A lost sale's promise ("press again - not charged twice") holds only for
   // the SAME bill while its key is kept.
@@ -425,12 +430,12 @@ export function GeneralCounterSurface() {
             setCompleted(null);
             // 'success' names the bill that sold: any other (pending) bill on
             // the till is kept (money review 31).
-            if (!store.resetTransaction('success', soldBillIdRef.current)) setErrorMsg(COULD_NOT_PUT_ASIDE);
+            if (!store.resetTransaction('success', soldBillId())) setErrorMsg(COULD_NOT_PUT_ASIDE);
           }}
         />
       ) : isComplete ? (
         <div className="flex-1 overflow-y-auto p-4">
-          <StepComplete onPrint={() => window.print()} onReset={() => { if (!store.resetTransaction('success', soldBillIdRef.current)) setErrorMsg(COULD_NOT_PUT_ASIDE); }} />
+          <StepComplete onPrint={() => window.print()} onReset={() => { if (!store.resetTransaction('success', soldBillId())) setErrorMsg(COULD_NOT_PUT_ASIDE); }} />
         </div>
       ) : (
         <div className="flex-1 lg:min-h-0 flex flex-col gap-3 px-3.5 pb-3.5">

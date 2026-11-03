@@ -108,7 +108,9 @@ vi.mock('../../../../components/pos/DiscountModal', () => ({
 vi.mock('../../../../components/pos/BillDiscountCard', () => ({ BillDiscountCard: () => null }));
 vi.mock('../../../../components/pos/POSPayment', () => ({ StepPayment: () => <div>payment</div> }));
 vi.mock('../../../../components/pos/POSInvoice', () => ({
-  StepComplete: () => <div>legacy-step-complete</div>,
+  StepComplete: (p: { onReset?: () => void }) => (
+    <div>legacy-step-complete<button type="button" onClick={p.onReset}>New Sale</button></div>
+  ),
 }));
 // The GOOD completion screen (server-read totals, PDF, sends), in its COUNTER
 // stage. A successful sale must land HERE, not on the legacy StepComplete.
@@ -594,5 +596,25 @@ describe('money review 31: the sold bill keeps its key until Done', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Done' }));
     expect(usePOSStore.getState().bill_id).toBe('other-pending');
     expect(billKeyEntry('other-pending')?.pending).toBe(true);
+  });
+});
+
+describe('money review 31: New Sale after the counter is left and opened again', () => {
+  it('resets the sold bill and clears its key (the ref is gone after a remount)', async () => {
+    submitPosOrder.mockImplementationOnce(async () => {
+      usePOSStore.getState().setStep('complete'); // the real submit does this on success
+      return { ok: true, orderId: 'o-5', orderNumber: 'ORD-5' };
+    });
+    putSomethingInTheCart();
+    const view = renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(1));
+    const sold = usePOSStore.getState().bill_id || '';
+    expect(billKeyEntry(sold)?.pending).toBe(true);
+    view.unmount(); // e.g. the Orders screen, then back
+    renderCounter();
+    fireEvent.click(screen.getByRole('button', { name: 'New Sale' }));
+    expect(usePOSStore.getState().cart).toEqual([]);
+    expect(billKeyEntry(sold)).toBeNull();
   });
 });
