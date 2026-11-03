@@ -56,6 +56,12 @@ def test_a_re_press_replays_its_order_even_in_a_locked_period(client, auth_heade
 
 
 def test_a_refusal_after_a_missed_lookup_says_key_checked(client, auth_headers, hardening_orders, monkeypatch):
+    import mongomock
+
+    # The press holds its key's claim (money review 27): only then is a
+    # refusal stamped key_checked.
+    claims = mongomock.MongoClient().db.order_key_claims
+    monkeypatch.setattr("api.routers.orders.create._claims_coll", lambda repo: claims)
     _period_locked(monkeypatch)
     r = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="K-NEW")
     assert r.status_code == 423, r.text
