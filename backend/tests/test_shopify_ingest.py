@@ -1163,6 +1163,35 @@ def test_cancelled_never_fulfilled_order_takes_no_invoice_serial(wired):
     assert sale["invoice_number"] and sale["invoice_number"].endswith("1")
 
 
+def test_shopify_test_order_books_as_test_with_no_invoice_serial(wired):
+    """Owner ruling 27: a Shopify TEST order is visible but never a sale --
+    no live serial, no payment row, out of the books and the GST returns, and
+    a later fulfil webhook cannot lift it into a sale. A real order still mints."""
+    from api.utils.real_sale import is_real_sale, real_sale_match
+
+    res = shopify_ingest.ingest_shopify_order(
+        wired["db"], {**_frame_order(1104, buyer_state="20"), "test": True}, topic="orders/create"
+    )
+    assert res["status"] == "created" and res["invoice_number"] is None
+    doc = wired["orders"].find_one({"shopify_order_id": "1104"})
+    assert doc["status"] == "TEST" and doc["is_test"] is True
+    assert doc["invoice_number"] is None and doc["payments"] == []
+    assert not is_real_sale(doc) and not is_real_sale(doc, gst_documents=True)
+    for gst in (False, True):
+        assert "TEST" in real_sale_match(gst_documents=gst)["status"]["$nin"]
+
+    online_order_mapper._sync_existing_order_status(
+        wired["db"], "1104", {"id": 1104, "financial_status": "paid",
+                              "fulfillment_status": "fulfilled"})
+    after = wired["orders"].find_one({"shopify_order_id": "1104"})
+    assert after["status"] == "TEST" and after["payments"] == []
+
+    sale = shopify_ingest.ingest_shopify_order(
+        wired["db"], {**_frame_order(1105, buyer_state="20"), "test": False}, topic="orders/create"
+    )
+    assert sale["invoice_number"] and sale["invoice_number"].endswith("1")
+
+
 def test_cancelled_after_fulfilment_keeps_its_invoice_serial(wired):
     payload = {**_frame_order(1103, buyer_state="20"),
                "cancelled_at": "2026-10-19T10:00:00+05:30", "fulfillment_status": "fulfilled"}
