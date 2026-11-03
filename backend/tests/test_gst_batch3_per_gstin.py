@@ -130,3 +130,32 @@ def test_table_3_2_is_the_gstins_unregistered_interstate_rows(gstins):
     assert to_gstr3b_json(g3)["inter_sup"]["unreg_details"] == [
         {"pos": "27", "txval": 3000.0, "iamt": 150.0}
     ]
+
+
+def test_a_sister_shop_refund_lands_in_one_month_on_both_returns(gstins):
+    """The return dated 30 Sep at SISTER; its legacy store-credit note booked at
+    STORE (the cashier's shop) on 1 Oct IST, with a ledger tax that differs from
+    the return's gst_breakup. GSTR-1 files the note from the ledger row in
+    October; GSTR-3B used to net the return doc in September (per-shop dedup)
+    -- one GSTIN, one refund, two periods and two amounts."""
+    _sale(gstins, SISTER, "O-ONLINE", "C-JH", 2100.0)
+    gstins.returns.insert_one({
+        "return_id": "RET-B3-2", "store_id": SISTER, "order_id": "O-ONLINE", "customer_id": "C-JH",
+        "status": "COMPLETED", "created_at": datetime(2026, 9, 30, 6, 0, 0),
+        "gst_breakup": {"gross": 252.0, "taxable": 240.0, "tax": 12.0, "gst_rate": 5},
+    })
+    gstins.credit_note_ledger.insert_one({
+        "store_id": STORE, "type": "ISSUED", "ref": "RET-B3-2", "customer_id": "C-JH",
+        "created_at": datetime(2026, 9, 30, 19, 0, 0).isoformat(),  # 1 Oct 00:30 IST
+        "taxable": 200.0, "tax": 10.0, "gst_rate": 5,
+        "gross_refund": 210.0, "net_refund": 210.0,
+    })
+    for month in ("2026-09", "2026-10"):
+        cdnr = r1._compute_gstr1(month, STORE)["cdnr"]
+        g1 = (round(sum(c["taxableValue"] for c in cdnr), 2),
+              round(sum(c["taxValue"] for c in cdnr), 2))
+        cn = r3b._compute_gstr3b(month, SISTER)["creditNotes"]
+        g3 = (round(cn["taxableValue"], 2),
+              round(cn["integratedTax"] + cn["centralTax"] + cn["stateTax"], 2))
+        assert g1 == g3, (month, g1, g3)
+    assert g1 == (200.0, 10.0)  # October: the ledger row, the credit note
