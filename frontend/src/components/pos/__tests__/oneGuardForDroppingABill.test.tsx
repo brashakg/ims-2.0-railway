@@ -78,6 +78,15 @@ describe('THE guard', () => {
     expect(usePOSStore.getState().cart).toHaveLength(0);
   });
 
+  it("a 'success' for ANOTHER bill never drops a pending bill; for this bill it does", () => {
+    pendingBill();
+    const id = usePOSStore.getState().bill_id;
+    expect(usePOSStore.getState().resetTransaction('success', 'another-bill')).toBe(false);
+    expect(usePOSStore.getState().resetTransaction('success')).toBe(false);
+    expect(usePOSStore.getState().cart).toHaveLength(1);
+    expect(usePOSStore.getState().resetTransaction('success', id)).toBe(true);
+  });
+
   it('a recall never replaces a pending live bill without a safe reason', () => {
     pendingBill();
     expect(usePOSStore.getState().restoreHeldSale({ cart: [] }, null, 'S1', 'not-pending')).toBe(false);
@@ -169,7 +178,7 @@ describe('no caller can skip the guard', () => {
         const restore = code.match(/\.restoreHeldSale\(([^)]*)\)/);
         if (restore && restore[1].split(',').length < 4) bad.push(`${rel}:${i + 1} restoreHeldSale without a reason`);
         if (/\bclearBillKey\(/.test(code) && !/export function clearBillKey/.test(code)
-            && rel !== 'stores/posStore.ts' && !/clearBillKey\(billFpRef\.current \|\| ''\)/.test(code)) {
+            && rel !== 'stores/posStore.ts') {
           bad.push(`${rel}:${i + 1} drops a bill key outside the store's guard`);
         }
       });

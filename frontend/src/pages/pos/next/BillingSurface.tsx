@@ -19,7 +19,7 @@ import { AlertTriangle, X } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
 import {
-  billKeyEntry, billKeyFor, clearBillKey, settleAfterPress, useUnconfirmedWording,
+  billKeyEntry, billKeyFor, COULD_NOT_PUT_ASIDE, settleAfterPress, useUnconfirmedWording,
 } from '../../../components/pos/posBillKey';
 import { billIdOf } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
@@ -84,6 +84,8 @@ export function BillingSurface() {
   // The bill key of the last press and the bill it was for (THE fingerprint:
   // the order body the sale sends). A re-press of the same bill prefers it.
   const idempotencyKeyRef = useRef<string | null>(null);
+  // The bill that sold (its id): Done drops only that bill (money review 31).
+  const soldBillIdRef = useRef<string | null>(null);
   const billFpRef = useRef<string | null>(null);
   // A lost sale's promise ("press again - not charged twice") holds only for
   // the SAME bill while its key is kept.
@@ -189,7 +191,10 @@ export function BillingSurface() {
         setErrorMsg(res.error || 'Failed to create order');
         return;
       }
-      clearBillKey(billFpRef.current || '');
+      // The sold bill KEEPS its key (pending, so it never ages out) until
+      // Done: parked, reloaded or recalled and pressed again, it replays its
+      // own order (money review 31).
+      soldBillIdRef.current = fp;
       idempotencyKeyRef.current = null;
       billFpRef.current = null;
       approvalIdRef.current = null;
@@ -258,7 +263,7 @@ export function BillingSurface() {
       {/* Bill strip — slim context row. The salesperson lives here as a CHIP
           (owner: the labelled field "takes up too much space"), not a form
           block; the picker itself still enforces the manager-tier rule. */}
-      {!isComplete && (
+      {!isComplete && !completed && (
         <div className="px-3.5 pt-2 pb-1 flex items-center gap-2 shrink-0">
           <span className="text-[10px] font-medium uppercase tracking-widest text-gray-500">
             Selling
@@ -287,12 +292,14 @@ export function BillingSurface() {
           salespersonName={store.salesperson_name}
           onDone={() => {
             setCompleted(null);
-            store.resetTransaction('success');
+            // 'success' names the bill that sold: any other (pending) bill on
+            // the till is kept (money review 31).
+            if (!store.resetTransaction('success', soldBillIdRef.current)) setErrorMsg(COULD_NOT_PUT_ASIDE);
           }}
         />
       ) : isComplete ? (
         <div className="flex-1 overflow-y-auto p-4">
-          <StepComplete onPrint={() => window.print()} onReset={() => store.resetTransaction('success')} />
+          <StepComplete onPrint={() => window.print()} onReset={() => { if (!store.resetTransaction('success', soldBillIdRef.current)) setErrorMsg(COULD_NOT_PUT_ASIDE); }} />
         </div>
       ) : (
         /* TWO columns, per the locked mockup (Main.dc.html): the left column

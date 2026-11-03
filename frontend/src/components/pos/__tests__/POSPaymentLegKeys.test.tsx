@@ -359,3 +359,23 @@ describe('money review 28: a pending bill stays held until it is saved or discar
     expect(await press(refused(403, 'Your role is not permitted to create orders.'), false)).toBe(false);
   });
 });
+
+describe('money review 31: every success ends on the complete step', () => {
+  it('the fitting-job path ends on step complete too', async () => {
+    const { workshopApi } = await import('../../../services/api');
+    vi.mocked(workshopApi.createJob).mockResolvedValueOnce({ job_id: 'JOB-9' } as any);
+    seed();
+    usePOSStore.setState({
+      sale_type: 'prescription_order', prescription: { id: 'rx-1' },
+      cart: [{ id: 'l', product_id: 'p-l', name: 'Lens', sku: 'L', category: 'OPTICAL_LENS', unit_price: 1000,
+               mrp: 1000, quantity: 1, discount_percent: 0, discount_amount: 0, line_total: 1000 }],
+      payments: [{ method: 'CASH', amount: 1000, timestamp: '' }],
+    } as any);
+    mockedCreate.mockResolvedValueOnce({ order_id: 'ord-1', order_number: 'BV-001' } as any);
+    mockedAddPayment.mockResolvedValue({ payment_id: 'p' } as any);
+    usePOSStore.getState().setStep('review' as any);
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'k-fit');
+    expect(res.ok && res.fittingJobId).toBe('JOB-9');
+    expect(usePOSStore.getState().current_step).toBe('complete');
+  });
+});

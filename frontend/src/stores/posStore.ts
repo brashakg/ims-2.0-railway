@@ -22,10 +22,12 @@ const newBillId = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto
   ? crypto.randomUUID() : `bill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 export const billIdOf = (s: any): string => (s && s.bill_id) || '';
 
-/** THE guard (money review 30): may this bill be dropped for this reason? */
-function mayDropBill(state: any, reason: BillDropReason): boolean {
+/** THE guard (money reviews 30-31): may this bill be dropped for this
+ *  reason? A 'success' names the bill that sold: it drops only THAT bill. */
+function mayDropBill(state: any, reason: BillDropReason, soldBillId?: string | null): boolean {
   if (!billKeyEntry(billIdOf(state))?.pending) return true;
-  return reason === 'success' || reason === 'discard' || reason === 'parked';
+  if (reason === 'success') return !!soldBillId && billIdOf(state) === soldBillId;
+  return reason === 'discard' || reason === 'parked';
 }
 
 /** The signed-in store (the parked bill names it; recall elsewhere is refused). */
@@ -296,7 +298,7 @@ export interface POSState {
   /** THE guard (money review 30): drops the bill, its key and its draft only
    *  for a reason that is safe for it; returns false (and touches nothing)
    *  when the bill is pending and the reason is not success/discard/parked. */
-  resetTransaction: (reason: BillDropReason) => boolean;
+  resetTransaction: (reason: BillDropReason, soldBillId?: string | null) => boolean;
   /** This bill's id, made now if it has none yet. */
   ensureBillId: () => string;
   clearAllOnLogout: (userId?: string, storeId?: string | null) => boolean;
@@ -632,8 +634,8 @@ export const usePOSStore = create<POSState>()(
       })),
 
       // --- Reset ---
-      resetTransaction: (reason: BillDropReason) => {
-        if (!mayDropBill(get(), reason)) return false;
+      resetTransaction: (reason: BillDropReason, soldBillId?: string | null) => {
+        if (!mayDropBill(get(), reason, soldBillId)) return false;
         const { store_id, salesperson_id, salesperson_name } = get();
         clearBillKey(billIdOf(get())); // a new sale is a new press (only THIS bill's key)
         set({ ...initialState, store_id, salesperson_id, salesperson_name });

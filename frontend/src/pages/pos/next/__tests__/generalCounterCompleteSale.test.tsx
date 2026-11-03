@@ -113,8 +113,8 @@ vi.mock('../../../../components/pos/POSInvoice', () => ({
 // The GOOD completion screen (server-read totals, PDF, sends), in its COUNTER
 // stage. A successful sale must land HERE, not on the legacy StepComplete.
 vi.mock('../SaleCompleteScreen', () => ({
-  CounterCompleteScreen: (props: { orderId: string }) => (
-    <div>counter-complete-screen:{props.orderId}</div>
+  CounterCompleteScreen: (props: { orderId: string; onDone?: () => void }) => (
+    <div>counter-complete-screen:{props.orderId}<button type="button" onClick={props.onDone}>Done</button></div>
   ),
 }));
 vi.mock('../../../../components/pos/BarcodeScanner', () => ({ BarcodeScanner: () => null }));
@@ -444,7 +444,7 @@ describe('a discount a manager must approve', () => {
 describe('the bill key ends with the sale', () => {
   const keyOf = (call: number) => submitPosOrder.mock.calls[call][1] as string;
 
-  it('a lost answer re-presses with the same key; a success drops it and the next identical cart gets a new one', async () => {
+  it('a lost answer re-presses with the same key; Done drops it and the next identical cart gets a new one', async () => {
     submitPosOrder.mockResolvedValueOnce({ ok: false, error: 'lost' });
     submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-1', orderNumber: 'ORD-1' });
     putSomethingInTheCart();
@@ -454,7 +454,11 @@ describe('the bill key ends with the sale', () => {
     fireEvent.click(completeButton());
     await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
     expect(keyOf(1)).toBe(keyOf(0));
-    expect(billKeyEntry(usePOSStore.getState().ensureBillId())).toBeNull(); // the success dropped it
+    // Money review 31: the sold bill keeps its key until Done, then it goes.
+    const sold = usePOSStore.getState().bill_id || '';
+    expect(billKeyEntry(sold)?.key).toBe(keyOf(0));
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(billKeyEntry(sold)).toBeNull();
     view.unmount();
     usePOSStore.getState().resetTransaction('discard');
     submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-2', orderNumber: 'ORD-2' });
@@ -552,5 +556,43 @@ describe('money review 28: the counter keeps a pending bill until it is saved or
     fireEvent.click(completeButton());
     await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(1));
     expect(billKeyEntry(usePOSStore.getState().ensureBillId())?.pending).toBe(true);
+  });
+});
+
+describe('money review 31: the sold bill keeps its key until Done', () => {
+  it('a sold bill parked at idle, recalled and pressed again re-sends the SAME key (its order replays)', async () => {
+    const { autoParkForIdleLogout } = await import('../../../../hooks/idleSignOut');
+    const keyOf = (call: number) => submitPosOrder.mock.calls[call][1] as string;
+    submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-9', orderNumber: 'ORD-9' });
+    putSomethingInTheCart();
+    const view = renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(1));
+    view.unmount(); // the screen goes before Done (idle sign-out)
+    autoParkForIdleLogout(usePOSStore.getState().salesperson_id || 'u1');
+    const held = JSON.parse(localStorage.getItem('ims-held-bills') || '[]').pop();
+    expect(held.bill_key?.key).toBe(keyOf(0));
+    usePOSStore.getState().restoreHeldSale(held.state, held.bill_key, held.store_id, 'not-pending');
+    submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-9', orderNumber: 'ORD-9' });
+    renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
+    expect(keyOf(1)).toBe(keyOf(0)); // the server replays order o-9: one order only
+  });
+
+  it('Done after a pending bill was recalled meanwhile keeps that bill (it may already be paid)', async () => {
+    submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-7', orderNumber: 'ORD-7' });
+    putSomethingInTheCart();
+    renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(1));
+    // Another bill, pending, comes onto the till while the completion screen shows.
+    act(() => {
+      usePOSStore.setState({ bill_id: 'other-pending', cart: [{ id: 'x' } as any] } as any);
+    });
+    billKeyFor('other-pending');
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(usePOSStore.getState().bill_id).toBe('other-pending');
+    expect(billKeyEntry('other-pending')?.pending).toBe(true);
   });
 });

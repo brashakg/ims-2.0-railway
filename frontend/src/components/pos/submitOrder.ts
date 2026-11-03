@@ -431,6 +431,7 @@ async function pressOnce(
         // the POS stays in its current step; the modal advances to
         // 'complete' from its onSave / onBack handlers.
         if (jobResp?.job_id) {
+          store.setStep('complete');
           return {
             ok: true,
             orderId: result.order_id,

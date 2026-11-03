@@ -87,7 +87,9 @@ vi.mock('../../../../components/pos/CustomerSearchBar', () => ({
 }));
 vi.mock('../PosWidgets', () => ({ PosWidgets: () => null }));
 vi.mock('../SaleCompleteScreen', () => ({
-  default: (p: { orderId: string }) => <div>sale-complete:{p.orderId}</div>,
+  default: (p: { orderId: string; onDone?: () => void }) => (
+    <div>sale-complete:{p.orderId}<button type="button" onClick={p.onDone}>Done</button></div>
+  ),
 }));
 // The strip reports the store it was handed (F46: its tiles' counts are keyed by it).
 const stripStores = vi.fn();
@@ -249,7 +251,7 @@ describe('money reviews 26-28: the optical till uses THE settle rule', () => {
     expect(billKeyEntry(fp())?.pending).toBe(true);
   });
 
-  it('keeps a pending key on a refusal at the order door too, and clears it on success', async () => {
+  it('keeps a pending key on a refusal at the order door too; after the sale, Done clears it', async () => {
     seed({ lines: ['FRAME'] });
     billKeyFor(fp());
     submitPosOrder.mockReset()
@@ -260,6 +262,35 @@ describe('money reviews 26-28: the optical till uses THE settle rule', () => {
     expect(billKeyEntry(fp())?.pending).toBe(true);
     fireEvent.click(screen.getByRole('button', { name: /complete sale|saving/i }));
     await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
-    await waitFor(() => expect(billKeyEntry(usePOSStore.getState().bill_id || '')).toBeNull());
+    const sold = usePOSStore.getState().bill_id || '';
+    expect(billKeyEntry(sold)?.pending).toBe(true); // money review 31: kept until Done
+    fireEvent.click(await screen.findByRole('button', { name: 'Done' }));
+    expect(billKeyEntry(sold)).toBeNull();
+  });
+});
+
+describe('money review 31: Done on the Rx completion screen drops only the bill that sold', () => {
+  beforeEach(() => {
+    const mem = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, String(v)),
+      removeItem: (k: string) => void mem.delete(k),
+      clear: () => mem.clear(),
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('a pending bill recalled while the completion screen shows stays reachable after Done', async () => {
+    seed({ rx: true, lines: ['FRAME'] });
+    submitPosOrder.mockReset().mockResolvedValueOnce({ ok: true, orderId: 'o-1', fittingJobId: 'J-1' });
+    render(<BillingSurface />);
+    await completeSale();
+    await screen.findByRole('button', { name: 'Done' });
+    usePOSStore.setState({ bill_id: 'recalled-pending' } as any); // a pending bill recalled meanwhile
+    billKeyFor('recalled-pending');
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }));
+    expect(usePOSStore.getState().bill_id).toBe('recalled-pending');
+    expect(billKeyEntry('recalled-pending')?.pending).toBe(true);
   });
 });
