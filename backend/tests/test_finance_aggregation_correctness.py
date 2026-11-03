@@ -382,8 +382,12 @@ def test_tally_sales_jv_excludes_draft_cancelled():
     matches = _all_order_matches(rec)
     assert matches
     assert all(_excludes_draft_cancelled(m) for m in matches)
-    # And a real datetime range so the export isn't silently empty.
-    assert isinstance(matches[0]["created_at"]["$gte"], datetime)
+    # And a real datetime range so the export isn't silently empty: the
+    # sale's filing month (gst_base._sale_window_match) -- invoice_date for a
+    # numbered invoice, else created_at.
+    by_invoice, by_order = matches[0]["$or"]
+    assert isinstance(by_invoice["invoice_date"]["$gte"], datetime)
+    assert isinstance(by_order["created_at"]["$gte"], datetime)
 
 
 def test_gst_reconciliation_endpoint_excludes_draft_cancelled(monkeypatch):

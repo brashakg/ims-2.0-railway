@@ -416,3 +416,52 @@ def test_customer_form_refuses_a_gstin_with_no_state(gstin):
         CustomerUpdate(gstin=gstin)
     assert _check_gstin(GSTIN_BUYER) == GSTIN_BUYER
     assert CustomerCreate  # the create model shares _check_gstin
+
+
+def test_tally_b2b_export_dates_the_voucher_on_the_invoice(monkeypatch):
+    """The B2B export's voucher <DATE> is the tax invoice's own day, 02 July.
+    REVERT CHECK: without o['created_at'] = _sale_filed_at(o) in
+    _b2b_fetch_orders the voucher is dated 28 June."""
+    import agents.nexus_providers as nexus
+
+    tally = _tally(monkeypatch, _gst_db(_next_month_sale(customer_gstin=GSTIN_BUYER), {
+        "customer_id": "C1", "name": "Acme", "gstin": GSTIN_BUYER, "state": "Jharkhand"}))
+    [o] = tally._b2b_fetch_orders(tally._get_db(), ["O1"])
+    assert nexus.ist_date_str_from_stored(o["created_at"]) == "2026-07-02"
+
+
+def test_gst_registration_refuses_a_stray_sale_in_its_invoice_month(monkeypatch):
+    """A sale booked to a shop that does not exist, taken 28 June and invoiced
+    02 July, is July's stray (409), never June's.
+    REVERT CHECK: the created_at window in gst_by_registration's stray count
+    refuses June and passes July."""
+    from api.routers.finance.gst_crosscheck import gst_by_registration
+
+    cust = {"customer_id": "C1", "name": "Acme", "gstin": GSTIN_BUYER, "state": "Jharkhand"}
+    db = _gst_db(_next_month_sale(store_id="S-GONE"), cust)
+    db.stores.update_one({"store_id": "S1"}, {"$set": {"entity_id": "E1"}})
+    monkeypatch.setattr(r, "_get_raw_db", lambda: db)
+    gst_by_registration(db, 6, 2026, None)
+    with pytest.raises(HTTPException) as exc:
+        gst_by_registration(db, 7, 2026, None)
+    assert exc.value.status_code == 409
+
+
+def test_cross_check_adds_back_a_refunded_invoice_in_its_invoice_month(monkeypatch):
+    """Taken 28 June, invoiced 02 July, advance refunded and cancelled behind
+    its credit note in July: the books add it back in July, as GSTR-1 files
+    it -- every row MATCH both months.
+    REVERT CHECK: the created_at window in _cancelled_behind_credit_note adds
+    it back in June (MISMATCH June and July)."""
+    from api.routers.finance.gst_crosscheck import _run_gst_cross_check
+
+    cust = {"customer_id": "C1", "name": "Acme", "gstin": GSTIN_BUYER, "state": "Jharkhand"}
+    db = _gst_db(_next_month_sale(status="CANCELLED", advance_refund_status="COMPLETED",
+                                  advance_refund_credit_note="BOK/C2627/0001",
+                                  cancelled_at=datetime(2026, 7, 5, 6, 0)), cust)
+    db.stores.update_one({"store_id": "S1"}, {"$set": {"entity_id": "E1"}})
+    monkeypatch.setattr(r, "_get_raw_db", lambda: db)
+    for m, added in ((6, 0), (7, 1)):
+        out = _run_gst_cross_check(db, m, 2026, None)
+        assert out["cancelled_behind_credit_note"]["count"] == added, m
+        assert [c["metric"] for c in out["comparisons"] if c["status"] == "MISMATCH"] == [], m
