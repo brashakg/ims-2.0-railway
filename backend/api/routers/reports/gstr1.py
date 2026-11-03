@@ -908,7 +908,10 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
         "hsnSummary": hsn_summary,
         "hsnB2B": hsn_b2b,
         "hsnB2C": hsn_b2c,
-        "docsIssued": _docs_issued(db, active_store, from_dt, to_dt) if db is not None else [],
+        "docsIssued": (
+            _docs_issued(db, active_store, from_dt, to_dt, cdnr, validation_issues)
+            if db is not None else []
+        ),
         "validation": {
             "ok": len(validation_issues) == 0,
             "issueCount": len(validation_issues),
@@ -933,7 +936,7 @@ _DOC_TYPES = {
 _SERIAL_RE = re.compile(r"^(.*?)(\d+)$")
 
 
-def _docs_issued(db, store_id: str, from_dt, to_dt) -> list:
+def _docs_issued(db, store_id: str, from_dt, to_dt, cdnr=(), issues=None) -> list:
     """Table 13 (documents issued, mandatory per the CA 2026-10-23) for the
     shop's month, from the document register every number is logged in
     (order_repository.log_document_number): per series (the number up to its
@@ -948,14 +951,19 @@ def _docs_issued(db, store_id: str, from_dt, to_dt) -> list:
         gst_registrations answer -- a move across GSTINs goes on a T tax
         invoice). A request never shipped issued no challan;
       * a transfer tax invoice (T), credit / debit note (C / D): the month
-        minted (T at ship, dated at dispatch).
+        minted (T at ship, dated at dispatch); a C serial the audit trail
+        wrote off (CREDIT_NOTE_NUMBER_UNUSED) is cancelled.
+    Invoices, challans and T numbers come from their documents (orders,
+    stock_transfers), so a number minted before the register existed still
+    counts; a filed CDNR note number the register never saw is a warning on
+    ``issues`` (its serial cannot be placed in a run).
     A number of the series that belongs to another month (or to no challan)
     ends a run; a serial with no register row inside a run is CANCELLED --
     except a challan gap (another shop's number in the shared TRF-X- series,
     or a request that never shipped), which ends the run. A read failure
     raises (the doors 503).
-    ponytail: a credit / debit note counts as issued once logged; check its
-    ledger row if a note mint ever leaves its document unwritten."""
+    ponytail: a D serial counts as issued once logged -- no write-off path
+    exists for it yet."""
     known: dict = {}  # series -> every number the shop was given
     minted: dict = {}  # series -> the numbers minted in the month
     for r in db.get_collection(DOCUMENT_LOG).find(
@@ -971,14 +979,18 @@ def _docs_issued(db, store_id: str, from_dt, to_dt) -> list:
             minted.setdefault(series, set()).add(n)
     state: dict = {s: {} for s in _DOC_TYPES}  # series -> {number: issued | cancelled}
 
-    invoices = known.get("", set())
+    # The invoice tables' own rule (real_sale_match(gst_documents=True)): an
+    # order cancelled behind a whole-invoice credit note is still filed.
     for o in db.get_collection("orders").find(
         {"store_id": store_id, "created_at": {"$gte": from_dt, "$lt": to_dt},
          "invoice_number": {"$nin": [None, ""]}},
-        {"_id": 0, "invoice_number": 1, "status": 1, "status_before_void": 1},
+        {"_id": 0, "invoice_number": 1, "status": 1, "status_before_void": 1,
+         "advance_refund_status": 1, "advance_refund_credit_note": 1},
     ):
-        if o.get("invoice_number") in invoices:
-            state[""][o["invoice_number"]] = "issued" if is_real_sale(o) else "cancelled"
+        if o.get("invoice_number"):
+            state[""][o["invoice_number"]] = (
+                "issued" if is_real_sale(o, gst_documents=True) else "cancelled"
+            )
     unwritten = set(minted.get("", ()))
     for o in db.get_collection("orders").find(
         {"invoice_number": {"$in": sorted(unwritten)}}, {"_id": 0, "invoice_number": 1}
@@ -995,22 +1007,48 @@ def _docs_issued(db, store_id: str, from_dt, to_dt) -> list:
     ):
         dead = str(t.get("status") or "").lower() in ("cancelled", "rejected")
         state["T"][t["tax_invoice_number"]] = "cancelled" if dead else "issued"
-    challans = known.get("TRF", set())
     for t in db.get_collection("stock_transfers").find(
         {"from_location_id": store_id, **instant_in_window_query("shipped_at", from_dt, to_dt)},
-        {"_id": 0, "transfer_number": 1, "tax_invoice_number": 1, "gst_registrations": 1},
+        {"_id": 0, "transfer_number": 1, "tax_invoice_number": 1, "gst_registrations": 1,
+         "status": 1},
     ):
-        crosses = (t.get("gst_registrations") or {}).get("crosses") or t.get("tax_invoice_number")
-        if t.get("transfer_number") in challans and not crosses:
+        tax_inv = t.get("tax_invoice_number")
+        if tax_inv and tax_inv not in state["T"]:  # T minted before the register
+            dead = str(t.get("status") or "").lower() in ("cancelled", "rejected")
+            state["T"][tax_inv] = "cancelled" if dead else "issued"
+        crosses = (t.get("gst_registrations") or {}).get("crosses") or tax_inv
+        if t.get("transfer_number") and not crosses:
             state["TRF"][t["transfer_number"]] = "issued"
     for series in ("C", "D"):
         for n in minted.get(series, ()):
             state[series][n] = "issued"
+    if minted.get("C"):
+        for a in db.get_collection("audit_logs").find(
+            {"action": "CREDIT_NOTE_NUMBER_UNUSED",
+             "details.unused_credit_note_number": {"$in": sorted(minted["C"])}},
+            {"_id": 0, "details": 1},
+        ):
+            n = str((a.get("details") or {}).get("unused_credit_note_number") or "")
+            if n in state["C"]:
+                state["C"][n] = "cancelled"
+    filed = sorted(
+        {str(c.get("refReference") or "") for c in cdnr} - known.get("C", set()) - {""}
+    )
+    if filed and issues is not None:
+        issues.append({
+            "level": "warn",
+            "invoice": filed[0],
+            "issue": (
+                f"Table 13: {len(filed)} credit note(s) filed in CDNR are not in the document "
+                f"register ({filed[0]} .. {filed[-1]}) and are not counted under Credit Note "
+                "-- the CA must add them to Table 13."
+            ),
+        })
 
     out: list = []
     for series in ("", "T", "D", "C", "TRF"):
         doc_num, doc_type = _DOC_TYPES[series]
-        mine, given = state[series], known.get(series, set())
+        mine, given = state[series], set(known.get(series, ()))
         prefixes: dict = {}
         for n in mine:
             m = _SERIAL_RE.match(n)
@@ -1019,6 +1057,16 @@ def _docs_issued(db, store_id: str, from_dt, to_dt) -> list:
         for prefix in sorted(prefixes):
             got = prefixes[prefix]
             width = len(next(iter(got.values()))) - len(prefix)
+            if series == "":
+                # A gap held by an order of another month (an invoice minted
+                # before the register) ends the run, as a logged one does.
+                gaps = [f"{prefix}{x:0{width}d}" for x in range(min(got), max(got) + 1)
+                        if x not in got]
+                gaps = [n for n in gaps if n not in given]
+                if gaps:
+                    given |= {o.get("invoice_number") for o in db.get_collection("orders").find(
+                        {"store_id": store_id, "invoice_number": {"$in": gaps}},
+                        {"_id": 0, "invoice_number": 1})}
             runs: list = [[]]
             for serial in range(min(got), max(got) + 1):
                 n = got.get(serial) or f"{prefix}{serial:0{width}d}"

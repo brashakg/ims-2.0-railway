@@ -385,3 +385,135 @@ def test_table_13_files_an_invoice_in_its_orders_month(monkeypatch):
 
     assert docs("2026-05") == [(late, late, 1, 0)]
     assert docs(MONTH) == [(june_1, june_1, 1, 0), (june_2, june_2, 1, 0)]
+
+
+# ---------------------------------------------------------------------------
+# Review round 2 (2026-11-03)
+# ---------------------------------------------------------------------------
+
+
+def _docs(month="2026-06", store="S1"):
+    return [(d["docNum"], d["from"], d["to"], d["total"], d["cancelled"])
+            for d in r._compute_gstr1(month, store)["docsIssued"]]
+
+
+def test_table_13_keeps_an_invoice_reversed_by_a_whole_invoice_credit_note(monkeypatch, june):
+    """Invoices 1-3; 2 was CANCELLED by the refund-advance door behind a
+    credit note for its whole invoice -- B2CS still files it, so Table 13
+    counts it issued: total 3, cancelled 0. REVERT CHECK: the Books view
+    (is_real_sale without gst_documents) gave cancelled 1."""
+    db = _db(customers=[W])
+    _use(monkeypatch, db)
+    n = [repo.next_document_number(db, "S1", "") for _ in range(3)]
+    item = [_line(5, 100.0, 5.0, "9004", 1)]
+    db.seed("orders", [
+        _order("O1", item, "W", number=n[0]),
+        {**_order("O2", item, "W", "CANCELLED", n[1]), "advance_refund_status": "COMPLETED",
+         "advance_refund_credit_note": "C0001"},
+        _order("O3", item, "W", number=n[2]),
+    ])
+    rep = r._compute_gstr1(MONTH, "S1")
+    assert len(rep["b2cs"]) >= 1
+    assert _docs() == [(1, n[0], n[2], 3, 0)]
+
+
+def test_table_13_counts_invoices_challans_and_t_numbers_minted_before_the_register(monkeypatch):
+    """No register rows at all (numbers minted before it existed): the
+    window's invoice, a shipped in-GSTIN challan in the old TRF-YYYYMM- form,
+    and a shipped cross-GSTIN transfer's T invoice still file in Table 13. An
+    invoice of ANOTHER month inside the run ends it, never reads cancelled.
+    REVERT CHECK: Table 13 was [] while B2CS filed the invoices."""
+    db = _db(customers=[W])
+    _use(monkeypatch, db)
+    item = [_line(5, 100.0, 5.0, "9004", 1)]
+    db.seed("orders", [
+        _order("O1", item, "W", number="BOK02/2627/00005"),
+        {**_order("O2", item, "W", number="BOK02/2627/00006"),
+         "created_at": datetime(2026, 5, 31, 12, 0)},
+        _order("O3", item, "W", number="BOK02/2627/00007"),
+        _order("O4", item, "W", number="BOK02/2627/00009"),
+    ])
+    _trf(db, "TRF-202606-0042", "completed", WHEN)
+    _trf(db, "TRF-202606-0043", "in_transit", WHEN, tax_invoice_number="BOK02/T/2627/00003",
+         gst_registrations={"crosses": True})
+    assert _docs() == [
+        (1, "BOK02/2627/00005", "BOK02/2627/00005", 1, 0),
+        (1, "BOK02/2627/00007", "BOK02/2627/00009", 3, 1),
+        (1, "BOK02/T/2627/00003", "BOK02/T/2627/00003", 1, 0),
+        (12, "TRF-202606-0042", "TRF-202606-0042", 1, 0),
+    ]
+
+
+def test_table_13_warns_on_a_filed_credit_note_the_register_never_saw(monkeypatch):
+    """A CDNR note numbered before the register cannot be placed in a run:
+    the return SAYS so instead of an under-reported Table 13 with ok True."""
+    db = _db(customers=[W], orders=[_order("O2", [_frame()], "W")],
+             returns=[{**_return("RET-2", "O2", "W"), "credit_note_number": "BOK02/C2627/0004"}])
+    _use(monkeypatch, db)
+    rep = r._compute_gstr1(MONTH, "S1")
+    assert [c["refReference"] for c in rep["cdnr"]] == ["BOK02/C2627/0004"]
+    assert any("Table 13" in i["issue"] and "BOK02/C2627/0004" in i["issue"]
+               for i in rep["validation"]["issues"])
+
+
+def test_table_13_a_written_off_credit_note_serial_is_cancelled(monkeypatch, june):
+    """Two C serials minted, one written off (CREDIT_NOTE_NUMBER_UNUSED):
+    total 2, cancelled 1. REVERT CHECK: both read issued."""
+    db = _db()
+    _use(monkeypatch, db)
+    c1, c2 = (repo.next_document_number(db, "S1", "C") for _ in range(2))
+    db.seed("audit_logs", [{"action": "CREDIT_NOTE_NUMBER_UNUSED", "store_id": "S1",
+                            "details": {"unused_credit_note_number": c2}}])
+    assert _docs() == [(5, c1, c2, 2, 1)]
+
+
+def test_table_13_t_invoice_on_a_cancelled_or_missing_transfer_is_cancelled(monkeypatch, june):
+    """T 1: a completed transfer (issued); T 2: a transfer cancelled after a
+    failed ship kept its number; T 3: no transfer holds it. Total 3,
+    cancelled 2. REVERT CHECK: always-issued gave cancelled 0 / 1."""
+    db = _db()
+    _use(monkeypatch, db)
+    t = [repo.next_document_number(db, "S1", "T") for _ in range(3)]
+    db.seed("stock_transfers", [
+        {"id": "a", "transfer_number": "TRF-BOK02-00001", "status": "completed",
+         "tax_invoice_number": t[0]},
+        {"id": "b", "transfer_number": "TRF-BOK02-00002", "status": "cancelled",
+         "tax_invoice_number": t[1]},
+    ])
+    assert _docs() == [(1, t[0], t[2], 3, 2)]
+
+
+def test_a_return_on_two_same_hsn_lines_takes_off_only_its_pieces(monkeypatch):
+    """Two 900311 @5% frame lines (2 each) and 1 frame back from L1: Table 12
+    files 3 pieces. REVERT CHECK: units.get (not pop) put the piece on both
+    lines -- 2 pieces."""
+    db = _db(customers=[W], orders=[_order("O2", [_frame(2, "L1"), _frame(2, "L2")], "W")],
+             returns=[_return("RET-2", "O2", "W")])
+    _use(monkeypatch, db)
+    (row,) = r._compute_gstr1(MONTH, "S1")["hsnB2C"]
+    assert (row["quantity"], row["taxableValue"]) == (3, 3000.0)
+
+
+def test_returned_units_match_by_product_when_the_line_id_is_blank(monkeypatch):
+    """A return line with no order_item_id still finds its sale line by
+    product_id. REVERT CHECK: item-only matching dropped the piece (qty 3)."""
+    ret = _return("RET-2", "O2", "W")
+    ret["items"][0]["order_item_id"] = ""
+    db = _db(customers=[W], orders=[_order("O2", [_frame()], "W")], returns=[ret])
+    _use(monkeypatch, db)
+    (row,) = r._compute_gstr1(MONTH, "S1")["hsnB2C"]
+    assert row["quantity"] == 2
+
+
+def test_returned_units_match_the_named_line_before_the_product(monkeypatch):
+    """Two sale lines of ONE product on different HSNs; the return names L2:
+    the piece comes off L2's HSN. REVERT CHECK: product-only matching took it
+    off L1's."""
+    l1 = _frame(2, "L1")
+    l2 = {**_frame(2, "L2"), "hsn_code": "900410", "product_id": "P-L1"}
+    ret = _return("RET-2", "O2", "W", item_id="L2")
+    ret["items"][0]["product_id"] = "P-L1"
+    db = _db(customers=[W], orders=[_order("O2", [l1, l2], "W")], returns=[ret])
+    _use(monkeypatch, db)
+    got = {h["hsnCode"]: h["quantity"] for h in r._compute_gstr1(MONTH, "S1")["hsnB2C"]}
+    assert got == {"900311": 2, "900410": 1}
