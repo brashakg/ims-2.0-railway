@@ -3,6 +3,7 @@ import { Eye, Plus, X, Glasses, Contact } from 'lucide-react';
 import { RxPowerInput } from '../clinical/RxPowerInput';
 import { validateEyeDetailed, VA_OPTIONS } from '../../constants/rxLimits';
 import { useToast } from '../../context/ToastContext';
+import { istDayString } from '../../utils/datetime';
 
 // Allowed contact-lens replacement modalities -- kept in sync with the
 // backend (prescriptions.CL_MODALITIES / products.CL_MODALITIES).
@@ -634,7 +635,7 @@ export function PrescriptionForm({
                 <input
                   type="date"
                   value={prescription.next_checkup || ''}
-                  min={new Date().toISOString().slice(0, 10)}
+                  min={istDayString(Date.now()) ?? undefined}
                   onChange={(e) => handleStringInputChange('next_checkup', e.target.value)}
                   className="input-field text-center text-sm"
                 />
