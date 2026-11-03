@@ -634,9 +634,10 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             return "CDNUR"
         return "B2CS"
 
-    def _note_buckets(by_rate, base_taxable, rate, taxable) -> list:
-        """A note's (rate, taxable) buckets: its own per-rate split ``by_rate``
-        ({rate: {taxable}} -- a return's gst_breakup, a debit note's stamp)
+    def _note_buckets(by_rate, base_taxable, rate, taxable) -> tuple:
+        """A note's (rate, taxable) buckets and whether they came from its own
+        per-rate split ``by_rate`` ({rate: {taxable}} -- a return's
+        gst_breakup, a SUPERADMIN correction's stamp)
         when it reconciles to ``base_taxable``, shared pro rata onto the
         note's ``taxable`` (a partial or fee'd note); else ONE bucket at
         ``rate``. A 5% + 18% return never nets whole into one rate's row."""
@@ -650,8 +651,25 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
         b = [x for x in b if x[1] != 0]
         if (not b or any(t < 0 for _, t in b)
                 or abs(sum(t for _, t in b) - base_taxable) > 0.05):
-            return [(rate, taxable)]
-        return [(r, t) for (r, _), t in zip(b, _alloc(taxable, [t for _, t in b]))]
+            return [(rate, taxable)], False
+        return [(r, t) for (r, _), t in zip(b, _alloc(taxable, [t for _, t in b]))], True
+
+    def _flag_unsplit(kind, ref, oid, buckets, explicit_rate=None) -> None:
+        """A note filed as ONE bucket at the rate its own tax / taxable gives
+        (no per-rate split) is wrong when its sale has lines of more than one
+        rate -- even at a slab (5% + 18% lowered by 100 each derives 12%):
+        said, never filed silently."""
+        rate = buckets[0][0]
+        if rate not in _GST_SLABS:
+            issue = (f"{kind} files at {rate}%, which is no GST slab (its tax / taxable "
+                     "over lines of two rates); split it by rate with the CA before filing.")
+        elif explicit_rate is None and len({ln[0] for ln in _parent_lines(oid)}) > 1:
+            issue = (f"{kind} files at one derived rate ({rate}%) but its sale has lines of "
+                     "more than one GST rate: it is not split by rate; split it with the CA "
+                     "before filing.")
+        else:
+            return
+        validation_issues.append({"level": "error", "invoice": ref, "issue": issue})
 
     if db is not None:
         # Process credit notes from returns/refunds in credit_note_ledger
@@ -760,10 +778,15 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                 # the ledger row's gst_rate is only the return's DOMINANT rate.
                 _gb = (_ret_doc or {}).get("gst_breakup")
                 _gb = _gb if isinstance(_gb, dict) else {}
-                cn_buckets = _note_buckets(
-                    _gb.get("by_rate"), round(float(_gb.get("taxable") or 0.0), 2),
-                    cn_rate, cn_taxable,
-                )
+                _cbr, _cbase = _gb.get("by_rate"), float(_gb.get("taxable") or 0.0)
+                if not _gb and isinstance(entry.get("by_rate"), dict):
+                    # No returns doc (the SUPERADMIN correction): the row's own
+                    # per-rate split (admin_edit note_by_rate).
+                    _cbr = entry["by_rate"]
+                    _cbase = sum(float((v or {}).get("taxable") or 0) for v in _cbr.values())
+                cn_buckets, _split = _note_buckets(_cbr, round(_cbase, 2), cn_rate, cn_taxable)
+                if not _split:
+                    _flag_unsplit("Credit note", ref, _cn_oid, cn_buckets, entry.get("gst_rate"))
                 cn_hsn_lines = _cn_hsn_lines(
                     ref,
                     _cn_oid,
@@ -884,7 +907,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                 # The return's own per-rate back-out (returns_engine.
                 # gst_breakup_lines `by_rate`) when it reconciles; else one
                 # bucket at the note's rate.
-                r_buckets = _note_buckets(gb.get("by_rate"), r_taxable, r_rate, r_taxable)
+                r_buckets, _ = _note_buckets(gb.get("by_rate"), r_taxable, r_rate, r_taxable)
                 r_ref = _cdnr_note_number(
                     {"note_number": ret.get("credit_note_number"), "ref": rid},
                     validation_issues,
@@ -959,15 +982,9 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             # 5% + 18% raise derives 14%, which the portal rejects).
             _dbr = d.get("by_rate")
             _dsum = sum(float((v or {}).get("taxable") or 0) for v in _dbr.values())                 if isinstance(_dbr, dict) else 0.0
-            d_buckets = _note_buckets(_dbr, round(_dsum, 2), d_rate, dn["taxable"])
-            if len(d_buckets) == 1 and d_buckets[0][0] not in _GST_SLABS:
-                validation_issues.append({
-                    "level": "error",
-                    "invoice": d_ref,
-                    "issue": f"Debit note files at {d_buckets[0][0]}%, which is no GST "
-                    "slab (its tax / taxable over lines of two rates); split it by "
-                    "rate with the CA before filing.",
-                })
+            d_buckets, _split = _note_buckets(_dbr, round(_dsum, 2), d_rate, dn["taxable"])
+            if not _split:
+                _flag_unsplit("Debit note", d_ref, d_oid, d_buckets, d.get("gst_rate"))
             d_hsn_lines = _cn_hsn_lines(d_ref, d_oid, d_buckets, d_heads)
             d_place = state_name(dn["code"]) or dn["code"] or store_state or "Unknown"
             cdnr.append(

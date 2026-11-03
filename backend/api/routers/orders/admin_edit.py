@@ -690,8 +690,14 @@ async def superadmin_invoice_change(
         user_id=current_user.get("user_id"),
         note_number=note_number,
     )
-    if not is_cn:  # GSTR-1 files the debit note per rate (gstr1 debit pass)
-        note_doc["by_rate"] = note_by_rate(order, corrected)
+    # GSTR-1 files the note per rate (a 5% + 18% correction never at its
+    # blended 12% / 14%): the change per rate, as a positive amount the note
+    # carries -- after less before for a debit note, before less after for a
+    # credit note (whose ledger row carries it: _issue_store_credit by_rate).
+    note_doc["by_rate"] = {
+        k: {"taxable": round(-v["taxable"], 2), "tax": round(-v["tax"], 2)} if is_cn else v
+        for k, v in note_by_rate(order, corrected).items()
+    }
 
     # SYNCHRONOUS immutable audit BEFORE issuing the note.
     _write_order_edit_audit(
@@ -729,6 +735,7 @@ async def superadmin_invoice_change(
                 # COMPUTED taxable / tax split -- never recomputed here.
                 taxable=note_doc["taxable_amount"],
                 tax=note_doc["tax_amount"],
+                by_rate=note_doc["by_rate"],
                 # GSTR-1 CDNR head consistency: reverse under the SAME head the
                 # parent invoice filed under (bool-gated; POS parents carry no
                 # flag and keep the legacy state-compare fallback).

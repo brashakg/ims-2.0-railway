@@ -323,3 +323,81 @@ def test_crosscheck_nets_a_debit_note_against_the_credit_notes():
         {"noteType": "D", "taxableValue": 100.0, "taxValue": 5.0},
     ]}])
     assert (agg["cdnr_totals"]["taxableValue"], agg["cdnr_totals"]["tax"]) == (100.0, 5.0)
+
+
+# ---------------------------------------------------------------------------
+# Review round 2: the SUPERADMIN credit note per rate, 3.2 CDNUR, held D note
+# ---------------------------------------------------------------------------
+
+
+def _superadmin_credit_note(db, number, order_id, customer, taxable, tax, by_rate=None):
+    """The ledger row admin_edit posts through _issue_store_credit: no
+    returns doc, it names its order; its per-rate split when stamped."""
+    row = {"store_id": STORE, "type": "ISSUED", "ref": number, "note_number": number,
+           "order_id": order_id, "customer_id": customer, "created_at": SEPT_10.isoformat(),
+           "taxable": taxable, "tax": tax, "net_refund": taxable + tax}
+    if by_rate is not None:
+        row["by_rate"] = by_rate
+    db.credit_note_ledger.insert_one(row)
+
+
+def test_a_mixed_rate_superadmin_credit_note_nets_each_rate(gstins):
+    """Each line of a 5% + 18% bill lowered by 100: taxable 200, tax 23 (11.5%).
+    REVERT CHECK: without the row's by_rate the note files one 12% bucket --
+    5% and 18% never reduced, a fake 12% row flagged 'exceed'."""
+    _mixed_sale(gstins, "O-MIX", "C-JH")
+    _superadmin_credit_note(gstins, "BOK/C2627/0009", "O-MIX", "C-JH", 200.0, 23.0, {
+        "5": {"taxable": 100.0, "tax": 5.0}, "18": {"taxable": 100.0, "tax": 18.0}})
+    rep = r1._compute_gstr1(MONTH, STORE)
+    [cn] = rep["cdnr"]
+    assert [(rl["rate"], rl["taxable"], rl["cgst"]) for rl in cn["rateLines"]] == [
+        (5, 100.0, 2.5), (18, 100.0, 9.0)]
+    assert [i for i in rep["validation"]["issues"] if i["level"] == "error"] == []
+    rows = {r["rt"]: (r["txval"], r["camt"], r["samt"]) for r in _export(rep)["b2cs"]}
+    assert rows == {5.0: (900.0, 22.5, 22.5), 18.0: (900.0, 81.0, 81.0)}
+
+
+def test_an_unsplit_credit_note_over_two_rates_is_flagged_even_at_a_slab(gstins):
+    """No per-rate stamp: 23 / 200 derives 12%, a slab -- still flagged, since
+    its sale has two rates. REVERT CHECK: a non-slab-only guard says nothing."""
+    _mixed_sale(gstins, "O-MIX", "C-JH")
+    _superadmin_credit_note(gstins, "BOK/C2627/0010", "O-MIX", "C-JH", 200.0, 23.0)
+    issues = r1._compute_gstr1(MONTH, STORE)["validation"]["issues"]
+    assert any(i["invoice"] == "BOK/C2627/0010" and "not split by rate" in i["issue"]
+               for i in issues)
+
+
+def test_an_unsplit_debit_note_at_a_slab_over_two_rates_is_flagged(gstins):
+    _mixed_sale(gstins, "O-MIX", "C-JH")
+    _debit_note(gstins, "BOK/D2627/0012", "O-MIX", "C-JH", 200.0, 23.0)
+    issues = r1._compute_gstr1(MONTH, STORE)["validation"]["issues"]
+    assert any(i["invoice"] == "BOK/D2627/0012" and "not split by rate" in i["issue"]
+               for i in issues)
+
+
+def test_table_3_2_nets_the_b2cl_sales_cdnur_notes(gstins):
+    """A Rs 3.15 lakh inter-state sale to an unregistered buyer (B2CL), a
+    Rs 21,000 return (CDNUR) and a Rs 10,500 debit note (CDNUR, adds).
+    REVERT CHECK: 3.2 filtering B2CS only stays gross at 300000 / 15000."""
+    _sale(gstins, STORE, "O-BIG", "C-MH", 315000.0)
+    _cash_return(gstins, "RET-B2-36", "O-BIG", "C-MH", 20000.0, 1000.0)
+    rep = r1._compute_gstr1(MONTH, STORE)
+    assert [c["noteSection"] for c in rep["cdnr"]] == ["CDNUR"]
+    assert _table_3_2() == {"27": (280000.0, 14000.0)}
+    _debit_note(gstins, "BOK/D2627/0013", "O-BIG", "C-MH", 10000.0, 500.0)
+    assert _table_3_2() == {"27": (290000.0, 14500.0)}
+
+
+def test_a_debit_note_on_a_held_sale_files_in_neither_return(gstins, monkeypatch):
+    """REVERT CHECK: without GSTR-3B's held filter the held row (no tax keys)
+    crashes the 3.1(a) sum."""
+    from api.routers.reports import gst_itc
+
+    monkeypatch.setattr(gst_itc, "_order_held_off_returns",
+                        lambda db, o: {"problem": "held"} if o.get("order_id") == "O-HELD" else None)
+    _sale(gstins, STORE, "O-HELD", "C-JH", 2100.0)
+    _debit_note(gstins, "BOK/D2627/0014", "O-HELD", "C-JH", 100.0, 5.0)
+    rep = r1._compute_gstr1(MONTH, STORE)
+    assert [c for c in rep["cdnr"] if c["noteType"] == "D"] == []
+    assert any("BOK/D2627/0014" in str(i.get("invoice")) for i in rep["validation"]["issues"])
+    assert r3b._compute_gstr3b(MONTH, STORE)["debitNotes"]["taxableValue"] == 0.0
