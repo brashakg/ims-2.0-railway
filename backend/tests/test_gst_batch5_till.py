@@ -325,3 +325,94 @@ def test_the_books_split_on_the_stamped_gstin(monkeypatch):
     order = {"store_id": "S1", "customer_id": "C1", "customer_gstin": GSTIN_BUYER}
     assert _order_is_interstate(order, {"S1": {"state_code": "20"}},
                                 {"C1": {"gstin": "27AAACB1234C1Z5", "state": "Maharashtra"}}) is False
+
+
+# ---------------------------------------------------------------------------
+# Review round: the books / Tally side asks the SAME sale month and buyer
+# ---------------------------------------------------------------------------
+
+_ADMIN = {"user_id": "u-admin", "username": "admin", "roles": ["SUPERADMIN"],
+          "active_role": "SUPERADMIN"}
+
+
+def _next_month_sale(**extra):
+    """Order taken 28 June, invoice printed 02 July 00:30 IST."""
+    return _sale(created_at=datetime(2026, 6, 28, 6, 0),
+                 invoice_date=datetime(2026, 7, 1, 19, 0), **extra)
+
+
+def test_cross_check_matches_an_invoice_minted_next_month(monkeypatch):
+    """The books and Tally legs file the invoice in its own month, as GSTR-1
+    / 3B do: every cross-check row is MATCH in June AND July.
+    REVERT CHECK: the created_at window in _books_and_tally_for_stores puts
+    the books in June and GSTR-1 in July -- four MISMATCH rows each month."""
+    from api.routers.finance.gst_crosscheck import _run_gst_cross_check
+
+    cust = {"customer_id": "C1", "name": "Acme", "gstin": GSTIN_BUYER, "state": "Jharkhand"}
+    db = _gst_db(_next_month_sale(), cust)
+    db.stores.update_one({"store_id": "S1"}, {"$set": {"entity_id": "E1"}})
+    monkeypatch.setattr(r, "_get_raw_db", lambda: db)
+    for m in (6, 7):
+        rows = _run_gst_cross_check(db, m, 2026, None)["comparisons"]
+        assert [c["metric"] for c in rows if c["status"] == "MISMATCH"] == [], m
+
+
+def _tally(monkeypatch, db):
+    from api.routers.finance import tally
+
+    monkeypatch.setattr(tally, "_get_db", lambda: db)
+    return tally
+
+
+def test_tally_files_an_invoice_minted_next_month_in_its_own_month(monkeypatch):
+    """The B2B book and the sales JV select and date the invoice on 02 July.
+    REVERT CHECK: the created_at window lists / exports it in June, dated 28 June."""
+    import agents.nexus_providers as nexus
+
+    tally = _tally(monkeypatch, _gst_db(_next_month_sale(), {
+        "customer_id": "C1", "name": "Acme", "gstin": GSTIN_BUYER, "state": "Jharkhand"}))
+    assert tally._b2b_invoices(tally._get_db(), from_date="2026-06-01", to_date="2026-06-30") == []
+    rows = tally._b2b_invoices(tally._get_db(), from_date="2026-07-01", to_date="2026-07-31")
+    assert [row["date"] for row in rows] == ["2026-07-02"]
+    seen = []
+    monkeypatch.setattr(nexus, "tally_build_day_voucher_xml",
+                        lambda orders, meta: seen.append(list(orders)) or "<x/>")
+    for frm, to in (("2026-06-01", "2026-06-30"), ("2026-07-01", "2026-07-31")):
+        asyncio.run(tally.get_tally_sales_jv(from_date=frm, to_date=to, store_id="S1",
+                                             entity_id=None, current_user=_ADMIN))
+    june, july = seen
+    assert (june, [o["order_id"] for o in july]) == ([], ["O1"])
+    assert nexus.ist_date_str_from_stored(july[0]["created_at"]) == "2026-07-02"
+
+
+@pytest.mark.parametrize("stamp,live,b2b", [
+    (GSTIN_BUYER, "", True),    # minted B2B; the record lost its GSTIN
+    ("", GSTIN_BUYER, False),   # minted a consumer bill; a GSTIN added later
+])
+def test_tally_b2b_reads_the_stamped_gstin(monkeypatch, stamp, live, b2b):
+    """The B2B worklist and its export classify on the GSTIN frozen at the
+    mint, as GSTR-1 files it.
+    REVERT CHECK: dropping _invoice_customer in _b2b_invoices / _b2b_fetch_orders
+    flips each case (list or export)."""
+    tally = _tally(monkeypatch, _gst_db(_sale(customer_gstin=stamp), {
+        "customer_id": "C1", "name": "Acme", "gstin": live, "state": "Jharkhand"}))
+    db = tally._get_db()
+    assert [row["order_id"] for row in tally._b2b_invoices(db)] == (["O1"] if b2b else [])
+    assert [o["order_id"] for o in tally._b2b_fetch_orders(db, ["O1"])] == (
+        ["BOK02/2627/00001"] if b2b else [])
+
+
+@pytest.mark.parametrize("gstin", ["00AAPFU0939F1ZV", "40AAPFU0939F1ZV"])
+def test_customer_form_refuses_a_gstin_with_no_state(gstin):
+    """The right shape with no Indian state code never reaches a customer
+    record (the mint would refuse every invoice for him).
+    REVERT CHECK: the shape-only regex saves it."""
+    from pydantic import ValidationError
+    from api.routers.customers import CustomerCreate, CustomerUpdate, _check_gstin
+
+    with pytest.raises(ValueError):
+        _check_gstin(gstin)
+    with pytest.raises(ValidationError):
+        CustomerUpdate(gstin=gstin)
+    assert _check_gstin(GSTIN_BUYER) == GSTIN_BUYER
+    assert CustomerCreate  # the create model shares _check_gstin

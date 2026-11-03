@@ -15,7 +15,7 @@ from ..auth import get_current_user
 from ...dependencies import filter_docs_by_store
 from ._shared import (
     real_sale_match,
-    _apply_created_at_range,
+    _parse_range_dt,
     _customer_state_map,
     _get_db,
     _order_is_interstate,
@@ -26,7 +26,7 @@ from ._shared import (
     router,
 )
 from .gst_crosscheck import _jv_cgst_sgst_split
-from ..reports.gst_base import _invoice_customer
+from ..reports.gst_base import _invoice_customer, _sale_filed_at, _sale_window_match
 
 # ===========================================================================
 # B2B invoices -> Tally (accountant console + worklist)
@@ -167,7 +167,8 @@ def _b2b_invoice_row(o: dict, cust: dict, split: dict, now: datetime) -> dict:
         "has_invoice_number": bool(o.get("invoice_number")),
         # BUG-104: the invoice date an accountant reads off the GST / Tally
         # reconciliation screen. IST business day, not the UTC box clock.
-        "date": ist_date_str(o.get("created_at")),
+        # GST batch 5: the tax invoice's own date (the one GSTR-1 files on).
+        "date": ist_date_str(_sale_filed_at(o)),
         "store_id": o.get("store_id"),
         "customer_id": o.get("customer_id"),
         "customer_name": o.get("customer_name") or cust.get("name") or "",
@@ -211,6 +212,22 @@ def _filed_orders(db, orders) -> List[dict]:
     return [o for o in orders if not _order_held_off_returns(db, o)]
 
 
+def _apply_sale_range(match: dict, from_date, to_date) -> dict:
+    """_apply_created_at_range on the month a sale files in: a numbered
+    invoice by its own invoice_date, else created_at (gst_base), so the Tally
+    doors select every invoice in the month GSTR-1 files it."""
+    window = {}
+    lo = _parse_range_dt(from_date, end=False)
+    hi = _parse_range_dt(to_date, end=True)
+    if lo is not None:
+        window["$gte"] = lo
+    if hi is not None:
+        window["$lte"] = hi
+    if window:
+        match.update(_sale_window_match(window))
+    return match
+
+
 def _b2b_invoices(
     db,
     *,
@@ -239,7 +256,7 @@ def _b2b_invoices(
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
-    _apply_created_at_range(match, from_date, to_date)
+    _apply_sale_range(match, from_date, to_date)
 
     try:
         orders = _filed_orders(db, db.get_collection("orders").find(match, {"_id": 0}))
@@ -378,6 +395,8 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
         # (falls back to order_id inside the builder otherwise).
         if o.get("invoice_number"):
             o["order_id"] = o["invoice_number"]
+        # The voucher <DATE> is the tax invoice's own date (GSTR-1's).
+        o["created_at"] = _sale_filed_at(o)
         out.append(o)
     return out
 
@@ -646,7 +665,7 @@ async def get_tally_sales_jv(
         store_ids = [sid for sid, eid in s2e.items() if eid == entity_id]
     if store_ids is not None:
         match["store_id"] = {"$in": store_ids}
-    _apply_created_at_range(match, from_date, to_date)
+    _apply_sale_range(match, from_date, to_date)
 
     # A routed online order held on its seller (GSTIN) check is no sale of
     # this GSTIN until Re-map re-routes it: the one question GSTR-1/3B ask.
@@ -674,6 +693,8 @@ async def get_tally_sales_jv(
         # leg (the formatter reads it off the order), never into Sales.
         o["subtotal"] = round(grand - float(o.get("round_off") or 0) - tax, 2)
         o["grand_total"] = grand
+        # The voucher <DATE> is the tax invoice's own date (GSTR-1's).
+        o["created_at"] = _sale_filed_at(o)
 
     store_meta = {}
     if store_id:

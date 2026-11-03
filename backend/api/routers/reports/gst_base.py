@@ -99,7 +99,12 @@ def _sale_period_match(from_dt, to_dt) -> dict:
     (one minted before the stamp) in its created_at month. GSTR-1, GSTR-3B
     and Table 13 all ask this, so the returns file every invoice once, in
     one month."""
-    window = {"$gte": from_dt, "$lt": to_dt}
+    return _sale_window_match({"$gte": from_dt, "$lt": to_dt})
+
+
+def _sale_window_match(window: dict) -> dict:
+    """_sale_period_match over any date-range operator dict (the Tally doors'
+    inclusive ``$lte`` day bounds)."""
     return {"$or": [
         {"invoice_number": {"$nin": [None, ""]}, "invoice_date": window},
         {"$or": [{"invoice_number": {"$in": [None, ""]}}, {"invoice_date": None}],
