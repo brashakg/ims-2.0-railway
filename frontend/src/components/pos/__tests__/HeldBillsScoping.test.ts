@@ -100,7 +100,7 @@ describe('held bills are scoped to the cashier', () => {
     let ok = false;
     act(() => { ok = result.current.recallBill('mine') as boolean; });
     expect(ok).toBe(true);
-    expect(store.restoreHeldSale).toHaveBeenCalledWith({ id: 'mine' }, { key: 'K-mine', at: 1 });
+    expect(store.restoreHeldSale).toHaveBeenCalledWith({ id: 'mine' }, { key: 'K-mine', at: 1 }, undefined);
     expect(stored().map((b) => b.id).sort()).toEqual(['mine2', 'theirs']);
   });
 

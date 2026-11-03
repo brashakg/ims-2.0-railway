@@ -39,7 +39,7 @@ import { orderApi } from '../../../services/api';
 import { buildApiError } from '../../../services/api/client';
 import { usePOSStore } from '../../../stores/posStore';
 import { submitPosOrder, TILL_SALE_UNCONFIRMED, TILL_SALE_UNCONFIRMED_CHECK } from '../submitOrder';
-import { billKeyEntry, billKeyFor, clearBillKey, settleBillKey } from '../posBillKey';
+import { billKeyEntry, billKeyFor, clearBillKey, settleAfterPress, settleBillKey } from '../posBillKey';
 import { billFingerprint, orderPayloadOf } from '../orderPayload';
 
 const mockedCreate = vi.mocked(orderApi.createOrder);
@@ -308,14 +308,14 @@ describe('money review 25: what a press tells the key', () => {
     response: { status, data: { detail } },
   } as any);
 
-  it('a plain refusal at the order door is definite; the store refusal is not', async () => {
+  it('only a key_checked refusal says the key was checked; the store refusal is not', async () => {
     seed();
-    mockedCreate.mockRejectedValueOnce(refused(400, 'Order must have at least one item'));
+    mockedCreate.mockRejectedValueOnce(refused(400, { message: 'Order must have at least one item', key_checked: true }));
     const a = await submitPosOrder(usePOSStore.getState() as any, 'k-a');
-    expect([a.sent, a.definite]).toEqual([true, true]);
+    expect([a.sent, a.definite, a.keyChecked]).toEqual([true, true, true]);
     mockedCreate.mockRejectedValueOnce(refused(409, { code: 'BILL_STORE_MISMATCH', message: 'started at S1' }));
     const b = await submitPosOrder(usePOSStore.getState() as any, 'k-b');
-    expect([b.sent, b.definite]).toEqual([true, false]);
+    expect([b.sent, b.keyChecked]).toEqual([true, false]);
   });
 
   it('a total that is not this bill keeps the key pending; the bill names its store to the server', async () => {
@@ -327,5 +327,38 @@ describe('money review 25: what a press tells the key', () => {
     expect(res.error).toMatch(/start a new bill/);
     expect((mockedCreate.mock.calls[0][0] as any).bill_store_id).toBe('S1');
     usePOSStore.setState({ bill_store_id: null } as any);
+  });
+});
+
+describe('money review 26: a refusal that proves nothing never settles a pending key', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.removeItem('ims_user');
+  });
+  const refused = (status: number, detail: unknown) => buildApiError({
+    isAxiosError: true, message: 'x', config: { method: 'post' },
+    response: { status, data: { detail } },
+  } as any);
+  const pressAfterLostAnswer = async (err: unknown, wasPending: boolean) => {
+    seed();
+    const fp = `bill-${Math.random()}`;
+    billKeyFor(fp); // this press marks the key pending; wasPending says whether it already was
+    mockedCreate.mockRejectedValueOnce(err);
+    const res = await submitPosOrder(usePOSStore.getState() as any, 'k-r');
+    settleAfterPress(fp, wasPending, res);
+    return billKeyEntry(fp)?.pending;
+  };
+
+  it('a 429, a 403, a 422 without key_checked and a 400 period lock keep a pending key pending', async () => {
+    expect(await pressAfterLostAnswer(refused(429, 'Too many requests'), true)).toBe(true);
+    expect(await pressAfterLostAnswer(refused(403, 'Your role is not permitted to create orders.'), true)).toBe(true);
+    expect(await pressAfterLostAnswer(refused(422, [{ msg: 'field required' }]), true)).toBe(true);
+    expect(await pressAfterLostAnswer(refused(423, 'This period is locked.'), true)).toBe(true);
+  });
+
+  it('a key_checked refusal settles a pending key; any 4xx settles a key that was not pending', async () => {
+    expect(await pressAfterLostAnswer(refused(423, { message: 'This period is locked.', key_checked: true }), true))
+      .toBe(false);
+    expect(await pressAfterLostAnswer(refused(403, 'Your role is not permitted to create orders.'), false)).toBe(false);
   });
 });

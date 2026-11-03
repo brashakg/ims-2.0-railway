@@ -309,10 +309,17 @@ describe('money review 25: THE one settle rule after a press', () => {
     expect(billKeyEntry('b-s')?.pending).toBe(true);
   });
 
-  it('a definite refusal at the order door settles it; a never-sent first press settles too', () => {
+  it('a pending key settles only on a key_checked refusal; a key that was not pending settles on any refusal', () => {
+    // Money review 26: a 4xx alone (a 403, a 422, a period lock refused
+    // before the key was looked up) proves nothing about a pending key.
     billKeyFor('b-d');
     settleAfterPress('b-d', true, { sent: true, definite: true });
+    expect(billKeyEntry('b-d')?.pending).toBe(true);
+    settleAfterPress('b-d', true, { sent: true, definite: true, keyChecked: true });
     expect(billKeyEntry('b-d')?.pending).toBe(false);
+    billKeyFor('b-f'); // not pending before this press: settles as before
+    settleAfterPress('b-f', false, { sent: true, definite: true });
+    expect(billKeyEntry('b-f')?.pending).toBe(false);
     billKeyFor('b-n'); // this press only
     settleAfterPress('b-n', false, { sent: false });
     expect(billKeyEntry('b-n')?.pending).toBe(false);
@@ -322,5 +329,29 @@ describe('money review 25: THE one settle rule after a press', () => {
     billKeyFor('b-o');
     settleAfterPress('b-o', false, { sent: true, pending: true });
     expect(billKeyEntry('b-o')?.pending).toBe(true);
+  });
+});
+
+describe('money review 26: a recalled bill always names its store', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    usePOSStore.setState({ store_id: '', salesperson_id: 'u1' } as any);
+    usePOSStore.getState().resetTransaction();
+  });
+
+  it('a bill parked before any press, recalled, gets its store and sends it', async () => {
+    const { orderPayloadOf } = await import('../orderPayload');
+    localStorage.setItem('ims_user', JSON.stringify({ id: 'u1', activeStoreId: 'S1' }));
+    putCart();
+    usePOSStore.getState().parkCurrentSale({ heldBy: 'u1' }); // no press: no bill id, no store on the snapshot
+    const [held] = heldBills();
+    expect(held.state.bill_store_id ?? null).toBeNull();
+    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().restoreHeldSale(held.state, held.bill_key, held.store_id);
+    expect(usePOSStore.getState().bill_store_id).toBe('S1');
+    usePOSStore.setState({ bill_store_id: null } as any); // a snapshot from before the store was kept
+    usePOSStore.getState().ensureBillId();
+    expect(usePOSStore.getState().bill_store_id).toBe('S1');
+    expect(orderPayloadOf(usePOSStore.getState()).bill_store_id).toBe('S1');
   });
 });

@@ -71,6 +71,12 @@ async def create_order(
     create) instead of creating a duplicate -- this makes a double-clicked /
     retried "Pay now" safe. The key is persisted on the order doc. Fail-soft:
     with no DB (or no header) the behaviour is identical to before.
+
+    Money review 26: the bill's store check and the key lookup run FIRST,
+    before any other refusal (a replay writes nothing). Once the lookup has
+    run and MISSED for a keyed press, every later refusal carries
+    detail.key_checked=true -- the till's proof that no order exists under
+    the key, the only answer that settles a pending bill key.
     """
     # RBAC: only POS-facing roles may create orders. This was relying on the
     # frontend alone -> ACCOUNTANT / OPTOMETRIST / CATALOG_MANAGER / WORKSHOP_STAFF
@@ -79,6 +85,53 @@ async def create_order(
         raise HTTPException(
             status_code=403, detail="Your role is not permitted to create orders."
         )
+    store_id = current_user.get("active_store_id")
+    # The bill's key replays only at the store it was made at: pressed in
+    # another store's session it would ring a second sale there. Refused
+    # before anything is looked up or written (money review 25).
+    if order.bill_store_id and order.bill_store_id != store_id:
+        raise HTTPException(status_code=409, detail={
+            "code": BILL_STORE_MISMATCH,
+            "message": (f"This bill was started at {order.bill_store_id} - switch back to that store to finish "
+                        "it. Nothing was charged.")})
+    # A direct (non-HTTP) call leaves the Header() default in place: no key.
+    idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
+    order_repo = get_order_repository()
+    key_checked = False
+    if idem_key and order_repo is not None:
+        # C-5 (DELTA 3): order-create idempotency -- an order with this key
+        # for this store is returned (for the SAME bill) rather than created
+        # twice. Fail-soft: a lookup error falls through to a normal create,
+        # and then nothing after it may claim the key was checked.
+        try:
+            existing = order_repo.find_one({"idempotency_key": idem_key, "store_id": store_id})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[ORDERS] idempotency lookup skipped: %s", exc)
+        else:
+            if existing:
+                return _replay_same_bill(existing, order_body_fingerprint(order))
+            key_checked = True
+    try:
+        return await _create_order_after_lookup(order, current_user, idem_key)
+    except HTTPException as exc:
+        if not key_checked:
+            raise
+        raise HTTPException(status_code=exc.status_code, detail=_key_checked_detail(exc.detail),
+                            headers=exc.headers) from exc
+
+
+def _key_checked_detail(detail: Any) -> Dict[str, Any]:
+    """A refusal after the key lookup missed: the same code and message, plus
+    key_checked (money review 26). A string detail becomes {message}."""
+    if isinstance(detail, dict):
+        return {**detail, "key_checked": True}
+    if isinstance(detail, str):
+        return {"message": detail, "key_checked": True}
+    return {"message": str(detail), "detail": detail, "key_checked": True}
+
+
+async def _create_order_after_lookup(order: OrderCreate, current_user: dict, idempotency_key: Optional[str]):
+    """create_order's work after its store check and key lookup."""
     order_repo = get_order_repository()
     customer_repo = get_customer_repository()
     store_id = current_user.get("active_store_id")
@@ -229,27 +282,9 @@ async def create_order(
         # for this store, return THAT order rather than creating a duplicate.
         # Looked up before any work so a retried "Pay now" is a cheap no-op.
         # Fail-soft: any lookup error falls through to a normal create.
+        # The store check and the key lookup ran first (create_order).
         idem_key = (idempotency_key or "").strip()
         body_fp = order_body_fingerprint(order)
-        # The bill's key replays only at the store it was made at: pressed in
-        # another store's session it would ring a second sale there. Refused
-        # before anything is looked up or written (money review 25).
-        if order.bill_store_id and order.bill_store_id != store_id:
-            raise HTTPException(status_code=409, detail={
-                "code": BILL_STORE_MISMATCH,
-                "message": (f"This bill was started at {order.bill_store_id} - switch back to that store to finish "
-                            "it. Nothing was charged.")})
-        if idem_key:
-            try:
-                existing = order_repo.find_one(
-                    {"idempotency_key": idem_key, "store_id": store_id}
-                )
-                if existing:
-                    return _replay_same_bill(existing, body_fp)
-            except HTTPException:
-                raise
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[ORDERS] idempotency lookup skipped: %s", exc)
 
         # Verify customer exists (allow walk-in with generated IDs)
         customer = customer_repo.find_by_id(order.customer_id)
@@ -1364,7 +1399,7 @@ def _replay_same_bill(order: Dict[str, Any], body_fp: str) -> Dict[str, Any]:
     # A cancelled or void order is never replayed as a sale (money review 25).
     if str(order.get("status") or "").upper() in ("CANCELLED", "VOID", "VOIDED"):
         raise HTTPException(status_code=409, detail={
-            "code": ORDER_NOT_LIVE,
+            "code": ORDER_NOT_LIVE, "key_checked": True,
             "message": f"Order {number} was cancelled - start a new bill. Nothing was charged."})
     saved = order.get("body_fingerprint")
     if saved and saved != body_fp:

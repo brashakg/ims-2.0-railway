@@ -105,7 +105,7 @@ export function useHeldBills(store: any, currentUserId: string, currentStoreId?:
       store.parkIfPending?.(currentUserId, currentStoreId);
       // Atomic REPLACE, not a merge into the current cart: restores the cart
       // verbatim plus the bill-level discount and delivery fields.
-      store.restoreHeldSale(bill.state, bill.bill_key);
+      store.restoreHeldSale(bill.state, bill.bill_key, bill.store_id);
       removeFromStorage(billId);
       refresh();
       return true;

@@ -299,7 +299,7 @@ export interface POSState {
   // Park/Hold: atomically REPLACE the current transaction with a previously
   // held one (no merge into the existing cart, per-item discounts preserved,
   // cart-level discount + delivery fields restored).
-  restoreHeldSale: (snapshot: any, billKey?: { key?: string } | null) => void;
+  restoreHeldSale: (snapshot: any, billKey?: { key?: string } | null, heldStoreId?: string | null) => void;
 
   // Computed getters
   getSubtotal: () => number;
@@ -696,11 +696,15 @@ export const usePOSStore = create<POSState>()(
       // from the restored cart, delivery + advance flags restored.
       ensureBillId: () => {
         const id = get().bill_id || newBillId();
-        if (id !== get().bill_id) set({ bill_id: id, bill_store_id: get().bill_store_id || sessionStoreId() });
+        // The store is stamped whenever it is missing (a recalled held bill
+        // parked before any press has none), not only when the id is made.
+        const storeId = get().bill_store_id || sessionStoreId();
+        if (id !== get().bill_id || storeId !== get().bill_store_id) set({ bill_id: id, bill_store_id: storeId });
         return id;
       },
 
-      restoreHeldSale: (snapshot: any, billKey?: { key?: string; pending?: boolean } | null) => {
+      restoreHeldSale: (snapshot: any, billKey?: { key?: string; pending?: boolean } | null,
+        heldStoreId?: string | null) => {
         clearBillKey(billIdOf(get())); // the bill being replaced
         const { store_id, salesperson_id, salesperson_name } = get();
         const snap = snapshot || {};
@@ -727,7 +731,9 @@ export const usePOSStore = create<POSState>()(
           cart_discount_reason: snap.cart_discount_reason ?? null,
           current_step: cart.length > 0 ? 'review' : 'customer',
           bill_id: snap.bill_id || newBillId(),
-          bill_store_id: snap.bill_store_id || null,
+          // The held entry names its store even when the snapshot (parked
+          // before any press) does not (money review 26).
+          bill_store_id: snap.bill_store_id || heldStoreId || null,
         });
         // The held bill's key comes back with it, freshly stamped -- and still
         // pending if its press was (money review 23).

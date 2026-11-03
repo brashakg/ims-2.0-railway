@@ -50,14 +50,13 @@ export interface SubmitPosOrderResult {
   pending?: boolean;
   /** The press reached the order door (POST /orders was sent). */
   sent?: boolean;
-  /** The order door refused and that refusal PROVES no order exists under
-      this key (money review 25): only this settles a key that was pending. */
+  /** The order door refused this press (a 4xx). */
   definite?: boolean;
+  /** The server says it looked the key up, found no order, and THEN refused
+      (detail.key_checked, money review 26): the only answer that proves no
+      order exists under the key, so the only one that settles a pending key. */
+  keyChecked?: boolean;
 }
-
-/** Order-door refusals that say nothing about an earlier press under the
-    key (an order exists, may exist, or the press was at the wrong store). */
-const NOT_ABOUT_THE_KEY = new Set(['IDEMPOTENCY_BODY_MISMATCH', 'SALE_STILL_SAVING', 'BILL_STORE_MISMATCH']);
 
 /** The cart lines a workshop job is built from. ONE predicate: the job
  *  creator below and BillingSurface's sale_type derivation both read it, so
@@ -476,10 +475,10 @@ async function pressOnce(
     const msg = err instanceof Error ? err.message : String(err);
     const { code, detail } = (err || {}) as { code?: string; detail?: unknown };
     const status = getErrorStatus(err);
-    const definite = !created && status !== undefined && status >= 400 && status < 500
-      && !NOT_ABOUT_THE_KEY.has(code || '');
+    const definite = !created && status !== undefined && status >= 400 && status < 500;
+    const keyChecked = !created && (detail as { key_checked?: unknown } | undefined)?.key_checked === true;
     if (code === 'DISCOUNT_NEEDS_APPROVAL') {
-      return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed, definite };
+      return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed, definite, keyChecked };
     }
     if (code === 'IDEMPOTENCY_BODY_MISMATCH') {
       // An order exists under this key (other items): no payment, and the key
@@ -490,12 +489,12 @@ async function pressOnce(
       return { ok: false, error: TILL_SALE_STILL_SAVING, pending: true };
     }
     if (code && DEAD_APPROVAL_CODES.has(code)) {
-      return { ok: false, error: msg, discountApprovalRejected: true, definite };
+      return { ok: false, error: msg, discountApprovalRejected: true, definite, keyChecked };
     }
     if (msg === WRITE_UNCONFIRMED_MESSAGE) {
       return { ok: false, error: replayGuaranteed() ? TILL_SALE_UNCONFIRMED : TILL_SALE_UNCONFIRMED_CHECK,
                pending: true };
     }
-    return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error'), definite };
+    return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error'), definite, keyChecked };
   }
 }

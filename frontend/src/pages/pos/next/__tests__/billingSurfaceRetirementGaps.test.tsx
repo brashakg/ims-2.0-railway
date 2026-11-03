@@ -19,7 +19,7 @@
 // test below reads the state the surface actually handed to the submit brain.
 
 import { render, screen, waitFor, fireEvent } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 vi.mock('../../../../context/AuthContext', () => ({
   useAuth: () => ({
@@ -101,6 +101,7 @@ vi.mock('../DeliveryOptionsRow', () => ({ default: () => null }));
 
 import { BillingSurface } from '../BillingSurface';
 import { usePOSStore } from '../../../../stores/posStore';
+import { billKeyEntry, billKeyFor } from '../../../../components/pos/posBillKey';
 
 type Line = 'FRAME' | 'OPTICAL_LENS' | 'ACCESSORIES' | 'CONTACT_LENS';
 
@@ -222,5 +223,39 @@ describe('G3: a wrong customer pick can be cleared', () => {
     fireEvent.click(screen.getByText('change-customer'));
     expect(usePOSStore.getState().customer).toBeNull();
     expect(usePOSStore.getState().prescription).toBeNull();
+  });
+});
+
+describe('money review 26: the optical till uses THE settle rule', () => {
+  const fp = () => usePOSStore.getState().ensureBillId();
+  // The runner's localStorage keeps nothing; the bill keys need a real store.
+  beforeEach(() => {
+    const mem = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (k: string) => mem.get(k) ?? null,
+      setItem: (k: string, v: string) => void mem.set(k, String(v)),
+      removeItem: (k: string) => void mem.delete(k),
+      clear: () => mem.clear(),
+    });
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('keeps the key pending when a pending bill is refused before the order door', async () => {
+    seed({ lines: ['FRAME'] });
+    billKeyFor(fp()); // an earlier press lost its answer
+    submitPosOrder.mockReset().mockResolvedValueOnce({ ok: false, error: 'Could not get the bill total from the server: x' });
+    render(<BillingSurface />);
+    await completeSale();
+    expect(billKeyEntry(fp())?.pending).toBe(true);
+  });
+
+  it('settles a pending key on a refusal the server marks key_checked', async () => {
+    seed({ lines: ['FRAME'] });
+    billKeyFor(fp());
+    submitPosOrder.mockReset().mockResolvedValueOnce({
+      ok: false, error: 'Payment incomplete.', sent: true, definite: true, keyChecked: true });
+    render(<BillingSurface />);
+    await completeSale();
+    expect(billKeyEntry(fp())?.pending).toBe(false);
   });
 });
