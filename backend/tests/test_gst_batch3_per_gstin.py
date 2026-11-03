@@ -240,3 +240,43 @@ def test_an_invoice_cancelled_behind_its_credit_note_stays_filed_per_gstin(gstin
     g3 = r3b._compute_gstr3b(MONTH, SISTER)
     assert g3["outwardTaxableValue"] == pytest.approx(0.0, abs=0.01)  # invoice met its note
     assert round(g3["creditNotes"]["taxableValue"], 2) == 2000.0
+
+
+@pytest.mark.parametrize(
+    "note_at, want",
+    [
+        # booked the same day as the return: one note, in September
+        (SEPT_10, {"2026-09": (200.0, 10.0), "2026-10": (0.0, 0.0)}),
+        # booked 1 Oct 00:30 IST for a 30 Sep return: one note, in October
+        (datetime(2026, 9, 30, 19, 0, 0), {"2026-09": (0.0, 0.0), "2026-10": (200.0, 10.0)}),
+    ],
+    ids=["same-month", "next-month"],
+)
+def test_a_note_naming_its_return_only_in_the_reason_is_filed_once(gstins, note_at, want):
+    """The return at SISTER; its store-credit note booked at STORE with its own
+    number as ref ("CN-0001") and the return named only in the reason text.
+    Through either shop of the GSTIN, the CDNR carries the note exactly once,
+    in the note's month, and equals GSTR-3B's credit notes."""
+    ret_at = SEPT_10 if note_at == SEPT_10 else datetime(2026, 9, 30, 6, 0, 0)
+    _sale(gstins, SISTER, "O-ONLINE", "C-JH", 2100.0)
+    gstins.returns.insert_one({
+        "return_id": "RET-P1", "store_id": SISTER, "order_id": "O-ONLINE", "customer_id": "C-JH",
+        "status": "COMPLETED", "created_at": ret_at,
+        "gst_breakup": {"gross": 252.0, "taxable": 240.0, "tax": 12.0, "gst_rate": 5},
+    })
+    gstins.credit_note_ledger.insert_one({
+        "store_id": STORE, "type": "ISSUED", "ref": "CN-0001",
+        "reason": "Return RET-P1, frame damaged", "customer_id": "C-JH",
+        "created_at": note_at.isoformat(), "taxable": 200.0, "tax": 10.0, "gst_rate": 5,
+        "gross_refund": 210.0, "net_refund": 210.0,
+    })
+    for ask in (STORE, SISTER):
+        for month in ("2026-09", "2026-10"):
+            cdnr = r1._compute_gstr1(month, ask)["cdnr"]
+            assert len(cdnr) == (1 if want[month][0] else 0), (ask, month, cdnr)
+            g1 = (round(sum(c["taxableValue"] for c in cdnr), 2),
+                  round(sum(c["taxValue"] for c in cdnr), 2))
+            cn = r3b._compute_gstr3b(month, ask)["creditNotes"]
+            g3 = (round(cn["taxableValue"], 2),
+                  round(cn["integratedTax"] + cn["centralTax"] + cn["stateTax"], 2))
+            assert g1 == g3 == want[month], (ask, month, g1, g3)
