@@ -63,7 +63,7 @@ import { usePOSStore } from '../../../stores/posStore';
 function seedCart(total: number, customerId = 'cust-1') {
   act(() => {
     const s = usePOSStore.getState();
-    s.resetTransaction();
+    s.resetTransaction('discard');
     s.setStoreId('BV-BOK-01');
     s.addToCart({
       product_id: 'p1', name: 'Frame A', sku: 'FR-1', category: 'FRAMES',

@@ -37,7 +37,7 @@ describe('an emptied pending bill keeps its key', () => {
   beforeEach(() => {
     localStorage.clear();
     usePOSStore.setState({ store_id: '', salesperson_id: 'u1' } as any);
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
   });
 
   it('a sign-out parks it with its key', () => {
@@ -62,7 +62,7 @@ describe('an emptied pending bill keeps its key', () => {
 
   it('a store switch parks it (parkIfPending says so only when it really parked)', () => {
     const key = emptiedPendingBill();
-    expect(usePOSStore.getState().parkIfPending('u1', 'S1')).toBe(true);
+    expect(usePOSStore.getState().parkIfPending('u1', 'S1')).toBe('parked');
     expect(heldBills().map((b: any) => b.bill_key?.key)).toEqual([key]);
   });
 
@@ -75,7 +75,7 @@ describe('an emptied pending bill keeps its key', () => {
       real(k, v);
     };
     try {
-      expect(usePOSStore.getState().parkIfPending('u1', 'S1')).toBe(false);
+      expect(usePOSStore.getState().parkIfPending('u1', 'S1')).toBeNull();
       usePOSStore.getState().clearAllOnLogout('u1', 'S1');
       expect(billKeyEntry(id)?.pending).toBe(true);
     } finally {
@@ -85,7 +85,7 @@ describe('an emptied pending bill keeps its key', () => {
 });
 
 describe('the login page Clear cache', () => {
-  it('keeps the bill keys and held bills, and clears everything else', () => {
+  it('keeps the bill keys, held bills and the live draft, and clears everything else', () => {
     localStorage.clear();
     billKeyFor('bill-p');
     localStorage.setItem('ims-held-bills', JSON.stringify([{ id: 'h1', bill_key: { key: 'k', pending: true } }]));
@@ -95,6 +95,6 @@ describe('the login page Clear cache', () => {
     expect(billKeyEntry('bill-p')?.pending).toBe(true);
     expect(heldBills()).toHaveLength(1);
     expect(localStorage.getItem('ims_token')).toBeNull();
-    expect(localStorage.getItem('ims-pos-draft')).toBeNull();
+    expect(localStorage.getItem('ims-pos-draft')).toBe('{}'); // the live bill's draft stays (money review 30)
   });
 });

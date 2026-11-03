@@ -54,7 +54,7 @@ describe('the cart preview and the Review screen quote the SAME rate', () => {
   beforeEach(async () => {
     apiGet.mockResolvedValue({ data: SERVER });
     await loadHsnRates();
-    act(() => usePOSStore.getState().resetTransaction());
+    act(() => usePOSStore.getState().resetTransaction('discard'));
   });
 
   it('rates a cart line by its category, never by the HSN on its record', async () => {

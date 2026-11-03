@@ -27,7 +27,7 @@
 //     jobId={res.fittingJobId}            // omit when no workshop job spawned
 //     salespersonId={store.salesperson_id}
 //     salespersonName={store.salesperson_name}
-//     onDone={() => store.resetTransaction()}
+//     onDone={() => store.resetTransaction('success')}
 //   />
 //
 // It fills its flex/grid cell (h-full) and scrolls INTERNALLY -- the POS page

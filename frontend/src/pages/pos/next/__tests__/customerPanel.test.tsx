@@ -183,7 +183,7 @@ beforeEach(() => {
   addToQueue.mockReset().mockResolvedValue({ id: 'q-1', tokenNumber: 'T004', status: 'WAITING' });
   sendRxReminder.mockReset().mockResolvedValue({ message: 'Rx reminder sent' });
   Object.values(toast).forEach((f) => f.mockReset());
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
   seedBill();
 });
 

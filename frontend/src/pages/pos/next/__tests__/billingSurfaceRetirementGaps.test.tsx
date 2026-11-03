@@ -132,7 +132,7 @@ const completeSale = async () => {
 };
 
 beforeEach(() => {
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
   submitPosOrder.mockReset().mockResolvedValue({ ok: true, orderId: 'o-1' });
   useSellableStock.mockReset().mockReturnValue({ data: undefined });
   stripStores.mockReset();

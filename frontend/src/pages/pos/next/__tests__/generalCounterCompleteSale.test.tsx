@@ -171,7 +171,7 @@ function putSomethingInTheCart() {
 const completeButton = () => screen.getByRole('button', { name: /complete sale|saving/i });
 
 beforeEach(() => {
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
   submitPosOrder.mockReset();
   productRows = [];
   sellableCounts = undefined;
@@ -456,7 +456,7 @@ describe('the bill key ends with the sale', () => {
     expect(keyOf(1)).toBe(keyOf(0));
     expect(billKeyEntry(usePOSStore.getState().ensureBillId())).toBeNull(); // the success dropped it
     view.unmount();
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     submitPosOrder.mockResolvedValueOnce({ ok: true, orderId: 'o-2', orderNumber: 'ORD-2' });
     putSomethingInTheCart(); // the very same cart again: a new sale
     renderCounter();
@@ -470,7 +470,7 @@ describe('the bill key ends with the sale', () => {
     const fp = usePOSStore.getState().ensureBillId();
     const k = billKeyFor(fp);
     const other = billKeyFor('another-tab-bill');
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     expect(billKeyEntry(fp)).toBeNull();
     expect(billKeyEntry('another-tab-bill')?.key).toBe(other);
     expect(k).toBeTruthy();
@@ -490,7 +490,7 @@ describe('the till stops promising once the cart changes', () => {
     expect(await screen.findByText(TILL_SALE_UNCONFIRMED)).toBeTruthy();
     putSomethingInTheCart(); // the cart changed (one more unit): the same bill, the same key
     expect(screen.queryByText(TILL_SALE_UNCONFIRMED)).toBeTruthy();
-    act(() => { usePOSStore.getState().resetTransaction(); }); // the bill (and its key) is gone
+    act(() => { usePOSStore.getState().resetTransaction('discard'); }); // the bill (and its key) is gone
     expect(await screen.findByText(TILL_SALE_UNCONFIRMED_CHECK)).toBeTruthy();
   });
 });

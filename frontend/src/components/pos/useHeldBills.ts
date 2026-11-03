@@ -19,6 +19,7 @@
 // missing owner is not a shared owner.
 
 import { useCallback, useEffect, useState } from 'react';
+import { COULD_NOT_PUT_ASIDE } from './posBillKey';
 
 const STORAGE_KEY = 'ims-held-bills';
 
@@ -82,9 +83,14 @@ export function useHeldBills(store: any, currentUserId: string, currentStoreId?:
   const holdCurrentBill = useCallback(() => {
     // ONE code path with the idle auto-park: the store builds and tags the
     // snapshot (held_by, store_id, auto=false) and pushes it to storage.
-    store.parkCurrentSale({ heldBy: currentUserId, storeId: currentStoreId });
+    const parked = store.parkCurrentSale({ heldBy: currentUserId, storeId: currentStoreId });
     refresh();
-    store.resetTransaction();
+    // The till is cleared only for a bill that was really put aside.
+    if (!parked) {
+      window.alert(COULD_NOT_PUT_ASIDE);
+      return false;
+    }
+    return store.resetTransaction('parked');
   }, [store, currentUserId, currentStoreId, refresh]);
 
   /** Restore a parked bill. Only ever one of this user's own. */
@@ -102,10 +108,14 @@ export function useHeldBills(store: any, currentUserId: string, currentStoreId?:
       }
       // The live bill, if its press is pending, is parked first with its key
       // -- a recall never drops it (money review 25).
-      store.parkIfPending?.(currentUserId, currentStoreId);
+      const reason = store.parkIfPending ? store.parkIfPending(currentUserId, currentStoreId) : 'not-pending';
+      if (!reason) {
+        window.alert(COULD_NOT_PUT_ASIDE); // the recall is refused: the live bill stays
+        return false;
+      }
       // Atomic REPLACE, not a merge into the current cart: restores the cart
       // verbatim plus the bill-level discount and delivery fields.
-      store.restoreHeldSale(bill.state, bill.bill_key, bill.store_id);
+      if (store.restoreHeldSale(bill.state, bill.bill_key, bill.store_id, reason) === false) return false;
       removeFromStorage(billId);
       refresh();
       return true;

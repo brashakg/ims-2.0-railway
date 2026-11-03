@@ -418,12 +418,12 @@ export function GeneralCounterSurface() {
           salespersonName={store.salesperson_name}
           onDone={() => {
             setCompleted(null);
-            store.resetTransaction();
+            store.resetTransaction('success');
           }}
         />
       ) : isComplete ? (
         <div className="flex-1 overflow-y-auto p-4">
-          <StepComplete onPrint={() => window.print()} onReset={() => store.resetTransaction()} />
+          <StepComplete onPrint={() => window.print()} onReset={() => store.resetTransaction('success')} />
         </div>
       ) : (
         <div className="flex-1 lg:min-h-0 flex flex-col gap-3 px-3.5 pb-3.5">

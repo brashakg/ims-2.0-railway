@@ -25,7 +25,7 @@ const line = (id: string, product_id: string, quantity = 1) =>
     tax_rate: 5,
   } as never);
 
-beforeEach(() => usePOSStore.getState().resetTransaction());
+beforeEach(() => usePOSStore.getState().resetTransaction('discard'));
 
 it('warns on a line that is not in stock at this shop', () => {
   line('l-1', 'FR-HAVANA');

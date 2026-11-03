@@ -408,7 +408,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // (money review 24).
     try {
       const pos = usePOSStore.getState();
-      if (pos.parkIfPending(state.user?.id)) pos.resetTransaction();
+      const reason = pos.parkIfPending(state.user?.id);
+      if (!reason) {
+        // It could not be put aside: the switch is refused, the bill stays.
+        window.alert('Could not put this bill aside - it may already be paid. It stays on the till; check Orders.');
+        return;
+      }
+      if (reason === 'parked') pos.resetTransaction('parked');
     } catch { /* never block a store switch */ }
 
     // Optimistic local update for a snappy switch.

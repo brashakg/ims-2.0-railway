@@ -65,7 +65,7 @@ describe('a forced sign-out on a 401', () => {
   it('parks the pending bill with its key before the draft is cleared', async () => {
     localStorage.clear();
     localStorage.setItem('ims_user', JSON.stringify({ id: 'u1', activeStoreId: 'S1' }));
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     usePOSStore.getState().addToCart({
       id: 'p-1', product_id: 'p-1', name: 'Frame', category: 'FRAME', quantity: 1,
       unit_price: 1000, price: 1000, mrp: 1000, discount_percent: 0,
@@ -84,7 +84,7 @@ describe('a forced sign-out on a 401', () => {
 describe('money review 24: discarding the LIVE bill', () => {
   it('asks with the may-already-be-paid words when its press is pending', () => {
     localStorage.clear();
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     usePOSStore.getState().addToCart({
       id: 'p-1', product_id: 'p-1', name: 'Frame', category: 'FRAME', quantity: 1,
       unit_price: 1000, price: 1000, mrp: 1000, discount_percent: 0,
@@ -102,7 +102,7 @@ describe('money review 24: discarding the LIVE bill', () => {
 describe('money review 28: Discard is what lets a pending bill go', () => {
   it('a confirmed Discard of the live pending bill clears its key', () => {
     localStorage.clear();
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     usePOSStore.getState().addToCart({
       id: 'p-1', product_id: 'p-1', name: 'Frame', category: 'FRAME', quantity: 1,
       unit_price: 1000, price: 1000, mrp: 1000, discount_percent: 0,

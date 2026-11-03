@@ -5,7 +5,7 @@ import { act, render } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const parkIfPending = vi.fn(() => true);
+const parkIfPending = vi.fn((): 'parked' | 'not-pending' | null => 'parked');
 const resetTransaction = vi.fn();
 vi.mock('../../services/api', () => ({
   authApi: { login: vi.fn(), logout: vi.fn(), getProfile: vi.fn(), switchStore: vi.fn(async () => ({})) },
@@ -53,7 +53,7 @@ describe('a store switch with a pending bill', () => {
   });
 
   it('a bill with nothing pending is left as it is', async () => {
-    parkIfPending.mockReturnValueOnce(false);
+    parkIfPending.mockReturnValueOnce('not-pending');
     await signIn();
     act(() => auth.setActiveStore('S2'));
     expect(resetTransaction).not.toHaveBeenCalled();

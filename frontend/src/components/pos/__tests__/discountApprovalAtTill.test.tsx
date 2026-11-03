@@ -56,7 +56,7 @@ function refusal(status: number, code: string, detail: Record<string, unknown> =
 
 function cartAt18() {
   const s = usePOSStore.getState();
-  s.resetTransaction();
+  s.resetTransaction('discard');
   s.addToCart({
     product_id: 'p-frame', name: 'Frame', sku: 'S', category: 'FRAME',
     unit_price: 1000, mrp: 1000, quantity: 1, is_optical: false,

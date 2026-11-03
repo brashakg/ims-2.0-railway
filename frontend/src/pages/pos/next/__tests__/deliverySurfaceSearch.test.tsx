@@ -107,7 +107,7 @@ beforeEach(() => {
   getOrder.mockReset().mockRejectedValue(new Error('404'));
   getOrders.mockReset().mockResolvedValue({ orders: [] });
   getPendingDelivery.mockReset().mockResolvedValue({ orders: [] });
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
 });
 
 describe('finding a waiting job by name or phone', () => {

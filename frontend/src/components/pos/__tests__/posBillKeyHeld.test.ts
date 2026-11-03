@@ -28,7 +28,7 @@ describe('the bill key and held bills', () => {
   beforeEach(() => {
     localStorage.clear();
     usePOSStore.setState({ store_id: 'S1', salesperson_id: 'u1' } as any);
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
   });
 
   for (const auto of [false, true]) {
@@ -47,7 +47,7 @@ describe('the bill key and held bills', () => {
     const key = billKeyFor(usePOSStore.getState().ensureBillId());
     usePOSStore.getState().parkCurrentSale({ heldBy: 'u1' });
     const held = heldBills()[0];
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     localStorage.removeItem('ims_pos_bill_keys'); // e.g. another tab, or long gone
     const before = Date.now();
     usePOSStore.getState().restoreHeldSale(held.state, { ...held.bill_key, at: before - BILL_KEY_TTL_MS + 1 });
@@ -102,7 +102,7 @@ describe('money review 17: the member is part of the bill; a reload keeps member
   beforeEach(() => {
     localStorage.clear();
     usePOSStore.setState({ store_id: 'S1', salesperson_id: 'u1' } as any);
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
   });
 
   it('another family member with the same cart is another bill (a NEW key)', () => {
@@ -111,7 +111,7 @@ describe('money review 17: the member is part of the bill; a reload keeps member
     putCart();
     usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'MOTHER' } } as any);
     const key = billKeyFor(usePOSStore.getState().ensureBillId());
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     putCart();
     usePOSStore.setState({ customer: { id: 'C1', name: 'Asha' }, patient: { id: 'SON' } } as any);
     expect(billKeyFor(usePOSStore.getState().ensureBillId())).not.toBe(key);
@@ -143,7 +143,7 @@ describe('money review 18: the draft keeps PII only while a press is pending', (
   beforeEach(() => {
     localStorage.clear();
     usePOSStore.setState({ store_id: 'S1', salesperson_id: 'u1' } as any);
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
   });
 
   it('a refused press leaves no customer, member or Rx in the saved draft (after the save delay)', async () => {
@@ -185,7 +185,7 @@ describe('money review 22: a manual logout keeps a pending press', () => {
   beforeEach(() => {
     localStorage.clear();
     usePOSStore.setState({ store_id: 'S1', salesperson_id: 'u1' } as any);
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
   });
 
   it('parks the bill WITH its key when a press is pending, once (the idle park is not repeated)', () => {
@@ -197,7 +197,7 @@ describe('money review 22: a manual logout keeps a pending press', () => {
     expect(usePOSStore.getState().cart).toEqual([]);
 
     localStorage.clear();
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     putCart();
     const fp2 = usePOSStore.getState().ensureBillId();
     billKeyFor(fp2);
@@ -220,7 +220,7 @@ describe('money review 23: the key belongs to the bill, wherever and whenever it
   beforeEach(() => {
     localStorage.clear();
     usePOSStore.setState({ store_id: '', salesperson_id: 'u1' } as any);
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
   });
 
   it('a pending bill parked at sign-out and recalled the next IST day presses with the SAME key', () => {
@@ -257,7 +257,7 @@ describe('money review 24: a pending key never expires, and the bill keeps its s
   beforeEach(() => {
     localStorage.clear();
     usePOSStore.setState({ store_id: '', salesperson_id: 'u1' } as any);
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
   });
   const SIXTEEN_MIN = 16 * 60_000;
 
@@ -335,7 +335,7 @@ describe('money review 26: a recalled bill always names its store', () => {
   beforeEach(() => {
     localStorage.clear();
     usePOSStore.setState({ store_id: '', salesperson_id: 'u1' } as any);
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
   });
 
   it('a bill parked before any press, recalled, gets its store and sends it', async () => {
@@ -345,7 +345,7 @@ describe('money review 26: a recalled bill always names its store', () => {
     usePOSStore.getState().parkCurrentSale({ heldBy: 'u1' }); // no press: no bill id, no store on the snapshot
     const [held] = heldBills();
     expect(held.state.bill_store_id ?? null).toBeNull();
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     usePOSStore.getState().restoreHeldSale(held.state, held.bill_key, held.store_id);
     expect(usePOSStore.getState().bill_store_id).toBe('S1');
     usePOSStore.setState({ bill_store_id: null } as any); // a snapshot from before the store was kept

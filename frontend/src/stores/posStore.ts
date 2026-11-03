@@ -7,6 +7,12 @@
 
 import { create } from 'zustand';
 import { billKeyEntry, clearBillKey, putBillKey } from '../components/pos/posBillKey';
+
+/** Why the till's bill (with its key and saved draft) may be dropped
+ *  (money review 30). A bill whose press is PENDING may already be a sale:
+ *  it is dropped only after a success, a confirmed Discard, or a park that
+ *  really stored it. 'not-pending' drops only a bill that is not pending. */
+export type BillDropReason = 'success' | 'discard' | 'parked' | 'not-pending';
 import { SIGNED_OUT_EVENT } from '../services/api/signOutEvent';
 
 /** The bill's own id (money review 23): made ONCE for the bill, kept with it
@@ -15,6 +21,12 @@ import { SIGNED_OUT_EVENT } from '../services/api/signOutEvent';
 const newBillId = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto
   ? crypto.randomUUID() : `bill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 export const billIdOf = (s: any): string => (s && s.bill_id) || '';
+
+/** THE guard (money review 30): may this bill be dropped for this reason? */
+function mayDropBill(state: any, reason: BillDropReason): boolean {
+  if (!billKeyEntry(billIdOf(state))?.pending) return true;
+  return reason === 'success' || reason === 'discard' || reason === 'parked';
+}
 
 /** The signed-in store (the parked bill names it; recall elsewhere is refused). */
 export function sessionStoreId(): string | null {
@@ -281,13 +293,16 @@ export interface POSState {
   clearPendingLoyaltyRedeem: () => void;
   markLoyaltyBurned: (leg: { amount: number; reference: string }) => void;
   // Reset
-  resetTransaction: () => void;
+  /** THE guard (money review 30): drops the bill, its key and its draft only
+   *  for a reason that is safe for it; returns false (and touches nothing)
+   *  when the bill is pending and the reason is not success/discard/parked. */
+  resetTransaction: (reason: BillDropReason) => boolean;
   /** This bill's id, made now if it has none yet. */
   ensureBillId: () => string;
-  clearAllOnLogout: (userId?: string, storeId?: string | null) => void;
+  clearAllOnLogout: (userId?: string, storeId?: string | null) => boolean;
   /** A bill whose press is pending is parked (once) under its own store;
    *  true when it was (money review 24: sign-out, 401, store switch). */
-  parkIfPending: (userId?: string, storeId?: string | null) => boolean;
+  parkIfPending: (userId?: string, storeId?: string | null) => 'parked' | 'not-pending' | null;
   // Park/Hold: push the CURRENT cart onto the held-bills queue
   // (`ims-held-bills`) as a snapshot, tagged with the owning user/store so a
   // shared terminal never leaks one cashier's cart to another. Used both by
@@ -299,7 +314,8 @@ export interface POSState {
   // Park/Hold: atomically REPLACE the current transaction with a previously
   // held one (no merge into the existing cart, per-item discounts preserved,
   // cart-level discount + delivery fields restored).
-  restoreHeldSale: (snapshot: any, billKey?: { key?: string } | null, heldStoreId?: string | null) => void;
+  restoreHeldSale: (snapshot: any, billKey: { key?: string } | null | undefined, heldStoreId: string | null | undefined,
+    reason: BillDropReason) => boolean;
 
   // Computed getters
   getSubtotal: () => number;
@@ -616,10 +632,12 @@ export const usePOSStore = create<POSState>()(
       })),
 
       // --- Reset ---
-      resetTransaction: () => {
+      resetTransaction: (reason: BillDropReason) => {
+        if (!mayDropBill(get(), reason)) return false;
         const { store_id, salesperson_id, salesperson_name } = get();
         clearBillKey(billIdOf(get())); // a new sale is a new press (only THIS bill's key)
         set({ ...initialState, store_id, salesperson_id, salesperson_name });
+        return true;
       },
 
       // --- Park/Hold: snapshot the CURRENT cart onto the held-bills queue ---
@@ -706,8 +724,9 @@ export const usePOSStore = create<POSState>()(
         return id;
       },
 
-      restoreHeldSale: (snapshot: any, billKey?: { key?: string; pending?: boolean } | null,
-        heldStoreId?: string | null) => {
+      restoreHeldSale: (snapshot: any, billKey: { key?: string; pending?: boolean } | null | undefined,
+        heldStoreId: string | null | undefined, reason: BillDropReason) => {
+        if (!mayDropBill(get(), reason)) return false; // the bill being replaced is guarded too
         clearBillKey(billIdOf(get())); // the bill being replaced
         const { store_id, salesperson_id, salesperson_name } = get();
         const snap = snapshot || {};
@@ -741,6 +760,7 @@ export const usePOSStore = create<POSState>()(
         // The held bill's key comes back with it, freshly stamped -- and still
         // pending if its press was (money review 23).
         if (billKey?.key) putBillKey(billIdOf(get()), billKey.key, Date.now(), !!billKey.pending);
+        return true;
       },
 
       // --- Full clear (for logout) ---
@@ -754,23 +774,27 @@ export const usePOSStore = create<POSState>()(
         // A press still pending keeps its promise ("press again, it finishes
         // once"): the bill is parked with its key, unless it already is (the
         // idle sign-out parks before it clears) (money review 22).
+        // Returns the reason the bill may now be dropped, or null when it is
+        // pending and could not be parked (money reviews 29-30).
         const pending = billKeyEntry(billIdOf(get()));
-        if (!pending?.pending) return false;
+        if (!pending?.pending) return 'not-pending';
         let held: any[] = [];
         try { held = JSON.parse(localStorage.getItem('ims-held-bills') || '[]'); } catch { held = []; }
-        if (Array.isArray(held) && held.some((b) => b?.bill_key?.key === pending.key)) return true;
-        // Honour the park's result: nothing parked -> false (money review 29).
-        return get().parkCurrentSale({ auto: true, heldBy: userId, storeId }) !== null;
+        if (Array.isArray(held) && held.some((b) => b?.bill_key?.key === pending.key)) return 'parked';
+        return get().parkCurrentSale({ auto: true, heldBy: userId, storeId }) !== null ? 'parked' : null;
       },
 
       clearAllOnLogout: (userId?: string, storeId?: string | null) => {
-        // A pending key is dropped only once its bill is parked with it.
-        const pending = billKeyEntry(billIdOf(get()))?.pending;
-        if (get().parkIfPending(userId, storeId) || !pending) clearBillKey(billIdOf(get()));
+        // A pending bill is dropped only once it is parked with its key; if
+        // the park failed, the bill, its key and its draft all stay.
+        const reason = get().parkIfPending(userId, storeId);
+        if (!reason || !mayDropBill(get(), reason)) return false;
+        clearBillKey(billIdOf(get()));
         set(initialState);
         try {
           localStorage.removeItem('ims-pos-draft');
         } catch { /* ignore */ }
+        return true;
       },
 
       // --- Computed (with null guards) ---

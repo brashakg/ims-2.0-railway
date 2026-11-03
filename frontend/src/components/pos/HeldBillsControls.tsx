@@ -24,16 +24,20 @@ export function HeldBillsControls() {
   const store = usePOSStore();
   const held = useHeldBills(store, user?.id || '', user?.activeStoreId);
   const [recallOpen, setRecallOpen] = useState(false);
+  // An emptied bill whose press is pending is still a bill: it can be held
+  // or discarded (money review 30).
+  const pendingLive = !!billKeyEntry(billIdOf(store))?.pending;
+  const hasBill = (store.cart || []).length > 0 || pendingLive;
 
   return (
     <>
       <button
         type="button"
         onClick={() => {
-          if ((store.cart || []).length === 0) return;
+          if (!hasBill) return;
           held.holdCurrentBill();
         }}
-        disabled={(store.cart || []).length === 0}
+        disabled={!hasBill}
         title="Put this bill aside and serve the next customer"
         className="inline-flex items-center gap-1.5 px-2.5 min-h-[44px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
       >
@@ -58,16 +62,15 @@ export function HeldBillsControls() {
       <button
         type="button"
         onClick={() => {
-          if ((store.cart || []).length === 0) return;
+          if (!hasBill) return;
           // A bill whose press was never confirmed may already be a sale (money review 24).
-          const pending = billKeyEntry(billIdOf(store))?.pending;
-          if (window.confirm(pending
+          if (window.confirm(pendingLive
             ? 'This bill may already be paid - check Orders first. Discard it anyway?'
             : 'Discard this bill? Items and payments entered so far will be lost.')) {
-            store.resetTransaction();
+            store.resetTransaction('discard');
           }
         }}
-        disabled={(store.cart || []).length === 0}
+        disabled={!hasBill}
         title="Throw this bill away and start a new one"
         className="inline-flex items-center gap-1.5 px-2.5 min-h-[44px] rounded-lg border border-gray-200 bg-white text-[11px] font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-40"
       >

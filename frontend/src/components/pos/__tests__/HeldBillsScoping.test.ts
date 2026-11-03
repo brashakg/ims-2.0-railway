@@ -50,7 +50,7 @@ function stored(): any[] {
 
 function fakeStore() {
   return {
-    parkCurrentSale: vi.fn(),
+    parkCurrentSale: vi.fn(() => 'hold-1'),
     resetTransaction: vi.fn(),
     restoreHeldSale: vi.fn(),
   };
@@ -100,7 +100,7 @@ describe('held bills are scoped to the cashier', () => {
     let ok = false;
     act(() => { ok = result.current.recallBill('mine') as boolean; });
     expect(ok).toBe(true);
-    expect(store.restoreHeldSale).toHaveBeenCalledWith({ id: 'mine' }, { key: 'K-mine', at: 1 }, undefined);
+    expect(store.restoreHeldSale).toHaveBeenCalledWith({ id: 'mine' }, { key: 'K-mine', at: 1 }, undefined, 'not-pending');
     expect(stored().map((b) => b.id).sort()).toEqual(['mine2', 'theirs']);
   });
 
@@ -150,7 +150,7 @@ describe('money review 25: a recall never drops a live pending bill', () => {
     const calls: string[] = [];
     const store = {
       ...fakeStore(),
-      parkIfPending: vi.fn(() => { calls.push('park'); return true; }),
+      parkIfPending: vi.fn(() => { calls.push('park'); return 'parked'; }),
       restoreHeldSale: vi.fn(() => { calls.push('restore'); }),
     };
     const { result } = renderHook(() => useHeldBills(store, ME, 'S1'));

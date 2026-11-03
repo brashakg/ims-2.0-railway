@@ -123,17 +123,21 @@ export function settleAfterPress(
 }
 
 /** The login page's "Clear cache": everything goes EXCEPT the till's bill
- *  keys and held bills -- a pending key there may stand for a sale that was
- *  saved (money review 29). */
+ *  keys, held bills and the live bill's draft -- a pending key there may
+ *  stand for a sale that was saved (money reviews 29-30). */
 export function clearCacheKeepingBills(): void {
   const keep: Record<string, string> = {};
-  for (const k of [STORAGE_KEY, 'ims-held-bills']) {
+  for (const k of [STORAGE_KEY, 'ims-held-bills', 'ims-pos-draft']) {
     const v = localStorage.getItem(k);
     if (v !== null) keep[k] = v;
   }
   localStorage.clear();
   for (const [k, v] of Object.entries(keep)) localStorage.setItem(k, v);
 }
+
+/** The till's words when a pending bill could not be put aside. */
+export const COULD_NOT_PUT_ASIDE =
+  'Could not put this bill aside - it may already be paid. It stays on the till; check Orders.';
 
 /** Drop THIS bill's key (never another tab's or a held bill's). */
 export function clearBillKey(fingerprint: string): void {

@@ -36,7 +36,7 @@ function addItem() {
 
 beforeEach(() => {
   localStorage.clear();
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
 });
 
 describe('single note field', () => {
@@ -59,7 +59,7 @@ describe('single note field', () => {
     usePOSStore.getState().updateItemNote(id, 'tint grey 40%');
     usePOSStore.getState().parkCurrentSale({ heldBy: 'u1' });
     const bills = JSON.parse(localStorage.getItem('ims-held-bills') || '[]');
-    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().resetTransaction('discard');
     usePOSStore.getState().restoreHeldSale(bills[0].state);
     expect(usePOSStore.getState().cart[0].item_note).toBe('tint grey 40%');
   });
