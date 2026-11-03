@@ -269,11 +269,20 @@ describe('who sees which bulk button', () => {
     expect(screen.queryByText('Add product')).toBeNull();
   });
 
-  it('a catalogue manager gets no tick boxes (they clear flags, not raise them)', async () => {
+  it('a catalogue manager can flag but not archive (owner 2026-11-03)', async () => {
     auth.roles = ['CATALOG_MANAGER'];
+    renderAt('');
+    const bar = await tickFirstRow();
+    expect(within(bar).getByText(/Flag 1 item/)).toBeTruthy();
+    expect(within(bar).queryByText('Delete (archive)')).toBeNull();
+  });
+
+  it('a counter role gets no tick boxes and no Flag', async () => {
+    auth.roles = ['SALES_CASHIER'];
     renderAt('');
     await screen.findByTestId('catalog-table');
     expect(screen.queryByLabelText('Select all on this page')).toBeNull();
+    expect(screen.queryByTestId('selection-bar')).toBeNull();
   });
 
   it('only admins are offered Archived; there the bar offers Restore', async () => {

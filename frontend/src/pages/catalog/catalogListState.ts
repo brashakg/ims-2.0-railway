@@ -28,6 +28,11 @@ export const DEFAULT_SORT: SortKey = 'edited';
 export const defaultSort = (segment: 'catalog' | 'review' = 'catalog'): SortKey =>
   segment === 'review' ? 'newest' : DEFAULT_SORT;
 
+/** Who may raise a flag: the server's services/catalog_flags.FLAGGER_ROLES
+ *  plus SUPERADMIN (pinned equal by backend/tests/test_catalog_flags_archive.py,
+ *  which reads this line). Owner 2026-11-03: cataloguers flag too. */
+export const FLAGGER_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CATALOG_MANAGER'] as const;
+
 /** The five flag types (backend services/catalog_flags.FLAG_TYPES). */
 export const FLAG_TYPES = [
   { value: 'needs_revision', label: 'Needs revision' },

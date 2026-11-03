@@ -4,9 +4,9 @@ Catalog page PART 2: select, flag, archive, restore (owner 2026-10-12)
 Mockup artboards Main + FlagDialog. Through the REAL routers (a small app
 over the catalog + tasks routers, the role gates are the routes' own):
 
-  * who may flag: ADMIN / SUPERADMIN / STORE_MANAGER; never a counter role,
-    never a CATALOG_MANAGER (owner: catalogue managers clear flags, they do
-    not raise them). Archive and Restore: ADMIN / SUPERADMIN only.
+  * who may flag: ADMIN / SUPERADMIN / STORE_MANAGER / CATALOG_MANAGER (owner
+    2026-11-03; a cataloguer flagging their own product gets the task); never
+    a counter role. Archive and Restore: ADMIN / SUPERADMIN only.
   * ONE task per person per flag action, assigned to the PERSON who added the
     product; a gone user's products go to an active CATALOG_MANAGER.
   * the same open type is never flagged twice on a product
@@ -223,14 +223,27 @@ def _flag(env, user, ids, type_="needs_revision", note="Lens colour is wrong"):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("user", [ADMIN, STORE_MGR, _user("u-root", "SUPERADMIN")])
+@pytest.mark.parametrize("user", [ADMIN, STORE_MGR, CAT_MGR, _user("u-root", "SUPERADMIN")])
 def test_flaggers_may_flag(env, user):
     assert _flag(env, user, ["P1"]).status_code == 200
 
 
+def test_a_cataloguer_flags_and_previews_any_product(env):
+    # Owner 2026-11-03: the same flow as a store manager's flag. P1 is
+    # Mansi's own product, P3 is Akshay's: each task goes to its adder, so
+    # Mansi flagging her own product gets that task herself (same rule).
+    body = {"product_ids": ["P1", "P3"], "type": "photo_redo", "note": "", "apply": False}
+    preview = env["call"](CAT_MGR, "POST", "/api/v1/catalog/flags", json=body)
+    assert preview.status_code == 200 and env["db"].tasks.count_documents({}) == 0
+    res = env["call"](CAT_MGR, "POST", "/api/v1/catalog/flags", json=dict(body, apply=True))
+    assert res.status_code == 200
+    assert {t["assigned_to"] for t in env["db"].tasks.find({})} == {"u-mansi", "u-akshay"}
+    assert _task_shape(preview.json()["tasks"]) == _task_shape(res.json()["tasks"])
+
+
 @pytest.mark.parametrize(
     "user",
-    [CAT_MGR, _user("u-c", "CASHIER"), _user("u-s", "SALES_STAFF"), _user("u-sc", "SALES_CASHIER"),
+    [_user("u-c", "CASHIER"), _user("u-s", "SALES_STAFF"), _user("u-sc", "SALES_CASHIER"),
      _user("u-o", "OPTOMETRIST"), _user("u-a", "AREA_MANAGER")],
 )
 def test_no_one_else_may_flag(env, user):
@@ -633,8 +646,19 @@ def test_rbac_rows_equal_the_code_gates():
 
 def test_raising_a_flag_is_its_own_capability():
     assert capability_for("POST", "/api/v1/catalog/flags") == "catalog:flag"
-    assert _CAP_ROLE_HINT["catalog:flag"] == {"ADMIN", "STORE_MANAGER", "SUPERADMIN"}
+    assert _CAP_ROLE_HINT["catalog:flag"] == {"ADMIN", "STORE_MANAGER", "CATALOG_MANAGER", "SUPERADMIN"}
     assert capability_for("POST", "/api/v1/catalog/flags/fix") == "catalog:write"
+
+
+def test_the_screens_flag_roles_are_the_servers():
+    # The Catalog page hides Flag by catalogListState.FLAGGER_ROLES: read the
+    # .ts itself (no third copy) and pin it to the server's gate.
+    import re
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    with open(os.path.join(repo, "frontend", "src", "pages", "catalog", "catalogListState.ts"),
+              encoding="utf-8") as fh:
+        (line,) = re.findall(r"export const FLAGGER_ROLES = \[([^\]]*)\]", fh.read())
+    assert set(re.findall(r"'([A-Z_]+)'", line)) == set(catalog_flags.FLAGGER_ROLES) | {"SUPERADMIN"}
 
 
 # ---------------------------------------------------------------------------

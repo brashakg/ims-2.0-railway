@@ -256,12 +256,13 @@ ROWS: List[Dict[str, object]] = [
     },
     # Catalogue flags ("needs work"). Raising one is its OWN capability
     # (catalog:flag, see capabilities.capability_for): STORE_MANAGER may flag
-    # but must never gain the catalog write grant. Marking fixed is the
-    # cataloguers' (the product edit page's roles).
+    # but must never gain the catalog write grant. CATALOG_MANAGER flags too
+    # (owner 2026-11-03). Marking fixed is the cataloguers' (the product edit
+    # page's roles).
     {
         "method": "POST",
         "path": "/api/v1/catalog/flags",
-        "allowed": ["ADMIN", "STORE_MANAGER", "SUPERADMIN"],
+        "allowed": ["ADMIN", "CATALOG_MANAGER", "STORE_MANAGER", "SUPERADMIN"],
     },
     {
         "method": "POST",
