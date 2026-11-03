@@ -1,5 +1,10 @@
 # RBAC matrix parity handover
 
+> **Superseded 2026-11-03:** the generated table is no longer committed (it
+> made every route-adding PR conflict). `python scripts/generate_rbac_matrix.py`
+> now writes a gitignored `docs/reference/RBAC_MATRIX.generated.md`; there is
+> no `--check`. See `docs/reference/RBAC_MATRIX.md`.
+
 ## Scope and result
 
 Based on main `10c6c645ebe8354958da2e1e64d91ee2c36a9791`.

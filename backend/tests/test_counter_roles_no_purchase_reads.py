@@ -467,17 +467,9 @@ def test_vendor_payments_handler_gate(role):
 # ---------------------------------------------------------------------------
 # 8. The human-readable matrix says the same as the rows this change moved
 # ---------------------------------------------------------------------------
-# rbac_policy's docstring: "if routes change ... update
-# docs/reference/RBAC_MATRIX.md". Every GET row F60 changed must be in the
-# doc, with the same roles (SUPERADMIN implied) and the same S column.
-_DOC = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "..",
-    "..",
-    "docs",
-    "reference",
-    "RBAC_MATRIX.md",
-)
+# Every GET row F60 changed must be in the rendered RBAC matrix (see
+# docs/reference/RBAC_MATRIX.md), with the same roles (SUPERADMIN implied)
+# and the same S column.
 _DOC_ROW = re.compile(r"^\| `(\w+)` \| `([^`]+)` \| ([^|]*)\| ([^|]*)\|", re.M)
 F60_GET_ROWS = sorted(
     {t for _c, t in PURCHASE_READS + PAYABLE_READS}
@@ -493,13 +485,13 @@ def _doc_cell(row):
     return allowed if isinstance(allowed, str) else set(allowed) - {"SUPERADMIN"}
 
 
-@pytest.mark.skipif(not os.path.exists(_DOC), reason="docs/ not shipped here")
 def test_rbac_matrix_doc_matches_the_rows_f60_moved():
-    with open(_DOC, encoding="utf-8") as fh:
-        doc = {
-            (m, p): (cell.strip(), s.strip())
-            for m, p, cell, s in _DOC_ROW.findall(fh.read())
-        }
+    from rbac_matrix import matrix_text
+
+    doc = {
+        (m, p): (cell.strip(), s.strip())
+        for m, p, cell, s in _DOC_ROW.findall(matrix_text())
+    }
     drift = []
     for path in F60_GET_ROWS:
         row = rbac.policy_for("GET", path)

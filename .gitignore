@@ -92,3 +92,6 @@ backfill_pim_sku_audit_*.json
 *.pfx
 nginx/ssl/*
 !nginx/ssl/README.md
+
+# Generated on demand by scripts/generate_rbac_matrix.py (not committed: merge-conflict magnet)
+docs/reference/RBAC_MATRIX.generated.md

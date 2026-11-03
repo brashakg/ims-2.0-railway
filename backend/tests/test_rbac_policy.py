@@ -36,8 +36,7 @@ from api.services import rbac_policy as rbac  # noqa: E402
 
 def test_no_uncatalogued_routes(app):
     """Every live /api/v1 route must have a POLICY entry. If this fails, a new
-    endpoint shipped without an access-gate decision - add it to POLICY (and the
-    matrix doc) with the correct ``allowed`` value."""
+    endpoint shipped without an access-gate decision - add it to POLICY with the correct ``allowed`` value."""
     missing = rbac.uncatalogued_routes(app)
     assert missing == [], (
         f"{len(missing)} /api/v1 route(s) missing from rbac_policy.POLICY:\n"
