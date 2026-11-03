@@ -23,6 +23,8 @@ from ._shared import (
 )
 from .gst_base import (
     CUSTOMER_SUPPLY_FIELDS,
+    _invoice_customer,
+    _sale_period_match,
     real_sale_match,
     UnfileableOrder,
     _get_raw_db,
@@ -479,7 +481,8 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
                 # credit notes, so an invoice cancelled behind a whole-invoice
                 # note stays filed and its note reverses it once.
                 **real_sale_match(db, gst_documents=True),
-                "created_at": {"$gte": from_dt, "$lt": to_dt},
+                # The tax invoice's own month -- GSTR-1's window.
+                **_sale_period_match(from_dt, to_dt),
             }
         ):
             # A routed online order held on the seller check is not an
@@ -498,7 +501,7 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             # The head the tax invoice PRINTED (_order_supply: the order's own
             # stamp, else the invoice's state-code rule), split per rate by
             # the invoice's split rule (_rate_heads) -- exactly GSTR-1's rows.
-            customer = cust_docs.get(str(order.get("customer_id", "")))
+            customer = _invoice_customer(order, cust_docs.get(str(order.get("customer_id", ""))))
             is_inter_state, pos_code, _assumed = _order_supply(
                 order,
                 shop_docs.get(order.get("store_id")) or {"gstin": store_gstin},

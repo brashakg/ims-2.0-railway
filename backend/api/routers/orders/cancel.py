@@ -41,10 +41,9 @@ def _refuse_cancel_holding_money(order: Dict[str, Any], order_id: str, current_u
     An ONLINE order is out of scope: its money was taken by Shopify and goes
     back through the Shopify refund (Online Store > Refund reviews), not the
     counter, so its cancel behaves exactly as before."""
-    if (
-        str(order.get("channel") or "").strip().upper() == "ONLINE"
-        or order.get("shopify_order_id")
-    ):
+    from ...utils.online_gst import is_online_order
+
+    if is_online_order(order):
         return
     from ..returns import _returns_coll, _sum_prior_refunds
 

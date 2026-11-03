@@ -63,11 +63,56 @@ def _order_supply(order: dict, store: Optional[dict], customer: Optional[dict]) 
     from ...services.org_validation import supply_interstate
     from ...utils.online_gst import order_place_of_supply
 
+    # The buyer as the invoice was minted (_invoice_customer): every return,
+    # the credit-note head and the books ask through here, so none can file
+    # the place of supply of a customer record edited after the mint.
+    customer = _invoice_customer(order, customer)
     inter, code, assumed = supply_interstate(store, customer, order_place_of_supply(order))
     flag = order_interstate_flag(order)
     if flag is not None:
         return flag, code, assumed and not flag
     return inter, code, assumed
+
+
+def _invoice_customer(order, customer: Optional[dict]) -> Optional[dict]:
+    """The customer as the sale's tax invoice was minted: the buyer GSTIN
+    frozen on the order at the mint (``customer_gstin`` -- GST batch 5) over
+    the record read now. An invoice minted before the stamp existed reads the
+    record, as before. GSTR-1 and GSTR-3B both ask this."""
+    if isinstance(order, dict) and "customer_gstin" in order and (
+        customer or order.get("customer_gstin")
+    ):
+        return {**(customer or {}), "gstin": str(order.get("customer_gstin") or "")}
+    return customer
+
+
+def _invoice_gstin(order, live: str) -> str:
+    """The buyer GSTIN a sale (or its note) files under: _invoice_customer's."""
+    return str((_invoice_customer(order, {"gstin": live or ""}) or {}).get("gstin") or "")
+
+
+def _sale_period_match(from_dt, to_dt) -> dict:
+    """THE month a sale files in, as a Mongo filter to spread into a query
+    (one top-level $or): a numbered tax invoice in the month of its own
+    invoice_date (stamped at the mint -- an order taken 28 Oct and printed
+    3 Nov files in November); an order with no number or no invoice_date
+    (one minted before the stamp) in its created_at month. GSTR-1, GSTR-3B
+    and Table 13 all ask this, so the returns file every invoice once, in
+    one month."""
+    window = {"$gte": from_dt, "$lt": to_dt}
+    return {"$or": [
+        {"invoice_number": {"$nin": [None, ""]}, "invoice_date": window},
+        {"$or": [{"invoice_number": {"$in": [None, ""]}}, {"invoice_date": None}],
+         "created_at": window},
+    ]}
+
+
+def _sale_filed_at(order: dict):
+    """The instant a sale files on (_sale_period_match's choice): its tax
+    invoice's own date, else the order's created_at."""
+    if order.get("invoice_number") and order.get("invoice_date") is not None:
+        return order.get("invoice_date")
+    return order.get("created_at")
 
 
 class UnfileableOrder(ValueError):

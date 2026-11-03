@@ -126,6 +126,10 @@ class _StrictColl:
     @staticmethod
     def _match(doc, flt):
         for key, expected in (flt or {}).items():
+            if key == "$or":
+                if not any(_StrictColl._match(doc, sub) for sub in expected):
+                    return False
+                continue
             actual = doc.get(key)
             if isinstance(expected, dict):
                 for op, val in expected.items():

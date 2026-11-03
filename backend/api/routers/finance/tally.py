@@ -26,6 +26,7 @@ from ._shared import (
     router,
 )
 from .gst_crosscheck import _jv_cgst_sgst_split
+from ..reports.gst_base import _invoice_customer
 
 # ===========================================================================
 # B2B invoices -> Tally (accountant console + worklist)
@@ -258,6 +259,8 @@ def _b2b_invoices(
                 "state": "",
                 "name": o.get("customer_name") or "",
             }
+        # The buyer GSTIN the invoice was minted with -- GSTR-1's B2B rule.
+        cust = _invoice_customer(o, cust)
         if not _is_b2b_customer(cust):
             continue
 
@@ -346,6 +349,7 @@ def _b2b_fetch_orders(db, order_ids: List[str]) -> List[dict]:
             "state": "",
             "name": o.get("customer_name") or "",
         }
+        cust = _invoice_customer(o, cust)
         if not _is_b2b_customer(cust):
             continue
         # The shop's own state fields (_store_state_map), as the invoice reads them.

@@ -1043,8 +1043,10 @@ def test_c6_invoice_endpoint_includes_gst_split(
     assert "items" in body and len(body["invoiceNumber"]) == 16
     # New C-6 fields.
     assert body["storeGstin"] == "20ABCDE1234F1Z5"
-    assert body["interstate"] is False  # walk-in customer -> intra default
-    assert body["placeOfSupplyAssumed"] is True
+    assert body["interstate"] is False  # a counter sale -> the shop's state
+    # CA 2026-10-23: a counter sale's place of supply is the shop's own state,
+    # stamped at the mint -- known, not assumed.
+    assert (body["placeOfSupply"], body["placeOfSupplyAssumed"]) == ("20", False)
     totals = body["taxTotals"]
     assert totals["igst"] == 0.0
     assert round(totals["cgst"] + totals["sgst"], 2) == totals["tax"]

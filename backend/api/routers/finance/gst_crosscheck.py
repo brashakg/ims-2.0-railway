@@ -340,6 +340,8 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
             # OS-008: the order-carried inter-state flag (online orders).
             "interstate": 1,
             "place_of_supply": 1,
+            "customer_gstin": 1,
+            "invoice_number": 1,
             "place_of_supply_assumed": 1,
             "fulfillment_route": 1,
             "fulfillment_hold": 1,

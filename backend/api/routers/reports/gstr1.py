@@ -31,6 +31,10 @@ from database.repositories.order_repository import DOCUMENT_LOG
 from ...utils.real_sale import is_real_sale
 from .gst_base import (
     B2CL_INVOICE_THRESHOLD,
+    _invoice_customer,
+    _invoice_gstin,
+    _sale_filed_at,
+    _sale_period_match,
     real_sale_match,
     _get_raw_db,
     _normalise_period,
@@ -61,15 +65,6 @@ from .gst_itc import (
     _transfer_cdnr_rows,
     _transfer_outward_bills,
 )
-
-def _invoice_gstin(order, live: str) -> str:
-    """The buyer GSTIN a sale files under: the one its tax invoice was minted
-    with (``customer_gstin``, frozen at the mint -- GST batch 5), else the
-    customer record's (an invoice minted before the stamp existed)."""
-    if isinstance(order, dict) and "customer_gstin" in order:
-        return str(order.get("customer_gstin") or "")
-    return live or ""
-
 
 def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
     """Compute the IMS GSTR-1 return for a month: THE return of
@@ -205,7 +200,8 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             # The GST-document view (PR #1264): it also files the credit notes,
             # so an invoice cancelled behind a whole-invoice note stays filed.
             **real_sale_match(db, gst_documents=True),
-            "created_at": {"$gte": from_dt, "$lt": to_dt},
+            # The tax invoice's own month (gst_base._sale_period_match).
+            **_sale_period_match(from_dt, to_dt),
         }
 
         for order in orders_col.find(query):
@@ -231,9 +227,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             # never the customer record read now; an invoice minted before
             # the stamp existed reads the customer, as before.
             customer_gstin = _invoice_gstin(order, cust_info.get("gstin", ""))
-            sale_cust = cust_docs.get(cust_id)
-            if "customer_gstin" in order and (sale_cust or customer_gstin):
-                sale_cust = {**(sale_cust or {}), "gstin": customer_gstin}
+            sale_cust = _invoice_customer(order, cust_docs.get(cust_id))
             customer_state = cust_info.get("state", "") or store_state
             customer_name = (
                 cust_info.get("name", "")
@@ -280,7 +274,9 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
 
             sale_is_b2cl = is_b2cl(customer_gstin, is_inter_state, invoice_value)
             bill_number = _gstr1_bill_number(order, validation_issues)
-            created_raw = order.get("created_at", "")
+            # The tax invoice's own date (invoice_date, stamped at the mint),
+            # else the order's -- the instant the query above filed it on.
+            created_raw = _sale_filed_at(order) or ""
             # BUG-104, VALUE rule (move the derived day FORWARD). This is
             # the invoiceDate on a FILED GSTR-1 row. The month window above
             # is already IST (ist_day_start_utc, correctly a BOUND moving
@@ -293,24 +289,6 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             # STRING created_at untouched by design (unknown frame), which
             # is exactly the old behaviour for the migrated orders.
             invoice_date = ist_date_str(created_raw) if created_raw else month + "-01"
-            # GST batch 5: the date the TAX INVOICE printed (invoice_date,
-            # stamped at the mint), when it falls in this month. An invoice
-            # minted in a later month than its order still files here, under
-            # the order's month, flagged for the CA.
-            inv_when = parse_event_utc_naive(order.get("invoice_date"))
-            if order.get("invoice_number") and inv_when is not None:
-                if from_dt <= inv_when < to_dt:
-                    invoice_date = ist_date_str(inv_when)
-                elif inv_when >= to_dt:
-                    validation_issues.append({
-                        "level": "error",
-                        "invoice": order.get("invoice_number"),
-                        "issue": (
-                            f"Tax invoice dated {ist_date_str(inv_when)} (after this month) "
-                            f"is filed here under its order's date {invoice_date} -- the "
-                            "CA must check which month it belongs to."
-                        ),
-                    })
             # The order's OWN persisted place of supply first (an online
             # order's delivery state -- the same record its IGST flag
             # above comes from); the customer doc's state is a returning
@@ -1186,8 +1164,9 @@ def _docs_issued(db, store_id: str, from_dt, to_dt, cdnr=(), issues=None) -> lis
     (order_repository.log_document_number): per series (the number up to its
     serial), each run of consecutive serials is one row -- from, to, total
     and cancelled. Each document is counted in the month its table files it:
-      * an invoice ('') in its ORDER's month (created_at -- the B2B / B2CL /
-        B2CS window), so Table 13 ties to the invoice tables; cancelled when
+      * an invoice ('') in the month the B2B / B2CL / B2CS tables file it
+        (gst_base._sale_period_match: its own invoice_date, else the order's
+        created_at), so Table 13 ties to the invoice tables; cancelled when
         the order is not a sale; a number minted with no order written:
         cancelled, in the month it was minted;
       * a delivery challan (TRF) in the month its goods LEFT (shipped_at;
@@ -1231,7 +1210,7 @@ def _docs_issued(db, store_id: str, from_dt, to_dt, cdnr=(), issues=None) -> lis
     # The invoice tables' own rule (real_sale_match(gst_documents=True)): an
     # order cancelled behind a whole-invoice credit note is still filed.
     for o in db.get_collection("orders").find(
-        {"store_id": store_id, "created_at": {"$gte": from_dt, "$lt": to_dt},
+        {"store_id": store_id, **_sale_period_match(from_dt, to_dt),
          "invoice_number": {"$nin": [None, ""]}},
         {"_id": 0, "invoice_number": 1, "status": 1, "status_before_void": 1,
          "advance_refund_status": 1, "advance_refund_credit_note": 1},

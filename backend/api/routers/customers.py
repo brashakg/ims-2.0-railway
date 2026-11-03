@@ -92,7 +92,9 @@ async def _email_validation_stamp(email, source: str) -> Optional[dict]:
 def _check_gstin(v):
     """Validate 15-char Indian GSTIN FORMAT when a non-empty value is supplied.
     Absent/blank passes here (presence for B2B is enforced separately)."""
-    if v and not _GSTIN_RE.match(v):
+    from ..services.org_validation import has_valid_gstin  # the one state-code rule
+
+    if v and not (_GSTIN_RE.match(v) and has_valid_gstin(v)):
         raise ValueError(
             "GSTIN must be a valid 15-character Indian GSTIN (e.g. 27AAPFU0939F1ZV)"
         )

@@ -303,8 +303,31 @@ async def superadmin_edit_order(
         user_id=current_user.get("user_id"),
     )
 
-    if not repo.update(order_id, update_data):
-        raise HTTPException(status_code=500, detail="Failed to save order edit")
+    # Compare-and-set on what this edit read: still no tax invoice, no
+    # refund-advance claim, the same status. A counter print that minted the
+    # invoice in between wins -- the issued number never carries lines it
+    # did not print (that change goes on a credit / debit note).
+    if not repo.update_if(
+        order_id,
+        {"invoice_number": {"$in": [None, ""]},
+         "advance_refund_id": order.get("advance_refund_id"),
+         "status": order.get("status")},
+        update_data,
+    ):
+        _write_order_edit_audit(
+            action="ORDER_SUPERADMIN_EDIT_REFUSED",
+            order=order,
+            before=before,
+            after=before,
+            reason="edit refused: the order changed (invoiced, refunded or "
+            "re-statused) while it was being edited",
+            user_id=current_user.get("user_id"),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="This order changed while it was being edited (it may have been "
+            "invoiced) - reload it and check.",
+        )
 
     # Owner hard rule: an edit that raises discounts must not leave the
     # create-time loyalty earn standing. Delta-claw, fail-soft.
@@ -470,10 +493,10 @@ async def superadmin_invoice_change(
             raise HTTPException(
                 status_code=503, detail="Cannot issue a revised invoice: the customer could not be read"
             ) from exc
-        from .invoices import invoice_buyer_gstin
+        from .invoices import invoice_mint_stamp
 
         try:
-            buyer_gstin = invoice_buyer_gstin(customer_doc)
+            mint_stamp = invoice_mint_stamp(order, customer_doc, store_doc)
             new_invoice_number = repo.next_invoice_number(
                 order.get("store_id"), store_doc=store_doc
             )
@@ -504,7 +527,7 @@ async def superadmin_invoice_change(
             "pricing_model": gst.get("pricing_model", "inclusive"),
             "invoice_number": new_invoice_number,
             "invoice_date": datetime.now(),
-            "customer_gstin": buyer_gstin,
+            **mint_stamp,
             "superseded_invoice_number": original_invoice,
             "invoice_revision_id": revised_doc["revision_id"],
             "superadmin_edited": True,
@@ -554,8 +577,14 @@ async def superadmin_invoice_change(
 
         # Compare-and-set on the number this request superseded: of two
         # presses only one replaces it -- never two revised numbers printed.
+        # ...and still uncancelled with no refund-advance claim (set_invoice's
+        # guard): a revised serial never lands on an order a credit note
+        # reversed in between.
         if not repo.update_if(
-            order_id, {"invoice_number": original_invoice}, update_data
+            order_id,
+            {"invoice_number": original_invoice, "advance_refund_id": None,
+             "status": order.get("status")},
+            update_data,
         ):
             # The serial this press minted is never printed: record the gap
             # (Rule 46(b) -- every serial accounted for) next to the audit row

@@ -52,6 +52,9 @@ def _matches(doc, filt):
                 elif op == "$exists":
                     if (actual is not None) != bool(val):
                         return False
+                elif op == "$in":
+                    if actual not in val:
+                        return False
                 else:
                     return False
         elif actual != expected:
@@ -888,3 +891,57 @@ def test_revised_invoice_refused_after_the_originals_month(client, auth_headers,
     resp = _revise(client, auth_headers)
     assert resp.status_code == 409 and "credit/debit note" in resp.json()["detail"], resp.text
     assert wired["order_repo"].find_by_id("ord-16")["invoice_number"] == "INV/BOK-01/26-27/0031"
+
+
+# ============================================================================
+# GST batch 5 review: every admin_edit write is compare-and-set against a
+# mint or a refund-advance claim landing between its read and its write.
+# ============================================================================
+
+
+def test_pre_invoice_edit_loses_to_an_invoice_minted_meanwhile(client, auth_headers, wired, monkeypatch):
+    """The counter printed (minted on the old lines) while the edit was open:
+    409, the issued invoice keeps the lines it printed.
+    REVERT CHECK: an unconditional update rewrites the invoiced order (200)."""
+    _seed_order(wired["order_repo"])
+    repo = wired["order_repo"]
+    stale = repo.find_by_id("ord-16")
+    repo.collection.update_one({"order_id": "ord-16"},
+                               {"$set": {"invoice_number": "TES01/2627/00007"}})
+    monkeypatch.setattr(repo, "find_by_id", lambda _oid: dict(stale))
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-edit",
+        json={"reason": "Customer agreed to upgraded frame price", "items": [_edit_item(2000.0)]},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 409, resp.text
+    assert repo.collection.find_one({"order_id": "ord-16"})["grand_total"] == 1000.0
+
+
+def test_revised_invoice_loses_to_a_refund_advance_claim(client, auth_headers, wired, monkeypatch):
+    """A whole-invoice credit note claimed the order after the revise press
+    read it: 409, no revised serial on the reversed order.
+    REVERT CHECK: a CAS on invoice_number alone writes it (200)."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0001")
+    repo = wired["order_repo"]
+    stale = repo.find_by_id("ord-16")
+    repo.collection.update_one({"order_id": "ord-16"}, {"$set": {"advance_refund_id": "RET-9"}})
+    monkeypatch.setattr(repo, "find_by_id", lambda _oid: dict(stale))
+    assert _revise(client, auth_headers).status_code == 409
+    assert repo.collection.find_one({"order_id": "ord-16"})["invoice_number"] == "INV/BOK-01/26-27/0001"
+
+
+def test_revised_invoice_to_another_customer_stamps_the_new_buyers_gstin(client, auth_headers, wired):
+    """REVERT CHECK: without the stamp the revised invoice keeps the old
+    buyer's frozen GSTIN and GSTR-1 files it under the wrong buyer."""
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0001", customer_gstin="")
+    wired["db"].get_collection("customers").insert_one(
+        {"customer_id": "cust-b2b", "name": "Acme", "gstin": "20AAACB1234C1Z5"})
+    resp = client.put(
+        "/api/v1/orders/ord-16/superadmin-invoice-change",
+        json={"mode": "REVISED_INVOICE", "reason": "Billed to the wrong customer",
+              "items": [_edit_item(unit_price=3000.0)], "customer_id": "cust-b2b"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert wired["order_repo"].find_by_id("ord-16")["customer_gstin"] == "20AAACB1234C1Z5"
