@@ -226,7 +226,7 @@ describe('G3: a wrong customer pick can be cleared', () => {
   });
 });
 
-describe('money review 26: the optical till uses THE settle rule', () => {
+describe('money reviews 26-28: the optical till uses THE settle rule', () => {
   const fp = () => usePOSStore.getState().ensureBillId();
   // The runner's localStorage keeps nothing; the bill keys need a real store.
   beforeEach(() => {
@@ -249,13 +249,17 @@ describe('money review 26: the optical till uses THE settle rule', () => {
     expect(billKeyEntry(fp())?.pending).toBe(true);
   });
 
-  it('settles a pending key on a refusal the server marks key_checked', async () => {
+  it('keeps a pending key on a refusal at the order door too, and clears it on success', async () => {
     seed({ lines: ['FRAME'] });
     billKeyFor(fp());
-    submitPosOrder.mockReset().mockResolvedValueOnce({
-      ok: false, error: 'Payment incomplete.', sent: true, definite: true, keyChecked: true });
+    submitPosOrder.mockReset()
+      .mockResolvedValueOnce({ ok: false, error: 'Failed to create order: x', sent: true, definite: true })
+      .mockResolvedValueOnce({ ok: true, orderId: 'o-1' });
     render(<BillingSurface />);
     await completeSale();
-    expect(billKeyEntry(fp())?.pending).toBe(false);
+    expect(billKeyEntry(fp())?.pending).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: /complete sale|saving/i }));
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(billKeyEntry(usePOSStore.getState().bill_id || '')).toBeNull());
   });
 });

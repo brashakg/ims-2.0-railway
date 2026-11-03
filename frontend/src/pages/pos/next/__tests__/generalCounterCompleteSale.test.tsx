@@ -542,3 +542,15 @@ describe('money review 25: a pre-create refusal never settles a pending bill (th
     expect(billKeyEntry(usePOSStore.getState().ensureBillId())?.pending).toBe(true);
   });
 });
+
+describe('money review 28: the counter keeps a pending bill until it is saved or discarded', () => {
+  it('keeps the key pending on a refusal at the order door too', async () => {
+    putSomethingInTheCart();
+    billKeyFor(usePOSStore.getState().ensureBillId()); // an earlier press lost its answer
+    submitPosOrder.mockResolvedValueOnce({ ok: false, error: 'Failed to create order: x', sent: true, definite: true });
+    renderCounter();
+    fireEvent.click(completeButton());
+    await waitFor(() => expect(submitPosOrder).toHaveBeenCalledTimes(1));
+    expect(billKeyEntry(usePOSStore.getState().ensureBillId())?.pending).toBe(true);
+  });
+});

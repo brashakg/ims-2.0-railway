@@ -225,12 +225,6 @@ class DatabaseConnection:
                   partialFilterExpression={"idempotency_key": {"$type": "string"}},
                   name="uniq_store_idempotency_key", background=True)
         ORDER_REPLAY_GUARANTEED = len(failures) == before
-        # One in-flight press per till key (money review 27): the claim's own
-        # _id already makes it unique; the {store_id, key} index states it,
-        # and a TTL index removes any claim a crashed press left behind.
-        _backstop("order_key_claims", [("store_id", 1), ("key", 1)], unique=True,
-                  name="uniq_order_key_claim", background=True)
-        _idx("order_key_claims", "expire_at", expireAfterSeconds=0, name="ttl_order_key_claim", background=True)
         _idx("orders", "store_id", background=True)
         _idx("orders", "customer_id", background=True)
         # The store-credit reconciler's scan (customers.reconcile_pending_credits) and

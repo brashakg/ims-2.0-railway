@@ -52,10 +52,6 @@ export interface SubmitPosOrderResult {
   sent?: boolean;
   /** The order door refused this press (a 4xx). */
   definite?: boolean;
-  /** The server says it looked the key up, found no order, and THEN refused
-      (detail.key_checked, money review 26): the only answer that proves no
-      order exists under the key, so the only one that settles a pending key. */
-  keyChecked?: boolean;
 }
 
 /** The cart lines a workshop job is built from. ONE predicate: the job
@@ -476,9 +472,8 @@ async function pressOnce(
     const { code, detail } = (err || {}) as { code?: string; detail?: unknown };
     const status = getErrorStatus(err);
     const definite = !created && status !== undefined && status >= 400 && status < 500;
-    const keyChecked = !created && (detail as { key_checked?: unknown } | undefined)?.key_checked === true;
     if (code === 'DISCOUNT_NEEDS_APPROVAL') {
-      return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed, definite, keyChecked };
+      return { ok: false, error: msg, discountApproval: detail as DiscountApprovalNeed, definite };
     }
     if (code === 'IDEMPOTENCY_BODY_MISMATCH') {
       // An order exists under this key (other items): no payment, and the key
@@ -489,12 +484,12 @@ async function pressOnce(
       return { ok: false, error: TILL_SALE_STILL_SAVING, pending: true };
     }
     if (code && DEAD_APPROVAL_CODES.has(code)) {
-      return { ok: false, error: msg, discountApprovalRejected: true, definite, keyChecked };
+      return { ok: false, error: msg, discountApprovalRejected: true, definite };
     }
     if (msg === WRITE_UNCONFIRMED_MESSAGE) {
       return { ok: false, error: replayGuaranteed() ? TILL_SALE_UNCONFIRMED : TILL_SALE_UNCONFIRMED_CHECK,
                pending: true };
     }
-    return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error'), definite, keyChecked };
+    return { ok: false, error: 'Failed to create order: ' + (msg || 'Network error'), definite };
   }
 }

@@ -107,20 +107,19 @@ export function settleBillKey(fingerprint: string): void {
   writeAll(map);
 }
 
-/** THE one settle rule after a press (money reviews 25-26), for every
- *  surface. A key that was NOT pending before this press settles on any
- *  refusal (nothing was outstanding under it). A key that WAS pending -- an
- *  earlier press may have landed -- settles ONLY on a refusal the server
- *  marks key_checked (it looked the key up, found no order, then refused):
- *  a 401/403/413/429, a 422 from validation, a network error or a 5xx proves
- *  nothing about the key and keeps it pending. */
+/** THE one settle rule after a refused press (money review 28), for every
+ *  surface: a bill that may have been saved stays held until it is saved or
+ *  the cashier discards it. A key that WAS pending before this press never
+ *  settles on a refusal of any kind (only a success clears it, or a Discard
+ *  / reset). A key that was not pending settles on a refusal from the order
+ *  door, or when this press never reached it (nothing is outstanding). */
 export function settleAfterPress(
   fingerprint: string,
   wasPending: boolean,
-  res: { pending?: boolean; sent?: boolean; definite?: boolean; keyChecked?: boolean },
+  res: { pending?: boolean; sent?: boolean; definite?: boolean },
 ): void {
-  if (res.pending) return;
-  if (wasPending ? res.keyChecked === true : (res.definite || !res.sent)) settleBillKey(fingerprint);
+  if (res.pending || wasPending) return;
+  if (res.definite || !res.sent) settleBillKey(fingerprint);
 }
 
 /** Drop THIS bill's key (never another tab's or a held bill's). */

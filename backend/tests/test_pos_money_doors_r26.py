@@ -1,11 +1,11 @@
 """
-IMS 2.0 - POS money doors, round-26 money review of PR #1264 (head 024887c9)
-============================================================================
-The bill's store check and the key lookup run FIRST at the order door: a
-re-press of a saved bill replays it even when a later gate (the Rx check, the
-period lock) would now refuse. Once the lookup has run and missed, every
-refusal says key_checked -- the till's only proof that no order exists under
-the key. No emoji.
+IMS 2.0 - POS money doors, round-26 money review of PR #1264
+============================================================
+The key lookup runs FIRST at the order door: a re-press of a bill that was
+saved replays it even when a later gate (the Rx check, the period lock) would
+now refuse. Refusals keep their plain codes and messages; nothing in them
+settles a pending bill key (the till keeps a pending bill until it is saved
+or discarded -- money review 28). No emoji.
 """
 
 from __future__ import annotations
@@ -55,25 +55,7 @@ def test_a_re_press_replays_its_order_even_in_a_locked_period(client, auth_heade
     assert r2.json()["order_id"] == r1.json()["order_id"] and len(_draft_orders(hardening_orders)) == 1
 
 
-def test_a_refusal_after_a_missed_lookup_says_key_checked(client, auth_headers, hardening_orders, monkeypatch):
-    import mongomock
-
-    # The press holds its key's claim (money review 27): only then is a
-    # refusal stamped key_checked.
-    claims = mongomock.MongoClient().db.order_key_claims
-    monkeypatch.setattr("api.routers.orders.create._claims_coll", lambda repo: claims)
+def test_a_refusal_keeps_its_plain_message(client, auth_headers, hardening_orders, monkeypatch):
     _period_locked(monkeypatch)
     r = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="K-NEW")
-    assert r.status_code == 423, r.text
-    assert r.json()["detail"] == {"message": "This period is locked.", "key_checked": True}
-    unkeyed = _post_order_idem(client, auth_headers, [_frame_item(1000.0)])
-    assert unkeyed.status_code == 423 and unkeyed.json()["detail"] == "This period is locked."  # no key: unchanged
-
-
-def test_a_cancelled_order_refusal_says_key_checked(client, auth_headers, hardening_orders):
-    _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="K-CX")
-    for d in hardening_orders["order_repo"].collection.docs:
-        d["status"] = "CANCELLED"
-    r = _post_order_idem(client, auth_headers, [_frame_item(1000.0)], key="K-CX")
-    detail = r.json()["detail"]
-    assert r.status_code == 409 and detail["code"] == "ORDER_NOT_LIVE" and detail["key_checked"] is True
+    assert r.status_code == 423 and r.json()["detail"] == "This period is locked."

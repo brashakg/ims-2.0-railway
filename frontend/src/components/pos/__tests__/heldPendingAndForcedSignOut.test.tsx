@@ -25,7 +25,7 @@ vi.mock('../../../context/AuthContext', () => ({
 import { HeldBillsControls } from '../HeldBillsControls';
 import api from '../../../services/api/client';
 import { usePOSStore } from '../../../stores/posStore';
-import { billKeyFor } from '../posBillKey';
+import { billKeyEntry, billKeyFor } from '../posBillKey';
 
 const heldBills = () => JSON.parse(localStorage.getItem('ims-held-bills') || '[]');
 const seedHeld = (pending: boolean) => localStorage.setItem('ims-held-bills', JSON.stringify([{
@@ -95,6 +95,26 @@ describe('money review 24: discarding the LIVE bill', () => {
     fireEvent.click(screen.getByRole('button', { name: /Discard bill/ }));
     expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/may already be paid/));
     expect(usePOSStore.getState().cart).toHaveLength(1);
+    confirm.mockRestore();
+  });
+});
+
+describe('money review 28: Discard is what lets a pending bill go', () => {
+  it('a confirmed Discard of the live pending bill clears its key', () => {
+    localStorage.clear();
+    usePOSStore.getState().resetTransaction();
+    usePOSStore.getState().addToCart({
+      id: 'p-1', product_id: 'p-1', name: 'Frame', category: 'FRAME', quantity: 1,
+      unit_price: 1000, price: 1000, mrp: 1000, discount_percent: 0,
+    } as any);
+    const id = usePOSStore.getState().ensureBillId();
+    billKeyFor(id);
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    render(<HeldBillsControls />);
+    fireEvent.click(screen.getByRole('button', { name: /Discard bill/ }));
+    expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/may already be paid/));
+    expect(billKeyEntry(id)).toBeNull();
+    expect(usePOSStore.getState().cart).toEqual([]);
     confirm.mockRestore();
   });
 });

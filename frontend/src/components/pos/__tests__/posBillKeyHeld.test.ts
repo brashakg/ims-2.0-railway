@@ -309,14 +309,13 @@ describe('money review 25: THE one settle rule after a press', () => {
     expect(billKeyEntry('b-s')?.pending).toBe(true);
   });
 
-  it('a pending key settles only on a key_checked refusal; a key that was not pending settles on any refusal', () => {
-    // Money review 26: a 4xx alone (a 403, a 422, a period lock refused
-    // before the key was looked up) proves nothing about a pending key.
+  it('a pending key never settles on a refusal; a key that was not pending settles on one', () => {
+    // Money review 28: a bill that may have been saved stays held until it
+    // is saved or discarded -- whatever any refusal (or its detail) says.
     billKeyFor('b-d');
     settleAfterPress('b-d', true, { sent: true, definite: true });
+    settleAfterPress('b-d', true, { sent: true, definite: true, key_checked: true } as any);
     expect(billKeyEntry('b-d')?.pending).toBe(true);
-    settleAfterPress('b-d', true, { sent: true, definite: true, keyChecked: true });
-    expect(billKeyEntry('b-d')?.pending).toBe(false);
     billKeyFor('b-f'); // not pending before this press: settles as before
     settleAfterPress('b-f', false, { sent: true, definite: true });
     expect(billKeyEntry('b-f')?.pending).toBe(false);

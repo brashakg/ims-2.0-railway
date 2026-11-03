@@ -10,7 +10,7 @@ from api.utils.event_time import utc_now_iso
 import secrets
 import uuid
 from database.repositories.order_repository import derive_bill_type
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from fastapi import Depends, HTTPException, Header
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
@@ -73,10 +73,8 @@ async def create_order(
     with no DB (or no header) the behaviour is identical to before.
 
     Money review 26: the bill's store check and the key lookup run FIRST,
-    before any other refusal (a replay writes nothing). Once the lookup has
-    run and MISSED for a keyed press, every later refusal carries
-    detail.key_checked=true -- the till's proof that no order exists under
-    the key, the only answer that settles a pending bill key.
+    before any other refusal (a replay writes nothing), so a re-press of a
+    bill that was saved replays it even when a later gate would now refuse.
     """
     # RBAC: only POS-facing roles may create orders. This was relying on the
     # frontend alone -> ACCOUNTANT / OPTOMETRIST / CATALOG_MANAGER / WORKSHOP_STAFF
@@ -97,144 +95,18 @@ async def create_order(
     # A direct (non-HTTP) call leaves the Header() default in place: no key.
     idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
     order_repo = get_order_repository()
-    body_fp = order_body_fingerprint(order)
-    claim: Optional[Dict[str, Any]] = None
+    customer_repo = get_customer_repository()
     if idem_key and order_repo is not None:
         # C-5 (DELTA 3): order-create idempotency -- an order with this key
         # for this store is returned (for the SAME bill) rather than created
-        # twice. Fail-soft: a lookup error falls through to a normal create,
-        # and then nothing after it may claim the key was checked.
+        # twice. Fail-soft: a lookup error falls through to a normal create.
         try:
             existing = order_repo.find_one({"idempotency_key": idem_key, "store_id": store_id})
         except Exception as exc:  # noqa: BLE001
             logger.warning("[ORDERS] idempotency lookup skipped: %s", exc)
         else:
             if existing:
-                return _replay_same_bill(existing, body_fp)
-            # ONE press of a key at a time (money review 27): the in-flight
-            # claim. Another press holding it -> this one never gets past it.
-            claim = _claim_key(order_repo, store_id, idem_key)
-            if claim is _IN_FLIGHT:
-                twin = _twin_of(order_repo, idem_key, store_id)
-                if twin:
-                    return _replay_same_bill(twin, body_fp)
-                raise HTTPException(status_code=409, detail={
-                    "code": SALE_STILL_SAVING,
-                    "message": ("The first press of this sale is still being saved. Do not change the bill - "
-                                "wait a moment and press Complete Sale again.")})
-    try:
-        result = await _create_order_after_lookup(order, current_user, idem_key)
-    except HTTPException as exc:
-        if not claim:
-            raise
-        # key_checked ONLY while THIS press holds the claim (no other press of
-        # the key can be mid-flight) and a last read finds no order under it.
-        twin = _twin_of(order_repo, idem_key, store_id)
-        _release_key_claim(claim)
-        if twin:
-            return _replay_same_bill(twin, body_fp)
-        raise HTTPException(status_code=exc.status_code, detail=_key_checked_detail(exc.detail),
-                            headers=exc.headers) from exc
-    except BaseException:
-        if claim:
-            _release_key_claim(claim)
-        raise
-    if claim:
-        _release_key_claim(claim)
-    return result
-
-
-# The in-flight claim of a till press's key (money review 27): one doc per
-# {store, key} in order_key_claims (_id and a unique index), taken by insert
-# right after the key lookup misses, deleted when the press ends. The order's
-# own unique index stays the lasting truth; the claim only says "a press of
-# this key is being served now". A claim older than KEY_CLAIM_STALE_SECONDS
-# (far above any real request) is a crashed press's: the next press takes it
-# over by compare-and-set on started_at. A TTL index backstops leftovers.
-KEY_CLAIM_STALE_SECONDS = 300
-_IN_FLIGHT = object()
-
-
-def _claims_coll(order_repo):
-    db = getattr(getattr(order_repo, "collection", None), "database", None)
-    try:
-        if db is not None and callable(getattr(type(db), "get_collection", None)):
-            return db.get_collection("order_key_claims")
-        db = _get_db()
-        return db.get_collection("order_key_claims") if db is not None else None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _claim_key(order_repo, store_id: Optional[str], key: str):
-    """Take the key's in-flight claim. Returns the claim (this press holds
-    it), _IN_FLIGHT (another live press holds it), or None (no claim store:
-    nothing may then say the key was checked)."""
-    from pymongo.errors import DuplicateKeyError
-
-    coll = _claims_coll(order_repo)
-    if coll is None:
-        return None
-    now = datetime.now(timezone.utc)
-    cid = f"{store_id}|{key}"
-    mine = {"_id": cid, "store_id": store_id, "key": key, "token": uuid.uuid4().hex, "started_at": now,
-            "expire_at": now + timedelta(days=1)}
-    try:
-        coll.insert_one(dict(mine))
-        return {"coll": coll, **mine}
-    except DuplicateKeyError:
-        pass
-    except Exception as exc:  # noqa: BLE001 -- no claim: nothing may claim the key was checked
-        logger.warning("[ORDERS] key claim not taken: %s", exc)
-        return None
-    try:
-        held = coll.find_one({"_id": cid})
-        if held is None:  # released meanwhile: try once more
-            coll.insert_one(dict(mine))
-            return {"coll": coll, **mine}
-        started = held.get("started_at")
-        if started is not None and started.tzinfo is None:
-            started = started.replace(tzinfo=timezone.utc)
-        if started is None or (now - started).total_seconds() < KEY_CLAIM_STALE_SECONDS:
-            return _IN_FLIGHT
-        # A crashed press's claim: its order may have landed -- re-checked first.
-        if _twin_of(order_repo, key, store_id):
-            return _IN_FLIGHT  # the caller replays it
-        res = coll.update_one({"_id": cid, "started_at": held.get("started_at")},
-                              {"$set": {"token": mine["token"], "started_at": now, "expire_at": mine["expire_at"]}})
-        return {"coll": coll, **mine} if int(getattr(res, "matched_count", 0) or 0) == 1 else _IN_FLIGHT
-    except DuplicateKeyError:
-        return _IN_FLIGHT
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[ORDERS] key claim unreadable: %s", exc)
-        return _IN_FLIGHT
-
-
-def _release_key_claim(claim: Dict[str, Any]) -> None:
-    """End this press's claim (only its own: by token). A failed delete is
-    only a delay -- the claim goes stale and is taken over."""
-    try:
-        claim["coll"].delete_one({"_id": claim["_id"], "token": claim["token"]})
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[ORDERS] key claim not released: %s", exc)
-
-
-def _key_checked_detail(detail: Any) -> Dict[str, Any]:
-    """A refusal by a press that held its key's claim and found no order under
-    the key: the same code and message, plus key_checked (money reviews
-    26-27). A string detail becomes {message}."""
-    if isinstance(detail, dict):
-        return {**detail, "key_checked": True}
-    if isinstance(detail, str):
-        return {"message": detail, "key_checked": True}
-    return {"message": str(detail), "detail": detail, "key_checked": True}
-
-
-async def _create_order_after_lookup(order: OrderCreate, current_user: dict, idempotency_key: Optional[str]):
-    """create_order's work after its store check and key lookup."""
-    order_repo = get_order_repository()
-    customer_repo = get_customer_repository()
-    store_id = current_user.get("active_store_id")
+                return _replay_same_bill(existing, order_body_fingerprint(order))
 
     # W1.4 / OS-005 (owner-approved 2026-07-23): an ONLINE store (BV-ONLINE-01 /
     # WO-ONLINE-01) owns no stock, has no till and no walk-ins -- a manual POS
@@ -382,8 +254,7 @@ async def _create_order_after_lookup(order: OrderCreate, current_user: dict, ide
         # for this store, return THAT order rather than creating a duplicate.
         # Looked up before any work so a retried "Pay now" is a cheap no-op.
         # Fail-soft: any lookup error falls through to a normal create.
-        # The store check and the key lookup ran first (create_order).
-        idem_key = (idempotency_key or "").strip()
+        # The store check and the key lookup ran first (top of create_order).
         body_fp = order_body_fingerprint(order)
 
         # Verify customer exists (allow walk-in with generated IDs)
@@ -1499,7 +1370,7 @@ def _replay_same_bill(order: Dict[str, Any], body_fp: str) -> Dict[str, Any]:
     # A cancelled or void order is never replayed as a sale (money review 25).
     if str(order.get("status") or "").upper() in ("CANCELLED", "VOID", "VOIDED"):
         raise HTTPException(status_code=409, detail={
-            "code": ORDER_NOT_LIVE, "key_checked": True,
+            "code": ORDER_NOT_LIVE,
             "message": f"Order {number} was cancelled - start a new bill. Nothing was charged."})
     saved = order.get("body_fingerprint")
     if saved and saved != body_fp:

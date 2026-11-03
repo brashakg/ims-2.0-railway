@@ -308,16 +308,6 @@ describe('money review 25: what a press tells the key', () => {
     response: { status, data: { detail } },
   } as any);
 
-  it('only a key_checked refusal says the key was checked; the store refusal is not', async () => {
-    seed();
-    mockedCreate.mockRejectedValueOnce(refused(400, { message: 'Order must have at least one item', key_checked: true }));
-    const a = await submitPosOrder(usePOSStore.getState() as any, 'k-a');
-    expect([a.sent, a.definite, a.keyChecked]).toEqual([true, true, true]);
-    mockedCreate.mockRejectedValueOnce(refused(409, { code: 'BILL_STORE_MISMATCH', message: 'started at S1' }));
-    const b = await submitPosOrder(usePOSStore.getState() as any, 'k-b');
-    expect([b.sent, b.keyChecked]).toEqual([true, false]);
-  });
-
   it('a total that is not this bill keeps the key pending; the bill names its store to the server', async () => {
     seed();
     usePOSStore.setState({ bill_store_id: 'S1' } as any);
@@ -330,7 +320,7 @@ describe('money review 25: what a press tells the key', () => {
   });
 });
 
-describe('money review 26: a refusal that proves nothing never settles a pending key', () => {
+describe('money review 28: a pending bill stays held until it is saved or discarded', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.removeItem('ims_user');
@@ -339,7 +329,7 @@ describe('money review 26: a refusal that proves nothing never settles a pending
     isAxiosError: true, message: 'x', config: { method: 'post' },
     response: { status, data: { detail } },
   } as any);
-  const pressAfterLostAnswer = async (err: unknown, wasPending: boolean) => {
+  const press = async (err: unknown, wasPending: boolean) => {
     seed();
     const fp = `bill-${Math.random()}`;
     billKeyFor(fp); // this press marks the key pending; wasPending says whether it already was
@@ -349,16 +339,23 @@ describe('money review 26: a refusal that proves nothing never settles a pending
     return billKeyEntry(fp)?.pending;
   };
 
-  it('a 429, a 403, a 422 without key_checked and a 400 period lock keep a pending key pending', async () => {
-    expect(await pressAfterLostAnswer(refused(429, 'Too many requests'), true)).toBe(true);
-    expect(await pressAfterLostAnswer(refused(403, 'Your role is not permitted to create orders.'), true)).toBe(true);
-    expect(await pressAfterLostAnswer(refused(422, [{ msg: 'field required' }]), true)).toBe(true);
-    expect(await pressAfterLostAnswer(refused(423, 'This period is locked.'), true)).toBe(true);
+  it('no refusal of any kind settles a pending key', async () => {
+    const refusals = [
+      refused(409, { code: 'DISCOUNT_APPROVAL_USED', message: 'That approval was already used.' }),
+      refused(422, 'This lens line needs a valid prescription.'),
+      refused(400, 'This period is locked.'),
+      refused(429, 'Too many requests'),
+      refused(403, 'Your role is not permitted to create orders.'),
+      refused(500, 'Internal error'),
+      refused(409, { code: 'ORDER_NOT_LIVE', message: 'Order BV-1 was cancelled - start a new bill.' }),
+      // The round-28 probes: a concurrent press, or a refusal after the
+      // insert landed -- whatever such a refusal carries settles nothing.
+      refused(400, { message: 'refused while another press landed', key_checked: true }),
+    ];
+    for (const err of refusals) expect(await press(err, true)).toBe(true);
   });
 
-  it('a key_checked refusal settles a pending key; any 4xx settles a key that was not pending', async () => {
-    expect(await pressAfterLostAnswer(refused(423, { message: 'This period is locked.', key_checked: true }), true))
-      .toBe(false);
-    expect(await pressAfterLostAnswer(refused(403, 'Your role is not permitted to create orders.'), false)).toBe(false);
+  it('a key that was not pending still settles on a refusal from the order door', async () => {
+    expect(await press(refused(403, 'Your role is not permitted to create orders.'), false)).toBe(false);
   });
 });
