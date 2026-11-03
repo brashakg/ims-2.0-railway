@@ -746,7 +746,6 @@ def test_the_purchase_invoice_gate_is_the_accounts_rule():
     assert purchase_invoices._AP_ROLES is AP_ROLES
 
 
-_MATRIX = os.path.join(_BACKEND, "..", "docs", "reference", "RBAC_MATRIX.md")
 # Every row the supplier-money rulings (2026-09-28 .. 10-12) moved, plus the
 # two GST reads R5 (2026-10-12) keeps open to managers with the input tax left
 # out by the handler.
@@ -773,22 +772,21 @@ _MOVED = (
 )
 
 
-@pytest.mark.skipif(not os.path.exists(_MATRIX), reason="docs/ not shipped here")
 @pytest.mark.parametrize("method,path", _MOVED)
 def test_the_rbac_matrix_says_what_the_row_says(method, path):
     import re
 
     from api.services import rbac_policy
+    from rbac_matrix import matrix_text
 
-    with open(_MATRIX, encoding="utf-8") as fh:
-        doc = {
-            (m, p): (cell.strip(), s.strip())
-            for m, p, cell, s in re.findall(
-                r"^\| `(\w+)` \| `([^`]+)` \| ([^|]*)\| ([^|]*)\|", fh.read(), re.M
-            )
-        }
+    doc = {
+        (m, p): (cell.strip(), s.strip())
+        for m, p, cell, s in re.findall(
+            r"^\| `(\w+)` \| `([^`]+)` \| ([^|]*)\| ([^|]*)\|", matrix_text(), re.M
+        )
+    }
     row = next(r for r in rbac_policy.POLICY if (r["method"], r["path"]) == (method, path))
-    assert (method, path) in doc, f"{method} {path} is missing from RBAC_MATRIX.md"
+    assert (method, path) in doc, f"{method} {path} is missing from the rendered RBAC matrix"
     cell, scoped = doc[(method, path)]
     want = "AUTH" if row["allowed"] == "AUTHENTICATED" else set(row["allowed"]) - {"SUPERADMIN"}
     got = cell if cell in ("AUTH", "PUBLIC") else {r.strip() for r in cell.split(",")} - {"SUPERADMIN"}

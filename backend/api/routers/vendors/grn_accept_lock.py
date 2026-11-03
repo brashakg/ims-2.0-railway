@@ -1,7 +1,11 @@
 """GRN accept concurrency: claim, heartbeat, guarded writes, unit mint."""
 
 from ._shared import HTTPException, Optional, datetime, logger, timedelta, uuid
-from api.services.receipt_origin import number_is_unique, origin_filters
+from api.services.receipt_origin import (
+    GRN_TERMINAL_ACCEPT_STATUSES as _GRN_TERMINAL_ACCEPT_STATUSES,
+    number_is_unique,
+    origin_filters,
+)
 from api.utils.event_time import parse_event_utc, utc_now
 
 
@@ -29,9 +33,9 @@ from api.utils.event_time import parse_event_utc, utc_now
 # no reader interprets them, but they are not literally invisible.)
 _GRN_ACCEPTABLE_STATUSES = ("PENDING", "PARTIALLY_ACCEPTED")
 
-# Statuses that mean "this receipt HAS been accepted". Anything else the flip
+# _GRN_TERMINAL_ACCEPT_STATUSES (imported from services.receipt_origin): the
+# statuses that mean "this receipt HAS been accepted". Anything else the flip
 # lands on (VOID, ESCALATED, missing) is a failure, not a benign no-op.
-_GRN_TERMINAL_ACCEPT_STATUSES = ("ACCEPTED", "PARTIALLY_ACCEPTED")
 
 # A crashed / KILLED worker (SIGKILL, OOM, Railway redeploy -- nothing that any
 # except/finally can catch) must not freeze a receipt forever, so a lock older

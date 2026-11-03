@@ -433,9 +433,10 @@ def test_the_second_doors_are_gone_from_the_app_and_the_policy(gone, kept):
 def test_the_rbac_matrix_doc_says_what_the_policy_says():
     import re
 
+    from rbac_matrix import matrix_text
+
     # Compare role membership, independent of the generated policy's ordering.
-    doc = open(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                            "docs", "reference", "RBAC_MATRIX.md"), encoding="utf-8").read()
+    doc = matrix_text()
     rows = {
         (method, path): {role.strip() for role in roles.split(",")}
         for method, path, roles in re.findall(

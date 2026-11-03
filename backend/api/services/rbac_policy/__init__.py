@@ -75,10 +75,11 @@ CAVEATS (the request-time enforcer relies on these holding true)
   * ``store_scoped`` means the handler additionally restricts the row to the
     caller's store(s) (HQ roles bypass). It is orthogonal to ``allowed``.
 
-This file is GENERATED-then-curated; if routes change, re-derive it and update
-``docs/reference/RBAC_MATRIX.md``. The companion test
-``backend/tests/test_rbac_policy.py`` fails if any live ``/api/v1`` route is
-missing here (the regression lock).
+This file is GENERATED-then-curated; if routes change, add their rows here.
+The full matrix is rendered on demand by ``scripts/generate_rbac_matrix.py``
+(not committed; reading notes in ``docs/reference/RBAC_MATRIX.md``). The
+companion test ``backend/tests/test_rbac_policy.py`` fails if any live
+``/api/v1`` route is missing here (the regression lock).
 
 PACKAGE LAYOUT (Wave 5 pure-move split; zero behaviour change)
 --------------------------------------------------------------
