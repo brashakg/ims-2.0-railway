@@ -62,7 +62,7 @@ function seedBill() {
 const editButton = () => screen.getByRole('button', { name: /edit/i });
 
 beforeEach(() => {
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
   updateCustomer.mockReset().mockResolvedValue({});
   roles = ['CASHIER'];
 });

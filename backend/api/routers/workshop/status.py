@@ -17,7 +17,12 @@ from ._shared import (
     _check_dc_hardlock,
     router,
 )
-from .gates import _is_patient_facing, _qc_cleared, gate_job_handover_payment
+from .gates import (
+    _is_patient_facing,
+    _qc_cleared,
+    gate_job_handover_payment,
+    undo_handover_if_order_refunded,
+)
 from .models import StatusBody
 from .helpers import _assert_job_store_access
 
@@ -198,6 +203,11 @@ async def update_job_status(
         if repo.update_status(
             job_id, status, current_user.get("user_id"), notes, **pickup_kwargs
         ):
+            if status == "DELIVERED" and undo_handover_if_order_refunded(repo, job, current_status):
+                raise HTTPException(
+                    status_code=409,
+                    detail="This order was cancelled or its advance refunded, so the job cannot be handed over.",
+                )
             if is_rework:
                 # Count this rework so the cap is enforced on the next attempt.
                 try:

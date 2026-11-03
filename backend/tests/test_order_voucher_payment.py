@@ -86,6 +86,10 @@ class FakeVouchers:
                 return copy.deepcopy(d)
         return None
 
+    def find(self, flt: Dict[str, Any]):
+        # Like the real collection (the till's one-rule scan reads vouchers).
+        return [copy.deepcopy(d) for d in self._docs if _matches(d, flt)]
+
     def find_one_and_update(self, flt, update, return_document=None):
         for d in self._docs:
             if not _matches(d, flt):

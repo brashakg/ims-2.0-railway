@@ -283,9 +283,10 @@ def test_named_summary_refuses_missing_customer_repository_but_walkin_still_uses
 def test_concurrent_idempotency_replay_returns_the_stored_payment_id(env, monkeypatch, method):
     db, repo, client = env
     sale(db, total=100)
-    original = repo.find_by_id
+    original, original_find = repo.find_by_id, repo.collection.find_one
     reads = 0
-    def read(oid):
+
+    def _race(oid):
         nonlocal reads
         reads += 1
         if reads == 2:  # another request wins between replay lookup and main read
@@ -294,8 +295,20 @@ def test_concurrent_idempotency_replay_returns_the_stored_payment_id(env, monkey
                 "idempotency_key": "repeat",
             }}, "$set": {"amount_paid": 40 if method == "CASH" else 0,
                           "balance_due": 60 if method == "CASH" else 100}})
+
+    def read(oid):
+        _race(oid)
         return original(oid)
+
+    def find(flt, *a, **k):
+        # The payment door's main read is straight off the collection since
+        # money review 19 (a read error is 503): the race lands before it.
+        if isinstance(flt, dict) and set(flt) == {"order_id"}:
+            _race(flt["order_id"])
+        return original_find(flt, *a, **k)
+
     monkeypatch.setattr(repo, "find_by_id", read)
+    monkeypatch.setattr(repo.collection, "find_one", find)
     response = client.post("/orders/O1/payments", json={"method": method, "amount": 40},
                            headers={"Idempotency-Key": "repeat"})
     assert response.status_code == 200, response.text

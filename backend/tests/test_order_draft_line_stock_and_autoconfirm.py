@@ -140,6 +140,12 @@ class _FakeOrdersColl:
     def __init__(self, orders):
         self.orders = orders
 
+    def find_one(self, flt, *a, **k):
+        # The payment door reads the order straight off the collection (a
+        # read error is 503, never a swallowed "not found" -- money review 19).
+        doc = self.orders.get((flt or {}).get("order_id"))
+        return dict(doc) if doc else None
+
     def find_one_and_update(self, flt, upd, **kw):
         doc = self.orders.get(flt.get("order_id"))
         if doc is None:
@@ -1517,17 +1523,36 @@ def _inject_cancel_after_nth_read(wired, n, order_id="ORD-1"):
     these doors never went through the claim, which is the finding itself.
     """
     real_find = wired["orders"].find_by_id
+    coll = getattr(wired["orders"], "collection", None)
+    real_coll_find = getattr(coll, "find_one", None)
     calls = {"n": 0}
 
-    def _find(oid):
-        doc = real_find(oid)          # pre-cancel snapshot, as the handler saw it
+    def _count():
         calls["n"] += 1
         if calls["n"] == n:
             _cancelled_by_a_concurrent_worker(wired, order_id)
+
+    def _find(oid):
+        doc = real_find(oid)          # pre-cancel snapshot, as the handler saw it
+        _count()
+        return doc
+
+    def _coll_find(flt, *a, **k):
+        # The handler's own read is straight off the collection since money
+        # review 19 (a read error is 503): it counts as a read too.
+        doc = real_coll_find(flt, *a, **k)
+        _count()
         return doc
 
     wired["orders"].find_by_id = _find
-    return lambda: setattr(wired["orders"], "find_by_id", real_find)
+    if real_coll_find is not None:
+        coll.find_one = _coll_find
+
+    def _restore():
+        wired["orders"].find_by_id = real_find
+        if real_coll_find is not None:
+            coll.find_one = real_coll_find
+    return _restore
 
 
 def test_confirm_cannot_resurrect_a_cancelled_order(wired):

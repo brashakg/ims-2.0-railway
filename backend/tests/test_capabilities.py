@@ -56,13 +56,15 @@ def test_capability_universe_nonempty_and_verb_shaped():
     """Every key is ``<module>:read|write`` or a curated key
     (approvals:approve, products:qc, online-store:rx-clear, catalog:flag,
     catalog:purge, users:set-password, vendor-returns:create, supplier
-    confirm-credit and the S4 inventory:cost-correction)."""
+    confirm-credit, returns:advance-refund, returns:complete-record and the S4
+    inventory:cost-correction)."""
     assert C.VALID_CAPABILITY_KEYS
     for key in C.VALID_CAPABILITY_KEYS:
         assert ":" in key, key
         verb = key.rsplit(":", 1)[1]
         assert verb in ("read", "write", "approve", "qc", "rx-clear", "flag", "purge", "create",
-                        "confirm-credit", "set-password", "cost-correction"), key
+                        "confirm-credit", "set-password", "advance-refund",
+                        "complete-record", "cost-correction"), key
 
 
 def test_set_password_is_carved_out_and_ungrantable():

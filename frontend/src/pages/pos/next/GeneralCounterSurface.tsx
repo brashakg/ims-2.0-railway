@@ -33,6 +33,10 @@ import { Link } from 'react-router-dom';
 import { AlertTriangle, X, Glasses, ShoppingBag, Home } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
 import { usePOSStore, type CartLineItem } from '../../../stores/posStore';
+import {
+  billKeyEntry, billKeyFor, COULD_NOT_PUT_ASIDE, settleAfterPress, useUnconfirmedWording,
+} from '../../../components/pos/posBillKey';
+import { billIdOf } from '../../../stores/posStore';
 import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import { useProducts, useSellableStock } from '../../../hooks/usePOSQueries';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
@@ -131,7 +135,20 @@ export function GeneralCounterSurface() {
     /** The server took the sale to DELIVERED (see handleCompleteSale). */
     delivered?: boolean;
   } | null>(null);
+  // The bill key of the last press and the bill it was for (THE fingerprint:
+  // the order body the sale sends). A re-press of the same bill prefers it.
   const idempotencyKeyRef = useRef<string | null>(null);
+  // The bill that sold (its id): Done drops only that bill (money review 31).
+  const soldBillIdRef = useRef<string | null>(null);
+  // After a remount on the complete step (the cashier went to another page
+  // and came back) the ref is empty: only a sale's success sets that step,
+  // and a recall moves it back to review, so the live bill IS the sold one.
+  const soldBillId = () => soldBillIdRef.current
+    || (usePOSStore.getState().current_step === 'complete' ? billIdOf(usePOSStore.getState()) : null);
+  const billFpRef = useRef<string | null>(null);
+  // A lost sale's promise ("press again - not charged twice") holds only for
+  // the SAME bill while its key is kept.
+  useUnconfirmedWording(billIdOf(store), errorMsg, setErrorMsg);
   // A discount over the seller's limit: the server's refusal (shown as the
   // ask-a-manager panel) and, once approved, the E4 request id the retry carries.
   const [approvalNeed, setApprovalNeed] = useState<DiscountApprovalNeed | null>(null);
@@ -208,12 +225,6 @@ export function GeneralCounterSurface() {
     if (store.is_processing) return;
     setErrorMsg(null);
     store.setProcessing(true);
-    if (!idempotencyKeyRef.current) {
-      idempotencyKeyRef.current =
-        typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    }
     try {
       // This counter only ever rings a QUICK SALE. A 'prescription_order' left
       // in the store by the optical POS would be refused by the shared submit
@@ -228,6 +239,17 @@ export function GeneralCounterSurface() {
       store.setDeliveryDate(istDayString(new Date()));
       store.setDeliveryTimeSlot(null);
       store.setCartNote(withFulfilmentTag(store.cart_note, homeDelivery));
+      // The bill key is kept with the cart (localStorage), so a reload after a
+      // lost answer presses the SAME bill again -- never a second sale. Taken
+      // AFTER the writes above: the fingerprint is the body the sale sends.
+      // Filed under the bill's own id (made once, never derived from the bill
+      // or the date): a reload, a recall or the next IST day presses the SAME
+      // bill again -- never a second sale (money review 23).
+      const fp = usePOSStore.getState().ensureBillId();
+      const wasPending = !!billKeyEntry(fp)?.pending;
+      idempotencyKeyRef.current = billKeyFor(fp, Date.now(),
+        billFpRef.current === fp ? idempotencyKeyRef.current : null);
+      billFpRef.current = fp;
       // Read the LIVE store, not this render's snapshot — the writes above
       // landed in the store, while `store` is the value from render time.
       const res = await submitPosOrder(
@@ -236,6 +258,9 @@ export function GeneralCounterSurface() {
         approvalIdRef.current,
       );
       if (!res.ok) {
+        // A definite refusal: nothing is pending, so the saved draft keeps no
+        // customer, member or Rx.
+        settleAfterPress(fp, wasPending, res);
         if (res.discountApproval) {
           setApprovalNeed(res.discountApproval);
           return;
@@ -245,7 +270,12 @@ export function GeneralCounterSurface() {
         setErrorMsg(res.error || 'Failed to create order');
         return;
       }
+      // The sold bill KEEPS its key (pending, so it never ages out) until
+      // Done: parked, reloaded or recalled and pressed again, it replays its
+      // own order (money review 31).
+      soldBillIdRef.current = fp;
       idempotencyKeyRef.current = null;
+      billFpRef.current = null;
       approvalIdRef.current = null;
       setApprovalNeed(null);
       // Owner ruling 2026-09-04: a completed take-away counter sale IS the
@@ -370,7 +400,7 @@ export function GeneralCounterSurface() {
 
       {/* Bill strip — the same slim context row as the billing surface: the
           salesperson is a CHIP, not a labelled form block. */}
-      {!isComplete && (
+      {!isComplete && !completed && (
         <div className="px-3.5 pt-2 pb-1 flex items-center gap-2 shrink-0">
           <span className="text-[10px] font-medium uppercase tracking-widest text-gray-500">
             General counter
@@ -398,12 +428,14 @@ export function GeneralCounterSurface() {
           salespersonName={store.salesperson_name}
           onDone={() => {
             setCompleted(null);
-            store.resetTransaction();
+            // 'success' names the bill that sold: any other (pending) bill on
+            // the till is kept (money review 31).
+            if (!store.resetTransaction('success', soldBillId())) setErrorMsg(COULD_NOT_PUT_ASIDE);
           }}
         />
       ) : isComplete ? (
         <div className="flex-1 overflow-y-auto p-4">
-          <StepComplete onPrint={() => window.print()} onReset={() => store.resetTransaction()} />
+          <StepComplete onPrint={() => window.print()} onReset={() => { if (!store.resetTransaction('success', soldBillId())) setErrorMsg(COULD_NOT_PUT_ASIDE); }} />
         </div>
       ) : (
         <div className="flex-1 lg:min-h-0 flex flex-col gap-3 px-3.5 pb-3.5">

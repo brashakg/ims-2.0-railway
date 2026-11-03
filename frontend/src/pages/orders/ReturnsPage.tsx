@@ -1,7 +1,7 @@
 // ============================================================================
 // IMS 2.0 — Returns, Exchanges & Credit Notes
 // ============================================================================
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { inventoryApi, orderApi, productApi } from '../../services/api';
 import {
@@ -12,6 +12,8 @@ import {
   type ReturnQuote,
 } from '../../services/api/returns';
 import { RefundApprovalModal } from '../../components/returns/RefundApprovalModal';
+import { NeedsCompletingPanel } from '../../components/returns/NeedsCompletingPanel';
+import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 import { formatDateIST } from '../../utils/datetime';
 import {
   Search, RotateCcw, ArrowLeftRight, Receipt,
@@ -146,7 +148,33 @@ const RETURN_TYPE_OPTIONS: {
     desc: 'Issue credit for future use' },
 ];
 
+// Who may finish an unfinished return (Returns > Needs completing), and who
+// runs the return desk. Accounts see the panel ONLY -- no return powers.
+const COMPLETE_RECORD_ROLES = ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'];
+const RETURN_DESK_ROLES = ['SUPERADMIN', 'ADMIN', 'STORE_MANAGER', 'CASHIER', 'SALES_STAFF'];
+
 export default function ReturnsPage() {
+  const { user } = useAuth();
+  const roles: string[] = (user as any)?.roles || [];
+  const canComplete = roles.some((r) => COMPLETE_RECORD_ROLES.includes(r));
+  const canReturn = roles.some((r) => RETURN_DESK_ROLES.includes(r));
+  if (!canReturn) {
+    return (
+      <div className="inv-body">
+        <div className="inv-head" style={{ maxWidth: 900 }}>
+          <div>
+            <div className="eyebrow" style={{ marginBottom: 6 }}>Returns</div>
+            <h1>Needs completing</h1>
+          </div>
+        </div>
+        {canComplete && <NeedsCompletingPanel standalone />}
+      </div>
+    );
+  }
+  return <ReturnsDesk canComplete={canComplete} />;
+}
+
+function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
   const { user } = useAuth();
   const [step, setStep] = useState<'search' | 'select' | 'review' | 'complete'>('search');
   const [searchQuery, setSearchQuery] = useState('');
@@ -202,7 +230,13 @@ export default function ReturnsPage() {
     amount: number;
     reason?: string;
     requiredTier?: string;
+    priorRefunds?: number;
+    // A fresh popup per gate (a refused approval reopens a NEW request, never
+    // the old popup's "approved" state).
+    seq: number;
   } | null>(null);
+  // An approval a failed resubmit gave back: reused by the next press.
+  const [keptApproval, setKeptApproval] = useState<{ requestId: string; approvalToken?: string } | null>(null);
 
   const searchOrders = async () => {
     if (!searchQuery.trim()) return;
@@ -315,6 +349,18 @@ export default function ReturnsPage() {
     l: activeReturns.map(i => [i.orderItemId, i.returnQty, i.unitPrice, i.gstRate]),
     r: returnType === 'EXCHANGE' ? replacementItems.map(r => [r.productId, r.quantity, r.unitPrice]) : null,
   });
+  // What one press asks for: the quote's selection plus the refund tenders.
+  // A kept approval and the press's Idempotency-Key both belong to it: any
+  // change of bill, lines, amounts or tender drops them.
+  const pressKey = JSON.stringify({
+    q: quoteKey,
+    tenders: returnType === 'RETURN' ? refundTenders.map((t) => [t.method, Number(t.amount) || 0]) : null,
+  });
+  useEffect(() => { setKeptApproval(null); }, [pressKey]);
+  // One key per return, made on the first Process press and reused by every
+  // re-press (after a lost answer, the approval resubmit, the kept approval).
+  const returnKeyRef = useRef('');
+  useEffect(() => { returnKeyRef.current = ''; }, [pressKey]);
   useEffect(() => {
     if (step !== 'select' || !selectedOrder || activeReturns.length === 0) {
       setQuote(null);
@@ -330,8 +376,7 @@ export default function ReturnsPage() {
       } catch (e: any) {
         if (!cancelled) {
           setQuote(null);
-          const d = e?.response?.data?.detail;
-          setQuoteError(typeof d === 'string' ? d : 'Could not price this return. Check the selected items.');
+          setQuoteError(getErrorMessage(e, 'Could not price this return. Check the selected items.'));
         }
       } finally {
         if (!cancelled) setQuoteLoading(false);
@@ -537,7 +582,12 @@ export default function ReturnsPage() {
   const submitReturn = async (
     approval?: { requestId: string; approvalToken?: string },
   ): Promise<boolean> => {
-    const result = await returnsApi.create(buildPayload(approval));
+    if (!returnKeyRef.current) {
+      returnKeyRef.current = typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+    const result = await returnsApi.create(buildPayload(approval), returnKeyRef.current);
+    returnKeyRef.current = ''; // recorded: the next return is a new press
     setResultId(result.return_id || null);
     // Read the SERVER's verdict + the amounts it actually recorded.
     setResultDrawerNetted(result?.drawer_auto_netted === true);
@@ -555,42 +605,58 @@ export default function ReturnsPage() {
     return true;
   };
 
+  // A 403 from the refund gate: any kept approval is spent or no longer
+  // fits -- dropped; a missing / invalid approval reopens the popup with the
+  // SERVER's figures (never the screen's quote).
+  const handleGate403 = (e: unknown): boolean => {
+    if (getErrorStatus(e) !== 403) return false;
+    setKeptApproval(null);
+    const detail = getErrorDetail(e) as any;
+    if (detail?.reason === 'REFUND_APPROVAL_REQUIRED' || detail?.reason === 'REFUND_APPROVAL_INVALID') {
+      setApprovalGate({
+        amount: Number(detail?.this_refund) || netRefund,
+        reason: dominantMatrixReason(),
+        requiredTier: detail?.required_tier,
+        priorRefunds: Number(detail?.prior_refunds) || 0,
+        seq: Date.now(),
+      });
+      return true;
+    }
+    return false;
+  };
+
   const handleSubmit = async () => {
     if (activeReturns.length === 0) { setError('Select at least one item to return'); return; }
     setError(null);
     setIsSubmitting(true);
     try {
-      await submitReturn();
+      await submitReturn(keptApproval || undefined);
+      setKeptApproval(null);
     } catch (e: any) {
-      // F27: the server gates a tiered refund with 403 reason=REFUND_APPROVAL_REQUIRED.
-      // Open the request+poll modal instead of surfacing a raw error.
-      const detail = e?.response?.data?.detail;
-      if (e?.response?.status === 403 && detail?.reason === 'REFUND_APPROVAL_REQUIRED') {
-        setApprovalGate({
-          amount: netRefund,
-          reason: dominantMatrixReason(),
-          requiredTier: detail?.required_tier,
-        });
-        return;
-      }
-      const msg = typeof detail === 'string' ? detail : detail?.message;
-      setError(msg || 'Failed to process return. Please try again.');
+      // F27: the server gates a tiered refund with 403 (read through the
+      // shared helpers, #1274: the client rejects with an ApiError).
+      if (handleGate403(e)) return;
+      setError(getErrorMessage(e, 'Failed to process return. Please try again.'));
     } finally {
       setIsSubmitting(false);
     }
   };
 
   // After a manager approves the gated refund, re-submit with the token.
+  // A failed resubmit gives the approval back (server side), so the page keeps
+  // it and the next press reuses it while it has not expired -- unless the
+  // gate itself refused it (handleGate403 drops it).
   const onRefundApproved = async (approval: { requestId: string; approvalToken?: string }) => {
     setApprovalGate(null);
     setIsSubmitting(true);
     setError(null);
     try {
       await submitReturn(approval);
-    } catch (e: any) {
-      const detail = e?.response?.data?.detail;
-      const msg = typeof detail === 'string' ? detail : detail?.message;
-      setError(msg || 'The refund could not be finalised after approval. Please retry.');
+      setKeptApproval(null);
+    } catch (e: unknown) {
+      setKeptApproval(approval);
+      if (handleGate403(e)) return;
+      setError(getErrorMessage(e, 'The refund could not be finalised after approval. Please retry.'));
     } finally {
       setIsSubmitting(false);
     }
@@ -670,6 +736,8 @@ export default function ReturnsPage() {
           ))}
         </div>
       </div>
+
+      {canComplete && <NeedsCompletingPanel />}
 
       {mode === 'new' && (
       <>
@@ -1183,6 +1251,7 @@ export default function ReturnsPage() {
 
       {approvalGate && (
         <RefundApprovalModal
+          key={approvalGate.seq}
           amount={approvalGate.amount}
           storeId={user?.activeStoreId}
           orderId={selectedOrder?.id || selectedOrder?.order_id || selectedOrder?.orderId}
@@ -1190,6 +1259,7 @@ export default function ReturnsPage() {
           customerName={selectedOrder?.customerName || selectedOrder?.customer_name}
           reason={approvalGate.reason}
           requiredTier={approvalGate.requiredTier}
+          priorRefunds={approvalGate.priorRefunds}
           requestedByName={user?.name}
           onClose={() => setApprovalGate(null)}
           onApproved={onRefundApproved}

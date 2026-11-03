@@ -143,7 +143,7 @@ function renderPOS() {
 function seedSaleWithOpticalItem() {
   act(() => {
     const s = usePOSStore.getState();
-    s.resetTransaction();
+    s.resetTransaction('discard');
     s.setStoreId('BV-BOK-01');
     s.setSalesperson('sp1', 'Sales Person');
     s.setSaleType('prescription_order');
@@ -174,7 +174,7 @@ const cartNoteInput = () => screen.getByPlaceholderText('PD / Fitting / Tint not
 beforeEach(() => {
   localStorage.clear();
   createOrderMock.mockClear();
-  act(() => usePOSStore.getState().resetTransaction());
+  act(() => usePOSStore.getState().resetTransaction('discard'));
 });
 
 describe('one line-item note box, always sent', () => {

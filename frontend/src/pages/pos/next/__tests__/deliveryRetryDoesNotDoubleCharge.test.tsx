@@ -108,7 +108,7 @@ beforeEach(() => {
   getOrder.mockReset().mockResolvedValue(order(10000, 0));
   addPayment.mockReset().mockResolvedValue({});
   deliverWithPayment.mockReset();
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
 });
 
 async function loadAndFailFirstAttempt() {

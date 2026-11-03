@@ -522,16 +522,34 @@ def build_crosscheck(
     d_cgst = _f(deemed.get("cgst"))
     d_sgst = _f(deemed.get("sgst"))
     d_igst = _f(deemed.get("igst"))
+    # Invoices cancelled behind a whole-invoice credit note (PR #1264): the
+    # returns keep filing the invoice (its note reverses it); the books drop
+    # the cancelled order. Added back to Books / Tally the same way.
+    cbn = books.get("cancelled_behind_credit_note") or {}
+    d_taxable += _f(cbn.get("taxableValue"))
+    d_tax += _f(cbn.get("tax"))
+    d_cgst += _f(cbn.get("cgst"))
+    d_sgst += _f(cbn.get("sgst"))
+    d_igst += _f(cbn.get("igst"))
+    cbn_note = (
+        "Books / Tally also include Rs %s of invoices cancelled behind a credit "
+        "note for the whole invoice (Rs %s tax): GSTR-1 / GSTR-3B still file "
+        "those invoices and their credit notes reverse them."
+        % (f"{_f(cbn.get('taxableValue')):,.2f}", f"{_f(cbn.get('tax')):,.2f}")
+        if (_f(cbn.get("taxableValue")) or _f(cbn.get("tax")))
+        else ""
+    )
     deemed_note = (
         (
             "Books / Tally include Rs %s inter-GSTIN transfer deemed supply "
             "(Rs %s tax) so they line up with GSTR-1 / GSTR-3B, which already "
             "carry it. See the deemed-supply card below."
-            % (f"{d_taxable:,.2f}", f"{d_tax:,.2f}")
+            % (f"{_f(deemed.get('taxableValue')):,.2f}", f"{_f(deemed.get('tax')):,.2f}")
         )
-        if (d_taxable or d_tax)
+        if (_f(deemed.get("taxableValue")) or _f(deemed.get("tax")))
         else ""
     )
+    deemed_note = (deemed_note + " " + cbn_note).strip()
     # A CGST/SGST-vs-IGST swap whose totals still agree is state-format drift
     # (store vs customer state stored as name vs code), not a real break.
     state_note = (
@@ -755,6 +773,8 @@ def build_crosscheck(
         },
         "deemed_supply": gstr1.get("deemed_supply")
         or {"count": 0, "taxableValue": 0.0, "tax": 0.0, "rows": []},
+        "cancelled_behind_credit_note": books.get("cancelled_behind_credit_note")
+        or {"count": 0, "taxableValue": 0.0, "tax": 0.0},
         "validation": gstr1.get("validation")
         or {"ok": True, "issueCount": 0, "issues": []},
         "summary": {

@@ -13,8 +13,8 @@ on three axes:
 
 The matrix is persisted as an E2 policy document (key ``refund.approval_matrix``)
 so it is per-store / per-entity overridable, with a sane seeded default. The
-``refund.matrix_enabled`` flag (default False) keeps the whole gate DARK until
-the owner turns it on (mirrors the Fcostfloor rollout pattern).
+``refund.matrix_enabled`` flag is ON by default (owner ruling 2026-10-23:
+refunds above Rs 2,000 need a manager) and the gate FAILS CLOSED.
 
 Matrix shape (the E2 policy ``value``)::
 
@@ -92,34 +92,53 @@ def int_to_e4_tier(tier: int) -> Optional[str]:
     return "super"  # clamp anything above the top defined tier to SUPERADMIN
 
 
-# The seeded default matrix. Mirrors the E4 amount tiers + the SYSTEM_INTENT
-# "control over convenience" posture: a plain cashier needs approval for any
-# non-trivial refund; managers are auto-cleared up to a higher floor; risky
-# reasons (goodwill / price-match) escalate one tier sooner.
+# The default matrix = OWNER RULING 2026-10-23: a refund ABOVE Rs 2,000 needs a
+# MANAGER's approval (STORE_MANAGER or above); at or below Rs 2,000 nothing
+# changes. Managers and HQ are never gated (they ARE the approvers); every other
+# role that can refund (CASHIER / SALES_STAFF / legacy SALES_CASHIER) falls to the
+# bands. One tier only ("auto" = STORE_MANAGER+), so no reason escalates past a
+# manager. A stored refund.approval_matrix policy still overrides this per scope.
+OWNER_MANAGER_ABOVE_PAISE = 200000
+
 DEFAULT_MATRIX: Dict[str, Any] = {
     "currency": "INR",
     "role_floor_paise": {
-        # SALES_CASHIER merged into SALES_STAFF (backlog #12); the survivor key
-        # below carries the identical floor.
-        "CASHIER": 0,
-        "SALES_STAFF": 0,           # any refund needs approval per the bands
-        "STORE_MANAGER": 500000,    # auto-cleared up to Rs 5,000
-        "AREA_MANAGER": 2000000,    # auto-cleared up to Rs 20,000
-        "ADMIN": None,              # HQ -- never needs a refund approval
+        "STORE_MANAGER": None,
+        "AREA_MANAGER": None,
+        "ADMIN": None,
         "SUPERADMIN": None,
     },
     "bands": [
-        {"max_paise": 100000, "tier": 0},    # <= Rs 1,000  -> none
-        {"max_paise": 500000, "tier": 1},    # <= Rs 5,000  -> tier 1 (manager)
-        {"max_paise": 2000000, "tier": 2},   # <= Rs 20,000 -> tier 2 (admin)
-        {"max_paise": None, "tier": 3},      # above        -> tier 3 (super)
+        {"max_paise": OWNER_MANAGER_ABOVE_PAISE, "tier": 0},  # <= Rs 2,000 -> none
+        {"max_paise": None, "tier": 1},                       # above -> a manager
     ],
     "reason_bump": {
         "DEFECTIVE": 0,
         "CHANGE_OF_MIND": 0,
-        "PRICE_MATCH": 1,
-        "GOODWILL": 1,
+        "PRICE_MATCH": 0,
+        "GOODWILL": 0,
     },
+    "max_tier": 1,
+}
+
+
+# The pre-2026-10-23 code default (multi-band; managers gated above Rs 5,000,
+# goodwill escalating to ADMIN). A copy of it saved as the
+# refund.approval_matrix policy would contradict the owner ruling, so
+# resolve_matrix ignores it (money review of #1264).
+LEGACY_DEFAULT_MATRIX: Dict[str, Any] = {
+    "currency": "INR",
+    "role_floor_paise": {
+        "CASHIER": 0, "SALES_STAFF": 0, "STORE_MANAGER": 500000,
+        "AREA_MANAGER": 2000000, "ADMIN": None, "SUPERADMIN": None,
+    },
+    "bands": [
+        {"max_paise": 100000, "tier": 0},
+        {"max_paise": 500000, "tier": 1},
+        {"max_paise": 2000000, "tier": 2},
+        {"max_paise": None, "tier": 3},
+    ],
+    "reason_bump": {"DEFECTIVE": 0, "CHANGE_OF_MIND": 0, "PRICE_MATCH": 1, "GOODWILL": 1},
     "max_tier": 3,
 }
 
@@ -223,15 +242,15 @@ def required_tier(
 
 
 def matrix_enabled(scope: Optional[dict] = None) -> bool:
-    """Is the F27 gate ON for this scope? DARK by default (flag default False).
-    Fail-soft -> False (no gate) when E2 is unavailable."""
+    """Is the gate ON for this scope? ON by default (owner ruling 2026-10-23).
+    FAIL CLOSED: a policy read error -> True (the gate runs), never a free pass."""
     try:
         from api.services.policy_engine import get_policy
 
-        return bool(get_policy(ENABLED_KEY, scope or None, default=False))
-    except Exception:  # noqa: BLE001 - fail-soft: a policy read error never gates
-        logger.debug("[F27] matrix_enabled read failed; treating as dark", exc_info=True)
-        return False
+        return bool(get_policy(ENABLED_KEY, scope or None, default=True))
+    except Exception:  # noqa: BLE001 - fail CLOSED: an unreadable flag still gates
+        logger.warning("[F27] matrix_enabled read failed; gating", exc_info=True)
+        return True
 
 
 def resolve_matrix(scope: Optional[dict] = None) -> Dict[str, Any]:
@@ -241,7 +260,9 @@ def resolve_matrix(scope: Optional[dict] = None) -> Dict[str, Any]:
         from api.services.policy_engine import get_policy
 
         val = get_policy(MATRIX_KEY, scope or None, default=DEFAULT_MATRIX)
-        return val if isinstance(val, dict) and val else DEFAULT_MATRIX
+        if not isinstance(val, dict) or not val or val == LEGACY_DEFAULT_MATRIX:
+            return DEFAULT_MATRIX
+        return val
     except Exception:  # noqa: BLE001
         logger.debug("[F27] resolve_matrix read failed; using default", exc_info=True)
         return DEFAULT_MATRIX
@@ -258,19 +279,19 @@ def required_tier_for_refund(
     """End-to-end resolver used by the refund path. Reads the flag + matrix from
     E2 for the (store/entity) scope and returns the E4 ``required_tier`` string
     ('auto'/'admin'/'super') a refund needs, or None when NO approval is required
-    (gate dark, or below the floor). Never raises -- a resolution error fails
-    OPEN (None == no gate) so a transient E2 outage can never wedge the till."""
+    (gate off, or below the floor). FAILS CLOSED: a resolution error RAISES and
+    the caller refuses the refund -- an error must never let a refund through."""
     scope: Dict[str, Any] = {}
     if store_id:
         scope["store_id"] = store_id
     if entity_id:
         scope["entity_id"] = entity_id
-    if not matrix_enabled(scope or None):
-        return None  # DARK -- behaves exactly as today
-    matrix = resolve_matrix(scope or None)
-    try:
-        tier_int = required_tier(amount_paise, reason, role, matrix)
-    except Exception:  # noqa: BLE001 - defensive; pure fn shouldn't raise
-        logger.warning("[F27] required_tier raised; failing open (no gate)", exc_info=True)
-        return None
-    return int_to_e4_tier(tier_int)
+    # The owner rule (DEFAULT_MATRIX: above Rs 2,000 needs a manager) always
+    # applies -- stricter-only covers stored values too, so an old saved
+    # refund.matrix_enabled=false can never switch it off. The switch only
+    # decides whether a saved (stricter) matrix applies on top.
+    matrix = resolve_matrix(scope or None) if matrix_enabled(scope or None) else DEFAULT_MATRIX
+    return int_to_e4_tier(max(
+        required_tier(amount_paise, reason, role, DEFAULT_MATRIX),
+        required_tier(amount_paise, reason, role, matrix),
+    ))

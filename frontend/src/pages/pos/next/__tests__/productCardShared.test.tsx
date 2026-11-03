@@ -19,7 +19,7 @@ import { ProductCard } from '../ProductResultsStrip';
 import { productIdOf } from '../../../../components/pos/productIntake';
 import { usePOSStore } from '../../../../stores/posStore';
 
-beforeEach(() => usePOSStore.getState().resetTransaction());
+beforeEach(() => usePOSStore.getState().resetTransaction('discard'));
 
 describe('the shared product reads', () => {
   it('falls back to plain `id` -- an order-shaped join carries no product_id/_id', () => {

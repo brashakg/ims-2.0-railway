@@ -50,7 +50,7 @@ function stored(): any[] {
 
 function fakeStore() {
   return {
-    parkCurrentSale: vi.fn(),
+    parkCurrentSale: vi.fn(() => 'hold-1'),
     resetTransaction: vi.fn(),
     restoreHeldSale: vi.fn(),
   };
@@ -93,13 +93,14 @@ describe('held bills are scoped to the cashier', () => {
   it('recalls my own bill and removes ONLY that one', () => {
     // The negative control for the two refusals above: without this, a hook
     // that refused everything would pass them both.
-    seed(bill('mine', ME), bill('theirs', THEM), bill('mine2', ME));
+    // The held bill's key (money review 15) goes back with it.
+    seed({ ...bill('mine', ME), bill_key: { key: 'K-mine', at: 1 } }, bill('theirs', THEM), bill('mine2', ME));
     const store = fakeStore();
     const { result } = renderHook(() => useHeldBills(store, ME));
     let ok = false;
     act(() => { ok = result.current.recallBill('mine') as boolean; });
     expect(ok).toBe(true);
-    expect(store.restoreHeldSale).toHaveBeenCalledWith({ id: 'mine' });
+    expect(store.restoreHeldSale).toHaveBeenCalledWith({ id: 'mine' }, { key: 'K-mine', at: 1 }, undefined, 'not-pending');
     expect(stored().map((b) => b.id).sort()).toEqual(['mine2', 'theirs']);
   });
 
@@ -117,5 +118,44 @@ describe('held bills are scoped to the cashier', () => {
     localStorage.setItem(KEY, 'not json{');
     const { result } = renderHook(() => useHeldBills(fakeStore(), ME));
     expect(result.current.heldBills).toEqual([]);
+  });
+});
+
+describe('money review 23: a parked bill stays at its store', () => {
+  it('a bill parked at another store is not recalled here', () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    seed(bill('b1', ME, { store_id: 'S1' }));
+    const store = fakeStore();
+    const { result } = renderHook(() => useHeldBills(store, ME, 'S2'));
+    let ok = true;
+    act(() => { ok = result.current.recallBill('b1'); });
+    expect(ok).toBe(false);
+    expect(store.restoreHeldSale).not.toHaveBeenCalled();
+    expect(alert).toHaveBeenCalledWith(expect.stringContaining('S1'));
+    expect(stored().map((b) => b.id)).toEqual(['b1']);
+    alert.mockRestore();
+  });
+
+  it('a hold names the signed-in store', () => {
+    const store = fakeStore();
+    const { result } = renderHook(() => useHeldBills(store, ME, 'S2'));
+    act(() => { result.current.holdCurrentBill(); });
+    expect(store.parkCurrentSale).toHaveBeenCalledWith({ heldBy: ME, storeId: 'S2' });
+  });
+});
+
+describe('money review 25: a recall never drops a live pending bill', () => {
+  it('parks the live bill (if its press is pending) before it recalls', () => {
+    seed(bill('b1', ME));
+    const calls: string[] = [];
+    const store = {
+      ...fakeStore(),
+      parkIfPending: vi.fn(() => { calls.push('park'); return 'parked'; }),
+      restoreHeldSale: vi.fn(() => { calls.push('restore'); }),
+    };
+    const { result } = renderHook(() => useHeldBills(store, ME, 'S1'));
+    act(() => { result.current.recallBill('b1'); });
+    expect(store.parkIfPending).toHaveBeenCalledWith(ME, 'S1');
+    expect(calls).toEqual(['park', 'restore']);
   });
 });

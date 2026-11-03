@@ -39,7 +39,9 @@ def _owed(order) -> float:
 def _snapshot(order):
     # Every field used to approve the exposure must still describe this sale.
     keys = ("payments", "grand_total", "balance_due", "amount_paid", "status",
-            "customer_id", "customer_phone", "store_id", "credit_fence")
+            "customer_id", "customer_phone", "store_id", "credit_fence",
+            # PR #1264: a refund-advance claim landing mid-payment voids the write.
+            "advance_refund_id")
     return {key: order[key] if key in order else {"$exists": False} for key in keys}
 
 

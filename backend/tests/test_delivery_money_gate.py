@@ -473,6 +473,14 @@ class _FakeColl:
                 return dict(d)
         return None
 
+    def update_one(self, query, update, upsert=False):
+        # $set only: the booking goes on record BEFORE the courier call, then
+        # takes the courier's answer (PR #1264).
+        for d in self.docs:
+            if doc_matches(d, query or {}):
+                d.update((update or {}).get("$set") or {})
+                return
+
 
 def _ship_client(monkeypatch, order):
     app = FastAPI()

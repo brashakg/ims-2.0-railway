@@ -42,7 +42,7 @@ const serverBill = (grand_total: number, round_off: number, tax: number) => ({
 });
 
 beforeEach(() => {
-  usePOSStore.getState().resetTransaction();
+  usePOSStore.getState().resetTransaction('discard');
   mockedQuote.mockReset();
 });
 

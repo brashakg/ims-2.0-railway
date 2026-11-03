@@ -275,11 +275,15 @@ def _cash_sales_for_window(db, store_id: str, start_iso: str, end_iso: Optional[
 
         add_cash_refunds = 0.0
         add_cash_sales = 0.0
+        from ...services.tender_reconciliation import drawer_day_clauses
+
         ret_match: Dict = {
             "store_id": store_id,
             "status": "COMPLETED",
             "historical": {"$ne": True},
-            "$or": or_clauses,
+            # By DRAWER day (drawer_at, else created_at): a recovered record's
+            # cash nets on the day it moved, a payout on the day it is paid.
+            "$or": drawer_day_clauses(or_clauses),
         }
         rcursor = db.get_collection("returns").find(
             ret_match,
@@ -518,9 +522,11 @@ def _cash_refund_legs_for_window(db, store_id: str, start_iso, end_iso) -> List[
             "status": "COMPLETED",
             "historical": {"$ne": True},
         }
+        from ...services.tender_reconciliation import drawer_day_clauses
+
         leg_or = _created_at_or_clauses(start_iso, end_iso)
         if leg_or:
-            leg_match["$or"] = leg_or
+            leg_match["$or"] = drawer_day_clauses(leg_or)
         cursor = db.get_collection("returns").find(
             leg_match,
             {"_id": 0, "return_type": 1, "refund_tenders": 1},

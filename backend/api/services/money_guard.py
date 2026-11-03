@@ -80,7 +80,7 @@ class GuardResult:
 
     reason machine-codes: None (success) | "duplicate" | "insufficient" |
     "inactive" | "expired" | "not_found" | "no_atomic" | "unavailable" |
-    "unknown_type" | "invalid_amount".
+    "unknown_type" | "invalid_amount" | "amount_mismatch".
     """
 
     ok: bool
@@ -285,7 +285,8 @@ def _find_existing_txn(coll, spec: AccountSpec, account_key: str, idempotency_ke
         for entry in (doc.get("money_ledger") or []):
             if entry.get("idempotency_key") == idempotency_key:
                 bal = doc.get(spec.balance_field)
-                return entry.get("txn_id"), (float(bal) if bal is not None else 0.0)
+                return (entry.get("txn_id"), (float(bal) if bal is not None else 0.0),
+                        abs(float(entry.get("delta") or 0)))
     except Exception:  # noqa: BLE001
         return None
     return None
@@ -294,6 +295,14 @@ def _find_existing_txn(coll, spec: AccountSpec, account_key: str, idempotency_ke
 # ---------------------------------------------------------------------------
 # Public verbs
 # ---------------------------------------------------------------------------
+
+
+def _debit_replay(prior, amt: float) -> GuardResult:
+    """A same-key debit replayed: THE same debit -- another amount under the
+    key is refused, never answered as paid (money review 20)."""
+    if abs(prior[2] - amt) > 0.005:
+        return GuardResult(ok=False, balance=prior[1], txn_id=prior[0], reason="amount_mismatch")
+    return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
 
 
 def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
@@ -325,7 +334,7 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
     if idempotency_key:
         prior = _find_existing_txn(coll, spec, account_key, idempotency_key)
         if prior is not None:
-            return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
+            return _debit_replay(prior, amt)
 
     txn_id = str(uuid.uuid4())
     filt: Dict[str, Any] = {spec.key_field: account_key, spec.balance_field: {"$gte": amt}}
@@ -362,6 +371,8 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
             update.setdefault("$set", {}).update(set_extra)
         if entry:
             update["$push"] = {"money_ledger": entry}
+        if push_extra:
+            update.setdefault("$push", {}).update(push_extra)
         try:
             res = coll.update_one(filt, update)
         except Exception:  # noqa: BLE001
@@ -373,7 +384,7 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
             if idempotency_key:
                 prior = _find_existing_txn(coll, spec, account_key, idempotency_key)
                 if prior is not None:
-                    return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
+                    return _debit_replay(prior, amt)
             return GuardResult(ok=False, reason="insufficient")
         post = None
         try:
@@ -416,7 +427,7 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
         if idempotency_key:
             prior = _find_existing_txn(coll, spec, account_key, idempotency_key)
             if prior is not None:
-                return GuardResult(ok=True, balance=prior[1], txn_id=prior[0], reason="duplicate")
+                return _debit_replay(prior, amt)
         return GuardResult(ok=False, reason=_classify_debit_failure(coll, spec, account_key, amt))
     bal = float(post.get(spec.balance_field) or 0.0)
     if entry:

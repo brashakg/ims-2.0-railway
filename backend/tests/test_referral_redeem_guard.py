@@ -24,48 +24,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test-key-referral-redeem")
 
 
-# --- Fake Mongo collections -------------------------------------------------
-class FakeColl:
-    def __init__(self, docs=None):
-        self.docs = docs or []
-        self.inc_calls = []  # (filter, update) for customers.update_one $inc
-
-    def find_one(self, flt):
-        for d in self.docs:
-            if all(d.get(k) == v for k, v in flt.items() if not isinstance(v, dict)):
-                return d
-        return None
-
-    def find_one_and_update(self, flt, update, return_document=None):
-        # Honour a {"status": {"$ne": "REWARD_CREDITED"}} guard.
-        rid = flt.get("referral_id")
-        for d in self.docs:
-            if d.get("referral_id") != rid:
-                continue
-            ne = flt.get("status", {})
-            if isinstance(ne, dict) and "$ne" in ne and d.get("status") == ne["$ne"]:
-                return None  # already credited -> claim fails
-            d.update(update["$set"])
-            return d
-        return None
-
-    def update_one(self, flt, update):
-        self.inc_calls.append((flt, update))
-
-        class _R:
-            modified_count = 1
-
-        return _R()
-
-
-class FakeDB:
-    def __init__(self, referrals, customers):
-        self._c = {"referrals": referrals, "customers": customers}
-
-    def get_collection(self, name):
-        return self._c[name]
-
-
 def _run(db, roles=("STORE_MANAGER",), referral_id="REF-1"):
     import api.routers.marketing as mk
 
@@ -82,30 +40,52 @@ def _run(db, roles=("STORE_MANAGER",), referral_id="REF-1"):
         mk._get_db = orig
 
 
-def _fresh_db():
-    referrals = FakeColl([
-        {"referral_id": "REF-1", "status": "INVITED", "reward_amount": 500,
-         "referrer_customer_id": "CUST-9"},
-    ])
-    customers = FakeColl([{"customer_id": "CUST-9", "store_credit": 0}])
-    return FakeDB(referrals, customers), referrals, customers
+def _strict_db(monkeypatch):
+    """Since PR #1264 the reward goes through THE store-credit rule
+    (customers.post_ledger_credit: a ledger row + one atomic $inc), so the
+    wallet is read off a strict fake, not counted $inc calls."""
+    from database.repositories.customer_repository import CustomerRepository
+    from tests.strict_fakes import StrictDB
+
+    db = StrictDB()
+    db.get_collection("referrals").insert_one(
+        {"referral_id": "REF-1", "status": "INVITED", "reward_amount": 500, "referrer_customer_id": "CUST-9"})
+    db.get_collection("customers").insert_one({"customer_id": "CUST-9", "store_credit": 0})
+
+    class _Conn:
+        is_connected = True
+
+        def get_collection(self, name):
+            return db.get_collection(name)
+
+    monkeypatch.setattr("api.dependencies.get_db", lambda: _Conn(), raising=False)
+    monkeypatch.setattr("api.dependencies.get_customer_repository",
+                        lambda: CustomerRepository(db.get_collection("customers")))
+    return db
 
 
-def test_first_redeem_credits_once():
-    db, referrals, customers = _fresh_db()
+def _wallet(db):
+    rows = list(db.get_collection("credit_note_ledger").find({"customer_id": "CUST-9"}))
+    return db.get_collection("customers").find_one({"customer_id": "CUST-9"})["store_credit"], rows
+
+
+def test_first_redeem_credits_once(monkeypatch):
+    db = _strict_db(monkeypatch)
     out = _run(db)
     assert "credited" in out["message"].lower()
-    assert len(customers.inc_calls) == 1  # wallet credited exactly once
-    assert referrals.docs[0]["status"] == "REWARD_CREDITED"
+    balance, rows = _wallet(db)
+    assert balance == 500 and [r["delta"] for r in rows] == [500.0]  # wallet credited exactly once
+    assert db.get_collection("referrals").find_one({"referral_id": "REF-1"})["status"] == "REWARD_CREDITED"
 
 
-def test_repeat_redeem_does_not_double_credit():
-    db, referrals, customers = _fresh_db()
+def test_repeat_redeem_does_not_double_credit(monkeypatch):
+    db = _strict_db(monkeypatch)
     _run(db)
     out2 = _run(db)  # second call
     assert out2.get("already_credited") is True
     # still only ONE wallet credit across both calls
-    assert len(customers.inc_calls) == 1
+    balance, rows = _wallet(db)
+    assert balance == 500 and len(rows) == 1
 
 
 def test_role_gate_blocks_non_reward_roles():
