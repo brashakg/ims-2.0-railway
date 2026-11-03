@@ -58,6 +58,9 @@ def _apply_update(doc, update):
         if op == "$set":
             for kk, vv in fields.items():
                 doc[kk] = vv
+        elif op == "$inc":
+            for kk, vv in fields.items():
+                doc[kk] = doc.get(kk, 0) + vv
         elif op == "$push":
             for kk, vv in fields.items():
                 doc.setdefault(kk, []).append(vv)
@@ -84,11 +87,16 @@ class FakeCollection:
     def find(self, query=None, projection=None):
         return [dict(d) for d in self.docs if _matches(d, query or {})]
 
-    def find_one_and_update(self, query, update, return_document=None, **_kw):
+    def find_one_and_update(self, query, update, return_document=None, upsert=False, **_kw):
         for d in self.docs:
             if _matches(d, query):
                 _apply_update(d, update)
                 return dict(d)
+        if upsert:
+            d = {k: v for k, v in query.items() if not str(k).startswith("$")}
+            _apply_update(d, update)
+            self.docs.append(d)
+            return dict(d)
         return None
 
     def create_index(self, *a, **k):
@@ -439,6 +447,25 @@ def test_transfer_written_to_stock_transfers_collection(db):
     )
     found = db.get_collection("stock_transfers").find_one({"id": out["transfer_id"]})
     assert found is not None and found["to_location_id"] == "BV-1"
+
+
+def test_transfer_takes_the_senders_challan_number_and_is_registered(db):
+    """The endless-aisle transfer is numbered by THE rule (the sending shop's
+    TRF series) and logged in the GST document register, so GSTR-1 Table 13
+    sees it once it ships. REVERT CHECK: it had no transfer_number and no
+    register row."""
+    db.get_collection("stores").insert_one({"store_id": "BV-2", "store_code": "BV-BOK-02"})
+    r = _pending(db, {("P", "BV-2"): 5})
+    svc.accept_request(
+        db, r["request_id"], actor=_mgr2(), on_hand_resolver=_oh({("P", "BV-2"): 5})
+    )
+    out = svc.create_transfer(
+        db, r["request_id"], actor=_mgr(), on_hand_resolver=_oh({("P", "BV-2"): 5})
+    )
+    found = db.get_collection("stock_transfers").find_one({"id": out["transfer_id"]})
+    assert found["transfer_number"] == "TRF-BOK02-00001"
+    logged = db.get_collection("gst_document_log").find_one({"number": "TRF-BOK02-00001"})
+    assert (logged["series"], logged["store_id"]) == ("TRF", "BV-2")
 
 
 def test_router_area_manager_cannot_read_cross_region(db, monkeypatch):

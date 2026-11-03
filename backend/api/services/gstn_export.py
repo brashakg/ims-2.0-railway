@@ -18,7 +18,10 @@ Schema references (public GSTN offline-tool format):
     * cdnr : credit/debit notes to registered persons, grouped by
              counterparty GSTIN -> [{ctin, nt:[{ntty, nt_num, nt_dt, val,
              pos, rchrg, inv_typ, itms:[{num, itm_det:{...}}]}]}]
-    * hsn  : {data:[{num, hsn_sc, desc, uqc, qty, txval, rt, iamt, camt, samt, csamt}]}
+    * hsn  : {hsn_b2b:[...], hsn_b2c:[...]}, each row {num, hsn_sc, desc, uqc,
+             qty, rt, txval, iamt, camt, samt, csamt} (Table 12 in two parts)
+    * doc_issue : {doc_det:[{doc_num, doc_typ, docs:[{num, from, to, totnum,
+             cancel, net_issue}]}]} (Table 13)
 - GSTR-3B: top-level {gstin, ret_period, sup_details, inter_sup, itc_elg, intr_ltax}
 
 Missing input yields a structurally valid skeleton (empty sections), so an
@@ -188,6 +191,7 @@ def to_gstr1_json(
         # from the `cdnr` list reports.py::_compute_gstr1 produces.
         "cdnr": _build_cdnr(data.get("cdnr") or [], store_state),
         "hsn": _build_hsn(data),
+        "doc_issue": _build_doc_issue(data),
     }
     return out
 
@@ -385,63 +389,59 @@ def _build_cdnr(rows: List[Dict[str, Any]], store_state: str) -> List[Dict[str, 
 
 
 def _build_hsn(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Build the section-12 HSN summary.
+    """Table 12, the HSN summary, in its two parts (CA 2026-10-23): ``hsn_b2b``
+    (supplies to a GSTIN) and ``hsn_b2c``, each row per HSN per rate with its
+    UQC and total quantity, from the report's ``hsnB2B`` / ``hsnB2C``
+    (reports gstr1._hsn_rows). Never synthesised from totals: a row the report
+    does not carry is not filed."""
 
-    If the report already carries an `hsn` / `hsnSummary` list, map it
-    directly. Otherwise synthesise a single consolidated HSN row from the
-    report totals so the section is never empty when there were sales
-    (the portal requires an HSN summary).
-    """
-    raw = data.get("hsn") or data.get("hsnSummary") or data.get("hsn_summary")
-    rows: List[Dict[str, Any]] = []
-    num = 1
-    if isinstance(raw, list) and raw:
-        for r in raw:
+    def rows(raw: Any) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for r in raw if isinstance(raw, list) else []:
             if not isinstance(r, dict):
                 continue
-            rows.append(
+            out.append(
                 {
-                    "num": num,
-                    "hsn_sc": str(r.get("hsnCode") or r.get("hsn_sc") or "9004"),
-                    "desc": str(r.get("description") or r.get("desc") or ""),
+                    "num": len(out) + 1,
+                    "hsn_sc": str(r.get("hsnCode") or "9004"),
+                    "desc": str(r.get("description") or ""),
                     "uqc": str(r.get("uqc") or "PCS"),
-                    "qty": _num(r.get("quantity") or r.get("qty")),
-                    "txval": _num(r.get("taxableValue") or r.get("txval")),
-                    "rt": _num(r.get("gstRate") or r.get("rt")),
-                    "iamt": _num(r.get("igst") or r.get("iamt")),
-                    "camt": _num(r.get("cgst") or r.get("camt")),
-                    "samt": _num(r.get("sgst") or r.get("samt")),
-                    "csamt": _num(r.get("cess") or r.get("csamt")),
+                    "qty": _num(r.get("quantity")),
+                    "rt": _num(r.get("gstRate")),
+                    "txval": _num(r.get("taxableValue")),
+                    "iamt": _num(r.get("igst")),
+                    "camt": _num(r.get("cgst")),
+                    "samt": _num(r.get("sgst")),
+                    "csamt": _num(r.get("cess")),
                 }
             )
-            num += 1
-        return {"data": rows}
+        return out
 
-    # Synthesise from totals when no per-HSN breakdown is available.
-    total_taxable = _num(data.get("totalTaxableValue"))
-    total_tax = _num(data.get("totalTax"))
-    if total_taxable > 0 or total_tax > 0:
-        rows.append(
+    return {"hsn_b2b": rows(data.get("hsnB2B")), "hsn_b2c": rows(data.get("hsnB2C"))}
+
+
+def _build_doc_issue(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Table 13, documents issued: one ``doc_det`` per document type, each
+    series run a ``docs`` row (from, to, total, cancelled, net issued), from
+    the report's ``docsIssued`` (reports gstr1._docs_issued)."""
+    by_type: Dict[int, Dict[str, Any]] = {}
+    for r in data.get("docsIssued") or []:
+        if not isinstance(r, dict):
+            continue
+        det = by_type.setdefault(
+            int(r["docNum"]), {"doc_num": int(r["docNum"]), "doc_typ": r["docType"], "docs": []}
+        )
+        det["docs"].append(
             {
-                "num": 1,
-                "hsn_sc": "9004",
-                "desc": "Spectacles, goggles and the like",
-                "uqc": "PCS",
-                "qty": 0.0,
-                "txval": total_taxable,
-                "rt": 0.0,
-                # We can't split CGST/SGST/IGST reliably at the aggregate
-                # level, so report the combined tax under camt+samt halves
-                # only when intra dominates; leave a single combined value
-                # in camt as a conservative best-effort. The accountant
-                # adjusts in the offline tool before filing.
-                "iamt": 0.0,
-                "camt": _num(total_tax / 2),
-                "samt": _num(total_tax / 2),
-                "csamt": 0.0,
+                "num": len(det["docs"]) + 1,
+                "from": r["from"],
+                "to": r["to"],
+                "totnum": int(r["total"]),
+                "cancel": int(r["cancelled"]),
+                "net_issue": int(r["total"]) - int(r["cancelled"]),
             }
         )
-    return {"data": rows}
+    return {"doc_det": [by_type[k] for k in sorted(by_type)]}
 
 
 def _fmt_date(d: Any) -> str:

@@ -293,7 +293,34 @@ def next_document_number(
     problem = gst_invoice_number_problem(number)
     if problem:
         raise InvoiceNumberError(problem)
+    log_document_number(db, number, series, owner)
     return number
+
+
+# GSTR-1 Table 13 (documents issued) reads this register: one row per number a
+# series handed out, whatever became of the document. Keys: number, series
+# ("", "T", "D", "C" of the mint; "TRF" the delivery-challan series of
+# transfers.generate_transfer_number), store_id, issued_at (naive UTC).
+DOCUMENT_LOG = "gst_document_log"
+
+
+def log_document_number(db, number: str, series: str, store_id: Optional[str]) -> None:
+    """Record ``number`` in the document register. A failed write REFUSES the
+    document (InvoiceNumberError): its serial is then an unused number, which
+    Table 13 reports as cancelled -- never an issued number Table 13 misses."""
+    try:
+        db.get_collection(DOCUMENT_LOG).insert_one(
+            {
+                "number": number,
+                "series": series,
+                "store_id": store_id,
+                "issued_at": utc_now().replace(tzinfo=None),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - fail CLOSED
+        raise InvoiceNumberError(
+            "the GST document register could not be written -- try again in a minute"
+        ) from exc
 
 
 def fy_start_year(dt: datetime) -> int:

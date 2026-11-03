@@ -88,13 +88,8 @@ class TestCollectionPersistence:
         ids = {t["id"] for t in transfers._all_transfers()}
         assert ids == {"a", "b"}
 
-    def test_transfer_number_uses_db_count(self, monkeypatch):
-        fake = _FakeColl()
-        fake.docs = {"x": {}, "y": {}}
-        monkeypatch.setattr(transfers, "_transfers_coll", lambda: fake)
-        num = transfers.generate_transfer_number()
-        assert num.startswith("TRF-")
-        assert num.endswith("-1003")  # 2 existing + 1001
+    # The DB-backed transfer number (atomic, per shop) is covered in
+    # test_gst_batch7_hsn_docs.py.
 
 
 class TestInMemoryFallback:
