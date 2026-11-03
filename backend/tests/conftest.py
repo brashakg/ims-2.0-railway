@@ -133,6 +133,97 @@ def pytest_collection_modifyitems(config, items):
     plugin is left active; pass -p no:randomly to honour this order."""
     items.sort(key=lambda it: str(getattr(it, "fspath", "") or it.nodeid))
     _skip_own_frozen_clock_modules(config, items)
+    _skip_real_mongo_tests_without_mongo(items)
+
+
+# ---------------------------------------------------------------------------
+# No local MongoDB -> skip the tests that need a real one, never on CI
+# ---------------------------------------------------------------------------
+# Tests that talk to a REAL Mongo do it through a fixture that opens a
+# pymongo.MongoClient (with serverSelectionTimeoutMS) and has NO mongomock
+# fallback. On a PC without Mongo each such module waits on its own connect
+# probe; here we probe ONCE per session (1.5 s) and skip them all up front with
+# one clear reason. CI (env CI set, real mongo:7.0 service) never probes and
+# never skips, so it runs exactly the same tests as before.
+NO_MONGO_REASON = "no MongoDB reachable - CI runs this"
+_mongo_reachable_cache = {}
+
+
+def _mongo_url():
+    return (
+        os.getenv("MONGODB_URL")
+        or os.getenv("MONGODB_URI")
+        or "mongodb://localhost:27017"
+    )
+
+
+def mongo_reachable(url=None, timeout_ms=1500):
+    """True when a real Mongo answers a ping at `url` (default: the same env
+    the tests use). Cached per URL for the session."""
+    url = url or _mongo_url()
+    if url not in _mongo_reachable_cache:
+        try:
+            from pymongo import MongoClient
+
+            c = MongoClient(url, serverSelectionTimeoutMS=timeout_ms)
+            try:
+                c.admin.command("ping")
+                _mongo_reachable_cache[url] = True
+            finally:
+                c.close()
+        except Exception:  # noqa: BLE001
+            _mongo_reachable_cache[url] = False
+    return _mongo_reachable_cache[url]
+
+
+_needs_real_mongo_cache = {}
+
+
+def _fixture_needs_real_mongo(func):
+    hit = _needs_real_mongo_cache.get(func)
+    if hit is None:
+        try:
+            import inspect
+
+            src = inspect.getsource(func)
+        except (OSError, TypeError):
+            src = ""
+        hit = (
+            "MongoClient(" in src
+            and "serverSelectionTimeoutMS" in src
+            and "mongomock" not in src
+        )
+        _needs_real_mongo_cache[func] = hit
+    return hit
+
+
+def _item_needs_real_mongo(item):
+    if item.get_closest_marker("integration"):
+        return True
+    info = getattr(item, "_fixtureinfo", None)
+    for defs in (getattr(info, "name2fixturedefs", None) or {}).values():
+        if defs and _fixture_needs_real_mongo(defs[-1].func):
+            return True
+    return False
+
+
+def _skip_real_mongo_tests_without_mongo(items, in_ci=None, reachable=None):
+    """Mark real-Mongo tests skip when no Mongo answers. `in_ci`/`reachable`
+    are injectable for the detector's own test."""
+    if in_ci is None:
+        in_ci = bool(os.getenv("CI"))
+    if in_ci:
+        return
+    needing = [it for it in items if _item_needs_real_mongo(it)]
+    if not needing:
+        return
+    if reachable is None:
+        reachable = mongo_reachable()
+    if reachable:
+        return
+    marker = pytest.mark.skip(reason=NO_MONGO_REASON)
+    for it in needing:
+        it.add_marker(marker)
 
 
 # Three BUG-104 files build their OWN frozen clock as a datetime subclass with a
