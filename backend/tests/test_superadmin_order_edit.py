@@ -875,3 +875,16 @@ def test_mixed_rate_correction_stamps_its_per_rate_split(client, auth_headers, w
         [row] = [d for d in docs if d.get("type") == "ISSUED"]
         assert row["by_rate"] == note["by_rate"]
         _assert_split(row["by_rate"], row["taxable"], row["tax"])
+
+
+def test_revised_invoice_refused_after_the_originals_month(client, auth_headers, wired):
+    """GST batch 5: an invoice issued in an earlier month is in that month's
+    GSTR-1; a revised invoice would replace it there. The change goes on a
+    credit / debit note instead (409), the original untouched."""
+    from datetime import datetime, timedelta
+
+    _seed_order(wired["order_repo"], invoice_number="INV/BOK-01/26-27/0031",
+                invoice_date=datetime.now() - timedelta(days=40))
+    resp = _revise(client, auth_headers)
+    assert resp.status_code == 409 and "credit/debit note" in resp.json()["detail"], resp.text
+    assert wired["order_repo"].find_by_id("ord-16")["invoice_number"] == "INV/BOK-01/26-27/0031"

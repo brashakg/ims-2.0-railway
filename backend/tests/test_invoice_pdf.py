@@ -76,8 +76,8 @@ class _FakeOrderRepo:
         self.minted += 1
         return f"BV/TEST-01/26-27/000{self.minted}"
 
-    def set_invoice(self, oid, number):
-        self._doc["invoice_number"] = number
+    def set_invoice(self, oid, number, stamp=None):
+        self._doc.update(stamp or {}, invoice_number=number)
         return number
 
 

@@ -443,7 +443,37 @@ async def superadmin_invoice_change(
             raise HTTPException(
                 status_code=400, detail=f"Cannot issue a revised invoice: {problem}"
             )
+        # GST batch 5: a revised invoice replaces the original in GSTR-1, so
+        # it is issued only inside the original's own month (cancel and
+        # re-issue before the return is filed). After that month the original
+        # stands as filed; the change goes on a credit / debit note.
+        from ...utils.event_time import parse_event_utc_naive
+        from ...utils.ist import ist_date_str, ist_today
+
+        issued = parse_event_utc_naive(order.get("invoice_date") or order.get("created_at"))
+        if issued is None or ist_date_str(issued)[:7] != ist_today().isoformat()[:7]:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Invoice {original_invoice} was issued in an earlier month and is "
+                    "already in that month's GSTR-1. Use the credit/debit note mode "
+                    "for this change."
+                ),
+            )
+        customer_doc = None
         try:
+            if db is not None:
+                customer_doc = db.get_collection("customers").find_one(
+                    {"customer_id": body.customer_id or order.get("customer_id")}
+                )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=503, detail="Cannot issue a revised invoice: the customer could not be read"
+            ) from exc
+        from .invoices import invoice_buyer_gstin
+
+        try:
+            buyer_gstin = invoice_buyer_gstin(customer_doc)
             new_invoice_number = repo.next_invoice_number(
                 order.get("store_id"), store_doc=store_doc
             )
@@ -474,6 +504,7 @@ async def superadmin_invoice_change(
             "pricing_model": gst.get("pricing_model", "inclusive"),
             "invoice_number": new_invoice_number,
             "invoice_date": datetime.now(),
+            "customer_gstin": buyer_gstin,
             "superseded_invoice_number": original_invoice,
             "invoice_revision_id": revised_doc["revision_id"],
             "superadmin_edited": True,

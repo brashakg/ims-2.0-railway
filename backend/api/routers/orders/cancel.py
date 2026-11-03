@@ -153,10 +153,26 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
         # undos are idempotent by construction. Without this, a partial restock
         # was permanent: the 400 below refused every retry forever.
         # ------------------------------------------------------------------
-        claimed = _claim_order_for_cancel(repo, order_id, reason, current_user)
+        claimed = _claim_order_for_cancel(
+            repo, order_id, reason, current_user, invoice=order.get("invoice_number")
+        )
         is_retry = False
         if claimed is None:
             fresh = repo.find_by_id(order_id) or {}
+            if fresh.get("status") != "CANCELLED" and (
+                fresh.get("invoice_number") or None
+            ) != (order.get("invoice_number") or None):
+                # A tax invoice was minted while this cancel ran (GST batch
+                # 5): the order stays a sale; a credit note reverses it.
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Tax invoice {fresh.get('invoice_number')} was issued on this "
+                        "order while it was being cancelled, so it was not cancelled. "
+                        "Return the items from Returns instead - that issues the "
+                        "credit note and the refund."
+                    ),
+                )
             if fresh.get("status") != "CANCELLED":
                 if fresh and fresh.get("status") in CANCELLABLE_STATUSES:
                     # Still cancellable -> we did not lose a race, the STATUS

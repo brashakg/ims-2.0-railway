@@ -382,8 +382,11 @@ def _claim_order_status(
 CANCELLABLE_STATUSES = [s for s, to in VALID_TRANSITIONS.items() if "CANCELLED" in to]
 
 
+_ANY_INVOICE = object()
+
+
 def _claim_order_for_cancel(
-    repo, order_id: str, reason: str, current_user: dict
+    repo, order_id: str, reason: str, current_user: dict, invoice=_ANY_INVOICE
 ) -> Optional[dict]:
     """Atomically flip ONE order to CANCELLED, only from a status the staff
     transition table (VALID_TRANSITIONS) lets cancel -- never a SHIPPED order
@@ -398,7 +401,15 @@ def _claim_order_for_cancel(
     Fail-soft: a collection that cannot do find_one_and_update (legacy mock)
     falls back to the previous read-check-update behaviour rather than blocking
     a cancel outright.
+
+    ``invoice``: the tax invoice number the caller's checks read (None: no
+    number). The claim lands only while the order still carries exactly it
+    (GST batch 5): an invoice minted between the door's read and this write
+    wins, so a cancel never lands on an invoice no credit note reverses.
     """
+    inv_match = {}
+    if invoice is not _ANY_INVOICE:
+        inv_match = {"invoice_number": invoice or {"$in": [None, ""]}}
     payload = {
         "status": "CANCELLED",
         # Nothing is owed on a cancelled order (PR #1264): no phantom balance
@@ -413,7 +424,7 @@ def _claim_order_for_cancel(
     if callable(updater):
         try:
             return updater(
-                {"order_id": order_id, "status": {"$in": CANCELLABLE_STATUSES}},
+                {"order_id": order_id, "status": {"$in": CANCELLABLE_STATUSES}, **inv_match},
                 {"$set": payload},
             )
         except Exception as exc:  # noqa: BLE001
@@ -425,6 +436,8 @@ def _claim_order_for_cancel(
             )
     existing = repo.find_by_id(order_id)
     if not existing or existing.get("status") not in CANCELLABLE_STATUSES:
+        return None
+    if inv_match and (existing.get("invoice_number") or None) != (invoice or None):
         return None
     # GATE ON THE WRITE. base_repository.update swallows exceptions and returns
     # False, so discarding this result meant a FAILED status write still ran the

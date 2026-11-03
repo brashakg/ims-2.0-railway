@@ -62,6 +62,15 @@ from .gst_itc import (
     _transfer_outward_bills,
 )
 
+def _invoice_gstin(order, live: str) -> str:
+    """The buyer GSTIN a sale files under: the one its tax invoice was minted
+    with (``customer_gstin``, frozen at the mint -- GST batch 5), else the
+    customer record's (an invoice minted before the stamp existed)."""
+    if isinstance(order, dict) and "customer_gstin" in order:
+        return str(order.get("customer_gstin") or "")
+    return live or ""
+
+
 def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
     """Compute the IMS GSTR-1 return for a month: THE return of
     `active_store`'s GSTIN -- GSTR-1 is filed per GSTIN, so it carries every
@@ -218,7 +227,13 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                 continue
             cust_id = str(order.get("customer_id", ""))
             cust_info = cust_map.get(cust_id, {})
-            customer_gstin = cust_info.get("gstin", "")
+            # The buyer GSTIN the tax invoice was minted with (GST batch 5),
+            # never the customer record read now; an invoice minted before
+            # the stamp existed reads the customer, as before.
+            customer_gstin = _invoice_gstin(order, cust_info.get("gstin", ""))
+            sale_cust = cust_docs.get(cust_id)
+            if "customer_gstin" in order and (sale_cust or customer_gstin):
+                sale_cust = {**(sale_cust or {}), "gstin": customer_gstin}
             customer_state = cust_info.get("state", "") or store_state
             customer_name = (
                 cust_info.get("name", "")
@@ -242,7 +257,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             # (_order_supply -- the order's own stamp, else the invoice's
             # state-code rule, org_validation.supply_interstate).
             is_inter_state, pos_code, pos_assumed = _order_supply(
-                order, _shop_doc(order.get("store_id")), cust_docs.get(cust_id)
+                order, _shop_doc(order.get("store_id")), sale_cust
             )
             items = order.get("items") or []
             # One item row per GST rate (GSTN `itms[]`), from the tax stamped
@@ -278,6 +293,24 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             # STRING created_at untouched by design (unknown frame), which
             # is exactly the old behaviour for the migrated orders.
             invoice_date = ist_date_str(created_raw) if created_raw else month + "-01"
+            # GST batch 5: the date the TAX INVOICE printed (invoice_date,
+            # stamped at the mint), when it falls in this month. An invoice
+            # minted in a later month than its order still files here, under
+            # the order's month, flagged for the CA.
+            inv_when = parse_event_utc_naive(order.get("invoice_date"))
+            if order.get("invoice_number") and inv_when is not None:
+                if from_dt <= inv_when < to_dt:
+                    invoice_date = ist_date_str(inv_when)
+                elif inv_when >= to_dt:
+                    validation_issues.append({
+                        "level": "error",
+                        "invoice": order.get("invoice_number"),
+                        "issue": (
+                            f"Tax invoice dated {ist_date_str(inv_when)} (after this month) "
+                            f"is filed here under its order's date {invoice_date} -- the "
+                            "CA must check which month it belongs to."
+                        ),
+                    })
             # The order's OWN persisted place of supply first (an online
             # order's delivery state -- the same record its IGST flag
             # above comes from); the customer doc's state is a returning
@@ -775,6 +808,8 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                     entry.get("gst_rate"), cn_tax, cn_taxable
                 )
                 _cn_oid = str((_ret_doc or {}).get("order_id") or "")
+                # The note's buyer = the GSTIN its invoice was minted with.
+                cust_gstin = _invoice_gstin(_parent(_cn_oid)[0], cust_gstin)
                 # The return's own per-rate back-out, scaled to this note --
                 # the ledger row's gst_rate is only the return's DOMINANT rate.
                 _gb = (_ret_doc or {}).get("gst_breakup")
@@ -923,7 +958,8 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                         "refReference": r_ref,
                         "noteType": "C",
                         "noteSection": _note_section(
-                            cust_info.get("gstin", ""), is_inter, r_oid
+                            _invoice_gstin(_parent(r_oid)[0], cust_info.get("gstin", "")),
+                            is_inter, r_oid
                         ),
                         "rateLines": _note_rate_lines(r_buckets, (r_cgst, r_sgst, r_igst)),
                         "creditNoteDate": (
@@ -938,7 +974,9 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                         "customerId": cust_id,
                         "customerName": cust_info.get("name", "")
                         or str(ret.get("customer_name", "") or ""),
-                        "customerGSTIN": cust_info.get("gstin", ""),
+                        "customerGSTIN": _invoice_gstin(
+                            _parent(r_oid)[0], cust_info.get("gstin", "")
+                        ),
                         "customerState": r_place,
                         "placeOfSupply": r_place,
                         "placeOfSupplyCode": r_code,
@@ -971,6 +1009,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             )
             d_oid = str(d.get("order_id") or "")
             d_cust = cust_map.get(str(d.get("customer_id") or ""), {})
+            d_gstin = _invoice_gstin(_parent(d_oid)[0], d_cust.get("gstin", ""))
             d_rate = _cn_bucket_rate(d.get("gst_rate"), dn["tax"], dn["taxable"])
             d_heads = (dn["cgst"], dn["sgst"], dn["igst"])
             # The per-rate raise admin_edit stamps (order_superadmin_edit.
@@ -988,12 +1027,12 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                 {
                     "refReference": d_ref,
                     "noteType": "D",
-                    "noteSection": _note_section(d_cust.get("gstin", ""), dn["inter"], d_oid),
+                    "noteSection": _note_section(d_gstin, dn["inter"], d_oid),
                     "rateLines": _note_rate_lines(d_buckets, d_heads),
                     "creditNoteDate": _credit_note_date_ist(d.get("created_at")) or (month + "-01"),
                     "customerId": str(d.get("customer_id") or ""),
                     "customerName": d_cust.get("name", "") or str(d.get("customer_name") or ""),
-                    "customerGSTIN": d_cust.get("gstin", ""),
+                    "customerGSTIN": d_gstin,
                     "customerState": d_place,
                     "placeOfSupply": d_place,
                     "placeOfSupplyCode": dn["code"],
