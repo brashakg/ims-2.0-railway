@@ -744,6 +744,9 @@ async def superadmin_invoice_change(
                     if isinstance(order.get("interstate"), bool)
                     else None
                 ),
+                # The SALE's store (its GSTIN files the note), never the
+                # SUPERADMIN's store picker -- the C-number is minted there too.
+                store_id=order.get("store_id"),
                 # No returns doc behind this note: the row names its parent.
                 order_id=order.get("order_id"),
                 note_number=note_doc["note_number"],

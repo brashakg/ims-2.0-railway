@@ -401,3 +401,72 @@ def test_a_debit_note_on_a_held_sale_files_in_neither_return(gstins, monkeypatch
     assert [c for c in rep["cdnr"] if c["noteType"] == "D"] == []
     assert any("BOK/D2627/0014" in str(i.get("invoice")) for i in rep["validation"]["issues"])
     assert r3b._compute_gstr3b(MONTH, STORE)["debitNotes"]["taxableValue"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Final review: the SUPERADMIN credit note files under the SALE's GSTIN
+# ---------------------------------------------------------------------------
+
+
+def test_a_superadmin_credit_note_files_under_the_sales_gstin_not_the_pickers(
+    client, gstins, monkeypatch
+):
+    """The owner's store picker is on the Pune shop (another GSTIN) while he
+    corrects a Jharkhand bill. REVERT CHECK: without admin_edit's
+    store_id=order['store_id'] the ISSUED row takes the token's active store,
+    so Pune's GSTR-1 nets a Jharkhand note and Jharkhand's never does."""
+    from datetime import timedelta
+
+    import api.dependencies as deps
+    from api.routers import finance as finance_module
+    from api.routers import orders as orders_module
+    from api.routers import returns as returns_module
+    from api.routers.auth import create_access_token
+    from database.repositories.audit_repository import AuditRepository
+    from database.repositories.customer_repository import CustomerRepository
+    from database.repositories.order_repository import OrderRepository
+
+    db = gstins
+    db.stores.update_one({"store_id": STORE}, {"$set": {"store_code": "BV-BOK-01"}})
+    order_repo = OrderRepository(db.orders)
+    customer_repo = CustomerRepository(db.customers)
+    monkeypatch.setattr(orders_module, "get_order_repository", lambda: order_repo)
+    monkeypatch.setattr(orders_module, "get_customer_repository", lambda: customer_repo)
+    monkeypatch.setattr(orders_module, "get_product_repository", lambda: None)
+    monkeypatch.setattr(orders_module, "get_walkin_counter_repository", lambda: None)
+    monkeypatch.setattr(orders_module, "_get_db", lambda: db)
+    monkeypatch.setattr(finance_module, "_get_db", lambda: db, raising=False)
+    monkeypatch.setattr(returns_module, "_get_db", lambda: db, raising=False)
+    monkeypatch.setattr(returns_module, "get_customer_repository", lambda: customer_repo)
+    monkeypatch.setattr(deps, "get_audit_repository", lambda: AuditRepository(db.audit_logs))
+
+    line = {"item_id": "line-1", "item_type": "FRAME", "category": "FRAME",
+            "product_name": "Test Frame", "quantity": 1, "discount_percent": 0}
+    order_repo.create({
+        "order_id": "O-SA-CN", "order_number": "ORD-SA-CN", "invoice_number": "INV/BOK/0001",
+        "store_id": STORE, "customer_id": "C-JH", "status": "CONFIRMED",
+        "items": [{**line, "unit_price": 1050.0, "discount_amount": 0, "item_total": 1050.0,
+                   "gst_rate": 5.0, "taxable_value": 1000.0, "tax_amount": 50.0}],
+        "subtotal": 1050.0, "grand_total": 1050.0, "tax_amount": 50.0, "tax_rate": 5.0,
+        "amount_paid": 1050.0, "balance_due": 0.0, "payment_status": "PAID",
+        "payments": [{"method": "CASH", "amount": 1050.0}],
+    })
+    token = create_access_token({
+        "user_id": "owner-1", "username": "owner", "roles": ["SUPERADMIN"],
+        "store_ids": [STORE, MH_STORE], "active_store_id": MH_STORE,
+    })
+    resp = client.put(
+        "/api/v1/orders/O-SA-CN/superadmin-invoice-change",
+        json={"mode": "CREDIT_NOTE", "reason": "Overcharged",
+              "items": [{**line, "unit_price": 840.0}]},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp.status_code == 200, resp.text
+    number = resp.json()["note_number"]
+    [issued] = list(db.credit_note_ledger.find({"type": "ISSUED"}))
+    assert (issued["note_number"], issued["store_id"]) == (number, STORE)
+
+    month = (datetime.utcnow() + timedelta(hours=5, minutes=30)).strftime("%Y-%m")
+    filed = {shop: [c.get("refReference") for c in r1._compute_gstr1(month, shop)["cdnr"]]
+             for shop in (STORE, MH_STORE)}
+    assert filed == {STORE: [number], MH_STORE: []}, filed
