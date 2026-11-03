@@ -73,7 +73,6 @@ const SEGMENT_LABELS: Record<string, string> = {
   'discount-rules': 'Discount Rules',
   menus: 'Menus',
   'refund-reviews': 'Refund Reviews',
-  'stock-tally': 'Stock Tally',
   'store-health': 'Store Health',
   ondc: 'ONDC Seller',
   shopify: 'Shopify Sync',

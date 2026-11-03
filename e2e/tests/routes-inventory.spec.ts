@@ -88,8 +88,10 @@ test('coverage has not silently shrunk', () => {
       'parameterised screen is probed only on a seeded id, through its `route` field; ' +
       '+3 redirect-only addresses retired into the one Reorder list (stock ' +
       'redesign S5): /catalog/buy-desk, /inventory/replenishment and ' +
-      '/inventory/low-stock, each a Navigate to /inventory/reorders). ' +
+      '/inventory/low-stock, each a Navigate to /inventory/reorders; +1 ' +
+      '/online-store/stock-tally, the retired Stock tally, a Navigate to the one ' +
+      'online-stock page /inventory/online-sync). ' +
       'If an exclusion is genuinely new and justified, raise the ceiling here in the ' +
       'same commit that adds it -- deliberately, not by accident.',
-  ).toEqual({ probedAtLeast: true, exclusions: 36 });
+  ).toEqual({ probedAtLeast: true, exclusions: 37 });
 });

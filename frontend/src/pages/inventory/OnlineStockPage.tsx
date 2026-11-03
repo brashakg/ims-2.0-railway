@@ -7,11 +7,16 @@
 // ("Recommended": each mapped shop's shelf minus the Shopify integration's
 // safety buffer, and 0 for a product blocked from online sale or no longer
 // sold -- the writer's own number; this page has no second buffer).
+// THE one online-stock page: the Online Store "Stock tally" retired into it
+// (its old address redirects here) and brought its SKU/name search, its
+// Held (POS) column and its honest load-failure state (a failed read is never
+// "No overselling risk").
 
 import { useCallback, useEffect, useState } from 'react';
-import { RefreshCcw, Loader2, AlertTriangle, CheckCircle2, ShoppingCart } from 'lucide-react';
+import { RefreshCcw, Loader2, AlertTriangle, CheckCircle2, ShoppingCart, Search } from 'lucide-react';
 import { onlineStockApi, type ReconcileItem, type ReconcileResult } from '../../services/api/onlineStock';
 import { storeApi } from '../../services/api/stores';
+import { classifyLoadError, type OnlineStoreLoadFailure } from '../../services/api/onlineStore';
 import { useToast } from '../../context/ToastContext';
 import { SHARES_ITEM_LABEL } from './sharedItem';
 
@@ -44,6 +49,12 @@ function listedOffRecommended(i: ReconcileItem): boolean {
   return typeof i.online === 'number' && typeof i.recommended === 'number' && i.online !== i.recommended;
 }
 
+// The retired tally's unit totals, over the online SKUs; one unknown row makes
+// the sum unknown ('—'), never a confident undercount.
+function sumOrDash(rows: ReconcileItem[], k: 'online' | 'in_store' | 'recommended'): number | string {
+  return rows.some((r) => typeof r[k] !== 'number') ? '—' : rows.reduce((a, r) => a + (r[k] as number), 0);
+}
+
 export default function OnlineStockPage() {
   const toast = useToast();
   const [data, setData] = useState<ReconcileResult | null>(null);
@@ -51,6 +62,8 @@ export default function OnlineStockPage() {
   const [storeId, setStoreId] = useState('');
   const [stores, setStores] = useState<StoreOpt[]>([]);
   const [onlyRisk, setOnlyRisk] = useState(true);
+  const [search, setSearch] = useState('');
+  const [failure, setFailure] = useState<OnlineStoreLoadFailure | null>(null);
 
   useEffect(() => {
     storeApi.getStores().then((r) => setStores(r?.stores || [])).catch(() => setStores([]));
@@ -60,7 +73,11 @@ export default function OnlineStockPage() {
     setLoading(true);
     try {
       setData(await onlineStockApi.reconcile({ store_id: storeId || undefined }));
+      setFailure(null);
     } catch (e) {
+      // The numbers are unknown, not zero: drop the last read, say why.
+      setData(null);
+      setFailure(classifyLoadError(e));
       toast.error(e instanceof Error ? e.message : 'Failed to load reconciliation');
     } finally { setLoading(false); }
   }, [storeId, toast]);
@@ -68,15 +85,25 @@ export default function OnlineStockPage() {
   useEffect(() => { load(); }, [load]);
 
   const s = data?.summary || {};
-  const items = (data?.items || []).filter((i) =>
-    onlyRisk ? (i.status === 'OVERSELL_RISK' || i.status === 'OVER_ALLOCATED' || i.status === 'SHARES_SHOPIFY_ITEM' || listedOffRecommended(i)) : true,
-  );
+  const q = search.trim().toLowerCase();
+  const searched = (data?.items || []).filter((i) => !q || [i.sku, i.name].some((v) => String(v ?? '').toLowerCase().includes(q)));
+  const atRisk = searched.filter((i) => i.status === 'OVERSELL_RISK' || i.status === 'OVER_ALLOCATED' || i.status === 'SHARES_SHOPIFY_ITEM' || listedOffRecommended(i));
+  const items = onlyRisk ? atRisk : searched;
   // An empty table never claims "no risk" for rows nobody could verify:
   // nothing verified (the live-listing read failed, or every row unknown)
   // vs some rows unverified (partial coverage) vs truly clear.
+  const onlineRows = (data?.items || []).filter((i) => i.status !== 'NOT_ONLINE');
+  const totals: [string, number | string, string][] = [
+    ['SKUs online', onlineRows.length, 'mapped to the website'],
+    ['Listed online', sumOrDash(onlineRows, 'online'), 'units live on Shopify'],
+    ['On-hand', sumOrDash(onlineRows, 'in_store'), 'units on the shelf'],
+    ['Sellable', sumOrDash(onlineRows, 'recommended'), 'units IMS sends'],
+  ];
   const unverified = (s.listed_unknown ?? 0) + (s.onhand_unknown ?? 0);
   const total = (data?.items || []).length;
-  const emptyText = data?.live_listings_unknown || (total > 0 && unverified >= total)
+  const emptyText = q
+    ? 'No SKUs match this search.'
+    : data?.live_listings_unknown || (total > 0 && unverified >= total)
     ? 'Nothing here could be verified right now — see the note above.'
     : !onlyRisk
       ? 'No products to show.'
@@ -131,12 +158,40 @@ export default function OnlineStockPage() {
           </select>
         </div>
         <label className="text-sm text-gray-600 flex items-center gap-1.5 pb-1.5">
-          <input type="checkbox" checked={onlyRisk} onChange={(e) => setOnlyRisk(e.target.checked)} /> Show only at-risk
+          <input type="checkbox" checked={onlyRisk} onChange={(e) => setOnlyRisk(e.target.checked)} /> Show only at-risk{data ? ` (${atRisk.length} of ${searched.length})` : ''}
         </label>
+        <div className="relative flex-1 min-w-[200px] max-w-sm">
+          <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            aria-label="Search by SKU or name"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by SKU or name…"
+            className="input-field w-full pl-9"
+          />
+        </div>
       </div>
 
       {loading ? (
         <div className="flex items-center gap-2 text-gray-500"><Loader2 className="w-4 h-4 animate-spin" /> Loading...</div>
+      ) : failure ? (
+        <div className="rounded-lg border border-red-200 bg-red-50 p-6 text-center">
+          <AlertTriangle className="w-8 h-8 mx-auto mb-2 text-red-400" />
+          <p className="text-sm font-medium text-red-900">
+            {failure === 'forbidden' ? 'No permission for this view' : "Couldn't load online stock"}
+          </p>
+          <p className="text-xs text-red-700 mt-1">
+            {failure === 'forbidden'
+              ? "Your role can't read this comparison. Ask an admin if you need access."
+              : 'The read failed — the numbers are unknown right now, not zero.'}
+          </p>
+          {failure !== 'forbidden' && (
+            <button type="button" onClick={load} className="mt-3 inline-flex items-center gap-1 text-xs font-medium text-red-700 hover:text-red-900">
+              <RefreshCcw className="w-3.5 h-3.5" /> Retry
+            </button>
+          )}
+        </div>
       ) : (
         <>
           {!data?.live_listings_unknown && <div className="grid grid-cols-3 gap-3 mb-4">
@@ -157,7 +212,17 @@ export default function OnlineStockPage() {
             </div>
           </div>}
 
-          <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+          {!data?.live_listings_unknown && <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+            {totals.map(([label, value, hint]) => (
+              <div key={label} className="bg-white border border-gray-200 rounded-lg p-4">
+                <p className="text-xs text-gray-500 mb-1">{label}</p>
+                <p className="text-xl font-semibold text-gray-900">{value}</p>
+                <p className="text-xs text-gray-400 mt-1">{hint}</p>
+              </div>
+            ))}
+          </div>}
+
+          <div className="bg-white border border-gray-200 rounded-lg overflow-x-auto">
             <table className="w-full text-sm">
               <thead className="bg-gray-50 text-gray-500 text-xs">
                 <tr>
@@ -166,12 +231,13 @@ export default function OnlineStockPage() {
                   <th className="text-right px-3 py-2">In-store</th>
                   <th className="text-right px-3 py-2">Online</th>
                   <th className="text-right px-3 py-2">Recommended</th>
+                  <th className="text-right px-3 py-2" title="Units held by POS (hold & recall). Online orders claim stock at ingest and never appear here.">Held (POS)</th>
                   <th className="text-left px-3 py-2">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {items.length === 0 ? (
-                  <tr><td colSpan={6} className="px-3 py-6 text-center text-gray-400">
+                  <tr><td colSpan={7} className="px-3 py-6 text-center text-gray-400">
                     {emptyText}
                   </td></tr>
                 ) : items.map((it) => (
@@ -181,6 +247,7 @@ export default function OnlineStockPage() {
                     <td className="px-3 py-2 text-right">{typeof it.in_store === 'number' ? it.in_store : '—'}</td>
                     <td className="px-3 py-2 text-right">{typeof it.online === 'number' ? it.online : '—'}</td>
                     <td className="px-3 py-2 text-right font-medium">{typeof it.recommended === 'number' ? it.recommended : '—'}</td>
+                    <td className="px-3 py-2 text-right text-gray-500">{it.held ?? 0}</td>
                     <td className="px-3 py-2">
                       <span className={`inline-flex items-center text-xs border rounded-full px-2 py-0.5 ${STATUS_STYLE[it.status]}`}>
                         {STATUS_LABEL[it.status]}

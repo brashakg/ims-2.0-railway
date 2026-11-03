@@ -50,7 +50,7 @@ from ..services.shopify_push import is_variant_of as _is_variant_of
 # (unpickable: no shelf, POS blocked) counted as in-store here while the writer
 # publishes 0 for it, and a real oversell classified OK on this screen after the
 # tile had stopped hiding it. Two online screens, one reader.
-from ..services.online_sync_health import _on_hand_by_product
+from ..services.online_sync_health import _on_hand_by_product, _reserved_by_product
 
 router = APIRouter()
 
@@ -257,6 +257,8 @@ async def online_stock_reconcile(
 
     pids = [p.get("product_id") for p in products if p.get("product_id")]
     on_hand = _on_hand_by_product(db, pids, store_id)
+    # Units on a POS hold (RESERVED): display only, never an oversell input.
+    held = _reserved_by_product(db, pids, store_id)
     skus = [p.get("sku") for p in products if p.get("sku")]
     from ..services.online_stock_writeback import _safety_buffer
     from ..services.online_sync_health import live_listed_qty_for_skus, rule_by_location
@@ -318,6 +320,7 @@ async def online_stock_reconcile(
                 "name": f"{p.get('brand', '') or ''} {p.get('model', '') or ''}".strip(),
                 # UNKNOWN on-hand is None (ONHAND_UNKNOWN), never a confident 0.
                 "in_store": None if on_hand is None else on_hand.get(p.get("product_id"), 0),
+                "held": held.get(p.get("product_id"), 0),
                 # A shared SKU is live but the writer refuses it: its listed
                 # number is not shown as a confident 0 (None = unknown).
                 "online": None if shares else (listed if is_online is not False else 0),
