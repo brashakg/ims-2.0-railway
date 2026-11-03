@@ -1263,7 +1263,7 @@ def _booking_unsettled(db, existing: Dict[str, Any], historical: bool) -> Dict[s
     {"booking_unsettled": why}, merged into the replay's answer: every caller
     goes on exactly as before (a duplicate mid-claim is normal), and the
     webhook drain reads the flag as NOT DONE, so the inbox retries it."""
-    if historical:
+    if historical or existing.get("is_test"):  # a test order claims nothing (ruling 27)
         return {}
     # A creator that stopped between the order insert and its total-mismatch
     # task: raise it now (a no-op once the order is stamped task_raised).

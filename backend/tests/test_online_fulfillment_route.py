@@ -6074,3 +6074,34 @@ def test_a_split_wait_switched_off_is_not_filled_by_the_other_shop(world, monkey
     assert getattr(out, "status_code", None) == 409, out
     assert _open_miss_tasks(world, oid) == ["BV-RAN-01"]
     assert _preorder_notes(world, oid)["BV-RAN-01"].startswith("No longer a pre-order")
+
+
+def test_a_test_order_replayed_after_the_settle_window_claims_no_stock(world, monkeypatch):
+    """Owner ruling 27: a Shopify test order claims no stock. Its stored shape
+    (route, no breakdown) is the SF03 crashed-booking shape, so a replay
+    (orders/updated on any edit) 15 minutes later used to claim a real unit
+    for it -- one never released, since a test order's cancel and refund are
+    skipped. The replay leaves the shelf alone."""
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    world["shop"].fo(FO_1, LOC_BOK)
+    payload = {**_order(53190), "test": True}
+    asyncio.run(route_mod.map_routed_order(payload, db, topic="orders/create"))
+    order = db.orders.find_one({"shopify_order_id": "53190"})
+    assert order["is_test"] and "fulfillment_breakdown" not in order
+
+    _sf03_age(db, "53190")
+    from api.services import shopify_ingest
+
+    raised = []
+    monkeypatch.setattr(shopify_ingest, "_raise_total_mismatch_task", lambda _db, o: raised.append(o))
+    res = asyncio.run(route_mod.map_routed_order(payload, db, topic="orders/updated"))
+    assert not res.get("booking_recovered"), res
+    assert raised == [], "a test order raises no total-mismatch task"
+    order = db.orders.find_one({"shopify_order_id": "53190"})
+    assert "fulfillment_breakdown" not in order
+    assert _sold_at(db, order["order_id"]) == []
+    assert db.stock_units.count_documents({"store_id": "BV-BOK-01", "status": "AVAILABLE"}) == 2
+    # Re-map / clear-hold reach the same claim directly: it claims nothing either.
+    assert route_mod.finish_crashed_booking(db, order) is None
+    assert db.stock_units.count_documents({"store_id": "BV-BOK-01", "status": "AVAILABLE"}) == 2
