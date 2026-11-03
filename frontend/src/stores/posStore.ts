@@ -632,7 +632,10 @@ export const usePOSStore = create<POSState>()(
       parkCurrentSale: (meta?: { auto?: boolean; heldBy?: string; storeId?: string | null }) => {
         const state = get();
         const cart = state.cart || [];
-        if (cart.length === 0) return null; // nothing to park
+        // Nothing to park -- unless a press of this bill is pending: then even
+        // an emptied cart keeps its key (it may already be a sale; money
+        // review 29).
+        if (cart.length === 0 && !billKeyEntry(billIdOf(state))?.pending) return null;
         const auto = meta?.auto === true;
         const id = `hold-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
         let bills: any[] = [];
@@ -682,7 +685,7 @@ export const usePOSStore = create<POSState>()(
         try {
           localStorage.setItem('ims-held-bills', JSON.stringify(bills));
         } catch {
-          /* quota / private-mode: best-effort, don't throw */
+          return null; // quota / private-mode: nothing was parked (never throw)
         }
         return id;
       },
@@ -755,15 +758,15 @@ export const usePOSStore = create<POSState>()(
         if (!pending?.pending) return false;
         let held: any[] = [];
         try { held = JSON.parse(localStorage.getItem('ims-held-bills') || '[]'); } catch { held = []; }
-        if (!(Array.isArray(held) && held.some((b) => b?.bill_key?.key === pending.key))) {
-          get().parkCurrentSale({ auto: true, heldBy: userId, storeId });
-        }
-        return true;
+        if (Array.isArray(held) && held.some((b) => b?.bill_key?.key === pending.key)) return true;
+        // Honour the park's result: nothing parked -> false (money review 29).
+        return get().parkCurrentSale({ auto: true, heldBy: userId, storeId }) !== null;
       },
 
       clearAllOnLogout: (userId?: string, storeId?: string | null) => {
-        get().parkIfPending(userId, storeId);
-        clearBillKey(billIdOf(get()));
+        // A pending key is dropped only once its bill is parked with it.
+        const pending = billKeyEntry(billIdOf(get()))?.pending;
+        if (get().parkIfPending(userId, storeId) || !pending) clearBillKey(billIdOf(get()));
         set(initialState);
         try {
           localStorage.removeItem('ims-pos-draft');

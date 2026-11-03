@@ -122,6 +122,19 @@ export function settleAfterPress(
   if (res.definite || !res.sent) settleBillKey(fingerprint);
 }
 
+/** The login page's "Clear cache": everything goes EXCEPT the till's bill
+ *  keys and held bills -- a pending key there may stand for a sale that was
+ *  saved (money review 29). */
+export function clearCacheKeepingBills(): void {
+  const keep: Record<string, string> = {};
+  for (const k of [STORAGE_KEY, 'ims-held-bills']) {
+    const v = localStorage.getItem(k);
+    if (v !== null) keep[k] = v;
+  }
+  localStorage.clear();
+  for (const [k, v] of Object.entries(keep)) localStorage.setItem(k, v);
+}
+
 /** Drop THIS bill's key (never another tab's or a held bill's). */
 export function clearBillKey(fingerprint: string): void {
   const map = readAll(Date.now());

@@ -118,3 +118,21 @@ describe('money review 28: Discard is what lets a pending bill go', () => {
     confirm.mockRestore();
   });
 });
+
+describe('money review 29: an emptied pending bill in the Held list', () => {
+  it('shows 0 items with the may-already-be-paid mark, and Discard asks first', () => {
+    localStorage.clear();
+    localStorage.setItem('ims-held-bills', JSON.stringify([{
+      id: 'h0', customer: 'Walk-in', items: 0, total: 0, heldAt: '', held_by: 'u1', store_id: 'S1', state: {},
+      bill_key: { key: 'k0', at: Date.now(), pending: true },
+    }]));
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    render(<HeldBillsControls />);
+    fireEvent.click(screen.getByRole('button', { name: /Held/ }));
+    expect(screen.getByText(/0 items/)).toBeTruthy();
+    expect(screen.getByText('May already be paid - check Orders')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(confirm).toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+});
