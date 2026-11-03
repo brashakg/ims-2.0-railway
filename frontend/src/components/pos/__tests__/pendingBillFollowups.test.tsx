@@ -97,23 +97,30 @@ describe('orphan warning on till load', () => {
   const load = async () => {
     vi.resetModules();
     const { usePOSStore } = await import('../../../stores/posStore');
-    const { HeldBillsControls } = await import('../HeldBillsControls');
+    const { OrphanBillWarning } = await import('../OrphanBillWarning');
     const { billKeyEntry } = await import('../posBillKey');
-    return { usePOSStore, HeldBillsControls, billKeyEntry };
+    return { usePOSStore, OrphanBillWarning, billKeyEntry };
   };
 
   it('lists only the pending key with no bill here, and shows ONE warning', async () => {
     seed();
-    const { usePOSStore, HeldBillsControls } = await load();
+    const { usePOSStore, OrphanBillWarning } = await load();
     expect(usePOSStore.getState().orphan_bill_ids).toEqual(['bill-gone']);
-    render(<HeldBillsControls />);
+    render(<OrphanBillWarning />);
     expect(screen.getAllByText(WARNING)).toHaveLength(1);
+  });
+
+  it('sits in the page flow, never fixed over Complete sale', async () => {
+    seed();
+    const { OrphanBillWarning } = await load();
+    render(<OrphanBillWarning />);
+    expect(screen.getByRole('alert').className).not.toMatch(/\b(fixed|absolute|sticky)\b/);
   });
 
   it('dismiss is a confirm: cancelled keeps it; confirmed clears only the orphan key', async () => {
     seed();
-    const { usePOSStore, HeldBillsControls, billKeyEntry } = await load();
-    render(<HeldBillsControls />);
+    const { usePOSStore, OrphanBillWarning, billKeyEntry } = await load();
+    render(<OrphanBillWarning />);
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
     expect(screen.queryByText(WARNING)).not.toBeNull();
@@ -132,8 +139,8 @@ describe('orphan warning on till load', () => {
     const keys = JSON.parse(localStorage.getItem('ims_pos_bill_keys')!);
     delete keys['bill-gone'];
     localStorage.setItem('ims_pos_bill_keys', JSON.stringify(keys));
-    const { HeldBillsControls } = await load();
-    render(<HeldBillsControls />);
+    const { OrphanBillWarning } = await load();
+    render(<OrphanBillWarning />);
     expect(screen.queryByText(WARNING)).toBeNull();
   });
 });

@@ -77,25 +77,6 @@ export function HeldBillsControls() {
         Discard bill
       </button>
 
-      {/* A pending key found on till load with no bill here (money review
-          follow-up): one warning; dismissing it is a confirm, like Discard. */}
-      {(store.orphan_bill_ids || []).length > 0 && (
-        <div role="alert" className="fixed inset-x-4 bottom-4 z-[60] mx-auto max-w-md flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-800 shadow-lg">
-          <span className="flex-1">A sale may already be paid but is no longer on this till - check Orders</span>
-          <button
-            type="button"
-            onClick={() => {
-              if (window.confirm('Have you checked Orders? Dismissing clears this warning for good.')) {
-                store.dismissOrphanBillKeys();
-              }
-            }}
-            className="min-h-[44px] px-3 rounded-lg border border-red-200 bg-white text-[11px] font-semibold text-red-700 hover:bg-red-100"
-          >
-            Dismiss
-          </button>
-        </div>
-      )}
-
       {recallOpen && (
         <div
           className="fixed inset-0 z-[60] bg-black/40 flex items-center justify-center p-4"
