@@ -899,6 +899,38 @@ def _cn_parent_held(db, ret_doc, cache) -> bool:
     return cache[oid]
 
 
+def _debit_notes(db, shops, from_dt, to_dt, held_cache, inter_cache, shop_doc) -> list:
+    """The customer DEBIT notes (a SUPERADMIN post-invoice change that raised
+    the bill, admin_edit -> ``debit_note_ledger``) the GSTIN's shops issued in
+    [from_dt, to_dt): ONE reader for GSTR-1 (CDNR / CDNUR / B2CS, note type D)
+    and GSTR-3B Table 3.1(a), so the two returns add the same tax. Each row:
+    ``{doc, taxable, tax, inter, code, cgst, sgst, igst}`` -- the note's own
+    stamped amounts, under the head and place of supply its SALE filed
+    (_return_supply). A note whose sale is held off the returns is not filed
+    (``held: True``). A read failure RAISES (the doors answer 503)."""
+    from ...services.gst_rates import split_gst
+    from ...utils.ist import instant_in_window_query
+
+    rows = []
+    for d in db.get_collection("debit_note_ledger").find(
+        {"store_id": {"$in": list(shops)}, **instant_in_window_query("created_at", from_dt, to_dt)}
+    ):
+        if not isinstance(d, dict):
+            continue
+        tax = round(float(d.get("tax_amount") or 0.0), 2)
+        taxable = round(float(d.get("taxable_amount") or 0.0), 2)
+        if tax <= 0 and taxable <= 0:
+            continue
+        if _cn_parent_held(db, d, held_cache):
+            rows.append({"doc": d, "held": True})
+            continue
+        inter, code = _return_supply(db, d, shop_doc(d.get("store_id")), inter_cache)
+        cgst, sgst, igst = split_gst(tax, inter)
+        rows.append({"doc": d, "held": False, "taxable": taxable, "tax": tax, "inter": inter,
+                     "code": code, "cgst": cgst, "sgst": sgst, "igst": igst})
+    return rows
+
+
 def _cn_foreign_store(ret_doc, active_store) -> bool:
     """True when a ledger row's return belongs to a DIFFERENT store's GSTIN.
 

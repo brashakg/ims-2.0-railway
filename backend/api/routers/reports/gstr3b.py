@@ -36,6 +36,7 @@ from ...services.gst_rates import split_gst
 from .gst_itc import (
     _cn_foreign_store,
     _cn_parent_held,
+    _debit_notes,
     _gstin_bound,
     _itc_from_vendor_bills,
     _itc_gstin_from_vendor_bills,
@@ -245,6 +246,25 @@ def _credit_note_totals(db, active_store, year, mon, last_day):
     return round(igst, 2), round(cgst, 2), round(sgst, 2), round(taxable, 2)
 
 
+def _debit_note_totals(db, shops, year, mon):
+    """(igst, cgst, sgst, taxable) of the customer DEBIT notes the GSTIN's
+    shops issued in the month -- ADDED to Table 3.1(a): a bill raised after
+    its invoice is more outward supply. The rows GSTR-1 files under note type
+    D (gst_itc._debit_notes, one reader); a held sale's note adds nothing."""
+    if db is None:
+        return 0.0, 0.0, 0.0, 0.0
+    from_dt, to_dt = ist_month_window_utc(year, mon)
+    docs: dict = {}
+
+    def _st(sid):
+        if sid not in docs:
+            docs[sid] = db.get_collection("stores").find_one({"store_id": sid}) or {}
+        return docs[sid]
+
+    rows = [d for d in _debit_notes(db, shops, from_dt, to_dt, {}, {}, _st) if not d["held"]]
+    return tuple(round(sum(d[k] for d in rows), 2) for k in ("igst", "cgst", "sgst", "taxable"))
+
+
 def _transfer_outward_totals(db, active_store, year, mon, last_day):
     """Sum (igst, cgst, sgst, taxable) of the sender-side transfer mirror bills
     for GSTR-3B Table 3.1(a). Sums the SAME header fields the receiver's ITC
@@ -398,6 +418,7 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
     # Credit-note totals + the per-head excess the zero-clamp would otherwise
     # swallow SILENTLY (filled below when a DB is present).
     cn_igst = cn_cgst = cn_sgst = cn_taxable = 0.0
+    dn_igst = dn_cgst = dn_sgst = dn_taxable = 0.0
     # Table 3.2: inter-state supplies to UNREGISTERED buyers, per place of
     # supply -- GSTR-1's B2CL + inter-state B2CS rows of this GSTIN (the same
     # orders, head and place code), never a second rule.
@@ -514,6 +535,13 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             out_cgst += t_cgst
             out_sgst += t_sgst
             out_taxable += t_taxable
+
+        # Customer debit notes (a bill raised after its invoice) ADD to 3.1(a).
+        dn_igst, dn_cgst, dn_sgst, dn_taxable = _debit_note_totals(db, filing, year, mon)
+        out_igst += dn_igst
+        out_cgst += dn_cgst
+        out_sgst += dn_sgst
+        out_taxable += dn_taxable
 
         # Table 3.1(a) is NET of credit notes - goods that came back are not an
         # outward supply. Clamped at zero: a month with more refunds than sales
@@ -654,6 +682,13 @@ def _compute_gstr3b(month: str, active_store: str, shops=None, db=None) -> dict:
             "taxableValue": _r(cn_taxable),
         },
         "creditNoteCarryForward": cn_carry,
+        # What Table 3.1(a) was RAISED by: customer debit notes in the period.
+        "debitNotes": {
+            "integratedTax": _r(dn_igst),
+            "centralTax": _r(dn_cgst),
+            "stateTax": _r(dn_sgst),
+            "taxableValue": _r(dn_taxable),
+        },
         # Table 3.1(d): inward supplies liable to reverse charge -- the buyer's
         # own GST liability on RCM purchases (NEW-GST-RCM).
         "inwardSuppliesReverseChargeValue": _r(rcm_taxable),

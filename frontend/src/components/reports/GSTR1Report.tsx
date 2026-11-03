@@ -51,6 +51,8 @@ interface GSTR1B2CSummary {
 // (its shop's C / D series, e.g. BOK02/C2627/0001), filed in full.
 interface GSTR1Note {
   refReference: string;
+  // 'D' = a debit note (the bill was raised after its invoice); else credit.
+  noteType?: 'C' | 'D';
   creditNoteDate: string;
   customerName: string;
   customerGSTIN?: string;
@@ -408,7 +410,10 @@ export function GSTR1Report() {
           <tbody>
             {notes.map((note, idx) => (
               <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50">
-                <td className="px-4 py-3 text-sm font-mono text-gray-900">{note.refReference}</td>
+                <td className="px-4 py-3 text-sm font-mono text-gray-900">
+                  {note.refReference}
+                  {note.noteType === 'D' && <span className="ml-2 text-xs font-sans text-amber-700">Debit note</span>}
+                </td>
                 <td className="px-4 py-3 text-sm text-gray-600">{new Date(note.creditNoteDate).toLocaleDateString('en-IN')}</td>
                 <td className="px-4 py-3 text-sm text-gray-900">{note.customerName}</td>
                 <td className="px-4 py-3 text-sm font-mono text-gray-600">{note.customerGSTIN}</td>

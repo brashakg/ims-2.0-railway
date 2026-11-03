@@ -125,10 +125,16 @@ def aggregate_gstr1(store_reports: List[Dict[str, Any]]) -> Dict[str, Any]:
     deemed_sgst = sum(_f(r.get("sgst")) for r in deemed)
     deemed_igst = sum(_f(r.get("igst")) for r in deemed)
 
-    cdnr_taxable = sum(_f(c.get("taxableValue")) for c in cdnr)
+    # NET reduction of the notes: a debit note (noteType D) counts against.
+    def _ns(c):
+        return -1 if c.get("noteType") == "D" else 1
+
+    cdnr_taxable = sum(_ns(c) * _f(c.get("taxableValue")) for c in cdnr)
     cdnr_tax = sum(
-        _f(c.get("taxValue"))
-        or (_f(c.get("cgst")) + _f(c.get("sgst")) + _f(c.get("igst")))
+        _ns(c) * (
+            _f(c.get("taxValue"))
+            or (_f(c.get("cgst")) + _f(c.get("sgst")) + _f(c.get("igst")))
+        )
         for c in cdnr
     )
 
