@@ -17,6 +17,7 @@
 import { useEffect, useState } from 'react';
 import { X, Check } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { istDayString } from '../../utils/datetime';
 
 export interface LensFittingFormValue {
   dia: string;
@@ -54,16 +55,15 @@ interface LensFittingFormModalProps {
   isSaving?: boolean;
 }
 
-const today = () => new Date().toISOString().slice(0, 10);
+// IST calendar day, not UTC (00:00-05:30 IST would otherwise be yesterday).
+const today = () => istDayString(Date.now()) ?? '';
 const nowHHMM = () => {
   const d = new Date();
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 };
 const defaultReceive = () => {
   // Lens suppliers typically deliver in 3-5 working days; default +5
-  const d = new Date();
-  d.setDate(d.getDate() + 5);
-  return d.toISOString().slice(0, 10);
+  return istDayString(Date.now() + 5 * 24 * 60 * 60 * 1000) ?? '';
 };
 
 export function LensFittingFormModal({

@@ -32,6 +32,7 @@ import type {
   FootfallEntryStatus,
 } from '../../types';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { istDayString } from '../../utils/datetime';
 
 const EDIT_ROLES = new Set([
   'SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER',
@@ -49,8 +50,7 @@ function hasAnyRole(
 
 function todayIso(): string {
   // Store-local (IST) day; the server validates against IST too.
-  const ist = new Date(Date.now() + (5 * 60 + 30) * 60 * 1000);
-  return ist.toISOString().slice(0, 10);
+  return istDayString(Date.now()) ?? '';
 }
 
 interface StaffRow {

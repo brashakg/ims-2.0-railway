@@ -22,6 +22,7 @@ import {
 import type { DiscountApprovalNeed } from './DiscountApprovalPanel';
 import { getErrorDetail, getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 import { WRITE_UNCONFIRMED_MESSAGE } from '../../services/api/client';
+import { istDayString } from '../../utils/datetime';
 
 // The order body, its lines and THE bill fingerprint live in orderPayload.
 export { mapCategory, orderPayloadOf, billFingerprint } from './orderPayload';
@@ -405,8 +406,6 @@ async function pressOnce(
     const { frameItem, lensItem } = workshopItemsOf(cartItems);
     if (store.sale_type === 'prescription_order' && store.prescription && (frameItem || lensItem)) {
       try {
-        const expectedDate = new Date();
-        expectedDate.setDate(expectedDate.getDate() + 5);
         const jobResp = await workshopApi.createJob({
           order_id: result.order_id,
           frame_details: frameItem ? {
@@ -425,7 +424,7 @@ async function pressOnce(
             .map((i: any) => `${i.name}: ${i.item_note}`)
             .join('; ') || undefined,
           special_notes: store.cart_note || undefined,
-          expected_date: expectedDate.toISOString().split('T')[0],
+          expected_date: istDayString(Date.now() + 5 * 24 * 60 * 60 * 1000) ?? '',
         });
         // Fitting modal path: the caller opens the modal with this jobId —
         // the POS stays in its current step; the modal advances to

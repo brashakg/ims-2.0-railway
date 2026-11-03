@@ -221,6 +221,10 @@ export const NAV_GROUPS: NavGroup[] = [
       // accountant confirmation. The /online-store/refund-reviews route already
       // admits ACCOUNTANT, but the "Online Store" nav item does not -- this gives
       // accountants a nav path without widening the Online Store module item.
+      // Accounts finish refunds / give-backs waiting for a record (PR #1264).
+      // /returns already admits ACCOUNTANT and shows it the Needs-completing
+      // panel only (no return desk); admins reach it from the Returns row.
+      { id: 'needs-completing', label: 'Needs completing', to: '/returns', icon: 'clipboard', requireRoles: ['ACCOUNTANT'] },
       { id: 'online-refunds', label: 'Online Refunds', to: '/online-store/refund-reviews', icon: 'receipt', requireRoles: ['SUPERADMIN', 'ADMIN', 'ACCOUNTANT'] },
       // B2B invoices -> Tally: e-invoice + e-way bill issued in Tally (owner
       // decision). Export console + reminder worklist; finance-admin only.
