@@ -6,7 +6,7 @@
 // Persists draft cart to localStorage so sales aren't lost on browser crash.
 
 import { create } from 'zustand';
-import { billKeyEntry, clearBillKey, putBillKey } from '../components/pos/posBillKey';
+import { billKeyEntry, clearBillKey, onBillKeyPending, pendingBillIds, putBillKey } from '../components/pos/posBillKey';
 
 /** Why the till's bill (with its key and saved draft) may be dropped
  *  (money review 30). A bill whose press is PENDING may already be a sale:
@@ -21,6 +21,15 @@ import { SIGNED_OUT_EVENT } from '../services/api/signOutEvent';
 const newBillId = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto
   ? crypto.randomUUID() : `bill-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 export const billIdOf = (s: any): string => (s && s.bill_id) || '';
+
+/** Pending bill keys whose bill is neither the live draft's nor a held bill's:
+    a sale that may be paid but is no longer on this till. */
+function orphanBillIds(liveBillId: string): string[] {
+  let held: any[] = [];
+  try { held = JSON.parse(localStorage.getItem('ims-held-bills') || '[]'); } catch { held = []; }
+  const heldIds = new Set((Array.isArray(held) ? held : []).map((b) => b?.state?.bill_id).filter(Boolean));
+  return pendingBillIds().filter((id) => id !== liveBillId && !heldIds.has(id));
+}
 
 /** THE guard (money reviews 30-31): may this bill be dropped for this
  *  reason? A 'success' names the bill that sold: it drops only THAT bill. */
@@ -44,19 +53,26 @@ import { resolveGstRate, isInclusivePricing } from '../constants/gstRuntime';
 // Writes are batched and delayed 500ms. Reads are instant.
 // ============================================================================
 
+let draftTimer: ReturnType<typeof setTimeout> | null = null;
+let draftQueued: [string, string] | null = null;
+/** Write the queued draft now (a press marking its key pending must not wait 500 ms). */
+function flushDraft(): void {
+  if (draftTimer) clearTimeout(draftTimer);
+  draftTimer = null;
+  const q = draftQueued;
+  draftQueued = null;
+  if (q) try { localStorage.setItem(q[0], q[1]); } catch { /* quota exceeded */ }
+}
+
 const debouncedLocalStorage = {
   getItem: (name: string): string | null => {
     return localStorage.getItem(name);
   },
-  setItem: (() => {
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-    return (name: string, value: string) => {
-      if (timeout) clearTimeout(timeout);
-      timeout = setTimeout(() => {
-        try { localStorage.setItem(name, value); } catch { /* quota exceeded */ }
-      }, 500);
-    };
-  })(),
+  setItem: (name: string, value: string) => {
+    draftQueued = [name, value];
+    if (draftTimer) clearTimeout(draftTimer);
+    draftTimer = setTimeout(flushDraft, 500);
+  },
   removeItem: (name: string) => {
     localStorage.removeItem(name);
   },
@@ -216,6 +232,8 @@ export interface POSState {
   bill_id: string | null;
   /** The store the bill was made at (with its id): its key replays only there. */
   bill_store_id: string | null;
+  /** Pending bill keys found on till load with no bill here (see orphanBillIds). */
+  orphan_bill_ids: string[];
 
   // Customer loyalty
   customerLoyaltyPoints: number;
@@ -299,6 +317,8 @@ export interface POSState {
    *  for a reason that is safe for it; returns false (and touches nothing)
    *  when the bill is pending and the reason is not success/discard/parked. */
   resetTransaction: (reason: BillDropReason, soldBillId?: string | null) => boolean;
+  /** The cashier confirmed the orphan warning: drop those keys. */
+  dismissOrphanBillKeys: () => void;
   /** This bill's id, made now if it has none yet. */
   ensureBillId: () => string;
   clearAllOnLogout: (userId?: string, storeId?: string | null) => boolean;
@@ -438,6 +458,7 @@ const initialState = {
   order_number: null,
   bill_id: null,
   bill_store_id: null,
+  orphan_bill_ids: [] as string[],
   is_processing: false,
   customerLoyaltyPoints: 0,
   appliedVoucher: undefined,
@@ -636,10 +657,16 @@ export const usePOSStore = create<POSState>()(
       // --- Reset ---
       resetTransaction: (reason: BillDropReason, soldBillId?: string | null) => {
         if (!mayDropBill(get(), reason, soldBillId)) return false;
-        const { store_id, salesperson_id, salesperson_name } = get();
+        const { store_id, salesperson_id, salesperson_name, orphan_bill_ids } = get();
         clearBillKey(billIdOf(get())); // a new sale is a new press (only THIS bill's key)
-        set({ ...initialState, store_id, salesperson_id, salesperson_name });
+        set({ ...initialState, store_id, salesperson_id, salesperson_name, orphan_bill_ids });
         return true;
+      },
+
+      dismissOrphanBillKeys: () => {
+        const still = orphanBillIds(billIdOf(get())); // re-checked: never the live or a held bill
+        for (const id of get().orphan_bill_ids || []) if (still.includes(id)) clearBillKey(id);
+        set({ orphan_bill_ids: [] });
       },
 
       // --- Park/Hold: snapshot the CURRENT cart onto the held-bills queue ---
@@ -730,7 +757,7 @@ export const usePOSStore = create<POSState>()(
         heldStoreId: string | null | undefined, reason: BillDropReason) => {
         if (!mayDropBill(get(), reason)) return false; // the bill being replaced is guarded too
         clearBillKey(billIdOf(get())); // the bill being replaced
-        const { store_id, salesperson_id, salesperson_name } = get();
+        const { store_id, salesperson_id, salesperson_name, orphan_bill_ids } = get();
         const snap = snapshot || {};
         const cart: CartLineItem[] = (Array.isArray(snap.cart) ? snap.cart : []).map(migrateLegacyItemNote);
         const percent = snap.cart_discount_percent || 0;
@@ -739,6 +766,7 @@ export const usePOSStore = create<POSState>()(
           store_id,
           salesperson_id,
           salesperson_name,
+          orphan_bill_ids,
           sale_type: snap.sale_type || initialState.sale_type,
           customer: snap.customer ?? null,
           patient: snap.patient ?? null,
@@ -792,7 +820,7 @@ export const usePOSStore = create<POSState>()(
         const reason = get().parkIfPending(userId, storeId);
         if (!reason || !mayDropBill(get(), reason)) return false;
         clearBillKey(billIdOf(get()));
-        set(initialState);
+        set({ ...initialState, orphan_bill_ids: get().orphan_bill_ids });
         try {
           localStorage.removeItem('ims-pos-draft');
         } catch { /* ignore */ }
@@ -942,6 +970,7 @@ export const usePOSStore = create<POSState>()(
         is_processing: false,
         order_id: null,
         order_number: null,
+        orphan_bill_ids: [],
       }),
       // Safe merge: ensure arrays are never undefined after hydration and
       // backfill Phase 6.7 fields if the persisted draft predates them.
@@ -963,11 +992,19 @@ export const usePOSStore = create<POSState>()(
           if (state.cart_discount_percent === undefined) state.cart_discount_percent = 0;
           if (state.cart_discount_amount === undefined) state.cart_discount_amount = 0;
           if (state.cart_discount_reason === undefined) state.cart_discount_reason = null;
+          state.orphan_bill_ids = orphanBillIds(billIdOf(state));
         }
       },
     }
   )
 );
+
+// The moment a press marks the bill's key pending, the draft is saved WITH
+// its bill id (and, now pending, its customer) -- not 500 ms later.
+onBillKeyPending(() => {
+  usePOSStore.setState({});
+  flushDraft();
+});
 
 // A forced sign-out (a 401 the client could not refresh) runs THE same
 // sign-out step as the menu and idle sign-outs: a pending bill is parked
