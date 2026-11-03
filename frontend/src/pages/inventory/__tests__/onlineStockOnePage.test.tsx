@@ -23,6 +23,8 @@ vi.mock('../../../services/api/stores', () => ({
 const TOAST = { error: vi.fn(), success: vi.fn() };
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => TOAST }));
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { onlineStoreRoutes } from '../../../routes/onlineStoreRoutes';
 import OnlineStockPage from '../OnlineStockPage';
 import { onlineStockApi } from '../../../services/api/onlineStock';
@@ -46,10 +48,27 @@ describe('the retired Stock tally address', () => {
   });
 });
 
+// The redirect forwards DESIGN_MANAGER (the tally's role) here, so the kept
+// page's gate must stay the union of who could open either page.
+describe('the /inventory/online-sync gate', () => {
+  it('admits the stock managers and the tally DESIGN_MANAGER', async () => {
+    const src = readFileSync(resolve(__dirname, '../../../routes/inventoryRoutes.tsx'), 'utf8');
+    const m = /path="inventory\/online-sync"[\s\S]*?allowedRoles=\{\[([\s\S]*?)\]\}/.exec(src);
+    expect(m).not.toBeNull();
+    const { INVENTORY_MANAGE_ROLES } = await import('../inventoryRoles');
+    const roles = m![1].split(',').map((r) => r.trim().replace(/^['"]|['"]$/g, ''))
+      .flatMap((r) => (r === '...INVENTORY_MANAGE_ROLES' ? [...INVENTORY_MANAGE_ROLES] : [r]));
+    expect([...new Set(roles)].sort()).toEqual(
+      ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'STORE_MANAGER', 'CATALOG_MANAGER', 'DESIGN_MANAGER'].sort(),
+    );
+  });
+});
+
 const ROWS = {
   items: [
     { sku: 'SKU-A', name: 'Ray-Ban Aviator', in_store: 2, held: 1, online: 2, recommended: 2, delta: 0, status: 'OK' },
     { sku: 'SKU-B', name: 'Oakley Frog', in_store: 1, held: 0, online: 1, recommended: 1, delta: 0, status: 'OK' },
+    { sku: 'SKU-C', name: 'Store-only frame', in_store: 5, held: 0, online: null, recommended: null, delta: null, status: 'NOT_ONLINE' },
   ],
   summary: { ok: 2, safety_buffer: 0 },
   online_configured: true,
@@ -71,6 +90,23 @@ describe('the kept online-stock page carries the tally bits', () => {
     expect(screen.queryByText('Oakley Frog')).toBeNull();
     const row = screen.getByText('SKU-A').closest('tr')!;
     expect(row.querySelectorAll('td')[5].textContent).toBe('1'); // the held unit
+  });
+
+  it('keeps the tally totals: SKUs online and unit sums, unknown as a dash', async () => {
+    (onlineStockApi.reconcile as any).mockResolvedValue(ROWS);
+    render(<OnlineStockPage />);
+    const tile = async (label: string) => (await screen.findByText(label)).parentElement!.querySelector('p:nth-child(2)')!.textContent;
+    expect(await tile('SKUs online')).toBe('2');
+    expect(await tile('Listed online')).toBe('3');
+    expect(await tile('On-hand')).toBe('3');
+    expect(await tile('Sellable')).toBe('3');
+    expect(screen.getByLabelText(/show only at-risk/i).parentElement!.textContent).toContain('(0 of 3)');
+    (onlineStockApi.reconcile as any).mockResolvedValue({
+      ...ROWS, items: [...ROWS.items, { sku: 'SKU-D', name: 'Unread', in_store: 1, held: 0, online: null, recommended: 1, delta: null, status: 'LISTED_UNKNOWN' }],
+    });
+    fireEvent.click(screen.getByRole('button', { name: /refresh/i }));
+    await waitFor(async () => expect(await tile('Listed online')).toBe('—'));
+    expect(await tile('SKUs online')).toBe('3');
   });
 
   it('a failed read says it could not load, never "No overselling risk"', async () => {

@@ -49,6 +49,12 @@ function listedOffRecommended(i: ReconcileItem): boolean {
   return typeof i.online === 'number' && typeof i.recommended === 'number' && i.online !== i.recommended;
 }
 
+// The retired tally's unit totals, over the online SKUs; one unknown row makes
+// the sum unknown ('—'), never a confident undercount.
+function sumOrDash(rows: ReconcileItem[], k: 'online' | 'in_store' | 'recommended'): number | string {
+  return rows.some((r) => typeof r[k] !== 'number') ? '—' : rows.reduce((a, r) => a + (r[k] as number), 0);
+}
+
 export default function OnlineStockPage() {
   const toast = useToast();
   const [data, setData] = useState<ReconcileResult | null>(null);
@@ -80,13 +86,19 @@ export default function OnlineStockPage() {
 
   const s = data?.summary || {};
   const q = search.trim().toLowerCase();
-  const items = (data?.items || []).filter((i) =>
-    (onlyRisk ? (i.status === 'OVERSELL_RISK' || i.status === 'OVER_ALLOCATED' || i.status === 'SHARES_SHOPIFY_ITEM' || listedOffRecommended(i)) : true)
-    && (!q || [i.sku, i.name].some((v) => String(v ?? '').toLowerCase().includes(q))),
-  );
+  const searched = (data?.items || []).filter((i) => !q || [i.sku, i.name].some((v) => String(v ?? '').toLowerCase().includes(q)));
+  const atRisk = searched.filter((i) => i.status === 'OVERSELL_RISK' || i.status === 'OVER_ALLOCATED' || i.status === 'SHARES_SHOPIFY_ITEM' || listedOffRecommended(i));
+  const items = onlyRisk ? atRisk : searched;
   // An empty table never claims "no risk" for rows nobody could verify:
   // nothing verified (the live-listing read failed, or every row unknown)
   // vs some rows unverified (partial coverage) vs truly clear.
+  const onlineRows = (data?.items || []).filter((i) => i.status !== 'NOT_ONLINE');
+  const totals: [string, number | string, string][] = [
+    ['SKUs online', onlineRows.length, 'mapped to the website'],
+    ['Listed online', sumOrDash(onlineRows, 'online'), 'units live on Shopify'],
+    ['On-hand', sumOrDash(onlineRows, 'in_store'), 'units on the shelf'],
+    ['Sellable', sumOrDash(onlineRows, 'recommended'), 'units IMS sends'],
+  ];
   const unverified = (s.listed_unknown ?? 0) + (s.onhand_unknown ?? 0);
   const total = (data?.items || []).length;
   const emptyText = q
@@ -146,7 +158,7 @@ export default function OnlineStockPage() {
           </select>
         </div>
         <label className="text-sm text-gray-600 flex items-center gap-1.5 pb-1.5">
-          <input type="checkbox" checked={onlyRisk} onChange={(e) => setOnlyRisk(e.target.checked)} /> Show only at-risk
+          <input type="checkbox" checked={onlyRisk} onChange={(e) => setOnlyRisk(e.target.checked)} /> Show only at-risk{data ? ` (${atRisk.length} of ${searched.length})` : ''}
         </label>
         <div className="relative flex-1 min-w-[200px] max-w-sm">
           <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -198,6 +210,16 @@ export default function OnlineStockPage() {
               <p className="text-xl font-semibold text-green-700">{s.ok || 0}</p>
               <p className="text-xs text-gray-400 mt-1">within safe allocation</p>
             </div>
+          </div>}
+
+          {!data?.live_listings_unknown && <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+            {totals.map(([label, value, hint]) => (
+              <div key={label} className="bg-white border border-gray-200 rounded-lg p-4">
+                <p className="text-xs text-gray-500 mb-1">{label}</p>
+                <p className="text-xl font-semibold text-gray-900">{value}</p>
+                <p className="text-xs text-gray-400 mt-1">{hint}</p>
+              </div>
+            ))}
           </div>}
 
           <div className="bg-white border border-gray-200 rounded-lg overflow-x-auto">
