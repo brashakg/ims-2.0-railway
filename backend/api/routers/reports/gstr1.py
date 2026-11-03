@@ -482,24 +482,60 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             "whose sale is held off this return on its seller (GSTIN) check.",
         }
 
-    _parent_lines_cache: dict = {}  # order_id -> the sale's rate lines
+    _parent_cache: dict = {}  # order_id -> (the sale's order doc, its rate lines)
 
-    def _parent_lines(oid: str) -> list:
-        """The PARENT sale's (rate, hsn, taxable, tax) lines -- the same
-        _order_rate_lines its own GSTR-1 rows were filed from. [] when the
-        note names no order or the order is gone. A read failure raises."""
+    def _parent(oid: str) -> tuple:
+        """The PARENT sale and its (rate, hsn, taxable, tax) lines -- the same
+        _order_rate_lines its own GSTR-1 rows were filed from. (None, []) when
+        the note names no order or the order is gone. A read failure raises."""
         if not oid:
-            return []
-        if oid not in _parent_lines_cache:
+            return None, []
+        if oid not in _parent_cache:
             po = db.get_collection("orders").find_one({"order_id": oid})
-            _parent_lines_cache[oid] = (
+            _parent_cache[oid] = (po, (
                 _order_rate_lines(po.get("items") or [], *_order_taxable_and_tax(po), po)
                 if po
                 else []
-            )
-        return _parent_lines_cache[oid]
+            ))
+        return _parent_cache[oid]
 
-    def _cn_hsn_lines(ref, oid, buckets, heads) -> list:
+    def _parent_lines(oid: str) -> list:
+        return _parent(oid)[1]
+
+    def _returned_units(ret_doc, oid) -> dict:
+        """(rate, hsn) -> pieces a note's return brought back: each return
+        line's ``return_qty`` on the HSN of the sale line it reverses (by
+        order_item_id, else product_id -- the return door's own match). {} for
+        a value-only note (no return lines: a price correction)."""
+        po = _parent(oid)[0]
+        if not isinstance(ret_doc, dict) or not po:
+            return {}
+        by_item, by_prod = {}, {}
+        for it in po.get("items") or []:
+            if isinstance(it, dict):
+                by_item.setdefault(str(it.get("item_id") or it.get("id") or ""), it)
+                by_prod.setdefault(str(it.get("product_id") or ""), it)
+        units: dict = {}
+        for ln in ret_doc.get("items") or []:
+            if not isinstance(ln, dict):
+                continue
+            orig = by_item.get(str(ln.get("order_item_id") or "")) or by_prod.get(
+                str(ln.get("product_id") or "")
+            )
+            if not orig:
+                continue
+            rate = orig.get("gst_rate")
+            try:
+                qty = float(ln.get("return_qty") or 0)
+                rate = int(round(float(str(ln.get("gst_rate") if rate is None else rate).rstrip("% "))))
+            except (TypeError, ValueError):
+                continue
+            if qty > 0:
+                key = (rate, str(orig.get("hsn_code") or "9004"))
+                units[key] = units.get(key, 0.0) + qty
+        return units
+
+    def _cn_hsn_lines(ref, oid, buckets, heads, units=None) -> list:
         """A credit note's HSN summary lines: each (rate, taxable) bucket
         spread over its PARENT sale's lines AT THAT RATE, by those lines' HSN
         (pro rata to the sale's taxable), and the note's own CGST/SGST/IGST
@@ -532,8 +568,10 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
             return []
         weights = [p[2] for p in pieces]
         cg, sg, ig = (_alloc(h, weights) for h in heads)
+        units = dict(units or {})  # the pieces go on the first line of their (rate, HSN)
         return [
-            {"hsn": h, "gst_rate": r, "taxable": t, "cgst": c, "sgst": g, "igst": i}
+            {"hsn": h, "gst_rate": r, "qty": units.pop((r, h), 0.0),
+             "taxable": t, "cgst": c, "sgst": g, "igst": i}
             for (h, r, t), c, g, i in zip(pieces, cg, sg, ig)
         ]
 
@@ -639,11 +677,13 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                 cn_rate = _cn_bucket_rate(
                     entry.get("gst_rate"), cn_tax, cn_taxable
                 )
+                _cn_oid = str((_ret_doc or {}).get("order_id") or "")
                 cn_hsn_lines = _cn_hsn_lines(
                     ref,
-                    str((_ret_doc or {}).get("order_id") or ""),
+                    _cn_oid,
                     [(cn_rate, cn_taxable)],
                     (cn_cgst, cn_sgst, cn_igst),
+                    _returned_units(_ret_doc, _cn_oid),
                 )
                 cn_hsn = cn_hsn_lines[0]["hsn"] if cn_hsn_lines else ""
                 cn_place = state_name(cn_code) or cn_code or cust_state or store_state or "Unknown"
@@ -762,9 +802,10 @@ def _compute_gstr1(month: str, active_store: str) -> dict:
                     {"note_number": ret.get("credit_note_number"), "ref": rid},
                     validation_issues,
                 )
+                r_oid = str(ret.get("order_id") or "")
                 r_hsn_lines = _cn_hsn_lines(
-                    r_ref, str(ret.get("order_id") or ""), r_buckets,
-                    (r_cgst, r_sgst, r_igst),
+                    r_ref, r_oid, r_buckets, (r_cgst, r_sgst, r_igst),
+                    _returned_units(ret, r_oid),
                 )
                 r_place = state_name(r_code) or r_code or cust_state or store_state or "Unknown"
 
@@ -894,55 +935,81 @@ def _docs_issued(db, store_id: str, from_dt, to_dt) -> list:
     shop's month, from the document register every number is logged in
     (order_repository.log_document_number): per series (the number up to its
     serial), each run of consecutive serials is one row -- from, to, total
-    and cancelled. A number counts as CANCELLED when its document was
-    cancelled (an order that is not a sale, a cancelled / rejected transfer)
-    or never written (a serial with no document, or no register row, inside
-    the run). A transfer number whose move went on a tax invoice (T series)
-    was no challan: it ends a run. A read failure raises (the doors 503).
+    and cancelled. Each document is counted in the month its table files it:
+      * an invoice ('') in its ORDER's month (created_at -- the B2B / B2CL /
+        B2CS window), so Table 13 ties to the invoice tables; cancelled when
+        the order is not a sale; a number minted with no order written:
+        cancelled, in the month it was minted;
+      * a delivery challan (TRF) in the month its goods LEFT (shipped_at;
+        Rule 55), and only for a move inside one GSTIN (ship's own
+        gst_registrations answer -- a move across GSTINs goes on a T tax
+        invoice). A request never shipped issued no challan;
+      * a transfer tax invoice (T), credit / debit note (C / D): the month
+        minted (T at ship, dated at dispatch).
+    A number of the series that belongs to another month (or to no challan)
+    ends a run; a serial with no register row inside a run is CANCELLED --
+    except a challan gap (another shop's number in the shared TRF-X- series,
+    or a request that never shipped), which ends the run. A read failure
+    raises (the doors 503).
     ponytail: a credit / debit note counts as issued once logged; check its
     ledger row if a note mint ever leaves its document unwritten."""
-    rows = list(
-        db.get_collection(DOCUMENT_LOG).find(
-            {"store_id": store_id, "issued_at": {"$gte": from_dt, "$lt": to_dt}},
-            {"_id": 0, "number": 1, "series": 1},
-        )
-    )
-    by_series: dict = {}
-    for r in rows:
-        if r.get("series") in _DOC_TYPES and r.get("number"):
-            by_series.setdefault(r["series"], set()).add(str(r["number"]))
-    state: dict = {}  # number -> "issued" | "cancelled" | "other"
-    for n in by_series.get("", ()):
-        state[n] = "cancelled"
+    known: dict = {}  # series -> every number the shop was given
+    minted: dict = {}  # series -> the numbers minted in the month
+    for r in db.get_collection(DOCUMENT_LOG).find(
+        {"store_id": store_id, "series": {"$in": list(_DOC_TYPES)}},
+        {"_id": 0, "number": 1, "series": 1, "issued_at": 1},
+    ):
+        n, series = str(r.get("number") or ""), r.get("series")
+        if not n:
+            continue
+        known.setdefault(series, set()).add(n)
+        when = parse_event_utc_naive(r.get("issued_at"))
+        if when is not None and from_dt <= when < to_dt:
+            minted.setdefault(series, set()).add(n)
+    state: dict = {s: {} for s in _DOC_TYPES}  # series -> {number: issued | cancelled}
+
+    invoices = known.get("", set())
     for o in db.get_collection("orders").find(
-        {"invoice_number": {"$in": sorted(by_series.get("", ()))}},
+        {"store_id": store_id, "created_at": {"$gte": from_dt, "$lt": to_dt},
+         "invoice_number": {"$nin": [None, ""]}},
         {"_id": 0, "invoice_number": 1, "status": 1, "status_before_void": 1},
     ):
-        if o.get("invoice_number") in state:
-            state[o["invoice_number"]] = "issued" if is_real_sale(o) else "cancelled"
-    t_nums = sorted(by_series.get("T", ()))
-    trf_nums = sorted(by_series.get("TRF", ()))
-    for n in t_nums + trf_nums:
-        state[n] = "cancelled"
+        if o.get("invoice_number") in invoices:
+            state[""][o["invoice_number"]] = "issued" if is_real_sale(o) else "cancelled"
+    unwritten = set(minted.get("", ()))
+    for o in db.get_collection("orders").find(
+        {"invoice_number": {"$in": sorted(unwritten)}}, {"_id": 0, "invoice_number": 1}
+    ):
+        unwritten.discard(o.get("invoice_number"))
+    for n in unwritten:
+        state[""][n] = "cancelled"
+
+    t_nums = sorted(minted.get("T", ()))
+    for n in t_nums:
+        state["T"][n] = "cancelled"
     for t in db.get_collection("stock_transfers").find(
-        {"$or": [{"tax_invoice_number": {"$in": t_nums}}, {"transfer_number": {"$in": trf_nums}}]},
-        {"_id": 0, "transfer_number": 1, "tax_invoice_number": 1, "status": 1},
+        {"tax_invoice_number": {"$in": t_nums}}, {"_id": 0, "tax_invoice_number": 1, "status": 1}
     ):
         dead = str(t.get("status") or "").lower() in ("cancelled", "rejected")
-        if t.get("tax_invoice_number") in state:
-            state[t["tax_invoice_number"]] = "cancelled" if dead else "issued"
-        if t.get("transfer_number") in trf_nums:
-            state[t["transfer_number"]] = (
-                "cancelled" if dead else "other" if t.get("tax_invoice_number") else "issued"
-            )
-    for n in by_series.get("C", set()) | by_series.get("D", set()):
-        state[n] = "issued"
+        state["T"][t["tax_invoice_number"]] = "cancelled" if dead else "issued"
+    challans = known.get("TRF", set())
+    for t in db.get_collection("stock_transfers").find(
+        {"from_location_id": store_id, **instant_in_window_query("shipped_at", from_dt, to_dt)},
+        {"_id": 0, "transfer_number": 1, "tax_invoice_number": 1, "gst_registrations": 1},
+    ):
+        crosses = (t.get("gst_registrations") or {}).get("crosses") or t.get("tax_invoice_number")
+        if t.get("transfer_number") in challans and not crosses:
+            state["TRF"][t["transfer_number"]] = "issued"
+    for series in ("C", "D"):
+        for n in minted.get(series, ()):
+            state[series][n] = "issued"
 
     out: list = []
     for series in ("", "T", "D", "C", "TRF"):
         doc_num, doc_type = _DOC_TYPES[series]
+        mine, given = state[series], known.get(series, set())
         prefixes: dict = {}
-        for n in by_series.get(series, ()):
+        for n in mine:
             m = _SERIAL_RE.match(n)
             if m:
                 prefixes.setdefault(m.group(1), {})[int(m.group(2))] = n
@@ -951,8 +1018,10 @@ def _docs_issued(db, store_id: str, from_dt, to_dt) -> list:
             width = len(next(iter(got.values()))) - len(prefix)
             runs: list = [[]]
             for serial in range(min(got), max(got) + 1):
-                n = got.get(serial)
-                st = state.get(n, "cancelled") if n else "cancelled"
+                n = got.get(serial) or f"{prefix}{serial:0{width}d}"
+                st = mine.get(n) or (
+                    "other" if series == "TRF" or n in given else "cancelled"
+                )
                 if st == "other":
                     runs.append([])
                 else:
@@ -1001,12 +1070,14 @@ def _hsn_rows(sale_lines: list, cn_lines: list, issues=None, part: str = "") -> 
                         + "; the row is filed at 0 -- carry the excess with the CA.",
                     }
                 )
+    # A service (SAC 99xx: a fitting 998599, an eye test 9993) has no pieces:
+    # GSTN takes UQC "NA" with quantity 0 on it.
     return [
         {
             "hsnCode": v["hsnCode"],
             "gstRate": v["gstRate"],
-            "uqc": "PCS",
-            "quantity": round(max(0, v["quantity"]), 3),
+            "uqc": "NA" if v["hsnCode"].startswith("99") else "PCS",
+            "quantity": 0 if v["hsnCode"].startswith("99") else round(max(0, v["quantity"]), 3),
             **{k: round(max(0, v[k]), 2) for k in heads},
         }
         for v in by.values()

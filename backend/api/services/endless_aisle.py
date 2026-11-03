@@ -329,12 +329,23 @@ def create_transfer(
             status=409,
             code="ghost_stock",
         )
+    from ..routers.transfers import generate_transfer_number  # lazy: import cycle
+
     tid = "TRF-EA-" + uuid.uuid4().hex[:8].upper()
+    try:
+        # THE challan number (the sending shop's TRF series, logged in the GST
+        # document register for GSTR-1 Table 13) -- never a second rule.
+        number = generate_transfer_number(req.get("source_store_id"), db=db)
+    except Exception as exc:  # noqa: BLE001
+        raise EndlessAisleError(
+            "could not number the transfer", status=503, code="transfer_failed"
+        ) from exc
     now = _now_iso()
     transfer = {
         "_id": tid,
         "id": tid,
         "transfer_id": tid,
+        "transfer_number": number,
         "transfer_type": "store_to_store",
         "from_location_id": req.get("source_store_id"),
         "to_location_id": req.get("selling_store_id"),

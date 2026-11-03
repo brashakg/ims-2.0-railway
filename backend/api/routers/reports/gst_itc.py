@@ -757,6 +757,7 @@ def _transfer_cdnr_rows(notes):
             {
                 "hsn": str(ln.get("hsn") or "9004"),
                 "gst_rate": float(ln.get("gst_rate") or 0),
+                "qty": abs(float(ln.get("qty") or 0)),  # the pieces short (Table 12)
                 "taxable": round(-float(ln.get("taxable") or 0), 2),
                 "cgst": round(-float(ln.get("cgst") or 0), 2),
                 "sgst": round(-float(ln.get("sgst") or 0), 2),

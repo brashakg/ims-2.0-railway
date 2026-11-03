@@ -478,7 +478,7 @@ def _caller_view(transfer: Dict, current_user: dict) -> Dict:
     )
 
 
-def generate_transfer_number(from_store_id: Optional[str] = None) -> str:
+def generate_transfer_number(from_store_id: Optional[str] = None, db=None) -> str:
     """The transfer's number -- its delivery challan number (Rule 55) for a
     move inside one GSTIN -- from the SENDING shop's own challan series:
     ``TRF-{shop code}-NNNNN`` (store_invoice_code; 15 characters), one
@@ -487,12 +487,14 @@ def generate_transfer_number(from_store_id: Optional[str] = None) -> str:
     gave both the same) and each shop's series is its own, the one GSTR-1
     Table 13 reads (logged in the document register). A shop with no code
     numbers in the shared ``TRF-X-`` series. DB-less: the in-memory counter.
-    A counter or register failure refuses the transfer (503)."""
+    A counter or register failure refuses the transfer (503). ``db``: a
+    caller's own handle (the endless-aisle service), else the app's."""
     from pymongo import ReturnDocument
     from pymongo.errors import DuplicateKeyError
 
-    if _transfers_coll() is not None:
+    if db is None and _transfers_coll() is not None:
         db = _get_db()
+    if db is not None:
         try:
             store = (
                 db.get_collection("stores").find_one({"store_id": from_store_id})
