@@ -26,6 +26,7 @@ import { useIsOnlineStore } from '../../../hooks/useIsOnlineStore';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
 import { HeldBillsControls } from '../../../components/pos/HeldBillsControls';
+import { OrphanBillWarning } from '../../../components/pos/OrphanBillWarning';
 import { addManualLensToCart, LensDetailsModal } from '../../../components/pos/LensDetailsModal';
 import { NewPrescriptionAtTill } from '../../../components/pos/NewPrescriptionAtTill';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
@@ -264,6 +265,8 @@ export function BillingSurface() {
           onClose={() => setApprovalNeed(null)}
         />
       )}
+
+      <OrphanBillWarning />
 
       {/* Bill strip — slim context row. The salesperson lives here as a CHIP
           (owner: the labelled field "takes up too much space"), not a form

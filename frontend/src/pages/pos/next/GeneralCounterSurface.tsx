@@ -42,6 +42,7 @@ import { useProducts, useSellableStock } from '../../../hooks/usePOSQueries';
 import WalkoutComplianceBanner from '../../../components/pos/WalkoutComplianceBanner';
 import { WalkinWalkoutControls } from '../../../components/pos/WalkinWalkoutControls';
 import { HeldBillsControls } from '../../../components/pos/HeldBillsControls';
+import { OrphanBillWarning } from '../../../components/pos/OrphanBillWarning';
 import { CustomerCardWithLoyalty } from '../../../components/pos/CustomerCardWithLoyalty';
 import { CartSidebar } from '../../../components/pos/POSCart';
 import { DiscountModal, toDiscountItem } from '../../../components/pos/DiscountModal';
@@ -397,6 +398,8 @@ export function GeneralCounterSurface() {
           </Link>
         </div>
       )}
+
+      <OrphanBillWarning />
 
       {/* Bill strip — the same slim context row as the billing surface: the
           salesperson is a CHIP, not a labelled form block. */}

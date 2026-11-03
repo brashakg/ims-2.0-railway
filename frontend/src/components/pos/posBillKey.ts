@@ -44,7 +44,16 @@ export const TILL_DEBIT_CHECK =
   'A store-credit or voucher payment on this bill could not be confirmed. Check the order payments on the '
   + 'Orders screen before taking another tender - pressing Complete Sale now would be a new sale.';
 
-export interface BillKeyEntry { key: string; at: number; pending?: boolean }
+export interface BillKeyEntry { key: string; at: number; pending?: boolean; press?: string }
+
+// Per tab (every tab loads its own copy of this module): the press THIS tab
+// last marked pending, per bill. A refusal settles a pending entry only when
+// the pending mark is still this tab's own press -- another tab's press of
+// the same bill may have landed.
+const ownPress: Record<string, string> = {};
+let onPendingMarked: (() => void) | null = null;
+/** The store saves its draft (with the bill id) the moment a press marks the key pending. */
+export function onBillKeyPending(fn: () => void): void { onPendingMarked = fn; }
 
 function readAll(now: number): Record<string, BillKeyEntry> {
   try {
@@ -64,12 +73,23 @@ function readAll(now: number): Record<string, BillKeyEntry> {
   }
 }
 
-function writeAll(map: Record<string, BillKeyEntry>): void {
+/** THE only writer: a read-modify-write of ONE bill's entry, read fresh right
+    before the write -- never a whole map held from earlier, so no tab puts
+    back a stale copy of another tab's entry (settled ones past the TTL are pruned). */
+function writeEntry(fp: string, entry: BillKeyEntry | null, now: number = Date.now()): void {
+  const map = readAll(now);
+  if (entry) map[fp] = entry;
+  else delete map[fp];
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
   } catch {
     /* private mode: the key still serves this page */
   }
+}
+
+/** The bill ids whose press is pending (the till's orphan check). */
+export function pendingBillIds(): string[] {
+  return Object.entries(readAll(Date.now())).filter(([, e]) => e.pending).map(([id]) => id);
 }
 
 /** This bill's kept key, or null when none is kept (or it is too old). */
@@ -80,31 +100,35 @@ export function billKeyEntry(fingerprint: string, now: number = Date.now()): Bil
 /** Keep `entry` as this bill's key (a recalled held bill), stamped now --
     still pending if its press was (money review 23). */
 export function putBillKey(fingerprint: string, key: string, now: number = Date.now(), pending = false): void {
-  writeAll({ ...readAll(now), [fingerprint]: { key, at: now, ...(pending ? { pending: true } : {}) } });
+  // Never un-pends an entry another press marked pending.
+  const keep = pending || !!readAll(now)[fingerprint]?.pending;
+  writeEntry(fingerprint, { key, at: now, ...(keep ? { pending: true } : {}) }, now);
 }
 
 /** The key a press of THIS bill uses: `preferred` (the surface's in-memory
  *  key for this bill) first, else the kept one, else a fresh one -- and its
  *  `at` is refreshed, so a cashier re-pressing for 14 minutes keeps it. */
 export function billKeyFor(fingerprint: string, now: number = Date.now(), preferred?: string | null): string {
-  const map = readAll(now);
-  const key = preferred || map[fingerprint]?.key
-    || (typeof crypto !== 'undefined' && 'randomUUID' in crypto
-      ? crypto.randomUUID() : `idem-${now}-${Math.random().toString(36).slice(2)}`);
+  const uid = () => (typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID() : `idem-${now}-${Math.random().toString(36).slice(2)}`);
+  const key = preferred || readAll(now)[fingerprint]?.key || uid();
   // `pending`: a press of this bill is in flight or its answer was lost --
   // the only time the saved draft may keep the customer, member and Rx.
-  map[fingerprint] = { key, at: now, pending: true };
-  writeAll(map);
+  const press = uid();
+  ownPress[fingerprint] = press;
+  writeEntry(fingerprint, { key, at: now, pending: true, press }, now);
+  try { onPendingMarked?.(); } catch { /* the key is kept either way */ }
   return key;
 }
 
 /** A definite answer (a refusal) for this bill: its key stays for the next
  *  press (e.g. after a manager's approval), but nothing is pending any more. */
 export function settleBillKey(fingerprint: string): void {
-  const map = readAll(Date.now());
-  if (!map[fingerprint]) return;
-  map[fingerprint] = { ...map[fingerprint], pending: false };
-  writeAll(map);
+  const e = readAll(Date.now())[fingerprint];
+  if (!e) return;
+  // A pending entry another press marked (another tab, or a recall) is never settled here.
+  if (e.pending && (!e.press || e.press !== ownPress[fingerprint])) return;
+  writeEntry(fingerprint, { ...e, pending: false });
 }
 
 /** THE one settle rule after a refused press (money review 28), for every
@@ -141,13 +165,7 @@ export const COULD_NOT_PUT_ASIDE =
 
 /** Drop THIS bill's key (never another tab's or a held bill's). */
 export function clearBillKey(fingerprint: string): void {
-  const map = readAll(Date.now());
-  if (!(fingerprint in map)) {
-    writeAll(map); // still prune the expired ones
-    return;
-  }
-  delete map[fingerprint];
-  writeAll(map);
+  writeEntry(fingerprint, null); // also prunes the expired ones
 }
 
 /** The lost-sale promise ("press again - not charged twice"), and a lost
