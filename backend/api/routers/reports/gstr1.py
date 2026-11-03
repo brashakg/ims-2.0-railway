@@ -31,6 +31,10 @@ from database.repositories.order_repository import DOCUMENT_LOG
 from ...utils.real_sale import is_real_sale
 from .gst_base import (
     B2CL_INVOICE_THRESHOLD,
+    _invoice_customer,
+    _invoice_gstin,
+    _sale_filed_at,
+    _sale_period_match,
     real_sale_match,
     _get_raw_db,
     _normalise_period,
@@ -196,7 +200,8 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             # The GST-document view (PR #1264): it also files the credit notes,
             # so an invoice cancelled behind a whole-invoice note stays filed.
             **real_sale_match(db, gst_documents=True),
-            "created_at": {"$gte": from_dt, "$lt": to_dt},
+            # The tax invoice's own month (gst_base._sale_period_match).
+            **_sale_period_match(from_dt, to_dt),
         }
 
         for order in orders_col.find(query):
@@ -218,7 +223,11 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                 continue
             cust_id = str(order.get("customer_id", ""))
             cust_info = cust_map.get(cust_id, {})
-            customer_gstin = cust_info.get("gstin", "")
+            # The buyer GSTIN the tax invoice was minted with (GST batch 5),
+            # never the customer record read now; an invoice minted before
+            # the stamp existed reads the customer, as before.
+            customer_gstin = _invoice_gstin(order, cust_info.get("gstin", ""))
+            sale_cust = _invoice_customer(order, cust_docs.get(cust_id))
             customer_state = cust_info.get("state", "") or store_state
             customer_name = (
                 cust_info.get("name", "")
@@ -242,7 +251,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             # (_order_supply -- the order's own stamp, else the invoice's
             # state-code rule, org_validation.supply_interstate).
             is_inter_state, pos_code, pos_assumed = _order_supply(
-                order, _shop_doc(order.get("store_id")), cust_docs.get(cust_id)
+                order, _shop_doc(order.get("store_id")), sale_cust
             )
             items = order.get("items") or []
             # One item row per GST rate (GSTN `itms[]`), from the tax stamped
@@ -265,7 +274,9 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
 
             sale_is_b2cl = is_b2cl(customer_gstin, is_inter_state, invoice_value)
             bill_number = _gstr1_bill_number(order, validation_issues)
-            created_raw = order.get("created_at", "")
+            # The tax invoice's own date (invoice_date, stamped at the mint),
+            # else the order's -- the instant the query above filed it on.
+            created_raw = _sale_filed_at(order) or ""
             # BUG-104, VALUE rule (move the derived day FORWARD). This is
             # the invoiceDate on a FILED GSTR-1 row. The month window above
             # is already IST (ist_day_start_utc, correctly a BOUND moving
@@ -775,6 +786,8 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                     entry.get("gst_rate"), cn_tax, cn_taxable
                 )
                 _cn_oid = str((_ret_doc or {}).get("order_id") or "")
+                # The note's buyer = the GSTIN its invoice was minted with.
+                cust_gstin = _invoice_gstin(_parent(_cn_oid)[0], cust_gstin)
                 # The return's own per-rate back-out, scaled to this note --
                 # the ledger row's gst_rate is only the return's DOMINANT rate.
                 _gb = (_ret_doc or {}).get("gst_breakup")
@@ -923,7 +936,8 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                         "refReference": r_ref,
                         "noteType": "C",
                         "noteSection": _note_section(
-                            cust_info.get("gstin", ""), is_inter, r_oid
+                            _invoice_gstin(_parent(r_oid)[0], cust_info.get("gstin", "")),
+                            is_inter, r_oid
                         ),
                         "rateLines": _note_rate_lines(r_buckets, (r_cgst, r_sgst, r_igst)),
                         "creditNoteDate": (
@@ -938,7 +952,9 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                         "customerId": cust_id,
                         "customerName": cust_info.get("name", "")
                         or str(ret.get("customer_name", "") or ""),
-                        "customerGSTIN": cust_info.get("gstin", ""),
+                        "customerGSTIN": _invoice_gstin(
+                            _parent(r_oid)[0], cust_info.get("gstin", "")
+                        ),
                         "customerState": r_place,
                         "placeOfSupply": r_place,
                         "placeOfSupplyCode": r_code,
@@ -971,6 +987,7 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
             )
             d_oid = str(d.get("order_id") or "")
             d_cust = cust_map.get(str(d.get("customer_id") or ""), {})
+            d_gstin = _invoice_gstin(_parent(d_oid)[0], d_cust.get("gstin", ""))
             d_rate = _cn_bucket_rate(d.get("gst_rate"), dn["tax"], dn["taxable"])
             d_heads = (dn["cgst"], dn["sgst"], dn["igst"])
             # The per-rate raise admin_edit stamps (order_superadmin_edit.
@@ -988,12 +1005,12 @@ def _compute_gstr1(month: str, active_store: str, shops=None, db=None) -> dict:
                 {
                     "refReference": d_ref,
                     "noteType": "D",
-                    "noteSection": _note_section(d_cust.get("gstin", ""), dn["inter"], d_oid),
+                    "noteSection": _note_section(d_gstin, dn["inter"], d_oid),
                     "rateLines": _note_rate_lines(d_buckets, d_heads),
                     "creditNoteDate": _credit_note_date_ist(d.get("created_at")) or (month + "-01"),
                     "customerId": str(d.get("customer_id") or ""),
                     "customerName": d_cust.get("name", "") or str(d.get("customer_name") or ""),
-                    "customerGSTIN": d_cust.get("gstin", ""),
+                    "customerGSTIN": d_gstin,
                     "customerState": d_place,
                     "placeOfSupply": d_place,
                     "placeOfSupplyCode": dn["code"],
@@ -1147,8 +1164,9 @@ def _docs_issued(db, store_id: str, from_dt, to_dt, cdnr=(), issues=None) -> lis
     (order_repository.log_document_number): per series (the number up to its
     serial), each run of consecutive serials is one row -- from, to, total
     and cancelled. Each document is counted in the month its table files it:
-      * an invoice ('') in its ORDER's month (created_at -- the B2B / B2CL /
-        B2CS window), so Table 13 ties to the invoice tables; cancelled when
+      * an invoice ('') in the month the B2B / B2CL / B2CS tables file it
+        (gst_base._sale_period_match: its own invoice_date, else the order's
+        created_at), so Table 13 ties to the invoice tables; cancelled when
         the order is not a sale; a number minted with no order written:
         cancelled, in the month it was minted;
       * a delivery challan (TRF) in the month its goods LEFT (shipped_at;
@@ -1192,7 +1210,7 @@ def _docs_issued(db, store_id: str, from_dt, to_dt, cdnr=(), issues=None) -> lis
     # The invoice tables' own rule (real_sale_match(gst_documents=True)): an
     # order cancelled behind a whole-invoice credit note is still filed.
     for o in db.get_collection("orders").find(
-        {"store_id": store_id, "created_at": {"$gte": from_dt, "$lt": to_dt},
+        {"store_id": store_id, **_sale_period_match(from_dt, to_dt),
          "invoice_number": {"$nin": [None, ""]}},
         {"_id": 0, "invoice_number": 1, "status": 1, "status_before_void": 1,
          "advance_refund_status": 1, "advance_refund_credit_note": 1},

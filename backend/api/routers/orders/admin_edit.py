@@ -303,8 +303,31 @@ async def superadmin_edit_order(
         user_id=current_user.get("user_id"),
     )
 
-    if not repo.update(order_id, update_data):
-        raise HTTPException(status_code=500, detail="Failed to save order edit")
+    # Compare-and-set on what this edit read: still no tax invoice, no
+    # refund-advance claim, the same status. A counter print that minted the
+    # invoice in between wins -- the issued number never carries lines it
+    # did not print (that change goes on a credit / debit note).
+    if not repo.update_if(
+        order_id,
+        {"invoice_number": {"$in": [None, ""]},
+         "advance_refund_id": order.get("advance_refund_id"),
+         "status": order.get("status")},
+        update_data,
+    ):
+        _write_order_edit_audit(
+            action="ORDER_SUPERADMIN_EDIT_REFUSED",
+            order=order,
+            before=before,
+            after=before,
+            reason="edit refused: the order changed (invoiced, refunded or "
+            "re-statused) while it was being edited",
+            user_id=current_user.get("user_id"),
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="This order changed while it was being edited (it may have been "
+            "invoiced) - reload it and check.",
+        )
 
     # Owner hard rule: an edit that raises discounts must not leave the
     # create-time loyalty earn standing. Delta-claw, fail-soft.
@@ -443,7 +466,37 @@ async def superadmin_invoice_change(
             raise HTTPException(
                 status_code=400, detail=f"Cannot issue a revised invoice: {problem}"
             )
+        # GST batch 5: a revised invoice replaces the original in GSTR-1, so
+        # it is issued only inside the original's own month (cancel and
+        # re-issue before the return is filed). After that month the original
+        # stands as filed; the change goes on a credit / debit note.
+        from ...utils.event_time import parse_event_utc_naive
+        from ...utils.ist import ist_date_str, ist_today
+
+        issued = parse_event_utc_naive(order.get("invoice_date") or order.get("created_at"))
+        if issued is None or ist_date_str(issued)[:7] != ist_today().isoformat()[:7]:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Invoice {original_invoice} was issued in an earlier month and is "
+                    "already in that month's GSTR-1. Use the credit/debit note mode "
+                    "for this change."
+                ),
+            )
+        customer_doc = None
         try:
+            if db is not None:
+                customer_doc = db.get_collection("customers").find_one(
+                    {"customer_id": body.customer_id or order.get("customer_id")}
+                )
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                status_code=503, detail="Cannot issue a revised invoice: the customer could not be read"
+            ) from exc
+        from .invoices import invoice_mint_stamp
+
+        try:
+            mint_stamp = invoice_mint_stamp(order, customer_doc, store_doc)
             new_invoice_number = repo.next_invoice_number(
                 order.get("store_id"), store_doc=store_doc
             )
@@ -474,6 +527,7 @@ async def superadmin_invoice_change(
             "pricing_model": gst.get("pricing_model", "inclusive"),
             "invoice_number": new_invoice_number,
             "invoice_date": datetime.now(),
+            **mint_stamp,
             "superseded_invoice_number": original_invoice,
             "invoice_revision_id": revised_doc["revision_id"],
             "superadmin_edited": True,
@@ -523,8 +577,14 @@ async def superadmin_invoice_change(
 
         # Compare-and-set on the number this request superseded: of two
         # presses only one replaces it -- never two revised numbers printed.
+        # ...and still uncancelled with no refund-advance claim (set_invoice's
+        # guard): a revised serial never lands on an order a credit note
+        # reversed in between.
         if not repo.update_if(
-            order_id, {"invoice_number": original_invoice}, update_data
+            order_id,
+            {"invoice_number": original_invoice, "advance_refund_id": None,
+             "status": order.get("status")},
+            update_data,
         ):
             # The serial this press minted is never printed: record the gap
             # (Rule 46(b) -- every serial accounted for) next to the audit row

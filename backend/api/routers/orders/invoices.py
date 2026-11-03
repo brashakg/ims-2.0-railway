@@ -45,6 +45,47 @@ def _invoice_state_code(*candidates) -> str:
     return resolve_state_code(*candidates)
 
 
+def invoice_buyer_gstin(customer: Optional[dict]) -> str:
+    """The buyer GSTIN a tax invoice is minted with, frozen on the order in
+    the minting write (GST batch 5): GSTR-1 files the sale B2B/CDNR on what
+    the invoice printed, never on the customer record read later. "" for a
+    consumer -- a blank or a placeholder a legacy import carries ('NA', '-',
+    'URP', '0': not 15 characters) is a consumer bill, never a refused one.
+    A 15-character value that fails org_validation.has_valid_gstin (the one
+    state-code rule) refuses the mint: a bad GSTIN on a B2B invoice files a
+    row the portal rejects."""
+    from ...services.org_validation import has_valid_gstin
+
+    gstin = str((customer or {}).get("gstin") or "").strip().upper()
+    if len(gstin) != 15:
+        return ""
+    if not has_valid_gstin(gstin):
+        raise InvoiceNumberError(
+            f"the customer's GSTIN {gstin} is not a valid GSTIN (15 characters, "
+            "starting with a real state code) -- correct it on the customer, or "
+            "clear it for a consumer bill, then print again"
+        )
+    return gstin
+
+
+def invoice_mint_stamp(order: dict, customer: Optional[dict], store: Optional[dict]) -> dict:
+    """What the minting write freezes on the order as issued: the buyer GSTIN
+    (invoice_buyer_gstin) and, for a COUNTER sale -- the buyer takes the goods
+    at the shop -- the shop's own state as the place of supply (CA 2026-10-23:
+    CGST+SGST of the shop's state, even for an out-of-state buyer). The
+    invoice split and every return read the stamp (order_interstate_flag /
+    order_place_of_supply win), so they print and file one head. A website
+    order keeps the delivery-state stamp its ingest wrote."""
+    from ...services.org_validation import shop_state_code
+    from ...utils.online_gst import is_online_order
+
+    stamp = {"customer_gstin": invoice_buyer_gstin(customer)}
+    shop_code = shop_state_code(store)
+    if shop_code and not is_online_order(order):
+        stamp.update(interstate=False, place_of_supply=shop_code, place_of_supply_assumed=False)
+    return stamp
+
+
 def _customer_state_code(customer: Optional[dict]) -> str:
     """Resolve the customer's place-of-supply state code from (in order):
     customer GSTIN -> billing_address.state_code -> billing_address.state.
@@ -231,6 +272,7 @@ def _assemble_invoice(order_id: str, current_user: dict):
         # customer (e.g. walk-in) just leaves the customer state unknown, which
         # the split defaults to intra-state.
         customer_doc = None
+        customer_unread = False
         try:
             customer_id = order.get("customer_id")
             if customer_id:
@@ -239,6 +281,7 @@ def _assemble_invoice(order_id: str, current_user: dict):
                     customer_doc = customer_repo.find_by_id(customer_id)
         except Exception:
             customer_doc = None
+            customer_unread = True
 
         # Return the existing invoice or generate a new one.
         #
@@ -265,9 +308,15 @@ def _assemble_invoice(order_id: str, current_user: dict):
             except Exception:  # noqa: BLE001 - index is defense-in-depth only
                 pass
             try:
+                # The buyer GSTIN is frozen in the minting write; a customer
+                # read that failed never freezes a B2B sale as a consumer one.
+                if customer_unread:
+                    raise InvoiceNumberError("the customer could not be read -- try again")
+                stamp = invoice_mint_stamp(order, customer_doc, store_doc)
                 invoice_number = repo.set_invoice(
-                    order_id, repo.next_invoice_number(store_id, store_doc=store_doc)
+                    order_id, repo.next_invoice_number(store_id, store_doc=store_doc), stamp
                 )
+                order = {**order, **stamp}
             except InvoiceNumberError as exc:
                 raise HTTPException(
                     status_code=400, detail=f"Cannot generate invoice: {exc}"
@@ -278,6 +327,10 @@ def _assemble_invoice(order_id: str, current_user: dict):
         # C-6 (DELTA 4): per-rate CGST/SGST/IGST tax summary + place of supply.
         from ...utils.online_gst import order_place_of_supply
 
+        # The GSTIN the invoice was minted with (frozen on the order); an
+        # invoice minted before the stamp existed reads the customer as before.
+        if "customer_gstin" in order and (customer_doc is not None or order.get("customer_gstin")):
+            customer_doc = {**(customer_doc or {}), "gstin": order.get("customer_gstin") or ""}
         gst_split = _build_invoice_gst_split(
             order.get("items", []), store_doc, customer_doc, order_place_of_supply(order)
         )

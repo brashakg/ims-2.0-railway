@@ -659,24 +659,33 @@ class OrderRepository(BaseRepository):
             print(f"Error adding payment: {e}")
             return False
     
-    def set_invoice(self, order_id: str, invoice_number: str) -> str:
+    def set_invoice(
+        self, order_id: str, invoice_number: str, stamp: Optional[Dict] = None
+    ) -> str:
         """Record the order's tax invoice number ONCE; return the number the
         order now carries. Compare-and-set on "no number yet": of two taps on
         one sale the loser gets the WINNER's number back -- one sale, one
         number. The loser's own serial is a gap (logged for the CA), never a
-        second printed number."""
+        second printed number. ``stamp`` lands in the same write: what the
+        invoice froze as issued (the buyer's GSTIN, GST batch 5)."""
         if self.update_if(
             order_id,
-            # ...and no refund-advance claim (order_mint_problem's rule, held
-            # at the write so a claim landing after the door's read wins).
+            # ...and no refund-advance claim, not cancelled, not a test order
+            # (order_mint_problem's rule, held at the write so a claim or a
+            # cancel landing after the door's read wins: the order stays
+            # numberless and this serial is a gap Table 13 files cancelled).
             {"invoice_number": {"$in": [None, ""]}, "advance_refund_id": None,
+             "status": {"$nin": ["CANCELLED", "CANCELED", "Cancelled", "cancelled"]},
              "is_test": {"$ne": True}},
-            {"invoice_number": invoice_number, "invoice_date": datetime.now()},
+            {"invoice_number": invoice_number, "invoice_date": datetime.now(), **(stamp or {})},
         ):
             return invoice_number
-        stored = (self.find_by_id(order_id) or {}).get("invoice_number")
+        fresh = self.find_by_id(order_id) or {}
+        stored = fresh.get("invoice_number")
         if not stored:
-            raise InvoiceNumberError("the invoice number could not be saved -- try again")
+            raise InvoiceNumberError(
+                order_mint_problem(fresh) or "the invoice number could not be saved -- try again"
+            )
         logger.warning(
             "invoice serial %s unused: order %s already carries %s",
             invoice_number, order_id, stored,

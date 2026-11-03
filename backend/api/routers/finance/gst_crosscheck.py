@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from ..auth import get_current_user
 from ...dependencies import user_store_scope
 from ...services.org_validation import shop_gstins
+from ..reports.gst_base import _sale_period_match
 from ._shared import (
     real_sale_match,
     _customer_state_map,
@@ -142,7 +143,7 @@ def gst_by_registration(db, m: int, y: int, scope: Optional[str],
         unplaced = _itc_unplaced(db, y, m, last_day, s2e.get(scope) if scope else entity_id,
                                  shops=store_ids if scope else None)
         stray = 0 if scope else db.get_collection("orders").count_documents({
-            "created_at": {"$gte": ist_month_window_utc(y, m)[0], "$lt": ist_month_window_utc(y, m)[1]},
+            **_sale_period_match(*ist_month_window_utc(y, m)),
             **real_sale_match(db),
             "store_id": {"$nin": list(s2e)},
         })
@@ -272,7 +273,7 @@ def _cancelled_behind_credit_note(db, store_ids, start, end, store_states, custo
     # Exactly the gap between the two rules: every refunded order the GST
     # returns file and the books drop -- cancelled, or with its cancel pending.
     match = {
-        "created_at": {"$gte": start, "$lt": end},
+        **_sale_period_match(start, end),
         "advance_refund_status": "COMPLETED",
     }
     if store_ids is not None:
@@ -296,14 +297,15 @@ def _cancelled_behind_credit_note(db, store_ids, start, end, store_states, custo
 
 
 def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
-    """Books + Tally-JV totals for a store set over a created_at window.
+    """Books + Tally-JV totals for a store set over a sale-month window.
 
     Returns (books, tally). books = {sales_taxable, sales_tax,
     sales_grand_total, payments_collected}; tally = {taxable, tax, cgst, sgst,
     igst}. Reuses the SAME field expressions and intra/inter-state split as the
     finance /gst/summary and /tally/sales-jv endpoints -- no new tax math."""
+    # The invoice's own month, as GSTR-1 / 3B file it (gst_base._sale_period_match).
     o_match = {
-        "created_at": {"$gte": start, "$lt": end},
+        **_sale_period_match(start, end),
         **real_sale_match(db),
     }
     if store_ids is not None:
@@ -340,6 +342,8 @@ def _books_and_tally_for_stores(db, store_ids, start, end) -> tuple:
             # OS-008: the order-carried inter-state flag (online orders).
             "interstate": 1,
             "place_of_supply": 1,
+            "customer_gstin": 1,
+            "invoice_number": 1,
             "place_of_supply_assumed": 1,
             "fulfillment_route": 1,
             "fulfillment_hold": 1,

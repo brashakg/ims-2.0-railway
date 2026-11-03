@@ -89,3 +89,12 @@ def order_place_of_supply(order: Dict[str, Any]) -> Optional[str]:
     if not pos or order.get("place_of_supply_assumed"):
         return None
     return pos
+
+
+def is_online_order(order: Dict[str, Any]) -> bool:
+    """A website (Shopify) order -- shipped to the buyer -- rather than a
+    counter sale the buyer takes from the shop."""
+    return (
+        str(order.get("channel") or "").strip().upper() == "ONLINE"
+        or bool(order.get("shopify_order_id"))
+    )

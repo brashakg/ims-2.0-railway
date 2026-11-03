@@ -55,6 +55,10 @@ def _doc_matches(doc, filter):
     if not filter:
         return True
     for k, expected in filter.items():
+        if k == "$or":
+            if not any(_doc_matches(doc, sub) for sub in expected):
+                return False
+            continue
         actual = doc.get(k)
         if isinstance(expected, dict):
             for op, op_val in expected.items():

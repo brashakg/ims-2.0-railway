@@ -382,8 +382,12 @@ def test_tally_sales_jv_excludes_draft_cancelled():
     matches = _all_order_matches(rec)
     assert matches
     assert all(_excludes_draft_cancelled(m) for m in matches)
-    # And a real datetime range so the export isn't silently empty.
-    assert isinstance(matches[0]["created_at"]["$gte"], datetime)
+    # And a real datetime range so the export isn't silently empty: the
+    # sale's filing month (gst_base._sale_window_match) -- invoice_date for a
+    # numbered invoice, else created_at.
+    by_invoice, by_order = matches[0]["$or"]
+    assert isinstance(by_invoice["invoice_date"]["$gte"], datetime)
+    assert isinstance(by_order["created_at"]["$gte"], datetime)
 
 
 def test_gst_reconciliation_endpoint_excludes_draft_cancelled(monkeypatch):
@@ -401,9 +405,10 @@ def test_gst_reconciliation_endpoint_excludes_draft_cancelled(monkeypatch):
     assert resp.status_code == 200
     matches = _all_order_matches(rec)
     assert matches
-    # Orders query (keyed on created_at range) must exclude draft/cancelled and
-    # use datetime bounds.
-    order_q = next(m for m in matches if "created_at" in m and "status" in m)
+    # Orders query (keyed on the sale's month -- gst_base._sale_period_match:
+    # invoice_date, else created_at) must exclude draft/cancelled and use
+    # datetime bounds.
+    order_q = next(m for m in matches if "$or" in m and "status" in m)
     # GSTR-3B reads THE rule's GST-document view (PR #1264): drafts out by
     # status, every cancelled order judged one by one (only an invoice
     # reversed by its whole credit note stays -- test_pos_money_doors).
@@ -411,7 +416,9 @@ def test_gst_reconciliation_endpoint_excludes_draft_cancelled(monkeypatch):
 
     assert order_q["status"]["$nin"] == real_sale_match(None, gst_documents=True)["status"]["$nin"]
     assert "DRAFT" in order_q["status"]["$nin"]
-    assert isinstance(order_q["created_at"]["$gte"], datetime)
+    by_invoice, by_order = order_q["$or"]
+    assert isinstance(by_invoice["invoice_date"]["$gte"], datetime)
+    assert isinstance(by_order["created_at"]["$gte"], datetime)
 
 
 # ============================================================================

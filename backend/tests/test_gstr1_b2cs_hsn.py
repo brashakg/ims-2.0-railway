@@ -29,7 +29,8 @@ class _Coll:
         out = []
         for d in self.docs:
             if not query or all(
-                d.get(k) == v for k, v in query.items() if not isinstance(v, dict)
+                d.get(k) == v for k, v in query.items()
+                if not isinstance(v, dict) and not k.startswith("$")  # loose: no operators
             ):
                 out.append(dict(d))
         return out
