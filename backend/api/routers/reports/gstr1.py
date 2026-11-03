@@ -934,6 +934,7 @@ _DOC_TYPES = {
     "TRF": (12, "Delivery Challan in cases other than by way of supply (excluding at S no. 9 to 11)"),
 }
 _SERIAL_RE = re.compile(r"^(.*?)(\d+)$")
+_MAX_GAP = 1000  # a longer gap is no real run of cancelled numbers
 
 
 def _docs_issued(db, store_id: str, from_dt, to_dt, cdnr=(), issues=None) -> list:
@@ -950,18 +951,23 @@ def _docs_issued(db, store_id: str, from_dt, to_dt, cdnr=(), issues=None) -> lis
         Rule 55), and only for a move inside one GSTIN (ship's own
         gst_registrations answer -- a move across GSTINs goes on a T tax
         invoice). A request never shipped issued no challan;
-      * a transfer tax invoice (T), credit / debit note (C / D): the month
-        minted (T at ship, dated at dispatch); a C serial the audit trail
-        wrote off (CREDIT_NOTE_NUMBER_UNUSED) is cancelled.
+      * a transfer tax invoice (T) in its DISPATCH month (tax_invoice_date,
+        re-dated by a retried ship; else shipped_at) -- the date its B2B row
+        files on -- and never in its mint month as well; a T no transfer
+        holds: cancelled, in the month minted;
+      * a credit / debit note (C / D): the month minted; a C serial the audit
+        trail wrote off (CREDIT_NOTE_NUMBER_UNUSED) is cancelled.
     Invoices, challans and T numbers come from their documents (orders,
     stock_transfers), so a number minted before the register existed still
     counts; a filed CDNR note number the register never saw is a warning on
     ``issues`` (its serial cannot be placed in a run).
-    A number of the series that belongs to another month (or to no challan)
-    ends a run; a serial with no register row inside a run is CANCELLED --
+    A series is a prefix AND a serial width. A number of the series that
+    belongs to another month, another shop's order, or no challan ends a
+    run; a serial with no register row after a LOGGED number is CANCELLED --
     except a challan gap (another shop's number in the shared TRF-X- series,
-    or a request that never shipped), which ends the run. A read failure
-    raises (the doors 503).
+    or a request that never shipped), a gap after a pre-register number
+    (nothing says it was cancelled) and a gap over _MAX_GAP (warned), which
+    end the run. A read failure raises (the doors 503).
     ponytail: a D serial counts as issued once logged -- no write-off path
     exists for it yet."""
     known: dict = {}  # series -> every number the shop was given
@@ -999,25 +1005,42 @@ def _docs_issued(db, store_id: str, from_dt, to_dt, cdnr=(), issues=None) -> lis
     for n in unwritten:
         state[""][n] = "cancelled"
 
-    t_nums = sorted(minted.get("T", ()))
-    for n in t_nums:
+    # A T invoice files in its DISPATCH month -- the tax invoice's own date
+    # (a retried ship re-dates it), the date its B2B row files on -- never in
+    # the mint month as well. A number no transfer holds: its mint month.
+    def _t_in_month(t) -> Optional[bool]:
+        when = parse_event_utc_naive(t.get("tax_invoice_date") or t.get("shipped_at"))
+        return None if when is None else from_dt <= when < to_dt
+
+    def _t_state(t) -> str:
+        dead = str(t.get("status") or "").lower() in ("cancelled", "rejected")
+        return "cancelled" if dead else "issued"
+
+    t_proj = {"_id": 0, "transfer_number": 1, "tax_invoice_number": 1, "tax_invoice_date": 1,
+              "shipped_at": 1, "gst_registrations": 1, "status": 1}
+    t_minted = minted.get("T", set())
+    for n in t_minted:
         state["T"][n] = "cancelled"
     for t in db.get_collection("stock_transfers").find(
-        {"tax_invoice_number": {"$in": t_nums}}, {"_id": 0, "tax_invoice_number": 1, "status": 1}
+        {"tax_invoice_number": {"$in": sorted(t_minted)}}, t_proj
     ):
-        dead = str(t.get("status") or "").lower() in ("cancelled", "rejected")
-        state["T"][t["tax_invoice_number"]] = "cancelled" if dead else "issued"
+        if _t_in_month(t) is False:
+            state["T"].pop(t["tax_invoice_number"], None)
+        else:
+            state["T"][t["tax_invoice_number"]] = _t_state(t)
     for t in db.get_collection("stock_transfers").find(
-        {"from_location_id": store_id, **instant_in_window_query("shipped_at", from_dt, to_dt)},
-        {"_id": 0, "transfer_number": 1, "tax_invoice_number": 1, "gst_registrations": 1,
-         "status": 1},
+        {"from_location_id": store_id,
+         "$or": instant_in_window_query("shipped_at", from_dt, to_dt)["$or"]
+         + instant_in_window_query("tax_invoice_date", from_dt, to_dt)["$or"]},
+        t_proj,
     ):
         tax_inv = t.get("tax_invoice_number")
-        if tax_inv and tax_inv not in state["T"]:  # T minted before the register
-            dead = str(t.get("status") or "").lower() in ("cancelled", "rejected")
-            state["T"][tax_inv] = "cancelled" if dead else "issued"
+        if tax_inv and tax_inv not in t_minted and _t_in_month(t):
+            state["T"][tax_inv] = _t_state(t)
+        shipped = parse_event_utc_naive(t.get("shipped_at"))
         crosses = (t.get("gst_registrations") or {}).get("crosses") or tax_inv
-        if t.get("transfer_number") and not crosses:
+        if (t.get("transfer_number") and not crosses and shipped is not None
+                and from_dt <= shipped < to_dt):
             state["TRF"][t["transfer_number"]] = "issued"
     for series in ("C", "D"):
         for n in minted.get(series, ()):
@@ -1049,34 +1072,49 @@ def _docs_issued(db, store_id: str, from_dt, to_dt, cdnr=(), issues=None) -> lis
     for series in ("", "T", "D", "C", "TRF"):
         doc_num, doc_type = _DOC_TYPES[series]
         mine, given = state[series], set(known.get(series, ()))
-        prefixes: dict = {}
+        register = known.get(series, set())
+        # One series = prefix AND serial width: an old-format number (the
+        # pre-#1231 time-stamp fallback) never stretches a run.
+        groups: dict = {}
         for n in mine:
             m = _SERIAL_RE.match(n)
             if m:
-                prefixes.setdefault(m.group(1), {})[int(m.group(2))] = n
-        for prefix in sorted(prefixes):
-            got = prefixes[prefix]
-            width = len(next(iter(got.values()))) - len(prefix)
-            if series == "":
-                # A gap held by an order of another month (an invoice minted
-                # before the register) ends the run, as a logged one does.
-                gaps = [f"{prefix}{x:0{width}d}" for x in range(min(got), max(got) + 1)
-                        if x not in got]
-                gaps = [n for n in gaps if n not in given]
-                if gaps:
-                    given |= {o.get("invoice_number") for o in db.get_collection("orders").find(
-                        {"store_id": store_id, "invoice_number": {"$in": gaps}},
-                        {"_id": 0, "invoice_number": 1})}
+                groups.setdefault((m.group(1), len(m.group(2))), {})[int(m.group(2))] = n
+        for prefix, width in sorted(groups):
+            got = groups[(prefix, width)]
+            serials = sorted(got)
+            # A gap can read cancelled only inside the register's era (the
+            # number before it logged, so every later mint is logged too),
+            # never in a challan series, and only when it can be real.
+            gaps: dict = {}
+            for a, b in zip(serials, serials[1:]):
+                if b - a - 1 > _MAX_GAP:
+                    if issues is not None:
+                        issues.append({"level": "warn", "invoice": got[a], "issue": (
+                            f"Table 13: {b - a - 1} numbers missing between {got[a]} and "
+                            f"{got[b]} -- not reported as cancelled; the CA must check them.")})
+                elif b - a > 1 and series != "TRF" and got[a] in register:
+                    gaps[a] = range(a + 1, b)
+            held = given
+            if series == "" and gaps:
+                # A gap held by an order of another month, or of another shop
+                # (re-routed: its invoice stays), ends the run.
+                want = [f"{prefix}{x:0{width}d}" for g in gaps.values() for x in g]
+                held = given | {o.get("invoice_number") for o in db.get_collection("orders").find(
+                    {"invoice_number": {"$in": [n for n in want if n not in given]}},
+                    {"_id": 0, "invoice_number": 1})}
             runs: list = [[]]
-            for serial in range(min(got), max(got) + 1):
-                n = got.get(serial) or f"{prefix}{serial:0{width}d}"
-                st = mine.get(n) or (
-                    "other" if series == "TRF" or n in given else "cancelled"
-                )
-                if st == "other":
-                    runs.append([])
-                else:
-                    runs[-1].append((serial, st))
+            for i, serial in enumerate(serials):
+                if i and serial - serials[i - 1] > 1:
+                    gap = gaps.get(serials[i - 1])
+                    if gap is None:
+                        runs.append([])
+                    for x in gap or ():
+                        if f"{prefix}{x:0{width}d}" in held:
+                            runs.append([])
+                        else:
+                            runs[-1].append((x, "cancelled"))
+                runs[-1].append((serial, mine[got[serial]]))
             for run in filter(None, runs):
                 out.append({
                     "docNum": doc_num,

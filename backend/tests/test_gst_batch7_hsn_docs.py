@@ -37,6 +37,7 @@ from api.services import gstn_export  # noqa: E402
 from api.utils.ist import IST  # noqa: E402
 from database.repositories import order_repository as repo  # noqa: E402
 from strict_fakes import StrictDB  # noqa: E402
+from database.repositories.order_repository import DOCUMENT_LOG as DOC_LOG  # noqa: E402
 
 WHEN = datetime(2026, 6, 15, 6, 0)  # naive UTC, mid-June 2026
 MONTH = "2026-06"
@@ -421,7 +422,8 @@ def test_table_13_counts_invoices_challans_and_t_numbers_minted_before_the_regis
     """No register rows at all (numbers minted before it existed): the
     window's invoice, a shipped in-GSTIN challan in the old TRF-YYYYMM- form,
     and a shipped cross-GSTIN transfer's T invoice still file in Table 13. An
-    invoice of ANOTHER month inside the run ends it, never reads cancelled.
+    invoice of ANOTHER month inside the run ends it, never reads cancelled;
+    so does a pre-register gap (00008: nothing says it was cancelled).
     REVERT CHECK: Table 13 was [] while B2CS filed the invoices."""
     db = _db(customers=[W])
     _use(monkeypatch, db)
@@ -438,7 +440,8 @@ def test_table_13_counts_invoices_challans_and_t_numbers_minted_before_the_regis
          gst_registrations={"crosses": True})
     assert _docs() == [
         (1, "BOK02/2627/00005", "BOK02/2627/00005", 1, 0),
-        (1, "BOK02/2627/00007", "BOK02/2627/00009", 3, 1),
+        (1, "BOK02/2627/00007", "BOK02/2627/00007", 1, 0),
+        (1, "BOK02/2627/00009", "BOK02/2627/00009", 1, 0),
         (1, "BOK02/T/2627/00003", "BOK02/T/2627/00003", 1, 0),
         (12, "TRF-202606-0042", "TRF-202606-0042", 1, 0),
     ]
@@ -517,3 +520,66 @@ def test_returned_units_match_the_named_line_before_the_product(monkeypatch):
     _use(monkeypatch, db)
     got = {h["hsnCode"]: h["quantity"] for h in r._compute_gstr1(MONTH, "S1")["hsnB2C"]}
     assert got == {"900311": 2, "900410": 1}
+
+
+# ---------------------------------------------------------------------------
+# Review round 3 (2026-11-03)
+# ---------------------------------------------------------------------------
+
+
+def test_table_13_files_a_t_invoice_once_in_its_dispatch_month(monkeypatch, june):
+    """Both T numbers minted 15 June. T 1 is dated 15 June (the date B2B files
+    it on) and only shipped 2 July; T 2's first ship failed and the retry
+    re-dated it 2 July. Each counts ONCE, in its tax invoice's month: T 1 in
+    June, T 2 in July. REVERT CHECK: June counted both (mint month) and July
+    counted T 1 again (shipped_at)."""
+    db = _db()
+    _use(monkeypatch, db)
+    t1, t2 = (repo.next_document_number(db, "S1", "T") for _ in range(2))
+    july = "2026-07-02T06:00:00+00:00"
+    for tid, n, dated in (("a", t1, "2026-06-15T06:00:00+00:00"), ("b", t2, july)):
+        db.get_collection("stock_transfers").insert_one(
+            {"id": tid, "transfer_number": f"TRF-BOK02-0000{tid}", "status": "in_transit",
+             "from_location_id": "S1", "tax_invoice_number": n, "tax_invoice_date": dated,
+             "shipped_at": july, "gst_registrations": {"crosses": True}})
+    assert _docs() == [(1, t1, t1, 1, 0)]
+    assert _docs("2026-07") == [(1, t2, t2, 1, 0)]
+
+
+def test_table_13_runs_never_span_an_old_format_outlier(monkeypatch):
+    """Pre-register invoices 0001, 0002 and a 7-digit 0300000 (the old
+    fallback shape): two runs, nothing cancelled, and 'to' is a real number.
+    REVERT CHECK: one row 0001..300000, total 300000, cancelled 299997."""
+    db = _db(customers=[W])
+    _use(monkeypatch, db)
+    item = [_line(5, 100.0, 5.0, "9004", 1)]
+    p = "BV/BOK02/26-27/"
+    db.seed("orders", [_order(f"O{i}", item, "W", number=f"{p}{s}")
+                       for i, s in enumerate(("0001", "0002", "0300000"))])
+    assert _docs() == [
+        (1, f"{p}0001", f"{p}0002", 2, 0),
+        (1, f"{p}0300000", f"{p}0300000", 1, 0),
+    ]
+
+
+def test_table_13_gap_rules_pre_register_rerouted_and_capped(monkeypatch):
+    """Pre-register 00007, 00009: the gap 00008 cannot be known cancelled --
+    two runs. Registered 00102, 00104 with 00103 held by an order now at
+    ANOTHER shop (re-routed): the gap ends the run. Registered 06000 and
+    11000: a 4,999 gap is no real run -- split, and the return says so.
+    REVERT CHECK: one 00007..11000 row of 10,994 with 10,988 cancelled (the
+    pre-register gap, the re-routed order and the 4,999 gap all read cancelled)."""
+    db = _db(customers=[W])
+    _use(monkeypatch, db)
+    item = [_line(5, 100.0, 5.0, "9004", 1)]
+    p = "BOK02/2627/"
+    db.seed(DOC_LOG, [{"number": f"{p}{s}", "series": "", "store_id": "S1", "issued_at": WHEN}
+                      for s in ("00102", "00104", "06000", "11000")])
+    db.seed("orders", [_order(f"O{s}", item, "W", number=f"{p}{s}")
+                       for s in ("00007", "00009", "00102", "00104", "06000", "11000")]
+            + [{**_order("Ox", item, "W", number=f"{p}00103"), "store_id": "S2",
+                "created_at": datetime(2026, 5, 3, 6, 0)}])
+    assert _docs() == [(1, f"{p}{s}", f"{p}{s}", 1, 0)
+                       for s in ("00007", "00009", "00102", "00104", "06000", "11000")]
+    issues = r._compute_gstr1(MONTH, "S1")["validation"]["issues"]
+    assert any("Table 13" in i["issue"] and f"{p}06000" in i["issue"] for i in issues)
