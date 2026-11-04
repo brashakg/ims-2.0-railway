@@ -400,7 +400,17 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/crm/customers/{customer_id}/cl-refill-status",
-        "allowed": "AUTHENTICATED",
+        # Same staff as the store worklist below (L1-F17); was AUTHENTICATED.
+        # The route itself enforces the customer's shop (customer_in_scope).
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_STAFF",
+            "SALES_CASHIER",
+            "OPTOMETRIST",
+        ],
     },
     # CRM-2 phase 2: in-app CL refill-due worklist + deduped reminder-task
     # creator. Read worklist = any store staff; create reminders = manager+.
