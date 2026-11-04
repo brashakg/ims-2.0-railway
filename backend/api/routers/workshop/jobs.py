@@ -20,6 +20,7 @@ from ...dependencies import (
     get_audit_repository,
     validate_store_access,
     can_access_store_scoped,
+    in_reach_or_404,
 )
 from ._shared import _FITTING_ROLES, _check_dc_hardlock, logger, router
 from ...utils.ist import now_ist
@@ -120,9 +121,14 @@ async def create_job(
         # Verify order exists
         order = None
         if order_repo is not None:
-            order = order_repo.find_by_id(job.order_id)
-            if order is None:
-                raise HTTPException(status_code=404, detail="Order not found")
+            # L2-WS-F01: authorize the ORDER's shop before the dedup return,
+            # the reverse-pointer backfill and the create -- a missing order
+            # and another shop's (or an unattributed legacy) one get the same
+            # 404, so a store login can neither attach a job to a foreign
+            # order nor read its existing job back through the dedup.
+            order = in_reach_or_404(
+                order_repo.find_by_id(job.order_id), current_user, "Order not found"
+            )
 
         # ------------------------------------------------------------------
         # DEDUP: one order, one lab job. MUST come before every other check.
@@ -204,7 +210,10 @@ async def create_job(
         # canonical POS Rx gate's rules; see _verify_job_prescription.
         _verify_job_prescription(job.prescription_id, order, current_user)
 
-        store_id = current_user.get("active_store_id")
+        # The job belongs to the ORDER's shop (as the confirm safety net,
+        # orders._ensure_workshop_job_for_order, stamps it), not to whichever
+        # shop an admin / area manager has open in the top bar.
+        store_id = (order or {}).get("store_id") or current_user.get("active_store_id")
         created_at = utc_now_iso()
 
         # F9 -- LENS DC HARDLOCK. An external-lab lens (lens_status=ORDERED) may

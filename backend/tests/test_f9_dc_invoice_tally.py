@@ -429,7 +429,13 @@ def _workshop_client(
 
     class _OrderRepo:
         def find_by_id(self, _id):
-            return {"order_id": _id, "customer_id": "C1"} if order_exists else None
+            # A real order always carries its shop; create_job authorizes it
+            # (L2-WS-F01) -- an unattributed order is admin-only.
+            return (
+                {"order_id": _id, "customer_id": "C1", "store_id": "S1"}
+                if order_exists
+                else None
+            )
 
         def update(self, *a, **k):
             return True

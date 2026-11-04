@@ -460,3 +460,51 @@ def test_audit_returns_movements_desc(fake_db):
     actions = [a["action"] for a in out["audit"]]
     assert "reserve" in actions
     assert "release" in actions
+
+
+# ---------------------------------------------------------------------------
+# L2-LENS-F02: the movement history is the same stock-access door as the cell
+# ---------------------------------------------------------------------------
+
+
+def _seed_audit_for_first_cell(fake_db):
+    admin = _user(["SUPERADMIN"])
+    _seed_cell(fake_db, on_hand=10, reserved=0)
+    asyncio.run(stock_router.reserve_cell(LINE_ID, _payload(qty=2), admin))
+    return fake_db["lens_stock_lines"]._docs[0]["line_stock_id"]
+
+
+def test_audit_other_shop_cell_denied(fake_db):
+    """A shop-B-only login must get no movement rows for a STR-001 cell --
+    the cell detail door already refuses it."""
+    lsid = _seed_audit_for_first_cell(fake_db)
+    other = _user(["SALES_STAFF"], store_id="STR-OTHER")
+    with pytest.raises(HTTPException) as cell_exc:
+        asyncio.run(stock_router.get_cell(lsid, other))
+    assert cell_exc.value.status_code in (403, 404)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(stock_router.stock_audit(lsid, 100, other))
+    assert exc.value.status_code in (403, 404)
+
+
+def test_audit_orphan_rows_hidden_from_store_staff(fake_db):
+    """History rows whose cell cannot be resolved carry no authorizable shop:
+    a store login sees nothing (404), never the rows."""
+    fake_db["lens_stock_audit"].insert_one(
+        {"audit_id": "a1", "line_stock_id": "ghost", "store_id": "STR-OTHER",
+         "action": "reserve", "at": "2026-11-01"}
+    )
+    staff = _user(["SALES_STAFF"])
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(stock_router.stock_audit("ghost", 100, staff))
+    assert exc.value.status_code == 404
+
+
+def test_audit_same_shop_and_area_manager_ok(fake_db):
+    lsid = _seed_audit_for_first_cell(fake_db)
+    own = _user(["SALES_STAFF"])  # STR-001, the cell's shop
+    assert asyncio.run(stock_router.stock_audit(lsid, 100, own))["total"] == 1
+    am = _user(["AREA_MANAGER"], store_id="STR-002")
+    am["store_ids"] = ["STR-002", "STR-001"]
+    assert asyncio.run(stock_router.stock_audit(lsid, 100, am))["total"] == 1
+    assert asyncio.run(stock_router.get_cell(lsid, am))["cell"]["line_stock_id"] == lsid

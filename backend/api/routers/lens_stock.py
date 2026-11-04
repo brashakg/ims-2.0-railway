@@ -48,6 +48,7 @@ from pydantic import BaseModel, Field
 from .auth import get_current_user, require_roles
 from ..dependencies import store_in_view
 from ..dependencies import validate_store_access
+from ..dependencies import in_reach_or_404
 from ..services.lens_catalog_validation import (
     compute_available,
     validate_bulk_import_payload,
@@ -367,6 +368,22 @@ async def gap_planner(
     return {"cells": out, "total": len(out)}
 
 
+def _cell_in_reach(line_stock_id: str, current_user: dict) -> Dict[str, Any]:
+    """THE by-id guard of a stock cell, shared by its detail and its movement
+    history (L2-LENS-F02: the history skipped the cell's shop check). A
+    missing cell, another shop's and an unattributed one get the same 404;
+    history rows whose cell no longer resolves are therefore never served."""
+    coll = _stock_coll()
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        doc = coll.find_one({"line_stock_id": line_stock_id})
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[LENS_STOCK] cell read failed: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to read cell")
+    return in_reach_or_404(doc, current_user, "Stock cell not found")
+
+
 @router.get("/audit/{line_stock_id}")
 async def stock_audit(
     line_stock_id: str,
@@ -374,7 +391,7 @@ async def stock_audit(
     current_user: dict = Depends(get_current_user),
 ):
     """History of movements for a single cell. Ordered desc by `at`."""
-    _ = current_user
+    _cell_in_reach(line_stock_id, current_user)
     coll = _audit_coll()
     if coll is None:
         return {"audit": [], "total": 0}
@@ -397,19 +414,8 @@ async def get_cell(
     line_stock_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """Single-cell detail. Store-scoped via validate_store_access."""
-    coll = _stock_coll()
-    if coll is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-    try:
-        doc = coll.find_one({"line_stock_id": line_stock_id})
-    except Exception as exc:  # noqa: BLE001
-        logger.error("[LENS_STOCK] cell read failed: %s", exc)
-        raise HTTPException(status_code=500, detail="Failed to read cell")
-    if not doc:
-        raise HTTPException(status_code=404, detail="Stock cell not found")
-    validate_store_access(doc.get("store_id"), current_user)
-    return {"cell": _enrich(doc)}
+    """Single-cell detail. Store-scoped via _cell_in_reach."""
+    return {"cell": _enrich(_cell_in_reach(line_stock_id, current_user))}
 
 
 @router.get("/{lens_line_id}")
