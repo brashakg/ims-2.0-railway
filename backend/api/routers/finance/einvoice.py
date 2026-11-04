@@ -7,6 +7,7 @@ or default was changed.
 
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
+from ...dependencies import validate_store_access
 from ._shared import _get_db, router
 
 # ============================================================================
@@ -68,6 +69,11 @@ async def trigger_einvoice(
         raise HTTPException(
             status_code=404, detail=f"Order/invoice {order_id!r} not found"
         )
+
+    # Audit L3-18: the same store rule GET /orders/{id} applies -- a
+    # store-scoped finance role never reads (or triggers) another shop's
+    # IRN / QR / ack (403; SUPERADMIN/ADMIN pass through).
+    validate_store_access(order.get("store_id"), current_user)
 
     result = await generate_irn(db, order)
     return result
