@@ -113,7 +113,9 @@ export function LoginPage() {
         //   - Everyone else (incl. AREA_MANAGER) -> their assigned store_ids.
         const u = response.user;
         let needsSelection = false;
-        if (u) {
+        // A temporary password must be replaced first: the server refuses
+        // everything else until then, and the app shell shows the change screen.
+        if (u && !u.mustChangePassword) {
           if (userSeesAllStores(u.roles)) {
             try {
               const res = await storeApi.getStores();

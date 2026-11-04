@@ -13,6 +13,8 @@ from typing import List, Optional, Dict, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
 import time
+import base64
+import binascii
 import jwt
 import hashlib
 import os
@@ -380,6 +382,27 @@ def create_access_token(data: dict, expires_delta: timedelta = None) -> str:
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
 
+def _is_canonical_jwt(token: str) -> bool:
+    """True when every segment is spelled exactly as we issue it.
+
+    base64url decoding tolerates '=' padding and ignores a segment's unused low
+    bits, so one signature can be written several ways that all verify. The
+    logout blacklist is keyed on the token string, so a respelled copy of a
+    revoked token would sail past it (L1-F42). We only ever emit the unpadded
+    canonical spelling, so anything else is refused outright."""
+    parts = token.split(".")
+    if len(parts) != 3:
+        return False
+    for seg in parts:
+        try:
+            raw = base64.urlsafe_b64decode(seg + "=" * (-len(seg) % 4))
+        except (ValueError, binascii.Error):
+            return False
+        if base64.urlsafe_b64encode(raw).rstrip(b"=").decode() != seg:
+            return False
+    return True
+
+
 def decode_token(token: str) -> dict:
     """Decode and validate JWT token.
 
@@ -390,6 +413,8 @@ def decode_token(token: str) -> dict:
     function) -- sees the merged survivor role. An existing JWT still carrying
     the old role therefore keeps full SALES_STAFF access and is never locked out.
     """
+    if not isinstance(token, str) or not _is_canonical_jwt(token):
+        raise HTTPException(status_code=401, detail="Invalid token")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         roles = payload.get("roles")
@@ -657,6 +682,78 @@ def current_authority(payload: dict, request: Request = None) -> dict:
     return {**payload, **claims}
 
 
+def session_claims(token: Optional[str]) -> dict:
+    """The ONE test that a bearer string is a live login session. Raises 401.
+
+    Every door that accepts a session token -- the per-request dependency AND
+    the legacy /refresh exchange -- goes through here, so a logged-out token
+    or a purpose ticket cannot be traded at one door after another refuses it
+    (R17/R18). The password-version check stays in current_authority/refresh,
+    which already hold the live record."""
+    if not token or _token_blacklist.is_revoked(token):
+        raise HTTPException(
+            status_code=401,
+            detail="No token provided",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    payload = decode_token(token)
+    # PURPOSE-SCOPED tokens (e.g. the device-enrolment ticket minted by
+    # the device gate) are signed with the same key but are NOT sessions:
+    # accepting one would let a device-REJECTED login reach every
+    # AUTHENTICATED route for the ticket's lifetime -- a bypass of the
+    # very gate that minted it. No real access token carries `purpose`.
+    if payload.get("purpose"):
+        raise HTTPException(
+            status_code=401,
+            detail="Not an access token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # F18: a valid signature is not enough -- the account behind it must
+    # still be active. See the block comment above for the cost and the
+    # deliberate fail-soft behaviour when the lookup cannot be made.
+    if _account_is_disabled(payload):
+        raise HTTPException(
+            status_code=401,
+            detail="Account is disabled",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return payload
+
+
+def sign_out_other_sessions(user_id: str, record: dict, keep_sid: Optional[str]) -> dict:
+    """The ONE session rule for every password change/reset door (R24).
+
+    Returns the fields to save with the new password: bumping token_version
+    makes every token minted before it 401 (token_superseded), except the one
+    session ``keep_sid`` names -- the actor's own, when they change their own
+    password. Call revoke_other_refresh_chains after the save lands."""
+    return {
+        "token_version": int((record or {}).get("token_version") or 0) + 1,
+        "token_version_kept_sid": keep_sid,
+    }
+
+
+def revoke_other_refresh_chains(user_id: str, keep_sid: Optional[str], reason: str) -> None:
+    """Belt-and-braces for sign_out_other_sessions: revoke the refresh chains
+    too, for a refresh whose live-user lookup fails. A failure only logs --
+    the token_version bump already refuses every older chain."""
+    try:
+        from api.services.refresh_tokens import refresh_token_store
+
+        refresh_token_store.revoke_user_families(
+            user_id, reason=reason, keep_family_id=keep_sid
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("%s: refresh chain revoke failed for %s: %s", reason, user_id, e)
+
+
+# While an account still has a temporary password, its session may only reach
+# these (R25: the first-login change is enforced here, not only by the screen).
+_PASSWORD_CHANGE_ONLY_PATHS = frozenset(
+    {"/api/v1/auth/change-password", "/api/v1/auth/logout", "/api/v1/auth/me"}
+)
+
+
 async def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     request: Request = None,
@@ -670,36 +767,20 @@ async def get_current_user(
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        token = credentials.credentials
-        if not token or _token_blacklist.is_revoked(token):
+        authority = current_authority(session_claims(credentials.credentials), request)
+        if (
+            authority.get("must_change_password")
+            and request is not None
+            and request.url.path not in _PASSWORD_CHANGE_ONLY_PATHS
+        ):
             raise HTTPException(
-                status_code=401,
-                detail="No token provided",
-                headers={"WWW-Authenticate": "Bearer"},
+                status_code=403,
+                detail={
+                    "code": "PASSWORD_CHANGE_REQUIRED",
+                    "message": "Change your temporary password before continuing.",
+                },
             )
-
-        payload = decode_token(token)
-        # PURPOSE-SCOPED tokens (e.g. the device-enrolment ticket minted by
-        # the device gate) are signed with the same key but are NOT sessions:
-        # accepting one here would let a device-REJECTED login reach every
-        # AUTHENTICATED route for the ticket's lifetime -- a bypass of the
-        # very gate that minted it. No real access token carries `purpose`.
-        if payload.get("purpose"):
-            raise HTTPException(
-                status_code=401,
-                detail="Not an access token",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        # F18: a valid signature is not enough -- the account behind it must
-        # still be active. See the block comment above for the cost and the
-        # deliberate fail-soft behaviour when the lookup cannot be made.
-        if _account_is_disabled(payload):
-            raise HTTPException(
-                status_code=401,
-                detail="Account is disabled",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        return current_authority(payload, request)
+        return authority
     except HTTPException:
         # Re-raise HTTPException as-is
         raise
@@ -1587,7 +1668,14 @@ async def refresh_token(request: RefreshTokenRequest):
             status_code=400, detail="refresh_token (or legacy token) is required"
         )
 
-    payload = decode_token(request.token)  # still-valid access token, as before
+    # Still-valid access token, as before -- but only a LIVE SESSION one: the
+    # same test every protected route applies (R17 logged-out token, R18
+    # enrolment ticket), plus its refresh chain must not have been ended.
+    payload = session_claims(request.token)
+    if payload.get("sid") and refresh_token_store.family_is_live(payload["sid"]) is False:
+        raise HTTPException(
+            status_code=401, detail="Session ended. Please log in again."
+        )
     live = _lookup_live_user(payload.get("user_id"), payload.get("username"))
     if token_superseded(payload, live):
         raise HTTPException(
@@ -1676,6 +1764,8 @@ async def change_password(
     # Hash new password and update. Clear must_change_password so a forced
     # first-login change unblocks the user (set by admin create / reset).
     new_hash = hash_password(request.new_password)
+    # This login stays signed in; every other login of the account ends (R24).
+    keep_sid = current_user.get("sid")
     user_repo.collection.update_one(
         {"_id": user["_id"]},
         {
@@ -1683,9 +1773,11 @@ async def change_password(
                 "password_hash": new_hash,
                 "must_change_password": False,
                 "updated_at": utc_now_iso(),
+                **sign_out_other_sessions(user.get("user_id"), user, keep_sid),
             }
         },
     )
+    revoke_other_refresh_chains(user.get("user_id"), keep_sid, "password_changed")
 
     _audit_auth_event(
         action="password_changed",
