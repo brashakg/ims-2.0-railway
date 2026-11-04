@@ -11,6 +11,7 @@ import { usePOSStore } from '../stores/posStore';
 import { permissionToCapability, isUngrantableCapability } from '../utils/capabilities';
 import { userSeesAllStores } from '../utils/storeAccess';
 import { USER_SHOPS_SYNCED_EVENT } from '../services/api/client';
+import { dropPaletteRecents } from '../services/api/signOutEvent';
 import { getSessionPolicy } from '../constants/sessionPolicy';
 import { LAST_ACTIVITY_KEY, storedSessionIdleExpired } from '../hooks/useIdleLogout';
 import { IDLE_LOGIN_PATH, autoParkForIdleLogout } from '../hooks/idleSignOut';
@@ -368,14 +369,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       localStorage.removeItem('ims_user');
       localStorage.removeItem('ims_login_time');
       localStorage.removeItem('ims_active_module');
-      // Ctrl-K recent lists (key owned by components/shell/CommandPalette.tsx
-      // RECENT_KEY_PREFIX): they hold customer names and phones (Codex R09).
-      try {
-        for (let i = localStorage.length - 1; i >= 0; i--) {
-          const k = localStorage.key(i);
-          if (k?.startsWith('cmdk_recent_v1')) localStorage.removeItem(k);
-        }
-      } catch { /* storage unavailable - nothing to drop */ }
+      dropPaletteRecents();
       // Clear POS state to prevent data leaking between users
       try { usePOSStore.getState().clearAllOnLogout(state.user?.id, state.user?.activeStoreId); } catch { /* ignore if store not ready */ }
       dispatch({ type: 'LOGOUT' });

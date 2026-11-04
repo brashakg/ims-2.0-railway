@@ -24,10 +24,10 @@ vi.mock('../../stores/posStore', () => ({
 import { authApi } from '../../services/api';
 import { AuthProvider, useAuth } from '../AuthContext';
 
-let auth: ReturnType<typeof useAuth>;
+const seen: { auth?: ReturnType<typeof useAuth> } = {};
 function Probe() {
-  auth = useAuth();
-  return <span>{auth.user?.id ?? 'signed out'}</span>;
+  seen.auth = useAuth();
+  return <span>{seen.auth.user?.id ?? 'signed out'}</span>;
 }
 
 let mem: Map<string, string>;
@@ -63,7 +63,7 @@ async function signedInTab() {
       </AuthProvider>
     </QueryClientProvider>,
   );
-  await act(() => auth.login({ username: 'u-admin', password: 'x' }));
+  await act(() => seen.auth!.login({ username: 'u-admin', password: 'x' }));
   qc.setQueryData(['customer360', 'C-1'], { name: 'AUDIT ONLY Customer', phone: '9000000002' });
   return qc;
 }
@@ -83,6 +83,17 @@ describe('cross-tab sign-out', () => {
     otherTabWrites('ims_token', null);
     otherTabWrites('ims_refresh_token', null);
     otherTabWrites('ims_user', null);
+    expect(screen.getByText('signed out')).toBeInTheDocument();
+    expect(qc.getQueryCache().getAll()).toHaveLength(0);
+    expect(reload).toHaveBeenCalled();
+  });
+
+  it('another tab clearing all storage (idle / Clear cache) empties this tab', async () => {
+    const qc = await signedInTab();
+    mem.clear();
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: null }));
+    });
     expect(screen.getByText('signed out')).toBeInTheDocument();
     expect(qc.getQueryCache().getAll()).toHaveLength(0);
     expect(reload).toHaveBeenCalled();
@@ -113,7 +124,7 @@ describe('sign-out drops the Ctrl-K recent lists (R09)', () => {
     await signedInTab();
     mem.set('cmdk_recent_v1', '[{"type":"customer","id":"C-1","label":"AUDIT ONLY Customer","route":"/x"}]');
     mem.set('cmdk_recent_v1:u-admin:BV-S1:ADMIN', '[]');
-    await act(() => auth.logout());
+    await act(() => seen.auth!.logout());
     expect([...mem.keys()].filter((k) => k.startsWith('cmdk_recent_v1'))).toEqual([]);
   });
 });

@@ -26,6 +26,7 @@ import { Icon } from './Icon';
 import { RETURN_READERS } from '../../pages/purchase/purchaseRoles';
 import { INVENTORY_MANAGE_ROLES, POWER_GRID_ROLES } from '../../pages/inventory/inventoryRoles';
 import type { UserRole } from '../../types';
+import { PALETTE_RECENT_PREFIX } from '../../services/api/signOutEvent';
 
 // ----------------------------------------------------------------------------
 // Recent items (localStorage)
@@ -33,16 +34,15 @@ import type { UserRole } from '../../types';
 
 // One list per person, role set and shop (Codex R09): on a shared tablet the
 // old single browser-wide key showed the last person's customers (name +
-// phone) to whoever signed in next. AuthContext.logout drops every key that
-// starts with this prefix, the old unscoped one included.
-const RECENT_KEY_PREFIX = 'cmdk_recent_v1';
+// phone) to whoever signed in next. Every sign-out drops them all
+// (dropPaletteRecents), the old unscoped key included.
 const RECENT_LIMIT = 5;
 
 type RecentOwner = { id?: string; roles?: string[]; activeStoreId?: string | null } | null | undefined;
 
 function recentKeyFor(u: RecentOwner): string | null {
   if (!u?.id) return null;
-  return [RECENT_KEY_PREFIX, u.id, u.activeStoreId || '', [...(u.roles || [])].sort().join(',')].join(':');
+  return [PALETTE_RECENT_PREFIX, u.id, u.activeStoreId || '', [...(u.roles || [])].sort().join(',')].join(':');
 }
 
 export interface RecentItem {
