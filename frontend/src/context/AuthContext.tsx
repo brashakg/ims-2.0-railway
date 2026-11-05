@@ -10,7 +10,7 @@ import { authApi } from '../services/api';
 import { usePOSStore } from '../stores/posStore';
 import { permissionToCapability, isUngrantableCapability } from '../utils/capabilities';
 import { userSeesAllStores } from '../utils/storeAccess';
-import { USER_SHOPS_SYNCED_EVENT } from '../services/api/client';
+import { USER_SHOPS_SYNCED_EVENT, decodeJwtClaims, syncCachedUserShops } from '../services/api/client';
 import { getSessionPolicy } from '../constants/sessionPolicy';
 import { LAST_ACTIVITY_KEY, storedSessionIdleExpired } from '../hooks/useIdleLogout';
 import { IDLE_LOGIN_PATH, autoParkForIdleLogout } from '../hooks/idleSignOut';
@@ -128,6 +128,15 @@ function authReducer(state: AuthState, action: AuthAction): AuthState {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+/** The id of the person in the shared cache (ims_user), if readable. */
+function storedUserId(): string | undefined {
+  try {
+    return (JSON.parse(localStorage.getItem('ims_user') || 'null') as User | null)?.id;
+  } catch {
+    return undefined;
+  }
+}
+
 // ============================================================================
 // Provider Component
 // ============================================================================
@@ -141,6 +150,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const queryClient = useQueryClient();
   // Latest store switch; an answer to an older one is stale (R41).
   const switchSeq = useRef(0);
+  // Sign-in session: login and logout bump it, so a switch answer asked for
+  // in an older session is never applied to the next one (#1372 review).
+  const sessionGen = useRef(0);
+  // The person and shop on THIS tab's screen, read by async/event handlers.
+  const userRef = useRef<User | null>(null);
+  useEffect(() => { userRef.current = state.user; }, [state.user]);
 
   // A token refresh re-reads the login's shops from the new token
   // (services/api/client syncCachedUserShops): follow it on screen at once.
@@ -267,8 +282,29 @@ export function AuthProvider({ children }: AuthProviderProps) {
     initializeAuth();
   }, []);
 
+  // Another tab of the SAME person switched shop: the shared token now acts
+  // for that shop, so this tab shows it too and drops its shop data (#1372
+  // review). A different person or a sign-out is the sign-out listener's.
+  useEffect(() => {
+    const follow = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== 'ims_token' && e.key !== 'ims_user') return;
+      const me = userRef.current;
+      const token = localStorage.getItem('ims_token');
+      const claims = decodeJwtClaims(token);
+      if (!me || !token || !claims || claims.user_id !== me.id || storedUserId() !== me.id) return;
+      const shop = claims.active_store_id || '';
+      syncCachedUserShops(token); // the cache follows the token too
+      if (shop === me.activeStoreId) return;
+      dispatch({ type: 'UPDATE_USER', payload: { activeStoreId: shop, storeIds: Array.isArray(claims.store_ids) ? claims.store_ids : me.storeIds } });
+      void queryClient.resetQueries();
+    };
+    window.addEventListener('storage', follow);
+    return () => window.removeEventListener('storage', follow);
+  }, [queryClient]);
+
   // Login function
   const login = async (credentials: LoginCredentials): Promise<LoginResponse> => {
+    sessionGen.current++;
     dispatch({ type: 'SET_LOADING', payload: true });
 
     try {
@@ -317,6 +353,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   // Logout function
   const logout = async () => {
+    sessionGen.current++;
     try {
       await authApi.logout();
     } catch {
@@ -399,9 +436,16 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // token all stay on the old shop. A newer switch makes an older answer
     // stale: it is ignored, never applied over the newer choice.
     const seq = ++switchSeq.current;
+    const gen = sessionGen.current;
     try {
       const { access_token, active_store_id } = await authApi.switchStore(storeId);
       if (seq !== switchSeq.current || !access_token) return false;
+      // Still the session and the person that asked? A sign-out / sign-in
+      // here, or another tab signing someone else in, makes the answer
+      // someone else's: it is dropped, the current token is left alone.
+      const issuedTo = decodeJwtClaims(access_token)?.user_id;
+      if (gen !== sessionGen.current || !issuedTo || issuedTo !== userRef.current?.id
+          || issuedTo !== storedUserId()) return false;
       const confirmed = active_store_id || storeId;
       localStorage.setItem('ims_token', access_token);
       dispatch({ type: 'SET_ACTIVE_STORE', payload: confirmed });

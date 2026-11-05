@@ -25,6 +25,9 @@ function Probe() {
   return null;
 }
 const switchStore = authApi.switchStore as unknown as ReturnType<typeof vi.fn>;
+// A server-issued token names its person and shop (R41 review: a switch answer
+// is applied only to the person who asked).
+const jwt = (shop: string) => `h.${btoa(JSON.stringify({ user_id: 'u1', active_store_id: shop, store_ids: ['S1', 'S2', 'S3'] }))}.s`;
 const cachedShop = () => JSON.parse(localStorage.getItem('ims_user') || '{}').activeStoreId;
 
 beforeEach(() => {
@@ -40,12 +43,12 @@ beforeEach(() => {
 
 const signIn = async () => {
   (authApi.login as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
-    success: true, token: 'token-A',
+    success: true, token: jwt('S1'),
     user: { id: 'u1', name: 'u1', roles: ['STORE_MANAGER'], storeIds: ['S1', 'S2', 'S3'], activeStoreId: 'S1' },
   });
   render(<QueryClientProvider client={new QueryClient()}><AuthProvider><Probe /></AuthProvider></QueryClientProvider>);
   await act(() => auth.login({ username: 'u1', password: 'x' }));
-  localStorage.setItem('ims_token', 'token-A');
+  localStorage.setItem('ims_token', jwt('S1'));
 };
 
 describe('a store switch moves the screen only when the server confirms it', () => {
@@ -57,7 +60,7 @@ describe('a store switch moves the screen only when the server confirms it', () 
     expect(ok).toBe(false);
     expect(auth.user?.activeStoreId).toBe('S1');
     expect(cachedShop()).toBe('S1');
-    expect(localStorage.getItem('ims_token')).toBe('token-A');
+    expect(localStorage.getItem('ims_token')).toBe(jwt('S1'));
   });
 
   it('while the switch is pending nothing has moved yet', async () => {
@@ -68,37 +71,37 @@ describe('a store switch moves the screen only when the server confirms it', () 
     act(() => { pending = auth.setActiveStore('S2'); });
     expect(auth.user?.activeStoreId).toBe('S1');
     expect(cachedShop()).toBe('S1');
-    await act(async () => { resolve({ access_token: 'token-B', active_store_id: 'S2' }); await pending; });
+    await act(async () => { resolve({ access_token: jwt('S2'), active_store_id: 'S2' }); await pending; });
     expect(auth.user?.activeStoreId).toBe('S2');
     expect(cachedShop()).toBe('S2');
-    expect(localStorage.getItem('ims_token')).toBe('token-B');
+    expect(localStorage.getItem('ims_token')).toBe(jwt('S2'));
   });
 
   it('a confirmed switch moves screen, cache and token together, to the shop the server named', async () => {
     await signIn();
-    switchStore.mockResolvedValueOnce({ access_token: 'token-B', active_store_id: 'S2' });
+    switchStore.mockResolvedValueOnce({ access_token: jwt('S2'), active_store_id: 'S2' });
     let ok: boolean | undefined;
     await act(async () => { ok = await auth.setActiveStore('S2'); });
     expect(ok).toBe(true);
     expect(auth.user?.activeStoreId).toBe('S2');
     expect(cachedShop()).toBe('S2');
-    expect(localStorage.getItem('ims_token')).toBe('token-B');
+    expect(localStorage.getItem('ims_token')).toBe(jwt('S2'));
   });
 
   it('an older answer arriving after a newer switch is ignored', async () => {
     await signIn();
     let slowB!: (v: unknown) => void;
     switchStore.mockReturnValueOnce(new Promise((r) => { slowB = r; }));
-    switchStore.mockResolvedValueOnce({ access_token: 'token-C', active_store_id: 'S3' });
+    switchStore.mockResolvedValueOnce({ access_token: jwt('S3'), active_store_id: 'S3' });
     let first!: Promise<boolean>;
     act(() => { first = auth.setActiveStore('S2'); });
     await act(async () => { await auth.setActiveStore('S3'); });
     let firstOk: boolean | undefined;
-    await act(async () => { slowB({ access_token: 'token-B', active_store_id: 'S2' }); firstOk = await first; });
+    await act(async () => { slowB({ access_token: jwt('S2'), active_store_id: 'S2' }); firstOk = await first; });
     expect(firstOk).toBe(false);
     expect(auth.user?.activeStoreId).toBe('S3');
     expect(cachedShop()).toBe('S3');
-    expect(localStorage.getItem('ims_token')).toBe('token-C');
+    expect(localStorage.getItem('ims_token')).toBe(jwt('S3'));
   });
 
   it('a shop the user is not given is refused without a request', async () => {
