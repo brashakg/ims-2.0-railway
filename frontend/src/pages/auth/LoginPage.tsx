@@ -8,8 +8,7 @@ import AuthContext from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { Eye, EyeOff, AlertCircle, RefreshCw } from 'lucide-react';
 import { getBrandAssets } from '../../utils/brandAssets';
-import { storeApi } from '../../services/api';
-import { userSeesAllStores } from '../../utils/storeAccess';
+import { needsStoreSelection } from '../../utils/storeAccess';
 import { clearCacheKeepingBills } from '../../components/pos/posBillKey';
 
 export function LoginPage() {
@@ -105,31 +104,9 @@ export function LoginPage() {
       });
 
       if (response.success) {
-        // Post-login store selection (multi-store roles only). A user who can
-        // operate as more than one store picks the active store on a dedicated
-        // interstitial BEFORE the dashboard; single-store users go straight
-        // through (their active store is already set by the login response).
-        //   - SUPERADMIN / ADMIN see EVERY active store -> need the org count.
-        //   - Everyone else (incl. AREA_MANAGER) -> their assigned store_ids.
-        const u = response.user;
-        let needsSelection = false;
-        // A temporary password must be replaced first: the server refuses
-        // everything else until then, and the app shell shows the change screen.
-        if (u && !u.mustChangePassword) {
-          if (userSeesAllStores(u.roles)) {
-            try {
-              const res = await storeApi.getStores();
-              const list = (res?.stores ?? res ?? []) as unknown[];
-              needsSelection = Array.isArray(list) && list.length > 1;
-            } catch {
-              // Couldn't enumerate stores -> don't block login. The AppLayout
-              // guard still routes an admin with no active store to /select-store.
-              needsSelection = false;
-            }
-          } else {
-            needsSelection = (u.storeIds?.length ?? 0) > 1;
-          }
-        }
+        // Post-login store selection (multi-store roles only): the shared
+        // decision in utils/storeAccess, also used after a first-password change.
+        const needsSelection = await needsStoreSelection(response.user);
         if (needsSelection) {
           navigate('/select-store', { state: { from }, replace: true });
         } else {
