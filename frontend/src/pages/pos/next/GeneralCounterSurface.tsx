@@ -70,6 +70,7 @@ import {
   resolveBarcode,
   posPriceGuard,
   cartItemFromProduct,
+  alreadyOnBillMessage,
   productIdOf,
 } from '../../../components/pos/productIntake';
 import { CATEGORY_BROWSE_OPTIONS } from '../../../utils/categoryNormalize';
@@ -207,16 +208,16 @@ export function GeneralCounterSurface() {
     const guard = posPriceGuard(product);
     if (!guard.ok) {
       setErrorMsg(guard.message || 'Blocked');
-      return;
+      return true;
     }
     setErrorMsg(null);
-    store.addToCart(cartItemFromProduct(product, guard));
+    return store.addToCart(cartItemFromProduct(product, guard));
   };
 
   const handleScan = async (code: string) => {
     const res = await resolveBarcode(store.store_id || activeStoreId, code);
     if (res.ok && res.product) {
-      addProduct(res.product);
+      if (!addProduct(res.product)) setErrorMsg(alreadyOnBillMessage(code));
       return;
     }
     if (res.message) setErrorMsg(res.message);

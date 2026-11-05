@@ -77,6 +77,15 @@ export function DeliverySurface() {
   const [cleaned, setCleaned] = useState(false);
   const [pickedUpBy, setPickedUpBy] = useState('');
   const [handoverNote, setHandoverNote] = useState('');
+  const resetHandover = () => {
+    setPickedUpBy('');
+    setHandoverNote('');
+    setFitCheck(false);
+    setCleaned(false);
+  };
+  // Only the LATEST lookup may select an order: a slow answer (or failure)
+  // for an earlier scan is dropped, never shown over the later one (SP03).
+  const lookupSeqRef = useRef(0);
 
   // Money: the tender legs the counter has taken for THIS handover. Held
   // locally, NOT in posStore — the cart on the till is a different bill and
@@ -138,6 +147,8 @@ export function DeliverySurface() {
   const findOrder = async (ref: string) => {
     const q = (ref || '').trim();
     if (!q) return;
+    const seq = ++lookupSeqRef.current;
+    const stale = () => seq !== lookupSeqRef.current;
     setErrorMsg(null);
     setOkMsg(null);
     setMatches([]);
@@ -148,6 +159,7 @@ export function DeliverySurface() {
       try {
         doc = await orderApi.getOrder(q);
       } catch {
+        if (stale()) return;
         // Not an id. Search the delivery QUEUE by order number, customer name
         // or phone. This replaces a fallback that fetched the newest 20 orders
         // of any status and matched the number exactly client-side: it could
@@ -158,6 +170,7 @@ export function DeliverySurface() {
           storeId: user?.activeStoreId,
           q,
         });
+        if (stale()) return;
         const rows: any[] = res?.orders || [];
         if (rows.length > 1) {
           setMatches(rows);
@@ -166,6 +179,7 @@ export function DeliverySurface() {
         }
         doc = rows[0] || null;
       }
+      if (stale()) return;
       if (!doc?.id) {
         setErrorMsg(
           `Nothing awaiting collection for "${q}". Try the job card number, ` +
@@ -176,14 +190,18 @@ export function DeliverySurface() {
       }
       selectOrder(doc);
     } catch {
+      if (stale()) return;
       setErrorMsg('Could not load that order. Try again.');
     }
   };
 
   /** Commit to one order. A different order means a different balance and a
-   *  different idempotency key — nothing from the last attempt may carry over. */
+   *  different idempotency key — nothing from the last attempt may carry over,
+   *  including who collected it and the handover note / checks (SP02). */
   const selectOrder = (doc: any) => {
+    lookupSeqRef.current += 1; // a pick from the list outranks a lookup still in flight
     resetTender();
+    resetHandover();
     setMatches([]);
     setOrder(doc);
   };
@@ -274,10 +292,7 @@ export function DeliverySurface() {
       // delivered-thank-you the server has already queued.
       setHandedOver(order);
       setOrder(null);
-      setPickedUpBy('');
-      setHandoverNote('');
-      setFitCheck(false);
-      setCleaned(false);
+      resetHandover();
       resetTender();
     } catch (err: any) {
       // The server owns the refusal (credit gate, QC gate, Rx hold, status),
