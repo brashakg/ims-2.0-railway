@@ -191,33 +191,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
           try {
             const profile = await authApi.getProfile();
 
-            // Restore client-side selections (activeStoreId + activeRole) from
-            // the cached user. The server's /auth/me returns active_store_id
-            // from the JWT — which defaults to storeIds[0] at LOGIN TIME and
-            // is NOT updated when the user picks a different store via the
-            // topbar dropdown (that's a pure client-side change persisted to
-            // localStorage). So on every browser refresh, the server hands
-            // back the original-login store, overwriting the user's pick.
-            // We must prefer the cached value over the server's "default"
-            // whenever the user still has access to it.
-            //
-            // First attempt (#278) only restored when !profile.activeStoreId,
-            // which failed because the server's default is always populated.
-            // Owner verified: F5 still reset to Bokaro (their first assigned
-            // store). This fix always overrides with the cached pick when
-            // it's still permitted.
+            // The shop is the server's: /auth/me answers with the token's
+            // active_store_id, which a store switch re-issues (R41), so an
+            // F5 keeps the pick. An older cache naming another shop (a switch
+            // that failed before R41) is set back to it, never trusted.
+            // Only the role pick is client-side and restored from the cache.
             try {
               const cached = JSON.parse(userJson) as User;
-              const cachedStoreId = cached?.activeStoreId;
-              if (cachedStoreId) {
-                // The server's reach (switch-store, validate_store_access):
-                // only ADMIN / SUPERADMIN reach a shop they were not given.
-                const hasCrossStoreAccess = userSeesAllStores(profile.roles);
-                const isAssigned = (profile.storeIds || []).includes(cachedStoreId);
-                if (hasCrossStoreAccess || isAssigned) {
-                  profile.activeStoreId = cachedStoreId;
-                }
-              }
               const cachedRole = cached?.activeRole;
               if (cachedRole && (profile.roles || []).includes(cachedRole)) {
                 profile.activeRole = cachedRole;
@@ -359,19 +339,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
   };
 
   // Re-fetch the signed-in user from the server (e.g. after a forced password
-  // change) and merge into state + cache. Preserves the client-side active
-  // store / role picks, which the server's /auth/me default would otherwise
-  // overwrite (same reasoning as the mount path above).
+  // change) and merge into state + cache. The shop is the server's (the
+  // token's, as on mount); only the client-side role pick is preserved.
   const refreshUser = async () => {
     const profile = await authApi.getProfile();
     const current = state.user;
-    if (current?.activeStoreId) {
-      const hasCrossStoreAccess = userSeesAllStores(profile.roles);
-      const isAssigned = (profile.storeIds || []).includes(current.activeStoreId);
-      if (hasCrossStoreAccess || isAssigned) {
-        profile.activeStoreId = current.activeStoreId;
-      }
-    }
     if (current?.activeRole && (profile.roles || []).includes(current.activeRole)) {
       profile.activeRole = current.activeRole;
     } else if (!profile.activeRole && profile.roles && profile.roles.length > 0) {
