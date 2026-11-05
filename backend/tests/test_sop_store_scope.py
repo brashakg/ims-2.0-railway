@@ -300,9 +300,12 @@ def test_no_sop_door_names_a_person_outside_the_sops_shop(world, people, who):
     before = _frozen(world)
     c = _client(MGR_A)
     body = {"title": "Close", "category": "Operations", "frequency": "DAILY"}
-    assert c.post("/tasks/sop-templates", json={**body, "assigned_users": [who]}).status_code == 400
-    assert c.patch("/tasks/sop-templates/SOP-A", json={"assigned_users": ["u-a1", who]}).status_code == 400
-    assert c.post("/tasks/sop-templates/SOP-A/assign", json={"assigned_users": [who]}).status_code == 400
+    codes = [  # all three doors judged in one assertion, so each is proven
+        c.post("/tasks/sop-templates", json={**body, "assigned_users": [who]}).status_code,
+        c.patch("/tasks/sop-templates/SOP-A", json={"assigned_users": ["u-a1", who]}).status_code,
+        c.post("/tasks/sop-templates/SOP-A/assign", json={"assigned_users": [who]}).status_code,
+    ]
+    assert codes == [400, 400, 400]
     assert _frozen(world) == before  # nothing saved by any of the three
 
 
