@@ -4193,21 +4193,53 @@ def _task_step_lost(return_id: Optional[str], step: str, detail: Dict[str, Any],
         logger.error("[RETURNS] step-lost task not raised for %s/%s: %s", return_id, step, exc)
 
 
-def _return_fingerprint(body: "ReturnCreate") -> str:
+def _disposition_lines(items) -> list:
+    """Each returned line's identity, qty and what happens to the piece
+    (condition, restock, scanned serial). Reads a ReturnLine or a saved
+    return's stored line dict alike; a stored line missing a field holds the
+    ReturnLine default it was recorded under."""
+    out = []
+    for it in items or []:
+        d = it if isinstance(it, dict) else it.model_dump()
+        qty = float(d.get("return_qty") or 0)
+        if qty > 0:
+            out.append((str(d.get("order_item_id") or d.get("product_id") or ""), round(qty, 4),
+                        str(d.get("condition") or "GOOD"), bool(d.get("restock", True)),
+                        str(d.get("serial") or "").strip()))
+    return sorted(out)
+
+
+def _return_fingerprint(body: "ReturnCreate", legacy: bool = False) -> str:
     """What one press of the Returns screen asked for: a reused
-    Idempotency-Key carrying other content is refused, never replayed."""
+    Idempotency-Key carrying other content is refused, never replayed.
+
+    ``legacy=True`` is the formula saved before #1381 (identity + qty only):
+    a return saved under it is matched by _replay_matches, which also checks
+    the disposition against the saved return's own lines."""
     import hashlib
     import json as _json
 
     # Condition, restock and the scanned serial decide what happens to the
     # piece, so a changed disposition under the same key is a different press.
-    lines = sorted((str(it.order_item_id or it.product_id or ""), round(float(it.return_qty or 0), 4),
-                    str(it.condition or ""), bool(it.restock), str(it.serial or "").strip())
-                   for it in body.items if (it.return_qty or 0) > 0)
+    lines = _disposition_lines(body.items)
+    if legacy:
+        lines = [ln[:2] for ln in lines]
     tenders = sorted((str(t.method or ""), round(float(t.amount or 0), 2)) for t in (body.refund_tenders or []))
     raw = _json.dumps([body.order_id or body.order_number, body.return_type,
                        round(float(body.restocking_fee or 0), 2), lines, tenders])
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _replay_matches(existing: Dict[str, Any], body: "ReturnCreate") -> bool:
+    """Is this press the one the saved return recorded? A current-format
+    fingerprint answers alone; an old-format one (saved before the disposition
+    joined it) must ALSO find the retry's condition / restock / serial on the
+    saved return's own lines -- the old hash alone cannot tell them apart."""
+    saved = existing.get("idempotency_fingerprint")
+    if saved is None or saved == _return_fingerprint(body):
+        return True
+    return (saved == _return_fingerprint(body, legacy=True)
+            and _disposition_lines(existing.get("items")) == _disposition_lines(body.items))
 
 
 @router.post("", status_code=201)
@@ -4302,7 +4334,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     # A known key from another shop replays nothing and names
                     # nothing: the same 404 as GET /returns/{id}.
                     in_reach_or_404(existing, current_user, "Return not found")
-                if existing and existing.get("idempotency_fingerprint") not in (None, _return_fingerprint(body)):
+                if existing and not _replay_matches(existing, body):
                     raise HTTPException(status_code=409, detail=(
                         f"This press already recorded return {existing.get('return_id')} with different "
                         "items or amounts. Reload the bill before starting a new return."))
