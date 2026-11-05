@@ -48,11 +48,14 @@ the request (SYSTEM_INTENT "Requester CANNOT approve own request").
 from __future__ import annotations
 
 import logging
+from collections import Counter
+from types import SimpleNamespace
 from typing import Annotated, List, Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from . import vendor_returns as _rtv
 from .auth import require_roles
 from ..dependencies import (
     get_db,
@@ -217,6 +220,66 @@ def _masked(doc: dict, user: dict) -> dict:
     return result
 
 
+def _physical_return_problem(db, doc: dict, *, shipped: bool) -> Optional[str]:
+    """Why this RMA's goods have not left the shop's stock; None when they have
+    (L2-RMA-F01). A line for a product this shop holds pieces of -- THE Vendor
+    Returns rule, _typed_line_problem -- goes back only on the pieces of the
+    vendor return the RMA links (return_id): open, same shop and supplier, its
+    pieces exactly the RMA's products and quantities, on no other RMA. That
+    return moves them (QUARANTINED -> RTV on its Ship), never this RMA, so no
+    piece leaves twice. ``shipped`` (dispatch, credit, close) asks that they
+    have left; at raise they may still be set aside for it. A line for
+    something IMS holds no piece of here (a customer's own frame on warranty,
+    a made-to-order lens) is unchanged: no owner policy is guessed for it."""
+    if db is None:
+        return "Stock data is unavailable; retry shortly."
+    rid = doc.get("return_id")
+    pieces: Counter = Counter()
+    if rid:
+        ret = db.get_collection("vendor_returns").find_one({"return_id": rid})
+        if (not ret or ret.get("claim") or ret.get("receipt_rejection")
+                or ret.get("status") in ("cancelled", *_rtv._UNSAVED)):
+            return f"Vendor return {rid} is not an open supplier return this RMA can go back on."
+        if ret.get("store_id") != doc.get("store_id") or ret.get("vendor_id") != doc.get("vendor_id"):
+            return f"Vendor return {rid} is for another shop or supplier."
+        if db.get_collection("vendor_rmas").find_one({
+                "return_id": rid, "rma_id": {"$ne": doc.get("rma_id")},
+                "status": {"$ne": RMAStatus.REJECTED.value}}):
+            return f"Vendor return {rid} already goes back on another RMA."
+        units = _rtv._named_units(db, ret)
+        for sid in ret.get("stock_ids") or []:
+            state = _rtv._ie.canonical_state((units.get(sid) or {}).get("status"))
+            if state is _rtv._STATE.RTV:
+                pieces[units[sid].get("product_id")] += 1
+            elif state is _rtv._STATE.QUARANTINED and not shipped:
+                pieces[units[sid].get("product_id")] += 1
+            elif state is _rtv._STATE.QUARANTINED:
+                return f"Ship vendor return {rid} first: its pieces leave stock there."
+            else:
+                return (f"Piece {_rtv._label(units.get(sid), sid)} of vendor return {rid} "
+                        "is no longer held for it.")
+    wanted: Counter = Counter()
+    for line in doc.get("lines") or []:
+        if line.get("product_id") in pieces:
+            wanted[line.get("product_id")] += int(line.get("quantity") or 0)
+            continue
+        why = _rtv._typed_line_problem(db, SimpleNamespace(
+            product_id=line.get("product_id"), product_name=line.get("product_name")),
+            doc.get("store_id"))
+        if why:
+            return (why + " Put them on a vendor return (Purchase > Vendor Returns) and "
+                    "raise the RMA with its return_id.")
+    if wanted != pieces:
+        return f"Vendor return {rid}'s pieces are not this RMA's products and quantities."
+    return None
+
+
+def _require_physical_return(doc: dict, *, shipped: bool, status_code: int = 409) -> None:
+    problem = _physical_return_problem(_get_db(), doc, shipped=shipped)
+    if problem:
+        raise HTTPException(status_code=status_code, detail=problem)
+
+
 def _http_from_result(res: dict, user: dict) -> HTTPException:
     """Map an engine fail result to an HTTPException, defaulting to 400. The
     detail goes through the same mask: a refused close names the variance."""
@@ -277,6 +340,10 @@ async def raise_rma(
     eng = _engine()
     if eng._coll() is None:  # noqa: SLF001 - intentional fail-soft DB probe
         raise HTTPException(status_code=503, detail="Database not available")
+    _require_physical_return(
+        {"store_id": body.store_id, "vendor_id": body.vendor_id, "return_id": body.return_id,
+         "lines": [ln.model_dump() for ln in body.lines]},
+        shipped=False, status_code=422)
     lines = [
         {
             "product_id": ln.product_id,
@@ -342,6 +409,7 @@ async def dispatch_rma(
     """Record courier dispatch (carrier / AWB / date); AUTHORIZED -> DISPATCHED."""
     eng = _engine()
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
+    _require_physical_return(doc, shipped=True)
     res = eng.dispatch(
         rma_id,
         carrier=body.carrier,
@@ -403,6 +471,7 @@ async def record_credit_note(
         if submitted["received_paise"] == 0 and submitted["allocations"]:
             raise SupplierCreditError("ZERO_ACKNOWLEDGEMENT_ONLY", "A zero acknowledgement cannot contain credit allocations.")
         if not existing or existing.get("posting_status") != "POSTED":
+            _require_physical_return(doc, shipped=True)
             if not rma_is_priced(doc):
                 raise _http_from_result(dict(PRICE_REQUIRED), current_user)
             if doc.get("status") not in rma_supplier_credit.READY:
@@ -519,6 +588,7 @@ async def close_rma(
         require_payables(current_user, "Writing off an RMA's credit variance")
     eng = _engine()
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
+    _require_physical_return(doc, shipped=True)
     res = eng.close_rma(
         rma_id,
         actor=current_user.get("user_id"),

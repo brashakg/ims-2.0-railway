@@ -448,22 +448,29 @@ def _set_aside(db, lines, return_id, store_id, actor_id, generations, progress):
     return linked, taken, prior
 
 
-def _release_pieces(db, return_id, ids, taken, actor_id, prior=None, note=None) -> List[str]:
+def _release_pieces(db, return_id, ids, taken, actor_id, prior=None, note=None,
+                    held=None) -> List[str]:
     """Take the given pieces off the return -- these ids only, never by link
     alone: a piece this return took off the shelf goes back on it through the
     ledger (unless another return holds it now), and each piece gets its
-    earlier link back. Returns the ids put back on the shelf."""
+    earlier link back. Returns the ids put back on the shelf. With `held` (a
+    list; the cancel's) a piece the ledger would not put back while it is
+    still set aside keeps its link to this return and is added to `held`, so
+    Cancel again finds it (L2-RTV-F01)."""
     stock = db.get_collection("stock_units")
     prior = prior or {}
     back = []
     for unit in list(stock.find({"stock_id": {"$in": list(ids)}})):
         sid = unit.get("stock_id")
         mine = unit.get("rtv_vendor_id") in (return_id, prior.get(sid))
-        if sid in taken and mine and _ledger_move(
-                db, unit, _STATE.QUARANTINED, _STATE.AVAILABLE,
-                _ie.ItemEventType.QUARANTINE_OUT, return_id, actor_id,
-                {"disposition": "RESTOCK", **(note or {})}):
-            back.append(unit)
+        if sid in taken and mine:
+            if _ledger_move(db, unit, _STATE.QUARANTINED, _STATE.AVAILABLE,
+                            _ie.ItemEventType.QUARANTINE_OUT, return_id, actor_id,
+                            {"disposition": "RESTOCK", **(note or {})}):
+                back.append(unit)
+            elif held is not None and _is_set_aside(stock.find_one({"stock_id": sid})):
+                held.append(sid)
+                continue
         res = stock.update_one({"stock_id": sid, "rtv_vendor_id": return_id},
                                {"$set": {"rtv_vendor_id": prior.get(sid)}})
         if getattr(res, "matched_count", 0):
@@ -488,6 +495,30 @@ def _named_units(db, return_doc) -> Dict[str, dict]:
     return {u.get("stock_id"): u for u in db.get_collection("stock_units").find({
         "stock_id": {"$in": named}, "rtv_vendor_id": return_doc.get("return_id"),
         "store_id": return_doc.get("store_id")})}
+
+
+def _put_back(db, return_doc, actor_id) -> List[str]:
+    """The cancel's release, run again by Cancel again: only the pieces still
+    linked to this return (one another return took since is left alone), and
+    a piece it took off the shelf goes back on it only while its last ledger
+    row is still this return's own (a lift or fresh quarantine since is
+    another flow's, and stays). Returns the labels of the pieces that could
+    not be put back yet."""
+    rid = return_doc.get("return_id")
+    units, held = _named_units(db, return_doc), []
+    taken = {sid for sid in return_doc.get("set_aside_stock_ids") or [] if _last_row_ours(db, sid, rid)}
+    _release_pieces(
+        db, rid, list(units), taken, actor_id,
+        {p.get("stock_id"): p.get("rtv_vendor_id") for p in return_doc.get("prior_links") or []},
+        held=held,
+    )
+    return [_label(units.get(sid), sid) for sid in held]
+
+
+def _not_put_back(labels) -> HTTPException:
+    return HTTPException(status_code=409, detail=(
+        f"The return is cancelled, but these pieces could not be put back on the shelf "
+        f"yet: {', '.join(labels)}. Press Cancel again to finish."))
 
 
 def _not_ready_to_ship(db, return_doc) -> Optional[str]:
@@ -585,12 +616,17 @@ def _untouched_since(db, unit, rid, generation) -> bool:
     one or the other -- and is left exactly as it is."""
     if not generation:
         return False
-    last = list(db.get_collection("item_events").find({"stock_id": unit.get("stock_id")})
-                .sort("event_seq", -1).limit(1))
-    return bool(last) and last[0].get("source_id") == rid \
-        and last[0].get("source_type") == "VENDOR_RETURN" \
+    return _last_row_ours(db, unit.get("stock_id"), rid) \
         and unit.get("quarantine_generation") in (generation.get("quarantine_generation"),
                                                   generation.get("before"))
+
+
+def _last_row_ours(db, sid, rid) -> bool:
+    """The piece's last ledger row is this vendor return's own."""
+    last = list(db.get_collection("item_events").find({"stock_id": sid})
+                .sort("event_seq", -1).limit(1))
+    return bool(last) and last[0].get("source_id") == rid \
+        and last[0].get("source_type") == "VENDOR_RETURN"
 
 
 def _undo_dead_claim(db, claim: dict, retried_by) -> None:
@@ -1016,6 +1052,18 @@ async def update_return_status(
             finished.pop("_id", None)
             return {"message": "Every piece on this return has left stock",
                     "return": mask_vendor_return(finished, current_user)}
+        # Cancel pressed again on a cancelled return (a lost reply, or a piece
+        # that could not be put back): finish putting back any piece still
+        # linked to it. Nothing else changes.
+        if status_update.status == "cancelled" and current_status == "cancelled":
+            if not return_doc.get("receipt_rejection"):
+                held = _put_back(db, return_doc, actor)
+                if held:
+                    raise _not_put_back(held)
+            finished = collection.find_one({"return_id": return_id}) or {}
+            finished.pop("_id", None)
+            return {"message": "This return is already cancelled",
+                    "return": mask_vendor_return(finished, current_user)}
         if current_status == "draft":
             if status_update.status == "created" and not status_update.return_type:
                 raise HTTPException(status_code=422, detail="Choose credit or replacement before confirming this return.")
@@ -1152,13 +1200,12 @@ async def update_return_status(
         # Cancelled before shipping: the pieces it took off the shelf go back
         # on it and every piece gets its earlier link back. A receipt-rejection
         # draft keeps its rejected pieces on a cancel (it can be reopened; they
-        # never were sellable).
+        # never were sellable). A piece that could not be put back stays
+        # linked to the cancelled return and is named: Cancel again finishes.
         if status_update.status == "cancelled" and not return_doc.get("receipt_rejection"):
-            _release_pieces(
-                db, return_id, return_doc.get("stock_ids") or [],
-                set(return_doc.get("set_aside_stock_ids") or []), actor,
-                {p.get("stock_id"): p.get("rtv_vendor_id") for p in return_doc.get("prior_links") or []},
-            )
+            held = _put_back(db, return_doc, actor)
+            if held:
+                raise _not_put_back(held)
 
         # Fetch and return updated document
         updated_doc = collection.find_one({"return_id": return_id})
