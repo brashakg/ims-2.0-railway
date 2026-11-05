@@ -551,14 +551,11 @@ async def update_cell(
 ):
     """Absolute updates to on_hand / reorder_point / safety_stock. Does NOT
     touch reserved -- reserved is only mutated by reserve/commit/release."""
+    # PR #1376 F2: the SAME cell guard as GET /cell and /audit, before the
+    # no-op reply -- a foreign or unattributed cell is a 404 that echoes and
+    # writes nothing.
+    existing = _cell_in_reach(line_stock_id, current_user)
     coll = _stock_coll()
-    if coll is None:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    existing = coll.find_one({"line_stock_id": line_stock_id})
-    if not existing:
-        raise HTTPException(status_code=404, detail="Stock cell not found")
-    validate_store_access(existing.get("store_id"), current_user)
 
     raw = payload.model_dump(exclude_none=True)
     notes = raw.pop("notes", None)
