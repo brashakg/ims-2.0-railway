@@ -12,7 +12,7 @@ Comprehensive settings management for all user roles.
 
 from api.utils.event_time import utc_now_iso
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, File
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing import Optional, List, Dict, Any
@@ -21,7 +21,7 @@ import os
 import re
 import time
 import logging
-from .auth import get_current_user, hash_password, verify_password, require_roles
+from .auth import get_current_user, require_roles
 from ..dependencies import get_audit_repository, get_store_repository
 from ..utils.ist import ist_day_start_utc, ist_today
 # BUG-155: the canonical at-rest credential crypto now lives in a shared leaf
@@ -781,38 +781,19 @@ async def update_profile(
 
 @router.post("/profile/change-password")
 async def change_password(
-    passwords: PasswordChange, current_user: dict = Depends(get_current_user)
+    passwords: PasswordChange,
+    req: Request = None,
+    current_user: dict = Depends(get_current_user),
 ):
-    """Change current user's password"""
-    from ..dependencies import get_user_repository
+    """Change current user's password. The same door as /auth/change-password,
+    so the one session rule holds here too: this login stays signed in, every
+    other login of the account ends, and an unsaved change is never reported
+    as a success (R24, Codex 11-05)."""
+    from .auth import ChangePasswordRequest, change_password as change_own_password
 
-    user_repo = get_user_repository()
-
-    if user_repo is not None:
-        # Get user from database
-        user = user_repo.find_by_id(current_user.get("user_id"))
-        if user is not None:
-            # Verify current password
-            stored_hash = user.get("password_hash")
-            if stored_hash and not verify_password(
-                passwords.current_password, stored_hash
-            ):
-                raise HTTPException(
-                    status_code=400, detail="Current password is incorrect"
-                )
-
-            # Update password in database
-            new_hash = hash_password(passwords.new_password)
-            user_repo.update(current_user.get("user_id"), {"password_hash": new_hash})
-            return {"message": "Password changed successfully"}
-
-    # For demo mode without database, validate format only
-    if len(passwords.new_password) < 8:
-        raise HTTPException(
-            status_code=400, detail="Password must be at least 8 characters"
-        )
-
-    return {"message": "Password changed successfully"}
+    return await change_own_password(
+        ChangePasswordRequest(**passwords.model_dump()), req=req, current_user=current_user
+    )
 
 
 # Default display/notification preferences. Returned verbatim when the user has

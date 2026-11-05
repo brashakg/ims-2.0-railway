@@ -1766,7 +1766,7 @@ async def change_password(
     new_hash = hash_password(request.new_password)
     # This login stays signed in; every other login of the account ends (R24).
     keep_sid = current_user.get("sid")
-    user_repo.collection.update_one(
+    saved = user_repo.collection.update_one(
         {"_id": user["_id"]},
         {
             "$set": {
@@ -1777,6 +1777,8 @@ async def change_password(
             }
         },
     )
+    if not saved.matched_count:
+        raise HTTPException(status_code=500, detail="Password was not saved. Please try again.")
     revoke_other_refresh_chains(user.get("user_id"), keep_sid, "password_changed")
 
     _audit_auth_event(

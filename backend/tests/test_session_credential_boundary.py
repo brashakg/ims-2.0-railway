@@ -8,6 +8,7 @@ real tokens, real refresh), no forged signatures:
   R18     a device-enrolment ticket traded at legacy /auth/refresh for a session
   L1-F42  a logged-out token re-spelled (padding / unused base64 bits) is accepted again
   R24     the admin password-reset door leaves the user's open logins usable
+          (and, 11-05, the settings change-password door did the same)
   R25     the forced first-login password change is enforced by the screen only
   L1-F25  the WhatsApp inbox decodes the bearer itself and accepts a logged-out token
 """
@@ -215,6 +216,58 @@ def test_self_change_keeps_this_login_and_ends_the_others(client, world):
     assert client.get("/api/v1/auth/me", headers=here).status_code == 200
     assert _me(client, elsewhere["access_token"]).status_code == 401
     assert _legacy_refresh(client, elsewhere["access_token"]).status_code == 401
+
+
+def test_settings_password_door_uses_the_same_session_rule(client, world):
+    """Codex 11-05: /settings/profile/change-password wrote only the hash, so
+    another login's access, rotating refresh and legacy refresh all lived on."""
+    here, _ = _session(client, "manager1")
+    _, elsewhere = _session(client, "manager1")
+    r = client.post(
+        "/api/v1/settings/profile/change-password",
+        json={"current_password": PW, "new_password": NEW},
+        headers=here,
+    )
+    assert r.status_code == 200, r.text
+
+    assert _me(client, elsewhere["access_token"]).status_code == 401
+    rot = client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": elsewhere["refresh_token"], "token": elsewhere["access_token"]},
+    )
+    assert rot.status_code == 401, rot.text
+    assert _legacy_refresh(client, elsewhere["access_token"]).status_code == 401
+    # The changing login stays in; only the new password signs in.
+    assert client.get("/api/v1/auth/me", headers=here).status_code == 200
+    bad = client.post("/api/v1/auth/login", json={"username": "manager1", "password": PW})
+    assert bad.status_code == 401
+    _session(client, "manager1", NEW)
+
+
+def test_settings_password_door_refuses_a_wrong_current_password(client, world):
+    here, _ = _session(client, "manager1")
+    _, elsewhere = _session(client, "manager1")
+    r = client.post(
+        "/api/v1/settings/profile/change-password",
+        json={"current_password": "Wrong@Pass1", "new_password": NEW},
+        headers=here,
+    )
+    assert r.status_code == 400, r.text
+    assert _me(client, elsewhere["access_token"]).status_code == 200
+    _session(client, "manager1", PW)
+
+
+def test_settings_password_door_reports_an_unsaved_change(client, world, monkeypatch):
+    """No database (or no such account) is not 'Password changed successfully'."""
+    here, _ = _session(client, "manager1")
+    monkeypatch.setattr("api.dependencies.get_user_repository", lambda: None)
+    r = client.post(
+        "/api/v1/settings/profile/change-password",
+        json={"current_password": PW, "new_password": NEW},
+        headers=here,
+    )
+    assert r.status_code == 503, r.text
+    assert "successfully" not in r.text
 
 
 # -- R25: the temporary password gates the API, not only the screen ----------
