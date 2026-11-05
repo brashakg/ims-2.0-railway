@@ -7,7 +7,7 @@ or default was changed.
 
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
-from ...dependencies import validate_store_access
+from ...dependencies import can_access_store_scoped, validate_store_access
 from ._shared import _get_db, router
 
 # ============================================================================
@@ -73,7 +73,15 @@ async def trigger_einvoice(
     # Audit L3-18: the same store rule GET /orders/{id} applies -- a
     # store-scoped finance role never reads (or triggers) another shop's
     # IRN / QR / ack (403; SUPERADMIN/ADMIN pass through).
-    validate_store_access(order.get("store_id"), current_user)
+    # Codex review of #1378: validate_store_access reads a missing store_id
+    # as "use my active store" and passes, so an unattributed (legacy) record
+    # is HQ-only -- the same per-object rule as can_access_store_scoped.
+    store_id = order.get("store_id")
+    if not store_id and not can_access_store_scoped(store_id, current_user):
+        raise HTTPException(
+            status_code=403, detail="This record has no shop; only an admin can open it"
+        )
+    validate_store_access(store_id, current_user)
 
     result = await generate_irn(db, order)
     return result

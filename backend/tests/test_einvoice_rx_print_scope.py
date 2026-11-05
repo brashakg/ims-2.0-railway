@@ -219,3 +219,100 @@ class TestRedoSiblingScope:
         r = c.post(REDO, json={"reason": "lens remake"})
         assert r.status_code == 200
         assert len(repo.updated) == 1
+
+
+# ============================================================================
+# Codex review of #1378, issue 2 -- unattributed e-invoice records (no shop)
+# ============================================================================
+# validate_store_access treats a missing store_id as "use the caller's active
+# store" and returns, so a legacy order / invoice with no shop handed its
+# cached IRN / QR / ack to any accountant -- even one assigned no shop. Only
+# ADMIN / SUPERADMIN may open an unattributed record (can_access_store_scoped).
+
+_IRN_FIELDS = {
+    "irn": "IRN-LEGACY-SECRET",
+    "ack_no": "ACK-LEGACY",
+    "ack_date": "2026-11-01",
+    "einvoice_signed_qr": "QR-LEGACY-SECRET",
+}
+
+
+class _OneCollDb:
+    """Serves `doc` only from `coll_name`; the other collection is empty, so
+    the invoices fallback is exercised when coll_name == 'invoices'."""
+
+    def __init__(self, coll_name, doc):
+        self._name, self._doc = coll_name, doc
+
+    def get_collection(self, name):
+        return _FakeColl(self._doc if name == self._name else None)
+
+
+def _einv_client_db(monkeypatch, user, db):
+    monkeypatch.setattr(einvoice_router, "_get_db", lambda: db)
+    app = FastAPI()
+    app.include_router(einvoice_router.router, prefix="/finance")
+
+    async def _fake():
+        return user
+
+    app.dependency_overrides[get_current_user] = _fake
+    return TestClient(app)
+
+
+_COLLS = ["orders", "invoices"]
+_NO_SHOP_VARIANTS = ["missing", None, ""]
+
+
+def _legacy_doc(variant):
+    doc = {"id": "legacy-1", **_IRN_FIELDS}
+    if variant != "missing":
+        doc["store_id"] = variant
+    return doc
+
+
+class TestEinvoiceUnattributed:
+    @pytest.mark.parametrize("coll", _COLLS)
+    @pytest.mark.parametrize("variant", _NO_SHOP_VARIANTS)
+    @pytest.mark.parametrize(
+        "store_ids", [[STORE_A], [STORE_B], []], ids=["shopA", "shopB", "noshop"]
+    )
+    def test_accountant_denied_unattributed(self, monkeypatch, coll, variant, store_ids):
+        user = _user(["ACCOUNTANT"], store_ids)
+        c = _einv_client_db(monkeypatch, user, _OneCollDb(coll, _legacy_doc(variant)))
+        r = c.post("/finance/einvoice/legacy-1")
+        assert r.status_code == 403, r.text
+        assert "IRN-LEGACY-SECRET" not in r.text
+        assert "QR-LEGACY-SECRET" not in r.text
+
+    @pytest.mark.parametrize("coll", _COLLS)
+    @pytest.mark.parametrize("role", ["ADMIN", "SUPERADMIN"])
+    def test_hq_reads_unattributed(self, monkeypatch, coll, role):
+        c = _einv_client_db(
+            monkeypatch, _user([role], []), _OneCollDb(coll, _legacy_doc("missing"))
+        )
+        r = c.post("/finance/einvoice/legacy-1")
+        assert r.status_code == 200, r.text
+        assert r.json()["irn"] == "IRN-LEGACY-SECRET"
+
+    def test_invoices_fallback_same_shop_accountant(self, monkeypatch):
+        doc = {"id": "inv-B1", "store_id": STORE_B, **_IRN_FIELDS}
+        c = _einv_client_db(
+            monkeypatch,
+            _user(["ACCOUNTANT"], [STORE_A, STORE_B]),
+            _OneCollDb("invoices", doc),
+        )
+        r = c.post("/finance/einvoice/inv-B1")
+        assert r.status_code == 200, r.text
+        assert r.json()["signed_qr"] == "QR-LEGACY-SECRET"
+
+    def test_invoices_fallback_foreign_and_noshop_accountant(self, monkeypatch):
+        doc = {"id": "inv-B1", "store_id": STORE_B, **_IRN_FIELDS}
+        for store_ids in ([STORE_A], []):
+            c = _einv_client_db(
+                monkeypatch, _user(["ACCOUNTANT"], store_ids), _OneCollDb("invoices", doc)
+            )
+            r = c.post("/finance/einvoice/inv-B1")
+            assert r.status_code == 403, r.text
+            assert "IRN-LEGACY-SECRET" not in r.text
+
