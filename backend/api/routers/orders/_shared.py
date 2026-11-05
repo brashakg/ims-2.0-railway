@@ -157,7 +157,8 @@ from ...services.stores_util import is_online_store
 # static canonical table, so a govt rate change is an in-app edit (Settings ->
 # HSN & GST Rates) with no code change. Fail-soft: falls back to the static
 # table when the master/DB is unavailable.
-from ...services.gst_rates import resolve_gst_rate, gst_pricing_mode
+from ...services.gst_rates import resolve_gst_rate, resolve_gst_rate_strict, gst_pricing_mode
+from ...services.gst_rates import hsn_for_category as _hsn_for_category
 
 # LOW_GST_CATEGORIES retained for any external reference / readability; it is
 # the set of categories the canonical table bills at 5%.
@@ -187,6 +188,19 @@ def _is_known_gst_category(value) -> bool:
     # Defensive: also accept the plain upper form (covers any table key that
     # is not itself in the _CATEGORY_HINT map, e.g. SMARTGLASSES / WALL_CLOCK).
     return str(value).strip().upper() in _GST_CATEGORY_TABLE
+
+
+def sale_line_hsn(product_doc, item_type) -> Optional[str]:
+    """THE HSN a NEW sale line is stamped with (create, add-item and the
+    till's quote): the live product master's ``hsn_code``, frozen on the line
+    so a later master edit never rewrites the sale (audit L1-F38). A virtual
+    line (lens configurator / custom / service: no master) takes its
+    item_type's table HSN -- the same table entry that already decides its
+    rate. A real product with no HSN stays None: the GST export flags it
+    rather than guessing one."""
+    if product_doc is not None:
+        return str(product_doc.get("hsn_code") or "").strip() or None
+    return _hsn_for_category(item_type)
 
 
 def bill_line_value(unit_price: float, quantity: float, discount_percent: float) -> tuple:
@@ -281,7 +295,13 @@ def _compute_per_category_gst(
         else:
             cat = it.get("category") or item_type_val or ""
         hsn = it.get("hsn_code") or it.get("hsn") or None
-        rate = resolve_gst_rate(hsn_code=hsn, category=cat)
+        # A line's HSN is rated by the SAME rule the product master's rate is
+        # derived by (resolve_gst_rate_strict, products.py create/edit), so an
+        # accepted HSN/rate edit is what the next sale bills; an HSN that rule
+        # cannot settle falls back to the category exactly as before.
+        rate = resolve_gst_rate_strict(hsn)[0] if hsn else None
+        if rate is None:
+            rate = resolve_gst_rate(hsn_code=hsn, category=cat)
         # GST mode (GST_PRICING_MODE, per-request):
         #   inclusive (default) — item_total IS the all-in price; the GST is the
         #     component WITHIN it: taxable = gross/(1+rate); tax = gross-taxable.

@@ -20,6 +20,7 @@ from ._shared import (
     bills_round_off,
     logger,
     router,
+    sale_line_hsn,
 )
 from .pricing import (
     OrderItemCreate,
@@ -179,6 +180,8 @@ async def add_order_item(
             # see the F15 note below).
             "brand": (product or {}).get("brand") or getattr(item, "brand", None),
             "discount_category": (product or {}).get("discount_category"),
+            # The master's HSN, frozen like create's (sale_line_hsn).
+            "hsn_code": sale_line_hsn(product, item.item_type),
             "mrp": _line_gate["mrp"],
             "quantity": item.quantity,
             "unit_price": item.unit_price,

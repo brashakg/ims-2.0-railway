@@ -31,6 +31,7 @@ from ._shared import (
     bills_round_off,
     logger,
     router,
+    sale_line_hsn,
 )
 from .pricing import (
     OrderItemCreate,
@@ -557,6 +558,9 @@ async def create_order(
                     "brand": _pdoc.get("brand") or item.brand,
                     "subbrand": item.subbrand,
                     "category": item.category,
+                    # The line's HSN from the live product master, frozen at
+                    # sale time (sale_line_hsn; GST rates it below).
+                    "hsn_code": sale_line_hsn(_pdoc_by_pid.get(item.product_id or ""), item.item_type),
                     # The DISCOUNT TIER (MASS/PREMIUM/LUXURY/SERVICE/
                     # NON_DISCOUNTABLE) from the product master. The promo
                     # engine's cap clamp reads this field; it was never
@@ -1345,15 +1349,29 @@ def order_body_fingerprint(order: OrderCreate) -> str:
     (orderPayload.ts builds it; this is its one definition): the lines (item,
     unit, quantity, price, discount, Rx), the customer and member, the sale
     type and the bill discount -- never the dates, notes or salesperson the
-    till may stamp afresh at each press."""
+    till may stamp afresh at each press.
+
+    A lens line's clinical identity (powers, axis, lens options/details) is
+    part of the bill too: the same key with a changed power is another bill
+    (audit L2-POS-F03). It is appended only when the line carries one, so a
+    line without lens data hashes exactly as before."""
     import hashlib
     import json
 
-    lines = sorted(
-        [str(i.item_type or "").upper(), str(i.product_id or ""), str(i.stock_id or ""), int(i.quantity or 0),
-         round(float(i.unit_price or 0), 2), round(float(i.discount_percent or 0), 4), str(i.prescription_id or ""),
-         str(i.lens_line_id or "")]
-        for i in order.items)
+    def _power(v):
+        return "" if v is None else round(float(v), 2) + 0.0  # -0.0 is 0.0
+
+    def _line(i):
+        line = [str(i.item_type or "").upper(), str(i.product_id or ""), str(i.stock_id or ""), int(i.quantity or 0),
+                round(float(i.unit_price or 0), 2), round(float(i.discount_percent or 0), 4),
+                str(i.prescription_id or ""), str(i.lens_line_id or "")]
+        lens = [_power(i.sph), _power(i.cyl), _power(i.axis), _power(i.add),
+                i.lens_options or {}, i.lens_details or {}]
+        if lens != ["", "", "", "", {}, {}]:
+            line.append(json.dumps(lens, sort_keys=True, default=str))
+        return line
+
+    lines = sorted(_line(i) for i in order.items)
     body = {"customer_id": order.customer_id or "", "patient_id": order.patient_id or "",
             "order_type": order.order_type or "", "lines": lines,
             "cart_discount_percent": round(float(order.cart_discount_percent or 0), 4),
@@ -1419,14 +1437,24 @@ async def quote_bill(
             status_code=403, detail="Your role is not permitted to create orders."
         )
     lines = []
+    product_repo = get_product_repository()
     for item in body.items:
         discount_amount, item_total = bill_line_value(
             item.unit_price, item.quantity, item.discount_percent
         )
+        # The HSN create will stamp (sale_line_hsn), so the quote's tax is
+        # create's. Read-only and fail-soft: a product create would refuse,
+        # or a failed read, is quoted without one.
+        try:
+            pdoc = (_resolve_billable_product(product_repo, item.product_id or "", item.product_name or "")
+                    if product_repo is not None else None)
+        except Exception:  # noqa: BLE001
+            pdoc = None
         lines.append(
             {
                 "item_type": item.item_type,
                 "category": item.category,
+                "hsn_code": sale_line_hsn(pdoc, item.item_type),
                 "discount_amount": discount_amount,
                 "item_total": item_total,
             }
