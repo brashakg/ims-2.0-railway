@@ -110,17 +110,23 @@ const PROACTIVE_REFRESH_WINDOW_MS = 5 * 60_000;
 // 15-min idle timeout (an idle user must NOT be refreshed).
 const ACTIVITY_FRESHNESS_MS = 5 * 60_000;
 
-/** Exp claim of a JWT in epoch MILLISECONDS, or null if unparseable. */
-export function decodeJwtExpMs(token: string): number | null {
+/** A JWT's payload claims (NOT verified - the server does that), or null if
+ *  unparseable. The one client-side reader of token claims. */
+export function decodeJwtClaims(token: string | null | undefined): Record<string, any> | null {
   try {
-    const part = token.split('.')[1];
+    const part = (token || '').split('.')[1];
     if (!part) return null;
-    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
-    const payload = JSON.parse(atob(b64));
-    return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+    const payload = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+    return payload && typeof payload === 'object' ? payload : null;
   } catch {
     return null;
   }
+}
+
+/** Exp claim of a JWT in epoch MILLISECONDS, or null if unparseable. */
+export function decodeJwtExpMs(token: string): number | null {
+  const exp = decodeJwtClaims(token)?.exp;
+  return typeof exp === 'number' ? exp * 1000 : null;
 }
 
 /**
@@ -221,8 +227,8 @@ export const USER_SHOPS_SYNCED_EVENT = 'ims:user-shops-synced';
  *  screen of 403s for a shop the client still remembered. */
 export function syncCachedUserShops(token: string): void {
   try {
-    const part = token.split('.')[1];
-    const claims = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+    const claims = decodeJwtClaims(token);
+    if (!claims) return;
     const raw = localStorage.getItem('ims_user');
     if (!raw) return;
     const user = JSON.parse(raw);
