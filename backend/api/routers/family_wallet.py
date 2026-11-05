@@ -368,51 +368,46 @@ async def redeem(
     if not out.get("ok"):
         _raise(out)
 
+    txn_id = out.get("txn_id")
     if out.get("duplicate"):
-        # A retried redeem on an already-consumed OTP: the debit deduped (no
-        # new points moved), so we must NEVER mint a second voucher (one
-        # debit -> N vouchers was the leak). Return the ORIGINAL voucher
-        # idempotently; if it does not exist the original mint failed and the
-        # points were compensated back -- tell the caller to start over.
-        existing = None
-        try:
-            existing = db.get_collection("vouchers").find_one(
-                {"pool_txn_id": out.get("txn_id"), "source": "family_wallet_pool"}
+        # A retried redeem whose debit already landed (deduped -- no new
+        # points moved). Reconcile by the debit txn_id: return the ORIGINAL
+        # voucher, NEVER mint a second (one debit -> N vouchers was the leak).
+        from ..services import money_guard as mg
+
+        existing = _find_pool_voucher(db, txn_id)
+        if existing is not None and existing.get("status") != _FENCE_STATUS:
+            return _redeem_response(household_id, out, existing, duplicate=True)
+        reversed_ = existing is not None or (
+            mg.find_applied(
+                db, svc.ACCOUNT_TYPE, household_id, f"poolredeem-reverse:{txn_id}"
             )
-        except Exception:  # noqa: BLE001
-            existing = None
-        if existing is not None:
-            return {
-                "ok": True,
-                "duplicate": True,
-                "household_id": household_id,
-                "points_redeemed": int(out["points"]),
-                "pool_balance_points": int(out["balance"]),
-                "txn_id": out.get("txn_id"),
-                "voucher": {
-                    "voucher_id": existing.get("voucher_id"),
-                    "code": existing.get("code"),
-                    "balance": existing.get("balance"),
-                    "expiry_date": existing.get("expiry_date"),
-                },
-            }
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "This redemption was already attempted and reversed after a "
-                "failed voucher mint. Request a fresh OTP and redeem again."
-            ),
+            is not None
         )
+        if reversed_:
+            # Fenced/reversed attempt: re-run the idempotent reversal in case
+            # it failed last time, then tell the caller to start over.
+            _compensate(db, household_id, out, current_user)
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "This redemption was already attempted and reversed after a "
+                    "failed voucher mint. Request a fresh OTP and redeem again."
+                ),
+            )
+        # Debit landed, no voucher, no reversal: the process died between the
+        # two. Finish the SAME operation below -- the _id fence keeps it to one.
 
     # Mint the spendable store-credit voucher (rupee conversion happens HERE,
     # not in the pool -- the pool unit is points).
+    from . import vouchers as vouchers_mod
+
     rate = _redeem_rate()
     rupee_value = round(int(out["points"]) * rate, 2)
+    fence = f"famwallet:{txn_id}"
     voucher = None
     try:
-        from .vouchers import mint_voucher
-
-        voucher = mint_voucher(
+        voucher = vouchers_mod.mint_voucher(
             db.get_collection("vouchers"),
             vtype="GIFT_CARD",
             amount=rupee_value,
@@ -420,71 +415,148 @@ async def redeem(
             customer_id=body.redeeming_customer_id,
             issued_by=current_user.get("user_id"),
             extra={
+                # Stable operation identity: one debit txn -> one voucher _id.
+                "_id": fence,
                 "source": "family_wallet_pool",
                 "household_id": household_id,
-                "pool_txn_id": out.get("txn_id"),
+                "pool_txn_id": txn_id,
                 "pool_points": int(out["points"]),
             },
         )
     except Exception:  # noqa: BLE001
         voucher = None
     if voucher is None:
-        # Standalone Mongo -- no cross-collection transaction. The points
-        # already left the pool, so COMPENSATE: credit them back and fail
-        # loudly. The reversal is idempotent on the debit txn_id.
-        from ..services import money_guard as mg
-
-        comp = mg.credit(
-            db,
-            svc.ACCOUNT_TYPE,
-            household_id,
-            int(out["points"]),
-            reason="pool_redeem_mint_failed_reversal",
-            actor=current_user.get("user_id"),
-            ref=out.get("txn_id"),
-            idempotency_key=f"poolredeem-reverse:{out.get('txn_id')}",
-        )
-        if (
-            not getattr(comp, "ok", False)
-            and getattr(comp, "reason", "") != "duplicate"
-        ):
-            # The reversal ITSELF failed: points are gone with no voucher.
-            # This must never be silent -- CRITICAL log + audit row carrying
-            # everything needed for a manual credit.
-            logger.critical(
-                "[FAMWALLET] COMPENSATION FAILED after voucher-mint failure: "
-                "household=%s points=%s txn=%s reason=%s -- MANUAL CREDIT REQUIRED",
-                household_id,
-                out.get("points"),
-                out.get("txn_id"),
-                getattr(comp, "reason", "unknown"),
+        # L2-WALLET-F01: the outcome is UNKNOWN (an exception can follow a
+        # durable insert). Reconcile BEFORE compensating by claiming the fence
+        # _id with a CANCELLED tombstone: the insert winning proves no voucher
+        # exists and a late in-flight write will now dup-key, so the refund is
+        # safe; a dup-key means the voucher landed -> answer with it; anything
+        # else is still unknown -> hold the debit, the identical retry settles.
+        try:
+            db.get_collection("vouchers").insert_one(
+                _fence_doc(fence, household_id, out)
             )
-            svc._audit(
-                db,
-                "family_wallet.compensation_failed",
-                household_id,
-                actor=current_user.get("user_id"),
-                detail={
-                    "points": int(out["points"]),
-                    "txn_id": out.get("txn_id"),
-                    "comp_reason": getattr(comp, "reason", "unknown"),
-                    "action_required": "manual pool credit",
-                },
+        except Exception as exc:  # noqa: BLE001
+            existing = (
+                _find_pool_voucher(db, txn_id) if vouchers_mod._is_dup_key(exc) else None
             )
-            raise HTTPException(
-                status_code=503,
-                detail=(
-                    "voucher_mint_failed AND the points reversal failed -- "
-                    f"flagged for manual credit (txn {out.get('txn_id')})"
-                ),
-            )
+            if existing is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="voucher_mint_unconfirmed -- retry the same request",
+                ) from exc
+            if existing.get("status") != _FENCE_STATUS:
+                return _redeem_response(household_id, out, existing)
+        _compensate(db, household_id, out, current_user)
         raise HTTPException(status_code=503, detail="voucher_mint_failed")
 
+    return _redeem_response(household_id, out, voucher)
+
+
+# A reversed redeem's voucher _id is held by a non-spendable tombstone.
+_FENCE_STATUS = "CANCELLED"
+
+
+def _fence_doc(fence: str, household_id: str, out: Dict[str, Any]) -> Dict[str, Any]:
+    from api.utils.event_time import utc_now_iso
+
+    now = utc_now_iso()
     return {
+        "_id": fence,
+        "voucher_id": fence,
+        "code": f"VOID-{out.get('txn_id')}",
+        "type": "GIFT_CARD",
+        "initial_amount": 0.0,
+        "balance": 0.0,
+        "currency": "INR",
+        "status": _FENCE_STATUS,
+        "redemptions": [],
+        "source": "family_wallet_pool",
+        "household_id": household_id,
+        "pool_txn_id": out.get("txn_id"),
+        "pool_points": int(out["points"]),
+        "cancel_reason": "pool_redeem_mint_failed_reversal",
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _find_pool_voucher(db, txn_id: Any) -> Optional[Dict[str, Any]]:
+    """The voucher (or tombstone) minted for this pool debit. A lookup error
+    is an UNKNOWN outcome: 503 and hold, never read it as 'no voucher'."""
+    try:
+        return db.get_collection("vouchers").find_one(
+            {"pool_txn_id": txn_id, "source": "family_wallet_pool"}
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503,
+            detail="voucher_mint_unconfirmed -- retry the same request",
+        ) from exc
+
+
+def _compensate(db, household_id: str, out: Dict[str, Any], current_user) -> None:
+    """Credit the points back once the voucher is CONFIRMED absent (fenced).
+    Standalone Mongo -- no cross-collection transaction. Idempotent on the
+    debit txn_id, so a retry re-runs it safely."""
+    from ..services import money_guard as mg
+
+    comp = mg.credit(
+        db,
+        svc.ACCOUNT_TYPE,
+        household_id,
+        int(out["points"]),
+        reason="pool_redeem_mint_failed_reversal",
+        actor=current_user.get("user_id"),
+        ref=out.get("txn_id"),
+        idempotency_key=f"poolredeem-reverse:{out.get('txn_id')}",
+    )
+    if getattr(comp, "ok", False) or getattr(comp, "reason", "") == "duplicate":
+        return
+    # The reversal ITSELF failed: points are gone with no voucher.
+    # This must never be silent -- CRITICAL log + audit row carrying
+    # everything needed for a manual credit.
+    logger.critical(
+        "[FAMWALLET] COMPENSATION FAILED after voucher-mint failure: "
+        "household=%s points=%s txn=%s reason=%s -- MANUAL CREDIT REQUIRED",
+        household_id,
+        out.get("points"),
+        out.get("txn_id"),
+        getattr(comp, "reason", "unknown"),
+    )
+    svc._audit(
+        db,
+        "family_wallet.compensation_failed",
+        household_id,
+        actor=current_user.get("user_id"),
+        detail={
+            "points": int(out["points"]),
+            "txn_id": out.get("txn_id"),
+            "comp_reason": getattr(comp, "reason", "unknown"),
+            "action_required": "manual pool credit",
+        },
+    )
+    raise HTTPException(
+        status_code=503,
+        detail=(
+            "voucher_mint_failed AND the points reversal failed -- "
+            f"flagged for manual credit (txn {out.get('txn_id')})"
+        ),
+    )
+
+
+def _redeem_response(
+    household_id: str,
+    out: Dict[str, Any],
+    voucher: Dict[str, Any],
+    *,
+    duplicate: bool = False,
+) -> Dict[str, Any]:
+    resp: Dict[str, Any] = {
         "ok": True,
         "household_id": household_id,
         "points_redeemed": int(out["points"]),
-        "rupee_value": rupee_value,
+        "rupee_value": voucher.get("initial_amount"),
         "pool_balance_points": int(out["balance"]),
         "txn_id": out.get("txn_id"),
         "voucher": {
@@ -494,3 +566,6 @@ async def redeem(
             "expiry_date": voucher.get("expiry_date"),
         },
     }
+    if duplicate:
+        resp["duplicate"] = True
+    return resp
