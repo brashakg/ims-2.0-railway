@@ -208,9 +208,9 @@ def test_archive_state_is_admin_only_on_patch_too(world):
 def test_manager_edits_and_assigns_own_template(world):
     c = _client(MGR_A)
     assert c.patch("/tasks/sop-templates/SOP-A", json={"description": "new"}).status_code == 200
-    assert c.post("/tasks/sop-templates/SOP-A/assign", json={"assigned_users": ["u1"]}).status_code == 200
+    assert c.post("/tasks/sop-templates/SOP-A/assign", json={"assigned_users": []}).status_code == 200
     doc = next(d for d in world[0].docs if d["template_id"] == "SOP-A")
-    assert doc["description"] == "new" and doc["assigned_users"] == ["u1"]
+    assert doc["description"] == "new" and doc["assigned_users"] == []
 
 
 def test_admin_edits_any_template_and_archive_state(world):
@@ -238,3 +238,131 @@ def test_create_stamps_only_a_shop_the_caller_holds(world):
     assert r.status_code == 201 and r.json()["template"]["store_id"] == A
     r = _client(ADMIN).post("/tasks/sop-templates", json={**body, "store_id": B})
     assert r.status_code == 201 and r.json()["template"]["store_id"] == B
+
+
+# -- who an SOP may be given to (Codex review of #1374) ------------------------
+#
+# The SOP's own doors were shut, but a second door stayed open: a shop-A
+# manager named a shop-B-only employee on shop A's SOP, the generator issued
+# that person a shop-A task, and the task detail then showed them shop A's
+# procedure. Every SOP writer now holds a named person to _named_target -- the
+# rule a task edit / reassign / escalate already uses: a real, active colleague
+# who works at the SOP's shop (a chain-wide SOP, which only an admin edits: any
+# active colleague). The generator re-checks legacy names against the shop it
+# issues for and skips (and logs) the ones that shop may not reach.
+
+PEOPLE = {
+    "u-a1": {"user_id": "u-a1", "roles": ["SALES_STAFF"], "store_ids": [A], "is_active": True},
+    "u-b1": {"user_id": "u-b1", "roles": ["SALES_STAFF"], "store_ids": [B], "is_active": True},
+    "u-gone": {"user_id": "u-gone", "roles": ["SALES_STAFF"], "store_ids": [A], "is_active": False},
+    "u-area": {"user_id": "u-area", "roles": ["AREA_MANAGER"], "store_ids": [A, B], "is_active": True},
+}
+
+
+class _People:
+    def find_by_id(self, user_id):
+        return copy.deepcopy(PEOPLE.get(user_id))
+
+    def find_by_role(self, role, store_id=None):
+        return [copy.deepcopy(u) for u in PEOPLE.values()
+                if role in u["roles"] and u["is_active"] and (not store_id or store_id in u["store_ids"])]
+
+
+class _Tasks:
+    def __init__(self):
+        self.rows = []
+
+    def create(self, doc):
+        self.rows.append(doc)
+        return doc
+
+    def find_many(self, flt=None):
+        return [r for r in self.rows if r.get("store_id") == (flt or {}).get("store_id", r.get("store_id"))]
+
+
+@pytest.fixture
+def people(world, monkeypatch):
+    monkeypatch.setattr(tasks_mod, "get_user_repository", lambda: _People())
+    tasks = _Tasks()
+    monkeypatch.setattr(tasks_mod, "get_task_repository", lambda: tasks)
+    return tasks
+
+
+def _doc(world, tid):
+    return next(d for d in world[0].docs if d["template_id"] == tid)
+
+
+BAD_PEOPLE = ["u-b1", "u-gone", "u-nobody"]  # another shop's, a leaver, nobody
+
+
+@pytest.mark.parametrize("who", BAD_PEOPLE)
+def test_no_sop_door_names_a_person_outside_the_sops_shop(world, people, who):
+    before = _frozen(world)
+    c = _client(MGR_A)
+    body = {"title": "Close", "category": "Operations", "frequency": "DAILY"}
+    assert c.post("/tasks/sop-templates", json={**body, "assigned_users": [who]}).status_code == 400
+    assert c.patch("/tasks/sop-templates/SOP-A", json={"assigned_users": ["u-a1", who]}).status_code == 400
+    assert c.post("/tasks/sop-templates/SOP-A/assign", json={"assigned_users": [who]}).status_code == 400
+    assert _frozen(world) == before  # nothing saved by any of the three
+
+
+@pytest.mark.parametrize("who", ["u-gone", "u-nobody"])
+def test_admin_names_only_an_active_colleague_on_a_chain_wide_sop(world, people, who):
+    before = _frozen(world)
+    assert _client(ADMIN).post("/tasks/sop-templates/SOP-G/assign", json={"assigned_users": [who]}).status_code == 400
+    assert _frozen(world) == before
+
+
+def test_same_shop_people_are_named_on_every_door(world, people):
+    c = _client(MGR_A)
+    body = {"title": "Close", "category": "Operations", "frequency": "DAILY"}
+    r = c.post("/tasks/sop-templates", json={**body, "assigned_users": ["u-a1", "u-area"]})
+    assert r.status_code == 201, r.text
+    assert r.json()["template"]["assigned_users"] == ["u-a1", "u-area"]
+    assert c.patch("/tasks/sop-templates/SOP-A", json={"assigned_users": ["u-area"]}).status_code == 200
+    assert _doc(world, "SOP-A")["assigned_users"] == ["u-area"]
+    assert c.post("/tasks/sop-templates/SOP-A/assign", json={"assigned_users": ["u-a1"]}).status_code == 200
+    assert _doc(world, "SOP-A")["assigned_users"] == ["u-a1"]
+    # Clearing is always allowed.
+    assert c.post("/tasks/sop-templates/SOP-A/assign", json={"assigned_users": []}).status_code == 200
+
+
+def test_admin_names_each_shops_people_and_anyone_on_a_chain_wide_sop(world, people):
+    c = _client(ADMIN)
+    assert c.post("/tasks/sop-templates/SOP-B/assign", json={"assigned_users": ["u-b1"]}).status_code == 200
+    assert c.patch("/tasks/sop-templates/SOP-G", json={"assigned_users": ["u-a1", "u-b1"]}).status_code == 200
+    assert _doc(world, "SOP-G")["assigned_users"] == ["u-a1", "u-b1"]
+    # The shop rule binds HQ too: a shop's SOP goes to that shop's people.
+    assert c.post("/tasks/sop-templates/SOP-A/assign", json={"assigned_users": ["u-b1"]}).status_code == 400
+
+
+def _generate(user, store):
+    return _client(user).post("/tasks/auto-generate", params={"store_id": store})
+
+
+def test_generation_skips_legacy_names_the_shop_may_not_reach(world, people):
+    _doc(world, "SOP-A")["assigned_users"] = ["u-b1", "u-a1", "u-gone", "u-nobody"]
+    _doc(world, "SOP-G")["assigned_users"] = ["u-b1", "u-a1"]
+    r = _generate(MGR_A, A)
+    assert r.status_code == 200, r.text
+    issued = {(t["sop_template_id"], t["assigned_to"]) for t in people.rows}
+    assert issued == {("SOP-A", "u-a1"), ("SOP-G", "u-a1")}
+    assert all(t["store_id"] == A for t in people.rows)
+
+
+def test_generation_with_every_legacy_name_skipped_goes_to_the_presser(world, people):
+    _doc(world, "SOP-A")["assigned_users"] = ["u-b1"]
+    _doc(world, "SOP-G")["is_active"] = False
+    r = _generate(MGR_A, A)
+    assert r.status_code == 200, r.text
+    assert [t["assigned_to"] for t in people.rows] == [MGR_A["user_id"]]
+    assert r.json()["unassigned_templates"] == ["SOP-A"]
+
+
+def test_area_manager_generates_his_second_shops_sop_for_its_people(world, people):
+    _doc(world, "SOP-B")["assigned_users"] = ["u-b1", "u-area", "u-a1"]
+    _doc(world, "SOP-G")["is_active"] = False
+    r = _generate(AREA_AB, B)
+    assert r.status_code == 200, r.text
+    assert {t["assigned_to"] for t in people.rows} == {"u-b1", "u-area"}
+    assert all(t["store_id"] == B for t in people.rows)

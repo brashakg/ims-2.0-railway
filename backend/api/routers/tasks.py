@@ -92,11 +92,14 @@ async def _managers_only(current_user: dict = Depends(get_current_user)) -> dict
     return current_user
 
 
-def _named_target(user_id: str, task: dict) -> dict:
-    """The person a manager names through an edit, reassignment or escalation:
-    a real, active colleague who works at the task's shop -- the
+def _named_target(user_id: str, task: dict, *, any_shop: bool = False) -> dict:
+    """The person a manager names through an edit, reassignment or escalation
+    -- or on an SOP template, whose daily tasks go to that person: a real,
+    active colleague who works at the task's shop -- the
     store reach every store gate uses -- so a task never lands on a leaver, a
-    stranger from another shop, or a name nobody signs in as."""
+    stranger from another shop, or a name nobody signs in as. ``any_shop``: a
+    chain-wide SOP (only an admin edits one) may name any active colleague;
+    the generator issues it only at a shop that person works at."""
     user_repo = get_user_repository()
     if user_repo is None:
         raise HTTPException(
@@ -110,7 +113,7 @@ def _named_target(user_id: str, task: dict) -> dict:
     if (
         not target
         or target.get("is_active", True) is False
-        or not can_access_store_scoped(task.get("store_id"), {**target, "roles": task_roles(target)})
+        or not (any_shop or can_access_store_scoped(task.get("store_id"), {**target, "roles": task_roles(target)}))
     ):
         raise HTTPException(
             status_code=400,
@@ -1105,6 +1108,17 @@ async def auto_generate_daily_tasks(
                 ids.append(uid)
 
         for uid in tpl.get("assigned_users") or []:
+            # Codex review of #1374: a legacy name the issuing shop may not
+            # reach (another shop's, a leaver, nobody) is skipped -- the task
+            # would show them this shop's procedure.
+            try:
+                _named_target(uid, {"store_id": active_store})
+            except HTTPException:
+                logger.warning(
+                    "[SOP] %s: skipped assignee %s, not an active colleague at %s",
+                    tpl.get("template_id"), uid, active_store,
+                )
+                continue
             _add(uid)
         # Roles resolve to the named people holding them IN THIS STORE. A role
         # is a way of naming a group of people, never an assignee itself.
@@ -1917,6 +1931,14 @@ def _sop_in_reach(template_id: str, current_user: dict, *, editing: bool = False
     return col, tpl
 
 
+def _sop_people(user_ids: Optional[List[str]], store_id: Optional[str]) -> None:
+    """Every person an SOP writer names (create / PATCH / assign) passes the
+    task rule _named_target for the SOP's shop -- 400 before anything is
+    saved (Codex review of #1374). A chain-wide SOP: any active colleague."""
+    for uid in user_ids or []:
+        _named_target(uid, {"store_id": store_id}, any_shop=not store_id)
+
+
 def _sop_checklist_scope(template_id: str, store_id: Optional[str], current_user: dict, *, writing: bool = False):
     """The template + the shop whose checklist a read or a tick works on -- one
     rule for both (audit R02: the read validated the shop, the write took
@@ -1984,6 +2006,10 @@ async def create_sop_template(
     if col is None:
         raise HTTPException(status_code=503, detail="DB unavailable")
 
+    # R02: a shop the caller holds (403 otherwise); an admin with none = chain-wide.
+    store = store_in_view(payload.store_id, current_user, writing=True)
+    _sop_people(payload.assigned_users, store)
+
     now = datetime.now()
     template_id = f"SOP-{uuid.uuid4().hex[:8].upper()}"
     doc = {
@@ -1996,8 +2022,7 @@ async def create_sop_template(
         "steps": [s.model_dump() for s in payload.steps],
         "assigned_roles": payload.assigned_roles,
         "assigned_users": payload.assigned_users,
-        # R02: a shop the caller holds (403 otherwise); an admin with none = chain-wide.
-        "store_id": store_in_view(payload.store_id, current_user, writing=True),
+        "store_id": store,
         "is_active": True,
         "created_by": current_user.get("user_id"),
         "created_at": now,
@@ -2037,7 +2062,7 @@ async def update_sop_template(
             detail="Only SUPERADMIN / ADMIN / STORE_MANAGER may edit SOPs",
         )
 
-    col, _ = _sop_in_reach(template_id, current_user, editing=True)
+    col, tpl = _sop_in_reach(template_id, current_user, editing=True)
 
     update_data = {
         k: v for k, v in updates.model_dump(exclude_unset=True).items() if v is not None
@@ -2048,6 +2073,7 @@ async def update_sop_template(
             status_code=403,
             detail="Only SUPERADMIN / ADMIN may archive or restore SOPs",
         )
+    _sop_people(update_data.get("assigned_users"), tpl.get("store_id"))
     # Serialize nested steps
     if "steps" in update_data and update_data["steps"] is not None:
         update_data["steps"] = [
@@ -2115,7 +2141,8 @@ async def assign_sop(
     if not (set(current_user.get("roles", [])) & allowed):
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    col, _ = _sop_in_reach(template_id, current_user, editing=True)
+    col, tpl = _sop_in_reach(template_id, current_user, editing=True)
+    _sop_people(payload.assigned_users, tpl.get("store_id"))
 
     update: dict = {
         "updated_at": datetime.now(),
