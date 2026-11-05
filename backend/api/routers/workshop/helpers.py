@@ -11,7 +11,12 @@ from fastapi import HTTPException
 from datetime import datetime
 import uuid
 from typing import Optional
-from ...dependencies import get_db, can_access_store_scoped
+from ...dependencies import (
+    get_db,
+    get_order_repository,
+    can_access_store_scoped,
+    user_store_scope,
+)
 from ...services.cost_mask import mask_cost
 
 
@@ -46,8 +51,35 @@ def _assert_job_store_access(job: dict, current_user: dict) -> None:
     legacy doc (no store_id) is admin-only -- both handled by
     dependencies.can_access_store_scoped. 404 (not 403) mirrors GET /{id} so the
     job's existence isn't confirmed to a cross-store caller."""
-    if not can_access_store_scoped(job.get("store_id"), current_user):
+    if not _job_in_reach(job, current_user):
         raise HTTPException(status_code=404, detail="Workshop job not found")
+
+
+def _job_in_reach(job, current_user: dict) -> bool:
+    """THE store rule of a workshop job (PR #1376 F3): the job's own shop AND
+    its ORDER's shop (the canonical owner) must both be the caller's. A legacy
+    job stamped with one shop but attached to another shop's order -- the
+    L2-WS-F01 create bug wrote those -- and a job whose order cannot be
+    resolved are therefore admin-only until an authorized repair; a correct
+    same-shop job is unchanged. SUPERADMIN/ADMIN reach every job."""
+    if not job or not can_access_store_scoped(job.get("store_id"), current_user):
+        return False
+    if user_store_scope(current_user)[0]:
+        return True
+    order_repo = get_order_repository()
+    order_id = job.get("order_id")
+    order = order_repo.find_by_id(order_id) if order_repo is not None and order_id else None
+    return bool(order) and can_access_store_scoped(order.get("store_id"), current_user)
+
+
+def _jobs_in_reach(jobs, current_user: dict) -> list:
+    """`_job_in_reach` over a list page (the job lists, the board, the vendor
+    queue). Admins get the page unchanged."""
+    # ponytail: one order read per row of a non-admin page (<=500); batch with
+    # an $in query if a list ever gets slow.
+    if user_store_scope(current_user)[0]:
+        return list(jobs or [])
+    return [j for j in (jobs or []) if _job_in_reach(j, current_user)]
 
 
 def _order_has_rx_required_line(order) -> bool:

@@ -19,14 +19,15 @@ from ...dependencies import (
     get_order_repository,
     get_audit_repository,
     validate_store_access,
-    can_access_store_scoped,
     in_reach_or_404,
+    user_store_scope,
 )
 from ._shared import _FITTING_ROLES, _check_dc_hardlock, logger, router
 from ...utils.ist import now_ist
 from .models import FittingDetailsUpdate, WorkshopJobCreate, WorkshopJobUpdate
 from .helpers import (
     _assert_job_store_access,
+    _jobs_in_reach,
     _stamp_job_actor_names,
     _verify_job_prescription,
     generate_job_number,
@@ -55,6 +56,12 @@ async def list_jobs_by_vendor(
         return {"vendor_id": vendor_id, "jobs": [], "total": 0}
 
     filter_dict: dict = {"vendor_id": vendor_id}
+    # PR #1376 F1: the vendor queue is the same jobs the shop list scopes --
+    # a non-admin reads only its own shops' (none for a no-shop login); the
+    # filter is in the query so skip/limit page over reachable jobs only.
+    is_cross, stores = user_store_scope(current_user)
+    if not is_cross:
+        filter_dict["store_id"] = {"$in": sorted(stores)}
     if not include_delivered:
         filter_dict["status"] = {"$nin": ["DELIVERED", "CANCELLED"]}
 
@@ -62,6 +69,7 @@ async def list_jobs_by_vendor(
         repo.find_many(filter_dict, skip=skip, limit=limit, sort=[("expected_date", 1)])
         or []
     )
+    jobs = _jobs_in_reach(jobs, current_user)
     _stamp_job_actor_names(jobs)
 
     return {
@@ -96,6 +104,7 @@ async def list_jobs(
         jobs = repo.find_many(
             filter_dict, skip=skip, limit=limit, sort=[("created_at", -1)]
         )
+        jobs = _jobs_in_reach(jobs, current_user)
         _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
@@ -363,8 +372,7 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
             # NEW-IDOR-by-id: a workshop job carries customer + medical Rx data;
             # existence-hide one whose store the caller can't access (cross-store
             # PII leak). Admins / area-managers pass.
-            if not can_access_store_scoped(job.get("store_id"), current_user):
-                raise HTTPException(status_code=404, detail="Workshop job not found")
+            _assert_job_store_access(job, current_user)
             _stamp_job_actor_names([job])
             return job_to_frontend(job, current_user)
         raise HTTPException(status_code=404, detail="Workshop job not found")
@@ -384,8 +392,7 @@ async def update_job(
         if existing is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
         # NEW-IDOR-by-id: don't let a store-scoped caller mutate another store's job.
-        if not can_access_store_scoped(existing.get("store_id"), current_user):
-            raise HTTPException(status_code=404, detail="Workshop job not found")
+        _assert_job_store_access(existing, current_user)
 
         # Bug fix: READY and QC_FAILED were missing from the immutable-status
         # guard. A job in READY or CANCELLED state must not have its details

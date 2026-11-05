@@ -46,10 +46,11 @@ os.environ.setdefault("ENVIRONMENT", "test")
 from api import dependencies as deps  # noqa: E402
 from api.routers import workshop as wm  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from strict_fakes import OrdersAt  # noqa: E402
 
 
 def _job(**kw) -> Dict[str, Any]:
-    doc = {"job_id": "J1", "status": "READY", "store_id": "BV-TEST-01"}
+    doc = {"job_id": "J1", "order_id": "ORD-1", "status": "READY", "store_id": "BV-TEST-01"}
     doc.update(kw)
     return doc
 
@@ -163,6 +164,8 @@ def _status_client(monkeypatch, job, roles=("STORE_MANAGER",)):
     app.include_router(wm.router, prefix="/workshop")
     repo = _StatusRepo(job)
     monkeypatch.setattr(wm, "get_workshop_repository", lambda: repo)
+    # The job's order is this shop's (PR #1376: a job's canonical shop).
+    monkeypatch.setattr(wm.helpers, "get_order_repository", lambda: OrdersAt("BV-TEST-01"))
     monkeypatch.setattr(wm, "get_audit_repository", lambda: None)
     monkeypatch.setattr(wm, "get_db", lambda: None)
 

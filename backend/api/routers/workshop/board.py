@@ -13,7 +13,7 @@ from ..auth import get_current_user
 from ...dependencies import store_in_view
 from ...dependencies import get_db, get_workshop_repository, validate_store_access
 from ._shared import logger, router
-from .helpers import _stamp_job_actor_names, job_to_frontend
+from .helpers import _jobs_in_reach, _stamp_job_actor_names, job_to_frontend
 from ...services.cost_mask import mask_cost
 from ...utils.ist import ist_date_str_from_stored, ist_today
 
@@ -47,7 +47,7 @@ async def get_pending_jobs(
     active_store = store_in_view(store_id, current_user)
 
     if repo is not None:
-        jobs = repo.find_pending(active_store)
+        jobs = _jobs_in_reach(repo.find_pending(active_store), current_user)
         _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
@@ -65,7 +65,7 @@ async def get_overdue_jobs(
     active_store = store_in_view(store_id, current_user)
 
     if repo is not None:
-        jobs = repo.find_overdue(active_store)
+        jobs = _jobs_in_reach(repo.find_overdue(active_store), current_user)
         _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
@@ -83,7 +83,7 @@ async def get_ready_jobs(
     active_store = store_in_view(store_id, current_user)
 
     if repo is not None:
-        jobs = repo.find_ready(active_store)
+        jobs = _jobs_in_reach(repo.find_ready(active_store), current_user)
         _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
         return {"jobs": jobs_formatted, "total": len(jobs_formatted)}

@@ -146,13 +146,17 @@ def world(monkeypatch):
     from api.routers import customers, expenses, inventory_router, returns, transfers
     from api.routers.inventory import stock as stock_mod
     from api.routers.workshop import jobs as jobs_mod
+    from api.routers.workshop import helpers as job_helpers
+    from database.repositories.order_repository import OrderRepository
     from database.repositories.customer_repository import CustomerRepository
 
     db = mongomock.MongoClient()["no_shop_outside"]
     now = datetime.utcnow()
     for sid in (DHN, PUN):
         db["returns"].insert_one({"return_id": f"R-{sid}", "store_id": sid, "created_at": now})
+        db["job_orders"].insert_one({"order_id": f"O-{sid}", "store_id": sid})
         db["workshop_jobs"].insert_one({"job_id": f"J-{sid}", "store_id": sid,
+                                        "order_id": f"O-{sid}",
                                         "status": "PENDING", "created_at": now})
         db["expenses"].insert_one({"expense_id": f"E-{sid}", "store_id": sid,
                                    "status": "PENDING", "amount": 123})
@@ -169,6 +173,10 @@ def world(monkeypatch):
 
     monkeypatch.setattr(returns, "_get_db", lambda: db)
     monkeypatch.setattr(jobs_mod, "get_workshop_repository", lambda: _Repo(db["workshop_jobs"]))
+    # A job's canonical shop is its order's (PR #1376): each shop's job sits on
+    # an order of that shop.
+    monkeypatch.setattr(job_helpers, "get_order_repository",
+                        lambda: OrderRepository(db["job_orders"]))
     monkeypatch.setattr(jobs_mod, "_stamp_job_actor_names", lambda jobs: None)
     monkeypatch.setattr(jobs_mod, "job_to_frontend", lambda j, _user=None: j)
     monkeypatch.setattr(expenses, "get_expense_repository", lambda: _Repo(db["expenses"]))

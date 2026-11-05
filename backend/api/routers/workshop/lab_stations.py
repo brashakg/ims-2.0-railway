@@ -18,11 +18,11 @@ from ...dependencies import (
     get_workshop_repository,
     get_audit_repository,
     validate_store_access,
-    can_access_store_scoped,
 )
 from ._shared import logger, router
 from .models import LabScanBody, LabStationUpsert
 from .lens import _perform_ready_notify
+from .helpers import _job_in_reach
 
 
 # ============================================================================
@@ -224,7 +224,7 @@ async def lab_scan(
         }
 
     # Store-scope guard: existence-hide a cross-store job (medical PII / IDOR).
-    if not can_access_store_scoped(job.get("store_id"), current_user):
+    if not _job_in_reach(job, current_user):
         return {
             "ok": False,
             "reason": "NOT_FOUND",
@@ -285,7 +285,7 @@ async def print_job_card(
     job = repo.find_by_id(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Workshop job not found")
-    if not can_access_store_scoped(job.get("store_id"), current_user):
+    if not _job_in_reach(job, current_user):
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
     now = utc_now().replace(tzinfo=None)
