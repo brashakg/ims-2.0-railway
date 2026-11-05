@@ -366,3 +366,19 @@ def test_area_manager_generates_his_second_shops_sop_for_its_people(world, peopl
     assert r.status_code == 200, r.text
     assert {t["assigned_to"] for t in people.rows} == {"u-b1", "u-area"}
     assert all(t["store_id"] == B for t in people.rows)
+
+
+def test_editor_can_still_save_a_template_naming_a_departed_person(world, people):
+    # The editor sends the whole list back; a name already on the template is
+    # not re-judged (the generator skips it), but a NEW foreign name still is.
+    _doc(world, "SOP-A")["assigned_users"] = ["u-gone"]
+    c = _client(MGR_A)
+    r = c.patch("/tasks/sop-templates/SOP-A", json={"description": "x", "assigned_users": ["u-gone", "u-a1"]})
+    assert r.status_code == 200, r.text
+    assert _doc(world, "SOP-A")["assigned_users"] == ["u-gone", "u-a1"]
+    before = _frozen(world)
+    assert c.post("/tasks/sop-templates/SOP-A/assign",
+                  json={"assigned_users": ["u-gone", "u-a1", "u-b1"]}).status_code == 400
+    assert _frozen(world) == before
+    _generate(MGR_A, A)
+    assert {t["assigned_to"] for t in people.rows if t["sop_template_id"] == "SOP-A"} == {"u-a1"}

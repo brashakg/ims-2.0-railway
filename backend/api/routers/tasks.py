@@ -1931,12 +1931,17 @@ def _sop_in_reach(template_id: str, current_user: dict, *, editing: bool = False
     return col, tpl
 
 
-def _sop_people(user_ids: Optional[List[str]], store_id: Optional[str]) -> None:
-    """Every person an SOP writer names (create / PATCH / assign) passes the
+def _sop_people(user_ids: Optional[List[str]], tpl: dict) -> None:
+    """Every person an SOP writer (create / PATCH / assign) ADDS passes the
     task rule _named_target for the SOP's shop -- 400 before anything is
-    saved (Codex review of #1374). A chain-wide SOP: any active colleague."""
+    saved (Codex review of #1374). A chain-wide SOP: any active colleague.
+    A name already on the template is not re-judged, so the editor, which
+    sends the whole list back, can still save a template that names a
+    since-departed person; the generator skips such a name."""
+    kept = set(tpl.get("assigned_users") or [])
     for uid in user_ids or []:
-        _named_target(uid, {"store_id": store_id}, any_shop=not store_id)
+        if uid not in kept:
+            _named_target(uid, tpl, any_shop=not tpl.get("store_id"))
 
 
 def _sop_checklist_scope(template_id: str, store_id: Optional[str], current_user: dict, *, writing: bool = False):
@@ -2008,7 +2013,7 @@ async def create_sop_template(
 
     # R02: a shop the caller holds (403 otherwise); an admin with none = chain-wide.
     store = store_in_view(payload.store_id, current_user, writing=True)
-    _sop_people(payload.assigned_users, store)
+    _sop_people(payload.assigned_users, {"store_id": store})
 
     now = datetime.now()
     template_id = f"SOP-{uuid.uuid4().hex[:8].upper()}"
@@ -2073,7 +2078,7 @@ async def update_sop_template(
             status_code=403,
             detail="Only SUPERADMIN / ADMIN may archive or restore SOPs",
         )
-    _sop_people(update_data.get("assigned_users"), tpl.get("store_id"))
+    _sop_people(update_data.get("assigned_users"), tpl)
     # Serialize nested steps
     if "steps" in update_data and update_data["steps"] is not None:
         update_data["steps"] = [
@@ -2142,7 +2147,7 @@ async def assign_sop(
         raise HTTPException(status_code=403, detail="Not authorized")
 
     col, tpl = _sop_in_reach(template_id, current_user, editing=True)
-    _sop_people(payload.assigned_users, tpl.get("store_id"))
+    _sop_people(payload.assigned_users, tpl)
 
     update: dict = {
         "updated_at": datetime.now(),
