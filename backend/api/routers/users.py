@@ -15,7 +15,12 @@ from typing import List, Optional, Dict
 from datetime import datetime
 import uuid
 
-from .auth import get_current_user, invalidate_user_status
+from .auth import (
+    get_current_user,
+    invalidate_user_status,
+    revoke_other_refresh_chains,
+    sign_out_other_sessions,
+)
 from ..dependencies import (
     can_access_store_scoped,
     get_audit_repository,
@@ -1359,15 +1364,22 @@ async def reset_password(
     server_generated = supplied is None
     temp = generate_temp_password() if server_generated else supplied
 
-    repo.update(
+    # Same session rule as set-password (R24): the reset signs out every open
+    # login of the account; only an actor resetting their OWN keeps this one.
+    keep_sid = current_user.get("sid") if current_user.get("user_id") == user_id else None
+    saved = repo.update(
         user_id,
         {
             "password_hash": hash_password(temp),
             "password_reset_at": utc_now_iso(),
             "password_reset_by": current_user.get("user_id"),
             "must_change_password": True,
+            **sign_out_other_sessions(user_id, existing, keep_sid),
         },
     )
+    if not saved:  # BaseRepository.update swallows DB errors -> False
+        raise HTTPException(status_code=500, detail="Password was not reset. Try again.")
+    revoke_other_refresh_chains(user_id, keep_sid, "password_reset")
 
     # Fail-soft audit -- records the actor + target, NEVER the temp value.
     _write_password_reset_audit(current_user, existing)
@@ -1427,27 +1439,14 @@ async def set_password(
             "must_change_password": False,
             "password_changed_at": utc_now_iso(),
             "password_set_by": current_user.get("user_id"),
-            "token_version": int(existing.get("token_version") or 0) + 1,
-            "token_version_kept_sid": keep_sid,
+            **sign_out_other_sessions(user_id, existing, keep_sid),
         },
     )
     if not saved:  # BaseRepository.update swallows DB errors -> False
         raise HTTPException(status_code=500, detail="Password was not saved. Try again.")
     # Saved = a real credential change: audit it before anything else can fail.
     _write_password_reset_audit(current_user, existing, action="PASSWORD_SET")
-
-    # The token_version bump above already signs every other login out: old
-    # access tokens and refresh docs carry an older tv (absent = 0) and are
-    # refused (auth.token_superseded). Revoking the chains is belt-and-braces
-    # for a refresh whose live-user lookup fails, so a failure here only logs.
-    from ..services.refresh_tokens import refresh_token_store
-
-    try:
-        refresh_token_store.revoke_user_families(
-            user_id, reason="password_set", keep_family_id=keep_sid
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning("set-password: refresh chain revoke failed for %s: %s", user_id, e)
+    revoke_other_refresh_chains(user_id, keep_sid, "password_set")
 
     return {
         "user_id": user_id,
