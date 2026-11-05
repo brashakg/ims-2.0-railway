@@ -3883,6 +3883,19 @@ def _gate_exchange_closed(return_type: Optional[str]) -> None:
 # ============================================================================
 
 
+def _authorise_order_shop(order: Dict[str, Any], current_user: dict) -> Optional[str]:
+    """THE return-side order guard (quote and create): the caller must reach
+    the ORDER's shop. An order with no shop on record is HQ-only
+    (can_access_store_scoped). Returns the order's store id."""
+    order_store_id = order.get("store_id") or order.get("storeId")
+    if not can_access_store_scoped(order_store_id, current_user):
+        raise HTTPException(
+            status_code=403,
+            detail="No access to the store this order belongs to.",
+        )
+    return order_store_id
+
+
 @router.post("/quote")
 async def quote_return(
     body: ReturnCreate = Body(...),
@@ -3909,7 +3922,9 @@ async def quote_return(
     order = _resolve_order(body)
     if order is None:
         raise HTTPException(status_code=404, detail="Original order not found")
-    validate_store_access(order.get("store_id"), current_user)
+    # The same shop rule as POST /returns: another shop's order, or one with
+    # no shop on record, shows no amount or tender to shop staff.
+    _authorise_order_shop(order, current_user)
 
     active_lines = [ln for ln in body.items if (ln.return_qty or 0) > 0]
     if not active_lines:
@@ -4413,12 +4428,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # _resolve_order fetches by id/number with no ownership check, so we authorise
     # the caller against the ORDER's store here. HQ roles (SUPERADMIN/ADMIN) pass
     # via can_access_store_scoped.
-    order_store_id = order.get("store_id") or order.get("storeId")
-    if not can_access_store_scoped(order_store_id, current_user):
-        raise HTTPException(
-            status_code=403,
-            detail="No access to the store this order belongs to.",
-        )
+    order_store_id = _authorise_order_shop(order, current_user)
     # If the client supplied a store_id, it MUST equal the order's store -- a
     # mismatch is a mis-book attempt (refund one store's sale into another).
     if body.store_id and str(body.store_id) != str(order_store_id):

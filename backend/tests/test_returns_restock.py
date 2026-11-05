@@ -1652,3 +1652,52 @@ def test_new_format_identical_retries_and_lost_ack_never_duplicate(ctx, monkeypa
     after.pop("units")
     before.pop("units")
     assert after == before, "recovery moves no money"
+
+
+# ============================================================================
+# PR #1381 review F2 - POST /returns/quote uses the same per-object shop rule
+# as POST /returns: an order with no shop on record is HQ-only, and another
+# shop's order is refused, before any amount or tender is shown.
+# ============================================================================
+
+
+def _quote(ctx, roles, store_id="BV-PUN-01"):
+    return ctx["client"].post("/api/v1/returns/quote", json=_payload(store_id=None),
+                              headers=_hdr(roles, store_id=store_id))
+
+
+@pytest.mark.parametrize("roles,store_id", [
+    (["SALES_STAFF"], "BV-RNC-01"),
+    (["SALES_STAFF"], None),
+    (["CASHIER"], "BV-PUN-01"),
+    (["STORE_MANAGER"], "BV-PUN-01"),
+])
+def test_quote_on_an_order_with_no_shop_is_refused_to_shop_staff(ctx, roles, store_id):
+    ctx["order_repo"]._order.pop("store_id")
+    r = _quote(ctx, roles, store_id)
+    assert r.status_code == 403, r.text
+    for leak in ("net_refund", "gross_refund", "captured_tenders", "1500"):
+        assert leak not in r.text
+    create = ctx["client"].post("/api/v1/returns", json=_payload(store_id=None),
+                                headers=_hdr(roles, store_id=store_id))
+    assert create.status_code == r.status_code, "quote and create agree"
+    assert ctx["returns_coll"].docs == []
+
+
+def test_quote_on_an_order_with_no_shop_still_works_for_admin(ctx):
+    ctx["order_repo"]._order.pop("store_id")
+    r = _quote(ctx, ["ADMIN"])
+    assert r.status_code == 200 and r.json()["net_refund"] > 0
+
+
+def test_quote_on_another_shops_order_is_refused(ctx):
+    r = _quote(ctx, ["CASHIER"], "BV-RNC-01")
+    assert r.status_code == 403 and "net_refund" not in r.text
+
+
+@pytest.mark.parametrize("roles", [["CASHIER"], ["SALES_STAFF"], ["STORE_MANAGER"], ["ADMIN"]])
+def test_quote_on_own_shops_order_still_works(ctx, roles):
+    r = _quote(ctx, roles)
+    assert r.status_code == 200, r.text
+    assert r.json()["net_refund"] > 0
+    assert ctx["returns_coll"].docs == [], "a quote writes nothing"
