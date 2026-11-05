@@ -4199,7 +4199,10 @@ def _return_fingerprint(body: "ReturnCreate") -> str:
     import hashlib
     import json as _json
 
-    lines = sorted((str(it.order_item_id or it.product_id or ""), round(float(it.return_qty or 0), 4))
+    # Condition, restock and the scanned serial decide what happens to the
+    # piece, so a changed disposition under the same key is a different press.
+    lines = sorted((str(it.order_item_id or it.product_id or ""), round(float(it.return_qty or 0), 4),
+                    str(it.condition or ""), bool(it.restock), str(it.serial or "").strip())
                    for it in body.items if (it.return_qty or 0) > 0)
     tenders = sorted((str(t.method or ""), round(float(t.amount or 0), 2)) for t in (body.refund_tenders or []))
     raw = _json.dumps([body.order_id or body.order_number, body.return_type,
@@ -4295,6 +4298,10 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             coll = _returns_coll()
             if coll is not None:
                 existing = coll.find_one({"idempotency_key": idem_key})
+                if existing:
+                    # A known key from another shop replays nothing and names
+                    # nothing: the same 404 as GET /returns/{id}.
+                    in_reach_or_404(existing, current_user, "Return not found")
                 if existing and existing.get("idempotency_fingerprint") not in (None, _return_fingerprint(body)):
                     raise HTTPException(status_code=409, detail=(
                         f"This press already recorded return {existing.get('return_id')} with different "
@@ -5908,6 +5915,14 @@ async def retry_restock(
     coll = _returns_coll()
     if coll is None:
         raise HTTPException(status_code=404, detail="Return not found")
+    # Another shop's return is never claimed, restocked or described: the
+    # same 404 as GET /returns/{id}, before any flag or unit moves.
+    try:
+        owner = coll.find_one({"return_id": return_id}, {"_id": 0, "store_id": 1})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[RETURNS] restock retry lookup failed: %s", exc)
+        owner = None
+    in_reach_or_404(owner, current_user, "Return not found")
 
     # Atomic claim: succeed only if NOT already applied AND NOT in progress.
     now_iso = utc_now_iso()

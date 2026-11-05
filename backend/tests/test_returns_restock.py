@@ -1413,3 +1413,108 @@ def test_a_counter_retry_restocks_only_the_units_still_out(ctx, monkeypatch, wal
         want["STK-W"] = "SOLD"
     assert {u["stock_id"]: u["status"] for u in units} == want, "2 back for 2, no hijack, no mint"
     assert all(u.get("order_id") == "ORD-WALKIN" for u in units if u["stock_id"] == "STK-W")
+
+
+# ============================================================================
+# L2-RETURN-F02 - replay and restock recovery are authorised against the
+# persisted return's shop; a replay is bound to the physical disposition too.
+# ============================================================================
+
+
+def _hdr(roles, store_id="BV-PUN-01", key=None):
+    h = {"Authorization": f"Bearer {_staff_token(roles, store_id=store_id)}"}
+    if key:
+        h["Idempotency-Key"] = key
+    return h
+
+
+def test_known_key_from_another_shop_reveals_no_return(ctx):
+    """A BV-RNC-01 cashier replaying BV-PUN-01's known key gets the same 404 as
+    the detail route -- no return id, no money, no stock ids -- and nothing is
+    written."""
+    created = ctx["client"].post("/api/v1/returns", json=_payload(),
+                                 headers=_hdr(["ADMIN"], key="K-F02-A"))
+    assert created.status_code == 201
+    rid = created.json()["return_id"]
+    r = ctx["client"].post("/api/v1/returns", json=_payload(),
+                           headers=_hdr(["CASHIER"], store_id="BV-RNC-01", key="K-F02-A"))
+    assert r.status_code == 404
+    assert rid not in r.text and "net_refund" not in r.text
+    assert len(ctx["returns_coll"].docs) == 1
+
+
+def test_known_key_with_changed_body_from_another_shop_does_not_name_the_return(ctx):
+    """Even the conflict answer used to name the other shop's return id."""
+    rid = ctx["client"].post("/api/v1/returns", json=_payload(),
+                             headers=_hdr(["ADMIN"], key="K-F02-B")).json()["return_id"]
+    body = _payload()
+    body["items"][0]["condition"] = "DAMAGED"
+    r = ctx["client"].post("/api/v1/returns", json=body,
+                           headers=_hdr(["CASHIER"], store_id="BV-RNC-01", key="K-F02-B"))
+    assert r.status_code == 404 and rid not in r.text
+
+
+def test_same_shop_identical_retry_replays_exactly_once(ctx):
+    hdr = _hdr(["CASHIER"], key="K-F02-C")
+    first = ctx["client"].post("/api/v1/returns", json=_payload(), headers=hdr)
+    again = ctx["client"].post("/api/v1/returns", json=_payload(), headers=hdr)
+    assert first.status_code == 201 and again.status_code == 201
+    assert again.json()["_idempotent_replay"] is True
+    assert again.json()["return_id"] == first.json()["return_id"]
+    assert again.json()["net_refund"] == first.json()["net_refund"]
+    assert len(ctx["returns_coll"].docs) == 1
+    assert [u["status"] for u in ctx["stock_repo"].units] == ["AVAILABLE"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("condition", "DAMAGED"),
+    ("restock", False),
+    ("serial", "SER-OTHER"),
+])
+def test_changed_disposition_under_the_same_key_conflicts(ctx, field, value):
+    """GOOD->DAMAGED, restock on->off or another scanned serial changes what
+    happens to the piece; the same key must refuse it, not replay success."""
+    hdr = _hdr(["CASHIER"], key=f"K-F02-D-{field}")
+    assert ctx["client"].post("/api/v1/returns", json=_payload(), headers=hdr).status_code == 201
+    snapshot = [dict(u) for u in ctx["stock_repo"].units]
+    body = _payload()
+    body["items"][0][field] = value
+    r = ctx["client"].post("/api/v1/returns", json=body, headers=hdr)
+    assert r.status_code == 409
+    assert len(ctx["returns_coll"].docs) == 1
+    assert ctx["stock_repo"].units == snapshot
+
+
+def _unapplied_return(ctx, monkeypatch):
+    """A BV-PUN-01 return whose restock never landed (stock layer was down)."""
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: None)
+    created = ctx["client"].post("/api/v1/returns", json=_payload(), headers=_hdr(["ADMIN"])).json()
+    assert created["restock_applied"] is False
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: ctx["stock_repo"])
+    return created["return_id"]
+
+
+def test_another_shop_cannot_restock_an_unapplied_return(ctx, monkeypatch):
+    rid = _unapplied_return(ctx, monkeypatch)
+    doc_before = dict(ctx["returns_coll"].docs[0])
+    r = ctx["client"].post(f"/api/v1/returns/{rid}/restock",
+                           headers=_hdr(["STORE_MANAGER"], store_id="BV-RNC-01"))
+    assert r.status_code == 404
+    assert "STK-OLD-1" not in r.text
+    assert ctx["stock_repo"].units[0]["status"] == "SOLD"
+    assert ctx["returns_coll"].docs[0] == doc_before, "claim flags untouched"
+
+
+def test_another_shop_cannot_read_an_applied_returns_stock_ids(ctx):
+    rid = ctx["client"].post("/api/v1/returns", json=_payload(), headers=_hdr(["ADMIN"])).json()["return_id"]
+    r = ctx["client"].post(f"/api/v1/returns/{rid}/restock",
+                           headers=_hdr(["STORE_MANAGER"], store_id="BV-RNC-01"))
+    assert r.status_code == 404 and "STK-OLD-1" not in r.text
+
+
+def test_own_shop_manager_still_recovers_an_unapplied_restock(ctx, monkeypatch):
+    rid = _unapplied_return(ctx, monkeypatch)
+    r = ctx["client"].post(f"/api/v1/returns/{rid}/restock", headers=_hdr(["STORE_MANAGER"]))
+    assert r.status_code == 200
+    assert r.json()["restock_stock_ids"] == ["STK-OLD-1"]
+    assert ctx["stock_repo"].units[0]["status"] == "AVAILABLE"
