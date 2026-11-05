@@ -494,7 +494,7 @@ def _match_or_create_customer(
                 raw_phone=raw_phone,
             )
         except Exception:  # noqa: BLE001 -- the mapper must never raise
-            logger.debug("[ONLINE_MAP] ensure_customer failed", exc_info=True)
+            logger.warning("[ONLINE_MAP] ensure_customer failed", exc_info=True)
             customer_id, created = (None, False)
         if customer_id:
             # Stamp the Shopify-specific fields the generic skeleton omits onto a
@@ -544,7 +544,16 @@ def _match_or_create_customer(
     # resolve one, the order is recorded as a guest sale; this side door never
     # mints a phone-keyed record the one door refused. Nothing to key on at all
     # -> no orphan keyless customer either.
-    if phone or not email:
+    if phone:
+        # A buyer WITH a usable phone that the one door could not resolve is a
+        # failure, not a guest: say so loudly (map_shopify_order also flags the
+        # order customer_link_failed so staff can see it and a replay repairs it).
+        logger.warning(
+            "[ONLINE_MAP] phone buyer could not be linked to a customer; order "
+            "recorded as guest (customer_link_failed)"
+        )
+        return None
+    if not email:
         return None
 
     # --- create an email-only minimal ONLINE (MARKETING) customer ---------------
@@ -1131,7 +1140,12 @@ def _sync_existing_order_status(
 
 
 def _stamp_order_customer(
-    db, shopify_order_id: str, customer_id: Optional[str]
+    db,
+    shopify_order_id: str,
+    customer_id: Optional[str],
+    *,
+    link_failed: bool = False,
+    only_if_link_failed: bool = False,
 ) -> None:
     """Best-effort: reconcile the freshly created order doc's customer linkage with
     the customer the MAPPER actually resolved (ingest doesn't know about the matched
@@ -1147,6 +1161,11 @@ def _stamp_order_customer(
         ``customer_phone`` snapshot, so the sale is fully recorded against an
         unidentified buyer instead of a phantom customer record.
 
+    ``link_failed`` (RUN-01): the buyer HAD a usable phone but no customer could
+    be resolved -- stamped ``customer_link_failed`` so it is visible, never a
+    silent guest. ``only_if_link_failed`` is the replay repair: it touches ONLY an
+    order this flag marked, never a genuine guest or an already-linked order.
+
     Fail-soft: any error is swallowed (the order itself is already created)."""
     if db is None or not shopify_order_id:
         return
@@ -1155,14 +1174,22 @@ def _stamp_order_customer(
         if orders_coll is None:
             return
         if customer_id:
-            update = {"customer_id": customer_id, "is_guest_order": False}
+            update = {
+                "customer_id": customer_id,
+                "is_guest_order": False,
+                "customer_link_failed": False,
+            }
         else:
             # GUEST path: clear the phantom Shopify-id link, mark unidentified.
-            update = {"customer_id": None, "is_guest_order": True}
-        orders_coll.update_one(
-            {"shopify_order_id": shopify_order_id},
-            {"$set": update},
-        )
+            update = {
+                "customer_id": None,
+                "is_guest_order": True,
+                "customer_link_failed": bool(link_failed),
+            }
+        query: Dict[str, Any] = {"shopify_order_id": shopify_order_id}
+        if only_if_link_failed:
+            query["customer_link_failed"] = True
+        orders_coll.update_one(query, {"$set": update})
     except Exception:  # noqa: BLE001
         logger.debug("[ONLINE_MAP] customer_id stamp failed", exc_info=True)
 
@@ -1317,6 +1344,14 @@ def map_shopify_order(
             customer_id = _match_existing_customer(db, buyer)
         else:
             customer_id = _match_or_create_customer(db, buyer, store_id)
+        # A live buyer with a usable phone always resolves to a customer; None
+        # here is a FAILURE (RUN-01), flagged on the order, never a silent guest.
+        # (A historical unmatched buyer is a legitimate guest.)
+        link_failed = bool(
+            not customer_id
+            and not historical
+            and _normalize_indian_mobile(buyer.get("phone", ""))
+        )
         # Stamp the resolved IMS customer id so the shared ingest's clinical
         # FLAG & HOLD check matches against THIS customer's prescriptions (the raw
         # Shopify customer id is not the IMS one; without this the Rx-match would
@@ -1352,7 +1387,9 @@ def map_shopify_order(
         # Shopify-id link cleared to NULL + be marked is_guest_order, so a buyer we
         # can never dedup is recorded as an unidentified sale, NOT a phantom record.
         if status == "created":
-            _stamp_order_customer(db, shopify_order_id, customer_id)
+            _stamp_order_customer(
+                db, shopify_order_id, customer_id, link_failed=link_failed
+            )
             # An order first seen through orders/cancelled | fulfilled |
             # updated (the create webhook was missed) gets its real status now,
             # on the drain as on the pull's catch-up: the body's ONE lifecycle
@@ -1373,8 +1410,16 @@ def map_shopify_order(
         status_synced = False
         if status in ("duplicate", "replayed"):
             status_synced = _sync_existing_order_status(db, shopify_order_id, payload, verdict)
+            if customer_id:
+                # Replay repair: an order booked while the link FAILED now
+                # resolves -> link it (touches only a customer_link_failed order).
+                _stamp_order_customer(
+                    db, shopify_order_id, customer_id, only_if_link_failed=True
+                )
 
         result["customer_id"] = customer_id
+        if link_failed:
+            result["customer_link_failed"] = True
         # The booked order's own shop (ingest returns it: since multi-location
         # PR 5 the shipping shop, not the bucket); the bucket only when ingest
         # names none.

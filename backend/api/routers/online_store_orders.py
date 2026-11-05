@@ -126,6 +126,8 @@ _LIST_PROJECTION: Dict[str, int] = {
     "customer_name": 1,
     "customer_phone": 1,
     "customer_email": 1,
+    # RUN-01: a phone buyer the customer door could not link (not a real guest).
+    "customer_link_failed": 1,
     "grand_total": 1,
     "currency": 1,
     "status": 1,
@@ -899,10 +901,10 @@ async def clear_rx_hold(
     # A stock miss released: its missing units are claimed FIRST, at the
     # shops its route names (claim_the_missing) -- or the hold stands. Under
     # Re-map's lease, which a Re-map running or stopped mid-way holds.
+    from ..services.online_fulfillment_route import claim_the_missing
+
     lease = None
     if order.get("stock_miss_reason") and not stock_left:
-        from ..services.online_fulfillment_route import claim_the_missing
-
         lease = datetime.now(timezone.utc).isoformat()
         try:
             took = coll.find_one_and_update(
