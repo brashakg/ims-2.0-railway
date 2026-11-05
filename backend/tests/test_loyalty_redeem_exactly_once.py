@@ -187,3 +187,63 @@ def test_a_plain_redeem_on_a_bill_burns_what_it_always_did(rig):
     assert row["txn_id"] == out["txn_id"] and row["order_id"] == ORDER
     assert row["rupee_value"] == 250.0
     _reconcile(rig, 250)
+
+
+def _debit_lands_then_ack_lost(rig, monkeypatch):
+    """The guarded find_one_and_update APPLIES, then its answer is lost (a
+    socket timeout): money_guard reports no_atomic, try_debit returns None."""
+    coll = rig["accounts"].collection
+    real = coll.find_one_and_update
+
+    def landed_then_raised(*a, **k):
+        real(*a, **k)
+        raise RuntimeError("NetworkTimeout: socket timed out")
+
+    monkeypatch.setattr(coll, "find_one_and_update", landed_then_raised)
+    return coll
+
+
+def test_debit_landed_but_its_ack_lost_answers_with_that_one_burn(rig, monkeypatch):
+    """The till must not be told 'no points were taken' (4xx) when they were:
+    the press's own landed debit is recognised, its ledger row is written, and
+    a later press replays it -- the points are never lost off the books."""
+    _debit_lands_then_ack_lost(rig, monkeypatch)
+    out = _redeem(points=100)
+    assert out["redeemed_points"] == 100 and out["rupee_value"] == 100.0
+    [row] = _redeem_rows(rig)
+    assert row["txn_id"] == out["txn_id"]
+    _reconcile(rig, 100)
+    again = _redeem(points=100)
+    assert again.get("replayed") is True and again["txn_id"] == out["txn_id"]
+    _reconcile(rig, 100)
+
+
+def test_debit_ack_lost_and_account_unreadable_is_never_a_refusal(rig, monkeypatch):
+    """Lost debit answer AND the re-read fails: the outcome is unknown, so the
+    till must get an error it treats as 'not confirmed' (5xx), never a 4xx it
+    reads as 'this attempt took NO points'."""
+    coll = _debit_lands_then_ack_lost(rig, monkeypatch)
+    real_find_one = coll.find_one
+    dark = {}
+    real_faau = coll.find_one_and_update
+
+    def faau(*a, **k):
+        try:
+            return real_faau(*a, **k)
+        finally:
+            dark["on"] = True  # after the write: the db goes dark
+
+    def find_one(*a, **k):
+        if dark:
+            raise RuntimeError("ServerSelectionTimeoutError")
+        return real_find_one(*a, **k)
+
+    monkeypatch.setattr(coll, "find_one_and_update", faau)
+    monkeypatch.setattr(coll, "find_one", find_one)
+    with pytest.raises(Exception) as ei:
+        _redeem(points=100)
+    exc = ei.value
+    assert not (isinstance(exc, HTTPException) and 400 <= exc.status_code < 500), exc.detail
+    dark.clear()
+    acct = rig["db"].loyalty_accounts.find_one({"customer_id": CUST})
+    assert int(acct["balance_points"]) == START - 100  # debited once, no more

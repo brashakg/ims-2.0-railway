@@ -711,8 +711,17 @@ async def redeem(
         idempotency_key=redeem_key,
     )
     if debited is None and redeem_key:
-        landed = _redeem_claim(accounts.find_by_id(body.customer_id), redeem_key)
-        if landed:
+        # RAW read (find_by_id swallows errors into None): an unreadable
+        # account must raise -> 5xx, which the till treats as "not confirmed",
+        # never as the 4xx "no points were taken".
+        now = accounts.collection.find_one({"customer_id": body.customer_id})
+        landed = _redeem_claim(now, redeem_key)
+        if landed and abs(int(landed.get("delta") or 0)) == capped_points:
+            # This press's own debit landed but its answer was lost (or a twin
+            # press's did): carry on and write the one ledger row under the
+            # marker's txn_id -- a twin collides on _id and replays.
+            debited = now
+        elif landed:
             # This bill's redemption already landed for another amount.
             raise HTTPException(
                 status_code=409,
