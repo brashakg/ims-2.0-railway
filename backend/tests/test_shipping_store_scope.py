@@ -37,7 +37,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from api.routers import auth as auth_mod  # noqa: E402
 from api.routers import shipping as shipping_router  # noqa: E402
 from api.services import shiprocket  # noqa: E402
-from tests.test_shipping import _FakeColl, _FakeCustomerRepo  # noqa: E402
+from tests.test_shipping import _FakeColl, _FakeCustomerRepo, _OrdersDistinct  # noqa: E402
 
 A, B = "AUDTA", "AUDTB"
 URL = "/api/v1/shipping/shipments"
@@ -57,6 +57,7 @@ class _Orders:
     def __init__(self, *orders):
         self.by_id = {o["order_id"]: o for o in orders}
         self.broken = False
+        self.collection = _OrdersDistinct(lambda: list(self.by_id.values()), lambda: self.broken)
 
     def find_by_id(self, oid):
         if self.broken:
@@ -67,6 +68,7 @@ class _Orders:
         if self.broken:
             raise RuntimeError("orders read failed")
         return next((o for o in self.by_id.values() if o["order_number"] == num), None)
+
 
 
 class _CountingColl(_FakeColl):
@@ -273,3 +275,105 @@ def test_list_same_shop_and_admin_see_shipments(ctx):
     assert r.json()["total"] == 1
     r2 = ctx["c"].get(URL, headers=_tok(["ADMIN"], A))
     assert r2.json()["total"] == 2
+
+
+# ------------------------------------------- list: canonical-order scope ----
+# Codex re-review of #1377: the list filtered on the shipment's SAVED
+# store_id, so a legacy row stamped A for B's order showed B's AWB, address
+# and phone to A, and an orderless row showed to whichever shop it was
+# stamped. A shipment now lists for a store-level caller only when its
+# canonical order resolves into the caller's shop; orderless / unresolvable
+# rows are HQ-only. Real Mongo semantics (mongomock), totals counted after scope.
+
+
+@pytest.fixture
+def mctx(monkeypatch):
+    import mongomock
+
+    from database.repositories.order_repository import OrderRepository
+
+    mdb = mongomock.MongoClient().db
+    mdb.orders.insert_many([_order("ORD-A", A, "INV-A"), _order("ORD-B", B, "INV-B"),
+                            _order("ORD-B2", B, "INV-B2")])
+    mdb.shipments.insert_many([
+        # Legacy mis-stamp: B's order, saved under A (pre-fix body-store fallback).
+        {"shipment_id": "SHP-MIS", "order_id": "ORD-B", "store_id": A, "awb": "AWB-MIS",
+         "phone": "9000000201", "created_at": "2026-11-04T03:00:00"},
+        {"shipment_id": "SHP-B2", "order_id": "ORD-B2", "store_id": B, "awb": "AWB-B2",
+         "created_at": "2026-11-04T02:00:00"},
+        {"shipment_id": "SHP-A", "order_id": "ORD-A", "store_id": A, "awb": "AWB-A",
+         "created_at": "2026-11-04T01:00:00"},
+        # Orderless / gone-order rows stamped B.
+        {"shipment_id": "SHP-NOORD", "store_id": B, "awb": "AWB-N",
+         "created_at": "2026-11-04T00:30:00"},
+        {"shipment_id": "SHP-GONE", "order_id": "ORD-GONE", "store_id": B, "awb": "AWB-G",
+         "created_at": "2026-11-04T00:00:00"},
+    ])
+
+    class _DB:
+        is_connected = True
+        db = mdb
+
+    app = FastAPI()
+    app.include_router(shipping_router.router, prefix="/api/v1/shipping")
+    orders = OrderRepository(mdb.orders)
+    monkeypatch.setattr(shipping_router, "get_order_repository", lambda: orders)
+    monkeypatch.setattr("api.dependencies.get_db", lambda: _DB(), raising=False)
+    return {"c": TestClient(app), "orders": orders}
+
+
+def _ids(r):
+    assert r.status_code == 200, r.text
+    return [s["shipment_id"] for s in r.json()["shipments"]], r.json()["total"]
+
+
+def test_list_mis_stamped_row_hidden_from_saved_shop(mctx):
+    for params in ({"order_id": "ORD-B"}, {}, {"store_id": ""}, {"store_id": A}):
+        r = mctx["c"].get(URL, params=params, headers=_tok(["SALES_STAFF"], A))
+        ids, total = _ids(r)
+        assert "SHP-MIS" not in ids and "AWB-MIS" not in r.text and "9000000201" not in r.text
+        assert total == len(ids) == (0 if "order_id" in params else 1)
+
+
+def test_list_mis_stamped_row_shown_to_canonical_shop(mctx):
+    ids, total = _ids(mctx["c"].get(URL, headers=_tok(["STORE_MANAGER"], B)))
+    assert ids == ["SHP-MIS", "SHP-B2"] and total == 2
+    ids, total = _ids(mctx["c"].get(URL, params={"order_id": "ORD-B"},
+                                    headers=_tok(["STORE_MANAGER"], B)))
+    assert ids == ["SHP-MIS"] and total == 1
+
+
+def test_list_orderless_rows_hq_only(mctx):
+    for hdr in (_tok(["SALES_STAFF"], B), _tok(["AREA_MANAGER"], A, [A, B])):
+        r = mctx["c"].get(URL, params={"store_id": B}, headers=hdr)
+        ids, _ = _ids(r)
+        assert "SHP-NOORD" not in ids and "SHP-GONE" not in ids
+    ids, total = _ids(mctx["c"].get(URL, headers=_tok(["ADMIN"], A)))
+    assert total == 5 and {"SHP-NOORD", "SHP-GONE"} <= set(ids)
+
+
+def test_list_area_manager_and_hq_shop_filter_use_canonical_shop(mctx):
+    for hdr in (_tok(["AREA_MANAGER"], A, [A, B]), _tok(["ADMIN"], A)):
+        ids, total = _ids(mctx["c"].get(URL, params={"store_id": B}, headers=hdr))
+        assert ids == ["SHP-MIS", "SHP-B2"] and total == 2
+    ids, total = _ids(mctx["c"].get(URL, headers=_tok(["AREA_MANAGER"], A, [A, B])))
+    assert ids == ["SHP-A"] and total == 1
+
+
+def test_list_pages_and_total_count_only_visible_rows(mctx):
+    hdr = _tok(["SALES_STAFF"], B)
+    p1, t1 = _ids(mctx["c"].get(URL, params={"limit": 1}, headers=hdr))
+    p2, t2 = _ids(mctx["c"].get(URL, params={"limit": 1, "skip": 1}, headers=hdr))
+    p3, t3 = _ids(mctx["c"].get(URL, params={"limit": 1, "skip": 2}, headers=hdr))
+    assert (p1, p2, p3) == (["SHP-MIS"], ["SHP-B2"], [])
+    assert t1 == t2 == t3 == 2
+
+
+def test_list_failed_order_read_fails_closed(mctx, monkeypatch):
+    def _boom(*_a, **_k):
+        raise RuntimeError("orders read failed")
+
+    monkeypatch.setattr(mctx["orders"].collection, "distinct", _boom)
+    r = mctx["c"].get(URL, headers=_tok(["SALES_STAFF"], B))
+    assert r.status_code == 503, r.text
+    assert "AWB" not in r.text

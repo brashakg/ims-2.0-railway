@@ -181,6 +181,23 @@ def _order_in_reach(order_id: Optional[str], current_user: dict, detail: str) ->
     return in_reach_or_404(_resolve_order(order_id) if order_id else None, current_user, detail)
 
 
+def _shop_order_ids(store_id: str, order_id: Optional[str] = None) -> List[str]:
+    """Ids of the orders whose shop is ``store_id`` (optionally just
+    ``order_id``) - the list door's form of _order_in_reach. FAILS CLOSED like
+    _resolve_order: an unreadable orders store is a 503, never "no filter".
+    ponytail: one $in of a shop's order ids; a $lookup when a shop's orders
+    outgrow it."""
+    repo = get_order_repository()
+    try:
+        flt: Dict[str, Any] = {"store_id": store_id}
+        if order_id:
+            flt["order_id"] = order_id
+        return [i for i in repo.collection.distinct("order_id", flt) if i]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHIPROCKET] shop order lookup failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Orders are unavailable - please retry.")
+
+
 # A BOOKING row older than this was never confirmed: the courier call takes
 # seconds. ponytail: a fixed timeout, not a Shiprocket lookup -- a booking
 # whose press died AFTER the courier accepted it expires too; staff then see
@@ -667,6 +684,12 @@ async def list_shipments(
     resolve_store_scope: ADMIN/SUPERADMIN any (or every) shop; everyone else,
     AREA_MANAGER included, only their own shops (403 for another), and a login
     with no shop reads nothing. Optional order_id filter.
+
+    The shop is the CANONICAL order's (the track door's rule), never the
+    shipment's saved store_id: a legacy row stamped with the wrong shop lists
+    under its order's shop, and an orderless / gone-order row lists only in
+    the HQ all-shops view. Filtered in the query, so total and pages count
+    only what the caller may see.
     """
     effective_store = resolve_store_scope(store_id, current_user)
     coll = _shipments_coll()
@@ -677,7 +700,7 @@ async def list_shipments(
     if order_id:
         query["order_id"] = order_id
     if effective_store:
-        query["store_id"] = effective_store
+        query["order_id"] = {"$in": _shop_order_ids(effective_store, order_id)}
 
     try:
         total = coll.count_documents(query)
