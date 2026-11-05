@@ -185,3 +185,37 @@ def derive_vendor_state(gstin: Optional[str], typed_state: Optional[str]):
     if normalised in ov.INDIAN_STATE_CODES:
         return normalised, ov.INDIAN_STATE_CODES[normalised]
     return None, typed
+
+
+def vendor_switched_off(vendor: Optional[dict]) -> bool:
+    """True for a supplier the Vendors screen switched off (is_active false).
+    A record with no is_active key is a live one (older rows never set it)."""
+    return bool(vendor) and vendor.get("is_active") is False
+
+
+def buyable_vendor(
+    vendor_repo, vendor_id: Optional[str], must_exist: bool = True
+) -> Optional[dict]:
+    """The supplier a NEW purchase may go to (L1-F40): 409 when it is switched
+    off; 404 when there is no such vendor, unless must_exist=False (send, which
+    never checked existence -- only the switch). Every door that starts or
+    commits a new order (create, edit a draft, send a draft) calls this;
+    reading, receiving and paying an order already placed do not."""
+    vendor = vendor_repo.find_by_id(vendor_id)
+    if vendor is None and must_exist:
+        raise HTTPException(status_code=404, detail="Vendor not found")
+    if vendor_switched_off(vendor):
+        name = vendor.get("trade_name") or vendor.get("legal_name") or vendor_id
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VENDOR_INACTIVE",
+                "message": (
+                    f"{name} is switched off as a supplier, so nothing new can "
+                    "be ordered from them. Choose another supplier, or ask an "
+                    "admin to switch this one back on under Vendors."
+                ),
+                "vendor_id": vendor_id,
+            },
+        )
+    return vendor

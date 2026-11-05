@@ -15,6 +15,7 @@ from ._shared import (
     _pm,
     _po_catalog_gate_on,
     ap_engine,
+    buyable_vendor,
     can_access_store_scoped,
     datetime,
     get_audit_repository,
@@ -328,6 +329,11 @@ async def send_po(
                 status_code=400,
                 detail="This order has no lines - add what to order before sending it.",
             )
+        # Sending commits the purchase: never to a switched-off supplier
+        # (L1-F40). A sourced draft with no vendor yet is the FE's to stop.
+        vendor_repo = get_vendor_repository()
+        if vendor_repo is not None and po.get("vendor_id"):
+            buyable_vendor(vendor_repo, po.get("vendor_id"), must_exist=False)
 
         # A line must name a product that exists. This is the ONE existence
         # check and it does not depend on the catalogue gate: a line whose
@@ -1244,9 +1250,9 @@ async def update_po(
     vendor = None
     vendor_repo = get_vendor_repository()
     if vendor_repo is not None:
-        vendor = vendor_repo.find_by_id(vendor_id)
-        if vendor is None:
-            raise HTTPException(status_code=404, detail="Vendor not found")
+        # A draft is still a new purchase: it may not move to, or stay with, a
+        # switched-off supplier (L1-F40). Moving it to a live one is the way out.
+        vendor = buyable_vendor(vendor_repo, vendor_id)
 
     # Omitted keeps what is stored (like vendor_id); an explicit null or ''
     # clears it.

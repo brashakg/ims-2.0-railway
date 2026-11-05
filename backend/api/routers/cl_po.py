@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field
 
 from .auth import require_roles
 from .vendors import build_po_gst, generate_po_number, po_gst_context
+from .vendors._shared import vendor_switched_off
 from .vendors.cockpit import server_line_prices
 from ..dependencies import (
     get_audit_repository,
@@ -286,8 +287,11 @@ def _make_vendor_resolver(db):
 
     Looks at the lens line (lens_catalog) first, then the product doc's
     preferred_vendor_id (the same field /purchase-orders/from-forecast groups
-    by). Cached per item; fail-soft None."""
+    by). A switched-off supplier resolves to None (L1-F40): its lines go to
+    the no-vendor draft (the FE disables send on it), never a closed supplier.
+    Cached per item; fail-soft None."""
     cache: Dict[str, Optional[str]] = {}
+    vendor_repo = get_vendor_repository()
 
     def _resolver(need: Dict[str, Any]) -> Optional[str]:
         key = need.get("lens_line_id") or need.get("product_id")
@@ -306,6 +310,10 @@ def _make_vendor_resolver(db):
                     prod = db.get_collection("products").find_one({"product_id": key})
                     if prod:
                         vendor_id = prod.get("preferred_vendor_id")
+                if vendor_id and vendor_repo is not None and vendor_switched_off(
+                    vendor_repo.find_by_id(vendor_id)
+                ):
+                    vendor_id = None
             except Exception:  # noqa: BLE001
                 vendor_id = None
         cache[key] = vendor_id or None
