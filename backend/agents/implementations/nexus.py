@@ -878,9 +878,10 @@ class NexusAgent(JarvisAgent):
         webhook_payload = doc.get("payload") or {}
         handler_error: str = ""
         terminal = False
+        outcome = None
         try:
             if vendor == "razorpay":
-                await self._handle_razorpay_webhook(webhook_payload)
+                outcome = await self._handle_razorpay_webhook(webhook_payload)
             elif vendor == "shopify":
                 # Stash the inbox headers so the handler can read the Shopify
                 # topic (orders/create) + the X-Shopify-Webhook-Id for the
@@ -906,7 +907,8 @@ class NexusAgent(JarvisAgent):
                                "status": "skipped", "handler_error": handler_error}}
         elif not handler_error:
             update = {"$set": {"processed": True, "processed_at": done_at,
-                               "status": "succeeded"},
+                               "status": "succeeded",
+                               **({"outcome": outcome} if outcome else {})},
                       "$unset": {"handler_error": ""}}
         else:
             dead = attempts >= self.WEBHOOK_MAX_ATTEMPTS
@@ -963,8 +965,15 @@ class NexusAgent(JarvisAgent):
     # ------------------------------------------------------------------
 
     async def _handle_razorpay_webhook(self, payload: Dict[str, Any]):
+        """Post THIS row's payment (L2-PAYMENT-F01): the one reconcile, the
+        same for inline and queued delivery. A bill it names but cannot credit
+        raises, so the row records failed (retried, then dead) -- never
+        succeeded with no tender. Returns the outcome stamped on the row."""
         evt = payload.get("event") or payload.get("type") or "unknown"
         logger.info(f"[NEXUS] razorpay webhook event={evt}")
+        from api.services.upi_qr import reconcile_razorpay_event
+
+        return reconcile_razorpay_event(self.db, payload)
 
     # Shopify ORDER topics the mapper handles. orders/create + orders/paid create
     # the IMS order (count-once); orders/updated + orders/cancelled SYNC the status

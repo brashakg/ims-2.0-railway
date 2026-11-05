@@ -8,16 +8,18 @@ Two responsibilities in one module:
      The NPCI UPI URI scheme is a public standard; building the link
      needs nothing from a payment gateway.
 
-  2. Fail-soft Razorpay/UPI payment auto-reconcile hook
-     reconcile_upi_payment(db, order_id, upi_txn)
-     Called from the Razorpay webhook receiver (payment.captured event)
-     when a matching payment credit arrives.  DARK when no Razorpay creds.
+  2. Razorpay/UPI payment auto-reconcile
+     reconcile_razorpay_event(db, payload)
+     Called by NEXUS while it drains one verified Razorpay inbox row, so
+     inline and queued delivery post the same event the same way.  DARK
+     when no Razorpay creds.
 
-     The hook matches on (order_ref, amount) and, when matched, records
-     the payment on the order with the same shape as a manual
-     POST /orders/{order_id}/payments call so downstream finance/reports
-     are unaffected.  FULLY fail-soft: any failure is logged; the order
-     and the webhook receiver MUST succeed even if reconciliation fails.
+     Only a captured INR payment, matched to its bill by order_ref, is
+     posted -- through OrderRepository.add_payment, the manual tender's own
+     write (never above what the bill still owes, once per payment id).  A
+     payment that names a bill but cannot be credited raises, so its inbox
+     row reads failed (retried, then dead-lettered), never succeeded.  The
+     webhook's 200 to Razorpay never depends on it.
 
 Store VPA lookup:
   The store's UPI Virtual Payment Address lives on the `stores` collection
@@ -27,8 +29,8 @@ Store VPA lookup:
 
 DARK default:
   The reconcile hook exits immediately when Razorpay creds are not
-  configured in the `integrations` collection (shop_url / access_token).
-  It never calls any gateway and never raises.
+  configured in the `integrations` collection (key_id / key_secret).
+  It never calls any gateway.
 
 No emojis in Python (Windows cp1252 safety rule).
 """
@@ -159,56 +161,46 @@ def _resolve_merchant_name(db, store_id: str) -> str:
     return "Better Vision"
 
 
+
 # ============================================================================
-# UPI auto-reconcile hook (Razorpay payment.captured webhook)
+# UPI auto-reconcile (Razorpay payment.captured webhook)
 # ============================================================================
 
 
-def reconcile_upi_payment(
-    db,
-    order_id: str,
-    upi_txn: Dict[str, Any],
-) -> bool:
-    """Fail-soft hook: when Razorpay notifies a payment.captured event, match
-    it to the IMS order and record the payment if it matches.
+class ReconcileMismatch(Exception):
+    """The event names an IMS bill but cannot be credited to it. Raised so the
+    event's inbox row records status=failed (retried hourly, then a dead
+    letter on the sync-health card) -- never 'succeeded' with no tender."""
 
-    Match criteria:
-      - The Razorpay payment note/description/order_ref matches the IMS
-        order_number (set as `tn` in the UPI link).  Several Razorpay
-        fields carry this: `description`, `notes.order_ref`, `order_id`
-        sub-key.  We try all three.
-      - The amount_in_paise / 100 matches the order's grand_total (within
-        0.01 tolerance for float drift).
 
-    When matched: appends a payment row to `orders.payments` and bumps
-    `amount_paid` / `balance_due` / `payment_status` in the same way the
-    manual POST /orders/{id}/payments endpoint does.
+def reconcile_razorpay_event(db, payload: Dict[str, Any]) -> str:
+    """Post ONE verified Razorpay inbox event to its IMS bill.
 
-    DARK when:
-      - Razorpay creds not configured (no `integrations/razorpay` doc).
-      - DB unavailable.
-      - upi_txn payload is missing expected fields.
-    Returns True when a payment was recorded, False otherwise.  NEVER raises.
+    Called by NEXUS's razorpay handler while it drains THAT inbox row, so the
+    inline and queued deliveries run the same code on the same event, and
+    the row only reads succeeded once this returned. Returns the outcome
+    stamped on the row; raises (ReconcileMismatch or anything else) when the
+    event names an IMS bill and could not be credited.
+
+    Only payment.captured credits: payment.authorized is a hold, not money,
+    and its captured event follows. The bill is matched on the order_number
+    carried in the UPI tn= note (notes.order_ref / notes.order_number /
+    description). DARK when Razorpay creds are not configured.
     """
-    if db is None or not order_id or not upi_txn:
-        return False
-
-    # Gate: only attempt when Razorpay integration is configured.
+    if str((payload or {}).get("event") or "").lower() != "payment.captured":
+        return "ignored"
     if not _razorpay_configured(db):
-        logger.debug(
-            "[UPI_RECONCILE] Razorpay not configured -- skipping reconcile "
-            "for order %s",
-            order_id,
-        )
-        return False
-
-    try:
-        return _do_reconcile(db, order_id, upi_txn)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[UPI_RECONCILE] reconcile raised for order %s: %s", order_id, exc
-        )
-        return False
+        return "dark"
+    entity = ((payload.get("payload") or {}).get("payment") or {}).get("entity") or {}
+    notes = entity.get("notes") or {}
+    order_ref = (
+        notes.get("order_ref") or notes.get("order_number") or entity.get("description") or ""
+    )
+    order = db.get_collection("orders").find_one({"order_number": order_ref}) if order_ref else None
+    if not order:
+        # Not an IMS bill (no ref, or a ref IMS never issued): nothing to post.
+        return "no_matching_order"
+    return _do_reconcile(db, order.get("order_id") or "", entity)
 
 
 def _razorpay_configured(db) -> bool:
@@ -222,105 +214,78 @@ def _razorpay_configured(db) -> bool:
         return False
 
 
-def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> bool:
-    """Inner logic -- separated so the outer catch handles any exception."""
-    # Pull the amount from the Razorpay payload.  Razorpay stores in paise.
-    amount_paise = int(upi_txn.get("amount") or 0)
+def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> str:
+    """Credit one captured rupee payment to the bill, exactly once.
+
+    Capture and currency are read from the payment itself, never inferred
+    from an amount that happens to match. The money is posted through
+    OrderRepository.add_payment -- the manual tender's own write: over-tender
+    is refused against what the bill still owes (never added on top of a
+    paid bill), the write is a compare-and-set on what was read, and the
+    `razorpay:<id>` idempotency key makes a concurrent twin land once.
+    """
+    pid = str(upi_txn.get("id") or upi_txn.get("payment_id") or "").strip()
+    if not pid:
+        raise ReconcileMismatch("payment carries no Razorpay payment id")
+    if upi_txn.get("status") != "captured" or upi_txn.get("captured") is not True:
+        raise ReconcileMismatch(f"payment {pid} is not captured (status {upi_txn.get('status')!r})")
+    currency = str(upi_txn.get("currency") or "").upper()
+    if currency != "INR":
+        raise ReconcileMismatch(f"payment {pid} is in {currency or 'no currency'}, not INR")
+    amount_paise = upi_txn.get("amount")
+    if type(amount_paise) is not int or amount_paise <= 0:
+        raise ReconcileMismatch(f"payment {pid} has no positive paise amount ({amount_paise!r})")
     amount_rupees = round(amount_paise / 100.0, 2)
 
-    # Razorpay payment id for idempotency / audit.
-    razorpay_payment_id = upi_txn.get("id") or upi_txn.get("payment_id") or ""
+    from database.repositories.order_repository import OrderRepository
 
-    orders_coll = db.get_collection("orders")
-    if orders_coll is None:
-        return False
-
-    order = orders_coll.find_one({"order_id": order_id})
+    repo = OrderRepository(db.get_collection("orders"))
+    order = repo.find_by_id(order_id)
     if not order:
-        logger.debug("[UPI_RECONCILE] order %s not found", order_id)
-        return False
+        raise ReconcileMismatch(f"order {order_id} not found for payment {pid}")
+    # Rows written before the idempotency key existed carry only the id.
+    if any(isinstance(p, dict) and p.get("provider_payment_id") == pid
+           for p in order.get("payments") or []):
+        _confirm_draft(repo, order_id)  # a retry finishes a lifecycle step a crash cut off
+        return "already_recorded"
 
-    order_number = order.get("order_number") or order_id
-    grand_total = float(order.get("grand_total") or 0.0)
-
-    # Amount must match (tolerance: 0.01).
-    if abs(amount_rupees - grand_total) > 0.01:
-        logger.info(
-            "[UPI_RECONCILE] amount mismatch for order %s: expected %.2f got %.2f",
-            order_id,
-            grand_total,
-            amount_rupees,
-        )
-        return False
-
-    # Idempotency: skip if this Razorpay payment_id is already recorded.
-    if razorpay_payment_id:
-        existing_payments = order.get("payments") or []
-        for p in existing_payments:
-            if (
-                isinstance(p, dict)
-                and p.get("provider_payment_id") == razorpay_payment_id
-            ):
-                logger.debug(
-                    "[UPI_RECONCILE] payment %s already recorded for order %s",
-                    razorpay_payment_id,
-                    order_id,
-                )
-                return False
-
-    now_iso = utc_now_iso()
     payment_row = {
-        "payment_id": f"upi-auto-{razorpay_payment_id or order_id}",
+        "payment_id": f"upi-auto-{pid}",
         "method": "UPI",
         "amount": amount_rupees,
         "provider": "razorpay",
-        "provider_payment_id": razorpay_payment_id,
+        "provider_payment_id": pid,
         "auto_reconciled": True,
-        "recorded_at": now_iso,
+        "recorded_at": utc_now_iso(),
+        "idempotency_key": f"razorpay:{pid}",
     }
-
-    current_paid = float(order.get("amount_paid") or 0.0)
-    new_paid = round(current_paid + amount_rupees, 2)
-    new_balance = round(grand_total - new_paid, 2)
-    new_status = (
-        "PAID" if new_balance <= 0.01 else ("PARTIAL" if new_paid > 0 else "UNPAID")
-    )
-    # Owner ruling 2026-08-30: bill type follows the money — same single
-    # derivation as add_payment / the superadmin recomputes.
-    from database.repositories.order_repository import derive_bill_type
-
     try:
-        res = orders_coll.update_one(
-            # Compare-and-set on what was read (PR #1264): never onto a
-            # cancelled order, one an advance refund holds, or money that
-            # moved meanwhile -- the same conditions add_payment writes under.
-            {"order_id": order_id, "status": {"$ne": "CANCELLED"}, "advance_refund_id": None,
-             "amount_paid": order.get("amount_paid")},
-            {
-                "$push": {"payments": payment_row},
-                "$set": {
-                    "amount_paid": new_paid,
-                    "balance_due": max(0.0, new_balance),
-                    "payment_status": new_status,
-                    "bill_type": derive_bill_type(new_status),
-                    "updated_at": now_iso,
-                },
-            },
-        )
-        if not getattr(res, "matched_count", getattr(res, "modified_count", 1)):
-            logger.warning("[UPI_RECONCILE] order %s changed or is refunded/cancelled; payment %s not recorded",
-                           order_id, razorpay_payment_id)
-            return False
-        logger.info(
-            "[UPI_RECONCILE] auto-reconciled order %s (order_number=%s) "
-            "razorpay_id=%s amount=%.2f status=%s",
-            order_id,
-            order_number,
-            razorpay_payment_id,
-            amount_rupees,
-            new_status,
-        )
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[UPI_RECONCILE] order update failed: %s", exc)
-        return False
+        recorded = repo.add_payment(order_id, payment_row)
+    except ValueError as exc:  # over-tender: more than the bill still owes
+        raise ReconcileMismatch(f"payment {pid} Rs {amount_rupees:.2f}: {exc}") from exc
+    if not recorded:
+        raise ReconcileMismatch(
+            f"order {order_id} did not take payment {pid} (cancelled, held by an "
+            f"advance refund, or changed meanwhile)")
+    _confirm_draft(repo, order_id)
+    logger.info("[UPI_RECONCILE] order %s credited razorpay_id=%s amount=%.2f",
+                order_id, pid, amount_rupees)
+    return "credited"
+
+
+def _confirm_draft(repo, order_id: str) -> None:
+    """The manual payment door's lifecycle step, through its own helpers: a
+    DRAFT bill that takes money is confirmed and gets its workshop job."""
+    from api.routers.orders.release import _claim_order_status
+    from api.routers.orders import workshop
+
+    order = repo.find_by_id(order_id) or {}
+    if order.get("status") != "DRAFT":
+        return
+    if not _claim_order_status(repo, order_id, "CONFIRMED", ("DRAFT",), "razorpay-webhook"):
+        logger.warning("[UPI_RECONCILE] auto-confirm skipped for %s -- its status changed", order_id)
+        return
+    try:
+        workshop._ensure_workshop_job_for_order(repo.find_by_id(order_id) or order, "razorpay-webhook")
+    except Exception as exc:  # noqa: BLE001 -- the manual door never blocks on it either
+        logger.warning("[UPI_RECONCILE] workshop auto-link skipped for %s: %s", order_id, exc)
