@@ -29,6 +29,15 @@ class _FakeStock:
         n = self._b.get(pid, {}).get("available", 0)
         return [{"stock_id": f"{pid}-U{i}", "status": "AVAILABLE"} for i in range(n)]
 
+    def find_by_id(self, sid):
+        # A scanned unit must exist, be its line's product and sit at the bill's
+        # shop (L2-STOCK-F01): the fake knows the units it was told about.
+        pid = sid.rsplit("-U", 1)[0]
+        if pid not in self._b:
+            return None
+        return {"stock_id": sid, "product_id": pid, "store_id": "BV-TEST-01",
+                "status": "AVAILABLE"}
+
     def mark_sold(self, sid, oid):
         return True
 

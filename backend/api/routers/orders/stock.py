@@ -11,7 +11,11 @@ from datetime import datetime, timedelta
 
 from fastapi import HTTPException
 from typing import Dict, List, Optional
-from ...dependencies import get_order_repository, get_stock_repository
+from ...dependencies import (
+    get_order_repository,
+    get_product_repository,
+    get_stock_repository,
+)
 from ._shared import logger
 
 
@@ -111,6 +115,17 @@ def _resolve_billable_product(product_repo, pid: str, product_name: str = ""):
                 f"{product_name or pid} exists only in the catalog "
                 f"and has no billing master record. Re-save it via "
                 f"Catalog / Add Product before selling it."
+            ),
+        )
+    # L1-F39: an archived (deleted_at) or switched-off product is off sale --
+    # is_active False is also a provisional buy never switched on. Only a NEW
+    # line comes through here; saved bills, returns and history never do.
+    if product.get("deleted_at") or product.get("is_active") is False:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{product_name or pid} is archived and no longer on sale. "
+                f"It cannot be billed."
             ),
         )
     return product
@@ -227,6 +242,48 @@ def _takes_serialized_stock(line: dict) -> bool:
     if not pid or pid.startswith(_VIRTUAL_PID_PREFIXES):
         return False
     return True
+
+
+def _stock_class(item_type) -> Optional[str]:
+    """'none' (service / eye test), 'lens' (lens-hook reserved) or
+    'serialized' for a type or category in any spelling; None if unknown."""
+    t = str(item_type or "").strip().upper()
+    if not t:
+        return None
+    if t in _NON_SERIALIZED_ITEM_TYPES:
+        return "none"
+    if t in _LENS_RESERVED_ITEM_TYPES:
+        return "lens"
+    from ...services.product_master import resolve_category
+
+    canon = resolve_category(t)
+    if canon is None:
+        return None
+    return {"SERVICES": "none", "OPTICAL_LENS": "lens"}.get(canon, "serialized")
+
+
+def _assert_line_type_matches_master(item_type, product, label: str) -> None:
+    """L2-STOCK-F02: whether a REAL product's line takes stock is the product
+    master's call, never the request's. A caller type that would skip the
+    unit (SERVICE / eye test) or hand it to the lens hook (LENS) is refused
+    when the master says otherwise; a stocked caller type is left to the stock
+    gate. Virtual lines (no product doc) and a master with no known category
+    keep the caller's type, as before."""
+    t = str(item_type or "").upper()  # the spelling _takes_serialized_stock reads
+    if not product or t not in _NON_SERIALIZED_ITEM_TYPES | _LENS_RESERVED_ITEM_TYPES:
+        return
+    claimed = _stock_class(t)
+    master = _stock_class(product.get("item_type")) or _stock_class(
+        product.get("category")
+    )
+    if master is not None and master != claimed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{label}' is a {product.get('category') or 'stocked'} product "
+                f"and cannot be billed as {t}. Add it from the product list."
+            ),
+        )
 
 
 def _assert_serialized_stock_available(
@@ -356,25 +413,29 @@ def _assert_explicit_unit_sellable(
     POS named must actually be sellable HERE and NOW, or the sale is refused
     with a message a shop-floor user can act on.
 
-    Fail-soft on infrastructure (unit not found / lookup error) so a stock-data
-    gap can never block revenue; fail-LOUD on a real conflict (already sold,
-    transferred out, quarantined/damaged, wrong store, expired). The atomic
-    guard inside StockRepository.mark_sold is the authoritative write-side
-    check -- this exists so the user sees WHY.
+    L2-STOCK-F01: the named unit must EXIST, be the line's product, sit at
+    this shop and be AVAILABLE (not expired). An unknown id used to pass
+    "fail-soft" and another product's unit was only logged, so a bill could
+    take no unit, or the wrong one. A lookup error is "try again" (503),
+    never a pass. The atomic guard inside StockRepository.mark_sold is the
+    authoritative write-side check -- this exists so the user sees WHY.
     """
     try:
         unit = stock_repo.find_by_id(stock_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK] explicit unit %s lookup failed: %s", stock_id, exc)
-        return
-    if not unit:
-        # Unknown id -> the FIFO path can still serve this line; don't block.
-        logger.warning(
-            "[STOCK] explicit stock_id %s not found (product %s) -- not blocking",
-            stock_id,
-            product_id,
+        raise HTTPException(
+            status_code=503,
+            detail=f"Stock could not be checked for '{label}'. Try again.",
         )
-        return
+    if not unit:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"'{label}' (unit {stock_id}) is not in the stock records. "
+                f"Scan the item again."
+            ),
+        )
 
     status = str(unit.get("status") or "").upper()
     if status != "AVAILABLE":
@@ -388,29 +449,35 @@ def _assert_explicit_unit_sellable(
         )
 
     unit_store = unit.get("store_id")
-    if unit_store and store_id and unit_store != store_id:
+    if store_id and unit_store != store_id:
         raise HTTPException(
             status_code=409,
             detail=(
-                f"'{label}' (unit {stock_id}) belongs to store {unit_store}, "
-                f"not this store. It cannot be sold here."
+                f"'{label}' (unit {stock_id}) belongs to store "
+                f"{unit_store or 'none'}, not this store. It cannot be sold here."
             ),
         )
 
-    # A product-id mismatch is LOGGED, never blocked. product_id canonicalisation
-    # (the products vs catalog_products convergence) means an older stock_units
-    # row can legitimately carry the pre-canonical id for the same physical item;
-    # 409-ing on that would false-block real scans at the counter. The unit's own
-    # status/store/expiry -- checked above -- are the safety-relevant facts.
-    unit_pid = unit.get("product_id")
-    if unit_pid and product_id and unit_pid != product_id:
-        logger.warning(
-            "[STOCK] scanned unit %s is product %s but the line says %s "
-            "(id canonicalisation drift?) -- selling the scanned unit",
-            stock_id,
-            unit_pid,
-            product_id,
-        )
+    # The unit must be the line's product. An older stock_units row may carry
+    # the pre-canonical id (SKU / Mongo _id) of the SAME product: both ids are
+    # resolved to the canonical product_id (_canonical_pid, the id rule the
+    # order lines use), so that alias sells and a different product does not.
+    unit_pid = str(unit.get("product_id") or "")
+    if unit_pid != product_id:
+        try:
+            _pr = get_product_repository()
+        except Exception:  # noqa: BLE001
+            _pr = None
+        if not unit_pid or _canonical_pid(_pr, unit_pid) != _canonical_pid(
+            _pr, product_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"'{label}' (unit {stock_id}) is a different product "
+                    f"({unit_pid or 'unknown'}). Scan the item being sold."
+                ),
+            )
 
     # F2 (patient safety): an in-date check for the scan path too -- FEFO only
     # governs auto-allocation, so without this a staffer could still scan an
@@ -515,10 +582,11 @@ def _claim_units(
     claim is one atomic guarded write, so the loser gets a 409 here, before any
     bill exists. Scanned units are claimed first, so a typed line of the same
     product can never take the unit another line scanned. A lost claim gives
-    back this call's earlier claims first. An unknown scanned unit stays
-    fail-soft, as the gate is; a stock backend error during a first-available
-    claim fails CLOSED (503 "try again"), never "out of stock" and never a
-    sale that took nothing off the shelf.
+    back this call's earlier claims first. A scanned unit that cannot be
+    claimed is refused (L2-STOCK-F01), never counted as taken; a stock
+    backend error during a first-available claim fails CLOSED (503 "try
+    again"), never "out of stock" and never a sale that took nothing off the
+    shelf.
 
     ponytail: the claim and the bill are two writes (standalone Mongo, no
     transaction). A server that dies between them leaves the units SOLD to an
@@ -548,15 +616,20 @@ def _claim_units(
         if ok:
             claimed[sid] = None
             continue
-        try:
-            # Lost the unit since the gate: re-read it for the reason.
-            pid = line.get("product_id") or ""
-            _assert_explicit_unit_sellable(
-                stock_repo, sid, pid, line.get("product_name") or pid, store_id
-            )
-        except HTTPException:
-            _release_claimed_units(order_id, claimed)
-            raise
+        # L2-STOCK-F01: the line did not take its unit, so no bill is written
+        # for it. A claim that wrote but lost its reply left the unit SOLD to
+        # this order id: give it back too, unless a saved bill holds it (a
+        # draft's own line at the add-item door).
+        _release_claimed_units(order_id, claimed)
+        _release_claimed_units(order_id, [sid], was_saved=lambda: _bill_exists(order_id))
+        pid = line.get("product_id") or ""
+        label = line.get("product_name") or pid
+        # Re-read it for the reason; with none, still refuse.
+        _assert_explicit_unit_sellable(stock_repo, sid, pid, label, store_id)
+        raise HTTPException(
+            status_code=409,
+            detail=f"'{label}' (unit {sid}) could not be taken off stock. Scan it again.",
+        )
     if not store_id:
         return claimed
     # The refusal counts the whole bill per product, as the gate adds it up.
@@ -588,6 +661,12 @@ def _claim_units(
             claimed[str(got)] = pid
             held[pid] = held.get(pid, 0) + 1
     return claimed
+
+
+def _bill_exists(order_id: str) -> bool:
+    """Is there a saved bill with this id? No repo -> assume yes (keep SOLD)."""
+    repo = get_order_repository()
+    return repo is None or repo.find_by_id(order_id) is not None
 
 
 def _release_claimed_units(order_id: str, stock_ids, was_saved=None) -> None:

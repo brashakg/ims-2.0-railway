@@ -667,34 +667,31 @@ def test_scanning_a_unit_with_an_unparseable_expiry_is_never_blocked(wired, valu
     assert any("UNPARSEABLE expiry_date" in r.message for r in caplog.records)
 
 
-def test_product_id_drift_is_logged_but_never_blocks_the_counter(wired, caplog):
-    """product_id canonicalisation (products vs catalog_products) means a live
-    stock_units row can carry the pre-canonical id for the SAME physical item.
-    Blocking there would false-block real scans, so this is a warning only --
-    the unit's status / store / expiry are the safety-relevant facts."""
+def test_unit_of_another_product_is_refused(wired):
+    """L2-STOCK-F01 (Codex audit 2026-11-04): a scanned unit of a DIFFERENT
+    product used to be only logged and sold to the line, so the bill and the
+    physical unit disagreed. It is now refused and the unit stays on the shelf
+    (a legacy alias of the SAME product still sells: test_pos_stock_identity)."""
     wired["units"].append(_unit("U1", product_id="P-OTHER"))
 
-    with caplog.at_level("WARNING"):
-        res = _add(_item(stock_id="U1"))
+    with pytest.raises(HTTPException) as exc:
+        _add(_item(stock_id="U1"))
 
-    assert res["item_id"]
-    assert wired["units"][0]["status"] == "SOLD"
-    assert any("canonicalisation drift" in r.message for r in caplog.records)
+    assert exc.value.status_code == 409
+    assert wired["units"][0]["status"] == "AVAILABLE"
 
 
-def test_unknown_stock_id_is_fail_soft_and_does_not_block_the_sale(wired, caplog):
-    """A stock-data GAP is not a conflict: an id that resolves to no unit at all
-    must never 409 the counter (revenue first). Nothing is written -- exactly as
-    before this change -- but the miss is now logged loudly instead of looking
-    like a successful sale."""
+def test_unknown_stock_id_is_refused_and_nothing_is_written(wired):
+    """L2-STOCK-F01: an id that resolves to no unit used to pass fail-soft, so
+    the line took NO unit off the shelf. It is now a 409 "scan again" and no
+    other unit is substituted."""
     wired["units"].append(_unit("U1"))
 
-    with caplog.at_level("ERROR"):
-        res = _add(_item(stock_id="GHOST-ID"))
+    with pytest.raises(HTTPException) as exc:
+        _add(_item(stock_id="GHOST-ID"))
 
-    assert res["item_id"]                              # sale not blocked
+    assert exc.value.status_code == 409
     assert wired["units"][0]["status"] == "AVAILABLE"  # no other unit substituted
-    assert any("SCANNED UNIT NOT SELLABLE" in r.message for r in caplog.records)
 
 
 # =========================================================================== #

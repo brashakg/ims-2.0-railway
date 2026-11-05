@@ -46,6 +46,7 @@ from .numbering import (
     generate_order_number,
 )
 from .stock import (
+    _assert_line_type_matches_master,
     _assert_serialized_stock_available,
     _canonical_pid,
     _claim_units,
@@ -204,11 +205,16 @@ async def create_order(
     if product_repo is not None:
         for item in order.items:
             pid = item.product_id or ""
-            if not pid or pid in _pdoc_by_pid:
+            if not pid:
                 continue
-            doc = _resolve_billable_product(product_repo, pid, item.product_name or "")
-            if doc is not None:
-                _pdoc_by_pid[pid] = doc
+            if pid not in _pdoc_by_pid:
+                doc = _resolve_billable_product(product_repo, pid, item.product_name or "")
+                if doc is not None:
+                    _pdoc_by_pid[pid] = doc
+            # L2-STOCK-F02: per LINE -- the master says whether it takes stock.
+            _assert_line_type_matches_master(
+                item.item_type, _pdoc_by_pid.get(pid), item.product_name or pid
+            )
 
     # BUG-005 / BUG-006 (patient-safety): validate every line's clinical Rx
     # powers (range / 0.25 grid / whole-axis / cyl-requires-axis) and require a

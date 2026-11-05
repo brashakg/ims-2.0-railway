@@ -30,6 +30,7 @@ from .pricing import (
 from ...services import discount_approval
 from .rx import _validate_order_line_rx
 from .stock import (
+    _assert_line_type_matches_master,
     _assert_serialized_stock_available,
     _canonical_pid,
     _claim_units,
@@ -110,6 +111,8 @@ async def add_order_item(
             # One id rule with create (_canonical_pid): a product named by SKU
             # or _id is gated, claimed and stored under its product_id.
             _pid = _canonical_pid(_pr, _pid)
+        # L2-STOCK-F02: the master, not the request, says whether it takes stock.
+        _assert_line_type_matches_master(item.item_type, product, item.product_name or _pid)
 
         # BUG-005 / BUG-006 (patient-safety): same Rx-power validation +
         # Rx-required check the create path runs, for a line appended to a DRAFT
