@@ -316,3 +316,167 @@ class TestEinvoiceUnattributed:
             assert r.status_code == 403, r.text
             assert "IRN-LEGACY-SECRET" not in r.text
 
+
+# ============================================================================
+# Codex review of #1378, issue 1 -- prescription PHOTO read + replace doors
+# ============================================================================
+# GET /prescriptions/{id}/photo used bare get_current_user (no clinical role
+# gate, no store check); POST replaced another shop's photo and deleted its
+# blob. Both now apply require_rx_read / the Rx store guard BEFORE touching the
+# file store.
+
+import io  # noqa: E402
+
+from api.routers import prescriptions as rx_router  # noqa: E402
+from api.services.file_store import InMemoryFileStore, set_file_store  # noqa: E402
+
+_OLD_PNG = b"\x89PNG\r\n\x1a\n" + b"OLD-PHOTO" * 8
+_NEW_PNG = b"\x89PNG\r\n\x1a\n" + b"NEW-PHOTO" * 8
+
+
+class _PhotoRxRepo:
+    def __init__(self, docs):
+        self.docs = {d["prescription_id"]: dict(d) for d in docs}
+        self.updated = []
+
+    def find_by_id(self, pid):
+        d = self.docs.get(pid)
+        return dict(d) if d else None
+
+    def update(self, pid, fields):
+        self.updated.append((pid, fields))
+        self.docs[pid].update(fields)
+        return self.docs[pid]
+
+
+@pytest.fixture
+def photo_env(monkeypatch):
+    store = InMemoryFileStore()
+    set_file_store(store)
+    docs = []
+    for pid, sid in (("rx-photo-B", STORE_B), ("rx-photo-none", None)):
+        fid = store.put(
+            content=_OLD_PNG,
+            filename="old.png",
+            mime_type="image/png",
+            metadata={"kind": "rx_photo", "prescription_id": pid},
+        )
+        doc = {"prescription_id": pid, "rx_photo_file_id": fid}
+        if sid:
+            doc["store_id"] = sid
+        docs.append(doc)
+    repo = _PhotoRxRepo(docs)
+    monkeypatch.setattr(rx_router, "get_prescription_repository", lambda: repo)
+    yield store, repo
+    set_file_store(None)
+
+
+def _photo_client(user):
+    app = FastAPI()
+    app.include_router(rx_router.router, prefix="/prescriptions")
+
+    async def _fake():
+        return user
+
+    app.dependency_overrides[get_current_user] = _fake
+    return TestClient(app)
+
+
+def _replace(c, pid):
+    return c.post(
+        f"/prescriptions/{pid}/photo",
+        files={"file": ("new.png", io.BytesIO(_NEW_PNG), "image/png")},
+    )
+
+
+class TestRxPhotoRead:
+    @pytest.mark.parametrize("role", ["INVESTOR", "ACCOUNTANT", "CASHIER"])
+    def test_non_clinical_role_denied(self, photo_env, role):
+        r = _photo_client(_user([role], [STORE_B])).get("/prescriptions/rx-photo-B/photo")
+        assert r.status_code == 403
+        assert _OLD_PNG not in r.content
+
+    def test_foreign_shop_optometrist_404(self, photo_env):
+        r = _photo_client(_user(["OPTOMETRIST"], [STORE_A])).get(
+            "/prescriptions/rx-photo-B/photo"
+        )
+        assert r.status_code == 404
+        assert _OLD_PNG not in r.content
+
+    def test_area_manager_outside_reach_404(self, photo_env):
+        r = _photo_client(_user(["AREA_MANAGER"], [STORE_A])).get(
+            "/prescriptions/rx-photo-B/photo"
+        )
+        assert r.status_code == 404
+
+    def test_unattributed_hidden_from_store_role(self, photo_env):
+        r = _photo_client(_user(["OPTOMETRIST"], [STORE_B])).get(
+            "/prescriptions/rx-photo-none/photo"
+        )
+        assert r.status_code == 404
+        assert _OLD_PNG not in r.content
+
+    @pytest.mark.parametrize(
+        "roles,stores",
+        [
+            (["OPTOMETRIST"], [STORE_B]),
+            (["SALES_STAFF"], [STORE_B]),
+            (["AREA_MANAGER"], [STORE_A, STORE_B]),
+            (["ADMIN"], [STORE_A]),
+        ],
+    )
+    def test_authorized_reads_photo(self, photo_env, roles, stores):
+        r = _photo_client(_user(roles, stores)).get("/prescriptions/rx-photo-B/photo")
+        assert r.status_code == 200
+        assert r.content == _OLD_PNG
+
+    def test_admin_reads_unattributed_photo(self, photo_env):
+        r = _photo_client(_user(["ADMIN"], [])).get("/prescriptions/rx-photo-none/photo")
+        assert r.status_code == 200
+        assert r.content == _OLD_PNG
+
+
+class TestRxPhotoReplace:
+    @pytest.mark.parametrize(
+        "pid,roles,stores",
+        [
+            ("rx-photo-B", ["OPTOMETRIST"], [STORE_A]),
+            ("rx-photo-B", ["SALES_CASHIER"], [STORE_A]),
+            ("rx-photo-none", ["STORE_MANAGER"], [STORE_B]),
+        ],
+    )
+    def test_out_of_scope_replace_leaves_blob_untouched(
+        self, photo_env, pid, roles, stores
+    ):
+        store, repo = photo_env
+        before_ids = set(store._files)
+        old_fid = repo.docs[pid]["rx_photo_file_id"]
+        r = _replace(_photo_client(_user(roles, stores)), pid)
+        assert r.status_code == 404, r.text
+        assert repo.updated == []
+        assert repo.docs[pid]["rx_photo_file_id"] == old_fid
+        assert set(store._files) == before_ids  # no new blob, old not deleted
+        assert store.get(old_fid, require_kind="rx_photo")[0] == _OLD_PNG
+
+    def test_same_shop_replaces(self, photo_env):
+        store, repo = photo_env
+        old_fid = repo.docs["rx-photo-B"]["rx_photo_file_id"]
+        r = _replace(_photo_client(_user(["SALES_CASHIER"], [STORE_B])), "rx-photo-B")
+        assert r.status_code == 201, r.text
+        new_fid = repo.docs["rx-photo-B"]["rx_photo_file_id"]
+        assert new_fid != old_fid
+        assert store.get(old_fid, require_kind="rx_photo") is None
+        assert store.get(new_fid, require_kind="rx_photo")[0] == _NEW_PNG
+
+    def test_admin_replaces_unattributed(self, photo_env):
+        _, repo = photo_env
+        r = _replace(_photo_client(_user(["ADMIN"], [])), "rx-photo-none")
+        assert r.status_code == 201, r.text
+        assert len(repo.updated) == 1
+
+    def test_policy_get_photo_row_matches_rx_read_roles(self):
+        from api.services import rbac_policy as rbac
+
+        entry = rbac.policy_for("GET", "/api/v1/prescriptions/RX-1/photo")
+        assert entry is not None
+        assert set(entry["allowed"]) == set(rx_router._RX_READ_ROLES)

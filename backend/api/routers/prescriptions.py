@@ -1479,6 +1479,9 @@ async def upload_prescription_photo(
     rx_doc = repo.find_by_id(prescription_id)
     if not rx_doc:
         raise HTTPException(status_code=404, detail="Prescription not found")
+    # Codex #1378: object store rule BEFORE any blob write/delete -- a foreign
+    # or unattributed Rx keeps its photo untouched (404, same hiding as reads).
+    _store_scope_or_404(rx_doc, current_user)
 
     mime = (file.content_type or "").lower()
     if mime not in _RX_PHOTO_MIMES:
@@ -1540,15 +1543,17 @@ async def upload_prescription_photo(
 @router.get("/{prescription_id}/photo")
 async def download_prescription_photo(
     prescription_id: str,
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_rx_read),
 ):
-    """Stream the attached outside-Rx photo (kind-checked in the store)."""
+    """Stream the attached outside-Rx photo (kind-checked in the store).
+    Same clinical role gate + per-object store rule as GET /{id} (Codex #1378)."""
     repo = get_prescription_repository()
     if repo is None:
         raise HTTPException(status_code=503, detail="Database not available")
     rx_doc = repo.find_by_id(prescription_id)
     if not rx_doc:
         raise HTTPException(status_code=404, detail="Prescription not found")
+    _store_scope_or_404(rx_doc, current_user)
     file_id = rx_doc.get("rx_photo_file_id")
     if not file_id:
         raise HTTPException(status_code=404, detail="No photo attached")
