@@ -21,6 +21,7 @@ from ._shared import (
 )
 from .release import (
     CANCELLABLE_STATUSES,
+    _CANCEL_MONEY_KEYS,
     _claim_order_for_cancel,
     _release_lens_lines,
 )
@@ -153,7 +154,8 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
         # was permanent: the 400 below refused every retry forever.
         # ------------------------------------------------------------------
         claimed = _claim_order_for_cancel(
-            repo, order_id, reason, current_user, invoice=order.get("invoice_number")
+            repo, order_id, reason, current_user, invoice=order.get("invoice_number"),
+            money_read=order,
         )
         is_retry = False
         if claimed is None:
@@ -170,6 +172,20 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
                         "order while it was being cancelled, so it was not cancelled. "
                         "Return the items from Returns instead - that issues the "
                         "credit note and the refund."
+                    ),
+                )
+            if fresh and fresh.get("status") != "CANCELLED" and any(
+                fresh.get(k) != order.get(k) for k in _CANCEL_MONEY_KEYS
+            ):
+                # A payment landed while this cancel ran (L2-POS-F04): the
+                # order stays a sale. The money check re-runs on what is there
+                # now, naming the refund door; anything else is a plain retry.
+                _refuse_cancel_holding_money(fresh, order_id, current_user)
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The order's payments changed while it was being cancelled, "
+                        "so it was not cancelled. Open the order again and retry."
                     ),
                 )
             if fresh.get("status") != "CANCELLED":

@@ -385,8 +385,13 @@ CANCELLABLE_STATUSES = [s for s, to in VALID_TRANSITIONS.items() if "CANCELLED" 
 _ANY_INVOICE = object()
 
 
+# The money fields a cancel's "no money held" check reads (L2-POS-F04).
+_CANCEL_MONEY_KEYS = ("payments", "amount_paid")
+
+
 def _claim_order_for_cancel(
-    repo, order_id: str, reason: str, current_user: dict, invoice=_ANY_INVOICE
+    repo, order_id: str, reason: str, current_user: dict, invoice=_ANY_INVOICE,
+    money_read: Optional[dict] = None,
 ) -> Optional[dict]:
     """Atomically flip ONE order to CANCELLED, only from a status the staff
     transition table (VALID_TRANSITIONS) lets cancel -- never a SHIPPED order
@@ -406,10 +411,20 @@ def _claim_order_for_cancel(
     number). The claim lands only while the order still carries exactly it
     (GST batch 5): an invoice minted between the door's read and this write
     wins, so a cancel never lands on an invoice no credit note reverses.
+
+    ``money_read``: the order doc the caller's money check read. The claim
+    lands only while its payments and amount_paid are still exactly those
+    (L2-POS-F04): a payment pushed between the check and this write wins, so
+    a cancel never strands money on a CANCELLED order. The payment write's own
+    compare-and-set carries the status, so on the one document exactly one of
+    the two lands.
     """
     inv_match = {}
     if invoice is not _ANY_INVOICE:
         inv_match = {"invoice_number": invoice or {"$in": [None, ""]}}
+    if money_read is not None:
+        for key in _CANCEL_MONEY_KEYS:
+            inv_match[key] = money_read[key] if key in money_read else {"$exists": False}
     payload = {
         "status": "CANCELLED",
         # Nothing is owed on a cancelled order (PR #1264): no phantom balance
@@ -437,7 +452,9 @@ def _claim_order_for_cancel(
     existing = repo.find_by_id(order_id)
     if not existing or existing.get("status") not in CANCELLABLE_STATUSES:
         return None
-    if inv_match and (existing.get("invoice_number") or None) != (invoice or None):
+    if invoice is not _ANY_INVOICE and (existing.get("invoice_number") or None) != (invoice or None):
+        return None
+    if money_read is not None and any(existing.get(k) != money_read.get(k) for k in _CANCEL_MONEY_KEYS):
         return None
     # GATE ON THE WRITE. base_repository.update swallows exceptions and returns
     # False, so discarding this result meant a FAILED status write still ran the
