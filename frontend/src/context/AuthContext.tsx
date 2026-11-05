@@ -10,10 +10,12 @@ import { authApi } from '../services/api';
 import { usePOSStore } from '../stores/posStore';
 import { permissionToCapability, isUngrantableCapability } from '../utils/capabilities';
 import { userSeesAllStores } from '../utils/storeAccess';
-import { USER_SHOPS_SYNCED_EVENT, decodeJwtClaims, syncCachedUserShops } from '../services/api/client';
+import { USER_SHOPS_SYNCED_EVENT } from '../services/api/client';
 import { getSessionPolicy } from '../constants/sessionPolicy';
 import { LAST_ACTIVITY_KEY, storedSessionIdleExpired } from '../hooks/useIdleLogout';
 import { IDLE_LOGIN_PATH, autoParkForIdleLogout } from '../hooks/idleSignOut';
+// Own line: keeps clear of #1379's import added beside the one above.
+import { decodeJwtClaims, syncCachedUserShops } from '../services/api/client';
 
 // ============================================================================
 // Types
