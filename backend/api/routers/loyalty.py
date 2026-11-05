@@ -535,6 +535,23 @@ async def redeem_otp_verify(
     return {"verified": True}
 
 
+def _redeem_key(order_id: Optional[str]) -> Optional[str]:
+    """One bill's redemption identity on the account's debit (None for a
+    standalone goodwill redeem, which stays one redemption per press)."""
+    return f"redeem:{order_id}" if order_id else None
+
+
+def _redeem_claim(account: Optional[Dict[str, Any]], key: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The debit already applied under `key` (money_guard's marker on the
+    account), or None."""
+    if not key:
+        return None
+    for entry in (account or {}).get("money_ledger") or []:
+        if entry.get("idempotency_key") == key:
+            return entry
+    return None
+
+
 @router.post("/redeem")
 async def redeem(
     body: RedeemRequest,
@@ -569,6 +586,18 @@ async def redeem(
 
     settings = _settings_safe()
     account = accounts.find_or_create(body.customer_id)
+
+    # EXACTLY-ONCE per bill (L2-LOYALTY-F01): the read above cannot stop two
+    # overlapping presses, so the DEBIT itself carries the bill's key (it
+    # rides in the guarded write). If a debit already landed under it but its
+    # ledger row did not (lost answer / process died), price this retry
+    # against the balance before that debit, so it re-derives the same burn
+    # and the guard answers it as a replay rather than debiting again.
+    redeem_key = _redeem_key(body.order_id)
+    claimed = _redeem_claim(account, redeem_key)
+    balance_for_calc = int(account.get("balance_points", 0)) + (
+        abs(int(claimed.get("delta") or 0)) if claimed else 0
+    )
 
     # OVER-REDEEM GUARD (security): when a redemption IS tied to an order, it must
     # be bounded by that order -- otherwise points worth more than the order could
@@ -614,7 +643,7 @@ async def redeem(
     # computed against the real order total.
     result = calc_redeem(
         body.points,
-        account.get("balance_points", 0),
+        balance_for_calc,
         order_ceiling,
         settings,
     )
@@ -654,7 +683,9 @@ async def redeem(
     otp_gate_on = loyalty_otp.redeem_otp_required(
         current_user.get("active_store_id")
     )
-    if otp_gate_on and not loyalty_otp.consume_verified(body.customer_id):
+    # A bill whose debit already landed was verified then; its retry moves no
+    # points, so it does not spend a second verification.
+    if otp_gate_on and not claimed and not loyalty_otp.consume_verified(body.customer_id):
         raise HTTPException(
             status_code=403,
             detail=(
@@ -677,7 +708,24 @@ async def redeem(
         body.customer_id,
         capped_points,
         delta_lifetime_redeemed=capped_points,
+        idempotency_key=redeem_key,
     )
+    if debited is None and redeem_key:
+        landed = _redeem_claim(accounts.find_by_id(body.customer_id), redeem_key)
+        if landed:
+            # This bill's redemption already landed for another amount.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "ok": False,
+                    "reason": "already_redeemed",
+                    "redeemed_points": abs(int(landed.get("delta") or 0)),
+                    "message": (
+                        "Points were already redeemed on this bill for a "
+                        "different amount. No further points were deducted."
+                    ),
+                },
+            )
     if debited is None:
         # Re-read for an accurate "available" in the message (best-effort).
         try:
@@ -700,24 +748,40 @@ async def redeem(
             },
         )
 
-    txn_id = str(uuid.uuid4())
-    txns.create(
-        {
+    # A bill's ONE ledger row takes the debit's own txn_id (its _id), so the
+    # two presses that shared one debit cannot write two rows: the second
+    # insert collides and answers with the row that landed.
+    txn_id = (_redeem_claim(debited, redeem_key) or {}).get("txn_id") or str(uuid.uuid4())
+    try:
+        txns.create(
+            {
+                "txn_id": txn_id,
+                "customer_id": body.customer_id,
+                "type": "REDEEM",
+                "points": capped_points,
+                "rupee_value": rupee_value,
+                "order_id": body.order_id,
+                "reason": (
+                    f"Redeem on order {body.order_id}" if body.order_id else "Manual redeem"
+                ),
+                "expires_at": None,
+                "was_capped": result.get("was_capped", False),
+                "created_by": current_user.get("user_id"),
+                "created_at": datetime.now(),
+            },
+            raise_on_duplicate=bool(redeem_key),
+        )
+    except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ != "DuplicateKeyError":
+            raise
+        prior = txns.collection.find_one({"txn_id": txn_id}) or {}
+        return {
+            "redeemed_points": int(prior.get("points") or 0),
+            "rupee_value": float(prior.get("rupee_value") or 0),
+            "was_capped": bool(prior.get("was_capped")),
             "txn_id": txn_id,
-            "customer_id": body.customer_id,
-            "type": "REDEEM",
-            "points": capped_points,
-            "rupee_value": rupee_value,
-            "order_id": body.order_id,
-            "reason": (
-                f"Redeem on order {body.order_id}" if body.order_id else "Manual redeem"
-            ),
-            "expires_at": None,
-            "was_capped": result.get("was_capped", False),
-            "created_by": current_user.get("user_id"),
-            "created_at": datetime.now(),
+            "replayed": True,
         }
-    )
 
     _audit(
         "loyalty.redeem",

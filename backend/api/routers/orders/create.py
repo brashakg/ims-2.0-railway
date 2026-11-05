@@ -1130,6 +1130,8 @@ async def create_order(
                             line_index=_lens_reservation_key(oi, idx),
                             store_id=store_id or "",
                             user=current_user,
+                            # Never under a bill that exists (as the units).
+                            was_saved=_order_was_saved,
                         )
                     except Exception:  # noqa: BLE001
                         pass  # fail-soft compensating action

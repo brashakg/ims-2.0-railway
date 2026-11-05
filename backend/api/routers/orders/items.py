@@ -421,6 +421,7 @@ async def add_order_item(
                     line_index=_line_idx,
                     store_id=_store_id or "",
                     user=current_user,
+                    was_saved=_line_was_saved,
                 )
             except Exception:  # noqa: BLE001
                 pass  # fail-soft compensating action
