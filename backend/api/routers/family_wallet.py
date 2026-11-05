@@ -376,7 +376,7 @@ async def redeem(
         from ..services import money_guard as mg
 
         existing = _find_pool_voucher(db, txn_id)
-        if existing is not None and existing.get("status") != _FENCE_STATUS:
+        if existing is not None and not _is_fence(existing):
             return _redeem_response(household_id, out, existing, duplicate=True)
         reversed_ = existing is not None or (
             mg.find_applied(
@@ -445,7 +445,7 @@ async def redeem(
                     status_code=503,
                     detail="voucher_mint_unconfirmed -- retry the same request",
                 ) from exc
-            if existing.get("status") != _FENCE_STATUS:
+            if not _is_fence(existing):
                 return _redeem_response(household_id, out, existing)
         _compensate(db, household_id, out, current_user)
         raise HTTPException(status_code=503, detail="voucher_mint_failed")
@@ -455,6 +455,17 @@ async def redeem(
 
 # A reversed redeem's voucher _id is held by a non-spendable tombstone.
 _FENCE_STATUS = "CANCELLED"
+_FENCE_REASON = "pool_redeem_mint_failed_reversal"
+
+
+def _is_fence(doc: Dict[str, Any]) -> bool:
+    """True only for the tombstone _fence_doc writes. Status alone is NOT
+    proof: staff cancel real vouchers to CANCELLED too (POST
+    /vouchers/{code}/cancel), and reading one of those as a tombstone would
+    refund points for a voucher that was issued (and maybe spent)."""
+    return doc.get("cancel_reason") == _FENCE_REASON and str(
+        doc.get("code") or ""
+    ).startswith("VOID-")
 
 
 def _fence_doc(fence: str, household_id: str, out: Dict[str, Any]) -> Dict[str, Any]:
@@ -475,7 +486,7 @@ def _fence_doc(fence: str, household_id: str, out: Dict[str, Any]) -> Dict[str, 
         "household_id": household_id,
         "pool_txn_id": out.get("txn_id"),
         "pool_points": int(out["points"]),
-        "cancel_reason": "pool_redeem_mint_failed_reversal",
+        "cancel_reason": _FENCE_REASON,
         "created_at": now,
         "updated_at": now,
     }

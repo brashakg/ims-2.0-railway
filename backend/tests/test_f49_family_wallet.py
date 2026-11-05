@@ -1353,3 +1353,63 @@ def test_f01_concurrent_identical_retries_after_interruption_one_voucher(db, mon
     assert len(db.get_collection("vouchers").docs) == 1
     assert svc.pool_balance(db, hid) == 240
     assert _benefit(db, hid) == 300.0
+
+
+def _reversal_rows(db):
+    return [
+        e
+        for w in db.get_collection("family_wallets").docs
+        for e in (w.get("money_ledger") or [])
+        if (e.get("reason") or "") == "pool_redeem_mint_failed_reversal"
+    ]
+
+
+def test_f01_staff_cancelled_voucher_is_not_a_tombstone_on_retry(db, monkeypatch):
+    """A REAL pool voucher later cancelled by staff (POST /vouchers/{code}/cancel)
+    shares status CANCELLED with the fence tombstone. The identical retry must
+    still treat it as the original voucher: never credit the points back."""
+    import api.routers.vouchers as vouchers_mod
+
+    r, hid = _wallet_setup(db, monkeypatch)
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=50)
+    first = _redeem_http(r, hid, points=50, customer="C2", otp=otp)
+    assert first["ok"] and svc.pool_balance(db, hid) == 250
+
+    monkeypatch.setattr(vouchers_mod, "_get_db", lambda: db)
+    cancelled = _run(
+        vouchers_mod.cancel_voucher(first["voucher"]["code"], current_user=_manager())
+    )
+    assert cancelled["status"] == "CANCELLED"
+
+    retry = _redeem_http(r, hid, points=50, customer="C2", otp=otp)
+    assert retry.get("duplicate") is True
+    assert retry["voucher"]["voucher_id"] == first["voucher"]["voucher_id"]
+    assert svc.pool_balance(db, hid) == 250  # no refund
+    assert _reversal_rows(db) == []
+    # HQ identical retry: same answer, still no refund.
+    again = _redeem_http(r, hid, points=50, customer="C2", otp=otp, user=_manager())
+    assert again["voucher"]["voucher_id"] == first["voucher"]["voucher_id"]
+    assert svc.pool_balance(db, hid) == 250
+    assert _reversal_rows(db) == []
+
+
+def test_f01_mint_error_with_cancelled_real_voucher_never_refunds(db, monkeypatch):
+    """Sibling door: the mint call errors after its write landed and the real
+    voucher is CANCELLED by the time we reconcile. The fence dup-keys on a real
+    voucher -> answer with it, never compensate."""
+    import api.routers.vouchers as vouchers_mod
+
+    r, hid = _wallet_setup(db, monkeypatch)
+    real_mint = vouchers_mod.mint_voucher
+
+    def _landed_then_cancelled(coll, **k):
+        doc = real_mint(coll, **k)
+        coll.update_one({"_id": doc["_id"]}, {"$set": {"status": "CANCELLED"}})
+        raise TimeoutError("ack lost")
+
+    monkeypatch.setattr(vouchers_mod, "mint_voucher", _landed_then_cancelled)
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=60)
+    out = _redeem_http(r, hid, points=60, customer="C2", otp=otp)
+    assert out["ok"] is True
+    assert svc.pool_balance(db, hid) == 240  # debit kept
+    assert _reversal_rows(db) == []
