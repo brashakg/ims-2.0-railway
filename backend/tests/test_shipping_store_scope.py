@@ -377,3 +377,85 @@ def test_list_failed_order_read_fails_closed(mctx, monkeypatch):
     r = mctx["c"].get(URL, headers=_tok(["SALES_STAFF"], B))
     assert r.status_code == 503, r.text
     assert "AWB" not in r.text
+
+
+# --------------------------------------------------------------------------
+# PR #1377 Codex round 2: equal creation times must not repeat or drop rows
+# across pages. MongoDB returns documents that tie on every sort key in no
+# defined order, and a fresh query (the next page) may order them differently.
+# mongomock's stable sort hides that, so this stand-in reorders tied rows on
+# every query unless the sort carries a unique tie-breaker (_id).
+# --------------------------------------------------------------------------
+
+class _TieUnstableShipments:
+    def __init__(self, coll):
+        self._coll = coll
+        self.calls = 0
+
+    def count_documents(self, query):
+        return self._coll.count_documents(query)
+
+    def find(self, query, projection=None):
+        outer = self
+
+        class _Cursor:
+            def __init__(self):
+                self._spec, self._skip, self._limit = [], 0, 0
+
+            def sort(self, key, direction=None):
+                self._spec = [(key, direction)] if isinstance(key, str) else list(key)
+                return self
+
+            def skip(self, n):
+                self._skip = n
+                return self
+
+            def limit(self, n):
+                self._limit = n
+                return self
+
+            def __iter__(self):
+                outer.calls += 1
+                docs = list(outer._coll.find(query))
+                keys = [k for k, _ in self._spec]
+                if "_id" not in keys:
+                    # No unique key: ties come back in a per-query order.
+                    docs.reverse() if outer.calls % 2 else None
+                for k, d in reversed(self._spec):
+                    docs.sort(key=lambda x, k=k: x.get(k) or "", reverse=d == -1)
+                page = docs[self._skip:self._skip + self._limit if self._limit else None]
+                hide_id = projection and projection.get("_id") == 0
+                return iter([{k: v for k, v in d.items() if not (hide_id and k == "_id")}
+                             for d in page])
+
+        return _Cursor()
+
+
+def test_list_pages_each_row_once_when_creation_times_tie(mctx, monkeypatch):
+    import mongomock
+
+    mdb = mongomock.MongoClient().db
+    mdb.orders.insert_many([_order(f"ORD-T{i}", B, f"INV-T{i}") for i in range(4)])
+    same = "2026-11-05T20:11:53.138024+00:00"
+    mdb.shipments.insert_many([
+        {"shipment_id": f"SHP-T{i}", "order_id": f"ORD-T{i}", "store_id": B,
+         "awb": f"AWB-T{i}", "created_at": same} for i in range(4)])
+    unstable = _TieUnstableShipments(mdb.shipments)
+    from database.repositories.order_repository import OrderRepository
+
+    orders = OrderRepository(mdb.orders)
+    monkeypatch.setattr(shipping_router, "get_order_repository", lambda: orders)
+    monkeypatch.setattr(shipping_router, "_shipments_coll", lambda: unstable)
+
+    hdr = _tok(["SALES_STAFF"], B)
+    seen = []
+    for skip in range(5):
+        ids, total = _ids(mctx["c"].get(URL, params={"limit": 1, "skip": skip, "store_id": B},
+                                        headers=hdr))
+        assert total == 4
+        seen += ids
+    assert sorted(seen) == ["SHP-T0", "SHP-T1", "SHP-T2", "SHP-T3"], seen
+    # Same pages again: the same order, page for page.
+    again = [(_ids(mctx["c"].get(URL, params={"limit": 1, "skip": s, "store_id": B},
+                                  headers=hdr))[0]) for s in range(4)]
+    assert sum(again, []) == seen[:4]

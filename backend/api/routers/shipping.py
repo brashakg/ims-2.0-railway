@@ -704,8 +704,13 @@ async def list_shipments(
 
     try:
         total = coll.count_documents(query)
+        # _id breaks created_at ties: Mongo orders tied rows arbitrarily per
+        # query, so without it a page could repeat one row and skip another.
         cursor = (
-            coll.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit)
+            coll.find(query, {"_id": 0})
+            .sort([("created_at", -1), ("_id", -1)])
+            .skip(skip)
+            .limit(limit)
         )
         shipments: List[Dict[str, Any]] = [_shipment_to_response(d) for d in cursor]
     except Exception as exc:  # noqa: BLE001
