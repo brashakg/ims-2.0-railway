@@ -1914,3 +1914,48 @@ def test_a_plain_refusal_raises_no_flag(client, shop, door):
     r = door.press(oid, [*stored, _line(ACC)])
     assert r.status_code == 409, r.text
     _no_flag_left(shop, oid)
+
+
+# ---------------------------------------------------------------------------
+# Review of fba16956 -- the lines the edit screen really sends
+# ---------------------------------------------------------------------------
+
+EDIT_MODES = [
+    ("superadmin-edit", {}),
+    ("superadmin-invoice-change", {"mode": "REVISED_INVOICE"}),
+    ("superadmin-invoice-change", {"mode": "CREDIT_NOTE"}),
+]
+# SuperadminOrderEditAddLine.test.tsx asserts the screen builds exactly this.
+TYPED = {"product_name": "Courier charge", "quantity": 1, "unit_price": 100, "discount_percent": 0}
+
+
+def _typed_bill(client, shop, invoiced, route):
+    items = [_line(SVC)]
+    return _saved_bill(client, shop, items) if route == "superadmin-edit" else invoiced(items)
+
+
+@pytest.mark.parametrize("route,body", EDIT_MODES)
+def test_the_screens_typed_service_line_saves(client, shop, invoiced, route, body):
+    oid = _typed_bill(client, shop, invoiced, route)
+    before = _ledger(shop)
+    stored = _as_sent(_order(shop, oid)["items"][0])
+    line = {"item_type": "SERVICE", "category": "SERVICE", **TYPED}
+    r = _edit(client, oid, [stored, line], route=route, **body)
+    assert r.status_code == 200, r.text
+    assert _ledger(shop) == before, "a service line takes nothing off the shelf"
+
+
+@pytest.mark.parametrize("route,body", EDIT_MODES)
+@pytest.mark.parametrize(
+    "item_type,category", [("FRAME", "FRAME"), ("COURIER", "Courier")], ids=["goods", "unknown"]
+)
+def test_the_screens_typed_goods_stay_refused(
+    client, shop, invoiced, route, body, item_type, category
+):
+    oid = _typed_bill(client, shop, invoiced, route)
+    before, bill = _ledger(shop), _order(shop, oid)
+    stored = _as_sent(bill["items"][0])
+    line = {"item_type": item_type, "category": category, **TYPED}
+    r = _edit(client, oid, [stored, line], route=route, **body)
+    _refused_unchanged(shop, r, before, 400)
+    assert _order(shop, oid) == bill
