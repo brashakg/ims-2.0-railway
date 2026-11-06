@@ -36,7 +36,9 @@ vi.mock('../../../../services/api', () => ({
   storeApi: { getStore: vi.fn().mockResolvedValue({ emi_annual_rate_percent: 12 }) },
   adminStoreApi: { getStoreUsers: vi.fn().mockResolvedValue({ users: [] }) },
 }));
-vi.mock('../DeliveryCompleteScreen', () => ({ default: () => <div>handed-over</div> }));
+vi.mock('../DeliveryCompleteScreen', () => ({
+  default: ({ onDone }: { onDone: () => void }) => <button onClick={onDone}>handed-over</button>,
+}));
 vi.mock('../../../../components/pos/BarcodeScanner', () => ({
   BarcodeScanner: ({ onScan }: { onScan: (v: string) => void }) => (
     <input
@@ -204,15 +206,19 @@ describe('SP03 - a pending lookup suspends the handover of the order still on sc
     expect(deliverWithPayment.mock.calls[0][0]).toBe('D');
   });
 
-  it('a latest lookup that FAILS leaves nothing actionable', async () => {
+  it('a latest lookup that FAILS changes nothing on screen: staff just try again', async () => {
     render(<DeliverySurface />);
     await load('C');
+    fillHandover();
     getOrder.mockRejectedValue(new Error('not an id'));
     getPendingDelivery.mockRejectedValue(new Error('network'));
     scan('D');
     await waitFor(() => expect(screen.getByText(/Could not load that order/)).toBeTruthy());
-    expect(screen.queryByText('Customer C')).toBeNull();
-    expect(deliverButton().disabled).toBe(true);
+    expect(screen.getByText('Customer C')).toBeTruthy();
+    expect(collector().value).toBe('PICKUP PERSON A');
+    expect(note().value).toBe('ONLY FOR ORDER A');
+    expect(checks().every((c) => c.checked)).toBe(true);
+    expect(deliverButton().disabled).toBe(false); // settled: no longer pending
   });
 
   it('a latest lookup that finds NOTHING leaves nothing actionable', async () => {
@@ -313,10 +319,12 @@ describe('SP03 - an old handover answer never writes over a newer selection', ()
     expect(screen.getByText(/ORD-A: QC gate/)).toBeTruthy();
   });
 
-  it('a delayed SUCCESS of A reports A and leaves B on the counter', async () => {
+  it("a delayed SUCCESS of A still opens A's completion screen; Done returns to B intact", async () => {
     const deliverA = await overlap();
     await act(async () => { deliverA.resolve({}); });
-    await waitFor(() => expect(screen.getByText(/Delivered — ORD-A/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('handed-over')).toBeTruthy());
+    expect(screen.getByText(/Delivered — ORD-A/)).toBeTruthy();
+    fireEvent.click(screen.getByText('handed-over'));
     expectBIntact();
     // B is a normal handover from here, with B's own details.
     fireEvent.click(deliverButton());
@@ -325,7 +333,7 @@ describe('SP03 - an old handover answer never writes over a newer selection', ()
     expect(deliverWithPayment.mock.calls[1][1].handover.picked_up_by_name).toBe('SYNTHETIC COLLECTOR B');
   });
 
-  it('a split stops at the next write once another job card is scanned', async () => {
+  it('a split already under way finishes for A when another job card is scanned', async () => {
     getOrder.mockImplementation(async (id: string) =>
       row(id, id === 'A' ? { amountPaid: 0, balanceDue: 1000 } : {}),
     );
@@ -338,14 +346,19 @@ describe('SP03 - an old handover answer never writes over a newer selection', ()
     fireEvent.click(deliverButton());
     await waitFor(() => expect(addPayment).toHaveBeenCalledTimes(1));
     await load('B');
+    fireEvent.change(collector(), { target: { value: 'SYNTHETIC COLLECTOR B' } });
+    fireEvent.change(note(), { target: { value: 'ONLY ORDER B' } });
 
-    getOrder.mockImplementation(async (id: string) =>
-      row(id, id === 'A' ? { amountPaid: 400, balanceDue: 600 } : {}),
-    );
     await act(async () => { firstLeg.resolve({}); });
-    await waitFor(() => expect(screen.getByText(/ORD-A: .*₹400 was recorded/)).toBeTruthy());
-    expect(deliverWithPayment).not.toHaveBeenCalled(); // A is not delivered behind B's back
-    expect(screen.getByText('Customer B')).toBeTruthy();
+    // The customer has paid both legs: A is not left half-taken.
+    await waitFor(() => expect(screen.getByText('handed-over')).toBeTruthy());
+    expect(deliverWithPayment).toHaveBeenCalledTimes(1);
+    expect(deliverWithPayment.mock.calls[0][0]).toBe('A');
+    // Selecting B reset the session ref; A's last leg keeps A's own session.
+    const session = String(addPayment.mock.calls[0][2]).split(':')[0];
+    expect(deliverWithPayment.mock.calls[0].at(-1)).toMatch(new RegExp(`^${session}:`));
+    fireEvent.click(screen.getByText('handed-over'));
+    expectBIntact();
   });
 
   it('a rescan of the SAME order still gets the refusal resync (money stays honest)', async () => {

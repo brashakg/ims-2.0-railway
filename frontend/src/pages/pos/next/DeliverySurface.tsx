@@ -202,8 +202,9 @@ export function DeliverySurface() {
     } catch {
       if (stale()) return;
       setErrorMsg('Could not load that order. Try again.');
-      // The scan named another order, so the previous one is not the target.
-      selectOrder(null);
+      // Settled, nothing selected: the screen stays as it was, typed details
+      // included, and staff do what the message says.
+      setLookupPending(false);
     }
   };
 
@@ -227,18 +228,17 @@ export function DeliverySurface() {
     if (!order || busy || lookupPending) return;
     setBusy(true);
     setErrorMsg(null);
-    // The scanner stays live during a handover, so everything after an await
-    // re-checks. `movedOn`: a later scan or pick happened, so send nothing more
-    // for this order and name it in whatever is reported. `stillSelected`: this
-    // order is still the one on screen, so its result may be written there.
+    // The scanner stays live during a handover. A handover already pressed
+    // runs to its end for THIS order (the customer's money is in hand), so a
+    // later scan never stops its writes; it only limits what the answer may
+    // touch. `stillSelected`: this order is still the one on screen, so its
+    // result may be written there. A later scan or pick also means a message
+    // has to say which order it is about.
     const scanAtStart = lookupSeqRef.current;
-    const movedOn = () => lookupSeqRef.current !== scanAtStart;
     const stillSelected = () => selectedIdRef.current === order.id;
     const label = order.orderNumber || order.id;
-    const named = (msg: string) => (movedOn() ? `${label}: ${msg}` : msg);
-    const stopIfMovedOn = () => {
-      if (movedOn()) throw new Error('Handover stopped: another job card was scanned.');
-    };
+    const named = (msg: string) =>
+      lookupSeqRef.current !== scanAtStart ? `${label}: ${msg}` : msg;
     // A HANDOVER SESSION id, not the delivery key. The key itself is derived
     // per attempt from the leg that rides the deliver door (see below): a
     // single key reused across attempts whose LAST LEG had changed matched the
@@ -250,6 +250,8 @@ export function DeliverySurface() {
           ? crypto.randomUUID()
           : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
+    // Held here: selecting another order resets the ref mid-handover.
+    const session = handoverSessionRef.current;
     try {
       const handover: Record<string, unknown> = {};
       if (pickedUpBy.trim()) handover.picked_up_by_name = pickedUpBy.trim();
@@ -281,7 +283,6 @@ export function DeliverySurface() {
       // the Idempotency-Key on the single-leg case, which is what the counter
       // does on nearly every handover.
       for (const leg of legs.slice(0, -1)) {
-        stopIfMovedOn();
         if (postedLegsRef.current.has(leg.key)) continue;
         // Keyed on the LEG, so a re-send of the same tender is a server-side
         // replay rather than a second payment row. postedLegsRef alone was not
@@ -290,7 +291,7 @@ export function DeliverySurface() {
         await orderApi.addPayment(
           order.id,
           leg.body as any,
-          `${handoverSessionRef.current}:${leg.key}`,
+          `${session}:${leg.key}`,
         );
         postedLegsRef.current.add(leg.key);
       }
@@ -299,8 +300,7 @@ export function DeliverySurface() {
       // The delivery key CHANGES when the last leg changes. Reusing one key
       // across attempts made the server match the earlier attempt's payment
       // and record nothing for the new tender.
-      stopIfMovedOn();
-      const deliverKey = `${handoverSessionRef.current}:${last?.key ?? 'no-tender'}`;
+      const deliverKey = `${session}:${last?.key ?? 'no-tender'}`;
 
       await orderApi.deliverWithPayment(
         order.id,
@@ -320,13 +320,10 @@ export function DeliverySurface() {
           (shortfall > 0 ? ` · ${money(shortfall)} booked as outstanding` : ''),
       );
       // Hand over to the completion screen: final invoice, care card, and the
-      // delivered-thank-you the server has already queued. If the counter has
-      // moved to another order, that order keeps the screen and the message
-      // above is the record; the invoice is on the order.
-      if (stillSelected()) {
-        setHandedOver(order);
-        commitSelection(null);
-      }
+      // delivered-thank-you the server has already queued. A newer selection
+      // waits underneath, untouched, and is back when this screen is done.
+      setHandedOver(order);
+      if (stillSelected()) commitSelection(null);
     } catch (err: any) {
       // The server owns the refusal (credit gate, QC gate, Rx hold, status),
       // read through the shared helper (the client strips .response, so the
