@@ -38,7 +38,10 @@ class _FakeStock:
         return {"stock_id": sid, "product_id": pid, "store_id": "BV-TEST-01",
                 "status": "AVAILABLE"}
 
-    def mark_sold(self, sid, oid):
+    def read_unit(self, sid):
+        return self.find_by_id(sid)
+
+    def mark_sold(self, sid, oid, store_id=None, product_ids=None):
         return True
 
     def claim_one_available(self, pid, store_id, order_id, exclude_ids=None):

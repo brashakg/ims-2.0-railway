@@ -76,6 +76,20 @@ def _canonical_pid(product_repo, pid: str) -> str:
     return str(doc.get("id") or doc.get("product_id") or pid)
 
 
+def _unit_product_ids(pid: str) -> List[str]:
+    """Every id a stock_units row of this product may carry: the line's own,
+    plus the master's product_id / id / SKU / Mongo _id (an older row holds the
+    pre-canonical one). What the atomic claim matches, so an alias still sells
+    and another product's unit does not. A failed read leaves the line's own."""
+    try:
+        doc = _resolve_product_doc(get_product_repository(), pid)
+    except Exception:  # noqa: BLE001
+        doc = None
+    doc = doc or {}
+    ids = {pid, doc.get("product_id"), doc.get("id"), doc.get("sku"), doc.get("_id")}
+    return sorted(str(i) for i in ids if i)
+
+
 def _resolve_billable_product(product_repo, pid: str, product_name: str = ""):
     """THE product resolution for a billing door -- create_order AND
     POST /{order_id}/items. One lookup, one refusal policy:
@@ -418,10 +432,11 @@ def _assert_explicit_unit_sellable(
     "fail-soft" and another product's unit was only logged, so a bill could
     take no unit, or the wrong one. A lookup error is "try again" (503),
     never a pass. The atomic guard inside StockRepository.mark_sold is the
-    authoritative write-side check -- this exists so the user sees WHY.
+    authoritative write-side check (it re-matches this shop and product in the
+    same write) -- this exists so the user sees WHY.
     """
     try:
-        unit = stock_repo.find_by_id(stock_id)
+        unit = stock_repo.read_unit(stock_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[STOCK] explicit unit %s lookup failed: %s", stock_id, exc)
         raise HTTPException(
@@ -610,7 +625,9 @@ def _claim_units(
             continue
         sid = str(sid)
         try:
-            ok = stock_repo.mark_sold(sid, order_id)
+            ok = stock_repo.mark_sold(
+                sid, order_id, store_id, _unit_product_ids(line.get("product_id") or "")
+            )
         except Exception:  # noqa: BLE001
             ok = False
         if ok:
@@ -775,7 +792,7 @@ def _mark_units_sold(
     Two paths:
       1. Item carries an explicit stock_id (POS knew the unit; barcode-scan
          flow). Already SOLD to this order when `claimed` holds it (the
-         pre-save _claim_units); else mark_sold(stock_id, order_id).
+         pre-save _claim_units); else the same guarded mark_sold.
       2. No stock_id but a real product_id + store_id. A unit _claim_units
          already took for this product, else claim the first AVAILABLE unit.
 
@@ -822,7 +839,7 @@ def _mark_units_sold(
                 # Path 1: POS told us exactly which unit.
                 try:
                     ok = str(explicit_sid) in claimed or stock_repo.mark_sold(
-                        explicit_sid, order_id
+                        explicit_sid, order_id, store_id, _unit_product_ids(pid)
                     )
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
