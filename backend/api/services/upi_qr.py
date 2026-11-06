@@ -168,9 +168,10 @@ def _resolve_merchant_name(db, store_id: str) -> str:
 
 
 class ReconcileMismatch(Exception):
-    """The event names an IMS bill but cannot be credited to it. Raised so the
-    event's inbox row records status=failed (retried hourly, then a dead
-    letter on the sync-health card) -- never 'succeeded' with no tender."""
+    """The event names an IMS bill but cannot be credited to it, or its bill
+    was credited and is not yet confirmed. Raised so the event's inbox row
+    records status=failed (retried hourly, then a dead letter on the
+    sync-health card) -- never 'succeeded' on unfinished work."""
 
 
 def reconcile_razorpay_event(db, payload: Dict[str, Any]) -> str:
@@ -277,17 +278,34 @@ def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> str:
 
 def _confirm_draft(repo, order_id: str) -> None:
     """The manual payment door's lifecycle step, through its own helpers: a
-    DRAFT bill that takes money is confirmed and gets its workshop job."""
+    DRAFT bill that takes money is confirmed and gets its workshop job.
+
+    Raises while the bill is still DRAFT or its state cannot be read, so the
+    row stays failed and its retry comes back here. A refused claim alone
+    proves nothing: _claim_order_status also answers False when its writes
+    failed, so only a re-read can tell a lost race from an outage.
+    """
     from api.routers.orders.release import _claim_order_status
     from api.routers.orders import workshop
 
-    order = repo.find_by_id(order_id) or {}
+    order = _stored_bill(repo, order_id)
     if order.get("status") != "DRAFT":
         return
     if not _claim_order_status(repo, order_id, "CONFIRMED", ("DRAFT",), "razorpay-webhook"):
+        if _stored_bill(repo, order_id).get("status") == "DRAFT":
+            raise ReconcileMismatch(f"order {order_id} took its payment but is still DRAFT")
         logger.warning("[UPI_RECONCILE] auto-confirm skipped for %s -- its status changed", order_id)
         return
     try:
         workshop._ensure_workshop_job_for_order(repo.find_by_id(order_id) or order, "razorpay-webhook")
     except Exception as exc:  # noqa: BLE001 -- the manual door never blocks on it either
         logger.warning("[UPI_RECONCILE] workshop auto-link skipped for %s: %s", order_id, exc)
+
+
+def _stored_bill(repo, order_id: str) -> Dict[str, Any]:
+    """The bill as stored, read so that a failed read raises: repo.find_by_id
+    answers None for one, and None must not pass as 'no longer DRAFT'."""
+    order = repo.collection.find_one({"order_id": order_id})
+    if not order:
+        raise ReconcileMismatch(f"order {order_id} is gone after taking its payment")
+    return order

@@ -430,3 +430,115 @@ def test_a_config_read_that_worked_still_ends_dark(rig, config_change):
     row = _row(db, "pay_F2")
     assert row["status"] == "succeeded" and row["outcome"] == "dark"
     assert _bill(db, "F2")["payments"] == []
+
+
+@pytest.mark.parametrize("how", ["sweep", "redelivery"])
+def test_a_failed_confirmation_stays_retryable_and_recovers_with_one_tender(rig, monkeypatch, how):
+    db = rig["db"]
+    _order(db, "F3", status="DRAFT")
+    payload = _event("F3", "pay_F3", 100000)
+    with monkeypatch.context() as m:
+        _fail(m, "find_one_and_update", _is_confirm_write)
+        _fail(m, "update_one", _is_confirm_write)
+        _post(rig, payload, event_id="evt_F3")
+        rig["drain"]()
+    bill, row = _bill(db, "F3"), _row(db, "pay_F3")
+    assert len(bill["payments"]) == 1 and bill["amount_paid"] == 1000.0 and bill["status"] == "DRAFT"
+    assert row["status"] == "failed" and row["processed"] is False
+
+    _recover(rig, how, payload, "evt_F3")
+    bill, row = _bill(db, "F3"), _row(db, "pay_F3")
+    assert bill["status"] == "CONFIRMED" and len(bill["payments"]) == 1
+    assert row["status"] == "succeeded" and row["outcome"] == "already_recorded"
+    assert [h["status"] for h in bill["status_history"]] == ["CONFIRMED"]
+
+
+def test_an_unreadable_bill_after_the_tender_stays_retryable(rig, monkeypatch):
+    """repo.find_by_id answers None for a failed read; that is not 'not DRAFT'."""
+    from database.repositories.order_repository import OrderRepository
+
+    db = rig["db"]
+    _order(db, "F4", status="DRAFT")
+    real, landed = OrderRepository.add_payment, []
+
+    def add(self, *a, **k):
+        recorded = real(self, *a, **k)
+        landed.append(1)
+        return recorded
+
+    with monkeypatch.context() as m:
+        m.setattr(OrderRepository, "add_payment", add)
+        _fail(m, "find_one", lambda coll, *_: coll.name == "orders" and landed)
+        _post(rig, _event("F4", "pay_F4", 100000), event_id="evt_F4")
+        rig["drain"]()
+    assert _row(db, "pay_F4")["status"] == "failed"
+    assert _bill(db, "F4")["status"] == "DRAFT"
+
+    asyncio.run(rig["nexus"]._retry_failed_webhooks())
+    bill = _bill(db, "F4")
+    assert bill["status"] == "CONFIRMED" and len(bill["payments"]) == 1
+
+
+def test_a_refused_claim_on_an_unreadable_bill_stays_retryable(rig, monkeypatch):
+    from api.routers.orders import release
+
+    db = rig["db"]
+    _order(db, "F5", status="DRAFT")
+    refused = []
+
+    def refuse(*_a, **_k):
+        refused.append(1)
+        return False
+
+    with monkeypatch.context() as m:
+        m.setattr(release, "_claim_order_status", refuse)
+        _fail(m, "find_one", lambda coll, *_: coll.name == "orders" and refused)
+        _post(rig, _event("F5", "pay_F5", 100000), event_id="evt_F5")
+        rig["drain"]()
+    assert refused and _row(db, "pay_F5")["status"] == "failed"
+
+    asyncio.run(rig["nexus"]._retry_failed_webhooks())
+    bill = _bill(db, "F5")
+    assert bill["status"] == "CONFIRMED" and len(bill["payments"]) == 1
+
+
+@pytest.mark.parametrize("moved_to", ["CONFIRMED", "CANCELLED"])
+def test_a_genuine_race_for_the_status_is_left_standing(rig, monkeypatch, moved_to):
+    """Another door moved the bill between the tender and the claim: it keeps
+    that status, and nothing is left to retry."""
+    from api.routers.orders import release
+
+    db = rig["db"]
+    _order(db, "F6", status="DRAFT")
+    real = release._claim_order_status
+
+    def raced(repo, order_id, *a, **k):
+        db.orders.update_one({"order_id": order_id}, {"$set": {"status": moved_to}})
+        return real(repo, order_id, *a, **k)
+
+    monkeypatch.setattr(release, "_claim_order_status", raced)
+    _post(rig, _event("F6", "pay_F6", 100000), event_id="evt_F6")
+    rig["drain"]()
+    bill, row = _bill(db, "F6"), _row(db, "pay_F6")
+    assert bill["status"] == moved_to and len(bill["payments"]) == 1
+    assert row["status"] == "succeeded" and row["outcome"] == "credited"
+
+
+def test_a_claim_that_landed_but_lost_its_reply_is_not_mistaken_for_a_failure(rig, monkeypatch):
+    db = rig["db"]
+    _order(db, "F7", status="DRAFT")
+    real = Collection.find_one_and_update
+
+    def applied_then_lost(self, query, update, *a, **k):
+        out = real(self, query, update, *a, **k)
+        if _is_confirm_write(self, query, update):
+            raise TimeoutError("reply lost after the write")
+        return out
+
+    monkeypatch.setattr(Collection, "find_one_and_update", applied_then_lost)
+    _post(rig, _event("F7", "pay_F7", 100000), event_id="evt_F7")
+    rig["drain"]()
+    bill, row = _bill(db, "F7"), _row(db, "pay_F7")
+    assert bill["status"] == "CONFIRMED" and len(bill["payments"]) == 1
+    assert [h["status"] for h in bill["status_history"]] == ["CONFIRMED"]
+    assert row["status"] == "succeeded"
