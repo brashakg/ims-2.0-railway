@@ -33,6 +33,8 @@ from api.routers import vendor_returns as vr
 from api.routers.purchase_recon import _pending_return_credit_notes
 from api.services import item_events as ie
 from api.services import rma_supplier_credit as rma_credit
+from api.services.return_provenance import ReturnProvenanceError, resolve_return_provenance
+from api.services.supplier_credit_evidence import source_key
 from api.services.supplier_credit_reads import confirmed_ap_rows
 from api.services.vendor_rma import VendorRMAEngine
 
@@ -947,3 +949,133 @@ def test_an_old_unflagged_line_with_nothing_held_keeps_todays_outcome(rw):
     assert res.status_code == 200, res.text
     saved = rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["lines"][0]
     assert "customer_owned" not in saved  # historical lines are not rewritten
+
+
+# --------------------------------------------------------------------------
+# Codex round 3, P1: a credit that names no piece stops a later physical return
+# --------------------------------------------------------------------------
+
+def _dispatched_old_rma(w, **extra):
+    eng, rma_id = old_rma(w, **extra)
+    eng.dispatch(rma_id, carrier="DTDC", awb="AWB1", dispatch_date=None, actor="old")
+    return eng, rma_id
+
+
+def rtv_note_open(w, rid, amount, number):
+    """The note as Accounts would post it, whatever the preview says now."""
+    source = resolve_return_provenance(w["db"], returned(w, rid))[0]
+    body = {"credit_note_number": number, "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+            "received_amount": amount, "source_selections": [],
+            "allocations": [{"source_key": source_key(rid, source), "taxable": amount,
+                             "cgst": 0, "sgst": 0, "igst": 0}]}
+    return body, w["as_"](ACCOUNTANT).post(f"/vendor-returns/{rid}/credit-confirmations", json=body)
+
+
+def unplaced_credit(w, monkeypatch, amount=1000, grn="G-OWN", **extra):
+    """An unlinked RMA's credit from before the rule: the real writer, only the
+    door that now refuses it passed by, as it was then. Its pieces stay unnamed."""
+    _, rma_id = _dispatched_old_rma(w, grn_id=grn, **extra)
+    with monkeypatch.context() as patched:
+        patched.setattr(rma_router, "_physical_return_problem", lambda *a, **k: None)
+        body, res = rma_note(w, rma_id, amount, "CN-OLD")
+    assert res.status_code == 200, res.text
+    return rma_id, body
+
+
+def test_an_unplaced_credit_stops_a_later_return_spending_the_same_goods(rw, monkeypatch):
+    """Codex's reproduction with SPARE receipt quantity (six bought, four in
+    play): the bill and receipt caps pass, only the ownership rule can refuse."""
+    bought(rw, "U1", "U2", "U3", "U4", "U5", "U6", qty=6)
+    rma_id, old_body = unplaced_credit(rw, monkeypatch)
+    stored = rw["db"].supplier_credit_confirmations.find_one({"_id": old_body["idempotency_key"]})
+    rid = received_return(rw, "U1", "U2")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    body, res = rtv_note_open(rw, rid, 1000, "CN-NEW")
+    assert res.status_code == 200, res.text
+    assert res.json()["confirmation"]["posting_status"] == "PENDING_EVIDENCE"
+    reason = res.json()["confirmation"]["pending_reasons"][0]
+    assert reason["code"] == "EARLIER_CREDIT_UNPLACED" and rma_id in reason["message"]
+    # The supplier's note is kept, nothing posts, and history is untouched.
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+    kept = rw["db"].supplier_credit_confirmations.find_one({"_id": body["idempotency_key"]})
+    assert kept["identity_claimed"] is True and not kept.get("token")
+    assert rw["db"].supplier_credit_confirmations.find_one({"_id": old_body["idempotency_key"]}) == stored
+    assert statuses(rw) == Counter({"RTV": 2, "AVAILABLE": 4})
+    assert returned(rw, rid)["status"] == "received_by_vendor"
+    # Duplicate and lost-reply retries hold; a new form UUID cannot re-enter it.
+    http = rw["as_"](ACCOUNTANT)
+    again = http.post(f"/vendor-returns/{rid}/credit-confirmations", json=body)
+    assert again.status_code == 200 and again.json()["confirmation"]["posting_status"] == "PENDING_EVIDENCE"
+    retyped = http.post(f"/vendor-returns/{rid}/credit-confirmations", json={**body, "idempotency_key": str(uuid4())})
+    assert retyped.status_code == 409 and "already been recorded" in retyped.text
+    shown = http.post(f"/vendor-returns/{rid}/credit-preview", json={}).json()
+    assert shown["source_status"] == "PENDING_EVIDENCE"
+    assert shown["pending_reasons"][0]["code"] == "EARLIER_CREDIT_UNPLACED"
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+    # The old RMA's own replay still answers, once.
+    replay = http.post(f"/vendor-rma/{rma_id}/credit-note", json=old_body)
+    assert replay.status_code == 200 and replay.json()["idempotent"] is True
+
+
+def test_a_linked_rma_door_is_stopped_by_the_same_unplaced_credit(rw, monkeypatch):
+    bought(rw, "U1", "U2", "U3", "U4", "U5", "U6", qty=6)
+    unplaced_credit(rw, monkeypatch)
+    rid = received_return(rw, "U1", "U2")
+    rma_id = linked_rma(rw, rid)
+    source = rma_credit.preview(rw["db"], rw["db"].vendor_rmas.find_one({"rma_id": rma_id}))
+    res = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json={
+        "credit_note_number": "CN-NEW", "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+        "received_amount": 1000, "source_selections": source["source_selections"],
+        "allocations": [{"source_key": s["source_key"], "taxable": 1000, "cgst": 0, "sgst": 0, "igst": 0}
+                        for s in source["sources"]]})
+    assert res.status_code == 200, res.text
+    assert res.json()["confirmation"]["pending_reasons"][0]["code"] == "EARLIER_CREDIT_UNPLACED"
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_a_customers_own_credit_is_placed_and_does_not_stop_a_shop_return(rw):
+    """The tick says whose goods it was: a shop return on that receipt is free."""
+    rw["db"].customers.insert_one({"customer_id": CUSTOMER, "store_id": STORE, "name": "A Customer"})
+    bought(rw, "U1", "U2", "U3", "U4", qty=4)
+    made = raise_lines(rw, own_line(customer_id=CUSTOMER, quantity=2), grn_id="G-OWN")
+    rma_id = made.json()["rma_id"]
+    http = rw["as_"]
+    http(MANAGER).post(f"/vendor-rma/{rma_id}/authorize", json={"vendor_rma_number": "VR-1"})
+    http(ACCOUNTANT).put(f"/vendor-rma/{rma_id}/prices", json={"unit_costs": [500]})
+    http(MANAGER).post(f"/vendor-rma/{rma_id}/dispatch", json={"carrier": "D", "awb": "A"})
+    assert rma_note(rw, rma_id, 1000, "CN-OWN")[1].status_code == 200
+    rid = received_return(rw, "U1", "U2")
+    http(ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    _, res = rtv_note(rw, rid, 1000, "CN-RTV")
+    assert res.status_code == 200, res.text
+    assert posted(rw) == (2, 200000) and credited(rw) == 200000
+
+
+def test_an_unplaced_credit_on_another_receipt_blocks_nothing(rw, monkeypatch):
+    bought(rw, "U1", "U2", qty=2)
+    rw["db"].grns.insert_one({"grn_id": "G-EARLIER", "store_id": STORE, "vendor_id": DEALER, "status": "ACCEPTED",
+                              "items": [{"product_id": FRAME, "accepted_qty": 2}]})
+    bill = rw["db"].vendor_bills.find_one({"bill_id": "B-OWN"})
+    rw["db"].vendor_bills.insert_one({**{k: v for k, v in bill.items() if k != "_id"},
+                                      "bill_id": "B-EARLIER", "grn_id": "G-EARLIER", "bill_number": "INV-EARLIER"})
+    unplaced_credit(rw, monkeypatch, grn="G-EARLIER")
+    rid = received_return(rw, "U1", "U2")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    _, res = rtv_note(rw, rid, 1000, "CN-RTV")
+    assert res.status_code == 200, res.text
+    assert res.json()["confirmation"]["posting_status"] == "POSTED"
+
+
+def test_two_lines_that_name_no_piece_stay_under_the_bill_cap_alone(rw):
+    """Off-inventory goods have no physical return to double: unchanged."""
+    for number in ("CN-1", "CN-2"):
+        made = raise_rma(rw, product=OFF_INVENTORY)
+        rma_id = made.json()["rma_id"]
+        http = rw["as_"]
+        http(MANAGER).post(f"/vendor-rma/{rma_id}/authorize", json={"vendor_rma_number": "VR-1"})
+        http(ACCOUNTANT).put(f"/vendor-rma/{rma_id}/prices", json={"unit_costs": [500]})
+        http(MANAGER).post(f"/vendor-rma/{rma_id}/dispatch", json={"carrier": "D", "awb": "A"})
+        note = credit_payload(rw["db"], rma_id, amount=1000.0, number=number)
+        assert http(ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=note).status_code == 200
+    assert posted(rw) == (2, 200000)
+    assert rw["db"].stock_units.count_documents({"product_id": OFF_INVENTORY}) == 0

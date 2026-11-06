@@ -132,6 +132,42 @@ def _verify_original(db, origin):
             raise ReturnProvenanceError("ORIGINAL_TAX_TOTAL_REQUIRED", "The original bill's input-tax totals need verified item evidence.") from exc
 
 
+def _goods_known(db, event, source):
+    """A credit naming no piece still says whose goods it took when its RMA
+    links a return (those pieces) or its line is ticked customer_owned."""
+    if event.get("return_kind") != "RMA":
+        return False
+    rma = db.get_collection("vendor_rmas").find_one({"rma_id": event["return_id"]}) or {}
+    lines = rma.get("lines") or []
+    index = source.get("return_line_index")
+    ticked = type(index) is int and index < len(lines) and lines[index].get("customer_owned")
+    return bool(rma.get("return_id") or ticked)
+
+
+def _refuse_unplaced_credit(db, return_doc, sources):
+    """L2-RMA-F01: a credit that named no piece on this receipt and product may
+    already have paid for these pieces, and nothing shows which goods it took:
+    the bill and receipt caps cannot see that while spare quantity remains. So
+    a return of named pieces stays pending (its supplier note kept, no money
+    posted) until that is reconciled. Which pieces the earlier credit covered
+    is never guessed, and the earlier credit is never changed."""
+    rid = return_doc.get("return_id") or return_doc.get("rma_id")
+    named = {(s["grn_id"], s["product_id"]) for s in sources if s["stock_ids"]}
+    if not named:
+        return
+    for event in db.get_collection(EVENTS).find({"posting_status": {"$in": ["PREPARING", "POSTED"]},
+                                                 "sources.grn_id": {"$in": sorted(g for g, _ in named)}}):
+        if event.get("return_id") == rid:
+            continue
+        for source in event.get("sources") or []:
+            if (not source.get("stock_ids") and (source.get("grn_id"), source.get("product_id")) in named
+                    and not _goods_known(db, event, source)):
+                _pending("EARLIER_CREDIT_UNPLACED",
+                         f"An earlier supplier credit on this purchase receipt ({event['return_id']}) names "
+                         "no pieces, so IMS cannot tell whether it already paid for these goods. This note "
+                         "is saved and nothing is posted until that earlier credit is reconciled.")
+
+
 def resolve_credit_evidence(db, return_doc, *, selections=None, allowed_store_ids=None):
     """Strict posting proof. Missing/contradictory tax identity stays pending."""
     sources = resolve_return_provenance(db, return_doc, selections=selections)
@@ -145,6 +181,7 @@ def resolve_credit_evidence(db, return_doc, *, selections=None, allowed_store_id
     registrations = {(s["recipient_entity_id"], s["recipient_gstin"], s.get("vendor_gstin")) for s in sources}
     if len(registrations) != 1:
         _pending("MIXED_ORIGINAL_REGISTRATIONS", "One supplier note must identify one original supplier and recipient registration pair.")
+    _refuse_unplaced_credit(db, return_doc, sources)
     return sources
 
 
