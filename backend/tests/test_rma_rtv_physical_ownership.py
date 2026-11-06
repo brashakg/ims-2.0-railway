@@ -298,7 +298,7 @@ def old_rma(w, product=FRAME, name="Acme Aviator 5420", qty=2, **extra):
     return eng, rma_id
 
 
-@pytest.mark.parametrize("held", ["RESERVED", "reserved ", "DAMAGED", "UNDER_AUDIT", "BLIND_COUNT"])
+@pytest.mark.parametrize("held", ["RESERVED", "reserved ", "DAMAGED", "UNDER_AUDIT", "BLIND_COUNT", "TRANSFERRED"])
 def test_a_rma_for_pieces_the_shop_still_owns_is_refused_however_they_are_held(rw, held):
     unit(rw, "U1", status=held)
     unit(rw, "U2", status=held)
@@ -316,10 +316,11 @@ def test_the_refusal_of_a_reserved_piece_says_release_it_first(rw):
     assert "reserved for an order" in refused.json()["detail"]
 
 
+@pytest.mark.parametrize("held", ["RESERVED", "TRANSFERRED"])
 @pytest.mark.parametrize("door", ["dispatch", "credit-note", "close"])
-def test_an_old_rma_over_reserved_pieces_cannot_pass_a_later_door(rw, door):
-    unit(rw, "U1", status="RESERVED")
-    unit(rw, "U2", status="RESERVED")
+def test_an_old_rma_over_reserved_pieces_cannot_pass_a_later_door(rw, door, held):
+    unit(rw, "U1", status=held)
+    unit(rw, "U2", status=held)
     eng, rma_id = old_rma(rw)
     http = rw["as_"]
     if door == "dispatch":
@@ -334,16 +335,18 @@ def test_an_old_rma_over_reserved_pieces_cannot_pass_a_later_door(rw, door):
             res = http(ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=note)
     assert res.status_code == 409, res.text
     assert posted(rw) == (0, 0)
-    assert statuses(rw) == Counter({"RESERVED": 2}) and events(rw, "U1") == []
+    assert statuses(rw) == Counter({held: 2}) and events(rw, "U1") == []
 
 
-def test_a_typed_vendor_return_line_cannot_skip_reserved_pieces_either(w):
-    unit(w, "U1", status="RESERVED")
+@pytest.mark.parametrize("held, words", [("RESERVED", "reserved for an order"),
+                                         ("TRANSFERRED", "in transit to another shop")])
+def test_a_typed_vendor_return_line_cannot_skip_reserved_pieces_either(w, held, words):
+    unit(w, "U1", status=held)
     typed = create(w, line(), notes="Typed, no piece named")
     assert typed.status_code == 422, typed.text
-    assert "reserved for an order" in typed.json()["detail"]
+    assert words in typed.json()["detail"]
     assert w["db"].vendor_returns.count_documents({"status": "created"}) == 0
-    assert state(w, "U1")["status"] == "RESERVED"
+    assert state(w, "U1")["status"] == held
 
 
 def test_once_released_the_same_pieces_go_back_and_reconcile_end_to_end(rw):
@@ -444,6 +447,38 @@ def test_a_linked_rma_owns_the_credit_and_the_return_door_refuses_before_writing
     assert posted(rw) == (1, 100000) and credited(rw) == 100000
     assert statuses(rw) == Counter({"RTV": 2, "AVAILABLE": 2})
     assert sum(len(events(rw, s)) for s in ("U1", "U2", "U3", "U4")) == 4
+
+
+def in_transit(w, *sids):
+    """transfers._claim_packed: the piece leaves the shelf, keeps its shop."""
+    w["db"].stock_units.update_many({"stock_id": {"$in": list(sids)}}, {"$set": {
+        "status": "TRANSFERRED", "transfer_id": "TR-1", "transfer_to_store_id": SHOP_B}})
+
+
+def test_pieces_on_the_way_to_a_sister_shop_are_still_the_chains_and_cannot_be_credited(rw):
+    """Codex's request A: a fresh receipt, both pieces shipped to the sister shop."""
+    bought(rw, "U1", "U2", qty=2)
+    in_transit(rw, "U1", "U2")
+    refused = raise_rma(rw, grn_id="G-OWN")
+    assert refused.status_code == 422, refused.text
+    assert "in transit to another shop" in refused.json()["detail"]
+    assert rw["db"].vendor_rmas.count_documents({}) == 0
+    assert posted(rw) == (0, 0) and credited(rw) == 0
+    assert statuses(rw) == Counter({"TRANSFERRED": 2}) and events(rw, "U1") == []
+
+
+def test_the_reported_double_credit_with_the_other_pieces_on_the_way_is_refused(rw):
+    """Codex's request B: RTV credits two, the other two are in transit."""
+    bought(rw, "U1", "U2", "U3", "U4")
+    rid = received_return(rw, "U1", "U2")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    _, first = rtv_note(rw, rid, 1000, "CN-RTV")
+    assert first.status_code == 200, first.text
+    in_transit(rw, "U3", "U4")
+    assert raise_rma(rw, grn_id="G-OWN").status_code == 422
+    assert rw["db"].vendor_rmas.count_documents({}) == 0
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+    assert statuses(rw) == Counter({"RTV": 2, "TRANSFERRED": 2})
 
 
 def test_a_return_with_its_own_credit_cannot_gain_an_rma(rw):

@@ -29,6 +29,7 @@ from ..services.payables_mask import require_payables
 from ..services.rtv_debit_note import debit_note_issued
 from ..services import item_events as _ie
 from ..services.org_validation import shop_gstins
+from ..services.product_cost import _STILL_OURS
 from ..services.quarantine_hold import (
     SAVING_MINUTES, UNSAVED as _UNSAVED, claim_is_dead, open_return_of, stamp as _stamp,
 )
@@ -297,10 +298,11 @@ def _gstin_refusal(db, receipt_store, store_id, gstins, label) -> Optional[str]:
 def _typed_line_problem(db, item, store_id) -> Optional[str]:
     """A line naming no piece is refused when it is (by id, exact name or SKU)
     a catalogued product this shop still holds pieces of, sellable or not
-    (on the shelf, reserved for an order, damaged, set aside, in a count) --
-    they are scanned instead; when none of them can go on this return, it
-    says why. A reserved piece is refused, never moved: its order lets go of
-    it first (L2-RMA-F01)."""
+    (on the shelf, reserved for an order, damaged, or still ours off the
+    shelf: product_cost's set aside, in a count, on the way to a sister shop
+    with this shop's id on it) -- they are scanned instead; when none of them
+    can go on this return, it says why. A reserved piece is refused, never
+    moved: its order lets go of it first (L2-RMA-F01)."""
     pids = {item.product_id}
     name = (item.product_name or "").strip()
     if name:
@@ -310,8 +312,7 @@ def _typed_line_problem(db, item, store_id) -> Optional[str]:
     held = list(db.get_collection("stock_units").find({
         "product_id": {"$in": sorted(p for p in pids if p)}, "store_id": store_id,
         "$or": [_ie.on_hand_match(include_reserved=True),
-                _ie.status_match(_STATE.QUARANTINED, _STATE.DAMAGED,
-                                 _STATE.UNDER_AUDIT, _STATE.BLIND_COUNT)],
+                _ie.status_match(_STATE.DAMAGED, *_STILL_OURS)],
     }))
     if not held:
         return None
