@@ -11,9 +11,13 @@ and an accepted master HSN/rate edit was ignored by the next sale. A new line
 now freezes the live master HSN (create, add-item, quote), the GST engine
 rates it by the product master's own HSN rule, and the export flags a line
 with no HSN instead of filing it silently.
+
+Codex 11-06 round 2: a bill saved under the old formula replays when the
+retry is unchanged, judged against the saved order's own lens lines.
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -179,6 +183,145 @@ def test_a_lost_insert_ack_with_changed_powers_is_refused(client, staff_headers,
     r3 = _post(client, staff_headers, [_lens(rxid)], key="K-F03C")
     assert r3.status_code in (200, 201) and r3.json()["order_id"] == r1.json()["order_id"], r3.text
     assert len(_orders(rx_orders)) == 1
+
+
+# =========================================================================== #
+# L2-POS-F03 round 2 -- a bill saved BEFORE lens data joined the fingerprint
+# =========================================================================== #
+def _old_format_fp(items):
+    """The formula a pre-deploy order was saved with, copied literally: the
+    production code must keep recognising hashes already in the database."""
+    from api.routers.orders.models import OrderCreate
+
+    order = OrderCreate(customer_id="cust-x", items=items)
+    lines = sorted(
+        [str(i.item_type or "").upper(), str(i.product_id or ""), str(i.stock_id or ""), int(i.quantity or 0),
+         round(float(i.unit_price or 0), 2), round(float(i.discount_percent or 0), 4), str(i.prescription_id or ""),
+         str(i.lens_line_id or "")]
+        for i in order.items)
+    body = {"customer_id": "cust-x", "patient_id": "", "order_type": order.order_type or "", "lines": lines,
+            "cart_discount_percent": 0.0, "cart_discount_amount": 0.0}
+    return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _old_bill(client, headers, rx, key, items):
+    """A saved bill exactly as a pre-deploy press left it. Returns its id."""
+    r = _post(client, headers, items, key=key)
+    assert r.status_code in (200, 201), r.text
+    docs = _orders(rx)
+    assert len(docs) == 1
+    docs[0]["body_fingerprint"] = _old_format_fp(items)
+    return r.json()["order_id"]
+
+
+def _lost_ack(monkeypatch):
+    """The other replay door: the pre-check misses and the unique key index
+    refuses the insert, so the twin answers."""
+    from api.routers import orders as orders_module
+
+    repo = orders_module.get_order_repository()
+    real_find_one = repo.find_one
+    missed = []
+
+    def _find_one(q, *a, **k):
+        if "idempotency_key" in q and not missed:
+            missed.append(1)
+            return None
+        return real_find_one(q, *a, **k)
+
+    def _dup(*a, **k):
+        raise Exception("E11000 duplicate key error index: store_id_1_idempotency_key_1")
+
+    monkeypatch.setattr(repo, "find_one", _find_one)
+    monkeypatch.setattr(repo, "create_unique", _dup)
+
+
+@pytest.mark.parametrize("door", ["pre-check", "lost-ack"])
+def test_an_old_format_unchanged_lens_retry_replays_with_no_effect(client, staff_headers, rx_orders, monkeypatch, door):
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-old")
+    oid = _old_bill(client, staff_headers, rx_orders, "K-OLD", [_lens(rxid)])
+    before = copy.deepcopy(_orders(rx_orders))
+    if door == "lost-ack":
+        _lost_ack(monkeypatch)
+    r = _post(client, staff_headers, [_lens(rxid)], key="K-OLD")
+    assert r.status_code in (200, 201), r.text
+    assert r.json()["order_id"] == oid
+    assert _orders(rx_orders) == before  # the saved order is untouched
+
+
+@pytest.mark.parametrize("door", ["pre-check", "lost-ack"])
+@pytest.mark.parametrize("change", [
+    {"sph": -1.0}, {"cyl": -0.75}, {"axis": 180}, {"add": 1.25}, {"lens_options": {"tint": "grey"}},
+    {"lens_details": {"type": "SV", "material": "1.67", "coatings": ["ARC"]}},
+    {"lens_details": None},
+])
+def test_an_old_format_key_refuses_changed_clinical_intent(client, staff_headers, rx_orders, monkeypatch, door, change):
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-old2")
+    _old_bill(client, staff_headers, rx_orders, "K-OLD2", [_lens(rxid)])
+    before = copy.deepcopy(_orders(rx_orders))
+    if door == "lost-ack":
+        _lost_ack(monkeypatch)
+    r = _post(client, staff_headers, [_lens(rxid, **change)], key="K-OLD2")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "IDEMPOTENCY_BODY_MISMATCH"
+    assert _orders(rx_orders) == before
+
+
+def test_an_old_format_key_refuses_a_retry_that_drops_the_powers(client, staff_headers, rx_orders):
+    """Without its lens data the changed body hashes EXACTLY like the old
+    saved one, so the hash alone calls it the same bill."""
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-old3")
+    _old_bill(client, staff_headers, rx_orders, "K-OLD3", [_lens(rxid)])
+    bare = _lens(rxid)
+    for field in ("sph", "cyl", "axis", "lens_details"):
+        bare.pop(field)
+    r = _post(client, staff_headers, [bare], key="K-OLD3")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "IDEMPOTENCY_BODY_MISMATCH"
+
+
+def test_an_old_format_key_refuses_powers_swapped_between_two_lenses(client, staff_headers, rx_orders):
+    """Both eyes' powers are still on the bill, on the wrong lenses."""
+    repo = _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150")
+    repo.create({"product_id": "LENS-Q", "name": "LENS-Q", "sku": "LENS-Q", "category": "OPTICAL_LENS",
+                 "item_type": "LENS", "mrp": 2000.0, "cost_price": 10.0, "discount_category": "MASS",
+                 "is_active": True, "hsn_code": "900150"})
+    rxid = _seed_rx(rx_orders, prescription_id="rx-old4")
+    left = _lens(rxid, sph=-1.0)
+    right = _lens(rxid, product_id="LENS-Q", product_name="LENS-Q", sph=-2.0)
+    _old_bill(client, staff_headers, rx_orders, "K-OLD4", [left, right])
+    r = _post(client, staff_headers, [{**left, "sph": -2.0}, {**right, "sph": -1.0}], key="K-OLD4")
+    assert r.status_code == 409, r.text
+    # The same two lenses listed the other way round are the same bill.
+    r = _post(client, staff_headers, [right, left], key="K-OLD4")
+    assert r.status_code in (200, 201), r.text
+
+
+def test_an_old_format_retry_by_sku_alias_replays(client, staff_headers, rx_orders):
+    """The saved line holds the canonical product; the retry names its SKU."""
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150", sku="LENS-SKU")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-old5")
+    line = _lens(rxid, product_id="LENS-SKU")
+    oid = _old_bill(client, staff_headers, rx_orders, "K-OLD5", [line])
+    assert _orders(rx_orders)[0]["items"][0]["product_id"] == "LENS-P"
+    r = _post(client, staff_headers, [line], key="K-OLD5")
+    assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
+    assert _post(client, staff_headers, [{**line, "sph": -1.0}], key="K-OLD5").status_code == 409
+
+
+def test_a_frame_bill_keeps_replaying_after_a_later_edit(client, staff_headers, rx_orders):
+    """No lens intent on either side: the saved lines hold nothing to compare,
+    so an order edited after the first press replays as it always did."""
+    _seed(rx_orders, pid="FR-9", category="FRAME", item_type="FRAME", hsn="900311")
+    line = _item("FR-9", item_type="FRAME", category="FRAME")
+    r1 = _post(client, staff_headers, [line], key="K-FR9")
+    assert r1.status_code in (200, 201), r1.text
+    _orders(rx_orders)[0]["items"][0]["quantity"] = 3
+    r2 = _post(client, staff_headers, [line], key="K-FR9")
+    assert r2.status_code in (200, 201) and r2.json()["order_id"] == r1.json()["order_id"], r2.text
 
 
 # =========================================================================== #
