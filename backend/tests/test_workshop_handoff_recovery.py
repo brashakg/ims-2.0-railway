@@ -519,6 +519,29 @@ def test_the_till_door_keeps_the_payment_and_the_repair_finishes_the_job(rig, mo
     assert len(_jobs(db, "ORD")) == 1
 
 
+def test_a_capture_that_beats_the_till_is_a_refusal_not_a_crash(rig, monkeypatch):
+    """Found with real processes: the capture lands after the door's balance
+    check, the repository refuses the over-tender, and the cashier got a 500."""
+    db = rig["db"]
+    _bill(db, "ORD")
+    real = rig["orders"].add_payment
+
+    def capture_lands_first(order_id, payment, **kw):
+        _post(rig, "ORD", "pay_first")
+        _together(rig["drain"])  # its own thread: the till door holds this loop
+        return real(order_id, payment, **kw)
+
+    with monkeypatch.context() as m:
+        m.setattr(rig["orders"], "add_payment", capture_lands_first)
+        with pytest.raises(HTTPException) as refused:
+            _pay()
+    assert refused.value.status_code == 400
+    assert "exceeds balance due" in refused.value.detail
+    bill, jobs = db.orders.find_one({"order_id": "ORD"}), _jobs(db, "ORD")
+    assert [p["method"] for p in bill["payments"]] == ["UPI"]
+    assert bill["amount_paid"] == 1000 and bill["status"] == "CONFIRMED" and len(jobs) == 1
+
+
 def test_the_confirm_door_survives_a_lost_confirm_reply(rig, monkeypatch):
     from api.routers.orders.confirm import confirm_order
 

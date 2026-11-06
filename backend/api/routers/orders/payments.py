@@ -446,7 +446,16 @@ async def add_payment(
 
                 recorded = record_credit(repo, order, payment_data, get_customer_repository())
             else:
-                recorded = repo.add_payment(order_id, payment_data)
+                try:
+                    recorded = repo.add_payment(order_id, payment_data)
+                except ValueError as exc:
+                    # Another tender (a Razorpay capture) landed after the check
+                    # above: the same refusal, not a 500.
+                    latest = order_balance_due(repo.find_by_id(order_id) or order) or 0
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Payment amount exceeds balance due (Rs {latest})",
+                    ) from exc
         except BaseException:
             if loyalty_txn_id:
                 _release_loyalty_redemption(loyalty_txn_id, payment_id)
