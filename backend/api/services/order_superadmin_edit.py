@@ -128,6 +128,12 @@ def rebuild_edited_line(line: Dict[str, Any]) -> Dict[str, Any]:
         "add": line.get("add"),
         "axis": line.get("axis"),
         "item_note": line.get("item_note") or None,
+        # What the line physically holds: the router (admin_edit) carries these
+        # over from the stored line, so a correction keeps the unit, its lens
+        # cell and its legacy reservation key. Same keys create_order writes.
+        "stock_id": line.get("stock_id"),
+        "lens_line_id": line.get("lens_line_id"),
+        "line_index": line.get("line_index"),
     }
     return out
 

@@ -13,11 +13,16 @@ from database.repositories.order_repository import (
     order_mint_problem,
     next_document_number,
 )
+from contextlib import contextmanager
 from datetime import datetime
 from fastapi import Depends, HTTPException
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from ..auth import get_current_user
-from ...dependencies import get_order_repository, validate_store_access
+from ...dependencies import (
+    get_order_repository,
+    get_product_repository,
+    validate_store_access,
+)
 from ._shared import (
     _compute_per_category_gst,
     _get_db,
@@ -28,6 +33,17 @@ from ._shared import (
 from .models import (
     SuperadminInvoiceChange,
     SuperadminOrderEdit,
+)
+from .release import _release_lens_lines, _release_line_units
+from .stock import (
+    _assert_line_type_matches_master,
+    _assert_serialized_stock_available,
+    _canonical_pid,
+    _claim_units,
+    _release_claimed_units,
+    _resolve_billable_product,
+    _stock_class,
+    _takes_serialized_stock,
 )
 
 
@@ -94,9 +110,44 @@ def _write_order_edit_audit(
     return True
 
 
+def _same_goods(line: dict, stored: dict) -> bool:
+    """Is this edited line still the stored line's physical goods? Same product,
+    same kind of stock, and not a different named unit. Anything else is a
+    replacement: the stored line's stock goes back, the new line takes its own."""
+    sid = line.get("stock_id")
+    return (
+        (line.get("product_id") or "") == (stored.get("product_id") or "")
+        and _stock_class(line.get("item_type")) == _stock_class(stored.get("item_type"))
+        and (not sid or sid == stored.get("stock_id"))
+    )
+
+
+def _pair_with_stored(payloads: list, existing_items: list) -> Tuple[list, list]:
+    """The stored line each incoming line corrects, one to one, and the stored
+    lines nothing corrects (removed). By item_id, then -- for a line sent with
+    none, or a legacy line that has none -- the same goods: a stored line sent
+    twice corrects once, so its copy is a NEW line and needs its own unit."""
+    unclaimed = list(existing_items or [])
+
+    def take(match) -> Optional[dict]:
+        for pos, stored in enumerate(unclaimed):
+            if match(stored):
+                return unclaimed.pop(pos)
+        return None
+
+    paired = [
+        take(lambda s, p=p: s.get("item_id") == p.get("item_id")) if p.get("item_id") else None
+        for p in payloads
+    ]
+    for at, payload in enumerate(payloads):
+        if paired[at] is None and _takes_serialized_stock(payload):
+            paired[at] = take(lambda s, p=payload: _same_goods(p, s))
+    return paired, unclaimed
+
+
 def _rebuilt_items_or_existing(
     body_items, existing_items: list, editor: Optional[dict] = None
-) -> list:
+) -> Tuple[list, List[dict], List[dict]]:
     """Resolve the corrected line set for an edit. When the caller supplies
     ``items`` it REPLACES the whole set (each normalised via rebuild_edited_line
     so item_total/discount are recomputed server-side); when omitted, the
@@ -104,27 +155,40 @@ def _rebuilt_items_or_existing(
 
     ``editor`` -- the admin making the edit: a line whose discount or price
     the edit CHANGES (or a new line) is now approved by them; an untouched
-    line keeps the approver the server stamped at sale."""
+    line keeps the approver the server stamped at sale.
+
+    Returns (lines, added, removed): what the edit does to the shelf. ``added``
+    are the goods it newly bills (they meet _gate_added_lines and take units),
+    ``removed`` the goods it stops billing. A correction of an unchanged line is
+    in neither, keeps the unit it holds and answers to no stock or master rule
+    -- the bill may be corrected long after the product was archived."""
     from ...services.order_superadmin_edit import rebuild_edited_line
     from ...services.discount_approval import who
 
     if body_items is None:
-        return [dict(it) for it in (existing_items or [])]
+        return [dict(it) for it in (existing_items or [])], [], []
     # SuperadminEditLine carries no discount_reason/discount_approved_by
     # (Pydantic strips unknown keys), so merge them from the STORED line by
     # item_id — an edit must not wipe the accountability trail. The approver
     # is only ever the one the server stamped at sale
     # (services/discount_approval); this door never takes one from a client.
-    _stored_by_id = {
-        it.get("item_id"): it for it in (existing_items or []) if it.get("item_id")
-    }
-    rebuilt = []
-    for line in body_items:
-        payload = line.model_dump() if hasattr(line, "model_dump") else dict(line)
-        stored = _stored_by_id.get(payload.get("item_id")) or {}
-        for _k in ("discount_reason", "discount_approved_by", "discount_approved_by_name"):
+    payloads = [
+        line.model_dump() if hasattr(line, "model_dump") else dict(line)
+        for line in body_items
+    ]
+    paired, removed = _pair_with_stored(payloads, existing_items)
+    rebuilt: List[dict] = []
+    added: List[dict] = []
+    for payload, stored in zip(payloads, paired):
+        stored = stored or {}
+        same = bool(stored) and _same_goods(payload, stored)
+        carried = ["discount_reason", "discount_approved_by", "discount_approved_by_name"]
+        if same:
+            carried += ["stock_id", "lens_line_id", "line_index"]
+        for _k in carried:
             if payload.get(_k) is None and stored.get(_k) is not None:
                 payload[_k] = stored.get(_k)
+        payload["item_id"] = stored.get("item_id")  # a new line gets a fresh one
         line = rebuild_edited_line(payload)
         if editor is not None and _discount_changed(line, stored):
             # The admin changed what this line sells for: they answer for it.
@@ -132,11 +196,101 @@ def _rebuilt_items_or_existing(
             line["discount_approved_by"] = approver["user_id"]
             line["discount_approved_by_name"] = approver["name"]
         rebuilt.append(line)
+        if not same:
+            added.append(line)
+            if stored:
+                removed.append(stored)
+            continue
+        extra = line["quantity"] - int(stored.get("quantity") or 1)
+        if extra > 0:  # the line keeps its unit; only the extra pieces are new
+            added.append({**line, "quantity": extra, "stock_id": None})
+        elif extra < 0:
+            removed.append({**stored, "quantity": -extra, "stock_id": None})
     if not rebuilt:
         raise HTTPException(
             status_code=400, detail="An edited order must keep at least one item."
         )
-    return rebuilt
+    return rebuilt, added, removed
+
+
+def _gate_added_lines(added: List[dict], store_id: Optional[str]) -> None:
+    """Goods an edit newly bills meet the till's rules (L2-STOCK-F01/F02, L1-F39):
+    a billable, unarchived master, the master's stock type, and units on this
+    shop's shelf. Read-only; _claim_units takes the units. The caps and floors
+    are not re-applied: price stays the admin's, this door's audited override."""
+    product_repo = get_product_repository()
+    if product_repo is not None:
+        for line in added:
+            pid = line.get("product_id") or ""
+            label = line.get("product_name") or pid
+            product = _resolve_billable_product(product_repo, pid, label)
+            _assert_line_type_matches_master(line.get("item_type"), product, label)
+            if product is not None:
+                line["product_id"] = _canonical_pid(product_repo, pid)
+    _assert_serialized_stock_available(added, store_id)
+
+
+@contextmanager
+def _units_back_unless_saved(order_id: str, claimed: dict, repo, field: str, value):
+    """The units this edit claimed go back if the save fails. `field` == `value`
+    on the stored order proves the write landed first, so they stay; an order
+    that cannot be read keeps them SOLD (_release_claimed_units fails closed)."""
+
+    def was_saved() -> bool:
+        stored = repo.find_by_id(order_id)
+        if stored is None:
+            raise RuntimeError("order unreadable")
+        return stored.get(field) == value
+
+    try:
+        yield
+    except Exception:
+        _release_claimed_units(order_id, claimed, was_saved)
+        raise
+
+
+async def _settle_removed_lines(
+    order: dict, new_items: List[dict], added: List[dict], removed: List[dict],
+    repo, user: dict,
+) -> None:
+    """After the edit landed: the goods it stopped billing go back on the shelf
+    (the remove-item door's own release, flagged on the order if it falls short)
+    and the website hears of every piece that moved. A DELIVERED bill keeps its
+    units: the customer holds them, and only a return puts one back."""
+    order_id, store_id = order.get("order_id"), order.get("store_id")
+    if removed and str(order.get("status") or "").upper() != "DELIVERED":
+        from ...services.lens_stock_hook import release_for_cancel
+
+        lines = order.get("items") or []
+        whole = [(pos, ln) for pos, ln in enumerate(lines) if any(ln is r for r in removed)]
+        try:
+            await _release_lens_lines(
+                [ln for _pos, ln in whole],
+                order_id=order_id,
+                store_id=store_id or "",
+                user=user,
+                release=release_for_cancel,
+                positions=[pos for pos, _ln in whole],
+            )
+        except Exception as exc:  # noqa: BLE001 -- the edit stands
+            logger.warning("[LENS_HOOK] release on edit failed (order %s): %s", order_id, exc)
+        for line in removed:
+            item_id = line.get("item_id")
+            _freed, failed = _release_line_units(
+                order_id, item_id, line, surviving_lines=new_items, store_id=store_id
+            )
+            if failed:
+                repo.update(
+                    order_id,
+                    {
+                        "line_remove_stock_release_failed": True,
+                        "line_remove_stock_failed_item_id": item_id,
+                    },
+                )
+    if added or removed:
+        from ...services.online_stock_writeback import writeback_after_sale
+
+        writeback_after_sale(None, added + removed, store_id)
 
 
 def _discount_changed(line: dict, stored: dict) -> bool:
@@ -184,7 +338,10 @@ async def superadmin_edit_order(
       * period lock -> 423 (cannot edit into a closed accounting month);
       * an already-invoiced order -> 409 (use /superadmin-invoice-change);
       * DRAFT -> 400 (use the ordinary PUT /{order_id} edit);
-      * terminal DELIVERED / CANCELLED -> 400.
+      * terminal DELIVERED / CANCELLED -> 400;
+      * a line the edit adds or replaces meets the till's master / type /
+        archive / stock rules and takes its unit (400 / 409); a line it drops
+        gives its unit back; a correction of an unchanged line keeps its unit.
     """
     _require_superadmin(current_user)
     repo = get_order_repository()
@@ -238,7 +395,10 @@ async def superadmin_edit_order(
     before = order_money_snapshot(order)
 
     # Resolve corrected lines + cart discount + customer.
-    new_items = _rebuilt_items_or_existing(body.items, order.get("items"), current_user)
+    new_items, added, removed = _rebuilt_items_or_existing(
+        body.items, order.get("items"), current_user
+    )
+    _gate_added_lines(added, order.get("store_id"))
     cart_discount_pct = (
         body.cart_discount_percent
         if body.cart_discount_percent is not None
@@ -293,41 +453,52 @@ async def superadmin_edit_order(
     after_order.update(update_data)
     after = order_money_snapshot(after_order)
 
-    # SYNCHRONOUS immutable audit BEFORE persisting/returning.
-    _write_order_edit_audit(
-        action="ORDER_SUPERADMIN_EDIT",
-        order=order,
-        before=before,
-        after=after,
-        reason=body.reason,
-        user_id=current_user.get("user_id"),
-    )
-
-    # Compare-and-set on what this edit read: still no tax invoice, no
-    # refund-advance claim, the same status. A counter print that minted the
-    # invoice in between wins -- the issued number never carries lines it
-    # did not print (that change goes on a credit / debit note).
-    if not repo.update_if(
-        order_id,
-        {"invoice_number": {"$in": [None, ""]},
-         "advance_refund_id": order.get("advance_refund_id"),
-         "status": order.get("status")},
-        update_data,
+    # The units the edit newly bills are claimed before it is saved, as at the
+    # till: a 409 here leaves the order untouched.
+    claimed = _claim_units(order_id, added, order.get("store_id"))
+    with _units_back_unless_saved(
+        order_id, claimed, repo, "superadmin_edited_at", update_data["superadmin_edited_at"]
     ):
+        # SYNCHRONOUS immutable audit BEFORE persisting/returning.
         _write_order_edit_audit(
-            action="ORDER_SUPERADMIN_EDIT_REFUSED",
+            action="ORDER_SUPERADMIN_EDIT",
             order=order,
             before=before,
-            after=before,
-            reason="edit refused: the order changed (invoiced, refunded or "
-            "re-statused) while it was being edited",
+            after=after,
+            reason=body.reason,
             user_id=current_user.get("user_id"),
         )
-        raise HTTPException(
-            status_code=409,
-            detail="This order changed while it was being edited (it may have been "
-            "invoiced) - reload it and check.",
-        )
+
+        # Compare-and-set on what this edit read: still no tax invoice, no
+        # refund-advance claim, the same status, the same lines. A counter
+        # print that minted the invoice in between wins -- the issued number
+        # never carries lines it did not print (that change goes on a credit /
+        # debit note). A second edit of the same lines loses here too, so a
+        # double press takes no second unit.
+        if not repo.update_if(
+            order_id,
+            {"invoice_number": {"$in": [None, ""]},
+             "advance_refund_id": order.get("advance_refund_id"),
+             "status": order.get("status"),
+             "items": order.get("items")},
+            update_data,
+        ):
+            _write_order_edit_audit(
+                action="ORDER_SUPERADMIN_EDIT_REFUSED",
+                order=order,
+                before=before,
+                after=before,
+                reason="edit refused: the order changed (invoiced, refunded or "
+                "re-statused) while it was being edited",
+                user_id=current_user.get("user_id"),
+            )
+            raise HTTPException(
+                status_code=409,
+                detail="This order changed while it was being edited (it may have been "
+                "invoiced) - reload it and check.",
+            )
+
+    await _settle_removed_lines(order, new_items, added, removed, repo, current_user)
 
     # Owner hard rule: an edit that raises discounts must not leave the
     # create-time loyalty earn standing. Delta-claw, fail-soft.
@@ -415,7 +586,19 @@ async def superadmin_invoice_change(
         check_period_locked(db, ist_today())
 
     before = order_money_snapshot(order)
-    new_items = _rebuilt_items_or_existing(body.items, order.get("items"), current_user)
+    new_items, added, removed = _rebuilt_items_or_existing(
+        body.items, order.get("items"), current_user
+    )
+    _gate_added_lines(added, order.get("store_id"))
+    if body.mode != "REVISED_INVOICE" and any(_takes_serialized_stock(ln) for ln in added):
+        # A note changes no order line, so no unit could ever answer to it.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "A credit / debit note moves no stock, so it cannot bill new "
+                "goods. Use a revised invoice, or a new bill for them."
+            ),
+        )
     cart_discount_pct = (
         body.cart_discount_percent
         if body.cart_discount_percent is not None
@@ -495,15 +678,22 @@ async def superadmin_invoice_change(
             ) from exc
         from .invoices import invoice_mint_stamp
 
+        claimed: dict = {}
         try:
             mint_stamp = invoice_mint_stamp(order, customer_doc, store_doc)
+            # Before the number is minted, so a lost unit burns no serial.
+            claimed = _claim_units(order_id, added, order.get("store_id"))
             new_invoice_number = repo.next_invoice_number(
                 order.get("store_id"), store_doc=store_doc
             )
         except InvoiceNumberError as exc:
+            _release_claimed_units(order_id, claimed)
             raise HTTPException(
                 status_code=400, detail=f"Cannot issue a revised invoice: {exc}"
             ) from exc
+        except Exception:
+            _release_claimed_units(order_id, claimed)
+            raise
         revised_doc = build_revised_invoice_doc(
             order=order,
             new_invoice_number=new_invoice_number,
@@ -553,71 +743,76 @@ async def superadmin_invoice_change(
         )
         update_data["bill_type"] = derive_bill_type(update_data["payment_status"])
 
-        # SYNCHRONOUS immutable audit BEFORE persisting.
-        _write_order_edit_audit(
-            action="ORDER_INVOICE_REVISED",
-            order=order,
-            before=before,
-            after=after,
-            reason=body.reason,
-            user_id=current_user.get("user_id"),
-            extra={
-                "original_invoice_number": original_invoice,
-                "revised_invoice_number": new_invoice_number,
-                "revision_id": revised_doc["revision_id"],
-            },
-        )
-
-        # Persist the revised-invoice link record (best-effort, fail-soft).
-        if db is not None:
-            try:
-                db.get_collection("revised_invoices").insert_one(dict(revised_doc))
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[ORDERS] revised_invoices insert failed: %s", exc)
-
-        # Compare-and-set on the number this request superseded: of two
-        # presses only one replaces it -- never two revised numbers printed.
-        # ...and still uncancelled with no refund-advance claim (set_invoice's
-        # guard): a revised serial never lands on an order a credit note
-        # reversed in between.
-        if not repo.update_if(
-            order_id,
-            {"invoice_number": original_invoice, "advance_refund_id": None,
-             "status": order.get("status")},
-            update_data,
+        with _units_back_unless_saved(
+            order_id, claimed, repo, "invoice_number", new_invoice_number
         ):
-            # The serial this press minted is never printed: record the gap
-            # (Rule 46(b) -- every serial accounted for) next to the audit row
-            # above that announced it, and void its link record.
+            # SYNCHRONOUS immutable audit BEFORE persisting.
             _write_order_edit_audit(
-                action="ORDER_INVOICE_REVISION_REFUSED",
+                action="ORDER_INVOICE_REVISED",
                 order=order,
                 before=before,
-                after=before,
-                reason="revision refused, serial unused: another request "
-                "revised this invoice first",
+                after=after,
+                reason=body.reason,
                 user_id=current_user.get("user_id"),
                 extra={
                     "original_invoice_number": original_invoice,
-                    "unused_invoice_number": new_invoice_number,
+                    "revised_invoice_number": new_invoice_number,
                     "revision_id": revised_doc["revision_id"],
                 },
             )
+
+            # Persist the revised-invoice link record (best-effort, fail-soft).
             if db is not None:
                 try:
-                    db.get_collection("revised_invoices").update_one(
-                        {"revision_id": revised_doc["revision_id"]},
-                        {"$set": {"status": "REFUSED_SERIAL_UNUSED"}},
-                    )
+                    db.get_collection("revised_invoices").insert_one(dict(revised_doc))
                 except Exception as exc:  # noqa: BLE001
-                    logger.warning("[ORDERS] revised_invoices void failed: %s", exc)
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "This invoice was already revised by another request -- "
-                    "reload the order"
-                ),
-            )
+                    logger.warning("[ORDERS] revised_invoices insert failed: %s", exc)
+
+            # Compare-and-set on the number this request superseded: of two
+            # presses only one replaces it -- never two revised numbers printed.
+            # ...and still uncancelled with no refund-advance claim (set_invoice's
+            # guard): a revised serial never lands on an order a credit note
+            # reversed in between.
+            if not repo.update_if(
+                order_id,
+                {"invoice_number": original_invoice, "advance_refund_id": None,
+                 "status": order.get("status")},
+                update_data,
+            ):
+                # The serial this press minted is never printed: record the gap
+                # (Rule 46(b) -- every serial accounted for) next to the audit row
+                # above that announced it, and void its link record.
+                _write_order_edit_audit(
+                    action="ORDER_INVOICE_REVISION_REFUSED",
+                    order=order,
+                    before=before,
+                    after=before,
+                    reason="revision refused, serial unused: another request "
+                    "revised this invoice first",
+                    user_id=current_user.get("user_id"),
+                    extra={
+                        "original_invoice_number": original_invoice,
+                        "unused_invoice_number": new_invoice_number,
+                        "revision_id": revised_doc["revision_id"],
+                    },
+                )
+                if db is not None:
+                    try:
+                        db.get_collection("revised_invoices").update_one(
+                            {"revision_id": revised_doc["revision_id"]},
+                            {"$set": {"status": "REFUSED_SERIAL_UNUSED"}},
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("[ORDERS] revised_invoices void failed: %s", exc)
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "This invoice was already revised by another request -- "
+                        "reload the order"
+                    ),
+                )
+
+        await _settle_removed_lines(order, new_items, added, removed, repo, current_user)
 
         # Same earn re-gate as the pre-invoice edit door (the CREDIT_NOTE
         # mode leaves the order's lines intact, so only REVISED needs it).
