@@ -181,7 +181,7 @@ def _client_no_db(monkeypatch, roles):
 
 
 class TestRedoListAndPrintReadable:
-    """Reads (redo history, print) are open to any authenticated user and must
+    """Reads (redo history, print) are open to the clinical read roles and must
     not 403; with no DB they fail soft rather than crashing."""
 
     def test_redo_history_not_forbidden_for_sales_staff(self):
@@ -250,7 +250,11 @@ class TestRedoRecording:
         return TestClient(app)
 
     def test_redo_appended_and_counted(self, monkeypatch):
-        repo = _FakeRxRepo({"prescription_id": "rx-9", "patient_name": "A"})
+        # Stamped with the caller's own store: like GET /prescriptions/{id}, the
+        # redo doors hide an unattributed / foreign-store Rx (L2-CLIN-F01).
+        repo = _FakeRxRepo(
+            {"prescription_id": "rx-9", "patient_name": "A", "store_id": "store-001"}
+        )
         client = self._client_with_repo(monkeypatch, ["OPTOMETRIST"], repo)
 
         resp = client.post(
@@ -295,6 +299,7 @@ class TestRedoRecording:
         repo = _FakeRxRepo(
             {
                 "prescription_id": "rx-9",
+                "store_id": "store-001",
                 "redos": [
                     {"redo_id": "r1", "reason": "first"},
                     {"redo_id": "r2", "reason": "second"},

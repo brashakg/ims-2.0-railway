@@ -279,7 +279,14 @@ def test_update_unknown_service_404(db):
 # ============================================================================
 
 
+def _seed_customer(db, cid, store="BV-1"):
+    coll = db.get_collection("customers")
+    if not coll.find_one({"customer_id": cid}):
+        coll.insert_one({"_id": cid, "customer_id": cid, "name": "Asha", "store_id": store})
+
+
 def _job(db, store="BV-1"):
+    _seed_customer(db, "C1")
     return svc.open_job(
         db,
         store,
@@ -464,3 +471,144 @@ def test_router_ready_queues_dark_sms(db, monkeypatch):
     )
     assert out["status"] == "READY"
     assert calls["n"] == 1 and calls["dispatched"] is False  # queued, never live-sent
+
+
+# ============================================================================
+# L2-REPAIR-F01 -- supplied customer / service references must resolve
+# ============================================================================
+
+
+def _service(db, *, stores=("BV-1",), active=True, category="FRAME_REPAIR"):
+    return svc.upsert_service(
+        db,
+        {
+            "name": "Frame Weld",
+            "category": category,
+            "enabled_store_ids": list(stores),
+            "active": active,
+        },
+        actor=_catalog_mgr(),
+    )
+
+
+def _intake(**over):
+    body = {"service_type": "FRAME_REPAIR", "quoted_price_paise": 25000}
+    body.update(over)
+    return body
+
+
+def _no_jobs(db):
+    return db.get_collection(svc.JOBS_COLLECTION).find({}) == []
+
+
+def test_open_job_rejects_invented_customer_id(db):
+    """The audit's door: an invented customer_id saved a job with no identity."""
+    with pytest.raises(svc.RepairError) as e:
+        svc.open_job(
+            db, "BV-1", _intake(customer_id="AUDIT-NONEXISTENT-CUSTOMER"), actor=_mgr()
+        )
+    assert e.value.status == 422
+    assert _no_jobs(db)
+
+
+def test_open_job_rejects_invented_service_id(db):
+    _seed_customer(db, "C1")
+    with pytest.raises(svc.RepairError) as e:
+        svc.open_job(
+            db,
+            "BV-1",
+            _intake(customer_id="C1", service_id="AUDIT-NONEXISTENT-SERVICE"),
+            actor=_mgr(),
+        )
+    assert e.value.status == 422
+    assert _no_jobs(db)
+
+
+@pytest.mark.parametrize(
+    "kw,service_type",
+    [
+        ({"active": False}, "FRAME_REPAIR"),  # retired service
+        ({"stores": ("BV-2",)}, "FRAME_REPAIR"),  # not offered at this shop
+        ({}, "WATCH_BATTERY"),  # service is a frame repair, job claims a battery
+    ],
+)
+def test_open_job_rejects_service_not_usable_here(db, kw, service_type):
+    _seed_customer(db, "C1")
+    s = _service(db, **kw)
+    with pytest.raises(svc.RepairError) as e:
+        svc.open_job(
+            db,
+            "BV-1",
+            _intake(customer_id="C1", service_id=s["service_id"], service_type=service_type),
+            actor=_mgr(),
+        )
+    assert e.value.status == 422
+    assert _no_jobs(db)
+
+
+def test_open_job_accepts_real_customer_and_enabled_service(db):
+    _seed_customer(db, "C1")
+    s = _service(db)
+    j = svc.open_job(
+        db, "BV-1", _intake(customer_id="C1", service_id=s["service_id"]), actor=_mgr()
+    )
+    assert j["customer_id"] == "C1" and j["service_id"] == s["service_id"]
+    # The service's own name is an equally valid service_type.
+    j2 = svc.open_job(
+        db,
+        "BV-1",
+        _intake(customer_id="C1", service_id=s["service_id"], service_type="frame weld"),
+        actor=_mgr(),
+    )
+    assert j2["status"] == svc.STATUS_INTAKE
+
+
+def test_open_job_walkin_without_service_still_works(db):
+    j = svc.open_job(
+        db,
+        "BV-1",
+        _intake(walkin_name="Ravi", walkin_mobile="9000000001"),
+        actor=_mgr(),
+    )
+    assert j["customer_id"] is None and j["walkin_name"] == "Ravi"
+
+
+def test_router_open_job_invented_refs_422_and_hq_positive(db, monkeypatch):
+    """Through the real route: a same-shop manager with an invented customer gets
+    422 and nothing is saved; an ADMIN (HQ) with real refs opens the job."""
+    from fastapi import HTTPException
+    from api.routers import repair_portal as r
+
+    monkeypatch.setattr(r, "_get_db", lambda: db)
+    monkeypatch.setattr(r, "_audit", lambda *a, **k: None)
+    with pytest.raises(HTTPException) as exc:
+        _run(
+            r.open_job(
+                r.JobIntakeBody(
+                    store_id="BV-1",
+                    service_type="FRAME_REPAIR",
+                    customer_id="AUDIT-NONEXISTENT-CUSTOMER",
+                    quoted_price_paise=25000,
+                ),
+                current_user=_mgr(),
+            )
+        )
+    assert exc.value.status_code == 422
+    assert _no_jobs(db)
+
+    _seed_customer(db, "C1")
+    s = _service(db)
+    admin = {"user_id": "A1", "roles": ["ADMIN"], "store_ids": [], "active_store_id": None}
+    job = _run(
+        r.open_job(
+            r.JobIntakeBody(
+                store_id="BV-1",
+                service_id=s["service_id"],
+                service_type="FRAME_REPAIR",
+                customer_id="C1",
+                quoted_price_paise=25000,
+            ),
+            current_user=admin,
+        )
+    )
+    assert job["status"] == svc.STATUS_INTAKE and job["customer_id"] == "C1"

@@ -293,6 +293,40 @@ def get_service(db, service_id: str) -> Optional[Dict[str, Any]]:
 # --- repair-job lifecycle --------------------------------------------------
 
 
+def _resolve_refs(db, store_id: str, clean: Dict[str, Any], service_id) -> Optional[str]:
+    """Supplied references must point at real records (audit L2-REPAIR-F01: an
+    invented customer_id / service_id was saved as-is). A customer_id must be a
+    real customer (existence only -- like POS order-create, a chain customer may
+    be served at any shop). A service_id must be an ACTIVE catalog service
+    enabled at THIS store whose category or name is the job's service_type.
+    422 on any miss, before anything is written. Returns the cleaned service_id."""
+    cid = clean["customer_id"]
+    if cid and not db.get_collection("customers").find_one({"customer_id": cid}):
+        raise RepairError("customer not found: " + cid, status=422, code="bad_customer")
+    sid = str(service_id).strip() if service_id else None
+    if not sid:
+        return None
+    service = get_service(db, sid)
+    if (
+        not service
+        or not service.get("active", True)
+        or store_id not in (service.get("enabled_store_ids") or [])
+    ):
+        raise RepairError(
+            "service not offered at this store: " + sid, status=422, code="bad_service"
+        )
+    wanted = clean["service_type"].upper()
+    if wanted not in {
+        str(service.get("category") or "").upper(),
+        str(service.get("name") or "").strip().upper(),
+    }:
+        raise RepairError(
+            "service_type does not match service " + sid, status=422, code="bad_service"
+        )
+    return sid
+
+
+
 def open_job(
     db, store_id: str, payload: Dict[str, Any], *, actor: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -302,13 +336,14 @@ def open_job(
     if not store_id:
         raise RepairError("store_id is required", status=422)
     clean = validate_intake(payload)
+    service_id = _resolve_refs(db, store_id, clean, (payload or {}).get("service_id"))
     jid = "RJ-" + uuid.uuid4().hex[:10].upper()
     now = _now_iso()
     doc = {
         "_id": jid,
         "job_id": jid,
         "store_id": store_id,
-        "service_id": (payload or {}).get("service_id"),
+        "service_id": service_id,
         "service_type": clean["service_type"],
         "customer_id": clean["customer_id"],
         "walkin_name": clean["walkin_name"],

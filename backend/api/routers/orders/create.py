@@ -24,7 +24,7 @@ from ...dependencies import (
 )
 from ...services.stores_util import is_online_store
 from ._shared import (
-    POS_WRITE_ROLES,
+    SALE_ROLES,
     _compute_per_category_gst,
     _get_db,
     bill_line_value,
@@ -79,7 +79,7 @@ async def create_order(
     # RBAC: only POS-facing roles may create orders. This was relying on the
     # frontend alone -> ACCOUNTANT / OPTOMETRIST / CATALOG_MANAGER / WORKSHOP_STAFF
     # could all POST an order. Enforce server-side.
-    if not any(r in current_user.get("roles", []) for r in POS_WRITE_ROLES):
+    if not any(r in current_user.get("roles", []) for r in SALE_ROLES):
         raise HTTPException(
             status_code=403, detail="Your role is not permitted to create orders."
         )
@@ -1414,7 +1414,7 @@ async def quote_bill(
     ponytail: promotions (PROMO_ENGINE_ENABLED, dark by default) are not in the
     quote; price them here too before that engine is switched on.
     """
-    if not any(r in current_user.get("roles", []) for r in POS_WRITE_ROLES):
+    if not any(r in current_user.get("roles", []) for r in SALE_ROLES):
         raise HTTPException(
             status_code=403, detail="Your role is not permitted to create orders."
         )

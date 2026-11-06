@@ -879,11 +879,14 @@ class TestCatalogRoutes:
 # ===========================================================================
 
 class TestOrderCreation:
-    """POST /orders requires ADMIN, AREA_MANAGER, SALES_CASHIER, SALES_STAFF,
-    STORE_MANAGER, SUPERADMIN -- ACCOUNTANT, OPTOMETRIST, CASHIER, WORKSHOP_STAFF
-    must be denied."""
+    """POST /orders requires ADMIN, AREA_MANAGER, CASHIER, SALES_CASHIER,
+    SALES_STAFF, STORE_MANAGER, SUPERADMIN -- ACCOUNTANT, OPTOMETRIST,
+    WORKSHOP_STAFF must be denied. CASHIER rings the sale it is paying
+    (orders SALE_ROLES, Codex L2-POS-F01)."""
 
-    _POS_ROLES_ALLOWED = {"ADMIN", "AREA_MANAGER", "SALES_CASHIER", "SALES_STAFF", "STORE_MANAGER", "SUPERADMIN"}
+    _POS_ROLES_ALLOWED = {
+        "ADMIN", "AREA_MANAGER", "CASHIER", "SALES_CASHIER", "SALES_STAFF", "STORE_MANAGER", "SUPERADMIN",
+    }
     _POS_ROLES_DENIED = set(ALL_ROLES) - _POS_ROLES_ALLOWED
 
     @pytest.mark.parametrize("role", sorted(_POS_ROLES_DENIED))
