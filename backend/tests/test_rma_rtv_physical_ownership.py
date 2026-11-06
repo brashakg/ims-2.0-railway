@@ -1193,6 +1193,8 @@ def finish_pending(w, rma_id, body, amount):
 
 def test_an_rma_holding_a_pending_note_is_not_rejected_and_the_note_finishes(rw, monkeypatch):
     rma_id, body = pending_note(rw, monkeypatch)
+    # Accounts' own decision stays Accounts': a manager hears only that.
+    assert rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/reject", json={}).status_code == 403
     refused = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "supplier dispute"})
     assert refused.status_code == 409, refused.text
     assert "supplier credit note" in refused.text

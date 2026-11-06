@@ -637,6 +637,8 @@ async def reject_rma(
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     actor = current_user.get("user_id")
     status = doc.get("status")
+    if status == RMAStatus.DISPATCHED.value:
+        require_payables(current_user, "Rejecting a dispatched RMA (forgoing its credit)")
     _require_no_unfinished_note(doc)
     if status in _REJECT_BEFORE_DISPATCH:
         # Pinned to the state just read (the engine's one-from-state guard): a
@@ -647,8 +649,6 @@ async def reject_rma(
             actor=actor, notes=body.reason or "", audit_action="rma_rejected",
         )
     else:
-        if status == RMAStatus.DISPATCHED.value:
-            require_payables(current_user, "Rejecting a dispatched RMA (forgoing its credit)")
         # DISPATCHED (accounts) -- or a state no reject leaves, which the engine
         # answers 409 invalid_transition with nothing written.
         res = eng.reject(rma_id, actor=actor, reason=body.reason or "")
