@@ -21,6 +21,7 @@ from ._shared import (
 )
 from .release import (
     CANCELLABLE_STATUSES,
+    _CANCEL_MONEY_KEYS,
     _claim_order_for_cancel,
     _release_lens_lines,
 )
@@ -153,11 +154,20 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
         # was permanent: the 400 below refused every retry forever.
         # ------------------------------------------------------------------
         claimed = _claim_order_for_cancel(
-            repo, order_id, reason, current_user, invoice=order.get("invoice_number")
+            repo, order_id, reason, current_user, invoice=order.get("invoice_number"),
+            money_read=order,
         )
         is_retry = False
         if claimed is None:
-            fresh = repo.find_by_id(order_id) or {}
+            fresh = repo.find_by_id(order_id)
+            if not fresh:
+                # Unreadable (find_by_id swallows the error): whether the claim
+                # landed is unknown, and nothing was undone. A re-press reads
+                # what happened and finishes or refuses.
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not cancel the order -- please retry.",
+                )
             if fresh.get("status") != "CANCELLED" and (
                 fresh.get("invoice_number") or None
             ) != (order.get("invoice_number") or None):
@@ -172,16 +182,29 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
                         "credit note and the refund."
                     ),
                 )
+            if fresh.get("status") != "CANCELLED" and any(
+                fresh.get(k) != order.get(k) for k in _CANCEL_MONEY_KEYS
+            ):
+                # A payment landed while this cancel ran (L2-POS-F04): the
+                # order stays a sale. The money check re-runs on what is there
+                # now, naming the refund door; anything else is a plain retry.
+                _refuse_cancel_holding_money(fresh, order_id, current_user)
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "The order's payments changed while it was being cancelled, "
+                        "so it was not cancelled. Open the order again and retry."
+                    ),
+                )
             if fresh.get("status") != "CANCELLED":
-                if fresh and fresh.get("status") in CANCELLABLE_STATUSES:
-                    # Still cancellable -> we did not lose a race, the STATUS
-                    # WRITE ITSELF failed. Fail loudly; the order is untouched
-                    # and no stock/loyalty undo has run.
+                if fresh.get("status") in CANCELLABLE_STATUSES:
+                    # Still cancellable -> we did not lose a race, the claim
+                    # itself failed. Fail loudly; no stock/loyalty undo has run.
                     raise HTTPException(
                         status_code=500,
                         detail="Could not cancel the order -- please retry.",
                     )
-                # Lost the race to a DELIVER (or the doc vanished).
+                # Lost the race to a DELIVER.
                 raise HTTPException(
                     status_code=400,
                     detail="Cannot cancel this order -- its status changed.",
