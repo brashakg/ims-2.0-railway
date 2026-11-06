@@ -2295,7 +2295,7 @@ def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, A
         return {"ok": False, "reason": "missing_ids"}
     if cid.startswith(("walkin-", "walk-in")):
         return {"ok": True, "skipped_reason": "walkin", "earned_clawed": 0}
-    try:
+    def reverse() -> Dict[str, Any]:
         return _reverse_order_loyalty(
             order_id=order_id,
             customer_id=cid,
@@ -2309,6 +2309,14 @@ def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, A
             # it -- see reverse_for_return for why returns must not.
             recompute_tier=True,
         )
+
+    try:
+        out = reverse()
+        # Losing the marker insert settles nothing: the winner may have read the
+        # account before this bill's debit landed. The winner's row is in the
+        # ledger now, so one more pass takes the marker branch, which finishes
+        # its money and hands back any debit it did not count.
+        return reverse() if out.get("raced") else out
     except Exception as exc:  # noqa: BLE001 -- must never break a cancel
         logger.error("reverse_for_cancel failed for order %s: %s", order_id, exc)
         return {"ok": False, "reason": "error", "error": str(exc)}

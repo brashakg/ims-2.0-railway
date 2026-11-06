@@ -17,6 +17,8 @@ driving the REAL redeem handler + repositories:
   * a cancel or return BEFORE that retry hands the debit back exactly once
     (the account's debit, not the ledger, is the truth of what was redeemed);
   * a debit landing after the cancel's reversal is handed back too, once;
+  * a press losing the reversal-marker insert to a cancel that never saw its
+    debit hands that debit back too, and the mirror restores nothing twice;
   * the same bill retried with a DIFFERENT amount after that -> refused,
     balance untouched;
   * a standalone goodwill redeem (no order) is unchanged: each press is its
@@ -448,6 +450,88 @@ def test_a_debit_landing_after_the_cancels_reversal_is_handed_back_once(rig, mon
     acct = _account(rig)
     assert int(acct["balance_points"]) == START and int(acct["lifetime_redeemed"]) == 0
     assert len(_reversal_rows(rig)) == 2  # the cancel's reversal + the one restore
+
+
+def _press_races_the_cancels_marker(rig, monkeypatch, cancel_lands_first):
+    """Two workers, one bill, in the order that matters. The press passes its
+    entry check; the cancel flips the bill, reads the account and the ledger
+    (nothing to restore) and stalls at its marker insert; the press debits, sees
+    CANCELLED, reads the ledger (no marker yet) and reaches its own insert. Only
+    then do the two inserts land, in the order asked for."""
+    rig["db"].loyalty_transactions.create_index(  # uniq_loyalty_cancel_reversal
+        [("customer_id", 1), ("cancel_of_order_id", 1)],
+        unique=True,
+        partialFilterExpression={"type": "ADJUST", "cancel_of_order_id": {"$type": "string"}},
+    )
+    accounts, txns = rig["accounts"], rig["txns"]
+    real_debit, real_create = accounts.try_debit, txns.create
+    cancel_at_insert, press_at_insert, first_landed = (threading.Event() for _ in range(3))
+    run = {"answer": {}}
+
+    def debit(*a, **k):
+        if "thread" not in run:
+            run["thread"] = threading.Thread(
+                target=lambda: run["answer"].update(_cancel_order(rig))
+            )
+            run["thread"].start()
+            assert cancel_at_insert.wait(10)
+        return real_debit(*a, **k)
+
+    def create(doc, **k):
+        if "cancel_of_order_id" not in doc:
+            return real_create(doc, **k)
+        is_cancel = threading.current_thread() is run.get("thread")
+        if is_cancel:
+            cancel_at_insert.set()
+            press_at_insert.wait(10)
+        else:
+            press_at_insert.set()
+        if is_cancel != cancel_lands_first:
+            first_landed.wait(10)
+        try:
+            return real_create(doc, **k)
+        finally:
+            first_landed.set()
+
+    monkeypatch.setattr(accounts, "try_debit", debit)
+    monkeypatch.setattr(txns, "create", create)
+    with pytest.raises(HTTPException) as ei:
+        _redeem()
+    run["thread"].join(10)
+    assert ei.value.status_code == 409 and ei.value.detail["reason"] == "order_cancelled"
+    assert run["answer"]["ok"] is True
+    return next(r for r in _reversal_rows(rig) if r.get("cancel_of_order_id"))
+
+
+def test_a_press_losing_the_marker_race_to_a_blind_cancel_hands_its_debit_back(rig, monkeypatch):
+    """The winning marker never saw this debit, so the lost insert settles
+    nothing: the 409 says the points are back, and they must be."""
+    _earn_on_order(rig)
+    marker = _press_races_the_cancels_marker(rig, monkeypatch, cancel_lands_first=True)
+    assert marker["redeem_txn_ids"] == []  # the winner really was blind
+    acct = _account(rig)
+    assert int(acct["balance_points"]) == START and int(acct["lifetime_redeemed"]) == 0
+    assert len(_redeem_rows(rig)) == 1
+    assert not rig["db"].orders.find_one({"order_id": ORDER}).get("loyalty_reversal_failed")
+
+    for _ in range(2):  # the press again, then the cancel retry door: nothing moves
+        with pytest.raises(HTTPException):
+            _redeem()
+        _cancel_order(rig)
+    acct = _account(rig)
+    assert int(acct["balance_points"]) == START and int(acct["lifetime_redeemed"]) == 0
+    assert len(_reversal_rows(rig)) == 2  # the cancel's reversal + the one restore
+
+
+def test_a_cancel_losing_the_marker_race_to_the_press_restores_nothing_twice(rig, monkeypatch):
+    """The mirror: the press's marker counted the debit, so the cancel's second
+    look finds it covered and adds no restore."""
+    _earn_on_order(rig)
+    marker = _press_races_the_cancels_marker(rig, monkeypatch, cancel_lands_first=False)
+    assert len(marker["redeem_txn_ids"]) == 1  # the press won, debit counted
+    acct = _account(rig)
+    assert int(acct["balance_points"]) == START and int(acct["lifetime_redeemed"]) == 0
+    assert len(_reversal_rows(rig)) == 1
 
 
 def test_a_late_debit_whose_restore_money_failed_is_finished_by_the_next_call(rig, monkeypatch):
