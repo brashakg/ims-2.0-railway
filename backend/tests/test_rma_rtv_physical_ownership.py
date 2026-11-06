@@ -1387,3 +1387,19 @@ def test_an_old_refused_row_with_its_number_claimed_does_not_hold_the_rma(rw):
         "_id": str(uuid4()), "return_id": rma_id, "return_kind": "RMA", "identity_claimed": True,
         "posting_status": "PENDING_EVIDENCE", "pending_reasons": []})
     assert rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 200
+
+
+def test_a_note_over_the_balance_can_never_finish_and_does_not_hold_the_rma(rw):
+    bought(rw, "U1", "U2", qty=2)
+    rma_id = linked_rma(rw, received_return(rw, "U1", "U2"))
+    assert rma_note(rw, rma_id, 600, "CN-1")[1].status_code == 200
+    http = rw["as_"](ACCOUNTANT)
+    shown = http.post(f"/vendor-rma/{rma_id}/credit-preview", json={}).json()
+    over = {"credit_note_number": "CN-OVER", "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+            "received_amount": 401, "source_selections": shown["source_selections"],
+            "allocations": [{"source_key": shown["sources"][0]["source_key"], "taxable": 401,
+                             "cgst": 0, "sgst": 0, "igst": 0}]}
+    assert http.post(f"/vendor-rma/{rma_id}/credit-note", json=over).status_code == 422
+    assert rma_note(rw, rma_id, 400, "CN-2")[1].status_code == 200
+    assert rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 200
+    assert posted(rw) == (2, 100000) and credited(rw) == 100000

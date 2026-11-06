@@ -25,6 +25,9 @@ from .vendor_rma import RMAStatus, VendorRMAEngine, _now
 
 APPROVAL_BINDINGS = "rma_supplier_credit_approvals"
 READY = {RMAStatus.DISPATCHED.value, RMAStatus.CREDIT_RECEIVED.value}
+# Refused by a cap: its fixed amount can never fit, so nothing waits on it.
+OVER_CAP = {"ORIGINAL_QUANTITY_EXCEEDED", "ORIGINAL_AMOUNT_EXCEEDED", "RETURN_AMOUNT_EXCEEDED",
+            "RECEIPT_QUANTITY_EXCEEDED", "RETURNED_UNIT_ALREADY_CREDITED"}
 
 
 def _noted_without_pieces(db, rma_id):
@@ -75,13 +78,14 @@ def return_door_problem(db, return_doc, confirmation_id):
 def unfinished_note(db, rma):
     """A supplier note this RMA has claimed but not yet carried onto itself:
     saved pending, posting, or posted with its summary lost. Only this door can
-    finish it, so the RMA stays open for it; the note is never released. An old
-    row refused with an error (claimed, no reason saved) was never saved pending
-    and may never finish: it does not hold the RMA."""
+    finish it, so the RMA stays open for it; the note is never released. A note
+    that can never finish does not hold it: one over a cap (OVER_CAP), or an old
+    row refused with an error (claimed, no reason saved)."""
     done = [n["confirmation_id"] for n in rma.get("credit_notes") or [] if n.get("confirmation_id")]
     for event in db.get_collection(EVENTS).find(
             {**return_event_query({"rma_id": rma["rma_id"]}), "identity_claimed": {"$ne": False}, "_id": {"$nin": done}}):
-        if event.get("posting_status") != "PENDING_EVIDENCE" or event.get("pending_reasons"):
+        reasons = {reason.get("code") for reason in event.get("pending_reasons") or []}
+        if event.get("posting_status") != "PENDING_EVIDENCE" or reasons - OVER_CAP:
             return event
     return None
 
