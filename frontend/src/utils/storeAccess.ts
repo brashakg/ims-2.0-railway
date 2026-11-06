@@ -14,6 +14,7 @@
 // ============================================================================
 
 import type { User } from '../types';
+import { storeApi } from '../services/api';
 
 /** True when the user's role set sees the whole org (every active store), not
  *  just their assigned store_ids. Mirrors the topbar / backend all-stores set
@@ -88,4 +89,25 @@ export function hasNoActiveStore(user: User | null | undefined): boolean {
  *  never multi-store-capable, so the picker / guard never touches them. */
 export function isMultiStoreCapable(user: User | null | undefined): boolean {
   return userSeesAllStores(user?.roles) || (user?.storeIds?.length ?? 0) > 1;
+}
+
+/** The ONE "show the store picker now" decision, used after sign-in
+ *  (LoginPage) and after a first-password change (ForcePasswordChange), so a
+ *  multi-store user always picks before work and a single-store user goes
+ *  straight in. A temporary password is replaced first: the server refuses a
+ *  shop switch until then, so the picker waits for the change.
+ *    - SUPERADMIN / ADMIN: more than one active store in the org.
+ *    - everyone else (incl. AREA_MANAGER): more than one assigned store_id.
+ *  If the org list cannot be read the answer is "no" -- never block sign-in;
+ *  the AppLayout guard still routes a storeless admin to /select-store. */
+export async function needsStoreSelection(user: User | null | undefined): Promise<boolean> {
+  if (!user || user.mustChangePassword) return false;
+  if (!userSeesAllStores(user.roles)) return (user.storeIds?.length ?? 0) > 1;
+  try {
+    const res = await storeApi.getStores();
+    const list = (res?.stores ?? res ?? []) as unknown[];
+    return Array.isArray(list) && list.length > 1;
+  } catch {
+    return false;
+  }
 }

@@ -85,6 +85,15 @@ class _Users:
     def find_by_role(self, role: str, store_id: Optional[str] = None):
         return self.STAFF.get((role, store_id), [])
 
+    def find_by_id(self, user_id: str):
+        """A named person's record (the generator checks they work at the
+        shop it issues for -- Codex review of #1374)."""
+        for (role, store), people in self.STAFF.items():
+            for u in people:
+                if u["user_id"] == user_id:
+                    return {**u, "roles": [role], "store_ids": [store], "is_active": True}
+        return None
+
 
 def _template(**over) -> Dict[str, Any]:
     tpl = {
