@@ -9,8 +9,8 @@ keeps it (the RMA is refused, vendor_rma._physical_return_problem); otherwise a
 live linked RMA does (return_door_problem), under its maker-checker. Partial
 notes and retries stay on that one door; settle_return carries the result onto
 the return, so it stops reading as a credit still owed. Nothing historical is
-merged or removed: a return and RMA that both already hold notes keep them and
-take no more.
+merged or removed: a return and RMA that both already hold notes keep them,
+each on its own row, and take no more.
 """
 from copy import deepcopy
 
@@ -63,8 +63,13 @@ def return_door_problem(db, return_doc, confirmation_id):
 def settle_return(db, rma):
     """Carry a linked RMA's credit onto its return, as _finish_return does for
     the return's own door. Reads the RMA, so it is safe to repeat; a lost reply
-    repairs here on the unchanged retry."""
+    repairs here on the unchanged retry. A return the RMA does not answer for
+    keeps its row: one holding its own supplier notes (an old pair), or one
+    settled by replacement goods."""
     if not rma.get("return_id"):
+        return
+    ret = db.get_collection("vendor_returns").find_one({"return_id": rma["return_id"]}) or {}
+    if ret.get("return_type") == "replacement" or credit_started(db, ret):
         return
     amount = int(rma.get("received_credit_paise") or 0) / 100
     variance = rma.get("variance_paise")

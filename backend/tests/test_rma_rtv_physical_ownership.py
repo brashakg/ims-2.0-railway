@@ -560,6 +560,75 @@ def test_partial_notes_on_the_rma_reconcile_the_return_and_replay_once(rw):
     assert rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [1]}).status_code == 409
 
 
+def old_pair(rw, monkeypatch):
+    """A pre-rule pair: return R holds POSTED CN-RTV Rs 500 (partial, so still
+    received_by_vendor); its linked RMA holds POSTED CN-RMA Rs 1,000. The doors
+    refuse to build this now, so the RMA's note posts unlinked, as it did then."""
+    bought(rw, "U1", "U2", "U3", "U4")
+    rid = received_return(rw, "U1", "U2")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    _, own = rtv_note(rw, rid, 500, "CN-RTV")
+    assert own.status_code == 200, own.text
+    eng, rma_id = old_rma(rw, grn_id="G-OWN")
+    eng.price_lines(rma_id, unit_costs_paise=[50000], actor="old")
+    eng.dispatch(rma_id, carrier="DTDC", awb="AWB1", dispatch_date=None, actor="old")
+    with monkeypatch.context() as patched:
+        patched.setattr(rma_router, "_physical_return_problem", lambda *a, **k: None)
+        body, res = rma_note(rw, rma_id, 1000, "CN-RMA")
+    assert res.status_code == 200, res.text
+    rw["db"].vendor_rmas.update_one({"rma_id": rma_id}, {"$set": {"return_id": rid}})
+    before = returned(rw, rid)
+    assert before["credit_note_number"] == "CN-RTV" and before["credit_note_amount"] == 500
+    assert "credit_settled_on_rma" not in before
+    return rid, rma_id, body, before
+
+
+def test_replaying_the_rma_of_an_old_pair_leaves_the_returns_own_figures_alone(rw, monkeypatch):
+    rid, rma_id, body, before = old_pair(rw, monkeypatch)
+    again = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=body)
+    assert again.status_code == 200 and again.json()["idempotent"] is True
+    assert returned(rw, rid) == before
+    assert posted(rw) == (2, 150000) and credited(rw) == 150000
+
+
+def test_closing_the_rma_of_an_old_pair_leaves_the_returns_own_figures_alone(rw, monkeypatch):
+    rid, rma_id, _, before = old_pair(rw, monkeypatch)
+    closed = rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={})
+    assert closed.status_code == 200, closed.text
+    assert rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["status"] == "CLOSED"
+    assert returned(rw, rid) == before
+    assert posted(rw) == (2, 150000) and credited(rw) == 150000
+
+
+def test_closing_an_old_rma_over_a_replacement_return_records_no_credit_on_it(rw):
+    for sid in ("U1", "U2"):
+        unit(rw, sid)
+    rid = create(rw, line(qty=2, stock_ids=["U1", "U2"]), return_type="replacement").json()["return_id"]
+    assert move(rw, rid, "approved").status_code == 200
+    assert move(rw, rid, "shipped").status_code == 200
+    before = returned(rw, rid)
+    eng, rma_id = old_rma(rw, return_id=rid)
+    eng.dispatch(rma_id, carrier="DTDC", awb="AWB1", dispatch_date=None, actor="old")
+    eng.record_credit_note(rma_id, credit_note_number="OLD-CN", received_amount=1000, actor="old")
+    assert rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 200
+    assert returned(rw, rid) == before
+
+
+def test_closing_a_zero_acknowledged_rma_cannot_blank_a_returns_own_note(rw):
+    bought(rw, "U1", "U2", "U3", "U4")
+    rid = received_return(rw, "U1", "U2")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    _, own = rtv_note(rw, rid, 500, "CN-RTV")
+    assert own.status_code == 200, own.text
+    before = returned(rw, rid)
+    eng, rma_id = old_rma(rw, return_id=rid, grn_id="G-OWN")
+    eng.dispatch(rma_id, carrier="DTDC", awb="AWB1", dispatch_date=None, actor="old")
+    eng.record_credit_note(rma_id, credit_note_number="ZERO-ACK", received_amount=0, actor="old")
+    closed = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/close", json={"write_off_variance": True})
+    assert closed.status_code == 200, closed.text
+    assert returned(rw, rid) == before
+
+
 def test_a_lost_reply_repairs_the_return_summary_on_the_unchanged_retry(rw, monkeypatch):
     bought(rw, "U1", "U2")
     rid = received_return(rw, "U1", "U2")
