@@ -315,7 +315,7 @@ def _held_match() -> Dict:
                     _ie.status_match(_STATE.DAMAGED, *_STILL_OURS)]}
 
 
-def _accounted_for(db, item, store_id, vendor_id) -> Optional[str]:
+def _accounted_for(db, item, store_id, vendor_id, takes_credit: bool = True) -> Optional[str]:
     """Why a line naming no piece cannot take a supplier credit, in words; None
     when nothing says so. Its pieces are this shop's, and those it bought from
     this supplier wherever they are now (a transfer keeps the origin receipt).
@@ -323,10 +323,11 @@ def _accounted_for(db, item, store_id, vendor_id) -> Optional[str]:
     it has taken so far, and one held at a sister shop goes back from there: a
     line naming no piece claims neither (L2-RMA-F01). When every piece has been
     sold nothing the shop holds is going back (owner ruling 2026-11-06), so the
-    line is ticked customer-owned or a real piece goes back. A product with no
-    piece at all (off-inventory, made-to-order) is not this rule's. A piece
-    released to RTV on the Quarantine screen is on no return, has no other
-    credit door, and leaves the line standing."""
+    line is ticked customer-owned or a real piece goes back; that ruling is about
+    a credit, so a replacement return (takes_credit False) is not its concern. A
+    product with no piece at all (off-inventory, made-to-order) is not this
+    rule's. A piece released to RTV on the Quarantine screen is on no return, has
+    no other credit door, and leaves the line standing."""
     pids = _line_product_ids(db, item)
     bought = [g.get("grn_id") for g in db.get_collection("grns").find(
         {"store_id": store_id, "vendor_id": vendor_id, "items.product_id": {"$in": pids}})]
@@ -348,7 +349,7 @@ def _accounted_for(db, item, store_id, vendor_id) -> Optional[str]:
         return (f"{item.product_name}: the pieces this shop bought are now held at "
                 f"{_shop_name(db, away.get('store_id'))}. {tail}")
     pieces = [u.get("status") for u in stock.find(ours)]
-    if pieces and all(_ie.canonical_state(s) is _STATE.SOLD for s in pieces):
+    if takes_credit and pieces and all(_ie.canonical_state(s) is _STATE.SOLD for s in pieces):
         return (f"{item.product_name}: every piece this shop bought has been sold, so this line "
                 "cannot take a supplier credit. If a customer's piece is going back, raise it on "
                 "an RMA with customer-owned ticked and the customer or order named; otherwise "
@@ -435,7 +436,8 @@ def _pieces_for_lines(db, data: "VendorReturnCreate", user):
             why = _typed_line_problem(db, item, data.store_id)
             if why:
                 _refuse(why)
-            where = _accounted_for(db, item, data.store_id, data.vendor_id)
+            where = _accounted_for(db, item, data.store_id, data.vendor_id,
+                                   takes_credit=data.return_type == "credit_note")
             if where:
                 _refuse(where)
             typed = True

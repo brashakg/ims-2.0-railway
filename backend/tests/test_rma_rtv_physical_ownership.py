@@ -1751,3 +1751,24 @@ def test_a_rejected_rma_and_a_refused_note_do_not_hold_the_return(rw):
         "posting_status": "PENDING_EVIDENCE", "pending_reasons": []})
     assert rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 200
     assert replace(rw, rid).status_code == 200
+
+
+def test_a_replacement_return_of_a_sold_out_product_still_creates(rw):
+    """The owner's ruling is about a supplier credit: a replacement takes none."""
+    bought(rw, "U1", "U2", qty=2)
+    sold_rest(rw, "U1", "U2")
+    made = create(rw, line(qty=1), notes="Warranty swap, no barcode", return_type="replacement")
+    assert made.status_code in (200, 201), made.text
+    rid = made.json()["return_id"]
+    for step in ("approved", "shipped", "received_by_vendor", "replaced"):
+        assert move(rw, rid, step).status_code == 200, step
+    assert statuses(rw) == Counter({"SOLD": 2})
+    # The same line as a credit return is still refused.
+    assert create(rw, line(qty=1), notes="Warranty").status_code == 422
+
+
+def test_a_replacement_line_still_cannot_claim_goods_accounted_for_elsewhere(rw):
+    bought(rw, "U1", "U2", qty=2)
+    landed_at_b(rw, "U1", "U2")
+    refused = create(rw, line(qty=1), notes="Swap", return_type="replacement")
+    assert refused.status_code == 422 and "are now held at" in refused.json()["detail"]
