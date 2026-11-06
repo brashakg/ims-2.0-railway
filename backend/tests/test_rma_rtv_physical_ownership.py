@@ -1941,3 +1941,30 @@ def test_a_typed_returns_note_from_before_the_rule_is_told_truthfully_too(rw, mo
         assert "retry that same note" not in res.text
     assert returned(rw, rid)["status"] == "received_by_vendor"
     assert waiting(rw)["identity_claimed"] is True and posted(rw) == (0, 0) and credited(rw) == 0
+
+
+def test_a_settled_note_still_cannot_credit_goods_a_later_return_credits(rw, monkeypatch):
+    """Skipping the line check skips no cap: the same receipt's pieces going back
+    on a return later cannot be paid for twice, whichever note posts first."""
+    rma_id, body = pending_note(rw, monkeypatch, rma_id=off_shelf_rma(rw))
+    for sid in ("U1", "U2"):
+        unit(rw, sid, grn_id="G-OWN", source_type="GRN", source_id="G-OWN")
+    rid = received_return(rw, "U1", "U2")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    assert finish_pending(rw, rma_id, body, 1000).status_code == 200
+    _, later = rtv_note_open(rw, rid, 1000, "CN-RTV")
+    assert later.status_code == 200 and later.json()["confirmation"]["posting_status"] == "PENDING_EVIDENCE", later.text
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_a_settled_note_cannot_follow_the_return_that_credited_those_goods(rw, monkeypatch):
+    rma_id, body = pending_note(rw, monkeypatch, rma_id=off_shelf_rma(rw))
+    for sid in ("U1", "U2"):
+        unit(rw, sid, grn_id="G-OWN", source_type="GRN", source_id="G-OWN")
+    rid = received_return(rw, "U1", "U2")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    _, first = rtv_note(rw, rid, 1000, "CN-RTV")
+    assert first.status_code == 200, first.text
+    late = finish_pending(rw, rma_id, body, 1000)
+    assert late.status_code == 422 and "RECEIPT_QUANTITY_EXCEEDED" in late.text, late.text
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
