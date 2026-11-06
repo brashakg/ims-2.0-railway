@@ -543,6 +543,64 @@ def test_swapping_the_named_unit_of_the_same_product(client, shop):
     assert _order(shop, oid)["items"][0]["stock_id"] == "SU-FR-B"
 
 
+def _by_id(line, **over):
+    """The least a caller may send for a stored line: its id, type, qty, price."""
+    keys = ("item_id", "item_type", "quantity", "unit_price")
+    return {**{k: line[k] for k in keys}, **over}
+
+
+@pytest.mark.parametrize("route, body", [
+    ("superadmin-edit", {}),
+    ("superadmin-invoice-change", {"mode": "REVISED_INVOICE"}),
+])
+def test_a_line_sent_by_its_id_alone_is_still_the_stored_line(client, shop, invoiced, route, body):
+    """Omitting product_id is not a swap: it used to send the unit back to the
+    shelf while the bill went on charging for the piece."""
+    if route == "superadmin-edit":
+        oid = _saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A")])
+    else:
+        oid = invoiced([_line(FR, stock_id="SU-FR-A")])
+    stored = _order(shop, oid)["items"][0]
+    before = _ledger(shop)[0]
+    r = _edit(client, oid, [_by_id(stored, unit_price=4500.0)], route=route, **body)
+    assert r.status_code == 200, r.text
+    saved = _order(shop, oid)["items"][0]
+    assert (saved["product_id"], saved["stock_id"]) == (stored["product_id"], "SU-FR-A")
+    assert saved["unit_price"] == 4500.0
+    assert _ledger(shop)[0] == before
+
+
+def test_raising_the_quantity_by_id_alone_still_takes_a_unit(client, shop):
+    oid = _saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A")])
+    r = _edit(client, oid, [_by_id(_order(shop, oid)["items"][0], quantity=2)])
+    assert r.status_code == 200, r.text
+    assert "SU-FR-A" in _sold_to(shop, oid) and len(_sold_to(shop, oid)) == 2
+
+
+def test_raising_the_quantity_by_id_alone_past_the_shelf_is_refused(client, shop):
+    oid = _saved_bill(client, shop, [_line(ACC)])
+    before = _ledger(shop)
+    r = _edit(client, oid, [_by_id(_order(shop, oid)["items"][0], quantity=2)])
+    _refused_unchanged(shop, r, before, 409)
+
+
+def test_swapping_the_named_unit_by_id_alone_is_the_same_product(client, shop):
+    oid = _saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A")])
+    r = _edit(client, oid, [_by_id(_order(shop, oid)["items"][0], stock_id="SU-FR-B")])
+    assert r.status_code == 200, r.text
+    assert _sold_to(shop, oid) == ["SU-FR-B"]
+    assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
+
+
+def test_turning_a_line_into_a_free_text_service_is_still_a_replacement(client, shop):
+    """Control: a different KIND of goods with no product is a real swap."""
+    oid = _saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A")])
+    r = _edit(client, oid, [_by_id(_order(shop, oid)["items"][0], item_type="SERVICE")])
+    assert r.status_code == 200, r.text
+    assert _sold_to(shop, oid) == []
+    assert _order(shop, oid)["items"][0].get("product_id") in (None, "")
+
+
 def test_refused_replacement_keeps_the_old_unit(client, shop):
     oid = _saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A")])
     stored = _order(shop, oid)["items"][0]
@@ -740,6 +798,66 @@ def test_note_can_still_add_a_service_charge(client, shop, invoiced):
               route="superadmin-invoice-change", mode="CREDIT_NOTE")
     assert r.status_code == 200, r.text
     assert _ledger(shop) == before
+
+
+@pytest.fixture
+def no_product_table(monkeypatch):
+    """Any read of the product table by the edit is a failure."""
+    from api.routers.orders import admin_edit
+
+    def unreachable():
+        raise AssertionError("a note that adds no goods read the product table")
+
+    monkeypatch.setattr(admin_edit, "get_product_repository", unreachable, raising=False)
+
+
+@pytest.mark.parametrize("send", [
+    lambda line: _as_sent(line, unit_price=line["unit_price"] - 500.0),
+    lambda line: _by_id(line, unit_price=line["unit_price"] - 500.0),
+], ids=["whole-line", "by-id"])
+def test_note_correcting_a_stored_line_needs_no_product_read(
+    client, shop, invoiced, no_product_table, send
+):
+    oid = invoiced([_line(FR, stock_id="SU-FR-A")])
+    before = _ledger(shop)
+    r = _edit(client, oid, [send(_order(shop, oid)["items"][0])],
+              route="superadmin-invoice-change", mode="CREDIT_NOTE")
+    assert r.status_code == 200, r.text
+    assert (r.json()["note_type"], r.json()["amount"]) == ("CREDIT_NOTE", 500.0)
+    assert _ledger(shop) == before
+    assert _order(shop, oid)["items"][0]["stock_id"] == "SU-FR-A"
+
+
+def test_note_with_no_lines_sent_needs_no_product_read(client, shop, invoiced, no_product_table):
+    oid = invoiced([_line(FR, stock_id="SU-FR-A")])
+    r = client.put(f"/api/v1/orders/{oid}/superadmin-invoice-change", headers=_token(ADMIN),
+                   json={"reason": "correcting this bill", "mode": "CREDIT_NOTE",
+                         "cart_discount_percent": 10.0})
+    assert r.status_code == 200, r.text
+    assert r.json()["note_type"] == "CREDIT_NOTE"
+
+
+def test_note_on_an_old_line_with_no_type_is_still_a_correction(
+    client, shop, invoiced, no_product_table
+):
+    """The edit screen sends FRAME for a stored line with no item_type."""
+    oid = invoiced([_line(FR, stock_id="SU-FR-A")])
+    stored = _order(shop, oid)["items"][0]
+    sent = _as_sent(stored, item_type="FRAME", unit_price=stored["unit_price"] - 500.0)
+    shop["db"].get_collection("orders").update_one(
+        {"order_id": oid}, {"$unset": {"items.0.item_type": ""}}
+    )
+    r = _edit(client, oid, [sent], route="superadmin-invoice-change", mode="CREDIT_NOTE")
+    assert r.status_code == 200, r.text
+    assert (r.json()["note_type"], r.json()["amount"]) == ("CREDIT_NOTE", 500.0)
+
+
+def test_note_raising_a_quantity_is_new_goods_and_is_refused(client, shop, invoiced):
+    oid = invoiced([_line(FR, stock_id="SU-FR-A")])
+    before = _ledger(shop)
+    r = _edit(client, oid, [_by_id(_order(shop, oid)["items"][0], quantity=2)],
+              route="superadmin-invoice-change", mode="CREDIT_NOTE")
+    _refused_unchanged(shop, r, before, 409)
 
 
 def test_revised_invoice_refuses_a_new_zero_stock_line_and_mints_no_number(

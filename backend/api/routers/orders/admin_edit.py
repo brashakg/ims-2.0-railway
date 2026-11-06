@@ -110,6 +110,14 @@ def _write_order_edit_audit(
     return True
 
 
+def _same_kind(line: dict, stored: dict) -> bool:
+    """Same kind of stock? An unreadable type (an old line with none) is a
+    shelf item, as _takes_serialized_stock has it."""
+    return (_stock_class(line.get("item_type")) or "serialized") == (
+        _stock_class(stored.get("item_type")) or "serialized"
+    )
+
+
 def _same_goods(line: dict, stored: dict) -> bool:
     """Is this edited line still the stored line's physical goods? Same product,
     same kind of stock, and not a different named unit. Anything else is a
@@ -117,7 +125,7 @@ def _same_goods(line: dict, stored: dict) -> bool:
     sid = line.get("stock_id")
     return (
         (line.get("product_id") or "") == (stored.get("product_id") or "")
-        and _stock_class(line.get("item_type")) == _stock_class(stored.get("item_type"))
+        and _same_kind(line, stored)
         and (not sid or sid == stored.get("stock_id"))
     )
 
@@ -181,6 +189,10 @@ def _rebuilt_items_or_existing(
     added: List[dict] = []
     for payload, stored in zip(payloads, paired):
         stored = stored or {}
+        # A line sent without its product still bills the stored one: leaving
+        # the field out is not a swap, and must not free the unit it holds.
+        if stored and not payload.get("product_id") and _same_kind(payload, stored):
+            payload["product_id"] = stored.get("product_id")
         same = bool(stored) and _same_goods(payload, stored)
         carried = ["discount_reason", "discount_approved_by", "discount_approved_by_name"]
         if same:
@@ -217,7 +229,10 @@ def _gate_added_lines(added: List[dict], store_id: Optional[str]) -> None:
     """Goods an edit newly bills meet the till's rules (L2-STOCK-F01/F02, L1-F39):
     a billable, unarchived master, the master's stock type, and units on this
     shop's shelf. Read-only; _claim_units takes the units. The caps and floors
-    are not re-applied: price stays the admin's, this door's audited override."""
+    are not re-applied: price stays the admin's, this door's audited override.
+    An edit that adds nothing touches neither the product table nor the shelf."""
+    if not added:
+        return
     product_repo = get_product_repository()
     if product_repo is not None:
         for line in added:
