@@ -339,7 +339,8 @@ _RETURN_KEYS = (
 # quantity and the reason, never a unit price, rate or line value under any
 # name. ONE allow-list for both kinds of return (return_line_for_reader), so a
 # price key added later under a new name stays hidden on both.
-_RETURN_ITEM_KEYS = ("product_id", "product_name", "quantity", "reason")
+_RETURN_ITEM_KEYS = ("product_id", "product_name", "quantity", "reason",
+                     "customer_owned", "customer_id", "order_id")
 _DEBIT_NOTE_KEYS = (
     "debit_note_id", "debit_note_number", "financial_year", "issue_date",
     "entity_id", "store_id", "seller", "rtv_ref", "rtv_ref_id",

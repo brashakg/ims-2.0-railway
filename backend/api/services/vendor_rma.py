@@ -339,11 +339,15 @@ class VendorRMAEngine:
             unit_paise = _unit_paise(ln)
             if unit_paise is not None and unit_paise < 0:
                 return {"ok": False, "error": "bad_unit_cost"}
+            # Owner ruling 2026-11-06: only the line says whose piece it is.
+            owner = ({"customer_owned": True, "customer_id": ln.get("customer_id"),
+                      "order_id": ln.get("order_id")} if ln.get("customer_owned") else {})
             norm_lines.append(_priced_line({
                 "product_id": ln.get("product_id"),
                 "product_name": ln.get("product_name"),
                 "quantity": qty,
                 "reason": reason,
+                **owner,
             }, unit_paise))
 
         # None while any line is unpriced: the accounts roles price it later

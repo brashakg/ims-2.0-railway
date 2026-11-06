@@ -59,6 +59,7 @@ from . import vendor_returns as _rtv
 from .auth import require_roles
 from ..dependencies import (
     get_db,
+    can_access_store_scoped,
     in_reach_or_404,
     resolve_store_scope,
     validate_store_access,
@@ -134,6 +135,12 @@ class RMALineCreate(BaseModel):
     # A manager raises the RMA without it; an accounts role prices it here or
     # later (PUT /{rma_id}/prices).
     unit_cost: Optional[float] = Field(None, ge=0, le=10_000_000)
+    # Owner ruling 2026-11-06: this piece is the customer's, not shop stock. No
+    # shop stock is touched for it, and it names the customer or the order
+    # (order id or number). Unticked, the line is shop stock.
+    customer_owned: bool = False
+    customer_id: Optional[str] = Field(None, max_length=120)
+    order_id: Optional[str] = Field(None, max_length=120)
 
 
 class RMACreate(BaseModel):
@@ -220,6 +227,27 @@ def _masked(doc: dict, user: dict) -> dict:
     return result
 
 
+def _customer_piece_problem(db, line: RMALineCreate, user: dict) -> Optional[str]:
+    """Why a line ticked customer_owned cannot be raised; None when it can: it
+    names a customer or an order the caller may reach (owner ruling 2026-11-06).
+    One out of reach reads as unknown, as a guessed id does on any by-id door."""
+    from .customers import customer_in_scope
+
+    customer_id, order_id = (line.customer_id or "").strip(), (line.order_id or "").strip()
+    if not customer_id and not order_id:
+        return f"{line.product_name}: a customer's own piece needs its customer_id or order_id."
+    if customer_id:
+        customer = db.get_collection("customers").find_one({"customer_id": customer_id})
+        if not customer or not customer_in_scope(customer, user):
+            return f"{line.product_name}: customer {customer_id} was not found."
+    if order_id:
+        order = db.get_collection("orders").find_one(
+            {"$or": [{"order_id": order_id}, {"order_number": order_id}]})
+        if not order or not can_access_store_scoped(order.get("store_id"), user):
+            return f"{line.product_name}: order {order_id} was not found."
+    return None
+
+
 def _physical_return_problem(db, doc: dict, *, shipped: bool) -> Optional[str]:
     """Why this RMA's goods have not left the shop's stock; None when they have
     (L2-RMA-F01). A line for a product this shop holds pieces of -- THE Vendor
@@ -260,6 +288,11 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool) -> Optional[str]:
                         "is no longer held for it.")
     wanted: Counter = Counter()
     for line in doc.get("lines") or []:
+        if line.get("customer_owned"):
+            if line.get("product_id") in pieces:
+                return (f"{line.get('product_name')}: raise the customer's own piece on its own "
+                        f"RMA, not with the shop's pieces of vendor return {rid}.")
+            continue
         if line.get("product_id") in pieces:
             wanted[line.get("product_id")] += int(line.get("quantity") or 0)
             continue
@@ -268,7 +301,8 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool) -> Optional[str]:
             doc.get("store_id"))
         if why:
             return (why + " Put them on a vendor return (Purchase > Vendor Returns) and "
-                    "raise the RMA with its return_id.")
+                    "raise the RMA with its return_id; a customer's own piece is sent as "
+                    "customer_owned with its customer_id or order_id.")
     if wanted != pieces:
         return f"Vendor return {rid}'s pieces are not this RMA's products and quantities."
     return None
@@ -340,6 +374,10 @@ async def raise_rma(
     eng = _engine()
     if eng._coll() is None:  # noqa: SLF001 - intentional fail-soft DB probe
         raise HTTPException(status_code=503, detail="Database not available")
+    for ln in body.lines:
+        problem = ln.customer_owned and _customer_piece_problem(_get_db(), ln, current_user)
+        if problem:
+            raise HTTPException(status_code=422, detail=problem)
     _require_physical_return(
         {"store_id": body.store_id, "vendor_id": body.vendor_id, "return_id": body.return_id,
          "lines": [ln.model_dump() for ln in body.lines]},
@@ -351,6 +389,9 @@ async def raise_rma(
             "quantity": ln.quantity,
             "reason": ln.reason,
             "unit_cost": ln.unit_cost,
+            "customer_owned": ln.customer_owned,
+            "customer_id": (ln.customer_id or "").strip() or None,
+            "order_id": (ln.order_id or "").strip() or None,
         }
         for ln in body.lines
     ]

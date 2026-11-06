@@ -361,3 +361,89 @@ def test_once_released_the_same_pieces_go_back_and_reconcile_end_to_end(rw):
     assert statuses(rw) == Counter({"RTV": 2}) and posted(rw) == (1, 100000)
     for sid in ("U1", "U2"):
         assert [e[0] for e in events(rw, sid)] == ["quarantine.in", "quarantine.out"]
+
+
+# --------------------------------------------------------------------------
+# Owner ruling 2026-11-06: each RMA line says whose piece it is
+# --------------------------------------------------------------------------
+
+CUSTOMER = "CUST-OWN-1"
+
+
+def own_line(**extra):
+    return {"product_id": FRAME, "product_name": "Acme Aviator 5420", "quantity": 1, "reason": "WARRANTY",
+            "customer_owned": True, **extra}
+
+
+def raise_lines(w, *lines, user=MANAGER, **extra):
+    return w["as_"](user).post("/vendor-rma/", json={
+        "vendor_id": DEALER, "vendor_name": "Bank More", "store_id": STORE, "lines": list(lines), **extra})
+
+
+def test_a_customers_own_piece_of_a_stocked_model_raises_and_touches_no_stock(rw):
+    rw["db"].customers.insert_one({"customer_id": CUSTOMER, "store_id": STORE, "name": "A Customer"})
+    unit(rw, "U1")
+    unit(rw, "U2", status="RESERVED")
+    made = raise_lines(rw, own_line(customer_id=CUSTOMER), notes="The shelf pieces are unrelated.")
+    assert made.status_code == 201, made.text
+    rma_id = made.json()["rma_id"]
+    saved = rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["lines"][0]
+    assert saved["customer_owned"] is True and saved["customer_id"] == CUSTOMER
+    # The manager reads back what was declared, without the money.
+    seen = rw["as_"](MANAGER).get(f"/vendor-rma/{rma_id}").json()["lines"][0]
+    assert seen["customer_owned"] is True and seen["customer_id"] == CUSTOMER
+    assert "unit_cost_paise" not in seen
+    http = rw["as_"]
+    assert http(MANAGER).post(f"/vendor-rma/{rma_id}/authorize", json={"vendor_rma_number": "VR-1"}).status_code == 200
+    assert http(ACCOUNTANT).put(f"/vendor-rma/{rma_id}/prices", json={"unit_costs": [500]}).status_code == 200
+    assert http(MANAGER).post(f"/vendor-rma/{rma_id}/dispatch", json={"carrier": "D", "awb": "A"}).status_code == 200
+    note = credit_payload(rw["db"], rma_id, amount=500.0)
+    assert http(ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=note).status_code == 200
+    assert http(MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 200
+    assert statuses(rw) == Counter({"AVAILABLE": 1, "RESERVED": 1})
+    assert events(rw, "U1") == [] and events(rw, "U2") == []
+    assert posted(rw) == (1, 50000)
+
+
+def test_the_same_line_unticked_is_shop_stock_and_is_refused(rw):
+    unit(rw, "U1")
+    refused = raise_lines(rw, {**own_line(), "customer_owned": False})
+    assert refused.status_code == 422 and "customer_owned" in refused.json()["detail"]
+    assert rw["db"].vendor_rmas.count_documents({}) == 0
+
+
+@pytest.mark.parametrize("ref", [{}, {"customer_id": "  "}, {"customer_id": "CUST-NOPE"},
+                                 {"order_id": "ORD-NOPE"}, {"order_id": "ORD-B"}])
+def test_a_ticked_line_needs_a_real_customer_or_order_in_reach(rw, ref):
+    rw["db"].orders.insert_one({"order_id": "ORD-B", "store_id": SHOP_B})
+    unit(rw, "U1")
+    refused = raise_lines(rw, own_line(**ref))
+    assert refused.status_code == 422, refused.text
+    assert rw["db"].vendor_rmas.count_documents({}) == 0
+    assert statuses(rw) == Counter({"AVAILABLE": 1})
+
+
+def test_a_ticked_line_may_name_its_order_instead(rw):
+    rw["db"].orders.insert_one({"order_id": "ORD-A", "order_number": "BV-1", "store_id": STORE})
+    for ref in ("ORD-A", "BV-1"):
+        made = raise_lines(rw, own_line(order_id=ref))
+        assert made.status_code == 201, made.text
+    hq = raise_lines(rw, own_line(order_id="ORD-A"), user=ADMIN)
+    assert hq.status_code == 201, hq.text
+
+
+def test_a_customers_piece_cannot_ride_a_return_of_the_same_product(rw):
+    rw["db"].customers.insert_one({"customer_id": CUSTOMER, "store_id": STORE})
+    rid = shipped_return(rw, "U1")
+    mixed = raise_lines(rw, {"product_id": FRAME, "product_name": "Acme Aviator 5420", "quantity": 1,
+                             "reason": "DEFECTIVE"}, own_line(customer_id=CUSTOMER), return_id=rid)
+    assert mixed.status_code == 422, mixed.text
+    assert "own RMA" in mixed.json()["detail"]
+
+
+def test_an_old_unflagged_line_with_nothing_held_keeps_todays_outcome(rw):
+    eng, rma_id = old_rma(rw, product=OFF_INVENTORY, name="Customer's own frame", qty=1)
+    res = rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/dispatch", json={"carrier": "D", "awb": "A"})
+    assert res.status_code == 200, res.text
+    saved = rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["lines"][0]
+    assert "customer_owned" not in saved  # historical lines are not rewritten
