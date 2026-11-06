@@ -259,13 +259,17 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
     products and quantities, on no other RMA. That return moves them
     (QUARANTINED -> RTV on its Ship), never this RMA, so no piece leaves twice.
     ``shipped`` (dispatch, credit, close) asks that they have left; at raise
-    they may still be set aside for it. An unticked line this shop holds no
-    piece of (a historical line, a made-to-order lens) keeps today's outcome.
+    they may still be set aside for it. Nor may an unticked, unlinked line claim
+    what this shop already sent this supplier on a vendor return
+    (_rtv._sent_back_on): those pieces hold that return's credit. An unticked
+    line with neither (a historical line, a made-to-order lens) keeps today's
+    outcome.
 
     The return must still be owed a credit this RMA can take: not one settled
     by replacement goods, and not one already holding a supplier note of its
-    own (services/rma_supplier_credit). ``closing`` skips that: closing moves no
-    money, and an old pair that already holds notes on both doors must end."""
+    own (services/rma_supplier_credit). ``closing`` skips both money checks:
+    closing moves no money, an RMA cannot gain a link later, and an old row or
+    pair that already holds notes must end."""
     if db is None:
         return "Stock data is unavailable; retry shortly."
     rid = doc.get("return_id")
@@ -309,13 +313,18 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
         if line.get("product_id") in pieces:
             wanted[line.get("product_id")] += int(line.get("quantity") or 0)
             continue
-        why = _rtv._typed_line_problem(db, SimpleNamespace(
-            product_id=line.get("product_id"), product_name=line.get("product_name")),
-            doc.get("store_id"))
+        item = SimpleNamespace(product_id=line.get("product_id"), product_name=line.get("product_name"))
+        why = _rtv._typed_line_problem(db, item, doc.get("store_id"))
         if why:
             return (why + " Put them on a vendor return (Purchase > Vendor Returns) and "
                     "raise the RMA with its return_id; a customer's own piece is sent as "
                     "customer_owned with its customer_id or order_id.")
+        gone = None if closing else _rtv._sent_back_on(db, item, doc.get("store_id"), doc.get("vendor_id"))
+        if gone:
+            return (f"{line.get('product_name')}: this shop's pieces of it already went back to "
+                    f"this supplier on vendor return {gone}. Raise the RMA with that return_id; "
+                    "a customer's own piece is sent as customer_owned with its customer_id or "
+                    "order_id.")
     if wanted != pieces:
         return f"Vendor return {rid}'s pieces are not this RMA's products and quantities."
     return None

@@ -295,6 +295,31 @@ def _gstin_refusal(db, receipt_store, store_id, gstins, label) -> Optional[str]:
     return None
 
 
+def _line_product_ids(db, item) -> List[str]:
+    """The catalogued products a typed line means: its id, exact name or SKU."""
+    pids = {item.product_id}
+    name = (item.product_name or "").strip()
+    if name:
+        exact = {"$regex": f"^{re.escape(name)}$", "$options": "i"}
+        pids |= {p.get("product_id") for p in db.get_collection("products").find(
+            {"$or": [{"name": exact}, {"sku": exact}]})}
+    return sorted(p for p in pids if p)
+
+
+def _sent_back_on(db, item, store_id, vendor_id) -> Optional[str]:
+    """The return of this supplier that this shop's pieces of a typed line's
+    product already left on, if any. They are that return's to credit, whatever
+    it has taken so far: a line naming no piece never claims them a second time
+    (L2-RMA-F01). A piece released to RTV on the Quarantine screen is on no
+    return, has no other credit door, and is not counted."""
+    links = [u.get("rtv_vendor_id") for u in db.get_collection("stock_units").find({
+        "product_id": {"$in": _line_product_ids(db, item)}, "store_id": store_id,
+        **_ie.status_match(_STATE.RTV)})]
+    ret = db.get_collection("vendor_returns").find_one(
+        {"return_id": {"$in": [link for link in links if link]}, "vendor_id": vendor_id})
+    return (ret or {}).get("return_id")
+
+
 def _typed_line_problem(db, item, store_id) -> Optional[str]:
     """A line naming no piece is refused when it is (by id, exact name or SKU)
     a catalogued product this shop still holds pieces of, sellable or not
@@ -303,14 +328,8 @@ def _typed_line_problem(db, item, store_id) -> Optional[str]:
     with this shop's id on it) -- they are scanned instead; when none of them
     can go on this return, it says why. A reserved piece is refused, never
     moved: its order lets go of it first (L2-RMA-F01)."""
-    pids = {item.product_id}
-    name = (item.product_name or "").strip()
-    if name:
-        exact = {"$regex": f"^{re.escape(name)}$", "$options": "i"}
-        pids |= {p.get("product_id") for p in db.get_collection("products").find(
-            {"$or": [{"name": exact}, {"sku": exact}]})}
     held = list(db.get_collection("stock_units").find({
-        "product_id": {"$in": sorted(p for p in pids if p)}, "store_id": store_id,
+        "product_id": {"$in": _line_product_ids(db, item)}, "store_id": store_id,
         "$or": [_ie.on_hand_match(include_reserved=True),
                 _ie.status_match(_STATE.DAMAGED, *_STILL_OURS)],
     }))
@@ -383,6 +402,11 @@ def _pieces_for_lines(db, data: "VendorReturnCreate", user):
             why = _typed_line_problem(db, item, data.store_id)
             if why:
                 _refuse(why)
+            gone = _sent_back_on(db, item, data.store_id, data.vendor_id)
+            if gone:
+                _refuse(f"{item.product_name}: this shop's pieces of it already went back to this "
+                        f"supplier on vendor return {gone}. Their credit belongs on that return, "
+                        "not on a line naming no piece.")
             typed = True
         lines.append(pieces)
     if typed and not (data.notes or "").strip():

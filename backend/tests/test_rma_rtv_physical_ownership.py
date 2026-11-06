@@ -481,6 +481,109 @@ def test_the_reported_double_credit_with_the_other_pieces_on_the_way_is_refused(
     assert statuses(rw) == Counter({"RTV": 2, "TRANSFERRED": 2})
 
 
+def sold_rest(w, *sids):
+    w["db"].stock_units.update_many({"stock_id": {"$in": list(sids)}}, {"$set": {"status": "SOLD"}})
+
+
+def test_an_unlinked_rma_cannot_claim_pieces_a_return_already_sent_back(rw):
+    """Nothing is held, so only the return's RTV pieces show where the goods went."""
+    bought(rw, "U1", "U2", "U3", "U4")
+    rid = received_return(rw, "U1", "U2")
+    sold_rest(rw, "U3", "U4")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    _, first = rtv_note(rw, rid, 1000, "CN-RTV")
+    assert first.status_code == 200, first.text
+    refused = raise_rma(rw, grn_id="G-OWN")
+    assert refused.status_code == 422, refused.text
+    assert rid in refused.json()["detail"] and "customer_owned" in refused.json()["detail"]
+    assert rw["db"].vendor_rmas.count_documents({}) == 0
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+    assert statuses(rw) == Counter({"RTV": 2, "SOLD": 2})
+
+
+def test_it_is_refused_before_the_return_is_credited_too_and_the_return_keeps_its_door(rw):
+    bought(rw, "U1", "U2", "U3", "U4")
+    rid = received_return(rw, "U1", "U2")
+    sold_rest(rw, "U3", "U4")
+    assert raise_rma(rw, grn_id="G-OWN").status_code == 422
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    _, own = rtv_note(rw, rid, 1000, "CN-RTV")
+    assert own.status_code == 200, own.text
+    assert posted(rw) == (1, 100000)
+
+
+@pytest.mark.parametrize("door", ["dispatch", "credit-note"])
+def test_an_old_unlinked_rma_cannot_take_money_for_pieces_a_return_sent_back(rw, door):
+    bought(rw, "U1", "U2", "U3", "U4")
+    eng, rma_id = old_rma(rw, grn_id="G-OWN")  # raised before the return shipped, through no door
+    rid = received_return(rw, "U1", "U2")
+    sold_rest(rw, "U3", "U4")
+    http = rw["as_"]
+    if door == "dispatch":
+        res = http(MANAGER).post(f"/vendor-rma/{rma_id}/dispatch", json={"carrier": "DTDC", "awb": "AWB1"})
+    else:
+        eng.dispatch(rma_id, carrier="DTDC", awb="AWB1", dispatch_date=None, actor="old")
+        res = http(ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note",
+                                    json=credit_payload(rw["db"], rma_id, amount=1000.0))
+    assert res.status_code == 409, res.text
+    assert rid in str(res.json()["detail"])
+    assert posted(rw) == (0, 0)
+
+
+def test_an_old_credited_rma_can_still_close_closing_moves_no_money(rw):
+    """It has no door left but close and can gain no link; the pieces have left."""
+    bought(rw, "U1", "U2", "U3", "U4")
+    eng, rma_id = old_rma(rw, grn_id="G-OWN")
+    eng.dispatch(rma_id, carrier="DTDC", awb="AWB1", dispatch_date=None, actor="old")
+    eng.record_credit_note(rma_id, credit_note_number="OLD-CN", received_amount=1000, actor="old")
+    rid = received_return(rw, "U1", "U2")
+    sold_rest(rw, "U3", "U4")
+    res = rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={})
+    assert res.status_code == 200, res.text
+    assert returned(rw, rid)["status"] == "received_by_vendor" and posted(rw) == (0, 0)
+
+
+def test_a_customers_own_piece_passes_a_return_that_sent_the_shops_back(rw):
+    rw["db"].customers.insert_one({"customer_id": "CUST-OWN-2", "store_id": STORE, "name": "A Customer"})
+    bought(rw, "U1", "U2", qty=2)
+    received_return(rw, "U1", "U2")
+    made = rw["as_"](MANAGER).post("/vendor-rma/", json={
+        "vendor_id": DEALER, "vendor_name": "Bank More", "store_id": STORE, "lines": [
+            {"product_id": FRAME, "product_name": "Acme Aviator 5420", "quantity": 1, "reason": "WARRANTY",
+             "customer_owned": True, "customer_id": "CUST-OWN-2"}]})
+    assert made.status_code == 201, made.text
+
+
+def test_pieces_another_supplier_took_back_or_no_return_sent_do_not_block_this_supplier(rw):
+    """The rule is this supplier's return: another supplier's holds no credit
+    from this one, and a Quarantine-screen RTV release has no other credit door."""
+    unit(rw, "U1", status="RTV", rtv_vendor_id="VR-OTHER")
+    unit(rw, "U2", status="RTV", rtv_vendor_id=DEALER)
+    unit(rw, "U3", status="RTV")
+    rw["db"].vendor_returns.insert_one({"return_id": "VR-OTHER", "vendor_id": "V-OTHER", "store_id": STORE,
+                                        "status": "received_by_vendor"})
+    made = raise_rma(rw, qty=1)
+    assert made.status_code == 201, made.text
+
+
+def test_another_shops_return_does_not_block_this_shops_line(rw):
+    unit(rw, "U1", status="RTV", store=SHOP_B, rtv_vendor_id="VR-B")
+    rw["db"].vendor_returns.insert_one({"return_id": "VR-B", "vendor_id": DEALER, "store_id": SHOP_B,
+                                        "status": "received_by_vendor"})
+    assert raise_rma(rw, qty=1).status_code == 201
+
+
+def test_a_typed_return_line_cannot_claim_pieces_another_return_sent_back_either(rw):
+    """The twin door: the same second credit through a typed vendor return."""
+    bought(rw, "U1", "U2", "U3", "U4")
+    rid = received_return(rw, "U1", "U2")
+    sold_rest(rw, "U3", "U4")
+    typed = create(rw, line(qty=2), notes="Typed, no piece named", grn_id="G-OWN")
+    assert typed.status_code == 422, typed.text
+    assert rid in typed.json()["detail"]
+    assert rw["db"].vendor_returns.count_documents({}) == 1
+
+
 def test_a_return_with_its_own_credit_cannot_gain_an_rma(rw):
     bought(rw, "U1", "U2", "U3", "U4")
     rid = received_return(rw, "U1", "U2")
