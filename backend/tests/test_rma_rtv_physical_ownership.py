@@ -584,6 +584,66 @@ def test_a_typed_return_line_cannot_claim_pieces_another_return_sent_back_either
     assert rw["db"].vendor_returns.count_documents({}) == 1
 
 
+def landed_at_b(w, *sids):
+    """A received transfer: the piece is the sister shop's, its origin receipt stays."""
+    w["db"].stock_units.update_many({"stock_id": {"$in": list(sids)}}, {"$set": {"store_id": SHOP_B}})
+
+
+def test_pieces_landed_at_a_sister_shop_are_not_this_shops_to_credit(rw):
+    """Codex's request A one step later: the receiving shop has them on sale."""
+    bought(rw, "U1", "U2", qty=2)
+    landed_at_b(rw, "U1", "U2")
+    refused = raise_rma(rw, grn_id="G-OWN")
+    assert refused.status_code == 422, refused.text
+    assert "are now held at" in refused.json()["detail"]
+    assert rw["db"].vendor_rmas.count_documents({}) == 0 and posted(rw) == (0, 0)
+    assert statuses(rw) == Counter({"AVAILABLE": 2})
+
+
+def test_leaving_the_receipt_off_finds_the_same_pieces(rw):
+    bought(rw, "U1", "U2", qty=2)
+    landed_at_b(rw, "U1", "U2")
+    assert raise_rma(rw).status_code == 422
+
+
+def test_a_return_shipped_from_the_sister_shop_is_not_credited_again_here(rw):
+    """The double credit through two shops: bought here, sent back from there."""
+    bought(rw, "U1", "U2", "U3", "U4")
+    sold_rest(rw, "U3", "U4")
+    landed_at_b(rw, "U1", "U2")
+    rw["db"].vendor_returns.insert_one({"return_id": "VR-B", "vendor_id": DEALER, "store_id": SHOP_B,
+                                        "status": "credit_issued", "stock_ids": ["U1", "U2"]})
+    rw["db"].stock_units.update_many({"stock_id": {"$in": ["U1", "U2"]}},
+                                     {"$set": {"status": "RTV", "rtv_vendor_id": "VR-B"}})
+    refused = raise_rma(rw, grn_id="G-OWN")
+    assert refused.status_code == 422, refused.text
+    assert "VR-B" in refused.json()["detail"]
+    assert rw["db"].vendor_rmas.count_documents({}) == 0
+
+
+def test_a_typed_return_line_cannot_claim_pieces_landed_at_a_sister_shop_either(rw):
+    bought(rw, "U1", "U2", qty=2)
+    landed_at_b(rw, "U1", "U2")
+    typed = create(rw, line(qty=2), notes="Typed, no piece named", grn_id="G-OWN")
+    assert typed.status_code == 422, typed.text
+    assert "are now held at" in typed.json()["detail"]
+
+
+def test_a_sister_shops_own_purchase_is_not_this_shops_concern(rw):
+    """Bought there, held there: a line here claims none of it, as before."""
+    rw["db"].grns.insert_one({"grn_id": "G-B", "store_id": SHOP_B, "vendor_id": DEALER, "status": "ACCEPTED",
+                              "items": [{"product_id": FRAME, "accepted_qty": 1}]})
+    unit(rw, "U1", store=SHOP_B, grn_id="G-B", source_type="GRN", source_id="G-B")
+    assert raise_rma(rw, qty=1).status_code == 201
+
+
+def test_pieces_all_sold_stay_todays_outcome(rw):
+    """Gone to customers: nothing shows where a line naming no piece is wrong."""
+    bought(rw, "U1", "U2", qty=2)
+    sold_rest(rw, "U1", "U2")
+    assert raise_rma(rw, grn_id="G-OWN").status_code == 201
+
+
 def test_a_return_with_its_own_credit_cannot_gain_an_rma(rw):
     bought(rw, "U1", "U2", "U3", "U4")
     rid = received_return(rw, "U1", "U2")

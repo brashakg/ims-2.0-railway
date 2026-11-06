@@ -260,10 +260,10 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
     (QUARANTINED -> RTV on its Ship), never this RMA, so no piece leaves twice.
     ``shipped`` (dispatch, credit, close) asks that they have left; at raise
     they may still be set aside for it. Nor may an unticked, unlinked line claim
-    what this shop already sent this supplier on a vendor return
-    (_rtv._sent_back_on): those pieces hold that return's credit. An unticked
-    line with neither (a historical line, a made-to-order lens) keeps today's
-    outcome.
+    what is accounted for elsewhere (_rtv._accounted_for): pieces this supplier's
+    return already carried back, or this shop's purchase now at a sister shop.
+    An unticked line with neither (a historical line, a made-to-order lens, a
+    piece sold on) keeps today's outcome.
 
     The return must still be owed a credit this RMA can take: not one settled
     by replacement goods, and not one already holding a supplier note of its
@@ -319,12 +319,11 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
             return (why + " Put them on a vendor return (Purchase > Vendor Returns) and "
                     "raise the RMA with its return_id; a customer's own piece is sent as "
                     "customer_owned with its customer_id or order_id.")
-        gone = None if closing else _rtv._sent_back_on(db, item, doc.get("store_id"), doc.get("vendor_id"))
-        if gone:
-            return (f"{line.get('product_name')}: this shop's pieces of it already went back to "
-                    f"this supplier on vendor return {gone}. Raise the RMA with that return_id; "
-                    "a customer's own piece is sent as customer_owned with its customer_id or "
-                    "order_id.")
+        where = None if closing else _rtv._accounted_for(db, item, doc.get("store_id"), doc.get("vendor_id"))
+        if where:
+            return (f"{line.get('product_name')}: the pieces this shop bought {where}. They go back "
+                    "from that shop, on a vendor return the RMA links by return_id; a customer's "
+                    "own piece is sent as customer_owned with its customer_id or order_id.")
     if wanted != pieces:
         return f"Vendor return {rid}'s pieces are not this RMA's products and quantities."
     return None

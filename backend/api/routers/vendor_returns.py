@@ -306,32 +306,48 @@ def _line_product_ids(db, item) -> List[str]:
     return sorted(p for p in pids if p)
 
 
-def _sent_back_on(db, item, store_id, vendor_id) -> Optional[str]:
-    """The return of this supplier that this shop's pieces of a typed line's
-    product already left on, if any. They are that return's to credit, whatever
-    it has taken so far: a line naming no piece never claims them a second time
-    (L2-RMA-F01). A piece released to RTV on the Quarantine screen is on no
-    return, has no other credit door, and is not counted."""
-    links = [u.get("rtv_vendor_id") for u in db.get_collection("stock_units").find({
-        "product_id": {"$in": _line_product_ids(db, item)}, "store_id": store_id,
-        **_ie.status_match(_STATE.RTV)})]
+def _held_match() -> Dict:
+    """Mongo fragment: a piece a shop still holds, sellable or not (on the
+    shelf, reserved for an order, damaged, or still ours off the shelf:
+    product_cost's set aside, in a count, on the way to a sister shop)."""
+    return {"$or": [_ie.on_hand_match(include_reserved=True),
+                    _ie.status_match(_STATE.DAMAGED, *_STILL_OURS)]}
+
+
+def _accounted_for(db, item, store_id, vendor_id) -> Optional[str]:
+    """Where a typed line's goods already are, in words; None when nothing says
+    so. Its pieces are this shop's, and those it bought from this supplier
+    wherever they are now (a transfer keeps the origin receipt). One that left
+    on this supplier's return is that return's to credit, whatever it has taken
+    so far, and one held at a sister shop goes back from there: a line naming
+    no piece claims neither (L2-RMA-F01). A piece released to RTV on the
+    Quarantine screen is on no return, has no other credit door, and is not
+    counted; nor is a sold one."""
+    pids = _line_product_ids(db, item)
+    bought = [g.get("grn_id") for g in db.get_collection("grns").find(
+        {"store_id": store_id, "vendor_id": vendor_id, "items.product_id": {"$in": pids}})]
+    ours = {"product_id": {"$in": pids},
+            "$or": [{"store_id": store_id}, {"grn_id": {"$in": bought}}, {"source_id": {"$in": bought}}]}
+    stock = db.get_collection("stock_units")
+    links = [u.get("rtv_vendor_id") for u in stock.find({**ours, **_ie.status_match(_STATE.RTV)})]
     ret = db.get_collection("vendor_returns").find_one(
         {"return_id": {"$in": [link for link in links if link]}, "vendor_id": vendor_id})
-    return (ret or {}).get("return_id")
+    if ret:
+        return (f"already went back to this supplier on vendor return {ret.get('return_id')} "
+                f"from {_shop_name(db, ret.get('store_id'))}")
+    away = stock.find_one({"$and": [ours, {"store_id": {"$ne": store_id}}, _held_match()]})
+    return f"are now held at {_shop_name(db, away.get('store_id'))}" if away else None
 
 
 def _typed_line_problem(db, item, store_id) -> Optional[str]:
     """A line naming no piece is refused when it is (by id, exact name or SKU)
     a catalogued product this shop still holds pieces of, sellable or not
-    (on the shelf, reserved for an order, damaged, or still ours off the
-    shelf: product_cost's set aside, in a count, on the way to a sister shop
-    with this shop's id on it) -- they are scanned instead; when none of them
-    can go on this return, it says why. A reserved piece is refused, never
-    moved: its order lets go of it first (L2-RMA-F01)."""
+    (_held_match; a piece on the way to a sister shop keeps this shop's id) --
+    they are scanned instead; when none of them can go on this return, it says
+    why. A reserved piece is refused, never moved: its order lets go of it
+    first (L2-RMA-F01)."""
     held = list(db.get_collection("stock_units").find({
-        "product_id": {"$in": _line_product_ids(db, item)}, "store_id": store_id,
-        "$or": [_ie.on_hand_match(include_reserved=True),
-                _ie.status_match(_STATE.DAMAGED, *_STILL_OURS)],
+        "product_id": {"$in": _line_product_ids(db, item)}, "store_id": store_id, **_held_match(),
     }))
     if not held:
         return None
@@ -402,11 +418,10 @@ def _pieces_for_lines(db, data: "VendorReturnCreate", user):
             why = _typed_line_problem(db, item, data.store_id)
             if why:
                 _refuse(why)
-            gone = _sent_back_on(db, item, data.store_id, data.vendor_id)
-            if gone:
-                _refuse(f"{item.product_name}: this shop's pieces of it already went back to this "
-                        f"supplier on vendor return {gone}. Their credit belongs on that return, "
-                        "not on a line naming no piece.")
+            where = _accounted_for(db, item, data.store_id, data.vendor_id)
+            if where:
+                _refuse(f"{item.product_name}: the pieces this shop bought {where}. They go back, "
+                        "and are credited, there: a line naming no piece cannot claim them.")
             typed = True
         lines.append(pieces)
     if typed and not (data.notes or "").strip():
