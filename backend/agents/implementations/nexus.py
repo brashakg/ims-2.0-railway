@@ -108,6 +108,9 @@ class NexusAgent(JarvisAgent):
         off to the existing admin.py integration endpoints (next pass).
         """
         await self._retry_failed_webhooks()
+        from api.routers.orders.workshop import repair_workshop_handoffs
+
+        repair_workshop_handoffs(self.db)
 
         configured = await self._get_enabled_integrations()
         if not configured:

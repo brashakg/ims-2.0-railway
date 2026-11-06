@@ -49,9 +49,6 @@ def rig(request, monkeypatch):
         "webhook_secret": SECRET, "key_id": "rzp_test_local", "key_secret": "local"}})
     monkeypatch.setattr(wh, "_get_db", lambda: db)
     monkeypatch.setattr(wh, "_check_webhook_rate_limit", lambda *a, **k: True)
-    # The workshop safety net reads the global repositories; not under test.
-    from api.routers.orders import workshop
-    monkeypatch.setattr(workshop, "_ensure_workshop_job_for_order", lambda *a, **k: None)
 
     nexus = NexusAgent(db=db)
     queue = []

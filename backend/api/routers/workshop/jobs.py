@@ -23,6 +23,7 @@ from ...dependencies import (
 )
 from ._shared import _FITTING_ROLES, _check_dc_hardlock, logger, router
 from ...utils.ist import now_ist
+from database.repositories.workshop_repository import job_id_for_order
 from .models import FittingDetailsUpdate, WorkshopJobCreate, WorkshopJobUpdate
 from .helpers import (
     _assert_job_store_access,
@@ -102,6 +103,45 @@ async def list_jobs(
     return {"jobs": [], "total": 0}
 
 
+def _existing_job_answer(existing_jobs, order, order_id, order_repo, response):
+    """The answer when a job already covers this order.
+
+    WHICH job to return when more than one already exists. This is not
+    hypothetical: a read-only prod query found 1 of 4 live jobs is already a
+    duplicate pair, created before this dedup existed. The rule is deliberate,
+    because returning an arbitrary one would hand the client a job the ORDER
+    does not reference -- the exact harm being fixed:
+      1. the job order.workshop_job_id points at, when that pointer is set AND
+         still resolves to one of this order's jobs; else
+      2. the OLDEST job (find_by_order does not sort, so sort here -- Mongo
+         natural order is not a guarantee).
+    """
+    pointed_id = order.get("workshop_job_id") if isinstance(order, dict) else None
+    oldest = sorted(existing_jobs, key=lambda j: str(j.get("created_at") or ""))[0]
+    chosen = next((j for j in existing_jobs if j.get("job_id") == pointed_id), oldest)
+    # Backfill the reverse pointer when the order has none, so the order and
+    # the client agree on which job carries the Rx.
+    if order_repo is not None and isinstance(order, dict) and not pointed_id:
+        try:
+            order_repo.update(
+                order_id,
+                {
+                    "workshop_job_id": chosen.get("job_id"),
+                    "workshop_job_number": chosen.get("job_number"),
+                },
+            )
+        except Exception:  # noqa: BLE001 -- best effort
+            pass
+    response.status_code = 200
+    return {
+        "job_id": chosen.get("job_id"),
+        "job_number": chosen.get("job_number"),
+        "dc_hardlock_override": False,
+        "existing": True,
+        "message": "Workshop job already exists for this order",
+    }
+
+
 @router.post("/jobs", status_code=201)
 async def create_job(
     job: WorkshopJobCreate,
@@ -158,45 +198,7 @@ async def create_job(
             logger.warning("[WORKSHOP] create dedup lookup failed: %s", _dedup_exc)
             existing_jobs = []
         if existing_jobs:
-            # WHICH job to return when more than one already exists. This is not
-            # hypothetical: a read-only prod query found 1 of 4 live jobs is
-            # already a duplicate pair, created before this dedup existed. The
-            # rule is deliberate, because returning an arbitrary one would hand
-            # the client a job the ORDER does not reference -- the exact harm
-            # being fixed:
-            #   1. the job order.workshop_job_id points at, when that pointer is
-            #      set AND still resolves to one of this order's jobs; else
-            #   2. the OLDEST job (find_by_order does not sort, so sort here --
-            #      Mongo natural order is not a guarantee).
-            pointed_id = order.get("workshop_job_id") if isinstance(order, dict) else None
-            oldest = sorted(
-                existing_jobs, key=lambda j: str(j.get("created_at") or "")
-            )[0]
-            chosen = next(
-                (j for j in existing_jobs if j.get("job_id") == pointed_id),
-                oldest,
-            )
-            # Backfill the reverse pointer when the order has none, so the order
-            # and the client agree on which job carries the Rx.
-            if order_repo is not None and isinstance(order, dict) and not pointed_id:
-                try:
-                    order_repo.update(
-                        job.order_id,
-                        {
-                            "workshop_job_id": chosen.get("job_id"),
-                            "workshop_job_number": chosen.get("job_number"),
-                        },
-                    )
-                except Exception:  # noqa: BLE001 -- best effort
-                    pass
-            response.status_code = 200
-            return {
-                "job_id": chosen.get("job_id"),
-                "job_number": chosen.get("job_number"),
-                "dc_hardlock_override": False,
-                "existing": True,
-                "message": "Workshop job already exists for this order",
-            }
+            return _existing_job_answer(existing_jobs, order, job.order_id, order_repo, response)
 
         # PATIENT SAFETY: the prescription_id stored on the job is what the bench
         # grinds -- verify it EXISTS, belongs to THIS order's customer, and is not
@@ -227,6 +229,8 @@ async def create_job(
         )
 
         job_data = {
+            # One _id per order: a contender's insert is refused by Mongo.
+            "job_id": job_id_for_order(job.order_id),
             "job_number": generate_job_number(repo),
             "order_id": job.order_id,
             "store_id": store_id,
@@ -294,6 +298,11 @@ async def create_job(
                 "dc_hardlock_override": bool(hardlock.get("override_applied")),
                 "message": "Workshop job created",
             }
+
+        # create() answers None for a contender's row as for an outage.
+        existing_jobs = repo.find_by_order(job.order_id)
+        if existing_jobs:
+            return _existing_job_answer(existing_jobs, order, job.order_id, order_repo, response)
 
         raise HTTPException(status_code=500, detail="Failed to create workshop job")
 

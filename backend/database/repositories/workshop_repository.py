@@ -5,11 +5,20 @@ Workshop job data access operations
 """
 
 from api.utils.event_time import utc_event_iso, utc_now
+import uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date, timedelta
 from api.utils.ist import ist_today
 from api.utils.dates import iso_date_window
 from .base_repository import BaseRepository
+
+
+def job_id_for_order(order_id: str) -> str:
+    """The one job_id an order's lab job can carry. create() stores it as _id,
+    so two doors inserting for one order collide in Mongo itself -- whether or
+    not uniq_workshop_job_per_order built, which it cannot while legacy
+    duplicates exist."""
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, f"workshop-job:{order_id}"))
 
 
 class WorkshopJobRepository(BaseRepository):
@@ -27,7 +36,9 @@ class WorkshopJobRepository(BaseRepository):
         return self.find_one({"job_number": job_number})
 
     def find_by_order(self, order_id: str) -> List[Dict]:
-        return self.find_many({"order_id": order_id})
+        """Raises on a failed read: [] means "no job", and callers create one
+        on that answer."""
+        return [self._clean_id(d) for d in self.collection.find({"order_id": order_id})]
 
     def find_by_store(self, store_id: str, status: str = None) -> List[Dict]:
         # BUG-061: limit=0 -> full-store rollup (workshop dashboard KPIs sum/count
