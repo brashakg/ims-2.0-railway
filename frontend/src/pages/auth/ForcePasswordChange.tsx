@@ -7,14 +7,18 @@
 // ============================================================================
 
 import { useState } from 'react';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Eye, EyeOff, Lock, AlertCircle, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { authApi } from '../../services/api/auth';
+import { needsStoreSelection } from '../../utils/storeAccess';
 
 export function ForcePasswordChange() {
   const { user, logout, refreshUser } = useAuth();
   const toast = useToast();
+  const navigate = useNavigate();
+  const location = useLocation();
 
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -55,6 +59,9 @@ export function ForcePasswordChange() {
         return;
       }
       toast.success('Password changed. Welcome aboard!');
+      // Sign-in skipped the store picker while the password was temporary;
+      // resume that same decision now, keeping where the user was headed.
+      const pick = await needsStoreSelection(user ? { ...user, mustChangePassword: false } : null);
       // Re-fetch the user so mustChangePassword flips to false and the gate
       // lifts. If the refresh fails for any reason, fall back to logout so the
       // user re-authenticates and picks up the cleared flag.
@@ -62,7 +69,9 @@ export function ForcePasswordChange() {
         await refreshUser();
       } catch {
         await logout();
+        return;
       }
+      if (pick) navigate('/select-store', { state: { from: location.pathname }, replace: true });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Could not change password.';
       // Surface the backend's "Current password is incorrect" cleanly.
