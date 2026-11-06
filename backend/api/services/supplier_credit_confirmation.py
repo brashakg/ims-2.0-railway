@@ -362,12 +362,13 @@ def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_s
             _identity(db, event, None)
             return _pending_event(db, event, submitted, [{"code": exc.code, "message": str(exc)}], actor_id), False
         registration = _hash([sources[0]["recipient_entity_id"], sources[0]["recipient_gstin"]])
-        _identity(db, event, registration)
         for previous in db.get_collection(EVENTS).find({**return_event_query(event), "posting_status": "POSTED"}):
             if {s["source_key"] for s in previous["sources"]} != {s["source_key"] for s in sources}:
                 _error("RETURN_ORIGIN_CHANGED", "A partly confirmed return cannot change its original bill allocation.", 409)
         allocations = _prepare_allocations(sources, submitted)
         _locked(db, submitted["credit_note_date"])
+        # Last: a note refused above claims nothing, so it strands no number.
+        _identity(db, event, registration)
         token = uuid4().hex
         updated = db.get_collection(EVENTS).update_one(
             {"_id": event["_id"], "version": event["version"], "posting_status": "PENDING_EVIDENCE"},

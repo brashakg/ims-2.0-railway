@@ -1359,3 +1359,31 @@ def test_a_piece_left_that_is_not_sold_keeps_todays_outcome(rw):
     sold_rest(rw, "U1")
     rw["db"].stock_units.update_one({"stock_id": "U2"}, {"$set": {"status": "RTV"}})
     assert raise_rma(rw, qty=1, grn_id="G-OWN").status_code == 201
+
+
+def test_a_note_refused_outright_claims_nothing_and_holds_nothing(rw):
+    """A note over the return's value is an error, not a saved note: its number
+    stays free for the real amount and the RMA can still end."""
+    bought(rw, "U1", "U2", qty=2)
+    rma_id = linked_rma(rw, received_return(rw, "U1", "U2"))
+    http = rw["as_"](ACCOUNTANT)
+    shown = http.post(f"/vendor-rma/{rma_id}/credit-preview", json={}).json()
+    over = {"credit_note_number": "CN-TYPO", "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+            "received_amount": 1001, "source_selections": shown["source_selections"],
+            "allocations": [{"source_key": shown["sources"][0]["source_key"], "taxable": 1001,
+                             "cgst": 0, "sgst": 0, "igst": 0}]}
+    assert http.post(f"/vendor-rma/{rma_id}/credit-note", json=over).status_code == 422
+    assert rw["db"].supplier_credit_note_identities.find_one({"claims.0": {"$exists": True}}) is None
+    _, right = rma_note(rw, rma_id, 1000, "CN-TYPO")
+    assert right.status_code == 200, right.text
+    assert rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 200
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_an_old_refused_row_with_its_number_claimed_does_not_hold_the_rma(rw):
+    bought(rw, "U1", "U2", qty=2)
+    rma_id = linked_rma(rw, received_return(rw, "U1", "U2"))
+    rw["db"].supplier_credit_confirmations.insert_one({
+        "_id": str(uuid4()), "return_id": rma_id, "return_kind": "RMA", "identity_claimed": True,
+        "posting_status": "PENDING_EVIDENCE", "pending_reasons": []})
+    assert rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 200

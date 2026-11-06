@@ -74,11 +74,16 @@ def return_door_problem(db, return_doc, confirmation_id):
 
 def unfinished_note(db, rma):
     """A supplier note this RMA has claimed but not yet carried onto itself:
-    pending, posting, or posted with its summary lost. Only this door can
-    finish it, so the RMA stays open for it; the note is never released."""
+    saved pending, posting, or posted with its summary lost. Only this door can
+    finish it, so the RMA stays open for it; the note is never released. An old
+    row refused with an error (claimed, no reason saved) was never saved pending
+    and may never finish: it does not hold the RMA."""
     done = [n["confirmation_id"] for n in rma.get("credit_notes") or [] if n.get("confirmation_id")]
-    return db.get_collection(EVENTS).find_one(
-        {**return_event_query({"rma_id": rma["rma_id"]}), "identity_claimed": {"$ne": False}, "_id": {"$nin": done}})
+    for event in db.get_collection(EVENTS).find(
+            {**return_event_query({"rma_id": rma["rma_id"]}), "identity_claimed": {"$ne": False}, "_id": {"$nin": done}}):
+        if event.get("posting_status") != "PENDING_EVIDENCE" or event.get("pending_reasons"):
+            return event
+    return None
 
 
 def settle_return(db, rma):
