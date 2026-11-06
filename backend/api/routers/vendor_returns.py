@@ -1157,10 +1157,13 @@ async def update_return_status(
                 status_code=400,
                 detail=f"Cannot transition from {current_status} to {status_update.status}",
             )
-        # 'replaced' forgoes the credit and shuts both doors: a claimed supplier
-        # note, here or on a live RMA, finishes first (one number, one record).
-        waiting = (status_update.status == "replaced" and return_doc.get("return_type") != "replacement"
-                   and rma_supplier_credit.unfinished_on_return(db, return_doc))
+        # Ending the return without its credit ('replaced', or a cancel: a typed
+        # return an RMA links can be cancelled under a note waiting there) shuts
+        # both doors: a claimed supplier note, here or on a live RMA, finishes
+        # first (one number, one record).
+        ends_credit = status_update.status == "cancelled" or (
+            status_update.status == "replaced" and return_doc.get("return_type") != "replacement")
+        waiting = ends_credit and rma_supplier_credit.unfinished_on_return(db, return_doc)
         held = waiting and rma_supplier_credit.held_note(waiting)
         if held:
             raise HTTPException(status_code=409, detail=held)

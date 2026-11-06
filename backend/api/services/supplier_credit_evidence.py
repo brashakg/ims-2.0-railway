@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 
+from .item_events import StockState, status_match
 from .org_validation import has_valid_gstin
 from .return_provenance import ReturnProvenanceError, resolve_return_provenance
 
@@ -152,9 +153,10 @@ def _ticked(lines, source):
 def _goods_known(db, event, source):
     """A credit naming no piece still says whose goods it took when its line is
     ticked customer_owned, or its RMA links a return that really carried them:
-    a live one, this supplier's, whose own pieces cover this product for the
-    quantity credited. A return_id alone proves nothing: before the rule it was
-    free text (a cancelled return, a typed one, another product, no such id)."""
+    a live one, this supplier's, whose own pieces have left (RTV) and cover this
+    product for the quantity credited. A return_id alone proves nothing: before
+    the rule it was free text (a cancelled return, a typed one, another product,
+    no such id), and pieces merely set aside for a return can still be put back."""
     if event.get("return_kind") != "RMA":
         return False
     rma = db.get_collection("vendor_rmas").find_one({"rma_id": event["return_id"]}) or {}
@@ -169,7 +171,14 @@ def _goods_known(db, event, source):
     wanted = sum(int(s.get("quantity") or 0) for s in event["sources"]
                  if s.get("product_id") == product and not _ticked(lines, s))
     return wanted <= db.get_collection("stock_units").count_documents(
-        {"rtv_vendor_id": rid, "product_id": product, "stock_id": {"$in": ret.get("stock_ids") or []}})
+        {"rtv_vendor_id": rid, "product_id": product, "stock_id": {"$in": ret.get("stock_ids") or []},
+         **status_match(StockState.RTV)})
+
+
+def goods_key(source):
+    """Which goods a credit source spends. Rejected custody and accepted stock on
+    one receipt line are never the same goods: each has its own receipt capacity."""
+    return source.get("grn_id"), source.get("product_id"), source.get("receipt_disposition", "ACCEPTED")
 
 
 def _spends_goods(db, return_doc, source):
@@ -191,22 +200,22 @@ def _refuse_unplaced_credit(db, return_doc, sources):
     supplier note kept and no money posted: one that meets an earlier credit naming
     no piece, or one naming no piece that meets a credit naming pieces. A credit
     whose goods are known (_goods_known) is placed, and neither stops nor is
-    stopped. Which pieces a credit covered is never guessed, and a posted credit
-    is never changed, so no route frees such a note yet: head office decides."""
+    stopped; nor does either meet a credit for other goods (goods_key). Which
+    pieces a credit covered is never guessed, and a posted credit is never
+    changed, so no route frees such a note yet: head office decides."""
     rid = return_doc.get("return_id") or return_doc.get("rma_id")
     spending = [s for s in sources if _spends_goods(db, return_doc, s)]
-    named = {(s["grn_id"], s["product_id"]) for s in spending}
+    named = {goods_key(s) for s in spending}
     if not named:
         return
     own = {"return_kind": return_doc.get("return_kind"), "return_id": rid, "sources": sources}
-    unplaced = {(s["grn_id"], s["product_id"]) for s in spending
-                if not s["stock_ids"] and not _goods_known(db, own, s)}
+    unplaced = {goods_key(s) for s in spending if not s["stock_ids"] and not _goods_known(db, own, s)}
     for event in db.get_collection(EVENTS).find({"posting_status": {"$in": ["PREPARING", "POSTED"]},
-                                                 "sources.grn_id": {"$in": sorted(g for g, _ in named)}}):
+                                                 "sources.grn_id": {"$in": sorted({key[0] for key in named})}}):
         if event.get("return_id") == rid:
             continue
         for source in event.get("sources") or []:
-            goods = (source.get("grn_id"), source.get("product_id"))
+            goods = goods_key(source)
             why = None
             if source.get("stock_ids"):
                 if goods in unplaced:

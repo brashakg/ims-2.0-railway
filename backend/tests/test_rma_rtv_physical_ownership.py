@@ -34,6 +34,7 @@ from api.routers.purchase_recon import _pending_return_credit_notes
 from api.services import item_events as ie
 from api.services import rma_supplier_credit as rma_credit
 from api.services import supplier_credit_evidence as credit_evidence
+from api.services.receipt_payment_hold import rejected_receipt_hold
 from api.services.return_provenance import ReturnProvenanceError, resolve_return_provenance
 from api.services.supplier_credit_evidence import _goods_known, source_key
 from api.services.supplier_credit_reads import confirmed_ap_rows
@@ -1481,15 +1482,24 @@ def link_one_piece_of_two(w):
     return "VR-ONE"
 
 
+def link_not_shipped(w):
+    """Still in the shop: its pieces are linked, set aside, and never left."""
+    rid = create(w, line(qty=2, stock_ids=["U1", "U2"])).json()["return_id"]
+    assert move(w, rid, "approved").status_code == 200
+    assert state(w, "U1")["status"] == "QUARANTINED" and state(w, "U2")["status"] == "QUARANTINED"
+    return rid
+
+
 @pytest.mark.parametrize("link", [link_cancelled, link_cancelled_with_a_piece_stuck, link_typed, link_other_product,
-                                  link_another_supplier, link_one_piece_of_two, lambda w: "VR-NO-SUCH-RETURN"],
+                                  link_another_supplier, link_one_piece_of_two, link_not_shipped,
+                                  lambda w: "VR-NO-SUCH-RETURN"],
                          ids=["cancelled", "cancelled-stuck", "typed", "other-product", "other-supplier",
-                              "short", "unknown"])
+                              "short", "not-shipped", "unknown"])
 def test_a_link_that_did_not_carry_the_goods_does_not_place_the_credit(rw, monkeypatch, link):
     """Spare receipt quantity: the caps pass, only the ownership rule can stop it."""
     bought(rw, "U1", "U2", "U3", "U4", "U5", "U6", qty=8)
     old = old_linked_credit(rw, monkeypatch, link(rw))
-    rid = received_return(rw, "U1", "U2")
+    rid = received_return(rw, "U3", "U4")
     rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
     _, res = rtv_note_open(rw, rid, 1000, "CN-NEW")
     assert res.status_code == 200, res.text
@@ -1497,6 +1507,35 @@ def test_a_link_that_did_not_carry_the_goods_does_not_place_the_credit(rw, monke
     reason = res.json()["confirmation"]["pending_reasons"][0]
     assert reason["code"] == "EARLIER_CREDIT_UNPLACED" and old in reason["message"]
     assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_a_return_still_in_the_shop_places_a_credit_only_once_it_ships(rw, monkeypatch):
+    """A linked return places the credit once its pieces have left, and then the
+    same held note finishes: four pieces gone, four credited."""
+    bought(rw, "U1", "U2", "U3", "U4", "U5", "U6", qty=8)
+    first = link_not_shipped(rw)
+    old_linked_credit(rw, monkeypatch, first)
+    rid = received_return(rw, "U3", "U4")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    body, res = rtv_note_open(rw, rid, 1000, "CN-NEW")
+    assert res.json()["confirmation"]["posting_status"] == "PENDING_EVIDENCE", res.text
+    assert move(rw, first, "shipped").status_code == 200
+    again = rw["as_"](ACCOUNTANT).post(f"/vendor-returns/{rid}/credit-confirmations", json=body)
+    assert again.status_code == 200 and again.json()["confirmation"]["posting_status"] == "POSTED", again.text
+    assert posted(rw) == (2, 200000) and statuses(rw) == Counter({"RTV": 4, "AVAILABLE": 2})
+
+
+def test_cancelling_the_unshipped_return_leaves_one_credit_for_one_return_of_goods(rw, monkeypatch):
+    """The reviewer's end state was 200,000 paise credited for 100,000 of goods."""
+    bought(rw, "U1", "U2", "U3", "U4", "U5", "U6", qty=8)
+    first = link_not_shipped(rw)
+    old_linked_credit(rw, monkeypatch, first)
+    rid = received_return(rw, "U3", "U4")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    rtv_note_open(rw, rid, 1000, "CN-NEW")
+    assert move(rw, first, "cancelled").status_code == 200
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+    assert statuses(rw) == Counter({"AVAILABLE": 4, "RTV": 2})
 
 
 def test_a_link_that_carried_the_goods_places_the_credit_and_frees_other_pieces(rw, monkeypatch):
@@ -2146,3 +2185,93 @@ def test_a_linked_note_an_unplaced_credit_holds_is_told_so_on_every_door(rw, mon
     assert rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["status"] == "DISPATCHED"
     assert returned(rw, rid)["status"] == "received_by_vendor"
     assert waiting(rw) == before and posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+# --------------------------------------------------------------------------
+# Cancelling shuts both doors on a waiting note, as 'replaced' does
+# --------------------------------------------------------------------------
+
+def typed_return_on_rma(w):
+    """A typed return (no piece named) an RMA links while it is still approved:
+    the only return that can have a note waiting before it ships."""
+    bought(w, qty=2)
+    made = create(w, line(qty=2), notes="Typed, no barcode")
+    assert made.status_code in (200, 201), made.text
+    rid = made.json()["return_id"]
+    assert move(w, rid, "approved").status_code == 200
+    return rid, linked_rma(w, rid)
+
+
+@pytest.mark.parametrize("user", [MANAGER, ACCOUNTANT])
+def test_a_typed_return_cannot_be_cancelled_under_its_rmas_waiting_note(rw, monkeypatch, user):
+    rid, rma_id = typed_return_on_rma(rw)
+    _, body = pending_note(rw, monkeypatch, rma_id=rma_id)
+    refused = rw["as_"](user).patch(f"/vendor-returns/{rid}/status", json={"status": "cancelled"})
+    assert refused.status_code == 409 and rma_id in refused.text, refused.text
+    assert returned(rw, rid)["status"] == "approved"
+    # Refused, not stranded: the same note on the same door still finishes.
+    done = finish_pending(rw, rma_id, body, 1000)
+    assert done.status_code == 200 and done.json()["confirmation"]["posting_status"] == "POSTED", done.text
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_a_typed_return_with_no_note_waiting_still_cancels(rw):
+    rid, _ = typed_return_on_rma(rw)
+    assert rw["as_"](MANAGER).patch(f"/vendor-returns/{rid}/status", json={"status": "cancelled"}).status_code == 200
+    assert returned(rw, rid)["status"] == "cancelled"
+
+
+def test_a_rejected_rma_does_not_hold_the_cancel_either(rw):
+    rid, rma_id = typed_return_on_rma(rw)
+    assert rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 200
+    assert rw["as_"](MANAGER).patch(f"/vendor-returns/{rid}/status", json={"status": "cancelled"}).status_code == 200
+
+
+# --------------------------------------------------------------------------
+# Rejected custody and accepted goods are never the same goods
+# --------------------------------------------------------------------------
+
+def rejected_on_the_receipt(w):
+    """Six delivered and billed, four accepted, two rejected and gone back on
+    their own receipt-rejection return."""
+    bought(w, "U1", "U2", "U3", "U4", qty=6)
+    w["db"].grns.update_one({"grn_id": "G-OWN"}, {"$set": {
+        "status": "PARTIALLY_ACCEPTED", "items": [{"product_id": FRAME, "accepted_qty": 4, "rejected_qty": 2}]}})
+    w["db"].vendor_returns.insert_one({
+        "return_id": "VR-REJ", "status": "received_by_vendor", "receipt_rejection": True, "store_id": STORE,
+        "vendor_id": DEALER, "return_type": "credit_note", "grn_id": "G-OWN", "grn_line_index": 0,
+        "stock_ids": ["R1", "R2"], "total_value": 1000,
+        "items": [{"product_id": FRAME, "product_name": "Frame", "quantity": 2, "unit_price": 500}]})
+    for sid in ("R1", "R2"):
+        unit(w, sid, status="RTV", receipt_disposition="REJECTED", rtv_vendor_id="VR-REJ",
+             grn_id="G-OWN", grn_line_index=0)
+
+
+def test_a_rejection_credit_is_not_held_by_an_earlier_no_piece_credit(rw, monkeypatch):
+    rejected_on_the_receipt(rw)
+    assert rejected_receipt_hold(rw["db"], "B-OWN")
+    unplaced_credit(rw, monkeypatch)
+    _, res = rtv_note(rw, "VR-REJ", 1000, "CN-REJ")
+    assert res.status_code == 200 and res.json()["confirmation"]["posting_status"] == "POSTED", res.text
+    assert posted(rw) == (2, 200000) and credited(rw) == 200000
+    assert rejected_receipt_hold(rw["db"], "B-OWN") is None
+
+
+def test_a_no_piece_credit_is_not_held_by_an_earlier_rejection_credit(rw, monkeypatch):
+    rejected_on_the_receipt(rw)
+    _, res = rtv_note(rw, "VR-REJ", 1000, "CN-REJ")
+    assert res.json()["confirmation"]["posting_status"] == "POSTED", res.text
+    unplaced_credit(rw, monkeypatch)
+    assert posted(rw) == (2, 200000) and credited(rw) == 200000
+
+
+def test_accepted_goods_are_still_held_beside_a_rejection_credit(rw, monkeypatch):
+    """Telling the two apart frees only the rejected custody."""
+    rejected_on_the_receipt(rw)
+    assert rtv_note(rw, "VR-REJ", 1000, "CN-REJ")[1].json()["confirmation"]["posting_status"] == "POSTED"
+    unplaced_credit(rw, monkeypatch)
+    rid = received_return(rw, "U1", "U2")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    _, res = rtv_note_open(rw, rid, 1000, "CN-NEW")
+    assert res.json()["confirmation"]["pending_reasons"][0]["code"] == "EARLIER_CREDIT_UNPLACED", res.text
+    assert posted(rw) == (2, 200000)

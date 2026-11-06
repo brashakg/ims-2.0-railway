@@ -15,7 +15,7 @@ from pymongo.errors import DuplicateKeyError
 
 from .return_provenance import ReturnProvenanceError
 from .supplier_credit_evidence import (
-    EVENTS, HEADS, SupplierCreditError, credit_preview, paise, resolve_credit_evidence, return_event_query,
+    EVENTS, HEADS, SupplierCreditError, credit_preview, goods_key, paise, resolve_credit_evidence, return_event_query,
 )
 
 GUARDS = "supplier_credit_bill_guards"
@@ -264,7 +264,7 @@ def _reserve_physical(db, event):
     collection = db.get_collection("supplier_credit_origin_guards")
     groups = defaultdict(list)
     for source in event["sources"]:
-        groups[(source["grn_id"], source["product_id"], source.get("receipt_disposition", "ACCEPTED"))].append(source)
+        groups[goods_key(source)].append(source)
     for (grn_id, product_id, disposition), sources in sorted(groups.items()):
         receipt = db.get_collection("grns").find_one({"grn_id": grn_id}) or {}
         quantity_key = "rejected_qty" if disposition == "REJECTED" else "accepted_qty"
