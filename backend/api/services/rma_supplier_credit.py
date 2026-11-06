@@ -19,6 +19,7 @@ from pymongo.errors import DuplicateKeyError
 from . import supplier_credit_confirmation as canonical
 from .supplier_credit_evidence import (
     EVENTS, SupplierCreditError, confirmation_view, credit_preview, credit_started, paise,
+    return_event_query,
 )
 from .vendor_rma import RMAStatus, VendorRMAEngine, _now
 
@@ -69,6 +70,15 @@ def return_door_problem(db, return_doc, confirmation_id):
         return None
     return (f"This return's pieces went back on RMA {rma['rma_id']}: record the supplier's "
             "credit note there, once, not here.")
+
+
+def unfinished_note(db, rma):
+    """A supplier note this RMA has claimed but not yet carried onto itself:
+    pending, posting, or posted with its summary lost. Only this door can
+    finish it, so the RMA stays open for it; the note is never released."""
+    done = [n["confirmation_id"] for n in rma.get("credit_notes") or [] if n.get("confirmation_id")]
+    return db.get_collection(EVENTS).find_one(
+        {**return_event_query({"rma_id": rma["rma_id"]}), "identity_claimed": {"$ne": False}, "_id": {"$nin": done}})
 
 
 def settle_return(db, rma):

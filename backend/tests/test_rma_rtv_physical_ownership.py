@@ -1153,3 +1153,88 @@ def test_a_note_that_named_the_pieces_keeps_the_physical_identity(rw):
     assert saved["sources"][0]["stock_ids"] == ["U1", "U2"]
     shown = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-preview", json={}).json()
     assert shown["sources"][0]["stock_ids"] == ["U1", "U2"]
+
+
+# --------------------------------------------------------------------------
+# Codex round 3, P2: a claimed supplier note is finished before the RMA ends
+# --------------------------------------------------------------------------
+
+def pending_note(w, monkeypatch, amount=1000, number="CN-WAIT", rma_id=None):
+    """The supplier's note saved while its original bill cannot be confirmed."""
+    if rma_id is None:
+        bought(w, "U1", "U2", qty=2)
+        rma_id = linked_rma(w, received_return(w, "U1", "U2"))
+    body = {"credit_note_number": number, "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+            "received_amount": amount, "source_selections": [], "allocations": []}
+
+    def unavailable(*_a, **_k):
+        raise ReturnProvenanceError("EVIDENCE_DOWN", "Original evidence unavailable")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(rma_credit.canonical, "resolve_credit_evidence", unavailable)
+        res = w["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=body)
+    assert res.status_code == 200 and res.json()["confirmation"]["posting_status"] == "PENDING_EVIDENCE", res.text
+    return rma_id, body
+
+
+def finish_pending(w, rma_id, body, amount):
+    http = w["as_"](ACCOUNTANT)
+    shown = http.post(f"/vendor-rma/{rma_id}/credit-preview", json={"confirmation_id": body["idempotency_key"]}).json()
+    return http.post(f"/vendor-rma/{rma_id}/credit-note", json={
+        **body, "source_selections": shown["source_selections"],
+        "allocations": [{"source_key": shown["sources"][0]["source_key"], "taxable": amount,
+                         "cgst": 0, "sgst": 0, "igst": 0}]})
+
+
+def test_an_rma_holding_a_pending_note_is_not_rejected_and_the_note_finishes(rw, monkeypatch):
+    rma_id, body = pending_note(rw, monkeypatch)
+    refused = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "supplier dispute"})
+    assert refused.status_code == 409, refused.text
+    assert "supplier credit note" in refused.text
+    assert rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["status"] == "DISPATCHED"
+    # Evidence back, the same note on the same door finishes: nothing was lost.
+    done = finish_pending(rw, rma_id, body, 1000)
+    assert done.status_code == 200 and done.json()["confirmation"]["posting_status"] == "POSTED", done.text
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+    assert rw["db"].supplier_credit_note_identities.count_documents({}) == 1
+
+
+def test_a_note_refused_before_its_number_was_claimed_does_not_hold_the_rma(rw):
+    bought(rw, "U1", "U2", qty=2)
+    rma_id = linked_rma(rw, received_return(rw, "U1", "U2"))
+    rw["db"].supplier_credit_confirmations.insert_one({
+        "_id": str(uuid4()), "return_id": rma_id, "return_kind": "RMA", "identity_claimed": False,
+        "posting_status": "PENDING_EVIDENCE"})
+    assert rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 200
+
+
+def test_a_lost_reply_on_a_posted_note_holds_the_rma_until_the_retry_repairs_it(rw, monkeypatch):
+    bought(rw, "U1", "U2", qty=2)
+    rma_id = linked_rma(rw, received_return(rw, "U1", "U2"))
+
+    def lost(*_a, **_k):
+        raise RuntimeError("lost reply")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(rma_credit.canonical, "_finish_return", lost)
+        body, res = rma_note(rw, rma_id, 1000, "CN-LOST")
+    assert res.status_code == 503, res.text
+    assert posted(rw) == (1, 100000)
+    assert rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 409
+    again = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=body)
+    assert again.status_code == 200, again.text
+    assert rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["received_credit_paise"] == 100000
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_a_write_off_close_cannot_strand_a_second_note(rw, monkeypatch):
+    bought(rw, "U1", "U2", qty=2)
+    rma_id = linked_rma(rw, received_return(rw, "U1", "U2"))
+    assert rma_note(rw, rma_id, 600, "CN-1")[1].status_code == 200
+    _, body = pending_note(rw, monkeypatch, amount=400, number="CN-2", rma_id=rma_id)
+    refused = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/close", json={"write_off_variance": True})
+    assert refused.status_code == 409 and "supplier credit note" in refused.text
+    done = finish_pending(rw, rma_id, body, 400)
+    assert done.status_code == 200, done.text
+    assert rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 200
+    assert posted(rw) == (2, 100000) and credited(rw) == 100000

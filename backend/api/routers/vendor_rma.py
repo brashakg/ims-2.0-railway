@@ -336,6 +336,17 @@ def _require_physical_return(doc: dict, *, shipped: bool, status_code: int = 409
         raise HTTPException(status_code=status_code, detail=problem)
 
 
+def _require_no_unfinished_note(doc: dict) -> None:
+    """Rejecting or closing shuts this RMA's credit door. A supplier note it has
+    claimed can finish nowhere else (one note number, one record), so it is
+    finished here first. Says no number: a manager may press reject."""
+    if rma_supplier_credit.unfinished_note(_get_db(), doc):
+        raise HTTPException(status_code=409, detail=(
+            "A supplier credit note is still waiting on this RMA. Accounts finishes it here "
+            "first: retry that same note here once its original bill is confirmed. Until "
+            "then this RMA stays open."))
+
+
 def _http_from_result(res: dict, user: dict) -> HTTPException:
     """Map an engine fail result to an HTTPException, defaulting to 400. The
     detail goes through the same mask: a refused close names the variance."""
@@ -627,6 +638,7 @@ async def reject_rma(
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     actor = current_user.get("user_id")
     status = doc.get("status")
+    _require_no_unfinished_note(doc)
     if status in _REJECT_BEFORE_DISPATCH:
         # Pinned to the state just read (the engine's one-from-state guard): a
         # dispatch landing in between makes this a 409, never a reject of the
@@ -662,6 +674,7 @@ async def close_rma(
     eng = _engine()
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     _require_physical_return(doc, shipped=True, closing=True)
+    _require_no_unfinished_note(doc)
     res = eng.close_rma(
         rma_id,
         actor=current_user.get("user_id"),
