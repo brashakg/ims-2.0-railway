@@ -1536,3 +1536,381 @@ def test_note_raising_a_lens_quantity_is_refused(client, shop, invoiced, cells):
               route="superadmin-invoice-change", mode="CREDIT_NOTE")
     assert r.status_code == 409, r.text
     assert cells.read() == (5, 1)
+
+
+# ---------------------------------------------------------------------------
+# Review of fba16956 -- a landed save settles what it removed, reply or no reply
+# ---------------------------------------------------------------------------
+
+DOORS = {"superadmin-edit": {}, "superadmin-invoice-change": {"mode": "REVISED_INVOICE"}}
+FLAGS = ("line_remove_stock_release_failed", "line_remove_stock_failed_item_id")
+
+
+@pytest.fixture(params=list(DOORS))
+def door(request, client, shop, invoiced):
+    """Both doors that rewrite a bill's lines. `arm` readies a saved bill for
+    this door; `press` sends the edit; `press_reply_lost` lands it and loses
+    the reply, on every order write, as test_write_that_landed does."""
+    from api.utils.event_time import utc_now_iso
+    from database.repositories.order_repository import OrderRepository
+
+    route, body = request.param, DOORS[request.param]
+
+    class Door:
+        name = route
+
+        @staticmethod
+        def arm(oid):
+            if body:
+                shop["db"].get_collection("orders").update_one(
+                    {"order_id": oid},
+                    {"$set": {"invoice_number": "BV-INV-1", "invoice_date": utc_now_iso()}},
+                )
+            return oid
+
+        @staticmethod
+        def press(oid, lines):
+            return _edit(client, oid, lines, route=route, **body)
+
+        @staticmethod
+        def press_reply_lost(oid, lines, monkeypatch):
+            real = OrderRepository.update_if
+
+            def lost_reply(self, *a, **k):
+                real(self, *a, **k)
+                raise TimeoutError("reply lost")
+
+            quiet = type(client)(client.app, raise_server_exceptions=False)
+            with monkeypatch.context() as m:
+                m.setattr(OrderRepository, "update_if", lost_reply)
+                r = quiet.put(
+                    f"/api/v1/orders/{oid}/{route}",
+                    json={"reason": "correcting this bill", "items": lines, **body},
+                    headers=_token(ADMIN),
+                )
+            assert r.status_code >= 500, r.text
+
+    return Door
+
+
+def _reconciled(shop, oid):
+    """Every piece and cell, the bill's lines and money, read off the collections."""
+    order = _order(shop, oid)
+    cell_rows = shop["db"].get_collection("lens_stock_lines").find({}, {"_id": 0})
+    return (
+        _ledger(shop),
+        sorted((c["sph"], c["on_hand"], c["reserved"]) for c in cell_rows),
+        [(ln.get("product_id"), ln.get("stock_id"), ln.get("quantity")) for ln in order["items"]],
+        order.get("grand_total"),
+        order.get("balance_due"),
+    )
+
+
+def _no_flag_left(shop, oid):
+    order = _order(shop, oid)
+    assert not any(k.startswith("line_remove_") for k in order), order
+
+
+def _retry_changes_nothing(shop, oid, door, lines):
+    """The same body again: the stored lines already match, so nothing moves."""
+    before = _reconciled(shop, oid)
+    r = door.press(oid, lines)
+    assert r.status_code == 200, r.text
+    assert _reconciled(shop, oid) == before
+    _no_flag_left(shop, oid)
+
+
+@pytest.mark.parametrize(
+    "new_line", [_line(ACC), _line(FR, stock_id="SU-FR-B")], ids=["other_product", "same_product"]
+)
+def test_lost_reply_on_a_replaced_line_frees_the_old_unit(
+    client, shop, door, monkeypatch, new_line
+):
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A")]))
+    stored = _order(shop, oid)["items"][0]
+    assert _sold_to(shop, oid) == ["SU-FR-A"]
+    lines = [{**new_line, "item_id": stored["item_id"]}]
+    door.press_reply_lost(oid, lines, monkeypatch)
+    old = _unit(shop, "SU-FR-A")
+    assert (old["status"], old.get("order_id")) == ("AVAILABLE", None), "stranded on a bill without it"
+    assert len(_sold_to(shop, oid)) == 1
+    _no_flag_left(shop, oid)
+    _retry_changes_nothing(shop, oid, door, lines)
+
+
+def test_lost_reply_on_a_removed_line_frees_its_unit(client, shop, door, monkeypatch):
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A"), _line(SVC)]))
+    keep = next(ln for ln in _order(shop, oid)["items"] if ln["product_id"] == SVC)
+    lines = [_as_sent(keep)]
+    door.press_reply_lost(oid, lines, monkeypatch)
+    assert _order(shop, oid)["items"][0]["product_id"] == SVC
+    assert _sold_to(shop, oid) == []
+    assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
+    _no_flag_left(shop, oid)
+    _retry_changes_nothing(shop, oid, door, lines)
+
+
+def test_lost_reply_on_a_lowered_quantity_frees_only_the_extra(client, shop, door, monkeypatch):
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A", quantity=2)]))
+    assert len(_sold_to(shop, oid)) == 2
+    lines = [_as_sent(_order(shop, oid)["items"][0], quantity=1)]
+    door.press_reply_lost(oid, lines, monkeypatch)
+    assert _sold_to(shop, oid) == ["SU-FR-A"]
+    _no_flag_left(shop, oid)
+    _retry_changes_nothing(shop, oid, door, lines)
+
+
+def test_lost_reply_on_a_replaced_lens_frees_the_old_cell(client, shop, cells, door, monkeypatch):
+    oid, stored = _lens_bill(client, shop, cells)
+    door.arm(oid)
+    cells(sph=-2.0, on_hand=2)
+    lines = [_other_line(shop, oid), _lens_sent(stored, sph=-2.0)]
+    door.press_reply_lost(oid, lines, monkeypatch)
+    assert cells.read() == (5, 0), "the old cell stayed held for a line no longer on the bill"
+    assert cells.read(-2.0) == (2, 1)
+    _no_flag_left(shop, oid)
+    _retry_changes_nothing(shop, oid, door, lines)
+    if door.name == "superadmin-edit":  # an invoiced bill goes back through Returns
+        _cancel(client, oid)
+        assert cells.read(-2.0) == (2, 0)
+
+
+def test_lost_reply_on_a_removed_lens_frees_its_cell(client, shop, cells, door, monkeypatch):
+    oid, _stored = _lens_bill(client, shop, cells)
+    door.arm(oid)
+    lines = [_other_line(shop, oid)]
+    door.press_reply_lost(oid, lines, monkeypatch)
+    assert cells.read() == (5, 0)
+    _no_flag_left(shop, oid)
+    _retry_changes_nothing(shop, oid, door, lines)
+
+
+def test_lost_reply_on_a_lowered_lens_frees_only_the_extra(client, shop, cells, door, monkeypatch):
+    oid, stored = _lens_bill(client, shop, cells, qty=3)
+    door.arm(oid)
+    lines = [_other_line(shop, oid), _lens_sent(stored, quantity=1)]
+    door.press_reply_lost(oid, lines, monkeypatch)
+    assert cells.read() == (5, 1)
+    _retry_changes_nothing(shop, oid, door, lines)
+    if door.name == "superadmin-edit":
+        _cancel(client, oid)
+        assert cells.read() == (5, 0)
+
+
+def test_settling_twice_moves_each_piece_once(client, shop, cells, door, monkeypatch):
+    """Re-running the settle is harmless on the shapes a blind re-run would hurt:
+    a first-available unit (no name to match) and a lowered lens (its own key)."""
+    from api.routers.orders import admin_edit
+
+    shop["db"].get_collection("stock_units").insert_one(
+        {"stock_id": "SU-FR-C", "barcode": "BC-C", "product_id": FR, "store_id": STORE,
+         "status": "AVAILABLE", "quantity": 1}
+    )
+    oid, stored = _lens_bill(client, shop, cells, qty=3)
+    other = _other_line(shop, oid)
+    assert _edit(client, oid, [other, _lens_sent(stored), _line(FR, quantity=3)]).status_code == 200
+    door.arm(oid)
+    assert len(_sold_to(shop, oid)) == 3
+    real = admin_edit._settle_removed_lines
+
+    async def twice(*a, **k):
+        await real(*a, **k)
+        await real(*a, **k)
+
+    monkeypatch.setattr(admin_edit, "_settle_removed_lines", twice)
+    lines = [_as_sent(ln, quantity=2) if ln["product_id"] != SVC else _as_sent(ln)
+             for ln in _order(shop, oid)["items"]]
+    r = door.press(oid, lines)
+    assert r.status_code == 200, r.text
+    assert len(_sold_to(shop, oid)) == 2, "a second settle freed a unit the bill still sells"
+    assert cells.read() == (5, 2), "a second settle gave back a lens the bill still sells"
+    _no_flag_left(shop, oid)
+
+
+@pytest.mark.parametrize("lost", [False, True], ids=["reply_kept", "reply_lost"])
+def test_a_unit_that_will_not_go_back_is_flagged(client, shop, door, monkeypatch, lost):
+    from database.repositories.product_repository import StockRepository
+
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A"), _line(SVC)]))
+    stored = _order(shop, oid)["items"]
+    gone = next(ln for ln in stored if ln["product_id"] == FR)
+    lines = [_as_sent(next(ln for ln in stored if ln["product_id"] == SVC))]
+
+    def dead(self, *a, **k):
+        raise TimeoutError("stock store gone")
+
+    monkeypatch.setattr(StockRepository, "release_sold_units_for_order", dead)
+    if lost:
+        door.press_reply_lost(oid, lines, monkeypatch)
+    else:
+        assert door.press(oid, lines).status_code == 200
+    order = _order(shop, oid)
+    assert order["line_remove_stock_release_failed"] is True
+    assert order["line_remove_stock_failed_item_id"] == gone["item_id"]
+    assert _unit(shop, "SU-FR-A")["status"] == "SOLD"
+
+
+@pytest.mark.parametrize("lost", [False, True], ids=["reply_kept", "reply_lost"])
+def test_a_cell_that_will_not_go_back_is_flagged(client, shop, cells, door, monkeypatch, lost):
+    from api.routers import lens_stock as stock_router
+
+    oid, stored = _lens_bill(client, shop, cells)
+    door.arm(oid)
+    lines = [_other_line(shop, oid)]
+
+    async def dead(*a, **k):
+        raise TimeoutError("lens store gone")
+
+    monkeypatch.setattr(stock_router, "release_cell", dead)
+    if lost:
+        door.press_reply_lost(oid, lines, monkeypatch)
+    else:
+        assert door.press(oid, lines).status_code == 200
+    order = _order(shop, oid)
+    assert order["line_remove_stock_release_failed"] is True
+    assert order["line_remove_stock_failed_item_id"] == stored["item_id"]
+    assert cells.read() == (5, 1)
+
+
+def test_a_save_that_cannot_be_read_back_leaves_the_bill_flagged(client, shop, door, monkeypatch):
+    """Landed or not cannot be told, so nothing moves; the save itself said what
+    it owed, so a landed one is not silent."""
+    from database.repositories.order_repository import OrderRepository
+
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A"), _line(SVC)]))
+    stored = _order(shop, oid)["items"]
+    gone = next(ln for ln in stored if ln["product_id"] == FR)
+    lines = [_as_sent(next(ln for ln in stored if ln["product_id"] == SVC))]
+    real_write = OrderRepository.update_if
+
+    def landed_then_dark(self, *a, **k):
+        real_write(self, *a, **k)
+        monkeypatch.setattr(OrderRepository, "find_by_id", lambda *_a, **_k: None)
+        raise TimeoutError("reply lost and the database gone")
+
+    with monkeypatch.context() as m:
+        m.setattr(OrderRepository, "find_by_id", OrderRepository.find_by_id)
+        m.setattr(OrderRepository, "update_if", landed_then_dark)
+        quiet = type(client)(client.app, raise_server_exceptions=False)
+        r = quiet.put(
+            f"/api/v1/orders/{oid}/{door.name}",
+            json={"reason": "correcting this bill", "items": lines, **DOORS[door.name]},
+            headers=_token(ADMIN),
+        )
+    assert r.status_code >= 500, r.text
+    order = _order(shop, oid)
+    assert len(order["items"]) == 1
+    assert _unit(shop, "SU-FR-A")["status"] == "SOLD", "never freed on a guess"
+    assert order["line_remove_stock_release_failed"] is True
+    assert order["line_remove_stock_failed_item_id"] == gone["item_id"]
+
+
+def test_a_clean_edit_keeps_an_older_flag(client, shop, door):
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A"), _line(SVC)]))
+    shop["db"].get_collection("orders").update_one(
+        {"order_id": oid}, {"$set": dict(zip(FLAGS, (True, "OLD-LINE")))}
+    )
+    keep = next(ln for ln in _order(shop, oid)["items"] if ln["product_id"] == SVC)
+    assert door.press(oid, [_as_sent(keep)]).status_code == 200
+    order = _order(shop, oid)
+    assert (order[FLAGS[0]], order[FLAGS[1]]) == (True, "OLD-LINE")
+    assert "line_remove_settle_token" not in order
+
+
+def test_lost_reply_on_a_bill_that_left_shelves_nothing(client, shop, invoiced, monkeypatch):
+    """A shipped parcel holds the piece, reply or no reply."""
+    from database.repositories.order_repository import OrderRepository
+
+    oid = invoiced([_line(FR, stock_id="SU-FR-A"), _line(SVC)])
+    told = _moved_online(monkeypatch)
+    shop["db"].get_collection("orders").update_one({"order_id": oid}, {"$set": {"status": "SHIPPED"}})
+    keep = next(ln for ln in _order(shop, oid)["items"] if ln["product_id"] == SVC)
+    real = OrderRepository.update_if
+
+    def lost_reply(self, *a, **k):
+        real(self, *a, **k)
+        raise TimeoutError("reply lost")
+
+    monkeypatch.setattr(OrderRepository, "update_if", lost_reply)
+    quiet = type(client)(client.app, raise_server_exceptions=False)
+    r = quiet.put(
+        f"/api/v1/orders/{oid}/superadmin-invoice-change",
+        json={"reason": "correcting this bill", "items": [_as_sent(keep)],
+              "mode": "REVISED_INVOICE"},
+        headers=_token(ADMIN),
+    )
+    assert r.status_code >= 500, r.text
+    assert len(_order(shop, oid)["items"]) == 1
+    assert _sold_to(shop, oid) == ["SU-FR-A"]
+    assert told == []
+    _no_flag_left(shop, oid)
+
+
+def test_lost_reply_still_tells_the_website_and_regates_the_points(
+    client, shop, door, monkeypatch
+):
+    """The rest of what follows a save: the same shape, the same fix."""
+    from api.routers import loyalty
+
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A"), _line(SVC)]))
+    told = _moved_online(monkeypatch)
+    regated = []
+    monkeypatch.setattr(
+        loyalty, "regate_earn_after_edit", lambda doc, user_id=None: regated.append(doc["order_id"])
+    )
+    keep = next(ln for ln in _order(shop, oid)["items"] if ln["product_id"] == SVC)
+    door.press_reply_lost(oid, [_as_sent(keep)], monkeypatch)
+    assert [ln["product_id"] for ln in told] == [FR]
+    assert regated == [oid], "a discount edit must not leave the earn standing"
+
+
+def test_a_claim_that_lost_its_reply_on_a_saved_bill_is_flagged(client, shop, door, monkeypatch):
+    """Refused, but the unit wrote SOLD to a bill with no line for it. It cannot
+    be told from another press's claim, so it stays; the bill says so."""
+    from database.repositories.product_repository import StockRepository
+
+    oid = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    keep = _as_sent(_order(shop, oid)["items"][0])
+    before = _order(shop, oid)["items"]
+    real = StockRepository.mark_sold
+
+    def wrote_then_lost(self, *a, **k):  # mark_sold swallows the fault: a plain False
+        real(self, *a, **k)
+        return False
+
+    monkeypatch.setattr(StockRepository, "mark_sold", wrote_then_lost)
+    r = door.press(oid, [keep, _line(FR, stock_id="SU-FR-A")])
+    assert r.status_code == 409, r.text
+    order = _order(shop, oid)
+    assert order["items"] == before
+    assert _sold_to(shop, oid) == ["SU-FR-A"]
+    assert order["line_remove_stock_release_failed"] is True
+    assert order["line_remove_stock_failed_item_id"] == "SU-FR-A"
+
+
+def test_a_first_available_claim_that_faulted_on_a_saved_bill_is_flagged(
+    client, shop, door, monkeypatch
+):
+    from database.repositories.product_repository import StockRepository
+
+    oid = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    keep = _as_sent(_order(shop, oid)["items"][0])
+    real = StockRepository.claim_one_available
+
+    def wrote_then_lost(self, *a, **k):
+        real(self, *a, **k)
+        raise TimeoutError("reply lost")
+
+    monkeypatch.setattr(StockRepository, "claim_one_available", wrote_then_lost)
+    r = door.press(oid, [keep, _line(FR)])
+    assert r.status_code == 503, r.text
+    assert _order(shop, oid)["line_remove_stock_release_failed"] is True
+
+
+def test_a_plain_refusal_raises_no_flag(client, shop, door):
+    """No stock on the shelf is a refusal, not a stray unit."""
+    oid = door.arm(_saved_bill(client, shop, [_line(ACC), _line(SVC)]))
+    stored = [_as_sent(ln) for ln in _order(shop, oid)["items"]]
+    r = door.press(oid, [*stored, _line(ACC)])
+    assert r.status_code == 409, r.text
+    _no_flag_left(shop, oid)
