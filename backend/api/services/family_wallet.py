@@ -654,6 +654,8 @@ def pool_redeem(
          (balance_points >= points) is IN the filter, so two concurrent
          redeems near the floor produce exactly one winner. The debit is
          idempotent on the consumed otp_id (a retry cannot double-debit).
+    A retry whose debit already landed skips 2 and re-proves (never
+    re-consumes) the OTP in 3, then replays the same debit (duplicate=True).
     The rupee-value voucher mint happens in the ROUTER (vouchers.mint_voucher)
     after this returns ok."""
     if _households(db) is None:
@@ -673,17 +675,27 @@ def pool_redeem(
     if redeeming_customer_id not in (household.get("member_customer_ids") or []):
         return {"ok": False, "http": 403, "error": "not_a_member"}
 
+    idem_key = f"poolredeem:{otp_id}" if otp_id else None
+    # L2-WALLET-F02: a retry of a redemption whose debit ALREADY landed (lost
+    # response) re-proves the consumed OTP instead of re-consuming it, so the
+    # router can hand back the ORIGINAL voucher. It moves no points.
+    replay = mg.find_applied(db, ACCOUNT_TYPE, household_id, idem_key) is not None
+
     # Advisory pre-check (the authoritative floor is in the debit filter).
-    if pool_balance(db, household_id) < pts:
+    if not replay and pool_balance(db, household_id) < pts:
         return {"ok": False, "http": 409, "error": "insufficient_balance"}
 
     if require_otp:
         if not otp_id or not otp_code:
             return {"ok": False, "http": 400, "error": "otp_required"}
         try:
-            from .reminder_rail import verify_pool_redemption_otp
+            from .reminder_rail import (
+                reprove_pool_redemption_otp,
+                verify_pool_redemption_otp,
+            )
 
-            ver = verify_pool_redemption_otp(db, otp_id=otp_id, code=otp_code)
+            verify = reprove_pool_redemption_otp if replay else verify_pool_redemption_otp
+            ver = verify(db, otp_id=otp_id, code=otp_code)
         except Exception:  # noqa: BLE001
             logger.warning("[FAMWALLET] OTP verify errored", exc_info=True)
             return {"ok": False, "http": 503, "error": "otp_unavailable"}
@@ -712,7 +724,7 @@ def pool_redeem(
         ref=otp_id,
         store_id=household.get("store_id"),
         # One consumed OTP -> at most one debit, even on a network retry.
-        idempotency_key=f"poolredeem:{otp_id}" if otp_id else None,
+        idempotency_key=idem_key,
     )
     if not res.ok:
         code = {
@@ -730,6 +742,15 @@ def pool_redeem(
         )
         return {"ok": False, "http": code, "error": err}
     if res.reason == "duplicate":
+        # The replay must be the SAME redemption: another member cannot
+        # collect the voucher this debit paid for.
+        coll = _coll(db, "loyalty_transactions")
+        try:
+            prior = coll.find_one({"txn_id": res.txn_id}) if coll is not None else None
+        except Exception:  # noqa: BLE001
+            prior = None
+        if prior and prior.get("customer_id") != redeeming_customer_id:
+            return {"ok": False, "http": 409, "error": "redeem_conflict"}
         return {
             "ok": True,
             "balance": int(res.balance),
