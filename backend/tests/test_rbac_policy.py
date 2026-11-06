@@ -118,13 +118,14 @@ def _allowed(method, path):
 
 
 def test_orders_create_is_pos_roles_not_accountant_or_optometrist():
-    """POST /orders is gated to POS-facing roles (POS_WRITE_ROLES). ACCOUNTANT,
-    OPTOMETRIST, CATALOG_MANAGER, WORKSHOP_STAFF, CASHIER are excluded."""
+    """POST /orders is gated to the till's sale roles (SALE_ROLES: the POS
+    write roles + CASHIER, Codex L2-POS-F01). ACCOUNTANT, OPTOMETRIST,
+    CATALOG_MANAGER, WORKSHOP_STAFF are excluded."""
     allowed = _allowed("POST", "/api/v1/orders")
     assert isinstance(allowed, list)
-    for pos_role in ("SALES_CASHIER", "SALES_STAFF", "STORE_MANAGER", "ADMIN"):
+    for pos_role in ("SALES_CASHIER", "SALES_STAFF", "STORE_MANAGER", "ADMIN", "CASHIER"):
         assert pos_role in allowed
-    for excluded in ("ACCOUNTANT", "OPTOMETRIST", "CATALOG_MANAGER", "CASHIER"):
+    for excluded in ("ACCOUNTANT", "OPTOMETRIST", "CATALOG_MANAGER", "WORKSHOP_STAFF"):
         assert excluded not in allowed
 
 

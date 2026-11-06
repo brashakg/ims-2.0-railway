@@ -238,6 +238,38 @@ def test_destination_is_refused_when_there_is_no_destination(db):
     assert stu.repair(db, rows, disposition="source", apply=True, actor="t")["repaired"] == 1
 
 
+@pytest.mark.parametrize(
+    "transfer_id,transfer_doc,reason",
+    [
+        ("T_CANCEL", _transfer("T_CANCEL", "CANCELLED"), "CLOSED_CANCELLED"),
+        ("T_GONE2", None, "MISSING_TRANSFER"),
+        (None, None, "NO_TRANSFER_ID"),
+    ],
+)
+def test_destination_is_refused_for_cancelled_or_missing_transfer_even_with_a_tag(
+    db, transfer_id, transfer_doc, reason
+):
+    """INFRA-04: the unit still carries its ship-time transfer_to_store_id, but a
+    cancelled / missing transfer has no destination to re-home to. The audit
+    re-homed such a unit to the tagged store as AVAILABLE."""
+    db["stock_units"].insert_one(_unit("u9", transfer_id=transfer_id, dest="ST_DST"))
+    if transfer_doc:
+        db["stock_transfers"].insert_one(transfer_doc)
+    rows = [r for r in stu.find_stranded(db, stores=[], transfers_filter=[])
+            if r["stock_id"] == "u9"]
+    assert rows and rows[0]["reason"] == reason and rows[0]["dest_store_id"] == "ST_DST"
+    res = stu.repair(db, rows, disposition="destination", apply=True, actor="t")
+    assert res["repaired"] == 0 and res["skipped_no_destination"] == 1
+    unit = db["stock_units"].find_one({"stock_id": "u9"})
+    assert unit["status"] == "TRANSFERRED" and unit["store_id"] == "ST_SRC"
+    assert db["stock_audit"].count_documents({}) == 0
+    # The dry-run preview must not promise the write either.
+    assert stu.repair(db, rows, disposition="destination", apply=False,
+                      actor="t")["repaired"] == 0
+    # ...source / quarantine stay available for it.
+    assert stu.repair(db, rows, disposition="quarantine", apply=True, actor="t")["repaired"] == 1
+
+
 def test_a_unit_that_moved_since_the_report_is_left_alone(db):
     rows = stu.find_stranded(db, stores=[], transfers_filter=[])
     # A real receive lands u2 at the destination between report and repair.

@@ -1378,6 +1378,12 @@ async def get_cl_refill_status(
     }
     if db_conn is None:
         return empty
+    # Object-level store scope, the SAME rule + non-disclosing 404 as the 360
+    # view (L1-F17): this payload is the customer's last order id/date, SKU and
+    # pack -- a guessed id from another shop must not even confirm it exists.
+    customer = db.query_customer(customer_id)
+    if not customer or not customer_in_scope(customer, current_user):
+        raise HTTPException(status_code=404, detail="Customer not found")
 
     try:
         # CL categories used across the codebase (see inventory.py _CL_CATEGORIES).

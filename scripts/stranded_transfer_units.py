@@ -103,6 +103,10 @@ CLOSED_TRANSFER_STATUSES = frozenset({"received", "completed", "cancelled"})
 
 DISPOSITIONS = ("destination", "source", "quarantine")
 
+# classify() reasons for which `destination` is refused: the transfer never
+# completed (cancelled) or cannot be found, so there is nothing to receive.
+_NO_DESTINATION_REASONS = frozenset({"NO_TRANSFER_ID", "MISSING_TRANSFER", "CLOSED_CANCELLED"})
+
 # Ledger event per disposition. `destination` is the receive that should have
 # happened; `source` is a correction (the frame never left / came back);
 # `quarantine` parks it pending a physical count.
@@ -427,7 +431,11 @@ def repair(db, rows: List[Dict], *, disposition: str, apply: bool, actor: str) -
     skipped_moved = 0
 
     for row in rows:
-        if disposition == "destination" and not row["dest_store_id"]:
+        # A missing / cancelled transfer has no destination, whatever store the
+        # unit was tagged for at ship time (audit INFRA-04 re-homed one).
+        if disposition == "destination" and (
+            not row["dest_store_id"] or row["reason"] in _NO_DESTINATION_REASONS
+        ):
             skipped_no_dest += 1
             continue
 

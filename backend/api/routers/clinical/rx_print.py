@@ -14,15 +14,19 @@ from datetime import datetime
 from ...utils.ist import ist_date_str
 from html import escape as _html_escape
 import uuid
-from ..auth import get_current_user, require_roles
-from ...dependencies import get_prescription_repository, get_store_repository
+from ..auth import require_roles
+from ...dependencies import (
+    can_access_store_scoped,
+    get_prescription_repository,
+    get_store_repository,
+)
 from ...services.rx_print_values import (
     first_present_rx_value,
     is_absent_rx_value,
     format_axis_value,
     format_rx_value,
 )
-from ._shared import _REDO_ROLES, router
+from ._shared import _REDO_ROLES, require_rx_read, router
 from .models import RedoCreate
 
 
@@ -267,11 +271,12 @@ def _build_rx_card_html(rx: dict, store: Optional[dict]) -> str:
 @router.get("/prescriptions/{prescription_id}/print")
 async def print_prescription(
     prescription_id: str = Path(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_rx_read),
 ):
     """Return a self-contained, printable A5 Rx card (read-only).
 
-    Any authenticated clinical/POS user can print. Fail-soft: if the DB is
+    Same gate as GET /prescriptions/{id} (audit L2-CLIN-F01): the clinical
+    read roles, and the Rx's own store (404 cross-store). Fail-soft: if the DB is
     unavailable we still return a minimal valid card rather than 500-ing, so a
     degraded backend never blocks a counter staffer from handing a patient a
     printout.
@@ -284,7 +289,8 @@ async def print_prescription(
         )
 
     rx = rx_repo.find_by_id(prescription_id)
-    if not rx:
+    # BUG-088 / L2-CLIN-F01: store-scope the Rx (404 hides existence cross-store).
+    if not rx or not can_access_store_scoped(rx.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Prescription not found")
 
     store = None
@@ -317,7 +323,8 @@ async def create_prescription_redo(
         raise HTTPException(status_code=503, detail="Database not available")
 
     rx = rx_repo.find_by_id(prescription_id)
-    if not rx:
+    # BUG-088 / L2-CLIN-F01: store-scope the Rx (404 hides existence cross-store).
+    if not rx or not can_access_store_scoped(rx.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Prescription not found")
 
     now = datetime.utcnow()
@@ -360,7 +367,7 @@ async def create_prescription_redo(
 @router.get("/prescriptions/{prescription_id}/redos")
 async def list_prescription_redos(
     prescription_id: str = Path(...),
-    current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(require_rx_read),
 ):
     """Return the redo history for a prescription (most recent last)."""
     rx_repo = get_prescription_repository()
@@ -368,7 +375,8 @@ async def list_prescription_redos(
         return {"redos": [], "total": 0}
 
     rx = rx_repo.find_by_id(prescription_id)
-    if not rx:
+    # BUG-088 / L2-CLIN-F01: store-scope the Rx (404 hides existence cross-store).
+    if not rx or not can_access_store_scoped(rx.get("store_id"), current_user):
         raise HTTPException(status_code=404, detail="Prescription not found")
 
     redos = rx.get("redos") or []

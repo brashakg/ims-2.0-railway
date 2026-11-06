@@ -11,6 +11,7 @@ import { usePOSStore } from '../stores/posStore';
 import { permissionToCapability, isUngrantableCapability } from '../utils/capabilities';
 import { userSeesAllStores } from '../utils/storeAccess';
 import { USER_SHOPS_SYNCED_EVENT } from '../services/api/client';
+import { dropPaletteRecents } from '../services/api/signOutEvent';
 import { getSessionPolicy } from '../constants/sessionPolicy';
 import { LAST_ACTIVITY_KEY, storedSessionIdleExpired } from '../hooks/useIdleLogout';
 import { IDLE_LOGIN_PATH, autoParkForIdleLogout } from '../hooks/idleSignOut';
@@ -151,6 +152,32 @@ export function AuthProvider({ children }: AuthProviderProps) {
     window.addEventListener(USER_SHOPS_SYNCED_EVENT, follow);
     return () => window.removeEventListener(USER_SHOPS_SYNCED_EVENT, follow);
   }, []);
+
+  // Another tab signed out, idled out, or signed a different person in (they
+  // share localStorage; the `storage` event fires only in the OTHER tabs).
+  // This tab must not keep showing the old person's screens (Codex R21): empty
+  // it and reload, so every in-memory view and store starts from the new
+  // storage. A refresh rotating ims_token / ims_refresh_token for the SAME
+  // person is not a sign-out and changes nothing.
+  const signedInId = state.user?.id;
+  useEffect(() => {
+    if (!signedInId) return;
+    const follow = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== 'ims_token' && e.key !== 'ims_user') return;
+      let storedId: string | undefined;
+      try {
+        storedId = (JSON.parse(localStorage.getItem('ims_user') || 'null') as User | null)?.id;
+      } catch { /* a malformed cache is no one */ }
+      // Mid-login in the other tab the new token can land before the new
+      // user: the ims_user event that follows decides.
+      if (localStorage.getItem('ims_token') && (!storedId || storedId === signedInId)) return;
+      dispatch({ type: 'LOGOUT' });
+      queryClient.clear();
+      window.location.reload();
+    };
+    window.addEventListener('storage', follow);
+    return () => window.removeEventListener('storage', follow);
+  }, [signedInId, queryClient]);
 
   // Check for existing token on mount
   useEffect(() => {
@@ -342,6 +369,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       localStorage.removeItem('ims_user');
       localStorage.removeItem('ims_login_time');
       localStorage.removeItem('ims_active_module');
+      dropPaletteRecents();
       // Clear POS state to prevent data leaking between users
       try { usePOSStore.getState().clearAllOnLogout(state.user?.id, state.user?.activeStoreId); } catch { /* ignore if store not ready */ }
       dispatch({ type: 'LOGOUT' });
