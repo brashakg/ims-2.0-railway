@@ -32,6 +32,15 @@ OVER_CAP = {"ORIGINAL_QUANTITY_EXCEEDED", "ORIGINAL_AMOUNT_EXCEEDED", "RETURN_AM
             "RECEIPT_QUANTITY_EXCEEDED", "RETURNED_UNIT_ALREADY_CREDITED"}
 
 
+# A claimed note the physical rule stops, and no door can free (retrying, rejecting,
+# closing and a new RMA all fail): only from before claims recorded that rule
+# (supplier_credit_evidence.rule_settled), or with its own pieces back. Every
+# refusal says so instead of promising a retry. The way out is the owner's.
+NOTE_HELD = ("The supplier note waiting here cannot finish, so this record stays open: retrying "
+             "will not help, a new RMA cannot take the same note, and no money has moved. It "
+             "needs a head-office decision. Why it cannot finish: ")
+
+
 def _noted_without_pieces(db, rma_id):
     """A note stored before an RMA carried its return's pieces: its source key
     was built with none, and a partly confirmed return keeps its origin."""

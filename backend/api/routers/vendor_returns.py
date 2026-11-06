@@ -30,6 +30,7 @@ from ..services.payables_mask import require_payables
 from ..services.rtv_debit_note import debit_note_issued
 from ..services import item_events as _ie, rma_supplier_credit
 from ..services.org_validation import shop_gstins
+from ..services.supplier_credit_evidence import rule_settled
 from ..services.product_cost import _STILL_OURS
 from ..services.quarantine_hold import (
     SAVING_MINUTES, UNSAVED as _UNSAVED, claim_is_dead, open_return_of, stamp as _stamp,
@@ -1158,9 +1159,15 @@ async def update_return_status(
             )
         # 'replaced' forgoes the credit and shuts both doors: a claimed supplier
         # note, here or on a live RMA, finishes first (one number, one record).
-        if (status_update.status == "replaced" and return_doc.get("return_type") != "replacement"
-                and rma_supplier_credit.unfinished_on_return(db, return_doc)):
+        waiting = (status_update.status == "replaced" and return_doc.get("return_type") != "replacement"
+                   and rma_supplier_credit.unfinished_on_return(db, return_doc))
+        if waiting and waiting.get("return_kind") == "RMA":
             raise HTTPException(status_code=409, detail=(
+                f"A supplier credit note is still waiting on RMA {waiting['return_id']}. "
+                "Accounts settles it there first."))
+        if waiting:
+            why = _typed_credit_problem(db, return_doc, waiting["_id"])
+            raise HTTPException(status_code=409, detail=rma_supplier_credit.NOTE_HELD + why if why else (
                 "A supplier credit note is still waiting on this return. Accounts finishes it "
                 "first: retry that same note once its original bill is confirmed."))
         # Shipping: every piece leaves stock FIRST (QUARANTINED -> RTV) while
@@ -1383,9 +1390,10 @@ async def price_vendor_return(
 def _typed_credit_problem(db, return_doc, confirmation_id) -> Optional[str]:
     """Why a line of this return naming no piece cannot take a new credit
     (_accounted_for, as on an RMA); None when it can. A POSTED note's replay
-    always answers: what is already credited stays as it is."""
+    always answers: what is already credited stays as it is. So does a return
+    whose claimed note passed this check (rule_settled)."""
     event = db.get_collection("supplier_credit_confirmations").find_one({"_id": confirmation_id})
-    if event and event.get("posting_status") == "POSTED":
+    if (event and event.get("posting_status") == "POSTED") or rule_settled(db, return_doc):
         return None
     moved = {u.get("product_id") for u in _named_units(db, return_doc).values()}
     for line in return_doc.get("items") or []:
@@ -1442,7 +1450,8 @@ async def confirm_supplier_credit(
     return_doc = _return_in_reach(db.get_collection("vendor_returns"), return_id, current_user)
     problem = _typed_credit_problem(db, return_doc, str(body.idempotency_key))
     if problem:
-        raise HTTPException(409, problem)
+        held = rma_supplier_credit.unfinished_on_return(db, return_doc)
+        raise HTTPException(409, rma_supplier_credit.NOTE_HELD + problem if held else problem)
     try:
         event, repeated = record_supplier_confirmation(
             db, return_doc, body.model_dump(mode="json"), actor_id=current_user.get("user_id"),

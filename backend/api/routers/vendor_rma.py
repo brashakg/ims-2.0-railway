@@ -79,7 +79,7 @@ from ..services.vendor_rma import (
 from ..services.rtv_debit_note import debit_note_issued
 from ..services.payables_mask import AP_ROLES, require_payables, strip_rma_credit
 from ..services import rma_supplier_credit
-from ..services.supplier_credit_evidence import SupplierCreditError, credit_started
+from ..services.supplier_credit_evidence import SupplierCreditError, credit_started, rule_settled
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +264,8 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
     return already carried back, this shop's purchase now at a sister shop, or
     a product whose every piece is sold (owner ruling 2026-11-06). An unticked
     line with none of these (a historical line, a made-to-order lens) keeps
-    today's outcome.
+    today's outcome. Once a note this RMA claimed passed these line checks they
+    stay answered (rule_settled); the return's own pieces are always asked.
 
     The return must still be owed a credit this RMA can take: not one settled
     by replacement goods, and not one already holding a supplier note of its
@@ -304,6 +305,7 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
             else:
                 return (f"Piece {_rtv._label(units.get(sid), sid)} of vendor return {rid} "
                         "is no longer held for it.")
+    settled = bool(doc.get("rma_id")) and rule_settled(db, {"rma_id": doc["rma_id"]})
     wanted: Counter = Counter()
     for line in doc.get("lines") or []:
         if line.get("customer_owned"):
@@ -313,6 +315,8 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
             continue
         if line.get("product_id") in pieces:
             wanted[line.get("product_id")] += int(line.get("quantity") or 0)
+            continue
+        if settled:
             continue
         item = SimpleNamespace(product_id=line.get("product_id"), product_name=line.get("product_name"))
         why = _rtv._typed_line_problem(db, item, doc.get("store_id"))
@@ -330,16 +334,21 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
 
 def _require_physical_return(doc: dict, *, shipped: bool, status_code: int = 409,
                              closing: bool = False) -> None:
-    problem = _physical_return_problem(_get_db(), doc, shipped=shipped, closing=closing)
+    db = _get_db()
+    problem = _physical_return_problem(db, doc, shipped=shipped, closing=closing)
     if problem:
-        raise HTTPException(status_code=status_code, detail=problem)
+        held = db is not None and doc.get("rma_id") and rma_supplier_credit.unfinished_note(db, doc)
+        raise HTTPException(status_code=status_code,
+                            detail=rma_supplier_credit.NOTE_HELD + problem if held else problem)
 
 
 def _require_no_unfinished_note(doc: dict) -> None:
     """Rejecting or closing shuts this RMA's credit door. A supplier note it has
     claimed can finish nowhere else (one note number, one record), so it is
-    finished here first. Says no number: a manager may press reject."""
+    finished here first. Says no number: a manager may press reject. One the
+    physical rule stops is told that, not to retry."""
     if rma_supplier_credit.unfinished_note(_get_db(), doc):
+        _require_physical_return(doc, shipped=True)
         raise HTTPException(status_code=409, detail=(
             "A supplier credit note is still waiting on this RMA. Accounts finishes it here "
             "first: retry that same note here once its original bill is confirmed. Until "

@@ -39,6 +39,16 @@ def credit_started(db, return_doc):
         {**return_event_query(return_doc), "identity_claimed": {"$ne": False}}) is not None
 
 
+def rule_settled(db, return_doc):
+    """True once a note this door claimed had passed its physical rule. That
+    answer stands: the goods had left, so a piece of the product arriving or
+    selling since is not what went back, and the note can still finish. A row
+    from before claims recorded this says nothing either way (physical_rule_passed
+    absent), and one refused before its claim settled nothing."""
+    return db.get_collection(EVENTS).find_one(
+        {**return_event_query(return_doc), "identity_claimed": True, "physical_rule_passed": True}) is not None
+
+
 def return_event_query(return_doc):
     kind = return_doc.get("return_kind") or ("RMA" if return_doc.get("rma_id") and not return_doc.get("return_id") else "VENDOR_RETURN")
     return {"return_id": return_doc.get("return_id") or return_doc.get("rma_id"),

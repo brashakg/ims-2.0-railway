@@ -121,7 +121,7 @@ def _event(db, return_doc, submitted, actor_id):
                  "return_kind": return_doc.get("return_kind", "VENDOR_RETURN"),
                  "vendor_id": return_doc["vendor_id"], "store_id": return_doc["store_id"],
                  "posting_status": "PENDING_EVIDENCE", "pending_reasons": [], "version": 0,
-                 "identity_claimed": False,
+                 "identity_claimed": False, "physical_rule_passed": True,
                  "created_at": _now(), "created_by": actor_id}
     try:
         collection.insert_one(candidate)
@@ -339,8 +339,9 @@ def _finish_return(db, event):
 def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_store_ids=None):
     """Record a whole actual supplier note, or preserve it wholly pending.
 
-    Route adapters must apply Accounts RBAC/shop access and prevent ordinary
-    status/pricing writes while credit_confirmation_fence is present.
+    Route adapters must apply Accounts RBAC/shop access and their physical rule
+    (a new row records it passed) and prevent ordinary status/pricing writes
+    while credit_confirmation_fence is present.
     """
     submitted = _input(payload)
     if return_doc.get("return_kind") != "RMA":
