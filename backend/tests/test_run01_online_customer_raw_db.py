@@ -374,3 +374,70 @@ def test_replay_while_the_door_is_down_keeps_a_linked_row_linked(raw_db, monkeyp
     assert not replay.get("customer_link_failed")
     order = raw_db["orders"].find_one({"shopify_order_id": "50107"})
     assert order["customer_id"] == first["customer_id"]
+
+
+# --- PR #1388 review: "resolution failed" is not a phone-only state. A buyer with
+# an email is a customer too; only a buyer with neither is a guest.
+
+
+class _RefusingRepo(CustomerRepository):
+    """The repository is there but neither finds nor creates (the write path)."""
+
+    def find_by_email(self, *_a, **_k):
+        raise pymongo.errors.AutoReconnect("synthetic customer read")
+
+    def create(self, *_a, **_k):
+        raise pymongo.errors.AutoReconnect("synthetic customer write")
+
+
+def _repo_gone(_db):
+    return None
+
+
+def _repo_refusing(db):
+    return _RefusingRepo(db["customers"])
+
+
+@pytest.mark.parametrize("fault", [_repo_gone, _repo_refusing], ids=["no_repo", "refusing"])
+@pytest.mark.parametrize(
+    "phone", [None, "+1 415 555 0100"], ids=["email_only", "foreign_phone"]
+)
+def test_email_buyer_whose_resolution_failed_is_flagged_and_replay_repairs_the_row(
+    raw_db, monkeypatch, fault, phone
+):
+    """The same P2 by the email door: flagged WITH the insert, so the replay
+    repairs the stored row and the contact it mints is not left an orphan."""
+    healthy = deps.get_customer_repository
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: fault(raw_db))
+    res = _map(raw_db, 50200, phone=phone, email="Only@Example.com")
+    assert res["status"] == "created" and res["customer_id"] is None
+    assert res["customer_link_failed"] is True
+    order = raw_db["orders"].find_one({"shopify_order_id": "50200"})
+    assert order["customer_id"] is None
+    assert order["is_guest_order"] is True
+    assert order["customer_link_failed"] is True
+    books = _books(raw_db)
+
+    monkeypatch.setattr(deps, "get_customer_repository", healthy)
+    replay = _map(raw_db, 50200, phone=phone, email="Only@Example.com")
+    assert replay["status"] in ("duplicate", "replayed")
+    assert replay["customer_link_repaired"] is True
+    order = raw_db["orders"].find_one({"shopify_order_id": "50200"})
+    cust = raw_db["customers"].find_one({"email": "only@example.com"})
+    assert order["customer_id"] == cust["customer_id"] == replay["customer_id"]
+    assert cust["contact_tier"] == "MARKETING"
+    assert order["is_guest_order"] is False
+    assert order["customer_link_failed"] is False
+    assert raw_db["customers"].count_documents({}) == 1
+    assert _books(raw_db) == books, "a retry books nothing: order, invoice, unit, counter"
+
+
+def test_foreign_phone_and_no_email_is_a_genuine_guest_even_with_the_door_down(
+    raw_db, monkeypatch
+):
+    """Nothing to key on: no failure to repair, down or up."""
+    monkeypatch.setattr(deps, "get_customer_repository", lambda: None)
+    res = _map(raw_db, 50201, phone="+1 415 555 0100", email=None)
+    assert res["customer_id"] is None and not res.get("customer_link_failed")
+    order = raw_db["orders"].find_one({"shopify_order_id": "50201"})
+    assert order["is_guest_order"] is True and order["customer_link_failed"] is False

@@ -609,7 +609,10 @@ def _match_or_create_customer(
             return _norm(found.get("customer_id"))
     except Exception:  # noqa: BLE001
         pass
-    logger.debug("[ONLINE_MAP] email-only customer create failed", exc_info=True)
+    logger.warning(
+        "[ONLINE_MAP] email buyer could not be linked to a customer; order "
+        "recorded as guest (customer_link_failed)"
+    )
     return None
 
 
@@ -1153,9 +1156,9 @@ def _customer_link_fields(
         the order's ``customer_name`` / ``customer_phone`` snapshot, so the sale
         is fully recorded against an unidentified buyer, not a phantom record.
 
-    ``link_failed`` (RUN-01): the buyer HAD a usable phone but no customer could
-    be resolved -- ``customer_link_failed`` makes it visible, never a silent
-    guest, and marks it for the replay repair."""
+    ``link_failed`` (RUN-01): the buyer HAD a usable phone or an email but no
+    customer could be resolved -- ``customer_link_failed`` makes it visible,
+    never a silent guest, and marks it for the replay repair."""
     if customer_id:
         return {
             "customer_id": customer_id,
@@ -1362,13 +1365,14 @@ def map_shopify_order(
             customer_id = _match_existing_customer(db, buyer)
         else:
             customer_id = _match_or_create_customer(db, buyer, store_id)
-        # A live buyer with a usable phone always resolves to a customer; None
-        # here is a FAILURE (RUN-01), flagged on the order, never a silent guest.
-        # (A historical unmatched buyer is a legitimate guest.)
+        # A live buyer with a usable phone or an email always resolves to a
+        # customer; None here is a FAILURE (RUN-01), flagged on the order, never a
+        # silent guest. (A buyer with neither, and a historical unmatched buyer,
+        # are legitimate guests.)
         link_failed = bool(
             not customer_id
             and not historical
-            and _normalize_indian_mobile(buyer.get("phone", ""))
+            and (_normalize_indian_mobile(buyer.get("phone", "")) or _norm(buyer.get("email")))
         )
         # Stamp the resolved IMS customer id so the shared ingest's clinical
         # FLAG & HOLD check matches against THIS customer's prescriptions (the raw
