@@ -132,8 +132,8 @@ class _FakeStockColl:
 
 class _FakeOrdersColl:
     """The order collection's atomic surface. _claim_order_for_cancel uses
-    find_one_and_update with a $nin status filter -- WITHOUT this the repo has
-    no `collection`, the claim silently takes the legacy fallback branch, and
+    find_one_and_update with a guarded filter -- WITHOUT this the repo has
+    no `collection`, the claim fails closed on every cancel, and
     the atomic guard that IS the fix is never executed by any test."""
 
     def __init__(self, orders):
@@ -488,8 +488,6 @@ def test_cancel_never_releases_the_units_of_an_order_whose_goods_are_out(wired, 
         _cancel()
     assert refused.value.status_code == 400
     assert status.upper() in refused.value.detail.upper(), "the pre-check names the status"
-    assert om._claim_order_for_cancel(wired["orders"], "ORD-1", "r" * 10, _ADMIN) is None
-    wired["orders"].collection = None  # the non-atomic fallback holds it too
     assert om._claim_order_for_cancel(wired["orders"], "ORD-1", "r" * 10, _ADMIN) is None
     assert wired["orders"].orders["ORD-1"]["status"] == status
     assert [u["status"] for u in wired["units"]] == ["SOLD"]
@@ -1025,9 +1023,8 @@ def test_atomic_claim_refuses_a_second_cancel_without_a_second_undo(wired):
 
 
 def test_failed_status_write_does_not_run_the_undo(monkeypatch):
-    """Legacy fallback path (no `collection`): base_repository.update returns
-    False on failure, so discarding it ran the FULL stock + loyalty undo and
-    reported success for an order still sitting CONFIRMED."""
+    """No conditional write available (no `collection`): the claim fails closed.
+    The FULL stock + loyalty undo must not run for an order still CONFIRMED."""
     orders = _FakeOrderRepo([_order()], with_collection=False)
     orders.update_ok = False
     units = [_unit("U1")]

@@ -159,7 +159,15 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
         )
         is_retry = False
         if claimed is None:
-            fresh = repo.find_by_id(order_id) or {}
+            fresh = repo.find_by_id(order_id)
+            if not fresh:
+                # Unreadable (find_by_id swallows the error): whether the claim
+                # landed is unknown, and nothing was undone. A re-press reads
+                # what happened and finishes or refuses.
+                raise HTTPException(
+                    status_code=500,
+                    detail="Could not cancel the order -- please retry.",
+                )
             if fresh.get("status") != "CANCELLED" and (
                 fresh.get("invoice_number") or None
             ) != (order.get("invoice_number") or None):
@@ -174,7 +182,7 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
                         "credit note and the refund."
                     ),
                 )
-            if fresh and fresh.get("status") != "CANCELLED" and any(
+            if fresh.get("status") != "CANCELLED" and any(
                 fresh.get(k) != order.get(k) for k in _CANCEL_MONEY_KEYS
             ):
                 # A payment landed while this cancel ran (L2-POS-F04): the
@@ -189,15 +197,14 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
                     ),
                 )
             if fresh.get("status") != "CANCELLED":
-                if fresh and fresh.get("status") in CANCELLABLE_STATUSES:
-                    # Still cancellable -> we did not lose a race, the STATUS
-                    # WRITE ITSELF failed. Fail loudly; the order is untouched
-                    # and no stock/loyalty undo has run.
+                if fresh.get("status") in CANCELLABLE_STATUSES:
+                    # Still cancellable -> we did not lose a race, the claim
+                    # itself failed. Fail loudly; no stock/loyalty undo has run.
                     raise HTTPException(
                         status_code=500,
                         detail="Could not cancel the order -- please retry.",
                     )
-                # Lost the race to a DELIVER (or the doc vanished).
+                # Lost the race to a DELIVER.
                 raise HTTPException(
                     status_code=400,
                     detail="Cannot cancel this order -- its status changed.",

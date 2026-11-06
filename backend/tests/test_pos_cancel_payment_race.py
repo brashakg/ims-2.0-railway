@@ -22,6 +22,7 @@ import asyncio
 import concurrent.futures
 import os
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,12 +32,16 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("MONGODB_URI", "")
 
 from fastapi import HTTPException  # noqa: E402
+from pymongo.errors import AutoReconnect  # noqa: E402
 
 from api.routers import customers as cust_router  # noqa: E402
 from api.routers.orders import PaymentCreate, add_payment, cancel_order  # noqa: E402
 from api.routers.orders import cancel as cancel_module  # noqa: E402
 from api.routers.orders.release import _claim_order_for_cancel  # noqa: E402
-from tests.test_pos_money_doors import _ledger, _order, _stored, _user, till  # noqa: E402,F401
+from database.repositories.product_repository import StockRepository  # noqa: E402
+from tests.test_pos_money_doors import (  # noqa: E402,F401
+    _ADV_BODY, _advance_client, _advance_order, _hdr, _ledger, _order, _stored, _user, till,
+)
 from tests.test_pos_money_doors_r9 import _ago, _balance, _customer  # noqa: E402
 from tests.test_pos_money_doors_r12 import _repo  # noqa: E402
 
@@ -198,3 +203,202 @@ async def test_unpaid_order_still_cancels_and_paid_one_still_takes_payment(till)
     coll.insert_one(_order("ORD-2"))
     await add_payment("ORD-2", PaymentCreate(method="CASH", amount=400.0), _user("CASHIER"), "k2")
     assert _stored(till, "ORD-2")["amount_paid"] == 400.0
+
+
+# =========================================================================== #
+# The claim's write fails or its outcome is unknown (Codex PR-1396 P1). There
+# is no second, weaker write: the claim's one conditional write is the only
+# thing that may cancel, so a failed claim changes nothing and a lost
+# acknowledgement finishes through the retry door on what the database holds.
+# =========================================================================== #
+@pytest.fixture()
+def shelf(till, monkeypatch):
+    """One serialized frame SOLD to ORD-1, behind the real stock repository."""
+    units = till["db"].get_collection("stock_units")
+    units.insert_one({"stock_id": "U1", "product_id": "P1", "store_id": "BV-PUN-01",
+                      "status": "SOLD", "order_id": "ORD-1"})
+    repo = StockRepository(units)
+    monkeypatch.setattr(cancel_module, "get_stock_repository", lambda: repo)
+    return units
+
+
+def _claim_fault(till, monkeypatch, land=False):
+    """The cancel's find_one_and_update raises once, like a dropped connection:
+    before the write, or (land=True) after it, the lost acknowledgement. Every
+    other write is real."""
+    coll = till["db"].get_collection("orders")
+    real = coll.find_one_and_update
+    seen = {"faults": 0}
+
+    def _fault(flt, upd, *a, **k):
+        if upd.get("$set", {}).get("status") == "CANCELLED" and not seen["faults"]:
+            seen["faults"] += 1
+            if land:
+                real(flt, upd, *a, **k)
+            raise AutoReconnect("connection dropped")
+        return real(flt, upd, *a, **k)
+
+    monkeypatch.setattr(coll, "find_one_and_update", _fault)
+    return seen
+
+
+def _pay_before_any_plain_cancel(till, monkeypatch):
+    """The audit's interleaving: a real payment lands immediately before any
+    plain status write the cancel attempts after a failed claim."""
+    repo = till["orders"]
+    real = repo.update
+    seen = {}
+
+    def _pay_then_write(order_id, data):
+        if data.get("status") == "CANCELLED" and "pay" not in seen:
+            seen["pay"] = _run(_pay("CASH"))
+        return real(order_id, data)
+
+    monkeypatch.setattr(repo, "update", _pay_then_write)
+    return seen
+
+
+def _refuse_plain_cancel(repo, monkeypatch):
+    """Only the conditional write may cancel: a plain one fails the test."""
+    real = repo.update
+
+    def _update(order_id, data):
+        assert data.get("status") != "CANCELLED", "a plain write cancelled the order"
+        return real(order_id, data)
+
+    monkeypatch.setattr(repo, "update", _update)
+
+
+@pytest.mark.asyncio
+async def test_failed_claim_then_payment_never_cancels_or_releases(till, shelf, monkeypatch):
+    till["db"].get_collection("orders").insert_one(_order(status="DRAFT"))
+    fault = _claim_fault(till, monkeypatch)
+    seen = _pay_before_any_plain_cancel(till, monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        await cancel_order("ORD-1", reason=REASON, current_user=_user("SALES_STAFF"))
+    assert exc.value.status_code == 500 and "retry" in exc.value.detail
+    assert fault["faults"] == 1 and "pay" not in seen  # no plain write was attempted
+    assert _stored(till)["status"] == "DRAFT"
+    assert shelf.find_one({"stock_id": "U1"})["status"] == "SOLD"
+
+    # The payment then goes through, and the re-pressed cancel names the refund door.
+    await _pay("CASH")
+    with pytest.raises(HTTPException) as again:
+        await cancel_order("ORD-1", reason=REASON, current_user=_user("SALES_STAFF"))
+    assert again.value.status_code == 400 and "Refund advance and cancel" in again.value.detail
+    doc = _stored(till)
+    assert doc["status"] == "CONFIRMED" and doc["amount_paid"] == 1000.0 and len(doc["payments"]) == 1
+    assert "cancelled_at" not in doc and _returns(till) == []
+    unit = shelf.find_one({"stock_id": "U1"})
+    assert unit["status"] == "SOLD" and unit["order_id"] == "ORD-1"
+
+
+@pytest.mark.asyncio
+async def test_failed_claim_cancels_once_on_a_healthy_retry(till, shelf, monkeypatch):
+    till["db"].get_collection("orders").insert_one(_order())
+    _claim_fault(till, monkeypatch)
+    _refuse_plain_cancel(till["orders"], monkeypatch)
+    with pytest.raises(HTTPException) as exc:
+        await cancel_order("ORD-1", reason=REASON, current_user=_user("SALES_STAFF"))
+    assert exc.value.status_code == 500
+    assert _stored(till)["status"] == "CONFIRMED" and "cancelled_at" not in _stored(till)
+    assert shelf.find_one({"stock_id": "U1"})["status"] == "SOLD"
+
+    out = await cancel_order("ORD-1", reason=REASON, current_user=_user("SALES_STAFF"))
+    assert out["status"] == "CANCELLED" and out["stock_units_released"] == 1
+    with pytest.raises(HTTPException) as again:
+        await cancel_order("ORD-1", reason=REASON, current_user=_user("SALES_STAFF"))
+    assert again.value.status_code == 400
+    unit = shelf.find_one({"stock_id": "U1"})
+    assert unit["status"] == "AVAILABLE" and not unit.get("order_id")
+
+
+@pytest.mark.asyncio
+async def test_lost_acknowledgement_finishes_the_undo_and_refuses_later_money(till, shelf, monkeypatch):
+    """The claim landed but its answer did not: the conditional write held, so
+    no money can be on the order; the undo runs once and the payment refuses."""
+    till["db"].get_collection("orders").insert_one(_order())
+    _claim_fault(till, monkeypatch, land=True)
+    out = await cancel_order("ORD-1", reason=REASON, current_user=_user("SALES_STAFF"))
+    assert out["status"] == "CANCELLED" and out["stock_units_released"] == 1
+    assert out["stock_release_failed"] is False
+    with pytest.raises(HTTPException):
+        await _pay("CASH")
+    with pytest.raises(HTTPException) as again:
+        await cancel_order("ORD-1", reason=REASON, current_user=_user("SALES_STAFF"))
+    assert again.value.status_code == 400
+    doc = _stored(till)
+    assert doc["status"] == "CANCELLED" and doc["payments"] == [] and doc["amount_paid"] == 0.0
+    assert _returns(till) == []
+    assert shelf.find_one({"stock_id": "U1"})["status"] == "AVAILABLE"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("landed", [False, True])
+async def test_claim_failure_with_an_unreadable_order_says_retry(till, shelf, monkeypatch, landed):
+    """The claim raised AND the re-read failed: nobody knows whether it landed.
+    It is a retry, not a status change; no undo runs until a re-press reads what
+    happened, and that press finishes either way, once."""
+    till["db"].get_collection("orders").insert_one(_order())
+    _claim_fault(till, monkeypatch, land=landed)
+    repo = till["orders"]
+    real = repo.find_by_id
+    blind = {"on": False}
+    real_claim = cancel_module._claim_order_for_cancel
+
+    def _claim_then_blind(*a, **k):
+        out = real_claim(*a, **k)
+        blind["on"] = True
+        return out
+
+    monkeypatch.setattr(cancel_module, "_claim_order_for_cancel", _claim_then_blind)
+    monkeypatch.setattr(repo, "find_by_id", lambda oid: None if blind["on"] else real(oid))
+    with pytest.raises(HTTPException) as exc:
+        await cancel_order("ORD-1", reason=REASON, current_user=_user("SALES_STAFF"))
+    assert exc.value.status_code == 500 and "retry" in exc.value.detail
+    assert shelf.find_one({"stock_id": "U1"})["status"] == "SOLD"
+    assert _stored(till)["status"] == ("CANCELLED" if landed else "CONFIRMED")
+
+    monkeypatch.setattr(cancel_module, "_claim_order_for_cancel", real_claim)
+    blind["on"] = False
+    out = await cancel_order("ORD-1", reason=REASON, current_user=_user("SALES_STAFF"))
+    assert out["status"] == "CANCELLED" and out["stock_units_released"] == 1
+    assert shelf.find_one({"stock_id": "U1"})["status"] == "AVAILABLE"
+
+
+def test_advance_refund_survives_a_failed_claim_and_a_second_press_finishes(till, shelf, monkeypatch):
+    """The approved door: the refund stands once, the cancel reports pending,
+    and the second press finishes it. One refund, one release."""
+    _advance_order(till)
+    _claim_fault(till, monkeypatch)
+    _refuse_plain_cancel(till["orders"], monkeypatch)
+    client = _advance_client()
+    r = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r.status_code == 201, r.text
+    assert r.json()["cancel_error"] and r.json()["order_status"] == "CONFIRMED"
+    assert shelf.find_one({"stock_id": "U1"})["status"] == "SOLD"
+
+    r2 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r2.status_code == 201, r2.text
+    assert r2.json()["cancel_error"] is None and r2.json()["refund_amount"] == 0.0
+    assert _stored(till)["status"] == "CANCELLED"
+    assert [x["net_refund"] for x in _returns(till)] == [1000.0]
+    assert shelf.find_one({"stock_id": "U1"})["status"] == "AVAILABLE"
+
+    r3 = client.post("/api/v1/returns/advance-refund", json=_ADV_BODY, headers=_hdr("ACCOUNTANT"))
+    assert r3.status_code == 400
+    assert [x["net_refund"] for x in _returns(till)] == [1000.0]
+
+
+def test_claim_without_an_atomic_surface_cancels_nothing(till, monkeypatch):
+    """No conditional write available, no cancel: there is no plain-write path."""
+    till["db"].get_collection("orders").insert_one(_order())
+    read = dict(_stored(till))
+    repo = till["orders"]
+    real = repo.collection
+    _refuse_plain_cancel(repo, monkeypatch)
+    repo.collection = SimpleNamespace(find_one=real.find_one)  # reads, no conditional write
+    claimed = _claim_order_for_cancel(repo, "ORD-1", REASON, {"user_id": "u"},
+                                      invoice=None, money_read=read)
+    repo.collection = real
+    assert claimed is None and _stored(till)["status"] == "CONFIRMED"

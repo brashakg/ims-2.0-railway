@@ -403,9 +403,13 @@ def _claim_order_for_cancel(
     loyalty clawback must run for exactly one caller, and a check-then-act
     status test cannot promise that under two concurrent cancels.
 
-    Fail-soft: a collection that cannot do find_one_and_update (legacy mock)
-    falls back to the previous read-check-update behaviour rather than blocking
-    a cancel outright.
+    Fail-closed (Codex PR-1396): this one conditional write is the ONLY thing
+    that may cancel. Any error returns None -- no reread-then-plain-write, whose
+    gap is the very race the filter closes (a payment landing there left a
+    CANCELLED order holding the money with its unit released). The error says
+    nothing about whether the write landed, so the caller decides on a fresh
+    read: still cancellable is a retry and nothing was undone; CANCELLED means
+    it landed under these same predicates, and the retry door finishes the undo.
 
     ``invoice``: the tax invoice number the caller's checks read (None: no
     number). The claim lands only while the order still carries exactly it
@@ -434,35 +438,11 @@ def _claim_order_for_cancel(
         "cancelled_by": current_user.get("user_id"),
         "cancelled_at": utc_now_iso(),
     }
-    coll = getattr(repo, "collection", None)
-    updater = getattr(coll, "find_one_and_update", None) if coll is not None else None
-    if callable(updater):
-        try:
-            return updater(
-                {"order_id": order_id, "status": {"$in": CANCELLABLE_STATUSES}, **inv_match},
-                {"$set": payload},
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[ORDERS] atomic cancel claim unavailable for %s (%s); "
-                "falling back to read-check-update",
-                order_id,
-                exc,
-            )
-    existing = repo.find_by_id(order_id)
-    if not existing or existing.get("status") not in CANCELLABLE_STATUSES:
-        return None
-    if invoice is not _ANY_INVOICE and (existing.get("invoice_number") or None) != (invoice or None):
-        return None
-    if money_read is not None and any(existing.get(k) != money_read.get(k) for k in _CANCEL_MONEY_KEYS):
-        return None
-    # GATE ON THE WRITE. base_repository.update swallows exceptions and returns
-    # False, so discarding this result meant a FAILED status write still ran the
-    # whole stock + loyalty undo and reported the order cancelled -- stock back
-    # on the shelf and points clawed for an order still sitting CONFIRMED.
-    if not repo.update(order_id, payload):
-        logger.error(
-            "[ORDERS] cancel status write failed for %s; undo NOT run", order_id
+    try:
+        return repo.collection.find_one_and_update(
+            {"order_id": order_id, "status": {"$in": CANCELLABLE_STATUSES}, **inv_match},
+            {"$set": payload},
         )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[ORDERS] cancel claim failed for %s (%s); undo NOT run", order_id, exc)
         return None
-    return existing
