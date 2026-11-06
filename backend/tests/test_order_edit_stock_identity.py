@@ -1928,11 +1928,14 @@ def test_a_first_available_claim_that_faulted_on_a_saved_bill_is_flagged(
     assert _order(shop, oid)["line_remove_stock_release_failed"] is True
 
 
-def test_a_plain_refusal_raises_no_flag(client, shop, door):
-    """No stock on the shelf is a refusal, not a stray unit."""
-    oid = door.arm(_saved_bill(client, shop, [_line(ACC), _line(SVC)]))
-    stored = [_as_sent(ln) for ln in _order(shop, oid)["items"]]
-    r = door.press(oid, [*stored, _line(ACC)])
+def test_a_plain_refusal_raises_no_flag(client, shop, door, monkeypatch):
+    """The last unit gone since the gate read the shelf: a refusal, no stray unit."""
+    from database.repositories.product_repository import StockRepository
+
+    oid = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    stored = _as_sent(_order(shop, oid)["items"][0])
+    monkeypatch.setattr(StockRepository, "claim_one_available", lambda *a, **k: None)
+    r = door.press(oid, [stored, _line(FR)])
     assert r.status_code == 409, r.text
     _no_flag_left(shop, oid)
 
