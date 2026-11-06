@@ -1727,6 +1727,27 @@ def test_settling_twice_moves_each_piece_once(client, shop, cells, door, monkeyp
     _no_flag_left(shop, oid)
 
 
+def test_a_lowered_lens_settled_twice_goes_back_once_even_with_no_claim(
+    client, shop, cells, door, monkeypatch
+):
+    """Its release key is the save's own, so it holds without the token's claim."""
+    from api.routers.orders import admin_edit
+
+    oid, stored = _lens_bill(client, shop, cells, qty=3)
+    door.arm(oid)
+    real = admin_edit._settle_removed_lines
+
+    async def twice(*a, **k):
+        await real(*a, **k)
+        await real(*a, **k)
+
+    monkeypatch.setattr(admin_edit, "_settle_removed_lines", twice)
+    monkeypatch.setattr(admin_edit, "_claim_settle", lambda *a: True)
+    r = door.press(oid, [_other_line(shop, oid), _lens_sent(stored, quantity=2)])
+    assert r.status_code == 200, r.text
+    assert cells.read() == (5, 2)
+
+
 @pytest.mark.parametrize("lost", [False, True], ids=["reply_kept", "reply_lost"])
 def test_a_unit_that_will_not_go_back_is_flagged(client, shop, door, monkeypatch, lost):
     from database.repositories.product_repository import StockRepository
