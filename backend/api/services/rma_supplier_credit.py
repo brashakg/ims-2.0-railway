@@ -26,9 +26,20 @@ APPROVAL_BINDINGS = "rma_supplier_credit_approvals"
 READY = {RMAStatus.DISPATCHED.value, RMAStatus.CREDIT_RECEIVED.value}
 
 
+def _noted_without_pieces(db, rma_id):
+    """A note stored before an RMA carried its return's pieces: its source key
+    was built with none, and a partly confirmed return keeps its origin."""
+    return any(event.get("sources") and not any(s.get("stock_ids") for s in event["sources"])
+               for event in db.get_collection(EVENTS).find(
+                   {"return_id": rma_id, "return_kind": "RMA", "posting_status": {"$in": ["PREPARING", "POSTED"]}}))
+
+
 def normalize(doc, db=None):
     """Adapt the stored lifecycle in memory; preserve its exact CAS preimage.
-    With `db`, a linked RMA carries its return's physical pieces."""
+    With `db`, a linked RMA carries its return's physical pieces -- unless a
+    note it already holds named none: then its balance keeps that note's
+    identity, so one source and its caps cover both notes, and the pieces stay
+    safe on this door (return_door_problem)."""
     items = []
     for line in doc.get("lines") or []:
         item = deepcopy(line)
@@ -36,7 +47,7 @@ def normalize(doc, db=None):
         item["unit_price"] = value / 100 if value is not None else line.get("unit_cost")
         items.append(item)
     linked = {}
-    if doc.get("return_id") and db is not None:
+    if doc.get("return_id") and db is not None and not _noted_without_pieces(db, doc["rma_id"]):
         ret = db.get_collection("vendor_returns").find_one({"return_id": doc["return_id"]}) or {}
         linked = {"physical_return_id": doc["return_id"], "stock_ids": ret.get("stock_ids") or []}
     return {**deepcopy(doc), **linked, "return_id": doc["rma_id"], "return_kind": "RMA",

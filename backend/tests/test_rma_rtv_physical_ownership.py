@@ -1079,3 +1079,77 @@ def test_two_lines_that_name_no_piece_stay_under_the_bill_cap_alone(rw):
         assert http(ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=note).status_code == 200
     assert posted(rw) == (2, 200000)
     assert rw["db"].stock_units.count_documents({"product_id": OFF_INVENTORY}) == 0
+
+
+# --------------------------------------------------------------------------
+# Codex round 3, P2: an old partial note can still receive its balance
+# --------------------------------------------------------------------------
+
+def legacy_partial(w, monkeypatch):
+    """A linked RMA's Rs 600 note written by the adapter before the pieces rode
+    along: its sources name no stock_ids, as stored notes of that time do."""
+    bought(w, "U1", "U2", qty=2)
+    rid = received_return(w, "U1", "U2")
+    rma_id = linked_rma(w, rid)
+    original = rma_credit.normalize
+    with monkeypatch.context() as patched:
+        patched.setattr(rma_credit, "normalize", lambda doc, db=None: original(doc))
+        body, res = rma_note(w, rma_id, 600, "CN-OLD")
+    assert res.status_code == 200, res.text
+    event = w["db"].supplier_credit_confirmations.find_one({"_id": body["idempotency_key"]})
+    assert event["sources"][0]["stock_ids"] == []
+    return rid, rma_id, body, event
+
+
+def test_an_old_partial_note_receives_its_genuine_balance_once(rw, monkeypatch):
+    rid, rma_id, body, event = legacy_partial(rw, monkeypatch)
+    moves = {sid: events(rw, sid) for sid in ("U1", "U2")}
+    http = rw["as_"](ACCOUNTANT)
+    replay = http.post(f"/vendor-rma/{rma_id}/credit-note", json=body)
+    assert replay.status_code == 200 and replay.json()["idempotent"] is True
+    shown = http.post(f"/vendor-rma/{rma_id}/credit-preview", json={}).json()
+    assert shown["source_status"] == "RESOLVED" and shown["remaining_amount"] == 400
+    # Same identity as the note already posted: same cap, no second origin.
+    assert shown["sources"][0]["source_key"] == event["sources"][0]["source_key"]
+    rest_body, rest = rma_note(rw, rma_id, 400, "CN-REST")
+    assert rest.status_code == 200, rest.text
+    assert rest.json()["confirmation"]["posting_status"] == "POSTED"
+    assert posted(rw) == (2, 100000) and credited(rw) == 100000
+    # Retry and lost-reply replay change nothing; the first note is untouched.
+    assert http.post(f"/vendor-rma/{rma_id}/credit-note", json=rest_body).json()["idempotent"] is True
+    assert rw["db"].supplier_credit_confirmations.find_one({"_id": body["idempotency_key"]}) == event
+    assert posted(rw) == (2, 100000) and credited(rw) == 100000
+    settled = returned(rw, rid)
+    assert settled["status"] == "credit_issued" and settled["confirmed_credit_amount"] == 1000
+    assert rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 200
+    assert {sid: events(rw, sid) for sid in ("U1", "U2")} == moves
+    assert statuses(rw) == Counter({"RTV": 2})
+
+
+def test_an_old_partial_note_cannot_be_overcredited_or_doubled(rw, monkeypatch):
+    rid, rma_id, body, _ = legacy_partial(rw, monkeypatch)
+    http = rw["as_"](ACCOUNTANT)
+    changed = http.post(f"/vendor-rma/{rma_id}/credit-note", json={**body, "received_amount": 601})
+    assert changed.status_code == 409
+    shown = http.post(f"/vendor-rma/{rma_id}/credit-preview", json={}).json()
+    over = {"credit_note_number": "CN-OVER", "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+            "received_amount": 401, "source_selections": shown["source_selections"],
+            "allocations": [{"source_key": shown["sources"][0]["source_key"], "taxable": 401,
+                             "cgst": 0, "sgst": 0, "igst": 0}]}
+    assert http.post(f"/vendor-rma/{rma_id}/credit-note", json=over).status_code in (409, 422)
+    # The return's own door stays shut: the RMA still owns these pieces.
+    _, door = rtv_note_open(rw, rid, 400, "CN-RTV")
+    assert door.status_code == 409 and rma_id in door.text
+    assert posted(rw) == (1, 60000) and credited(rw) == 60000
+
+
+def test_a_note_that_named_the_pieces_keeps_the_physical_identity(rw):
+    """Only a note stored without pieces keeps the old identity."""
+    bought(rw, "U1", "U2", "U3", "U4")
+    rma_id = linked_rma(rw, received_return(rw, "U1", "U2"))
+    body, first = rma_note(rw, rma_id, 600, "CN-1")
+    assert first.status_code == 200, first.text
+    saved = rw["db"].supplier_credit_confirmations.find_one({"_id": body["idempotency_key"]})
+    assert saved["sources"][0]["stock_ids"] == ["U1", "U2"]
+    shown = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-preview", json={}).json()
+    assert shown["sources"][0]["stock_ids"] == ["U1", "U2"]
