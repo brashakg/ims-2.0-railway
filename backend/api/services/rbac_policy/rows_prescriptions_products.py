@@ -80,7 +80,12 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/prescriptions/{prescription_id}/photo",
-        "allowed": "AUTHENTICATED",
+        # Clinical PII -> prescription read set (require_rx_read); store
+        # scope per object in the handler. Codex review of #1378.
+        "allowed": [
+            "ADMIN", "AREA_MANAGER", "OPTOMETRIST", "SALES_CASHIER",
+            "SALES_STAFF", "STORE_MANAGER", "SUPERADMIN", "WORKSHOP_STAFF",
+        ],
     },
     {
         "method": "PUT",

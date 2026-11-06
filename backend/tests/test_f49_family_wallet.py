@@ -1033,3 +1033,383 @@ def test_otp_attempt_ceiling_is_atomic_in_filter(db, monkeypatch):
     # And the REAL code is now refused too (budget burned).
     final = rail.verify_pool_redemption_otp(db, otp_id=otp["otp_id"], code=otp["code"])
     assert final["ok"] is False
+
+
+# ============================================================================
+# L2-WALLET-F01 / F02 -- one intended redemption = exactly one net points
+# debit and one spendable voucher, or neither. Lost acknowledgements, retries
+# and process interruption reconcile by the stable operation (the debit
+# txn_id / OTP key) BEFORE any compensation; an identical authenticated retry
+# returns the ORIGINAL voucher (default OTP policy stays ON throughout).
+# ============================================================================
+
+
+def _active_voucher_rupees(db) -> float:
+    return sum(
+        float(v.get("balance") or 0)
+        for v in db.get_collection("vouchers").docs
+        if v.get("status") == "ACTIVE"
+    )
+
+
+def _benefit(db, hid) -> float:
+    """Independent reconciliation: pool points + spendable voucher rupees (the
+    default redeem rate is 1 rupee/point, so a correct redeem conserves it).
+    Also cross-checks the in-document ledger: its signed deltas sum to the
+    balance, and the NET redeem debit (redeems minus reversals) equals the
+    issued value of the spendable vouchers -- one debit <-> one voucher."""
+    bal = svc.pool_balance(db, hid)
+    wallet = db.get_collection("family_wallets").find_one({"household_id": hid}) or {}
+    ledger = wallet.get("money_ledger") or []
+    assert sum(float(e.get("delta") or 0) for e in ledger) == bal
+    net_redeemed = -sum(
+        float(e.get("delta") or 0)
+        for e in ledger
+        if e.get("reason") in ("pool_redeem", "pool_redeem_mint_failed_reversal")
+    )
+    issued = sum(
+        float(v.get("initial_amount") or 0)
+        for v in db.get_collection("vouchers").docs
+        if v.get("status") == "ACTIVE" and v.get("household_id") == hid
+    )
+    assert net_redeemed == issued, (net_redeemed, issued)
+    return bal + _active_voucher_rupees(db)
+
+
+def _redeem_http(r, hid, *, points, customer, otp, user=None):
+    return _run(
+        r.redeem(
+            hid,
+            r.RedeemBody(
+                points=points,
+                redeeming_customer_id=customer,
+                otp_id=otp["otp_id"],
+                otp_code=otp["code"],
+            ),
+            current_user=user or _cashier(),
+        )
+    )
+
+
+def _wallet_setup(db, monkeypatch, points=300):
+    r = _wire(monkeypatch, db)
+    _seed_customers(db, "C1", "C2")
+    hid = _mk_household(db, primary="C1")
+    assert svc.add_member(db, hid, "C2", actor=_manager())["ok"]
+    svc.pool_earn(db, hid, points, actor=_manager())
+    return r, hid
+
+
+def test_f02_identical_otp_retry_returns_original_voucher(db, monkeypatch):
+    r, hid = _wallet_setup(db, monkeypatch)
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=50)
+    first = _redeem_http(r, hid, points=50, customer="C2", otp=otp)
+    assert first["ok"] and first["pool_balance_points"] == 250
+
+    retry = _redeem_http(r, hid, points=50, customer="C2", otp=otp)
+    assert retry["ok"] is True and retry.get("duplicate") is True
+    assert retry["voucher"]["voucher_id"] == first["voucher"]["voucher_id"]
+    assert retry["voucher"]["code"] == first["voucher"]["code"]
+    # HQ (manager) identical retry recovers the same voucher too.
+    again = _redeem_http(r, hid, points=50, customer="C2", otp=otp, user=_manager())
+    assert again["voucher"]["voucher_id"] == first["voucher"]["voucher_id"]
+
+    assert len(db.get_collection("vouchers").docs) == 1
+    assert svc.pool_balance(db, hid) == 250  # ONE debit
+    assert _benefit(db, hid) == 300.0  # 250 points + Rs 50 voucher
+    otp_doc = db.get_collection("pool_otp").find_one({"otp_id": otp["otp_id"]})
+    assert otp_doc["status"] == "VERIFIED"  # never re-consumed / re-opened
+
+
+def test_f02_conflicting_or_unproven_retries_stay_rejected(db, monkeypatch):
+    from fastapi import HTTPException
+
+    r, hid = _wallet_setup(db, monkeypatch)
+    _seed_customers(db, "C9")
+    other = _mk_household(db, primary="C9")
+    svc.pool_earn(db, other, 300, actor=_manager())
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=50)
+    first = _redeem_http(r, hid, points=50, customer="C2", otp=otp)
+    assert first["ok"]
+
+    bad = [
+        dict(hid=hid, points=50, customer="C1", otp=otp),  # another member
+        dict(hid=hid, points=60, customer="C2", otp=otp),  # another amount
+        dict(hid=other, points=50, customer="C9", otp=otp),  # another household
+        dict(hid=hid, points=50, customer="C2", otp=dict(otp, code="000000x")),
+    ]
+    for case in bad:
+        with pytest.raises(HTTPException) as exc:
+            _redeem_http(
+                r, case["hid"], points=case["points"], customer=case["customer"],
+                otp=case["otp"],
+            )
+        assert exc.value.status_code in (403, 409), case
+    assert len(db.get_collection("vouchers").docs) == 1
+    assert svc.pool_balance(db, hid) == 250 and svc.pool_balance(db, other) == 300
+    assert _benefit(db, hid) == 300.0
+
+
+def test_f02_wrong_code_retries_burn_the_attempt_budget(db, monkeypatch):
+    """The replay re-proof is not an unlimited code oracle: wrong guesses
+    against a consumed OTP spend the same attempt budget; after it is spent
+    even the real code no longer reveals the voucher."""
+    from fastapi import HTTPException
+
+    r, hid = _wallet_setup(db, monkeypatch)
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=50)
+    assert _redeem_http(r, hid, points=50, customer="C2", otp=otp)["ok"]
+    for _ in range(rail.OTP_MAX_ATTEMPTS + 2):
+        with pytest.raises(HTTPException):
+            _redeem_http(r, hid, points=50, customer="C2", otp=dict(otp, code="BAD"))
+    with pytest.raises(HTTPException) as exc:
+        _redeem_http(r, hid, points=50, customer="C2", otp=otp)
+    assert exc.value.status_code == 403
+    assert svc.pool_balance(db, hid) == 250
+
+
+def test_f01_insert_ack_lost_returns_durable_voucher_no_refund(db, monkeypatch):
+    """The audit door: 300 pts -> redeem 50 OK -> redeem 60 whose voucher
+    insert is DURABLE but its acknowledgement is lost. Must answer with that
+    voucher and keep the 60-point debit (never points back AND a voucher)."""
+    import api.routers.vouchers as vouchers_mod
+
+    r, hid = _wallet_setup(db, monkeypatch)
+    otp1 = _issue_otp(db, monkeypatch, household_id=hid, points=50)
+    assert _redeem_http(r, hid, points=50, customer="C2", otp=otp1)["ok"]
+
+    real_mint = vouchers_mod.mint_voucher
+
+    def _ack_lost(*a, **k):
+        real_mint(*a, **k)  # the write lands...
+        raise TimeoutError("ack lost")  # ...the caller never hears back
+
+    monkeypatch.setattr(vouchers_mod, "mint_voucher", _ack_lost)
+    otp2 = _issue_otp(db, monkeypatch, household_id=hid, points=60)
+    out = _redeem_http(r, hid, points=60, customer="C2", otp=otp2)
+    assert out["ok"] is True and out["voucher"]["balance"] == 60.0
+    assert svc.pool_balance(db, hid) == 190
+    assert len(db.get_collection("vouchers").docs) == 2
+    assert _benefit(db, hid) == 300.0  # 190 points + Rs 50 + Rs 60
+    reversals = [
+        e
+        for w in db.get_collection("family_wallets").docs
+        for e in (w.get("money_ledger") or [])
+        if (e.get("reason") or "") == "pool_redeem_mint_failed_reversal"
+    ]
+    assert reversals == []  # no compensation for a voucher that exists
+
+    # And the identical retry returns that same voucher.
+    monkeypatch.setattr(vouchers_mod, "mint_voucher", real_mint)
+    retry = _redeem_http(r, hid, points=60, customer="C2", otp=otp2)
+    assert retry["voucher"]["voucher_id"] == out["voucher"]["voucher_id"]
+    assert _benefit(db, hid) == 300.0
+
+
+def test_f01_late_insert_after_compensation_is_fenced(db, monkeypatch):
+    """A mint whose write is still in flight when we give up: once the points
+    are compensated, that late write must NOT become spendable credit."""
+    from fastapi import HTTPException
+    import api.routers.vouchers as vouchers_mod
+
+    r, hid = _wallet_setup(db, monkeypatch)
+    real_mint = vouchers_mod.mint_voucher
+    inflight: List[Dict[str, Any]] = []
+
+    def _timeout_before_write(coll, **k):
+        inflight.append(real_mint(FakeCollection(), **k))  # the doc it WOULD write
+        raise TimeoutError("no answer")
+
+    monkeypatch.setattr(vouchers_mod, "mint_voucher", _timeout_before_write)
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=60)
+    with pytest.raises(HTTPException) as exc:
+        _redeem_http(r, hid, points=60, customer="C2", otp=otp)
+    assert exc.value.status_code == 503
+    assert svc.pool_balance(db, hid) == 300  # compensated
+
+    from pymongo.errors import DuplicateKeyError
+
+    try:  # the in-flight write finally reaches the server
+        db.get_collection("vouchers").insert_one(dict(inflight[0]))
+    except DuplicateKeyError:
+        pass
+    assert _active_voucher_rupees(db) == 0.0
+    assert _benefit(db, hid) == 300.0
+
+
+def test_f01_interrupted_after_debit_retry_mints_exactly_once(db, monkeypatch):
+    """Process dies after the pool debit, before the mint: the identical retry
+    finishes the SAME operation -- one voucher, one debit."""
+    r, hid = _wallet_setup(db, monkeypatch)
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=60)
+    half = svc.pool_redeem(
+        db, hid, 60, redeeming_customer_id="C2", actor=_cashier(),
+        otp_id=otp["otp_id"], otp_code=otp["code"], require_otp=True,
+    )
+    assert half["ok"] and svc.pool_balance(db, hid) == 240
+    assert db.get_collection("vouchers").docs == []
+
+    out = _redeem_http(r, hid, points=60, customer="C2", otp=otp)
+    assert out["ok"] and out["voucher"]["balance"] == 60.0
+    assert out["txn_id"] == half["txn_id"]
+    again = _redeem_http(r, hid, points=60, customer="C2", otp=otp)
+    assert again["voucher"]["voucher_id"] == out["voucher"]["voucher_id"]
+    assert len(db.get_collection("vouchers").docs) == 1
+    assert svc.pool_balance(db, hid) == 240
+    assert _benefit(db, hid) == 300.0
+
+
+def test_f01_unconfirmed_mint_holds_points_then_retry_settles(db, monkeypatch):
+    """When the voucher outcome cannot be established (the store is not
+    answering), do NOT refund blindly: hold the debit, 503, and let the
+    identical retry settle it to exactly one voucher."""
+    from fastapi import HTTPException
+    import api.routers.vouchers as vouchers_mod
+
+    r, hid = _wallet_setup(db, monkeypatch)
+    real_mint = vouchers_mod.mint_voucher
+    vcoll = db.get_collection("vouchers")
+    real_insert = vcoll.insert_one
+
+    def _down(*a, **k):
+        raise TimeoutError("store not answering")
+
+    monkeypatch.setattr(vouchers_mod, "mint_voucher", _down)
+    monkeypatch.setattr(vcoll, "insert_one", _down)
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=60)
+    with pytest.raises(HTTPException) as exc:
+        _redeem_http(r, hid, points=60, customer="C2", otp=otp)
+    assert exc.value.status_code == 503
+    assert svc.pool_balance(db, hid) == 240  # held, not blindly refunded
+
+    monkeypatch.setattr(vouchers_mod, "mint_voucher", real_mint)
+    monkeypatch.setattr(vcoll, "insert_one", real_insert)
+    out = _redeem_http(r, hid, points=60, customer="C2", otp=otp)
+    assert out["ok"] and len(vcoll.docs) == 1
+    assert svc.pool_balance(db, hid) == 240
+    assert _benefit(db, hid) == 300.0
+
+
+def test_f01_failed_compensation_is_retried_by_the_identical_request(db, monkeypatch):
+    """Mint confirmed absent, reversal credit fails (loud 503). The identical
+    retry re-runs the idempotent reversal: the points come back exactly once
+    and no voucher is ever spendable."""
+    from fastapi import HTTPException
+    import api.routers.vouchers as vouchers_mod
+
+    r, hid = _wallet_setup(db, monkeypatch)
+    real_credit = mg.credit
+
+    def _boom(*a, **k):
+        raise RuntimeError("mint down")
+
+    class _Fail:
+        ok = False
+        reason = "unavailable"
+
+    monkeypatch.setattr(vouchers_mod, "mint_voucher", _boom)
+    monkeypatch.setattr(mg, "credit", lambda *a, **k: _Fail())
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=60)
+    with pytest.raises(HTTPException) as exc:
+        _redeem_http(r, hid, points=60, customer="C2", otp=otp)
+    assert exc.value.status_code == 503 and "manual credit" in str(exc.value.detail)
+    assert svc.pool_balance(db, hid) == 240
+
+    monkeypatch.setattr(mg, "credit", real_credit)
+    for _ in range(2):
+        with pytest.raises(HTTPException) as exc:
+            _redeem_http(r, hid, points=60, customer="C2", otp=otp)
+        assert exc.value.status_code == 409
+    assert svc.pool_balance(db, hid) == 300  # reversed exactly once
+    assert _active_voucher_rupees(db) == 0.0
+    assert _benefit(db, hid) == 300.0
+
+
+def test_f01_concurrent_identical_retries_after_interruption_one_voucher(db, monkeypatch):
+    """Debit landed, process died before the mint; several identical retries
+    race: all answer with the SAME voucher, one debit, one voucher."""
+    r, hid = _wallet_setup(db, monkeypatch)
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=60)
+    assert svc.pool_redeem(
+        db, hid, 60, redeeming_customer_id="C2", actor=_cashier(),
+        otp_id=otp["otp_id"], otp_code=otp["code"], require_otp=True,
+    )["ok"]
+
+    results: List[Any] = []
+
+    def _go():
+        try:
+            results.append(_redeem_http(r, hid, points=60, customer="C2", otp=otp))
+        except Exception as exc:  # noqa: BLE001
+            results.append(exc)
+
+    threads = [threading.Thread(target=_go) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    ids = {x["voucher"]["voucher_id"] for x in results if isinstance(x, dict)}
+    assert len(ids) == 1 and all(isinstance(x, dict) for x in results), results
+    assert len(db.get_collection("vouchers").docs) == 1
+    assert svc.pool_balance(db, hid) == 240
+    assert _benefit(db, hid) == 300.0
+
+
+def _reversal_rows(db):
+    return [
+        e
+        for w in db.get_collection("family_wallets").docs
+        for e in (w.get("money_ledger") or [])
+        if (e.get("reason") or "") == "pool_redeem_mint_failed_reversal"
+    ]
+
+
+def test_f01_staff_cancelled_voucher_is_not_a_tombstone_on_retry(db, monkeypatch):
+    """A REAL pool voucher later cancelled by staff (POST /vouchers/{code}/cancel)
+    shares status CANCELLED with the fence tombstone. The identical retry must
+    still treat it as the original voucher: never credit the points back."""
+    import api.routers.vouchers as vouchers_mod
+
+    r, hid = _wallet_setup(db, monkeypatch)
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=50)
+    first = _redeem_http(r, hid, points=50, customer="C2", otp=otp)
+    assert first["ok"] and svc.pool_balance(db, hid) == 250
+
+    monkeypatch.setattr(vouchers_mod, "_get_db", lambda: db)
+    cancelled = _run(
+        vouchers_mod.cancel_voucher(first["voucher"]["code"], current_user=_manager())
+    )
+    assert cancelled["status"] == "CANCELLED"
+
+    retry = _redeem_http(r, hid, points=50, customer="C2", otp=otp)
+    assert retry.get("duplicate") is True
+    assert retry["voucher"]["voucher_id"] == first["voucher"]["voucher_id"]
+    assert svc.pool_balance(db, hid) == 250  # no refund
+    assert _reversal_rows(db) == []
+    # HQ identical retry: same answer, still no refund.
+    again = _redeem_http(r, hid, points=50, customer="C2", otp=otp, user=_manager())
+    assert again["voucher"]["voucher_id"] == first["voucher"]["voucher_id"]
+    assert svc.pool_balance(db, hid) == 250
+    assert _reversal_rows(db) == []
+
+
+def test_f01_mint_error_with_cancelled_real_voucher_never_refunds(db, monkeypatch):
+    """Sibling door: the mint call errors after its write landed and the real
+    voucher is CANCELLED by the time we reconcile. The fence dup-keys on a real
+    voucher -> answer with it, never compensate."""
+    import api.routers.vouchers as vouchers_mod
+
+    r, hid = _wallet_setup(db, monkeypatch)
+    real_mint = vouchers_mod.mint_voucher
+
+    def _landed_then_cancelled(coll, **k):
+        doc = real_mint(coll, **k)
+        coll.update_one({"_id": doc["_id"]}, {"$set": {"status": "CANCELLED"}})
+        raise TimeoutError("ack lost")
+
+    monkeypatch.setattr(vouchers_mod, "mint_voucher", _landed_then_cancelled)
+    otp = _issue_otp(db, monkeypatch, household_id=hid, points=60)
+    out = _redeem_http(r, hid, points=60, customer="C2", otp=otp)
+    assert out["ok"] is True
+    assert svc.pool_balance(db, hid) == 240  # debit kept
+    assert _reversal_rows(db) == []

@@ -878,3 +878,42 @@ def verify_pool_redemption_otp(
         "amount": doc.get("amount"),
         "household_id": doc.get("household_id"),
     }
+
+
+def reprove_pool_redemption_otp(db, *, otp_id: str, code: str) -> Dict[str, Any]:
+    """Re-prove the code of an ALREADY-CONSUMED (VERIFIED) OTP -- only for an
+    identical retry of a redemption whose debit already landed (lost
+    response). Read-only on success: it never re-consumes or re-opens the
+    OTP, so it authorises no new money move. Wrong guesses still burn the
+    same attempt budget, so this is not an unlimited code oracle."""
+    if db is None:
+        return {"ok": False, "reason": "unavailable"}
+    try:
+        coll = db.get_collection("pool_otp")
+        doc = coll.find_one({"otp_id": otp_id})
+    except Exception:  # noqa: BLE001
+        return {"ok": False, "reason": "unavailable"}
+    if not doc:
+        return {"ok": False, "reason": "not_found"}
+    if doc.get("status") != "VERIFIED":
+        return {"ok": False, "reason": str(doc.get("status") or "rejected").lower()}
+    if int(doc.get("attempts", 0) or 0) >= OTP_MAX_ATTEMPTS:
+        return {"ok": False, "reason": "max_attempts"}
+    if _hash_code(code) != doc.get("code_hash"):
+        try:
+            coll.update_one(
+                {
+                    "otp_id": otp_id,
+                    "status": "VERIFIED",
+                    "attempts": {"$lt": OTP_MAX_ATTEMPTS},
+                },
+                {"$inc": {"attempts": 1}},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return {"ok": False, "reason": "wrong_code"}
+    return {
+        "ok": True,
+        "amount": doc.get("amount"),
+        "household_id": doc.get("household_id"),
+    }
