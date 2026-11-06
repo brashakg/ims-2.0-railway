@@ -71,7 +71,7 @@ describe('a store switch moves the screen only when the server confirms it', () 
     act(() => { pending = auth.setActiveStore('S2'); });
     expect(auth.user?.activeStoreId).toBe('S1');
     expect(cachedShop()).toBe('S1');
-    await act(async () => { resolve({ access_token: jwt('S2'), active_store_id: 'S2' }); await pending; });
+    await act(async () => { resolve({ access_token: jwt('S2'), active_store_id: 'S2', sent_with: jwt('S1') }); await pending; });
     expect(auth.user?.activeStoreId).toBe('S2');
     expect(cachedShop()).toBe('S2');
     expect(localStorage.getItem('ims_token')).toBe(jwt('S2'));
@@ -79,7 +79,7 @@ describe('a store switch moves the screen only when the server confirms it', () 
 
   it('a confirmed switch moves screen, cache and token together, to the shop the server named', async () => {
     await signIn();
-    switchStore.mockResolvedValueOnce({ access_token: jwt('S2'), active_store_id: 'S2' });
+    switchStore.mockResolvedValueOnce({ access_token: jwt('S2'), active_store_id: 'S2', sent_with: jwt('S1') });
     let ok: boolean | undefined;
     await act(async () => { ok = await auth.setActiveStore('S2'); });
     expect(ok).toBe(true);
@@ -92,12 +92,12 @@ describe('a store switch moves the screen only when the server confirms it', () 
     await signIn();
     let slowB!: (v: unknown) => void;
     switchStore.mockReturnValueOnce(new Promise((r) => { slowB = r; }));
-    switchStore.mockResolvedValueOnce({ access_token: jwt('S3'), active_store_id: 'S3' });
+    switchStore.mockResolvedValueOnce({ access_token: jwt('S3'), active_store_id: 'S3', sent_with: jwt('S1') });
     let first!: Promise<boolean>;
     act(() => { first = auth.setActiveStore('S2'); });
     await act(async () => { await auth.setActiveStore('S3'); });
     let firstOk: boolean | undefined;
-    await act(async () => { slowB({ access_token: jwt('S2'), active_store_id: 'S2' }); firstOk = await first; });
+    await act(async () => { slowB({ access_token: jwt('S2'), active_store_id: 'S2', sent_with: jwt('S1') }); firstOk = await first; });
     expect(firstOk).toBe(false);
     expect(auth.user?.activeStoreId).toBe('S3');
     expect(cachedShop()).toBe('S3');

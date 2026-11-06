@@ -16,7 +16,7 @@ import { getSessionPolicy } from '../constants/sessionPolicy';
 import { LAST_ACTIVITY_KEY, storedSessionIdleExpired } from '../hooks/useIdleLogout';
 import { IDLE_LOGIN_PATH, autoParkForIdleLogout } from '../hooks/idleSignOut';
 // Own line: keeps clear of #1379's import added beside the one above.
-import { decodeJwtClaims, syncCachedUserShops } from '../services/api/client';
+import { decodeJwtClaims, sameSession, syncCachedUserShops } from '../services/api/client';
 
 // ============================================================================
 // Types
@@ -140,6 +140,23 @@ function storedUserId(): string | undefined {
   }
 }
 
+/** The profile of the token stored NOW, or null once none is. The stored token
+ *  is the session: an answer (or refusal) to a token replaced while it travelled
+ *  -- another tab's shop switch, sign-out or sign-in -- is out of date, so it is
+ *  thrown away and the live token is asked instead (#1372 review). */
+async function currentProfile(): Promise<User | null> {
+  for (;;) {
+    const token = localStorage.getItem('ims_token');
+    if (!token) return null;
+    try {
+      const profile = await authApi.getProfile();
+      if (localStorage.getItem('ims_token') === token) return profile;
+    } catch (e) {
+      if (localStorage.getItem('ims_token') === token) throw e;
+    }
+  }
+}
+
 // ============================================================================
 // Provider Component
 // ============================================================================
@@ -153,9 +170,6 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const queryClient = useQueryClient();
   // Latest store switch; an answer to an older one is stale (R41).
   const switchSeq = useRef(0);
-  // Sign-in session: login and logout bump it, so a switch answer asked for
-  // in an older session is never applied to the next one (#1372 review).
-  const sessionGen = useRef(0);
   // The person and shop on THIS tab's screen, read by async/event handlers.
   const userRef = useRef<User | null>(null);
   useEffect(() => { userRef.current = state.user; }, [state.user]);
@@ -233,7 +247,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
           // Try to verify token is still valid with API
           try {
-            const profile = await authApi.getProfile();
+            const profile = await currentProfile();
+            if (!profile) {
+              // Signed out in another tab while this one was loading.
+              dispatch({ type: 'LOGOUT' });
+              return;
+            }
 
             // The shop is the server's: /auth/me answers with the token's
             // active_store_id, which a store switch re-issues (R41), so an
@@ -241,7 +260,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
             // that failed before R41) is set back to it, never trusted.
             // Only the role pick is client-side and restored from the cache.
             try {
-              const cached = JSON.parse(userJson) as User;
+              const cached = JSON.parse(localStorage.getItem('ims_user') || 'null') as User | null;
               const cachedRole = cached?.activeRole;
               if (cachedRole && (profile.roles || []).includes(cachedRole)) {
                 profile.activeRole = cachedRole;
@@ -266,7 +285,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
             dispatch({
               type: 'LOGIN_SUCCESS',
-              payload: { user: profile, token },
+              payload: { user: profile, token: localStorage.getItem('ims_token') ?? token },
             });
             return;
           } catch (apiError) {
@@ -333,7 +352,6 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   // Login function
   const login = async (credentials: LoginCredentials): Promise<LoginResponse> => {
-    sessionGen.current++;
     dispatch({ type: 'SET_LOADING', payload: true });
 
     try {
@@ -382,21 +400,26 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   // Logout function
   const logout = async () => {
-    sessionGen.current++;
+    const ending = localStorage.getItem('ims_token');
     try {
       await authApi.logout();
     } catch {
       // Ignore logout errors
     } finally {
-      localStorage.removeItem('ims_token');
-      localStorage.removeItem('ims_refresh_token');
-      localStorage.removeItem('ims_user');
-      localStorage.removeItem('ims_login_time');
-      localStorage.removeItem('ims_active_module');
+      // The idle sign-out does not wait for this answer, so the next person may
+      // already be signed in: their session is not the one being ended.
+      const now = localStorage.getItem('ims_token');
+      if (!now || sameSession(ending, now)) {
+        localStorage.removeItem('ims_token');
+        localStorage.removeItem('ims_refresh_token');
+        localStorage.removeItem('ims_user');
+        localStorage.removeItem('ims_login_time');
+        localStorage.removeItem('ims_active_module');
+        // Clear POS state to prevent data leaking between users
+        try { usePOSStore.getState().clearAllOnLogout(state.user?.id, state.user?.activeStoreId); } catch { /* ignore if store not ready */ }
+        dispatch({ type: 'LOGOUT' });
+      }
       dropPaletteRecents();
-      // Clear POS state to prevent data leaking between users
-      try { usePOSStore.getState().clearAllOnLogout(state.user?.id, state.user?.activeStoreId); } catch { /* ignore if store not ready */ }
-      dispatch({ type: 'LOGOUT' });
       // Every screen's cached server data goes too, so the next person on a
       // shared tablet is never shown the last person's (tasks or anything
       // else). Every sign-out path - the menu, idle, store picker, forced
@@ -409,8 +432,10 @@ export function AuthProvider({ children }: AuthProviderProps) {
   // change) and merge into state + cache. The shop is the server's (the
   // token's, as on mount); only the client-side role pick is preserved.
   const refreshUser = async () => {
-    const profile = await authApi.getProfile();
-    const current = state.user;
+    const profile = await currentProfile();
+    const current = userRef.current;
+    // Another person's token now: the sign-out listener takes this tab down.
+    if (!profile || profile.id !== current?.id) return;
     if (current?.activeRole && (profile.roles || []).includes(current.activeRole)) {
       profile.activeRole = current.activeRole;
     } else if (!profile.activeRole && profile.roles && profile.roles.length > 0) {
@@ -466,16 +491,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // token all stay on the old shop. A newer switch makes an older answer
     // stale: it is ignored, never applied over the newer choice.
     const seq = ++switchSeq.current;
-    const gen = sessionGen.current;
     try {
-      const { access_token, active_store_id } = await authApi.switchStore(storeId);
+      const { access_token, active_store_id, sent_with } = await authApi.switchStore(storeId);
       if (seq !== switchSeq.current || !access_token) return false;
-      // Still the session and the person that asked? A sign-out / sign-in
-      // here, or another tab signing someone else in, makes the answer
-      // someone else's: it is dropped, the current token is left alone.
-      const issuedTo = decodeJwtClaims(access_token)?.user_id;
-      if (gen !== sessionGen.current || !issuedTo || issuedTo !== userRef.current?.id
-          || issuedTo !== storedUserId()) return false;
+      // The answer is good only for the token that asked. Anything that moved
+      // it since -- sign-out, a sign-in, another tab's later shop choice, even
+      // a refresh, as the order can't be told -- wins: the switch is reported
+      // failed, the person picks again (#1372 review).
+      if (localStorage.getItem('ims_token') !== sent_with) return false;
       const confirmed = active_store_id || storeId;
       localStorage.setItem('ims_token', access_token);
       dispatch({ type: 'SET_ACTIVE_STORE', payload: confirmed });
