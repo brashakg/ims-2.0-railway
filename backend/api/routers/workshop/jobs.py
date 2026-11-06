@@ -27,7 +27,7 @@ from ...utils.ist import now_ist
 from .models import FittingDetailsUpdate, WorkshopJobCreate, WorkshopJobUpdate
 from .helpers import (
     _assert_job_store_access,
-    _jobs_in_reach,
+    _reachable_page,
     _stamp_job_actor_names,
     _verify_job_prescription,
     generate_job_number,
@@ -57,25 +57,27 @@ async def list_jobs_by_vendor(
 
     filter_dict: dict = {"vendor_id": vendor_id}
     # PR #1376 F1: the vendor queue is the same jobs the shop list scopes --
-    # a non-admin reads only its own shops' (none for a no-shop login); the
-    # filter is in the query so skip/limit page over reachable jobs only.
+    # a non-admin reads only its own shops' (none for a no-shop login).
     is_cross, stores = user_store_scope(current_user)
     if not is_cross:
         filter_dict["store_id"] = {"$in": sorted(stores)}
     if not include_delivered:
         filter_dict["status"] = {"$nin": ["DELIVERED", "CANCELLED"]}
 
-    jobs = (
-        repo.find_many(filter_dict, skip=skip, limit=limit, sort=[("expected_date", 1)])
-        or []
+    jobs, total = _reachable_page(
+        repo,
+        filter_dict,
+        current_user,
+        sort=[("expected_date", 1), ("job_id", 1)],
+        skip=skip,
+        limit=limit,
     )
-    jobs = _jobs_in_reach(jobs, current_user)
     _stamp_job_actor_names(jobs)
 
     return {
         "vendor_id": vendor_id,
         "jobs": [job_to_frontend(j, current_user) for j in jobs],
-        "total": len(jobs),
+        "total": total,
     }
 
 
@@ -101,13 +103,17 @@ async def list_jobs(
         if technician_id:
             filter_dict["technician_id"] = technician_id
 
-        jobs = repo.find_many(
-            filter_dict, skip=skip, limit=limit, sort=[("created_at", -1)]
+        jobs, total = _reachable_page(
+            repo,
+            filter_dict,
+            current_user,
+            sort=[("created_at", -1), ("job_id", 1)],
+            skip=skip,
+            limit=limit,
         )
-        jobs = _jobs_in_reach(jobs, current_user)
         _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
-        return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
+        return {"jobs": jobs_formatted, "total": total}
 
     return {"jobs": [], "total": 0}
 

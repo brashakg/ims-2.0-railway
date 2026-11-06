@@ -140,6 +140,9 @@ class _Repo:
     def count(self, flt=None):
         return self.coll.count_documents(flt or {})
 
+    def find_reach_keys(self, flt):
+        return self.find_many(flt)
+
 
 @pytest.fixture
 def world(monkeypatch):

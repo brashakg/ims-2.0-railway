@@ -56,30 +56,62 @@ def _assert_job_store_access(job: dict, current_user: dict) -> None:
 
 
 def _job_in_reach(job, current_user: dict) -> bool:
+    """One job through `_jobs_in_reach`, THE store rule of a workshop job."""
+    return bool(job) and bool(_jobs_in_reach([job], current_user))
+
+
+def _jobs_in_reach(jobs, current_user: dict) -> list:
     """THE store rule of a workshop job (PR #1376 F3): the job's own shop AND
     its ORDER's shop (the canonical owner) must both be the caller's. A legacy
     job stamped with one shop but attached to another shop's order -- the
     L2-WS-F01 create bug wrote those -- and a job whose order cannot be
     resolved are therefore admin-only until an authorized repair; a correct
-    same-shop job is unchanged. SUPERADMIN/ADMIN reach every job."""
-    if not job or not can_access_store_scoped(job.get("store_id"), current_user):
-        return False
-    if user_store_scope(current_user)[0]:
-        return True
+    same-shop job is unchanged. SUPERADMIN/ADMIN reach every job. One order
+    read for the whole list, so a rollup can run it over a shop's jobs; an
+    unreadable order store hides the jobs (fail closed)."""
+    jobs = [j for j in (jobs or []) if j]
+    is_cross, stores = user_store_scope(current_user)
+    if is_cross:
+        return jobs
+    mine = [j for j in jobs if can_access_store_scoped(j.get("store_id"), current_user)]
     order_repo = get_order_repository()
-    order_id = job.get("order_id")
-    order = order_repo.find_by_id(order_id) if order_repo is not None and order_id else None
-    return bool(order) and can_access_store_scoped(order.get("store_id"), current_user)
+    if not mine or order_repo is None:
+        return []
+    owned = order_repo.ids_in_stores(
+        {j.get("order_id") for j in mine if j.get("order_id")}, stores
+    )
+    return [j for j in mine if j.get("order_id") in owned]
 
 
-def _jobs_in_reach(jobs, current_user: dict) -> list:
-    """`_job_in_reach` over a list page (the job lists, the board, the vendor
-    queue). Admins get the page unchanged."""
-    # ponytail: one order read per row of a non-admin page (<=500); batch with
-    # an $in query if a list ever gets slow.
+def _hidden_job_ids(repo, filter_dict: dict, current_user: dict) -> list:
+    """The job_ids matching `filter_dict` that the caller may NOT reach, for a
+    query to exclude: this is how the rule runs BEFORE paging or counting
+    (PR #1376 round 2). Admins hide nothing and pay no read."""
+    # ponytail: an id-only read of the filter's jobs per request, to find what
+    # is normally nothing; drop it once the legacy rows are repaired.
     if user_store_scope(current_user)[0]:
-        return list(jobs or [])
-    return [j for j in (jobs or []) if _job_in_reach(j, current_user)]
+        return []
+    keys = repo.find_reach_keys(filter_dict)
+    reachable = {k.get("job_id") for k in _jobs_in_reach(keys, current_user)}
+    return [k.get("job_id") for k in keys if k.get("job_id") not in reachable]
+
+
+def _reachable_page(repo, filter_dict: dict, current_user: dict, *, sort, skip, limit):
+    """(page, total) of the jobs the caller reaches: Mongo pages and counts
+    with the hidden jobs already excluded, so no hidden row uses up a page."""
+    hidden = _hidden_job_ids(repo, filter_dict, current_user)
+    if hidden:
+        filter_dict = {**filter_dict, "job_id": {"$nin": hidden}}
+    jobs = repo.find_many(filter_dict, skip=skip, limit=limit, sort=sort) or []
+    return jobs, repo.count(filter_dict)
+
+
+def _board_jobs(find, store_id, current_user: dict) -> list:
+    """A board list (`repo.find_pending` / `find_overdue` / `find_ready`) with
+    its 100-row cap taken AFTER the rule."""
+    if user_store_scope(current_user)[0]:
+        return find(store_id)
+    return _jobs_in_reach(find(store_id, limit=0), current_user)[:100]
 
 
 def _order_has_rx_required_line(order) -> bool:

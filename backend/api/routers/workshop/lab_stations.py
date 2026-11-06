@@ -22,7 +22,7 @@ from ...dependencies import (
 from ._shared import logger, router
 from .models import LabScanBody, LabStationUpsert
 from .lens import _perform_ready_notify
-from .helpers import _job_in_reach
+from .helpers import _job_in_reach, _jobs_in_reach
 
 
 # ============================================================================
@@ -168,7 +168,9 @@ async def get_station_queue(
     db = get_db()
     if db is None or not active_store:
         return {"station": code.upper(), "store_id": active_store, "jobs": [], "total": 0}
-    jobs = lab_routing.station_queue(db, active_store, code)
+    jobs = lab_routing.station_queue(
+        db, active_store, code, lambda rows: _jobs_in_reach(rows, current_user)
+    )
     return {
         "station": code.upper(),
         "store_id": active_store,

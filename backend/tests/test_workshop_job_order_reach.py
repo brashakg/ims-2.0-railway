@@ -54,11 +54,17 @@ class _JobRepo:
             rows.sort(key=lambda d: d.get(key) or "", reverse=direction == -1)
         return rows[skip: skip + limit] if limit else rows[skip:]
 
-    def find_pending(self, store_id=None):
+    def find_reach_keys(self, flt):
+        return self.find_many(flt, limit=0)
+
+    def count(self, flt):
+        return len(self.find_many(flt, limit=0))
+
+    def find_pending(self, store_id=None, limit=100):
         flt = {"status": {"$in": ["PENDING", "IN_PROGRESS"]}}
         if store_id:
             flt["store_id"] = store_id
-        return self.find_many(flt, limit=0)
+        return self.find_many(flt, limit=limit)
 
     def update(self, jid, data):
         self.updates.append((jid, data))
@@ -75,6 +81,13 @@ class _OrderRepo:
 
     def find_by_id(self, oid):
         return self.orders.get(oid)
+
+    def ids_in_stores(self, order_ids, store_ids):
+        return {
+            oid
+            for oid in order_ids
+            if self.orders.get(oid, {}).get("store_id") in store_ids
+        }
 
 
 _ORDERS = [

@@ -119,6 +119,10 @@ class FakeOrderRepo:
             return dict(self._order)
         return None
 
+    def ids_in_stores(self, order_ids, store_ids):
+        o = self._order or {}
+        return {o.get("order_id")} & set(order_ids) if o.get("store_id") in store_ids else set()
+
 
 class RecordingApprovalEngine:
     """Stands in for services.approvals.ApprovalEngine. Configured per-test to

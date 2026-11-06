@@ -437,6 +437,9 @@ def _workshop_client(
                 else None
             )
 
+        def ids_in_stores(self, order_ids, store_ids):
+            return set(order_ids) if order_exists and "S1" in store_ids else set()
+
         def update(self, *a, **k):
             return True
 

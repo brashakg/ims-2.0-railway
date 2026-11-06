@@ -669,3 +669,6 @@ class OrdersAt:
 
     def find_by_id(self, order_id):
         return {"order_id": order_id, "store_id": self.store_id} if order_id else None
+
+    def ids_in_stores(self, order_ids, store_ids):
+        return set(order_ids) if self.store_id in store_ids else set()
