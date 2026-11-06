@@ -1691,3 +1691,63 @@ def test_a_note_a_real_posting_found_over_a_cap_still_lets_the_rma_end(rw, monke
     saved = rw["db"].supplier_credit_confirmations.find_one({"_id": body["idempotency_key"]})
     assert saved["posting_status"] == "PENDING_EVIDENCE" and saved["fenced_token"]
     assert rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 200
+
+
+def replace(w, rid, user=ACCOUNTANT):
+    return w["as_"](user).patch(f"/vendor-returns/{rid}/status", json={"status": "replaced"})
+
+
+def test_a_return_cannot_end_as_replaced_under_its_rmas_waiting_note(rw, monkeypatch):
+    rma_id, body = pending_note(rw, monkeypatch)
+    rid = rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["return_id"]
+    refused = replace(rw, rid)
+    assert refused.status_code == 409 and "supplier credit note" in refused.text, refused.text
+    assert returned(rw, rid)["status"] == "received_by_vendor"
+    done = finish_pending(rw, rma_id, body, 1000)
+    assert done.status_code == 200 and done.json()["confirmation"]["posting_status"] == "POSTED", done.text
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_a_return_cannot_end_as_replaced_under_its_own_waiting_note(rw, monkeypatch):
+    bought(rw, "U1", "U2", qty=2)
+    rid = received_return(rw, "U1", "U2")
+    rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    body = {"credit_note_number": "CN-OWN", "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+            "received_amount": 1000, "source_selections": [], "allocations": []}
+
+    def unavailable(*_a, **_k):
+        raise ReturnProvenanceError("EVIDENCE_DOWN", "Original evidence unavailable")
+
+    http = rw["as_"](ACCOUNTANT)
+    with monkeypatch.context() as patched:
+        patched.setattr(rma_credit.canonical, "resolve_credit_evidence", unavailable)
+        saved = http.post(f"/vendor-returns/{rid}/credit-confirmations", json=body)
+    assert saved.status_code == 200 and saved.json()["confirmation"]["posting_status"] == "PENDING_EVIDENCE", saved.text
+    assert replace(rw, rid).status_code == 409
+    shown = http.post(f"/vendor-returns/{rid}/credit-preview", json={"confirmation_id": body["idempotency_key"]}).json()
+    done = http.post(f"/vendor-returns/{rid}/credit-confirmations", json={
+        **body, "source_selections": shown["source_selections"],
+        "allocations": [{"source_key": shown["sources"][0]["source_key"], "taxable": 1000,
+                         "cgst": 0, "sgst": 0, "igst": 0}]})
+    assert done.status_code == 200 and done.json()["confirmation"]["posting_status"] == "POSTED", done.text
+    assert posted(rw) == (1, 100000)
+
+
+def test_a_credit_return_with_no_note_waiting_still_ends_as_replaced(rw):
+    """Accounts forgoing the credit stays Accounts' to do, and only theirs."""
+    bought(rw, "U1", "U2", qty=2)
+    rid = received_return(rw, "U1", "U2")
+    assert replace(rw, rid, user=MANAGER).status_code == 403
+    assert replace(rw, rid).status_code == 200
+    assert returned(rw, rid)["status"] == "replaced"
+
+
+def test_a_rejected_rma_and_a_refused_note_do_not_hold_the_return(rw):
+    bought(rw, "U1", "U2", qty=2)
+    rid = received_return(rw, "U1", "U2")
+    rma_id = linked_rma(rw, rid)
+    rw["db"].supplier_credit_confirmations.insert_one({
+        "_id": str(uuid4()), "return_id": rma_id, "return_kind": "RMA", "identity_claimed": False,
+        "posting_status": "PENDING_EVIDENCE", "pending_reasons": []})
+    assert rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 200
+    assert replace(rw, rid).status_code == 200

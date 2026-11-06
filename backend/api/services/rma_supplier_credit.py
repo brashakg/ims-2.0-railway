@@ -97,6 +97,17 @@ def unfinished_note(db, rma):
         if _holds_its_door(event)), None)
 
 
+def unfinished_on_return(db, return_doc):
+    """The same for a return: a note of its own not yet posted, or one waiting on
+    an RMA still live on it. Ending the return shuts both doors on that note."""
+    own = db.get_collection(EVENTS).find(
+        {**return_event_query(return_doc), "identity_claimed": {"$ne": False}, "posting_status": {"$ne": "POSTED"}})
+    live = db.get_collection("vendor_rmas").find({"return_id": return_doc["return_id"], "status": {
+        "$nin": [RMAStatus.REJECTED.value, RMAStatus.CLOSED.value]}})
+    return next((e for e in own if _holds_its_door(e)), None) or next(
+        (e for e in (unfinished_note(db, rma) for rma in live) if e), None)
+
+
 def settle_return(db, rma):
     """Carry a linked RMA's credit onto its return, as _finish_return does for
     the return's own door. Reads the RMA, so it is safe to repeat; a lost reply

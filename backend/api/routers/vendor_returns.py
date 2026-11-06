@@ -28,7 +28,7 @@ from ..dependencies import (
 from ..services.cost_mask import AP_ROLES, PURCHASE_ROLES, RETURN_READERS, mask_vendor_return
 from ..services.payables_mask import require_payables
 from ..services.rtv_debit_note import debit_note_issued
-from ..services import item_events as _ie
+from ..services import item_events as _ie, rma_supplier_credit
 from ..services.org_validation import shop_gstins
 from ..services.product_cost import _STILL_OURS
 from ..services.quarantine_hold import (
@@ -1154,6 +1154,13 @@ async def update_return_status(
                 status_code=400,
                 detail=f"Cannot transition from {current_status} to {status_update.status}",
             )
+        # 'replaced' forgoes the credit and shuts both doors: a claimed supplier
+        # note, here or on a live RMA, finishes first (one number, one record).
+        if (status_update.status == "replaced" and return_doc.get("return_type") != "replacement"
+                and rma_supplier_credit.unfinished_on_return(db, return_doc)):
+            raise HTTPException(status_code=409, detail=(
+                "A supplier credit note is still waiting on this return. Accounts finishes it "
+                "first: retry that same note once its original bill is confirmed."))
         # Shipping: every piece leaves stock FIRST (QUARANTINED -> RTV) while
         # the return is claimed against any other change; the status moves
         # only once they all have. A piece that will not move is named and the
