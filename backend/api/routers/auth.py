@@ -13,6 +13,7 @@ from typing import List, Optional, Dict, Tuple
 from datetime import datetime, timedelta
 from collections import defaultdict
 import time
+import uuid
 import base64
 import binascii
 import jwt
@@ -1824,6 +1825,12 @@ async def switch_store(store_id: str, current_user: dict = Depends(get_current_u
         token_data["sess_start"] = sess_start
     if current_user.get("sid"):
         token_data["sid"] = current_user["sid"]
+
+    # Every switch mints a distinct token. exp is kept (below), so without this
+    # a return to the first shop re-creates the login token byte for byte, and
+    # the browser's check that an answer belongs to the token still stored
+    # could not tell a held older switch from the current choice (#1372).
+    token_data["jti"] = uuid.uuid4().hex
 
     # Keep the current token's exp: the refresh token is NOT rotated here, so
     # the client's proactive refresh (exp - 5 min) must still fire inside the
