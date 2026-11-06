@@ -597,7 +597,8 @@ def _exec_draft_po(db, proposal: Dict[str, Any]) -> Dict[str, Any]:
     the DRAFT PO as ``delivery_store_id`` so the draft is store-attributed - the
     same field vendors.py's from-forecast POs carry. A draft for a SKU with no
     preferred vendor still drafts (vendor_id null); assigning a vendor before
-    SENDING is the human step.
+    SENDING is the human step. A vendor that IS named must be buyable (L1-F40):
+    otherwise this raises, the proposal goes FAILED and no PO is written.
     """
     if db is None:
         raise RuntimeError("database unavailable")
@@ -631,8 +632,23 @@ def _exec_draft_po(db, proposal: Dict[str, Any]) -> Dict[str, Any]:
         except Exception:  # noqa: BLE001
             return None
 
+    vendor = None
+    if vendor_id:
+        from fastapi import HTTPException
+        from api.routers.vendors._shared import buyable_vendor
+        from database.repositories.vendor_repository import VendorRepository
+
+        try:
+            vendor = buyable_vendor(
+                VendorRepository(db.get_collection("vendors")), vendor_id
+            )
+        except HTTPException as exc:
+            detail = exc.detail
+            raise ValueError(
+                detail["message"] if isinstance(detail, dict) else detail
+            ) from exc
+
     prod = _one("products", "product_id", product_id) or {}
-    vendor = _one("vendors", "vendor_id", vendor_id)
     store_doc = _one("stores", "store_id", store_id)
 
     # THE order shape every other door writes: `items` lines priced and taxed by
