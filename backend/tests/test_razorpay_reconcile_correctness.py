@@ -26,6 +26,7 @@ import mongomock
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from mongomock.collection import Collection
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
@@ -123,7 +124,8 @@ def _assert_books_reconcile(db):
     under test): every bill's amount_paid is the sum of its tenders, never above
     its total, each Razorpay payment id is on at most one tender anywhere, and
     no captured-payment event for an IMS bill sits 'succeeded' unless its
-    payment id is on that bill."""
+    payment id is on that bill and the bill left DRAFT. Only a verified dark
+    integration may finish without one."""
     seen = {}
     for o in db.orders.find():
         pays = o.get("payments") or []
@@ -141,9 +143,11 @@ def _assert_books_reconcile(db):
         ent = ((payload.get("payload") or {}).get("payment") or {}).get("entity") or {}
         ref = (ent.get("notes") or {}).get("order_ref")
         bill = db.orders.find_one({"order_number": ref}) if ref else None
-        if payload.get("event") == "payment.captured" and bill is not None:
+        if (payload.get("event") == "payment.captured" and bill is not None
+                and row.get("outcome") != "dark"):
             assert seen.get(ent.get("id")) == bill["order_id"], (
                 f"event {ent.get('id')} marked succeeded with no tender on {ref}")
+            assert bill["status"] != "DRAFT", f"event {ent.get('id')} succeeded on a DRAFT bill"
 
 
 # --------------------------------------------------------------------------- #
@@ -356,3 +360,73 @@ def test_a_refund_event_changes_no_bill(rig):
     rig["drain"]()
     bill = _bill(db, "O13")
     assert len(bill["payments"]) == 1 and bill["amount_paid"] == 1000.0
+
+
+# --------------------------------------------------------------------------- #
+# Codex 11-06 (PR #1387): an event finishes only on a verified outcome. An
+# outage must leave it failed, and retry or redelivery must finish it once.
+
+def _fail(monkeypatch, method, when):
+    """Raise a timeout from mongomock's real collection op when `when` matches."""
+    real = getattr(Collection, method)
+
+    def faulty(self, *a, **k):
+        if when(self, *a):
+            raise TimeoutError(f"transient {method} failure")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(Collection, method, faulty)
+
+
+def _is_config_read(coll, query=None, *_):
+    """The drain's config read; the receiver's secret read has no `enabled`."""
+    return coll.name == "integrations" and "enabled" in (query or {})
+
+
+def _is_confirm_write(coll, _query, update, *_):
+    return coll.name == "orders" and (update.get("$set") or {}).get("status") == "CONFIRMED"
+
+
+def _recover(rig, how, payload, event_id):
+    if how == "sweep":
+        asyncio.run(rig["nexus"]._retry_failed_webhooks())
+    else:  # the provider resends the identical signed delivery
+        assert _post(rig, payload, event_id=event_id).json()["status"] == "duplicate"
+        rig["drain"]()
+
+
+@pytest.mark.parametrize("how", ["sweep", "redelivery"])
+def test_a_config_read_outage_is_not_dark_and_recovers_with_one_tender(rig, monkeypatch, how):
+    db = rig["db"]
+    _order(db, "F1")
+    payload = _event("F1", "pay_F1", 100000)
+    with monkeypatch.context() as m:
+        _fail(m, "find_one", _is_config_read)
+        assert _post(rig, payload, event_id="evt_F1").status_code == 200
+        rig["drain"]()
+    row = _row(db, "pay_F1")
+    assert row["status"] == "failed" and row["processed"] is False
+    assert "TimeoutError" in row["handler_error"] and "outcome" not in row
+    assert _bill(db, "F1")["payments"] == []
+
+    _recover(rig, how, payload, "evt_F1")
+    bill, row = _bill(db, "F1"), _row(db, "pay_F1")
+    assert len(bill["payments"]) == 1 and bill["amount_paid"] == 1000.0
+    assert row["status"] == "succeeded" and row["outcome"] == "credited"
+
+    _recover(rig, "redelivery", payload, "evt_F1")
+    assert len(_bill(db, "F1")["payments"]) == 1
+
+
+@pytest.mark.parametrize("config_change", [
+    {"$unset": {"config.key_secret": ""}}, {"$set": {"enabled": False}}])
+def test_a_config_read_that_worked_still_ends_dark(rig, config_change):
+    """Intentional dark mode: the read answered, Razorpay is not set up here."""
+    db = rig["db"]
+    db.integrations.update_one({"type": "razorpay"}, config_change)
+    _order(db, "F2")
+    _post(rig, _event("F2", "pay_F2", 100000), event_id="evt_F2")
+    rig["drain"]()
+    row = _row(db, "pay_F2")
+    assert row["status"] == "succeeded" and row["outcome"] == "dark"
+    assert _bill(db, "F2")["payments"] == []

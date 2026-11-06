@@ -185,7 +185,8 @@ def reconcile_razorpay_event(db, payload: Dict[str, Any]) -> str:
     Only payment.captured credits: payment.authorized is a hold, not money,
     and its captured event follows. The bill is matched on the order_number
     carried in the UPI tn= note (notes.order_ref / notes.order_number /
-    description). DARK when Razorpay creds are not configured.
+    description). DARK only when a config read that WORKED shows Razorpay
+    creds are not configured; a failed read raises like any other outage.
     """
     if str((payload or {}).get("event") or "").lower() != "payment.captured":
         return "ignored"
@@ -204,14 +205,15 @@ def reconcile_razorpay_event(db, payload: Dict[str, Any]) -> str:
 
 
 def _razorpay_configured(db) -> bool:
-    """True when the `integrations/razorpay` doc carries key_id + key_secret."""
-    try:
-        from agents.nexus_providers import _load_integration_config
+    """True when the `integrations/razorpay` doc carries key_id + key_secret.
 
-        cfg = _load_integration_config(db, "razorpay") or {}
-        return bool(cfg.get("key_id") and cfg.get("key_secret"))
-    except Exception:  # noqa: BLE001
-        return False
+    Strict: False ends the event as dark for good, so only a read that worked
+    may answer it. A failed read raises and the row stays failed and retried.
+    """
+    from agents.nexus_providers import _load_integration_config
+
+    cfg = _load_integration_config(db, "razorpay", strict=True)
+    return bool(cfg.get("key_id") and cfg.get("key_secret"))
 
 
 def _do_reconcile(db, order_id: str, upi_txn: Dict[str, Any]) -> str:
