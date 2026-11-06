@@ -25,10 +25,12 @@ What this adds (and what it deliberately REUSES):
     - The promo quiet-hours window guard (agents.quiet_hours) used by the manual
       send API.
 
-Role gate: ADMIN / SUPERADMIN for org-wide actions; STORE_MANAGER is permitted
-for store-scoped campaigns (a campaign carrying a store_id is restricted to that
-manager's store via validate_store_access). Every route is catalogued in
-rbac_policy.POLICY (the coverage-lock test enforces this).
+Role gate: ADMIN / SUPERADMIN for org-wide actions; AREA_MANAGER and
+STORE_MANAGER for their own shops only. ONE store rule (L1-F23) covers every
+door of a campaign and a promo template: lists (_list_scope), by-id reads and
+writes (_enforce_store_scope) and the shop a create/update stamps
+(_write_store). Every route is catalogued in rbac_policy.POLICY (the
+coverage-lock test enforces this).
 """
 
 from __future__ import annotations
@@ -46,7 +48,12 @@ from pydantic import BaseModel, Field, field_validator
 logger = logging.getLogger(__name__)
 
 from .auth import get_current_user, require_roles
-from ..dependencies import validate_store_access
+from ..dependencies import (
+    can_access_store_scoped,
+    resolve_store_scope,
+    store_in_view,
+    validate_store_access,
+)
 from .marketing import (
     VALID_CHANNELS,
     _enforce_promo_window,
@@ -194,23 +201,45 @@ def _audit(
         logger.warning("campaign audit write failed (%s): %s", action, exc)
 
 
-def _enforce_store_scope(campaign: Dict[str, Any], user: dict) -> None:
-    """A campaign carrying a store_id is restricted to that store. HQ roles
-    (SUPERADMIN/ADMIN/AREA_MANAGER) bypass; a STORE_MANAGER may only act on a
-    campaign for a store they can access."""
-    store_id = campaign.get("store_id")
-    if not store_id:
-        return
-    roles = set(user.get("roles", []) or [])
-    if roles & {"SUPERADMIN", "ADMIN"}:
-        return
-    # validate_store_access(store_id, user) returns the store_id when the caller
-    # may access it and raises HTTPException(403) otherwise (admins bypass, area
-    # managers by region, others by store_ids list). It is the SAME validator the
-    # rest of the store-scoped routers use.
-    from ..dependencies import validate_store_access
+def _is_hq(user: dict) -> bool:
+    return bool(set(user.get("roles", []) or []) & {"SUPERADMIN", "ADMIN"})
 
-    validate_store_access(store_id, user)
+
+def _enforce_store_scope(record: Dict[str, Any], user: dict) -> None:
+    """THE by-id rule for a campaign / promo template (read AND write).
+
+    SUPERADMIN / ADMIN reach every record, org-wide (no store) included.
+    Everyone else -- AREA_MANAGER too -- only a record stamped with one of
+    their own shops (can_access_store_scoped). An org-wide record is HQ-only:
+    its audience is the whole chain, so a missing or blank store must never
+    hand a shop manager org-wide reach (L1-F23)."""
+    store_id = record.get("store_id")
+    if can_access_store_scoped(store_id, user):
+        return
+    if store_id:
+        validate_store_access(store_id, user)  # the standard 403 wording
+    raise HTTPException(
+        status_code=403,
+        detail="Organisation-wide campaigns and templates are HQ-only",
+    )
+
+
+def _write_store(store_id: Optional[str], user: dict) -> Optional[str]:
+    """THE shop a campaign / promo template create or update stamps. HQ may
+    name any shop or none (org-wide). Everyone else lands in a shop of their
+    own: a named shop is validated (403 outside their reach), a missing/blank
+    one resolves to their active shop -- never org-wide, never a forbidden
+    shop."""
+    if _is_hq(user):
+        return store_id or None
+    return store_in_view(store_id or None, user, writing=True)
+
+
+def _list_scope(store_id: Optional[str], user: dict) -> Optional[str]:
+    """THE list filter, agreeing with _enforce_store_scope: a ?store_id is
+    validated (403 outside reach), HQ with none sees every record, everyone
+    else their own shop's records only (org-wide ones excluded)."""
+    return resolve_store_scope(store_id or None, user)
 
 
 def _get_campaign_or_404(db, campaign_id: str) -> Dict[str, Any]:
@@ -311,7 +340,7 @@ async def list_segments(
     current_user: dict = Depends(require_roles(*_CAMPAIGN_ROLES)),
 ):
     """Predefined segments, each with a LIVE audience count computed now."""
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
+    active_store = store_in_view(store_id, current_user, one_shop=True)
     db = _marketing_get_db()
     segments = seg.list_segments(db, store_id=active_store or None)
     return {"segments": segments, "total": len(segments)}
@@ -329,7 +358,7 @@ async def preview_segment(
     ('Estimated audience: N')."""
     if key not in seg.SEGMENT_KEYS:
         raise HTTPException(status_code=404, detail=f"Unknown segment '{key}'")
-    active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
+    active_store = store_in_view(store_id, current_user, one_shop=True)
     params: Dict[str, Any] = {}
     if customer_type:
         params["customer_type"] = customer_type
@@ -366,8 +395,9 @@ async def list_campaigns(
             },
         }
     query: Dict[str, Any] = {}
-    if store_id:
-        query["store_id"] = store_id
+    scope = _list_scope(store_id, current_user)
+    if scope:
+        query["store_id"] = scope
     if status:
         query["status"] = status.upper()
     coll = db.get_collection("campaigns")
@@ -404,9 +434,7 @@ async def create_campaign(
     db = _marketing_get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    # A STORE_MANAGER may only create a campaign scoped to a store they access.
-    if req.store_id:
-        _enforce_store_scope({"store_id": req.store_id}, current_user)
+    store_id = _write_store(req.store_id, current_user)
 
     schedule = req.schedule.model_dump() if req.schedule else None
     campaign_id = _new_campaign_id()
@@ -418,7 +446,7 @@ async def create_campaign(
         "segment_params": req.segment_params or {},
         "channels": req.channels,
         "template_id": req.template_id,
-        "store_id": req.store_id,
+        "store_id": store_id,
         "schedule": schedule,
         "description": req.description,
         "status": "DRAFT",
@@ -497,9 +525,9 @@ async def update_campaign(
             updates[field] = payload[field]
     if "schedule" in payload and payload["schedule"] is not None:
         updates["schedule"] = req.schedule.model_dump() if req.schedule else None
-    # If the store_id is being changed, re-check scope for the NEW store too.
-    if "store_id" in updates and updates["store_id"]:
-        _enforce_store_scope({"store_id": updates["store_id"]}, current_user)
+    # A store change goes through the create rule: never out of reach.
+    if "store_id" in updates:
+        updates["store_id"] = _write_store(updates["store_id"], current_user)
 
     if not updates:
         return {"message": "No changes", "campaign": _strip(dict(doc))}
@@ -954,8 +982,9 @@ async def list_promo_templates(
     if db is None:
         return {"templates": [], "total": 0}
     query: Dict[str, Any] = {}
-    if store_id:
-        query["store_id"] = store_id
+    scope = _list_scope(store_id, current_user)
+    if scope:
+        query["store_id"] = scope
     if type and type.upper() in _PROMO_TEMPLATE_TYPES:
         query["type"] = type.upper()
     if active_only:
@@ -977,8 +1006,7 @@ async def create_promo_template(
     db = _marketing_get_db()
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
-    if req.store_id:
-        _enforce_store_scope({"store_id": req.store_id}, current_user)
+    store_id = _write_store(req.store_id, current_user)
     template_id = f"PT-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
     doc = {
         "template_id": template_id,
@@ -992,7 +1020,7 @@ async def create_promo_template(
         "combo_discount_pct": req.combo_discount_pct,
         "min_order_value": req.min_order_value,
         "threshold_discount_pct": req.threshold_discount_pct,
-        "store_id": req.store_id,
+        "store_id": store_id,
         "active": req.active,
         "valid_from": req.valid_from,
         "valid_until": req.valid_until,
@@ -1017,8 +1045,7 @@ async def get_promo_template(
     doc = db.get_collection("promo_templates").find_one({"template_id": template_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Promo template not found")
-    if doc.get("store_id"):
-        _enforce_store_scope(doc, current_user)
+    _enforce_store_scope(doc, current_user)
     return _strip(dict(doc))
 
 
@@ -1035,9 +1062,10 @@ async def update_promo_template(
     doc = db.get_collection("promo_templates").find_one({"template_id": template_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Promo template not found")
-    if doc.get("store_id"):
-        _enforce_store_scope(doc, current_user)
+    _enforce_store_scope(doc, current_user)
     updates = req.model_dump(exclude_unset=True, exclude_none=True)
+    if "store_id" in updates:
+        updates["store_id"] = _write_store(updates["store_id"], current_user)
     if not updates:
         return _strip(dict(doc))
     updates["updated_at"] = _now_iso()
@@ -1061,8 +1089,7 @@ async def delete_promo_template(
     doc = db.get_collection("promo_templates").find_one({"template_id": template_id})
     if not doc:
         raise HTTPException(status_code=404, detail="Promo template not found")
-    if doc.get("store_id"):
-        _enforce_store_scope(doc, current_user)
+    _enforce_store_scope(doc, current_user)
     db.get_collection("promo_templates").delete_one({"template_id": template_id})
     _audit(db, template_id, "DELETE_PROMO_TEMPLATE", current_user, {"name": doc.get("name")})
     return {"message": "Promo template deleted", "template_id": template_id}
