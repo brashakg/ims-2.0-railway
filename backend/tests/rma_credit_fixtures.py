@@ -39,7 +39,9 @@ def credit_payload(db, rma_id, *, amount, number="CN-1"):
                 "gstins": [{"gstin": "20AAAAA0000A1Z5"}]})
         db.get_collection("vendor_rmas").update_one({"rma_id": rma_id}, {"$set": {"grn_id": gid}})
         doc["grn_id"] = gid
-    preview = credit_preview(db, normalize(doc))
+        if doc.get("return_id"):  # a linked RMA's evidence is its pieces' own receipt
+            db.get_collection("stock_units").update_many({"rtv_vendor_id": doc["return_id"]}, {"$set": {"grn_id": gid}})
+    preview = credit_preview(db, normalize(doc, db))
     assert preview["source_status"] == "RESOLVED", preview
     assert len(preview["sources"]) == 1, "This fixture intentionally covers a single-line RMA."
     if amount:

@@ -79,7 +79,7 @@ from ..services.vendor_rma import (
 from ..services.rtv_debit_note import debit_note_issued
 from ..services.payables_mask import AP_ROLES, require_payables, strip_rma_credit
 from ..services import rma_supplier_credit
-from ..services.supplier_credit_evidence import SupplierCreditError
+from ..services.supplier_credit_evidence import SupplierCreditError, credit_started
 
 logger = logging.getLogger(__name__)
 
@@ -248,17 +248,24 @@ def _customer_piece_problem(db, line: RMALineCreate, user: dict) -> Optional[str
     return None
 
 
-def _physical_return_problem(db, doc: dict, *, shipped: bool) -> Optional[str]:
+def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = False) -> Optional[str]:
     """Why this RMA's goods have not left the shop's stock; None when they have
-    (L2-RMA-F01). A line for a product this shop holds pieces of -- THE Vendor
-    Returns rule, _typed_line_problem -- goes back only on the pieces of the
-    vendor return the RMA links (return_id): open, same shop and supplier, its
-    pieces exactly the RMA's products and quantities, on no other RMA. That
-    return moves them (QUARANTINED -> RTV on its Ship), never this RMA, so no
-    piece leaves twice. ``shipped`` (dispatch, credit, close) asks that they
-    have left; at raise they may still be set aside for it. A line for
-    something IMS holds no piece of here (a customer's own frame on warranty,
-    a made-to-order lens) is unchanged: no owner policy is guessed for it."""
+    (L2-RMA-F01). The line says whose piece it is (owner ruling 2026-11-06), a
+    model match never does: a line ticked customer_owned touches no shop stock
+    and is skipped here. An unticked line is shop stock: while this shop still
+    holds pieces of its product -- THE Vendor Returns rule, _typed_line_problem
+    -- it goes back only on the pieces of the vendor return the RMA links
+    (return_id): open, same shop and supplier, its pieces exactly the RMA's
+    products and quantities, on no other RMA. That return moves them
+    (QUARANTINED -> RTV on its Ship), never this RMA, so no piece leaves twice.
+    ``shipped`` (dispatch, credit, close) asks that they have left; at raise
+    they may still be set aside for it. An unticked line this shop holds no
+    piece of (a historical line, a made-to-order lens) keeps today's outcome.
+
+    The return must still be owed a credit this RMA can take: not one settled
+    by replacement goods, and not one already holding a supplier note of its
+    own (services/rma_supplier_credit). ``closing`` skips that: closing moves no
+    money, and an old pair that already holds notes on both doors must end."""
     if db is None:
         return "Stock data is unavailable; retry shortly."
     rid = doc.get("return_id")
@@ -274,6 +281,12 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool) -> Optional[str]:
                 "return_id": rid, "rma_id": {"$ne": doc.get("rma_id")},
                 "status": {"$ne": RMAStatus.REJECTED.value}}):
             return f"Vendor return {rid} already goes back on another RMA."
+        if not closing:
+            if ret.get("return_type") == "replacement" or ret.get("status") == "replaced":
+                return f"Vendor return {rid} is settled by replacement goods, not a supplier credit."
+            if credit_started(db, ret):
+                return (f"Vendor return {rid} already holds its supplier's credit note: finish "
+                        "it on Vendor Returns, the same pieces cannot be credited twice.")
         units = _rtv._named_units(db, ret)
         for sid in ret.get("stock_ids") or []:
             state = _rtv._ie.canonical_state((units.get(sid) or {}).get("status"))
@@ -308,8 +321,9 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool) -> Optional[str]:
     return None
 
 
-def _require_physical_return(doc: dict, *, shipped: bool, status_code: int = 409) -> None:
-    problem = _physical_return_problem(_get_db(), doc, shipped=shipped)
+def _require_physical_return(doc: dict, *, shipped: bool, status_code: int = 409,
+                             closing: bool = False) -> None:
+    problem = _physical_return_problem(_get_db(), doc, shipped=shipped, closing=closing)
     if problem:
         raise HTTPException(status_code=status_code, detail=problem)
 
@@ -408,6 +422,16 @@ async def raise_rma(
     )
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "create failed"))
+    # Two raises can pass the check above together. Whichever sees the other
+    # stands down, so a return never ends up on two live RMAs.
+    if body.return_id and eng._coll().find_one({  # noqa: SLF001
+            "return_id": body.return_id, "rma_id": {"$ne": res["rma_id"]},
+            "status": {"$ne": RMAStatus.REJECTED.value}}):
+        eng._transition(  # noqa: SLF001 - the engine's atomic from-state guard
+            res["rma_id"], from_status=RMAStatus.DRAFT.value, to_status=RMAStatus.REJECTED.value,
+            actor=current_user.get("user_id"), notes="Another RMA took this vendor return first.",
+            audit_action="rma_rejected")
+        raise HTTPException(status_code=409, detail=f"Vendor return {body.return_id} already goes back on another RMA.")
     return mask_rma(res, current_user)
 
 
@@ -629,7 +653,7 @@ async def close_rma(
         require_payables(current_user, "Writing off an RMA's credit variance")
     eng = _engine()
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
-    _require_physical_return(doc, shipped=True)
+    _require_physical_return(doc, shipped=True, closing=True)
     res = eng.close_rma(
         rma_id,
         actor=current_user.get("user_id"),
@@ -638,6 +662,8 @@ async def close_rma(
     )
     if not res.get("ok"):
         raise _http_from_result(res, current_user)
+    # A written-off balance ends the return's wait for a credit too.
+    rma_supplier_credit.settle_return(_get_db(), eng.get(rma_id) or {})
     return mask_rma(res, current_user)
 
 

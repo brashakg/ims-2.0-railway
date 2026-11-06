@@ -31,6 +31,14 @@ class _CollectionAccess:
         return self.db.get_collection(name)
 
 
+def credit_started(db, return_doc):
+    """True once a door has taken this return's supplier credit: any supplier
+    note it holds, pending or posted, claims that note and its pieces. A row
+    refused before its note was claimed (identity_claimed False) is no claim."""
+    return db.get_collection(EVENTS).find_one(
+        {**return_event_query(return_doc), "identity_claimed": {"$ne": False}}) is not None
+
+
 def return_event_query(return_doc):
     kind = return_doc.get("return_kind") or ("RMA" if return_doc.get("rma_id") and not return_doc.get("return_id") else "VENDOR_RETURN")
     return {"return_id": return_doc.get("return_id") or return_doc.get("rma_id"),
@@ -191,7 +199,7 @@ def credit_choices(db, return_doc, *, allowed_store_ids=None):
     """Only stored physical origins are offered; no guessed latest purchase."""
     from api.routers.finance.gst import _bill_booked
 
-    rid = return_doc.get("return_id") or return_doc.get("rma_id")
+    rid = return_doc.get("physical_return_id") or return_doc.get("return_id") or return_doc.get("rma_id")
     linked = list(db.get_collection("stock_units").find({"rtv_vendor_id": rid}))
     output = []
     for index, item in enumerate(return_doc.get("items") or return_doc.get("lines") or []):

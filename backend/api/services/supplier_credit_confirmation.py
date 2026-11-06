@@ -343,6 +343,12 @@ def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_s
     status/pricing writes while credit_confirmation_fence is present.
     """
     submitted = _input(payload)
+    if return_doc.get("return_kind") != "RMA":
+        # Before _event: a refused note must not claim its number on this door.
+        from . import rma_supplier_credit
+        problem = rma_supplier_credit.return_door_problem(db, return_doc, submitted["confirmation_id"])
+        if problem:
+            _error("CREDIT_BELONGS_TO_RMA", problem, 409)
     event = _event(db, return_doc, submitted, actor_id)
     if event["posting_status"] == "POSTED":
         _finish_return(db, event)

@@ -1,32 +1,86 @@
-"""RMA adapter for canonical supplier confirmations; no shadow RTV documents."""
+"""RMA adapter for canonical supplier confirmations; no shadow RTV documents.
+
+One physical return, one financial owner (L2-RMA-F01). An RMA linked to a
+vendor return (return_id) answers for that return's pieces: normalize() hands
+the canonical writer those exact pieces, so its atomic physical reservation
+refuses the same piece on any second door. Which door records the note is
+settled before anything is written: a return that already holds a supplier note
+keeps it (the RMA is refused, vendor_rma._physical_return_problem); otherwise a
+live linked RMA does (return_door_problem), under its maker-checker. Partial
+notes and retries stay on that one door; settle_return carries the result onto
+the return, so it stops reading as a credit still owed. Nothing historical is
+merged or removed: a return and RMA that both already hold notes keep them and
+take no more.
+"""
 from copy import deepcopy
 
 from pymongo.errors import DuplicateKeyError
 
 from . import supplier_credit_confirmation as canonical
-from .supplier_credit_evidence import EVENTS, SupplierCreditError, confirmation_view, credit_preview, paise
+from .supplier_credit_evidence import (
+    EVENTS, SupplierCreditError, confirmation_view, credit_preview, credit_started, paise,
+)
 from .vendor_rma import RMAStatus, VendorRMAEngine, _now
 
 APPROVAL_BINDINGS = "rma_supplier_credit_approvals"
 READY = {RMAStatus.DISPATCHED.value, RMAStatus.CREDIT_RECEIVED.value}
 
 
-def normalize(doc):
-    """Adapt the stored lifecycle in memory; preserve its exact CAS preimage."""
+def normalize(doc, db=None):
+    """Adapt the stored lifecycle in memory; preserve its exact CAS preimage.
+    With `db`, a linked RMA carries its return's physical pieces."""
     items = []
     for line in doc.get("lines") or []:
         item = deepcopy(line)
         value = line.get("unit_cost_paise")
         item["unit_price"] = value / 100 if value is not None else line.get("unit_cost")
         items.append(item)
-    return {**deepcopy(doc), "return_id": doc["rma_id"], "return_kind": "RMA",
+    linked = {}
+    if doc.get("return_id") and db is not None:
+        ret = db.get_collection("vendor_returns").find_one({"return_id": doc["return_id"]}) or {}
+        linked = {"physical_return_id": doc["return_id"], "stock_ids": ret.get("stock_ids") or []}
+    return {**deepcopy(doc), **linked, "return_id": doc["rma_id"], "return_kind": "RMA",
             "items": items, "return_type": "credit_note",
             "status": "received_by_vendor" if doc.get("status") in READY else "not_ready",
             "_rma_snapshot": deepcopy(doc)}
 
 
+def return_door_problem(db, return_doc, confirmation_id):
+    """Why the return's own credit door is shut for this note; None when open.
+    A POSTED note's replay always answers. A live linked RMA owns the credit
+    unless the return already held a note first."""
+    event = db.get_collection(EVENTS).find_one({"_id": confirmation_id})
+    if event and event.get("posting_status") == "POSTED":
+        return None
+    rma = db.get_collection("vendor_rmas").find_one(
+        {"return_id": return_doc["return_id"], "status": {"$ne": RMAStatus.REJECTED.value}})
+    if not rma or (credit_started(db, return_doc) and not credit_started(db, {"rma_id": rma["rma_id"]})):
+        return None
+    return (f"This return's pieces went back on RMA {rma['rma_id']}: record the supplier's "
+            "credit note there, once, not here.")
+
+
+def settle_return(db, rma):
+    """Carry a linked RMA's credit onto its return, as _finish_return does for
+    the return's own door. Reads the RMA, so it is safe to repeat; a lost reply
+    repairs here on the unchanged retry."""
+    if not rma.get("return_id"):
+        return
+    amount = int(rma.get("received_credit_paise") or 0) / 100
+    variance = rma.get("variance_paise")
+    full = rma.get("status") == RMAStatus.CLOSED.value or (variance is not None and variance <= 0)
+    numbers = dict.fromkeys(n["credit_note_number"] for n in rma.get("credit_notes") or []
+                            if n.get("confirmation_id"))
+    db.get_collection("vendor_returns").update_one(
+        {"return_id": rma["return_id"], "status": {"$in": ["shipped", "received_by_vendor"]}},
+        {"$set": {"status": "credit_issued" if full else "received_by_vendor",
+                  "credit_note_number": ", ".join(numbers), "credit_note_amount": amount,
+                  "confirmed_credit_amount": amount, "credit_confirmation_locked": True,
+                  "credit_settled_on_rma": rma["rma_id"], "updated_at": _now()}})
+
+
 def preview(db, doc, *, selections=None, confirmation_id=None, allowed_store_ids=None):
-    return credit_preview(db, normalize(doc), selections=selections,
+    return credit_preview(db, normalize(doc, db), selections=selections,
                           confirmation_id=confirmation_id, allowed_store_ids=allowed_store_ids)
 
 
@@ -58,6 +112,7 @@ def finish(db, event):
     if not current:
         raise SupplierCreditError("RMA_NOT_FOUND", "The confirmed RMA needs technical reconciliation.", 503)
     if any(note.get("confirmation_id") == event["confirmation_id"] for note in current.get("credit_notes") or []):
+        settle_return(db, current)
         return
     received = int(current.get("received_credit_paise") or 0)
     amount = event["received_paise"]
@@ -87,6 +142,7 @@ def finish(db, event):
                  "received_credit_paise": received + amount, "variance_paise": int(expected) - received - amount}
         engine._audit("rma_credit_recorded", after, actor=event.get("posted_by"),
                       before=engine._snapshot(current), after=engine._snapshot(after), reason=event.get("notes"))
+    settle_return(db, collection.find_one({"rma_id": event["return_id"]}))
 
 
 def existing_confirmation(db, doc, submitted):
@@ -200,7 +256,7 @@ def require_approval(db, doc, submitted, *, request_id, token, actor_id, consume
 
 def record(db, doc, payload, *, actor_id, allowed_store_ids=None):
     event, repeated = canonical.record_supplier_confirmation(
-        db, normalize(doc), payload, actor_id=actor_id, allowed_store_ids=allowed_store_ids)
+        db, normalize(doc, db), payload, actor_id=actor_id, allowed_store_ids=allowed_store_ids)
     current = db.get_collection("vendor_rmas").find_one({"rma_id": doc["rma_id"]}) or doc
     shown = confirmation_view(event)
     return {"ok": True, "rma_id": doc["rma_id"], "idempotent": repeated,
