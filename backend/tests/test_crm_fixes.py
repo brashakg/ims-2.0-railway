@@ -257,11 +257,13 @@ def test_cl_refill_daily_disposable(monkeypatch):
             return _FakeColl(orders if name == "orders" else [])
 
     monkeypatch.setattr(crm_mod, "_crm_get_db", lambda: _CL_DB())
+    # L1-F17: the route now checks the customer's shop first.
+    monkeypatch.setattr(crm_mod.db, "query_customer", lambda cid: {"customer_id": cid, "home_store_id": "S1"})
     import asyncio
     result = asyncio.run(
         crm_mod.get_cl_refill_status(
             customer_id="cust-1",
-            current_user={"user_id": "u1", "roles": ["STORE_MANAGER"]},
+            current_user={"user_id": "u1", "roles": ["STORE_MANAGER"], "store_ids": ["S1"]},
         )
     )
     assert result["has_cl_history"] is True
@@ -280,11 +282,13 @@ def test_cl_refill_no_history(monkeypatch):
             return _FakeColl([])
 
     monkeypatch.setattr(crm_mod, "_crm_get_db", lambda: _EmptyDB())
+    # L1-F17: the route now checks the customer's shop first.
+    monkeypatch.setattr(crm_mod.db, "query_customer", lambda cid: {"customer_id": cid, "home_store_id": "S1"})
     import asyncio
     result = asyncio.run(
         crm_mod.get_cl_refill_status(
             customer_id="cust-99",
-            current_user={"user_id": "u1", "roles": ["STORE_MANAGER"]},
+            current_user={"user_id": "u1", "roles": ["STORE_MANAGER"], "store_ids": ["S1"]},
         )
     )
     assert result["has_cl_history"] is False

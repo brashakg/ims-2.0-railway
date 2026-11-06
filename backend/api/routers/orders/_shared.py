@@ -73,8 +73,9 @@ def _get_db():
 
 # Roles permitted to create / modify POS orders. Excludes ACCOUNTANT,
 # CATALOG_MANAGER, OPTOMETRIST, WORKSHOP_STAFF (out of POS scope) and INVESTOR
-# (read-only, also blocked by middleware). CASHIER is payment-only -> may record
-# payments but not create orders, so it is intentionally NOT in this set.
+# (read-only, also blocked by middleware). CASHIER is NOT in this set: it takes
+# payments and rings the sale it is paying (SALE_ROLES, below) but holds no
+# other POS write, e.g. cancel.
 POS_WRITE_ROLES = (
     "SUPERADMIN",
     "ADMIN",
@@ -107,6 +108,16 @@ POS_WRITE_ROLES = (
 # but is in NEITHER scan-role tuple, so it is deliberately not added here. That
 # FE/BE mismatch predates this change and is flagged, not decided.
 HANDOVER_ROLES = POS_WRITE_ROLES + ("CASHIER", "WORKSHOP_STAFF")
+
+# Roles permitted to RING A SALE at the till: price it (POST /orders/quote) and
+# save the bill (POST /orders). The till's "Complete sale" runs quote -> create
+# -> payments in one press, so a CASHIER who may take the money must be able to
+# save the bill it is paying (Codex L2-POS-F01: the till opened for CASHIER and
+# then 403'd on the quote). Only these two doors: cancel and every other
+# POS_WRITE_ROLES door stay closed to CASHIER, and its 0% role discount cap
+# (services/role_caps) still sends every discount to a manager. Keep the
+# policy rows for /orders and /orders/quote in sync.
+SALE_ROLES = POS_WRITE_ROLES + ("CASHIER",)
 
 # Roles permitted to TAKE MONEY on a bill (POST /orders/{id}/payments, and the
 # deliver-with-payment door that calls it). The till's role set (frontend

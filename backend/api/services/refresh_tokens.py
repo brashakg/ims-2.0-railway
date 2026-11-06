@@ -296,6 +296,33 @@ class RefreshTokenStore:
         except Exception as e:  # noqa: BLE001
             logger.warning("refresh_tokens: family revoke failed: %s", e)
 
+    def family_is_live(self, family_id: Optional[str]) -> Optional[bool]:
+        """True while the chain still holds an unrevoked, unexpired token;
+        False once it was ended (logout, reuse canary, password set, disable)
+        or ran out; None when the store cannot answer (callers keep their
+        other checks -- same outage posture as the rest of auth)."""
+        if not family_id:
+            return None
+        now = _utcnow()
+        try:
+            coll = self._coll()
+            if coll is not None:
+                return coll.find_one(
+                    {"family_id": family_id, "revoked": {"$ne": True},
+                     "expires_at": {"$gt": now}},
+                    {"_id": 1},
+                ) is not None
+            with self._mem_lock:
+                return any(
+                    d.get("family_id") == family_id
+                    and not d.get("revoked")
+                    and d.get("expires_at") and d["expires_at"] > now
+                    for d in self._mem.values()
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("refresh_tokens: family check failed: %s", e)
+            return None
+
     def revoke_user_families(
         self, user_id: str, reason: str, keep_family_id: Optional[str] = None
     ) -> None:

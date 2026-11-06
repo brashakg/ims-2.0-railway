@@ -1630,6 +1630,10 @@ from api.routers import online_store_refund_reviews as reviews_router  # noqa: E
 from api.routers import returns as returns_router  # noqa: E402
 
 _ACCT = {"user_id": "acct-1", "roles": ["ACCOUNTANT"], "active_store_id": "BV-GANGA-01"}
+# The restock retry door (POST /returns/{id}/restock) is ADMIN / store staff
+# only, and an online return bills to BV-ONLINE-01, which no shop login holds:
+# its blocked-restock task says "ask the IMS admin to retry it" (L2-RETURN-F02).
+_RETRIER = {"user_id": "admin-1", "roles": ["ADMIN"], "active_store_id": "BV-GANGA-01"}
 
 
 def _one_unit_refund(swept, oid, rid, **order_set):
@@ -1663,7 +1667,7 @@ def test_a_blip_in_the_sold_read_at_the_confirm_leaves_the_restock_open(swept, m
     assert "could not read this order's SOLD units or its earlier returns" in text
     assert "press Goods back" in text and "Never add these units by hand" in text
     assert "no physical shop" not in text and "add them at the receiving shop" not in text
-    out = asyncio.run(returns_router.retry_restock(ret["return_id"], current_user=_ACCT))
+    out = asyncio.run(returns_router.retry_restock(ret["return_id"], current_user=_RETRIER))
     assert out["restock_applied"] is True and _units(swept) == [("stk-1", "AVAILABLE")]
 
 
@@ -1752,7 +1756,7 @@ def _open_restock(swept, monkeypatch, oid, rid):
 
 
 def _retry(ret):
-    return asyncio.run(returns_router.retry_restock(ret["return_id"], current_user=_ACCT))
+    return asyncio.run(returns_router.retry_restock(ret["return_id"], current_user=_RETRIER))
 
 
 @pytest.mark.parametrize("goods_first", [False, True])

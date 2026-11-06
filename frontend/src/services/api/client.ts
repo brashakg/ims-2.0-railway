@@ -5,7 +5,7 @@
 import axios from 'axios';
 import type { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { _storedActivity, IDLE_LOGIN_PATH } from '../../hooks/useIdleLogout';
-import { SIGNED_OUT_EVENT } from './signOutEvent';
+import { SIGNED_OUT_EVENT, dropPaletteRecents } from './signOutEvent';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL ||
   (import.meta.env.PROD ? 'https://ims-20-railway-production.up.railway.app/api/v1' : '/api/v1');
@@ -430,6 +430,7 @@ const handleFinalError = (error: AxiosError<{ message?: string; detail?: string 
     localStorage.removeItem(TOKEN_STORAGE_KEY);
     localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
     localStorage.removeItem('ims_user');
+    dropPaletteRecents();
     window.location.href = refreshRefusedIdle ? IDLE_LOGIN_PATH : '/login';
   }
 

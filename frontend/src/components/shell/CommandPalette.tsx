@@ -26,13 +26,24 @@ import { Icon } from './Icon';
 import { RETURN_READERS } from '../../pages/purchase/purchaseRoles';
 import { INVENTORY_MANAGE_ROLES, POWER_GRID_ROLES } from '../../pages/inventory/inventoryRoles';
 import type { UserRole } from '../../types';
+import { PALETTE_RECENT_PREFIX } from '../../services/api/signOutEvent';
 
 // ----------------------------------------------------------------------------
 // Recent items (localStorage)
 // ----------------------------------------------------------------------------
 
-const RECENT_KEY = 'cmdk_recent_v1';
+// One list per person, role set and shop (Codex R09): on a shared tablet the
+// old single browser-wide key showed the last person's customers (name +
+// phone) to whoever signed in next. Every sign-out drops them all
+// (dropPaletteRecents), the old unscoped key included.
 const RECENT_LIMIT = 5;
+
+type RecentOwner = { id?: string; roles?: string[]; activeStoreId?: string | null } | null | undefined;
+
+function recentKeyFor(u: RecentOwner): string | null {
+  if (!u?.id) return null;
+  return [PALETTE_RECENT_PREFIX, u.id, u.activeStoreId || '', [...(u.roles || [])].sort().join(',')].join(':');
+}
 
 export interface RecentItem {
   type: 'customer' | 'order' | 'product' | 'page';
@@ -42,9 +53,10 @@ export interface RecentItem {
   route: string;
 }
 
-function loadRecent(): RecentItem[] {
+function loadRecent(key: string | null): RecentItem[] {
+  if (!key) return [];
   try {
-    const raw = localStorage.getItem(RECENT_KEY);
+    const raw = localStorage.getItem(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -64,13 +76,14 @@ function loadRecent(): RecentItem[] {
   }
 }
 
-function pushRecent(next: RecentItem): RecentItem[] {
-  const list = loadRecent();
+function pushRecent(key: string | null, next: RecentItem): RecentItem[] {
+  if (!key) return [];
+  const list = loadRecent(key);
   // LRU: dedupe by (type, id), put the new one in front
   const deduped = list.filter((r) => !(r.type === next.type && r.id === next.id));
   const updated = [next, ...deduped].slice(0, RECENT_LIMIT);
   try {
-    localStorage.setItem(RECENT_KEY, JSON.stringify(updated));
+    localStorage.setItem(key, JSON.stringify(updated));
   } catch {
     /* storage disabled or full - in-memory only is fine */
   }
@@ -197,6 +210,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const [query, setQuery] = useState('');
   const debouncedQuery = useDebounced(query, 200);
   const inputRef = useRef<HTMLInputElement>(null);
+  const recentKey = recentKeyFor(user);
 
   // Recent items - re-read on every open so an action in another tab is reflected.
   const [recent, setRecent] = useState<RecentItem[]>([]);
@@ -216,10 +230,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   useEffect(() => {
     if (open) {
       setQuery('');
-      setRecent(loadRecent());
+      setRecent(loadRecent(recentKey));
       window.setTimeout(() => inputRef.current?.focus(), 0);
     }
-  }, [open]);
+  }, [open, recentKey]);
 
   // ----- Per-section search effects --------------------------------------
   // Each section ignores stale responses via a local cancellation flag so a
@@ -412,7 +426,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
 
   const selectCustomer = (c: CustomerHit) => {
     const route = `/customers/${c.customer_id}/360`;
-    pushRecent({
+    pushRecent(recentKey, {
       type: 'customer',
       id: c.customer_id,
       label: c.name,
@@ -427,7 +441,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     // Orders page with the order_id in the query so the user lands
     // pre-filtered. OrdersPage reads searchParams.
     const route = `/orders?order_id=${encodeURIComponent(o.order_id)}`;
-    pushRecent({
+    pushRecent(recentKey, {
       type: 'order',
       id: o.order_id,
       label: o.order_number || o.order_id,
@@ -443,7 +457,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     const route = `/inventory?search=${encodeURIComponent(filter)}`;
     const label =
       [p.brand, p.model].filter(Boolean).join(' ') || p.sku || p.name || 'Product';
-    pushRecent({
+    pushRecent(recentKey, {
       type: 'product',
       id: p.product_id,
       label,
@@ -454,7 +468,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   };
 
   const selectPage = (page: JumpPage) => {
-    pushRecent({
+    pushRecent(recentKey, {
       type: 'page',
       id: page.route,
       label: page.label,
@@ -464,7 +478,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   };
 
   const selectRecent = (r: RecentItem) => {
-    pushRecent(r); // bump it to front of LRU
+    pushRecent(recentKey, r); // bump it to front of LRU
     closeAndGo(r.route);
   };
 

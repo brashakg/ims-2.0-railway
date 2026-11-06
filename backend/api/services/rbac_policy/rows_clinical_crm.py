@@ -56,10 +56,22 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/clinical/prescription-redo-rate",
         "allowed": "AUTHENTICATED",
     },
+    # Rx print + redo history carry clinical PII -> same role set as
+    # prescription reads (require_rx_read); store-scope per object in the
+    # handler (404-hide cross-store). Audit L2-CLIN-F01.
     {
         "method": "GET",
         "path": "/api/v1/clinical/prescriptions/{prescription_id}/print",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "OPTOMETRIST",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {
         "method": "POST",
@@ -69,7 +81,16 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/clinical/prescriptions/{prescription_id}/redos",
-        "allowed": "AUTHENTICATED",
+        "allowed": [
+            "ADMIN",
+            "AREA_MANAGER",
+            "OPTOMETRIST",
+            "SALES_CASHIER",
+            "SALES_STAFF",
+            "STORE_MANAGER",
+            "SUPERADMIN",
+            "WORKSHOP_STAFF",
+        ],
     },
     {"method": "GET", "path": "/api/v1/clinical/queue", "allowed": "AUTHENTICATED"},
     # Owner ruling 2026-09-06: sales roles may add a customer to today's queue
@@ -400,7 +421,17 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "GET",
         "path": "/api/v1/crm/customers/{customer_id}/cl-refill-status",
-        "allowed": "AUTHENTICATED",
+        # Same staff as the store worklist below (L1-F17); was AUTHENTICATED.
+        # The route itself enforces the customer's shop (customer_in_scope).
+        "allowed": [
+            "SUPERADMIN",
+            "ADMIN",
+            "AREA_MANAGER",
+            "STORE_MANAGER",
+            "SALES_STAFF",
+            "SALES_CASHIER",
+            "OPTOMETRIST",
+        ],
     },
     # CRM-2 phase 2: in-app CL refill-due worklist + deduped reminder-task
     # creator. Read worklist = any store staff; create reminders = manager+.
