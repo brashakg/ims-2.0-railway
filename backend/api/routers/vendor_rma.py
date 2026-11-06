@@ -345,11 +345,12 @@ def _require_physical_return(doc: dict, *, shipped: bool, status_code: int = 409
 def _require_no_unfinished_note(doc: dict) -> None:
     """Rejecting or closing shuts this RMA's credit door. A supplier note it has
     claimed can finish nowhere else (one note number, one record), so it is
-    finished here first. Says no number: a manager may press reject. One the
-    physical rule stops is told that, not to retry."""
-    if rma_supplier_credit.unfinished_note(_get_db(), doc):
+    finished here first. Says no number: a manager may press reject. One that
+    cannot finish is told that, not to retry."""
+    waiting = rma_supplier_credit.unfinished_note(_get_db(), doc)
+    if waiting:
         _require_physical_return(doc, shipped=True)
-        raise HTTPException(status_code=409, detail=(
+        raise HTTPException(status_code=409, detail=rma_supplier_credit.held_note(waiting) or (
             "A supplier credit note is still waiting on this RMA. Accounts finishes it here "
             "first: retry that same note here once its original bill is confirmed. Until "
             "then this RMA stays open."))

@@ -85,8 +85,9 @@ def _locked(db, note_date):
         _error("CLOSED_ACCOUNTING_PERIOD", "The supplier credit-note period is locked; Accounts must resolve the closed period first.", 423)
 
 
-def _identity(db, event, registration):
-    """Deduplicate even if a lost response is followed by a new form UUID."""
+def _identity(db, event, registration, rule_passed):
+    """Deduplicate even if a lost response is followed by a new form UUID. The
+    claim records what the door's physical rule answered at that moment."""
     collection = db.get_collection(IDENTITIES)
     key = _hash([event["vendor_id"], event["normalized_number"], event["credit_note_date"]])
     try:
@@ -109,7 +110,8 @@ def _identity(db, event, registration):
         saved = collection.update_one({"_id": key, "version": state["version"]},
                                       {"$set": {"claims": replacement}, "$inc": {"version": 1}})
         if saved.matched_count:
-            db.get_collection(EVENTS).update_one({"_id": event["_id"]}, {"$set": {"identity_claimed": True}})
+            db.get_collection(EVENTS).update_one({"_id": event["_id"]}, {
+                "$set": {"identity_claimed": True, "physical_rule_passed": rule_passed}})
             return
     _error("SUPPLIER_NOTE_BUSY", "Another confirmation is recording this supplier note. Retry the same request.", 409)
 
@@ -121,7 +123,7 @@ def _event(db, return_doc, submitted, actor_id):
                  "return_kind": return_doc.get("return_kind", "VENDOR_RETURN"),
                  "vendor_id": return_doc["vendor_id"], "store_id": return_doc["store_id"],
                  "posting_status": "PENDING_EVIDENCE", "pending_reasons": [], "version": 0,
-                 "identity_claimed": False, "physical_rule_passed": True,
+                 "identity_claimed": False,
                  "created_at": _now(), "created_by": actor_id}
     try:
         collection.insert_one(candidate)
@@ -336,12 +338,12 @@ def _finish_return(db, event):
     )
 
 
-def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_store_ids=None):
+def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_store_ids=None, rule_passed=False):
     """Record a whole actual supplier note, or preserve it wholly pending.
 
     Route adapters must apply Accounts RBAC/shop access and their physical rule
-    (a new row records it passed) and prevent ordinary status/pricing writes
-    while credit_confirmation_fence is present.
+    (rule_passed says it really ran and passed; the claim records it) and prevent
+    ordinary status/pricing writes while credit_confirmation_fence is present.
     """
     submitted = _input(payload)
     if return_doc.get("return_kind") != "RMA":
@@ -360,7 +362,7 @@ def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_s
         try:
             sources = resolve_credit_evidence(db, return_doc, selections=submitted["source_selections"], allowed_store_ids=allowed_store_ids)
         except ReturnProvenanceError as exc:
-            _identity(db, event, None)
+            _identity(db, event, None, rule_passed)
             return _pending_event(db, event, submitted, [{"code": exc.code, "message": str(exc)}], actor_id), False
         registration = _hash([sources[0]["recipient_entity_id"], sources[0]["recipient_gstin"]])
         for previous in db.get_collection(EVENTS).find({**return_event_query(event), "posting_status": "POSTED"}):
@@ -369,7 +371,7 @@ def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_s
         allocations = _prepare_allocations(sources, submitted)
         _locked(db, submitted["credit_note_date"])
         # Last: a note refused above claims nothing, so it strands no number.
-        _identity(db, event, registration)
+        _identity(db, event, registration, rule_passed)
         token = uuid4().hex
         updated = db.get_collection(EVENTS).update_one(
             {"_id": event["_id"], "version": event["version"], "posting_status": "PENDING_EVIDENCE"},

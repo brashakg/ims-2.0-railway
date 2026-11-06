@@ -32,13 +32,22 @@ OVER_CAP = {"ORIGINAL_QUANTITY_EXCEEDED", "ORIGINAL_AMOUNT_EXCEEDED", "RETURN_AM
             "RECEIPT_QUANTITY_EXCEEDED", "RETURNED_UNIT_ALREADY_CREDITED"}
 
 
-# A claimed note the physical rule stops, and no door can free (retrying, rejecting,
-# closing and a new RMA all fail): only from before claims recorded that rule
-# (supplier_credit_evidence.rule_settled), or with its own pieces back. Every
-# refusal says so instead of promising a retry. The way out is the owner's.
+# A claimed note no door can free (retrying, rejecting, closing and a new RMA all
+# fail): the physical rule stops one from before claims recorded it
+# (supplier_credit_evidence.rule_settled) or with its own pieces back, and another
+# credit on the same goods stops the rest (held_note). Every refusal says so
+# instead of promising a retry. The way out is the owner's.
 NOTE_HELD = ("The supplier note waiting here cannot finish, so this record stays open: retrying "
              "will not help, a new RMA cannot take the same note, and no money has moved. It "
              "needs a head-office decision. Why it cannot finish: ")
+
+
+def held_note(event):
+    """NOTE_HELD and the stored reason when another credit on the same goods holds
+    this note (_refuse_unplaced_credit); None for a note that can still finish."""
+    why = next((reason.get("message") for reason in event.get("pending_reasons") or []
+                if reason.get("code") == "EARLIER_CREDIT_UNPLACED"), None)
+    return NOTE_HELD + why if why else None
 
 
 def _noted_without_pieces(db, rma_id):
@@ -88,12 +97,16 @@ def return_door_problem(db, return_doc, confirmation_id):
 
 def _holds_its_door(event):
     """A claimed note that can still finish keeps its door open. One that can
-    never finish does not: a real posting found it over a cap, or an old row
-    refused with an error (claimed, no reason saved)."""
+    never finish does not: a real posting found it over a cap. No reason saved
+    means one of two things: every claim now records physical_rule_passed, so a
+    row carrying it passed its checks and only its next write was lost (the same
+    retry finishes it), while an old row without it was refused with an error."""
     if event.get("posting_status") != "PENDING_EVIDENCE":
         return True
     reasons = {reason.get("code") for reason in event.get("pending_reasons") or []}
-    return bool(reasons) and not (event.get("fenced_token") and reasons <= OVER_CAP)
+    if not reasons:
+        return "physical_rule_passed" in event
+    return not (event.get("fenced_token") and reasons <= OVER_CAP)
 
 
 def unfinished_note(db, rma):
@@ -318,7 +331,8 @@ def require_approval(db, doc, submitted, *, request_id, token, actor_id, consume
 
 def record(db, doc, payload, *, actor_id, allowed_store_ids=None):
     event, repeated = canonical.record_supplier_confirmation(
-        db, normalize(doc, db), payload, actor_id=actor_id, allowed_store_ids=allowed_store_ids)
+        db, normalize(doc, db), payload, actor_id=actor_id, allowed_store_ids=allowed_store_ids,
+        rule_passed=True)  # the route's _require_physical_return refuses otherwise
     current = db.get_collection("vendor_rmas").find_one({"rma_id": doc["rma_id"]}) or doc
     shown = confirmation_view(event)
     return {"ok": True, "rma_id": doc["rma_id"], "idempotent": repeated,

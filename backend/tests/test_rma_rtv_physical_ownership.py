@@ -33,6 +33,7 @@ from api.routers import vendor_returns as vr
 from api.routers.purchase_recon import _pending_return_credit_notes
 from api.services import item_events as ie
 from api.services import rma_supplier_credit as rma_credit
+from api.services import supplier_credit_evidence as credit_evidence
 from api.services.return_provenance import ReturnProvenanceError, resolve_return_provenance
 from api.services.supplier_credit_evidence import _goods_known, source_key
 from api.services.supplier_credit_reads import confirmed_ap_rows
@@ -736,7 +737,8 @@ def test_partial_notes_on_the_rma_reconcile_the_return_and_replay_once(rw):
 def old_pair(rw, monkeypatch):
     """A pre-rule pair: return R holds POSTED CN-RTV Rs 500 (partial, so still
     received_by_vendor); its linked RMA holds POSTED CN-RMA Rs 1,000. The doors
-    refuse to build this now, so the RMA's note posts unlinked, as it did then."""
+    refuse to build this now, and so does the writer, so the RMA's note posts
+    unlinked and past both, as it did then."""
     bought(rw, "U1", "U2", "U3", "U4")
     rid = received_return(rw, "U1", "U2")
     rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
@@ -747,6 +749,7 @@ def old_pair(rw, monkeypatch):
     eng.dispatch(rma_id, carrier="DTDC", awb="AWB1", dispatch_date=None, actor="old")
     with monkeypatch.context() as patched:
         patched.setattr(rma_router, "_physical_return_problem", lambda *a, **k: None)
+        patched.setattr(credit_evidence, "_refuse_unplaced_credit", lambda *a, **k: None)
         body, res = rma_note(rw, rma_id, 1000, "CN-RMA")
     assert res.status_code == 200, res.text
     before_the_rule(rw)
@@ -1944,8 +1947,7 @@ def test_a_typed_returns_note_from_before_the_rule_is_told_truthfully_too(rw, mo
 
 
 def test_a_settled_note_still_cannot_credit_goods_a_later_return_credits(rw, monkeypatch):
-    """Skipping the line check skips no cap: the same receipt's pieces going back
-    on a return later cannot be paid for twice, whichever note posts first."""
+    """The note posts first; the later return's note is the one held."""
     rma_id, body = pending_note(rw, monkeypatch, rma_id=off_shelf_rma(rw))
     for sid in ("U1", "U2"):
         unit(rw, sid, grn_id="G-OWN", source_type="GRN", source_id="G-OWN")
@@ -1957,14 +1959,190 @@ def test_a_settled_note_still_cannot_credit_goods_a_later_return_credits(rw, mon
     assert posted(rw) == (1, 100000) and credited(rw) == 100000
 
 
-def test_a_settled_note_cannot_follow_the_return_that_credited_those_goods(rw, monkeypatch):
-    rma_id, body = pending_note(rw, monkeypatch, rma_id=off_shelf_rma(rw))
-    for sid in ("U1", "U2"):
+def retry_open(w, path, route, body, identity, doc, amount=1000):
+    """The saved note retried with its allocation, whatever the preview says now."""
+    source = resolve_return_provenance(w["db"], doc)[0]
+    return w["as_"](ACCOUNTANT).post(f"{path}/{route}", json={**body, "allocations": [
+        {"source_key": source_key(identity, source), "taxable": amount, "cgst": 0, "sgst": 0, "igst": 0}]})
+
+
+def retry_on_rma(w, rma_id, body):
+    doc = rma_credit.normalize(w["db"].vendor_rmas.find_one({"rma_id": rma_id}), w["db"])
+    return retry_open(w, f"/vendor-rma/{rma_id}", "credit-note", body, f"RMA:{rma_id}", doc)
+
+
+def retry_on_return(w, rid, body):
+    return retry_open(w, f"/vendor-returns/{rid}", "credit-confirmations", body, rid, returned(w, rid))
+
+
+def return_credits_two(w, *mint):
+    """U1 and U2 go back on a real return and its note posts Rs 1000."""
+    for sid in mint:
+        unit(w, sid, grn_id="G-OWN", source_type="GRN", source_id="G-OWN")
+    rid = received_return(w, "U1", "U2")
+    w["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    _, first = rtv_note(w, rid, 1000, "CN-RTV")
+    assert first.status_code == 200 and first.json()["confirmation"]["posting_status"] == "POSTED", first.text
+    return rid
+
+
+def assert_one_credit_and_held(w, res, rid):
+    assert res.status_code == 200, res.text
+    assert res.json()["confirmation"]["posting_status"] == "PENDING_EVIDENCE"
+    reason = res.json()["confirmation"]["pending_reasons"][0]
+    assert reason["code"] == "EARLIER_CREDIT_UNPLACED" and rid in reason["message"]
+    assert posted(w) == (1, 100000) and credited(w) == 100000
+
+
+def test_a_claimed_rma_note_cannot_post_after_a_return_credited_that_receipt(rw, monkeypatch):
+    """SPARE quantity (six bought, four in play): no cap can refuse this, only
+    the ownership rule. A note with no piece cannot say it is not those goods."""
+    bought(rw, qty=6)
+    rma_id = to_the_supplier(rw, raise_rma(rw, qty=2, grn_id="G-OWN").json()["rma_id"])
+    _, body = pending_note(rw, monkeypatch, rma_id=rma_id)
+    assert waiting(rw)["physical_rule_passed"] is True
+    rid = return_credits_two(rw, "U1", "U2")
+    assert_one_credit_and_held(rw, retry_on_rma(rw, rma_id, body), rid)
+    assert_one_credit_and_held(rw, retry_on_rma(rw, rma_id, body), rid)
+    assert statuses(rw) == Counter({"RTV": 2})
+    assert rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["status"] == "DISPATCHED"
+
+
+def test_a_claimed_typed_note_cannot_post_after_a_return_credited_that_receipt(rw, monkeypatch):
+    bought(rw, qty=6)
+    typed = typed_return(rw)
+    body = pending_on_return(rw, monkeypatch, typed)
+    assert waiting(rw)["physical_rule_passed"] is True
+    rid = return_credits_two(rw, "U1", "U2")
+    assert_one_credit_and_held(rw, retry_on_return(rw, typed, body), rid)
+    assert returned(rw, typed)["status"] == "received_by_vendor"
+
+
+def test_a_typed_note_over_shelf_pieces_is_not_recorded_as_passing_and_cannot_double_credit(rw, monkeypatch):
+    """The reviewers' sequence. The typed door does not refuse over shelf pieces
+    (today's outcome), so nothing may record the line rule as passed."""
+    bought(rw, qty=6)
+    typed = typed_return(rw)
+    for sid in ("U1", "U2", "U3", "U4", "U5", "U6"):
         unit(rw, sid, grn_id="G-OWN", source_type="GRN", source_id="G-OWN")
+    body = pending_on_return(rw, monkeypatch, typed)
+    assert waiting(rw)["physical_rule_passed"] is False
+    return_credits_two(rw)
+    late = retry_on_return(rw, typed, body)
+    assert late.status_code == 409 and HELD in late.text and "already went back" in late.text, late.text
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+    assert statuses(rw) == Counter({"RTV": 2, "AVAILABLE": 4})
+
+
+def test_a_placed_old_balance_still_finishes_beside_a_return_credited_on_its_receipt(rw, monkeypatch):
+    """Its link proves whose goods it is: another return's pieces are not them."""
+    bought(rw, "U1", "U2", "U3", "U4", "U5", "U6", qty=6)
+    rma_id = linked_rma(rw, received_return(rw, "U3", "U4"))
+    original = rma_credit.normalize
+    with monkeypatch.context() as patched:
+        patched.setattr(rma_credit, "normalize", lambda doc, db=None: original(doc))
+        assert rma_note(rw, rma_id, 600, "CN-PART")[1].status_code == 200
+    before_the_rule(rw)
+    return_credits_two(rw)
+    res = no_piece_note(rw, rma_id, 400, "CN-REST")
+    assert res.status_code == 200 and res.json()["confirmation"]["posting_status"] == "POSTED", res.text
+    assert posted(rw) == (3, 200000) and credited(rw) == 200000
+
+
+def test_a_customers_own_line_still_credits_beside_a_return_credited_on_its_receipt(rw):
+    rw["db"].customers.insert_one({"customer_id": CUSTOMER, "store_id": STORE, "name": "A Customer"})
+    bought(rw, "U1", "U2", "U3", "U4", qty=6)
+    return_credits_two(rw)
+    made = raise_lines(rw, own_line(customer_id=CUSTOMER, quantity=2), grn_id="G-OWN")
+    rma_id = to_the_supplier(rw, made.json()["rma_id"])
+    _, res = rma_note(rw, rma_id, 1000, "CN-OWN")
+    assert res.status_code == 200 and res.json()["confirmation"]["posting_status"] == "POSTED", res.text
+    assert posted(rw) == (2, 200000)
+
+
+def lose_the_preparing_write(w, patched):
+    """The last write of a note that passed every check never lands."""
+    kind = type(w["db"].get_collection("supplier_credit_confirmations"))
+    original = kind.update_one
+
+    def lost(self, query, update, *args, **kwargs):
+        if (update.get("$set") or {}).get("posting_status") == "PREPARING":
+            raise ConnectionError("write lost")
+        return original(self, query, update, *args, **kwargs)
+
+    patched.setattr(kind, "update_one", lost)
+
+
+def test_a_lost_preparing_write_keeps_the_rma_open_and_the_same_note_posts(rw, monkeypatch):
+    bought(rw, "U1", "U2", qty=2)
+    rma_id = linked_rma(rw, received_return(rw, "U1", "U2"))
+    with monkeypatch.context() as patched:
+        lose_the_preparing_write(rw, patched)
+        body, res = rma_note(rw, rma_id, 1000, "CN-LOST")
+    assert res.status_code == 503, res.text
+    row = waiting(rw)
+    assert row["identity_claimed"] is True and not row["pending_reasons"] and row["physical_rule_passed"] is True
+    rid = rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["return_id"]
+    for refused in (rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}),
+                    rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}), replace(rw, rid)):
+        assert refused.status_code == 409 and HELD not in refused.text, refused.text
+    assert rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["status"] == "DISPATCHED"
+    done = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=body)
+    assert done.status_code == 200 and done.json()["confirmation"]["posting_status"] == "POSTED", done.text
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+@pytest.mark.parametrize("shelf", [False, True])
+def test_a_lost_preparing_write_holds_a_typed_return_too(rw, monkeypatch, shelf):
+    """Whether or not the line rule was passed, the door asked: a row of this
+    code with no reason is a lost write, never a refusal."""
+    bought(rw, qty=2)
+    rid = typed_return(rw)
+    if shelf:
+        unit(rw, "U1", grn_id="G-OWN", source_type="GRN", source_id="G-OWN")
+    with monkeypatch.context() as patched:
+        lose_the_preparing_write(rw, patched)
+        body, res = rtv_note(rw, rid, 1000, "CN-LOST")
+    assert res.status_code == 503, res.text
+    assert waiting(rw)["physical_rule_passed"] is (not shelf)
+    assert replace(rw, rid).status_code == 409
+    assert returned(rw, rid)["status"] == "received_by_vendor"
+    done = rw["as_"](ACCOUNTANT).post(f"/vendor-returns/{rid}/credit-confirmations", json=body)
+    assert done.status_code == 200 and done.json()["confirmation"]["posting_status"] == "POSTED", done.text
+    assert posted(rw) == (1, 100000)
+
+
+def assert_told_the_truth(res):
+    assert res.status_code == 409 and HELD in res.text and "names no pieces" in res.text, res.text
+    assert "retry that same note" not in res.text and "settles it there" not in res.text
+    assert "reconciled" not in res.text
+
+
+def test_a_return_note_an_unplaced_credit_holds_is_told_it_cannot_finish(rw, monkeypatch):
+    bought(rw, "U1", "U2", "U3", "U4", "U5", "U6", qty=6)
+    unplaced_credit(rw, monkeypatch)
     rid = received_return(rw, "U1", "U2")
     rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
-    _, first = rtv_note(rw, rid, 1000, "CN-RTV")
-    assert first.status_code == 200, first.text
-    late = finish_pending(rw, rma_id, body, 1000)
-    assert late.status_code == 422 and "RECEIPT_QUANTITY_EXCEEDED" in late.text, late.text
-    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+    _, res = rtv_note_open(rw, rid, 1000, "CN-NEW")
+    message = res.json()["confirmation"]["pending_reasons"][0]["message"]
+    assert HELD in message and "reconciled" not in message
+    before = waiting(rw)
+    assert_told_the_truth(replace(rw, rid))
+    assert returned(rw, rid)["status"] == "received_by_vendor"
+    assert waiting(rw) == before and posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_a_linked_note_an_unplaced_credit_holds_is_told_so_on_every_door(rw, monkeypatch):
+    bought(rw, "U1", "U2", "U3", "U4", "U5", "U6", qty=6)
+    unplaced_credit(rw, monkeypatch)
+    rid = received_return(rw, "U1", "U2")
+    rma_id = linked_rma(rw, rid)
+    res = no_piece_note(rw, rma_id, 1000, "CN-NEW")
+    assert res.json()["confirmation"]["pending_reasons"][0]["code"] == "EARLIER_CREDIT_UNPLACED"
+    before = waiting(rw)
+    assert_told_the_truth(rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}))
+    assert_told_the_truth(rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}))
+    assert_told_the_truth(replace(rw, rid))
+    assert rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["status"] == "DISPATCHED"
+    assert returned(rw, rid)["status"] == "received_by_vendor"
+    assert waiting(rw) == before and posted(rw) == (1, 100000) and credited(rw) == 100000

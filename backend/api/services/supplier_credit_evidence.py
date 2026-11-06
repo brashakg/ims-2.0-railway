@@ -42,9 +42,11 @@ def credit_started(db, return_doc):
 def rule_settled(db, return_doc):
     """True once a note this door claimed had passed its physical rule. That
     answer stands: the goods had left, so a piece of the product arriving or
-    selling since is not what went back, and the note can still finish. A row
-    from before claims recorded this says nothing either way (physical_rule_passed
-    absent), and one refused before its claim settled nothing."""
+    selling since is not what went back, and the note can still finish. It
+    settles only that line question: another credit on the same goods is still
+    asked at the writer (_refuse_unplaced_credit). A row from before claims
+    recorded this says nothing either way (physical_rule_passed absent), nor
+    does one claimed with the rule unpassed (False), or refused before a claim."""
     return db.get_collection(EVENTS).find_one(
         {**return_event_query(return_doc), "identity_claimed": True, "physical_rule_passed": True}) is not None
 
@@ -182,27 +184,41 @@ def _spends_goods(db, return_doc, source):
 
 
 def _refuse_unplaced_credit(db, return_doc, sources):
-    """L2-RMA-F01: a credit that named no piece on this receipt and product may
-    already have paid for these goods, and nothing shows which it took: the bill
-    and receipt caps cannot see that while spare quantity remains. So a new
-    credit spending them (_spends_goods) stays pending (its supplier note kept,
-    no money posted) until that is reconciled. Which pieces the earlier credit
-    covered is never guessed, and the earlier credit is never changed."""
+    """L2-RMA-F01: a credit naming no piece on a receipt and product may be paying
+    for the goods another credit there paid for, and nothing shows which it took:
+    the bill and receipt caps cannot see that while spare quantity remains. So in
+    either order the later credit spending them (_spends_goods) stays pending, its
+    supplier note kept and no money posted: one that meets an earlier credit naming
+    no piece, or one naming no piece that meets a credit naming pieces. A credit
+    whose goods are known (_goods_known) is placed, and neither stops nor is
+    stopped. Which pieces a credit covered is never guessed, and a posted credit
+    is never changed, so no route frees such a note yet: head office decides."""
     rid = return_doc.get("return_id") or return_doc.get("rma_id")
-    named = {(s["grn_id"], s["product_id"]) for s in sources if _spends_goods(db, return_doc, s)}
+    spending = [s for s in sources if _spends_goods(db, return_doc, s)]
+    named = {(s["grn_id"], s["product_id"]) for s in spending}
     if not named:
         return
+    own = {"return_kind": return_doc.get("return_kind"), "return_id": rid, "sources": sources}
+    unplaced = {(s["grn_id"], s["product_id"]) for s in spending
+                if not s["stock_ids"] and not _goods_known(db, own, s)}
     for event in db.get_collection(EVENTS).find({"posting_status": {"$in": ["PREPARING", "POSTED"]},
                                                  "sources.grn_id": {"$in": sorted(g for g, _ in named)}}):
         if event.get("return_id") == rid:
             continue
         for source in event.get("sources") or []:
-            if (not source.get("stock_ids") and (source.get("grn_id"), source.get("product_id")) in named
-                    and not _goods_known(db, event, source)):
+            goods = (source.get("grn_id"), source.get("product_id"))
+            why = None
+            if source.get("stock_ids"):
+                if goods in unplaced:
+                    why = (f"A supplier credit on this purchase receipt ({event['return_id']}) paid for "
+                           "pieces of this product and this note names none, so IMS cannot tell whether "
+                           "it is the same goods.")
+            elif goods in named and not _goods_known(db, event, source):
+                why = (f"An earlier supplier credit on this purchase receipt ({event['return_id']}) names "
+                       "no pieces, so IMS cannot tell whether it already paid for these goods.")
+            if why:
                 _pending("EARLIER_CREDIT_UNPLACED",
-                         f"An earlier supplier credit on this purchase receipt ({event['return_id']}) names "
-                         "no pieces, so IMS cannot tell whether it already paid for these goods. This note "
-                         "is saved and nothing is posted until that earlier credit is reconciled.")
+                         why + " A note here stays saved with nothing posted, and needs a head-office decision.")
 
 
 def resolve_credit_evidence(db, return_doc, *, selections=None, allowed_store_ids=None):
