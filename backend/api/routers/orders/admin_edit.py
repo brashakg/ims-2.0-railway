@@ -268,8 +268,9 @@ def _rebuilt_items_or_existing(
 
 def _gate_added_lines(added: List[dict], store_id: Optional[str]) -> None:
     """Goods an edit newly bills meet the till's rules (L2-STOCK-F01/F02, L1-F39):
-    a named product (only a true service may be free text), a billable,
-    unarchived master, the master's stock type, and units on this shop's shelf.
+    a named product (only a true service may be free text), no unit named on a
+    line that takes none, a billable, unarchived master, the master's stock type,
+    and units on this shop's shelf.
     Read-only; _take_added_stock takes the units and the lens cells. The caps
     and floors are not re-applied: price stays the admin's, this door's audited
     override. An edit that adds nothing touches neither the product table nor
@@ -281,6 +282,12 @@ def _gate_added_lines(added: List[dict], store_id: Optional[str]) -> None:
         pid = line.get("product_id") or ""
         label = line.get("product_name") or pid
         _assert_goods_name_a_product(line.get("item_type"), line.get("category"), pid, label)
+        if line.get("stock_id") and not _takes_serialized_stock(line):
+            # Nothing would check or claim it: the bill would claim a sale of that piece.
+            raise HTTPException(
+                status_code=400,
+                detail=f"'{label or line.get('item_type')}' takes no stock unit, so it cannot name one.",
+            )
         if product_repo is None:
             continue
         product = _resolve_billable_product(product_repo, pid, label)

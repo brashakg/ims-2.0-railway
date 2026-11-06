@@ -1983,3 +1983,58 @@ def test_the_screens_typed_goods_stay_refused(
     r = _edit(client, oid, [stored, line], route=route, **body)
     _refused_unchanged(shop, r, before, 400)
     assert _order(shop, oid) == bill
+
+
+# ---------------------------------------------------------------------------
+# Review of 770095d9 -- a line that takes no unit cannot name one
+# ---------------------------------------------------------------------------
+
+NO_UNIT_LINES = {
+    "service": {"item_type": "SERVICE", "product_name": "Adjustment", "unit_price": 50.0},
+    "virtual": {"item_type": "FRAME", "product_id": "custom-1", "product_name": "Made to order",
+                "unit_price": 300.0},
+    "lens": _lens(),
+}
+
+
+@pytest.mark.parametrize("route,body", EDIT_MODES)
+@pytest.mark.parametrize("kind", list(NO_UNIT_LINES))
+@pytest.mark.parametrize("named", ["sold", "SU-FR-B", "GHOST-1"])
+def test_a_new_line_that_takes_no_unit_cannot_name_one(
+    client, shop, invoiced, cells, route, body, kind, named
+):
+    """Nothing checks or claims such a line's unit, so the id would stand on the
+    bill as a sale of a piece it never took (barcode trace, returns, release)."""
+    cells()
+    if named == "sold":
+        named = "SU-FR-A"
+        _saved_bill(client, shop, [_line(FR, stock_id=named)])
+    oid = _typed_bill(client, shop, invoiced, route)
+    before, bill = _ledger(shop), _order(shop, oid)
+    stored = _as_sent(bill["items"][0])
+    line = {**NO_UNIT_LINES[kind], "stock_id": named}
+    r = _edit(client, oid, [stored, line], route=route, **body)
+    _refused_unchanged(shop, r, before, 400)
+    assert _order(shop, oid) == bill
+
+
+def test_a_stored_service_line_cannot_be_handed_a_unit(client, shop):
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    before, bill = _ledger(shop), _order(shop, oid)
+    r = _edit(client, oid, [_as_sent(bill["items"][0], stock_id="SU-FR-B")])
+    _refused_unchanged(shop, r, before, 400)
+    assert _order(shop, oid) == bill
+
+
+def test_an_old_line_keeps_the_unit_it_already_names(client, shop):
+    """The refusal is for what the edit adds: a correction of a stored line
+    answers to no stock rule, so an old bill stays correctable."""
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    orders = shop["db"].get_collection("orders")
+    orders.update_one({"order_id": oid}, {"$set": {"items.0.stock_id": "OLD-UNIT"}})
+    before = _ledger(shop)
+    line = _as_sent(_order(shop, oid)["items"][0], unit_price=90.0)
+    r = _edit(client, oid, [line])
+    assert r.status_code == 200, r.text
+    assert _order(shop, oid)["items"][0]["stock_id"] == "OLD-UNIT"
+    assert _ledger(shop) == before
