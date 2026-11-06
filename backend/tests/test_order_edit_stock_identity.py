@@ -923,3 +923,85 @@ def test_revised_invoice_on_a_delivered_bill_never_shelves_what_the_customer_hol
               mode="REVISED_INVOICE")
     assert r.status_code == 200, r.text
     assert _unit(shop, "SU-FR-A")["status"] == "SOLD"
+
+
+# ---------------------------------------------------------------------------
+# Review of c67e0dcc -- goods that left stay gone
+# ---------------------------------------------------------------------------
+
+
+def _moved_online(monkeypatch):
+    """What the website is told moved, line by line."""
+    from api.services import online_stock_writeback
+
+    told = []
+    monkeypatch.setattr(
+        online_stock_writeback, "writeback_after_sale",
+        lambda _db, lines, _store: told.extend(lines),
+    )
+    return told
+
+
+@pytest.mark.parametrize("status", ["SHIPPED", "DELIVERED", "REFUNDED", "VOID"])
+def test_revised_invoice_never_shelves_goods_that_left(
+    client, shop, invoiced, monkeypatch, status
+):
+    """The parcel holds the piece: reading AVAILABLE would sell it twice, and
+    the website would be told it is back."""
+    oid = invoiced([_line(FR, stock_id="SU-FR-A"), _line(SVC)])
+    told = _moved_online(monkeypatch)
+    shop["db"].get_collection("orders").update_one({"order_id": oid}, {"$set": {"status": status}})
+    keep = next(ln for ln in _order(shop, oid)["items"] if ln["product_id"] == SVC)
+    r = _edit(client, oid, [_as_sent(keep)], route="superadmin-invoice-change",
+              mode="REVISED_INVOICE")
+    assert r.status_code == 200, r.text
+    unit = _unit(shop, "SU-FR-A")
+    assert (unit["status"], unit.get("order_id")) == ("SOLD", oid)
+    assert told == [], "a unit that did not move is not news for the website"
+
+
+def test_lowering_the_quantity_on_a_shipped_bill_shelves_nothing(
+    client, shop, invoiced, monkeypatch
+):
+    oid = invoiced([_line(FR, stock_id="SU-FR-A", quantity=2)])
+    told = _moved_online(monkeypatch)
+    shop["db"].get_collection("orders").update_one({"order_id": oid},
+                                                   {"$set": {"status": "SHIPPED"}})
+    held = _sold_to(shop, oid)
+    assert len(held) == 2
+    line = _as_sent(_order(shop, oid)["items"][0], quantity=1)
+    r = _edit(client, oid, [line], route="superadmin-invoice-change", mode="REVISED_INVOICE")
+    assert r.status_code == 200, r.text
+    assert _sold_to(shop, oid) == held
+    assert told == []
+
+
+def test_replacing_a_line_on_a_shipped_bill_keeps_the_old_and_takes_the_new(
+    client, shop, invoiced, monkeypatch
+):
+    oid = invoiced([_line(FR, stock_id="SU-FR-A")])
+    told = _moved_online(monkeypatch)
+    shop["db"].get_collection("orders").update_one({"order_id": oid},
+                                                   {"$set": {"status": "SHIPPED"}})
+    stored = _order(shop, oid)["items"][0]
+    r = _edit(client, oid, [{**_line(FR, stock_id="SU-FR-B"), "item_id": stored["item_id"]}],
+              route="superadmin-invoice-change", mode="REVISED_INVOICE")
+    assert r.status_code == 200, r.text
+    assert _sold_to(shop, oid) == ["SU-FR-A", "SU-FR-B"]
+    assert [ln.get("stock_id") for ln in told] == ["SU-FR-B"], "only the new piece moved"
+
+
+@pytest.mark.parametrize("status", ["CONFIRMED", "PROCESSING", "READY"])
+def test_revised_invoice_still_shelves_goods_the_shop_holds(
+    client, shop, invoiced, monkeypatch, status
+):
+    oid = invoiced([_line(FR, stock_id="SU-FR-A"), _line(SVC)])
+    told = _moved_online(monkeypatch)
+    shop["db"].get_collection("orders").update_one({"order_id": oid}, {"$set": {"status": status}})
+    keep = next(ln for ln in _order(shop, oid)["items"] if ln["product_id"] == SVC)
+    r = _edit(client, oid, [_as_sent(keep)], route="superadmin-invoice-change",
+              mode="REVISED_INVOICE")
+    assert r.status_code == 200, r.text
+    unit = _unit(shop, "SU-FR-A")
+    assert (unit["status"], unit.get("order_id")) == ("AVAILABLE", None)
+    assert [ln.get("product_id") for ln in told] == [FR]

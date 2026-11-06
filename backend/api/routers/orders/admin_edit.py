@@ -34,7 +34,7 @@ from .models import (
     SuperadminInvoiceChange,
     SuperadminOrderEdit,
 )
-from .release import _release_lens_lines, _release_line_units
+from .release import CANCELLABLE_STATUSES, _release_lens_lines, _release_line_units
 from .stock import (
     _assert_line_type_matches_master,
     _assert_serialized_stock_available,
@@ -270,12 +270,15 @@ async def _settle_removed_lines(
 ) -> None:
     """After the edit landed: the goods it stopped billing go back on the shelf
     (the remove-item door's own release, flagged on the order if it falls short)
-    and the website hears of every piece that moved. A DELIVERED bill keeps its
-    units: the customer holds them, and only a return puts one back."""
+    and the website hears of every piece that moved. Only a bill the counter may
+    still cancel gives stock back (the cancel door's own rule): on any other, a
+    parcel or the customer holds it, and only a return puts one back."""
     order_id, store_id = order.get("order_id"), order.get("store_id")
-    if removed and str(order.get("status") or "").upper() != "DELIVERED":
+    moved = list(added)
+    if removed and str(order.get("status") or "").upper() in CANCELLABLE_STATUSES:
         from ...services.lens_stock_hook import release_for_cancel
 
+        moved += removed
         lines = order.get("items") or []
         whole = [(pos, ln) for pos, ln in enumerate(lines) if any(ln is r for r in removed)]
         try:
@@ -302,10 +305,10 @@ async def _settle_removed_lines(
                         "line_remove_stock_failed_item_id": item_id,
                     },
                 )
-    if added or removed:
+    if moved:
         from ...services.online_stock_writeback import writeback_after_sale
 
-        writeback_after_sale(None, added + removed, store_id)
+        writeback_after_sale(None, moved, store_id)
 
 
 def _discount_changed(line: dict, stored: dict) -> bool:
