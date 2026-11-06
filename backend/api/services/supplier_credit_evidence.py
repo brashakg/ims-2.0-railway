@@ -132,27 +132,54 @@ def _verify_original(db, origin):
             raise ReturnProvenanceError("ORIGINAL_TAX_TOTAL_REQUIRED", "The original bill's input-tax totals need verified item evidence.") from exc
 
 
+def _ticked(lines, source):
+    index = source.get("return_line_index")
+    return type(index) is int and 0 <= index < len(lines) and lines[index].get("customer_owned")
+
+
 def _goods_known(db, event, source):
-    """A credit naming no piece still says whose goods it took when its RMA
-    links a return (those pieces) or its line is ticked customer_owned."""
+    """A credit naming no piece still says whose goods it took when its line is
+    ticked customer_owned, or its RMA links a return that really carried them:
+    a live one, this supplier's, whose own pieces cover this product for the
+    quantity credited. A return_id alone proves nothing: before the rule it was
+    free text (a cancelled return, a typed one, another product, no such id)."""
     if event.get("return_kind") != "RMA":
         return False
     rma = db.get_collection("vendor_rmas").find_one({"rma_id": event["return_id"]}) or {}
     lines = rma.get("lines") or []
-    index = source.get("return_line_index")
-    ticked = type(index) is int and index < len(lines) and lines[index].get("customer_owned")
-    return bool(rma.get("return_id") or ticked)
+    if _ticked(lines, source):
+        return True
+    rid = rma.get("return_id")
+    ret = db.get_collection("vendor_returns").find_one({"return_id": rid}) if rid else None
+    if not ret or ret.get("status") == "cancelled" or ret.get("vendor_id") != rma.get("vendor_id"):
+        return False
+    product = source.get("product_id")
+    wanted = sum(int(s.get("quantity") or 0) for s in event["sources"]
+                 if s.get("product_id") == product and not _ticked(lines, s))
+    return wanted <= db.get_collection("stock_units").count_documents(
+        {"rtv_vendor_id": rid, "product_id": product, "stock_id": {"$in": ret.get("stock_ids") or []}})
+
+
+def _spends_goods(db, return_doc, source):
+    """Does this credit spend the receipt's pieces? One naming them does. So does
+    a line naming none on a product tracked piece by piece, unless it is ticked
+    customer_owned. A product with no piece at all has nothing to spend twice."""
+    if source["stock_ids"]:
+        return True
+    if _ticked(return_doc.get("items") or return_doc.get("lines") or [], source):
+        return False
+    return db.get_collection("stock_units").find_one({"product_id": source["product_id"]}) is not None
 
 
 def _refuse_unplaced_credit(db, return_doc, sources):
     """L2-RMA-F01: a credit that named no piece on this receipt and product may
-    already have paid for these pieces, and nothing shows which goods it took:
-    the bill and receipt caps cannot see that while spare quantity remains. So
-    a return of named pieces stays pending (its supplier note kept, no money
-    posted) until that is reconciled. Which pieces the earlier credit covered
-    is never guessed, and the earlier credit is never changed."""
+    already have paid for these goods, and nothing shows which it took: the bill
+    and receipt caps cannot see that while spare quantity remains. So a new
+    credit spending them (_spends_goods) stays pending (its supplier note kept,
+    no money posted) until that is reconciled. Which pieces the earlier credit
+    covered is never guessed, and the earlier credit is never changed."""
     rid = return_doc.get("return_id") or return_doc.get("rma_id")
-    named = {(s["grn_id"], s["product_id"]) for s in sources if s["stock_ids"]}
+    named = {(s["grn_id"], s["product_id"]) for s in sources if _spends_goods(db, return_doc, s)}
     if not named:
         return
     for event in db.get_collection(EVENTS).find({"posting_status": {"$in": ["PREPARING", "POSTED"]},
