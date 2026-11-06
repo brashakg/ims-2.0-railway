@@ -106,6 +106,7 @@ class LoyaltyAccountRepository(BaseRepository):
         delta_lifetime_earned: int = 0,
         new_tier: Optional[str] = None,
         idempotency_key: Optional[str] = None,
+        ledger_extra: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Atomically debit `points` from a customer's balance, guard-in-the-
         filter (mirrors the voucher redeem). The decrement happens ONLY when the
@@ -125,7 +126,8 @@ class LoyaltyAccountRepository(BaseRepository):
         guarded write (money_guard's money_ledger marker), so a second debit
         under it -- an overlapping or later press -- never decrements again;
         it returns the current account doc instead. The same key with a
-        different amount returns None (refused).
+        different amount returns None (refused). `ledger_extra` rides on that
+        marker: the result this debit authorised, kept with the debit.
         """
         points = int(points)
         if points <= 0:
@@ -157,6 +159,7 @@ class LoyaltyAccountRepository(BaseRepository):
             self.collection, "LOYALTY", customer_id, points,
             reason="redeem", inc_extra=inc_extra, set_extra=set_extra,
             record_ledger=False, idempotency_key=idempotency_key,
+            ledger_extra=ledger_extra,
         )
         if res.ok:
             # A replayed key moved nothing: answer with the account as it is.
