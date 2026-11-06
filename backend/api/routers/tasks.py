@@ -22,6 +22,7 @@ from ..dependencies import (
     get_db,
     can_access_store_scoped,
     get_order_repository,
+    user_store_scope,
     validate_store_access,
 )
 from ..services.file_store import (
@@ -91,11 +92,14 @@ async def _managers_only(current_user: dict = Depends(get_current_user)) -> dict
     return current_user
 
 
-def _named_target(user_id: str, task: dict) -> dict:
-    """The person a manager names through an edit, reassignment or escalation:
-    a real, active colleague who works at the task's shop -- the
+def _named_target(user_id: str, task: dict, *, any_shop: bool = False) -> dict:
+    """The person a manager names through an edit, reassignment or escalation
+    -- or on an SOP template, whose daily tasks go to that person: a real,
+    active colleague who works at the task's shop -- the
     store reach every store gate uses -- so a task never lands on a leaver, a
-    stranger from another shop, or a name nobody signs in as."""
+    stranger from another shop, or a name nobody signs in as. ``any_shop``: a
+    chain-wide SOP (only an admin edits one) may name any active colleague;
+    the generator issues it only at a shop that person works at."""
     user_repo = get_user_repository()
     if user_repo is None:
         raise HTTPException(
@@ -109,7 +113,7 @@ def _named_target(user_id: str, task: dict) -> dict:
     if (
         not target
         or target.get("is_active", True) is False
-        or not can_access_store_scoped(task.get("store_id"), {**target, "roles": task_roles(target)})
+        or not (any_shop or can_access_store_scoped(task.get("store_id"), {**target, "roles": task_roles(target)}))
     ):
         raise HTTPException(
             status_code=400,
@@ -1104,6 +1108,17 @@ async def auto_generate_daily_tasks(
                 ids.append(uid)
 
         for uid in tpl.get("assigned_users") or []:
+            # Codex review of #1374: a legacy name the issuing shop may not
+            # reach (another shop's, a leaver, nobody) is skipped -- the task
+            # would show them this shop's procedure.
+            try:
+                _named_target(uid, {"store_id": active_store})
+            except HTTPException:
+                logger.warning(
+                    "[SOP] %s: skipped assignee %s, not an active colleague at %s",
+                    tpl.get("template_id"), uid, active_store,
+                )
+                continue
             _add(uid)
         # Roles resolve to the named people holding them IN THIS STORE. A role
         # is a way of naming a group of people, never an assignee itself.
@@ -1894,6 +1909,54 @@ def _sop_completions_collection():
         return None
 
 
+def _sop_in_reach(template_id: str, current_user: dict, *, editing: bool = False):
+    """THE SOP-template door (audit R02): every read and write of one template
+    opens it here. A shop's template is its own shops' only (can_access_store_
+    scoped: AREA_MANAGER his shops, admins every shop) -- another shop's reads
+    404, the same as a missing one. A chain-wide template (no store_id) is
+    every shop's procedure: anyone may read and tick it, only an admin may
+    change it (``editing``). Returns (collection, template)."""
+    col = _sop_collection()
+    if col is None:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    tpl = col.find_one({"template_id": template_id}, {"_id": 0})
+    store = (tpl or {}).get("store_id")
+    if not tpl or (store and not can_access_store_scoped(store, current_user)):
+        raise HTTPException(status_code=404, detail="SOP template not found")
+    if editing and not store and not user_store_scope(current_user)[0]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only an admin can change an SOP every shop follows",
+        )
+    return col, tpl
+
+
+def _sop_people(user_ids: Optional[List[str]], tpl: dict) -> None:
+    """Every person an SOP writer (create / PATCH / assign) ADDS passes the
+    task rule _named_target for the SOP's shop -- 400 before anything is
+    saved (Codex review of #1374). A chain-wide SOP: any active colleague.
+    A name already on the template is not re-judged, so the editor, which
+    sends the whole list back, can still save a template that names a
+    since-departed person; the generator skips such a name."""
+    kept = set(tpl.get("assigned_users") or [])
+    for uid in user_ids or []:
+        if uid not in kept:
+            _named_target(uid, tpl, any_shop=not tpl.get("store_id"))
+
+
+def _sop_checklist_scope(template_id: str, store_id: Optional[str], current_user: dict, *, writing: bool = False):
+    """The template + the shop whose checklist a read or a tick works on -- one
+    rule for both (audit R02: the read validated the shop, the write took
+    payload.store_id as given). A shop's SOP is kept at that shop; a
+    chain-wide one at the named shop, else the caller's own (store_in_view)."""
+    _, tpl = _sop_in_reach(template_id, current_user)
+    own = tpl.get("store_id")
+    shop = store_in_view(store_id or own, current_user, writing=writing, one_shop=True)
+    if own and shop != own:
+        raise HTTPException(status_code=400, detail="This SOP belongs to another shop")
+    return tpl, shop
+
+
 @router.get("/sop-templates")
 async def list_sop_templates(
     category: Optional[str] = Query(None),
@@ -1912,6 +1975,11 @@ async def list_sop_templates(
     if store_id:
         # BUG-062: authorise the requested store (store roles 403 cross-store).
         filter_dict["store_id"] = validate_store_access(store_id, current_user)
+    else:
+        is_cross, stores = user_store_scope(current_user)
+        if not is_cross:
+            # R02: a shop login lists its own shops' SOPs and the chain-wide ones.
+            filter_dict["store_id"] = {"$in": [*sorted(stores), None]}
     if active_only:
         filter_dict["is_active"] = {"$ne": False}
 
@@ -1943,6 +2011,10 @@ async def create_sop_template(
     if col is None:
         raise HTTPException(status_code=503, detail="DB unavailable")
 
+    # R02: a shop the caller holds (403 otherwise); an admin with none = chain-wide.
+    store = store_in_view(payload.store_id, current_user, writing=True)
+    _sop_people(payload.assigned_users, {"store_id": store})
+
     now = datetime.now()
     template_id = f"SOP-{uuid.uuid4().hex[:8].upper()}"
     doc = {
@@ -1955,7 +2027,7 @@ async def create_sop_template(
         "steps": [s.model_dump() for s in payload.steps],
         "assigned_roles": payload.assigned_roles,
         "assigned_users": payload.assigned_users,
-        "store_id": payload.store_id or current_user.get("active_store_id"),
+        "store_id": store,
         "is_active": True,
         "created_by": current_user.get("user_id"),
         "created_at": now,
@@ -1978,13 +2050,7 @@ async def get_sop_template(
     template_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    col = _sop_collection()
-    if col is None:
-        raise HTTPException(status_code=503, detail="DB unavailable")
-    tpl = col.find_one({"template_id": template_id}, {"_id": 0})
-    if not tpl:
-        raise HTTPException(status_code=404, detail="SOP template not found")
-    return tpl
+    return _sop_in_reach(template_id, current_user)[1]
 
 
 @router.patch("/sop-templates/{template_id}")
@@ -2001,13 +2067,18 @@ async def update_sop_template(
             detail="Only SUPERADMIN / ADMIN / STORE_MANAGER may edit SOPs",
         )
 
-    col = _sop_collection()
-    if col is None:
-        raise HTTPException(status_code=503, detail="DB unavailable")
+    col, tpl = _sop_in_reach(template_id, current_user, editing=True)
 
     update_data = {
         k: v for k, v in updates.model_dump(exclude_unset=True).items() if v is not None
     }
+    # Archiving is admin-only on DELETE; is_active here is the same switch.
+    if "is_active" in update_data and not user_store_scope(current_user)[0]:
+        raise HTTPException(
+            status_code=403,
+            detail="Only SUPERADMIN / ADMIN may archive or restore SOPs",
+        )
+    _sop_people(update_data.get("assigned_users"), tpl)
     # Serialize nested steps
     if "steps" in update_data and update_data["steps"] is not None:
         update_data["steps"] = [
@@ -2075,9 +2146,8 @@ async def assign_sop(
     if not (set(current_user.get("roles", [])) & allowed):
         raise HTTPException(status_code=403, detail="Not authorized")
 
-    col = _sop_collection()
-    if col is None:
-        raise HTTPException(status_code=503, detail="DB unavailable")
+    col, tpl = _sop_in_reach(template_id, current_user, editing=True)
+    _sop_people(payload.assigned_users, tpl)
 
     update: dict = {
         "updated_at": datetime.now(),
@@ -2126,14 +2196,7 @@ async def get_sop_checklist(
 ):
     """An SOP template's steps merged with today's completion state + progress.
     Read-only; the completion doc is created lazily on the first toggle."""
-    tcol = _sop_collection()
-    if tcol is None:
-        raise HTTPException(status_code=503, detail="DB unavailable")
-    tpl = tcol.find_one({"template_id": template_id}, {"_id": 0})
-    if not tpl:
-        raise HTTPException(status_code=404, detail="SOP template not found")
-
-    active_store = store_in_view(store_id, current_user, one_shop=True)
+    tpl, active_store = _sop_checklist_scope(template_id, store_id, current_user)
     # IST audit: the checklist day key must be the IST business day. The UTC
     # day (datetime.now() on Railway) put late-night reads on yesterday's doc.
     day = date or ist_today().isoformat()
@@ -2170,18 +2233,18 @@ async def toggle_sop_checklist_item(
 ):
     """Tick / untick one checklist step for a template+store+date. Upserts the
     sop_completions doc and returns the updated checklist + progress."""
-    tcol = _sop_collection()
     ccol = _sop_completions_collection()
-    if tcol is None or ccol is None:
+    if ccol is None:
         raise HTTPException(status_code=503, detail="DB unavailable")
-    tpl = tcol.find_one({"template_id": payload.template_id}, {"_id": 0})
-    if not tpl:
-        raise HTTPException(status_code=404, detail="SOP template not found")
+    tpl, active_store = _sop_checklist_scope(
+        payload.template_id, payload.store_id, current_user, writing=True
+    )
+    if tpl.get("is_active") is False:
+        raise HTTPException(status_code=409, detail="This SOP is archived and can no longer be ticked")
 
     if payload.completed:
         _ensure_cashier_may_complete(tpl, current_user)
 
-    active_store = payload.store_id or current_user.get("active_store_id")
     # IST audit: same IST day key as the GET above -- a tick at 23:30 IST must
     # land on TODAY's completion doc, not yesterday's (UTC) one.
     day = payload.date or ist_today().isoformat()

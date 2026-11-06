@@ -480,6 +480,9 @@ def ctx(monkeypatch):
         "stock_repo": stock_repo,
         "returns_coll": returns_coll,
         "stock_audit_coll": stock_audit_coll,
+        "ledger_coll": ledger_coll,
+        "customer_repo": customer_repo,
+        "order_repo": order_repo,
     }
 
 
@@ -1413,3 +1416,288 @@ def test_a_counter_retry_restocks_only_the_units_still_out(ctx, monkeypatch, wal
         want["STK-W"] = "SOLD"
     assert {u["stock_id"]: u["status"] for u in units} == want, "2 back for 2, no hijack, no mint"
     assert all(u.get("order_id") == "ORD-WALKIN" for u in units if u["stock_id"] == "STK-W")
+
+
+# ============================================================================
+# L2-RETURN-F02 - replay and restock recovery are authorised against the
+# persisted return's shop; a replay is bound to the physical disposition too.
+# ============================================================================
+
+
+def _hdr(roles, store_id="BV-PUN-01", key=None):
+    h = {"Authorization": f"Bearer {_staff_token(roles, store_id=store_id)}"}
+    if key:
+        h["Idempotency-Key"] = key
+    return h
+
+
+def test_known_key_from_another_shop_reveals_no_return(ctx):
+    """A BV-RNC-01 cashier replaying BV-PUN-01's known key gets the same 404 as
+    the detail route -- no return id, no money, no stock ids -- and nothing is
+    written."""
+    created = ctx["client"].post("/api/v1/returns", json=_payload(),
+                                 headers=_hdr(["ADMIN"], key="K-F02-A"))
+    assert created.status_code == 201
+    rid = created.json()["return_id"]
+    r = ctx["client"].post("/api/v1/returns", json=_payload(),
+                           headers=_hdr(["CASHIER"], store_id="BV-RNC-01", key="K-F02-A"))
+    assert r.status_code == 404
+    assert rid not in r.text and "net_refund" not in r.text
+    assert len(ctx["returns_coll"].docs) == 1
+
+
+def test_known_key_with_changed_body_from_another_shop_does_not_name_the_return(ctx):
+    """Even the conflict answer used to name the other shop's return id."""
+    rid = ctx["client"].post("/api/v1/returns", json=_payload(),
+                             headers=_hdr(["ADMIN"], key="K-F02-B")).json()["return_id"]
+    body = _payload()
+    body["items"][0]["condition"] = "DAMAGED"
+    r = ctx["client"].post("/api/v1/returns", json=body,
+                           headers=_hdr(["CASHIER"], store_id="BV-RNC-01", key="K-F02-B"))
+    assert r.status_code == 404 and rid not in r.text
+
+
+def test_same_shop_identical_retry_replays_exactly_once(ctx):
+    hdr = _hdr(["CASHIER"], key="K-F02-C")
+    first = ctx["client"].post("/api/v1/returns", json=_payload(), headers=hdr)
+    again = ctx["client"].post("/api/v1/returns", json=_payload(), headers=hdr)
+    assert first.status_code == 201 and again.status_code == 201
+    assert again.json()["_idempotent_replay"] is True
+    assert again.json()["return_id"] == first.json()["return_id"]
+    assert again.json()["net_refund"] == first.json()["net_refund"]
+    assert len(ctx["returns_coll"].docs) == 1
+    assert [u["status"] for u in ctx["stock_repo"].units] == ["AVAILABLE"]
+
+
+@pytest.mark.parametrize("field,value", [
+    ("condition", "DAMAGED"),
+    ("restock", False),
+    ("serial", "SER-OTHER"),
+])
+def test_changed_disposition_under_the_same_key_conflicts(ctx, field, value):
+    """GOOD->DAMAGED, restock on->off or another scanned serial changes what
+    happens to the piece; the same key must refuse it, not replay success."""
+    hdr = _hdr(["CASHIER"], key=f"K-F02-D-{field}")
+    assert ctx["client"].post("/api/v1/returns", json=_payload(), headers=hdr).status_code == 201
+    snapshot = [dict(u) for u in ctx["stock_repo"].units]
+    body = _payload()
+    body["items"][0][field] = value
+    r = ctx["client"].post("/api/v1/returns", json=body, headers=hdr)
+    assert r.status_code == 409
+    assert len(ctx["returns_coll"].docs) == 1
+    assert ctx["stock_repo"].units == snapshot
+
+
+def _unapplied_return(ctx, monkeypatch):
+    """A BV-PUN-01 return whose restock never landed (stock layer was down)."""
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: None)
+    created = ctx["client"].post("/api/v1/returns", json=_payload(), headers=_hdr(["ADMIN"])).json()
+    assert created["restock_applied"] is False
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: ctx["stock_repo"])
+    return created["return_id"]
+
+
+def test_another_shop_cannot_restock_an_unapplied_return(ctx, monkeypatch):
+    rid = _unapplied_return(ctx, monkeypatch)
+    doc_before = dict(ctx["returns_coll"].docs[0])
+    r = ctx["client"].post(f"/api/v1/returns/{rid}/restock",
+                           headers=_hdr(["STORE_MANAGER"], store_id="BV-RNC-01"))
+    assert r.status_code == 404
+    assert "STK-OLD-1" not in r.text
+    assert ctx["stock_repo"].units[0]["status"] == "SOLD"
+    assert ctx["returns_coll"].docs[0] == doc_before, "claim flags untouched"
+
+
+def test_another_shop_cannot_read_an_applied_returns_stock_ids(ctx):
+    rid = ctx["client"].post("/api/v1/returns", json=_payload(), headers=_hdr(["ADMIN"])).json()["return_id"]
+    r = ctx["client"].post(f"/api/v1/returns/{rid}/restock",
+                           headers=_hdr(["STORE_MANAGER"], store_id="BV-RNC-01"))
+    assert r.status_code == 404 and "STK-OLD-1" not in r.text
+
+
+def test_own_shop_manager_still_recovers_an_unapplied_restock(ctx, monkeypatch):
+    rid = _unapplied_return(ctx, monkeypatch)
+    r = ctx["client"].post(f"/api/v1/returns/{rid}/restock", headers=_hdr(["STORE_MANAGER"]))
+    assert r.status_code == 200
+    assert r.json()["restock_stock_ids"] == ["STK-OLD-1"]
+    assert ctx["stock_repo"].units[0]["status"] == "AVAILABLE"
+
+
+# ============================================================================
+# PR #1381 review F1 - a return saved BEFORE the disposition joined the
+# fingerprint (old format) still replays an identical retry, and still refuses
+# a changed condition / restock / serial: the retry is compared against the
+# saved return's OWN lines, never accepted on the old hash alone. F3 - no retry
+# ever adds a second refund, credit or physical unit.
+# ============================================================================
+
+
+def _old_format_fingerprint(body):
+    """The fingerprint exactly as returns.py computed it before #1381
+    (aa14c90e): identity + qty per line, no disposition."""
+    import hashlib
+    import json as _json
+
+    lines = sorted((str(it.get("order_item_id") or it.get("product_id") or ""),
+                    round(float(it.get("return_qty") or 0), 4))
+                   for it in body["items"] if (it.get("return_qty") or 0) > 0)
+    tenders = sorted((str(t.get("method") or ""), round(float(t.get("amount") or 0), 2))
+                     for t in (body.get("refund_tenders") or []))
+    raw = _json.dumps([body.get("order_id") or body.get("order_number"), body["return_type"],
+                       round(float(body.get("restocking_fee") or 0), 2), lines, tenders])
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _books(ctx):
+    """Everything a retry could duplicate: returns, money, credit, units."""
+    docs = ctx["returns_coll"].docs
+    return {
+        "returns": len(docs),
+        "refunded": round(sum(float(d.get("refund_amount") or 0) for d in docs), 2),
+        "credited": round(sum(float(d.get("credit_amount") or 0) for d in docs), 2),
+        "ledger_rows": len(ctx["ledger_coll"].docs),
+        "ledger_total": round(sum(float(d.get("amount") or 0) for d in ctx["ledger_coll"].docs), 2),
+        "store_credit": ctx["customer_repo"].customers["CUST-1"].get("store_credit"),
+        "units": sorted((u["stock_id"], u["status"]) for u in ctx["stock_repo"].units),
+        "order_returned": [li.get("returned_qty") for li in ctx["order_repo"].collection.docs[0]["items"]],
+    }
+
+
+def _saved_old_format(ctx, key, return_type="RETURN", drop_serial=False):
+    """Record a return, then turn it into one saved before #1381: the old
+    fingerprint (and, optionally, no serial field on its lines)."""
+    body = _payload(return_type=return_type)
+    r = ctx["client"].post("/api/v1/returns", json=body, headers=_hdr(["CASHIER"], key=key))
+    assert r.status_code == 201, r.text
+    doc = ctx["returns_coll"].docs[0]
+    doc["idempotency_fingerprint"] = _old_format_fingerprint(body)
+    if drop_serial:
+        for ln in doc["items"]:
+            ln.pop("serial", None)
+    return body, r.json()
+
+
+@pytest.mark.parametrize("return_type", ["RETURN", "CREDIT_NOTE"])
+@pytest.mark.parametrize("drop_serial", [False, True])
+def test_identical_retry_of_an_old_format_saved_return_replays_once(ctx, return_type, drop_serial):
+    key = f"K-OLD-{return_type}-{drop_serial}"
+    body, first = _saved_old_format(ctx, key, return_type, drop_serial)
+    before = _books(ctx)
+    if return_type == "CREDIT_NOTE":
+        assert before["credited"] > 0 and before["ledger_rows"] == 1
+    for roles in (["CASHIER"], ["SALES_STAFF"], ["ADMIN"]):
+        again = ctx["client"].post("/api/v1/returns", json=body, headers=_hdr(roles, key=key))
+        assert again.status_code == 201, again.text
+        assert again.json()["_idempotent_replay"] is True
+        assert again.json()["return_id"] == first["return_id"]
+        assert again.json()["net_refund"] == first["net_refund"]
+    assert _books(ctx) == before, "no second return, refund, credit or unit"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("condition", "DAMAGED"),
+    ("restock", False),
+    ("serial", "SER-OTHER"),
+])
+def test_changed_disposition_against_an_old_format_saved_return_conflicts(ctx, field, value):
+    body, _first = _saved_old_format(ctx, f"K-OLD-D-{field}")
+    before = _books(ctx)
+    changed = _payload()
+    changed["items"][0][field] = value
+    assert _old_format_fingerprint(changed) == _old_format_fingerprint(body), "old hash cannot tell"
+    r = ctx["client"].post("/api/v1/returns", json=changed, headers=_hdr(["CASHIER"], key=f"K-OLD-D-{field}"))
+    assert r.status_code == 409, r.text
+    assert _books(ctx) == before
+
+
+def test_changed_qty_against_an_old_format_saved_return_conflicts(ctx):
+    _saved_old_format(ctx, "K-OLD-Q")
+    before = _books(ctx)
+    body = _payload()
+    body["items"][0]["return_qty"] = 2
+    r = ctx["client"].post("/api/v1/returns", json=body, headers=_hdr(["CASHIER"], key="K-OLD-Q"))
+    assert r.status_code == 409
+    assert _books(ctx) == before
+
+
+def test_old_format_saved_return_from_another_shop_still_404(ctx):
+    body, first = _saved_old_format(ctx, "K-OLD-X")
+    before = _books(ctx)
+    r = ctx["client"].post("/api/v1/returns", json=body,
+                           headers=_hdr(["CASHIER"], store_id="BV-RNC-01", key="K-OLD-X"))
+    assert r.status_code == 404 and first["return_id"] not in r.text
+    assert _books(ctx) == before
+
+
+def test_new_format_identical_retries_and_lost_ack_never_duplicate(ctx, monkeypatch):
+    """Lost acknowledgement: the press landed, the till retries the same key;
+    then the restock recovery is pressed twice. One return, one refund, one
+    unit back -- never two."""
+    hdr = _hdr(["CASHIER"], key="K-NEW-RECON")
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: None)
+    first = ctx["client"].post("/api/v1/returns", json=_payload(), headers=hdr)
+    assert first.status_code == 201 and first.json()["restock_applied"] is False
+    monkeypatch.setattr(returns_router, "get_stock_repository", lambda: ctx["stock_repo"])
+    before = _books(ctx)
+    for _ in range(2):
+        again = ctx["client"].post("/api/v1/returns", json=_payload(), headers=hdr)
+        assert again.status_code == 201 and again.json()["_idempotent_replay"] is True
+    assert _books(ctx) == before
+    rid = first.json()["return_id"]
+    for _ in range(2):
+        rec = ctx["client"].post(f"/api/v1/returns/{rid}/restock", headers=_hdr(["STORE_MANAGER"]))
+        assert rec.status_code == 200, rec.text
+    after = _books(ctx)
+    assert after["units"] == [("STK-OLD-1", "AVAILABLE")], "one unit back, none minted"
+    after.pop("units")
+    before.pop("units")
+    assert after == before, "recovery moves no money"
+
+
+# ============================================================================
+# PR #1381 review F2 - POST /returns/quote uses the same per-object shop rule
+# as POST /returns: an order with no shop on record is HQ-only, and another
+# shop's order is refused, before any amount or tender is shown.
+# ============================================================================
+
+
+def _quote(ctx, roles, store_id="BV-PUN-01"):
+    return ctx["client"].post("/api/v1/returns/quote", json=_payload(store_id=None),
+                              headers=_hdr(roles, store_id=store_id))
+
+
+@pytest.mark.parametrize("roles,store_id", [
+    (["SALES_STAFF"], "BV-RNC-01"),
+    (["SALES_STAFF"], None),
+    (["CASHIER"], "BV-PUN-01"),
+    (["STORE_MANAGER"], "BV-PUN-01"),
+])
+def test_quote_on_an_order_with_no_shop_is_refused_to_shop_staff(ctx, roles, store_id):
+    ctx["order_repo"]._order.pop("store_id")
+    r = _quote(ctx, roles, store_id)
+    assert r.status_code == 403, r.text
+    for leak in ("net_refund", "gross_refund", "captured_tenders", "1500"):
+        assert leak not in r.text
+    create = ctx["client"].post("/api/v1/returns", json=_payload(store_id=None),
+                                headers=_hdr(roles, store_id=store_id))
+    assert create.status_code == r.status_code, "quote and create agree"
+    assert ctx["returns_coll"].docs == []
+
+
+def test_quote_on_an_order_with_no_shop_still_works_for_admin(ctx):
+    ctx["order_repo"]._order.pop("store_id")
+    r = _quote(ctx, ["ADMIN"])
+    assert r.status_code == 200 and r.json()["net_refund"] > 0
+
+
+def test_quote_on_another_shops_order_is_refused(ctx):
+    r = _quote(ctx, ["CASHIER"], "BV-RNC-01")
+    assert r.status_code == 403 and "net_refund" not in r.text
+
+
+@pytest.mark.parametrize("roles", [["CASHIER"], ["SALES_STAFF"], ["STORE_MANAGER"], ["ADMIN"]])
+def test_quote_on_own_shops_order_still_works(ctx, roles):
+    r = _quote(ctx, roles)
+    assert r.status_code == 200, r.text
+    assert r.json()["net_refund"] > 0
+    assert ctx["returns_coll"].docs == [], "a quote writes nothing"

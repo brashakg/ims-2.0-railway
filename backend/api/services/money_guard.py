@@ -594,6 +594,20 @@ def _stamp_balance_after(coll, spec: AccountSpec, account_key: str, txn_id: str,
         return
 
 
+def find_applied(db_or_coll: Any, account_type: str, account_key: str,
+                 idempotency_key: Optional[str]):
+    """Read-only: (txn_id, balance, amount) of the entry already applied under
+    this idempotency_key, or None. Lets a caller recognise a retry of a move
+    that already landed BEFORE re-running its own preconditions. No write."""
+    spec = ACCOUNT_TYPES.get(account_type)
+    if spec is None or spec.greenfield or not idempotency_key:
+        return None
+    coll = _resolve_collection(db_or_coll, spec)
+    if coll is None:
+        return None
+    return _find_existing_txn(coll, spec, account_key, idempotency_key)
+
+
 def get_balance(db_or_coll: Any, account_type: str, account_key: str) -> Dict[str, Any]:
     """Read-only projection of {balance, status, holds}. No write. Greenfield types
     report status='unavailable' (no collection exists in Phase A)."""
