@@ -1591,3 +1591,103 @@ def test_a_product_with_no_pieces_keeps_two_credits_on_one_receipt(rw):
         _, res = rma_note(rw, rma_id, 1000, number)
         assert res.status_code == 200 and res.json()["confirmation"]["posting_status"] == "POSTED", res.text
     assert posted(rw) == (2, 200000)
+
+
+def split_bill_rma(w):
+    """A dispatched two-piece RMA whose receipt was billed on two lines of one."""
+    bought(w, "U1", "U2", qty=2)
+    w["db"].vendor_bills.update_one({"bill_id": "B-OWN"}, {"$set": {"lines": [
+        {"product_id": FRAME, "qty": 1, "taxable": 500, "cgst": 0, "sgst": 0, "igst": 0,
+         "gst_rate": 0, "line_total": 500} for _ in range(2)]}})
+    return linked_rma(w, received_return(w, "U1", "U2"))
+
+
+def wrong_selection_note(w, rma_id):
+    body = {"credit_note_number": "CN-SPLIT", "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+            "received_amount": 1000, "allocations": [],
+            "source_selections": [{"return_line_index": 0, "grn_id": "G-OWN", "quantity": 2,
+                                   "bill_id": "B-OWN", "bill_line_index": 0}]}
+    res = w["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=body)
+    assert res.status_code == 200, res.text
+    assert res.json()["confirmation"]["pending_reasons"][0]["code"] == "ORIGINAL_QUANTITY_EXCEEDED"
+    saved = w["db"].supplier_credit_confirmations.find_one({"_id": body["idempotency_key"]})
+    assert saved["identity_claimed"] is True
+    return body
+
+
+def test_a_wrong_selection_is_a_recoverable_note_and_holds_the_rma(rw):
+    """ORIGINAL_QUANTITY_EXCEEDED from the evidence is no cap: the right split posts."""
+    rma_id = split_bill_rma(rw)
+    body = wrong_selection_note(rw, rma_id)
+    http = rw["as_"](ACCOUNTANT)
+    assert http.post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 409
+    assert rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 409
+    assert rw["db"].vendor_rmas.find_one({"rma_id": rma_id})["status"] == "DISPATCHED"
+    http = rw["as_"](ACCOUNTANT)
+    split = [{"return_line_index": 0, "grn_id": "G-OWN", "quantity": 1, "bill_id": "B-OWN",
+              "bill_line_index": n, "stock_ids": [sid]} for n, sid in enumerate(("U1", "U2"))]
+    shown = http.post(f"/vendor-rma/{rma_id}/credit-preview", json={"source_selections": split}).json()
+    assert shown["source_status"] == "RESOLVED", shown
+    done = http.post(f"/vendor-rma/{rma_id}/credit-note", json={
+        **body, "source_selections": shown["source_selections"],
+        "allocations": [{"source_key": s["source_key"], "taxable": 500, "cgst": 0, "sgst": 0, "igst": 0}
+                        for s in shown["sources"]]})
+    assert done.status_code == 200 and done.json()["confirmation"]["posting_status"] == "POSTED", done.text
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_a_selection_over_one_receipt_is_recoverable_too(rw):
+    """RECEIPT_QUANTITY_EXCEEDED from the evidence, on an unlinked line."""
+    db = rw["db"]
+    made = raise_rma(rw, product=OFF_INVENTORY)
+    rma_id = made.json()["rma_id"]
+    http = rw["as_"]
+    http(MANAGER).post(f"/vendor-rma/{rma_id}/authorize", json={"vendor_rma_number": "VR-1"})
+    http(ACCOUNTANT).put(f"/vendor-rma/{rma_id}/prices", json={"unit_costs": [500]})
+    http(MANAGER).post(f"/vendor-rma/{rma_id}/dispatch", json={"carrier": "D", "awb": "A"})
+    db.entities.insert_one({"entity_id": "E-OWN", "gstins": [{"gstin": "20AAAAA0000A1Z5"}]})
+    for gid in ("G-A", "G-B"):
+        db.grns.insert_one({"grn_id": gid, "store_id": STORE, "vendor_id": DEALER, "status": "ACCEPTED",
+                            "items": [{"product_id": OFF_INVENTORY, "accepted_qty": 1}]})
+        db.vendor_bills.insert_one({
+            "bill_id": "B-" + gid, "grn_id": gid, "store_id": STORE, "vendor_id": DEALER, "status": "UNPAID",
+            "received": True, "doc_type": "PURCHASE_INVOICE", "bill_number": "INV-" + gid,
+            "bill_date": datetime(2026, 1, 1), "recipient_entity_id": "E-OWN",
+            "recipient_gstin": "20AAAAA0000A1Z5", "vendor_gstin": "20BBBBB0000B1Z5",
+            "lines": [{"product_id": OFF_INVENTORY, "qty": 2, "taxable": 1000, "cgst": 0, "sgst": 0, "igst": 0,
+                       "gst_rate": 0, "line_total": 1000}],
+            "taxable_amount": 1000, "tax_amount": 0, "cgst_total": 0, "sgst_total": 0, "igst_total": 0})
+    body = {"credit_note_number": "CN-RCPT", "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+            "received_amount": 1000, "allocations": [],
+            "source_selections": [{"return_line_index": 0, "grn_id": "G-A", "quantity": 2,
+                                   "bill_id": "B-G-A", "bill_line_index": 0}]}
+    res = http(ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=body)
+    assert res.status_code == 200, res.text
+    assert res.json()["confirmation"]["pending_reasons"][0]["code"] == "RECEIPT_QUANTITY_EXCEEDED"
+    assert http(ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 409
+    split = [{"return_line_index": 0, "grn_id": g, "quantity": 1, "bill_id": "B-" + g, "bill_line_index": 0}
+             for g in ("G-A", "G-B")]
+    shown = http(ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-preview", json={"source_selections": split}).json()
+    done = http(ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json={
+        **body, "source_selections": shown["source_selections"],
+        "allocations": [{"source_key": s["source_key"], "taxable": 500, "cgst": 0, "sgst": 0, "igst": 0}
+                        for s in shown["sources"]]})
+    assert done.status_code == 200 and done.json()["confirmation"]["posting_status"] == "POSTED", done.text
+    assert posted(rw) == (1, 100000)
+
+
+def test_a_note_a_real_posting_found_over_a_cap_still_lets_the_rma_end(rw, monkeypatch):
+    """The saved row of a refused reservation can never fit: it holds nothing."""
+    bought(rw, "U1", "U2", qty=2)
+    rma_id = linked_rma(rw, received_return(rw, "U1", "U2"))
+
+    def full(*_a, **_k):
+        raise rma_credit.SupplierCreditError("RECEIPT_QUANTITY_EXCEEDED", "Already reserved")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(rma_credit.canonical, "_reserve_physical", full)
+        body, res = rma_note(rw, rma_id, 1000, "CN-FULL")
+    assert res.status_code == 422, res.text
+    saved = rw["db"].supplier_credit_confirmations.find_one({"_id": body["idempotency_key"]})
+    assert saved["posting_status"] == "PENDING_EVIDENCE" and saved["fenced_token"]
+    assert rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/reject", json={"reason": "x"}).status_code == 200

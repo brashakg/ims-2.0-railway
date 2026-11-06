@@ -25,7 +25,9 @@ from .vendor_rma import RMAStatus, VendorRMAEngine, _now
 
 APPROVAL_BINDINGS = "rma_supplier_credit_approvals"
 READY = {RMAStatus.DISPATCHED.value, RMAStatus.CREDIT_RECEIVED.value}
-# Refused by a cap: its fixed amount can never fit, so nothing waits on it.
+# Refused by a cap at posting: its fixed amount can never fit, so nothing waits
+# on it. The same codes from the evidence (a wrong selection) are recoverable:
+# only a row a real posting attempt fenced lets go (_holds_its_door).
 OVER_CAP = {"ORIGINAL_QUANTITY_EXCEEDED", "ORIGINAL_AMOUNT_EXCEEDED", "RETURN_AMOUNT_EXCEEDED",
             "RECEIPT_QUANTITY_EXCEEDED", "RETURNED_UNIT_ALREADY_CREDITED"}
 
@@ -75,19 +77,24 @@ def return_door_problem(db, return_doc, confirmation_id):
             "credit note there, once, not here.")
 
 
+def _holds_its_door(event):
+    """A claimed note that can still finish keeps its door open. One that can
+    never finish does not: a real posting found it over a cap, or an old row
+    refused with an error (claimed, no reason saved)."""
+    if event.get("posting_status") != "PENDING_EVIDENCE":
+        return True
+    reasons = {reason.get("code") for reason in event.get("pending_reasons") or []}
+    return bool(reasons) and not (event.get("fenced_token") and reasons <= OVER_CAP)
+
+
 def unfinished_note(db, rma):
     """A supplier note this RMA has claimed but not yet carried onto itself:
     saved pending, posting, or posted with its summary lost. Only this door can
-    finish it, so the RMA stays open for it; the note is never released. A note
-    that can never finish does not hold it: one over a cap (OVER_CAP), or an old
-    row refused with an error (claimed, no reason saved)."""
+    finish it, so the RMA stays open for it; the note is never released."""
     done = [n["confirmation_id"] for n in rma.get("credit_notes") or [] if n.get("confirmation_id")]
-    for event in db.get_collection(EVENTS).find(
-            {**return_event_query({"rma_id": rma["rma_id"]}), "identity_claimed": {"$ne": False}, "_id": {"$nin": done}}):
-        reasons = {reason.get("code") for reason in event.get("pending_reasons") or []}
-        if event.get("posting_status") != "PENDING_EVIDENCE" or reasons - OVER_CAP:
-            return event
-    return None
+    return next((event for event in db.get_collection(EVENTS).find(
+        {**return_event_query({"rma_id": rma["rma_id"]}), "identity_claimed": {"$ne": False}, "_id": {"$nin": done}})
+        if _holds_its_door(event)), None)
 
 
 def settle_return(db, rma):
