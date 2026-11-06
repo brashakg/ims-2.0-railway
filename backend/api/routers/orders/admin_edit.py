@@ -436,9 +436,11 @@ async def _settle_removed_lines(
         moved += removed
         failed: List[Optional[str]] = []
 
-        async def release(*, order_item, part=None, **where) -> None:
-            hook = partial(release_for_cancel, part=part) if part else release_for_cancel
-            rec = await hook(order_item=order_item, **where)
+        async def release(*, order_item, order_id, line_index, store_id, user, **part) -> None:
+            rec = await release_for_cancel(
+                order_item=order_item, order_id=order_id, line_index=line_index,
+                store_id=store_id, user=user, **part,
+            )
             if (rec or {}).get("status") == "failed":
                 failed.append(order_item.get("item_id"))
 
