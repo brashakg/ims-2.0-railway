@@ -627,6 +627,9 @@ def _refuse_if_cancelled(body: "RedeemRequest") -> None:
         return
     settled = reverse_for_cancel(body.order_id, body.customer_id)
     if not settled.get("ok"):
+        # The same flag the cancel stamps: reconciliation sees it, and it opens
+        # the cancel's retry door.
+        orders.update(body.order_id, {"loyalty_reversal_failed": True})
         raise HTTPException(
             status_code=503,
             detail={

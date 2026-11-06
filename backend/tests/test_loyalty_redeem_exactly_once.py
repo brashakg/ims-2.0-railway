@@ -464,6 +464,7 @@ def test_a_late_debit_whose_restore_money_failed_is_finished_by_the_next_call(ri
     with pytest.raises(HTTPException) as ei:
         _redeem()
     assert ei.value.status_code == 503  # not a 4xx: the points are not back yet
+    assert rig["db"].orders.find_one({"order_id": ORDER})["loyalty_reversal_failed"] is True
     assert int(_account(rig)["balance_points"]) == START - 100
     monkeypatch.setattr(lm, "_apply_reversal_balance", real)
     assert lm.reverse_for_cancel(ORDER, CUST)["ok"] is True
