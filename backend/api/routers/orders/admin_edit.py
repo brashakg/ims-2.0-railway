@@ -36,6 +36,7 @@ from .models import (
 )
 from .release import CANCELLABLE_STATUSES, _release_lens_lines, _release_line_units
 from .stock import (
+    _assert_goods_name_a_product,
     _assert_line_type_matches_master,
     _assert_serialized_stock_available,
     _canonical_pid,
@@ -227,21 +228,24 @@ def _rebuilt_items_or_existing(
 
 def _gate_added_lines(added: List[dict], store_id: Optional[str]) -> None:
     """Goods an edit newly bills meet the till's rules (L2-STOCK-F01/F02, L1-F39):
-    a billable, unarchived master, the master's stock type, and units on this
-    shop's shelf. Read-only; _claim_units takes the units. The caps and floors
-    are not re-applied: price stays the admin's, this door's audited override.
-    An edit that adds nothing touches neither the product table nor the shelf."""
+    a named product (only a true service may be free text), a billable,
+    unarchived master, the master's stock type, and units on this shop's shelf.
+    Read-only; _claim_units takes the units. The caps and floors are not
+    re-applied: price stays the admin's, this door's audited override. An edit
+    that adds nothing touches neither the product table nor the shelf."""
     if not added:
         return
     product_repo = get_product_repository()
-    if product_repo is not None:
-        for line in added:
-            pid = line.get("product_id") or ""
-            label = line.get("product_name") or pid
-            product = _resolve_billable_product(product_repo, pid, label)
-            _assert_line_type_matches_master(line.get("item_type"), product, label)
-            if product is not None:
-                line["product_id"] = _canonical_pid(product_repo, pid)
+    for line in added:
+        pid = line.get("product_id") or ""
+        label = line.get("product_name") or pid
+        _assert_goods_name_a_product(line.get("item_type"), line.get("category"), pid, label)
+        if product_repo is None:
+            continue
+        product = _resolve_billable_product(product_repo, pid, label)
+        _assert_line_type_matches_master(line.get("item_type"), product, label)
+        if product is not None:
+            line["product_id"] = _canonical_pid(product_repo, pid)
     _assert_serialized_stock_available(added, store_id)
 
 

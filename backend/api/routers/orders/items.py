@@ -37,6 +37,7 @@ from .stock import (
     _lens_reservation_key,
     _mark_units_sold,
     _release_claimed_units,
+    _assert_goods_name_a_product,
     _resolve_billable_product,
 )
 from .release import (
@@ -90,6 +91,9 @@ async def add_order_item(
         # brand caps and reason requirement ALL silently no-op'd -- and a
         # catalog-only product create_order refuses was billed outright.
         _pid = item.product_id or ""
+        _assert_goods_name_a_product(
+            item.item_type, item.category, _pid, item.product_name or ""
+        )
         _pr = get_product_repository()
         product = None
         if _pr is not None:

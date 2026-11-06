@@ -1005,3 +1005,88 @@ def test_revised_invoice_still_shelves_goods_the_shop_holds(
     unit = _unit(shop, "SU-FR-A")
     assert (unit["status"], unit.get("order_id")) == ("AVAILABLE", None)
     assert [ln.get("product_id") for ln in told] == [FR]
+
+
+# ---------------------------------------------------------------------------
+# Review of c67e0dcc -- goods with no product id
+# ---------------------------------------------------------------------------
+
+NO_ID_LINES = [
+    {"item_type": "FRAME", "category": "FRAME"},
+    {"item_type": "ACCESSORY"},
+    {"item_type": "LENS"},
+    {"item_type": "SUNGLASS", "product_id": ""},
+    {"item_type": "SERVICE", "category": "FRAME"},
+    {"item_type": "WHATEVER"},
+]
+
+
+@pytest.mark.parametrize("extra", NO_ID_LINES)
+def test_goods_with_no_product_are_refused_on_the_edit(client, shop, extra):
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    line = _as_sent(_order(shop, oid)["items"][0])
+    before, total = _ledger(shop), _order(shop, oid)["grand_total"]
+    r = _edit(client, oid, [line, {"product_name": "Ray-Ban RB3025", "quantity": 1,
+                                   "unit_price": 1000.0, **extra}])
+    _refused_unchanged(shop, r, before, 400)
+    assert _order(shop, oid)["grand_total"] == total
+    assert len(_order(shop, oid)["items"]) == 1
+
+
+@pytest.mark.parametrize("mode", ["REVISED_INVOICE", "CREDIT_NOTE"])
+def test_goods_with_no_product_are_refused_on_the_invoice_doors(client, shop, invoiced, mode):
+    oid = invoiced([_line(SVC)])
+    line = _as_sent(_order(shop, oid)["items"][0])
+    before = _ledger(shop)
+    r = _edit(client, oid, [line, {"item_type": "FRAME", "category": "FRAME",
+                                   "product_name": "Ray-Ban RB3025", "unit_price": 1000.0}],
+              route="superadmin-invoice-change", mode=mode)
+    _refused_unchanged(shop, r, before, 400)
+    assert _order(shop, oid)["invoice_number"] == "BV-INV-1"
+
+
+def test_a_stored_line_with_no_product_can_still_be_corrected(client, shop):
+    """History: an old free-text frame stays correctable, it adds no goods."""
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    shop["db"].get_collection("orders").update_one(
+        {"order_id": oid},
+        {"$set": {"items.0.item_type": "FRAME", "items.0.product_id": None,
+                  "items.0.category": "FRAME"}},
+    )
+    line = _order(shop, oid)["items"][0]
+    r = _edit(client, oid, [_as_sent(line, unit_price=150.0)])
+    assert r.status_code == 200, r.text
+    assert _order(shop, oid)["items"][0]["unit_price"] == 150.0
+
+
+def test_raising_a_stored_line_with_no_product_is_refused(client, shop):
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    shop["db"].get_collection("orders").update_one(
+        {"order_id": oid},
+        {"$set": {"items.0.item_type": "FRAME", "items.0.product_id": None}},
+    )
+    before = _ledger(shop)
+    line = _order(shop, oid)["items"][0]
+    r = _edit(client, oid, [_as_sent(line, quantity=2)])
+    _refused_unchanged(shop, r, before, 400)
+
+
+def test_the_till_refuses_goods_with_a_blank_product_too(client, shop):
+    before = _ledger(shop)
+    r = _sell(client, [_line(FR, product_id="")])
+    _refused_unchanged(shop, r, before, 400)
+
+
+def test_add_item_refuses_goods_with_a_blank_product_too(client, shop):
+    oid = _saved_bill(client, shop, [_line(ACC)], status="DRAFT")
+    before = _ledger(shop)
+    r = client.post(
+        f"/api/v1/orders/{oid}/items", json=_line(FR, product_id=""), headers=_token(STAFF)
+    )
+    _refused_unchanged(shop, r, before, 400)
+    assert len(_order(shop, oid)["items"]) == 1
+
+
+def test_the_till_still_bills_a_free_text_service(client, shop):
+    r = _sell(client, [_line(SVC, product_id="", product_name="Nose pad fitting")])
+    assert r.status_code in (200, 201), r.text

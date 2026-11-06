@@ -276,6 +276,21 @@ def _stock_class(item_type) -> Optional[str]:
     return {"SERVICES": "none", "OPTICAL_LENS": "lens"}.get(canon, "serialized")
 
 
+def _assert_goods_name_a_product(item_type, category, pid: str, label: str) -> None:
+    """A line with no product id reaches no master, archive or stock rule and
+    takes nothing off the shelf, so only a true service may be free text. A
+    virtual id (custom-/lens-) is a named line and answers to its own rules."""
+    if pid or {_stock_class(item_type), _stock_class(category)} - {None} == {"none"}:
+        return
+    raise HTTPException(
+        status_code=400,
+        detail=(
+            f"'{label or item_type}' names no product. Goods must be picked from the "
+            f"product list; only a service line can be typed in."
+        ),
+    )
+
+
 def _assert_line_type_matches_master(item_type, product, label: str) -> None:
     """L2-STOCK-F02: whether a REAL product's line takes stock is the product
     master's call, never the request's. A caller type that would skip the

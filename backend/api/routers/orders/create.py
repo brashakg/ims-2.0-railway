@@ -53,6 +53,7 @@ from .stock import (
     _lens_reservation_key,
     _mark_units_sold,
     _release_claimed_units,
+    _assert_goods_name_a_product,
     _resolve_billable_product,
     _resolve_product_doc,
 )
@@ -205,6 +206,9 @@ async def create_order(
     if product_repo is not None:
         for item in order.items:
             pid = item.product_id or ""
+            _assert_goods_name_a_product(
+                item.item_type, item.category, pid, item.product_name or ""
+            )
             if not pid:
                 continue
             if pid not in _pdoc_by_pid:
