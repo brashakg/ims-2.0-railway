@@ -296,8 +296,11 @@ def _gstin_refusal(db, receipt_store, store_id, gstins, label) -> Optional[str]:
 
 def _typed_line_problem(db, item, store_id) -> Optional[str]:
     """A line naming no piece is refused when it is (by id, exact name or SKU)
-    a catalogued product this shop holds pieces of -- they are scanned
-    instead; when none of them can go on this return, it says so."""
+    a catalogued product this shop still holds pieces of, sellable or not
+    (on the shelf, reserved for an order, damaged, set aside, in a count) --
+    they are scanned instead; when none of them can go on this return, it
+    says why. A reserved piece is refused, never moved: its order lets go of
+    it first (L2-RMA-F01)."""
     pids = {item.product_id}
     name = (item.product_name or "").strip()
     if name:
@@ -306,13 +309,21 @@ def _typed_line_problem(db, item, store_id) -> Optional[str]:
             {"$or": [{"name": exact}, {"sku": exact}]})}
     held = list(db.get_collection("stock_units").find({
         "product_id": {"$in": sorted(p for p in pids if p)}, "store_id": store_id,
-        "$or": [_ie.on_hand_match(), _ie.status_match(_STATE.QUARANTINED)],
+        "$or": [_ie.on_hand_match(include_reserved=True),
+                _ie.status_match(_STATE.QUARANTINED, _STATE.DAMAGED,
+                                 _STATE.UNDER_AUDIT, _STATE.BLIND_COUNT)],
     }))
     if not held:
         return None
     if any(_not_returnable(db, u) is None for u in held):
         return (f"{item.product_name} is a product this shop holds pieces of: scan or "
                 "pick the pieces going back.")
+    stuck = next((u for u in held if not _is_set_aside(u)
+                  and u.get("receipt_disposition") != "REJECTED"), None)
+    if stuck:
+        return (f"{item.product_name} is a product this shop holds pieces of, but none can go "
+                f"on this return: piece {_label(stuck, stuck.get('stock_id'))} "
+                f"{_not_returnable(db, stuck)}.")
     return (f"{item.product_name} is a product this shop holds pieces of, but every one is "
             "already on another supplier return or held by its receiving rejection, so none "
             "can go on this one.")

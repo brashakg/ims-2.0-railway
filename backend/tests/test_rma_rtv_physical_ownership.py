@@ -4,8 +4,12 @@ RMA-F01: a stock-backed vendor RMA (a line for a product this shop holds
 pieces of) could be raised, dispatched, credited and closed while its pieces
 stayed AVAILABLE (sellable). The RMA now goes back only on the pieces of the
 vendor return it links (return_id): that return moves them (QUARANTINED ->
-RTV, once), the RMA never moves a piece. A line for something IMS holds no
-piece of (a customer's own frame on warranty) is unchanged.
+RTV, once), the RMA never moves a piece. Codex 11-06: "holds" means the shop
+still owns the piece, sellable or not (a reserved one is refused, never moved);
+a return and its RMA have one financial owner for the same pieces; and each
+line says whose piece it is (owner ruling 2026-11-06: customer_owned plus a
+customer or order reference, no shop stock touched). An unticked line the shop
+holds no piece of is unchanged.
 
 RTV-F01: a cancel whose piece could not be put back left it QUARANTINED with
 its link cleared, and a retry was a 400. The piece now stays linked to the
@@ -13,6 +17,8 @@ cancelled return, the cancel says so, and Cancel again finishes it -- or says
 it already did. Real routes, one mongomock database.
 """
 from collections import Counter
+from datetime import datetime
+from uuid import uuid4
 
 import pytest
 
@@ -24,7 +30,10 @@ from tests.test_vendor_return_pieces import (  # noqa: F401
 from rma_credit_fixtures import credit_payload
 from api.routers import vendor_rma as rma_router
 from api.routers import vendor_returns as vr
+from api.routers.purchase_recon import _pending_return_credit_notes
 from api.services import item_events as ie
+from api.services import rma_supplier_credit as rma_credit
+from api.services.supplier_credit_reads import confirmed_ap_rows
 from api.services.vendor_rma import VendorRMAEngine
 
 OFF_INVENTORY = "P-CUSTOMER-OWN"
@@ -273,3 +282,82 @@ def test_a_normal_cancel_and_its_retry_put_each_piece_back_once(rw):
     assert again.status_code == 200, again.text
     assert state(rw, "U1")["status"] == "AVAILABLE" and state(rw, "U1")["rtv_vendor_id"] is None
     assert [e[0] for e in events(rw, "U1")] == ["quarantine.in", "quarantine.out"]
+
+
+# --------------------------------------------------------------------------
+# Codex 11-06, P1: stock the shop still owns, whether or not it is sellable
+# --------------------------------------------------------------------------
+
+def old_rma(w, product=FRAME, name="Acme Aviator 5420", qty=2, **extra):
+    """An RMA that never met the raise rule (engine direct): a live historical row."""
+    eng = VendorRMAEngine(w["db"])
+    rma_id = eng.raise_rma(vendor_id=DEALER, vendor_name="Bank More", store_id=STORE, created_by="old",
+                           lines=[{"product_id": product, "product_name": name, "quantity": qty,
+                                   "reason": "DEFECTIVE", "unit_cost": 500}], **extra)["rma_id"]
+    eng.authorize(rma_id, vendor_rma_number="VR-1", actor="old")
+    return eng, rma_id
+
+
+@pytest.mark.parametrize("held", ["RESERVED", "reserved ", "DAMAGED", "UNDER_AUDIT", "BLIND_COUNT"])
+def test_a_rma_for_pieces_the_shop_still_owns_is_refused_however_they_are_held(rw, held):
+    unit(rw, "U1", status=held)
+    unit(rw, "U2", status=held)
+    refused = raise_rma(rw, grn_id="GRN-1")
+    assert refused.status_code == 422, refused.text
+    assert rw["db"].vendor_rmas.count_documents({}) == 0
+    assert statuses(rw) == Counter({held: 2})
+    assert events(rw, "U1") == [] and posted(rw) == (0, 0)
+
+
+def test_the_refusal_of_a_reserved_piece_says_release_it_first(rw):
+    unit(rw, "U1", status="RESERVED")
+    refused = raise_rma(rw, qty=1)
+    assert refused.status_code == 422
+    assert "reserved for an order" in refused.json()["detail"]
+
+
+@pytest.mark.parametrize("door", ["dispatch", "credit-note", "close"])
+def test_an_old_rma_over_reserved_pieces_cannot_pass_a_later_door(rw, door):
+    unit(rw, "U1", status="RESERVED")
+    unit(rw, "U2", status="RESERVED")
+    eng, rma_id = old_rma(rw)
+    http = rw["as_"]
+    if door == "dispatch":
+        res = http(MANAGER).post(f"/vendor-rma/{rma_id}/dispatch", json={"carrier": "DTDC", "awb": "AWB1"})
+    else:
+        eng.dispatch(rma_id, carrier="DTDC", awb="AWB1", dispatch_date=None, actor="old")
+        note = credit_payload(rw["db"], rma_id, amount=1000.0)
+        if door == "close":
+            eng.record_credit_note(rma_id, credit_note_number="OLD-CN", received_amount=1000, actor="old")
+            res = http(MANAGER).post(f"/vendor-rma/{rma_id}/close", json={})
+        else:
+            res = http(ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=note)
+    assert res.status_code == 409, res.text
+    assert posted(rw) == (0, 0)
+    assert statuses(rw) == Counter({"RESERVED": 2}) and events(rw, "U1") == []
+
+
+def test_a_typed_vendor_return_line_cannot_skip_reserved_pieces_either(w):
+    unit(w, "U1", status="RESERVED")
+    typed = create(w, line(), notes="Typed, no piece named")
+    assert typed.status_code == 422, typed.text
+    assert "reserved for an order" in typed.json()["detail"]
+    assert w["db"].vendor_returns.count_documents({"status": "created"}) == 0
+    assert state(w, "U1")["status"] == "RESERVED"
+
+
+def test_once_released_the_same_pieces_go_back_and_reconcile_end_to_end(rw):
+    unit(rw, "U1", status="RESERVED")
+    unit(rw, "U2", status="RESERVED")
+    assert raise_rma(rw).status_code == 422
+    rw["db"].stock_units.update_many({"product_id": FRAME}, {"$set": {"status": "AVAILABLE"}})
+    rid = create(rw, line(qty=2, stock_ids=["U1", "U2"])).json()["return_id"]
+    assert move(rw, rid, "approved").status_code == 200
+    assert move(rw, rid, "shipped").status_code == 200
+    made = raise_rma(rw, return_id=rid)
+    assert made.status_code == 201, made.text
+    codes, _ = walk(rw, made.json()["rma_id"])
+    assert codes == [200, 200, 200, 200, 200]
+    assert statuses(rw) == Counter({"RTV": 2}) and posted(rw) == (1, 100000)
+    for sid in ("U1", "U2"):
+        assert [e[0] for e in events(rw, sid)] == ["quarantine.in", "quarantine.out"]
