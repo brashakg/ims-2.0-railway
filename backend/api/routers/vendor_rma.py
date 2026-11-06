@@ -261,9 +261,10 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
     ``shipped`` (dispatch, credit, close) asks that they have left; at raise
     they may still be set aside for it. Nor may an unticked, unlinked line claim
     what is accounted for elsewhere (_rtv._accounted_for): pieces this supplier's
-    return already carried back, or this shop's purchase now at a sister shop.
-    An unticked line with neither (a historical line, a made-to-order lens, a
-    piece sold on) keeps today's outcome.
+    return already carried back, this shop's purchase now at a sister shop, or
+    a product whose every piece is sold (owner ruling 2026-11-06). An unticked
+    line with none of these (a historical line, a made-to-order lens) keeps
+    today's outcome.
 
     The return must still be owed a credit this RMA can take: not one settled
     by replacement goods, and not one already holding a supplier note of its
@@ -321,9 +322,7 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
                     "customer_owned with its customer_id or order_id.")
         where = None if closing else _rtv._accounted_for(db, item, doc.get("store_id"), doc.get("vendor_id"))
         if where:
-            return (f"{line.get('product_name')}: the pieces this shop bought {where}. They go back "
-                    "from that shop, on a vendor return the RMA links by return_id; a customer's "
-                    "own piece is sent as customer_owned with its customer_id or order_id.")
+            return where
     if wanted != pieces:
         return f"Vendor return {rid}'s pieces are not this RMA's products and quantities."
     return None

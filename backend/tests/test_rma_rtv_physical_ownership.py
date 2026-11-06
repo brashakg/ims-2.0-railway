@@ -639,11 +639,16 @@ def test_a_sister_shops_own_purchase_is_not_this_shops_concern(rw):
     assert raise_rma(rw, qty=1).status_code == 201
 
 
-def test_pieces_all_sold_stay_todays_outcome(rw):
-    """Gone to customers: nothing shows where a line naming no piece is wrong."""
+def test_every_piece_sold_needs_the_tick_or_a_real_piece(rw):
+    """Owner ruling 2026-11-06: bought piece by piece and every one sold, an
+    unticked line takes no supplier credit: nothing the shop holds is going back."""
     bought(rw, "U1", "U2", qty=2)
     sold_rest(rw, "U1", "U2")
-    assert raise_rma(rw, grn_id="G-OWN").status_code == 201
+    refused = raise_rma(rw, grn_id="G-OWN")
+    assert refused.status_code == 422, refused.text
+    assert "been sold" in refused.json()["detail"] and "customer-owned" in refused.json()["detail"]
+    assert rw["db"].vendor_rmas.count_documents({}) == 0
+    assert statuses(rw) == Counter({"SOLD": 2}) and posted(rw) == (0, 0)
 
 
 def test_a_return_with_its_own_credit_cannot_gain_an_rma(rw):
@@ -1238,3 +1243,117 @@ def test_a_write_off_close_cannot_strand_a_second_note(rw, monkeypatch):
     assert done.status_code == 200, done.text
     assert rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 200
     assert posted(rw) == (2, 100000) and credited(rw) == 100000
+
+
+# --------------------------------------------------------------------------
+# Owner ruling 2026-11-06: every piece sold, an unticked line takes no credit
+# --------------------------------------------------------------------------
+
+def test_an_old_unticked_rma_cannot_dispatch_or_take_credit_once_every_piece_is_sold(rw):
+    bought(rw, "U1", "U2", qty=2)
+    sold_rest(rw, "U1", "U2")
+    _, waiting = old_rma(rw, grn_id="G-OWN")
+    res = rw["as_"](MANAGER).post(f"/vendor-rma/{waiting}/dispatch", json={"carrier": "D", "awb": "A"})
+    assert res.status_code == 409 and "been sold" in res.text
+    _, rma_id = _dispatched_old_rma(rw, grn_id="G-OWN")
+    note = {"credit_note_number": "CN-1", "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+            "received_amount": 1000, "source_selections": [], "allocations": []}
+    res = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=note)
+    assert res.status_code == 409 and "been sold" in res.text
+    assert posted(rw) == (0, 0) and credited(rw) == 0
+    assert rw["db"].supplier_credit_note_identities.count_documents({}) == 0
+
+
+def test_a_credit_posted_before_the_ruling_stays_replays_and_closes(rw, monkeypatch):
+    bought(rw, "U1", "U2", qty=2)
+    _, rma_id = _dispatched_old_rma(rw, grn_id="G-OWN")
+    with monkeypatch.context() as patched:
+        patched.setattr(rma_router, "_physical_return_problem", lambda *a, **k: None)
+        body, res = rma_note(rw, rma_id, 1000, "CN-OLD")
+    assert res.status_code == 200, res.text
+    sold_rest(rw, "U1", "U2")
+    stored = rw["db"].supplier_credit_confirmations.find_one({"_id": body["idempotency_key"]})
+    again = rw["as_"](ACCOUNTANT).post(f"/vendor-rma/{rma_id}/credit-note", json=body)
+    assert again.status_code == 200 and again.json()["idempotent"] is True
+    assert rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 200
+    assert rw["db"].supplier_credit_confirmations.find_one({"_id": body["idempotency_key"]}) == stored
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_a_typed_return_line_takes_no_credit_on_sold_pieces_either(rw):
+    bought(rw, "U1", "U2", qty=2)
+    sold_rest(rw, "U1", "U2")
+    refused = create(rw, line(qty=2), notes="Warranty frame, no barcode")
+    assert refused.status_code == 422, refused.text
+    assert "been sold" in refused.json()["detail"] and "customer-owned" in refused.json()["detail"]
+
+
+def typed_return(w):
+    """A typed return of a product no piece of is held yet, walked to the supplier."""
+    made = create(w, line(qty=2), notes="Typed before the pieces were sold")
+    assert made.status_code in (200, 201), made.text
+    rid = made.json()["return_id"]
+    for step in ("approved", "shipped", "received_by_vendor"):
+        assert move(w, rid, step).status_code == 200, step
+    w["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
+    return rid
+
+
+def test_a_typed_return_from_before_the_ruling_cannot_take_new_credit_on_sold_pieces(rw):
+    bought(rw, qty=2)
+    rid = typed_return(rw)
+    unit(rw, "U1", status="SOLD", grn_id="G-OWN", source_type="GRN", source_id="G-OWN")
+    unit(rw, "U2", status="SOLD", grn_id="G-OWN", source_type="GRN", source_id="G-OWN")
+    _, res = rtv_note_open(rw, rid, 1000, "CN-TYPED")
+    assert res.status_code == 409 and "been sold" in res.text
+    # Refused before the door: the supplier's note number stays free.
+    assert rw["db"].supplier_credit_note_identities.count_documents({}) == 0
+    assert posted(rw) == (0, 0) and credited(rw) == 0
+
+
+def test_a_typed_return_whose_credit_posted_first_still_replays(rw):
+    bought(rw, qty=2)
+    rid = typed_return(rw)
+    body, res = rtv_note(rw, rid, 1000, "CN-TYPED")
+    assert res.status_code == 200, res.text
+    unit(rw, "U1", status="SOLD", grn_id="G-OWN", source_type="GRN", source_id="G-OWN")
+    again = rw["as_"](ACCOUNTANT).post(f"/vendor-returns/{rid}/credit-confirmations", json=body)
+    assert again.status_code == 200 and again.json()["idempotent"] is True
+    assert posted(rw) == (1, 100000)
+
+
+def test_a_product_never_tracked_piece_by_piece_keeps_its_credit(rw):
+    """Off-inventory and made-to-order: no piece was ever minted, unticked works."""
+    made = raise_rma(rw, product=OFF_INVENTORY)
+    assert made.status_code == 201, made.text
+    codes, _ = walk(rw, made.json()["rma_id"])
+    assert codes == [200, 200, 200, 200, 200] and posted(rw) == (1, 100000)
+    typed = create(rw, line(qty=1, product=OFF_INVENTORY, name="Customer's own frame"), notes="Made to order")
+    assert typed.status_code in (200, 201), typed.text
+
+
+def test_the_ticked_route_credits_a_sold_piece_and_touches_no_stock(rw):
+    rw["db"].customers.insert_one({"customer_id": CUSTOMER, "store_id": STORE, "name": "A Customer"})
+    bought(rw, "U1", "U2", qty=2)
+    sold_rest(rw, "U1", "U2")
+    made = raise_lines(rw, own_line(customer_id=CUSTOMER, quantity=2), grn_id="G-OWN")
+    assert made.status_code == 201, made.text
+    rma_id = made.json()["rma_id"]
+    http = rw["as_"]
+    assert http(MANAGER).post(f"/vendor-rma/{rma_id}/authorize", json={"vendor_rma_number": "VR-1"}).status_code == 200
+    assert http(ACCOUNTANT).put(f"/vendor-rma/{rma_id}/prices", json={"unit_costs": [500]}).status_code == 200
+    assert http(MANAGER).post(f"/vendor-rma/{rma_id}/dispatch", json={"carrier": "D", "awb": "A"}).status_code == 200
+    _, res = rma_note(rw, rma_id, 1000, "CN-OWN")
+    assert res.status_code == 200, res.text
+    assert http(MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 200
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+    assert statuses(rw) == Counter({"SOLD": 2}) and events(rw, "U1") == []
+
+
+def test_a_piece_left_that_is_not_sold_keeps_todays_outcome(rw):
+    """Every piece means every piece: one released to RTV on the Quarantine
+    screen has no other credit door, so the line still answers for it."""
+    bought(rw, "U1", "U2", qty=2)
+    sold_rest(rw, "U1")
+    rw["db"].stock_units.update_one({"stock_id": "U2"}, {"$set": {"status": "RTV"}})
+    assert raise_rma(rw, qty=1, grn_id="G-OWN").status_code == 201

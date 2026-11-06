@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import re
+from types import SimpleNamespace
 import uuid
 from .auth import require_roles
 from ..dependencies import (
@@ -315,14 +316,17 @@ def _held_match() -> Dict:
 
 
 def _accounted_for(db, item, store_id, vendor_id) -> Optional[str]:
-    """Where a typed line's goods already are, in words; None when nothing says
-    so. Its pieces are this shop's, and those it bought from this supplier
-    wherever they are now (a transfer keeps the origin receipt). One that left
-    on this supplier's return is that return's to credit, whatever it has taken
-    so far, and one held at a sister shop goes back from there: a line naming
-    no piece claims neither (L2-RMA-F01). A piece released to RTV on the
-    Quarantine screen is on no return, has no other credit door, and is not
-    counted; nor is a sold one."""
+    """Why a line naming no piece cannot take a supplier credit, in words; None
+    when nothing says so. Its pieces are this shop's, and those it bought from
+    this supplier wherever they are now (a transfer keeps the origin receipt).
+    One that left on this supplier's return is that return's to credit, whatever
+    it has taken so far, and one held at a sister shop goes back from there: a
+    line naming no piece claims neither (L2-RMA-F01). When every piece has been
+    sold nothing the shop holds is going back (owner ruling 2026-11-06), so the
+    line is ticked customer-owned or a real piece goes back. A product with no
+    piece at all (off-inventory, made-to-order) is not this rule's. A piece
+    released to RTV on the Quarantine screen is on no return, has no other
+    credit door, and leaves the line standing."""
     pids = _line_product_ids(db, item)
     bought = [g.get("grn_id") for g in db.get_collection("grns").find(
         {"store_id": store_id, "vendor_id": vendor_id, "items.product_id": {"$in": pids}})]
@@ -332,11 +336,24 @@ def _accounted_for(db, item, store_id, vendor_id) -> Optional[str]:
     links = [u.get("rtv_vendor_id") for u in stock.find({**ours, **_ie.status_match(_STATE.RTV)})]
     ret = db.get_collection("vendor_returns").find_one(
         {"return_id": {"$in": [link for link in links if link]}, "vendor_id": vendor_id})
+    tail = ("They go back, and are credited, there, on a vendor return an RMA links by "
+            "return_id; a customer's own piece is raised as customer_owned with its "
+            "customer_id or order_id.")
     if ret:
-        return (f"already went back to this supplier on vendor return {ret.get('return_id')} "
-                f"from {_shop_name(db, ret.get('store_id'))}")
+        return (f"{item.product_name}: the pieces this shop bought already went back to this "
+                f"supplier on vendor return {ret.get('return_id')} from "
+                f"{_shop_name(db, ret.get('store_id'))}. {tail}")
     away = stock.find_one({"$and": [ours, {"store_id": {"$ne": store_id}}, _held_match()]})
-    return f"are now held at {_shop_name(db, away.get('store_id'))}" if away else None
+    if away:
+        return (f"{item.product_name}: the pieces this shop bought are now held at "
+                f"{_shop_name(db, away.get('store_id'))}. {tail}")
+    pieces = [u.get("status") for u in stock.find(ours)]
+    if pieces and all(_ie.canonical_state(s) is _STATE.SOLD for s in pieces):
+        return (f"{item.product_name}: every piece this shop bought has been sold, so this line "
+                "cannot take a supplier credit. If a customer's piece is going back, raise it on "
+                "an RMA with customer-owned ticked and the customer or order named; otherwise "
+                "send back a real piece on a vendor return.")
+    return None
 
 
 def _typed_line_problem(db, item, store_id) -> Optional[str]:
@@ -420,8 +437,7 @@ def _pieces_for_lines(db, data: "VendorReturnCreate", user):
                 _refuse(why)
             where = _accounted_for(db, item, data.store_id, data.vendor_id)
             if where:
-                _refuse(f"{item.product_name}: the pieces this shop bought {where}. They go back, "
-                        "and are credited, there: a line naming no piece cannot claim them.")
+                _refuse(where)
             typed = True
         lines.append(pieces)
     if typed and not (data.notes or "").strip():
@@ -1355,6 +1371,23 @@ async def price_vendor_return(
     return {"message": "Return prices set", "return": mask_vendor_return(updated, current_user)}
 
 
+def _typed_credit_problem(db, return_doc, confirmation_id) -> Optional[str]:
+    """Why a line of this return naming no piece cannot take a new credit
+    (_accounted_for, as on an RMA); None when it can. A POSTED note's replay
+    always answers: what is already credited stays as it is."""
+    event = db.get_collection("supplier_credit_confirmations").find_one({"_id": confirmation_id})
+    if event and event.get("posting_status") == "POSTED":
+        return None
+    moved = {u.get("product_id") for u in _named_units(db, return_doc).values()}
+    for line in return_doc.get("items") or []:
+        if line.get("product_id") not in moved:
+            item = SimpleNamespace(product_id=line.get("product_id"), product_name=line.get("product_name"))
+            problem = _accounted_for(db, item, return_doc.get("store_id"), return_doc.get("vendor_id"))
+            if problem:
+                return problem
+    return None
+
+
 def _credit_scope(current_user):
     cross_shop, shops = user_store_scope(current_user)
     return None if cross_shop else shops
@@ -1398,6 +1431,9 @@ async def confirm_supplier_credit(
     if db is None:
         raise HTTPException(503, "Database not available")
     return_doc = _return_in_reach(db.get_collection("vendor_returns"), return_id, current_user)
+    problem = _typed_credit_problem(db, return_doc, str(body.idempotency_key))
+    if problem:
+        raise HTTPException(409, problem)
     try:
         event, repeated = record_supplier_confirmation(
             db, return_doc, body.model_dump(mode="json"), actor_id=current_user.get("user_id"),
