@@ -2029,26 +2029,21 @@ async def list_whatsapp_conversations(
     Role-gated: requires a valid IMS JWT with SUPERADMIN, ADMIN, or STORE_MANAGER.
     Read-only v1 -- no reply composition in this endpoint.
     """
-    # Role gate -- inline check (mirrors the pattern in other routers).
-    try:
-        from .auth import get_current_user as _get_user
-        from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+    # Role gate on the SHARED session check (L1-F25: a hand-rolled decode here
+    # skipped logout revocation, purpose tickets and live-authority).
+    from fastapi.security import HTTPAuthorizationCredentials
+    from .auth import get_current_user as _get_user
 
-        auth_header = request.headers.get("Authorization") or ""
-        if not auth_header.startswith("Bearer "):
-            raise HTTPException(status_code=401, detail="not authenticated")
-        token = auth_header.split(" ", 1)[1]
-        from .auth import decode_token as _decode
-        payload = _decode(token)
-        roles = payload.get("roles") or []
-        allowed = {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}
-        if not any(r in allowed for r in roles):
-            raise HTTPException(status_code=403, detail="forbidden")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.debug("[WA_INBOUND] auth check failed: %s", e)
+    auth_header = request.headers.get("Authorization") or ""
+    if not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="not authenticated")
+    payload = await _get_user(
+        HTTPAuthorizationCredentials(scheme="Bearer", credentials=auth_header.split(" ", 1)[1]),
+        request,
+    )
+    allowed = {"SUPERADMIN", "ADMIN", "STORE_MANAGER"}
+    if not any(r in allowed for r in payload.get("roles") or []):
+        raise HTTPException(status_code=403, detail="forbidden")
 
     coll = _get_wa_conversations_collection()
     if coll is None:

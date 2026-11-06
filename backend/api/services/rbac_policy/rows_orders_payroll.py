@@ -23,9 +23,13 @@ ROWS: List[Dict[str, object]] = [
     {
         "method": "POST",
         "path": "/api/v1/orders",
+        # Mirrors orders/_shared.SALE_ROLES (CASHIER rings the sale it is
+        # paying; Codex L2-POS-F01). CASHIER is already in orders:write via
+        # the payments row, so no capability grant-union widens.
         "allowed": [
             "ADMIN",
             "AREA_MANAGER",
+            "CASHIER",
             "SALES_CASHIER",
             "SALES_STAFF",
             "STORE_MANAGER",
@@ -40,6 +44,7 @@ ROWS: List[Dict[str, object]] = [
         "allowed": [
             "ADMIN",
             "AREA_MANAGER",
+            "CASHIER",
             "SALES_CASHIER",
             "SALES_STAFF",
             "STORE_MANAGER",

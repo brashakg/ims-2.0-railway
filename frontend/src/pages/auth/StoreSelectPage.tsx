@@ -153,6 +153,12 @@ export function StoreSelectPage() {
   // makes the StrictMode double-invoke (and unmounts) safe.
   useEffect(() => {
     if (!user) return;
+    // A temporary password is replaced first (the app shell shows that
+    // screen); the server refuses a shop switch until then.
+    if (user.mustChangePassword) {
+      navigate(from, { replace: true });
+      return;
+    }
 
     const proceed = (storeId?: string) => {
       if (storeId && storeId !== user.activeStoreId) {
