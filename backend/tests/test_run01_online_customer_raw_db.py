@@ -222,3 +222,155 @@ def test_online_orders_list_carries_the_link_failed_flag():
     from api.routers import online_store_orders as oso
 
     assert oso._LIST_PROJECTION.get("customer_link_failed") == 1
+
+
+# --- PR #1388 Codex P2: the customer-link state must not depend on a follow-up
+# write. These read the STORED order, never just the returned customer id.
+
+
+class _DropWrites:
+    """orders.update_one on the customer-link fields fails `times` times; a
+    lost acknowledgement (`applied`) still lands the write, then raises."""
+
+    def __init__(self, monkeypatch, db, times=1, applied=False):
+        self.left, self.hits = times, 0
+        coll = db["orders"]
+        real = coll.update_one
+
+        def update_one(query, update, *a, **k):
+            if "customer_link_failed" in update.get("$set", {}) and self.left:
+                self.left -= 1
+                self.hits += 1
+                if applied:
+                    real(query, update, *a, **k)
+                raise pymongo.errors.AutoReconnect("synthetic lost link write")
+            return real(query, update, *a, **k)
+
+        monkeypatch.setattr(coll, "update_one", update_one)
+
+
+def _broken_repo(monkeypatch):
+    """The customer door down until the returned switch is flipped."""
+    broken = {"on": True}
+    real_get_repo = cs._get_repo
+    monkeypatch.setattr(
+        cs, "_get_repo", lambda db=None: None if broken["on"] else real_get_repo(db)
+    )
+    return broken
+
+
+def _books(db):
+    """Everything a retry must leave alone."""
+    orders = sorted(
+        (o["order_id"], o.get("invoice_number"), o["grand_total"], o["amount_paid"],
+         o["balance_due"])
+        for o in db["orders"].find({})
+    )
+    return orders, sorted(map(str, db["counters"].find({}))), db["stock_units"].count_documents({})
+
+
+def test_unresolved_buyer_survives_a_lost_follow_up_write_and_replay_repairs_the_row(
+    raw_db, monkeypatch
+):
+    """Codex stamp_unresolved_retest: resolution failed AND the follow-up write
+    failed. The row must still say so, and the retry must repair the ROW."""
+    broken = _broken_repo(monkeypatch)
+    _DropWrites(monkeypatch, raw_db)
+    res = _map(raw_db, 50101)
+    assert res["status"] == "created" and res["customer_link_failed"] is True
+    order = raw_db["orders"].find_one({"shopify_order_id": "50101"})
+    assert order["customer_id"] is None, "no raw Shopify id left on a failed link"
+    assert order["is_guest_order"] is True
+    assert order["customer_link_failed"] is True
+    books = _books(raw_db)
+
+    broken["on"] = False
+    replay = _map(raw_db, 50101)
+    if replay.get("sync_failed"):  # the fault landed on the repair: retried
+        replay = _map(raw_db, 50101)
+    assert replay["status"] in ("duplicate", "replayed")
+    order = raw_db["orders"].find_one({"shopify_order_id": "50101"})
+    assert order["customer_id"] and order["customer_id"] == replay["customer_id"]
+    assert raw_db["customers"].find_one({"customer_id": order["customer_id"]})
+    assert order["is_guest_order"] is False
+    assert order["customer_link_failed"] is False
+    assert _books(raw_db) == books, "a retry books nothing: order, invoice, unit, counter"
+
+
+def test_resolved_buyer_is_on_the_row_even_if_a_follow_up_write_is_lost(raw_db, monkeypatch):
+    _DropWrites(monkeypatch, raw_db)
+    res = _map(raw_db, 50102)
+    order = raw_db["orders"].find_one({"shopify_order_id": "50102"})
+    assert res["customer_id"] and order["customer_id"] == res["customer_id"]
+    assert order["is_guest_order"] is False
+    assert order["customer_link_failed"] is False
+
+
+def test_genuine_guest_is_on_the_row_even_if_a_follow_up_write_is_lost(raw_db, monkeypatch):
+    _DropWrites(monkeypatch, raw_db)
+    _map(raw_db, 50103, phone=None, email=None)
+    order = raw_db["orders"].find_one({"shopify_order_id": "50103"})
+    assert order["customer_id"] is None
+    assert order["is_guest_order"] is True
+    assert order["customer_link_failed"] is False
+
+
+def test_failed_repair_is_not_advertised_and_stays_retryable(raw_db, monkeypatch):
+    broken = _broken_repo(monkeypatch)
+    _map(raw_db, 50104)
+    broken["on"] = False
+    fault = _DropWrites(monkeypatch, raw_db)
+    replay = _map(raw_db, 50104)
+    assert fault.hits == 1
+    assert replay["customer_id"] is None, "the row is not linked: do not claim it"
+    assert replay["customer_link_failed"] is True
+    assert replay["sync_failed"], "the inbox must retry this delivery"
+    assert not replay.get("customer_link_repaired")
+    assert raw_db["orders"].find_one({"shopify_order_id": "50104"})["customer_link_failed"] is True
+
+    again = _map(raw_db, 50104)
+    order = raw_db["orders"].find_one({"shopify_order_id": "50104"})
+    assert again["customer_link_repaired"] is True and not again.get("sync_failed")
+    assert order["customer_id"] == again["customer_id"] and order["customer_id"]
+    assert raw_db["customers"].count_documents({"mobile": PHONE}) == 1
+
+
+def test_lost_acknowledgement_of_the_repair_reports_the_stored_link(raw_db, monkeypatch):
+    broken = _broken_repo(monkeypatch)
+    _map(raw_db, 50105)
+    broken["on"] = False
+    _DropWrites(monkeypatch, raw_db, applied=True)
+    replay = _map(raw_db, 50105)
+    order = raw_db["orders"].find_one({"shopify_order_id": "50105"})
+    assert order["customer_id"] and order["customer_link_failed"] is False
+    assert replay["customer_id"] == order["customer_id"]
+    assert not replay.get("customer_link_failed")
+
+
+def test_replay_never_backfills_an_unflagged_old_order_and_says_so(raw_db):
+    """A legacy guest has no flag: left exactly as stored, and the answer is
+    what the row holds, not the buyer the replay happened to resolve."""
+    _map(raw_db, 50106)
+    raw_db["orders"].update_one(
+        {"shopify_order_id": "50106"},
+        {"$set": {"customer_id": None}, "$unset": {"is_guest_order": 1, "customer_link_failed": 1}},
+    )
+    before = raw_db["orders"].find_one({"shopify_order_id": "50106"})
+    replay = _map(raw_db, 50106)
+    after = raw_db["orders"].find_one({"shopify_order_id": "50106"})
+    assert (after["customer_id"], "is_guest_order" in after, "customer_link_failed" in after) == (
+        None, False, False,
+    )
+    assert after["invoice_number"] == before["invoice_number"]
+    assert replay["customer_id"] is None
+    assert not replay.get("customer_link_failed")
+
+
+def test_replay_while_the_door_is_down_keeps_a_linked_row_linked(raw_db, monkeypatch):
+    first = _map(raw_db, 50107)
+    _broken_repo(monkeypatch)
+    replay = _map(raw_db, 50107)
+    assert replay["customer_id"] == first["customer_id"]
+    assert not replay.get("customer_link_failed")
+    order = raw_db["orders"].find_one({"shopify_order_id": "50107"})
+    assert order["customer_id"] == first["customer_id"]

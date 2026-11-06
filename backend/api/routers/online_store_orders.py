@@ -674,6 +674,12 @@ async def remap_online_order(
         result = {**result, "nothing_done": True, "message": (
             "This order's booking has not finished claiming its stock yet (it may "
             "still be running). Press Re-map again in a few minutes.")}
+    elif (result or {}).get("customer_link_repaired"):
+        result = {**result, "message": "Re-map linked this order to its customer."}
+    elif booked and (result or {}).get("customer_link_failed"):
+        result = {**result, "nothing_done": True, "message": (
+            "This order is in the books but still has no customer linked. "
+            "Press Re-map again in a few minutes.")}
     elif (
         booked
         and str((result or {}).get("status")) in ("duplicate", "replayed")

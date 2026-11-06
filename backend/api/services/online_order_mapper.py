@@ -1139,59 +1139,77 @@ def _sync_existing_order_status(
         return failed(f"status sync write failed: {exc}")
 
 
+def _customer_link_fields(
+    customer_id: Optional[str], *, link_failed: bool = False
+) -> Dict[str, Any]:
+    """The order's customer linkage for what the mapper resolved (ingest doesn't
+    know the IMS customer; left alone it copies the raw Shopify ``customer.id``).
+
+      * customer_id resolved -> the canonical IMS ``customer_id`` so CRM / loyalty
+        / AR see the same buyer.
+      * customer_id is None (a GUEST: no usable phone AND no email, so NO IMS
+        customer was minted) -> NULL ``customer_id`` (never a dangling non-IMS
+        reference) and mark the order a guest. The buyer's name/phone remain on
+        the order's ``customer_name`` / ``customer_phone`` snapshot, so the sale
+        is fully recorded against an unidentified buyer, not a phantom record.
+
+    ``link_failed`` (RUN-01): the buyer HAD a usable phone but no customer could
+    be resolved -- ``customer_link_failed`` makes it visible, never a silent
+    guest, and marks it for the replay repair."""
+    if customer_id:
+        return {
+            "customer_id": customer_id,
+            "is_guest_order": False,
+            "customer_link_failed": False,
+        }
+    return {
+        "customer_id": None,
+        "is_guest_order": True,
+        "customer_link_failed": bool(link_failed),
+    }
+
+
 def _stamp_order_customer(
     db,
     shopify_order_id: str,
     customer_id: Optional[str],
     *,
-    link_failed: bool = False,
     only_if_link_failed: bool = False,
-) -> None:
-    """Best-effort: reconcile the freshly created order doc's customer linkage with
-    the customer the MAPPER actually resolved (ingest doesn't know about the matched
-    IMS customer -- it copies the raw Shopify ``customer.id`` onto the order).
+) -> Optional[int]:
+    """Write the linkage onto an order that already exists: the replay repair
+    (``only_if_link_failed`` touches ONLY an order the flag marked, never a
+    genuine guest, an already-linked order or an unflagged historical one) and
+    the back-catalogue import. A live create needs neither: ingest inserts the
+    linkage WITH the order, so no lost write can orphan it.
 
-    Two cases (unification step-4 -- phantom-profile fix):
-      * customer_id resolved -> stamp the canonical IMS ``customer_id`` so CRM /
-        loyalty / AR see the same buyer.
-      * customer_id is None (a GUEST: no usable phone AND no email, so NO IMS
-        customer was minted) -> NULL the order's ``customer_id`` (it currently holds
-        the raw Shopify id, a dangling non-IMS reference) and mark the order as a
-        guest. The buyer's name/phone remain on the order's ``customer_name`` /
-        ``customer_phone`` snapshot, so the sale is fully recorded against an
-        unidentified buyer instead of a phantom customer record.
-
-    ``link_failed`` (RUN-01): the buyer HAD a usable phone but no customer could
-    be resolved -- stamped ``customer_link_failed`` so it is visible, never a
-    silent guest. ``only_if_link_failed`` is the replay repair: it touches ONLY an
-    order this flag marked, never a genuine guest or an already-linked order.
-
-    Fail-soft: any error is swallowed (the order itself is already created)."""
+    Returns the rows changed, or None if the write failed (its outcome is
+    unknown; the flag, if it is still there, is what a retry repairs)."""
     if db is None or not shopify_order_id:
-        return
+        return 0
     try:
         orders_coll = db.get_collection("orders")
         if orders_coll is None:
-            return
-        if customer_id:
-            update = {
-                "customer_id": customer_id,
-                "is_guest_order": False,
-                "customer_link_failed": False,
-            }
-        else:
-            # GUEST path: clear the phantom Shopify-id link, mark unidentified.
-            update = {
-                "customer_id": None,
-                "is_guest_order": True,
-                "customer_link_failed": bool(link_failed),
-            }
+            return 0
         query: Dict[str, Any] = {"shopify_order_id": shopify_order_id}
         if only_if_link_failed:
             query["customer_link_failed"] = True
-        orders_coll.update_one(query, {"$set": update})
+        res = orders_coll.update_one(query, {"$set": _customer_link_fields(customer_id)})
+        return getattr(res, "modified_count", 0)
     except Exception:  # noqa: BLE001
         logger.debug("[ONLINE_MAP] customer_id stamp failed", exc_info=True)
+        return None
+
+
+def _stored_customer_link(db, shopify_order_id: str) -> Optional[Dict[str, Any]]:
+    """What the booked order's row holds now (None: unreadable or no such row)."""
+    try:
+        return db.get_collection("orders").find_one(
+            {"shopify_order_id": shopify_order_id},
+            {"customer_id": 1, "customer_link_failed": 1},
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("[ONLINE_MAP] customer link read failed", exc_info=True)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1359,6 +1377,13 @@ def map_shopify_order(
         # id, which simply won't match -> the order is flagged for staff to verify.
         if customer_id:
             payload["_ims_customer_id"] = customer_id
+        # The linkage rides INTO the order insert (a live create): a follow-up
+        # write can fail after the order is booked, and an unflagged row could
+        # then never be told from a historical guest the replay must not touch.
+        if not historical:
+            payload["_ims_customer_link"] = _customer_link_fields(
+                customer_id, link_failed=link_failed
+            )
 
         # (4) delegate to the single, idempotent create path.
         # The shared ingest only creates on orders/create | orders/paid. When THIS
@@ -1381,15 +1406,11 @@ def map_shopify_order(
         result = result if isinstance(result, dict) else {"status": "error"}
         status = result.get("status")
 
-        # Reconcile the created order's customer linkage with what the mapper
-        # resolved. ALWAYS run on a create (not only when a customer matched): a
-        # GUEST (no phone + no email -> customer_id is None) must have the raw
-        # Shopify-id link cleared to NULL + be marked is_guest_order, so a buyer we
-        # can never dedup is recorded as an unidentified sale, NOT a phantom record.
         if status == "created":
-            _stamp_order_customer(
-                db, shopify_order_id, customer_id, link_failed=link_failed
-            )
+            # A HISTORICAL import books on the raw Shopify id (its refund credit
+            # notes read the order as inserted) and takes its linkage here.
+            if historical:
+                _stamp_order_customer(db, shopify_order_id, customer_id)
             # An order first seen through orders/cancelled | fulfilled |
             # updated (the create webhook was missed) gets its real status now,
             # on the drain as on the pull's catch-up: the body's ONE lifecycle
@@ -1413,9 +1434,22 @@ def map_shopify_order(
             if customer_id:
                 # Replay repair: an order booked while the link FAILED now
                 # resolves -> link it (touches only a customer_link_failed order).
-                _stamp_order_customer(
+                changed = _stamp_order_customer(
                     db, shopify_order_id, customer_id, only_if_link_failed=True
                 )
+                if changed is None:
+                    # Unlinked until proven otherwise; the drain retries it.
+                    verdict.setdefault("sync_failed", "customer link repair failed")
+                    customer_id, link_failed = None, True
+                elif changed:
+                    result["customer_link_repaired"] = True
+            # A replay answers with what the ROW holds, not the buyer this
+            # delivery happened to resolve: an unflagged historical guest stays
+            # one, and a repair that did not land is never claimed.
+            stored = _stored_customer_link(db, shopify_order_id)
+            if stored is not None:
+                customer_id = stored.get("customer_id")
+                link_failed = bool(stored.get("customer_link_failed"))
 
         result["customer_id"] = customer_id
         if link_failed:

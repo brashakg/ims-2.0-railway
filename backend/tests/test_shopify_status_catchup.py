@@ -1589,3 +1589,36 @@ def test_a_lost_second_edit_on_a_mismatched_order_still_reaches_the_cod_gate(swe
     with pytest.raises(HTTPException) as exc:
         cod_collectable(doc)
     assert exc.value.detail["code"] == "COD_ABOVE_SHOPIFY_TOTAL"
+
+
+def test_the_hourly_sweep_repairs_a_failed_customer_link_and_only_that(swept):
+    """PR #1388: a flagged order with no other fact moving is still fed to the
+    mapper's replay repair; once linked, or for a plain guest, the sweep stays
+    quiet (a historical guest is never backfilled)."""
+    doc = _book(swept, 30901)
+    customer_id = doc["customer_id"]
+    money = (doc["grand_total"], doc["amount_paid"], doc["balance_due"], doc["invoice_number"])
+    swept["orders"].update_one(
+        {"shopify_order_id": "30901"},
+        {"$set": {"customer_id": None, "is_guest_order": True, "customer_link_failed": True}},
+    )
+
+    swept["state"]["orders"] = [_pulled(30901)]
+    assert swept["run"]().payload["status_synced"] == ["30901"]
+    doc = _doc(swept, 30901)
+    assert (doc["customer_id"], doc["is_guest_order"], doc["customer_link_failed"]) == (
+        customer_id, False, False,
+    )
+    assert (doc["grand_total"], doc["amount_paid"], doc["balance_due"], doc["invoice_number"]) == money
+    assert swept["orders"].count_documents({"shopify_order_id": "30901"}) == 1
+
+    swept["seen"].clear()
+    assert swept["run"]().payload["status_synced"] == []
+    assert swept["seen"] == []
+
+    swept["orders"].update_one(
+        {"shopify_order_id": "30901"},
+        {"$set": {"customer_id": None, "is_guest_order": True}},
+    )
+    swept["run"]()
+    assert swept["seen"] == [] and _doc(swept, 30901)["customer_id"] is None
