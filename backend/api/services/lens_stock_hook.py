@@ -77,6 +77,11 @@ def _is_lens_item(order_item: Dict[str, Any]) -> bool:
     return False
 
 
+def takes_lens_cell(order_item: Dict[str, Any]) -> bool:
+    """Does this line reserve a lens cell? Exactly when the hooks below act on it."""
+    return _is_lens_item(order_item) and _extract_cell_key(order_item) is not None
+
+
 def _extract_cell_key(
     order_item: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
@@ -464,8 +469,12 @@ async def release_for_cancel(
     line_index: int,
     store_id: str,
     user: Dict[str, Any],
+    part: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Release the reserved cell back to AVAILABLE on order cancel.
+
+    `part`: a one-off token for a lowered quantity. This `order_item` carries the
+    pieces going back; the line's own release key stays unused for what it holds.
 
     Idempotent on (order_id, line_index, "release"). Fail-soft -- a 409
     here means the cell was already committed (workshop ran ahead of
@@ -483,6 +492,8 @@ async def release_for_cancel(
     qty = _qty_for(order_item)
     reserve_source_id = "{oid}#{idx}".format(oid=order_id, idx=line_index)
     release_source_id = "{oid}#{idx}#release".format(oid=order_id, idx=line_index)
+    if part:
+        release_source_id += "-" + part
 
     # If we already released, no-op.
     prior_rel = _already_acted(release_source_id, "release")

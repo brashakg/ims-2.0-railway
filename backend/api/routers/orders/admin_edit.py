@@ -13,10 +13,12 @@ from database.repositories.order_repository import (
     order_mint_problem,
     next_document_number,
 )
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from datetime import datetime
+from functools import partial
 from fastapi import Depends, HTTPException
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 from ..auth import get_current_user
 from ...dependencies import (
     get_order_repository,
@@ -46,6 +48,7 @@ from .stock import (
     _stock_class,
     _takes_serialized_stock,
 )
+from ...services.lens_stock_hook import _extract_cell_key, _is_lens_item, takes_lens_cell
 
 
 # ============================================================================
@@ -119,15 +122,35 @@ def _same_kind(line: dict, stored: dict) -> bool:
     )
 
 
+# What names a line's lens cell, and what else a correction keeps of the stored
+# line: the edit screen sends none of these back.
+_CELL_FIELDS = ("lens_line_id", "sph", "cyl", "add", "lens_options")
+_HELD_FIELDS = ("stock_id", "line_index", "axis", "lens_details", "prescription_id")
+
+
+def _same_product(line: dict, stored: dict) -> bool:
+    return (line.get("product_id") or "") == (stored.get("product_id") or "") and _same_kind(
+        line, stored
+    )
+
+
+def _same_cell(line: dict, stored: dict) -> bool:
+    """A lens line sent with no power still bills the stored cell; any power it
+    does send may name another."""
+    sent = {k: line[k] for k in _CELL_FIELDS if line.get(k) is not None}
+    return _extract_cell_key({**stored, **sent}) == _extract_cell_key(stored)
+
+
 def _same_goods(line: dict, stored: dict) -> bool:
     """Is this edited line still the stored line's physical goods? Same product,
-    same kind of stock, and not a different named unit. Anything else is a
-    replacement: the stored line's stock goes back, the new line takes its own."""
+    same kind of stock, not a different named unit, not a different lens cell.
+    Anything else is a replacement: the stored line's stock goes back, the new
+    line takes its own."""
     sid = line.get("stock_id")
     return (
-        (line.get("product_id") or "") == (stored.get("product_id") or "")
-        and _same_kind(line, stored)
+        _same_product(line, stored)
         and (not sid or sid == stored.get("stock_id"))
+        and _same_cell(line, stored)
     )
 
 
@@ -149,7 +172,7 @@ def _pair_with_stored(payloads: list, existing_items: list) -> Tuple[list, list]
         for p in payloads
     ]
     for at, payload in enumerate(payloads):
-        if paired[at] is None and _takes_serialized_stock(payload):
+        if paired[at] is None and (_takes_serialized_stock(payload) or _is_lens_item(payload)):
             paired[at] = take(lambda s, p=payload: _same_goods(p, s))
     return paired, unclaimed
 
@@ -167,10 +190,11 @@ def _rebuilt_items_or_existing(
     line keeps the approver the server stamped at sale.
 
     Returns (lines, added, removed): what the edit does to the shelf. ``added``
-    are the goods it newly bills (they meet _gate_added_lines and take units),
-    ``removed`` the goods it stops billing. A correction of an unchanged line is
-    in neither, keeps the unit it holds and answers to no stock or master rule
-    -- the bill may be corrected long after the product was archived."""
+    are the goods it newly bills (they meet _gate_added_lines and take units and
+    lens cells), ``removed`` the goods it stops billing. A correction of an
+    unchanged line is in neither, keeps the stock it holds and answers to no
+    stock or master rule -- the bill may be corrected long after the product was
+    archived. A lowered quantity's ``removed`` entry names its line in ``part_of``."""
     from ...services.order_superadmin_edit import rebuild_edited_line
     from ...services.discount_approval import who
 
@@ -197,11 +221,15 @@ def _rebuilt_items_or_existing(
         same = bool(stored) and _same_goods(payload, stored)
         carried = ["discount_reason", "discount_approved_by", "discount_approved_by_name"]
         if same:
-            carried += ["stock_id", "lens_line_id", "line_index"]
+            carried += _HELD_FIELDS
+        if stored and _same_product(payload, stored):
+            carried += _CELL_FIELDS  # a new power of this lens: the rest of its cell
         for _k in carried:
             if payload.get(_k) is None and stored.get(_k) is not None:
                 payload[_k] = stored.get(_k)
-        payload["item_id"] = stored.get("item_id")  # a new line gets a fresh one
+        # A replacement is a new line with a fresh id: its reservation key must
+        # never be the stored line's, which is about to carry a #release row.
+        payload["item_id"] = stored.get("item_id") if same else None
         line = rebuild_edited_line(payload)
         if editor is not None and _discount_changed(line, stored):
             # The admin changed what this line sells for: they answer for it.
@@ -215,10 +243,16 @@ def _rebuilt_items_or_existing(
                 removed.append(stored)
             continue
         extra = line["quantity"] - int(stored.get("quantity") or 1)
-        if extra > 0:  # the line keeps its unit; only the extra pieces are new
-            added.append({**line, "quantity": extra, "stock_id": None})
+        if extra > 0:
+            # The line keeps its unit; only the extra pieces are new, under their
+            # own lens key (the line's key already holds its reserve row). The
+            # line's release and commit run on its whole quantity, so they cover
+            # these too. ponytail: a line that never held a reservation (a soft
+            # failure at sale) or is already cut never releases them; the cell
+            # then reads low, never oversold, until the Power Grid is corrected.
+            added.append({**line, "quantity": extra, "stock_id": None, "item_id": str(uuid4())})
         elif extra < 0:
-            removed.append({**stored, "quantity": -extra, "stock_id": None})
+            removed.append({**stored, "quantity": -extra, "stock_id": None, "part_of": stored})
     if not rebuilt:
         raise HTTPException(
             status_code=400, detail="An edited order must keep at least one item."
@@ -230,9 +264,10 @@ def _gate_added_lines(added: List[dict], store_id: Optional[str]) -> None:
     """Goods an edit newly bills meet the till's rules (L2-STOCK-F01/F02, L1-F39):
     a named product (only a true service may be free text), a billable,
     unarchived master, the master's stock type, and units on this shop's shelf.
-    Read-only; _claim_units takes the units. The caps and floors are not
-    re-applied: price stays the admin's, this door's audited override. An edit
-    that adds nothing touches neither the product table nor the shelf."""
+    Read-only; _take_added_stock takes the units and the lens cells. The caps
+    and floors are not re-applied: price stays the admin's, this door's audited
+    override. An edit that adds nothing touches neither the product table nor
+    the shelf."""
     if not added:
         return
     product_repo = get_product_repository()
@@ -249,22 +284,70 @@ def _gate_added_lines(added: List[dict], store_id: Optional[str]) -> None:
     _assert_serialized_stock_available(added, store_id)
 
 
-@contextmanager
-def _units_back_unless_saved(order_id: str, claimed: dict, repo, field: str, value):
-    """The units this edit claimed go back if the save fails. `field` == `value`
-    on the stored order proves the write landed first, so they stay; an order
-    that cannot be read keeps them SOLD (_release_claimed_units fails closed)."""
+async def _give_stock_back(order: dict, claimed: dict, cells: List[dict], user: dict) -> None:
+    """Undo _take_added_stock for an edit that was not saved. The hook's release
+    is fail-soft and each line's key is its own, so no legacy key is tried."""
+    from ...services.lens_stock_hook import release_for_cancel
 
-    def was_saved() -> bool:
-        stored = repo.find_by_id(order_id)
-        if stored is None:
-            raise RuntimeError("order unreadable")
-        return stored.get(field) == value
+    _release_claimed_units(order.get("order_id"), claimed)
+    for line in cells:
+        await release_for_cancel(
+            order_item=line,
+            order_id=order.get("order_id"),
+            line_index=line["item_id"],
+            store_id=order.get("store_id") or "",
+            user=user,
+        )
 
+
+async def _take_added_stock(
+    order: dict, added: List[dict], user: dict
+) -> Tuple[dict, List[dict], bool]:
+    """Take what the edit newly bills BEFORE it is saved, in the till's order:
+    lens cells (a 409 here is the lens stock gate), then units. Anything refused
+    gives back what this call took and leaves the order untouched. Returns
+    (units claimed, lens lines reserved, did a reserve fail soft)."""
+    from ...services.lens_stock_hook import reserve_for_order_item
+
+    cells: List[dict] = []
+    soft_failed = False
+    try:
+        for line in added:
+            rec = await reserve_for_order_item(
+                order_item=line,
+                order_id=order.get("order_id"),
+                line_index=line["item_id"],
+                store_id=order.get("store_id") or "",
+                user=user,
+            )
+            if rec is not None:
+                cells.append(line)
+                soft_failed = soft_failed or rec.get("status") == "failed"
+        claimed = _claim_units(order.get("order_id"), added, order.get("store_id"))
+    except Exception:
+        await _give_stock_back(order, {}, cells, user)
+        raise
+    return claimed, cells, soft_failed
+
+
+@asynccontextmanager
+async def _stock_back_unless_saved(
+    order: dict, claimed: dict, cells: List[dict], user: dict, repo, field: str, value
+):
+    """What this edit took goes back if the save fails. `field` == `value` on the
+    stored order proves the write landed first, so it stays; an order that cannot
+    be read keeps it too (fail closed)."""
     try:
         yield
     except Exception:
-        _release_claimed_units(order_id, claimed, was_saved)
+        try:
+            stored = repo.find_by_id(order.get("order_id"))
+        except Exception:  # noqa: BLE001 -- the read's fault must not hide the save's
+            stored = None
+        if stored is None:
+            logger.warning("[STOCK] could not tell if order %s was saved", order.get("order_id"))
+        elif stored.get(field) != value:
+            await _give_stock_back(order, claimed, cells, user)
         raise
 
 
@@ -285,6 +368,9 @@ async def _settle_removed_lines(
         moved += removed
         lines = order.get("items") or []
         whole = [(pos, ln) for pos, ln in enumerate(lines) if any(ln is r for r in removed)]
+        parts = [
+            (pos, r) for pos, ln in enumerate(lines) for r in removed if r.get("part_of") is ln
+        ]
         try:
             await _release_lens_lines(
                 [ln for _pos, ln in whole],
@@ -294,6 +380,15 @@ async def _settle_removed_lines(
                 release=release_for_cancel,
                 positions=[pos for pos, _ln in whole],
             )
+            for pos, part in parts:
+                await _release_lens_lines(
+                    [part],
+                    order_id=order_id,
+                    store_id=store_id or "",
+                    user=user,
+                    release=partial(release_for_cancel, part=uuid4().hex),
+                    positions=[pos],
+                )
         except Exception as exc:  # noqa: BLE001 -- the edit stands
             logger.warning("[LENS_HOOK] release on edit failed (order %s): %s", order_id, exc)
         for line in removed:
@@ -362,8 +457,9 @@ async def superadmin_edit_order(
       * DRAFT -> 400 (use the ordinary PUT /{order_id} edit);
       * terminal DELIVERED / CANCELLED -> 400;
       * a line the edit adds or replaces meets the till's master / type /
-        archive / stock rules and takes its unit (400 / 409); a line it drops
-        gives its unit back; a correction of an unchanged line keeps its unit.
+        archive / stock rules and takes its unit or lens cell (400 / 409); a
+        line it drops gives them back; a correction of an unchanged line keeps
+        them.
     """
     _require_superadmin(current_user)
     repo = get_order_repository()
@@ -475,11 +571,14 @@ async def superadmin_edit_order(
     after_order.update(update_data)
     after = order_money_snapshot(after_order)
 
-    # The units the edit newly bills are claimed before it is saved, as at the
-    # till: a 409 here leaves the order untouched.
-    claimed = _claim_units(order_id, added, order.get("store_id"))
-    with _units_back_unless_saved(
-        order_id, claimed, repo, "superadmin_edited_at", update_data["superadmin_edited_at"]
+    # What the edit newly bills is taken before it is saved, as at the till: a
+    # 409 here leaves the order untouched.
+    claimed, cells, soft_failed = await _take_added_stock(order, added, current_user)
+    if soft_failed:
+        update_data["lens_reserve_failed"] = True
+    async with _stock_back_unless_saved(
+        order, claimed, cells, current_user, repo,
+        "superadmin_edited_at", update_data["superadmin_edited_at"],
     ):
         # SYNCHRONOUS immutable audit BEFORE persisting/returning.
         _write_order_edit_audit(
@@ -612,8 +711,10 @@ async def superadmin_invoice_change(
         body.items, order.get("items"), current_user
     )
     _gate_added_lines(added, order.get("store_id"))
-    if body.mode != "REVISED_INVOICE" and any(_takes_serialized_stock(ln) for ln in added):
-        # A note changes no order line, so no unit could ever answer to it.
+    if body.mode != "REVISED_INVOICE" and any(
+        _takes_serialized_stock(ln) or takes_lens_cell(ln) for ln in added
+    ):
+        # A note changes no order line, so no unit or cell could ever answer to it.
         raise HTTPException(
             status_code=409,
             detail=(
@@ -701,20 +802,22 @@ async def superadmin_invoice_change(
         from .invoices import invoice_mint_stamp
 
         claimed: dict = {}
+        cells: List[dict] = []
+        soft_failed = False
         try:
             mint_stamp = invoice_mint_stamp(order, customer_doc, store_doc)
             # Before the number is minted, so a lost unit burns no serial.
-            claimed = _claim_units(order_id, added, order.get("store_id"))
+            claimed, cells, soft_failed = await _take_added_stock(order, added, current_user)
             new_invoice_number = repo.next_invoice_number(
                 order.get("store_id"), store_doc=store_doc
             )
         except InvoiceNumberError as exc:
-            _release_claimed_units(order_id, claimed)
+            await _give_stock_back(order, claimed, cells, current_user)
             raise HTTPException(
                 status_code=400, detail=f"Cannot issue a revised invoice: {exc}"
             ) from exc
         except Exception:
-            _release_claimed_units(order_id, claimed)
+            await _give_stock_back(order, claimed, cells, current_user)
             raise
         revised_doc = build_revised_invoice_doc(
             order=order,
@@ -764,9 +867,11 @@ async def superadmin_invoice_change(
             else ("PARTIAL" if amount_paid > 0 else "UNPAID")
         )
         update_data["bill_type"] = derive_bill_type(update_data["payment_status"])
+        if soft_failed:
+            update_data["lens_reserve_failed"] = True
 
-        with _units_back_unless_saved(
-            order_id, claimed, repo, "invoice_number", new_invoice_number
+        async with _stock_back_unless_saved(
+            order, claimed, cells, current_user, repo, "invoice_number", new_invoice_number
         ):
             # SYNCHRONOUS immutable audit BEFORE persisting.
             _write_order_edit_audit(

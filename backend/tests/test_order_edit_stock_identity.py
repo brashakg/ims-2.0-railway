@@ -1090,3 +1090,449 @@ def test_add_item_refuses_goods_with_a_blank_product_too(client, shop):
 def test_the_till_still_bills_a_free_text_service(client, shop):
     r = _sell(client, [_line(SVC, product_id="", product_name="Nose pad fitting")])
     assert r.status_code in (200, 201), r.text
+
+
+# ---------------------------------------------------------------------------
+# Review of c67e0dcc -- lens cells, read back off lens_stock_lines
+# ---------------------------------------------------------------------------
+
+CELL = "LENS-LINE-1"
+
+
+def _lens(power=-1.0, **over):
+    """A lens line in the till's own shape: the cell rides in lens_options."""
+    return {
+        "item_type": "LENS", "product_id": "lens-x", "product_name": "SV 1.5",
+        "quantity": 1, "unit_price": 1000.0,
+        "sph": power, "lens_options": {"lens_line_id": CELL},
+        **over,
+    }
+
+
+@pytest.fixture
+def cells(shop, monkeypatch):
+    """The real lens_stock router on this shop's database. `cells(sph, on_hand,
+    reserved)` seeds one cell; `cells.read(sph)` is (on_hand, reserved)."""
+    from api.routers import lens_stock as stock_router
+
+    monkeypatch.setattr(stock_router, "_get_db", lambda: shop["db"])
+    coll = shop["db"].get_collection("lens_stock_lines")
+
+    class Cells:
+        def __call__(self, sph=-1.0, on_hand=5, reserved=0):
+            coll.insert_one({
+                "line_stock_id": f"CELL-{sph}", "lens_line_id": CELL, "store_id": STORE,
+                "sph": sph, "cyl": 0.0, "add": None, "on_hand": on_hand, "reserved": reserved,
+            })
+
+        def read(self, sph=-1.0):
+            doc = coll.find_one({"lens_line_id": CELL, "sph": sph})
+            return doc["on_hand"], doc["reserved"]
+
+    return Cells()
+
+
+def _cancel(client, oid):
+    r = client.post(
+        f"/api/v1/orders/{oid}/cancel", params={"reason": "customer left"}, headers=_token(ADMIN)
+    )
+    assert r.status_code == 200, r.text
+
+
+def _lens_line(shop, oid):
+    return next(ln for ln in _order(shop, oid)["items"] if ln["item_type"] == "LENS")
+
+
+def _other_line(shop, oid):
+    return _as_sent(next(ln for ln in _order(shop, oid)["items"] if ln["item_type"] != "LENS"))
+
+
+def _lens_sent(line, **over):
+    """A stored lens line as the screen sends it: no powers, no lens_options."""
+    return _as_sent(line, **over)
+
+
+def _lens_bill(client, shop, cells, qty=1, on_hand=5):
+    """A bill holding a reserved cell at quantity `qty`."""
+    cells(on_hand=on_hand)
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    keep = _as_sent(_order(shop, oid)["items"][0])
+    r = _edit(client, oid, [keep, _lens(quantity=qty)])
+    assert r.status_code == 200, r.text
+    assert cells.read() == (on_hand, qty)
+    return oid, _lens_line(shop, oid)
+
+
+def test_new_lens_on_an_empty_cell_is_refused(client, shop, cells):
+    cells(on_hand=0)
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    line = _as_sent(_order(shop, oid)["items"][0])
+    total = _order(shop, oid)["grand_total"]
+    r = _edit(client, oid, [line, _lens()])
+    assert r.status_code == 409, r.text
+    assert _order(shop, oid)["grand_total"] == total
+    assert cells.read() == (0, 0)
+
+
+def test_new_lens_cannot_take_what_another_bill_holds(client, shop, cells):
+    cells(on_hand=1, reserved=1)
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    r = _edit(client, oid, [_as_sent(_order(shop, oid)["items"][0]), _lens()])
+    assert r.status_code == 409, r.text
+    assert cells.read() == (1, 1)
+
+
+def test_new_lens_on_a_cell_never_set_up_is_refused(client, shop, cells):
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    r = _edit(client, oid, [_as_sent(_order(shop, oid)["items"][0]), _lens(power=-9.0)])
+    assert r.status_code == 409, r.text
+    assert len(_order(shop, oid)["items"]) == 1
+
+
+def test_new_lens_reserves_and_cancel_gives_it_back(client, shop, cells):
+    oid, _line_saved = _lens_bill(client, shop, cells)
+    assert cells.read() == (5, 1)
+    _cancel(client, oid)
+    assert cells.read() == (5, 0)
+
+
+def test_new_lens_reserves_under_the_saved_lines_key(client, shop, cells):
+    oid, line = _lens_bill(client, shop, cells)
+    audit = shop["db"].get_collection("lens_stock_audit")
+    assert audit.find_one({"source_id": f"{oid}#{line['item_id']}", "action": "reserve"})
+
+
+def test_second_new_lens_refused_gives_the_first_back(client, shop, cells):
+    cells(on_hand=1)
+    cells(sph=-2.0, on_hand=0)
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    r = _edit(client, oid, [_as_sent(_order(shop, oid)["items"][0]), _lens(), _lens(power=-2.0)])
+    assert r.status_code == 409, r.text
+    assert cells.read() == (1, 0)
+
+
+def test_lens_given_back_when_a_unit_on_the_same_edit_is_lost(client, shop, cells, monkeypatch):
+    from database.repositories.product_repository import StockRepository
+
+    cells(on_hand=1)
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    line = _as_sent(_order(shop, oid)["items"][0])
+    monkeypatch.setattr(StockRepository, "mark_sold", lambda self, *a, **k: False)
+    r = _edit(client, oid, [line, _lens(), _line(FR, stock_id="SU-FR-A")])
+    assert r.status_code == 409, r.text
+    assert cells.read() == (1, 0)
+
+
+def test_replacing_a_lens_frees_the_old_cell_and_takes_a_fresh_key(client, shop, cells):
+    oid, stored = _lens_bill(client, shop, cells)
+    cells(sph=-2.0, on_hand=2)
+    r = _edit(client, oid, [
+        _other_line(shop, oid),
+        {**_lens(power=-2.0, product_id="lens-y"), "item_id": stored["item_id"]},
+    ])
+    assert r.status_code == 200, r.text
+    assert cells.read() == (5, 0) and cells.read(-2.0) == (2, 1)
+    assert _lens_line(shop, oid)["item_id"] != stored["item_id"], (
+        "the old key already has its #release row"
+    )
+    _cancel(client, oid)
+    assert cells.read(-2.0) == (2, 0), "a replaced lens must still come back on cancel"
+
+
+def test_replacing_a_lens_onto_an_empty_cell_keeps_the_old(client, shop, cells):
+    oid, stored = _lens_bill(client, shop, cells)
+    cells(sph=-2.0, on_hand=0)
+    r = _edit(client, oid, [
+        _other_line(shop, oid),
+        {**_lens(power=-2.0, product_id="lens-y"), "item_id": stored["item_id"]},
+    ])
+    assert r.status_code == 409, r.text
+    assert cells.read() == (5, 1) and cells.read(-2.0) == (0, 0)
+    assert _lens_line(shop, oid)["item_id"] == stored["item_id"]
+
+
+def test_changing_only_the_power_moves_the_reservation(client, shop, cells):
+    oid, stored = _lens_bill(client, shop, cells)
+    cells(sph=-2.0, on_hand=1)
+    r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, sph=-2.0)])
+    assert r.status_code == 200, r.text
+    assert cells.read() == (5, 0) and cells.read(-2.0) == (1, 1)
+    _cancel(client, oid)
+    assert cells.read(-2.0) == (1, 0)
+
+
+def test_changing_only_the_power_onto_an_empty_cell_is_refused(client, shop, cells):
+    oid, stored = _lens_bill(client, shop, cells)
+    cells(sph=-2.0, on_hand=0)
+    r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, sph=-2.0)])
+    assert r.status_code == 409, r.text
+    assert cells.read() == (5, 1)
+
+
+def test_price_correction_keeps_the_lens_cell_and_cancel_still_frees_it(client, shop, cells):
+    """The edit screen sends no powers back: the line must not forget its cell."""
+    oid, stored = _lens_bill(client, shop, cells)
+    r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, unit_price=900.0)])
+    assert r.status_code == 200, r.text
+    saved = _lens_line(shop, oid)
+    assert saved["item_id"] == stored["item_id"]
+    assert (saved["sph"], saved["lens_options"]) == (stored["sph"], stored["lens_options"])
+    assert cells.read() == (5, 1)
+    _cancel(client, oid)
+    assert cells.read() == (5, 0)
+
+
+def test_a_lens_line_with_no_item_id_is_still_the_stored_line(client, shop, cells):
+    oid, stored = _lens_bill(client, shop, cells, on_hand=1)
+    shop["db"].get_collection("orders").update_one(
+        {"order_id": oid}, {"$unset": {"items.1.item_id": ""}}
+    )
+    sent = {k: v for k, v in _lens_sent(stored, unit_price=900.0).items() if k != "item_id"}
+    r = _edit(client, oid, [_other_line(shop, oid), sent])
+    assert r.status_code == 200, r.text
+    assert cells.read() == (1, 1), "a price correction moves no cell"
+    assert _lens_line(shop, oid)["sph"] == stored["sph"], "it is still the stored line"
+
+
+def test_raising_a_lens_quantity_reserves_the_extra(client, shop, cells):
+    oid, stored = _lens_bill(client, shop, cells, on_hand=3)
+    r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, quantity=3)])
+    assert r.status_code == 200, r.text
+    assert cells.read() == (3, 3)
+    _cancel(client, oid)
+    assert cells.read() == (3, 0), "the line's release covers the raised quantity"
+
+
+def test_raising_a_lens_quantity_past_the_cell_is_refused(client, shop, cells):
+    oid, stored = _lens_bill(client, shop, cells, on_hand=1)
+    r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, quantity=2)])
+    assert r.status_code == 409, r.text
+    assert cells.read() == (1, 1)
+    assert _lens_line(shop, oid)["quantity"] == 1
+
+
+def test_lowering_a_lens_quantity_gives_back_the_rest_and_cancel_the_remainder(
+    client, shop, cells
+):
+    oid, stored = _lens_bill(client, shop, cells, qty=3)
+    r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, quantity=1)])
+    assert r.status_code == 200, r.text
+    assert cells.read() == (5, 1)
+    _cancel(client, oid)
+    assert cells.read() == (5, 0)
+
+
+def test_lowering_a_lens_on_a_full_cell_is_never_refused(client, shop, cells):
+    oid, stored = _lens_bill(client, shop, cells, qty=2, on_hand=2)
+    r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, quantity=1)])
+    assert r.status_code == 200, r.text
+    assert cells.read() == (2, 1)
+
+
+def test_removing_a_lens_after_a_raise_gives_all_of_it_back(client, shop, cells):
+    oid, stored = _lens_bill(client, shop, cells)
+    other = _other_line(shop, oid)
+    assert _edit(client, oid, [other, _lens_sent(stored, quantity=2)]).status_code == 200
+    assert cells.read() == (5, 2)
+    assert _edit(client, oid, [other]).status_code == 200
+    assert cells.read() == (5, 0)
+
+
+def test_lens_on_a_shipped_bill_keeps_its_cell(client, shop, invoiced, cells):
+    oid, _stored = _lens_bill(client, shop, cells)
+    shop["db"].get_collection("orders").update_one(
+        {"order_id": oid},
+        {"$set": {"status": "SHIPPED", "invoice_number": "BV-INV-1"}},
+    )
+    r = _edit(client, oid, [_other_line(shop, oid)], route="superadmin-invoice-change",
+              mode="REVISED_INVOICE")
+    assert r.status_code == 200, r.text
+    assert cells.read() == (5, 1)
+
+
+def test_lowering_a_cut_lens_gives_nothing_back(client, shop, cells):
+    oid, stored = _lens_bill(client, shop, cells, qty=2)
+    shop["db"].get_collection("lens_stock_audit").insert_one(
+        {"source_id": f"{oid}#1#commit", "action": "commit"}
+    )
+    r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, quantity=1)])
+    assert r.status_code == 200, r.text
+    assert cells.read() == (5, 2)
+
+
+def test_edit_that_loses_the_order_gives_its_cell_back(client, shop, cells, monkeypatch):
+    from database.repositories.order_repository import OrderRepository
+
+    cells(on_hand=1)
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    line = _as_sent(_order(shop, oid)["items"][0])
+    monkeypatch.setattr(OrderRepository, "update_if", lambda self, *a, **k: False)
+    r = _edit(client, oid, [line, _lens()])
+    assert r.status_code == 409, r.text
+    assert cells.read() == (1, 0)
+
+
+def test_write_that_raised_before_landing_gives_the_cell_back(client, shop, cells, monkeypatch):
+    from database.repositories.order_repository import OrderRepository
+
+    cells(on_hand=1)
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    line = _as_sent(_order(shop, oid)["items"][0])
+
+    def dropped(self, *a, **k):
+        raise TimeoutError("write never reached the server")
+
+    monkeypatch.setattr(OrderRepository, "update_if", dropped)
+    client_no_raise = type(client)(client.app, raise_server_exceptions=False)
+    r = client_no_raise.put(
+        f"/api/v1/orders/{oid}/superadmin-edit",
+        json={"reason": "correcting this bill", "items": [line, _lens()]},
+        headers=_token(ADMIN),
+    )
+    assert r.status_code >= 500, r.text
+    assert cells.read() == (1, 0)
+
+
+def test_write_that_landed_but_lost_its_reply_keeps_the_cell(client, shop, cells, monkeypatch):
+    from database.repositories.order_repository import OrderRepository
+
+    cells(on_hand=1)
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    line = _as_sent(_order(shop, oid)["items"][0])
+    real = OrderRepository.update_if
+
+    def lost_reply(self, *a, **k):
+        real(self, *a, **k)
+        raise TimeoutError("reply lost")
+
+    monkeypatch.setattr(OrderRepository, "update_if", lost_reply)
+    client_no_raise = type(client)(client.app, raise_server_exceptions=False)
+    r = client_no_raise.put(
+        f"/api/v1/orders/{oid}/superadmin-edit",
+        json={"reason": "correcting this bill", "items": [line, _lens()]},
+        headers=_token(ADMIN),
+    )
+    assert r.status_code >= 500, r.text
+    assert len(_order(shop, oid)["items"]) == 2
+    assert cells.read() == (1, 1), "the saved line must keep its cell"
+
+
+def test_order_unreadable_after_a_failed_write_keeps_what_it_took(client, shop, cells, monkeypatch):
+    """Cannot tell if it landed: nothing goes back under a bill that may exist."""
+    from database.repositories.order_repository import OrderRepository
+
+    cells(on_hand=1)
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    line = _as_sent(_order(shop, oid)["items"][0])
+
+    def dropped(self, *a, **k):
+        def dark(_self, *_a, **_k):
+            raise TimeoutError("database gone")
+
+        monkeypatch.setattr(OrderRepository, "find_by_id", dark)
+        raise TimeoutError("write never reached the server")
+
+    monkeypatch.setattr(OrderRepository, "update_if", dropped)
+    client_no_raise = type(client)(client.app, raise_server_exceptions=False)
+    r = client_no_raise.put(
+        f"/api/v1/orders/{oid}/superadmin-edit",
+        json={"reason": "correcting this bill",
+              "items": [line, _lens(), _line(FR, stock_id="SU-FR-A")]},
+        headers=_token(ADMIN),
+    )
+    assert r.status_code >= 500, r.text
+    assert cells.read() == (1, 1)
+    assert _unit(shop, "SU-FR-A")["status"] == "SOLD"
+
+
+def test_a_soft_reserve_failure_is_flagged_on_the_bill(client, shop, cells, monkeypatch):
+    from api.services import lens_stock_hook
+
+    async def blip(**_kw):
+        return {"status": "failed", "error": "mongo blip"}
+
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    assert not _order(shop, oid)["lens_reserve_failed"]
+    monkeypatch.setattr(lens_stock_hook, "reserve_for_order_item", blip)
+    r = _edit(client, oid, [_as_sent(_order(shop, oid)["items"][0]), _lens()])
+    assert r.status_code == 200, r.text
+    assert _order(shop, oid)["lens_reserve_failed"] is True
+
+
+def test_revised_invoice_with_a_lens_on_an_empty_cell_mints_no_number(
+    client, shop, invoiced, cells, monkeypatch
+):
+    from database.repositories.order_repository import OrderRepository
+
+    cells(on_hand=0)
+    oid = invoiced([_line(SVC)])
+    minted = []
+    monkeypatch.setattr(OrderRepository, "next_invoice_number",
+                        lambda self, *a, **k: minted.append(1) or "BV-INV-REV-1")
+    r = _edit(client, oid, [_as_sent(_order(shop, oid)["items"][0]), _lens()],
+              route="superadmin-invoice-change", mode="REVISED_INVOICE")
+    assert r.status_code == 409, r.text
+    assert not minted, "a refused correction must not burn an invoice number"
+    assert _order(shop, oid)["invoice_number"] == "BV-INV-1"
+
+
+def test_revised_invoice_reserves_a_new_lens(client, shop, invoiced, cells):
+    cells(on_hand=1)
+    oid = invoiced([_line(SVC)])
+    r = _edit(client, oid, [_as_sent(_order(shop, oid)["items"][0]), _lens()],
+              route="superadmin-invoice-change", mode="REVISED_INVOICE")
+    assert r.status_code == 200, r.text
+    assert cells.read() == (1, 1)
+
+
+def test_revised_invoice_refused_at_the_write_gives_the_cell_back(
+    client, shop, invoiced, cells, monkeypatch
+):
+    from database.repositories.order_repository import OrderRepository
+
+    cells(on_hand=1)
+    oid = invoiced([_line(SVC)])
+    line = _as_sent(_order(shop, oid)["items"][0])
+    monkeypatch.setattr(OrderRepository, "update_if", lambda self, *a, **k: False)
+    r = _edit(client, oid, [line, _lens()], route="superadmin-invoice-change",
+              mode="REVISED_INVOICE")
+    assert r.status_code == 409, r.text
+    assert cells.read() == (1, 0)
+
+
+def test_revised_invoice_number_failure_gives_the_cell_back(
+    client, shop, invoiced, cells, monkeypatch
+):
+    from database.repositories.order_repository import InvoiceNumberError, OrderRepository
+
+    cells(on_hand=1)
+    oid = invoiced([_line(SVC)])
+
+    def no_number(self, *a, **k):
+        raise InvoiceNumberError("series exhausted")
+
+    monkeypatch.setattr(OrderRepository, "next_invoice_number", no_number)
+    r = _edit(client, oid, [_as_sent(_order(shop, oid)["items"][0]), _lens()],
+              route="superadmin-invoice-change", mode="REVISED_INVOICE")
+    assert r.status_code == 400, r.text
+    assert cells.read() == (1, 0)
+
+
+def test_note_cannot_bill_a_new_lens(client, shop, invoiced, cells):
+    cells(on_hand=1)
+    oid = invoiced([_line(SVC)])
+    r = _edit(client, oid, [_as_sent(_order(shop, oid)["items"][0]), _lens()],
+              route="superadmin-invoice-change", mode="CREDIT_NOTE")
+    assert r.status_code == 409, r.text
+    assert cells.read() == (1, 0)
+
+
+def test_note_raising_a_lens_quantity_is_refused(client, shop, invoiced, cells):
+    oid, stored = _lens_bill(client, shop, cells)
+    shop["db"].get_collection("orders").update_one(
+        {"order_id": oid}, {"$set": {"invoice_number": "BV-INV-1"}}
+    )
+    r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, quantity=2)],
+              route="superadmin-invoice-change", mode="CREDIT_NOTE")
+    assert r.status_code == 409, r.text
+    assert cells.read() == (5, 1)
