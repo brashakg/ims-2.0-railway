@@ -123,6 +123,21 @@ export function decodeJwtClaims(token: string | null | undefined): Record<string
   }
 }
 
+/** One sign-in? Same person on the same refresh chain (`sid`); a token that
+ *  was rotated or moved shop stays in it, a new login is a new chain. An answer
+ *  to a request of another sign-in must not touch this one (#1372 review). */
+export function sameSession(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (a === b) return true;
+  const [x, y] = [decodeJwtClaims(a), decodeJwtClaims(b)];
+  return !!x && !!y && x.user_id === y.user_id && x.sid === y.sid;
+}
+
+/** The token a request really went out with; a 401 replay carries the new one. */
+export function sentToken(config?: { headers?: unknown }): string {
+  const header = (config?.headers as { Authorization?: unknown } | undefined)?.Authorization;
+  return String(header ?? '').replace(/^Bearer /, '');
+}
+
 /** Exp claim of a JWT in epoch MILLISECONDS, or null if unparseable. */
 export function decodeJwtExpMs(token: string): number | null {
   const exp = decodeJwtClaims(token)?.exp;
@@ -194,6 +209,19 @@ async function performRefresh(): Promise<string | null> {
     });
     const newAccess: string | undefined = resp.data?.access_token;
     if (!newAccess) return null;
+    // The stored token moved while this answer travelled (shop switch, another
+    // tab's refresh, sign-out, a new sign-in): the access token here is older
+    // than it and is dropped. Only the rotated refresh token of the SAME
+    // sign-in is kept: the one it replaced is spent, and presenting that again
+    // past the server's grace window revokes the whole chain.
+    const current = localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (current !== access || localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY) !== refresh) {
+      if (!current || !sameSession(current, newAccess)) return null;
+      if (resp.data?.refresh_token) {
+        localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, resp.data.refresh_token);
+      }
+      return current;
+    }
     localStorage.setItem(TOKEN_STORAGE_KEY, newAccess);
     if (resp.data?.refresh_token) {
       localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, resp.data.refresh_token);
@@ -203,7 +231,8 @@ async function performRefresh(): Promise<string | null> {
     return newAccess;
   } catch (e) {
     const detail = axios.isAxiosError(e) ? e.response?.data?.detail : undefined;
-    if (detail?.code === 'SESSION_IDLE') {
+    // The refusal is about the sign-in that asked, not a later one.
+    if (detail?.code === 'SESSION_IDLE' && sameSession(access, localStorage.getItem(TOKEN_STORAGE_KEY))) {
       refreshRefusedIdle = true;
       try {
         localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
@@ -232,6 +261,7 @@ export function syncCachedUserShops(token: string): void {
     const raw = localStorage.getItem('ims_user');
     if (!raw) return;
     const user = JSON.parse(raw);
+    if (claims.user_id !== user.id) return; // another person's shops are not this cache's
     const activeStoreId = claims.active_store_id || '';
     const storeIds = Array.isArray(claims.store_ids) ? claims.store_ids : [];
     // Unchanged shops (nearly every refresh): nothing re-renders.
@@ -415,9 +445,17 @@ export function buildApiError(
   return new ApiError(message, { status, code, detail: rawDetail });
 }
 
+// The answer to a request sent under an older sign-in: it says nothing about
+// the session in storage now, so it never refreshes, replays or signs that
+// person out. The caller just gets its error.
+const fromOlderSession = (config?: { headers?: unknown }): boolean => {
+  const sent = sentToken(config);
+  return !!sent && !sameSession(sent, localStorage.getItem(TOKEN_STORAGE_KEY));
+};
+
 // Handle final error after retries exhausted
 const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
-  if (error.response?.status === 401) {
+  if (error.response?.status === 401 && !fromOlderSession(error.config)) {
     // Clear auth state on unauthorized (refresh already failed or was not
     // possible by the time we get here -> same logout flow as before).
     // The POS goes through THE one sign-out step (a pending bill is parked,
@@ -496,6 +534,8 @@ api.interceptors.response.use(
     if (!config) {
       return handleFinalError(error);
     }
+
+    if (fromOlderSession(config)) return Promise.reject(buildApiError(error));
 
     // Reactive refresh-and-retry, ONCE per request: an expired access token
     // (laptop wake, throttled tab that missed the proactive window) gets one
