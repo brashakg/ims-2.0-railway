@@ -393,7 +393,7 @@ async def generate_cl_po(
 
     dry_run=True (default) returns the grouped draft WITHOUT writing. With
     dry_run=False, one DRAFT PO is created per vendor group (vendor_id may be
-    null -- the FE disables send until a vendor is assigned). Never SENT."""
+    null -- send refuses it, see buyable_vendor). Never SENT."""
     store_id = validate_store_access(body.store_id, current_user)
     if not store_id:
         raise HTTPException(status_code=422, detail="store_id is required")
@@ -498,7 +498,7 @@ async def generate_cl_po(
         po_doc = {
             "po_id": po_id,
             "po_number": po_number,
-            "vendor_id": grp["vendor_id"],  # may be None -> FE disables send
+            "vendor_id": grp["vendor_id"],  # may be None -> send refuses it
             "vendor_name": grp["vendor_name"],
             "delivery_store_id": store_id,
             "items": computed["items"],

@@ -193,16 +193,30 @@ def vendor_switched_off(vendor: Optional[dict]) -> bool:
     return bool(vendor) and vendor.get("is_active") is False
 
 
-def buyable_vendor(
-    vendor_repo, vendor_id: Optional[str], must_exist: bool = True
-) -> Optional[dict]:
-    """The supplier a NEW purchase may go to (L1-F40): 409 when it is switched
-    off; 404 when there is no such vendor, unless must_exist=False (send, which
-    never checked existence -- only the switch). Every door that starts or
-    commits a new order (create, edit a draft, send a draft) calls this;
-    reading, receiving and paying an order already placed do not."""
+def buyable_vendor(vendor_repo, vendor_id: Optional[str]) -> Optional[dict]:
+    """The supplier a NEW purchase may go to (L1-F40): 409 when none is named
+    or it is switched off; 404 when there is no such vendor (a failed read
+    answers None too, so it refuses). Every door that starts or commits a new
+    order (create, edit a draft, send a draft, an approved reorder proposal)
+    calls this; reading, receiving and paying an order already placed do not.
+    No repo = no database: nothing to look the supplier up in."""
+    if not vendor_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "VENDOR_REQUIRED",
+                "message": (
+                    "This order has no supplier, so it cannot go ahead. Edit "
+                    "it and choose one. A generated draft cannot be edited: "
+                    "cancel it, set the supplier on the item, and generate it "
+                    "again."
+                ),
+            },
+        )
+    if vendor_repo is None:
+        return None
     vendor = vendor_repo.find_by_id(vendor_id)
-    if vendor is None and must_exist:
+    if vendor is None:
         raise HTTPException(status_code=404, detail="Vendor not found")
     if vendor_switched_off(vendor):
         name = vendor.get("trade_name") or vendor.get("legal_name") or vendor_id

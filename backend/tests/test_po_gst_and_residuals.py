@@ -724,6 +724,7 @@ def test_a_gap_other_than_cost_still_blocks_the_send(monkeypatch):
         def find_by_id(self, pid):
             return {
                 "po_id": "PO1",
+                "vendor_id": "V1",
                 "status": "DRAFT",
                 "delivery_store_id": "BV-TEST-01",
                 "items": [{"product_id": "P1"}],
@@ -733,6 +734,7 @@ def test_a_gap_other_than_cost_still_blocks_the_send(monkeypatch):
             raise AssertionError("must not send an incomplete PO")
 
     monkeypatch.setattr(v, "get_purchase_order_repository", lambda: _SendablePORepo())
+    monkeypatch.setattr(v, "get_vendor_repository", lambda: _FakeVendorRepo())
     with pytest.raises(HTTPException) as exc:
         asyncio.run(send_po("PO1", current_user=_user()))
     assert exc.value.detail["code"] == "PO_LINES_INCOMPLETE"

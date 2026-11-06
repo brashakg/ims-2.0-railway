@@ -228,10 +228,16 @@ def test_create_po_accepts_known_product(monkeypatch):
 # ===========================================================================
 
 
+@pytest.fixture(autouse=True)
+def _a_supplier_is_on_file(monkeypatch):
+    monkeypatch.setattr(vd, "get_vendor_repository", lambda: _VendorRepo())
+
+
 def _po_repo_with_line(pid):
     repo = _PORepo()
     repo.pos["PO-1"] = {
         "po_id": "PO-1",
+        "vendor_id": "V1",
         "status": "DRAFT",
         "items": [{"product_id": pid, "quantity": 1, "unit_price": 100.0}],
     }
@@ -278,6 +284,7 @@ def test_send_po_skips_gate_for_auto_generated_source(monkeypatch):
     repo = _PORepo()
     repo.pos["PO-CL"] = {
         "po_id": "PO-CL",
+        "vendor_id": "V1",
         "status": "DRAFT",
         "source": "cl_po_generator",
         "items": [{"product_id": "LENS-LINE-1", "quantity": 1, "unit_price": 50.0}],

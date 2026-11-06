@@ -251,7 +251,85 @@ def test_cl_resolver_drops_switched_off_vendor(monkeypatch):
         {"lens_line_id": "LL-ON", "preferred_vendor_id": "V-ON"},
     ])
     resolve = cl_po._make_vendor_resolver(db)
-    # A closed supplier's lines land in the no-vendor draft (send disabled
+    # A closed supplier's lines land in the no-vendor draft (send refused
     # until a vendor is chosen); a live supplier keeps its lines.
     assert resolve({"lens_line_id": "LL-OFF"}) is None
     assert resolve({"lens_line_id": "LL-ON"}) == "V-ON"
+
+
+# --------------------------------------------------------------------------- #
+# generated drafts, sent by the API (Codex 11-06: the guard only looked at a
+# vendor_id that was there, so the no-vendor draft the generator makes for a
+# switched-off supplier went SENT with nobody to send it to)
+# --------------------------------------------------------------------------- #
+
+_NEED = {"lens_line_id": "LL-OFF", "sph": -2.0, "cyl": 0.0, "add": None,
+         "qty": 2, "description": "Acme One", "unit_price": 50}
+
+
+def _generate(monkeypatch, repo, line_vendor):
+    """The REAL generator writes the draft into `repo`; returns its po_id."""
+    monkeypatch.setattr(cl_po, "_get_db", lambda: _DB(
+        [{"lens_line_id": "LL-OFF", "preferred_vendor_id": line_vendor}]
+    ))
+    monkeypatch.setattr(cl_po, "_read_gap_planner_needs", lambda s, l: [dict(_NEED)])
+    monkeypatch.setattr(cl_po, "get_vendor_repository", lambda: _VendorRepo())
+    monkeypatch.setattr(cl_po, "get_purchase_order_repository", lambda: repo)
+    monkeypatch.setattr(cl_po, "get_audit_repository", lambda: None)
+    monkeypatch.setattr(cl_po, "generate_po_number", lambda s: f"PO-{s}")
+    out = asyncio.run(cl_po.generate_cl_po(
+        cl_po.CLPOGenerateRequest(store_id="S1", source="gap-planner", dry_run=False),
+        _user(),
+    ))
+    assert out["pos_created"] == 1
+    return out["created_pos"][0]["po_id"]
+
+
+@pytest.mark.parametrize("roles", [("STORE_MANAGER",), ("ADMIN",), ("SUPERADMIN",)])
+def test_generated_draft_with_no_supplier_cannot_be_sent(monkeypatch, roles):
+    repo = _wire(monkeypatch)
+    po_id = _generate(monkeypatch, repo, "V-OFF")
+    assert repo.pos[po_id]["vendor_id"] is None
+    before = copy.deepcopy(repo.pos[po_id])
+    writes = len(repo.writes)
+
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(v.send_po(po_id, _user(roles)))
+
+    assert e.value.status_code == 409
+    assert e.value.detail["code"] == "VENDOR_REQUIRED"
+    assert repo.pos[po_id] == before, "a refused send leaves the draft as it was"
+    assert len(repo.writes) == writes
+
+
+def test_generated_draft_to_active_supplier_still_sends(monkeypatch):
+    repo = _wire(monkeypatch)
+    po_id = _generate(monkeypatch, repo, "V-ON")
+    assert repo.pos[po_id]["vendor_id"] == "V-ON"
+    asyncio.run(v.send_po(po_id, _user()))
+    assert repo.pos[po_id]["status"] == "SENT"
+
+
+def test_send_rule_does_not_lean_on_the_source_tag(monkeypatch):
+    """A proposal's no-vendor draft carries no `source`: same refusal, and the
+    way out -- pick a live supplier on the draft -- then sends it."""
+    repo = _wire(monkeypatch, dict(_draft("V-ON"), vendor_id=None, vendor_name=None))
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(v.send_po("PO1", _user()))
+    assert e.value.detail["code"] == "VENDOR_REQUIRED"
+    assert repo.pos["PO1"]["status"] == "DRAFT"
+
+    asyncio.run(v.update_po("PO1", _edit_body(vendor_id="V-ON"), _user()))
+    asyncio.run(v.send_po("PO1", _user()))
+    assert repo.pos["PO1"]["status"] == "SENT"
+
+
+def test_send_to_a_vendor_record_that_is_gone_refused(monkeypatch):
+    """A vendor_id naming nothing is not a supplier either. BaseRepository
+    answers None on a failed read too, so an unreadable vendor lands here."""
+    repo = _wire(monkeypatch, dict(_draft("V-ON"), vendor_id="V-GONE"))
+    with pytest.raises(HTTPException) as e:
+        asyncio.run(v.send_po("PO1", _user()))
+    assert e.value.status_code == 404
+    assert repo.pos["PO1"]["status"] == "DRAFT"
+    assert repo.writes == []

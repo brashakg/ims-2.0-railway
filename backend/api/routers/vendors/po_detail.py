@@ -329,11 +329,9 @@ async def send_po(
                 status_code=400,
                 detail="This order has no lines - add what to order before sending it.",
             )
-        # Sending commits the purchase: never to a switched-off supplier
-        # (L1-F40). A sourced draft with no vendor yet is the FE's to stop.
-        vendor_repo = get_vendor_repository()
-        if vendor_repo is not None and po.get("vendor_id"):
-            buyable_vendor(vendor_repo, po.get("vendor_id"), must_exist=False)
+        # Sending commits the purchase: only to a real, live supplier
+        # (L1-F40). Generated and proposal drafts can arrive with none.
+        buyable_vendor(get_vendor_repository(), po.get("vendor_id"))
 
         # A line must name a product that exists. This is the ONE existence
         # check and it does not depend on the catalogue gate: a line whose
