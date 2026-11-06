@@ -153,10 +153,11 @@ def _ticked(lines, source):
 def _goods_known(db, event, source):
     """A credit naming no piece still says whose goods it took when its line is
     ticked customer_owned, or its RMA links a return that really carried them:
-    a live one, this supplier's, whose own pieces have left (RTV) and cover this
-    product for the quantity credited. A return_id alone proves nothing: before
-    the rule it was free text (a cancelled return, a typed one, another product,
-    no such id), and pieces merely set aside for a return can still be put back."""
+    a live one, this shop's and supplier's, whose own pieces have left (RTV) and
+    cover this product for the quantity credited. A return_id alone proves
+    nothing: before the rule it was free text (a cancelled return, a typed one,
+    another product, no such id), pieces merely set aside can still be put back,
+    and a receipt rejection carried custody, never the accepted goods credited."""
     if event.get("return_kind") != "RMA":
         return False
     rma = db.get_collection("vendor_rmas").find_one({"rma_id": event["return_id"]}) or {}
@@ -165,7 +166,8 @@ def _goods_known(db, event, source):
         return True
     rid = rma.get("return_id")
     ret = db.get_collection("vendor_returns").find_one({"return_id": rid}) if rid else None
-    if not ret or ret.get("status") == "cancelled" or ret.get("vendor_id") != rma.get("vendor_id"):
+    if (not ret or ret.get("status") == "cancelled" or ret.get("receipt_rejection")
+            or ret.get("vendor_id") != rma.get("vendor_id") or ret.get("store_id") != rma.get("store_id")):
         return False
     product = source.get("product_id")
     wanted = sum(int(s.get("quantity") or 0) for s in event["sources"]

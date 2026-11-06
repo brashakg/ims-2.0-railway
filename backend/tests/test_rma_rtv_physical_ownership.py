@@ -1490,11 +1490,29 @@ def link_not_shipped(w):
     return rid
 
 
+def link_rejected_custody(w):
+    """Rejected pieces left, but a credit naming no piece is accepted goods."""
+    w["db"].vendor_returns.insert_one({"return_id": "VR-CUST", "store_id": STORE, "vendor_id": DEALER,
+                                       "status": "received_by_vendor", "receipt_rejection": True,
+                                       "stock_ids": ["C1", "C2"], "items": []})
+    for sid in ("C1", "C2"):
+        unit(w, sid, status="RTV", rtv_vendor_id="VR-CUST", receipt_disposition="REJECTED")
+    return "VR-CUST"
+
+
+def link_another_shop(w):
+    w["db"].vendor_returns.insert_one({"return_id": "VR-SHOP", "store_id": SHOP_B, "vendor_id": DEALER,
+                                       "status": "received_by_vendor", "stock_ids": ["B1", "B2"], "items": []})
+    for sid in ("B1", "B2"):
+        unit(w, sid, status="RTV", rtv_vendor_id="VR-SHOP", store=SHOP_B)
+    return "VR-SHOP"
+
+
 @pytest.mark.parametrize("link", [link_cancelled, link_cancelled_with_a_piece_stuck, link_typed, link_other_product,
                                   link_another_supplier, link_one_piece_of_two, link_not_shipped,
-                                  lambda w: "VR-NO-SUCH-RETURN"],
+                                  link_rejected_custody, link_another_shop, lambda w: "VR-NO-SUCH-RETURN"],
                          ids=["cancelled", "cancelled-stuck", "typed", "other-product", "other-supplier",
-                              "short", "not-shipped", "unknown"])
+                              "short", "not-shipped", "rejected-custody", "other-shop", "unknown"])
 def test_a_link_that_did_not_carry_the_goods_does_not_place_the_credit(rw, monkeypatch, link):
     """Spare receipt quantity: the caps pass, only the ownership rule can stop it."""
     bought(rw, "U1", "U2", "U3", "U4", "U5", "U6", qty=8)
@@ -2212,6 +2230,17 @@ def test_a_typed_return_cannot_be_cancelled_under_its_rmas_waiting_note(rw, monk
     # Refused, not stranded: the same note on the same door still finishes.
     done = finish_pending(rw, rma_id, body, 1000)
     assert done.status_code == 200 and done.json()["confirmation"]["posting_status"] == "POSTED", done.text
+    assert posted(rw) == (1, 100000) and credited(rw) == 100000
+
+
+def test_a_typed_return_cannot_be_cancelled_under_its_rmas_posted_credit(rw):
+    """The RMA still has to close, and closing asks for an open return."""
+    rid, rma_id = typed_return_on_rma(rw)
+    assert rma_note(rw, rma_id, 1000, "CN-DONE")[1].json()["confirmation"]["posting_status"] == "POSTED"
+    refused = rw["as_"](MANAGER).patch(f"/vendor-returns/{rid}/status", json={"status": "cancelled"})
+    assert refused.status_code == 409 and rma_id in refused.text, refused.text
+    assert returned(rw, rid)["status"] == "approved"
+    assert rw["as_"](MANAGER).post(f"/vendor-rma/{rma_id}/close", json={}).status_code == 200
     assert posted(rw) == (1, 100000) and credited(rw) == 100000
 
 

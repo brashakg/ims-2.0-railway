@@ -130,6 +130,14 @@ def unfinished_on_return(db, return_doc):
         (e for e in (unfinished_note(db, rma) for rma in live) if e), None)
 
 
+def credited_rma(db, return_doc):
+    """An RMA on this return holding a supplier credit: it still has to close,
+    and closing asks for an open return."""
+    return db.get_collection("vendor_rmas").find_one({
+        "return_id": return_doc["return_id"], "status": {"$ne": RMAStatus.REJECTED.value},
+        "credit_notes.0": {"$exists": True}})
+
+
 def settle_return(db, rma):
     """Carry a linked RMA's credit onto its return, as _finish_return does for
     the return's own door. Reads the RMA, so it is safe to repeat; a lost reply

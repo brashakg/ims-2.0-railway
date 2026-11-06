@@ -1198,6 +1198,11 @@ async def update_return_status(
         # Cancelling puts the pieces back -- not once any of them has left
         # (a receiving rejection's draft included).
         if status_update.status == "cancelled":
+            credited = rma_supplier_credit.credited_rma(db, return_doc)
+            if credited:
+                raise HTTPException(status_code=409, detail=(
+                    f"RMA {credited['rma_id']} already took the supplier's credit on this return, "
+                    "so it cannot be cancelled."))
             sent = [_label(u, sid) for sid, u in _named_units(db, return_doc).items()
                     if _ie.canonical_state(u.get("status")) is _STATE.RTV]
             if sent:
