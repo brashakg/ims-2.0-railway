@@ -1543,17 +1543,19 @@ def test_a_return_still_in_the_shop_places_a_credit_only_once_it_ships(rw, monke
     assert posted(rw) == (2, 200000) and statuses(rw) == Counter({"RTV": 4, "AVAILABLE": 2})
 
 
-def test_cancelling_the_unshipped_return_leaves_one_credit_for_one_return_of_goods(rw, monkeypatch):
-    """The reviewer's end state was 200,000 paise credited for 100,000 of goods."""
+def test_the_unshipped_return_cannot_be_cancelled_out_from_under_two_credits(rw, monkeypatch):
+    """The reviewer's end state was 200,000 paise credited for 100,000 of goods:
+    the later note stays unposted, and the old RMA's credit keeps its return."""
     bought(rw, "U1", "U2", "U3", "U4", "U5", "U6", qty=8)
     first = link_not_shipped(rw)
     old_linked_credit(rw, monkeypatch, first)
     rid = received_return(rw, "U3", "U4")
     rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
     rtv_note_open(rw, rid, 1000, "CN-NEW")
-    assert move(rw, first, "cancelled").status_code == 200
+    assert move(rw, first, "cancelled").status_code == 409
+    assert returned(rw, first)["status"] == "approved"
     assert posted(rw) == (1, 100000) and credited(rw) == 100000
-    assert statuses(rw) == Counter({"AVAILABLE": 4, "RTV": 2})
+    assert statuses(rw) == Counter({"AVAILABLE": 2, "QUARANTINED": 2, "RTV": 2})
 
 
 def test_a_link_that_carried_the_goods_places_the_credit_and_frees_other_pieces(rw, monkeypatch):
@@ -1574,7 +1576,8 @@ def test_two_lines_of_one_product_need_pieces_for_both(rw, pieces, placed):
                                         "status": "received_by_vendor", "stock_ids": ids, "items": []})
     for sid in ids:
         unit(rw, sid, status="RTV", rtv_vendor_id="VR-L")
-    rw["db"].vendor_rmas.insert_one({"rma_id": "RMA-L", "vendor_id": DEALER, "return_id": "VR-L", "lines": [{}, {}]})
+    rw["db"].vendor_rmas.insert_one({"rma_id": "RMA-L", "vendor_id": DEALER, "store_id": STORE,
+                                     "return_id": "VR-L", "lines": [{}, {}]})
     sources = [{"product_id": FRAME, "quantity": 2, "return_line_index": n, "stock_ids": []} for n in (0, 1)]
     event = {"return_kind": "RMA", "return_id": "RMA-L", "sources": sources}
     assert _goods_known(rw["db"], event, sources[0]) is placed
