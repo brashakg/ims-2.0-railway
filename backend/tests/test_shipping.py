@@ -234,9 +234,23 @@ def test_create_shipment_live_books_via_fake_network(monkeypatch):
 # ============================================================================
 
 
+class _OrdersDistinct:
+    """``repo.collection`` for the list door's distinct("order_id", flt) over
+    an in-memory set of orders; ``broken()`` True makes the read fail."""
+
+    def __init__(self, orders, broken=lambda: False):
+        self._orders, self._broken = orders, broken
+
+    def distinct(self, key, flt):
+        if self._broken():
+            raise RuntimeError("orders read failed")
+        return [o.get(key) for o in self._orders() if doc_matches(o, flt)]
+
+
 class _FakeOrderRepo:
     def __init__(self, order=None):
         self._order = order
+        self.collection = _OrdersDistinct(lambda: [self._order] if self._order else [])
 
     def find_by_id(self, oid):
         if self._order and self._order.get("order_id") == oid:
@@ -285,7 +299,7 @@ class _FakeColl:
 
     def find(self, query=None, projection=None):
         q = query or {}
-        matched = [d for d in self.docs if all(d.get(k) == v for k, v in q.items())]
+        matched = [d for d in self.docs if doc_matches(d, q)]
         return _FakeCursor(matched)
 
     def find_one(self, query=None, projection=None):
@@ -298,7 +312,7 @@ class _FakeColl:
 
     def count_documents(self, query=None):
         q = query or {}
-        return sum(1 for d in self.docs if all(d.get(k) == v for k, v in q.items()))
+        return sum(1 for d in self.docs if doc_matches(d, q))
 
     def update_one(self, flt, update):
         for d in self.docs:

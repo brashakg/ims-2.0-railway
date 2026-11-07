@@ -1803,6 +1803,7 @@ def test_an_oracle_draft_can_be_edited_and_sent(monkeypatch):
     db.get_collection("products").insert_one(
         {"product_id": "P1", "name": "Carrera CA8895", "cost_price": 1000, "hsn_code": "9003"}
     )
+    db.get_collection("vendors").insert_one({"vendor_id": "V1", "trade_name": "Acme Optics"})
     store = ProposalStore(db=db)
     prop = store.create(
         created_by_agent="oracle", proposal_type="draft_po", title="Reorder P1",

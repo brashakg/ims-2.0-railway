@@ -48,14 +48,18 @@ the request (SYSTEM_INTENT "Requester CANNOT approve own request").
 from __future__ import annotations
 
 import logging
+from collections import Counter
+from types import SimpleNamespace
 from typing import Annotated, List, Optional, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from . import vendor_returns as _rtv
 from .auth import require_roles
 from ..dependencies import (
     get_db,
+    can_access_store_scoped,
     in_reach_or_404,
     resolve_store_scope,
     validate_store_access,
@@ -75,7 +79,7 @@ from ..services.vendor_rma import (
 from ..services.rtv_debit_note import debit_note_issued
 from ..services.payables_mask import AP_ROLES, require_payables, strip_rma_credit
 from ..services import rma_supplier_credit
-from ..services.supplier_credit_evidence import SupplierCreditError
+from ..services.supplier_credit_evidence import SupplierCreditError, credit_started, rule_settled
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +135,12 @@ class RMALineCreate(BaseModel):
     # A manager raises the RMA without it; an accounts role prices it here or
     # later (PUT /{rma_id}/prices).
     unit_cost: Optional[float] = Field(None, ge=0, le=10_000_000)
+    # Owner ruling 2026-11-06: this piece is the customer's, not shop stock. No
+    # shop stock is touched for it, and it names the customer or the order
+    # (order id or number). Unticked, the line is shop stock.
+    customer_owned: bool = False
+    customer_id: Optional[str] = Field(None, max_length=120)
+    order_id: Optional[str] = Field(None, max_length=120)
 
 
 class RMACreate(BaseModel):
@@ -214,7 +224,140 @@ def _masked(doc: dict, user: dict) -> dict:
     # the accounts roles only (owner ruling 2026-10-12, services/cost_mask).
     result = mask_rma(_with_rupees(doc), user)
     result.pop("credit_confirmation_fence", None)
+    result.pop("note_claims", None)
     return result
+
+
+def _customer_piece_problem(db, line: RMALineCreate, user: dict) -> Optional[str]:
+    """Why a line ticked customer_owned cannot be raised; None when it can: it
+    names a customer or an order the caller may reach (owner ruling 2026-11-06).
+    One out of reach reads as unknown, as a guessed id does on any by-id door."""
+    from .customers import customer_in_scope
+
+    customer_id, order_id = (line.customer_id or "").strip(), (line.order_id or "").strip()
+    if not customer_id and not order_id:
+        return f"{line.product_name}: a customer's own piece needs its customer_id or order_id."
+    if customer_id:
+        customer = db.get_collection("customers").find_one({"customer_id": customer_id})
+        if not customer or not customer_in_scope(customer, user):
+            return f"{line.product_name}: customer {customer_id} was not found."
+    if order_id:
+        order = db.get_collection("orders").find_one(
+            {"$or": [{"order_id": order_id}, {"order_number": order_id}]})
+        if not order or not can_access_store_scoped(order.get("store_id"), user):
+            return f"{line.product_name}: order {order_id} was not found."
+    return None
+
+
+def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = False) -> Optional[str]:
+    """Why this RMA's goods have not left the shop's stock; None when they have
+    (L2-RMA-F01). The line says whose piece it is (owner ruling 2026-11-06), a
+    model match never does: a line ticked customer_owned touches no shop stock
+    and is skipped here. An unticked line is shop stock: while this shop still
+    holds pieces of its product -- THE Vendor Returns rule, _typed_line_problem
+    -- it goes back only on the pieces of the vendor return the RMA links
+    (return_id): open, same shop and supplier, its pieces exactly the RMA's
+    products and quantities, on no other RMA. That return moves them
+    (QUARANTINED -> RTV on its Ship), never this RMA, so no piece leaves twice.
+    ``shipped`` (dispatch, credit, close) asks that they have left; at raise
+    they may still be set aside for it. Nor may an unticked, unlinked line claim
+    what is accounted for elsewhere (_rtv._accounted_for): pieces this supplier's
+    return already carried back, this shop's purchase now at a sister shop, or
+    a product whose every piece is sold (owner ruling 2026-11-06). An unticked
+    line with none of these (a historical line, a made-to-order lens) keeps
+    today's outcome. Once a note this RMA claimed passed these line checks they
+    stay answered (rule_settled); the return's own pieces are always asked.
+
+    The return must still be owed a credit this RMA can take: not one settled
+    by replacement goods, and not one already holding a supplier note of its
+    own (services/rma_supplier_credit). ``closing`` skips both money checks:
+    closing moves no money, an RMA cannot gain a link later, and an old row or
+    pair that already holds notes must end."""
+    if db is None:
+        return "Stock data is unavailable; retry shortly."
+    rid = doc.get("return_id")
+    pieces: Counter = Counter()
+    if rid:
+        ret = db.get_collection("vendor_returns").find_one({"return_id": rid})
+        if (not ret or ret.get("claim") or ret.get("receipt_rejection")
+                or ret.get("status") in ("cancelled", *_rtv._UNSAVED)):
+            return f"Vendor return {rid} is not an open supplier return this RMA can go back on."
+        if ret.get("store_id") != doc.get("store_id") or ret.get("vendor_id") != doc.get("vendor_id"):
+            return f"Vendor return {rid} is for another shop or supplier."
+        if db.get_collection("vendor_rmas").find_one({
+                "return_id": rid, "rma_id": {"$ne": doc.get("rma_id")},
+                "status": {"$ne": RMAStatus.REJECTED.value}}):
+            return f"Vendor return {rid} already goes back on another RMA."
+        if not closing:
+            if ret.get("return_type") == "replacement" or ret.get("status") == "replaced":
+                return f"Vendor return {rid} is settled by replacement goods, not a supplier credit."
+            if credit_started(db, ret):
+                return (f"Vendor return {rid} already holds its supplier's credit note: finish "
+                        "it on Vendor Returns, the same pieces cannot be credited twice.")
+        units = _rtv._named_units(db, ret)
+        for sid in ret.get("stock_ids") or []:
+            state = _rtv._ie.canonical_state((units.get(sid) or {}).get("status"))
+            if state is _rtv._STATE.RTV:
+                pieces[units[sid].get("product_id")] += 1
+            elif state is _rtv._STATE.QUARANTINED and not shipped:
+                pieces[units[sid].get("product_id")] += 1
+            elif state is _rtv._STATE.QUARANTINED:
+                return rma_supplier_credit.ship_first(rid)
+            else:
+                return (f"Piece {_rtv._label(units.get(sid), sid)} of vendor return {rid} "
+                        "is no longer held for it.")
+    settled = bool(doc.get("rma_id")) and rule_settled(db, {"rma_id": doc["rma_id"]})
+    wanted: Counter = Counter()
+    for line in doc.get("lines") or []:
+        if line.get("customer_owned"):
+            if line.get("product_id") in pieces:
+                return (f"{line.get('product_name')}: raise the customer's own piece on its own "
+                        f"RMA, not with the shop's pieces of vendor return {rid}.")
+            continue
+        if line.get("product_id") in pieces:
+            wanted[line.get("product_id")] += int(line.get("quantity") or 0)
+            continue
+        if settled:
+            continue
+        item = SimpleNamespace(product_id=line.get("product_id"), product_name=line.get("product_name"))
+        why = _rtv._typed_line_problem(db, item, doc.get("store_id"))
+        if why:
+            return (why + " Put them on a vendor return (Purchase > Vendor Returns) and "
+                    "raise the RMA with its return_id; a customer's own piece is sent as "
+                    "customer_owned with its customer_id or order_id.")
+        where = None if closing else _rtv._accounted_for(db, item, doc.get("store_id"), doc.get("vendor_id"))
+        if where:
+            return where
+    if wanted != pieces:
+        return f"Vendor return {rid}'s pieces are not this RMA's products and quantities."
+    return None
+
+
+def _require_physical_return(doc: dict, *, shipped: bool, status_code: int = 409,
+                             closing: bool = False) -> None:
+    db = _get_db()
+    problem = _physical_return_problem(db, doc, shipped=shipped, closing=closing)
+    if problem:
+        held = db is not None and doc.get("rma_id") and rma_supplier_credit.unfinished_note(db, doc)
+        raise HTTPException(status_code=status_code,
+                            detail=rma_supplier_credit.note_stopped(problem) if held else problem)
+
+
+def _require_no_unfinished_note(doc: dict) -> None:
+    """Rejecting or closing shuts this RMA's credit door. A supplier note it has
+    claimed can finish nowhere else (one note number, one record), so it is
+    finished here first. Says no number: a manager may press reject. One that
+    cannot finish is told that, not to retry. The end's write then carries
+    claims_as_read(doc): this reads, only that write decides."""
+    db = _get_db()
+    waiting = (rma_supplier_credit.canonical.finish_open_claims(db, doc)
+               or rma_supplier_credit.unfinished_note(db, doc))
+    if waiting:
+        _require_physical_return(doc, shipped=True)
+        raise HTTPException(status_code=409, detail=rma_supplier_credit.held_note(waiting) or (
+            "A supplier credit note is still waiting on this RMA. Accounts finishes it here "
+            "first: retry that same note here once its original bill is confirmed. Until "
+            "then this RMA stays open."))
 
 
 def _http_from_result(res: dict, user: dict) -> HTTPException:
@@ -277,6 +420,14 @@ async def raise_rma(
     eng = _engine()
     if eng._coll() is None:  # noqa: SLF001 - intentional fail-soft DB probe
         raise HTTPException(status_code=503, detail="Database not available")
+    for ln in body.lines:
+        problem = ln.customer_owned and _customer_piece_problem(_get_db(), ln, current_user)
+        if problem:
+            raise HTTPException(status_code=422, detail=problem)
+    _require_physical_return(
+        {"store_id": body.store_id, "vendor_id": body.vendor_id, "return_id": body.return_id,
+         "lines": [ln.model_dump() for ln in body.lines]},
+        shipped=False, status_code=422)
     lines = [
         {
             "product_id": ln.product_id,
@@ -284,6 +435,9 @@ async def raise_rma(
             "quantity": ln.quantity,
             "reason": ln.reason,
             "unit_cost": ln.unit_cost,
+            "customer_owned": ln.customer_owned,
+            "customer_id": (ln.customer_id or "").strip() or None,
+            "order_id": (ln.order_id or "").strip() or None,
         }
         for ln in body.lines
     ]
@@ -300,6 +454,16 @@ async def raise_rma(
     )
     if not res.get("ok"):
         raise HTTPException(status_code=400, detail=res.get("error", "create failed"))
+    # Two raises can pass the check above together. Whichever sees the other
+    # stands down, so a return never ends up on two live RMAs.
+    if body.return_id and eng._coll().find_one({  # noqa: SLF001
+            "return_id": body.return_id, "rma_id": {"$ne": res["rma_id"]},
+            "status": {"$ne": RMAStatus.REJECTED.value}}):
+        eng._transition(  # noqa: SLF001 - the engine's atomic from-state guard
+            res["rma_id"], from_status=RMAStatus.DRAFT.value, to_status=RMAStatus.REJECTED.value,
+            actor=current_user.get("user_id"), notes="Another RMA took this vendor return first.",
+            audit_action="rma_rejected")
+        raise HTTPException(status_code=409, detail=f"Vendor return {body.return_id} already goes back on another RMA.")
     return mask_rma(res, current_user)
 
 
@@ -342,6 +506,7 @@ async def dispatch_rma(
     """Record courier dispatch (carrier / AWB / date); AUTHORIZED -> DISPATCHED."""
     eng = _engine()
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
+    _require_physical_return(doc, shipped=True)
     res = eng.dispatch(
         rma_id,
         carrier=body.carrier,
@@ -403,6 +568,7 @@ async def record_credit_note(
         if submitted["received_paise"] == 0 and submitted["allocations"]:
             raise SupplierCreditError("ZERO_ACKNOWLEDGEMENT_ONLY", "A zero acknowledgement cannot contain credit allocations.")
         if not existing or existing.get("posting_status") != "POSTED":
+            _require_physical_return(doc, shipped=True)
             if not rma_is_priced(doc):
                 raise _http_from_result(dict(PRICE_REQUIRED), current_user)
             if doc.get("status") not in rma_supplier_credit.READY:
@@ -485,6 +651,9 @@ async def reject_rma(
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
     actor = current_user.get("user_id")
     status = doc.get("status")
+    if status == RMAStatus.DISPATCHED.value:
+        require_payables(current_user, "Rejecting a dispatched RMA (forgoing its credit)")
+    _require_no_unfinished_note(doc)
     if status in _REJECT_BEFORE_DISPATCH:
         # Pinned to the state just read (the engine's one-from-state guard): a
         # dispatch landing in between makes this a 409, never a reject of the
@@ -492,14 +661,15 @@ async def reject_rma(
         res = eng._transition(  # noqa: SLF001 - the engine's atomic from-state guard
             rma_id, from_status=status, to_status=RMAStatus.REJECTED.value,
             actor=actor, notes=body.reason or "", audit_action="rma_rejected",
+            guard=rma_supplier_credit.claims_as_read(doc),
         )
     else:
-        if status == RMAStatus.DISPATCHED.value:
-            require_payables(current_user, "Rejecting a dispatched RMA (forgoing its credit)")
         # DISPATCHED (accounts) -- or a state no reject leaves, which the engine
         # answers 409 invalid_transition with nothing written.
-        res = eng.reject(rma_id, actor=actor, reason=body.reason or "")
+        res = eng.reject(rma_id, actor=actor, reason=body.reason or "",
+                         guard=rma_supplier_credit.claims_as_read(doc))
     if not res.get("ok"):
+        _require_no_unfinished_note(eng.get(rma_id) or doc)  # one that passed since says so
         raise _http_from_result(res, current_user)
     return mask_rma(res, current_user)
 
@@ -519,14 +689,20 @@ async def close_rma(
         require_payables(current_user, "Writing off an RMA's credit variance")
     eng = _engine()
     doc = in_reach_or_404(eng.get(rma_id), current_user, "RMA not found")
+    _require_physical_return(doc, shipped=True, closing=True)
+    _require_no_unfinished_note(doc)
     res = eng.close_rma(
         rma_id,
         actor=current_user.get("user_id"),
         notes=body.notes or "",
         write_off_variance=bool(body.write_off_variance),
+        guard=rma_supplier_credit.claims_as_read(doc),
     )
     if not res.get("ok"):
+        _require_no_unfinished_note(eng.get(rma_id) or doc)  # one that passed since says so
         raise _http_from_result(res, current_user)
+    # A written-off balance ends the return's wait for a credit too.
+    rma_supplier_credit.settle_return(_get_db(), eng.get(rma_id) or {})
     return mask_rma(res, current_user)
 
 
