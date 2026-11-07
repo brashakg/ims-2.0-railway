@@ -302,7 +302,7 @@ def _physical_return_problem(db, doc: dict, *, shipped: bool, closing: bool = Fa
             elif state is _rtv._STATE.QUARANTINED and not shipped:
                 pieces[units[sid].get("product_id")] += 1
             elif state is _rtv._STATE.QUARANTINED:
-                return f"Ship vendor return {rid} first: its pieces leave stock there."
+                return rma_supplier_credit.ship_first(rid)
             else:
                 return (f"Piece {_rtv._label(units.get(sid), sid)} of vendor return {rid} "
                         "is no longer held for it.")
@@ -340,7 +340,7 @@ def _require_physical_return(doc: dict, *, shipped: bool, status_code: int = 409
     if problem:
         held = db is not None and doc.get("rma_id") and rma_supplier_credit.unfinished_note(db, doc)
         raise HTTPException(status_code=status_code,
-                            detail=rma_supplier_credit.NOTE_HELD + problem if held else problem)
+                            detail=rma_supplier_credit.note_stopped(problem) if held else problem)
 
 
 def _require_no_unfinished_note(doc: dict) -> None:

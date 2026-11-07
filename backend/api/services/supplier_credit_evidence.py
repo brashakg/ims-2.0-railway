@@ -17,6 +17,9 @@ from .return_provenance import ReturnProvenanceError, resolve_return_provenance
 
 HEADS = ("cgst", "sgst", "igst")
 EVENTS = "supplier_credit_confirmations"
+KNOWN = "KNOWN"
+SHIP_THEN_RETRY = (" If those pieces really are going back to the supplier, ship that return, then retry "
+                   "this same note. If they are not, it needs a head-office decision.")
 
 
 class _CollectionAccess:
@@ -150,31 +153,54 @@ def _ticked(lines, source):
     return type(index) is int and 0 <= index < len(lines) and lines[index].get("customer_owned")
 
 
-def _goods_known(db, event, source):
-    """A credit naming no piece still says whose goods it took when its line is
-    ticked customer_owned, or its RMA links a return that really carried them:
-    a live one, this shop's and supplier's, whose own pieces have left (RTV) and
-    cover this product for the quantity credited. A return_id alone proves
-    nothing: before the rule it was free text (a cancelled return, a typed one,
-    another product, no such id), pieces merely set aside can still be put back,
-    and a receipt rejection carried custody, never the accepted goods credited."""
+def _same_goods(row, source):
+    """The same receipt, product, disposition and original bill line."""
+    return goods_key(row) == goods_key(source) and (row.get("bill_id"), row.get("bill_line_index")) == (
+        source.get("bill_id"), source.get("bill_line_index"))
+
+
+def _goods_place(db, event, source):
+    """Whose goods a credit naming no piece took: KNOWN when its line is ticked
+    customer_owned, or its RMA links a return that really carried them: a live one,
+    the only one on that link, this shop's and supplier's, whose pieces (the shared
+    provenance resolver, as any credit on that return) trace to this source's own
+    receipt, disposition and bill line, and have left (RTV) for the quantity
+    credited. The return's id when only their shipment is missing; None otherwise.
+    A return_id alone proves nothing: before the rule it was free text (a cancelled
+    return, a typed one, another product, another purchase of the same product, no
+    such id), and a receipt rejection carried custody, never the accepted goods."""
     if event.get("return_kind") != "RMA":
-        return False
+        return None
     rma = db.get_collection("vendor_rmas").find_one({"rma_id": event["return_id"]}) or {}
     lines = rma.get("lines") or []
     if _ticked(lines, source):
-        return True
+        return KNOWN
     rid = rma.get("return_id")
     ret = db.get_collection("vendor_returns").find_one({"return_id": rid}) if rid else None
-    if (not ret or ret.get("status") == "cancelled" or ret.get("receipt_rejection")
-            or ret.get("vendor_id") != rma.get("vendor_id") or ret.get("store_id") != rma.get("store_id")):
-        return False
-    product = source.get("product_id")
+    if (not ret or ret.get("status") in ("cancelled", "replaced") or ret.get("return_type") == "replacement"
+            or ret.get("receipt_rejection")
+            or ret.get("vendor_id") != rma.get("vendor_id") or ret.get("store_id") != rma.get("store_id")
+            or db.get_collection("vendor_rmas").count_documents({"return_id": rid, "status": {"$ne": "REJECTED"}}) > 1):
+        return None
+    try:
+        origins = resolve_return_provenance(db, ret)
+    except ReturnProvenanceError:
+        return None
+    ids = [sid for origin in origins if _same_goods(origin, source) for sid in origin["stock_ids"]]
     wanted = sum(int(s.get("quantity") or 0) for s in event["sources"]
-                 if s.get("product_id") == product and not _ticked(lines, s))
-    return wanted <= db.get_collection("stock_units").count_documents(
-        {"rtv_vendor_id": rid, "product_id": product, "stock_id": {"$in": ret.get("stock_ids") or []},
-         **status_match(StockState.RTV)})
+                 if _same_goods(s, source) and not _ticked(lines, s))
+    if not ids or wanted > len(ids):
+        return None
+    pieces = db.get_collection("stock_units")
+    left = pieces.count_documents({"stock_id": {"$in": ids}, **status_match(StockState.RTV)})
+    if wanted <= left:
+        return KNOWN
+    set_aside = pieces.count_documents({"stock_id": {"$in": ids}, **status_match(StockState.QUARANTINED)})
+    return rid if wanted <= left + set_aside else None
+
+
+def _goods_known(db, event, source):
+    return _goods_place(db, event, source) == KNOWN
 
 
 def goods_key(source):
@@ -204,7 +230,9 @@ def _refuse_unplaced_credit(db, return_doc, sources):
     whose goods are known (_goods_known) is placed, and neither stops nor is
     stopped; nor does either meet a credit for other goods (goods_key). Which
     pieces a credit covered is never guessed, and a posted credit is never
-    changed, so no route frees such a note yet: head office decides."""
+    changed, so no route frees such a note yet: head office decides. The one
+    thing that can still finish it is a linked return whose right pieces only have
+    to ship (_goods_place), said only when no other credit stands in the way."""
     rid = return_doc.get("return_id") or return_doc.get("rma_id")
     spending = [s for s in sources if _spends_goods(db, return_doc, s)]
     named = {goods_key(s) for s in spending}
@@ -212,6 +240,7 @@ def _refuse_unplaced_credit(db, return_doc, sources):
         return
     own = {"return_kind": return_doc.get("return_kind"), "return_id": rid, "sources": sources}
     unplaced = {goods_key(s) for s in spending if not s["stock_ids"] and not _goods_known(db, own, s)}
+    shipment = None
     for event in db.get_collection(EVENTS).find({"posting_status": {"$in": ["PREPARING", "POSTED"]},
                                                  "sources.grn_id": {"$in": sorted({key[0] for key in named})}}):
         if event.get("return_id") == rid:
@@ -224,12 +253,21 @@ def _refuse_unplaced_credit(db, return_doc, sources):
                     why = (f"A supplier credit on this purchase receipt ({event['return_id']}) paid for "
                            "pieces of this product and this note names none, so IMS cannot tell whether "
                            "it is the same goods.")
-            elif goods in named and not _goods_known(db, event, source):
-                why = (f"An earlier supplier credit on this purchase receipt ({event['return_id']}) names "
-                       "no pieces, so IMS cannot tell whether it already paid for these goods.")
+            elif goods in named:
+                place = _goods_place(db, event, source)
+                if place not in (KNOWN, None):
+                    shipment = (f"An earlier supplier credit on this purchase receipt ({event['return_id']}) names "
+                                f"no pieces, and the pieces of its vendor return {place} have not left yet, so IMS "
+                                "cannot tell yet whether it already paid for these goods. A note here stays saved "
+                                "with nothing posted." + SHIP_THEN_RETRY)
+                elif place is None:
+                    why = (f"An earlier supplier credit on this purchase receipt ({event['return_id']}) names "
+                           "no pieces, so IMS cannot tell whether it already paid for these goods.")
             if why:
                 _pending("EARLIER_CREDIT_UNPLACED",
                          why + " A note here stays saved with nothing posted, and needs a head-office decision.")
+    if shipment:
+        _pending("EARLIER_CREDIT_NOT_SHIPPED", shipment)
 
 
 def resolve_credit_evidence(db, return_doc, *, selections=None, allowed_store_ids=None):

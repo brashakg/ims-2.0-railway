@@ -1174,7 +1174,7 @@ async def update_return_status(
                 "Accounts settles it there first."))
         if waiting:
             why = _typed_credit_problem(db, return_doc, waiting["_id"])
-            raise HTTPException(status_code=409, detail=rma_supplier_credit.NOTE_HELD + why if why else (
+            raise HTTPException(status_code=409, detail=rma_supplier_credit.note_stopped(why) if why else (
                 "A supplier credit note is still waiting on this return. Accounts finishes it "
                 "first: retry that same note once its original bill is confirmed."))
         # Shipping: every piece leaves stock FIRST (QUARANTINED -> RTV) while
@@ -1477,7 +1477,7 @@ async def confirm_supplier_credit(
     problem = _typed_credit_problem(db, return_doc, str(body.idempotency_key))
     if problem:
         held = rma_supplier_credit.unfinished_on_return(db, return_doc)
-        raise HTTPException(409, rma_supplier_credit.NOTE_HELD + problem if held else problem)
+        raise HTTPException(409, rma_supplier_credit.note_stopped(problem) if held else problem)
     try:
         event, repeated = record_supplier_confirmation(
             db, return_doc, body.model_dump(mode="json"), actor_id=current_user.get("user_id"),

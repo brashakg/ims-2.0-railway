@@ -18,8 +18,8 @@ from pymongo.errors import DuplicateKeyError
 
 from . import supplier_credit_confirmation as canonical
 from .supplier_credit_evidence import (
-    EVENTS, SupplierCreditError, confirmation_view, credit_preview, credit_started, paise,
-    return_event_query,
+    EVENTS, SHIP_THEN_RETRY, SupplierCreditError, confirmation_view, credit_preview, credit_started,
+    paise, return_event_query,
 )
 from .vendor_rma import RMAStatus, VendorRMAEngine, _now
 
@@ -36,18 +36,35 @@ OVER_CAP = {"ORIGINAL_QUANTITY_EXCEEDED", "ORIGINAL_AMOUNT_EXCEEDED", "RETURN_AM
 # a new RMA all fail): the physical rule stops one from before claims recorded it
 # (supplier_credit_evidence.rule_settled) or with its own pieces back, and another
 # credit on the same goods stops the rest (held_note). Every refusal says so
-# instead of promising a retry. The way out is the owner's.
-NOTE_HELD = ("The supplier note waiting here cannot finish, so this record stays open: retrying "
-             "will not help, a new RMA cannot take the same note, and no money has moved. It "
-             "needs a head-office decision. Why it cannot finish: ")
+# instead of promising a retry. The way out is the owner's. Pieces still on their
+# way out are the exception, and say that instead (NOTE_WAITS): a real shipment
+# finishes the note, and nothing here asks for one that is not real.
+NOTE_HELD = ("The supplier note waiting here cannot finish as things stand, so this record stays "
+             "open: retrying alone will not help, a new RMA cannot take the same note, and no "
+             "money has moved. It needs a head-office decision. Why it cannot finish: ")
+NOTE_WAITS = ("The supplier note waiting here cannot finish yet, so this record stays open: a new "
+              "RMA cannot take the same note, and no money has moved. Why it is waiting: ")
+_SHIP_FIRST = " first: its pieces leave stock there."
+
+
+def ship_first(return_id):
+    return f"Ship vendor return {return_id}{_SHIP_FIRST}"
+
+
+def note_stopped(problem):
+    """A physical refusal of a claimed note, with the next step it really has."""
+    return NOTE_WAITS + problem + SHIP_THEN_RETRY if problem.endswith(_SHIP_FIRST) else NOTE_HELD + problem
 
 
 def held_note(event):
-    """NOTE_HELD and the stored reason when another credit on the same goods holds
-    this note (_refuse_unplaced_credit); None for a note that can still finish."""
-    why = next((reason.get("message") for reason in event.get("pending_reasons") or []
-                if reason.get("code") == "EARLIER_CREDIT_UNPLACED"), None)
-    return NOTE_HELD + why if why else None
+    """The refusal when another credit on the same goods holds this note
+    (_refuse_unplaced_credit); None for a note that can still finish."""
+    reasons = {reason.get("code"): reason.get("message") for reason in event.get("pending_reasons") or []}
+    if "EARLIER_CREDIT_UNPLACED" in reasons:
+        return NOTE_HELD + reasons["EARLIER_CREDIT_UNPLACED"]
+    if "EARLIER_CREDIT_NOT_SHIPPED" in reasons:
+        return NOTE_WAITS + reasons["EARLIER_CREDIT_NOT_SHIPPED"]
+    return None
 
 
 def _noted_without_pieces(db, rma_id):
@@ -109,23 +126,6 @@ def _holds_its_door(event):
     return not (event.get("fenced_token") and reasons <= OVER_CAP)
 
 
-def unfinished_note(db, rma):
-    """A supplier note this RMA has claimed but not yet carried onto itself:
-    saved pending, posting, or posted with its summary lost. Only this door can
-    finish it, so the RMA stays open for it; the note is never released."""
-    done = [n["confirmation_id"] for n in rma.get("credit_notes") or [] if n.get("confirmation_id")]
-    return next((event for event in db.get_collection(EVENTS).find(
-        {**return_event_query({"rma_id": rma["rma_id"]}), "identity_claimed": {"$ne": False}, "_id": {"$nin": done}})
-        if _holds_its_door(event)), None)
-
-
-def unfinished_on_return(db, return_doc):
-    """The same for a return: a note of its own not yet posted, or one waiting on
-    an RMA still live on it. Ending the return shuts both doors on that note."""
-    own = db.get_collection(EVENTS).find(
-        {**return_event_query(return_doc), "identity_claimed": {"$ne": False}, "posting_status": {"$ne": "POSTED"}})
-    live = db.get_collection("vendor_rmas").find({"return_id": return_doc["return_id"], "status": {
-        "$nin": [RMAStatus.REJECTED.value, RMAStatus.CLOSED.value]}})
 def hold_doors(db, event):
     """Only this RMA can finish its note, and ending the RMA or its return shuts
     that door: the note passes both while they are open (canonical._claim)."""
@@ -143,6 +143,23 @@ def claims_as_read(door):
     return {canonical.NOTE_CLAIMS: door.get(canonical.NOTE_CLAIMS)}
 
 
+def unfinished_note(db, rma):
+    """A supplier note this RMA has claimed but not yet carried onto itself:
+    saved pending, posting, or posted with its summary lost. Only this door can
+    finish it, so the RMA stays open for it; the note is never released."""
+    done = [n["confirmation_id"] for n in rma.get("credit_notes") or [] if n.get("confirmation_id")]
+    return next((event for event in db.get_collection(EVENTS).find(
+        {**return_event_query({"rma_id": rma["rma_id"]}), "identity_claimed": {"$ne": False}, "_id": {"$nin": done}})
+        if _holds_its_door(event)), None)
+
+
+def unfinished_on_return(db, return_doc):
+    """The same for a return: a note of its own not yet posted, or one waiting on
+    an RMA still live on it. Ending the return shuts both doors on that note."""
+    own = db.get_collection(EVENTS).find(
+        {**return_event_query(return_doc), "identity_claimed": {"$ne": False}, "posting_status": {"$ne": "POSTED"}})
+    live = db.get_collection("vendor_rmas").find({"return_id": return_doc["return_id"], "status": {
+        "$nin": [RMAStatus.REJECTED.value, RMAStatus.CLOSED.value]}})
     return next((e for e in own if _holds_its_door(e)), None) or next(
         (e for e in (unfinished_note(db, rma) for rma in live) if e), None)
 
