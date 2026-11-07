@@ -2477,7 +2477,9 @@ def reconcile_loyalty_reversals() -> Dict[str, int]:
     }
     for order in bills.find(
         {"status": "CANCELLED",
-         "$or": [{"loyalty_reversal_failed": True}, {"cancelled_at": {"$gte": reach}}]},
+         "$or": [{"loyalty_reversal_failed": True},
+                 {"loyalty_exception_task": {"$exists": True}},
+                 {"cancelled_at": {"$gte": reach}}]},
         fields,
     ):
         what = f"cancelled bill {order.get('order_number') or order.get('order_id')}"
@@ -2488,7 +2490,7 @@ def reconcile_loyalty_reversals() -> Dict[str, int]:
             counts["unresolved"] += 1
             logger.error("loyalty reconcile failed on %s: %s", what, exc)
     for doc in returns.find(
-        {"status": "COMPLETED", "loyalty_reversal_failed": True},
+        {"status": "COMPLETED", "$or": [{"loyalty_reversal_failed": True}, {"loyalty_exception_task": {"$exists": True}}]},
         {**fields, "return_id": 1},
     ):
         what = f"return {doc.get('return_id')}"

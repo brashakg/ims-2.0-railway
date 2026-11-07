@@ -203,6 +203,21 @@ def test_what_cannot_be_settled_is_one_visible_exception_that_closes_itself(rig,
     assert int(_account(rig)["balance_points"]) == 0 and len(_exceptions(rig)) == 1
 
 
+def test_an_old_bill_healed_at_a_door_still_closes_its_exception(rig, tasks, monkeypatch):
+    """Past the sweep's reach, unflagged again: the open task must not outlive it."""
+    _underflow_stranded(rig, monkeypatch)
+    _tick(rig)
+    assert len(_exceptions(rig, "OPEN")) == 1
+    rig["accounts"].adjust_balance(CUST, delta_points=500)
+    old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    rig["db"].orders.update_one({"order_id": ORDER}, {"$set": {"cancelled_at": old}})
+    with pytest.raises(HTTPException) as ei:  # the redeem door heals it
+        _redeem()
+    assert ei.value.status_code == 409 and _bill(rig)["loyalty_reversal_failed"] is False
+    _tick(rig)
+    assert _exceptions(rig, "OPEN") == [] and "loyalty_exception_task" not in _bill(rig)
+
+
 def test_an_exception_a_person_closed_is_not_filed_again(rig, tasks, monkeypatch):
     _underflow_stranded(rig, monkeypatch)
     _tick(rig)
