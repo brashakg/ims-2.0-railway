@@ -589,6 +589,17 @@ def test_a_no_fingerprint_lens_bill_also_weighs_what_is_not_lens(client, staff_h
     assert _orders(rx_orders) == before
 
 
+def test_a_no_fingerprint_bill_edited_since_refuses_the_old_request(client, staff_headers, rx_orders):
+    """The saved bill is the only evidence, so a later edit makes the old press
+    a different bill: refused, sent to Orders, nothing rewritten."""
+    lines = _two_line_bill(rx_orders)
+    _no_fp_bill(client, staff_headers, rx_orders, "K-NF-E", lines)
+    _orders(rx_orders)[0]["items"][0]["quantity"] = 3
+    before = copy.deepcopy(_orders(rx_orders))
+    assert _post(client, staff_headers, lines, key="K-NF-E").status_code == 409
+    assert _orders(rx_orders) == before
+
+
 def test_a_no_fingerprint_bill_replays_a_reorder_and_a_raw_saved_sku(client, staff_headers, rx_orders):
     """Identical retries still replay: whole lines in another order, and a bill
     that saved the SKU it was sent (nothing rewrites that saved line)."""
