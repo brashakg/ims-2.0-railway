@@ -19,13 +19,15 @@ from ...dependencies import (
     get_order_repository,
     get_audit_repository,
     validate_store_access,
-    can_access_store_scoped,
+    in_reach_or_404,
+    user_store_scope,
 )
 from ._shared import _FITTING_ROLES, _check_dc_hardlock, logger, router
 from ...utils.ist import now_ist
 from .models import FittingDetailsUpdate, WorkshopJobCreate, WorkshopJobUpdate
 from .helpers import (
     _assert_job_store_access,
+    _reachable_page,
     _stamp_job_actor_names,
     _verify_job_prescription,
     generate_job_number,
@@ -54,19 +56,28 @@ async def list_jobs_by_vendor(
         return {"vendor_id": vendor_id, "jobs": [], "total": 0}
 
     filter_dict: dict = {"vendor_id": vendor_id}
+    # PR #1376 F1: the vendor queue is the same jobs the shop list scopes --
+    # a non-admin reads only its own shops' (none for a no-shop login).
+    is_cross, stores = user_store_scope(current_user)
+    if not is_cross:
+        filter_dict["store_id"] = {"$in": sorted(stores)}
     if not include_delivered:
         filter_dict["status"] = {"$nin": ["DELIVERED", "CANCELLED"]}
 
-    jobs = (
-        repo.find_many(filter_dict, skip=skip, limit=limit, sort=[("expected_date", 1)])
-        or []
+    jobs, total = _reachable_page(
+        repo,
+        filter_dict,
+        current_user,
+        sort=[("expected_date", 1), ("job_id", 1)],
+        skip=skip,
+        limit=limit,
     )
     _stamp_job_actor_names(jobs)
 
     return {
         "vendor_id": vendor_id,
         "jobs": [job_to_frontend(j, current_user) for j in jobs],
-        "total": len(jobs),
+        "total": total,
     }
 
 
@@ -92,12 +103,17 @@ async def list_jobs(
         if technician_id:
             filter_dict["technician_id"] = technician_id
 
-        jobs = repo.find_many(
-            filter_dict, skip=skip, limit=limit, sort=[("created_at", -1)]
+        jobs, total = _reachable_page(
+            repo,
+            filter_dict,
+            current_user,
+            sort=[("created_at", -1), ("job_id", 1)],
+            skip=skip,
+            limit=limit,
         )
         _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
-        return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
+        return {"jobs": jobs_formatted, "total": total}
 
     return {"jobs": [], "total": 0}
 
@@ -120,9 +136,14 @@ async def create_job(
         # Verify order exists
         order = None
         if order_repo is not None:
-            order = order_repo.find_by_id(job.order_id)
-            if order is None:
-                raise HTTPException(status_code=404, detail="Order not found")
+            # L2-WS-F01: authorize the ORDER's shop before the dedup return,
+            # the reverse-pointer backfill and the create -- a missing order
+            # and another shop's (or an unattributed legacy) one get the same
+            # 404, so a store login can neither attach a job to a foreign
+            # order nor read its existing job back through the dedup.
+            order = in_reach_or_404(
+                order_repo.find_by_id(job.order_id), current_user, "Order not found"
+            )
 
         # ------------------------------------------------------------------
         # DEDUP: one order, one lab job. MUST come before every other check.
@@ -204,7 +225,10 @@ async def create_job(
         # canonical POS Rx gate's rules; see _verify_job_prescription.
         _verify_job_prescription(job.prescription_id, order, current_user)
 
-        store_id = current_user.get("active_store_id")
+        # The job belongs to the ORDER's shop (as the confirm safety net,
+        # orders._ensure_workshop_job_for_order, stamps it), not to whichever
+        # shop an admin / area manager has open in the top bar.
+        store_id = (order or {}).get("store_id") or current_user.get("active_store_id")
         created_at = utc_now_iso()
 
         # F9 -- LENS DC HARDLOCK. An external-lab lens (lens_status=ORDERED) may
@@ -354,8 +378,7 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
             # NEW-IDOR-by-id: a workshop job carries customer + medical Rx data;
             # existence-hide one whose store the caller can't access (cross-store
             # PII leak). Admins / area-managers pass.
-            if not can_access_store_scoped(job.get("store_id"), current_user):
-                raise HTTPException(status_code=404, detail="Workshop job not found")
+            _assert_job_store_access(job, current_user)
             _stamp_job_actor_names([job])
             return job_to_frontend(job, current_user)
         raise HTTPException(status_code=404, detail="Workshop job not found")
@@ -375,8 +398,7 @@ async def update_job(
         if existing is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
         # NEW-IDOR-by-id: don't let a store-scoped caller mutate another store's job.
-        if not can_access_store_scoped(existing.get("store_id"), current_user):
-            raise HTTPException(status_code=404, detail="Workshop job not found")
+        _assert_job_store_access(existing, current_user)
 
         # Bug fix: READY and QC_FAILED were missing from the immutable-status
         # guard. A job in READY or CANCELLED state must not have its details

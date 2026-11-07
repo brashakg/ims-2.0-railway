@@ -39,19 +39,27 @@ class WorkshopJobRepository(BaseRepository):
             filter_dict["status"] = status
         return self.find_many(filter_dict, sort=[("created_at", -1)], limit=0)
 
-    def find_pending(self, store_id: str = None) -> List[Dict]:
+    def find_reach_keys(self, filter_dict: Dict) -> List[Dict]:
+        """The id fields the store rule needs, of every job matching the filter."""
+        return list(
+            self.collection.find(
+                filter_dict, {"_id": 0, "job_id": 1, "order_id": 1, "store_id": 1}
+            )
+        )
+
+    def find_pending(self, store_id: str = None, limit: int = 100) -> List[Dict]:
         filter_dict = {"status": {"$in": ["PENDING", "IN_PROGRESS"]}}
         if store_id:
             filter_dict["store_id"] = store_id
-        return self.find_many(filter_dict, sort=[("expected_date", 1)])
+        return self.find_many(filter_dict, sort=[("expected_date", 1)], limit=limit)
 
-    def find_ready(self, store_id: str = None) -> List[Dict]:
+    def find_ready(self, store_id: str = None, limit: int = 100) -> List[Dict]:
         filter_dict = {"status": "READY"}
         if store_id:
             filter_dict["store_id"] = store_id
-        return self.find_many(filter_dict, sort=[("completed_at", -1)])
+        return self.find_many(filter_dict, sort=[("completed_at", -1)], limit=limit)
 
-    def find_overdue(self, store_id: str = None) -> List[Dict]:
+    def find_overdue(self, store_id: str = None, limit: int = 100) -> List[Dict]:
         # expected_date is a date-only ISO STRING ("2026-05-30", written by
         # create_job / update_job), so the bound is a string too, and it is
         # day-granular: a job due TODAY is not overdue until the IST day rolls
@@ -67,7 +75,7 @@ class WorkshopJobRepository(BaseRepository):
         }
         if store_id:
             filter_dict["store_id"] = store_id
-        return self.find_many(filter_dict, sort=[("expected_date", 1)])
+        return self.find_many(filter_dict, sort=[("expected_date", 1)], limit=limit)
 
     def update_status(
         self,
@@ -185,11 +193,14 @@ class WorkshopJobRepository(BaseRepository):
             return False
         return self.update_status(job_id, target_status, by_user)
 
-    def get_technician_workload(self, store_id: str) -> List[Dict]:
+    def get_technician_workload(
+        self, store_id: str, exclude_job_ids: Optional[List[str]] = None
+    ) -> List[Dict]:
         pipeline = [
             {
                 "$match": {
                     **({"store_id": store_id} if store_id else {}),
+                    **({"job_id": {"$nin": exclude_job_ids}} if exclude_job_ids else {}),
                     "status": {"$in": ["PENDING", "IN_PROGRESS"]},
                 }
             },

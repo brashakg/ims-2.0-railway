@@ -654,3 +654,21 @@ class StrictDB:
         if name.startswith("_"):
             raise AttributeError(name)
         return self.get_collection(name)
+
+
+class OrdersAt:
+    """An order repository whose every order belongs to ``store_id``.
+
+    A workshop job's canonical shop is its ORDER's (PR #1376 F3): a non-admin
+    reaches a job only when its order resolves to one of their shops. Harnesses
+    that model a consistent same-shop job patch ``get_order_repository`` with
+    this rather than leaving it unresolvable."""
+
+    def __init__(self, store_id):
+        self.store_id = store_id
+
+    def find_by_id(self, order_id):
+        return {"order_id": order_id, "store_id": self.store_id} if order_id else None
+
+    def ids_in_stores(self, order_ids, store_ids):
+        return set(order_ids) if self.store_id in store_ids else set()

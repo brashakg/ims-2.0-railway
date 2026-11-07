@@ -46,6 +46,7 @@ from fastapi.testclient import TestClient
 from api.routers import workshop as workshop_module
 from api.routers.workshop import VALID_JOB_TRANSITIONS
 from api.routers.auth import get_current_user
+from strict_fakes import OrdersAt  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -211,6 +212,9 @@ def _client_with(monkeypatch, roles: List[str], fake_repo: Optional[FakeRepo] = 
     if fake_repo is not None:
         monkeypatch.setattr(workshop_module, "get_workshop_repository", lambda: fake_repo)
         monkeypatch.setattr(workshop_module, "get_audit_repository", lambda: None)
+        monkeypatch.setattr(
+            workshop_module.helpers, "get_order_repository", lambda: OrdersAt("BV-TEST-01")
+        )
 
     return TestClient(app)
 
