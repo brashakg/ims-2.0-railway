@@ -187,7 +187,9 @@ def _resolve_origins(db, return_doc, *, selections=None, allow_unbooked=False):
     vendor_id, shop = return_doc.get("vendor_id"), return_doc.get("store_id")
     if not vendor_id or not shop:
         _pending("RETURN_OWNER_REQUIRED", "The return's supplier and shop must be identified.")
-    return_id = return_doc.get("return_id") or return_doc.get("rma_id")
+    # A linked RMA's pieces stay linked to the return that moved them.
+    return_id = (return_doc.get("physical_return_id") or return_doc.get("return_id")
+                 or return_doc.get("rma_id"))
     units = list(db.get_collection("stock_units").find({"rtv_vendor_id": return_id})) if return_id else []
     wanted = set(return_doc.get("stock_ids") or [])
     if wanted and wanted != {unit.get("stock_id") for unit in units}:
