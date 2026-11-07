@@ -254,6 +254,13 @@ async def add_payment(
                 detail=f"Payment amount exceeds balance due (Rs {balance_due})",
             )
 
+        # Every debit leg carries a key, sent or not: the give-back door finds a
+        # leg that lost its bill by that key alone, so a keyless debit that
+        # lost one was out of reach for good.
+        wallet_tender = payment.method in (PaymentMethod.GIFT_VOUCHER, PaymentMethod.STORE_CREDIT)
+        if wallet_tender and not idem_key:
+            idem_key = str(uuid.uuid4())
+
         # Gift voucher: REDEEM (decrement the card) before recording the
         # payment, so an abandoned sale never burns a card and there is no
         # client-side double-spend. The atomic redeem is the single source
@@ -275,7 +282,7 @@ async def add_payment(
             # THE one rule: no new gift-voucher debit while this customer --
             # or this voucher -- has another unresolved debit; only the same
             # leg (key) resumes. A leg given back is never taken again.
-            leg_key = f"POSPAY:{order_id}:{idem_key}" if idem_key else None
+            leg_key = f"POSPAY:{order_id}:{idem_key}"
             refuse_unresolved_debit(str(order.get("customer_id") or ""), leg_key, voucher_code)
             refuse_given_back_voucher_leg(voucher_code, leg_key)
             result = redeem_voucher_atomic(
@@ -286,7 +293,7 @@ async def add_payment(
                 current_user.get("user_id"),
                 # The till leg's key keys the DEBIT itself: a re-sent leg whose
                 # answer was lost never takes the card twice.
-                idempotency_key=f"POSPAY:{order_id}:{idem_key}" if idem_key else None,
+                idempotency_key=leg_key,
             )
             if not result.get("ok"):
                 raise HTTPException(
@@ -320,13 +327,13 @@ async def add_payment(
                 user_id=current_user.get("user_id"),
                 # The till leg's key guards the DEBIT itself (the manual
                 # door's pattern): a re-sent leg never debits twice.
-                guard_ref=f"POSPAY:{order_id}:{idem_key}" if idem_key else None,
+                guard_ref=f"POSPAY:{order_id}:{idem_key}",
                 source="POS_PAYMENT",
             )
 
         # ONE owner per debit leg (money review 21): the bill wins the leg
         # before the payment goes on the order, or the give-back owns it (409).
-        if idem_key and payment.method in (PaymentMethod.STORE_CREDIT, PaymentMethod.GIFT_VOUCHER):
+        if wallet_tender:
             from ..customers import claim_leg_for_bill
 
             claim_leg_for_bill(payment.method.value, f"POSPAY:{order_id}:{idem_key}",
@@ -452,10 +459,11 @@ async def add_payment(
                     # Another tender (a Razorpay capture) landed after the check
                     # above: the same refusal, not a 500.
                     latest = order_balance_due(repo.find_by_id(order_id) or order) or 0
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Payment amount exceeds balance due (Rs {latest})",
-                    ) from exc
+                    detail = f"Payment amount exceeds balance due (Rs {latest})"
+                    if wallet_tender:  # its debit landed: an unbilled leg, given back once
+                        detail += (f". The Rs {payment.amount:.2f} already taken goes back through "
+                                   "Accounts (Returns > Needs completing > Unbilled payments).")
+                    raise HTTPException(status_code=400, detail=detail) from exc
         except BaseException:
             if loyalty_txn_id:
                 _release_loyalty_redemption(loyalty_txn_id, payment_id)
