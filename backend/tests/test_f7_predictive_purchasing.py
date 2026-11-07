@@ -320,6 +320,7 @@ class TestT1ProposalGeneration:
             orders.insert_one(_order("S1", "P1", days_ago=i % 7))
         db.get_collection("stock_units").insert_one(_stock("S1", "P1", 5))
         db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
+        db.get_collection("vendors").insert_one({"vendor_id": "VEND-1", "trade_name": "Acme Optics"})
         return db
 
     def test_generates_one_proposal_with_full_payload(self):
@@ -434,6 +435,7 @@ class TestReservedNotOnHand:
         # 50 units, but ALL RESERVED -> zero sellable on-hand.
         db.get_collection("stock_units").insert_one(_stock("S1", "P1", 50, status="RESERVED"))
         db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
+        db.get_collection("vendors").insert_one({"vendor_id": "VEND-1", "trade_name": "Acme Optics"})
         assert _run_oracle(db) == 1  # reorder fired despite 50 RESERVED units
         pl = _pending(db)[0]["payload"]
         assert pl["product_id"] == "P1"
@@ -456,6 +458,7 @@ class TestLegacyBlankStatusOnHand:
         for i in range(8):  # ~1.14/day burn
             orders.insert_one(_order("S1", "P1", days_ago=i % 7))
         db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
+        db.get_collection("vendors").insert_one({"vendor_id": "VEND-1", "trade_name": "Acme Optics"})
 
     def test_missing_and_blank_status_count_as_on_hand(self):
         db = FakeDB()
@@ -493,6 +496,7 @@ class TestT3PerStore:
         db.get_collection("stock_units").insert_one(_stock("STORE_A", "P1", 3))   # low
         db.get_collection("stock_units").insert_one(_stock("STORE_B", "P1", 20))  # high
         db.get_collection("products").insert_one(_product("P1", vendor="VEND-1"))
+        db.get_collection("vendors").insert_one({"vendor_id": "VEND-1", "trade_name": "Acme Optics"})
 
         count = _run_oracle(db)
         props = _pending(db)
@@ -592,6 +596,7 @@ class TestT6DraftNotSent:
             orders.insert_one(_order("S1", "P1", days_ago=i % 7))
         db.get_collection("stock_units").insert_one(_stock("S1", "P1", 6))
         db.get_collection("products").insert_one(_product("P1", vendor="V"))
+        db.get_collection("vendors").insert_one({"vendor_id": "V", "trade_name": "Acme Optics"})
         _run_oracle(db)
         prop = _pending(db)[0]
         res = ProposalStore(db=db).approve(prop["proposal_id"], reviewed_by="ceo")
