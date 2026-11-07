@@ -63,6 +63,8 @@ def _matches(doc: Dict[str, Any], flt: Dict[str, Any]) -> bool:
                     return False
                 if op == "$lt" and not (val is not None and val < operand):
                     return False
+                if op == "$in" and val not in operand:
+                    return False
         else:
             if val != cond:
                 return False
@@ -89,6 +91,13 @@ class FakeVouchers:
     def find(self, flt: Dict[str, Any]):
         # Like the real collection (the till's one-rule scan reads vouchers).
         return [copy.deepcopy(d) for d in self._docs if _matches(d, flt)]
+
+    def update_one(self, flt, update):
+        """Enough for the leg's owner (a keyless tender is keyed by the door)."""
+        hits = [d for d in self._docs if _matches(d, flt)][:1]
+        for d in hits:
+            d.update(update.get("$set", {}))
+        return type("R", (), {"matched_count": len(hits)})()
 
     def find_one_and_update(self, flt, update, return_document=None):
         for d in self._docs:
@@ -166,6 +175,7 @@ def wired(monkeypatch):
     from api import dependencies as deps_module
 
     monkeypatch.setattr(deps_module, "get_seeded_db", lambda: fake_db)
+    monkeypatch.setattr("api.routers.customers._vouchers_coll", lambda: store)
 
     repo = FakeOrderRepo(_order())
     monkeypatch.setattr(orders_module, "get_order_repository", lambda: repo)

@@ -12,8 +12,7 @@ from ._shared import (
     router,
     validate_status_transition,
 )
-from .workshop import _ensure_workshop_job_for_order
-from .release import _claim_order_status
+from .workshop import confirm_and_hand_off
 
 
 @router.post("/{order_id}/confirm")
@@ -43,15 +42,16 @@ async def confirm_order(order_id: str, current_user: dict = Depends(get_current_
 
         # Guarded claim, not a blind stamp: a cancel that wins its own claim
         # between this handler's read and this write must NOT be overwritten.
-        if _claim_order_status(
-            repo, order_id, "CONFIRMED", ("DRAFT",), current_user.get("user_id")
-        ):
-            # POS operational-wins: guarantee a fitting order has a workshop/lab
-            # job once it's committed. Idempotent + fail-soft (the POS client may
-            # already have created it; a non-POS confirm path may not have).
-            workshop_job_id = _ensure_workshop_job_for_order(
-                order, current_user.get("user_id")
+        # POS operational-wins: a fitting order gets its workshop/lab job once
+        # it's committed, whoever's write it was. Idempotent + fail-soft (the
+        # POS client may already have created it).
+        try:
+            stored, workshop_job_id = confirm_and_hand_off(
+                repo, order_id, current_user.get("user_id")
             )
+        except RuntimeError:  # still DRAFT or unreadable: not confirmed
+            stored, workshop_job_id = None, None
+        if stored and stored.get("status") == "CONFIRMED":
             return {
                 "order_id": order_id,
                 "status": "CONFIRMED",

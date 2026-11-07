@@ -396,8 +396,8 @@ def assert_linked_job_qc_cleared(order: dict) -> None:
     order_id = order.get("order_id")
     try:
         jobs: List[dict] = list(repo.find_by_order(order_id) or [])
-    except Exception:  # noqa: BLE001 -- infrastructure fail-soft
-        return
+    except Exception:  # noqa: BLE001 -- infrastructure fail-soft; the pointer still counts
+        jobs = []
 
     # Add the pointed-at job ONLY when it belongs to this order and the sweep
     # missed it (a sweep that already returned it needs no duplicate entry).
