@@ -1106,3 +1106,20 @@ def test_successful_return_still_reverses_loyalty(ctx):
     )
     assert r.status_code in (200, 201), r.text
     assert len(c["loyalty"]) == 1, c["loyalty"]
+
+
+def test_loyalty_store_unavailable_on_a_return_is_flagged_not_finished(ctx, monkeypatch):
+    """No loyalty store means the reversal did not run: the return doc must say
+    so, not read as a finished one."""
+    c = ctx([{"method": "CASH", "amount": _BILLED_GROSS}])
+    monkeypatch.setattr(
+        "api.routers.loyalty.reverse_for_return",
+        lambda *a: {"ok": False, "reason": "loyalty_db_unavailable"},
+    )
+    r = c["client"].post(
+        "/api/v1/returns",
+        json=_payload(refund_tenders=[{"method": "CASH", "amount": _BILLED_GROSS}]),
+        headers=_HDR,
+    )
+    assert r.status_code in (200, 201), r.text
+    assert c["returns"].docs[0]["loyalty_reversal_failed"] is True
