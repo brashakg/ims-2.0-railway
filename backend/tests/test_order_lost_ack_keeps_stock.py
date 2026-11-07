@@ -135,6 +135,39 @@ def test_insert_landed_but_ack_lost_keeps_unit_and_lens_with_the_bill(client, sh
     assert held == 1 and units["SU-B"] == "SOLD"
 
 
+def test_the_saved_bill_the_cell_and_every_retry_agree_until_the_cancel_frees_it_once(client, shop, monkeypatch):
+    """Codex (#1395 round 4, owned here): the bill said reserved, the cell did
+    not, and identical retries answered that bill with the reservation gone."""
+    real_create = _saved_then_raised(shop, monkeypatch)
+    body = [_lens_line()]
+    assert _sell(client, body, key="bill-key-2").status_code == 500
+    [saved] = _orders(shop)
+    assert [r["status"] for r in saved["lens_reservations"]] == ["reserved"]
+
+    monkeypatch.setattr(shop["orders"], "create_unique", real_create)
+    for _ in range(2):
+        again = _sell(client, body, key="bill-key-2")
+        assert again.status_code in (200, 201) and _order_id(again) == saved["order_id"]
+        assert _books(shop)[1] == 1 and _cell(shop)["reserved"] == 1
+    assert len(_lens_acts(shop, "reserve")) == 1 and _lens_acts(shop, "release") == []
+
+    gone = client.post(f"/api/v1/orders/{saved['order_id']}/cancel?reason=customer%20changed%20their%20mind",
+                       headers=_token(["SUPERADMIN"]))
+    assert gone.status_code == 200, gone.text
+    assert _books(shop)[1] == 0 and len(_lens_acts(shop, "release")) == 1
+
+
+def test_a_save_that_answers_nothing_frees_the_lens_like_the_unit(client, shop, monkeypatch):
+    """create_unique's None (number retries spent): no bill exists, so the cell
+    goes back with the unit. It used to stay reserved under no bill at all."""
+    monkeypatch.setattr(shop["orders"], "create_unique", lambda *_a, **_k: None)
+    r = _sell(client, [_line(stock_id="SU-B"), _lens_line()])
+    assert r.status_code == 500, r.text
+    assert _orders(shop) == []
+    units, held = _books(shop)
+    assert units["SU-B"] == "AVAILABLE" and held == 0
+
+
 def _db_goes_dark_on_read(shop, monkeypatch, broken):
     """Break the RAW orders collection read (what a real outage breaks):
     BaseRepository.find_one / find_by_id swallow errors into None, so the
