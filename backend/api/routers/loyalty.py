@@ -2362,7 +2362,8 @@ def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, A
 
 # ----------------------------------------------------------------------------
 # AUTOMATIC RECONCILIATION (owner ruling 2026-11-07: recovery is the system's
-# job -- no staff button, no new screen). TASKMASTER's 5-minute tick runs this.
+# job -- no staff button, no new screen). The scheduler's 10-minute money sweep
+# (customers.scheduled_credit_reconcile, no agent switch can stop it) runs this.
 # The reversal engine is exactly-once by construction, so re-running it IS the
 # recovery; the sweep only decides which rows to run it on. Durable work needs
 # no new record: a CANCELLED bill and the debit still on the account are the
@@ -2451,21 +2452,24 @@ def _after_settling(coll, id_field: str, doc: Dict[str, Any], what: str, outcome
     logger.warning("loyalty reconciled on %s: %s", what, moved)
     _audit(
         "loyalty.reversal_reconciled",
-        {"user_id": "system", "username": "TASKMASTER", "active_store_id": doc.get("store_id")},
+        {"user_id": "system", "username": "system", "active_store_id": doc.get("store_id")},
         {"order_id": doc.get("order_id"), "return_id": doc.get("return_id"), **moved},
         doc.get("customer_id"),
     )
     return "reconciled"
 
 
-def reconcile_loyalty_reversals(db) -> Dict[str, int]:
+def reconcile_loyalty_reversals() -> Dict[str, int]:
     """Finish every cancel and return reversal no staff door can reach. Safe to
     run from any worker at any moment, beside a press or a cancel: the engine's
     marker and applied_reversals guards decide who moves the money. One row's
-    failure never stops the next. Returns counts for the tick's log."""
+    failure never stops the next. Returns counts for the log."""
     counts = {"reconciled": 0, "unresolved": 0, "clean": 0}
     orders = get_order_repository()
-    bills, returns = db.get_collection("orders"), db.get_collection("returns")
+    if orders is None:
+        return counts
+    bills = orders.collection
+    returns = bills.database.get_collection("returns")
     reach = (datetime.now(timezone.utc) - timedelta(days=_SWEEP_REACH_DAYS)).isoformat()
     fields = {
         "_id": 0, "order_id": 1, "order_number": 1, "customer_id": 1, "store_id": 1,
@@ -2496,4 +2500,6 @@ def reconcile_loyalty_reversals(db) -> Dict[str, int]:
         except Exception as exc:  # noqa: BLE001
             counts["unresolved"] += 1
             logger.error("loyalty reconcile failed on %s: %s", what, exc)
+    if counts["reconciled"] or counts["unresolved"]:
+        logger.warning("loyalty reversals reconciled: %s", counts)
     return counts

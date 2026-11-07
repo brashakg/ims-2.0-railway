@@ -10,7 +10,7 @@ Owner ruling 2026-11-07: AUTOMATIC backend reconciliation -- exactly once,
 idempotent, a visible exception for anything unresolved, no new staff control.
 
 Driven through the REAL redeem door, the REAL reversal engine and the REAL
-TASKMASTER tick over mongomock; the exception is a row on the existing tasks
+scheduled money sweep over mongomock; the exception is a row on the existing tasks
 collection. Every money case reconciles balance, lifetime counters and ledger.
 
 No emoji (Windows cp1252).
@@ -59,11 +59,11 @@ def tasks(rig, monkeypatch):
     return repo
 
 
-def _tick(rig):
-    """TASKMASTER's real 5-minute tick, the whole of it."""
-    from agents.implementations.taskmaster import TaskmasterAgent
+def _tick(_rig):
+    """The scheduler's real money sweep, the whole job."""
+    from api.routers.customers import scheduled_credit_reconcile
 
-    asyncio.run(TaskmasterAgent(db=rig["db"])._do_background_work())
+    asyncio.run(scheduled_credit_reconcile())
 
 
 def _bill(rig):
@@ -242,7 +242,7 @@ def test_the_tick_racing_a_press_hands_the_debit_back_once(rig, tasks, monkeypat
             _stamp_cancelled(rig)
             from api.routers.loyalty import reconcile_loyalty_reversals
 
-            reconcile_loyalty_reversals(rig["db"])
+            reconcile_loyalty_reversals()
         return out
 
     monkeypatch.setattr(accounts, "try_debit", debit_then_tick)
