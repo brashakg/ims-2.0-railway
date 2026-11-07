@@ -1357,6 +1357,15 @@ def _lens_identity(line: Dict[str, Any]) -> str:
     return "" if lens == ["", "", "", "", {}, {}] else json.dumps(lens, sort_keys=True, default=str)
 
 
+def _bill_line(line: Dict[str, Any], canonical=lambda pid: pid) -> List[Any]:
+    """A line's identity on the bill, read the same from a request line and a
+    saved order line: item, unit, quantity, price, discount, Rx, lens cell."""
+    return [str(line.get("item_type") or "").upper(), canonical(str(line.get("product_id") or "")),
+            str(line.get("stock_id") or ""), int(line.get("quantity") or 0),
+            round(float(line.get("unit_price") or 0), 2), round(float(line.get("discount_percent") or 0), 4),
+            str(line.get("prescription_id") or ""), str(line.get("lens_line_id") or "")]
+
+
 def order_body_fingerprint(order: OrderCreate, legacy: bool = False) -> str:
     """THE identity of a bill (money review 24), from the body the till sends
     (orderPayload.ts builds it; this is its one definition): the lines (item,
@@ -1376,10 +1385,9 @@ def order_body_fingerprint(order: OrderCreate, legacy: bool = False) -> str:
     import json
 
     def _line(i):
-        line = [str(i.item_type or "").upper(), str(i.product_id or ""), str(i.stock_id or ""), int(i.quantity or 0),
-                round(float(i.unit_price or 0), 2), round(float(i.discount_percent or 0), 4),
-                str(i.prescription_id or ""), str(i.lens_line_id or "")]
-        lens = "" if legacy else _lens_identity(i.model_dump())
+        fields = i.model_dump()
+        line = _bill_line(fields)
+        lens = "" if legacy else _lens_identity(fields)
         if lens:
             line.append(lens)
         return line
@@ -1392,12 +1400,11 @@ def order_body_fingerprint(order: OrderCreate, legacy: bool = False) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _lens_lines(lines: List[Dict[str, Any]], canonical=lambda pid: pid) -> List[tuple]:
-    """A bill's lens lines, each tied to the lens it is for, in a fixed order."""
-    return sorted(
-        (canonical(str(ln.get("product_id") or "")), str(ln.get("prescription_id") or ""),
-         str(ln.get("lens_line_id") or ""), int(ln.get("quantity") or 0), _lens_identity(ln))
-        for ln in lines if _lens_identity(ln))
+def _lens_lines(lines: List[Dict[str, Any]], canonical=lambda pid: pid) -> List[List[Any]]:
+    """A bill's lens lines in a fixed order, each power still tied to its WHOLE
+    line: two prices of one lens are two lines, and swapping their powers is
+    another bill, while listing the same lines the other way round is not."""
+    return sorted(_bill_line(ln, canonical) + [_lens_identity(ln)] for ln in lines if _lens_identity(ln))
 
 
 def _same_bill(order: Dict[str, Any], body: OrderCreate) -> bool:

@@ -325,6 +325,61 @@ def test_a_frame_bill_keeps_replaying_after_a_later_edit(client, staff_headers, 
 
 
 # =========================================================================== #
+# L2-POS-F03 round 3 -- each power stays on ITS OWN financial line
+# =========================================================================== #
+def _twin_lines(rxid, **each):
+    """One lens, one Rx, one quantity: the two lines differ only in money and power."""
+    dear = _lens(rxid, unit_price=2000.0, sph=0.0, **each)
+    cheap = _lens(rxid, unit_price=1900.0, sph=-1.0, discount_reason="loyal customer", **each)
+    return dear, cheap
+
+
+@pytest.mark.parametrize("door", ["pre-check", "lost-ack"])
+def test_an_old_format_key_refuses_powers_swapped_between_two_prices_of_one_lens(
+        client, staff_headers, rx_orders, monkeypatch, door):
+    """Codex round 3: both powers are still on the bill and the old hash sees
+    the same prices, yet the Rs 2000 line now grinds the Rs 1900 line's power."""
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-twin")
+    dear, cheap = _twin_lines(rxid)
+    _old_bill(client, staff_headers, rx_orders, "K-TWIN", [dear, cheap])
+    before = copy.deepcopy(_orders(rx_orders))
+    if door == "lost-ack":
+        _lost_ack(monkeypatch)
+    r = _post(client, staff_headers, [{**dear, "sph": -1.0}, {**cheap, "sph": 0.0}], key="K-TWIN")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "IDEMPOTENCY_BODY_MISMATCH"
+    assert _orders(rx_orders) == before
+
+
+def test_an_old_format_key_refuses_powers_swapped_between_two_discounts_of_one_lens(client, staff_headers, rx_orders):
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-twin-d")
+    full = _lens(rxid, sph=0.0)
+    off = _lens(rxid, sph=-1.0, discount_percent=5, discount_reason="loyal customer")
+    _old_bill(client, staff_headers, rx_orders, "K-TWIN-D", [full, off])
+    r = _post(client, staff_headers, [{**full, "sph": -1.0}, {**off, "sph": 0.0}], key="K-TWIN-D")
+    assert r.status_code == 409, r.text
+
+
+@pytest.mark.parametrize("door", ["pre-check", "lost-ack"])
+def test_an_old_format_two_price_bill_replays_unchanged_and_with_whole_lines_reordered(
+        client, staff_headers, rx_orders, monkeypatch, door):
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150", sku="LENS-SKU")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-twin2")
+    dear, cheap = _twin_lines(rxid, product_id="LENS-SKU")
+    oid = _old_bill(client, staff_headers, rx_orders, "K-TWIN2", [dear, cheap])
+    before = copy.deepcopy(_orders(rx_orders))
+    if door == "lost-ack":
+        _lost_ack(monkeypatch)
+    r = _post(client, staff_headers, [dear, cheap], key="K-TWIN2")
+    assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
+    r = _post(client, staff_headers, [cheap, dear], key="K-TWIN2")  # SKU alias, whole lines swapped
+    assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
+    assert _orders(rx_orders) == before
+
+
+# =========================================================================== #
 # L1-F38 -- the sale freezes the master HSN; the next sale follows an edit
 # =========================================================================== #
 def _acc(pid="ACC-1", price=118.0):
