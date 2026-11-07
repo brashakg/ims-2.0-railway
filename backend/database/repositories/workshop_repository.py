@@ -4,7 +4,7 @@ IMS 2.0 - Workshop Repository
 Workshop job data access operations
 """
 
-from api.utils.event_time import utc_event_iso, utc_now
+from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
 import uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date, timedelta
@@ -19,6 +19,36 @@ def job_id_for_order(order_id: str) -> str:
     not uniq_workshop_job_per_order built, which it cannot while legacy
     duplicates exist."""
     return str(uuid.uuid5(uuid.NAMESPACE_OID, f"workshop-job:{order_id}"))
+
+
+def end_jobs_of_cancelled_order(jobs, order_id: str, reason: Optional[str]) -> int:
+    """THE rule (PR #1264): a cancelled order's open job ends with it -- the lab
+    must not finish, nor the pickup scan hand over, glasses for an order that is
+    cancelled. A job already DELIVERED stays as the record of what left."""
+    res = jobs.update_many(
+        {"order_id": order_id, "status": {"$nin": ["DELIVERED", "CANCELLED"]}},
+        {"$set": {
+            "status": "CANCELLED",
+            "cancelled_with_order": True,
+            "cancellation_reason": reason,
+            "updated_at": utc_now_iso(),
+        }},
+    )
+    return int(getattr(res, "modified_count", 0) or 0)
+
+
+def end_job_if_order_cancelled(order_repo, wrepo, order_id: str) -> bool:
+    """The re-check every job insert owes: True when the order reads CANCELLED
+    now, its job ended. Job and order are different collections, so write-then-
+    read is the compare-and-set: the cancel writes the order and then sweeps the
+    jobs, a door writes the job and then reads the order, and at least one of
+    the two sees the other. A read or write that fails here is the hourly
+    repair's (repair_workshop_handoffs)."""
+    order = order_repo.find_by_id(order_id) if order_repo is not None else None
+    if (order or {}).get("status") != "CANCELLED":
+        return False
+    end_jobs_of_cancelled_order(wrepo.collection, order_id, order.get("cancellation_reason"))
+    return True
 
 
 class WorkshopJobRepository(BaseRepository):

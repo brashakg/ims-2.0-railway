@@ -5,7 +5,7 @@ split): no path, method, dependency, status code, response_model, default,
 rounding or validation was changed.
 """
 
-from api.utils.event_time import utc_now_iso
+from database.repositories.workshop_repository import end_jobs_of_cancelled_order
 from fastapi import Depends, HTTPException, Query
 from typing import Any, Dict, List
 from ..auth import get_current_user
@@ -439,23 +439,15 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
         # not finish -- nor the pickup scan hand over -- glasses for an order
         # that is cancelled (and, after an advance refund, paid back). A job
         # already DELIVERED stays as the record of what left. Fail-soft but
-        # loud: the handover gate refuses a cancelled order anyway.
+        # loud: the handover gate refuses a cancelled order anyway, and the
+        # hourly repair ends a job this sweep could not reach.
         workshop_jobs_cancelled = 0
         try:
             from ...dependencies import get_workshop_repository
 
             _jobs = getattr(get_workshop_repository(), "collection", None)
             if _jobs is not None:
-                _res = _jobs.update_many(
-                    {"order_id": order_id, "status": {"$nin": ["DELIVERED", "CANCELLED"]}},
-                    {"$set": {
-                        "status": "CANCELLED",
-                        "cancelled_with_order": True,
-                        "cancellation_reason": reason,
-                        "updated_at": utc_now_iso(),
-                    }},
-                )
-                workshop_jobs_cancelled = int(getattr(_res, "modified_count", 0) or 0)
+                workshop_jobs_cancelled = end_jobs_of_cancelled_order(_jobs, order_id, reason)
         except Exception as exc:  # noqa: BLE001
             logger.error("[ORDERS] workshop job not cancelled with order %s: %s", order_id, exc)
 

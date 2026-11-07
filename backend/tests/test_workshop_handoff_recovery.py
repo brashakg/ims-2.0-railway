@@ -44,7 +44,8 @@ from api.utils.event_time import utc_now  # noqa: E402
 SECRET = "rzp_local_test_secret"
 REAL_HOST = "127.0.0.1"
 REAL_PORT = os.environ.get("IMS_TEST_MONGO_PORT") or ("27017" if os.environ.get("CI") else "")
-REAL_DB = f"ims_test_workshop_handoff_{os.getpid()}"
+# IMS_TEST_MONGO_DB: a builder's own scratch name. The test DROPS it.
+REAL_DB = os.environ.get("IMS_TEST_MONGO_DB") or f"ims_test_workshop_handoff_{os.getpid()}"
 # Contenders meet at Mongo's refusal of a second _id, and mongomock has none to
 # meet at: _insert tests `id in store`, then stores it, under separate locks, so
 # both threads can "win" and the later overwrites the earlier (measured: 1866
@@ -127,15 +128,23 @@ def _assert_books_reconcile(db):
         pays = o.get("payments") or []
         assert round(float(o["amount_paid"]), 2) == round(sum(p["amount"] for p in pays), 2)
         assert o["amount_paid"] <= o["grand_total"]
-        assert round(o["grand_total"] - o["amount_paid"], 2) == round(o["balance_due"], 2)
+        if o["status"] != "CANCELLED":  # the cancel door zeroes it; a test may write the status raw
+            assert round(o["grand_total"] - o["amount_paid"], 2) == round(o["balance_due"], 2)
         for p in pays:
             pid = p.get("provider_payment_id")
             assert not pid or pid not in seen, f"{pid} tendered twice"
             seen.add(pid)
         jobs = list(db.workshop_jobs.find({"order_id": o["order_id"]}))
         assert len(jobs) <= 1, f"{o['order_id']} has {len(jobs)} lab jobs"
+        if o["status"] == "CANCELLED":
+            assert not _actionable(jobs), f"cancelled {o['order_id']} left work for the lab"
         if o.get("workshop_job_id"):
             assert [j["job_id"] for j in jobs] == [o["workshop_job_id"]]
+
+
+def _actionable(jobs):
+    """Work the lab would still pick up: every job not finished or cancelled."""
+    return [j for j in jobs if j["status"] not in ("CANCELLED", "DELIVERED")]
 
 
 def _bill(db, order_id, status="DRAFT", items=LENS, **over):
@@ -646,3 +655,244 @@ def test_an_unreadable_workshop_is_an_error_not_an_empty_list(rig, monkeypatch):
         _fail_workshop(rig, m, "find")
         with pytest.raises(TimeoutError):
             rig["jobs"].find_by_order("ORD")
+
+
+# --------------------------------------------------------------------------- #
+# Codex round 4: a job on a cancelled order ends non-actionable, whichever side
+# wins, at every door that can create one
+# --------------------------------------------------------------------------- #
+MANAGER = {**USER, "roles": ["STORE_MANAGER"]}
+REASON = "customer changed mind"
+
+
+def _cancel(order_id="ORD"):
+    from api.routers.orders import cancel_order
+
+    return asyncio.run(cancel_order(order_id, reason=REASON, current_user=MANAGER))
+
+
+def _cancel_before_the_insert(m, order_id="ORD", cancel=_cancel):
+    """The door read the bill; the real cancel lands just before its job insert."""
+    from database.repositories.workshop_repository import WorkshopJobRepository
+
+    real = WorkshopJobRepository.create
+    fired = []
+
+    def create(self, doc, *a, **k):
+        if doc.get("order_id") == order_id and not fired:
+            fired.append(1)
+            _together(lambda: cancel(order_id))  # its own thread: a door may hold this loop
+        return real(self, doc, *a, **k)
+
+    m.setattr(WorkshopJobRepository, "create", create)
+    return fired
+
+
+def _door_confirmed_without_a_job(rig, monkeypatch, order_id="ORD"):
+    from api.routers.orders.confirm import confirm_order
+
+    _bill(rig["db"], order_id)
+    with monkeypatch.context() as m:
+        _fail_workshop(rig, m, "insert_one")
+        asyncio.run(confirm_order(order_id, USER))
+    bill = rig["db"].orders.find_one({"order_id": order_id})
+    assert bill["status"] == "CONFIRMED" and _jobs(rig["db"], order_id) == []
+
+
+def _assert_the_job_ended(db, order_id="ORD"):
+    bill, jobs = db.orders.find_one({"order_id": order_id}), _jobs(db, order_id)
+    assert bill["status"] == "CANCELLED" and bill["balance_due"] == 0
+    assert [j["status"] for j in jobs] == ["CANCELLED"] and jobs[0]["cancelled_with_order"] is True
+    assert jobs[0]["cancellation_reason"] == REASON
+
+
+def test_a_cancel_inside_the_repair_leaves_the_lab_no_work(rig, monkeypatch):
+    """Codex's reproduction: the sweep read CONFIRMED, the real cancel lands, the
+    insert goes ahead. The job stands as a record, ended, and is not 'repaired'."""
+    from api.routers.orders.workshop import repair_workshop_handoffs
+
+    db = rig["db"]
+    _door_confirmed_without_a_job(rig, monkeypatch)
+    with monkeypatch.context() as m:
+        fired = _cancel_before_the_insert(m)
+        linked = repair_workshop_handoffs(db)
+    assert fired and linked == 0
+    _assert_the_job_ended(db)
+    assert repair_workshop_handoffs(db) == 0
+    _assert_the_job_ended(db)
+
+
+def test_a_cancel_inside_the_confirm_door_leaves_the_lab_no_work(rig, monkeypatch):
+    from api.routers.orders.confirm import confirm_order
+
+    db = rig["db"]
+    _bill(db, "ORD")
+    with monkeypatch.context() as m:
+        fired = _cancel_before_the_insert(m)
+        res = asyncio.run(confirm_order("ORD", USER))
+    assert fired and res["workshop_job_id"] is None
+    _assert_the_job_ended(db)
+
+
+def test_a_cancel_inside_the_webhook_handoff_leaves_the_lab_no_work(rig, monkeypatch):
+    """A paid bill leaves through refund-advance-and-cancel; what matters here is
+    the stored CANCELLED it writes after the worker's read."""
+    db = rig["db"]
+    _bill(db, "ORD")
+    _post(rig, "ORD", "pay_1")
+
+    def refunded_and_cancelled(order_id):
+        db.orders.update_one({"order_id": order_id}, {"$set": {
+            "status": "CANCELLED", "balance_due": 0.0, "cancellation_reason": REASON}})
+
+    with monkeypatch.context() as m:
+        fired = _cancel_before_the_insert(m, cancel=refunded_and_cancelled)
+        rig["drain"]()
+    assert fired and _row(db, "evt_pay_1")["status"] == "succeeded"
+    bill, jobs = db.orders.find_one({"order_id": "ORD"}), _jobs(db, "ORD")
+    assert [j["status"] for j in jobs] == ["CANCELLED"] and len(bill["payments"]) == 1
+
+
+def _client_door(rig, monkeypatch):
+    from api.routers.workshop import jobs as door
+    from api.routers.workshop.models import WorkshopJobCreate
+
+    monkeypatch.setattr(door, "get_workshop_repository", lambda: rig["jobs"])
+    monkeypatch.setattr(door, "get_order_repository", lambda: rig["orders"])
+    monkeypatch.setattr(door, "_verify_job_prescription", lambda *a, **k: None)
+    monkeypatch.setattr(door, "_check_dc_hardlock", lambda *a, **k: {})
+    monkeypatch.setattr(door, "get_db", lambda: None)
+    body = WorkshopJobCreate(order_id="ORD", frame_details={}, lens_details={},
+                             prescription_id="RX-1", expected_date="2026-12-01")
+    return lambda: asyncio.run(door.create_job(body, Response(), USER))
+
+
+def test_a_cancel_inside_the_client_job_door_is_refused_and_leaves_no_work(rig, monkeypatch):
+    db = rig["db"]
+    _bill(db, "ORD", status="CONFIRMED")
+    press = _client_door(rig, monkeypatch)
+    with monkeypatch.context() as m:
+        fired = _cancel_before_the_insert(m)
+        with pytest.raises(HTTPException) as refused:
+            press()
+    assert fired and refused.value.status_code == 409
+    _assert_the_job_ended(db)
+
+
+def test_the_client_job_door_refuses_a_cancelled_order(rig, monkeypatch):
+    db = rig["db"]
+    _bill(db, "ORD", status="CONFIRMED")
+    press = _client_door(rig, monkeypatch)
+    _cancel()
+    with pytest.raises(HTTPException) as refused:
+        press()
+    assert refused.value.status_code == 409 and _jobs(db, "ORD") == []
+
+
+def test_the_client_job_door_still_answers_a_duplicate_on_a_cancelled_order(rig, monkeypatch):
+    """A second call is a duplicate request, not a new decision: it reads the job."""
+    db = rig["db"]
+    _bill(db, "ORD", status="CONFIRMED")
+    press = _client_door(rig, monkeypatch)
+    first = press()
+    _cancel()
+    assert press()["job_id"] == first["job_id"]
+    _assert_the_job_ended(db)
+
+
+@pytest.mark.parametrize("lost", ["read", "end"])
+def test_a_failed_re_check_is_finished_by_the_repair(rig, monkeypatch, lost):
+    """The insert stood; the re-read or the end write failed. The door answers as
+    it would for any failed handoff, and the hourly repair ends the job."""
+    from api.routers.orders.workshop import ensure_workshop_job, repair_workshop_handoffs
+    from database.repositories.order_repository import OrderRepository
+
+    db = rig["db"]
+    _bill(db, "ORD", status="CONFIRMED", status_updated_by="U1", status_updated_at=_recent())
+    order = db.orders.find_one({"order_id": "ORD"})
+    with monkeypatch.context() as m:
+        _cancel_before_the_insert(m)
+        if lost == "read":
+            real = OrderRepository.find_by_id
+            state = []
+
+            def read_fails_after_the_cancel(self, oid):
+                # The cancel door's own reads pass; only the door's re-check fails.
+                if threading.current_thread() is threading.main_thread():
+                    return None
+                return real(self, oid)
+
+            m.setattr(OrderRepository, "find_by_id", read_fails_after_the_cancel)
+        else:
+            _fail_workshop(rig, m, "update_many")
+        try:
+            ensure_workshop_job(order, "U1", rig["jobs"], rig["orders"])
+        except Exception:  # noqa: BLE001 -- a door with a retry raises; either is fine
+            pass
+    assert [j["status"] for j in _jobs(db, "ORD")] == ["PENDING"]
+    repair_workshop_handoffs(db)
+    assert [j["status"] for j in _jobs(db, "ORD")] == ["CANCELLED"]
+
+
+def _recent():
+    return utc_now().replace(tzinfo=None)
+
+
+def test_the_repair_ends_a_job_whose_cancel_sweep_failed(rig, monkeypatch):
+    from api.routers.orders.confirm import confirm_order
+    from api.routers.orders.workshop import repair_workshop_handoffs
+
+    db = rig["db"]
+    _bill(db, "ORD")
+    asyncio.run(confirm_order("ORD", USER))
+    with monkeypatch.context() as m:
+        _fail_workshop(rig, m, "update_many")
+        assert _cancel()["workshop_jobs_cancelled"] == 0
+    assert [j["status"] for j in _jobs(db, "ORD")] == ["PENDING"]
+    assert repair_workshop_handoffs(db) == 0
+    _assert_the_job_ended(db)
+
+
+def test_the_repair_touches_only_a_recent_cancels_open_job(rig):
+    from api.routers.orders.workshop import repair_workshop_handoffs
+
+    db = rig["db"]
+    old = (utc_now() - timedelta(days=30)).isoformat()
+    now = utc_now().isoformat()
+    for oid, status, cancelled_at, job in (("LIVE", "CONFIRMED", None, "PENDING"),
+                                           ("GONE", "CANCELLED", now, "DELIVERED"),
+                                           ("OLD", "CANCELLED", old, "PENDING")):
+        _bill(db, oid, status=status, cancelled_at=cancelled_at, grand_total=0.0, balance_due=0.0,
+              workshop_job_id="J" + oid, status_updated_by="U1")
+        db.workshop_jobs.insert_one({"job_id": "J" + oid, "order_id": oid, "status": job})
+    repair_workshop_handoffs(db)
+    assert {j["order_id"]: j["status"] for j in db.workshop_jobs.find()} == {
+        "LIVE": "PENDING", "GONE": "DELIVERED", "OLD": "PENDING"}
+    db.workshop_jobs.delete_many({"order_id": "OLD"})  # historical: a person's, not the books check's
+    db.orders.update_one({"order_id": "OLD"}, {"$unset": {"workshop_job_id": ""}})
+
+
+@REAL_ONLY
+def test_cancel_and_handoff_converge_in_every_real_interleaving(rig):
+    """Real Mongo, real threads, nothing staged: whichever lands first, a
+    cancelled bill ends with no work for the lab, in every round."""
+    from api.routers.orders.workshop import ensure_workshop_job
+
+    db = rig["db"]
+    for n in range(25):
+        oid = f"ORD{n}"
+        _bill(db, oid, status="CONFIRMED")
+        order = db.orders.find_one({"order_id": oid})
+        gate = threading.Barrier(2, timeout=5)
+
+        def hand_off():
+            gate.wait()
+            ensure_workshop_job(order, "U1", rig["jobs"], rig["orders"])
+
+        def cancel():
+            gate.wait()
+            _cancel(oid)
+
+        _together(hand_off, cancel)
+        assert db.orders.find_one({"order_id": oid})["status"] == "CANCELLED"
+        assert _actionable(_jobs(db, oid)) == []

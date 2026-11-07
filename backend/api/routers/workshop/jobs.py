@@ -23,7 +23,7 @@ from ...dependencies import (
 )
 from ._shared import _FITTING_ROLES, _check_dc_hardlock, logger, router
 from ...utils.ist import now_ist
-from database.repositories.workshop_repository import job_id_for_order
+from database.repositories.workshop_repository import end_job_if_order_cancelled, job_id_for_order
 from .models import FittingDetailsUpdate, WorkshopJobCreate, WorkshopJobUpdate
 from .helpers import (
     _assert_job_store_access,
@@ -32,6 +32,8 @@ from .helpers import (
     generate_job_number,
     job_to_frontend,
 )
+
+CANCELLED_ORDER_NO_JOB = "This order is cancelled, so it cannot go to the workshop."
 
 
 @router.get("/jobs/by-vendor/{vendor_id}")
@@ -200,6 +202,9 @@ async def create_job(
         if existing_jobs:
             return _existing_job_answer(existing_jobs, order, job.order_id, order_repo, response)
 
+        if (order or {}).get("status") == "CANCELLED":
+            raise HTTPException(status_code=409, detail=CANCELLED_ORDER_NO_JOB)
+
         # PATIENT SAFETY: the prescription_id stored on the job is what the bench
         # grinds -- verify it EXISTS, belongs to THIS order's customer, and is not
         # expired (Store-Manager+ override) before the job is opened. Reuses the
@@ -278,6 +283,9 @@ async def create_job(
                         )
                 except Exception:
                     pass
+            # A cancel that landed after the read above ends this job here.
+            if end_job_if_order_cancelled(order_repo, repo, job.order_id):
+                raise HTTPException(status_code=409, detail=CANCELLED_ORDER_NO_JOB)
             # Stamp the reverse pointer on the order so an order can find its
             # workshop job directly (the link was previously one-way: job ->
             # order only). Best-effort: a stamp failure never fails job create.

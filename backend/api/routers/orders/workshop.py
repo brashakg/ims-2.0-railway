@@ -8,7 +8,11 @@ rounding or validation was changed.
 import logging
 from datetime import timedelta
 from typing import Optional, Tuple
-from database.repositories.workshop_repository import job_id_for_order
+from database.repositories.workshop_repository import (
+    end_job_if_order_cancelled,
+    end_jobs_of_cancelled_order,
+    job_id_for_order,
+)
 from ...dependencies import get_order_repository
 from ...utils.event_time import utc_now
 from ...utils.ist import ist_today
@@ -78,8 +82,10 @@ def ensure_workshop_job(
     via a non-POS path (e.g. the Orders page). It NEVER creates a duplicate:
     every job of an order shares one _id (job_id_for_order), so a contender's
     insert is refused by Mongo and it takes the winner's row. Returns the job_id
-    (created or pre-existing), or None when the order needs no job. RAISES when
-    it cannot say the job and its pointer are stored, so a caller with a retry
+    (created or pre-existing), or None when the order needs no job or was
+    cancelled meanwhile -- `order` is the caller's read, so the stored bill is
+    read again once the job stands, and its job ends with it. RAISES when it
+    cannot say the job and its pointer are stored, so a caller with a retry
     keeps retrying. `wrepo` / `order_repo` default to the global repositories.
     """
     if not _order_needs_fitting(order):
@@ -115,13 +121,18 @@ def ensure_workshop_job(
             raise RuntimeError(f"workshop pointer not stored on order {order_id}")
         return job_id
 
+    def settle(job: dict) -> Optional[str]:
+        if end_job_if_order_cancelled(order_repo, wrepo, order_id):
+            return None
+        return link(job)
+
     existing = wrepo.find_by_order(order_id)
     if existing:
         # Backfill the reverse pointer if the client created the job but never
         # stamped it back onto the order.
         if order.get("workshop_job_id"):
             return existing[0].get("job_id")
-        return link(existing[0])
+        return settle(existing[0])
 
     items = order.get("items") or []
     frame = next(
@@ -192,7 +203,7 @@ def ensure_workshop_job(
         if not stored:
             raise RuntimeError(f"workshop job not stored for order {order_id}")
         created = stored[0]
-    return link(created)
+    return settle(created)
 
 
 def _confirmed_at_a_door(order: dict) -> bool:
@@ -242,11 +253,28 @@ def confirm_and_hand_off(
 _HANDOFF_REPAIR_WINDOW = timedelta(days=7)
 
 
+def _end_jobs_of_recent_cancels(orders, jobs, since) -> None:
+    """A cancel whose sweep failed, or a door that died between its job insert
+    and its re-check, leaves an open job on a cancelled bill: end it here. A
+    cancel stamps cancelled_at (text); an online one status_updated_at."""
+    for order in orders.find({"status": "CANCELLED", "$or": [
+        {"cancelled_at": {"$gte": since.isoformat()}},
+        {"status_updated_at": {"$gte": since}},
+    ]}):
+        try:
+            ended = end_jobs_of_cancelled_order(jobs, order["order_id"], order.get("cancellation_reason"))
+            if ended:
+                logger.warning("[ORDERS] open job of cancelled %s ended by the repair", order["order_id"])
+        except Exception as exc:  # noqa: BLE001 -- the next tick comes back
+            logger.warning("[ORDERS] cancelled %s job not ended: %s", order.get("order_id"), exc)
+
+
 def repair_workshop_handoffs(db) -> int:
     """The hourly repair: finish the handoff of any recently door-confirmed bill
     that has no job pointer -- the reach of a till or /confirm door with no
-    inbox row to retry, and of an event that went dead. Idempotent (the job's
-    fixed _id), fail-soft per bill. Returns how many bills it linked."""
+    inbox row to retry, and of an event that went dead -- and end any job still
+    open on a recently cancelled bill. Idempotent (the job's fixed _id),
+    fail-soft per bill. Returns how many bills it linked."""
     from database.repositories.order_repository import OrderRepository
     from database.repositories.workshop_repository import WorkshopJobRepository
 
@@ -270,6 +298,7 @@ def repair_workshop_handoffs(db) -> int:
             except Exception as exc:  # noqa: BLE001 -- the next tick comes back
                 logger.warning("[ORDERS] workshop handoff repair failed for %s: %s",
                                order.get("order_id"), exc)
+        _end_jobs_of_recent_cancels(orders, wrepo.collection, since)
     except Exception as exc:  # noqa: BLE001 -- a repair never breaks the tick
         logger.warning("[ORDERS] workshop handoff repair sweep failed: %s", exc)
     return repaired
