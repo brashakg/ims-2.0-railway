@@ -270,9 +270,9 @@ def test_book_cod_refused_when_balance_exceeds_bill(monkeypatch):
 
 
 def test_book_cod_refused_when_order_unresolvable(monkeypatch):
-    """A Prepaid booking of an unloadable order still books 'with request
-    data only' (fail-soft, unchanged). COD cannot: the collectable amount
-    lives on the order and nowhere else."""
+    """An unloadable order books nothing (L2-INTEGRATION-F04: the order is
+    what authorises the shop, Prepaid and COD alike - pinned in
+    test_shipping_store_scope). COD's collectable amount lives on it too."""
     client, coll = _ship_client(monkeypatch, None)
     assert FakeOrderRepo(None).find_by_id("ORD-C1") is None  # fixture sanity
     resp = client.post(
@@ -280,7 +280,7 @@ def test_book_cod_refused_when_order_unresolvable(monkeypatch):
         json=_cod_body(),
         headers={"Authorization": f"Bearer {_ship_token(['STORE_MANAGER'])}"},
     )
-    assert resp.status_code == 400, resp.text
+    assert resp.status_code == 404, resp.text
     assert coll.docs == []
 
 

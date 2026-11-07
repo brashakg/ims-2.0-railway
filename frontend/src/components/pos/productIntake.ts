@@ -75,6 +75,10 @@ export async function resolveBarcode(
   }
 }
 
+/** What the till says when a scanned unit is already a line on the bill. */
+export const alreadyOnBillMessage = (code: string) =>
+  `Barcode ${code} is already on this bill - one piece, one line.`;
+
 export interface PriceGuardResult {
   ok: boolean;
   message?: string;
