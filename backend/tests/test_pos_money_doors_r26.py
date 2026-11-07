@@ -27,7 +27,7 @@ def _rx_refuses(monkeypatch):
     def _refuse(*a, **k):
         raise HTTPException(status_code=422, detail="This lens line needs a valid prescription.")
 
-    monkeypatch.setattr("api.routers.orders.create._validate_order_line_rx", _refuse)
+    monkeypatch.setattr("api.routers.orders.rx._validate_order_line_rx", _refuse)
 
 
 def _period_locked(monkeypatch):

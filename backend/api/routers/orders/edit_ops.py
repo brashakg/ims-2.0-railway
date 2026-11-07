@@ -228,6 +228,20 @@ def flag_order(repo, order_id: str, item_id) -> None:
         logger.error("[STOCK] could not flag order %s (%s): %s", order_id, item_id, exc)
 
 
+def _names(op: dict) -> set:
+    """What a flag raised for this op can name: never an older flag's line."""
+    lines = [*op["added"], *(e["line"] for e in op["give_back"])]
+    return {ln.get(k) for ln in lines for k in ("item_id", "stock_id") if ln.get(k)}
+
+
+def _clear_flag(repo, op: dict) -> None:
+    try:
+        repo.update_if(op["order_id"], {}, {}, unset=[RELEASE_FAILED, RELEASE_FAILED_ITEM])
+        _close_task(op["order_id"], op["user"])
+    except Exception as exc:  # noqa: BLE001 -- a false alarm, never a lost unit
+        logger.warning("[STOCK] flag not cleared (order %s): %s", op["order_id"], exc)
+
+
 async def _give_back_cells(op: dict, failed: List[Any]) -> None:
     from ...services.lens_stock_hook import release_for_cancel
 
@@ -308,12 +322,8 @@ async def settle(op: dict, after: dict, repo) -> bool:
     short = [e["line"].get("item_id") for e in op["give_back"] if e.get("short")]
     if failed or short:
         flag_order(repo, order_id, (failed or short)[0])
-    elif op.get("raised_flag"):
-        try:
-            repo.update_if(order_id, {}, {}, unset=[RELEASE_FAILED, RELEASE_FAILED_ITEM])
-            _close_task(order_id, op["user"])
-        except Exception as exc:  # noqa: BLE001 -- a false alarm, never a lost unit
-            logger.warning("[STOCK] flag not cleared (order %s): %s", order_id, exc)
+    elif op.get("raised_flag") or after.get(RELEASE_FAILED_ITEM) in _names(op):
+        _clear_flag(repo, op)
     moved = op["added"] + [e["line"] for e in op["give_back"]]
     if moved:
         from ...services.online_stock_writeback import writeback_after_sale
@@ -397,9 +407,11 @@ async def sweep_edit_ops() -> Dict[str, int]:
             landed = op["op_id"] in (order.get("edit_ops") or [])
             done = await (settle(op, order, repo) if landed else give_back(op))
             out["settled" if done and landed else "given_back" if done else "unfinished"] += 1
-            if not done and not landed:
+            if not landed and not done:
                 line = (op["added"] or [{}])[0]
                 flag_order(repo, op["order_id"], line.get("stock_id") or line.get("item_id"))
+            elif not landed and order.get(RELEASE_FAILED_ITEM) in _names(op):
+                _clear_flag(repo, op)
         running = set(coll.distinct("order_id", {"state": "OPEN", "created_at": {"$gte": cutoff}}))
         flagged = repo.collection.find(
             {RELEASE_FAILED: True},

@@ -830,6 +830,8 @@ def test_a_failed_give_back_of_an_unsaved_edit_is_recoverable(client, shop, cell
     assert tasks.count_documents({"source_ref": f"order_stock_unsettled:{oid}"}) == 1
     assert _sweep(shop)["given_back"] == 1
     assert (_unit(shop, "SU-FR-A")["status"], cells.read()) == ("AVAILABLE", (5, 0))
+    _no_flag_left(shop, oid)
+    assert tasks.find_one({"source_ref": f"order_stock_unsettled:{oid}"})["status"] == "COMPLETED"
 
 
 # ---------------------------------------------------------------------------
