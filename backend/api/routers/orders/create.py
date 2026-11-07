@@ -1434,7 +1434,7 @@ def _same_bill(order: Dict[str, Any], body: OrderCreate) -> bool:
     """Is this press the bill the saved order recorded? A hash with lens data
     in it answers alone. An old-format hash cannot see lens data (and a retry
     that drops it hashes the same), so the lens lines must ALSO be the saved
-    order's own; a saved line holds the canonical product, never the SKU sent.
+    order's own. Both sides resolve the product alike: a line may hold a SKU.
 
     A keyed order saved before any fingerprint has only what it stored to go by
     (owner ruling 2026-11-07: fail closed). Every line and bill field must match
