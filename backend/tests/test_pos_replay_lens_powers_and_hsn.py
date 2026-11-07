@@ -580,6 +580,24 @@ def test_a_no_fingerprint_bill_saved_without_a_customer_matches_only_a_blank(cli
     assert _orders(rx_orders) == before
 
 
+@pytest.mark.parametrize("sent, status", [("patient-other", 409), ("", 201)], ids=["names-one", "blank-too"])
+def test_a_no_fingerprint_bill_saved_without_a_member_refuses_a_named_one(client, staff_headers, rx_orders, sent, status):
+    """A named member is always stored, so no true retry names one on a bill
+    saved blank. A blank sent still passes: the server resolves that member."""
+    lines = _two_line_bill(rx_orders)
+    h = {**staff_headers, "Idempotency-Key": "K-NF-M"}
+    body = {"customer_id": "cust-x", "order_type": "quick_sale", "items": lines}
+    r = client.post("/api/v1/orders", json=body, headers=h)
+    assert r.status_code in (200, 201), r.text
+    doc = _orders(rx_orders)[0]
+    doc.pop("body_fingerprint")
+    doc["patient_id"] = None
+    before = copy.deepcopy(_orders(rx_orders))
+    r = client.post("/api/v1/orders", json={**body, "patient_id": sent}, headers=h)
+    assert r.status_code == status, r.text
+    assert _orders(rx_orders) == before
+
+
 @pytest.mark.parametrize("change", [
     {"items": 1}, {"order_type": "quick_sale"}, {"cart_discount_percent": 6.0}, {"cart_discount_amount": 80.0},
 ], ids=["non-lens-line", "type", "bill-percent", "bill-amount"])
