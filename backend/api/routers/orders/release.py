@@ -221,9 +221,35 @@ async def _release_lens_lines(
 
     Both calls are idempotent no-ops when no such reservation exists. Fully
     fail-soft per line.
+
+    A line's holds (LENS_HOLDS: pieces an edit raised its quantity by) go back
+    under their own keys first, each as uncut or cut as it is: that the line's
+    own lens is cut says nothing about them.
     """
+    from ...services.lens_stock_hook import LENS_HOLDS, line_base_qty
+
     seq = list(positions) if positions is not None else list(range(len(lines or [])))
     for pos, line in zip(seq, lines or []):
+        for hold in line.get(LENS_HOLDS) or []:
+            try:
+                await release(
+                    order_item={**line, "quantity": hold["qty"]},
+                    order_id=order_id,
+                    line_index=hold["key"],
+                    store_id=store_id,
+                    user=user,
+                )
+            except Exception as rel_exc:  # noqa: BLE001
+                logger.warning(
+                    "[LENS_HOOK] release failed (order %s hold %s): %s",
+                    order_id,
+                    hold["key"],
+                    rel_exc,
+                )
+        if line.get(LENS_HOLDS):
+            line = {**line, "quantity": line_base_qty(line)}
+            if line["quantity"] < 1:
+                continue
         keys = [_lens_reservation_key(line, pos)]
         legacy = _legacy_lens_reservation_key(line, pos)
         if legacy is not None:
@@ -389,6 +415,12 @@ _ANY_INVOICE = object()
 _CANCEL_MONEY_KEYS = ("payments", "amount_paid")
 
 
+def _money_unchanged(read: dict) -> dict:
+    """The compare-and-set a door puts on the tenders it read: a payment pushed
+    after the read wins, and the door reads again. Used by cancel and the edits."""
+    return {k: read[k] if k in read else {"$exists": False} for k in _CANCEL_MONEY_KEYS}
+
+
 def _claim_order_for_cancel(
     repo, order_id: str, reason: str, current_user: dict, invoice=_ANY_INVOICE,
     money_read: Optional[dict] = None,
@@ -427,8 +459,7 @@ def _claim_order_for_cancel(
     if invoice is not _ANY_INVOICE:
         inv_match = {"invoice_number": invoice or {"$in": [None, ""]}}
     if money_read is not None:
-        for key in _CANCEL_MONEY_KEYS:
-            inv_match[key] = money_read[key] if key in money_read else {"$exists": False}
+        inv_match.update(_money_unchanged(money_read))
     payload = {
         "status": "CANCELLED",
         # Nothing is owed on a cancelled order (PR #1264): no phantom balance

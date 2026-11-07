@@ -258,6 +258,18 @@ def _takes_serialized_stock(line: dict) -> bool:
     return True
 
 
+def _line_unit_id(item):
+    """The stock_id an ordinary sale line stores (owner ruling 2026-11-07, QUIETLY
+    STRIP). A line that takes a unit keeps it, as does a scanned lens; on any
+    other line nothing checks or claims the id, so it would stand on the bill as
+    a sale of a piece it never took. Dropped: the bill saves as normal."""
+    from ...services.lens_stock_hook import _is_lens_item
+
+    sid = getattr(item, "stock_id", None)
+    line = {"item_type": getattr(item, "item_type", None), "product_id": getattr(item, "product_id", None)}
+    return sid if _takes_serialized_stock(line) or _is_lens_item(line) else None
+
+
 def _stock_class(item_type) -> Optional[str]:
     """'none' (service / eye test), 'lens' (lens-hook reserved) or
     'serialized' for a type or category in any spelling; None if unknown."""
@@ -586,6 +598,8 @@ def _legacy_lens_reservation_key(line: dict, fallback_position: int):
     it would duplicate the primary key (nothing extra to try).
     """
     raw = (line or {}).get("line_index") if isinstance(line, dict) else None
+    if isinstance(line, dict) and line.get("lens_key_own"):
+        return None  # born under its item_id: it has no older key
     if isinstance(raw, bool) or raw is None:
         legacy = fallback_position
     else:
@@ -602,6 +616,7 @@ def _claim_units(
     order_id: str,
     items_data: List[dict],
     store_id: Optional[str],
+    claim_op: Optional[str] = None,
 ) -> dict:
     """Claim every unit the bill takes (atomic AVAILABLE -> SOLD) BEFORE the
     order is saved. Returns {stock_id: product_id} -- product_id for a
@@ -625,6 +640,11 @@ def _claim_units(
     the Idempotency-Key: the lens hook's reserve is idempotent on
     order_id#line, so a reused order id would read a released cell as still
     reserved. Upgrade path: stamp the key on the claimed unit and adopt it.
+
+    `claim_op`: the operation claiming, for a door writing onto a SAVED bill (an
+    edit, add-item). It is stamped in the claim's own write, so a refusal gives
+    back exactly this operation's units: a claim that wrote but lost its reply
+    goes back too, and another press's claim on the same bill is never touched.
     """
     try:
         stock_repo = get_stock_repository()
@@ -633,6 +653,7 @@ def _claim_units(
     if stock_repo is None or not order_id:
         return {}
     claimed: dict = {}
+    stamp = {"claim_op": claim_op} if claim_op else {}
     lines = [ln for ln in items_data or [] if _takes_serialized_stock(ln)]
     for line in lines:
         sid = line.get("stock_id")
@@ -641,7 +662,8 @@ def _claim_units(
         sid = str(sid)
         try:
             ok = stock_repo.mark_sold(
-                sid, order_id, store_id, _unit_product_ids(line.get("product_id") or "")
+                sid, order_id, store_id, _unit_product_ids(line.get("product_id") or ""),
+                **stamp,
             )
         except Exception:  # noqa: BLE001
             ok = False
@@ -651,9 +673,13 @@ def _claim_units(
         # L2-STOCK-F01: the line did not take its unit, so no bill is written
         # for it. A claim that wrote but lost its reply left the unit SOLD to
         # this order id: give it back too, unless a saved bill holds it (a
-        # draft's own line at the add-item door).
-        _release_claimed_units(order_id, claimed)
-        _release_claimed_units(order_id, [sid], was_saved=lambda: _bill_exists(order_id))
+        # draft's own line at the add-item door) and nothing proves it this
+        # operation's.
+        if claim_op:
+            _release_op_claims(order_id, claim_op)
+        else:
+            _release_claimed_units(order_id, claimed)
+            _release_claimed_units(order_id, [sid], was_saved=lambda: _bill_exists(order_id))
         pid = line.get("product_id") or ""
         label = line.get("product_name") or pid
         # Re-read it for the reason; with none, still refuse.
@@ -678,17 +704,25 @@ def _claim_units(
         qty = int(line.get("quantity") or 1) - (1 if line.get("stock_id") else 0)
         for _ in range(max(qty, 0)):
             try:
-                got = stock_repo.claim_one_available(pid, store_id, order_id, set(claimed))
+                got = stock_repo.claim_one_available(
+                    pid, store_id, order_id, set(claimed), **stamp
+                )
             except Exception as exc:  # noqa: BLE001 -- fail closed, never oversell
                 logger.error("[STOCK] claim_one_available(%s,%s) failed: %s", pid, store_id, exc)
-                _release_claimed_units(order_id, claimed)
+                if claim_op:
+                    _release_op_claims(order_id, claim_op)
+                else:
+                    _release_claimed_units(order_id, claimed)
                 raise HTTPException(
                     status_code=503,
                     detail=f"Stock could not be checked for '{label}'. Try again.",
                 )
             if not got:
                 # Another bill took the last unit since the gate read the shelf.
-                _release_claimed_units(order_id, claimed)
+                if claim_op:
+                    _release_op_claims(order_id, claim_op)
+                else:
+                    _release_claimed_units(order_id, claimed)
                 raise _not_in_stock(label, held.get(pid, 0), on_bill[pid])
             claimed[str(got)] = pid
             held[pid] = held.get(pid, 0) + 1
@@ -731,6 +765,20 @@ def _release_claimed_units(order_id: str, stock_ids, was_saved=None) -> None:
             order_id,
             exc,
         )
+
+
+def _release_op_claims(order_id: str, claim_op: str) -> bool:
+    """Give back every unit `claim_op` took on this order, lost replies included.
+    True when nothing it took is left SOLD: the release's own report, not a guess."""
+    try:
+        stock_repo = get_stock_repository()
+        result = stock_repo.release_sold_units_for_order(
+            order_id, claim_op=claim_op, reason="ORDER_NOT_SAVED"
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[STOCK] operation %s (order %s) gave nothing back: %s", claim_op, order_id, exc)
+        return False
+    return not getattr(result, "incomplete", False)
 
 
 CLAIM_SWEEP_MINUTES = 15  # an in-flight sale writes its bill within seconds
@@ -791,8 +839,12 @@ def sweep_unsaved_claims() -> List[str]:
 
 
 async def scheduled_claim_sweep() -> None:
-    """The scheduler's tick (agents/scheduler) -- the sweep off the event loop."""
+    """The scheduler's tick (agents/scheduler) -- the sweep off the event loop,
+    then any bill edit that never finished moving its stock."""
+    from .edit_ops import sweep_edit_ops
+
     await asyncio.to_thread(sweep_unsaved_claims)
+    await sweep_edit_ops()
 
 
 def _mark_units_sold(

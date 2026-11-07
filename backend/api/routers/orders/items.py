@@ -35,6 +35,7 @@ from .stock import (
     _canonical_pid,
     _claim_units,
     _lens_reservation_key,
+    _line_unit_id,
     _mark_units_sold,
     _release_claimed_units,
     _assert_goods_name_a_product,
@@ -207,7 +208,7 @@ async def add_order_item(
             # `category` -- that feeds _compute_per_category_gst and would
             # change this path's tax resolution.
             "lens_details": item.lens_details,
-            "stock_id": getattr(item, "stock_id", None),
+            "stock_id": _line_unit_id(item),
             "lens_line_id": getattr(item, "lens_line_id", None),
             "sph": getattr(item, "sph", None),
             "cyl": getattr(item, "cyl", None),
@@ -360,7 +361,7 @@ async def add_order_item(
         # Every unit the line takes is claimed before the save, as at create
         # (a 409 here leaves the order untouched; a scanned line reserves no
         # lens cell).
-        claimed = _claim_units(order_id, [item_data], _store_id)
+        claimed = _claim_units(order_id, [item_data], _store_id, claim_op=uuid.uuid4().hex)
         try:
             # Spend the manager's approval (if one lifted the limit) last thing
             # before the save -- atomic, single use, as at create. ANY failure

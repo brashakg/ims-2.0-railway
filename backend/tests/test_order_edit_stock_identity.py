@@ -1104,7 +1104,7 @@ def _lens(power=-1.0, **over):
     return {
         "item_type": "LENS", "product_id": "lens-x", "product_name": "SV 1.5",
         "quantity": 1, "unit_price": 1000.0,
-        "sph": power, "lens_options": {"lens_line_id": CELL},
+        "sph": power, "lens_options": {"lens_line_id": CELL}, "prescription_id": "RX-PSI-1",
         **over,
     }
 
@@ -1353,7 +1353,7 @@ def test_lens_on_a_shipped_bill_keeps_its_cell(client, shop, invoiced, cells):
 def test_lowering_a_cut_lens_gives_nothing_back(client, shop, cells):
     oid, stored = _lens_bill(client, shop, cells, qty=2)
     shop["db"].get_collection("lens_stock_audit").insert_one(
-        {"source_id": f"{oid}#1#commit", "action": "commit"}
+        {"source_id": f"{oid}#{stored['item_id']}#commit", "action": "commit"}
     )
     r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, quantity=1)])
     assert r.status_code == 200, r.text
@@ -1698,9 +1698,9 @@ def test_lost_reply_on_a_lowered_lens_frees_only_the_extra(client, shop, cells, 
 
 
 def test_settling_twice_moves_each_piece_once(client, shop, cells, door, monkeypatch):
-    """Re-running the settle is harmless on the shapes a blind re-run would hurt:
-    a first-available unit (no name to match) and a lowered lens (its own key)."""
-    from api.routers.orders import admin_edit
+    """A settle goes by name, so a re-run is harmless on the shapes a blind re-run
+    would hurt: a first-available unit and a lowered lens."""
+    from api.routers.orders import admin_edit, edit_ops
 
     shop["db"].get_collection("stock_units").insert_one(
         {"stock_id": "SU-FR-C", "barcode": "BC-C", "product_id": FR, "store_id": STORE,
@@ -1711,13 +1711,15 @@ def test_settling_twice_moves_each_piece_once(client, shop, cells, door, monkeyp
     assert _edit(client, oid, [other, _lens_sent(stored), _line(FR, quantity=3)]).status_code == 200
     door.arm(oid)
     assert len(_sold_to(shop, oid)) == 3
-    real = admin_edit._settle_removed_lines
+    real = edit_ops.settle
 
-    async def twice(*a, **k):
-        await real(*a, **k)
-        await real(*a, **k)
+    async def twice(*a):
+        await real(*a)
+        await real(*a)
 
-    monkeypatch.setattr(admin_edit, "_settle_removed_lines", twice)
+    monkeypatch.setattr(admin_edit, "settle", twice)
+    monkeypatch.setattr(edit_ops, "_take_lease", lambda op: True)
+    monkeypatch.setattr(edit_ops, "_end", lambda *a: None)
     lines = [_as_sent(ln, quantity=2) if ln["product_id"] != SVC else _as_sent(ln)
              for ln in _order(shop, oid)["items"]]
     r = door.press(oid, lines)
@@ -1725,27 +1727,6 @@ def test_settling_twice_moves_each_piece_once(client, shop, cells, door, monkeyp
     assert len(_sold_to(shop, oid)) == 2, "a second settle freed a unit the bill still sells"
     assert cells.read() == (5, 2), "a second settle gave back a lens the bill still sells"
     _no_flag_left(shop, oid)
-
-
-def test_a_lowered_lens_settled_twice_goes_back_once_even_with_no_claim(
-    client, shop, cells, door, monkeypatch
-):
-    """Its release key is the save's own, so it holds without the token's claim."""
-    from api.routers.orders import admin_edit
-
-    oid, stored = _lens_bill(client, shop, cells, qty=3)
-    door.arm(oid)
-    real = admin_edit._settle_removed_lines
-
-    async def twice(*a, **k):
-        await real(*a, **k)
-        await real(*a, **k)
-
-    monkeypatch.setattr(admin_edit, "_settle_removed_lines", twice)
-    monkeypatch.setattr(admin_edit, "_claim_settle", lambda *a: True)
-    r = door.press(oid, [_other_line(shop, oid), _lens_sent(stored, quantity=2)])
-    assert r.status_code == 200, r.text
-    assert cells.read() == (5, 2)
 
 
 @pytest.mark.parametrize("lost", [False, True], ids=["reply_kept", "reply_lost"])
@@ -1885,9 +1866,9 @@ def test_lost_reply_still_tells_the_website_and_regates_the_points(
     assert regated == [oid], "a discount edit must not leave the earn standing"
 
 
-def test_a_claim_that_lost_its_reply_on_a_saved_bill_is_flagged(client, shop, door, monkeypatch):
-    """Refused, but the unit wrote SOLD to a bill with no line for it. It cannot
-    be told from another press's claim, so it stays; the bill says so."""
+def test_a_claim_that_lost_its_reply_on_a_saved_bill_goes_back(client, shop, door, monkeypatch):
+    """Refused, and the unit that wrote SOLD comes back: the claim's stamp proves
+    it this press's, so nothing strands and the retry takes it (Codex round 4)."""
     from database.repositories.product_repository import StockRepository
 
     oid = door.arm(_saved_bill(client, shop, [_line(SVC)]))
@@ -1899,17 +1880,22 @@ def test_a_claim_that_lost_its_reply_on_a_saved_bill_is_flagged(client, shop, do
         real(self, *a, **k)
         return False
 
-    monkeypatch.setattr(StockRepository, "mark_sold", wrote_then_lost)
-    r = door.press(oid, [keep, _line(FR, stock_id="SU-FR-A")])
+    with monkeypatch.context() as m:
+        m.setattr(StockRepository, "mark_sold", wrote_then_lost)
+        r = door.press(oid, [keep, _line(FR, stock_id="SU-FR-A")])
     assert r.status_code == 409, r.text
     order = _order(shop, oid)
     assert order["items"] == before
+    assert _sold_to(shop, oid) == []
+    assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
+    _no_flag_left(shop, oid)
+    r = door.press(oid, [keep, _line(FR, stock_id="SU-FR-A")])
+    assert r.status_code == 200, r.text
     assert _sold_to(shop, oid) == ["SU-FR-A"]
-    assert order["line_remove_stock_release_failed"] is True
-    assert order["line_remove_stock_failed_item_id"] == "SU-FR-A"
+    assert len(_order(shop, oid)["items"]) == 2
 
 
-def test_a_first_available_claim_that_faulted_on_a_saved_bill_is_flagged(
+def test_a_first_available_claim_that_faulted_on_a_saved_bill_goes_back(
     client, shop, door, monkeypatch
 ):
     from database.repositories.product_repository import StockRepository
@@ -1925,7 +1911,8 @@ def test_a_first_available_claim_that_faulted_on_a_saved_bill_is_flagged(
     monkeypatch.setattr(StockRepository, "claim_one_available", wrote_then_lost)
     r = door.press(oid, [keep, _line(FR)])
     assert r.status_code == 503, r.text
-    assert _order(shop, oid)["line_remove_stock_release_failed"] is True
+    assert _sold_to(shop, oid) == [], "a unit nobody can name stranded SOLD"
+    _no_flag_left(shop, oid)
 
 
 def test_a_plain_refusal_raises_no_flag(client, shop, door, monkeypatch):
