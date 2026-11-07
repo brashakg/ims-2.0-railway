@@ -123,6 +123,10 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<Array<Record<string, unknown>>>([]);
   const [searching, setSearching] = useState(false);
+  // SP04: a search that FAILED is not "nothing found" -- it must never read
+  // as "not catalogued", or staff catalogue a duplicate of a real product.
+  const [searchFailed, setSearchFailed] = useState(false);
+  const [searchTry, setSearchTry] = useState(0);
   const [scan, setScan] = useState('');
   const [batchOpen, setBatchOpen] = useState<Set<string>>(new Set());
   const [showCompleted, setShowCompleted] = useState(false);
@@ -187,6 +191,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   // Product search for a receipt with no order (debounced).
   useEffect(() => {
     const q = query.trim();
+    setSearchFailed(false);
     if (po || q.length < 2) {
       setResults([]);
       return;
@@ -198,7 +203,10 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
         const data = await productApi.getProducts({ search: q, limit: 10 });
         if (!cancelled) setResults((data?.products || []).slice(0, 10));
       } catch {
-        if (!cancelled) setResults([]);
+        if (!cancelled) {
+          setResults([]);
+          setSearchFailed(true);
+        }
       } finally {
         if (!cancelled) setSearching(false);
       }
@@ -207,7 +215,7 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
       cancelled = true;
       clearTimeout(t);
     };
-  }, [query, po]);
+  }, [query, po, searchTry]);
 
   const setLine = (key: string, patch: Partial<ReceiveLine>) =>
     setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
@@ -238,7 +246,14 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
       setLines((ls) => ls.map((l) => (l.key === key ? scanOne(l) : l)));
       return;
     }
-    const found = ((await productApi.getProducts({ search: code, limit: 5 }).catch(() => null))?.products ?? []) as Array<Record<string, unknown>>;
+    let found: Array<Record<string, unknown>>;
+    try {
+      found = ((await productApi.getProducts({ search: code, limit: 5 }))?.products ?? []) as Array<Record<string, unknown>>;
+    } catch {
+      // SP04: a failed lookup says nothing about the delivery -- scan again.
+      toast.error(`Could not look up ${code} just now - check the connection and scan it again.`);
+      return;
+    }
     const hit = !po && found.length === 1 ? found[0] : found.find((p) => lines.some((l) => l.product_id === p.product_id));
     const pid = hit ? String(hit.product_id ?? '') : '';
     if (!pid) {
@@ -763,7 +778,15 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
                 </div>
               )}
             </div>
-            {query.trim().length >= 2 && !searching && results.length === 0 && (
+            {query.trim().length >= 2 && !searching && searchFailed && (
+              <p className="text-xs mt-1" role="alert" style={{ color: 'var(--err)' }}>
+                Could not search the catalogue just now — this does not mean the item is missing.{' '}
+                <button type="button" className="underline" onClick={() => setSearchTry((n) => n + 1)}>
+                  Try again
+                </button>
+              </p>
+            )}
+            {query.trim().length >= 2 && !searching && !searchFailed && results.length === 0 && (
               <p className="text-xs mt-1" style={{ color: 'var(--ink-4)' }}>
                 Nothing found — the item is not catalogued yet. Catalogue it first, then receive it.
               </p>
