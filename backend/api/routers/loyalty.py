@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from api.utils.event_time import utc_now_iso
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 import logging
 import uuid
@@ -535,6 +535,245 @@ async def redeem_otp_verify(
     return {"verified": True}
 
 
+def _read_account(accounts, customer_id: str) -> Dict[str, Any]:
+    """What the account really holds, for the doors that act on its debits; a
+    failed read RAISES instead of answering with find_or_create's empty seed.
+    A customer with no account still gets the empty row."""
+    return accounts.read_or_raise(customer_id) or accounts.find_or_create(customer_id)
+
+
+def _redeem_key(order_id: Optional[str]) -> Optional[str]:
+    """One bill's redemption identity on the account's debit (None for a
+    standalone goodwill redeem, which stays one redemption per press)."""
+    return f"redeem:{order_id}" if order_id else None
+
+
+def _redeem_claim(account: Optional[Dict[str, Any]], key: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The debit already applied under `key` (money_guard's marker on the
+    account), or None."""
+    if not key:
+        return None
+    for entry in (account or {}).get("money_ledger") or []:
+        if entry.get("idempotency_key") == key:
+            return entry
+    return None
+
+
+def _redeem_row(customer_id: str, order_id: Optional[str], claim: Dict[str, Any]) -> Dict[str, Any]:
+    """The ONE ledger row of a debit, built from the snapshot the debit itself
+    carries -- so whoever completes it (the press, its retry, a cancel, a
+    return, the tender) records the result that was authorised, never one
+    re-priced from today's settings."""
+    return {
+        "txn_id": claim["txn_id"],
+        "customer_id": customer_id,
+        "type": "REDEEM",
+        "points": abs(int(claim.get("delta") or 0)),
+        "rupee_value": float(claim.get("rupee_value") or 0),
+        "order_id": order_id,
+        "reason": f"Redeem on order {order_id}" if order_id else "Manual redeem",
+        "expires_at": None,
+        "was_capped": bool(claim.get("was_capped")),
+        "created_by": claim.get("created_by"),
+        "created_at": datetime.now(),
+    }
+
+
+def _save_redeem_row(txns, row: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Insert `row` (its _id is the debit's txn_id, so a twin collides) and
+    return the row that stands, or None when none landed. create() swallows
+    every other insert error into None, so that answer is never trusted alone;
+    an unreadable ledger RAISES -- the outcome is unknown, not "none landed"."""
+    try:
+        saved = txns.create(row, raise_on_duplicate=True)
+    except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ != "DuplicateKeyError":
+            raise
+        saved = None
+    return saved or txns.collection.find_one({"txn_id": row["txn_id"]})
+
+
+def _complete_redeem_row(txns, customer_id: str, order_id: str, claim: Dict[str, Any]) -> None:
+    """Best-effort ledger completion for the doors that must not fail on it
+    (the debit on the account stays the truth either way)."""
+    try:
+        if _save_redeem_row(txns, _redeem_row(customer_id, order_id, claim)) is None:
+            logger.error("loyalty debit %s on order %s still has no ledger row",
+                         claim.get("txn_id"), order_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("loyalty debit %s ledger completion failed: %s", claim.get("txn_id"), exc)
+
+
+def complete_bill_redemption(order_id: str, customer_id: str) -> None:
+    """Write the ledger row of a bill's landed debit if it is missing, so a
+    LOYALTY tender can claim the burn the till could not confirm. Never raises."""
+    try:
+        accounts = get_loyalty_account_repository()
+        txns = get_loyalty_transaction_repository()
+        account = accounts.collection.find_one({"customer_id": customer_id})
+        claim = _redeem_claim(account, _redeem_key(order_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("bill redemption check failed for order %s: %s", order_id, exc)
+        return
+    if claim:
+        _complete_redeem_row(txns, customer_id, order_id, claim)
+
+
+def _is_walk_in(customer_id: Any) -> bool:
+    """Walk-in pseudo-customers never earn or redeem: nothing to reverse."""
+    return str(customer_id).startswith(("walkin-", "walk-in"))
+
+
+def _reversal_settled(outcome: Dict[str, Any]) -> bool:
+    """True when a reversal needs nothing more. No customer on the record is
+    nothing to reverse, the cancel and return doors' own reading."""
+    return bool(outcome.get("ok")) or outcome.get("reason") == "missing_ids"
+
+
+def settle_cancelled_bill(order: Dict[str, Any], orders) -> Dict[str, Any]:
+    """Run the one reversal engine for a CANCELLED bill and make its flag say
+    what is now true: the redeem door and the reconciliation sweep both end here,
+    so a bill that was healed never keeps saying it failed."""
+    outcome = reverse_for_cancel(order.get("order_id"), order.get("customer_id"))
+    failed = not _reversal_settled(outcome)
+    if bool(order.get("loyalty_reversal_failed")) != failed:
+        orders.update(order.get("order_id"), {"loyalty_reversal_failed": failed})
+    return outcome
+
+
+def _refuse_if_cancelled(body: "RedeemRequest") -> None:
+    """A cancelled bill takes no redemption -- and any debit it still holds is
+    handed back FIRST, through the one reversal engine, so the refusal can never
+    strand points. An unreadable bill RAISES (a 5xx, "not confirmed" at the
+    till): only a bill read as live may pass, or a debit landing after the cancel
+    is answered as a success. What that 5xx leaves behind, no staff door can
+    reach: reconcile_loyalty_reversals finds it."""
+    orders = get_order_repository()
+    if orders is None:
+        raise HTTPException(status_code=503, detail="Order store unavailable")
+    order = orders.read_or_raise(body.order_id)
+    if (
+        not order
+        or order.get("status") != "CANCELLED"
+        or order.get("customer_id") != body.customer_id
+    ):
+        return
+    if not _reversal_settled(settle_cancelled_bill(order, orders)):
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "ok": False,
+                "reason": "cancelled_reversal_pending",
+                "message": (
+                    "This bill was cancelled, but its points could not be put "
+                    "back yet. They go back on their own within a few minutes; "
+                    "if they cannot, the admin gets a task."
+                ),
+            },
+        )
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "ok": False,
+            "reason": "order_cancelled",
+            "message": (
+                "This bill was cancelled, so no points can be redeemed on it. "
+                "Any points taken for it are back on the customer's account."
+            ),
+        },
+    )
+
+
+def _finish_redeem(
+    accounts,
+    txns,
+    body: "RedeemRequest",
+    claim: Dict[str, Any],
+    current_user: Dict[str, Any],
+    otp_verified: bool = False,
+) -> Dict[str, Any]:
+    """Turn a landed debit into its ledger row and its answer. `claim` is the
+    debit's snapshot, so every press of one bill answers the same result. A
+    success is only ever reported with the row on the books."""
+    if int(claim.get("requested_points") or 0) != body.points:
+        # This bill's redemption already landed for another amount.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "reason": "already_redeemed",
+                "redeemed_points": abs(int(claim.get("delta") or 0)),
+                "message": (
+                    "Points were already redeemed on this bill for a "
+                    "different amount. No further points were deducted."
+                ),
+            },
+        )
+    row = _redeem_row(body.customer_id, body.order_id, claim)
+    saved = _save_redeem_row(txns, row)
+    if saved is None and body.order_id:
+        # The debit stands under the bill's key, so nothing is lost: a retry,
+        # the tender, a cancel or a return completes it. 5xx, because the till
+        # reads a 4xx as "no points were taken".
+        logger.error("redeem debit %s on order %s has no ledger row yet",
+                     claim.get("txn_id"), body.order_id)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "ok": False,
+                "reason": "redeem_not_recorded",
+                "message": (
+                    "The points were taken but could not be recorded yet. Press "
+                    "again - no more points will be deducted."
+                ),
+            },
+        )
+    if saved is None:
+        # Goodwill has no key, so a retry would burn again: hand this one back.
+        points = int(row["points"])
+        status, _doc = _apply_reversal_balance(
+            accounts, body.customer_id, row["txn_id"], points, 0, points, None
+        )
+        if status in ("underflow", "failed"):
+            logger.error("goodwill debit %s could not be recorded or handed back",
+                         row["txn_id"])
+            raise HTTPException(
+                status_code=500,
+                detail="The redemption could not be confirmed. Check the customer's points.",
+            )
+        raise HTTPException(
+            status_code=503,
+            detail="The redemption could not be recorded. No points were deducted. Try again.",
+        )
+    if saved is row:
+        _audit(
+            "loyalty.redeem",
+            current_user,
+            {
+                # Only stamped when the OTP gate actually ran - the dark /
+                # policy-off audit row stays byte-identical to before this gate
+                # existed.
+                **({"otp_verified": True} if otp_verified else {}),
+                "requested_points": claim.get("requested_points"),
+                "capped_points": row["points"],
+                "rupee_value": row["rupee_value"],
+                "order_id": body.order_id,
+            },
+            body.customer_id,
+        )
+    if body.order_id:
+        # The bill may have been cancelled while this press ran; its reversal
+        # could not have seen this debit.
+        _refuse_if_cancelled(body)
+    out = {
+        "redeemed_points": int(saved.get("points") or 0),
+        "rupee_value": float(saved.get("rupee_value") or 0),
+        "was_capped": bool(saved.get("was_capped")),
+        "txn_id": saved.get("txn_id"),
+    }
+    return out if saved is row else {**out, "replayed": True}
+
+
 @router.post("/redeem")
 async def redeem(
     body: RedeemRequest,
@@ -555,6 +794,7 @@ async def redeem(
     # bill -- a retry after an unconfirmed answer -- returns the burn that
     # already landed, never debits twice.
     if body.order_id:
+        _refuse_if_cancelled(body)
         coll = getattr(txns, "collection", None)
         prior = coll.find_one({"customer_id": body.customer_id, "order_id": body.order_id,
                                "type": "REDEEM"}) if coll is not None else None
@@ -567,8 +807,22 @@ async def redeem(
                 "replayed": True,
             }
 
+    # Unreadable -> 5xx, never the 400 a zero seed would earn: this may be the
+    # retry of a landed debit, and the till reads a 4xx as "no points were taken".
+    account = _read_account(accounts, body.customer_id)
+
+    # EXACTLY-ONCE per bill (L2-LOYALTY-F01): the read above cannot stop two
+    # overlapping presses, so the DEBIT itself carries the bill's key and the
+    # result it authorised (both ride in the guarded write). If a debit already
+    # landed under it but its ledger row did not (lost answer / process died),
+    # this retry just completes THAT debit: nothing is priced again, so a
+    # settings or balance change since cannot alter what it was worth.
+    redeem_key = _redeem_key(body.order_id)
+    claimed = _redeem_claim(account, redeem_key)
+    if claimed:
+        return _finish_redeem(accounts, txns, body, claimed, current_user)
+
     settings = _settings_safe()
-    account = accounts.find_or_create(body.customer_id)
 
     # OVER-REDEEM GUARD (security): when a redemption IS tied to an order, it must
     # be bounded by that order -- otherwise points worth more than the order could
@@ -588,7 +842,7 @@ async def redeem(
         orders = get_order_repository()
         if orders is None:
             raise HTTPException(status_code=503, detail="Order store unavailable")
-        order_doc = orders.find_by_id(body.order_id)
+        order_doc = orders.read_or_raise(body.order_id)
         if not order_doc:
             raise HTTPException(status_code=404, detail="Order not found")
         if (order_doc.get("customer_id") or "") != body.customer_id:
@@ -614,7 +868,7 @@ async def redeem(
     # computed against the real order total.
     result = calc_redeem(
         body.points,
-        account.get("balance_points", 0),
+        int(account.get("balance_points", 0)),
         order_ceiling,
         settings,
     )
@@ -673,11 +927,30 @@ async def redeem(
     # insufficient (or another redeem won the race) -> 409, and we DON'T write a
     # ledger row, so the immutable ledger never records a redeem that didn't
     # actually decrement the balance.
+    snapshot = {
+        "order_id": body.order_id,
+        "requested_points": result.get("requested_points"),
+        "rupee_value": rupee_value,
+        "was_capped": result.get("was_capped", False),
+        "redeem_rupee_per_point": result.get("redeem_rupee_per_point"),
+        "created_by": current_user.get("user_id"),
+    }
     debited = accounts.try_debit(
         body.customer_id,
         capped_points,
         delta_lifetime_redeemed=capped_points,
+        idempotency_key=redeem_key,
+        ledger_extra=snapshot if redeem_key else None,
     )
+    if debited is None and redeem_key:
+        # RAW read (find_by_id swallows errors into None): an unreadable
+        # account must raise -> 5xx, which the till treats as "not confirmed",
+        # never as the 4xx "no points were taken".
+        now = accounts.collection.find_one({"customer_id": body.customer_id})
+        if _redeem_claim(now, redeem_key):
+            # This press's own debit landed but its answer was lost (or a twin
+            # press's did): carry on with that debit.
+            debited = now
     if debited is None:
         # Re-read for an accurate "available" in the message (best-effort).
         try:
@@ -700,47 +973,17 @@ async def redeem(
             },
         )
 
-    txn_id = str(uuid.uuid4())
-    txns.create(
-        {
-            "txn_id": txn_id,
-            "customer_id": body.customer_id,
-            "type": "REDEEM",
-            "points": capped_points,
-            "rupee_value": rupee_value,
-            "order_id": body.order_id,
-            "reason": (
-                f"Redeem on order {body.order_id}" if body.order_id else "Manual redeem"
-            ),
-            "expires_at": None,
-            "was_capped": result.get("was_capped", False),
-            "created_by": current_user.get("user_id"),
-            "created_at": datetime.now(),
-        }
-    )
-
-    _audit(
-        "loyalty.redeem",
-        current_user,
-        {
-            # Only stamped when the OTP gate actually ran - the dark /
-            # policy-off audit row stays byte-identical to before this gate
-            # existed.
-            **({"otp_verified": True} if otp_gate_on else {}),
-            "requested_points": result.get("requested_points"),
-            "capped_points": capped_points,
-            "rupee_value": rupee_value,
-            "order_id": body.order_id,
-        },
-        body.customer_id,
-    )
-
-    return {
-        "redeemed_points": capped_points,
-        "rupee_value": rupee_value,
-        "was_capped": result.get("was_capped", False),
-        "txn_id": txn_id,
+    # A bill's ONE ledger row takes the debit's own txn_id (its _id), so the
+    # two presses that shared one debit cannot write two rows: the second
+    # insert collides and answers with the row that landed.
+    claim = _redeem_claim(debited, redeem_key) or {
+        "txn_id": str(uuid.uuid4()),
+        "delta": -capped_points,
+        **snapshot,
     }
+    return _finish_redeem(
+        accounts, txns, body, claim, current_user, otp_verified=otp_gate_on
+    )
 
 
 @router.post("/adjust")
@@ -1436,7 +1679,9 @@ def _apply_reversal_balance(
     return "underflow", current
 
 
-def _ensure_reversal_applied(accounts, marker: Dict[str, Any]) -> Dict[str, Any]:
+def _ensure_reversal_applied(
+    accounts, marker: Dict[str, Any], account: Dict[str, Any]
+) -> Dict[str, Any]:
     """Make sure the money for an EXISTING reversal marker has moved.
 
     Safe to call any number of times, from any worker, at any point in another
@@ -1491,7 +1736,6 @@ def _ensure_reversal_applied(accounts, marker: Dict[str, Any]) -> Dict[str, Any]
     new_tier = None
     if marker.get("recompute_tier"):
         try:
-            account = accounts.find_or_create(customer_id)
             settings = _settings_safe()
             lifetime_after = max(0, int(account.get("lifetime_earned", 0)) - earned)
             recomputed = compute_tier(lifetime_after, settings)
@@ -1530,6 +1774,50 @@ def _ensure_reversal_applied(accounts, marker: Dict[str, Any]) -> Dict[str, Any]
             "net_delta": net_delta,
         }
     return out
+
+
+def _restore_late_debit(
+    accounts, txns, customer_id: str, order_id: str, ledger: List[Dict[str, Any]], claim: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Hand back a bill debit no reversal counted: it landed after the cancel's
+    reversal was written, so that reversal's marker would otherwise short-circuit
+    every later call and strand the points.
+
+    Exactly once by its own key: the row's _id and the applied_reversals guard
+    both derive from the debit's txn_id. The row deliberately carries no
+    reversal-marker field -- it is an addition to the order's one reversal, not
+    a second one -- and no `redeem_txn_ids`, so a call that finds the row but not
+    the money re-issues the guarded write. None when nothing is outstanding.
+    """
+    txn_id = claim.get("txn_id")
+    _complete_redeem_row(txns, customer_id, order_id, claim)
+    if any(txn_id in (t.get("redeem_txn_ids") or []) for t in ledger):
+        return None
+    points = abs(int(claim.get("delta") or 0))
+    restore_id = f"redeem-restore:{txn_id}"
+    try:
+        saved = _save_redeem_row(txns, {
+            "txn_id": restore_id,
+            "customer_id": customer_id,
+            "type": "ADJUST",
+            "points": points,
+            "order_id": order_id,
+            "reason": f"Restore {points} redeemed on cancelled order {order_id}",
+            "created_at": datetime.now(),
+        })
+    except Exception as exc:  # noqa: BLE001
+        logger.error("late redeem restore row failed: %s", exc)
+        saved = None
+    if saved is None:
+        return {"ok": False, "reason": "marker_write_failed"}
+    status, _doc = _apply_reversal_balance(
+        accounts, customer_id, restore_id, points, 0, points, None
+    )
+    if status == "failed":
+        return {"ok": False, "reason": "balance_update_failed", "unapplied_reversal": True}
+    # Only the call that moved the points says so: this step re-runs on every
+    # sweep tick, and each answer here becomes a reversal_reconciled audit row.
+    return {"redeemed_restored": points} if status == "applied" else None
 
 
 def _reverse_order_loyalty(
@@ -1581,7 +1869,17 @@ def _reverse_order_loyalty(
     txns = get_loyalty_transaction_repository()
     if accounts is None or txns is None:
         return {"ok": False, "reason": "loyalty_db_unavailable"}
-    account = accounts.find_or_create(customer_id)
+    try:
+        account = _read_account(accounts, customer_id)
+    except Exception as exc:  # noqa: BLE001
+        # UNKNOWN is not EMPTY: the debit that says what this bill redeemed lives
+        # on this account, so nothing may be concluded -- or written -- without it.
+        logger.error(
+            "%s account read FAILED for cust=%s order=%s -- refusing to reverse "
+            "on an unreadable account: %s",
+            reason_prefix, customer_id, order_id, exc,
+        )
+        return {"ok": False, "reason": "account_read_failed"}
     ledger, read_ok = _read_order_ledger(txns, customer_id, order_id, account)
     if not read_ok:
         # DISTINGUISHABLE from "no loyalty rows". find_for_customer swallows
@@ -1597,6 +1895,11 @@ def _reverse_order_loyalty(
             reason_prefix, customer_id, order_id,
         )
         return {"ok": False, "reason": "ledger_read_failed"}
+
+    # The DEBIT on the account, not the ledger, is the truth of what this order
+    # redeemed: its row can be missing (write failed, press died) with the
+    # points gone, and a ledger-only total would restore nothing.
+    claim = _redeem_claim(account, _redeem_key(order_id))
 
     # Idempotency. A prior reversal row short-circuits -- but we ALWAYS re-issue
     # its guarded balance write first. That is free (the applied_reversals guard
@@ -1617,7 +1920,7 @@ def _reverse_order_loyalty(
         )
         if not (same_marker or same_order):
             continue
-        out = _ensure_reversal_applied(accounts, row)
+        out = _ensure_reversal_applied(accounts, row, account)
         # `same_order` without `same_marker` is the guard that stops a SECOND
         # PARTIAL RETURN (different return_id, different unique key, no index
         # collision) from reversing the WHOLE order again.
@@ -1625,6 +1928,12 @@ def _reverse_order_loyalty(
             out["reversed_by"] = next(
                 (f for f in _REVERSAL_MARKER_FIELDS if row.get(f)),
                 _REVERSAL_ORDER_FIELD,
+            )
+        # Cancel only: a cancel un-does the whole bill, a return's order-wide
+        # claw must not grow after the fact.
+        if out.get("ok") and claim and marker_field == "cancel_of_order_id":
+            out.update(
+                _restore_late_debit(accounts, txns, customer_id, order_id, ledger, claim) or {}
             )
         return out
 
@@ -1644,11 +1953,15 @@ def _reverse_order_loyalty(
         and t.get("edit_regate_of_order_id") == order_id
     )
     earned = max(0, earned + _regate_claw)
-    redeemed = sum(
-        int(t.get("points") or 0)
-        for t in ledger
-        if t.get("order_id") == order_id and t.get("type") == "REDEEM"
-    )
+    redeem_rows = [
+        t for t in ledger if t.get("order_id") == order_id and t.get("type") == "REDEEM"
+    ]
+    redeemed = sum(int(t.get("points") or 0) for t in redeem_rows)
+    redeem_txn_ids = [t.get("txn_id") for t in redeem_rows]
+    if claim and claim.get("txn_id") not in redeem_txn_ids:
+        _complete_redeem_row(txns, customer_id, order_id, claim)
+        redeemed += abs(int(claim.get("delta") or 0))
+        redeem_txn_ids.append(claim.get("txn_id"))
     if earned <= 0 and redeemed <= 0:
         return {"ok": True, "earned_clawed": 0, "redeemed_restored": 0, "net_delta": 0}
 
@@ -1699,6 +2012,9 @@ def _reverse_order_loyalty(
         # the exact $inc without re-deriving it from a ledger that has moved on.
         "reversed_earn_points": earned,
         "reversed_redeem_points": redeemed,
+        # Which debits this reversal hands back, so one that lands later is
+        # told apart (see _restore_late_debit).
+        "redeem_txn_ids": redeem_txn_ids,
         # Whether THIS flow owns the tier, so a completion applies the same tier
         # rule the primary path did (a cancel drops the tier, a return does not).
         "recompute_tier": bool(recompute_tier),
@@ -1989,6 +2305,8 @@ def reverse_for_return(
     """
     if not customer_id or not order_id or not return_id:
         return {"ok": False, "reason": "missing_ids"}
+    if _is_walk_in(customer_id):
+        return {"ok": True, "skipped_reason": "walkin", "earned_clawed": 0}
     return _reverse_order_loyalty(
         order_id=order_id,
         customer_id=customer_id,
@@ -2022,9 +2340,9 @@ def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, A
     cid = str(customer_id or "").strip()
     if not cid:
         return {"ok": False, "reason": "missing_ids"}
-    if cid.startswith(("walkin-", "walk-in")):
+    if _is_walk_in(cid):
         return {"ok": True, "skipped_reason": "walkin", "earned_clawed": 0}
-    try:
+    def reverse() -> Dict[str, Any]:
         return _reverse_order_loyalty(
             order_id=order_id,
             customer_id=cid,
@@ -2038,6 +2356,161 @@ def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, A
             # it -- see reverse_for_return for why returns must not.
             recompute_tier=True,
         )
+
+    try:
+        out = reverse()
+        # Losing the marker insert settles nothing: the winner may have read the
+        # account before this bill's debit landed. The winner's row is in the
+        # ledger now, so one more pass takes the marker branch, which finishes
+        # its money and hands back any debit it did not count.
+        return reverse() if out.get("raced") else out
     except Exception as exc:  # noqa: BLE001 -- must never break a cancel
         logger.error("reverse_for_cancel failed for order %s: %s", order_id, exc)
         return {"ok": False, "reason": "error", "error": str(exc)}
+
+
+# ----------------------------------------------------------------------------
+# AUTOMATIC RECONCILIATION (owner ruling 2026-11-07: recovery is the system's
+# job -- no staff button, no new screen). The scheduler's 10-minute money sweep
+# (customers.scheduled_credit_reconcile, no agent switch can stop it) runs this.
+# The reversal engine is exactly-once by construction, so re-running it IS the
+# recovery; the sweep only decides which rows to run it on. Durable work needs
+# no new record: a CANCELLED bill and the debit still on the account are the
+# record, and they survive what the press and the cancel do not (a lost answer,
+# a dead process, a stamp lost with the blip that failed the reversal).
+# ----------------------------------------------------------------------------
+
+# A debit can only land after a cancel while its press is still running, and a
+# lost cancel stamp is found on the first tick; this is the tick's reach back
+# for a bill nobody flagged. Older bills are not re-judged: historical cancels
+# predate the reversal and clawing them now would be a new decision.
+# ponytail: a scheduler stopped longer than this leaves an unflagged late debit
+# unfound; scan loyalty_accounts.money_ledger for redeem: keys if that happens.
+_SWEEP_REACH_DAYS = 7
+
+_EXCEPTION_REASONS = {
+    "balance_underflow": (
+        "taking the points back would put the customer's balance below zero "
+        "(the points this bill earned have already been spent)"
+    ),
+    "account_read_failed": "the customer's loyalty account could not be read",
+    "ledger_read_failed": "the customer's loyalty history could not be read",
+    "loyalty_db_unavailable": "the loyalty records could not be reached",
+}
+
+
+def _raise_reversal_exception(coll, id_field: str, doc: Dict[str, Any], what: str, reason: Any) -> None:
+    """The visible exception: ONE P1 task for an admin on the existing Tasks
+    screen (points are adjusted by admins only). Stamped once it exists, so a
+    person who closed it is not re-told every five minutes."""
+    from ..dependencies import get_task_repository
+    from ..services.task_triggers import _person_holding, active_tasks, create_system_task
+
+    ref = f"loyalty_reversal:{doc[id_field]}"
+    why = _EXCEPTION_REASONS.get(reason, "the points could not be updated")
+    repo = get_task_repository()
+    created = create_system_task(
+        repo,
+        title=f"Loyalty points not settled on {what}",
+        description=(
+            f"The customer's loyalty points on {what} could not be settled "
+            f"automatically: {why}. The system keeps trying every few minutes and "
+            "closes this task itself once it works. Do not correct these points by "
+            "hand: the automatic retry would then correct them a second time. If "
+            "it stays open for a day, tell support."
+        ),
+        priority="P1",
+        category="Accounts",
+        store_id=doc.get("store_id"),
+        dedupe_ref=ref,
+        assigned_to=_person_holding("ADMIN", None, any_store=True),
+        extra={
+            "link": "/orders",
+            "payload": {"order_id": doc.get("order_id"), "customer_id": doc.get("customer_id")},
+        },
+    )
+    if created or active_tasks(repo, ref):
+        coll.update_one({id_field: doc[id_field]}, {"$set": {"loyalty_exception_task": ref}})
+
+
+def _close_reversal_exception(coll, id_field: str, doc: Dict[str, Any]) -> None:
+    from ..dependencies import get_task_repository
+    from ..services.task_triggers import active_tasks
+
+    repo = get_task_repository()
+    for task in active_tasks(repo, doc["loyalty_exception_task"]):
+        repo.complete_task(task["task_id"], notes="The points were settled automatically.")
+    coll.update_one({id_field: doc[id_field]}, {"$unset": {"loyalty_exception_task": ""}})
+
+
+def _after_settling(coll, id_field: str, doc: Dict[str, Any], what: str, outcome: Dict[str, Any]) -> str:
+    """One row's outcome, the same for a bill and a return. A failure first seen
+    on this tick only sets the flag: a blip heals on the next tick unseen, and
+    only a failure that lasts reaches a person."""
+    if not _reversal_settled(outcome):
+        if doc.get("loyalty_reversal_failed") and not doc.get("loyalty_exception_task"):
+            _raise_reversal_exception(coll, id_field, doc, what, outcome.get("reason"))
+        return "unresolved"
+    if doc.get("loyalty_exception_task"):
+        _close_reversal_exception(coll, id_field, doc)
+    moved = {
+        k: outcome[k] for k in ("earned_clawed", "redeemed_restored", "completed_now") if outcome.get(k)
+    }
+    if not moved:
+        return "clean"
+    logger.warning("loyalty reconciled on %s: %s", what, moved)
+    _audit(
+        "loyalty.reversal_reconciled",
+        {"user_id": "system", "username": "system", "active_store_id": doc.get("store_id")},
+        {"order_id": doc.get("order_id"), "return_id": doc.get("return_id"), **moved},
+        doc.get("customer_id"),
+    )
+    return "reconciled"
+
+
+def reconcile_loyalty_reversals() -> Dict[str, int]:
+    """Finish every cancel and return reversal no staff door can reach. Safe to
+    run from any worker at any moment, beside a press or a cancel: the engine's
+    marker and applied_reversals guards decide who moves the money. One row's
+    failure never stops the next. Returns counts for the log."""
+    counts = {"reconciled": 0, "unresolved": 0, "clean": 0}
+    orders = get_order_repository()
+    if orders is None:
+        return counts
+    bills = orders.collection
+    returns = bills.database.get_collection("returns")
+    reach = (datetime.now(timezone.utc) - timedelta(days=_SWEEP_REACH_DAYS)).isoformat()
+    fields = {
+        "_id": 0, "order_id": 1, "order_number": 1, "customer_id": 1, "store_id": 1,
+        "loyalty_reversal_failed": 1, "loyalty_exception_task": 1,
+    }
+    for order in bills.find(
+        {"status": "CANCELLED",
+         "$or": [{"loyalty_reversal_failed": True},
+                 {"loyalty_exception_task": {"$exists": True}},
+                 {"cancelled_at": {"$gte": reach}}]},
+        fields,
+    ):
+        what = f"cancelled bill {order.get('order_number') or order.get('order_id')}"
+        try:
+            outcome = settle_cancelled_bill(order, orders)
+            counts[_after_settling(bills, "order_id", order, what, outcome)] += 1
+        except Exception as exc:  # noqa: BLE001
+            counts["unresolved"] += 1
+            logger.error("loyalty reconcile failed on %s: %s", what, exc)
+    for doc in returns.find(
+        {"status": "COMPLETED", "$or": [{"loyalty_reversal_failed": True}, {"loyalty_exception_task": {"$exists": True}}]},
+        {**fields, "return_id": 1},
+    ):
+        what = f"return {doc.get('return_id')}"
+        try:
+            outcome = reverse_for_return(doc.get("return_id"), doc.get("order_id"), doc.get("customer_id"))
+            if _reversal_settled(outcome):
+                returns.update_one({"return_id": doc.get("return_id")}, {"$set": {"loyalty_reversal_failed": False}})
+            counts[_after_settling(returns, "return_id", doc, what, outcome)] += 1
+        except Exception as exc:  # noqa: BLE001
+            counts["unresolved"] += 1
+            logger.error("loyalty reconcile failed on %s: %s", what, exc)
+    if counts["reconciled"] or counts["unresolved"]:
+        logger.warning("loyalty reversals reconciled: %s", counts)
+    return counts

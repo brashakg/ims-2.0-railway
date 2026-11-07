@@ -310,14 +310,18 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
           store_id: Optional[str] = None, entity_id: Optional[str] = None,
           idempotency_key: Optional[str] = None, guard_extra: Optional[Dict] = None,
           inc_extra: Optional[Dict] = None, set_extra: Optional[Dict] = None,
-          push_extra: Optional[Dict] = None, record_ledger: bool = True) -> GuardResult:
+          push_extra: Optional[Dict] = None, record_ledger: bool = True,
+          ledger_extra: Optional[Dict] = None) -> GuardResult:
     """Guarded debit: the floor (balance >= amount) lives IN the filter, so two
     racing debits that together exceed the balance can never both win. Returns
     GuardResult; never raises on a business failure.
 
     The three Phase-A shims pass guard_extra/inc_extra/set_extra/push_extra to
     reconstruct their exact historical filter/update (and record_ledger=False so
-    the existing collections' document shape is unchanged)."""
+    the existing collections' document shape is unchanged).
+
+    `ledger_extra` rides on the ledger entry, so a caller's snapshot of what the
+    debit was worth is as durable as the debit itself."""
     spec = ACCOUNT_TYPES.get(account_type)
     if spec is None:
         return GuardResult(ok=False, reason="unknown_type")
@@ -362,6 +366,8 @@ def debit(db_or_coll: Any, account_type: str, account_key: str, amount: Any, *,
         _ledger_entry(txn_id, "DEBIT", -amt, reason, ref, actor, store_id, idempotency_key)
         if record_ledger or idempotency_key else None
     )
+    if entry and ledger_extra:
+        entry.update(ledger_extra)
 
     if spec.mechanism == "update_reread":
         if not callable(getattr(coll, "update_one", None)):
