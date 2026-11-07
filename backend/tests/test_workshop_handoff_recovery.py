@@ -896,3 +896,134 @@ def test_cancel_and_handoff_converge_in_every_real_interleaving(rig):
         _together(hand_off, cancel)
         assert db.orders.find_one({"order_id": oid})["status"] == "CANCELLED"
         assert _actionable(_jobs(db, oid)) == []
+
+
+# --------------------------------------------------------------------------- #
+# Codex round 4: no status claim ever ends in an unguarded write
+# --------------------------------------------------------------------------- #
+def _status_writes_fail(rig, m, order_id="ORD", during_guarded=None):
+    """The atomic claim and its guarded fallback both time out (nothing landed);
+    `during_guarded` runs inside the second fault. Only a write carrying a status
+    precondition is failed, so an unguarded write still gets through."""
+    cls = rig["collection_type"]
+    real_fau, real_one = cls.find_one_and_update, cls.update_one
+    fired = []
+
+    def is_claim(self, query, update):
+        return (self.name == "orders" and query.get("order_id") == order_id
+                and "status" in (update.get("$set") or {}) and "status_history" in (update.get("$push") or {}))
+
+    def atomic(self, query, update, *a, **k):
+        if is_claim(self, query, update):
+            raise TimeoutError("atomic status claim down")
+        return real_fau(self, query, update, *a, **k)
+
+    def guarded(self, query, update, *a, **k):
+        if is_claim(self, query, update) and "status" in query:
+            fired.append(1)
+            if during_guarded and len(fired) == 1:
+                _together(during_guarded)
+            raise TimeoutError("guarded status claim down")
+        return real_one(self, query, update, *a, **k)
+
+    m.setattr(cls, "find_one_and_update", atomic)
+    m.setattr(cls, "update_one", guarded)
+    return fired
+
+
+def test_a_double_fault_cannot_resurrect_a_cancelled_order(rig, monkeypatch):
+    """Codex's reproduction: atomic write fails, a real cancel lands, the guarded
+    write fails, and the last fallback stamped CONFIRMED over it: paid 0, balance
+    0, a pending job."""
+    from api.routers.orders.confirm import confirm_order
+
+    db = rig["db"]
+    _bill(db, "ORD")
+    with monkeypatch.context() as m:
+        fired = _status_writes_fail(rig, m, during_guarded=_cancel)
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(confirm_order("ORD", USER))
+    bill = db.orders.find_one({"order_id": "ORD"})
+    assert fired and refused.value.status_code == 500
+    assert bill["status"] == "CANCELLED" and bill["balance_due"] == 0 and _jobs(db, "ORD") == []
+    assert "status_history" not in bill
+
+
+def test_a_double_fault_leaves_a_draft_a_re_press_confirms_once(rig, monkeypatch):
+    from api.routers.orders.confirm import confirm_order
+
+    db = rig["db"]
+    _bill(db, "ORD")
+    with monkeypatch.context() as m:
+        _status_writes_fail(rig, m)
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(confirm_order("ORD", USER))
+    assert refused.value.status_code == 500
+    assert db.orders.find_one({"order_id": "ORD"})["status"] == "DRAFT" and _jobs(db, "ORD") == []
+    assert asyncio.run(confirm_order("ORD", USER))["status"] == "CONFIRMED"
+    bill, jobs = db.orders.find_one({"order_id": "ORD"}), _jobs(db, "ORD")
+    assert [h["status"] for h in bill["status_history"]] == ["CONFIRMED"] and len(jobs) == 1
+
+
+def test_a_double_fault_at_the_till_keeps_the_money_and_the_confirm_door_finishes(rig, monkeypatch):
+    from api.routers.orders.confirm import confirm_order
+
+    db = rig["db"]
+    _bill(db, "ORD")
+    with monkeypatch.context() as m:
+        _status_writes_fail(rig, m)
+        res = _pay()
+    bill = db.orders.find_one({"order_id": "ORD"})
+    assert res["order_status"] == "DRAFT" and bill["status"] == "DRAFT" and bill["amount_paid"] == 1000
+    assert _pay()["_idempotent_replay"] is True
+    assert asyncio.run(confirm_order("ORD", USER))["status"] == "CONFIRMED"
+    bill = db.orders.find_one({"order_id": "ORD"})
+    assert len(bill["payments"]) == 1 and len(_jobs(db, "ORD")) == 1
+
+
+def test_a_double_fault_keeps_the_webhook_retryable(rig, monkeypatch):
+    db = rig["db"]
+    _bill(db, "ORD")
+    _post(rig, "ORD", "pay_1")
+    with monkeypatch.context() as m:
+        _status_writes_fail(rig, m)
+        rig["drain"]()
+    bill = db.orders.find_one({"order_id": "ORD"})
+    assert _row(db, "evt_pay_1")["status"] == "failed" and bill["status"] == "DRAFT"
+    _sweep(rig)
+    bill = db.orders.find_one({"order_id": "ORD"})
+    assert bill["status"] == "CONFIRMED" and len(bill["payments"]) == 1 and len(_jobs(db, "ORD")) == 1
+
+
+@pytest.mark.parametrize("to,start,required", [
+    ("READY", "CONFIRMED", ("CONFIRMED", "PROCESSING")),
+    ("DELIVERED", "READY", "READY"),
+    ("SHIPPED", "CONFIRMED", ["CONFIRMED"]),
+])
+def test_every_door_of_the_helper_stops_at_the_double_fault(rig, monkeypatch, to, start, required):
+    """The same helper behind the ready, deliver and online doors: a cancel inside
+    the fault stands, and no status or handover field is stamped over it."""
+    from api.routers.orders.release import _claim_order_status
+
+    db = rig["db"]
+    _bill(db, "ORD", status=start)
+    with monkeypatch.context() as m:
+        fired = _status_writes_fail(rig, m, during_guarded=_cancel)
+        won = _claim_order_status(rig["orders"], "ORD", to, required, "U1", extra={"handover_record": {"by": "U1"}})
+    bill = db.orders.find_one({"order_id": "ORD"})
+    assert fired and won is False
+    assert bill["status"] == "CANCELLED" and "handover_record" not in bill and "delivered_at" not in bill
+
+
+def test_the_ready_door_answers_a_retry_on_a_double_fault(rig, monkeypatch):
+    from api.routers.orders.delivery import mark_ready
+
+    db = rig["db"]
+    _bill(db, "ORD", status="CONFIRMED", items=[])
+    with monkeypatch.context() as m:
+        _status_writes_fail(rig, m)
+        with pytest.raises(HTTPException) as refused:
+            asyncio.run(mark_ready("ORD", USER))
+    assert refused.value.status_code == 500
+    assert db.orders.find_one({"order_id": "ORD"})["status"] == "CONFIRMED"
+    assert asyncio.run(mark_ready("ORD", USER))["status"] == "READY"
