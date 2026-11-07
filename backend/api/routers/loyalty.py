@@ -535,6 +535,13 @@ async def redeem_otp_verify(
     return {"verified": True}
 
 
+def _read_account(accounts, customer_id: str) -> Dict[str, Any]:
+    """What the account really holds, for the doors that act on its debits; a
+    failed read RAISES instead of answering with find_or_create's empty seed.
+    A customer with no account still gets the empty row."""
+    return accounts.read_or_raise(customer_id) or accounts.find_or_create(customer_id)
+
+
 def _redeem_key(order_id: Optional[str]) -> Optional[str]:
     """One bill's redemption identity on the account's debit (None for a
     standalone goodwill redeem, which stays one redemption per press)."""
@@ -777,7 +784,9 @@ async def redeem(
                 "replayed": True,
             }
 
-    account = accounts.find_or_create(body.customer_id)
+    # Unreadable -> 5xx, never the 400 a zero seed would earn: this may be the
+    # retry of a landed debit, and the till reads a 4xx as "no points were taken".
+    account = _read_account(accounts, body.customer_id)
 
     # EXACTLY-ONCE per bill (L2-LOYALTY-F01): the read above cannot stop two
     # overlapping presses, so the DEBIT itself carries the bill's key and the
@@ -1647,7 +1656,9 @@ def _apply_reversal_balance(
     return "underflow", current
 
 
-def _ensure_reversal_applied(accounts, marker: Dict[str, Any]) -> Dict[str, Any]:
+def _ensure_reversal_applied(
+    accounts, marker: Dict[str, Any], account: Dict[str, Any]
+) -> Dict[str, Any]:
     """Make sure the money for an EXISTING reversal marker has moved.
 
     Safe to call any number of times, from any worker, at any point in another
@@ -1702,7 +1713,6 @@ def _ensure_reversal_applied(accounts, marker: Dict[str, Any]) -> Dict[str, Any]
     new_tier = None
     if marker.get("recompute_tier"):
         try:
-            account = accounts.find_or_create(customer_id)
             settings = _settings_safe()
             lifetime_after = max(0, int(account.get("lifetime_earned", 0)) - earned)
             recomputed = compute_tier(lifetime_after, settings)
@@ -1834,7 +1844,17 @@ def _reverse_order_loyalty(
     txns = get_loyalty_transaction_repository()
     if accounts is None or txns is None:
         return {"ok": False, "reason": "loyalty_db_unavailable"}
-    account = accounts.find_or_create(customer_id)
+    try:
+        account = _read_account(accounts, customer_id)
+    except Exception as exc:  # noqa: BLE001
+        # UNKNOWN is not EMPTY: the debit that says what this bill redeemed lives
+        # on this account, so nothing may be concluded -- or written -- without it.
+        logger.error(
+            "%s account read FAILED for cust=%s order=%s -- refusing to reverse "
+            "on an unreadable account: %s",
+            reason_prefix, customer_id, order_id, exc,
+        )
+        return {"ok": False, "reason": "account_read_failed"}
     ledger, read_ok = _read_order_ledger(txns, customer_id, order_id, account)
     if not read_ok:
         # DISTINGUISHABLE from "no loyalty rows". find_for_customer swallows
@@ -1875,7 +1895,7 @@ def _reverse_order_loyalty(
         )
         if not (same_marker or same_order):
             continue
-        out = _ensure_reversal_applied(accounts, row)
+        out = _ensure_reversal_applied(accounts, row, account)
         # `same_order` without `same_marker` is the guard that stops a SECOND
         # PARTIAL RETURN (different return_id, different unique key, no index
         # collision) from reversing the WHOLE order again.

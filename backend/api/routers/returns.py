@@ -5062,7 +5062,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     _lr.get("earned_clawed", 0),
                     _lr.get("redeemed_restored", 0),
                 )
-            elif _lr.get("reason") not in ("missing_ids", "loyalty_db_unavailable"):
+            elif _lr.get("reason") != "missing_ids":
                 loyalty_reversal_failed = True
                 logger.error(
                     "[RETURNS] loyalty reversal FAILED for %s: %s",

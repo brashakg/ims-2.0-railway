@@ -45,6 +45,9 @@ class _FakeAccounts:
         self.acct = {"balance_points": balance, "lifetime_earned": le, "lifetime_redeemed": lr}
         self.adjustments = []
 
+    def read_or_raise(self, cid):
+        return dict(self.acct)
+
     def find_or_create(self, cid):
         return dict(self.acct)
 

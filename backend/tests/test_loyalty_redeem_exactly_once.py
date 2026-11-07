@@ -597,3 +597,214 @@ def test_a_loyalty_tender_completes_the_unconfirmed_burn(rig, monkeypatch):
     with pytest.raises(HTTPException):
         _claim_loyalty_redemption(order, 100.0, "pay-2")
     _reconcile(rig, 100)
+
+
+# --- Account unreadable during a reversal (Codex round 3 P1) ----------------
+
+class _FlakyReads:
+    """The account collection with its find_one failing -- a wrapper, because
+    mongomock's own writes go through find_one and a real server's do not."""
+
+    def __init__(self, coll, fails):
+        self._coll, self._fails = coll, fails
+
+    def __getattr__(self, name):
+        return getattr(self._coll, name)
+
+    def find_one(self, *a, **k):
+        if self._fails():
+            raise RuntimeError("AutoReconnect: account reads unavailable")
+        return self._coll.find_one(*a, **k)
+
+
+def _account_reads_down(rig, monkeypatch):
+    """Every account read fails at the COLLECTION, while the row and its debit
+    stand -- the real repository swallows that into a zero-balance seed. The
+    bill earned nothing, so nothing else can betray the debit. Returns undo()."""
+    real = rig["accounts"].collection
+    monkeypatch.setattr(rig["accounts"], "collection", _FlakyReads(real, lambda: True))
+    return lambda: monkeypatch.setattr(rig["accounts"], "collection", real)
+
+
+def _assert_restored_once(rig):
+    acct = _account(rig)
+    assert int(acct["balance_points"]) == START and int(acct["lifetime_redeemed"]) == 0
+    assert len(_redeem_rows(rig)) == 1 and len(_reversal_rows(rig)) == 1
+
+
+def test_unreadable_account_is_never_read_as_no_debit_and_the_retry_restores_once(rig, monkeypatch):
+    """Codex's path: no EARN, durable debit, no REDEEM row, account unreadable.
+    The answer must be a failure (the debit cannot be ruled out), nothing moves,
+    and the next call hands the points back exactly once."""
+    _press_with_ledger_down(rig, monkeypatch)
+    undo = _account_reads_down(rig, monkeypatch)
+    out = _cancel_order(rig)
+    undo()
+
+    assert out["ok"] is False and out["reason"] == "account_read_failed"
+    assert int(_account(rig)["balance_points"]) == START - 100
+    assert _reversal_rows(rig) == []
+
+    retry = _cancel_order(rig)
+    assert retry["ok"] is True and retry["redeemed_restored"] == 100
+    _assert_restored_once(rig)
+    _cancel_order(rig)
+    _assert_restored_once(rig)
+
+
+def _cancel_route(rig, monkeypatch):
+    """The real cancel door over the real repositories."""
+    import api.services.audit_alerts as alerts
+    import api.services.lens_stock_hook as hook
+    from api.routers import loyalty as lm
+    from api.routers import orders as om
+    from database.repositories.product_repository import StockRepository
+
+    async def noop(*a, **k):
+        return None
+
+    monkeypatch.setattr(om, "get_order_repository", lm.get_order_repository)
+    monkeypatch.setattr(om, "get_stock_repository",
+                        lambda: StockRepository(rig["db"].get_collection("stock_units")))
+    monkeypatch.setattr(om, "validate_store_access", lambda *a, **k: None)
+    monkeypatch.setattr(hook, "release_for_cancel", noop)
+    monkeypatch.setattr(alerts, "alert_order_cancelled", noop)
+    rig["db"].orders.update_one(
+        {"order_id": ORDER}, {"$set": {"status": "CONFIRMED", "order_number": "SO-1", "items": []}}
+    )
+    admin = {"user_id": "u-admin", "username": "admin", "roles": ["SUPERADMIN"],
+             "store_ids": ["BV-TEST-01"], "active_store_id": "BV-TEST-01"}
+    return lambda: asyncio.run(om.cancel_order(ORDER, reason="customer changed mind", current_user=admin))
+
+
+def test_the_cancel_door_flags_the_unreadable_account_and_its_retry_restores_once(rig, monkeypatch):
+    """The report's stranding: 200 with no failure flag closed the retry door
+    (400 already cancelled) with 100 points gone. The door stays open until the
+    money is back, and only then closes."""
+    cancel = _cancel_route(rig, monkeypatch)
+    _press_with_ledger_down(rig, monkeypatch)
+    undo = _account_reads_down(rig, monkeypatch)
+    first = cancel()
+    undo()
+
+    assert first["status"] == "CANCELLED" and first["loyalty_reversal_failed"] is True
+    stored = rig["db"].orders.find_one({"order_id": ORDER})
+    assert stored["status"] == "CANCELLED" and stored["loyalty_reversal_failed"] is True
+    assert stored["loyalty_reversal"]["reason"] == "account_read_failed"
+    assert int(_account(rig)["balance_points"]) == START - 100
+
+    retry = cancel()
+    assert retry["loyalty_reversal_failed"] is False
+    assert rig["db"].orders.find_one({"order_id": ORDER})["loyalty_reversal_failed"] is False
+    _assert_restored_once(rig)
+
+    with pytest.raises(HTTPException) as ei:
+        cancel()
+    assert ei.value.status_code == 400
+    _assert_restored_once(rig)
+
+
+def test_a_return_on_an_unreadable_account_fails_loudly_and_restores_once(rig, monkeypatch):
+    """Same engine, the return door: flagged, never a quiet zero."""
+    from api.routers.loyalty import reverse_for_return
+
+    _press_with_ledger_down(rig, monkeypatch)
+    undo = _account_reads_down(rig, monkeypatch)
+    out = reverse_for_return("RET-1", ORDER, CUST)
+    undo()
+    assert out["ok"] is False and out["reason"] == "account_read_failed"
+    assert int(_account(rig)["balance_points"]) == START - 100
+
+    assert reverse_for_return("RET-1", ORDER, CUST)["redeemed_restored"] == 100
+    _assert_restored_once(rig)
+
+
+def test_a_late_debit_is_not_lost_to_an_unreadable_account(rig, monkeypatch):
+    """The marker branch: the cancel's reversal exists, a debit landed after it,
+    and the account cannot be read -- that must not settle as ok."""
+    _earn_on_order(rig)
+    assert _cancel_order(rig)["ok"] is True
+    rig["accounts"].try_debit(
+        CUST, 100, delta_lifetime_redeemed=100, idempotency_key=f"redeem:{ORDER}",
+        ledger_extra={"order_id": ORDER, "requested_points": 100, "rupee_value": 100.0},
+    )
+    undo = _account_reads_down(rig, monkeypatch)
+    out = _cancel_order(rig)
+    undo()
+    assert out["ok"] is False and out["reason"] == "account_read_failed"
+    assert int(_account(rig)["balance_points"]) == START - 100
+
+    assert _cancel_order(rig)["redeemed_restored"] == 100
+    assert int(_account(rig)["balance_points"]) == START
+    assert _cancel_order(rig)["ok"] is True
+    assert int(_account(rig)["balance_points"]) == START
+
+
+def test_an_absent_account_is_still_nothing_to_reverse(rig, monkeypatch):
+    """Control: ABSENT is not UNAVAILABLE. A customer with no account and no
+    ledger reverses to ok/zero with the empty row created as ever; only a read
+    that FAILED refuses."""
+    from api.routers.loyalty import reverse_for_cancel
+
+    assert reverse_for_cancel(ORDER, "cust-never-seen") == {
+        "ok": True, "earned_clawed": 0, "redeemed_restored": 0, "net_delta": 0,
+    }
+    assert rig["db"].loyalty_accounts.find_one({"customer_id": "cust-never-seen"})["balance_points"] == 0
+
+    undo = _account_reads_down(rig, monkeypatch)
+    out = reverse_for_cancel(ORDER, "cust-also-unseen")
+    undo()
+    assert out["ok"] is False and out["reason"] == "account_read_failed"
+    assert rig["db"].loyalty_accounts.find_one({"customer_id": "cust-also-unseen"}) is None
+
+
+def test_a_retry_press_on_an_unreadable_account_is_never_a_refusal(rig, monkeypatch):
+    """The debit landed, its row did not, and the till's retry meets the same
+    outage: a zero-balance seed answered 400 'insufficient', which the till
+    reads as 'this attempt took NO points'. It must be a 5xx, and nothing moves."""
+    _press_with_ledger_down(rig, monkeypatch)
+    undo = _account_reads_down(rig, monkeypatch)
+    with pytest.raises(Exception) as ei:
+        _redeem()
+    undo()
+    exc = ei.value
+    assert not (isinstance(exc, HTTPException) and 400 <= exc.status_code < 500), exc.detail
+    assert int(_account(rig)["balance_points"]) == START - 100
+
+    assert _redeem()["redeemed_points"] == 100
+    _reconcile(rig, 100)
+
+
+def test_finishing_a_stranded_reversal_on_a_failed_read_still_drops_the_tier(rig, monkeypatch):
+    """Marker written, money not moved, tier owed. The finishing pass moves the
+    money under a guard that can never run again, so a seed standing in for the
+    account at that moment left the bought tier on the customer for good."""
+    from api.routers import loyalty as lm
+
+    monkeypatch.setattr(lm, "_settings_safe", lambda: {"tier_thresholds": {"GOLD": 5000}})
+    rig["db"].loyalty_accounts.update_one(
+        {"customer_id": CUST}, {"$set": {"tier": "GOLD", "lifetime_earned": 4950}}
+    )
+    _earn_on_order(rig, points=100)
+    coll = rig["accounts"].collection
+    real_write = coll.find_one_and_update
+
+    def write_down(*a, **k):
+        raise RuntimeError("write unavailable")
+
+    monkeypatch.setattr(coll, "find_one_and_update", write_down)
+    assert _cancel_order(rig)["reason"] == "balance_update_failed"
+    monkeypatch.setattr(coll, "find_one_and_update", real_write)
+
+    reads = []
+
+    def second_read_on():
+        reads.append(1)
+        return len(reads) > 1
+
+    monkeypatch.setattr(rig["accounts"], "collection", _FlakyReads(coll, second_read_on))
+    assert _cancel_order(rig)["ok"] is True
+    monkeypatch.setattr(rig["accounts"], "collection", coll)
+
+    acct = _account(rig)
+    assert int(acct["balance_points"]) == START and acct["tier"] == "BRONZE"

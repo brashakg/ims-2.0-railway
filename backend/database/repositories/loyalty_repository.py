@@ -9,7 +9,8 @@ Two collections:
   loyalty_settings        -- single-doc rule config
 
 Fail-soft: every helper returns a sensible default on any DB error so a
-loyalty failure can NEVER block POS.
+loyalty failure can NEVER block POS. The one exception is read_or_raise, for
+the money doors that must tell "no account" from "could not read it".
 """
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,12 @@ class LoyaltyAccountRepository(BaseRepository):
     @property
     def id_field(self) -> str:
         return "customer_id"
+
+    def read_or_raise(self, customer_id: str) -> Optional[Dict[str, Any]]:
+        """The stored account, None only when there truly is none. A failed
+        read RAISES: find_by_id swallows it, and find_or_create then answers
+        with an empty seed that looks exactly like an account holding nothing."""
+        return self._clean_id(self.collection.find_one({self.id_field: customer_id}))
 
     def find_or_create(self, customer_id: str) -> Dict[str, Any]:
         """Return the account, creating an empty BRONZE row on first hit."""
