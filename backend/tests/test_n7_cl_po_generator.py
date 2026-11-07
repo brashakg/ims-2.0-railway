@@ -15,7 +15,7 @@ Maps to the N7 acceptance intents:
                            qty drops, "+2.00" and 2.0 snap to one cell
   * vendor grouping     -- one group per preferred vendor; unresolved (or
                            resolver-raising) items group under vendor_id=None
-                           (PO drafts vendor-less; FE disables send)
+                           (PO drafts vendor-less; send refuses it)
   * dry_run safety      -- dry_run=True is the DEFAULT and writes NOTHING
   * DRAFT only          -- non-dry-run creates status=DRAFT POs (never SENT)
                            via the existing PO repository + one audit row
@@ -473,7 +473,7 @@ def test_non_dry_run_creates_one_draft_po_per_vendor_group(env):
     assert line["quantity"] == 4
     assert line["description"] == "Acuvue Oasys SPH -2.00 CYL -0.75"
 
-    # vendor-less group drafts with vendor_id=None (FE disables send)
+    # vendor-less group drafts with vendor_id=None (send refuses it)
     novend = by_vendor[None]
     assert novend["vendor_name"] is None
     assert novend["items"][0]["power"]["sph"] == 1.5

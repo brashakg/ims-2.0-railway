@@ -735,11 +735,13 @@ class TestOrderAnUncataloguedItem:
         saved = (
             vendors_mod.get_purchase_order_repository,
             vendors_mod.get_product_repository,
+            vendors_mod.get_vendor_repository,
             vendors_mod._po_catalog_gate_on,
             vendors_mod.validate_store_access,
         )
         vendors_mod.get_purchase_order_repository = lambda: r
         vendors_mod.get_product_repository = lambda: repo
+        vendors_mod.get_vendor_repository = lambda: _VendorRepo()
         vendors_mod._po_catalog_gate_on = lambda: True
         vendors_mod.validate_store_access = lambda *a, **k: None
         try:
@@ -752,6 +754,7 @@ class TestOrderAnUncataloguedItem:
             (
                 vendors_mod.get_purchase_order_repository,
                 vendors_mod.get_product_repository,
+                vendors_mod.get_vendor_repository,
                 vendors_mod._po_catalog_gate_on,
                 vendors_mod.validate_store_access,
             ) = saved

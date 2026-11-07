@@ -253,7 +253,8 @@ def test_F5_other_store_cashier_cannot_book(monkeypatch):
     client, coll = _ship_client(monkeypatch, _partial())  # store BV-TEST-01
     r = client.post(URL, json={"order_id": "ORD-P1", "address": {"payment_method": "COD"}},
                     headers=H(["CASHIER"], store_id="BV-TEST-02"))
-    assert r.status_code == 403, r.text
+    # 404, the same answer as a missing order (L2-INTEGRATION-F04).
+    assert r.status_code == 404, r.text
     assert coll.docs == []
 
 

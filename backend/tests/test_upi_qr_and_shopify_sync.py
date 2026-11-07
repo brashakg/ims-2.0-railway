@@ -350,3 +350,58 @@ def test_skus_from_items_filters_service_and_virtual():
     # Blank sku should not appear.
     assert "" not in skus
     assert len(skus) == 2
+
+
+# ===========================================================================
+# 2b. UPI QR asks for the BALANCE, never the whole bill (audit L2-PAYMENT-F03)
+# ===========================================================================
+
+
+async def _upi_qr_for(order: dict):
+    fake_repo = MagicMock()
+    fake_repo.find_by_id.return_value = order
+    db_conn = MagicMock()
+    db_conn.db = MockDB({"stores": MockCollection([{"store_id": "BV-BOK-01", "upi_vpa": "shop@upi"}])})
+    with (
+        patch("api.routers.orders.upi.get_order_repository", return_value=fake_repo),
+        patch("api.routers.orders.upi.validate_store_access", return_value="BV-BOK-01"),
+        patch("api.dependencies.get_db", return_value=db_conn),
+        patch("api.services.upi_qr._resolve_store_vpa", return_value="shop@upi"),
+    ):
+        from api.routers.orders.upi import get_upi_qr
+
+        return await get_upi_qr(order["order_id"], {"user_id": "u1", "roles": ["STORE_MANAGER"],
+                                                   "active_store_id": "BV-BOK-01"})
+
+
+@pytest.mark.asyncio
+async def test_upi_qr_requests_the_balance_after_a_part_payment():
+    out = await _upi_qr_for({"order_id": "o1", "order_number": "ORD-1", "store_id": "BV-BOK-01",
+                             "status": "CONFIRMED", "grand_total": 1000.0, "amount_paid": 400.0,
+                             "balance_due": 600.0})
+    assert out["amount"] == 600.0
+    assert "am=600.00" in out["upi_link"]
+
+
+@pytest.mark.asyncio
+async def test_upi_qr_unpaid_order_still_requests_the_whole_bill():
+    # Same-shop positive: nothing paid yet -> the whole bill is the balance.
+    out = await _upi_qr_for({"order_id": "o2", "order_number": "ORD-2", "store_id": "BV-BOK-01",
+                             "status": "CONFIRMED", "grand_total": 1000.0})
+    assert out["amount"] == 1000.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra", [
+    {"balance_due": 0.0, "amount_paid": 1000.0},          # fully paid
+    {"balance_due": 1000.0, "status": "CANCELLED"},       # cancelled
+    {"balance_due": 1000.0, "advance_refund_id": "r1"},   # advance refunded
+])
+async def test_upi_qr_refuses_when_nothing_is_collectable(extra):
+    from fastapi import HTTPException
+
+    order = {"order_id": "o3", "order_number": "ORD-3", "store_id": "BV-BOK-01",
+             "status": "CONFIRMED", "grand_total": 1000.0, **extra}
+    with pytest.raises(HTTPException) as exc_info:
+        await _upi_qr_for(order)
+    assert exc_info.value.status_code in (400, 409)
