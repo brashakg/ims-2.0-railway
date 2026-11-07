@@ -1406,14 +1406,28 @@ def order_body_fingerprint(order: OrderCreate, legacy: bool = False) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _lens_lines(lines: List[Dict[str, Any]], canonical=lambda pid: pid, rx_counts: bool = False) -> List[List[Any]]:
-    """A bill's lens lines in a fixed order, each power still tied to its WHOLE
+def _bill_lines(lines: List[Dict[str, Any]], canonical=lambda pid: pid, lens_only: bool = False) -> List[List[Any]]:
+    """A bill's lines in a fixed order, each power still tied to its WHOLE
     line: two prices of one lens are two lines, and swapping their powers is
-    another bill, while listing the same lines the other way round is not.
-    ``rx_counts``: a line with only an Rx or a lens cell is a lens line too
-    (no hash has seen that Rx)."""
+    another bill, while listing the same lines the other way round is not."""
     return sorted(_bill_line(ln, canonical) + [_lens_identity(ln)] for ln in lines
-                  if _lens_identity(ln) or (rx_counts and (ln.get("prescription_id") or ln.get("lens_line_id"))))
+                  if _lens_identity(ln) or not lens_only)
+
+
+def _same_bill_fields(order: Dict[str, Any], body: OrderCreate) -> bool:
+    """A saved bill's own fields beside this press: sale type, bill discount,
+    customer and member. The discount the bill took is its percent; the amount
+    is the server's own sum, so a sent amount only has to agree to the paise
+    each rounded line can differ by, and a press that sends none is not another
+    bill. The saved patient is the member the server resolved: a blank proves
+    nothing."""
+    sent_amount = float(body.cart_discount_amount or 0)
+    return (str(order.get("order_type") or "") == str(body.order_type or "")
+            and round(float(order.get("cart_discount_percent") or 0), 4) == round(float(body.cart_discount_percent or 0), 4)
+            and (not sent_amount or abs(sent_amount - float(order.get("cart_discount_amount") or 0))
+                 <= 0.01 * (len(body.items) + 1))
+            and all(not getattr(body, f) or not order.get(f) or getattr(body, f) == order.get(f)
+                    for f in ("customer_id", "patient_id")))
 
 
 def _same_bill(order: Dict[str, Any], body: OrderCreate) -> bool:
@@ -1422,22 +1436,21 @@ def _same_bill(order: Dict[str, Any], body: OrderCreate) -> bool:
     that drops it hashes the same), so the lens lines must ALSO be the saved
     order's own; a saved line holds the canonical product, never the SKU sent.
 
-    A keyed order saved before any fingerprint has only its lines to go by, and
-    nothing is back-filled onto it: its lens lines and whose they are must
-    match. With no lens intent on either side there is nothing clinical to weigh
-    and it replays as it always did -- which is NOT proof of the same bill."""
+    A keyed order saved before any fingerprint has only what it stored to go by
+    (owner ruling 2026-11-07: fail closed). Every line and bill field must match
+    it; nothing is back-filled onto it, and a bill edited since is refused."""
     saved = order.get("body_fingerprint")
     if saved and saved != order_body_fingerprint(body, legacy=True):
         return saved == order_body_fingerprint(body)
     repo = get_product_repository()
-    sent = _lens_lines([i.model_dump() for i in body.items], lambda pid: _canonical_pid(repo, pid), not saved)
-    if sent != _lens_lines(order.get("items") or [], rx_counts=not saved):
-        return False
-    if saved or not sent:
-        return True
-    # The saved patient is the member the server resolved: a blank proves nothing.
-    return all(not getattr(body, f) or not order.get(f) or getattr(body, f) == order.get(f)
-               for f in ("customer_id", "patient_id"))
+
+    def canon(pid):
+        return _canonical_pid(repo, pid)
+
+    sent, stored = [i.model_dump() for i in body.items], order.get("items") or []
+    if saved:
+        return _bill_lines(sent, canon, lens_only=True) == _bill_lines(stored, canon, lens_only=True)
+    return _bill_lines(sent, canon) == _bill_lines(stored, canon) and _same_bill_fields(order, body)
 
 
 def _replay_same_bill(order: Dict[str, Any], body: OrderCreate) -> Dict[str, Any]:

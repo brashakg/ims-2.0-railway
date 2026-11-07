@@ -17,6 +17,9 @@ retry is unchanged, judged against the saved order's own lens lines.
 
 Codex 11-06 round 3: that judgement keeps each power on its whole financial
 line, and a keyed bill with no fingerprint at all is judged the same way.
+
+Owner ruling 2026-11-07 (round 4): a keyed bill with no fingerprint fails
+closed. Every saved line and bill field is compared, not only the lens lines.
 """
 from __future__ import annotations
 
@@ -490,17 +493,112 @@ def test_a_hashed_rx_only_line_keeps_replaying_after_a_later_edit(client, staff_
     assert r2.status_code in (200, 201) and r2.json()["order_id"] == r1.json()["order_id"], r2.text
 
 
-def test_a_no_fingerprint_frame_bill_replays_as_it_always_did(client, staff_headers, rx_orders):
-    """KNOWN LIMIT, kept on purpose: with no hash and no lens intent there is
-    no clinical evidence to weigh, so a non-clinical change still replays the
-    saved bill. No sale, payment or stock moves; the response names the old
-    order. Not a claim that such a retry is the same bill."""
+def test_a_no_fingerprint_frame_bill_replays_only_as_saved(client, staff_headers, rx_orders):
+    """Owner ruling 2026-11-07 (fail closed): with no hash, the saved bill's own
+    fields are the evidence. The unchanged retry replays; a changed price is
+    refused and points to the Orders screen. Nothing moves either way."""
     _seed(rx_orders, pid="FR-9", category="FRAME", item_type="FRAME", hsn="900311")
     line = _item("FR-9", item_type="FRAME", category="FRAME")
     oid = _no_fp_bill(client, staff_headers, rx_orders, "K-NOFP6", [line])
     before = copy.deepcopy(_orders(rx_orders))
-    for items in ([line], [{**line, "unit_price": 1900.0, "discount_reason": "loyal customer"}]):
-        r = _post(client, staff_headers, items, key="K-NOFP6")
+    r = _post(client, staff_headers, [line], key="K-NOFP6")
+    assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
+    r = _post(client, staff_headers, [{**line, "unit_price": 1900.0, "discount_reason": "loyal customer"}], key="K-NOFP6")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "IDEMPOTENCY_BODY_MISMATCH"
+    assert "Orders screen" in r.json()["detail"]["message"]
+    assert _orders(rx_orders) == before
+
+
+def _two_line_bill(rx, price=2000.0):
+    _seed(rx, pid="FR-8", category="FRAME", item_type="FRAME", hsn="900311")
+    _seed(rx, pid="FR-9", category="FRAME", item_type="FRAME", hsn="900311", sku="FR-SKU")
+    return [_item("FR-9", item_type="FRAME", category="FRAME", unit_price=price),
+            _item("custom-fit", item_type="SERVICE", category="SERVICES", unit_price=50.0)]
+
+
+@pytest.mark.parametrize("door", ["pre-check", "lost-ack"])
+@pytest.mark.parametrize("change", [
+    {"unit_price": 1900.0, "discount_reason": "loyal customer"}, {"quantity": 2},
+    {"discount_percent": 5.0, "discount_reason": "changed"}, {"stock_id": "UNIT-OTHER"}, {"item_type": "SUNGLASS"},
+    {"product_id": "FR-8"},
+], ids=["price", "quantity", "discount", "unit", "type", "product"])
+def test_a_no_fingerprint_bill_refuses_a_changed_non_lens_line(client, staff_headers, rx_orders, monkeypatch, door, change):
+    lines = _two_line_bill(rx_orders)
+    _no_fp_bill(client, staff_headers, rx_orders, "K-NF-L", lines)
+    before = copy.deepcopy(_orders(rx_orders))
+    if door == "lost-ack":
+        _lost_ack(monkeypatch)
+    r = _post(client, staff_headers, [{**lines[0], **change}, lines[1]], key="K-NF-L")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "IDEMPOTENCY_BODY_MISMATCH"
+    assert _orders(rx_orders) == before
+
+
+def test_a_no_fingerprint_bill_refuses_a_line_added_or_dropped(client, staff_headers, rx_orders):
+    lines = _two_line_bill(rx_orders)
+    _no_fp_bill(client, staff_headers, rx_orders, "K-NF-N", lines)
+    before = copy.deepcopy(_orders(rx_orders))
+    for items in (lines[:1], lines + [{**lines[1], "product_id": "custom-more"}]):
+        assert _post(client, staff_headers, items, key="K-NF-N").status_code == 409
+    assert _orders(rx_orders) == before
+
+
+@pytest.mark.parametrize("change", [
+    {"order_type": "prescription_order"}, {"cart_discount_percent": 5.0, "cart_discount_reason": "changed"},
+    {"cart_discount_amount": 10.0}, {"customer_id": "cust-other"}, {"patient_id": "patient-other"},
+], ids=["type", "bill-percent", "bill-amount", "customer", "member"])
+def test_a_no_fingerprint_bill_refuses_a_changed_bill_field(client, staff_headers, rx_orders, change):
+    lines = _two_line_bill(rx_orders)
+    h = {**staff_headers, "Idempotency-Key": "K-NF-B"}
+    body = {"customer_id": "cust-x", "order_type": "quick_sale", "items": lines}
+    r = client.post("/api/v1/orders", json=body, headers=h)
+    assert r.status_code in (200, 201), r.text
+    _orders(rx_orders)[0].pop("body_fingerprint")
+    before = copy.deepcopy(_orders(rx_orders))
+    r = client.post("/api/v1/orders", json={**body, **change}, headers=h)
+    assert r.status_code == 409, r.text
+    assert _orders(rx_orders) == before
+
+
+@pytest.mark.parametrize("change", [
+    {"items": 1}, {"order_type": "quick_sale"}, {"cart_discount_percent": 6.0}, {"cart_discount_amount": 80.0},
+], ids=["non-lens-line", "type", "bill-percent", "bill-amount"])
+def test_a_no_fingerprint_lens_bill_also_weighs_what_is_not_lens(client, staff_headers, rx_orders, change):
+    """Round-4 gap: only the lens lines and the people were compared."""
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-nf-m")
+    lens = _lens(rxid)
+    extra = _item("custom-fit", item_type="SERVICE", category="SERVICES", unit_price=33.33)
+    h = {**staff_headers, "Idempotency-Key": "K-NF-M"}
+    body = {"customer_id": "cust-x", "order_type": "prescription_order", "items": [lens, extra],
+            "cart_discount_percent": 5.0, "cart_discount_reason": "good customer", "cart_discount_amount": 101.67}
+    r = client.post("/api/v1/orders", json=body, headers=h)
+    assert r.status_code in (200, 201), r.text
+    oid = r.json()["order_id"]
+    _orders(rx_orders)[0].pop("body_fingerprint")
+    before = copy.deepcopy(_orders(rx_orders))
+    for same in (body, {**body, "items": [extra, lens]}, {**body, "cart_discount_amount": 0}):
+        r = client.post("/api/v1/orders", json=same, headers=h)
+        assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
+    changed = {**body, **change}
+    if "items" in change:
+        changed["items"] = [lens, {**extra, "unit_price": 34.0}]
+    r = client.post("/api/v1/orders", json=changed, headers=h)
+    assert r.status_code == 409, r.text
+    assert _orders(rx_orders) == before
+
+
+def test_a_no_fingerprint_bill_replays_a_reorder_and_a_raw_saved_sku(client, staff_headers, rx_orders):
+    """Identical retries still replay: whole lines in another order, and a bill
+    that saved the SKU it was sent (nothing rewrites that saved line)."""
+    lines = _two_line_bill(rx_orders)
+    oid = _no_fp_bill(client, staff_headers, rx_orders, "K-NF-R", lines)
+    assert _orders(rx_orders)[0]["items"][0]["product_id"] == "FR-9"
+    _orders(rx_orders)[0]["items"][0]["product_id"] = "FR-SKU"
+    before = copy.deepcopy(_orders(rx_orders))
+    for items in (lines, list(reversed(lines)), [{**lines[0], "product_id": "FR-SKU"}, lines[1]]):
+        r = _post(client, staff_headers, items, key="K-NF-R")
         assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
     assert _orders(rx_orders) == before
 
