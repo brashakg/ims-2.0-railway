@@ -5,7 +5,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import axios from 'axios';
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios';
-import api, { refreshAccessToken, syncCachedUserShops } from '../client';
+import api, {
+  REPLAY_REFUSED_MESSAGE, WRITE_UNCONFIRMED_MESSAGE, refreshAccessToken, syncCachedUserShops,
+} from '../client';
 import { authApi } from '../auth';
 
 const jwt = (user_id: string, shop: string, sid = 'chain-1', tag = '') =>
@@ -200,6 +202,180 @@ describe('an error answer to a request of an older sign-in', () => {
     await expect(api.get('/x', { adapter })).rejects.toBeTruthy();
     expect(mem.get('ims_token')).toBeUndefined();
     expect(location.href).toBe('/login');
+  });
+});
+
+// PR #1372 round 3 (Codex): a replay goes out only for the person, sign-in and
+// shop that first sent the request. Both reproduced as a stored task on the
+// wrong shop / under the wrong person; the wait is where the world moves.
+const S2 = jwt('admin', 'S2');
+const refusal = (e: { status?: number; message?: string }) => ({ status: e.status, message: e.message });
+const REFUSED = (status: number) => ({ status, message: REPLAY_REFUSED_MESSAGE });
+const sentAs = (adapter: { mock: { calls: unknown[][] } }, call: number) =>
+  String((adapter.mock.calls[call][0] as InternalAxiosRequestConfig).headers.Authorization).replace('Bearer ', '');
+// The answers a request gets, in order; after them it succeeds.
+const answering = (...statuses: number[]) => {
+  const adapter = vi.fn((config: InternalAxiosRequestConfig) => {
+    const status = statuses[adapter.mock.calls.length - 1];
+    return status ? Promise.reject(failWith(status, config)) : Promise.resolve(ok(config));
+  });
+  return adapter;
+};
+// The client's backoff, cut short: `during` runs in the wait, as the world moving.
+const duringBackoff = (during: (ms: number) => void) =>
+  vi.spyOn(globalThis, 'setTimeout').mockImplementation(((run: () => void, ms: number) => {
+    during(ms);
+    run();
+    return 0;
+  }) as never);
+
+describe('a 401 replay never moves a request into another shop', () => {
+  it('a 401 answered after the switch: no refresh, no replay, nobody signed out, and it says so', async () => {
+    const post = vi.spyOn(axios, 'post').mockResolvedValueOnce({ data: { access_token: S2, refresh_token: 'r2' } });
+    let fail!: () => void;
+    const adapter = vi.fn((config: InternalAxiosRequestConfig) =>
+      adapter.mock.calls.length === 1
+        ? new Promise<AxiosResponse>((_, reject) => { fail = () => reject(failWith(401, config)); })
+        : Promise.resolve(ok(config)));
+    const done = api.post('/tasks', {}, { adapter }).catch(refusal);
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalled());
+    mem.set('ims_token', S2);
+    fail();
+    expect(await done).toEqual(REFUSED(401));
+    expect(adapter).toHaveBeenCalledTimes(1);
+    expect(post).not.toHaveBeenCalled();
+    expect(mem.get('ims_token')).toBe(S2);
+    expect(location.href).toBe('');
+  });
+
+  it('a switch landing during the 401\'s own refresh: the chain keeps its new refresh token, the request stays unsent', async () => {
+    let answer!: (data: unknown) => void;
+    vi.spyOn(axios, 'post').mockReturnValueOnce(new Promise((resolve) => { answer = (data) => resolve({ data }); }));
+    const adapter = answering(401);
+    const done = api.post('/tasks', {}, { adapter }).catch(refusal);
+    await vi.waitFor(() => expect(axios.post).toHaveBeenCalled());
+    mem.set('ims_token', S2);
+    answer({ access_token: jwt('admin', 'S1', 'chain-1', 'new'), refresh_token: 'r2' });
+    expect(await done).toEqual(REFUSED(401));
+    expect(adapter).toHaveBeenCalledTimes(1);
+    expect(mem.get('ims_token')).toBe(S2);
+    expect(mem.get('ims_refresh_token')).toBe('r2');
+  });
+
+  it('positive control: there and back to the first shop, the request is still that shop\'s', async () => {
+    const back = jwt('admin', 'S1', 'chain-1', 'back');
+    const fresh = jwt('admin', 'S1', 'chain-1', 'fresh');
+    vi.spyOn(axios, 'post').mockResolvedValueOnce({ data: { access_token: fresh, refresh_token: 'r2' } });
+    let fail!: () => void;
+    const adapter = vi.fn((config: InternalAxiosRequestConfig) =>
+      adapter.mock.calls.length === 1
+        ? new Promise<AxiosResponse>((_, reject) => { fail = () => reject(failWith(401, config)); })
+        : Promise.resolve(ok(config)));
+    const done = api.post('/tasks', {}, { adapter });
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalled());
+    mem.set('ims_token', back);
+    fail();
+    expect((await done).status).toBe(200);
+    expect(adapter).toHaveBeenCalledTimes(2);
+    expect(sentAs(adapter, 1)).toBe(fresh);
+  });
+
+  it('positive control: an HQ login with no shop refreshes and replays', async () => {
+    const hq = (tag: string) => `h.${btoa(JSON.stringify({ user_id: 'hq', sid: 'c', active_store_id: null, tag }))}.s`;
+    const noShopClaim = `h.${btoa(JSON.stringify({ user_id: 'hq', sid: 'c' }))}.s`;
+    signIn('hq', hq('old'), 'r1', '');
+    vi.spyOn(axios, 'post').mockResolvedValueOnce({ data: { access_token: noShopClaim, refresh_token: 'r2' } });
+    const adapter = answering(401);
+    expect((await api.get('/x', { adapter })).status).toBe(200);
+    expect(adapter).toHaveBeenCalledTimes(2);
+  });
+
+  it('positive control: a sign-in with no chain yet takes its first one on refresh, and the replay goes', async () => {
+    // The server's refresh-store hiccup at login leaves no refresh token: the
+    // legacy refresh mints a chain, so `sid` appears where there was none.
+    const noChain = `h.${btoa(JSON.stringify({ user_id: 'admin', active_store_id: 'S1' }))}.s`;
+    const chained = jwt('admin', 'S1', 'chain-9');
+    mem.set('ims_token', noChain);
+    mem.delete('ims_refresh_token');
+    vi.spyOn(axios, 'post').mockResolvedValueOnce({ data: { access_token: chained, refresh_token: 'r9' } });
+    const adapter = answering(401);
+    expect((await api.post('/tasks', {}, { adapter })).status).toBe(200);
+    expect(sentAs(adapter, 1)).toBe(chained);
+  });
+});
+
+describe('a request waiting out its backoff is checked again when the wait ends', () => {
+  it('the next person signed in during the wait: the old request never goes out as them', async () => {
+    duringBackoff(() => signIn('investor', INVESTOR, 'r-investor'));
+    const adapter = answering(429);
+    expect(await api.post('/tasks', {}, { adapter }).catch(refusal)).toEqual(REFUSED(429));
+    expect(adapter).toHaveBeenCalledTimes(1);
+    expect(mem.get('ims_token')).toBe(INVESTOR);
+    expect(cached().id).toBe('investor');
+    expect(location.href).toBe('');
+  });
+
+  it('the third wait counts too (the natural 1s, 2s, 4s backoff)', async () => {
+    duringBackoff((ms) => { if (ms === 4000) signIn('investor', INVESTOR, 'r-investor'); });
+    const adapter = answering(429, 429, 429);
+    expect(await api.post('/tasks', {}, { adapter }).catch(refusal)).toEqual(REFUSED(429));
+    expect(adapter).toHaveBeenCalledTimes(3);
+    expect(sentAs(adapter, 2)).toBe(ADMIN);
+  });
+
+  it('sign-out alone during the wait: the dead token is not sent again', async () => {
+    duringBackoff(() => mem.clear());
+    const adapter = answering(429);
+    expect(await api.post('/tasks', {}, { adapter }).catch(refusal)).toEqual(REFUSED(429));
+    expect(adapter).toHaveBeenCalledTimes(1);
+    expect(mem.size).toBe(0);
+  });
+
+  it('a shop switch during the wait: refused, on a write and on a read being retried', async () => {
+    duringBackoff(() => mem.set('ims_token', S2));
+    const write = answering(429);
+    expect(await api.post('/tasks', {}, { adapter: write }).catch(refusal)).toEqual(REFUSED(429));
+    expect(write).toHaveBeenCalledTimes(1);
+    mem.set('ims_token', ADMIN);
+    const read = answering(503);
+    expect(await api.get('/x', { adapter: read }).catch(refusal)).toEqual(REFUSED(503));
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('a request sent signed out is not carried by whoever signs in during its wait', async () => {
+    mem.clear();
+    duringBackoff(() => signIn('investor', INVESTOR, 'r-investor'));
+    const adapter = answering(429);
+    expect(await api.post('/x', {}, { adapter }).catch(refusal)).toEqual(REFUSED(429));
+    expect(adapter).toHaveBeenCalledTimes(1);
+  });
+
+  it('positive control: same person and shop, token rotated in the wait - it retries once, on the new token', async () => {
+    const fresh = jwt('admin', 'S1', 'chain-1', 'fresh');
+    duringBackoff(() => mem.set('ims_token', fresh));
+    const adapter = answering(429);
+    expect((await api.post('/tasks', {}, { adapter })).status).toBe(200);
+    expect(adapter).toHaveBeenCalledTimes(2);
+    expect(sentAs(adapter, 1)).toBe(fresh);
+  });
+
+  it('positive control: a sign-in in its own backoff still signs in', async () => {
+    mem.clear();
+    duringBackoff(() => undefined);
+    const adapter = answering(429);
+    expect((await api.post('/auth/login', {}, { adapter })).status).toBe(200);
+    expect(adapter).toHaveBeenCalledTimes(2);
+  });
+
+  it('a 5xx on a write from the old shop keeps its "may already be saved" warning', async () => {
+    let fail!: () => void;
+    const adapter = vi.fn((config: InternalAxiosRequestConfig) =>
+      new Promise<AxiosResponse>((_, reject) => { fail = () => reject(failWith(500, config)); }));
+    const done = api.post('/tasks', {}, { adapter }).catch(refusal);
+    await vi.waitFor(() => expect(adapter).toHaveBeenCalled());
+    mem.set('ims_token', S2);
+    fail();
+    expect(await done).toEqual({ status: 500, message: WRITE_UNCONFIRMED_MESSAGE });
   });
 });
 

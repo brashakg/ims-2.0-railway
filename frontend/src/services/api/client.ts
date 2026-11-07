@@ -129,10 +129,11 @@ export function decodeJwtClaims(token: string | null | undefined): Record<string
 export function sameSession(a: string | null | undefined, b: string | null | undefined): boolean {
   if (a === b) return true;
   const [x, y] = [decodeJwtClaims(a), decodeJwtClaims(b)];
-  return !!x && !!y && x.user_id === y.user_id && x.sid === y.sid;
+  // No `sid`: a sign-in with no chain yet, which its first refresh gives it.
+  return !!x && !!y && x.user_id === y.user_id && (!x.sid || !y.sid || x.sid === y.sid);
 }
 
-/** The token a request really went out with; a 401 replay carries the new one. */
+/** The token a request really went out with. */
 export function sentToken(config?: { headers?: unknown }): string {
   const header = (config?.headers as { Authorization?: unknown } | undefined)?.Authorization;
   return String(header ?? '').replace(/^Bearer /, '');
@@ -445,17 +446,33 @@ export function buildApiError(
   return new ApiError(message, { status, code, detail: rawDetail });
 }
 
-// The answer to a request sent under an older sign-in: it says nothing about
-// the session in storage now, so it never refreshes, replays or signs that
-// person out. The caller just gets its error.
-const fromOlderSession = (config?: { headers?: unknown }): boolean => {
+// The answer to a request sent under another sign-in or another shop, or
+// signed out: it says nothing about the session in storage now, so it never
+// refreshes, replays or signs that person out. The caller just gets its error.
+const fromOlderContext = (config?: { headers?: unknown }): boolean => {
   const sent = sentToken(config);
-  return !!sent && !sameSession(sent, localStorage.getItem(TOKEN_STORAGE_KEY));
+  const now = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+  return !sameSession(sent, now)
+    || (decodeJwtClaims(sent)?.active_store_id || '') !== (decodeJwtClaims(now)?.active_store_id || '');
 };
+
+// Only a read or a write the server refused (401, 429) is ever replayed, so
+// "not saved" is the truth. Its status stays: the till reads a 4xx as refused.
+export const REPLAY_REFUSED_MESSAGE =
+  'Not saved: the shop or sign-in changed while this was waiting. Check the shop and try again.';
+const refuseReplay = (error: AxiosError) =>
+  Promise.reject(new ApiError(REPLAY_REFUSED_MESSAGE, { status: error.response?.status }));
+
+// THE way a request goes out again. Everything waited on before it (a refresh,
+// a backoff) is time for a shop switch or the next person's sign-in, so the
+// check sits here, after the wait; the request interceptor then stamps the
+// same token this just compared.
+const replay = (config: RetryTrackedConfig, error: AxiosError) =>
+  fromOlderContext(config) ? refuseReplay(error) : api.request(config);
 
 // Handle final error after retries exhausted
 const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
-  if (error.response?.status === 401 && !fromOlderSession(error.config)) {
+  if (error.response?.status === 401 && !fromOlderContext(error.config)) {
     // Clear auth state on unauthorized (refresh already failed or was not
     // possible by the time we get here -> same logout flow as before).
     // The POS goes through THE one sign-out step (a pending bill is parked,
@@ -535,8 +552,6 @@ api.interceptors.response.use(
       return handleFinalError(error);
     }
 
-    if (fromOlderSession(config)) return Promise.reject(buildApiError(error));
-
     // Reactive refresh-and-retry, ONCE per request: an expired access token
     // (laptop wake, throttled tab that missed the proactive window) gets one
     // silent refresh + replay instead of a logout. Auth endpoints themselves
@@ -548,15 +563,15 @@ api.interceptors.response.use(
       reqUrl.includes('/auth/login') ||
       reqUrl.includes('/auth/refresh') ||
       reqUrl.includes('/auth/logout');
-    if (status401 && !isAuthEndpoint && !config.__retried401) {
+    const refreshable = status401 && !isAuthEndpoint && !config.__retried401;
+
+    if (fromOlderContext(config)) {
+      return refreshable || isRetryableError(error) ? refuseReplay(error) : Promise.reject(buildApiError(error));
+    }
+
+    if (refreshable) {
       config.__retried401 = true;
-      const newToken = await refreshAccessToken();
-      if (newToken) {
-        if (config.headers) {
-          config.headers.Authorization = `Bearer ${newToken}`;
-        }
-        return api.request(config);
-      }
+      if (await refreshAccessToken()) return replay(config, error);
     }
 
     const retryCount = config.__retryCount ?? 0;
@@ -568,7 +583,7 @@ api.interceptors.response.use(
       // Exponential backoff: 1s, 2s, 4s
       const backoffDelay = RETRY_DELAY_MS * Math.pow(2, retryCount);
       await delay(backoffDelay);
-      return api.request(config);
+      return replay(config, error);
     }
 
     return handleFinalError(error);
