@@ -1077,7 +1077,11 @@ async def create_order(
         approval_spent = False
 
         def _order_was_saved() -> bool:
-            return bool(order_repo.find_one({"order_id": precomputed_order_id}))
+            # The RAW collection, not order_repo.find_one: the repo swallows a
+            # read error into None ("not saved") and the rollback would free
+            # stock under a bill that exists. A read error must raise, so every
+            # give-back below fails closed.
+            return bool(order_repo.collection.find_one({"order_id": precomputed_order_id}))
 
         try:
             # Every unit the bill takes is claimed (atomic) BEFORE the save: a

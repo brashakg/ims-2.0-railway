@@ -13,7 +13,8 @@ and a REAL serialized frame unit, asserted together:
   * failure BEFORE the insert -> unit back on the shelf, lens released ONCE;
   * failure AFTER the insert  -> unit stays SOLD to the bill, lens stays
     reserved; the same-key retry returns that one bill, still one reservation;
-  * save outcome UNREADABLE   -> neither the unit nor the lens is freed;
+  * save outcome UNREADABLE   -> neither the unit nor the lens is freed
+    (the RAW collection read fails -- the repo wrappers swallow errors);
   * the add-line door: line saved, ack lost -> its lens stays reserved.
 
 No emoji (Windows cp1252).
@@ -134,26 +135,60 @@ def test_insert_landed_but_ack_lost_keeps_unit_and_lens_with_the_bill(client, sh
     assert held == 1 and units["SU-B"] == "SOLD"
 
 
+def _db_goes_dark_on_read(shop, monkeypatch, broken):
+    """Break the RAW orders collection read (what a real outage breaks):
+    BaseRepository.find_one / find_by_id swallow errors into None, so the
+    saved-check must read the collection itself to see the failure."""
+    coll = shop["orders"].collection
+    real_find_one = coll.find_one
+
+    def find_one(*a, **k):
+        if broken:
+            raise RuntimeError("ServerSelectionTimeoutError: cannot read orders")
+        return real_find_one(*a, **k)
+
+    monkeypatch.setattr(coll, "find_one", find_one)
+
+
 def test_unreadable_save_outcome_frees_neither_unit_nor_lens(client, shop, monkeypatch):
-    orders = shop["orders"]
-    real_find_one = orders.find_one
     broken = {}
 
     def write_fails_and_db_goes_dark(*_a, **_k):
         broken["on"] = True
         raise RuntimeError("connection reset")
 
-    def find_one(flt, *a, **k):
-        if broken:
-            raise RuntimeError("cannot read orders")
-        return real_find_one(flt, *a, **k)
-
-    monkeypatch.setattr(orders, "create_unique", write_fails_and_db_goes_dark)
-    monkeypatch.setattr(orders, "find_one", find_one)
+    monkeypatch.setattr(shop["orders"], "create_unique", write_fails_and_db_goes_dark)
+    _db_goes_dark_on_read(shop, monkeypatch, broken)
     r = _sell(client, [_line(stock_id="SU-B"), _lens_line()])
     assert r.status_code == 500, r.text
+    broken.clear()
     units, held = _books(shop)
     assert held == 1 and units["SU-B"] == "SOLD"
+
+
+def test_added_lens_line_unreadable_outcome_keeps_its_reservation(client, shop, monkeypatch):
+    first = _sell(client, [_line()])
+    assert first.status_code in (200, 201), first.text
+    order_id = _order_id(first)
+    real_update = shop["orders"].update
+    broken = {}
+
+    def landed_then_db_goes_dark(oid, data, *a, **k):
+        out = real_update(oid, data, *a, **k)
+        if "items" in data:
+            broken["on"] = True
+            raise RuntimeError("simulated lost update acknowledgement")
+        return out
+
+    monkeypatch.setattr(shop["orders"], "update", landed_then_db_goes_dark)
+    _db_goes_dark_on_read(shop, monkeypatch, broken)
+    added = client.post(f"/api/v1/orders/{order_id}/items", json=_lens_line(),
+                        headers=_token(["SUPERADMIN"]))
+    assert added.status_code == 500, added.text
+    broken.clear()
+    assert len(shop["db"].orders.find_one({"order_id": order_id})["items"]) == 2
+    _units, held = _books(shop)
+    assert held == 1, "lens freed under a line whose save could not be read"
 
 
 def test_added_lens_line_saved_but_ack_lost_keeps_its_reservation(client, shop, monkeypatch):
