@@ -110,17 +110,39 @@ const PROACTIVE_REFRESH_WINDOW_MS = 5 * 60_000;
 // 15-min idle timeout (an idle user must NOT be refreshed).
 const ACTIVITY_FRESHNESS_MS = 5 * 60_000;
 
-/** Exp claim of a JWT in epoch MILLISECONDS, or null if unparseable. */
-export function decodeJwtExpMs(token: string): number | null {
+/** A JWT's payload claims (NOT verified - the server does that), or null if
+ *  unparseable. The one client-side reader of token claims. */
+export function decodeJwtClaims(token: string | null | undefined): Record<string, any> | null {
   try {
-    const part = token.split('.')[1];
+    const part = (token || '').split('.')[1];
     if (!part) return null;
-    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
-    const payload = JSON.parse(atob(b64));
-    return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+    const payload = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+    return payload && typeof payload === 'object' ? payload : null;
   } catch {
     return null;
   }
+}
+
+/** One sign-in? Same person on the same refresh chain (`sid`); a token that
+ *  was rotated or moved shop stays in it, a new login is a new chain. An answer
+ *  to a request of another sign-in must not touch this one (#1372 review). */
+export function sameSession(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (a === b) return true;
+  const [x, y] = [decodeJwtClaims(a), decodeJwtClaims(b)];
+  // No `sid`: a sign-in with no chain yet, which its first refresh gives it.
+  return !!x && !!y && x.user_id === y.user_id && (!x.sid || !y.sid || x.sid === y.sid);
+}
+
+/** The token a request really went out with. */
+export function sentToken(config?: { headers?: unknown }): string {
+  const header = (config?.headers as { Authorization?: unknown } | undefined)?.Authorization;
+  return String(header ?? '').replace(/^Bearer /, '');
+}
+
+/** Exp claim of a JWT in epoch MILLISECONDS, or null if unparseable. */
+export function decodeJwtExpMs(token: string): number | null {
+  const exp = decodeJwtClaims(token)?.exp;
+  return typeof exp === 'number' ? exp * 1000 : null;
 }
 
 /**
@@ -188,6 +210,19 @@ async function performRefresh(): Promise<string | null> {
     });
     const newAccess: string | undefined = resp.data?.access_token;
     if (!newAccess) return null;
+    // The stored token moved while this answer travelled (shop switch, another
+    // tab's refresh, sign-out, a new sign-in): the access token here is older
+    // than it and is dropped. Only the rotated refresh token of the SAME
+    // sign-in is kept: the one it replaced is spent, and presenting that again
+    // past the server's grace window revokes the whole chain.
+    const current = localStorage.getItem(TOKEN_STORAGE_KEY);
+    if (current !== access || localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY) !== refresh) {
+      if (!current || !sameSession(current, newAccess)) return null;
+      if (resp.data?.refresh_token) {
+        localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, resp.data.refresh_token);
+      }
+      return current;
+    }
     localStorage.setItem(TOKEN_STORAGE_KEY, newAccess);
     if (resp.data?.refresh_token) {
       localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, resp.data.refresh_token);
@@ -197,7 +232,8 @@ async function performRefresh(): Promise<string | null> {
     return newAccess;
   } catch (e) {
     const detail = axios.isAxiosError(e) ? e.response?.data?.detail : undefined;
-    if (detail?.code === 'SESSION_IDLE') {
+    // The refusal is about the sign-in that asked, not a later one.
+    if (detail?.code === 'SESSION_IDLE' && sameSession(access, localStorage.getItem(TOKEN_STORAGE_KEY))) {
       refreshRefusedIdle = true;
       try {
         localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
@@ -221,11 +257,12 @@ export const USER_SHOPS_SYNCED_EVENT = 'ims:user-shops-synced';
  *  screen of 403s for a shop the client still remembered. */
 export function syncCachedUserShops(token: string): void {
   try {
-    const part = token.split('.')[1];
-    const claims = JSON.parse(atob(part.replace(/-/g, '+').replace(/_/g, '/')));
+    const claims = decodeJwtClaims(token);
+    if (!claims) return;
     const raw = localStorage.getItem('ims_user');
     if (!raw) return;
     const user = JSON.parse(raw);
+    if (claims.user_id !== user.id) return; // another person's shops are not this cache's
     const activeStoreId = claims.active_store_id || '';
     const storeIds = Array.isArray(claims.store_ids) ? claims.store_ids : [];
     // Unchanged shops (nearly every refresh): nothing re-renders.
@@ -409,9 +446,33 @@ export function buildApiError(
   return new ApiError(message, { status, code, detail: rawDetail });
 }
 
+// The answer to a request sent under another sign-in or another shop, or
+// signed out: it says nothing about the session in storage now, so it never
+// refreshes, replays or signs that person out. The caller just gets its error.
+const fromOlderContext = (config?: { headers?: unknown }): boolean => {
+  const sent = sentToken(config);
+  const now = localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+  return !sameSession(sent, now)
+    || (decodeJwtClaims(sent)?.active_store_id || '') !== (decodeJwtClaims(now)?.active_store_id || '');
+};
+
+// Only a read or a write the server refused (401, 429) is ever replayed, so
+// "not saved" is the truth. Its status stays: the till reads a 4xx as refused.
+export const REPLAY_REFUSED_MESSAGE =
+  'Not saved: the shop or sign-in changed while this was waiting. Check the shop and try again.';
+const refuseReplay = (error: AxiosError) =>
+  Promise.reject(new ApiError(REPLAY_REFUSED_MESSAGE, { status: error.response?.status }));
+
+// THE way a request goes out again. Everything waited on before it (a refresh,
+// a backoff) is time for a shop switch or the next person's sign-in, so the
+// check sits here, after the wait; the request interceptor then stamps the
+// same token this just compared.
+const replay = (config: RetryTrackedConfig, error: AxiosError) =>
+  fromOlderContext(config) ? refuseReplay(error) : api.request(config);
+
 // Handle final error after retries exhausted
 const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
-  if (error.response?.status === 401) {
+  if (error.response?.status === 401 && !fromOlderContext(error.config)) {
     // Clear auth state on unauthorized (refresh already failed or was not
     // possible by the time we get here -> same logout flow as before).
     // The POS goes through THE one sign-out step (a pending bill is parked,
@@ -502,15 +563,15 @@ api.interceptors.response.use(
       reqUrl.includes('/auth/login') ||
       reqUrl.includes('/auth/refresh') ||
       reqUrl.includes('/auth/logout');
-    if (status401 && !isAuthEndpoint && !config.__retried401) {
+    const refreshable = status401 && !isAuthEndpoint && !config.__retried401;
+
+    if (fromOlderContext(config)) {
+      return refreshable || isRetryableError(error) ? refuseReplay(error) : Promise.reject(buildApiError(error));
+    }
+
+    if (refreshable) {
       config.__retried401 = true;
-      const newToken = await refreshAccessToken();
-      if (newToken) {
-        if (config.headers) {
-          config.headers.Authorization = `Bearer ${newToken}`;
-        }
-        return api.request(config);
-      }
+      if (await refreshAccessToken()) return replay(config, error);
     }
 
     const retryCount = config.__retryCount ?? 0;
@@ -522,7 +583,7 @@ api.interceptors.response.use(
       // Exponential backoff: 1s, 2s, 4s
       const backoffDelay = RETRY_DELAY_MS * Math.pow(2, retryCount);
       await delay(backoffDelay);
-      return api.request(config);
+      return replay(config, error);
     }
 
     return handleFinalError(error);

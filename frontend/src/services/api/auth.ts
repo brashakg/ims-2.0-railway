@@ -2,7 +2,7 @@
 // IMS 2.0 - Auth API
 // ============================================================================
 
-import api, { getSecureApiUrl, refreshAccessToken } from './client';
+import api, { getSecureApiUrl, refreshAccessToken, sentToken } from './client';
 import type { ApiResponse, LoginCredentials, LoginResponse, User } from '../../types';
 
 // Mirrors backend/api/services/role_caps.py. Only used as a fallback when
@@ -114,11 +114,10 @@ export const authApi = {
     }
   },
 
+  // The session's storage is AuthContext.logout's to clear, once it knows the
+  // answer is not landing on a newer sign-in.
   logout: async (): Promise<void> => {
     await api.post('/auth/logout');
-    localStorage.removeItem('ims_token');
-    localStorage.removeItem('ims_refresh_token');
-    localStorage.removeItem('ims_user');
   },
 
   // Exchange the stored rotating refresh token (or, pre-upgrade, the access
@@ -135,13 +134,15 @@ export const authApi = {
   // store from the token; if we only flip client state the token keeps the
   // OLD store and writes can land on the wrong store (QA F9). Callers must
   // persist the returned access_token so the next request carries it.
+  // `sent_with` is the token the answered request really carried: the caller
+  // applies the answer only if that token is still the stored one.
   switchStore: async (
     storeId: string
-  ): Promise<{ access_token: string; active_store_id: string }> => {
+  ): Promise<{ access_token: string; active_store_id: string; sent_with: string }> => {
     const response = await api.post<{ access_token: string; active_store_id: string }>(
       `/auth/switch-store/${encodeURIComponent(storeId)}`
     );
-    return response.data;
+    return { ...response.data, sent_with: sentToken(response.config) };
   },
 
   getProfile: async (): Promise<User> => {
