@@ -278,7 +278,9 @@ def _claim_order_status(
 ) -> bool:
     """Atomically move an order to `new_status` ONLY while its status is still
     one of `required_status`. Returns False when the precondition no longer
-    holds. `required_status` may be a single status or any collection of them.
+    holds, and when a write failed with its outcome unknown: False never says
+    the order did not move, so a caller that must know reads the stored order.
+    `required_status` may be a single status or any collection of them.
 
     THE PRECONDITION IS THE POINT. OrderRepository.update_status writes
     update_one({order_id}, ...) filtered on the id ALONE, so every door that
