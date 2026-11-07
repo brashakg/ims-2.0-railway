@@ -1419,15 +1419,16 @@ def _same_bill_fields(order: Dict[str, Any], body: OrderCreate) -> bool:
     customer and member. The discount the bill took is its percent; the amount
     is the server's own sum, so a sent amount only has to agree to the paise
     each rounded line can differ by, and a press that sends none is not another
-    bill. The saved patient is the member the server resolved: a blank proves
-    nothing."""
+    bill. The customer is saved as sent, so a retry matches it exactly, blank
+    included. The saved patient is the member the server resolved: a blank
+    proves nothing."""
     sent_amount = float(body.cart_discount_amount or 0)
     return (str(order.get("order_type") or "") == str(body.order_type or "")
             and round(float(order.get("cart_discount_percent") or 0), 4) == round(float(body.cart_discount_percent or 0), 4)
             and (not sent_amount or abs(sent_amount - float(order.get("cart_discount_amount") or 0))
                  <= 0.01 * (len(body.items) + 1))
-            and all(not getattr(body, f) or not order.get(f) or getattr(body, f) == order.get(f)
-                    for f in ("customer_id", "patient_id")))
+            and str(order.get("customer_id") or "") == str(body.customer_id or "")
+            and (not body.patient_id or not order.get("patient_id") or body.patient_id == order.get("patient_id")))
 
 
 def _same_bill(order: Dict[str, Any], body: OrderCreate) -> bool:

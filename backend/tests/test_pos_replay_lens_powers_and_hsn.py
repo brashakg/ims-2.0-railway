@@ -546,8 +546,9 @@ def test_a_no_fingerprint_bill_refuses_a_line_added_or_dropped(client, staff_hea
 
 @pytest.mark.parametrize("change", [
     {"order_type": "prescription_order"}, {"cart_discount_percent": 5.0, "cart_discount_reason": "changed"},
-    {"cart_discount_amount": 10.0}, {"customer_id": "cust-other"}, {"patient_id": "patient-other"},
-], ids=["type", "bill-percent", "bill-amount", "customer", "member"])
+    {"cart_discount_amount": 10.0}, {"customer_id": "cust-other"}, {"customer_id": ""},
+    {"patient_id": "patient-other"},
+], ids=["type", "bill-percent", "bill-amount", "customer", "customer-dropped", "member"])
 def test_a_no_fingerprint_bill_refuses_a_changed_bill_field(client, staff_headers, rx_orders, change):
     lines = _two_line_bill(rx_orders)
     h = {**staff_headers, "Idempotency-Key": "K-NF-B"}
@@ -558,6 +559,24 @@ def test_a_no_fingerprint_bill_refuses_a_changed_bill_field(client, staff_header
     before = copy.deepcopy(_orders(rx_orders))
     r = client.post("/api/v1/orders", json={**body, **change}, headers=h)
     assert r.status_code == 409, r.text
+    assert _orders(rx_orders) == before
+
+
+@pytest.mark.parametrize("sent, status", [("cust-x", 409), ("", 201)], ids=["names-one", "blank-too"])
+def test_a_no_fingerprint_bill_saved_without_a_customer_matches_only_a_blank(client, staff_headers, rx_orders, sent, status):
+    """The customer is stored as sent, so a true retry always matches exactly:
+    a blank on either side is a different customer, never a pass."""
+    lines = _two_line_bill(rx_orders)
+    h = {**staff_headers, "Idempotency-Key": "K-NF-C"}
+    body = {"customer_id": "cust-x", "order_type": "quick_sale", "items": lines}
+    r = client.post("/api/v1/orders", json=body, headers=h)
+    assert r.status_code in (200, 201), r.text
+    doc = _orders(rx_orders)[0]
+    doc.pop("body_fingerprint")
+    doc["customer_id"] = None
+    before = copy.deepcopy(_orders(rx_orders))
+    r = client.post("/api/v1/orders", json={**body, "customer_id": sent}, headers=h)
+    assert r.status_code == status, r.text
     assert _orders(rx_orders) == before
 
 
