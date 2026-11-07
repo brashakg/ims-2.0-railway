@@ -150,3 +150,21 @@ def _validate_order_line_rx(
                     f"Manager or higher must approve dispensing on an expired Rx."
                 ),
             )
+
+
+def _validate_line_rx_on_master(item, customer_id: str, current_user: dict, product_repo) -> None:
+    """_validate_order_line_rx with the line's product master resolved here, so the
+    Rx-required decision keys off the product's canonical item_type / category, not
+    the client's (a lens sent as 'FRAME' must still require an Rx). Virtual
+    lens-*/custom-* lines and unresolvable ids have no product doc -> the client
+    value is the fallback. Fail-soft: any resolution error -> client fallback."""
+    from .stock import _resolve_product_doc
+
+    product_doc = None
+    pid = getattr(item, "product_id", None) or ""
+    if pid and not pid.startswith(("custom-", "lens-", "lens-sug-")):
+        try:
+            product_doc = _resolve_product_doc(product_repo, pid)
+        except Exception:  # noqa: BLE001 -- resolution is best-effort
+            product_doc = None
+    _validate_order_line_rx(item, customer_id, current_user, product_doc=product_doc)

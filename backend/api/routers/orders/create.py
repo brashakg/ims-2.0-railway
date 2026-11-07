@@ -40,18 +40,21 @@ from .pricing import (
 )
 from ...services import discount_approval
 from .models import OrderCreate
-from .rx import _validate_order_line_rx
+from .rx import _validate_line_rx_on_master
 from .numbering import (
     _order_create_response,
     generate_order_number,
 )
 from .stock import (
+    _assert_line_type_matches_master,
     _assert_serialized_stock_available,
     _canonical_pid,
     _claim_units,
     _lens_reservation_key,
+    _line_unit_id,
     _mark_units_sold,
     _release_claimed_units,
+    _assert_goods_name_a_product,
     _resolve_billable_product,
     _resolve_product_doc,
 )
@@ -204,11 +207,19 @@ async def create_order(
     if product_repo is not None:
         for item in order.items:
             pid = item.product_id or ""
-            if not pid or pid in _pdoc_by_pid:
+            _assert_goods_name_a_product(
+                item.item_type, item.category, pid, item.product_name or ""
+            )
+            if not pid:
                 continue
-            doc = _resolve_billable_product(product_repo, pid, item.product_name or "")
-            if doc is not None:
-                _pdoc_by_pid[pid] = doc
+            if pid not in _pdoc_by_pid:
+                doc = _resolve_billable_product(product_repo, pid, item.product_name or "")
+                if doc is not None:
+                    _pdoc_by_pid[pid] = doc
+            # L2-STOCK-F02: per LINE -- the master says whether it takes stock.
+            _assert_line_type_matches_master(
+                item.item_type, _pdoc_by_pid.get(pid), item.product_name or pid
+            )
 
     # BUG-005 / BUG-006 (patient-safety): validate every line's clinical Rx
     # powers (range / 0.25 grid / whole-axis / cyl-requires-axis) and require a
@@ -225,22 +236,7 @@ async def create_order(
     # wrap this loop in an `if order.order_type != "quick_sale"` (or any sale_type)
     # branch. Pinned by test_order_rx_validation.py::test_quicksale_* .
     for item in order.items:
-        # SECURITY (Rx-item_type spoof): resolve the PRODUCT MASTER so the
-        # Rx-required decision keys off the product's canonical item_type /
-        # category, not the client-supplied item_type (a lens sent as 'FRAME'
-        # must still require an Rx). Virtual lens-*/custom-* lines and
-        # unresolvable ids have no product doc -> the client value is the
-        # fallback. Fail-soft: any resolution error -> None -> client fallback.
-        _rx_product_doc = None
-        _rx_pid = item.product_id or ""
-        if _rx_pid and not _rx_pid.startswith(("custom-", "lens-", "lens-sug-")):
-            try:
-                _rx_product_doc = _resolve_product_doc(product_repo, _rx_pid)
-            except Exception:  # noqa: BLE001 -- resolution is best-effort
-                _rx_product_doc = None
-        _validate_order_line_rx(
-            item, order.customer_id, current_user, product_doc=_rx_product_doc
-        )
+        _validate_line_rx_on_master(item, order.customer_id, current_user, product_repo)
 
     # BUG-119/BUG-118: the real server-side price ceiling / cost floor / discount
     # validation runs in the totals loop below (AFTER the idempotency check, using
@@ -588,7 +584,7 @@ async def create_order(
                     # Carry the explicit serialized unit so a future return can
                     # re-activate exactly the unit that left. Optional; FIFO
                     # allocation by product+store fills the gap when missing.
-                    "stock_id": getattr(item, "stock_id", None),
+                    "stock_id": _line_unit_id(item),
                     # Lens catalog cell coordinates (B'4) -- consumed by
                     # the lens_stock_hook on reserve/commit/release.
                     "lens_line_id": getattr(item, "lens_line_id", None),

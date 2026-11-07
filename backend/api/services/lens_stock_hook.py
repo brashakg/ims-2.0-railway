@@ -62,6 +62,22 @@ logger = logging.getLogger(__name__)
 
 _LENS_ITEM_TYPES = {"LENS", "OPTICAL_LENS", "CONTACT_LENS_RX"}
 
+# A reservation is one (key, quantity), and every step of its life goes by that
+# key: reserve "{order}#{key}", commit "...#commit", release "...#release".
+#   A line's own reservation sits under its item_id (older orders: its position).
+#   LENS_HOLDS are the rest of what the line answers for: pieces an edit raised
+#   its quantity by, each [{"key", "qty"}] under its own key, because the line's
+#   own reservation may be cut already, or never have been made.
+#   LENS_KEY_OWN marks a line an edit added: it has no history under a position,
+#   so a commit row at its position is the line it replaced, never its own.
+LENS_HOLDS = "lens_holds"
+LENS_KEY_OWN = "lens_key_own"
+
+
+def line_base_qty(order_item: Dict[str, Any]) -> int:
+    """The pieces under the line's own reservation: its quantity less its holds."""
+    return _qty_for(order_item) - sum(int(h["qty"]) for h in order_item.get(LENS_HOLDS) or [])
+
 
 def _is_lens_item(order_item: Dict[str, Any]) -> bool:
     """True when this order line is a lens we should attempt to track.
@@ -75,6 +91,11 @@ def _is_lens_item(order_item: Dict[str, Any]) -> bool:
     if pid.startswith(("lens-", "lens-sug-")):
         return True
     return False
+
+
+def takes_lens_cell(order_item: Dict[str, Any]) -> bool:
+    """Does this line reserve a lens cell? Exactly when the hooks below act on it."""
+    return _is_lens_item(order_item) and _extract_cell_key(order_item) is not None
 
 
 def _extract_cell_key(
@@ -362,20 +383,67 @@ async def commit_for_workshop_dispatch(
     """Hard-commit the reserved lens cell when the workshop mounts the
     physical lens into the frame.
 
-    Idempotent on (order_id, line_index, "commit"). Returns None when the
-    item is not a lens or has no cell key. Fail-soft: any exception is
-    logged + None is returned (the workshop has already produced the lens;
-    blocking the dispatch on a stock-side hiccup is worse than logging it).
+    `line_index` is the line's position; the commit goes under the line's own
+    item_id (the key its reservation and release use), so a line that replaced
+    a cut one at that position is not read as cut. A commit row an older build
+    wrote at the position still counts for a line that was there then. The
+    line's holds commit too, each under its own key.
+
+    Idempotent per key. Returns None when the item is not a lens or has no cell
+    key. Fail-soft: any exception is logged + None is returned (the workshop has
+    already produced the lens; blocking the dispatch on a stock-side hiccup is
+    worse than logging it).
     """
     if not _is_lens_item(order_item):
         return None
-
     cell = _extract_cell_key(order_item)
     if cell is None:
         return None
 
+    for hold in order_item.get(LENS_HOLDS) or []:
+        await _commit_one(
+            {**order_item, "quantity": hold["qty"]}, cell, order_id, hold["key"], store_id, user
+        )
+    key = order_item.get("item_id") or line_index
+    base = line_base_qty(order_item)
+    if base < 1 or (
+        not order_item.get(LENS_KEY_OWN)
+        and _already_acted("{oid}#{idx}#commit".format(oid=order_id, idx=line_index), "commit")
+    ):
+        return {"status": "already_committed", **cell, "qty": base}
+    return await _commit_one(
+        {**order_item, "quantity": base}, cell, order_id, key, store_id, user
+    )
+
+
+async def commit_edit_holds(order: Dict[str, Any], user: Dict[str, Any]) -> None:
+    """A bill handed over: lenses an edit added may have reached no workshop step
+    (the job was past it, or there was none), and a reservation nothing will ever
+    commit is not stock accounted for. Their lines only; every other line keeps
+    the workshop's one commit. Idempotent, fail-soft: delivery never waits on it."""
+    for idx, item in enumerate(order.get("items") or []):
+        if not (item.get(LENS_HOLDS) or item.get(LENS_KEY_OWN)):
+            continue
+        try:
+            await commit_for_workshop_dispatch(
+                order_item=item, order_id=order.get("order_id"), line_index=idx,
+                store_id=order.get("store_id") or "", user=user,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[LENS_HOOK] handover commit failed (order %s): %s", order.get("order_id"), exc)
+
+
+async def _commit_one(
+    order_item: Dict[str, Any],
+    cell: Dict[str, Any],
+    order_id: str,
+    key: Any,
+    store_id: str,
+    user: Dict[str, Any],
+) -> Dict[str, Any]:
+    """One reservation, under its own key, once."""
     qty = _qty_for(order_item)
-    source_id = "{oid}#{idx}#commit".format(oid=order_id, idx=line_index)
+    source_id = "{oid}#{idx}#commit".format(oid=order_id, idx=key)
 
     prior = _already_acted(source_id, "commit")
     if prior is not None:
@@ -464,8 +532,12 @@ async def release_for_cancel(
     line_index: int,
     store_id: str,
     user: Dict[str, Any],
+    part: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Release the reserved cell back to AVAILABLE on order cancel.
+
+    `part`: a one-off token for a lowered quantity. This `order_item` carries the
+    pieces going back; the line's own release key stays unused for what it holds.
 
     Idempotent on (order_id, line_index, "release"). Fail-soft -- a 409
     here means the cell was already committed (workshop ran ahead of
@@ -483,6 +555,8 @@ async def release_for_cancel(
     qty = _qty_for(order_item)
     reserve_source_id = "{oid}#{idx}".format(oid=order_id, idx=line_index)
     release_source_id = "{oid}#{idx}#release".format(oid=order_id, idx=line_index)
+    if part:
+        release_source_id += "-" + part
 
     # If we already released, no-op.
     prior_rel = _already_acted(release_source_id, "release")

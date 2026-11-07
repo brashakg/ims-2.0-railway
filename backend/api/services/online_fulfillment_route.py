@@ -1910,7 +1910,8 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
             stock miss, loud."""
             if not freed:
                 return
-            lost = [sid for sid in freed if not stock_repo.mark_sold(sid, order_id)]
+            lost = [sid for sid in freed if not stock_repo.mark_sold(
+                sid, order_id, shop_of_unit.get(sid), [pid_of_unit.get(sid)])]
             if not _dead_order_units(db, order_id) and lost:
                 short = sorted({shop_of_unit.get(sid) or "" for sid in lost})
                 _record_stock_miss(db, order_id, short[0], "under_claim",
@@ -1920,6 +1921,7 @@ async def reroute_held_order(db, order_id: str) -> Dict[str, Any]:
         # own by the route, kept wherever the new route still wants them.
         held_ids = _sold_units(order_id)
         shop_of_unit = {sid: shop for (shop, _pid), ids in held_ids.items() for sid in ids}
+        pid_of_unit = {sid: pid for (_shop, pid), ids in held_ids.items() for sid in ids}
         own: Dict[str, Dict[str, int]] = {}
         for (shop, pid), ids in held_ids.items():
             own.setdefault(pid, {})[shop] = len(ids)
