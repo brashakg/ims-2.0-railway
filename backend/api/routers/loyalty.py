@@ -623,9 +623,13 @@ def _refuse_if_cancelled(body: "RedeemRequest") -> None:
     """A cancelled bill takes no redemption -- and any debit it still holds is
     handed back FIRST, through the one reversal engine, so the refusal can never
     strand points: this door is also what recovers a debit that landed after
-    the cancel's own reversal ran."""
+    the cancel's own reversal ran. An unreadable bill RAISES (a 5xx, "not
+    confirmed" at the till): only a bill read as live may pass, or a debit
+    landing after the cancel is answered as a success and stranded."""
     orders = get_order_repository()
-    order = orders.find_by_id(body.order_id) if orders is not None else None
+    if orders is None:
+        raise HTTPException(status_code=503, detail="Order store unavailable")
+    order = orders.read_or_raise(body.order_id)
     if (
         not order
         or order.get("status") != "CANCELLED"
@@ -819,7 +823,7 @@ async def redeem(
         orders = get_order_repository()
         if orders is None:
             raise HTTPException(status_code=503, detail="Order store unavailable")
-        order_doc = orders.find_by_id(body.order_id)
+        order_doc = orders.read_or_raise(body.order_id)
         if not order_doc:
             raise HTTPException(status_code=404, detail="Order not found")
         if (order_doc.get("customer_id") or "") != body.customer_id:

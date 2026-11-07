@@ -19,6 +19,8 @@ driving the REAL redeem handler + repositories:
   * a debit landing after the cancel's reversal is handed back too, once;
   * a press losing the reversal-marker insert to a cancel that never saw its
     debit hands that debit back too, and the mirror restores nothing twice;
+  * a bill that cannot be READ is never taken for a live one: the press gets no
+    success, nothing strands, and the next press hands the late debit back once;
   * the same bill retried with a DIFFERENT amount after that -> refused,
     balance untouched;
   * a standalone goodwill redeem (no order) is unchanged: each press is its
@@ -808,3 +810,122 @@ def test_finishing_a_stranded_reversal_on_a_failed_read_still_drops_the_tier(rig
 
     acct = _account(rig)
     assert int(acct["balance_points"]) == START and acct["tier"] == "BRONZE"
+
+
+# --- Bill unreadable at the cancelled-bill guard (review of 922bb6f) ---------
+
+def _order_reads_down(rig, monkeypatch, fails=lambda: True):
+    """Order reads fail at the COLLECTION, while the bill stands -- the real
+    repository's find_by_id swallows that into None. Returns undo()."""
+    from api.routers import loyalty as lm
+
+    orders = lm.get_order_repository()
+    real = orders.collection
+    monkeypatch.setattr(orders, "collection", _FlakyReads(real, fails))
+    return lambda: monkeypatch.setattr(orders, "collection", real)
+
+
+def _order_reads_down_from_the_debit(rig, monkeypatch):
+    """The front door reads the bill; from the debit on it cannot. Returns undo()."""
+    accounts = rig["accounts"]
+    real = accounts.try_debit
+    landed = []
+
+    def debit(*a, **k):
+        out = real(*a, **k)
+        landed.append(True)
+        return out
+
+    monkeypatch.setattr(accounts, "try_debit", debit)
+    return _order_reads_down(rig, monkeypatch, fails=lambda: bool(landed))
+
+
+def _assert_unconfirmed(exc):
+    """A 5xx or a raised read: anything but the 4xx the till reads as 'NO points'."""
+    assert not (isinstance(exc, HTTPException) and 400 <= exc.status_code < 500), exc.detail
+
+
+def _assert_cancelled_and_restored_once(rig):
+    with pytest.raises(HTTPException) as ei:
+        _redeem()
+    assert ei.value.status_code == 409 and ei.value.detail["reason"] == "order_cancelled"
+    acct = _account(rig)
+    assert int(acct["balance_points"]) == START and int(acct["lifetime_redeemed"]) == 0
+    assert len(_redeem_rows(rig)) == 1
+    # The cancel's own (empty) reversal + the one restore.
+    assert sum(abs(int(r.get("points") or 0)) for r in _reversal_rows(rig)) == 100
+
+
+def test_a_late_debit_on_an_unreadable_bill_is_never_answered_as_success(rig, monkeypatch):
+    """No EARN; the cancel's reversal ran before the debit; the post-debit guard
+    then cannot read the bill. A 200 stranded the points: cancel answers 'already
+    cancelled' and the till has no reason to press again."""
+    _cancel_inside_the_press(rig, monkeypatch)
+    undo = _order_reads_down_from_the_debit(rig, monkeypatch)
+    with pytest.raises(Exception) as ei:
+        _redeem()
+    undo()
+    _assert_unconfirmed(ei.value)
+    assert int(_account(rig)["balance_points"]) == START - 100
+
+    _assert_cancelled_and_restored_once(rig)
+    _assert_cancelled_and_restored_once(rig)
+
+
+def test_a_retry_of_a_late_debit_on_an_unreadable_bill_is_never_a_success(rig, monkeypatch):
+    """The lost-answer variant: the debit landed after the reversal, its row did
+    not, and the retry meets the outage at the front door."""
+    _cancel_inside_the_press(rig, monkeypatch)
+    _press_with_ledger_down(rig, monkeypatch)
+    assert int(_account(rig)["balance_points"]) == START - 100 and _redeem_rows(rig) == []
+
+    undo = _order_reads_down(rig, monkeypatch)
+    with pytest.raises(Exception) as ei:
+        _redeem()
+    undo()
+    _assert_unconfirmed(ei.value)
+    assert int(_account(rig)["balance_points"]) == START - 100
+
+    _assert_cancelled_and_restored_once(rig)
+
+
+def test_a_live_bill_unreadable_after_the_debit_replays_the_one_burn(rig, monkeypatch):
+    """Control: the guard cannot tell cancelled from live, so it says so -- and on
+    a live bill the retry answers the same burn, nothing debited twice."""
+    undo = _order_reads_down_from_the_debit(rig, monkeypatch)
+    with pytest.raises(Exception) as ei:
+        _redeem()
+    undo()
+    _assert_unconfirmed(ei.value)
+
+    out = _redeem()
+    assert out["redeemed_points"] == 100 and out["replayed"] is True
+    _reconcile(rig, 100)
+    assert rig["db"].audit_logs.count_documents({"action": "loyalty.redeem"}) == 1
+
+
+def test_a_fresh_press_on_an_unreadable_bill_takes_nothing_and_says_unconfirmed(rig, monkeypatch):
+    """At the guard and at the bill's ceiling alike, UNKNOWN is not 'Order not
+    found': no points move, and a healthy retry burns as ever."""
+    for reads_before_outage in (0, 1):
+        seen = []
+        undo = _order_reads_down(
+            rig, monkeypatch,
+            fails=lambda n=reads_before_outage: seen.append(1) or len(seen) > n,
+        )
+        with pytest.raises(Exception) as ei:
+            _redeem()
+        undo()
+        _assert_unconfirmed(ei.value)
+        assert int(_account(rig)["balance_points"]) == START and _redeem_rows(rig) == []
+
+    assert _redeem()["redeemed_points"] == 100
+    _reconcile(rig, 100)
+
+
+def test_a_missing_bill_is_still_not_found(rig):
+    """Control: ABSENT is not UNAVAILABLE."""
+    with pytest.raises(HTTPException) as ei:
+        _redeem(order_id="ORD-NOT-THERE")
+    assert ei.value.status_code == 404
+    assert int(_account(rig)["balance_points"]) == START
