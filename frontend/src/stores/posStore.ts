@@ -43,6 +43,23 @@ function mayDropBill(state: any, reason: BillDropReason, soldBillId?: string | n
 export function sessionStoreId(): string | null {
   try { return JSON.parse(localStorage.getItem('ims_user') || 'null')?.activeStoreId || null; } catch { return null; }
 }
+function sessionUserId(): string | null {
+  try { return JSON.parse(localStorage.getItem('ims_user') || 'null')?.id || null; } catch { return null; }
+}
+// The update bar's Refresh carries the open bill's customer across THAT ONE
+// reload (audit R35). sessionStorage: this tab only, gone when it closes, and
+// read-and-removed on the next load. Taken back only by the same bill for the
+// same signed-in user; every other load keeps SEC-4 (no customer on disk).
+const RELOAD_HANDOFF_KEY = 'ims-pos-reload-customer';
+function takeReloadHandoff(billId: string): Pick<POSState, 'customer' | 'patient' | 'prescription'> | null {
+  let h: any = null;
+  try {
+    h = JSON.parse(sessionStorage.getItem(RELOAD_HANDOFF_KEY) || 'null');
+    sessionStorage.removeItem(RELOAD_HANDOFF_KEY);
+  } catch { return null; }
+  if (!h || !billId || h.bill_id !== billId || !h.user_id || h.user_id !== sessionUserId()) return null;
+  return { customer: h.customer ?? null, patient: h.patient ?? null, prescription: h.prescription ?? null };
+}
 import { persist, createJSONStorage } from 'zustand/middleware';
 import type { Customer, Patient, Prescription } from '../types';
 import type { DenomRow } from '../utils/denominations';
@@ -274,7 +291,8 @@ export interface POSState {
   setPrescription: (rx: Prescription | null) => void;
 
   // Cart
-  addToCart: (item: Omit<CartLineItem, 'id' | 'line_total' | 'discount_percent' | 'discount_amount'>) => void;
+  /** false = that exact scanned unit (stock_id) is already on this bill; nothing added. */
+  addToCart: (item: Omit<CartLineItem, 'id' | 'line_total' | 'discount_percent' | 'discount_amount'>) => boolean;
   removeFromCart: (lineId: string) => void;
   updateQuantity: (lineId: string, qty: number) => void;
   applyDiscount: (lineId: string, percent: number, reason?: string) => void;
@@ -501,13 +519,21 @@ export const usePOSStore = create<POSState>()(
           discount_amount: 0,
           line_total: item.unit_price * item.quantity,
         };
+        let added = false;
         set((state) => {
+          // ONE physical unit is ONE line: a second scan of the same stock_id
+          // (scanner double-trigger, or two lookups landing together) adds
+          // nothing. Checked inside the updater so overlapping completions
+          // cannot both pass (audit R34). Typed adds carry no stock_id.
+          if (item.stock_id && (state.cart || []).some((l) => l.stock_id === item.stock_id)) return {};
+          added = true;
           const newCart = [...(state.cart || []), newItem];
           return {
             cart: newCart,
             cart_discount_amount: recalcCartDiscountAmount(newCart, state.cart_discount_percent || 0),
           };
         });
+        return added;
       },
 
       removeFromCart: (lineId: string) => {
@@ -993,11 +1019,30 @@ export const usePOSStore = create<POSState>()(
           if (state.cart_discount_amount === undefined) state.cart_discount_amount = 0;
           if (state.cart_discount_reason === undefined) state.cart_discount_reason = null;
           state.orphan_bill_ids = orphanBillIds(billIdOf(state));
+          const handoff = takeReloadHandoff(billIdOf(state));
+          if (handoff) Object.assign(state, handoff);
         }
       },
     }
   )
 );
+
+/** Called by the update bar just before it reloads: names the open bill, saves
+ *  its draft now, and hands its customer to the next load (see
+ *  takeReloadHandoff). No customer, or nobody signed in: nothing is kept. */
+export function holdBillCustomerForReload(): void {
+  const s = usePOSStore.getState();
+  const userId = sessionUserId();
+  if (!s.customer || !userId) return;
+  const billId = s.ensureBillId();
+  flushDraft();
+  try {
+    sessionStorage.setItem(RELOAD_HANDOFF_KEY, JSON.stringify({
+      user_id: userId, bill_id: billId,
+      customer: s.customer, patient: s.patient, prescription: s.prescription,
+    }));
+  } catch { /* storage unavailable: the reload drops the customer as before */ }
+}
 
 // The moment a press marks the bill's key pending, the draft is saved WITH
 // its bill id (and, now pending, its customer) -- not 500 ms later.

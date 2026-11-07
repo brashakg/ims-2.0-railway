@@ -24,6 +24,7 @@ from __future__ import annotations
 import os
 import sys
 from datetime import date
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -39,6 +40,7 @@ from api.routers import tasks as tasks_mod  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 
 # Reuse the battle-tested returns fakes (same pattern as test_returns_refund_cap).
+from tests.strict_fakes import matches  # noqa: E402
 from tests.test_returns_gst_refund import (  # noqa: E402
     _FakeColl,
     _FakeCustomerRepo,
@@ -81,6 +83,20 @@ class _OrderRepo:
         self.updates = []
         self.status_updates = []
         self.payments = []
+
+    def allow_cancel_claim(self):
+        """The cancel's one conditional write -- nothing else may cancel. Armed
+        per test: a `collection` would move the other doors onto their atomic
+        paths, which this double does not model."""
+        self.collection = SimpleNamespace(find_one_and_update=self._cancel_claim)
+
+    def _cancel_claim(self, flt, upd):
+        if not matches(self.order, flt):
+            return None
+        before = dict(self.order)
+        self.updates.append(upd["$set"])
+        self.order.update(upd["$set"])
+        return before
 
     def find_by_id(self, oid):
         return dict(self.order) if self.order.get("order_id") == oid else None
@@ -252,6 +268,7 @@ def test_order_cancel_same_store_still_succeeds(monkeypatch):
     client, repo = _orders_client(
         monkeypatch, _seed_order(store_id=OWN_STORE), ["STORE_MANAGER"], OWN_STORE
     )
+    repo.allow_cancel_claim()
     r = client.post("/api/v1/orders/ORD-1/cancel", params=_CANCEL_QS)
     assert r.status_code == 200
     assert r.json()["status"] == "CANCELLED"
@@ -305,6 +322,7 @@ def test_order_admin_cross_store_bypass(monkeypatch):
     client, repo = _orders_client(monkeypatch, _seed_order(), ["ADMIN"], "BV-HQ")
     r = client.put("/api/v1/orders/ORD-1", json={"notes": "HQ note"})
     assert r.status_code == 200
+    repo.allow_cancel_claim()
     r2 = client.post("/api/v1/orders/ORD-1/cancel", params=_CANCEL_QS)
     assert r2.status_code == 200
     assert repo.order["status"] == "CANCELLED"
