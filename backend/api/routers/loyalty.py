@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from api.utils.event_time import utc_now_iso
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Literal, Optional
 import logging
 import uuid
@@ -619,13 +619,30 @@ def complete_bill_redemption(order_id: str, customer_id: str) -> None:
         _complete_redeem_row(txns, customer_id, order_id, claim)
 
 
+def _reversal_settled(outcome: Dict[str, Any]) -> bool:
+    """True when a reversal needs nothing more. No customer on the record is
+    nothing to reverse, the cancel and return doors' own reading."""
+    return bool(outcome.get("ok")) or outcome.get("reason") == "missing_ids"
+
+
+def settle_cancelled_bill(order: Dict[str, Any], orders) -> Dict[str, Any]:
+    """Run the one reversal engine for a CANCELLED bill and make its flag say
+    what is now true: the redeem door and the reconciliation sweep both end here,
+    so a bill that was healed never keeps saying it failed."""
+    outcome = reverse_for_cancel(order.get("order_id"), order.get("customer_id"))
+    failed = not _reversal_settled(outcome)
+    if bool(order.get("loyalty_reversal_failed")) != failed:
+        orders.update(order.get("order_id"), {"loyalty_reversal_failed": failed})
+    return outcome
+
+
 def _refuse_if_cancelled(body: "RedeemRequest") -> None:
     """A cancelled bill takes no redemption -- and any debit it still holds is
     handed back FIRST, through the one reversal engine, so the refusal can never
-    strand points: this door is also what recovers a debit that landed after
-    the cancel's own reversal ran. An unreadable bill RAISES (a 5xx, "not
-    confirmed" at the till): only a bill read as live may pass, or a debit
-    landing after the cancel is answered as a success and stranded."""
+    strand points. An unreadable bill RAISES (a 5xx, "not confirmed" at the
+    till): only a bill read as live may pass, or a debit landing after the cancel
+    is answered as a success. What that 5xx leaves behind, no staff door can
+    reach: reconcile_loyalty_reversals finds it."""
     orders = get_order_repository()
     if orders is None:
         raise HTTPException(status_code=503, detail="Order store unavailable")
@@ -636,11 +653,7 @@ def _refuse_if_cancelled(body: "RedeemRequest") -> None:
         or order.get("customer_id") != body.customer_id
     ):
         return
-    settled = reverse_for_cancel(body.order_id, body.customer_id)
-    if not settled.get("ok"):
-        # The same flag the cancel stamps: reconciliation sees it, and it opens
-        # the cancel's retry door.
-        orders.update(body.order_id, {"loyalty_reversal_failed": True})
+    if not _reversal_settled(settle_cancelled_bill(order, orders)):
         raise HTTPException(
             status_code=503,
             detail={
@@ -648,7 +661,8 @@ def _refuse_if_cancelled(body: "RedeemRequest") -> None:
                 "reason": "cancelled_reversal_pending",
                 "message": (
                     "This bill was cancelled, but its points could not be put "
-                    "back yet. Press again or re-run the cancel."
+                    "back yet. They go back on their own within a few minutes; "
+                    "if they cannot, the admin gets a task."
                 ),
             },
         )
@@ -2344,3 +2358,142 @@ def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, A
     except Exception as exc:  # noqa: BLE001 -- must never break a cancel
         logger.error("reverse_for_cancel failed for order %s: %s", order_id, exc)
         return {"ok": False, "reason": "error", "error": str(exc)}
+
+
+# ----------------------------------------------------------------------------
+# AUTOMATIC RECONCILIATION (owner ruling 2026-11-07: recovery is the system's
+# job -- no staff button, no new screen). TASKMASTER's 5-minute tick runs this.
+# The reversal engine is exactly-once by construction, so re-running it IS the
+# recovery; the sweep only decides which rows to run it on. Durable work needs
+# no new record: a CANCELLED bill and the debit still on the account are the
+# record, and they survive what the press and the cancel do not (a lost answer,
+# a dead process, a stamp lost with the blip that failed the reversal).
+# ----------------------------------------------------------------------------
+
+# A debit can only land after a cancel while its press is still running, and a
+# lost cancel stamp is found on the first tick; this is the tick's reach back
+# for a bill nobody flagged. Older bills are not re-judged: historical cancels
+# predate the reversal and clawing them now would be a new decision.
+# ponytail: a scheduler stopped longer than this leaves an unflagged late debit
+# unfound; scan loyalty_accounts.money_ledger for redeem: keys if that happens.
+_SWEEP_REACH_DAYS = 7
+
+_EXCEPTION_REASONS = {
+    "balance_underflow": (
+        "taking the points back would put the customer's balance below zero "
+        "(the points this bill earned have already been spent)"
+    ),
+    "account_read_failed": "the customer's loyalty account could not be read",
+    "ledger_read_failed": "the customer's loyalty history could not be read",
+    "loyalty_db_unavailable": "the loyalty records could not be reached",
+}
+
+
+def _raise_reversal_exception(coll, id_field: str, doc: Dict[str, Any], what: str, reason: Any) -> None:
+    """The visible exception: ONE P1 task for an admin on the existing Tasks
+    screen (points are adjusted by admins only). Stamped once it exists, so a
+    person who closed it is not re-told every five minutes."""
+    from ..dependencies import get_task_repository
+    from ..services.task_triggers import _person_holding, active_tasks, create_system_task
+
+    ref = f"loyalty_reversal:{doc[id_field]}"
+    why = _EXCEPTION_REASONS.get(reason, "the points could not be updated")
+    repo = get_task_repository()
+    created = create_system_task(
+        repo,
+        title=f"Loyalty points not settled on {what}",
+        description=(
+            f"The customer's loyalty points on {what} could not be settled "
+            f"automatically: {why}. The system keeps trying every few minutes and "
+            "closes this task itself once it works. Do not correct these points by "
+            "hand: the automatic retry would then correct them a second time. If "
+            "it stays open for a day, tell support."
+        ),
+        priority="P1",
+        category="Accounts",
+        store_id=doc.get("store_id"),
+        dedupe_ref=ref,
+        assigned_to=_person_holding("ADMIN", None, any_store=True),
+        extra={
+            "link": "/orders",
+            "payload": {"order_id": doc.get("order_id"), "customer_id": doc.get("customer_id")},
+        },
+    )
+    if created or active_tasks(repo, ref):
+        coll.update_one({id_field: doc[id_field]}, {"$set": {"loyalty_exception_task": ref}})
+
+
+def _close_reversal_exception(coll, id_field: str, doc: Dict[str, Any]) -> None:
+    from ..dependencies import get_task_repository
+    from ..services.task_triggers import active_tasks
+
+    repo = get_task_repository()
+    for task in active_tasks(repo, doc["loyalty_exception_task"]):
+        repo.complete_task(task["task_id"], notes="The points were settled automatically.")
+    coll.update_one({id_field: doc[id_field]}, {"$unset": {"loyalty_exception_task": ""}})
+
+
+def _after_settling(coll, id_field: str, doc: Dict[str, Any], what: str, outcome: Dict[str, Any]) -> str:
+    """One row's outcome, the same for a bill and a return. A failure first seen
+    on this tick only sets the flag: a blip heals on the next tick unseen, and
+    only a failure that lasts reaches a person."""
+    if not _reversal_settled(outcome):
+        if doc.get("loyalty_reversal_failed") and not doc.get("loyalty_exception_task"):
+            _raise_reversal_exception(coll, id_field, doc, what, outcome.get("reason"))
+        return "unresolved"
+    if doc.get("loyalty_exception_task"):
+        _close_reversal_exception(coll, id_field, doc)
+    moved = {
+        k: outcome[k] for k in ("earned_clawed", "redeemed_restored", "completed_now") if outcome.get(k)
+    }
+    if not moved:
+        return "clean"
+    logger.warning("loyalty reconciled on %s: %s", what, moved)
+    _audit(
+        "loyalty.reversal_reconciled",
+        {"user_id": "system", "username": "TASKMASTER", "active_store_id": doc.get("store_id")},
+        {"order_id": doc.get("order_id"), "return_id": doc.get("return_id"), **moved},
+        doc.get("customer_id"),
+    )
+    return "reconciled"
+
+
+def reconcile_loyalty_reversals(db) -> Dict[str, int]:
+    """Finish every cancel and return reversal no staff door can reach. Safe to
+    run from any worker at any moment, beside a press or a cancel: the engine's
+    marker and applied_reversals guards decide who moves the money. One row's
+    failure never stops the next. Returns counts for the tick's log."""
+    counts = {"reconciled": 0, "unresolved": 0, "clean": 0}
+    orders = get_order_repository()
+    bills, returns = db.get_collection("orders"), db.get_collection("returns")
+    reach = (datetime.now(timezone.utc) - timedelta(days=_SWEEP_REACH_DAYS)).isoformat()
+    fields = {
+        "_id": 0, "order_id": 1, "order_number": 1, "customer_id": 1, "store_id": 1,
+        "loyalty_reversal_failed": 1, "loyalty_exception_task": 1,
+    }
+    for order in bills.find(
+        {"status": "CANCELLED",
+         "$or": [{"loyalty_reversal_failed": True}, {"cancelled_at": {"$gte": reach}}]},
+        fields,
+    ):
+        what = f"cancelled bill {order.get('order_number') or order.get('order_id')}"
+        try:
+            outcome = settle_cancelled_bill(order, orders)
+            counts[_after_settling(bills, "order_id", order, what, outcome)] += 1
+        except Exception as exc:  # noqa: BLE001
+            counts["unresolved"] += 1
+            logger.error("loyalty reconcile failed on %s: %s", what, exc)
+    for doc in returns.find(
+        {"status": "COMPLETED", "loyalty_reversal_failed": True},
+        {**fields, "return_id": 1},
+    ):
+        what = f"return {doc.get('return_id')}"
+        try:
+            outcome = reverse_for_return(doc.get("return_id"), doc.get("order_id"), doc.get("customer_id"))
+            if _reversal_settled(outcome):
+                returns.update_one({"return_id": doc.get("return_id")}, {"$set": {"loyalty_reversal_failed": False}})
+            counts[_after_settling(returns, "return_id", doc, what, outcome)] += 1
+        except Exception as exc:  # noqa: BLE001
+            counts["unresolved"] += 1
+            logger.error("loyalty reconcile failed on %s: %s", what, exc)
+    return counts

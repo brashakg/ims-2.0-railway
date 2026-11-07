@@ -94,6 +94,11 @@ class TaskmasterAgent(JarvisAgent):
         # is finished (exactly once per product -- nothing doubles).
         actions.extend(self._finish_bill_costs())
 
+        # 2a-ii. A loyalty reversal no staff door can reach (a late debit on a
+        # cancelled bill, a flagged cancel or return) is finished exactly once;
+        # what cannot be is an admin task. Owner ruling 2026-11-07. Fail-soft.
+        actions.extend(self._reconcile_loyalty())
+
         # 2b. F8: aged-backorder sweep. Open PO lines past their expected_date
         # get an accountable P2 task (P1 once critically overdue 14d+). Tier 1
         # auto-act -- task creation is fully reversible. Fail-soft.
@@ -640,6 +645,21 @@ class TaskmasterAgent(JarvisAgent):
             logger.warning(f"[TASKMASTER] finishing bill costs failed: {e}")
             return []
         return [{"action": "bill_costs_finished", "count": n}] if n else []
+
+    def _reconcile_loyalty(self) -> List[Dict[str, Any]]:
+        """loyalty.reconcile_loyalty_reversals. Fail-soft."""
+        if self.db is None:
+            return []
+        try:
+            from api.routers.loyalty import reconcile_loyalty_reversals
+
+            counts = reconcile_loyalty_reversals(self.db)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[TASKMASTER] loyalty reconcile failed: {e}")
+            return []
+        if counts["reconciled"] or counts["unresolved"]:
+            return [{"action": "loyalty_reversals_reconciled", **counts}]
+        return []
 
     async def _sweep_aged_backorders(self) -> List[Dict[str, Any]]:
         """F8: turn aged open PO lines into accountable backorder tasks.
