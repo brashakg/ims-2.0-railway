@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import re
+from types import SimpleNamespace
 import uuid
 from .auth import require_roles
 from ..dependencies import (
@@ -27,8 +28,10 @@ from ..dependencies import (
 from ..services.cost_mask import AP_ROLES, PURCHASE_ROLES, RETURN_READERS, mask_vendor_return
 from ..services.payables_mask import require_payables
 from ..services.rtv_debit_note import debit_note_issued
-from ..services import item_events as _ie
+from ..services import item_events as _ie, rma_supplier_credit
 from ..services.org_validation import shop_gstins
+from ..services.supplier_credit_evidence import rule_settled
+from ..services.product_cost import _STILL_OURS
 from ..services.quarantine_hold import (
     SAVING_MINUTES, UNSAVED as _UNSAVED, claim_is_dead, open_return_of, stamp as _stamp,
 )
@@ -294,25 +297,88 @@ def _gstin_refusal(db, receipt_store, store_id, gstins, label) -> Optional[str]:
     return None
 
 
-def _typed_line_problem(db, item, store_id) -> Optional[str]:
-    """A line naming no piece is refused when it is (by id, exact name or SKU)
-    a catalogued product this shop holds pieces of -- they are scanned
-    instead; when none of them can go on this return, it says so."""
+def _line_product_ids(db, item) -> List[str]:
+    """The catalogued products a typed line means: its id, exact name or SKU."""
     pids = {item.product_id}
     name = (item.product_name or "").strip()
     if name:
         exact = {"$regex": f"^{re.escape(name)}$", "$options": "i"}
         pids |= {p.get("product_id") for p in db.get_collection("products").find(
             {"$or": [{"name": exact}, {"sku": exact}]})}
+    return sorted(p for p in pids if p)
+
+
+def _held_match() -> Dict:
+    """Mongo fragment: a piece a shop still holds, sellable or not (on the
+    shelf, reserved for an order, damaged, or still ours off the shelf:
+    product_cost's set aside, in a count, on the way to a sister shop)."""
+    return {"$or": [_ie.on_hand_match(include_reserved=True),
+                    _ie.status_match(_STATE.DAMAGED, *_STILL_OURS)]}
+
+
+def _accounted_for(db, item, store_id, vendor_id, takes_credit: bool = True) -> Optional[str]:
+    """Why a line naming no piece cannot take a supplier credit, in words; None
+    when nothing says so. Its pieces are this shop's, and those it bought from
+    this supplier wherever they are now (a transfer keeps the origin receipt).
+    One that left on this supplier's return is that return's to credit, whatever
+    it has taken so far, and one held at a sister shop goes back from there: a
+    line naming no piece claims neither (L2-RMA-F01). When every piece has been
+    sold nothing the shop holds is going back (owner ruling 2026-11-06), so the
+    line is ticked customer-owned or a real piece goes back; that ruling is about
+    a credit, so a replacement return (takes_credit False) is not its concern. A
+    product with no piece at all (off-inventory, made-to-order) is not this
+    rule's. A piece released to RTV on the Quarantine screen is on no return, has
+    no other credit door, and leaves the line standing."""
+    pids = _line_product_ids(db, item)
+    bought = [g.get("grn_id") for g in db.get_collection("grns").find(
+        {"store_id": store_id, "vendor_id": vendor_id, "items.product_id": {"$in": pids}})]
+    ours = {"product_id": {"$in": pids},
+            "$or": [{"store_id": store_id}, {"grn_id": {"$in": bought}}, {"source_id": {"$in": bought}}]}
+    stock = db.get_collection("stock_units")
+    links = [u.get("rtv_vendor_id") for u in stock.find({**ours, **_ie.status_match(_STATE.RTV)})]
+    ret = db.get_collection("vendor_returns").find_one(
+        {"return_id": {"$in": [link for link in links if link]}, "vendor_id": vendor_id})
+    tail = ("They go back, and are credited, there, on a vendor return an RMA links by "
+            "return_id; a customer's own piece is raised as customer_owned with its "
+            "customer_id or order_id.")
+    if ret:
+        return (f"{item.product_name}: the pieces this shop bought already went back to this "
+                f"supplier on vendor return {ret.get('return_id')} from "
+                f"{_shop_name(db, ret.get('store_id'))}. {tail}")
+    away = stock.find_one({"$and": [ours, {"store_id": {"$ne": store_id}}, _held_match()]})
+    if away:
+        return (f"{item.product_name}: the pieces this shop bought are now held at "
+                f"{_shop_name(db, away.get('store_id'))}. {tail}")
+    pieces = [u.get("status") for u in stock.find(ours)]
+    if takes_credit and pieces and all(_ie.canonical_state(s) is _STATE.SOLD for s in pieces):
+        return (f"{item.product_name}: every piece this shop bought has been sold, so this line "
+                "cannot take a supplier credit. If a customer's piece is going back, raise it on "
+                "an RMA with customer-owned ticked and the customer or order named; otherwise "
+                "send back a real piece on a vendor return.")
+    return None
+
+
+def _typed_line_problem(db, item, store_id) -> Optional[str]:
+    """A line naming no piece is refused when it is (by id, exact name or SKU)
+    a catalogued product this shop still holds pieces of, sellable or not
+    (_held_match; a piece on the way to a sister shop keeps this shop's id) --
+    they are scanned instead; when none of them can go on this return, it says
+    why. A reserved piece is refused, never moved: its order lets go of it
+    first (L2-RMA-F01)."""
     held = list(db.get_collection("stock_units").find({
-        "product_id": {"$in": sorted(p for p in pids if p)}, "store_id": store_id,
-        "$or": [_ie.on_hand_match(), _ie.status_match(_STATE.QUARANTINED)],
+        "product_id": {"$in": _line_product_ids(db, item)}, "store_id": store_id, **_held_match(),
     }))
     if not held:
         return None
     if any(_not_returnable(db, u) is None for u in held):
         return (f"{item.product_name} is a product this shop holds pieces of: scan or "
                 "pick the pieces going back.")
+    stuck = next((u for u in held if not _is_set_aside(u)
+                  and u.get("receipt_disposition") != "REJECTED"), None)
+    if stuck:
+        return (f"{item.product_name} is a product this shop holds pieces of, but none can go "
+                f"on this return: piece {_label(stuck, stuck.get('stock_id'))} "
+                f"{_not_returnable(db, stuck)}.")
     return (f"{item.product_name} is a product this shop holds pieces of, but every one is "
             "already on another supplier return or held by its receiving rejection, so none "
             "can go on this one.")
@@ -371,6 +437,10 @@ def _pieces_for_lines(db, data: "VendorReturnCreate", user):
             why = _typed_line_problem(db, item, data.store_id)
             if why:
                 _refuse(why)
+            where = _accounted_for(db, item, data.store_id, data.vendor_id,
+                                   takes_credit=data.return_type == "credit_note")
+            if where:
+                _refuse(where)
             typed = True
         lines.append(pieces)
     if typed and not (data.notes or "").strip():
@@ -448,22 +518,29 @@ def _set_aside(db, lines, return_id, store_id, actor_id, generations, progress):
     return linked, taken, prior
 
 
-def _release_pieces(db, return_id, ids, taken, actor_id, prior=None, note=None) -> List[str]:
+def _release_pieces(db, return_id, ids, taken, actor_id, prior=None, note=None,
+                    held=None) -> List[str]:
     """Take the given pieces off the return -- these ids only, never by link
     alone: a piece this return took off the shelf goes back on it through the
     ledger (unless another return holds it now), and each piece gets its
-    earlier link back. Returns the ids put back on the shelf."""
+    earlier link back. Returns the ids put back on the shelf. With `held` (a
+    list; the cancel's) a piece the ledger would not put back while it is
+    still set aside keeps its link to this return and is added to `held`, so
+    Cancel again finds it (L2-RTV-F01)."""
     stock = db.get_collection("stock_units")
     prior = prior or {}
     back = []
     for unit in list(stock.find({"stock_id": {"$in": list(ids)}})):
         sid = unit.get("stock_id")
         mine = unit.get("rtv_vendor_id") in (return_id, prior.get(sid))
-        if sid in taken and mine and _ledger_move(
-                db, unit, _STATE.QUARANTINED, _STATE.AVAILABLE,
-                _ie.ItemEventType.QUARANTINE_OUT, return_id, actor_id,
-                {"disposition": "RESTOCK", **(note or {})}):
-            back.append(unit)
+        if sid in taken and mine:
+            if _ledger_move(db, unit, _STATE.QUARANTINED, _STATE.AVAILABLE,
+                            _ie.ItemEventType.QUARANTINE_OUT, return_id, actor_id,
+                            {"disposition": "RESTOCK", **(note or {})}):
+                back.append(unit)
+            elif held is not None and _is_set_aside(stock.find_one({"stock_id": sid})):
+                held.append(sid)
+                continue
         res = stock.update_one({"stock_id": sid, "rtv_vendor_id": return_id},
                                {"$set": {"rtv_vendor_id": prior.get(sid)}})
         if getattr(res, "matched_count", 0):
@@ -488,6 +565,30 @@ def _named_units(db, return_doc) -> Dict[str, dict]:
     return {u.get("stock_id"): u for u in db.get_collection("stock_units").find({
         "stock_id": {"$in": named}, "rtv_vendor_id": return_doc.get("return_id"),
         "store_id": return_doc.get("store_id")})}
+
+
+def _put_back(db, return_doc, actor_id) -> List[str]:
+    """The cancel's release, run again by Cancel again: only the pieces still
+    linked to this return (one another return took since is left alone), and
+    a piece it took off the shelf goes back on it only while its last ledger
+    row is still this return's own (a lift or fresh quarantine since is
+    another flow's, and stays). Returns the labels of the pieces that could
+    not be put back yet."""
+    rid = return_doc.get("return_id")
+    units, held = _named_units(db, return_doc), []
+    taken = {sid for sid in return_doc.get("set_aside_stock_ids") or [] if _last_row_ours(db, sid, rid)}
+    _release_pieces(
+        db, rid, list(units), taken, actor_id,
+        {p.get("stock_id"): p.get("rtv_vendor_id") for p in return_doc.get("prior_links") or []},
+        held=held,
+    )
+    return [_label(units.get(sid), sid) for sid in held]
+
+
+def _not_put_back(labels) -> HTTPException:
+    return HTTPException(status_code=409, detail=(
+        f"The return is cancelled, but these pieces could not be put back on the shelf "
+        f"yet: {', '.join(labels)}. Press Cancel again to finish."))
 
 
 def _not_ready_to_ship(db, return_doc) -> Optional[str]:
@@ -585,12 +686,17 @@ def _untouched_since(db, unit, rid, generation) -> bool:
     one or the other -- and is left exactly as it is."""
     if not generation:
         return False
-    last = list(db.get_collection("item_events").find({"stock_id": unit.get("stock_id")})
-                .sort("event_seq", -1).limit(1))
-    return bool(last) and last[0].get("source_id") == rid \
-        and last[0].get("source_type") == "VENDOR_RETURN" \
+    return _last_row_ours(db, unit.get("stock_id"), rid) \
         and unit.get("quarantine_generation") in (generation.get("quarantine_generation"),
                                                   generation.get("before"))
+
+
+def _last_row_ours(db, sid, rid) -> bool:
+    """The piece's last ledger row is this vendor return's own."""
+    last = list(db.get_collection("item_events").find({"stock_id": sid})
+                .sort("event_seq", -1).limit(1))
+    return bool(last) and last[0].get("source_id") == rid \
+        and last[0].get("source_type") == "VENDOR_RETURN"
 
 
 def _undo_dead_claim(db, claim: dict, retried_by) -> None:
@@ -1016,6 +1122,18 @@ async def update_return_status(
             finished.pop("_id", None)
             return {"message": "Every piece on this return has left stock",
                     "return": mask_vendor_return(finished, current_user)}
+        # Cancel pressed again on a cancelled return (a lost reply, or a piece
+        # that could not be put back): finish putting back any piece still
+        # linked to it. Nothing else changes.
+        if status_update.status == "cancelled" and current_status == "cancelled":
+            if not return_doc.get("receipt_rejection"):
+                held = _put_back(db, return_doc, actor)
+                if held:
+                    raise _not_put_back(held)
+            finished = collection.find_one({"return_id": return_id}) or {}
+            finished.pop("_id", None)
+            return {"message": "This return is already cancelled",
+                    "return": mask_vendor_return(finished, current_user)}
         if current_status == "draft":
             if status_update.status == "created" and not status_update.return_type:
                 raise HTTPException(status_code=422, detail="Choose credit or replacement before confirming this return.")
@@ -1039,6 +1157,26 @@ async def update_return_status(
                 status_code=400,
                 detail=f"Cannot transition from {current_status} to {status_update.status}",
             )
+        # Ending the return without its credit ('replaced', or a cancel: a typed
+        # return an RMA links can be cancelled under a note waiting there) shuts
+        # both doors: a claimed supplier note, here or on a live RMA, finishes
+        # first (one number, one record).
+        ends_credit = status_update.status == "cancelled" or (
+            status_update.status == "replaced" and return_doc.get("return_type") != "replacement")
+        waiting = ends_credit and (rma_supplier_credit.canonical.finish_open_claims(db, return_doc)
+                                   or rma_supplier_credit.unfinished_on_return(db, return_doc))
+        held = waiting and rma_supplier_credit.held_note(waiting)
+        if held:
+            raise HTTPException(status_code=409, detail=held)
+        if waiting and waiting.get("return_kind") == "RMA":
+            raise HTTPException(status_code=409, detail=(
+                f"A supplier credit note is still waiting on RMA {waiting['return_id']}. "
+                "Accounts settles it there first."))
+        if waiting:
+            why = _typed_credit_problem(db, return_doc, waiting["_id"])
+            raise HTTPException(status_code=409, detail=rma_supplier_credit.note_stopped(why) if why else (
+                "A supplier credit note is still waiting on this return. Accounts finishes it "
+                "first: retry that same note once its original bill is confirmed."))
         # Shipping: every piece leaves stock FIRST (QUARANTINED -> RTV) while
         # the return is claimed against any other change; the status moves
         # only once they all have. A piece that will not move is named and the
@@ -1061,6 +1199,11 @@ async def update_return_status(
         # Cancelling puts the pieces back -- not once any of them has left
         # (a receiving rejection's draft included).
         if status_update.status == "cancelled":
+            credited = rma_supplier_credit.credited_rma(db, return_doc)
+            if credited:
+                raise HTTPException(status_code=409, detail=(
+                    f"RMA {credited['rma_id']} already took the supplier's credit on this return, "
+                    "so it cannot be cancelled."))
             sent = [_label(u, sid) for sid, u in _named_units(db, return_doc).items()
                     if _ie.canonical_state(u.get("status")) is _STATE.RTV]
             if sent:
@@ -1115,6 +1258,9 @@ async def update_return_status(
         # pure (no side effect) and is simply discarded by the loser.
         expected = {"return_id": return_id, "status": current_status,
                     "credit_confirmation_fence": {"$exists": False}}
+        # No note passed this return since the check above (one number, one record).
+        if ends_credit:
+            expected.update(rma_supplier_credit.claims_as_read(return_doc))
         # A Ship moving the pieces holds the return: only it may move it on.
         if ship_token:
             expected["ship_fence.token"] = ship_token
@@ -1152,13 +1298,12 @@ async def update_return_status(
         # Cancelled before shipping: the pieces it took off the shelf go back
         # on it and every piece gets its earlier link back. A receipt-rejection
         # draft keeps its rejected pieces on a cancel (it can be reopened; they
-        # never were sellable).
+        # never were sellable). A piece that could not be put back stays
+        # linked to the cancelled return and is named: Cancel again finishes.
         if status_update.status == "cancelled" and not return_doc.get("receipt_rejection"):
-            _release_pieces(
-                db, return_id, return_doc.get("stock_ids") or [],
-                set(return_doc.get("set_aside_stock_ids") or []), actor,
-                {p.get("stock_id"): p.get("rtv_vendor_id") for p in return_doc.get("prior_links") or []},
-            )
+            held = _put_back(db, return_doc, actor)
+            if held:
+                raise _not_put_back(held)
 
         # Fetch and return updated document
         updated_doc = collection.find_one({"return_id": return_id})
@@ -1257,6 +1402,35 @@ async def price_vendor_return(
     return {"message": "Return prices set", "return": mask_vendor_return(updated, current_user)}
 
 
+def _unnamed_lines(db, return_doc) -> list:
+    moved = {u.get("product_id") for u in _named_units(db, return_doc).values()}
+    return [SimpleNamespace(product_id=line.get("product_id"), product_name=line.get("product_name"))
+            for line in return_doc.get("items") or [] if line.get("product_id") not in moved]
+
+
+def _typed_rule_passed(db, return_doc) -> bool:
+    """What a note claimed here records (rule_settled). This door takes a note
+    while the shop holds pieces of a typed line (it may have restocked since the
+    goods left), so only a line the shelf check really cleared counts as passed."""
+    return rule_settled(db, return_doc) or not any(
+        _typed_line_problem(db, item, return_doc.get("store_id")) for item in _unnamed_lines(db, return_doc))
+
+
+def _typed_credit_problem(db, return_doc, confirmation_id) -> Optional[str]:
+    """Why a line of this return naming no piece cannot take a new credit
+    (_accounted_for, as on an RMA); None when it can. A POSTED note's replay
+    always answers: what is already credited stays as it is. So does a return
+    whose claimed note passed this check (rule_settled)."""
+    event = db.get_collection("supplier_credit_confirmations").find_one({"_id": confirmation_id})
+    if (event and event.get("posting_status") == "POSTED") or rule_settled(db, return_doc):
+        return None
+    for item in _unnamed_lines(db, return_doc):
+        problem = _accounted_for(db, item, return_doc.get("store_id"), return_doc.get("vendor_id"))
+        if problem:
+            return problem
+    return None
+
+
 def _credit_scope(current_user):
     cross_shop, shops = user_store_scope(current_user)
     return None if cross_shop else shops
@@ -1300,10 +1474,14 @@ async def confirm_supplier_credit(
     if db is None:
         raise HTTPException(503, "Database not available")
     return_doc = _return_in_reach(db.get_collection("vendor_returns"), return_id, current_user)
+    problem = _typed_credit_problem(db, return_doc, str(body.idempotency_key))
+    if problem:
+        held = rma_supplier_credit.unfinished_on_return(db, return_doc)
+        raise HTTPException(409, rma_supplier_credit.note_stopped(problem) if held else problem)
     try:
         event, repeated = record_supplier_confirmation(
             db, return_doc, body.model_dump(mode="json"), actor_id=current_user.get("user_id"),
-            allowed_store_ids=_credit_scope(current_user),
+            allowed_store_ids=_credit_scope(current_user), rule_passed=_typed_rule_passed(db, return_doc),
         )
         updated = db.get_collection("vendor_returns").find_one({"return_id": return_id}) or {}
         updated.pop("_id", None)

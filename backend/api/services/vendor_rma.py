@@ -339,11 +339,15 @@ class VendorRMAEngine:
             unit_paise = _unit_paise(ln)
             if unit_paise is not None and unit_paise < 0:
                 return {"ok": False, "error": "bad_unit_cost"}
+            # Owner ruling 2026-11-06: only the line says whose piece it is.
+            owner = ({"customer_owned": True, "customer_id": ln.get("customer_id"),
+                      "order_id": ln.get("order_id")} if ln.get("customer_owned") else {})
             norm_lines.append(_priced_line({
                 "product_id": ln.get("product_id"),
                 "product_name": ln.get("product_name"),
                 "quantity": qty,
                 "reason": reason,
+                **owner,
             }, unit_paise))
 
         # None while any line is unpriced: the accounts roles price it later
@@ -458,10 +462,11 @@ class VendorRMAEngine:
 
     # --- reject (any pre-credit state -> REJECTED) -------------------------
 
-    def reject(self, rma_id: str, *, actor: str, reason: str = "") -> Dict[str, Any]:
+    def reject(self, rma_id: str, *, actor: str, reason: str = "",
+               guard: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Reject an RMA from DRAFT / AUTHORIZED / DISPATCHED. The from-state is
         whatever the doc currently holds among those three (atomic guard via
-        $in). Terminal."""
+        $in). Terminal. ``guard`` joins the atomic filter."""
         from pymongo import ReturnDocument
 
         coll = self._coll()
@@ -478,7 +483,8 @@ class VendorRMAEngine:
         now = _now()
         try:
             updated = coll.find_one_and_update(
-                {"rma_id": rma_id, "status": {"$in": rejectable}, "credit_confirmation_fence": None},
+                {"rma_id": rma_id, "status": {"$in": rejectable}, "credit_confirmation_fence": None,
+                 **(guard or {})},
                 {
                     "$set": {"status": RMAStatus.REJECTED.value, "updated_at": now},
                     "$push": {
@@ -713,6 +719,7 @@ class VendorRMAEngine:
         actor: str,
         notes: str = "",
         write_off_variance: bool = False,
+        guard: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Close a CREDIT_RECEIVED RMA. Refuses to close with an OUTSTANDING
         positive variance (vendor still owes credit) unless ``write_off_variance``
@@ -747,7 +754,7 @@ class VendorRMAEngine:
         try:
             updated = coll.find_one_and_update(
                 {"rma_id": rma_id, "status": RMAStatus.CREDIT_RECEIVED.value,
-                 "credit_confirmation_fence": None,
+                 "credit_confirmation_fence": None, **(guard or {}),
                  "received_credit_paise": cur.get("received_credit_paise"),
                  "expected_credit_paise": cur.get("expected_credit_paise"),
                  "variance_paise": cur.get("variance_paise")},
@@ -796,6 +803,7 @@ class VendorRMAEngine:
         notes: str,
         extra_set: Optional[Dict[str, Any]] = None,
         audit_action: str,
+        guard: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         from pymongo import ReturnDocument
 
@@ -812,7 +820,8 @@ class VendorRMAEngine:
             set_fields.update(extra_set)
         try:
             updated = coll.find_one_and_update(
-                {"rma_id": rma_id, "status": from_status, "credit_confirmation_fence": None},
+                {"rma_id": rma_id, "status": from_status, "credit_confirmation_fence": None,
+                 **(guard or {})},
                 {
                     "$set": set_fields,
                     "$push": {
