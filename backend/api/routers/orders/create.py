@@ -1400,33 +1400,44 @@ def order_body_fingerprint(order: OrderCreate, legacy: bool = False) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _lens_lines(lines: List[Dict[str, Any]], canonical=lambda pid: pid) -> List[List[Any]]:
+def _lens_lines(lines: List[Dict[str, Any]], canonical=lambda pid: pid, rx_counts: bool = False) -> List[List[Any]]:
     """A bill's lens lines in a fixed order, each power still tied to its WHOLE
     line: two prices of one lens are two lines, and swapping their powers is
-    another bill, while listing the same lines the other way round is not."""
-    return sorted(_bill_line(ln, canonical) + [_lens_identity(ln)] for ln in lines if _lens_identity(ln))
+    another bill, while listing the same lines the other way round is not.
+    ``rx_counts``: a line with only an Rx or a lens cell is a lens line too
+    (no hash has seen that Rx)."""
+    return sorted(_bill_line(ln, canonical) + [_lens_identity(ln)] for ln in lines
+                  if _lens_identity(ln) or (rx_counts and (ln.get("prescription_id") or ln.get("lens_line_id"))))
 
 
 def _same_bill(order: Dict[str, Any], body: OrderCreate) -> bool:
     """Is this press the bill the saved order recorded? A hash with lens data
     in it answers alone. An old-format hash cannot see lens data (and a retry
     that drops it hashes the same), so the lens lines must ALSO be the saved
-    order's own; a saved line holds the canonical product, never the SKU sent."""
+    order's own; a saved line holds the canonical product, never the SKU sent.
+
+    A keyed order saved before any fingerprint has only its lines to go by, and
+    nothing is back-filled onto it: its lens lines and whose they are must
+    match. With no lens intent on either side there is nothing clinical to weigh
+    and it replays as it always did -- which is NOT proof of the same bill."""
     saved = order.get("body_fingerprint")
-    if not saved:
+    if saved and saved != order_body_fingerprint(body, legacy=True):
+        return saved == order_body_fingerprint(body)
+    repo = get_product_repository()
+    sent = _lens_lines([i.model_dump() for i in body.items], lambda pid: _canonical_pid(repo, pid), not saved)
+    if sent != _lens_lines(order.get("items") or [], rx_counts=not saved):
+        return False
+    if saved or not sent:
         return True
-    if saved == order_body_fingerprint(body, legacy=True):
-        repo = get_product_repository()
-        sent = _lens_lines([i.model_dump() for i in body.items], lambda pid: _canonical_pid(repo, pid))
-        return sent == _lens_lines(order.get("items") or [])
-    return saved == order_body_fingerprint(body)
+    # The saved patient is the member the server resolved: a blank proves nothing.
+    return all(not getattr(body, f) or not order.get(f) or getattr(body, f) == order.get(f)
+               for f in ("customer_id", "patient_id"))
 
 
 def _replay_same_bill(order: Dict[str, Any], body: OrderCreate) -> Dict[str, Any]:
     """A press with an existing key replays its order -- only for the SAME
     bill. Another body under the key is refused (409): the till then posts
-    no payment and never says the sale is complete. An order saved before
-    the fingerprint existed replays as before."""
+    no payment and never says the sale is complete. _same_bill decides."""
     number = order.get("order_number") or order.get("order_id")
     # A cancelled or void order is never replayed as a sale (money review 25).
     if str(order.get("status") or "").upper() in ("CANCELLED", "VOID", "VOIDED"):

@@ -14,6 +14,9 @@ with no HSN instead of filing it silently.
 
 Codex 11-06 round 2: a bill saved under the old formula replays when the
 retry is unchanged, judged against the saved order's own lens lines.
+
+Codex 11-06 round 3: that judgement keeps each power on its whole financial
+line, and a keyed bill with no fingerprint at all is judged the same way.
 """
 from __future__ import annotations
 
@@ -376,6 +379,129 @@ def test_an_old_format_two_price_bill_replays_unchanged_and_with_whole_lines_reo
     assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
     r = _post(client, staff_headers, [cheap, dear], key="K-TWIN2")  # SKU alias, whole lines swapped
     assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
+    assert _orders(rx_orders) == before
+
+
+# =========================================================================== #
+# L2-POS-F03 round 3 -- a keyed bill saved before any fingerprint existed: its
+# own saved lines are the only evidence, and nothing is back-filled onto it
+# =========================================================================== #
+def _no_fp_bill(client, headers, rx, key, items):
+    r = _post(client, headers, items, key=key)
+    assert r.status_code in (200, 201), r.text
+    docs = _orders(rx)
+    assert len(docs) == 1
+    docs[0].pop("body_fingerprint")
+    return r.json()["order_id"]
+
+
+@pytest.mark.parametrize("door", ["pre-check", "lost-ack"])
+@pytest.mark.parametrize("change", [
+    {"sph": -1.0}, {"cyl": -0.75}, {"axis": 180}, {"add": 1.25}, {"lens_options": {"tint": "grey"}},
+    {"lens_details": {"type": "SV", "material": "1.67", "coatings": ["ARC"]}},
+    {"lens_details": None}, {"sph": None, "cyl": None, "axis": None, "lens_details": None},
+    {"prescription_id": "rx-other"}, {"lens_line_id": "LL-other"},
+])
+def test_a_no_fingerprint_key_refuses_changed_clinical_intent(client, staff_headers, rx_orders, monkeypatch, door, change):
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-nofp")
+    _seed_rx(rx_orders, prescription_id="rx-other")
+    _no_fp_bill(client, staff_headers, rx_orders, "K-NOFP", [_lens(rxid)])
+    before = copy.deepcopy(_orders(rx_orders))
+    if door == "lost-ack":
+        _lost_ack(monkeypatch)
+    r = _post(client, staff_headers, [_lens(rxid, **change)], key="K-NOFP")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["code"] == "IDEMPOTENCY_BODY_MISMATCH"
+    assert _orders(rx_orders) == before  # no fingerprint invented, nothing rewritten
+
+
+@pytest.mark.parametrize("door", ["pre-check", "lost-ack"])
+def test_a_no_fingerprint_unchanged_lens_retry_replays_with_no_effect(client, staff_headers, rx_orders, monkeypatch, door):
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150", sku="LENS-SKU")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-nofp2")
+    dear, cheap = _twin_lines(rxid, product_id="LENS-SKU")
+    oid = _no_fp_bill(client, staff_headers, rx_orders, "K-NOFP2", [dear, cheap])
+    before = copy.deepcopy(_orders(rx_orders))
+    if door == "lost-ack":
+        _lost_ack(monkeypatch)
+    for items in ([dear, cheap], [cheap, dear]):
+        r = _post(client, staff_headers, items, key="K-NOFP2")
+        assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
+    assert _orders(rx_orders) == before
+
+
+def test_a_no_fingerprint_key_refuses_powers_swapped_between_two_prices(client, staff_headers, rx_orders):
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-nofp3")
+    dear, cheap = _twin_lines(rxid)
+    _no_fp_bill(client, staff_headers, rx_orders, "K-NOFP3", [dear, cheap])
+    r = _post(client, staff_headers, [{**dear, "sph": -1.0}, {**cheap, "sph": 0.0}], key="K-NOFP3")
+    assert r.status_code == 409, r.text
+
+
+def test_a_no_fingerprint_key_refuses_a_lens_added_to_a_bill_that_had_none(client, staff_headers, rx_orders):
+    _seed(rx_orders, pid="FR-9", category="FRAME", item_type="FRAME", hsn="900311")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-nofp4")
+    line = _item("FR-9", item_type="FRAME", category="FRAME")
+    _no_fp_bill(client, staff_headers, rx_orders, "K-NOFP4", [line])
+    r = _post(client, staff_headers, [{**line, "sph": -1.0, "prescription_id": rxid}], key="K-NOFP4")
+    assert r.status_code == 409, r.text
+
+
+@pytest.mark.parametrize("field,value", [("customer_id", "cust-other"), ("patient_id", "patient-other")])
+def test_a_no_fingerprint_key_refuses_a_lens_bill_for_someone_else(client, staff_headers, rx_orders, field, value):
+    """Same powers, another person's eyes: the customer and the billed member
+    are on the saved order, so they are compared when the bill has lens intent."""
+    _seed(rx_orders, pid="LENS-P", category="OPTICAL_LENS", item_type="LENS", hsn="900150")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-nofp5")
+    oid = _no_fp_bill(client, staff_headers, rx_orders, "K-NOFP5", [_lens(rxid)])
+    h = {**staff_headers, "Idempotency-Key": "K-NOFP5"}
+    same = {"customer_id": "cust-x", "items": [_lens(rxid)]}
+    r = client.post("/api/v1/orders", json=same, headers=h)
+    assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
+    saved_patient = _orders(rx_orders)[0]["patient_id"]
+    r = client.post("/api/v1/orders", json={**same, "patient_id": saved_patient}, headers=h)
+    assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
+    r = client.post("/api/v1/orders", json={**same, field: value}, headers=h)
+    assert r.status_code == 409, r.text
+
+
+def test_an_rx_only_line_is_lens_intent_when_no_hash_has_seen_the_rx(client, staff_headers, rx_orders):
+    _seed(rx_orders, pid="FR-9", category="FRAME", item_type="FRAME", hsn="900311")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-nofp7")
+    other = _seed_rx(rx_orders, prescription_id="rx-nofp8")
+    line = _item("FR-9", item_type="FRAME", category="FRAME", prescription_id=rxid)
+    oid = _no_fp_bill(client, staff_headers, rx_orders, "K-NOFP7", [line])
+    r = _post(client, staff_headers, [line], key="K-NOFP7")
+    assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
+    assert _post(client, staff_headers, [{**line, "prescription_id": other}], key="K-NOFP7").status_code == 409
+
+
+def test_a_hashed_rx_only_line_keeps_replaying_after_a_later_edit(client, staff_headers, rx_orders):
+    """A hash has seen this Rx, so the saved line is not re-judged."""
+    _seed(rx_orders, pid="FR-9", category="FRAME", item_type="FRAME", hsn="900311")
+    rxid = _seed_rx(rx_orders, prescription_id="rx-nofp9")
+    line = _item("FR-9", item_type="FRAME", category="FRAME", prescription_id=rxid)
+    r1 = _post(client, staff_headers, [line], key="K-NOFP9")
+    assert r1.status_code in (200, 201), r1.text
+    _orders(rx_orders)[0]["items"][0]["quantity"] = 3
+    r2 = _post(client, staff_headers, [line], key="K-NOFP9")
+    assert r2.status_code in (200, 201) and r2.json()["order_id"] == r1.json()["order_id"], r2.text
+
+
+def test_a_no_fingerprint_frame_bill_replays_as_it_always_did(client, staff_headers, rx_orders):
+    """KNOWN LIMIT, kept on purpose: with no hash and no lens intent there is
+    no clinical evidence to weigh, so a non-clinical change still replays the
+    saved bill. No sale, payment or stock moves; the response names the old
+    order. Not a claim that such a retry is the same bill."""
+    _seed(rx_orders, pid="FR-9", category="FRAME", item_type="FRAME", hsn="900311")
+    line = _item("FR-9", item_type="FRAME", category="FRAME")
+    oid = _no_fp_bill(client, staff_headers, rx_orders, "K-NOFP6", [line])
+    before = copy.deepcopy(_orders(rx_orders))
+    for items in ([line], [{**line, "unit_price": 1900.0, "discount_reason": "loyal customer"}]):
+        r = _post(client, staff_headers, items, key="K-NOFP6")
+        assert r.status_code in (200, 201) and r.json()["order_id"] == oid, r.text
     assert _orders(rx_orders) == before
 
 
