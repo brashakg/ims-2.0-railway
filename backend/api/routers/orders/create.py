@@ -1083,6 +1083,22 @@ async def create_order(
             # give-back below fails closed.
             return bool(order_repo.collection.find_one({"order_id": precomputed_order_id}))
 
+        async def _give_back_lens_cells() -> None:
+            # Never under a bill that exists (as the units). Fail-soft: a cell
+            # that could not be freed stays reserved under its audit row.
+            for idx, oi in enumerate(items_data):
+                try:
+                    await release_for_cancel(
+                        order_item=oi,
+                        order_id=precomputed_order_id,
+                        line_index=_lens_reservation_key(oi, idx),
+                        store_id=store_id or "",
+                        user=current_user,
+                        was_saved=_order_was_saved,
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
+
         try:
             # Every unit the bill takes is claimed (atomic) BEFORE the save: a
             # till that lost a unit (scanned, or the last one) to another till
@@ -1127,24 +1143,7 @@ async def create_order(
                 discount_approval.give_back(
                     discount_approver, current_user, _order_was_saved
                 )
-            try:
-                from ...services.lens_stock_hook import release_for_cancel
-
-                for idx, oi in enumerate(items_data):
-                    try:
-                        await release_for_cancel(
-                            order_item=oi,
-                            order_id=precomputed_order_id,
-                            line_index=_lens_reservation_key(oi, idx),
-                            store_id=store_id or "",
-                            user=current_user,
-                            # Never under a bill that exists (as the units).
-                            was_saved=_order_was_saved,
-                        )
-                    except Exception:  # noqa: BLE001
-                        pass  # fail-soft compensating action
-            except Exception:  # noqa: BLE001
-                pass
+            await _give_back_lens_cells()
             # Two presses of one bill (same Idempotency-Key) at once: the
             # first holds the units / the approval (a 409 here), or the unique
             # (store_id, idempotency_key) index refused this insert -- either
@@ -1275,6 +1274,7 @@ async def create_order(
 
         _release_claimed_units(precomputed_order_id, claimed_units, _order_was_saved)
         discount_approval.give_back(discount_approver, current_user, _order_was_saved)
+        await _give_back_lens_cells()
         raise HTTPException(status_code=500, detail="Failed to create order")
 
     return {
