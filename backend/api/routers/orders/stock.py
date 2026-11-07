@@ -772,6 +772,8 @@ def _release_op_claims(order_id: str, claim_op: str) -> bool:
     True when nothing it took is left SOLD: the release's own report, not a guess."""
     try:
         stock_repo = get_stock_repository()
+        if stock_repo is None:
+            return True  # no stock backend: nothing was claimed
         result = stock_repo.release_sold_units_for_order(
             order_id, claim_op=claim_op, reason="ORDER_NOT_SAVED"
         )
