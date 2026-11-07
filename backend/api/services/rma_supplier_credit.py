@@ -1,32 +1,203 @@
-"""RMA adapter for canonical supplier confirmations; no shadow RTV documents."""
+"""RMA adapter for canonical supplier confirmations; no shadow RTV documents.
+
+One physical return, one financial owner (L2-RMA-F01). An RMA linked to a
+vendor return (return_id) answers for that return's pieces: normalize() hands
+the canonical writer those exact pieces, so its atomic physical reservation
+refuses the same piece on any second door. Which door records the note is
+settled before anything is written: a return that already holds a supplier note
+keeps it (the RMA is refused, vendor_rma._physical_return_problem); otherwise a
+live linked RMA does (return_door_problem), under its maker-checker. Partial
+notes and retries stay on that one door; settle_return carries the result onto
+the return, so it stops reading as a credit still owed. Nothing historical is
+merged or removed: a return and RMA that both already hold notes keep them,
+each on its own row, and take no more.
+"""
 from copy import deepcopy
 
 from pymongo.errors import DuplicateKeyError
 
 from . import supplier_credit_confirmation as canonical
-from .supplier_credit_evidence import EVENTS, SupplierCreditError, confirmation_view, credit_preview, paise
+from .supplier_credit_evidence import (
+    EVENTS, SHIP_THEN_RETRY, SupplierCreditError, confirmation_view, credit_preview, credit_started,
+    paise, return_event_query,
+)
 from .vendor_rma import RMAStatus, VendorRMAEngine, _now
 
 APPROVAL_BINDINGS = "rma_supplier_credit_approvals"
 READY = {RMAStatus.DISPATCHED.value, RMAStatus.CREDIT_RECEIVED.value}
+# Refused by a cap at posting: its fixed amount can never fit, so nothing waits
+# on it. The same codes from the evidence (a wrong selection) are recoverable:
+# only a row a real posting attempt fenced lets go (_holds_its_door).
+OVER_CAP = {"ORIGINAL_QUANTITY_EXCEEDED", "ORIGINAL_AMOUNT_EXCEEDED", "RETURN_AMOUNT_EXCEEDED",
+            "RECEIPT_QUANTITY_EXCEEDED", "RETURNED_UNIT_ALREADY_CREDITED"}
 
 
-def normalize(doc):
-    """Adapt the stored lifecycle in memory; preserve its exact CAS preimage."""
+# A claimed note no door can free as things stand (retrying, rejecting, closing and
+# a new RMA all fail): the physical rule stops one from before claims recorded it
+# (supplier_credit_evidence.rule_settled) or with its own pieces back, and another
+# credit on the same goods stops the rest (held_note). Every refusal says so
+# instead of promising a retry. The way out is the owner's. Pieces still on their
+# way out are the exception, and say that instead (NOTE_WAITS): a real shipment
+# finishes the note, and nothing here asks for one that is not real.
+NOTE_HELD = ("The supplier note waiting here cannot finish as things stand, so this record stays "
+             "open: retrying alone will not help, a new RMA cannot take the same note, and no "
+             "money has moved. It needs a head-office decision. Why it cannot finish: ")
+NOTE_WAITS = ("The supplier note waiting here cannot finish yet, so this record stays open: a new "
+              "RMA cannot take the same note, and no money has moved. Why it is waiting: ")
+_SHIP_FIRST = " first: its pieces leave stock there."
+
+
+def ship_first(return_id):
+    return f"Ship vendor return {return_id}{_SHIP_FIRST}"
+
+
+def note_stopped(problem):
+    """A physical refusal of a claimed note, with the next step it really has."""
+    return NOTE_WAITS + problem + SHIP_THEN_RETRY if problem.endswith(_SHIP_FIRST) else NOTE_HELD + problem
+
+
+def held_note(event):
+    """The refusal when another credit on the same goods holds this note
+    (_refuse_unplaced_credit); None for a note that can still finish."""
+    reasons = {reason.get("code"): reason.get("message") for reason in event.get("pending_reasons") or []}
+    if "EARLIER_CREDIT_UNPLACED" in reasons:
+        return NOTE_HELD + reasons["EARLIER_CREDIT_UNPLACED"]
+    if "EARLIER_CREDIT_NOT_SHIPPED" in reasons:
+        return NOTE_WAITS + reasons["EARLIER_CREDIT_NOT_SHIPPED"]
+    return None
+
+
+def _noted_without_pieces(db, rma_id):
+    """A note stored before an RMA carried its return's pieces: its source key
+    was built with none, and a partly confirmed return keeps its origin."""
+    return any(event.get("sources") and not any(s.get("stock_ids") for s in event["sources"])
+               for event in db.get_collection(EVENTS).find(
+                   {"return_id": rma_id, "return_kind": "RMA", "posting_status": {"$in": ["PREPARING", "POSTED"]}}))
+
+
+def normalize(doc, db=None):
+    """Adapt the stored lifecycle in memory; preserve its exact CAS preimage.
+    With `db`, a linked RMA carries its return's physical pieces -- unless a
+    note it already holds named none: then its balance keeps that note's
+    identity, so one source and its caps cover both notes, and the pieces stay
+    safe on this door (return_door_problem)."""
     items = []
     for line in doc.get("lines") or []:
         item = deepcopy(line)
         value = line.get("unit_cost_paise")
         item["unit_price"] = value / 100 if value is not None else line.get("unit_cost")
         items.append(item)
-    return {**deepcopy(doc), "return_id": doc["rma_id"], "return_kind": "RMA",
+    linked = {}
+    if doc.get("return_id") and db is not None and not _noted_without_pieces(db, doc["rma_id"]):
+        ret = db.get_collection("vendor_returns").find_one({"return_id": doc["return_id"]}) or {}
+        linked = {"physical_return_id": doc["return_id"], "stock_ids": ret.get("stock_ids") or []}
+    return {**deepcopy(doc), **linked, "return_id": doc["rma_id"], "return_kind": "RMA",
             "items": items, "return_type": "credit_note",
             "status": "received_by_vendor" if doc.get("status") in READY else "not_ready",
             "_rma_snapshot": deepcopy(doc)}
 
 
+def return_door_problem(db, return_doc, confirmation_id):
+    """Why the return's own credit door is shut for this note; None when open.
+    A POSTED note's replay always answers. A live linked RMA owns the credit
+    unless the return already held a note first."""
+    event = db.get_collection(EVENTS).find_one({"_id": confirmation_id})
+    if event and event.get("posting_status") == "POSTED":
+        return None
+    rma = db.get_collection("vendor_rmas").find_one(
+        {"return_id": return_doc["return_id"], "status": {"$ne": RMAStatus.REJECTED.value}})
+    if not rma or (credit_started(db, return_doc) and not credit_started(db, {"rma_id": rma["rma_id"]})):
+        return None
+    return (f"This return's pieces went back on RMA {rma['rma_id']}: record the supplier's "
+            "credit note there, once, not here.")
+
+
+def _holds_its_door(event):
+    """A claimed note that can still finish keeps its door open. One that can
+    never finish does not: a real posting found it over a cap. No reason saved
+    means one of two things: every claim now records physical_rule_passed, so a
+    row carrying it passed its checks and only its next write was lost (the same
+    retry finishes it), while an old row without it was refused with an error."""
+    if event.get("posting_status") != "PENDING_EVIDENCE":
+        return True
+    reasons = {reason.get("code") for reason in event.get("pending_reasons") or []}
+    if not reasons:
+        return "physical_rule_passed" in event
+    return not (event.get("fenced_token") and reasons <= OVER_CAP)
+
+
+def hold_doors(db, event):
+    """Only this RMA can finish its note, and ending the RMA or its return shuts
+    that door: the note passes both while they are open (canonical._claim)."""
+    claim = {"$addToSet": {canonical.NOTE_CLAIMS: event["_id"]}}
+    rma = db.get_collection("vendor_rmas").find_one_and_update(
+        {"rma_id": event["return_id"], "status": {"$in": sorted(READY)}}, claim)
+    if rma is None or (rma.get("return_id") and not db.get_collection("vendor_returns").update_one(
+            {"return_id": rma["return_id"], "status": {"$nin": ["cancelled", "replaced"]}}, claim).matched_count):
+        raise SupplierCreditError(canonical.DOOR_SHUT, "This RMA or its return has ended, so it cannot "
+                                  "take a supplier note. The note was not recorded.", 409)
+
+
+def claims_as_read(door):
+    """The condition an end adds to its write: no note passed since it checked."""
+    return {canonical.NOTE_CLAIMS: door.get(canonical.NOTE_CLAIMS)}
+
+
+def unfinished_note(db, rma):
+    """A supplier note this RMA has claimed but not yet carried onto itself:
+    saved pending, posting, or posted with its summary lost. Only this door can
+    finish it, so the RMA stays open for it; the note is never released."""
+    done = [n["confirmation_id"] for n in rma.get("credit_notes") or [] if n.get("confirmation_id")]
+    return next((event for event in db.get_collection(EVENTS).find(
+        {**return_event_query({"rma_id": rma["rma_id"]}), "identity_claimed": {"$ne": False}, "_id": {"$nin": done}})
+        if _holds_its_door(event)), None)
+
+
+def unfinished_on_return(db, return_doc):
+    """The same for a return: a note of its own not yet posted, or one waiting on
+    an RMA still live on it. Ending the return shuts both doors on that note."""
+    own = db.get_collection(EVENTS).find(
+        {**return_event_query(return_doc), "identity_claimed": {"$ne": False}, "posting_status": {"$ne": "POSTED"}})
+    live = db.get_collection("vendor_rmas").find({"return_id": return_doc["return_id"], "status": {
+        "$nin": [RMAStatus.REJECTED.value, RMAStatus.CLOSED.value]}})
+    return next((e for e in own if _holds_its_door(e)), None) or next(
+        (e for e in (unfinished_note(db, rma) for rma in live) if e), None)
+
+
+def credited_rma(db, return_doc):
+    """An RMA on this return holding a supplier credit: it still has to close,
+    and closing asks for an open return."""
+    return db.get_collection("vendor_rmas").find_one({
+        "return_id": return_doc["return_id"], "status": {"$ne": RMAStatus.REJECTED.value},
+        "credit_notes.0": {"$exists": True}})
+
+
+def settle_return(db, rma):
+    """Carry a linked RMA's credit onto its return, as _finish_return does for
+    the return's own door. Reads the RMA, so it is safe to repeat; a lost reply
+    repairs here on the unchanged retry. A return the RMA does not answer for
+    keeps its row: one holding its own supplier notes (an old pair), or one
+    settled by replacement goods."""
+    if not rma.get("return_id"):
+        return
+    ret = db.get_collection("vendor_returns").find_one({"return_id": rma["return_id"]}) or {}
+    if ret.get("return_type") == "replacement" or credit_started(db, ret):
+        return
+    amount = int(rma.get("received_credit_paise") or 0) / 100
+    variance = rma.get("variance_paise")
+    full = rma.get("status") == RMAStatus.CLOSED.value or (variance is not None and variance <= 0)
+    numbers = dict.fromkeys(n["credit_note_number"] for n in rma.get("credit_notes") or []
+                            if n.get("confirmation_id"))
+    db.get_collection("vendor_returns").update_one(
+        {"return_id": rma["return_id"], "status": {"$in": ["shipped", "received_by_vendor"]}},
+        {"$set": {"status": "credit_issued" if full else "received_by_vendor",
+                  "credit_note_number": ", ".join(numbers), "credit_note_amount": amount,
+                  "confirmed_credit_amount": amount, "credit_confirmation_locked": True,
+                  "credit_settled_on_rma": rma["rma_id"], "updated_at": _now()}})
+
+
 def preview(db, doc, *, selections=None, confirmation_id=None, allowed_store_ids=None):
-    return credit_preview(db, normalize(doc), selections=selections,
+    return credit_preview(db, normalize(doc, db), selections=selections,
                           confirmation_id=confirmation_id, allowed_store_ids=allowed_store_ids)
 
 
@@ -58,6 +229,7 @@ def finish(db, event):
     if not current:
         raise SupplierCreditError("RMA_NOT_FOUND", "The confirmed RMA needs technical reconciliation.", 503)
     if any(note.get("confirmation_id") == event["confirmation_id"] for note in current.get("credit_notes") or []):
+        settle_return(db, current)
         return
     received = int(current.get("received_credit_paise") or 0)
     amount = event["received_paise"]
@@ -87,6 +259,7 @@ def finish(db, event):
                  "received_credit_paise": received + amount, "variance_paise": int(expected) - received - amount}
         engine._audit("rma_credit_recorded", after, actor=event.get("posted_by"),
                       before=engine._snapshot(current), after=engine._snapshot(after), reason=event.get("notes"))
+    settle_return(db, collection.find_one({"rma_id": event["return_id"]}))
 
 
 def existing_confirmation(db, doc, submitted):
@@ -200,7 +373,8 @@ def require_approval(db, doc, submitted, *, request_id, token, actor_id, consume
 
 def record(db, doc, payload, *, actor_id, allowed_store_ids=None):
     event, repeated = canonical.record_supplier_confirmation(
-        db, normalize(doc), payload, actor_id=actor_id, allowed_store_ids=allowed_store_ids)
+        db, normalize(doc, db), payload, actor_id=actor_id, allowed_store_ids=allowed_store_ids,
+        rule_passed=True)  # the route's _require_physical_return refuses otherwise
     current = db.get_collection("vendor_rmas").find_one({"rma_id": doc["rma_id"]}) or doc
     shown = confirmation_view(event)
     return {"ok": True, "rma_id": doc["rma_id"], "idempotent": repeated,

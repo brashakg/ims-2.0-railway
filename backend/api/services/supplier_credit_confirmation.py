@@ -4,6 +4,13 @@ Only POSTED events are accounting facts. A bill's unique _id guard serializes
 quantity/value/head reservations; a token-matching event transition publishes
 all allocations together. No expiry releases an uncertain reservation. Retrying
 the same UUID resumes it, and fencing precedes release after known rejection.
+
+A note and the end of its record exclude each other in the record's own atomic
+writes (L2-RMA-F01). A claim passes every door the note could finish on
+(note_claims) before it takes the number, and only while that door is open; an
+end compares the list with the one it checked. The list only grows, so no claim
+can come and go unseen. Whichever write lands first decides: the note holds the
+record, or it is refused with no number taken.
 """
 from collections import defaultdict
 from datetime import date, datetime, timezone
@@ -15,11 +22,13 @@ from pymongo.errors import DuplicateKeyError
 
 from .return_provenance import ReturnProvenanceError
 from .supplier_credit_evidence import (
-    EVENTS, HEADS, SupplierCreditError, credit_preview, paise, resolve_credit_evidence, return_event_query,
+    EVENTS, HEADS, SupplierCreditError, credit_preview, goods_key, paise, resolve_credit_evidence, return_event_query,
 )
 
 GUARDS = "supplier_credit_bill_guards"
 IDENTITIES = "supplier_credit_note_identities"
+NOTE_CLAIMS = "note_claims"
+DOOR_SHUT = "SUPPLIER_NOTE_DOOR_SHUT"
 
 
 def _now():
@@ -85,8 +94,9 @@ def _locked(db, note_date):
         _error("CLOSED_ACCOUNTING_PERIOD", "The supplier credit-note period is locked; Accounts must resolve the closed period first.", 423)
 
 
-def _identity(db, event, registration):
-    """Deduplicate even if a lost response is followed by a new form UUID."""
+def _identity(db, event, registration, rule_passed):
+    """Deduplicate even if a lost response is followed by a new form UUID. The
+    claim records what the door's physical rule answered at that moment."""
     collection = db.get_collection(IDENTITIES)
     key = _hash([event["vendor_id"], event["normalized_number"], event["credit_note_date"]])
     try:
@@ -109,9 +119,44 @@ def _identity(db, event, registration):
         saved = collection.update_one({"_id": key, "version": state["version"]},
                                       {"$set": {"claims": replacement}, "$inc": {"version": 1}})
         if saved.matched_count:
-            db.get_collection(EVENTS).update_one({"_id": event["_id"]}, {"$set": {"identity_claimed": True}})
+            db.get_collection(EVENTS).update_one({"_id": event["_id"]}, {
+                "$set": {"identity_claimed": True, "physical_rule_passed": rule_passed}})
             return
     _error("SUPPLIER_NOTE_BUSY", "Another confirmation is recording this supplier note. Retry the same request.", 409)
+
+
+def _hold_door(db, event):
+    if event.get("return_kind") == "RMA":
+        from .rma_supplier_credit import hold_doors
+        return hold_doors(db, event)
+    held = db.get_collection("vendor_returns").update_one(
+        {"return_id": event["return_id"], "status": "received_by_vendor"},
+        {"$addToSet": {NOTE_CLAIMS: event["_id"]}})
+    if not held.matched_count:
+        _error(DOOR_SHUT, "This return has ended, so it cannot take a supplier note. The note was not recorded.", 409)
+
+
+def _claim(db, event, registration, rule_passed):
+    """Pass the note's doors, then take its number. The row says how first, so a
+    claim that dies between the two can be finished (finish_open_claims)."""
+    db.get_collection(EVENTS).update_one({"_id": event["_id"]}, {
+        "$set": {"claim": {"registration": registration, "rule_passed": rule_passed}}})
+    _hold_door(db, event)
+    _identity(db, event, registration, rule_passed)
+
+
+def finish_open_claims(db, door):
+    """Before a door ends: finish any claim that passed it and has no number yet,
+    mid-request or dead. Run here it either stands, and the note then holds the
+    door, or it never can (a door shut, or the number recorded by another form)
+    and holds nothing. Returns a note it could not answer for, which still holds."""
+    for event in db.get_collection(EVENTS).find({"_id": {"$in": door.get(NOTE_CLAIMS) or []}, "identity_claimed": False}):
+        try:
+            _claim(db, event, event["claim"]["registration"], event["claim"]["rule_passed"])
+        except SupplierCreditError as exc:
+            if exc.code not in (DOOR_SHUT, "SUPPLIER_NOTE_ALREADY_RECORDED"):
+                return event
+    return None
 
 
 def _event(db, return_doc, submitted, actor_id):
@@ -262,7 +307,7 @@ def _reserve_physical(db, event):
     collection = db.get_collection("supplier_credit_origin_guards")
     groups = defaultdict(list)
     for source in event["sources"]:
-        groups[(source["grn_id"], source["product_id"], source.get("receipt_disposition", "ACCEPTED"))].append(source)
+        groups[goods_key(source)].append(source)
     for (grn_id, product_id, disposition), sources in sorted(groups.items()):
         receipt = db.get_collection("grns").find_one({"grn_id": grn_id}) or {}
         quantity_key = "rejected_qty" if disposition == "REJECTED" else "accepted_qty"
@@ -336,13 +381,20 @@ def _finish_return(db, event):
     )
 
 
-def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_store_ids=None):
+def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_store_ids=None, rule_passed=False):
     """Record a whole actual supplier note, or preserve it wholly pending.
 
-    Route adapters must apply Accounts RBAC/shop access and prevent ordinary
-    status/pricing writes while credit_confirmation_fence is present.
+    Route adapters must apply Accounts RBAC/shop access and their physical rule
+    (rule_passed says it really ran and passed; the claim records it) and prevent
+    ordinary status/pricing writes while credit_confirmation_fence is present.
     """
     submitted = _input(payload)
+    if return_doc.get("return_kind") != "RMA":
+        # Before _event: a refused note must not claim its number on this door.
+        from . import rma_supplier_credit
+        problem = rma_supplier_credit.return_door_problem(db, return_doc, submitted["confirmation_id"])
+        if problem:
+            _error("CREDIT_BELONGS_TO_RMA", problem, 409)
     event = _event(db, return_doc, submitted, actor_id)
     if event["posting_status"] == "POSTED":
         _finish_return(db, event)
@@ -353,15 +405,16 @@ def record_supplier_confirmation(db, return_doc, payload, *, actor_id, allowed_s
         try:
             sources = resolve_credit_evidence(db, return_doc, selections=submitted["source_selections"], allowed_store_ids=allowed_store_ids)
         except ReturnProvenanceError as exc:
-            _identity(db, event, None)
+            _claim(db, event, None, rule_passed)
             return _pending_event(db, event, submitted, [{"code": exc.code, "message": str(exc)}], actor_id), False
         registration = _hash([sources[0]["recipient_entity_id"], sources[0]["recipient_gstin"]])
-        _identity(db, event, registration)
         for previous in db.get_collection(EVENTS).find({**return_event_query(event), "posting_status": "POSTED"}):
             if {s["source_key"] for s in previous["sources"]} != {s["source_key"] for s in sources}:
                 _error("RETURN_ORIGIN_CHANGED", "A partly confirmed return cannot change its original bill allocation.", 409)
         allocations = _prepare_allocations(sources, submitted)
         _locked(db, submitted["credit_note_date"])
+        # Last: a note refused above claims nothing, so it strands no number.
+        _claim(db, event, registration, rule_passed)
         token = uuid4().hex
         updated = db.get_collection(EVENTS).update_one(
             {"_id": event["_id"], "version": event["version"], "posting_status": "PENDING_EVIDENCE"},
