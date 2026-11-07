@@ -8,7 +8,7 @@ rounding or validation was changed.
 from fastapi import Depends, HTTPException
 from ..auth import get_current_user
 from ...dependencies import get_order_repository, validate_store_access
-from ._shared import router
+from ._shared import refuse_if_advance_refunded, router
 
 # ============================================================================
 # POS-6: UPI QR code endpoint
@@ -43,6 +43,19 @@ async def get_upi_qr(
     # Store-scope check (same pattern as GET /orders/{id}).
     validate_store_access(order.get("store_id"), current_user)
 
+    # The QR asks for what is still OWED - the same reading the payment door
+    # uses (delivery_gate.order_balance_due) - never the whole bill: a part
+    # payment used to leave a QR for grand_total (audit L2-PAYMENT-F03). A
+    # cancelled / advance-refunded / fully-paid order has nothing to collect.
+    if order.get("status") == "CANCELLED":
+        raise HTTPException(status_code=400, detail="This order is cancelled - there is nothing to collect.")
+    refuse_if_advance_refunded(order, "take a payment")
+    from ...services.delivery_gate import order_balance_due
+
+    balance_due = round(order_balance_due(order) or 0.0, 2)
+    if balance_due <= 0:
+        raise HTTPException(status_code=400, detail="Nothing is due on this order - no UPI QR to show.")
+
     store_id = order.get("store_id") or current_user.get("active_store_id") or ""
 
     # Resolve the store's UPI VPA.
@@ -74,9 +87,8 @@ async def get_upi_qr(
 
     merchant = _resolve_merchant_name(raw_db, store_id)
     order_ref = order.get("order_number") or order_id
-    grand_total = float(order.get("grand_total") or 0.0)
 
-    upi_link = build_upi_link(vpa, merchant, grand_total, order_ref)
+    upi_link = build_upi_link(vpa, merchant, balance_due, order_ref)
     qr_image = build_qr_data_uri(upi_link)
 
     return {
@@ -85,7 +97,7 @@ async def get_upi_qr(
         "store_id": store_id,
         "vpa": vpa,
         "merchant": merchant,
-        "amount": grand_total,
+        "amount": balance_due,
         "currency": "INR",
         "upi_link": upi_link,
         "qr_image": qr_image,  # None when qrcode lib absent
