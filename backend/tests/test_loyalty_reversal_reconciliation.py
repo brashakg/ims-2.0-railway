@@ -308,3 +308,157 @@ def test_a_voided_return_is_not_reversed(rig, tasks):
     books = _books(rig)
     _tick(rig)
     assert _books(rig) == books and _reversal_rows(rig) == []
+
+
+# --- Independent review of e087e43a -----------------------------------------
+
+def _audited(rig):
+    return rig["db"].audit_logs.count_documents({"action": "loyalty.reversal_reconciled"})
+
+
+def _sweep():
+    from api.routers.loyalty import reconcile_loyalty_reversals
+
+    return reconcile_loyalty_reversals()
+
+
+def test_a_late_restore_on_a_bill_that_earned_is_recorded_once(rig, tasks, monkeypatch):
+    """A bill that earned gets its marker from the cancel, before the debit: the
+    marker never names that debit, so every tick for the sweep's reach takes the
+    late-restore step again. Only the tick that moved the points may say so."""
+    _earn_on_order(rig)
+    _late_debit_stranded(rig, monkeypatch)
+
+    assert _sweep()["reconciled"] == 1
+    acct = _account(rig)
+    assert int(acct["balance_points"]) == START and int(acct["lifetime_redeemed"]) == 0
+    books = _books(rig)
+    for _ in range(3):
+        assert _sweep() == {"reconciled": 0, "unresolved": 0, "clean": 1}
+    assert _books(rig) == books
+    assert _audited(rig) == 1
+
+
+def test_a_restore_the_door_already_made_is_no_news_to_the_tick(rig, tasks, monkeypatch):
+    _earn_on_order(rig)
+    _cancel_inside_the_press(rig, monkeypatch)
+    with pytest.raises(HTTPException) as ei:  # the press's own check hands it back
+        _redeem()
+    assert ei.value.status_code == 409
+    _stamp_cancelled(rig)
+    books = _books(rig)
+
+    _tick(rig)
+    _tick(rig)
+    assert _books(rig) == books and int(_account(rig)["balance_points"]) == START
+    assert _audited(rig) == 0
+
+
+RET = "RET-U"
+ACCOUNTS_USER = {"user_id": "acc-1", "username": "accounts", "roles": ["ACCOUNTANT"],
+                 "active_store_id": "BV-TEST-01", "store_ids": ["BV-TEST-01"]}
+
+
+def _unfinished_return(rig, monkeypatch, *, customer=CUST, credit=True, **hold):
+    """A return whose money moved but whose record was never written: the press
+    stopped before its reversal, so Needs completing is the only way forward."""
+    from api.routers import returns as returns_router
+
+    monkeypatch.setattr(returns_router, "_get_db", lambda: rig["db"])
+    monkeypatch.setattr(returns_router, "_orders_coll", lambda: rig["db"].orders)
+    facts = {"amount": 1200.0, "at": "2026-11-01T10:00:00+00:00", "kept": True, "money_out": True,
+             "store_id": "BV-TEST-01", "customer_id": customer, "net_amount": 1200.0, "return_type": "RETURN",
+             "gst_view": {"taxable": 1016.95, "tax": 183.05, "gross": 1200.0},
+             "tenders": [{"method": "CASH", "amount": 1200.0}],
+             "lines": [{"item_id": "li1", "product_id": "P1", "qty": 1.0}]}
+    facts.update(hold)
+    rig["db"].orders.update_one({"order_id": ORDER}, {"$set": {"refund_holds": {RET: facts}, "refund_holds_v": 1}})
+    if credit:
+        rig["db"].credit_note_ledger.insert_one({
+            "_id": f"{RET}:credit", "entry_id": f"{RET}:credit", "customer_id": customer, "type": "ISSUED",
+            "applied": True, "delta": 1200.0, "note_number": "TST01/C2627/0007", "order_id": ORDER,
+            "created_at": "2026-11-01T10:00:00+00:00",
+            "undo_on_void": {"order_id": ORDER, "return_id": RET, "net_amount": 1200.0, "return_type": "CREDIT_NOTE",
+                             "lines": facts["lines"], "refund_tenders": [{"method": "STORE_CREDIT", "amount": 1200.0}]}})
+    return lambda: asyncio.run(returns_router.complete_return_record(
+        RET, returns_router.CompleteRecordBody(cash_leg_paid=True), ACCOUNTS_USER))
+
+
+def _return_doc(rig):
+    return rig["db"].returns.find_one({"return_id": RET})
+
+
+def _return_exceptions(rig):
+    return list(rig["db"].tasks.find({"source_ref": f"loyalty_reversal:{RET}"}))
+
+
+@pytest.mark.parametrize("credit", [True, False], ids=["credit_line", "held_refund"])
+def test_a_return_completed_by_hand_gets_its_reversal_once(rig, tasks, monkeypatch, credit):
+    _earn_on_order(rig)
+    _redeem()
+    assert int(_account(rig)["balance_points"]) == START + 11 - 100
+    complete = _unfinished_return(rig, monkeypatch, credit=credit)
+
+    assert complete()["status"] == "COMPLETED"
+    _tick(rig)
+    acct = _account(rig)
+    assert int(acct["balance_points"]) == START and int(acct["lifetime_redeemed"]) == 0
+    assert _return_doc(rig)["loyalty_reversal_failed"] is False
+    assert _audited(rig) == 1
+
+    books = _books(rig)
+    _tick(rig)
+    assert _books(rig) == books and _audited(rig) == 1 and len(_reversal_rows(rig)) == 1
+    assert _return_exceptions(rig) == []
+
+
+def test_a_hand_completed_return_whose_reversal_already_ran_moves_nothing(rig, tasks, monkeypatch):
+    from api.routers.loyalty import reverse_for_return
+
+    _earn_on_order(rig)
+    _redeem()
+    assert reverse_for_return(RET, ORDER, CUST)["ok"] is True  # the press died just after this
+    books = _books(rig)
+    complete = _unfinished_return(rig, monkeypatch)
+
+    complete()
+    _tick(rig)
+    assert _books(rig) == books and _audited(rig) == 0
+    assert _return_doc(rig)["loyalty_reversal_failed"] is False
+
+
+def test_a_hand_completed_return_that_cannot_settle_is_a_visible_exception(rig, tasks, monkeypatch):
+    _earn_on_order(rig, 500)
+    rig["accounts"].adjust_balance(CUST, delta_points=-(START + 500))  # already spent
+    complete = _unfinished_return(rig, monkeypatch)
+
+    complete()
+    _tick(rig)
+    assert _return_doc(rig)["loyalty_reversal_failed"] is True
+    assert [t["priority"] for t in _return_exceptions(rig)] == ["P1"]
+    assert _audited(rig) == 0
+
+    rig["accounts"].adjust_balance(CUST, delta_points=500)  # the balance can cover it now
+    _tick(rig)
+    assert _return_doc(rig)["loyalty_reversal_failed"] is False
+    assert int(_account(rig)["balance_points"]) == 0
+    assert [t["status"] for t in _return_exceptions(rig)] == ["COMPLETED"]
+
+
+def test_a_hand_completed_walk_in_return_opens_no_loyalty_account(rig, tasks, monkeypatch):
+    complete = _unfinished_return(rig, monkeypatch, customer="walkin-77", credit=False)
+
+    complete()
+    _tick(rig)
+    assert rig["db"].loyalty_accounts.find_one({"customer_id": "walkin-77"}) is None
+    assert _return_doc(rig)["loyalty_reversal_failed"] is False
+
+
+def test_the_saved_doc_keeps_the_reversal_answer_its_press_gave(rig, tasks, monkeypatch):
+    """A kept doc was built after the press's reversal: it already says what
+    happened, and a settled reversal is not re-opened."""
+    complete = _unfinished_return(rig, monkeypatch, credit=False, doc={
+        "return_id": RET, "order_id": ORDER, "customer_id": CUST, "store_id": "BV-TEST-01",
+        "refund_tenders": [{"method": "CASH", "amount": 1200.0}], "loyalty_reversal_failed": False})
+
+    assert complete()["loyalty_reversal_failed"] is False

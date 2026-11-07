@@ -5728,6 +5728,11 @@ async def complete_return_record(
             "restock_applied": False,
             "restock_stock_ids": [],
             "created_by": current_user.get("user_id"),
+            # Nothing kept says whether the press reached its loyalty reversal,
+            # so the sweep (reconcile_loyalty_reversals) settles it: the engine
+            # is idempotent on the return, and a reversal already made moves
+            # nothing and clears this. A kept doc already holds the press's answer.
+            "loyalty_reversal_failed": True,
         }
         source = "credit line" if credit_landed else "held refund"
     if owed:

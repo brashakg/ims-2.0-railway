@@ -619,6 +619,11 @@ def complete_bill_redemption(order_id: str, customer_id: str) -> None:
         _complete_redeem_row(txns, customer_id, order_id, claim)
 
 
+def _is_walk_in(customer_id: Any) -> bool:
+    """Walk-in pseudo-customers never earn or redeem: nothing to reverse."""
+    return str(customer_id).startswith(("walkin-", "walk-in"))
+
+
 def _reversal_settled(outcome: Dict[str, Any]) -> bool:
     """True when a reversal needs nothing more. No customer on the record is
     nothing to reverse, the cancel and return doors' own reading."""
@@ -1810,7 +1815,9 @@ def _restore_late_debit(
     )
     if status == "failed":
         return {"ok": False, "reason": "balance_update_failed", "unapplied_reversal": True}
-    return {"redeemed_restored": points}
+    # Only the call that moved the points says so: this step re-runs on every
+    # sweep tick, and each answer here becomes a reversal_reconciled audit row.
+    return {"redeemed_restored": points} if status == "applied" else None
 
 
 def _reverse_order_loyalty(
@@ -2298,6 +2305,8 @@ def reverse_for_return(
     """
     if not customer_id or not order_id or not return_id:
         return {"ok": False, "reason": "missing_ids"}
+    if _is_walk_in(customer_id):
+        return {"ok": True, "skipped_reason": "walkin", "earned_clawed": 0}
     return _reverse_order_loyalty(
         order_id=order_id,
         customer_id=customer_id,
@@ -2331,7 +2340,7 @@ def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, A
     cid = str(customer_id or "").strip()
     if not cid:
         return {"ok": False, "reason": "missing_ids"}
-    if cid.startswith(("walkin-", "walk-in")):
+    if _is_walk_in(cid):
         return {"ok": True, "skipped_reason": "walkin", "earned_clawed": 0}
     def reverse() -> Dict[str, Any]:
         return _reverse_order_loyalty(
