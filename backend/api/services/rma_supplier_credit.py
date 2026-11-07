@@ -32,8 +32,8 @@ OVER_CAP = {"ORIGINAL_QUANTITY_EXCEEDED", "ORIGINAL_AMOUNT_EXCEEDED", "RETURN_AM
             "RECEIPT_QUANTITY_EXCEEDED", "RETURNED_UNIT_ALREADY_CREDITED"}
 
 
-# A claimed note no door can free (retrying, rejecting, closing and a new RMA all
-# fail): the physical rule stops one from before claims recorded it
+# A claimed note no door can free as things stand (retrying, rejecting, closing and
+# a new RMA all fail): the physical rule stops one from before claims recorded it
 # (supplier_credit_evidence.rule_settled) or with its own pieces back, and another
 # credit on the same goods stops the rest (held_note). Every refusal says so
 # instead of promising a retry. The way out is the owner's.
@@ -126,6 +126,23 @@ def unfinished_on_return(db, return_doc):
         {**return_event_query(return_doc), "identity_claimed": {"$ne": False}, "posting_status": {"$ne": "POSTED"}})
     live = db.get_collection("vendor_rmas").find({"return_id": return_doc["return_id"], "status": {
         "$nin": [RMAStatus.REJECTED.value, RMAStatus.CLOSED.value]}})
+def hold_doors(db, event):
+    """Only this RMA can finish its note, and ending the RMA or its return shuts
+    that door: the note passes both while they are open (canonical._claim)."""
+    claim = {"$addToSet": {canonical.NOTE_CLAIMS: event["_id"]}}
+    rma = db.get_collection("vendor_rmas").find_one_and_update(
+        {"rma_id": event["return_id"], "status": {"$in": sorted(READY)}}, claim)
+    if rma is None or (rma.get("return_id") and not db.get_collection("vendor_returns").update_one(
+            {"return_id": rma["return_id"], "status": {"$nin": ["cancelled", "replaced"]}}, claim).matched_count):
+        raise SupplierCreditError(canonical.DOOR_SHUT, "This RMA or its return has ended, so it cannot "
+                                  "take a supplier note. The note was not recorded.", 409)
+
+
+def claims_as_read(door):
+    """The condition an end adds to its write: no note passed since it checked."""
+    return {canonical.NOTE_CLAIMS: door.get(canonical.NOTE_CLAIMS)}
+
+
     return next((e for e in own if _holds_its_door(e)), None) or next(
         (e for e in (unfinished_note(db, rma) for rma in live) if e), None)
 

@@ -224,6 +224,7 @@ def _masked(doc: dict, user: dict) -> dict:
     # the accounts roles only (owner ruling 2026-10-12, services/cost_mask).
     result = mask_rma(_with_rupees(doc), user)
     result.pop("credit_confirmation_fence", None)
+    result.pop("note_claims", None)
     return result
 
 
@@ -346,8 +347,11 @@ def _require_no_unfinished_note(doc: dict) -> None:
     """Rejecting or closing shuts this RMA's credit door. A supplier note it has
     claimed can finish nowhere else (one note number, one record), so it is
     finished here first. Says no number: a manager may press reject. One that
-    cannot finish is told that, not to retry."""
-    waiting = rma_supplier_credit.unfinished_note(_get_db(), doc)
+    cannot finish is told that, not to retry. The end's write then carries
+    claims_as_read(doc): this reads, only that write decides."""
+    db = _get_db()
+    waiting = (rma_supplier_credit.canonical.finish_open_claims(db, doc)
+               or rma_supplier_credit.unfinished_note(db, doc))
     if waiting:
         _require_physical_return(doc, shipped=True)
         raise HTTPException(status_code=409, detail=rma_supplier_credit.held_note(waiting) or (
@@ -657,12 +661,15 @@ async def reject_rma(
         res = eng._transition(  # noqa: SLF001 - the engine's atomic from-state guard
             rma_id, from_status=status, to_status=RMAStatus.REJECTED.value,
             actor=actor, notes=body.reason or "", audit_action="rma_rejected",
+            guard=rma_supplier_credit.claims_as_read(doc),
         )
     else:
         # DISPATCHED (accounts) -- or a state no reject leaves, which the engine
         # answers 409 invalid_transition with nothing written.
-        res = eng.reject(rma_id, actor=actor, reason=body.reason or "")
+        res = eng.reject(rma_id, actor=actor, reason=body.reason or "",
+                         guard=rma_supplier_credit.claims_as_read(doc))
     if not res.get("ok"):
+        _require_no_unfinished_note(eng.get(rma_id) or doc)  # one that passed since says so
         raise _http_from_result(res, current_user)
     return mask_rma(res, current_user)
 
@@ -689,8 +696,10 @@ async def close_rma(
         actor=current_user.get("user_id"),
         notes=body.notes or "",
         write_off_variance=bool(body.write_off_variance),
+        guard=rma_supplier_credit.claims_as_read(doc),
     )
     if not res.get("ok"):
+        _require_no_unfinished_note(eng.get(rma_id) or doc)  # one that passed since says so
         raise _http_from_result(res, current_user)
     # A written-off balance ends the return's wait for a credit too.
     rma_supplier_credit.settle_return(_get_db(), eng.get(rma_id) or {})

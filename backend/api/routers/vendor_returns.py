@@ -1163,7 +1163,8 @@ async def update_return_status(
         # first (one number, one record).
         ends_credit = status_update.status == "cancelled" or (
             status_update.status == "replaced" and return_doc.get("return_type") != "replacement")
-        waiting = ends_credit and rma_supplier_credit.unfinished_on_return(db, return_doc)
+        waiting = ends_credit and (rma_supplier_credit.canonical.finish_open_claims(db, return_doc)
+                                   or rma_supplier_credit.unfinished_on_return(db, return_doc))
         held = waiting and rma_supplier_credit.held_note(waiting)
         if held:
             raise HTTPException(status_code=409, detail=held)
@@ -1257,6 +1258,9 @@ async def update_return_status(
         # pure (no side effect) and is simply discarded by the loser.
         expected = {"return_id": return_id, "status": current_status,
                     "credit_confirmation_fence": {"$exists": False}}
+        # No note passed this return since the check above (one number, one record).
+        if ends_credit:
+            expected.update(rma_supplier_credit.claims_as_read(return_doc))
         # A Ship moving the pieces holds the return: only it may move it on.
         if ship_token:
             expected["ship_fence.token"] = ship_token
