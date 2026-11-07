@@ -126,7 +126,9 @@ def _assert_books_reconcile(db):
     seen = set()
     for o in db.orders.find():
         pays = o.get("payments") or []
-        assert round(float(o["amount_paid"]), 2) == round(sum(p["amount"] for p in pays), 2)
+        # A CREDIT row is a pay-later promise, never money in.
+        assert round(float(o["amount_paid"]), 2) == round(
+            sum(p["amount"] for p in pays if p.get("method") != "CREDIT"), 2)
         assert o["amount_paid"] <= o["grand_total"]
         if o["status"] != "CANCELLED":  # the cancel door zeroes it; a test may write the status raw
             assert round(o["grand_total"] - o["amount_paid"], 2) == round(o["balance_due"], 2)
@@ -965,20 +967,100 @@ def test_a_double_fault_leaves_a_draft_a_re_press_confirms_once(rig, monkeypatch
     assert [h["status"] for h in bill["status_history"]] == ["CONFIRMED"] and len(jobs) == 1
 
 
-def test_a_double_fault_at_the_till_keeps_the_money_and_the_confirm_door_finishes(rig, monkeypatch):
-    from api.routers.orders.confirm import confirm_order
+def test_a_double_fault_at_the_till_keeps_the_money_and_the_repair_finishes(rig, monkeypatch):
+    """No staff screen has a Confirm button, a re-press replays, and a settled bill
+    takes no new payment: the hourly repair is the door that moves this bill."""
+    from api.routers.orders.workshop import repair_workshop_handoffs
 
     db = rig["db"]
     _bill(db, "ORD")
     with monkeypatch.context() as m:
         _status_writes_fail(rig, m)
         res = _pay()
+        assert _pay()["_idempotent_replay"] is True
+        assert repair_workshop_handoffs(db) == 0  # still down: the next tick comes back
     bill = db.orders.find_one({"order_id": "ORD"})
     assert res["order_status"] == "DRAFT" and bill["status"] == "DRAFT" and bill["amount_paid"] == 1000
-    assert _pay()["_idempotent_replay"] is True
-    assert asyncio.run(confirm_order("ORD", USER))["status"] == "CONFIRMED"
+
+    assert repair_workshop_handoffs(db) == 1
+    bill, jobs = db.orders.find_one({"order_id": "ORD"}), _jobs(db, "ORD")
+    assert bill["status"] == "CONFIRMED" and bill["workshop_job_id"] == jobs[0]["job_id"]
+    assert len(bill["payments"]) == 1 and bill["amount_paid"] == 1000 and bill["balance_due"] == 0
+
+    assert repair_workshop_handoffs(db) == 0
     bill = db.orders.find_one({"order_id": "ORD"})
-    assert len(bill["payments"]) == 1 and len(_jobs(db, "ORD")) == 1
+    assert [h["status"] for h in bill["status_history"]] == ["CONFIRMED"] and len(_jobs(db, "ORD")) == 1
+
+
+def test_a_stranded_bill_with_no_fitting_is_released_to_the_ready_door(rig, monkeypatch):
+    from api.routers.orders.delivery import mark_ready
+    from api.routers.orders.workshop import repair_workshop_handoffs
+
+    db = rig["db"]
+    _bill(db, "ORD", items=[])
+    with monkeypatch.context() as m:
+        _status_writes_fail(rig, m)
+        _pay()
+    with pytest.raises(HTTPException) as refused:
+        asyncio.run(mark_ready("ORD", USER))
+    assert refused.value.status_code == 400
+
+    assert repair_workshop_handoffs(db) == 0  # no job owed, the bill still moves
+    assert db.orders.find_one({"order_id": "ORD"})["status"] == "CONFIRMED" and _jobs(db, "ORD") == []
+    assert asyncio.run(mark_ready("ORD", USER))["status"] == "READY"
+
+
+CREDIT_ROW = {"payment_id": "P1", "method": "CREDIT", "amount": 1000.0}
+
+
+def _touched(**ago):
+    return utc_now().replace(tzinfo=None) - timedelta(**ago)
+
+
+def test_a_credit_tender_counts_as_the_first_payment(rig):
+    """amount_paid stays 0 on a pay-later tender, and the till confirms on it."""
+    from api.routers.orders.workshop import repair_workshop_handoffs
+
+    db = rig["db"]
+    _bill(db, "ORD", payments=[CREDIT_ROW], payment_status="CREDIT", updated_at=_touched(hours=1))
+    assert repair_workshop_handoffs(db) == 1
+    assert db.orders.find_one({"order_id": "ORD"})["status"] == "CONFIRMED" and len(_jobs(db, "ORD")) == 1
+
+
+@pytest.mark.parametrize("over", [
+    {"payments": [], "updated_at": _touched(hours=1)},  # an ordinary open draft
+    {"payments": [CREDIT_ROW], "updated_at": _touched(days=8)},  # older than the window
+    {"payments": [CREDIT_ROW]},  # never touched by the tender writer
+    {"payments": [CREDIT_ROW], "updated_at": _touched(hours=1), "advance_refund_id": "RET-1"},
+], ids=["no-tender", "old", "no-stamp", "refund-claim"])
+def test_the_repair_leaves_a_draft_it_does_not_own(rig, over):
+    from api.routers.orders.workshop import repair_workshop_handoffs
+
+    db = rig["db"]
+    _bill(db, "ORD", **over)
+    assert repair_workshop_handoffs(db) == 0
+    assert db.orders.find_one({"order_id": "ORD"})["status"] == "DRAFT" and _jobs(db, "ORD") == []
+
+
+def test_a_cancel_inside_the_repair_wins_the_draft(rig, monkeypatch):
+    from api.routers.orders.workshop import repair_workshop_handoffs
+
+    db = rig["db"]
+    _bill(db, "ORD", payments=[CREDIT_ROW], payment_status="CREDIT", updated_at=_touched(hours=1))
+    real, fired = rig["collection_type"].find_one_and_update, []
+
+    def cancel_first(self, query, update, *a, **k):
+        if self.name == "orders" and (update.get("$set") or {}).get("status") == "CONFIRMED":
+            fired.append(1)
+            _together(_cancel)
+        return real(self, query, update, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(rig["collection_type"], "find_one_and_update", cancel_first)
+        assert repair_workshop_handoffs(db) == 0
+    bill = db.orders.find_one({"order_id": "ORD"})
+    assert fired and bill["status"] == "CANCELLED" and _jobs(db, "ORD") == []
+    assert "CONFIRMED" not in [h["status"] for h in bill.get("status_history") or []]
 
 
 def test_a_double_fault_keeps_the_webhook_retryable(rig, monkeypatch):

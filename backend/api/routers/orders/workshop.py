@@ -228,7 +228,8 @@ def confirm_and_hand_off(
     a write that landed and lost its reply, and for its own outage -- so the
     outcome is read back and the handoff follows the STORED bill, not the claim.
     Raises while the bill is still DRAFT or unreadable (repo.find_by_id answers
-    None for a failed read, and None must not pass as 'no longer DRAFT').
+    None for a failed read, and None must not pass as 'no longer DRAFT'); a
+    DRAFT holding a tender comes back through repair_workshop_handoffs.
     Returns (stored bill, job_id). A bill another door moved on, or cancelled,
     is left standing and gets no job.
     """
@@ -251,6 +252,7 @@ def confirm_and_hand_off(
 # older than this is left to a person (the hours of a real outage fit easily).
 # ponytail: one flat window, widen it if an outage ever outlasts it.
 _HANDOFF_REPAIR_WINDOW = timedelta(days=7)
+_REPAIR_ACTOR = "workshop-handoff-repair"
 
 
 def _end_jobs_of_recent_cancels(orders, jobs, since) -> None:
@@ -269,12 +271,40 @@ def _end_jobs_of_recent_cancels(orders, jobs, since) -> None:
             logger.warning("[ORDERS] cancelled %s job not ended: %s", order.get("order_id"), exc)
 
 
+def _confirm_paid_drafts(orders, repo, wrepo, since) -> int:
+    """A tender stands on a DRAFT only when its door's confirm failed: every door
+    confirms on the first tender, and that bill has no other way on (no staff
+    screen confirms, a re-press replays, a settled bill takes no new tender, and
+    the invoice, ready and deliver doors refuse a DRAFT). The same step as those
+    doors, so a cancel still wins the claim. `updated_at` is the tender writer's
+    stamp; a bill a refund-advance claim holds is on its way to CANCELLED."""
+    linked = 0
+    for order in orders.find({
+        "status": "DRAFT",
+        "payments.0": {"$exists": True},
+        "advance_refund_id": None,
+        "updated_at": {"$gte": since},
+    }):
+        order_id = order.get("order_id")
+        try:
+            stored, job_id = confirm_and_hand_off(
+                repo, order_id, _REPAIR_ACTOR,
+                hand_off=lambda bill, by: ensure_workshop_job(bill, by, wrepo, repo),
+            )
+            linked += 1 if job_id else 0
+            logger.warning("[ORDERS] paid draft %s moved on by the repair: %s", order_id, stored.get("status"))
+        except Exception as exc:  # noqa: BLE001 -- the next tick comes back
+            logger.warning("[ORDERS] paid draft %s not confirmed: %s", order_id, exc)
+    return linked
+
+
 def repair_workshop_handoffs(db) -> int:
-    """The hourly repair: finish the handoff of any recently door-confirmed bill
-    that has no job pointer -- the reach of a till or /confirm door with no
-    inbox row to retry, and of an event that went dead -- and end any job still
-    open on a recently cancelled bill. Idempotent (the job's fixed _id),
-    fail-soft per bill. Returns how many bills it linked."""
+    """The hourly repair: confirm any recent DRAFT that holds a tender, finish
+    the handoff of any recently door-confirmed bill that has no job pointer --
+    the reach of a till or /confirm door with no inbox row to retry, and of an
+    event that went dead -- and end any job still open on a recently cancelled
+    bill. Idempotent (the job's fixed _id, the guarded claim), fail-soft per
+    bill. Returns how many bills it linked."""
     from database.repositories.order_repository import OrderRepository
     from database.repositories.workshop_repository import WorkshopJobRepository
 
@@ -284,6 +314,7 @@ def repair_workshop_handoffs(db) -> int:
         repo = OrderRepository(orders)
         wrepo = WorkshopJobRepository(db.get_collection("workshop_jobs"))
         since = utc_now().replace(tzinfo=None) - _HANDOFF_REPAIR_WINDOW
+        repaired += _confirm_paid_drafts(orders, repo, wrepo, since)
         for order in orders.find({
             "status": "CONFIRMED",
             "workshop_job_id": {"$in": [None, ""]},
@@ -292,7 +323,7 @@ def repair_workshop_handoffs(db) -> int:
             if not _confirmed_at_a_door(order):
                 continue
             try:
-                if ensure_workshop_job(order, "workshop-handoff-repair", wrepo, repo):
+                if ensure_workshop_job(order, _REPAIR_ACTOR, wrepo, repo):
                     repaired += 1
                     logger.warning("[ORDERS] workshop handoff repaired for %s", order.get("order_id"))
             except Exception as exc:  # noqa: BLE001 -- the next tick comes back

@@ -500,8 +500,8 @@ async def add_payment(
             if refreshed and refreshed.get("status") == "DRAFT":
                 # Same rule as /confirm (F16: this door once skipped the safety
                 # net and a paid spectacle order never reached the lab). The
-                # payment stands whatever this answers; a failed handoff is
-                # finished by the hourly repair.
+                # payment stands whatever this answers; a failed confirm or
+                # handoff is finished by the hourly repair.
                 try:
                     refreshed, workshop_job_id = confirm_and_hand_off(
                         repo, order_id, current_user.get("user_id")
