@@ -447,7 +447,8 @@ async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) ->
                 res = call()  # the orders/* door is async, the others sync
                 res = (await res if inspect.isawaitable(res) else res) or {}
                 applied = (
-                    bool(res.get("status_synced")) if family == "orders"
+                    bool(res.get("status_synced") or res.get("customer_link_repaired"))
+                    if family == "orders"
                     else res.get("status") in _SWEEP_OK[family]
                 )
                 if not applied and (res.get("status"), res.get("reason")) not in _SWEEP_SETTLED:
@@ -523,6 +524,10 @@ async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) ->
                 if check and (check["status"], check["shopify_total"]) != (
                     stored.get("status"), stored.get("shopify_total")
                 ):
+                    topic = "orders/updated"
+                # A customer link that failed at booking: the mapper's replay
+                # repairs it, with no other fact to wait for.
+                elif existing.get("customer_link_failed"):
                     topic = "orders/updated"
             if topic:
                 res = await feed(topic, raw, lambda: map_routed_order(order, db, webhook_id=None, topic=topic))
