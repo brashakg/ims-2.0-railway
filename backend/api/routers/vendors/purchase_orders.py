@@ -15,6 +15,7 @@ from ._shared import (
     _get_db,
     _pm,
     _po_catalog_gate_on,
+    buyable_vendor,
     datetime,
     get_audit_repository,
     get_product_repository,
@@ -640,11 +641,9 @@ async def create_po(
 
     po_id = str(uuid.uuid4())
 
-    # Validate vendor exists
+    # The vendor exists and is not switched off (L1-F40).
     if vendor_repo is not None:
-        vendor = vendor_repo.find_by_id(po.vendor_id)
-        if vendor is None:
-            raise HTTPException(status_code=404, detail="Vendor not found")
+        vendor = buyable_vendor(vendor_repo, po.vendor_id)
 
     computed, products, typed_in = price_po_lines(
         po.items,

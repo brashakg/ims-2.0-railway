@@ -385,8 +385,13 @@ CANCELLABLE_STATUSES = [s for s, to in VALID_TRANSITIONS.items() if "CANCELLED" 
 _ANY_INVOICE = object()
 
 
+# The money fields a cancel's "no money held" check reads (L2-POS-F04).
+_CANCEL_MONEY_KEYS = ("payments", "amount_paid")
+
+
 def _claim_order_for_cancel(
-    repo, order_id: str, reason: str, current_user: dict, invoice=_ANY_INVOICE
+    repo, order_id: str, reason: str, current_user: dict, invoice=_ANY_INVOICE,
+    money_read: Optional[dict] = None,
 ) -> Optional[dict]:
     """Atomically flip ONE order to CANCELLED, only from a status the staff
     transition table (VALID_TRANSITIONS) lets cancel -- never a SHIPPED order
@@ -398,18 +403,32 @@ def _claim_order_for_cancel(
     loyalty clawback must run for exactly one caller, and a check-then-act
     status test cannot promise that under two concurrent cancels.
 
-    Fail-soft: a collection that cannot do find_one_and_update (legacy mock)
-    falls back to the previous read-check-update behaviour rather than blocking
-    a cancel outright.
+    Fail-closed (Codex PR-1396): this one conditional write is the ONLY thing
+    that may cancel. Any error returns None -- no reread-then-plain-write, whose
+    gap is the very race the filter closes (a payment landing there left a
+    CANCELLED order holding the money with its unit released). The error says
+    nothing about whether the write landed, so the caller decides on a fresh
+    read: still cancellable is a retry and nothing was undone; CANCELLED means
+    it landed under these same predicates, and the retry door finishes the undo.
 
     ``invoice``: the tax invoice number the caller's checks read (None: no
     number). The claim lands only while the order still carries exactly it
     (GST batch 5): an invoice minted between the door's read and this write
     wins, so a cancel never lands on an invoice no credit note reverses.
+
+    ``money_read``: the order doc the caller's money check read. The claim
+    lands only while its payments and amount_paid are still exactly those
+    (L2-POS-F04): a payment pushed between the check and this write wins, so
+    a cancel never strands money on a CANCELLED order. The payment write's own
+    compare-and-set carries the status, so on the one document exactly one of
+    the two lands.
     """
     inv_match = {}
     if invoice is not _ANY_INVOICE:
         inv_match = {"invoice_number": invoice or {"$in": [None, ""]}}
+    if money_read is not None:
+        for key in _CANCEL_MONEY_KEYS:
+            inv_match[key] = money_read[key] if key in money_read else {"$exists": False}
     payload = {
         "status": "CANCELLED",
         # Nothing is owed on a cancelled order (PR #1264): no phantom balance
@@ -419,33 +438,11 @@ def _claim_order_for_cancel(
         "cancelled_by": current_user.get("user_id"),
         "cancelled_at": utc_now_iso(),
     }
-    coll = getattr(repo, "collection", None)
-    updater = getattr(coll, "find_one_and_update", None) if coll is not None else None
-    if callable(updater):
-        try:
-            return updater(
-                {"order_id": order_id, "status": {"$in": CANCELLABLE_STATUSES}, **inv_match},
-                {"$set": payload},
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[ORDERS] atomic cancel claim unavailable for %s (%s); "
-                "falling back to read-check-update",
-                order_id,
-                exc,
-            )
-    existing = repo.find_by_id(order_id)
-    if not existing or existing.get("status") not in CANCELLABLE_STATUSES:
-        return None
-    if inv_match and (existing.get("invoice_number") or None) != (invoice or None):
-        return None
-    # GATE ON THE WRITE. base_repository.update swallows exceptions and returns
-    # False, so discarding this result meant a FAILED status write still ran the
-    # whole stock + loyalty undo and reported the order cancelled -- stock back
-    # on the shelf and points clawed for an order still sitting CONFIRMED.
-    if not repo.update(order_id, payload):
-        logger.error(
-            "[ORDERS] cancel status write failed for %s; undo NOT run", order_id
+    try:
+        return repo.collection.find_one_and_update(
+            {"order_id": order_id, "status": {"$in": CANCELLABLE_STATUSES}, **inv_match},
+            {"$set": payload},
         )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[ORDERS] cancel claim failed for %s (%s); undo NOT run", order_id, exc)
         return None
-    return existing

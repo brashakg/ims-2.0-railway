@@ -13,13 +13,16 @@ Endpoints (prefix /api/v1/shipping):
   GET  /shipments/{id}/track            - live track via Shiprocket, falling back
                                           to the last-known status on the doc.
 
-Everything FAILS SOFT: no DB / no creds / wrong mode never 500s. The actual
-booking is gated exactly like MEGAPHONE/NEXUS sends - see services/shiprocket.py.
+Everything FAILS SOFT: no DB / no creds / wrong mode never 500s - EXCEPT the
+order: every door authorises against the shipment's canonical order and shop,
+so a missing / unreadable / other-shop order books and reveals nothing. The
+actual booking is gated exactly like MEGAPHONE/NEXUS sends - see
+services/shiprocket.py.
 
 Conventions mirrored from returns.py:
   - get_current_user / require_roles for auth + RBAC (writes gated).
   - _get_db() raw-handle pattern; fail-soft when the DB is absent.
-  - persists to a `shipments` collection; list is store-scoped for non-HQ roles.
+  - persists to a `shipments` collection; list is store-scoped (resolve_store_scope).
 """
 
 from __future__ import annotations
@@ -38,7 +41,8 @@ from .auth import get_current_user, require_roles
 from ..dependencies import (
     get_customer_repository,
     get_order_repository,
-    validate_store_access,
+    in_reach_or_404,
+    resolve_store_scope,
 )
 from ..services import shiprocket
 
@@ -56,8 +60,6 @@ _FULFILMENT_ROLES = (
     "CASHIER",
     "SALES_STAFF",
 )
-
-_HQ_ROLES = ("SUPERADMIN", "ADMIN", "AREA_MANAGER")
 
 # Orders whose goods must never leave. OrderStatus (orders.py) names CANCELLED
 # as its only dead state; REFUNDED / RETURNED / VOID(ED) are the wider
@@ -153,10 +155,12 @@ def generate_shipment_id() -> str:
 
 
 def _resolve_order(order_id: str) -> Optional[Dict[str, Any]]:
-    """Look up the IMS order by id (or order_number). Fail-soft -> None."""
+    """Look up the IMS order by id (or order_number); None = no such order.
+    FAILS CLOSED (audit L2-INTEGRATION-F04): the order is what authorises a
+    shipment's shop, so an unreadable order is a 503, never "no order"."""
     repo = get_order_repository()
     if repo is None:
-        return None
+        raise HTTPException(status_code=503, detail="Orders are unavailable - please retry.")
     try:
         found = repo.find_by_id(order_id)
         if found:
@@ -166,7 +170,32 @@ def _resolve_order(order_id: str) -> Optional[Dict[str, Any]]:
             return finder(order_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[SHIPROCKET] order lookup failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Orders are unavailable - please retry.")
     return None
+
+
+def _order_in_reach(order_id: Optional[str], current_user: dict, detail: str) -> Dict[str, Any]:
+    """THE shop guard of every shipping door: the shipment's canonical order,
+    authorised against the caller's shops. A missing order, another shop's
+    and an unattributed one are the same 404 (in_reach_or_404)."""
+    return in_reach_or_404(_resolve_order(order_id) if order_id else None, current_user, detail)
+
+
+def _shop_order_ids(store_id: str, order_id: Optional[str] = None) -> List[str]:
+    """Ids of the orders whose shop is ``store_id`` (optionally just
+    ``order_id``) - the list door's form of _order_in_reach. FAILS CLOSED like
+    _resolve_order: an unreadable orders store is a 503, never "no filter".
+    ponytail: one $in of a shop's order ids; a $lookup when a shop's orders
+    outgrow it."""
+    repo = get_order_repository()
+    try:
+        flt: Dict[str, Any] = {"store_id": store_id}
+        if order_id:
+            flt["order_id"] = order_id
+        return [i for i in repo.collection.distinct("order_id", flt) if i]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHIPROCKET] shop order lookup failed: %s", exc)
+        raise HTTPException(status_code=503, detail="Orders are unavailable - please retry.")
 
 
 # A BOOKING row older than this was never confirmed: the courier call takes
@@ -364,106 +393,93 @@ async def book_shipment(
     payment_method = shiprocket.payment_kind(body.address.payment_method)
     is_cod = payment_method == "COD"
     cod_amount = 0.0
-    order = _resolve_order(body.order_id)
-    if order is not None:
-        # IDOR guard: mirror the Orders doors - only ship an order in a store
-        # the caller can reach (403 otherwise; SUPERADMIN/ADMIN pass through).
-        validate_store_access(order.get("store_id"), current_user)
-
-        # A cancelled / refunded / returned order is finished: cancelling
-        # RELEASES its stock but leaves balance_due standing, so it still
-        # reads as a bookable COD parcel. Nothing may be dispatched on it.
-        order_status = str(order.get("status") or "").strip().upper()
-        if order_status in _DEAD_ORDER_STATUSES:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "ORDER_NOT_SHIPPABLE",
-                    "message": (
-                        f"Order {order.get('order_number') or body.order_id} is "
-                        f"{order_status} - nothing ships on it."
-                    ),
-                },
-            )
-
-        # Clinical Rx FLAG-AND-HOLD (owner decision 2026-06-30): a held
-        # spectacle order (missing a valid prescription) must never be
-        # dispatched -- and booking a shipment for an ONLINE order ALSO pushes a
-        # "Fulfilled" back to Shopify (see _maybe_push_online_fulfillment) -- so
-        # block the booking here while rx_pending / fulfillment_hold is active.
-        # Mirrors the orders.py deliver/ready guard; a released order (both flags
-        # cleared to False) books normally. Late import avoids an import cycle.
-        from .orders import assert_no_active_rx_hold
-
-        assert_no_active_rx_hold(order)
-
-        # PATIENT SAFETY: booking a shipment IS a handover -- the goods leave for
-        # the patient by courier and an ONLINE order also gets a "Fulfilled" push
-        # back to Shopify, so the buyer is told it shipped. This is the THIRD door
-        # in the guard family the comment above names, and it was the one left
-        # open: a job the Orders-screen gate refuses can simply be shipped
-        # instead, by a strictly WIDER role set (_FULFILMENT_ROLES includes
-        # CASHIER). Same predicate, same 400, never re-derived.
-        from .workshop import assert_linked_job_qc_cleared
-
-        assert_linked_job_qc_cleared(order)
-
-        # MONEY GATE (owner ruling): booking a shipment dispatches the goods,
-        # and the courier is told "Prepaid" unless the booking says COD - so a
-        # non-COD booking on an order with money still owed hands the goods
-        # over with NOTHING collected at either end. It must clear the SAME
-        # money rule as the counter deliver door (services.delivery_gate -
-        # the single implementation): at least partial payment on record, and
-        # a balance still due needs a manager or a manager-approved
-        # CREDIT_DELIVERY token.
-        #
-        # A COD booking is exempt: the courier collects on delivery, so a
-        # web COD order (imported UNPAID from Shopify) ships normally - and a
-        # prepaid web order is only "unpaid-at-dispatch" legitimately when
-        # payment was captured upstream, which the Shopify/ONDC ingest
-        # records as payment_status PAID / balance_due 0, so it passes this
-        # gate untouched.
-        #
-        # The exemption is only honest if the courier is told the amount
-        # still OWED (the order's server-side balance_due), so the COD leg
-        # runs the other half of the same gate: it yields that figure and
-        # refuses a booking with nothing to collect or a balance above the
-        # bill. The same helper feeds the courier payload, so what is
-        # persisted here and what the courier collects cannot differ.
-        if is_cod:
-            from ..services.delivery_gate import cod_collectable, refuse_handover_of_refunded
-
-            refuse_handover_of_refunded(order)
-            cod_amount = cod_collectable(order)
-        else:
-            from ..services.delivery_gate import assert_handover_payment
-
-            assert_handover_payment(
-                order,
-                approval_token=body.approval_token,
-                current_user=current_user,
-                db=_get_db(),
-            )
-    if order is None:
-        if is_cod:
-            # Never tell a courier to collect an amount we cannot read.
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "code": "COD_ORDER_NOT_FOUND",
-                    "message": (
-                        "Order not found - a COD booking needs the order's "
-                        "balance to tell the courier what to collect."
-                    ),
-                },
-            )
-        # Allow booking even if the order can't be loaded (mock/no-DB), but warn.
-        logger.info(
-            "[SHIPROCKET] order %s not found - booking with request data only",
-            body.order_id,
+    # The order authorises the booking: a missing / unreadable / other-shop
+    # order books nothing (no row, no courier call), prepaid or COD alike.
+    order = _order_in_reach(body.order_id, current_user, "Order not found")
+    # The shipment belongs to the ORDER's shop. A caller-named store can never
+    # relocate it (fulfilment routing would need its own validated field).
+    if body.store_id and body.store_id != order.get("store_id"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "SHIPMENT_STORE_MISMATCH",
+                "message": "A shipment belongs to its order's shop - store_id must match the order.",
+            },
         )
-        order = {"order_id": body.order_id}
+    # A cancelled / refunded / returned order is finished: cancelling
+    # RELEASES its stock but leaves balance_due standing, so it still
+    # reads as a bookable COD parcel. Nothing may be dispatched on it.
+    order_status = str(order.get("status") or "").strip().upper()
+    if order_status in _DEAD_ORDER_STATUSES:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": "ORDER_NOT_SHIPPABLE",
+                "message": (
+                    f"Order {order.get('order_number') or body.order_id} is "
+                    f"{order_status} - nothing ships on it."
+                ),
+            },
+        )
 
+    # Clinical Rx FLAG-AND-HOLD (owner decision 2026-06-30): a held
+    # spectacle order (missing a valid prescription) must never be
+    # dispatched -- and booking a shipment for an ONLINE order ALSO pushes a
+    # "Fulfilled" back to Shopify (see _maybe_push_online_fulfillment) -- so
+    # block the booking here while rx_pending / fulfillment_hold is active.
+    # Mirrors the orders.py deliver/ready guard; a released order (both flags
+    # cleared to False) books normally. Late import avoids an import cycle.
+    from .orders import assert_no_active_rx_hold
+
+    assert_no_active_rx_hold(order)
+
+    # PATIENT SAFETY: booking a shipment IS a handover -- the goods leave for
+    # the patient by courier and an ONLINE order also gets a "Fulfilled" push
+    # back to Shopify, so the buyer is told it shipped. This is the THIRD door
+    # in the guard family the comment above names, and it was the one left
+    # open: a job the Orders-screen gate refuses can simply be shipped
+    # instead, by a strictly WIDER role set (_FULFILMENT_ROLES includes
+    # CASHIER). Same predicate, same 400, never re-derived.
+    from .workshop import assert_linked_job_qc_cleared
+
+    assert_linked_job_qc_cleared(order)
+
+    # MONEY GATE (owner ruling): booking a shipment dispatches the goods,
+    # and the courier is told "Prepaid" unless the booking says COD - so a
+    # non-COD booking on an order with money still owed hands the goods
+    # over with NOTHING collected at either end. It must clear the SAME
+    # money rule as the counter deliver door (services.delivery_gate -
+    # the single implementation): at least partial payment on record, and
+    # a balance still due needs a manager or a manager-approved
+    # CREDIT_DELIVERY token.
+    #
+    # A COD booking is exempt: the courier collects on delivery, so a
+    # web COD order (imported UNPAID from Shopify) ships normally - and a
+    # prepaid web order is only "unpaid-at-dispatch" legitimately when
+    # payment was captured upstream, which the Shopify/ONDC ingest
+    # records as payment_status PAID / balance_due 0, so it passes this
+    # gate untouched.
+    #
+    # The exemption is only honest if the courier is told the amount
+    # still OWED (the order's server-side balance_due), so the COD leg
+    # runs the other half of the same gate: it yields that figure and
+    # refuses a booking with nothing to collect or a balance above the
+    # bill. The same helper feeds the courier payload, so what is
+    # persisted here and what the courier collects cannot differ.
+    if is_cod:
+        from ..services.delivery_gate import cod_collectable, refuse_handover_of_refunded
+
+        refuse_handover_of_refunded(order)
+        cod_amount = cod_collectable(order)
+    else:
+        from ..services.delivery_gate import assert_handover_payment
+
+        assert_handover_payment(
+            order,
+            approval_token=body.approval_token,
+            current_user=current_user,
+            db=_get_db(),
+        )
     # One order, one live shipment. A retry after a courier no-show used to
     # insert a SECOND booking, so the courier was told to collect the same
     # balance again. Runs AFTER the money/role gates so a caller who may not
@@ -486,9 +502,7 @@ async def book_shipment(
             },
         )
 
-    store_id = (
-        body.store_id or order.get("store_id") or current_user.get("active_store_id")
-    )
+    store_id = order.get("store_id")
     address = _merge_address(body.address, order)
 
     db = _get_db()
@@ -514,14 +528,17 @@ async def book_shipment(
         except Exception as exc:  # noqa: BLE001
             logger.error("[SHIPROCKET] booking not recorded, courier not called: %s", exc)
             raise HTTPException(status_code=503, detail="Could not record the booking - please retry.")
-        fresh = _resolve_order(order.get("order_id") or body.order_id) if order.get("status") else None
-        if fresh is None and order.get("status"):
+        try:
+            fresh = _resolve_order(order.get("order_id") or body.order_id)
+        except HTTPException:
+            fresh = None
+        if fresh is None:
             # The re-read failed: fail CLOSED -- never call the courier blind.
             coll.update_one({"shipment_id": shipment_id},
                             {"$set": {"status": "FAILED", "updated_at": utc_now_iso(),
                                       "error": "order could not be re-read before the courier call"}})
             raise HTTPException(status_code=503, detail="Could not re-check the order - nothing was booked. Retry.")
-        if fresh is not None:
+        else:
             from ..services.delivery_gate import cod_collectable, refuse_handover_of_refunded
 
             try:
@@ -664,27 +681,36 @@ async def list_shipments(
 ):
     """List shipments, store-scoped, newest first.
 
-    HQ roles (SUPERADMIN/ADMIN/AREA_MANAGER) may pass any store_id; lower roles
-    are pinned to their active store. Optional order_id filter.
+    resolve_store_scope: ADMIN/SUPERADMIN any (or every) shop; everyone else,
+    AREA_MANAGER included, only their own shops (403 for another), and a login
+    with no shop reads nothing. Optional order_id filter.
+
+    The shop is the CANONICAL order's (the track door's rule), never the
+    shipment's saved store_id: a legacy row stamped with the wrong shop lists
+    under its order's shop, and an orderless / gone-order row lists only in
+    the HQ all-shops view. Filtered in the query, so total and pages count
+    only what the caller may see.
     """
+    effective_store = resolve_store_scope(store_id, current_user)
     coll = _shipments_coll()
     if coll is None:
         return {"shipments": [], "total": 0}
-
-    roles = current_user.get("roles", []) or []
-    is_hq = any(r in roles for r in _HQ_ROLES)
-    effective_store = store_id if is_hq else current_user.get("active_store_id")
 
     query: Dict[str, Any] = {}
     if order_id:
         query["order_id"] = order_id
     if effective_store:
-        query["store_id"] = effective_store
+        query["order_id"] = {"$in": _shop_order_ids(effective_store, order_id)}
 
     try:
         total = coll.count_documents(query)
+        # _id breaks created_at ties: Mongo orders tied rows arbitrarily per
+        # query, so without it a page could repeat one row and skip another.
         cursor = (
-            coll.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit)
+            coll.find(query, {"_id": 0})
+            .sort([("created_at", -1), ("_id", -1)])
+            .skip(skip)
+            .limit(limit)
         )
         shipments: List[Dict[str, Any]] = [_shipment_to_response(d) for d in cursor]
     except Exception as exc:  # noqa: BLE001
@@ -713,6 +739,10 @@ async def track_shipment(
             logger.warning("[SHIPROCKET] track lookup failed: %s", exc)
     if not doc:
         raise HTTPException(status_code=404, detail="Shipment not found")
+    # Authorise by the shipment's ORDER before anything is returned or the
+    # courier is asked: another shop's shipment, or one whose order is gone,
+    # is the same 404 as a missing one.
+    _order_in_reach(doc.get("order_id"), current_user, "Shipment not found")
 
     awb = doc.get("awb")
     sr_shipment_id = doc.get("sr_shipment_id")

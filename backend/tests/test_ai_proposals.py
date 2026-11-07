@@ -170,6 +170,65 @@ class TestWhitelist:
 # ============================================================================
 
 
+class TestDraftPoVendorRule:
+    """L1-F40 (Codex 11-06): approving a reorder proposal is a door to a NEW
+    order, so it obeys the one buyable-supplier rule. Refused = FAILED, no PO."""
+
+    def _approve(self, db, vendor_id):
+        store = ProposalStore(db=db)
+        prop = store.create(
+            created_by_agent="oracle", proposal_type="draft_po", title="Reorder",
+            rationale="low", payload={"sku": "SKU-1", "quantity": 2, "vendor_id": vendor_id},
+        )
+        return store.approve(prop["proposal_id"], reviewed_by="ceo@bv.com")
+
+    def _db(self, **vendor):
+        db = FakeDB()
+        db.get_collection("vendors").docs.append(
+            {"vendor_id": "V1", "trade_name": "Acme Optics", **vendor}
+        )
+        return db
+
+    def _assert_refused(self, db, result, words):
+        assert result["executed"] is False
+        assert result["proposal"]["status"] == ProposalStatus.FAILED.value
+        assert words in result["error"]
+        assert db.get_collection("purchase_orders").docs == []
+
+    def test_switched_off_vendor_creates_no_po(self):
+        db = self._db(is_active=False)
+        self._assert_refused(db, self._approve(db, "V1"), "Acme Optics is switched off")
+
+    def test_unknown_vendor_creates_no_po(self):
+        db = self._db()
+        self._assert_refused(db, self._approve(db, "V-NOPE"), "Vendor not found")
+
+    def test_unreadable_vendor_creates_no_po(self):
+        db = self._db()
+
+        def boom(*_a, **_k):
+            raise RuntimeError("vendors read failed")
+
+        db.get_collection("vendors").find_one = boom
+        self._assert_refused(db, self._approve(db, "V1"), "Vendor not found")
+
+    def test_active_vendor_still_drafts(self):
+        db = self._db(is_active=True)
+        result = self._approve(db, "V1")
+        assert result["executed"] is True
+        po = db.get_collection("purchase_orders").docs[0]
+        assert (po["vendor_id"], po["vendor_name"]) == ("V1", "Acme Optics")
+
+    def test_row_with_no_is_active_key_is_live(self):
+        db = self._db()
+        assert self._approve(db, "V1")["executed"] is True
+
+    def test_no_vendor_named_still_drafts_for_a_human_to_assign(self):
+        db = self._db()
+        assert self._approve(db, None)["executed"] is True
+        assert db.get_collection("purchase_orders").docs[0]["vendor_id"] is None
+
+
 class TestReversibleAutoExecutes:
     def _make(self, db):
         store = ProposalStore(db=db)

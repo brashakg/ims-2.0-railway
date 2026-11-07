@@ -77,6 +77,24 @@ export function DeliverySurface() {
   const [cleaned, setCleaned] = useState(false);
   const [pickedUpBy, setPickedUpBy] = useState('');
   const [handoverNote, setHandoverNote] = useState('');
+  const resetHandover = () => {
+    setPickedUpBy('');
+    setHandoverNote('');
+    setFitCheck(false);
+    setCleaned(false);
+  };
+  // Only the LATEST lookup may select an order: a slow answer (or failure)
+  // for an earlier scan is dropped, never shown over the later one (SP03).
+  const lookupSeqRef = useRef(0);
+  // A scan changes which order the staff member means before its answer lands.
+  // Until it settles the order on screen is the PREVIOUS target: visible, not
+  // deliverable.
+  const [lookupPending, setLookupPending] = useState(false);
+  // The order on screen, readable after an await. A handover outlives the
+  // selection it started from, so each of its writers asks this first. By id,
+  // not by a counter: a re-scan of the same job card is still the same order,
+  // and must still receive that order's resync.
+  const selectedIdRef = useRef<string | null>(null);
 
   // Money: the tender legs the counter has taken for THIS handover. Held
   // locally, NOT in posStore — the cart on the till is a different bill and
@@ -138,9 +156,12 @@ export function DeliverySurface() {
   const findOrder = async (ref: string) => {
     const q = (ref || '').trim();
     if (!q) return;
+    const seq = ++lookupSeqRef.current;
+    const stale = () => seq !== lookupSeqRef.current;
     setErrorMsg(null);
     setOkMsg(null);
     setMatches([]);
+    setLookupPending(true);
     try {
       // A SCAN is an order id or number, so try the direct read first — it is
       // the common case and a single-record lookup carries no browse window.
@@ -148,6 +169,7 @@ export function DeliverySurface() {
       try {
         doc = await orderApi.getOrder(q);
       } catch {
+        if (stale()) return;
         // Not an id. Search the delivery QUEUE by order number, customer name
         // or phone. This replaces a fallback that fetched the newest 20 orders
         // of any status and matched the number exactly client-side: it could
@@ -158,40 +180,65 @@ export function DeliverySurface() {
           storeId: user?.activeStoreId,
           q,
         });
+        if (stale()) return;
         const rows: any[] = res?.orders || [];
         if (rows.length > 1) {
+          selectOrder(null);
           setMatches(rows);
-          setOrder(null);
           return;
         }
         doc = rows[0] || null;
       }
+      if (stale()) return;
       if (!doc?.id) {
         setErrorMsg(
           `Nothing awaiting collection for "${q}". Try the job card number, ` +
             `the customer's name, or their phone number.`,
         );
-        setOrder(null);
+        selectOrder(null);
         return;
       }
       selectOrder(doc);
     } catch {
+      if (stale()) return;
       setErrorMsg('Could not load that order. Try again.');
+      // Settled, nothing selected: the screen stays as it was, typed details
+      // included, and staff do what the message says.
+      setLookupPending(false);
     }
   };
 
   /** Commit to one order. A different order means a different balance and a
-   *  different idempotency key — nothing from the last attempt may carry over. */
-  const selectOrder = (doc: any) => {
+   *  different idempotency key — nothing from the last attempt may carry over,
+   *  including who collected it and the handover note / checks (SP02). */
+  const commitSelection = (doc: any) => {
+    selectedIdRef.current = doc?.id ?? null;
     resetTender();
+    resetHandover();
     setMatches([]);
     setOrder(doc);
   };
+  const selectOrder = (doc: any) => {
+    lookupSeqRef.current += 1; // a pick from the list outranks a lookup still in flight
+    setLookupPending(false);
+    commitSelection(doc);
+  };
 
   const handOver = async () => {
-    if (!order || busy) return;
+    if (!order || busy || lookupPending) return;
     setBusy(true);
     setErrorMsg(null);
+    // The scanner stays live during a handover. A handover already pressed
+    // runs to its end for THIS order (the customer's money is in hand), so a
+    // later scan never stops its writes; it only limits what the answer may
+    // touch. `stillSelected`: this order is still the one on screen, so its
+    // result may be written there. A later scan or pick also means a message
+    // has to say which order it is about.
+    const scanAtStart = lookupSeqRef.current;
+    const stillSelected = () => selectedIdRef.current === order.id;
+    const label = order.orderNumber || order.id;
+    const named = (msg: string) =>
+      lookupSeqRef.current !== scanAtStart ? `${label}: ${msg}` : msg;
     // A HANDOVER SESSION id, not the delivery key. The key itself is derived
     // per attempt from the leg that rides the deliver door (see below): a
     // single key reused across attempts whose LAST LEG had changed matched the
@@ -203,6 +250,8 @@ export function DeliverySurface() {
           ? crypto.randomUUID()
           : `idem-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     }
+    // Held here: selecting another order resets the ref mid-handover.
+    const session = handoverSessionRef.current;
     try {
       const handover: Record<string, unknown> = {};
       if (pickedUpBy.trim()) handover.picked_up_by_name = pickedUpBy.trim();
@@ -242,7 +291,7 @@ export function DeliverySurface() {
         await orderApi.addPayment(
           order.id,
           leg.body as any,
-          `${handoverSessionRef.current}:${leg.key}`,
+          `${session}:${leg.key}`,
         );
         postedLegsRef.current.add(leg.key);
       }
@@ -251,7 +300,7 @@ export function DeliverySurface() {
       // The delivery key CHANGES when the last leg changes. Reusing one key
       // across attempts made the server match the earlier attempt's payment
       // and record nothing for the new tender.
-      const deliverKey = `${handoverSessionRef.current}:${last?.key ?? 'no-tender'}`;
+      const deliverKey = `${session}:${last?.key ?? 'no-tender'}`;
 
       await orderApi.deliverWithPayment(
         order.id,
@@ -266,19 +315,15 @@ export function DeliverySurface() {
         deliverKey,
       );
       setOkMsg(
-        `Delivered — ${order.orderNumber || order.id}` +
+        `Delivered — ${label}` +
           (collected > 0 ? ` · collected ${money(collected)}` : '') +
           (shortfall > 0 ? ` · ${money(shortfall)} booked as outstanding` : ''),
       );
       // Hand over to the completion screen: final invoice, care card, and the
-      // delivered-thank-you the server has already queued.
+      // delivered-thank-you the server has already queued. A newer selection
+      // waits underneath, untouched, and is back when this screen is done.
       setHandedOver(order);
-      setOrder(null);
-      setPickedUpBy('');
-      setHandoverNote('');
-      setFitCheck(false);
-      setCleaned(false);
-      resetTender();
+      if (stillSelected()) commitSelection(null);
     } catch (err: any) {
       // The server owns the refusal (credit gate, QC gate, Rx hold, status),
       // read through the shared helper (the client strips .response, so the
@@ -298,20 +343,26 @@ export function DeliverySurface() {
         if (fresh?.id) {
           const wasDue = balance;
           const nowDue = Number(fresh.balanceDue || 0);
-          setOrder(fresh);
-          resetTender();
+          // Read even when the counter has moved on: money banked against this
+          // order must still be reported. Only the screen write is conditional.
+          if (stillSelected()) {
+            setOrder(fresh);
+            resetTender();
+          }
           setErrorMsg(
-            nowDue < wasDue
-              ? `${reason} ${money(wasDue - nowDue)} was recorded before it stopped; ` +
-                `${money(nowDue)} is still due. Re-enter only the outstanding amount.`
-              : reason,
+            named(
+              nowDue < wasDue
+                ? `${reason} ${money(wasDue - nowDue)} was recorded before it stopped; ` +
+                  `${money(nowDue)} is still due. Re-enter only the outstanding amount.`
+                : reason,
+            ),
           );
           return;
         }
       } catch {
         /* the re-read failed too; fall through to the plain refusal below */
       }
-      setErrorMsg(reason);
+      setErrorMsg(named(reason));
     } finally {
       setBusy(false);
     }
@@ -523,7 +574,7 @@ export function DeliverySurface() {
           <button
             type="button"
             onClick={handOver}
-            disabled={!order || busy}
+            disabled={!order || busy || lookupPending}
             className="h-12 shrink-0 rounded-xl bg-gray-900 text-white font-semibold text-base disabled:opacity-40"
           >
             {busy
