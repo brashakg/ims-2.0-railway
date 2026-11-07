@@ -2665,3 +2665,22 @@ def test_a_genuinely_unplaced_credit_wins_over_one_that_only_waits_to_ship(rw, m
     rw["as_"](ACCOUNTANT).put(f"/vendor-returns/{rid}/prices", json={"unit_prices": [500]})
     _, res = rtv_note_open(rw, rid, 1000, "CN-NEW")
     assert res.json()["confirmation"]["pending_reasons"][0]["code"] == "EARLIER_CREDIT_UNPLACED", res.text
+
+
+def test_a_return_replaced_first_refuses_its_own_note_before_the_number(rw, monkeypatch):
+    """The return's own door, the same ordering: replaced won, nothing is claimed."""
+    bought(rw, "U1", "U2", qty=2)
+    rid = received_return(rw, "U1", "U2")
+    body = {"credit_note_number": "CN-LATE", "credit_note_date": "2026-10-18", "idempotency_key": str(uuid4()),
+            "received_amount": 1000, "source_selections": [], "allocations": []}
+
+    def replaced_then_unavailable(*_a, **_k):
+        assert replace(rw, rid).status_code == 200
+        raise ReturnProvenanceError("EVIDENCE_DOWN", "Original evidence unavailable")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(rma_credit.canonical, "resolve_credit_evidence", replaced_then_unavailable)
+        res = rw["as_"](ACCOUNTANT).post(f"/vendor-returns/{rid}/credit-confirmations", json=body)
+    assert res.status_code == 409 and "has ended" in res.text, res.text
+    assert rw["db"].supplier_credit_note_identities.count_documents({"claims.0": {"$exists": True}}) == 0
+    assert returned(rw, rid)["status"] == "replaced" and posted(rw) == (0, 0)
