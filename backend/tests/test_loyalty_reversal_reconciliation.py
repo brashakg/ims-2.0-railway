@@ -581,3 +581,70 @@ def test_a_hand_completed_points_sale_pays_only_its_cash_part_and_the_points_onc
     _tick(rig)
     acct = _account(rig)
     assert int(acct["balance_points"]) == START and len(_reversal_rows(rig)) == 1
+
+
+# ----------------------------------------------------------------------------
+# Round 6 (#1397 review item 4): the admin's close holds at EVERY door, not only
+# the sweep. The redeem door on a cancelled bill runs the reversal engine too;
+# after the admin closed the exception and the customer earned again, it used to
+# claw the points back although the cashier only tried a redemption. A later
+# return or a cancel of the same bill runs the same engine.
+# ----------------------------------------------------------------------------
+
+
+def _admin_closed_underflow(rig, tasks, monkeypatch):
+    _underflow_stranded(rig, monkeypatch)
+    _tick(rig)
+    _tick(rig)
+    [task] = _exceptions(rig, "OPEN")
+    tasks.complete_task(task["task_id"], notes="Settled with the customer by hand.")
+    rig["accounts"].adjust_balance(CUST, delta_points=500)  # the customer earns again
+    return _books(rig)
+
+
+def test_a_redeem_attempt_never_claws_a_bill_whose_exception_an_admin_closed(rig, tasks, monkeypatch):
+    books = _admin_closed_underflow(rig, tasks, monkeypatch)
+    with pytest.raises(HTTPException) as ei:  # before the next tick saw the close
+        _redeem()
+    assert _books(rig) == books and _reversal_rows(rig) == []  # nothing clawed
+    assert ei.value.status_code == 409 and ei.value.detail["reason"] == "order_cancelled"
+    assert "admin" in ei.value.detail["message"].lower()
+    assert "are back on the customer's account" not in ei.value.detail["message"]
+    assert _bill(rig)["loyalty_reversal_failed"] is True  # never settled: the record says so
+    _tick(rig)
+    with pytest.raises(HTTPException):
+        _redeem()
+    assert _books(rig) == books and _audited(rig) == 0
+
+
+def test_a_later_return_or_cancel_never_claws_once_an_admin_closed_the_return_exception(rig, tasks, monkeypatch):
+    from api.routers.loyalty import reverse_for_cancel, reverse_for_return
+
+    _earn_on_order(rig, 500)
+    rig["accounts"].adjust_balance(CUST, delta_points=-(START + 500))
+    _unfinished_return(rig, monkeypatch)()
+    _tick(rig)
+    [task] = _return_exceptions(rig)
+    tasks.complete_task(task["task_id"], notes="Points corrected by hand.")
+    rig["accounts"].adjust_balance(CUST, delta_points=500)
+    books = _books(rig)
+
+    second = reverse_for_return("RET-2", ORDER, CUST)  # the next return of the bill
+    assert second["ok"] is True and second.get("waived") is True
+    cancel = reverse_for_cancel(ORDER, CUST)  # then the bill is cancelled
+    assert cancel["ok"] is True and cancel.get("waived") is True
+    assert _books(rig) == books and _reversal_rows(rig) == []
+
+
+def test_an_open_exception_still_lets_the_doors_settle_the_bill(rig, tasks, monkeypatch):
+    """Positive control: while the task is open, the redeem door still settles."""
+    _underflow_stranded(rig, monkeypatch)
+    _tick(rig)
+    _tick(rig)
+    assert len(_exceptions(rig, "OPEN")) == 1
+    rig["accounts"].adjust_balance(CUST, delta_points=500)
+    with pytest.raises(HTTPException) as ei:
+        _redeem()
+    assert ei.value.status_code == 409
+    assert int(_account(rig)["balance_points"]) == 0 and len(_reversal_rows(rig)) == 1
+    assert _bill(rig)["loyalty_reversal_failed"] is False

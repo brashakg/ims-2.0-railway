@@ -636,7 +636,7 @@ def settle_cancelled_bill(order: Dict[str, Any], orders) -> Dict[str, Any]:
     so a bill that was healed never keeps saying it failed."""
     outcome = reverse_for_cancel(order.get("order_id"), order.get("customer_id"))
     failed = not _reversal_settled(outcome)
-    if bool(order.get("loyalty_reversal_failed")) != failed:
+    if not outcome.get("waived") and bool(order.get("loyalty_reversal_failed")) != failed:
         orders.update(order.get("order_id"), {"loyalty_reversal_failed": failed})
     return outcome
 
@@ -658,7 +658,8 @@ def _refuse_if_cancelled(body: "RedeemRequest") -> None:
         or order.get("customer_id") != body.customer_id
     ):
         return
-    if not _reversal_settled(settle_cancelled_bill(order, orders)):
+    outcome = settle_cancelled_bill(order, orders)
+    if not _reversal_settled(outcome):
         raise HTTPException(
             status_code=503,
             detail={
@@ -678,7 +679,9 @@ def _refuse_if_cancelled(body: "RedeemRequest") -> None:
             "reason": "order_cancelled",
             "message": (
                 "This bill was cancelled, so no points can be redeemed on it. "
-                "Any points taken for it are back on the customer's account."
+                + ("An admin closed its points exception: any correction to the "
+                   "customer's points is made by hand." if outcome.get("waived") else
+                   "Any points taken for it are back on the customer's account.")
             ),
         },
     )
@@ -2307,6 +2310,9 @@ def reverse_for_return(
         return {"ok": False, "reason": "missing_ids"}
     if _is_walk_in(customer_id):
         return {"ok": True, "skipped_reason": "walkin", "earned_clawed": 0}
+    waived = _waived_outcome(order_id)
+    if waived:
+        return waived
     return _reverse_order_loyalty(
         order_id=order_id,
         customer_id=customer_id,
@@ -2342,6 +2348,10 @@ def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, A
         return {"ok": False, "reason": "missing_ids"}
     if _is_walk_in(cid):
         return {"ok": True, "skipped_reason": "walkin", "earned_clawed": 0}
+    waived = _waived_outcome(order_id)
+    if waived:
+        return waived
+
     def reverse() -> Dict[str, Any]:
         return _reverse_order_loyalty(
             order_id=order_id,
@@ -2396,6 +2406,7 @@ _EXCEPTION_REASONS = {
     "account_read_failed": "the customer's loyalty account could not be read",
     "ledger_read_failed": "the customer's loyalty history could not be read",
     "loyalty_db_unavailable": "the loyalty records could not be reached",
+    "exception_read_failed": "the system could not check whether an admin had closed this",
 }
 
 
@@ -2462,8 +2473,9 @@ def _close_reversal_exception(coll, id_field: str, doc: Dict[str, Any]) -> None:
 
 
 def _closed_by_a_person(coll, id_field: str, doc: Dict[str, Any]) -> bool:
-    """Owner ruling 2026-11-08: once a PERSON closes the exception, the sweep
-    leaves the row alone for good -- it never claws back on its own later. The
+    """Owner ruling 2026-11-08: once an admin closes the exception (only an
+    admin may: tasks._ensure_may_close), nothing reverses the row on its own
+    again -- this sweep and every door (_waived_outcome). The
     stamp outlives only a task nobody is working: the sweep's own close clears
     it right after completing the task, so a stamp beside nothing but the
     sweep's own completed task is that close interrupted, and is finished here.
@@ -2490,6 +2502,37 @@ def _closed_by_a_person(coll, id_field: str, doc: Dict[str, Any]) -> bool:
     logger.warning("loyalty reversal on %s %s left alone: its exception was closed by a person",
                    id_field, doc[id_field])
     return True
+
+
+def _waived_outcome(order_id: str) -> Optional[Dict[str, Any]]:
+    """Owner ruling 2026-11-08 at EVERY door: once an admin closed a points
+    exception on this bill -- its cancel's or any of its returns' -- nothing
+    reverses the bill's loyalty again on its own (the redeem door, a later
+    return, a cancel, the sweep). The reversal is order-wide, so the close is
+    too. Reads _closed_by_a_person, which also catches a close the sweep has
+    not yet noticed. None = go on and reverse. An unreadable answer refuses the
+    reversal (flagged for retry) rather than claw on a guess."""
+    orders = get_order_repository()
+    bills = getattr(orders, "collection", None)
+    if bills is None:
+        return None  # no order store: no exception can have been recorded
+    either = {"order_id": order_id, "$or": [{"loyalty_exception_task": {"$exists": True}},
+                                            {"loyalty_exception_closed": True}]}
+    try:
+        rows = [(bills, "order_id", d) for d in bills.find(either)]
+        db = getattr(bills, "database", None)  # every real collection has one
+        if db is not None:
+            returns = db.get_collection("returns")
+            rows += [(returns, "return_id", d) for d in returns.find(either)]
+        closed = any(d.get("loyalty_exception_closed") or _closed_by_a_person(coll, field, d)
+                     for coll, field, d in rows)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("loyalty exception check failed for order %s: %s", order_id, exc)
+        return {"ok": False, "reason": "exception_read_failed"}
+    if not closed:
+        return None
+    logger.warning("loyalty reversal on order %s left alone: an admin closed its exception", order_id)
+    return {"ok": True, "waived": True, "earned_clawed": 0, "redeemed_restored": 0}
 
 
 def _after_settling(coll, id_field: str, doc: Dict[str, Any], what: str, outcome: Dict[str, Any]) -> str:
