@@ -1003,6 +1003,12 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
                       {quoteLoading && !quote ? 'Calculating…' : fp(netRefund)}
                     </span>
                   </div>
+                  {(quote?.points_paid_share ?? 0) > 0 && (
+                    <p className="mt-1 text-xs text-gray-500">
+                      {fp(quote?.points_paid_share ?? 0)} was paid with loyalty points: it goes back to the
+                      customer's points by itself, not as money or store credit.
+                    </p>
+                  )}
 
                   {/* Refund-tender capture (RETURN only): how the cash is returned. */}
                   {returnType === 'RETURN' && roundedNet > 0 && (
