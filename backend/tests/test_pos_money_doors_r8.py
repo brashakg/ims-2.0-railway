@@ -550,7 +550,9 @@ def test_upi_auto_reconcile_never_pays_an_order_an_advance_refund_holds(till):
     from api.services import upi_qr
 
     till["db"].get_collection("orders").insert_one(_order(advance_refund_id="RET-1"))
-    assert upi_qr._do_reconcile(till["db"], "ORD-1", {"amount": 100000, "id": "pay_1"}) is False
+    with pytest.raises(upi_qr.ReconcileMismatch):
+        upi_qr._do_reconcile(till["db"], "ORD-1", {"amount": 100000, "id": "pay_1", "currency": "INR",
+                                                   "status": "captured", "captured": True})
     assert _stored(till)["payments"] == []
 
 
