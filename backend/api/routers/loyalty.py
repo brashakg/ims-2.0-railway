@@ -2473,7 +2473,8 @@ def _closed_by_a_person(coll, id_field: str, doc: Dict[str, Any]) -> bool:
     tasks_coll = getattr(repo, "collection", None)
     closed = list(tasks_coll.find({"source_ref": ref}) if tasks_coll is not None
                   else repo.find_many({"source_ref": ref}) or [])
-    if closed and all(t.get("completion_notes") == _SETTLED_NOTE for t in closed):
+    if closed and all(t.get("completion_notes") == _SETTLED_NOTE and not t.get("completed_by")
+                      for t in closed):
         _unstamp_exception(coll, id_field, doc)
         return False
     coll.update_one({id_field: doc[id_field]}, {"$set": {"loyalty_exception_closed": True}})
