@@ -11,6 +11,7 @@
 import { act, render, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import axios from 'axios';
 
 vi.mock('../../services/api', () => ({
   authApi: { login: vi.fn(), logout: vi.fn(async () => {}), getProfile: vi.fn(), switchStore: vi.fn() },
@@ -23,6 +24,7 @@ vi.mock('../../stores/posStore', () => ({
 
 import { authApi } from '../../services/api';
 import { AuthProvider, useAuth } from '../AuthContext';
+import { refreshAccessToken } from '../../services/api/client';
 
 let auth: ReturnType<typeof useAuth>;
 const keep = (a: ReturnType<typeof useAuth>) => { auth = a; };
@@ -31,8 +33,9 @@ function Probe({ onAuth }: { onAuth: typeof keep }) {
   return null;
 }
 const fn = (f: unknown) => f as ReturnType<typeof vi.fn>;
-const jwt = (user_id: string, shop: string, store_ids = ['S1', 'S2']) =>
-  `h.${btoa(JSON.stringify({ user_id, active_store_id: shop, store_ids }))}.s`;
+// No `sid` unless given: a sign-in from before refresh chains.
+const jwt = (user_id: string, shop: string, store_ids = ['S1', 'S2'], sid?: string) =>
+  `h.${btoa(JSON.stringify({ user_id, active_store_id: shop, store_ids, ...(sid ? { sid } : {}) }))}.s`;
 const person = (id: string, shop: string, extra: Record<string, unknown> = {}) => ({
   id, name: id, roles: ['STORE_MANAGER'], storeIds: ['S1', 'S2'], activeStoreId: shop, ...extra,
 });
@@ -54,8 +57,8 @@ beforeEach(() => {
 
 const mount = () =>
   render(<QueryClientProvider client={qc}><AuthProvider><Probe onAuth={keep} /></AuthProvider></QueryClientProvider>);
-const loginAs = async (id: string, shop: string) => {
-  fn(authApi.login).mockResolvedValueOnce({ success: true, token: jwt(id, shop), user: person(id, shop) });
+const loginAs = async (id: string, shop: string, sid?: string) => {
+  fn(authApi.login).mockResolvedValueOnce({ success: true, token: jwt(id, shop, undefined, sid), user: person(id, shop) });
   await act(() => auth.login({ username: id, password: 'x' }));
 };
 // A switch to S2 whose answer (for u1) is held back until release().
@@ -352,11 +355,38 @@ describe('a slow sign-out answer', () => {
 
   it('positive control: a token refreshed during the sign-out is still cleared', async () => {
     mount();
-    await loginAs('u1', 'S1');
+    await loginAs('u1', 'S1', 'chain-1');
     const out = heldLogout();
-    localStorage.setItem('ims_token', jwt('u1', 'S1').replace(/\.s$/, '.refreshed'));
+    localStorage.setItem('ims_token', jwt('u1', 'S1', undefined, 'chain-1').replace(/\.s$/, '.refreshed'));
     await out.land();
     expect(localStorage.getItem('ims_token')).toBeNull();
+    expect(auth.user).toBeNull();
+  });
+
+  // #1372 round 4: a sign-in with no chain (`sid`) is not the same sign-in as
+  // a later chain of the same person.
+  it("a no-chain sign-in ending late never ends the same person's fresh sign-in", async () => {
+    mount();
+    await loginAs('u1', 'S1');
+    const out = heldLogout();
+    await loginAs('u1', 'S1', 'fresh-chain');
+    localStorage.setItem('ims_refresh_token', 'r-fresh');
+    await out.land();
+    expect(localStorage.getItem('ims_token')).toBe(jwt('u1', 'S1', undefined, 'fresh-chain'));
+    expect(localStorage.getItem('ims_refresh_token')).toBe('r-fresh');
+    expect(auth.user?.id).toBe('u1');
+  });
+
+  it('positive control: a no-chain sign-in this tab upgraded during the sign-out is still cleared', async () => {
+    mount();
+    await loginAs('u1', 'S1');
+    const out = heldLogout();
+    const upgraded = jwt('u1', 'S1', undefined, 'chain-up');
+    vi.spyOn(axios, 'post').mockResolvedValueOnce({ data: { access_token: upgraded, refresh_token: 'r-up' } });
+    expect(await refreshAccessToken()).toBe(upgraded);
+    await out.land();
+    expect(localStorage.getItem('ims_token')).toBeNull();
+    expect(localStorage.getItem('ims_refresh_token')).toBeNull();
     expect(auth.user).toBeNull();
   });
 });

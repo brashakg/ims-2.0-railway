@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import axios from 'axios';
 import type { AxiosResponse, InternalAxiosRequestConfig } from 'axios';
 import api, {
-  REPLAY_REFUSED_MESSAGE, WRITE_UNCONFIRMED_MESSAGE, refreshAccessToken, syncCachedUserShops,
+  REPLAY_REFUSED_MESSAGE, WRITE_UNCONFIRMED_MESSAGE, refreshAccessToken, sameSession, syncCachedUserShops,
 } from '../client';
 import { authApi } from '../auth';
 
@@ -395,5 +395,83 @@ describe('switchStore names the token that really carried it', () => {
     } finally {
       api.defaults.adapter = realAdapter;
     }
+  });
+});
+
+// PR #1372 round 4 (Codex 2026-11-07): a token with no `sid` (a sign-in from
+// before refresh chains, or a login whose chain store hiccuped) is the same
+// sign-in only as the chain THIS tab's refresh of it produced -- never any
+// later chain of the same person, e.g. after a sign-out and a fresh sign-in.
+const noChain = (tag = '') => `h.${btoa(JSON.stringify({ user_id: 'admin', active_store_id: 'S1', tag }))}.s`;
+const signInAgain = (sid: string) => { mem.clear(); signIn('admin', jwt('admin', 'S1', sid), `r-${sid}`); };
+
+describe('a token with no chain is not proof of the same sign-in', () => {
+  it('an old 429 write waiting out its backoff is refused after sign-out and the same person signing in again', async () => {
+    mem.set('ims_token', noChain('old'));
+    mem.delete('ims_refresh_token');
+    duringBackoff(() => signInAgain('fresh-chain'));
+    const adapter = answering(429);
+    expect(await api.post('/tasks', {}, { adapter }).catch(refusal)).toEqual(REFUSED(429));
+    expect(adapter).toHaveBeenCalledTimes(1);
+    expect(mem.get('ims_token')).toBe(jwt('admin', 'S1', 'fresh-chain'));
+    expect(mem.get('ims_refresh_token')).toBe('r-fresh-chain');
+  });
+
+  it('a late idle refusal of the old sign-in leaves the fresh sign-in its refresh token', async () => {
+    mem.set('ims_token', noChain('old'));
+    mem.set('ims_refresh_token', 'r-old');
+    const r = heldRefresh();
+    signInAgain('brand-new-chain');
+    r.refuse(Object.assign(new Error('401'), {
+      isAxiosError: true, response: { status: 401, data: { detail: { code: 'SESSION_IDLE' } } },
+    }));
+    expect(await r.result).toBeNull();
+    expect(mem.get('ims_token')).toBe(jwt('admin', 'S1', 'brand-new-chain'));
+    expect(mem.get('ims_refresh_token')).toBe('r-brand-new-chain');
+  });
+
+  it('positive control: the idle refusal of the sign-in still stored drops its refresh token', async () => {
+    mem.set('ims_token', noChain('still'));
+    mem.set('ims_refresh_token', 'r-still');
+    const r = heldRefresh();
+    r.refuse(Object.assign(new Error('401'), {
+      isAxiosError: true, response: { status: 401, data: { detail: { code: 'SESSION_IDLE' } } },
+    }));
+    expect(await r.result).toBeNull();
+    expect(mem.has('ims_refresh_token')).toBe(false);
+  });
+
+  it('only the chain this tab upgraded the token into continues it', async () => {
+    const legacy = noChain('upgrade');
+    mem.set('ims_token', legacy);
+    // A refresh credential beside it (an idle refusal earlier in this file is
+    // sticky for a sign-in without one); Codex's no-refresh-token shape is
+    // rerun verbatim from its evidence.
+    mem.set('ims_refresh_token', 'r-legacy');
+    const upgraded = jwt('admin', 'S1', 'chain-up');
+    vi.spyOn(axios, 'post').mockResolvedValueOnce({ data: { access_token: upgraded, refresh_token: 'r-up' } });
+    expect(await refreshAccessToken()).toBe(upgraded);
+    expect(sameSession(legacy, upgraded)).toBe(true);
+    expect(sameSession(upgraded, legacy)).toBe(true);
+    expect(sameSession(legacy, jwt('admin', 'S1', 'chain-up', 'shop-moved'))).toBe(true);
+    expect(sameSession(legacy, jwt('admin', 'S1', 'fresh-chain'))).toBe(false); // sign-out, sign-in again
+    expect(sameSession(legacy, noChain('another-chainless-login'))).toBe(false);
+    expect(sameSession(noChain('never-refreshed'), upgraded)).toBe(false);
+  });
+
+  it('positive control: a request waiting out its backoff while this tab upgrades the token still goes, once', async () => {
+    const legacy = noChain('in-wait');
+    mem.set('ims_token', legacy);
+    mem.set('ims_refresh_token', 'r-legacy');
+    const upgraded = jwt('admin', 'S1', 'chain-wait');
+    vi.spyOn(axios, 'post').mockResolvedValueOnce({ data: { access_token: upgraded, refresh_token: 'r-wait' } });
+    await refreshAccessToken(); // the proactive refresh, as if it ran during the wait
+    mem.set('ims_token', legacy); // the request below was sent with the old token
+    const adapter = answering(429);
+    duringBackoff(() => mem.set('ims_token', upgraded));
+    expect((await api.post('/tasks', {}, { adapter })).status).toBe(200);
+    expect(adapter).toHaveBeenCalledTimes(2);
+    expect(sentAs(adapter, 0)).toBe(legacy);
+    expect(sentAs(adapter, 1)).toBe(upgraded);
   });
 });

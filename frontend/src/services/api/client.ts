@@ -123,14 +123,22 @@ export function decodeJwtClaims(token: string | null | undefined): Record<string
   }
 }
 
+// A token with no chain (`sid`) that THIS tab refreshed while it was still the
+// stored one -> the chain that refresh gave it. A missing `sid` proves nothing
+// about continuity: only this recorded first upgrade does (#1372 round 4).
+// ponytail: tab memory only; another tab holding a request of the same legacy
+// token gets "not saved" instead of a replay (fail closed, deploy window only).
+const legacyUpgrades = new Map<string, string>();
+
 /** One sign-in? Same person on the same refresh chain (`sid`); a token that
  *  was rotated or moved shop stays in it, a new login is a new chain. An answer
  *  to a request of another sign-in must not touch this one (#1372 review). */
 export function sameSession(a: string | null | undefined, b: string | null | undefined): boolean {
   if (a === b) return true;
   const [x, y] = [decodeJwtClaims(a), decodeJwtClaims(b)];
-  // No `sid`: a sign-in with no chain yet, which its first refresh gives it.
-  return !!x && !!y && x.user_id === y.user_id && (!x.sid || !y.sid || x.sid === y.sid);
+  if (!x || !y || x.user_id !== y.user_id) return false;
+  if (x.sid && y.sid) return x.sid === y.sid;
+  return (!!y.sid && legacyUpgrades.get(a!) === y.sid) || (!!x.sid && legacyUpgrades.get(b!) === x.sid);
 }
 
 /** The token a request really went out with. */
@@ -224,6 +232,8 @@ async function performRefresh(): Promise<string | null> {
       return current;
     }
     localStorage.setItem(TOKEN_STORAGE_KEY, newAccess);
+    const sid = decodeJwtClaims(newAccess)?.sid;
+    if (access && sid && !decodeJwtClaims(access)?.sid) legacyUpgrades.set(access, sid);
     if (resp.data?.refresh_token) {
       localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, resp.data.refresh_token);
     }
