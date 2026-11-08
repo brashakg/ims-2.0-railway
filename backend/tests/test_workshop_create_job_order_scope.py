@@ -263,3 +263,19 @@ def test_admin_keeps_the_mismatched_job(monkeypatch):
     r = c.post("/workshop/jobs", json=_BODY)
     assert r.status_code == 200 and r.json()["job_id"] == "J-A"
     assert jrepo.created == []
+
+
+def test_legacy_pair_with_one_other_shop_job_refused_even_if_pointer_is_mine(monkeypatch):
+    # Every job already on the order passes the rule: the dedup never links or
+    # shows one while another shop's job sits on the same order.
+    order = dict(_order("SHOP-B"), workshop_job_id="J-B", workshop_job_number="WS-B-1")
+    before = copy.deepcopy(order)
+    c, jrepo, orepo = _client(
+        monkeypatch,
+        _user(["WORKSHOP_STAFF"], "SHOP-B"),
+        order,
+        jobs=[dict(_EXISTING), dict(_MISMATCH)],
+    )
+    r = c.post("/workshop/jobs", json=_BODY)
+    assert r.status_code == 404 and "J-A" not in r.text
+    assert jrepo.created == [] and orepo.updates == [] and order == before

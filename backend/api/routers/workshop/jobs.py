@@ -178,6 +178,11 @@ async def create_job(
             # through to the pre-existing behaviour.
             logger.warning("[WORKSHOP] create dedup lookup failed: %s", _dedup_exc)
             existing_jobs = []
+        # PR #1376 round 3: a job already on this order must pass THE job rule
+        # (its shop AND its order's shop) before the dedup links or shows it --
+        # a legacy job stamped with another shop is refused, not repaired.
+        for _on_order in existing_jobs:
+            _assert_job_store_access(_on_order, current_user)
         if existing_jobs:
             # WHICH job to return when more than one already exists. This is not
             # hypothetical: a read-only prod query found 1 of 4 live jobs is
@@ -197,10 +202,6 @@ async def create_job(
                 (j for j in existing_jobs if j.get("job_id") == pointed_id),
                 oldest,
             )
-            # PR #1376 round 3: the job handed back must pass THE job rule too
-            # (its shop AND its order's shop), before any backfill -- a legacy
-            # job stamped with another shop is refused, not linked or shown.
-            _assert_job_store_access(chosen, current_user)
             # Backfill the reverse pointer when the order has none, so the order
             # and the client agree on which job carries the Rx.
             if order_repo is not None and isinstance(order, dict) and not pointed_id:
