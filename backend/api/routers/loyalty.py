@@ -2399,6 +2399,15 @@ _EXCEPTION_REASONS = {
 }
 
 
+_EXCEPTION_REF = "loyalty_reversal:"
+
+
+def is_loyalty_exception(task: Dict[str, Any]) -> bool:
+    """A loyalty points exception task: closing it waives the automatic retry,
+    so only an admin may (tasks._ensure_may_close)."""
+    return str(task.get("source_ref") or "").startswith(_EXCEPTION_REF)
+
+
 def _raise_reversal_exception(coll, id_field: str, doc: Dict[str, Any], what: str, reason: Any) -> None:
     """The visible exception: ONE P1 task for an admin on the existing Tasks
     screen (points are adjusted by admins only). Stamped once it exists, so a
@@ -2406,7 +2415,7 @@ def _raise_reversal_exception(coll, id_field: str, doc: Dict[str, Any], what: st
     from ..dependencies import get_task_repository
     from ..services.task_triggers import _person_holding, active_tasks, create_system_task
 
-    ref = f"loyalty_reversal:{doc[id_field]}"
+    ref = f"{_EXCEPTION_REF}{doc[id_field]}"
     why = _EXCEPTION_REASONS.get(reason, "the points could not be updated")
     repo = get_task_repository()
     created = create_system_task(
@@ -2415,9 +2424,9 @@ def _raise_reversal_exception(coll, id_field: str, doc: Dict[str, Any], what: st
         description=(
             f"The customer's loyalty points on {what} could not be settled "
             f"automatically: {why}. While this task is open the system keeps trying "
-            "every few minutes and closes it itself once it works. If you close it "
-            "yourself, the system stops trying on this one for good and the points "
-            "stay as they are: any correction is then made by hand. If it stays "
+            "every few minutes and closes it itself once it works. Only an admin can "
+            "close it; once an admin does, the system stops trying on this one for "
+            "good and the points stay as they are: any correction is then made by hand. If it stays "
             "open for a day, tell support."
         ),
         priority="P1",
