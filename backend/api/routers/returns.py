@@ -1205,25 +1205,25 @@ def _order_non_refundable_tenders(
 
 
 def _points_paid_share(
-    order: Optional[Dict[str, Any]], order_id: Optional[str], gross_refund: float,
-    net_amount: float, *, strict: bool,
+    order: Optional[Dict[str, Any]], order_id: Optional[str], net_amount: float, *, strict: bool,
 ) -> float:
     """THE rule (owner 2026-11-08): the part of this return the customer paid
-    with loyalty points. It comes back as points -- loyalty.reverse_for_return
-    restores the bill's redeemed points -- so it is never ALSO paid out as cash
-    or store credit. Each returned rupee is settled in the bill's own mix: the
-    points share of this return's value, capped at what earlier returns of the
-    bill have not settled already, and at this return's net. Cash caps and the
-    partial-return rules are untouched; only the money a return pays shrinks by
-    this. Every return door prices through here (quote, POST, Needs completing
-    keeps it on the hold)."""
+    with loyalty points. It comes back as points, so it is never ALSO paid out as
+    cash or store credit. The points come back the way the one engine gives them
+    (loyalty.reverse_for_return): the bill's WHOLE redemption on its first
+    return, nothing on later ones. So the money holds back exactly that: every
+    points-paid rupee not held back by an earlier return of the bill, capped at
+    this return's net (a refund cannot go below zero; whatever that cap leaves
+    is held back by the bill's next return). Not a proportional slice -- that
+    paid the rest of the redemption twice, as points now and as cash. Cash caps
+    and the partial-return rules are untouched; only the money a return pays
+    shrinks by this. Every return door prices through here (quote, POST, Needs
+    completing keeps it on the hold)."""
     paid = _order_non_refundable_tenders(order, (_POINTS_TENDER,)).get(_POINTS_TENDER, 0.0)
     if paid <= 0:
         return 0.0
-    billed = _order_billed_total(order)
-    share = paid * float(gross_refund) / billed if billed > 0 else paid
     left = paid - _sum_prior_refunds(order_id, "points_paid_share", strict=strict)
-    return round(max(0.0, min(share, left, float(net_amount))), 2)
+    return round(max(0.0, min(left, float(net_amount))), 2)
 
 
 def _prior_refund_tenders(order_id: Optional[str]) -> Dict[str, float]:
@@ -3990,7 +3990,7 @@ async def quote_return(
         _gate_exchange_settlement(settlement, replacement_priced, gross_refund)
 
     # The points-paid part goes back as points: the split covers the rest.
-    points_share = _points_paid_share(order, resolved_order_id, gross_refund, net_amount, strict=False)
+    points_share = _points_paid_share(order, resolved_order_id, net_amount, strict=False)
     return_value, net_amount = net_amount, round(net_amount - points_share, 2)
 
     captured = _order_captured_tenders(order)
@@ -4672,7 +4672,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # what this return PAYS -- the split, the refund, the store credit -- is the
     # rest. net_amount stays the return's value: the cap, the approval rule and
     # the credit note's tax all read it, unchanged.
-    points_share = _points_paid_share(order, resolved_order_id, gross_refund, net_amount, strict=True)
+    points_share = _points_paid_share(order, resolved_order_id, net_amount, strict=True)
     pays = round(net_amount - points_share, 2)
 
     refund_tenders: Optional[List[Dict[str, Any]]] = None

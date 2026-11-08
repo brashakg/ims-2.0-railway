@@ -8,8 +8,9 @@ credit pool counted the LOYALTY tender (returns._order_non_refundable_tenders),
 the STORE_CREDIT leg drew on it, and reverse_for_return restored the points.
 
 Owner ruling 2026-11-08: the points-paid part comes back once, as points. Cash
-caps and partial-return rules unchanged; a partial return settles its
-proportional share.
+caps and partial-return rules unchanged. The engine gives the whole redemption
+back on the bill's first return, so that return holds the points-paid part back
+from its money (round 6: a proportional slice paid the rest twice).
 
 Driven through the REAL quote + POST /returns over the fakes of
 test_returns_endpoint_tender_capture; the loyalty reversal is a recorder there
@@ -156,24 +157,41 @@ def test_a_return_with_no_breakdown_records_only_the_cash_part(ctx):
     assert r.json()["refund_amount"] == CASH and r.json()["drawer_auto_netted"] is False
 
 
-def test_two_partial_returns_each_settle_their_share_and_never_more(ctx):
+def test_two_partial_returns_hold_the_points_part_back_once_and_never_more(ctx):
     c = _points_sale(ctx, qty=2)
-    half_cash, half_points = CASH / 2, POINTS / 2
+    half = _BILLED_GROSS / 2
     q = _quote(c, items=_line(1))
-    assert q["net_refund"] == half_cash and q["points_paid_share"] == half_points
-    assert _post(c, [{"method": "CASH", "amount": half_cash}], items=_line(1)).status_code == 201
+    assert q["net_refund"] == half - POINTS and q["points_paid_share"] == POINTS
+    assert _post(c, [{"method": "CASH", "amount": half - POINTS}], items=_line(1)).status_code == 201
 
     q2 = _quote(c, items=_line(1))
-    assert q2["net_refund"] == half_cash and q2["points_paid_share"] == half_points
-    bad = _post(c, [{"method": "CASH", "amount": half_cash - half_points},
-                    {"method": "STORE_CREDIT", "amount": half_points}], items=_line(1))
+    assert q2["net_refund"] == half and q2["points_paid_share"] == 0.0
+    bad = _post(c, [{"method": "CASH", "amount": half - POINTS},
+                    {"method": "STORE_CREDIT", "amount": POINTS}], items=_line(1))
     assert bad.status_code in (400, 422), bad.text
-    assert _post(c, [{"method": "CASH", "amount": half_cash}], items=_line(1)).status_code == 201
+    assert _post(c, [{"method": "CASH", "amount": half}], items=_line(1)).status_code == 201
 
     docs = [d for d in c["returns"].docs if d.get("status") == "COMPLETED"]
     assert sum(d["refund_amount"] for d in docs) == CASH
     assert sum(d["points_paid_share"] for d in docs) == POINTS
     assert _drawer(c) == CASH and _issued(c) == []
+
+
+def test_a_small_first_return_holds_what_it_can_and_the_next_return_the_rest(ctx):
+    """The first return's net is below the points-paid part: it pays nothing,
+    and the next return of the bill holds back what is left -- never twice."""
+    c = _points_sale(ctx, qty=20)  # Rs 295 a unit, under the Rs 590 points part
+    unit = _BILLED_GROSS / 20
+    q = _quote(c, items=_line(1))
+    assert q["points_paid_share"] == unit and q["net_refund"] == 0.0
+    assert _post(c, items=_line(1)).status_code == 201
+    q2 = _quote(c, items=_line(19))
+    assert q2["points_paid_share"] == POINTS - unit
+    assert q2["net_refund"] == CASH
+    assert _post(c, [{"method": "CASH", "amount": q2["net_refund"]}], items=_line(19)).status_code == 201
+    docs = [d for d in c["returns"].docs if d.get("status") == "COMPLETED"]
+    assert sum(d["points_paid_share"] for d in docs) == POINTS
+    assert sum(d["refund_amount"] for d in docs) == CASH
 
 
 def test_an_identical_retry_replays_and_pays_nothing_more(ctx):
@@ -203,3 +221,64 @@ def test_a_voucher_sale_still_refunds_its_voucher_part_as_store_credit(ctx):
     r = _post(c, [{"method": "CASH", "amount": CASH}, {"method": "STORE_CREDIT", "amount": POINTS}])
     assert r.status_code == 201, r.text
     assert r.json()["credit_amount"] == POINTS and r.json()["refund_amount"] == _BILLED_GROSS
+
+
+# ----------------------------------------------------------------------------
+# Round 6 (#1397 review): the REAL engine on a partial return. reverse_for_return
+# restores the bill's WHOLE redemption on its first return and nothing on later
+# ones (block_on_any_prior_reversal). The money side must hold back exactly what
+# the engine gives back as points -- not a proportional slice -- or the first
+# partial return pays the points-paid part twice: once as points, once as cash.
+# ----------------------------------------------------------------------------
+
+
+def _real_engine(c, monkeypatch):
+    """The real reversal engine over the real loyalty repositories (mongomock),
+    holding the bill's 590-point redemption."""
+    import mongomock
+    from api.routers import loyalty as L
+    from database.repositories.loyalty_repository import (
+        LoyaltyAccountRepository,
+        LoyaltyTransactionRepository,
+    )
+
+    db = mongomock.MongoClient()["points_paid_once"]
+    accounts = LoyaltyAccountRepository(db.get_collection("loyalty_accounts"))
+    txns = LoyaltyTransactionRepository(db.get_collection("loyalty_transactions"))
+    accounts.find_or_create("CUST-1")
+    accounts.adjust_balance("CUST-1", delta_points=0, delta_lifetime_redeemed=int(POINTS))
+    db.loyalty_transactions.insert_one({"txn_id": "R-1", "customer_id": "CUST-1", "type": "REDEEM",
+                                        "points": int(POINTS), "order_id": c["order"]["order_id"]})
+    monkeypatch.setattr(L, "get_loyalty_transaction_repository", lambda: txns)
+    monkeypatch.setattr(L, "get_loyalty_account_repository", lambda: accounts)
+    monkeypatch.setattr(L, "get_order_repository", lambda: None, raising=False)
+    monkeypatch.setattr(L, "reverse_for_return", _REAL_REVERSE)
+    return lambda: int(db.loyalty_accounts.find_one({"customer_id": "CUST-1"})["balance_points"])
+
+
+from api.routers.loyalty import reverse_for_return as _REAL_REVERSE  # noqa: E402
+
+
+def _value_back(c, points):
+    docs = [d for d in c["returns"].docs if d.get("status") == "COMPLETED"]
+    return round(sum(d["refund_amount"] for d in docs) + points(), 2)
+
+
+def test_a_first_partial_return_never_pays_more_than_the_goods_handed_back(ctx, monkeypatch):
+    c = _points_sale(ctx, qty=2)
+    points = _real_engine(c, monkeypatch)
+    half_value = _BILLED_GROSS / 2
+
+    q = _quote(c, items=_line(1))
+    r = _post(c, [{"method": "CASH", "amount": q["net_refund"]}], items=_line(1))
+    assert r.status_code == 201, r.text
+    assert points() == POINTS  # what the real engine restored
+    assert _value_back(c, points) == half_value  # cash + points == the goods returned
+    assert q["points_paid_share"] == r.json()["points_paid_share"] == POINTS
+
+    q2 = _quote(c, items=_line(1))
+    assert q2["points_paid_share"] == 0.0 and q2["net_refund"] == half_value
+    assert _post(c, [{"method": "CASH", "amount": half_value}], items=_line(1)).status_code == 201
+    assert points() == POINTS  # never restored twice
+    assert _value_back(c, points) == _BILLED_GROSS
+    assert _drawer(c) == CASH and _issued(c) == []
