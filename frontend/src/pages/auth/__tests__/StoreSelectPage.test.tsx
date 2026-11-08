@@ -38,7 +38,7 @@ vi.mock('react-router-dom', async (importOriginal) => {
   };
 });
 
-const setActiveStore = vi.fn();
+const setActiveStore = vi.fn(async (_id: string) => true);
 const logout = vi.fn(() => Promise.resolve());
 let mockUser: Record<string, unknown>;
 vi.mock('../../../context/AuthContext', () => ({
@@ -238,7 +238,7 @@ describe('StoreSelectPage - keyboard', () => {
 
     fireEvent.keyDown(window, { key: '4' });
     expect(setActiveStore).toHaveBeenCalledWith('WIZ-DHN-01');
-    expect(navigateSpy).toHaveBeenCalledWith('/pos/new', { replace: true });
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/pos/new', { replace: true }));
   });
 
   it('Enter continues where you were (last store persisted per user)', async () => {
@@ -250,7 +250,7 @@ describe('StoreSelectPage - keyboard', () => {
 
     fireEvent.keyDown(window, { key: 'Enter' });
     expect(setActiveStore).toHaveBeenCalledWith('BV-DHN-02');
-    expect(localStorage.getItem('ims_last_store:u1')).toBe('BV-DHN-02');
+    await waitFor(() => expect(localStorage.getItem('ims_last_store:u1')).toBe('BV-DHN-02'));
   });
 
   it('falls back to the active store for "Where you were"', async () => {
@@ -281,6 +281,32 @@ describe('StoreSelectPage - keyboard', () => {
     await heading();
     fireEvent.click(screen.getByRole('option', { name: /GANGADHAM- PUNE/ }));
     expect(setActiveStore).toHaveBeenCalledWith('4dc49c44-08a1-46e1-85fb-8b7eca55f560');
-    expect(localStorage.getItem('ims_last_store:u1')).toBe('4dc49c44-08a1-46e1-85fb-8b7eca55f560');
+    await waitFor(() => expect(localStorage.getItem('ims_last_store:u1')).toBe('4dc49c44-08a1-46e1-85fb-8b7eca55f560'));
+  });
+});
+
+// R41 (Codex audit 2026-11-04): a switch the server did not confirm must leave
+// the user on the picker, on the shop they were on, with a visible error.
+describe('StoreSelectPage - a switch the server refuses', () => {
+  it('stays on the picker with an error and moves nothing', async () => {
+    setActiveStore.mockResolvedValueOnce(false);
+    render(<StoreSelectPage />);
+    await heading();
+    fireEvent.click(screen.getByRole('option', { name: /GANGADHAM- PUNE/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Could not switch to GANGADHAM- PUNE/);
+    expect(navigateSpy).not.toHaveBeenCalled();
+    expect(localStorage.getItem('ims_last_store:u1')).toBeNull();
+    // A retry that succeeds then proceeds.
+    fireEvent.click(screen.getByRole('option', { name: /GANGADHAM- PUNE/ }));
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/pos/new', { replace: true }));
+  });
+
+  it('a single-store auto-proceed that fails shows the store with the error instead of moving on', async () => {
+    mockUser = admin({ roles: ['AREA_MANAGER'], activeRole: 'AREA_MANAGER', storeIds: ['BV-DHN-02'], activeStoreId: '' });
+    setActiveStore.mockResolvedValueOnce(false);
+    render(<StoreSelectPage />);
+    expect(await screen.findByRole('alert')).toHaveTextContent(/Could not switch/);
+    expect(navigateSpy).not.toHaveBeenCalled();
+    expect(screen.getByRole('option', { name: /HIRAPUR-DHN/ })).toBeInTheDocument();
   });
 });

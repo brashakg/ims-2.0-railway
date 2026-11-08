@@ -32,8 +32,7 @@ from .pricing import (
     PaymentMethod,
 )
 from .numbering import build_emi_schedule
-from .workshop import _ensure_workshop_job_for_order
-from .release import _claim_order_status
+from .workshop import confirm_and_hand_off
 
 
 def _claim_loyalty_redemption(order: dict, amount: float, payment_id: str, idem_key: str = ""):
@@ -260,6 +259,13 @@ async def add_payment(
                 detail=f"Payment amount exceeds balance due (Rs {balance_due})",
             )
 
+        # Every debit leg carries a key, sent or not: the give-back door finds a
+        # leg that lost its bill by that key alone, so a keyless debit that
+        # lost one was out of reach for good.
+        wallet_tender = payment.method in (PaymentMethod.GIFT_VOUCHER, PaymentMethod.STORE_CREDIT)
+        if wallet_tender and not idem_key:
+            idem_key = str(uuid.uuid4())
+
         # Gift voucher: REDEEM (decrement the card) before recording the
         # payment, so an abandoned sale never burns a card and there is no
         # client-side double-spend. The atomic redeem is the single source
@@ -281,7 +287,7 @@ async def add_payment(
             # THE one rule: no new gift-voucher debit while this customer --
             # or this voucher -- has another unresolved debit; only the same
             # leg (key) resumes. A leg given back is never taken again.
-            leg_key = f"POSPAY:{order_id}:{idem_key}" if idem_key else None
+            leg_key = f"POSPAY:{order_id}:{idem_key}"
             refuse_unresolved_debit(str(order.get("customer_id") or ""), leg_key, voucher_code)
             refuse_given_back_voucher_leg(voucher_code, leg_key)
             result = redeem_voucher_atomic(
@@ -292,7 +298,7 @@ async def add_payment(
                 current_user.get("user_id"),
                 # The till leg's key keys the DEBIT itself: a re-sent leg whose
                 # answer was lost never takes the card twice.
-                idempotency_key=f"POSPAY:{order_id}:{idem_key}" if idem_key else None,
+                idempotency_key=leg_key,
             )
             if not result.get("ok"):
                 raise HTTPException(
@@ -326,13 +332,13 @@ async def add_payment(
                 user_id=current_user.get("user_id"),
                 # The till leg's key guards the DEBIT itself (the manual
                 # door's pattern): a re-sent leg never debits twice.
-                guard_ref=f"POSPAY:{order_id}:{idem_key}" if idem_key else None,
+                guard_ref=f"POSPAY:{order_id}:{idem_key}",
                 source="POS_PAYMENT",
             )
 
         # ONE owner per debit leg (money review 21): the bill wins the leg
         # before the payment goes on the order, or the give-back owns it (409).
-        if idem_key and payment.method in (PaymentMethod.STORE_CREDIT, PaymentMethod.GIFT_VOUCHER):
+        if wallet_tender:
             from ..customers import claim_leg_for_bill
 
             claim_leg_for_bill(payment.method.value, f"POSPAY:{order_id}:{idem_key}",
@@ -452,7 +458,17 @@ async def add_payment(
 
                 recorded = record_credit(repo, order, payment_data, get_customer_repository())
             else:
-                recorded = repo.add_payment(order_id, payment_data)
+                try:
+                    recorded = repo.add_payment(order_id, payment_data)
+                except ValueError as exc:
+                    # Another tender (a Razorpay capture) landed after the check
+                    # above: the same refusal, not a 500.
+                    latest = order_balance_due(repo.find_by_id(order_id) or order) or 0
+                    detail = f"Payment amount exceeds balance due (Rs {latest})"
+                    if wallet_tender:  # its debit landed: an unbilled leg, given back once
+                        detail += (f". The Rs {payment.amount:.2f} already taken goes back through "
+                                   "Accounts (Returns > Needs completing > Unbilled payments).")
+                    raise HTTPException(status_code=400, detail=detail) from exc
         except BaseException:
             if loyalty_txn_id:
                 _release_loyalty_redemption(loyalty_txn_id, payment_id)
@@ -487,49 +503,22 @@ async def add_payment(
             auto_confirmed = False
             workshop_job_id = None
             if refreshed and refreshed.get("status") == "DRAFT":
-                # Same guarded claim as /confirm -- the auto-confirm door is
-                # not exempt from a concurrent cancel.
-                if not _claim_order_status(
-                    repo,
-                    order_id,
-                    "CONFIRMED",
-                    ("DRAFT",),
-                    current_user.get("user_id"),
-                ):
-                    logger.warning(
-                        "[ORDERS] auto-confirm on payment skipped for %s -- "
-                        "its status changed (likely cancelled)",
-                        order_id,
-                    )
-                    refreshed = repo.find_by_id(order_id) or refreshed
-                    return {
-                        "payment_id": payment_data["payment_id"],
-                        "message": "Payment recorded",
-                        "amount": payment.amount,
-                        "workshop_job_id": None,
-                        "order_status": (refreshed or {}).get("status", "DRAFT"),
-                        "payment_status": (refreshed or {}).get(
-                            "payment_status", "PARTIAL"
-                        ),
-                    }
-                auto_confirmed = True
-                # F16: this auto-confirm bypassed confirm_order, so the workshop
-                # safety-net never ran and a paid spectacle order NEVER reached
-                # the lab queue -- the job simply did not exist. Run the exact
-                # same idempotent, fail-soft helper confirm_order runs (it skips
-                # non-fitting orders, never duplicates an existing job, and never
-                # raises), so both confirm paths behave identically.
+                # Same rule as /confirm (F16: this door once skipped the safety
+                # net and a paid spectacle order never reached the lab). The
+                # payment stands whatever this answers; a failed confirm or
+                # handoff is finished by the hourly repair.
                 try:
-                    workshop_job_id = _ensure_workshop_job_for_order(
-                        refreshed, current_user.get("user_id")
+                    refreshed, workshop_job_id = confirm_and_hand_off(
+                        repo, order_id, current_user.get("user_id")
                     )
                 except Exception as exc:  # noqa: BLE001 -- must never block a payment
                     logger.warning(
-                        "[ORDERS] workshop auto-link skipped on payment "
-                        "auto-confirm for %s: %s",
+                        "[ORDERS] auto-confirm on payment left %s unsettled: %s",
                         order_id,
                         exc,
                     )
+                    refreshed = repo.find_by_id(order_id) or refreshed
+                auto_confirmed = refreshed.get("status") == "CONFIRMED"
 
             return {
                 "payment_id": payment_data["payment_id"],

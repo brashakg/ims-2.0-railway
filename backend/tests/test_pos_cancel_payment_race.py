@@ -24,6 +24,7 @@ import os
 import sys
 from types import SimpleNamespace
 
+import mongomock
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -189,6 +190,121 @@ async def test_cancel_landing_inside_a_store_credit_payment_strands_nothing(till
     cust_router.give_back_unbilled_leg(LEG, _user("ADMIN"))  # a re-press gives nothing more
     assert _balance(till) == 1000.0
     assert _stored(till)["status"] == "CANCELLED" and _stored(till)["payments"] == []
+
+
+# =========================================================================== #
+# A capture beats a wallet tender (#1387): the debit is given back exactly once
+# =========================================================================== #
+def _capture_lands_after_the_debit(monkeypatch, till):
+    """The tender passed the balance check and took its debit; another tender
+    settles the bill before the tender's own order write."""
+    repo = till["orders"]
+    real = repo.add_payment
+    seen = []
+
+    def _capture_then_write(*a, **k):
+        if not seen:
+            seen.append(1)
+            real("ORD-1", {"payment_id": "cap", "method": "UPI", "amount": 1000.0,
+                           "idempotency_key": "razorpay:pay_1"})
+        return real(*a, **k)
+
+    monkeypatch.setattr(repo, "add_payment", _capture_then_write)
+    return seen
+
+
+def _voucher_wallet(monkeypatch):
+    db = mongomock.MongoClient().db
+    monkeypatch.setattr("api.dependencies.get_seeded_db", lambda: db)
+    monkeypatch.setattr(cust_router, "_vouchers_coll", lambda: db.vouchers)
+    db.vouchers.insert_one({"code": "GV1", "status": "ACTIVE", "balance": 1000.0, "expiry_date": None})
+    return db.vouchers
+
+
+def _pay_voucher(key):
+    body = PaymentCreate(method="GIFT_VOUCHER", amount=1000.0, voucher_code="GV1")
+    return add_payment("ORD-1", body, _user("CASHIER"), key)
+
+
+def _leg_rows(till):
+    """Every debit key the wallets now hold, read from the stored rows."""
+    rows = [r["entry_id"] for r in _ledger(till).find({"source": "POS_PAYMENT"})
+            if str(r["entry_id"]).startswith("POSPAY:")]
+    for v in cust_router._vouchers_coll().find({}):
+        rows += [e["idempotency_key"] for e in v.get("money_ledger") or []
+                 if str(e.get("idempotency_key") or "").startswith("POSPAY:")]
+    return rows
+
+
+def _past_the_lease(till, leg):
+    _ledger(till).update_one({"entry_id": leg}, {"$set": {"pending_at": _ago(30), "leg_owner_at": _ago(30)}})
+    coll = cust_router._vouchers_coll()
+    for v in coll.find({"money_ledger.idempotency_key": leg}):
+        ledger = [{**e, "created_at": _ago(30)} if e.get("idempotency_key") == leg else e
+                  for e in v["money_ledger"]]
+        coll.update_one({"code": v["code"]}, {"$set": {
+            "money_ledger": ledger, f"pos_leg_owner_at.{leg.replace('.', '_')}": _ago(30)}})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["leg-k", None], ids=["keyed", "keyless"])
+async def test_a_store_credit_tender_beaten_by_a_capture_is_given_back_once(till, credit, monkeypatch, key):
+    till["db"].get_collection("orders").insert_one(_order(status="DRAFT", order_number="BV/0001"))
+    _capture_lands_after_the_debit(monkeypatch, till)
+    with pytest.raises(HTTPException) as e:
+        await _pay("STORE_CREDIT", key=key)
+    assert e.value.status_code == 400 and "exceeds balance due" in e.value.detail
+    assert "Needs completing" in e.value.detail  # the cashier knows it is not lost
+    assert _balance(till) == 0.0 and [p["method"] for p in _stored(till)["payments"]] == ["UPI"]
+    [leg] = _leg_rows(till)
+    row = _ledger(till).find_one({"entry_id": leg})
+    assert cust_router.leg_unresolved(cust_router._store_credit_leg(row), _stored(till))
+    _past_the_lease(till, leg)
+    cust_router.give_back_unbilled_leg(leg, _user("ADMIN"))
+    again = cust_router.give_back_unbilled_leg(leg, _user("ADMIN"))
+    assert again["replayed"] is True and _balance(till) == 1000.0
+    assert [p["method"] for p in _stored(till)["payments"]] == ["UPI"]
+    assert _stored(till)["amount_paid"] == 1000.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["leg-k", None], ids=["keyed", "keyless"])
+async def test_a_voucher_tender_beaten_by_a_capture_is_given_back_once(till, credit, monkeypatch, key):
+    till["db"].get_collection("orders").insert_one(_order(status="DRAFT", order_number="BV/0001"))
+    vouchers = _voucher_wallet(monkeypatch)
+    _capture_lands_after_the_debit(monkeypatch, till)
+    with pytest.raises(HTTPException) as e:
+        await _pay_voucher(key)
+    assert e.value.status_code == 400 and "Needs completing" in e.value.detail
+    assert vouchers.find_one({"code": "GV1"})["balance"] == 0.0
+    [leg] = _leg_rows(till)
+    _past_the_lease(till, leg)
+    cust_router.give_back_unbilled_leg(leg, _user("ADMIN"))
+    again = cust_router.give_back_unbilled_leg(leg, _user("ADMIN"))
+    v = vouchers.find_one({"code": "GV1"})
+    assert again["replayed"] is True and v["balance"] == 1000.0 and v["status"] == "ACTIVE"
+    assert [p["method"] for p in _stored(till)["payments"]] == ["UPI"]
+
+
+@pytest.mark.asyncio
+async def test_a_keyless_wallet_tender_that_lands_is_on_its_bill_and_resolved(till, credit):
+    """The key minted for a keyless leg rides on the payment: nothing unresolved."""
+    till["db"].get_collection("orders").insert_one(_order(status="DRAFT", order_number="BV/0001"))
+    await _pay("STORE_CREDIT", key=None)
+    [leg] = _leg_rows(till)
+    row = _ledger(till).find_one({"entry_id": leg})
+    assert not cust_router.leg_unresolved(cust_router._store_credit_leg(row), _stored(till))
+    assert _stored(till)["amount_paid"] == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_a_cash_tender_beaten_by_a_capture_says_nothing_of_a_wallet(till, monkeypatch):
+    till["db"].get_collection("orders").insert_one(_order(status="DRAFT"))
+    _capture_lands_after_the_debit(monkeypatch, till)
+    with pytest.raises(HTTPException) as e:
+        await _pay("CASH")
+    assert e.value.status_code == 400 and e.value.detail.startswith("Payment amount exceeds balance due")
+    assert "Needs completing" not in e.value.detail
 
 
 # =========================================================================== #
