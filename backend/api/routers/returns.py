@@ -1218,12 +1218,27 @@ def _points_paid_share(
     paid the rest of the redemption twice, as points now and as cash. Cash caps
     and the partial-return rules are untouched; only the money a return pays
     shrinks by this. Every return door prices through here (quote, POST, Needs
-    completing keeps it on the hold)."""
+    completing keeps it on the hold).
+
+    "Held back by an earlier return" is the COMPLETED docs AND the live or kept
+    refund holds of returns still being written or kept for Needs completing
+    (_live_refund_holds, one read). A hold carries its return's share from the
+    moment it is reserved (_reserve_order_refund prices through here inside its
+    compare-and-set), so two returns of one bill never both hold the same
+    points back while the engine restores them once (#1397 round 7).
+    ``order`` must carry the bill's refund_holds as stored now."""
     paid = _order_non_refundable_tenders(order, (_POINTS_TENDER,)).get(_POINTS_TENDER, 0.0)
-    if paid <= 0:
+    if paid <= 0 or not order_id:
         return 0.0
-    left = paid - _sum_prior_refunds(order_id, "points_paid_share", strict=strict)
-    return round(max(0.0, min(left, float(net_amount))), 2)
+    try:
+        live, documented = _live_refund_holds(order_id, (order or {}).get("refund_holds") or {},
+                                              field="points_paid_share")
+    except HTTPException:
+        if strict:
+            raise
+        live, documented = {}, 0.0  # the quote is only a preview
+    held = documented + sum(float((h or {}).get("points_paid_share") or 0) for h in live.values())
+    return round(max(0.0, min(paid - held, float(net_amount))), 2)
 
 
 def _prior_refund_tenders(order_id: Optional[str]) -> Dict[str, float]:
@@ -1804,7 +1819,9 @@ def _reassert_return_claims(row: Dict[str, Any]) -> None:
                 lost.append(line)
         except Exception:  # noqa: BLE001
             lost.append(line)
-    _keep_order_refund_hold(order_id, spec.get("return_id"), amount=spec.get("net_amount"))
+    _keep_order_refund_hold(order_id, spec.get("return_id"), amount=spec.get("net_amount"),
+                            extra=({"points_paid_share": spec["points_paid_share"]}
+                                   if spec.get("points_paid_share") is not None else None))
     if lost:
         logger.error("[RETURNS] return %s: units could not be claimed again after a healed credit: %s",
                      spec.get("return_id"), lost)
@@ -4090,8 +4107,9 @@ def _refund_hold_ttl_seconds() -> int:
     return _STALE_CLAIM_SECONDS
 
 
-def _live_refund_holds(order_id: str, holds: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
-    """(holds still counting, the COMPLETED returns' total) -- read together.
+def _live_refund_holds(order_id: str, holds: Dict[str, Any],
+                       field: str = "net_refund") -> Tuple[Dict[str, Any], float]:
+    """(holds still counting, the COMPLETED returns' total of ``field``) -- read together.
     A hold counts only while its return has no COMPLETED doc (the doc's own
     total counts it then). A hold whose money went out is KEPT (marked by
     _keep_order_refund_hold) and never ages out: it stays the record of that
@@ -4113,7 +4131,7 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any]) -> Tuple[Dict[str, 
                     continue
                 done.add(doc.get("return_id"))
                 try:
-                    documented += float(doc.get("net_refund") or 0)
+                    documented += float(doc.get(field) or 0)
                 except (TypeError, ValueError):
                     pass
         except Exception as exc:  # noqa: BLE001 -- fail CLOSED (owner 2026-10-23)
@@ -4134,21 +4152,26 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any]) -> Tuple[Dict[str, 
     return live, round(documented, 2)
 
 
-def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id: str) -> Tuple[float, bool]:
+def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id: str,
+                          bill: Optional[Dict[str, Any]] = None) -> Tuple[float, bool, float]:
     """Reserve this refund on the ORDER, atomically, BEFORE the over-refund
     cap and the Rs 2,000 approval rule decide (PR #1264): two returns fired at
     once each read the other's refund, so neither can dodge the rule or the
     cap. Each return holds its own entry in ``refund_holds`` (compare-and-set
     on ``refund_holds_v``); the prior total is the COMPLETED returns plus the
-    live holds of returns still being written. Returns (prior total,
-    reserved?). Released by _release_order_refund when the return fails; a
-    hold whose worker died ages out (_live_refund_holds). A repository
-    without compare-and-set (test doubles) reads the documented sum only."""
+    live holds of returns still being written. The hold also carries this
+    return's points-paid share, priced in the same compare-and-set
+    (_points_paid_share), so a return pressed alongside it never holds the
+    same points back again (#1397 round 7). Returns (prior total, reserved?,
+    points-paid share). Released by _release_order_refund when the return
+    fails; a hold whose worker died ages out (_live_refund_holds). A
+    repository without compare-and-set (test doubles) reads the documented
+    sum only, and prices the share from ``bill``."""
     documented = _sum_prior_refunds(order_id, strict=True)
     repo = get_order_repository()
     update_if = getattr(repo, "update_if", None) if repo is not None else None
     if not order_id or not callable(update_if) or getattr(repo, "collection", None) is None:
-        return documented, False
+        return documented, False, _points_paid_share(bill, order_id, net_amount, strict=True)
     for _ in range(8):
         order = repo.find_by_id(order_id) or {}
         version = order.get("refund_holds_v")
@@ -4160,10 +4183,12 @@ def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id:
         unfinished = _nothing_paid_ids(order_id)
         keep = {rid: h for rid, h in (order.get("refund_holds") or {}).items()
                 if rid not in live and (rid in unfinished or "*" in unfinished) and (h or {}).get("kept")}
-        live[return_id] = {"amount": round(float(net_amount), 2), "at": utc_now_iso()}
+        share = _points_paid_share(order, order_id, net_amount, strict=True)
+        live[return_id] = {"amount": round(float(net_amount), 2), "at": utc_now_iso(),
+                           "points_paid_share": share}
         if update_if(order_id, {"refund_holds_v": version},
                      {"refund_holds": {**keep, **live}, "refund_holds_v": int(version or 0) + 1}):
-            return prior, True
+            return prior, True, share
     raise HTTPException(status_code=503, detail="Too many refunds on this bill at once - nothing was recorded. Try again.")
 
 
@@ -4633,7 +4658,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             "Could not check this bill's credit notes - try again. Nothing was recorded."))
     _refuse_while_a_return_settles(order or {}, resolved_order_id)
     return_id = generate_return_id()
-    _prior_refunds, _reserved = _reserve_order_refund(resolved_order_id, net_amount, return_id)
+    _prior_refunds, _reserved, points_share = _reserve_order_refund(
+        resolved_order_id, net_amount, return_id, bill=order)
     if _reserved:
         held.update(order_id=resolved_order_id, return_id=return_id)
     if round(_prior_refunds + net_amount, 2) > _refund_ceiling + 0.01:
@@ -4671,8 +4697,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # The points-paid part goes back as points (the loyalty reversal below):
     # what this return PAYS -- the split, the refund, the store credit -- is the
     # rest. net_amount stays the return's value: the cap, the approval rule and
-    # the credit note's tax all read it, unchanged.
-    points_share = _points_paid_share(order, resolved_order_id, net_amount, strict=True)
+    # the credit note's tax all read it, unchanged. points_share was priced
+    # inside the reservation above (the one rule: _points_paid_share).
     pays = round(net_amount - points_share, 2)
 
     refund_tenders: Optional[List[Dict[str, Any]]] = None
@@ -4959,6 +4985,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                                "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in claimed],
                     "refund_tenders": refund_tenders,
                     "net_amount": round(float(net_amount), 2),
+                    "points_paid_share": points_share,
                     "return_type": body.return_type,
                 },
                 outcome=_outcome,
