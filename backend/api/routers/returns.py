@@ -1000,15 +1000,22 @@ _REFUND_CASH_IN = ("CASH", "UPI", "CARD", "BANK_TRANSFER")
 # CASH row -- which (before the aggregation fix) silently over-netted the
 # drawer. The refundable substitute is STORE_CREDIT, which is RECORDED on the
 # breakdown but NEVER netted into a drawer.
-_ORDER_NON_REFUNDABLE = ("GIFT_VOUCHER", "LOYALTY", "EMI", "CREDIT")
+_ORDER_NON_REFUNDABLE = ("GIFT_VOUCHER", "EMI", "CREDIT")
 
-# Non-drawer tenders a refund leg may legitimately name. STORE_CREDIT is the
-# standard substitute for any non-refundable instrument; the instrument itself
-# is accepted too (a voucher reissued as a voucher).
-_REFUND_NON_DRAWER = ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE
+# LOYALTY is NOT in that pool (owner ruling 2026-11-08): the part of a sale paid
+# with points comes back AS POINTS -- the loyalty reversal restores them -- so it
+# is never also paid as money or store credit. _points_paid_share takes it out
+# of what a return pays; no refund leg may name it.
+_POINTS_TENDER = "LOYALTY"
 
-# Every tender a refund leg may name.
-_REFUND_ALLOWED = _REFUND_CASH_IN + _REFUND_NON_DRAWER
+# Non-drawer tenders: never netted into a drawer. LOYALTY stays here so a leg
+# saved before the 2026-11-08 ruling is still read as not-drawer money.
+_REFUND_NON_DRAWER = ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE + (_POINTS_TENDER,)
+
+# Every tender a NEW refund leg may name. STORE_CREDIT is the standard
+# substitute for a non-refundable instrument; the instrument itself is accepted
+# too (a voucher reissued as a voucher).
+_REFUND_ALLOWED = _REFUND_CASH_IN + ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE
 
 # Ceilings on an EXCHANGE replacement. The exchange difference feeds the cash
 # drawer, so every client-supplied factor of it is a drawer input.
@@ -1069,7 +1076,8 @@ def _normalize_refund_tenders(
                 detail=(
                     f"Unrecognized refund tender '{method}'. Use CASH / UPI / "
                     "CARD / BANK, or STORE_CREDIT for the part of the sale paid "
-                    "with a gift voucher / loyalty / EMI / credit."
+                    "with a gift voucher / EMI / credit. Points paid on the sale "
+                    "go back as points by themselves."
                 ),
             )
         try:
@@ -1172,10 +1180,11 @@ def _order_captured_tenders(order: Optional[Dict[str, Any]]) -> Dict[str, float]
 
 
 def _order_non_refundable_tenders(
-    order: Optional[Dict[str, Any]],
+    order: Optional[Dict[str, Any]], kinds: Tuple[str, ...] = _ORDER_NON_REFUNDABLE,
 ) -> Dict[str, float]:
     """What the order collected on instruments that CANNOT be refunded back to
-    themselves as drawer/gateway money (gift voucher / loyalty / EMI / credit).
+    themselves as drawer/gateway money (gift voucher / EMI / credit), or on
+    ``kinds``.
 
     This portion is legitimately refundable only as STORE_CREDIT (or a reissued
     instrument), and it is what makes an otherwise-DOA refund completable on a
@@ -1185,7 +1194,7 @@ def _order_non_refundable_tenders(
         if not isinstance(p, dict):
             continue
         canon = canonicalize_tender(p.get("method"), p.get("mode"))
-        if canon not in _ORDER_NON_REFUNDABLE:
+        if canon not in kinds:
             continue
         try:
             amt = float(p.get("amount", 0) or 0)
@@ -1193,6 +1202,28 @@ def _order_non_refundable_tenders(
             amt = 0.0
         out[canon] = round(out.get(canon, 0.0) + amt, 2)
     return {k: v for k, v in out.items() if v > 0}
+
+
+def _points_paid_share(
+    order: Optional[Dict[str, Any]], order_id: Optional[str], gross_refund: float,
+    net_amount: float, *, strict: bool,
+) -> float:
+    """THE rule (owner 2026-11-08): the part of this return the customer paid
+    with loyalty points. It comes back as points -- loyalty.reverse_for_return
+    restores the bill's redeemed points -- so it is never ALSO paid out as cash
+    or store credit. Each returned rupee is settled in the bill's own mix: the
+    points share of this return's value, capped at what earlier returns of the
+    bill have not settled already, and at this return's net. Cash caps and the
+    partial-return rules are untouched; only the money a return pays shrinks by
+    this. Every return door prices through here (quote, POST, Needs completing
+    keeps it on the hold)."""
+    paid = _order_non_refundable_tenders(order, (_POINTS_TENDER,)).get(_POINTS_TENDER, 0.0)
+    if paid <= 0:
+        return 0.0
+    billed = _order_billed_total(order)
+    share = paid * float(gross_refund) / billed if billed > 0 else paid
+    left = paid - _sum_prior_refunds(order_id, "points_paid_share", strict=strict)
+    return round(max(0.0, min(share, left, float(net_amount))), 2)
 
 
 def _prior_refund_tenders(order_id: Optional[str]) -> Dict[str, float]:
@@ -3958,6 +3989,10 @@ async def quote_return(
             raise HTTPException(status_code=400, detail=str(exc))
         _gate_exchange_settlement(settlement, replacement_priced, gross_refund)
 
+    # The points-paid part goes back as points: the split covers the rest.
+    points_share = _points_paid_share(order, resolved_order_id, gross_refund, net_amount, strict=False)
+    return_value, net_amount = net_amount, round(net_amount - points_share, 2)
+
     captured = _order_captured_tenders(order)
     non_refundable = _order_non_refundable_tenders(order)
     prior = _prior_refund_tenders(resolved_order_id)
@@ -4013,8 +4048,12 @@ async def quote_return(
         # the bill) -- already inside gross_refund / net_refund.
         "round_off": refund_round_off,
         "restocking_fee": restocking_fee,
-        # THE authoritative figure the refund-tender split must sum to.
+        # THE authoritative figure the refund-tender split must sum to: the
+        # money this return pays (its value less the points-paid part).
         "net_refund": net_amount,
+        # The part paid with points, given back as points (never as money).
+        "points_paid_share": points_share,
+        "return_value": return_value,
         "gst_breakup": engine.gst_breakup_lines(priced_lines),
         "settlement": settlement,
         # Server-resolved replacement lines + the total they sum to, so the till
@@ -4366,6 +4405,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                         "gross_refund": existing.get("gross_refund"),
                         "restocking_fee": existing.get("restocking_fee"),
                         "net_refund": existing.get("net_refund"),
+                        "points_paid_share": existing.get("points_paid_share", 0.0),
                         "gst_breakup": existing.get("gst_breakup"),
                         "refund_amount": existing.get("refund_amount"),
                         "refund_method": existing.get("refund_method"),
@@ -4628,12 +4668,19 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             raise HTTPException(status_code=400, detail=str(exc))
         _gate_exchange_settlement(settlement, replacement_dump, gross_refund)
 
+    # The points-paid part goes back as points (the loyalty reversal below):
+    # what this return PAYS -- the split, the refund, the store credit -- is the
+    # rest. net_amount stays the return's value: the cap, the approval rule and
+    # the credit note's tax all read it, unchanged.
+    points_share = _points_paid_share(order, resolved_order_id, gross_refund, net_amount, strict=True)
+    pays = round(net_amount - points_share, 2)
+
     refund_tenders: Optional[List[Dict[str, Any]]] = None
     collect_method: Optional[str] = None
     drawer_auto_netted = False
     if body.return_type == "RETURN":
         refund_tenders, drawer_auto_netted = _normalize_refund_tenders(
-            body.refund_tenders, net_amount
+            body.refund_tenders, pays
         )
         # AUTHORITATIVE cross-check: a tender may only be refunded up to what it
         # actually collected on this order (a UI rule is not a control).
@@ -4815,6 +4862,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             # What a recovered record needs to file the reversal once and
             # stay inside the cap (money review 14).
             "net_amount": round(float(net_amount), 2),
+            "points_paid_share": points_share,
             "gross_refund": round(float(gross_refund), 2),
             "restocking_fee": round(float(restocking_fee), 2),
             "round_off": round(float(_ro), 2),
@@ -4966,7 +5014,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     if body.return_type == "RETURN":
         # Net of any restocking fee = the cash actually given back. The explicit
         # refund-tender breakdown was validated + cross-checked pre-claim.
-        refund_amount = net_amount
+        refund_amount = pays
         refund_method = body.refund_method or _order_payment_method(order)
 
         # ISSUE the NON-DRAWER portion. A STORE_CREDIT (or reissued voucher) leg
@@ -4997,7 +5045,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             credit_amount = _non_drawer_total
 
     elif body.return_type == "CREDIT_NOTE":
-        credit_amount = net_amount
+        credit_amount = pays
         refund_method = "STORE_CREDIT"
         # SAME GUARD AS THE RETURN BRANCH ABOVE. A restocking fee equal to the
         # gross is legitimate ("take the goods back, issue nothing") and the FE
@@ -5005,12 +5053,15 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # _issue_store_credit return None (it refuses amount <= 0), which the
         # fail-loud path then reported as a ledger outage, sending the cashier
         # into an infinite retry against a perfectly healthy ledger.
+        # The note reverses the whole return's tax; the balance moves by what
+        # this return pays (the points-paid part goes back as points).
         if net_amount > 0:
             credit_entry = _issue_credit_or_fail(
-                net_amount,
+                pays,
                 reason=f"Credit note for return {return_id}",
                 gross=gross_refund,
                 fee=restocking_fee,
+                note_amount=net_amount if points_share > 0 else None,
             )
 
     else:  # EXCHANGE (settlement + collect_method validated pre-claim above)
@@ -5183,6 +5234,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "round_off": _ro,
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
+        # The part paid with points: given back as points, not in refund_amount
+        # / credit_amount. Later returns of the bill read it (_points_paid_share).
+        "points_paid_share": points_share,
         "gst_breakup": gst_view,
         # The credit note's Rule 53 number (None when nothing reverses tax).
         "credit_note_number": credit_note_number,
@@ -5294,9 +5348,14 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         if restocking_fee > 0
         else ""
     )
+    points_note = (
+        f"; Rs {points_share} paid with points goes back to the customer's points"
+        if points_share > 0
+        else ""
+    )
     message = {
-        "RETURN": f"Refund of Rs {net_amount} recorded{fee_note}",
-        "CREDIT_NOTE": f"Store credit of Rs {net_amount} issued{fee_note}",
+        "RETURN": f"Refund of Rs {pays} recorded{fee_note}{points_note}",
+        "CREDIT_NOTE": f"Store credit of Rs {pays} issued{fee_note}{points_note}",
         "EXCHANGE": "Exchange recorded",
     }[body.return_type]
 
@@ -5309,6 +5368,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "round_off": _ro,
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
+        "points_paid_share": points_share,
         "gst_breakup": gst_view,
         "credit_note_number": credit_note_number,
         "refund_amount": refund_amount,
@@ -5696,6 +5756,8 @@ async def complete_return_record(
         # The whole refund: its credit note covers all of it; the reserved
         # amount, never more (it stays inside the cap).
         net = facts.get("net_amount") if facts.get("net_amount") is not None else round(credit + drawer, 2)
+        # The points-paid part went back as points, never in the money.
+        points_share = round(float(facts.get("points_paid_share") or 0.0), 2)
         doc = {
             "return_id": return_id,
             "order_id": order_id,
@@ -5716,9 +5778,10 @@ async def complete_return_record(
             # later as round off).
             "round_off": facts.get("round_off") or 0.0,
             "net_refund": net,
+            "points_paid_share": points_share,
             "gst_breakup": gst,
             "credit_note_number": base.get("note_number") or facts.get("note_number"),
-            "refund_amount": net if rtype == "RETURN" else None,
+            "refund_amount": round(net - points_share, 2) if rtype == "RETURN" else None,
             "refund_method": "STORE_CREDIT" if rtype == "CREDIT_NOTE" else None,
             "refund_tenders": tenders if rtype == "RETURN" else None,
             "drawer_auto_netted": bool(rtype == "RETURN" and _drawer(tenders)),

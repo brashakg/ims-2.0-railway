@@ -462,3 +462,122 @@ def test_the_saved_doc_keeps_the_reversal_answer_its_press_gave(rig, tasks, monk
         "refund_tenders": [{"method": "CASH", "amount": 1200.0}], "loyalty_reversal_failed": False})
 
     assert complete()["loyalty_reversal_failed"] is False
+
+
+# ----------------------------------------------------------------------------
+# Owner ruling 2026-11-08 (#1397 round 5, item 1): once a PERSON closes the
+# exception, the sweep leaves that bill or return alone for good -- it never
+# claws back on its own later, when the customer's balance happens to cover it.
+# An exception still open keeps retrying (the 11-07 ruling, unchanged).
+# ----------------------------------------------------------------------------
+
+
+def test_a_bill_whose_exception_a_person_closed_is_never_clawed_later(rig, tasks, monkeypatch):
+    _underflow_stranded(rig, monkeypatch)
+    _tick(rig)
+    _tick(rig)
+    [task] = _exceptions(rig, "OPEN")
+    tasks.complete_task(task["task_id"], notes="Settled with the customer by hand.")
+
+    rig["accounts"].adjust_balance(CUST, delta_points=500)  # later earning covers the claw now
+    books = _books(rig)
+    _tick(rig)
+    _tick(rig)
+    assert _books(rig) == books  # nothing clawed, no new ledger row
+    assert _reversal_rows(rig) == []
+    assert _bill(rig)["loyalty_reversal_failed"] is True  # still true: it was never settled
+    assert len(_exceptions(rig)) == 1 and _exceptions(rig, "OPEN") == []
+    assert _audited(rig) == 0
+
+
+def test_a_return_whose_exception_a_person_closed_is_never_reversed_later(rig, tasks, monkeypatch):
+    _earn_on_order(rig, 500)
+    rig["accounts"].adjust_balance(CUST, delta_points=-(START + 500))
+    _unfinished_return(rig, monkeypatch)()
+    _tick(rig)
+    [task] = _return_exceptions(rig)
+    tasks.complete_task(task["task_id"], notes="Points corrected by hand.")
+
+    rig["accounts"].adjust_balance(CUST, delta_points=500)
+    books = _books(rig)
+    _tick(rig)
+    _tick(rig)
+    assert _books(rig) == books and _reversal_rows(rig) == []
+    assert _return_doc(rig)["loyalty_reversal_failed"] is True
+    assert [t["status"] for t in _return_exceptions(rig)] == ["COMPLETED"]
+
+
+def test_a_person_cancelling_the_exception_also_stops_the_retry(rig, tasks, monkeypatch):
+    _underflow_stranded(rig, monkeypatch)
+    _tick(rig)
+    _tick(rig)
+    [task] = _exceptions(rig, "OPEN")
+    rig["db"].tasks.update_one({"task_id": task["task_id"]}, {"$set": {"status": "CANCELLED"}})
+    rig["accounts"].adjust_balance(CUST, delta_points=500)
+    books = _books(rig)
+    _tick(rig)
+    assert _books(rig) == books and _reversal_rows(rig) == []
+
+
+def test_an_exception_the_sweep_closed_itself_mid_way_is_finished_not_frozen(rig, tasks, monkeypatch):
+    """The sweep completes its task, then clears the stamp; a worker stopped
+    between the two leaves the stamp beside the sweep's own closed task. That is
+    not a person's decision: the next tick finishes the close."""
+    from api.routers import loyalty
+
+    _underflow_stranded(rig, monkeypatch)
+    _tick(rig)
+    _tick(rig)
+    rig["accounts"].adjust_balance(CUST, delta_points=500)
+    real = loyalty._unstamp_exception
+    stop = {"once": True}
+
+    def stopped(*a, **k):
+        if stop.pop("once", False):
+            return None  # the worker stopped here
+        return real(*a, **k)
+
+    monkeypatch.setattr(loyalty, "_unstamp_exception", stopped)
+    _tick(rig)
+    assert _exceptions(rig, "OPEN") == [] and "loyalty_exception_task" in _bill(rig)
+    assert int(_account(rig)["balance_points"]) == 0  # the claw landed on this tick
+    books = _books(rig)
+    _tick(rig)
+    assert "loyalty_exception_task" not in _bill(rig)
+    assert not _bill(rig).get("loyalty_exception_closed")
+    assert _books(rig) == books and _bill(rig)["loyalty_reversal_failed"] is False
+
+
+def test_an_unreadable_task_list_settles_nothing(rig, tasks, monkeypatch):
+    from api.services import task_triggers
+
+    _underflow_stranded(rig, monkeypatch)
+    _tick(rig)
+    _tick(rig)
+    rig["accounts"].adjust_balance(CUST, delta_points=500)
+    books = _books(rig)
+
+    def down(*_a, **_k):
+        raise RuntimeError("tasks unreadable")
+
+    monkeypatch.setattr(task_triggers, "active_tasks", down)
+    _tick(rig)
+    assert _books(rig) == books
+
+
+def test_a_hand_completed_points_sale_pays_only_its_cash_part_and_the_points_once(rig, tasks, monkeypatch):
+    """Owner ruling 2026-11-08 (item 2) on the recovery door: a press that died
+    after its money moved is rebuilt from the hold, whose figures carry the
+    points-paid part; the record pays the rest, the sweep gives the points."""
+    _earn_on_order(rig)
+    _redeem()
+    complete = _unfinished_return(rig, monkeypatch, credit=False, net_amount=1200.0,
+                                  points_paid_share=100.0, tenders=[{"method": "CASH", "amount": 1100.0}])
+    complete()
+    doc = _return_doc(rig)
+    assert doc["refund_amount"] == 1100.0 and doc["points_paid_share"] == 100.0
+    assert doc["net_refund"] == 1200.0 and doc["credit_amount"] == 0.0
+    _tick(rig)
+    _tick(rig)
+    acct = _account(rig)
+    assert int(acct["balance_points"]) == START and len(_reversal_rows(rig)) == 1
