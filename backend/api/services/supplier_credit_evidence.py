@@ -11,11 +11,15 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import hashlib
 import json
 
+from .item_events import StockState, status_match
 from .org_validation import has_valid_gstin
 from .return_provenance import ReturnProvenanceError, resolve_return_provenance
 
 HEADS = ("cgst", "sgst", "igst")
 EVENTS = "supplier_credit_confirmations"
+KNOWN = "KNOWN"
+SHIP_THEN_RETRY = (" If those pieces really are going back to the supplier, ship that return, then retry "
+                   "this same note. If they are not, it needs a head-office decision.")
 
 
 class _CollectionAccess:
@@ -29,6 +33,26 @@ class _CollectionAccess:
 
     def get_collection(self, name):
         return self.db.get_collection(name)
+
+
+def credit_started(db, return_doc):
+    """True once a door has taken this return's supplier credit: any supplier
+    note it holds, pending or posted, claims that note and its pieces. A row
+    refused before its note was claimed (identity_claimed False) is no claim."""
+    return db.get_collection(EVENTS).find_one(
+        {**return_event_query(return_doc), "identity_claimed": {"$ne": False}}) is not None
+
+
+def rule_settled(db, return_doc):
+    """True once a note this door claimed had passed its physical rule. That
+    answer stands: the goods had left, so a piece of the product arriving or
+    selling since is not what went back, and the note can still finish. It
+    settles only that line question: another credit on the same goods is still
+    asked at the writer (_refuse_unplaced_credit). A row from before claims
+    recorded this says nothing either way (physical_rule_passed absent), nor
+    does one claimed with the rule unpassed (False), or refused before a claim."""
+    return db.get_collection(EVENTS).find_one(
+        {**return_event_query(return_doc), "identity_claimed": True, "physical_rule_passed": True}) is not None
 
 
 def return_event_query(return_doc):
@@ -124,6 +148,128 @@ def _verify_original(db, origin):
             raise ReturnProvenanceError("ORIGINAL_TAX_TOTAL_REQUIRED", "The original bill's input-tax totals need verified item evidence.") from exc
 
 
+def _ticked(lines, source):
+    index = source.get("return_line_index")
+    return type(index) is int and 0 <= index < len(lines) and lines[index].get("customer_owned")
+
+
+def _same_goods(row, source):
+    """The same receipt, product, disposition and original bill line."""
+    return goods_key(row) == goods_key(source) and (row.get("bill_id"), row.get("bill_line_index")) == (
+        source.get("bill_id"), source.get("bill_line_index"))
+
+
+def _goods_place(db, event, source):
+    """Whose goods a credit naming no piece took: KNOWN when its line is ticked
+    customer_owned, or its RMA links a return that really carried them: a live one,
+    the only one on that link, this shop's and supplier's, whose pieces (the shared
+    provenance resolver, as any credit on that return) trace to this source's own
+    receipt, disposition and bill line, and have left (RTV) for the quantity
+    credited. The return's id when only their shipment is missing; None otherwise.
+    A return_id alone proves nothing: before the rule it was free text (a cancelled
+    return, a typed one, another product, another purchase of the same product, no
+    such id), and a receipt rejection carried custody, never the accepted goods."""
+    if event.get("return_kind") != "RMA":
+        return None
+    rma = db.get_collection("vendor_rmas").find_one({"rma_id": event["return_id"]}) or {}
+    lines = rma.get("lines") or []
+    if _ticked(lines, source):
+        return KNOWN
+    rid = rma.get("return_id")
+    ret = db.get_collection("vendor_returns").find_one({"return_id": rid}) if rid else None
+    if (not ret or ret.get("status") in ("cancelled", "replaced") or ret.get("return_type") == "replacement"
+            or ret.get("receipt_rejection")
+            or ret.get("vendor_id") != rma.get("vendor_id") or ret.get("store_id") != rma.get("store_id")
+            or db.get_collection("vendor_rmas").count_documents({"return_id": rid, "status": {"$ne": "REJECTED"}}) > 1):
+        return None
+    try:
+        origins = resolve_return_provenance(db, ret)
+    except ReturnProvenanceError:
+        return None
+    ids = [sid for origin in origins if _same_goods(origin, source) for sid in origin["stock_ids"]]
+    wanted = sum(int(s.get("quantity") or 0) for s in event["sources"]
+                 if _same_goods(s, source) and not _ticked(lines, s))
+    if not ids or wanted > len(ids):
+        return None
+    pieces = db.get_collection("stock_units")
+    left = pieces.count_documents({"stock_id": {"$in": ids}, **status_match(StockState.RTV)})
+    if wanted <= left:
+        return KNOWN
+    set_aside = pieces.count_documents({"stock_id": {"$in": ids}, **status_match(StockState.QUARANTINED)})
+    return rid if wanted <= left + set_aside else None
+
+
+def _goods_known(db, event, source):
+    return _goods_place(db, event, source) == KNOWN
+
+
+def goods_key(source):
+    """Which goods a credit source spends. Rejected custody and accepted stock on
+    one receipt line are never the same goods: each has its own receipt capacity."""
+    return source.get("grn_id"), source.get("product_id"), source.get("receipt_disposition", "ACCEPTED")
+
+
+def _spends_goods(db, return_doc, source):
+    """Does this credit spend the receipt's pieces? One naming them does. So does
+    a line naming none on a product tracked piece by piece, unless it is ticked
+    customer_owned. A product with no piece at all has nothing to spend twice."""
+    if source["stock_ids"]:
+        return True
+    if _ticked(return_doc.get("items") or return_doc.get("lines") or [], source):
+        return False
+    return db.get_collection("stock_units").find_one({"product_id": source["product_id"]}) is not None
+
+
+def _refuse_unplaced_credit(db, return_doc, sources):
+    """L2-RMA-F01: a credit naming no piece on a receipt and product may be paying
+    for the goods another credit there paid for, and nothing shows which it took:
+    the bill and receipt caps cannot see that while spare quantity remains. So in
+    either order the later credit spending them (_spends_goods) stays pending, its
+    supplier note kept and no money posted: one that meets an earlier credit naming
+    no piece, or one naming no piece that meets a credit naming pieces. A credit
+    whose goods are known (_goods_known) is placed, and neither stops nor is
+    stopped; nor does either meet a credit for other goods (goods_key). Which
+    pieces a credit covered is never guessed, and a posted credit is never
+    changed, so no route frees such a note yet: head office decides. The one
+    thing that can still finish it is a linked return whose right pieces only have
+    to ship (_goods_place), said only when no other credit stands in the way."""
+    rid = return_doc.get("return_id") or return_doc.get("rma_id")
+    spending = [s for s in sources if _spends_goods(db, return_doc, s)]
+    named = {goods_key(s) for s in spending}
+    if not named:
+        return
+    own = {"return_kind": return_doc.get("return_kind"), "return_id": rid, "sources": sources}
+    unplaced = {goods_key(s) for s in spending if not s["stock_ids"] and not _goods_known(db, own, s)}
+    shipment = None
+    for event in db.get_collection(EVENTS).find({"posting_status": {"$in": ["PREPARING", "POSTED"]},
+                                                 "sources.grn_id": {"$in": sorted({key[0] for key in named})}}):
+        if event.get("return_id") == rid:
+            continue
+        for source in event.get("sources") or []:
+            goods = goods_key(source)
+            why = None
+            if source.get("stock_ids"):
+                if goods in unplaced:
+                    why = (f"A supplier credit on this purchase receipt ({event['return_id']}) paid for "
+                           "pieces of this product and this note names none, so IMS cannot tell whether "
+                           "it is the same goods.")
+            elif goods in named:
+                place = _goods_place(db, event, source)
+                if place not in (KNOWN, None):
+                    shipment = (f"An earlier supplier credit on this purchase receipt ({event['return_id']}) names "
+                                f"no pieces, and the pieces of its vendor return {place} have not left yet, so IMS "
+                                "cannot tell yet whether it already paid for these goods. A note here stays saved "
+                                "with nothing posted." + SHIP_THEN_RETRY)
+                elif place is None:
+                    why = (f"An earlier supplier credit on this purchase receipt ({event['return_id']}) names "
+                           "no pieces, so IMS cannot tell whether it already paid for these goods.")
+            if why:
+                _pending("EARLIER_CREDIT_UNPLACED",
+                         why + " A note here stays saved with nothing posted, and needs a head-office decision.")
+    if shipment:
+        _pending("EARLIER_CREDIT_NOT_SHIPPED", shipment)
+
+
 def resolve_credit_evidence(db, return_doc, *, selections=None, allowed_store_ids=None):
     """Strict posting proof. Missing/contradictory tax identity stays pending."""
     sources = resolve_return_provenance(db, return_doc, selections=selections)
@@ -137,6 +283,7 @@ def resolve_credit_evidence(db, return_doc, *, selections=None, allowed_store_id
     registrations = {(s["recipient_entity_id"], s["recipient_gstin"], s.get("vendor_gstin")) for s in sources}
     if len(registrations) != 1:
         _pending("MIXED_ORIGINAL_REGISTRATIONS", "One supplier note must identify one original supplier and recipient registration pair.")
+    _refuse_unplaced_credit(db, return_doc, sources)
     return sources
 
 
@@ -191,7 +338,7 @@ def credit_choices(db, return_doc, *, allowed_store_ids=None):
     """Only stored physical origins are offered; no guessed latest purchase."""
     from api.routers.finance.gst import _bill_booked
 
-    rid = return_doc.get("return_id") or return_doc.get("rma_id")
+    rid = return_doc.get("physical_return_id") or return_doc.get("return_id") or return_doc.get("rma_id")
     linked = list(db.get_collection("stock_units").find({"rtv_vendor_id": rid}))
     output = []
     for index, item in enumerate(return_doc.get("items") or return_doc.get("lines") or []):

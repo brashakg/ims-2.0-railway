@@ -57,6 +57,7 @@ import {
   resolveBarcode,
   posPriceGuard,
   cartItemFromProduct,
+  alreadyOnBillMessage,
 } from '../../../components/pos/productIntake';
 
 export function BillingSurface() {
@@ -142,7 +143,7 @@ export function BillingSurface() {
         return;
       }
       setErrorMsg(null);
-      store.addToCart(cartItemFromProduct(res.product, guard));
+      if (!store.addToCart(cartItemFromProduct(res.product, guard))) setErrorMsg(alreadyOnBillMessage(code));
       return;
     }
     if (res.message) setErrorMsg(res.message);

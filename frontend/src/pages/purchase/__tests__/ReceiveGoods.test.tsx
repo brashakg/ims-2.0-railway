@@ -487,6 +487,32 @@ describe('no purchase order', () => {
     await waitFor(() => expect(arrived.value).toBe('2'));
   });
 
+  it('SP04: a product search that fails says so with a retry, never "not catalogued"', async () => {
+    products.getProducts.mockRejectedValue(new ApiError('Service unavailable', { status: 503 }));
+    renderAt();
+    fireEvent.click(await screen.findByRole('button', { name: 'Bought without PO' }));
+    fireEvent.change(screen.getByPlaceholderText(/Search a product to add/), { target: { value: 'aviator' } });
+    expect(await screen.findByText(/Could not search the catalogue/)).toBeInTheDocument();
+    expect(screen.queryByText(/not catalogued yet/)).toBeNull();
+    // The retry runs the same search again; a real zero-match keeps its message.
+    products.getProducts.mockResolvedValue({ products: [] });
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    expect(await screen.findByText(/not catalogued yet/)).toBeInTheDocument();
+    expect(screen.queryByText(/Could not search the catalogue/)).toBeNull();
+    expect(products.getProducts).toHaveBeenLastCalledWith({ search: 'aviator', limit: 10 });
+  });
+
+  it('SP04: a scan whose lookup fails is an error, never "not on this delivery"', async () => {
+    products.getProducts.mockRejectedValue(new ApiError('Service unavailable', { status: 503 }));
+    renderAt();
+    fireEvent.click(await screen.findByRole('button', { name: 'Bought without PO' }));
+    const scan = await screen.findByLabelText('Scan a barcode');
+    fireEvent.change(scan, { target: { value: '8900000000017' } });
+    fireEvent.keyDown(scan, { key: 'Enter' });
+    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/Could not look up 8900000000017/)));
+    expect(toast.warning).not.toHaveBeenCalled();
+  });
+
   async function typeOneLine() {
     fireEvent.change(screen.getByPlaceholderText(/Search a product to add/), { target: { value: 'frame' } });
     fireEvent.click(await screen.findByText('Acme Aviator'));

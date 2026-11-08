@@ -13,6 +13,7 @@
 import { useState } from 'react';
 import { RefreshCw, X } from 'lucide-react';
 import { useUpdateAvailable } from '../../hooks/useUpdateAvailable';
+import { holdBillCustomerForReload } from '../../stores/posStore';
 
 export function UpdateAvailableBanner() {
   const { updateAvailable } = useUpdateAvailable();
@@ -21,6 +22,10 @@ export function UpdateAvailableBanner() {
   if (!updateAvailable || dismissed) return null;
 
   const reload = () => {
+    try {
+      // An open bill keeps its customer across this one reload (R35).
+      holdBillCustomerForReload();
+    } catch { /* never block the refresh */ }
     try {
       window.location.reload();
     } catch {
