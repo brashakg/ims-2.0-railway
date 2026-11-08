@@ -339,7 +339,8 @@ _RETURN_KEYS = (
 # quantity and the reason, never a unit price, rate or line value under any
 # name. ONE allow-list for both kinds of return (return_line_for_reader), so a
 # price key added later under a new name stays hidden on both.
-_RETURN_ITEM_KEYS = ("product_id", "product_name", "quantity", "reason")
+_RETURN_ITEM_KEYS = ("product_id", "product_name", "quantity", "reason",
+                     "customer_owned", "customer_id", "order_id")
 _DEBIT_NOTE_KEYS = (
     "debit_note_id", "debit_note_number", "financial_year", "issue_date",
     "entity_id", "store_id", "seller", "rtv_ref", "rtv_ref_id",
@@ -360,8 +361,8 @@ def mask_vendor_return(doc: Dict, user: dict) -> Dict:
     """A vendor return without the price paid, its total, the credit amount or
     the supplier's credit-note / bill reference, unless the caller may see
     what we pay."""
-    if isinstance(doc, dict) and "credit_confirmation_fence" in doc:
-        doc = {k: v for k, v in doc.items() if k != "credit_confirmation_fence"}
+    if isinstance(doc, dict) and ("credit_confirmation_fence" in doc or "note_claims" in doc):
+        doc = {k: v for k, v in doc.items() if k not in ("credit_confirmation_fence", "note_claims")}
     if not isinstance(doc, dict) or can_see_cost(user, "purchase"):
         return doc
     out = _pick(doc, _RETURN_KEYS)
