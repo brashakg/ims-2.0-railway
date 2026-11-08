@@ -19,6 +19,7 @@ describe('automatic retry', () => {
   });
 
   it('hands an unclear write straight back with the server sentence, never replayed', async () => {
+    vi.stubGlobal('localStorage', { getItem: () => null }); // the replay check reads the live token
     const sentence = 'The store credit could not be confirmed just now - Do NOT redo this return.';
     const replay = vi.spyOn(api, 'request').mockResolvedValue({ data: 'replayed' } as any);
     const handlers = (api.interceptors.response as any).handlers.filter(Boolean);
@@ -29,6 +30,7 @@ describe('automatic retry', () => {
       .rejects.toMatchObject({ status: 503, message: sentence });
     expect(replay).not.toHaveBeenCalled();
     replay.mockRestore();
+    vi.unstubAllGlobals();
   });
 });
 

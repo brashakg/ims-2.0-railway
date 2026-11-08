@@ -86,6 +86,15 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
   // Store-switch confirmation: switching store clears the current POS cart +
   // any in-progress forms (the context/JWT is re-issued). Warn before doing it.
   const [pendingStoreId, setPendingStoreId] = useState<string | null>(null);
+  // R41: the dialog stays until the server confirms the switch; a failure is
+  // shown here and nothing on screen changes shop.
+  const [switchState, setSwitchState] = useState<'idle' | 'busy' | 'failed'>('idle');
+  const closeSwitch = () => { if (switchState !== 'busy') { setPendingStoreId(null); setSwitchState('idle'); } };
+  const confirmSwitch = async (id: string) => {
+    setSwitchState('busy');
+    const ok = await setActiveStore(id);
+    if (ok) { setPendingStoreId(null); setSwitchState('idle'); } else setSwitchState('failed');
+  };
   const roleRef = useRef<HTMLDivElement>(null);
   const storeRef = useRef<HTMLDivElement>(null);
 
@@ -389,7 +398,7 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
           role="dialog"
           aria-modal="true"
           aria-label="Confirm store switch"
-          onClick={() => setPendingStoreId(null)}
+          onClick={closeSwitch}
           style={{
             position: 'fixed', inset: 0, zIndex: 200,
             background: 'rgba(17,17,17,0.45)',
@@ -412,10 +421,16 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
               Any unsaved work on the current store — your <strong>POS cart</strong> and any open forms —
               will be cleared and cannot be recovered. Save first if you need it.
             </div>
+            {switchState === 'failed' && (
+              <div role="alert" style={{ fontSize: 13, color: 'var(--err)', background: 'var(--err-50)', borderRadius: 8, padding: '8px 12px', marginBottom: 14 }}>
+                Could not switch to {friendlyStoreLabel(pendingStoreId, storeNames)}. Nothing changed - you are still on your current store. Check the connection and try again.
+              </div>
+            )}
             <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
               <button
                 type="button"
-                onClick={() => setPendingStoreId(null)}
+                onClick={closeSwitch}
+                disabled={switchState === 'busy'}
                 style={{
                   padding: '8px 16px', borderRadius: 8, minHeight: 40,
                   border: '1px solid var(--line)', background: 'var(--surface)',
@@ -426,14 +441,15 @@ export function Topbar({ crumbs = [], actions, onHamburgerClick, navOpen = false
               </button>
               <button
                 type="button"
-                onClick={() => { const id = pendingStoreId; setPendingStoreId(null); setActiveStore(id); }}
+                onClick={() => void confirmSwitch(pendingStoreId)}
+                disabled={switchState === 'busy'}
                 style={{
                   padding: '8px 16px', borderRadius: 8, minHeight: 40, border: 0,
                   background: 'var(--bv)', color: '#fff',
                   font: '600 13px var(--font-sans)', cursor: 'pointer',
                 }}
               >
-                Switch store
+                {switchState === 'busy' ? 'Switching…' : switchState === 'failed' ? 'Try again' : 'Switch store'}
               </button>
             </div>
           </div>

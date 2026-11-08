@@ -459,6 +459,33 @@ def test_logout_revokes_chain_and_blacklists_access(client, patched_repo):
 # ============================================================================
 
 
+def test_switch_there_and_back_never_reissues_the_same_token(client, patched_repo):
+    """The browser applies a switch answer only if the token that asked is
+    still the stored one (#1372). Switching keeps exp, so without a per-switch
+    claim a return to the first shop re-mints the login token byte for byte and
+    a held older answer passes that check over the later choice."""
+    patched_repo([_make_user()])
+    first = _login(client)["access_token"]
+    start = decode_token(first)["active_store_id"]
+
+    def switch(token, store):
+        r = client.post(
+            f"/api/v1/auth/switch-store/{store}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert r.status_code == 200, r.text
+        return r.json()["access_token"]
+
+    away = switch(first, "BV-TEST-02")
+    back = switch(away, start)
+    away_again = switch(back, "BV-TEST-02")
+
+    assert back != first
+    assert away_again != away
+    # Only the switch nonce differs: same person, shop, session and expiry.
+    a, b = decode_token(first), decode_token(back)
+    assert {k: v for k, v in b.items() if k != "jti"} == a
+
 def test_switch_store_preserves_session_anchors(client, patched_repo):
     patched_repo([_make_user()])
     body = _login(client)
