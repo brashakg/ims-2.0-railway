@@ -45,6 +45,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 from api import dependencies as deps  # noqa: E402
 from api.routers import workshop as wm  # noqa: E402
+from api.routers.workshop import helpers as ws_helpers  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 from strict_fakes import OrdersAt  # noqa: E402
 
@@ -240,8 +241,10 @@ def test_qc_fail_on_ready_job_pulls_it_off_the_shelf(monkeypatch):
 class _CreateWorkshopRepo:
     def __init__(self, seed=None):
         self.created = []
-        # Jobs that already exist in the collection (dedup fixtures).
-        self._jobs = list(seed or [])
+        # Jobs that already exist in the collection (dedup fixtures). Create
+        # stamps a job with its order's shop, so a seeded job carries it too:
+        # the dedup's chosen job passes THE job rule (PR #1376 round 3).
+        self._jobs = [{"store_id": _ORDER["store_id"], **j} for j in (seed or [])]
 
     def find_by_id(self, job_id):
         return next((j for j in self._jobs if j.get("job_id") == job_id), None)
@@ -269,6 +272,11 @@ class _OrderRepo:
         if self._order and self._order.get("order_id") == order_id:
             return self._order
         return None
+
+    def ids_in_stores(self, order_ids, store_ids):
+        # THE job rule's order-shop read (workshop.helpers._jobs_in_reach).
+        o = self._order or {}
+        return {o.get("order_id")} & set(order_ids) if o.get("store_id") in store_ids else set()
 
     def update(self, order_id, data):
         self.updates.append((order_id, dict(data)))
@@ -314,6 +322,7 @@ def _create_client(monkeypatch, rx_rows, roles=("SALES_STAFF",), order=None, see
     orepo = _OrderRepo(dict(_ORDER) if order is None else order)
     monkeypatch.setattr(wm, "get_workshop_repository", lambda: wrepo)
     monkeypatch.setattr(wm, "get_order_repository", lambda: orepo)
+    monkeypatch.setattr(ws_helpers, "get_order_repository", lambda: orepo)
     monkeypatch.setattr(wm, "get_audit_repository", lambda: None)
     monkeypatch.setattr(wm, "get_db", lambda: None)
     # The Rx repo is resolved lazily from api.dependencies inside the verifier.
