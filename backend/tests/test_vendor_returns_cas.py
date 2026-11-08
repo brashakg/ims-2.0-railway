@@ -39,6 +39,9 @@ class _FrozenReadColl:
     def find_one(self, filt=None, *a, **k):
         return dict(self._snapshot)
 
+    def find(self, *a, **k):
+        return []  # no supplier note waiting on this return
+
     def update_one(self, filt, update, upsert=False):
         want = filt.get("status", None)
         matches = (

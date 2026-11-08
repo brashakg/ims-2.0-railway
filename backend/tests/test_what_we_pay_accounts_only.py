@@ -510,8 +510,10 @@ def test_a_vendor_rma_run_end_to_end_reads_its_money_back_to_accounts_only(clien
     def read_for_role(rid):
         return client.get(f"/api/v1/vendor-rma/{rid}", headers=_headers(role))
 
+    # A product the shop holds no piece of (P1 is on its shelf, and a stocked
+    # line goes back only on a linked vendor return: L2-RMA-F01).
     made = post("", {"vendor_id": "V1", "vendor_name": "Acme Optics", "store_id": STORE,
-                     "lines": [{"product_id": "P1", "product_name": "Aviator",
+                     "lines": [{"product_id": "P-WARRANTY", "product_name": "Customer frame (warranty)",
                                 "quantity": QTY, "reason": "DEFECTIVE", "unit_cost": COST}]}, "ACCOUNTANT")
     assert made.status_code == 201, made.text
     rid = made.json()["rma_id"]
