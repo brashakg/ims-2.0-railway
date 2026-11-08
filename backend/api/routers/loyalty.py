@@ -2414,10 +2414,11 @@ def _raise_reversal_exception(coll, id_field: str, doc: Dict[str, Any], what: st
         title=f"Loyalty points not settled on {what}",
         description=(
             f"The customer's loyalty points on {what} could not be settled "
-            f"automatically: {why}. The system keeps trying every few minutes and "
-            "closes this task itself once it works. Do not correct these points by "
-            "hand: the automatic retry would then correct them a second time. If "
-            "it stays open for a day, tell support."
+            f"automatically: {why}. While this task is open the system keeps trying "
+            "every few minutes and closes it itself once it works. If you close it "
+            "yourself, the system stops trying on this one for good and the points "
+            "stay as they are: any correction is then made by hand. If it stays "
+            "open for a day, tell support."
         ),
         priority="P1",
         category="Accounts",
@@ -2433,14 +2434,52 @@ def _raise_reversal_exception(coll, id_field: str, doc: Dict[str, Any], what: st
         coll.update_one({id_field: doc[id_field]}, {"$set": {"loyalty_exception_task": ref}})
 
 
+_SETTLED_NOTE = "The points were settled automatically."
+
+
+def _unstamp_exception(coll, id_field: str, doc: Dict[str, Any]) -> None:
+    coll.update_one({id_field: doc[id_field]}, {"$unset": {"loyalty_exception_task": ""}})
+    doc.pop("loyalty_exception_task", None)
+
+
 def _close_reversal_exception(coll, id_field: str, doc: Dict[str, Any]) -> None:
     from ..dependencies import get_task_repository
     from ..services.task_triggers import active_tasks
 
     repo = get_task_repository()
     for task in active_tasks(repo, doc["loyalty_exception_task"]):
-        repo.complete_task(task["task_id"], notes="The points were settled automatically.")
-    coll.update_one({id_field: doc[id_field]}, {"$unset": {"loyalty_exception_task": ""}})
+        repo.complete_task(task["task_id"], notes=_SETTLED_NOTE)
+    _unstamp_exception(coll, id_field, doc)
+
+
+def _closed_by_a_person(coll, id_field: str, doc: Dict[str, Any]) -> bool:
+    """Owner ruling 2026-11-08: once a PERSON closes the exception, the sweep
+    leaves the row alone for good -- it never claws back on its own later. The
+    stamp outlives only a task nobody is working: the sweep's own close clears
+    it right after completing the task, so a stamp beside nothing but the
+    sweep's own completed task is that close interrupted, and is finished here.
+    Anything else closed (completed by a person, cancelled, deleted) is the
+    person's decision, remembered on the row. A task read error RAISES: the
+    caller settles nothing on a row it cannot judge."""
+    ref = doc.get("loyalty_exception_task")
+    if not ref:
+        return False
+    from ..dependencies import get_task_repository
+    from ..services.task_triggers import active_tasks
+
+    repo = get_task_repository()
+    if active_tasks(repo, ref):
+        return False
+    tasks_coll = getattr(repo, "collection", None)
+    closed = list(tasks_coll.find({"source_ref": ref}) if tasks_coll is not None
+                  else repo.find_many({"source_ref": ref}) or [])
+    if closed and all(t.get("completion_notes") == _SETTLED_NOTE for t in closed):
+        _unstamp_exception(coll, id_field, doc)
+        return False
+    coll.update_one({id_field: doc[id_field]}, {"$set": {"loyalty_exception_closed": True}})
+    logger.warning("loyalty reversal on %s %s left alone: its exception was closed by a person",
+                   id_field, doc[id_field])
+    return True
 
 
 def _after_settling(coll, id_field: str, doc: Dict[str, Any], what: str, outcome: Dict[str, Any]) -> str:
@@ -2485,7 +2524,7 @@ def reconcile_loyalty_reversals() -> Dict[str, int]:
         "loyalty_reversal_failed": 1, "loyalty_exception_task": 1,
     }
     for order in bills.find(
-        {"status": "CANCELLED",
+        {"status": "CANCELLED", "loyalty_exception_closed": {"$ne": True},
          "$or": [{"loyalty_reversal_failed": True},
                  {"loyalty_exception_task": {"$exists": True}},
                  {"cancelled_at": {"$gte": reach}}]},
@@ -2493,17 +2532,24 @@ def reconcile_loyalty_reversals() -> Dict[str, int]:
     ):
         what = f"cancelled bill {order.get('order_number') or order.get('order_id')}"
         try:
+            if _closed_by_a_person(bills, "order_id", order):
+                counts["clean"] += 1  # a person decided: nothing moves
+                continue
             outcome = settle_cancelled_bill(order, orders)
             counts[_after_settling(bills, "order_id", order, what, outcome)] += 1
         except Exception as exc:  # noqa: BLE001
             counts["unresolved"] += 1
             logger.error("loyalty reconcile failed on %s: %s", what, exc)
     for doc in returns.find(
-        {"status": "COMPLETED", "$or": [{"loyalty_reversal_failed": True}, {"loyalty_exception_task": {"$exists": True}}]},
+        {"status": "COMPLETED", "loyalty_exception_closed": {"$ne": True},
+         "$or": [{"loyalty_reversal_failed": True}, {"loyalty_exception_task": {"$exists": True}}]},
         {**fields, "return_id": 1},
     ):
         what = f"return {doc.get('return_id')}"
         try:
+            if _closed_by_a_person(returns, "return_id", doc):
+                counts["clean"] += 1  # a person decided: nothing moves
+                continue
             outcome = reverse_for_return(doc.get("return_id"), doc.get("order_id"), doc.get("customer_id"))
             if _reversal_settled(outcome):
                 returns.update_one({"return_id": doc.get("return_id")}, {"$set": {"loyalty_reversal_failed": False}})
