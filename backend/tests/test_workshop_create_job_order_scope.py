@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api.routers import workshop as wm  # noqa: E402
 from api.routers.workshop import jobs as jobs_mod  # noqa: E402
+from api.routers.workshop import helpers as helpers_mod  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 
 
@@ -47,6 +48,11 @@ class _OrderRepo:
     def update(self, oid, data):
         self.updates.append((oid, data))
 
+    def ids_in_stores(self, order_ids, store_ids):
+        # THE job rule's order-shop read (helpers._jobs_in_reach).
+        o = self.order or {}
+        return {o.get("order_id")} & set(order_ids) if o.get("store_id") in store_ids else set()
+
 
 def _order(store):
     return {"order_id": "ORD-B", "store_id": store, "status": "DELIVERED", "items": []}
@@ -75,6 +81,7 @@ def _client(monkeypatch, user, order, jobs=None):
     jrepo, orepo = _JobRepo(jobs), _OrderRepo(order)
     monkeypatch.setattr(jobs_mod, "get_workshop_repository", lambda: jrepo)
     monkeypatch.setattr(jobs_mod, "get_order_repository", lambda: orepo)
+    monkeypatch.setattr(helpers_mod, "get_order_repository", lambda: orepo)
     monkeypatch.setattr(jobs_mod, "get_db", lambda: None)
 
     async def _u():
@@ -182,3 +189,77 @@ def test_admin_any_shop_job_lands_at_order_shop(monkeypatch):
     assert c.post("/workshop/jobs", json=_BODY).status_code == 201
     assert jrepo.created[0]["store_id"] == "SHOP-B"
     assert orepo.updates
+
+
+# --- PR #1376 round 3: the dedup's chosen job passes THE job rule ------------
+# Codex repro: a legacy job stamped AUDTA but attached to an AUDTB order; an
+# AUDTB-only login posted its own B order and got 200 existing=true with that
+# job's id -- and workshop_job_id was backfilled onto the B order -- while GET
+# of the same job is 404 to them. The chosen job is now checked first.
+
+import copy  # noqa: E402
+
+_MISMATCH = dict(_EXISTING, job_id="J-A", job_number="WS-A-1", store_id="SHOP-A")
+
+
+def test_own_order_with_other_shop_job_refused_order_unchanged(monkeypatch):
+    order = _order("SHOP-B")
+    before = copy.deepcopy(order)
+    c, jrepo, orepo = _client(
+        monkeypatch, _user(["WORKSHOP_STAFF"], "SHOP-B"), order, jobs=[dict(_MISMATCH)]
+    )
+    r = c.post("/workshop/jobs", json=_BODY)
+    assert r.status_code == 404, r.text
+    assert "J-A" not in r.text and "WS-A-1" not in r.text
+    assert jrepo.created == []  # no second job
+    assert orepo.updates == []  # no reverse-pointer backfill
+    assert order == before
+
+
+def test_pointer_already_at_other_shop_job_refused(monkeypatch):
+    order = dict(_order("SHOP-B"), workshop_job_id="J-A", workshop_job_number="WS-A-1")
+    before = copy.deepcopy(order)
+    c, jrepo, orepo = _client(
+        monkeypatch, _user(["WORKSHOP_STAFF"], "SHOP-B"), order, jobs=[dict(_MISMATCH)]
+    )
+    assert c.post("/workshop/jobs", json=_BODY).status_code == 404
+    assert jrepo.created == [] and orepo.updates == [] and order == before
+
+
+def test_reverse_direction_job_in_my_shop_on_other_shop_order_refused(monkeypatch):
+    # Job stamped with MY shop, order belongs to the other shop: refused at the
+    # order, nothing written.
+    order = _order("SHOP-A")
+    before = copy.deepcopy(order)
+    c, jrepo, orepo = _client(
+        monkeypatch,
+        _user(["WORKSHOP_STAFF"], "SHOP-B"),
+        order,
+        jobs=[dict(_EXISTING, store_id="SHOP-B")],
+    )
+    r = c.post("/workshop/jobs", json=_BODY)
+    assert r.status_code == 404
+    assert "J-B" not in r.text
+    assert jrepo.created == [] and orepo.updates == [] and order == before
+
+
+def test_area_manager_of_both_shops_keeps_the_mismatched_job(monkeypatch):
+    c, jrepo, orepo = _client(
+        monkeypatch,
+        _user(["AREA_MANAGER"], "SHOP-A", ["SHOP-A", "SHOP-B"]),
+        _order("SHOP-B"),
+        jobs=[dict(_MISMATCH)],
+    )
+    r = c.post("/workshop/jobs", json=_BODY)
+    assert r.status_code == 200 and r.json()["job_id"] == "J-A"
+    assert jrepo.created == []
+    assert orepo.updates[0][1]["workshop_job_id"] == "J-A"
+
+
+def test_admin_keeps_the_mismatched_job(monkeypatch):
+    c, jrepo, _ = _client(
+        monkeypatch, _user(["ADMIN"], "HQ"), _order("SHOP-B"), jobs=[dict(_MISMATCH)]
+    )
+    r = c.post("/workshop/jobs", json=_BODY)
+    assert r.status_code == 200 and r.json()["job_id"] == "J-A"
+    assert jrepo.created == []
