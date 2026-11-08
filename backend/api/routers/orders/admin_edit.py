@@ -643,8 +643,11 @@ async def superadmin_edit_order(
 
 
 def _revision_key(body: SuperadminInvoiceChange) -> str:
-    """The edit's identity: the same corrected bill asked for twice is one edit."""
-    canon = json.dumps(body.model_dump(mode="json"), sort_keys=True)
+    """The edit's identity: the same corrected bill asked for twice is one edit. The
+    free-text reasons are not the bill: a retry with the reason retyped is the same
+    edit, and only a change to what the invoice says earns a new number."""
+    what = body.model_dump(mode="json", exclude={"reason", "cart_discount_reason"})
+    canon = json.dumps(what, sort_keys=True)
     return hashlib.sha256(canon.encode()).hexdigest()[:32]
 
 

@@ -896,6 +896,38 @@ def test_an_identical_retry_after_a_lost_reply_is_the_first_revision(
     assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
 
 
+def test_a_retry_with_the_reason_retyped_is_still_the_first_revision(
+    client, shop, invoiced, serials, monkeypatch
+):
+    """Codex's round-4 probe retries with a new reason text: the bill it asks for
+    is the same, so the number is too (owner ruling 2026-11-07)."""
+    from database.repositories.order_repository import OrderRepository
+
+    oid, lines = _revised_bill(client, shop, invoiced, serials)
+    real = OrderRepository.update_if
+
+    def lost(self, key, expected, data, *a, **k):
+        answer = real(self, key, expected, data, *a, **k)
+        if "items" in data:
+            raise TimeoutError("reply lost")
+        return answer
+
+    quiet = type(client)(client.app, raise_server_exceptions=False)
+    body = {"reason": "first try at this", "items": lines, "mode": "REVISED_INVOICE"}
+    with monkeypatch.context() as m:
+        m.setattr(OrderRepository, "update_if", lost)
+        r = quiet.put(f"/api/v1/orders/{oid}/superadmin-invoice-change", json=body, headers=_token(ADMIN))
+    assert r.status_code >= 500
+    r = client.put(
+        f"/api/v1/orders/{oid}/superadmin-invoice-change",
+        json={**body, "reason": "retyped after the error"}, headers=_token(ADMIN),
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["revised_invoice_number"] == "BV-INV-REV-1"
+    assert serials == ["BV-INV-REV-1"], "no spare serial"
+    assert len(_revisions(shop, oid)) == 1
+
+
 def test_a_save_that_never_landed_keeps_its_number_for_the_retry(
     client, shop, invoiced, serials, monkeypatch
 ):
