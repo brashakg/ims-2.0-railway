@@ -2,7 +2,7 @@
 // IMS 2.0 - Login Page
 // ============================================================================
 
-import { useState, useEffect, useContext } from 'react';
+import { useState, useContext } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import AuthContext from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -30,15 +30,9 @@ export function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
 
-  // Clear any stale auth data when login page mounts
-  useEffect(() => {
-    const token = localStorage.getItem('ims_token');
-    if (token) {
-      localStorage.removeItem('ims_token');
-      localStorage.removeItem('ims_user');
-      localStorage.removeItem('ims_active_module');
-    }
-  }, []);
+  // Opening this page signs no one out (owner 2026-11-07): a valid sign-in -
+  // this tab's or another tab's - stays until an explicit sign-out or a
+  // successful sign-in as someone else. The idle sign-out clears its own.
 
   const handleClearCache = () => {
     if (!window.confirm('Are you sure you want to clear all cached data? Your login session and saved preferences will be removed.')) {

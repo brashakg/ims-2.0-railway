@@ -475,3 +475,15 @@ describe('a token with no chain is not proof of the same sign-in', () => {
     expect(sentAs(adapter, 1)).toBe(upgraded);
   });
 });
+
+describe('a refused sign-in signs no one out (owner 2026-11-07)', () => {
+  it('a wrong password with a valid sign-in stored leaves that sign-in whole', async () => {
+    const adapter = answering(401);
+    await expect(api.post('/auth/login', { username: 'x', password: 'bad' }, { adapter })).rejects.toBeTruthy();
+    expect(adapter).toHaveBeenCalledTimes(1);
+    expect(mem.get('ims_token')).toBe(ADMIN);
+    expect(mem.get('ims_refresh_token')).toBe('r1');
+    expect(cached().id).toBe('admin');
+    expect(location.href).toBe('');
+  });
+});

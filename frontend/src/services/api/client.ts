@@ -482,7 +482,9 @@ const replay = (config: RetryTrackedConfig, error: AxiosError) =>
 
 // Handle final error after retries exhausted
 const handleFinalError = (error: AxiosError<{ message?: string; detail?: string | Array<Record<string, unknown>> }>) => {
-  if (error.response?.status === 401 && !fromOlderContext(error.config)) {
+  // A refused sign-in (wrong password) ends no one's session (owner 2026-11-07).
+  const signInRefused = String(error.config?.url || '').includes('/auth/login');
+  if (error.response?.status === 401 && !signInRefused && !fromOlderContext(error.config)) {
     // Clear auth state on unauthorized (refresh already failed or was not
     // possible by the time we get here -> same logout flow as before).
     // The POS goes through THE one sign-out step (a pending bill is parked,
