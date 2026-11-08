@@ -135,6 +135,10 @@ def _same_kind(line: dict, stored: dict) -> bool:
 _CELL_FIELDS = ("lens_line_id", "sph", "cyl", "add", "lens_options")
 # What the recompute stamps afresh on every line, and a note the screen may clear.
 _NEVER_HELD = ("gst_rate", "taxable_value", "tax_amount", "item_note")
+# What the sale stamped from the price it sold at: a new price or discount makes
+# them stale, so they go and the readers re-derive (the loyalty re-gate fills
+# the effective discount from the master when it is missing).
+_PRICED_AT_SALE = ("effective_discount_percent", "promo_discount_amount", "incentive_tag")
 # A line's clinical spec: a change to one is a new clinical decision.
 _CLINICAL_FIELDS = ("prescription_id", "sph", "cyl", "add", "axis")
 
@@ -277,9 +281,11 @@ def _rebuilt_items_or_existing(
 def _hold_stored(line: dict, stored: dict) -> None:
     """A correction of a line is that line: what the server stamped on it at sale
     (its unit, cell, frozen cost, SKU, category, HSN, returned quantity...) stands
-    unless the edit says otherwise. Its cost is the server's alone."""
+    unless the edit says otherwise. Its cost is the server's alone. A new price
+    or discount drops what the sale priced from the old one."""
+    skip = _NEVER_HELD + (_PRICED_AT_SALE if _discount_changed(line, stored) else ())
     for field, value in stored.items():
-        if line.get(field) is None and field not in _NEVER_HELD:
+        if line.get(field) is None and field not in skip:
             line[field] = value
     line["cost_at_sale"] = stored.get("cost_at_sale")
 

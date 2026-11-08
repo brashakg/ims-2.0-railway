@@ -2025,3 +2025,61 @@ def test_an_old_line_keeps_the_unit_it_already_names(client, shop):
     assert r.status_code == 200, r.text
     assert _order(shop, oid)["items"][0]["stock_id"] == "OLD-UNIT"
     assert _ledger(shop) == before
+
+
+# ---------------------------------------------------------------------------
+# Review of 55b9c9fa -- a held line keeps no stale discount stamp
+# ---------------------------------------------------------------------------
+
+
+def _regated_stamp(client, shop, door, monkeypatch, **change):
+    """Edit a full-price frame on `door` and return the effective discount the
+    loyalty re-gate reads for it (the doc it is handed, through its own filler)."""
+    from api.routers import loyalty
+
+    monkeypatch.setattr(loyalty, "get_product_repository", lambda: shop["products"])
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A")]))
+    stored = _order(shop, oid)["items"][0]
+    assert stored["effective_discount_percent"] == 0.0
+    seen = []
+    monkeypatch.setattr(
+        loyalty, "regate_earn_after_edit", lambda doc, user_id=None: seen.append(doc)
+    )
+    r = door.press(oid, [_as_sent(stored, **change)])
+    assert r.status_code == 200, r.text
+    assert len(seen) == 1
+    return loyalty._with_effective_discounts(seen[0]["items"])[0]["effective_discount_percent"]
+
+
+def test_a_raised_discount_reaches_the_points_regate(client, shop, door, monkeypatch):
+    """Owner hard rule: a line taken to 20% off earns nothing. The stamp the sale
+    wrote (0) must not survive the edit, or the earn stays standing."""
+    assert _regated_stamp(client, shop, door, monkeypatch, discount_percent=20.0) >= 20.0
+
+
+def test_a_price_typed_below_shelf_reaches_the_points_regate(client, shop, door, monkeypatch):
+    """Rs 4500 on a Rs 5000 frame is 10% off, read from the master."""
+    assert _regated_stamp(client, shop, door, monkeypatch, unit_price=4500.0) >= 10.0
+
+
+def test_a_correction_that_keeps_the_price_keeps_the_sale_stamp(client, shop, door, monkeypatch):
+    """Positive control: no money change, the sale's own stamp stands."""
+    assert _regated_stamp(client, shop, door, monkeypatch, product_name="Carrera CA1") == 0.0
+
+
+@pytest.mark.parametrize("change, kept", [
+    ({"discount_percent": 20.0}, False),
+    ({"unit_price": 4500.0}, False),
+    ({"product_name": "Carrera CA1"}, True),
+])
+def test_promo_and_incentive_stamps_go_with_the_old_price(client, shop, door, change, kept):
+    """The sale's promo share and incentive tag were priced off the old figure."""
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A")]))
+    stamps = {"promo_discount_amount": 250.0, "incentive_tag": {"item_value": 5000.0}}
+    shop["db"].get_collection("orders").update_one(
+        {"order_id": oid}, {"$set": {f"items.0.{k}": v for k, v in stamps.items()}}
+    )
+    r = door.press(oid, [_as_sent(_order(shop, oid)["items"][0], **change)])
+    assert r.status_code == 200, r.text
+    saved = _order(shop, oid)["items"][0]
+    assert {k: saved.get(k) for k in stamps} == (stamps if kept else {k: None for k in stamps})
