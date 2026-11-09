@@ -474,7 +474,14 @@ def test_unreadable_row_never_advertises_the_buyer_this_replay_resolved(raw_db, 
         {"shopify_order_id": "50301"},
         {"$set": {"customer_id": None}, "$unset": {"is_guest_order": 1, "customer_link_failed": 1}},
     )
-    before = raw_db["orders"].find_one({"shopify_order_id": "50301"})
+    link = ("customer_id", "is_guest_order", "customer_link_failed")
+
+    def stored_link():
+        row = raw_db["orders"].find_one({"shopify_order_id": "50301"})
+        return {k: row.get(k, "absent") for k in link}
+
+    before = stored_link()
+    assert before == {"customer_id": None, "is_guest_order": "absent", "customer_link_failed": "absent"}
     books = _books(raw_db)
     fault = _FailLinkRead(monkeypatch, raw_db)
     replay = _map(raw_db, 50301)
@@ -483,12 +490,13 @@ def test_unreadable_row_never_advertises_the_buyer_this_replay_resolved(raw_db, 
     assert replay["customer_id"] is None, "nothing was stored: do not claim a link"
     assert replay["sync_failed"], "unknown: the inbox must retry this delivery"
     assert not replay.get("customer_link_repaired")
-    assert raw_db["orders"].find_one({"shopify_order_id": "50301"}) == before
+    assert stored_link() == before, "no backfill: the historical guest is untouched"
     assert _books(raw_db) == books
 
     again = _map(raw_db, 50301)  # the drain's retry, read healthy
     assert again["customer_id"] is None and not again.get("sync_failed")
-    assert raw_db["orders"].find_one({"shopify_order_id": "50301"}) == before
+    assert stored_link() == before
+    assert _books(raw_db) == books
 
 
 def test_unreadable_row_after_an_acknowledged_repair_reports_that_repair(raw_db, monkeypatch):
