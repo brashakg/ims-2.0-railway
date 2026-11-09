@@ -2066,8 +2066,11 @@ def _reverse_order_loyalty(
     redeemed = max(0, redeemed - sum(int(t.get("points") or 0) for t in ledger
                                      if t.get("type") == "ADJUST" and t.get(_RETURN_RESTORE)))
     if restore_rupees is not None:
+        # The bill's OWN rate (its whole redemption, unreduced) -- the rate
+        # returns._points_paid_share held the rupees back at; the reduced total
+        # above is only the cap.
         redeemed = max(0, min(redeemed, points_for_rupees(
-            restore_rupees, redeemed, _bill_redeemed(redeem_rows, order_id, claim)[1])))
+            restore_rupees, *_bill_redeemed(redeem_rows, order_id, claim))))
     if earned <= 0 and redeemed <= 0:
         return {"ok": True, "earned_clawed": 0, "redeemed_restored": 0, "net_delta": 0}
 

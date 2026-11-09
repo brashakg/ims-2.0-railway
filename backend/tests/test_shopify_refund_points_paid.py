@@ -173,3 +173,44 @@ def test_two_half_refunds_give_back_half_the_points_each(env, points):
         assert row["credit_note"]["store_credit"] == 450.0, row["credit_note"]
     assert sorted(r["delta"] for r in _ledger(env)) == [450.0, 450.0]
     assert points() == (150, 0, 50)
+
+
+def test_a_counter_return_after_a_shopify_half_refund_gives_back_its_full_share(env, points):
+    """Review 11-09 (round 2): the first counter return after a Shopify refund
+    priced its points at the bill's rate on the REDUCED redemption (100 - 50
+    already given back, over the full Rs 100), so Rs 50 held back from the cash
+    gave back only 25 points. One rule both sides: Rs 50 -> 50 points."""
+    from api.routers import loyalty as L
+
+    _order(env, payments=PAYS, items=[{
+        "item_id": "it-1", "product_id": "7001", "ims_product_id": "IMS-P-1",
+        "shopify_line_item_id": 9001, "sku": "RB-1", "product_name": "RB",
+        "quantity": 2, "gst_rate": 5.0, "taxable_value": 952.38, "tax_amount": 47.62}])
+    p = _payload(txns=[])
+    p["refund_line_items"][0].update({"quantity": 1, "subtotal": 476.19, "total_tax": 23.81})
+    _row, res = _queue_and_confirm(env, p)
+    assert res["status"] == "credited", res
+    assert points() == (100, 50, 50)
+    # Counter return of the other unit: _points_paid_share holds back Rs 50.
+    assert L.points_for_rupees(50.0, *L.bill_redemption("ord-1")) == 50
+    out = L.reverse_for_return("RET-2", "ord-1", "CUST-1", points_paid_share=50.0)
+    assert out["ok"] is True, out
+    assert points() == (100, 0, 0)  # 50 restored, the 50 earned clawed
+
+
+@pytest.mark.parametrize("shopify_pts,share,restored", [(30, 20.0, 20), (50, 50.0, 50), (0, 20.0, 20)])
+def test_first_counter_return_prices_at_the_bills_rate_not_the_reduced_one(points, shopify_pts, share, restored):
+    """Same rule on the ledger directly: a Shopify restore row already gave back
+    `shopify_pts`; the counter return's Rs `share` gives back exactly `restored`."""
+    from api.routers import loyalty as L
+
+    db = points.db
+    if shopify_pts:
+        db.loyalty_transactions.insert_one({
+            "txn_id": "return-restore:SH-1", "customer_id": "CUST-1", "type": "ADJUST",
+            "points": shopify_pts, "order_id": "ord-1", L._RETURN_RESTORE: "SH-1"})
+        db.loyalty_accounts.update_one({"customer_id": "CUST-1"}, {"$inc": {
+            "balance_points": shopify_pts, "lifetime_redeemed": -shopify_pts}})
+    out = L.reverse_for_return("RET-2", "ord-1", "CUST-1", points_paid_share=share)
+    assert out["ok"] is True, out
+    assert points() == (50 + shopify_pts + restored - 50, 100 - shopify_pts - restored, 0)
