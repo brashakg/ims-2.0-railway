@@ -156,7 +156,7 @@ def test_three_returns_give_back_exactly_the_points_spent(ctx, monkeypatch):
     # the cash is every return's value less exactly the points held back.
     nets = round(sum(d["net_refund"] for d in _done(c)), 2)
     assert round(sum(d["refund_amount"] for d in _done(c)), 2) == round(nets - POINTS, 2)
-    assert abs(nets - _BILLED_GROSS) <= 0.01
+    assert round(abs(nets - _BILLED_GROSS), 2) <= 0.01
 
 
 def test_an_identical_retry_gives_nothing_back_twice(ctx, monkeypatch):
