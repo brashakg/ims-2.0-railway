@@ -441,3 +441,64 @@ def test_foreign_phone_and_no_email_is_a_genuine_guest_even_with_the_door_down(
     assert res["customer_id"] is None and not res.get("customer_link_failed")
     order = raw_db["orders"].find_one({"shopify_order_id": "50201"})
     assert order["is_guest_order"] is True and order["customer_link_failed"] is False
+
+
+# --- PR #1388 Codex round 3 P2: the replay's FINAL read of the row can fail too.
+
+
+class _FailLinkRead:
+    """orders.find_one for the customer-link projection raises `times` times
+    (Codex independent_recovery: AutoReconnect on exactly that read)."""
+
+    def __init__(self, monkeypatch, db, times=1):
+        self.left, self.hits = times, 0
+        coll = db["orders"]
+        real = coll.find_one
+
+        def find_one(query=None, projection=None, *a, **k):
+            if projection == {"customer_id": 1, "customer_link_failed": 1} and self.left:
+                self.left -= 1
+                self.hits += 1
+                raise pymongo.errors.AutoReconnect("synthetic lost link read")
+            return real(query, projection, *a, **k)
+
+        monkeypatch.setattr(coll, "find_one", find_one)
+
+
+def test_unreadable_row_never_advertises_the_buyer_this_replay_resolved(raw_db, monkeypatch):
+    """An unflagged historical guest: the no-backfill rule writes nothing, so
+    when the final read fails the answer is unknown and retryable, not the
+    customer the payload resolved."""
+    _map(raw_db, 50301)
+    raw_db["orders"].update_one(
+        {"shopify_order_id": "50301"},
+        {"$set": {"customer_id": None}, "$unset": {"is_guest_order": 1, "customer_link_failed": 1}},
+    )
+    before = raw_db["orders"].find_one({"shopify_order_id": "50301"})
+    books = _books(raw_db)
+    fault = _FailLinkRead(monkeypatch, raw_db)
+    replay = _map(raw_db, 50301)
+    assert fault.hits == 1
+    assert replay["status"] in ("duplicate", "replayed")
+    assert replay["customer_id"] is None, "nothing was stored: do not claim a link"
+    assert replay["sync_failed"], "unknown: the inbox must retry this delivery"
+    assert not replay.get("customer_link_repaired")
+    assert raw_db["orders"].find_one({"shopify_order_id": "50301"}) == before
+    assert _books(raw_db) == books
+
+    again = _map(raw_db, 50301)  # the drain's retry, read healthy
+    assert again["customer_id"] is None and not again.get("sync_failed")
+    assert raw_db["orders"].find_one({"shopify_order_id": "50301"}) == before
+
+
+def test_unreadable_row_after_an_acknowledged_repair_reports_that_repair(raw_db, monkeypatch):
+    """The repair's own acknowledgement is what the row holds."""
+    broken = _broken_repo(monkeypatch)
+    _map(raw_db, 50302)
+    broken["on"] = False
+    _FailLinkRead(monkeypatch, raw_db)
+    replay = _map(raw_db, 50302)
+    order = raw_db["orders"].find_one({"shopify_order_id": "50302"})
+    assert replay["customer_link_repaired"] is True and not replay.get("sync_failed")
+    assert order["customer_id"] and replay["customer_id"] == order["customer_id"]
+    assert order["customer_link_failed"] is False

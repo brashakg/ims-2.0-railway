@@ -1622,3 +1622,48 @@ def test_the_hourly_sweep_repairs_a_failed_customer_link_and_only_that(swept):
     )
     swept["run"]()
     assert swept["seen"] == [] and _doc(swept, 30901)["customer_id"] is None
+
+
+def test_a_status_that_lands_never_hides_a_failed_customer_link_repair(swept):
+    """PR #1388 Codex round 3 (sweep_recovery): the status sync succeeds but the
+    repair write fails -> the run and the inbox row report the failure; the
+    next healthy pass repairs the link, books untouched across both."""
+    doc = _book(swept, 30902)
+    customer_id = doc["customer_id"]
+    money = (doc["grand_total"], doc["amount_paid"], doc["balance_due"], doc["invoice_number"])
+    coll = swept["orders"]
+    coll.update_one(
+        {"shopify_order_id": "30902"},
+        {"$set": {"customer_id": None, "is_guest_order": True, "customer_link_failed": True}},
+    )
+    real_update = coll.update_one
+    hits = []
+
+    def update_one(query, update, *a, **k):
+        if query.get("customer_link_failed") is True and not hits:
+            hits.append(query)
+            raise RuntimeError("AutoReconnect: synthetic lost repair write")
+        return real_update(query, update, *a, **k)
+
+    swept["mp"].setattr(coll, "update_one", update_one)
+    swept["state"]["orders"] = [_pulled(30902, cancelled_at=CANCELLED_AT)]
+    p = swept["run"]().payload
+
+    assert hits, "the fault fired on the repair write"
+    assert _doc(swept, 30902)["status"] != doc["status"], "the status itself did land"
+    assert p["status_synced"] == [] and p["status_failed"] == ["30902"]
+    assert "customer link repair failed" in p["failed_reasons"]["30902"]
+    row = swept["inbox"].find_one({"_id": f"pull:30902:{UPDATED}"})
+    assert row["handler_error"] and "customer link repair failed" in row["handler_error"]
+    stored = _doc(swept, 30902)
+    assert (stored["customer_id"], stored["customer_link_failed"]) == (None, True)
+
+    swept["run"]()  # healthy next pass
+    stored = _doc(swept, 30902)
+    assert (stored["customer_id"], stored["is_guest_order"], stored["customer_link_failed"]) == (
+        customer_id, False, False,
+    )
+    assert (stored["grand_total"], stored["amount_paid"], stored["balance_due"],
+            stored["invoice_number"]) == money
+    assert coll.count_documents({"shopify_order_id": "30902"}) == 1
+    assert not swept["inbox"].find_one({"_id": f"pull:30902:{UPDATED}"})["handler_error"]

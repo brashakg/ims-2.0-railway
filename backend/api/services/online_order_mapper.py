@@ -1454,6 +1454,13 @@ def map_shopify_order(
             if stored is not None:
                 customer_id = stored.get("customer_id")
                 link_failed = bool(stored.get("customer_link_failed"))
+            elif not result.get("customer_link_repaired"):
+                # The row could not be read and this delivery wrote no link:
+                # what it holds is unknown -- never claim the buyer resolved
+                # here; the drain retries (an acknowledged repair above IS
+                # what the row holds).
+                verdict.setdefault("sync_failed", "customer link unreadable")
+                customer_id = None
 
         result["customer_id"] = customer_id
         if link_failed:
