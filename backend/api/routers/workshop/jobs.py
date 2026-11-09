@@ -121,8 +121,14 @@ async def list_jobs(
     return {"jobs": [], "total": 0}
 
 
-def _existing_job_answer(existing_jobs, order, order_id, order_repo, response):
+def _existing_job_answer(existing_jobs, order, order_id, order_repo, response, current_user):
     """The answer when a job already covers this order.
+
+    PR #1376: every job already on the order must pass THE job rule (its shop
+    AND its order's shop) before this links or shows one -- a legacy job
+    stamped with another shop is refused (404), not repaired. Checked HERE so
+    both dedup reads of create_job (before the insert, and after an insert
+    refused by a row a failed first read hid) go through it.
 
     WHICH job to return when more than one already exists. This is not
     hypothetical: a read-only prod query found 1 of 4 live jobs is already a
@@ -134,6 +140,8 @@ def _existing_job_answer(existing_jobs, order, order_id, order_repo, response):
       2. the OLDEST job (find_by_order does not sort, so sort here -- Mongo
          natural order is not a guarantee).
     """
+    for on_order in existing_jobs:
+        _assert_job_store_access(on_order, current_user)
     pointed_id = order.get("workshop_job_id") if isinstance(order, dict) else None
     oldest = sorted(existing_jobs, key=lambda j: str(j.get("created_at") or ""))[0]
     chosen = next((j for j in existing_jobs if j.get("job_id") == pointed_id), oldest)
@@ -220,13 +228,10 @@ async def create_job(
             # through to the pre-existing behaviour.
             logger.warning("[WORKSHOP] create dedup lookup failed: %s", _dedup_exc)
             existing_jobs = []
-        # PR #1376 round 3: a job already on this order must pass THE job rule
-        # (its shop AND its order's shop) before the dedup links or shows it --
-        # a legacy job stamped with another shop is refused, not repaired.
-        for _on_order in existing_jobs:
-            _assert_job_store_access(_on_order, current_user)
         if existing_jobs:
-            return _existing_job_answer(existing_jobs, order, job.order_id, order_repo, response)
+            return _existing_job_answer(
+                existing_jobs, order, job.order_id, order_repo, response, current_user
+            )
 
         if (order or {}).get("status") == "CANCELLED":
             raise HTTPException(status_code=409, detail=CANCELLED_ORDER_NO_JOB)
@@ -339,7 +344,9 @@ async def create_job(
         # create() answers None for a contender's row as for an outage.
         existing_jobs = repo.find_by_order(job.order_id)
         if existing_jobs:
-            return _existing_job_answer(existing_jobs, order, job.order_id, order_repo, response)
+            return _existing_job_answer(
+                existing_jobs, order, job.order_id, order_repo, response, current_user
+            )
 
         raise HTTPException(status_code=500, detail="Failed to create workshop job")
 

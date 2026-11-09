@@ -279,3 +279,78 @@ def test_legacy_pair_with_one_other_shop_job_refused_even_if_pointer_is_mine(mon
     r = c.post("/workshop/jobs", json=_BODY)
     assert r.status_code == 404 and "J-A" not in r.text
     assert jrepo.created == [] and orepo.updates == [] and order == before
+
+
+# --- PR #1376 round 4: the SECOND dedup read passes THE job rule too ---------
+# Codex repro (merged with #1387): one find_by_order failure hid a stored AUDTA
+# job on an AUDTB order; the insert lost to the per-order unique index, and the
+# contender read that followed returned and backfilled the job unchecked.
+
+
+class _LostFirstRead(_JobRepo):
+    """The first lookup fails; the insert loses (a row already stands)."""
+
+    def __init__(self, jobs):
+        super().__init__(jobs)
+        self.reads = 0
+
+    def find_by_order(self, oid):
+        self.reads += 1
+        if self.reads == 1:
+            raise RuntimeError("lost dedup read")
+        return super().find_by_order(oid)
+
+    def create(self, data):
+        return None  # refused: the order's job already stands
+
+
+def _lost_read_client(monkeypatch, user, order, jobs):
+    c, _, orepo = _client(monkeypatch, user, order)
+    jrepo = _LostFirstRead(jobs)
+    monkeypatch.setattr(jobs_mod, "get_workshop_repository", lambda: jrepo)
+    return c, jrepo, orepo
+
+
+def test_lost_first_read_still_refuses_other_shop_job(monkeypatch):
+    order = _order("SHOP-B")
+    before = copy.deepcopy(order)
+    c, jrepo, orepo = _lost_read_client(
+        monkeypatch, _user(["WORKSHOP_STAFF"], "SHOP-B"), order, [dict(_MISMATCH)]
+    )
+    r = c.post("/workshop/jobs", json=_BODY)
+    assert jrepo.reads == 2  # the guarded path is the second read
+    assert r.status_code == 404, r.text
+    assert "J-A" not in r.text and "WS-A-1" not in r.text
+    assert orepo.updates == [] and order == before
+    assert [j["job_id"] for j in jrepo.jobs] == ["J-A"]  # no second job, no restamp
+    assert jrepo.jobs[0]["store_id"] == "SHOP-A"
+
+
+def test_lost_first_read_same_shop_job_still_recovered(monkeypatch):
+    c, jrepo, orepo = _lost_read_client(
+        monkeypatch, _user(["WORKSHOP_STAFF"], "SHOP-B"), _order("SHOP-B"), [dict(_EXISTING)]
+    )
+    r = c.post("/workshop/jobs", json=_BODY)
+    assert jrepo.reads == 2
+    assert r.status_code == 200 and r.json()["job_id"] == "J-B" and r.json()["existing"]
+    assert orepo.updates[0][1]["workshop_job_id"] == "J-B"
+
+
+def test_lost_first_read_area_manager_of_both_shops_keeps_the_job(monkeypatch):
+    c, _, orepo = _lost_read_client(
+        monkeypatch,
+        _user(["AREA_MANAGER"], "SHOP-A", ["SHOP-A", "SHOP-B"]),
+        _order("SHOP-B"),
+        [dict(_MISMATCH)],
+    )
+    r = c.post("/workshop/jobs", json=_BODY)
+    assert r.status_code == 200 and r.json()["job_id"] == "J-A"
+    assert orepo.updates[0][1]["workshop_job_id"] == "J-A"
+
+
+def test_lost_first_read_admin_keeps_the_job(monkeypatch):
+    c, _, _ = _lost_read_client(
+        monkeypatch, _user(["ADMIN"], "HQ"), _order("SHOP-B"), [dict(_MISMATCH)]
+    )
+    r = c.post("/workshop/jobs", json=_BODY)
+    assert r.status_code == 200 and r.json()["job_id"] == "J-A"
