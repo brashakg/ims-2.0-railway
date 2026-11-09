@@ -136,10 +136,18 @@ def test_a_failed_restore_stays_flagged_and_the_sweep_finishes_it(env, points, m
     doc = env.get_collection("returns").find_one({"shopify_refund_id": "700001"})
     assert doc["loyalty_reversal_failed"] is True
     monkeypatch.setattr(L, "_apply_reversal_balance", real)
-    out = L.restore_return_points(doc["return_id"], "ord-1", "CUST-1", doc["points_paid_share"])
-    assert out["ok"] is True and points() == (150, 0, 50)
-    again = L.restore_return_points(doc["return_id"], "ord-1", "CUST-1", doc["points_paid_share"])
-    assert again["ok"] is True and points() == (150, 0, 50)
+
+    class _Orders:  # the scheduled sweep reads bills + returns through the order repo
+        collection = env.get_collection("orders")
+
+    _Orders.collection.database = env
+    monkeypatch.setattr(L, "get_order_repository", lambda: _Orders())
+    L.reconcile_loyalty_reversals()
+    assert points() == (150, 0, 50)  # restore only: the 50 earned is not clawed
+    assert env.get_collection("returns").find_one(
+        {"shopify_refund_id": "700001"})["loyalty_reversal_failed"] is False
+    L.reconcile_loyalty_reversals()
+    assert points() == (150, 0, 50)
 
 
 def test_positive_control_no_points_tender_is_unchanged(env, points):
