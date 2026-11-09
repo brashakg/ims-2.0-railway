@@ -842,7 +842,7 @@ def test_redrive_does_not_count_its_own_dead_run_credit(env):
     env.get_collection("credit_note_ledger").insert_one({
         "customer_id": "CUST-1", "type": "ISSUED", "amount": 1000.0, "delta": 1000.0,
         "ref": "RET-261020-AB12CD", "order_id": "ord-1", "entry_id": "own-1"})
-    credit, why, label, _ = sr._store_credit_allowance(env, "ord-1", "700001", 1000.0, 0.0)
+    credit, why, label, _, _pts = sr._store_credit_allowance(env, "ord-1", "700001", 1000.0, 0.0)
     assert (credit, label) == (1000.0, None)
     res = sr.post_from_review(env, row)
     assert res["status"] == "credited"

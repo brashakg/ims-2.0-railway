@@ -942,7 +942,8 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
                 credit = _f((doc.get("credit_entry") or {}).get("delta"))
                 if doc.get("money_back") is not None:
                     back = _f(doc.get("money_back"))
-                    total += back + credit
+                    # Its points-paid share went back as points (review 11-09).
+                    total += back + credit + _f(doc.get("points_paid_share"))
                     shopify_back += back
                     continue
                 # A doc whose refund was queued before this rule (a live post
@@ -1027,7 +1028,7 @@ def _shopify_said(money_back: float, pending: float) -> str:
 def _store_credit_allowance(
     db, order_id: Any, refund_id: str, gross: float, money_back: Optional[float],
     pending: float = 0.0,
-) -> Tuple[Optional[float], str, Optional[str], bool]:
+) -> Tuple[Optional[float], str, Optional[str], bool, float]:
     """THE rule for the redeemable store credit a Shopify refund may give: the
     refund less what Shopify itself sends back for it, and never more than the
     money the customer actually paid for the order (amount_paid: the gateway
@@ -1035,7 +1036,12 @@ def _store_credit_allowance(
     row is written (to show the reviewer) and again at the post (AUTO or
     Confirm, under the order's credit lock), which books it.
 
-    Returns (credit, why, settlement, ask_a_person): settlement labels a
+    POINTS (owner 2026-11-08 / 2026-11-09, review 11-09): the part of this
+    refund the customer paid with loyalty points (returns._points_paid_share,
+    the counter's one rule) comes back AS POINTS, never as store credit -- it
+    is the fifth answer, given back by the post (loyalty.restore_return_points).
+
+    Returns (credit, why, settlement, ask_a_person, points): settlement labels a
     credit cut below the note on its ledger row (EXTERNAL: Shopify paid it
     back; NOT_COLLECTED: never paid or cannot tell; ALREADY_RETURNED;
     PARTIAL), None for the full refund. ask_a_person: Shopify says money of
@@ -1046,18 +1052,18 @@ def _store_credit_allowance(
     if money_back is None:
         return 0.0, ("This refund was queued before IMS checked what Shopify paid back, "
                      "so no store credit is given. Give credit by hand only if it is owed."
-                     ), "NOT_COLLECTED", False
+                     ), "NOT_COLLECTED", False, 0.0
     said = _shopify_said(money_back, pending)
     rest = round(gross - money_back, 2)
     if rest <= 0:
-        return 0.0, f"{said}, so no store credit is given.", "EXTERNAL", False
+        return 0.0, f"{said}, so no store credit is given.", "EXTERNAL", False, 0.0
     try:
         order = db.get_collection("orders").find_one({"order_id": order_id}) if order_id else None
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] order unreadable for store credit order=%s", order_id,
                        exc_info=True)
         return None, ("IMS could not read this order just now, so no store credit is given "
-                      "yet."), None, False
+                      "yet."), None, False, 0.0
     # THE refundable ceiling: what was paid, and never above Shopify's own
     # total on a MISMATCH order (returns.refundable_ceiling).
     from ..routers.returns import refundable_ceiling
@@ -1074,21 +1080,38 @@ def _store_credit_allowance(
     if not math.isfinite(paid):
         return 0.0, ("IMS cannot tell how much was paid for this order, so no store credit "
                      "is given. Check the payment and give credit by hand only if it is owed."
-                     ), "NOT_COLLECTED", False
+                     ), "NOT_COLLECTED", False, 0.0
     if paid <= 0:
         return 0.0, ("This order was never paid, so there is nothing to give back. "
-                     "No store credit is given."), "NOT_COLLECTED", False
+                     "No store credit is given."), "NOT_COLLECTED", False, 0.0
     if _norm(order.get("payment_status")).upper() == "REFUNDED":
         return 0.0, ("Shopify shows this whole order already refunded, so no store credit "
-                     "is given."), "EXTERNAL", False
+                     "is given."), "EXTERNAL", False, 0.0
     back = _given_back_elsewhere(db, order, refund_id)
     if back is None:
         return None, ("IMS could not read this order's earlier refunds just now, so no store "
-                      "credit is given yet."), None, False
+                      "credit is given yet."), None, False, 0.0
     held = round(paid - back["given"] - money_back, 2)
     if held <= 0:
         return 0.0, ("Everything paid for this order has already been given back, so no "
-                     "store credit is given."), "ALREADY_RETURNED", False
+                     "store credit is given."), "ALREADY_RETURNED", False, 0.0
+    from fastapi import HTTPException
+
+    from ..routers.returns import _points_paid_share
+
+    try:
+        share = _points_paid_share(order, order.get("order_id"), gross, strict=True)
+    except HTTPException:
+        return None, ("IMS could not read the loyalty points paid on this order just now, so no "
+                      "store credit is given yet."), None, False, 0.0
+    # Money Shopify sent back covers this refund first; only what is left of
+    # the points part comes back as points.
+    points = round(max(0.0, min(share, rest, held)), 2)
+    points_note = (f" Rs {points:.2f} of this refund was paid with loyalty points; it goes back "
+                   "as points, not store credit.") if points > 0 else ""
+    rest, held = round(rest - points, 2), round(held - points, 2)
+    if rest <= 0 or held <= 0:
+        return 0.0, f"{said + '; ' if said else ''}No store credit is given.{points_note}", "PARTIAL", False, points
     lead = f"{said}; " if said else ""
     if held < rest:
         credit, why, label = held, (
@@ -1097,7 +1120,7 @@ def _store_credit_allowance(
     elif money_back > 0:
         credit, why, label = rest, f"{said}, so the store credit is the rest, Rs {rest:.2f}.", "PARTIAL"
     else:
-        credit, why, label = gross, f"Rs {gross:.2f} goes to the customer as store credit.", None
+        credit, why, label = rest, f"Rs {rest:.2f} goes to the customer as store credit.", None
     # Shopify says part of this order went back but IMS holds no record of
     # any Shopify money back on it: the refund was money-only and predates
     # money-only rows. A person checks before any credit.
@@ -1113,7 +1136,10 @@ def _store_credit_allowance(
         why += (f" Also check: this customer has Rs {back['untied_hand']:.2f} of store credit "
                 "added by hand that IMS cannot tie to an order -- make sure it was not for "
                 "this one.")
-    return credit, why, label, ask
+    if points > 0:
+        why += points_note
+        label = "PARTIAL"
+    return credit, why, label, ask, points
 
 
 def _lock_order_credit(db, order_id: Any) -> Tuple[bool, Optional[str]]:
@@ -1363,7 +1389,7 @@ def handle_shopify_refund(
         # the same store-credit rule (_store_credit_allowance) against it. The
         # allowance here is what the reviewer is shown; the post asks again.
         settled_externally = money_back > 0
-        store_credit, credit_why, _, ask_a_person = _store_credit_allowance(
+        store_credit, credit_why, _, ask_a_person, _points = _store_credit_allowance(
             db, order.get("order_id"), refund_id, gross_refund, money_back, money_pending)
 
         credit_note = {
@@ -1673,7 +1699,7 @@ def _post_locked(
     restock_store: Optional[str],
     settled_externally: bool,
     restock_unverified: bool,
-    allowance: Tuple[Optional[float], str, Optional[str], bool],
+    allowance: Tuple[Optional[float], str, Optional[str], bool, float],
 ) -> Dict[str, Any]:
     """Post the GST credit note to `credit_note_ledger` (via the SAME returns.py
     `_issue_store_credit` an in-store CREDIT_NOTE uses, so the output-tax reversal
@@ -1744,6 +1770,10 @@ def _post_locked(
         # Known now: a claim still in flight counts its Shopify money exactly
         # (its credit row, once booked, is counted by its order_id).
         "money_back": credit_note.get("money_back"),
+        # The part paid with loyalty points: given back as points, never as
+        # store credit (the allowance's fifth answer). Later refunds and
+        # returns of the bill read it (_points_paid_share, _given_back_elsewhere).
+        "points_paid_share": _f(allowance[4]),
         "settled_externally": bool(settled_externally),
         "status": "PENDING",
         "reason_summary": "Shopify refund",
@@ -1802,7 +1832,7 @@ def _post_locked(
     #     already posted (SF03: a run that died after posting it): never twice.
     credit_entry = _posted_credit(db, return_id) if prior_doc is not None else None
     money_back = credit_note.get("money_back")
-    store_credit, credit_why, settlement, _ = allowance
+    store_credit, credit_why, settlement, _, points_share = allowance
     s34_unreadable = False
     try:
         from ..routers.returns import S34_UNREADABLE, _credit_note_window_closed, _issue_store_credit
@@ -2042,6 +2072,7 @@ def _post_locked(
         "credit_note_issued": credit_ok,
         "settled_externally": bool(settled_externally),
         "money_back": money_back,
+        "points_paid_share": _f(points_share),
         "store_credit_reason": credit_why,
         "restocked": restocked,
         "restock_applied": restock_applied,
@@ -2076,6 +2107,23 @@ def _post_locked(
         except Exception as exc:  # noqa: BLE001
             logger.warning("[SHOPIFY_REFUND] returns doc persist failed: %s", exc)
 
+    # (c) The points-paid part goes back AS POINTS, once the refund is booked
+    #     (a CREDIT_FAILED post is re-driven under the same return id, so the
+    #     restore -- keyed on it -- runs exactly once). Not restored now: the
+    #     doc stays flagged and the scheduled loyalty sweep finishes it.
+    points_restored = 0
+    if credit_ok and _f(points_share) > 0 and customer_id:
+        from ..routers.loyalty import restore_return_points
+
+        restored = restore_return_points(return_id, order_id, customer_id, _f(points_share))
+        points_restored = int(restored.get("redeemed_restored") or 0)
+        if returns_coll is not None:
+            try:
+                returns_coll.update_one({"shopify_refund_id": refund_id}, {"$set": {
+                    "loyalty_reversal_failed": not restored.get("ok")}})
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[SHOPIFY_REFUND] refund=%s points flag not saved: %s", refund_id, exc)
+
     logger.info(
         "[SHOPIFY_REFUND] AUTO-posted refund=%s order=%s credit=%s tax=%s "
         "credit_issued=%s settled_externally=%s restock_applied=%s",
@@ -2102,6 +2150,8 @@ def _post_locked(
         # The redeemable part the customer got (the ledger row's balance move).
         "store_credit": _f((credit_entry or {}).get("delta")),
         "store_credit_reason": credit_why,
+        "points_paid_share": _f(points_share),
+        "points_restored": points_restored,
         "restock_applied": restock_applied,
         # Where the units ACTUALLY landed (None when the restock was blocked or
         # a split sent them to several shops -- see restock_store_ids).

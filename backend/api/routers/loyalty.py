@@ -2061,6 +2061,10 @@ def _reverse_order_loyalty(
         _complete_redeem_row(txns, customer_id, order_id, claim)
         redeemed += abs(int(claim.get("delta") or 0))
         redeem_txn_ids.append(claim.get("txn_id"))
+    # A refund that gave back its share on its own row before any reversal
+    # (the Shopify refund door, restore_return_points): never handed back twice.
+    redeemed = max(0, redeemed - sum(int(t.get("points") or 0) for t in ledger
+                                     if t.get("type") == "ADJUST" and t.get(_RETURN_RESTORE)))
     if restore_rupees is not None:
         redeemed = max(0, min(redeemed, points_for_rupees(
             restore_rupees, redeemed, _bill_redeemed(redeem_rows, order_id, claim)[1])))
@@ -2444,6 +2448,40 @@ def reverse_for_return(
     return {"ok": False, "reason": "reversal_race_unsettled"} if out.get("raced") else out
 
 
+def restore_return_points(
+    return_id: str, order_id: str, customer_id: Optional[str], points_paid_share: float,
+) -> Dict[str, Any]:
+    """RESTORE ONLY (the Shopify refund door, review 11-09): give back THIS
+    refund's points-paid share as points, exactly once (keyed by the return),
+    through the same row and guard a later counter return uses
+    (_restore_return_share). The order-wide earn claw is NOT run: that door
+    never clawed earn. Never raises."""
+    cid = str(customer_id or "").strip()
+    if not cid or not order_id or not return_id:
+        return {"ok": False, "reason": "missing_ids"}
+    if _is_walk_in(cid) or float(points_paid_share or 0) <= 0:
+        return {"ok": True, "redeemed_restored": 0}
+    try:
+        waived = _waived_outcome(order_id)
+        if waived:
+            return waived
+        accounts = get_loyalty_account_repository()
+        txns = get_loyalty_transaction_repository()
+        if accounts is None or txns is None:
+            return {"ok": False, "reason": "loyalty_db_unavailable"}
+        account = _read_account(accounts, cid)
+        ledger, read_ok = _read_order_ledger(txns, cid, order_id, account)
+        if not read_ok:
+            return {"ok": False, "reason": "ledger_read_failed"}
+        out = _restore_return_share(accounts, txns, cid, order_id, ledger,
+                                    _redeem_claim(account, _redeem_key(order_id)),
+                                    return_id, float(points_paid_share)) or {}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("restore_return_points failed for %s: %s", return_id, exc)
+        return {"ok": False, "reason": "error", "error": str(exc)}
+    return out if out.get("ok") is False else {"ok": True, **out}
+
+
 def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, Any]:
     """F4: reverse loyalty when an ORDER IS CANCELLED.
 
@@ -2726,15 +2764,20 @@ def reconcile_loyalty_reversals() -> Dict[str, int]:
     for doc in returns.find(
         {"status": "COMPLETED", "loyalty_exception_closed": {"$ne": True},
          "$or": [{"loyalty_reversal_failed": True}, {"loyalty_exception_task": {"$exists": True}}]},
-        {**fields, "return_id": 1, "points_paid_share": 1},
+        {**fields, "return_id": 1, "points_paid_share": 1, "shopify_refund_id": 1},
     ):
         what = f"return {doc.get('return_id')}"
         try:
             if _closed_by_a_person(returns, "return_id", doc):
                 counts["clean"] += 1  # a person decided: nothing moves
                 continue
-            outcome = reverse_for_return(doc.get("return_id"), doc.get("order_id"), doc.get("customer_id"),
-                                         points_paid_share=_return_points_share(bills, doc))
+            if doc.get("shopify_refund_id"):
+                # The Shopify refund door restores its points share only.
+                outcome = restore_return_points(doc.get("return_id"), doc.get("order_id"),
+                                                doc.get("customer_id"), doc.get("points_paid_share") or 0)
+            else:
+                outcome = reverse_for_return(doc.get("return_id"), doc.get("order_id"), doc.get("customer_id"),
+                                             points_paid_share=_return_points_share(bills, doc))
             if _reversal_settled(outcome):
                 returns.update_one({"return_id": doc.get("return_id")}, {"$set": {"loyalty_reversal_failed": False}})
             counts[_after_settling(returns, "return_id", doc, what, outcome)] += 1
