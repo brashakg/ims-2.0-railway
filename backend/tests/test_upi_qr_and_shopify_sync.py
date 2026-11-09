@@ -2,7 +2,7 @@
 IMS 2.0 - POS-6 (UPI QR) + BVI-1 (Shopify sync) tests
 ========================================================
 Tests for:
-  - api.services.upi_qr  (build_upi_link, reconcile_upi_payment)
+  - api.services.upi_qr  (build_upi_link, reconcile_razorpay_event)
   - GET /api/v1/orders/{order_id}/upi-qr endpoint (400 when no VPA)
   - api.services.online_stock_writeback (writeback_after_sale /
     writeback_after_restock -- SIMULATED when writes disabled)
@@ -10,7 +10,7 @@ Tests for:
     (sale + return MUST succeed even when Shopify is broken)
 
 No live network calls: online_stock_writeback.writeback_skus (the ONE path
-to the Shopify stock writer) and upi_qr.reconcile_upi_payment are
+to the Shopify stock writer) and upi_qr.reconcile_razorpay_event are
 monkeypatched throughout.
 No real DB: a minimal MockCollection / MockDB is defined below.
 """
@@ -192,52 +192,48 @@ async def test_upi_qr_endpoint_400_when_no_vpa():
 # ===========================================================================
 
 
+def _captured(pay_id, paise, order_ref):
+    return {"event": "payment.captured", "payload": {"payment": {"entity": {
+        "id": pay_id, "amount": paise, "currency": "INR", "status": "captured",
+        "captured": True, "notes": {"order_ref": order_ref}}}}}
+
+
+def _rzp_db(order_doc, configured=True):
+    import mongomock
+
+    db = mongomock.MongoClient()["t"]
+    if configured:
+        db.integrations.insert_one({"type": "razorpay", "enabled": True,
+                                    "config": {"key_id": "rzp_test_xxx", "key_secret": "secret"}})
+    db.orders.insert_one(order_doc)
+    return db
+
+
+def _bill(order_id, grand_total, payments=()):
+    paid = sum(p["amount"] for p in payments)
+    return {"order_id": order_id, "order_number": f"ORD-{order_id}", "status": "CONFIRMED",
+            "grand_total": grand_total, "amount_paid": paid, "balance_due": grand_total - paid,
+            "payment_status": "PAID" if paid >= grand_total else "UNPAID",
+            "payments": list(payments)}
+
+
 def test_reconcile_upi_payment_dark_when_no_creds():
-    """reconcile_upi_payment must return False (no-op) when Razorpay
-    integration is not configured -- NOT raise."""
-    from api.services.upi_qr import reconcile_upi_payment
+    """No Razorpay creds -> a no-op outcome, nothing written."""
+    from api.services.upi_qr import reconcile_razorpay_event
 
-    # DB with no integrations collection docs.
-    db = MockDB({"integrations": MockCollection(), "orders": MockCollection()})
-
-    txn = {"id": "pay_abc", "amount": 250000}  # Rs 2500.00
-    result = reconcile_upi_payment(db, "ord-1", txn)
-    assert result is False
+    db = _rzp_db(_bill("ord-1", 2500.0), configured=False)
+    assert reconcile_razorpay_event(db, _captured("pay_abc", 250000, "ORD-ord-1")) == "dark"
+    assert db.orders.find_one({"order_id": "ord-1"})["payments"] == []
 
 
 def test_reconcile_upi_payment_matches_and_records():
-    """When Razorpay is configured AND amount matches, reconcile marks PAID."""
-    from api.services.upi_qr import reconcile_upi_payment
+    """When Razorpay is configured AND the captured amount fits, the bill is PAID."""
+    from api.services.upi_qr import reconcile_razorpay_event
 
-    razorpay_cfg = {
-        "type": "razorpay",
-        "enabled": True,
-        "config": {"key_id": "rzp_test_xxx", "key_secret": "secret"},
-    }
-    order_doc = {
-        "order_id": "ord-1",
-        "order_number": "ORD-BOK01-2026-ABCD",
-        "grand_total": 1500.0,
-        "amount_paid": 0.0,
-        "balance_due": 1500.0,
-        "payment_status": "UNPAID",
-        "payments": [],
-    }
-    orders_coll = MockCollection([order_doc])
-    db = MockDB(
-        {
-            "integrations": MockCollection([razorpay_cfg]),
-            "orders": orders_coll,
-        }
-    )
+    db = _rzp_db(_bill("ord-1", 1500.0))
+    assert reconcile_razorpay_event(db, _captured("pay_xyz", 150000, "ORD-ord-1")) == "credited"
 
-    txn = {"id": "pay_xyz", "amount": 150000}  # Rs 1500.00 in paise
-    result = reconcile_upi_payment(db, "ord-1", txn)
-    assert result is True
-
-    # Order should now be PAID.
-    updated = orders_coll.find_one({"order_id": "ord-1"})
-    assert updated is not None
+    updated = db.orders.find_one({"order_id": "ord-1"})
     assert updated["payment_status"] == "PAID"
     # Bill type follows the money on the webhook writer too (round-2 panel
     # blocker): a settled QR payment must not leave a stale bill_type.
@@ -248,68 +244,24 @@ def test_reconcile_upi_payment_matches_and_records():
 
 
 def test_reconcile_upi_payment_amount_mismatch():
-    """When amount doesn't match the order total, reconcile must return False."""
-    from api.services.upi_qr import reconcile_upi_payment
+    """More than the bill owes is refused (raised, so the inbox row reads failed)."""
+    from api.services.upi_qr import ReconcileMismatch, reconcile_razorpay_event
 
-    razorpay_cfg = {
-        "type": "razorpay",
-        "enabled": True,
-        "config": {"key_id": "rzp_test_xxx", "key_secret": "secret"},
-    }
-    order_doc = {
-        "order_id": "ord-2",
-        "order_number": "ORD-TEST-2026-XYZ",
-        "grand_total": 3000.0,
-        "amount_paid": 0.0,
-        "balance_due": 3000.0,
-        "payment_status": "UNPAID",
-        "payments": [],
-    }
-    db = MockDB(
-        {
-            "integrations": MockCollection([razorpay_cfg]),
-            "orders": MockCollection([order_doc]),
-        }
-    )
-    txn = {"id": "pay_bad", "amount": 100000}  # Rs 1000 != Rs 3000
-    result = reconcile_upi_payment(db, "ord-2", txn)
-    assert result is False
+    db = _rzp_db(_bill("ord-2", 3000.0))
+    with pytest.raises(ReconcileMismatch):
+        reconcile_razorpay_event(db, _captured("pay_bad", 400000, "ORD-ord-2"))
+    assert db.orders.find_one({"order_id": "ord-2"})["payments"] == []
 
 
 def test_reconcile_upi_payment_idempotent():
     """Second reconcile with same payment_id must not double-record."""
-    from api.services.upi_qr import reconcile_upi_payment
+    from api.services.upi_qr import reconcile_razorpay_event
 
-    razorpay_cfg = {
-        "type": "razorpay",
-        "enabled": True,
-        "config": {"key_id": "rzp_test_xxx", "key_secret": "secret"},
-    }
-    existing_payment = {
-        "payment_id": "upi-auto-pay_dup",
-        "method": "UPI",
-        "provider_payment_id": "pay_dup",
-        "amount": 1000.0,
-    }
-    order_doc = {
-        "order_id": "ord-3",
-        "order_number": "ORD-TEST-2026-DUP",
-        "grand_total": 1000.0,
-        "amount_paid": 1000.0,
-        "balance_due": 0.0,
-        "payment_status": "PAID",
-        "payments": [existing_payment],
-    }
-    db = MockDB(
-        {
-            "integrations": MockCollection([razorpay_cfg]),
-            "orders": MockCollection([order_doc]),
-        }
-    )
-    txn = {"id": "pay_dup", "amount": 100000}
-    result = reconcile_upi_payment(db, "ord-3", txn)
-    # Idempotent -- already recorded, must return False (no re-record).
-    assert result is False
+    existing = {"payment_id": "upi-auto-pay_dup", "method": "UPI",
+                "provider_payment_id": "pay_dup", "amount": 1000.0}
+    db = _rzp_db(_bill("ord-3", 1000.0, [existing]))
+    assert reconcile_razorpay_event(db, _captured("pay_dup", 100000, "ORD-ord-3")) == "already_recorded"
+    assert len(db.orders.find_one({"order_id": "ord-3"})["payments"]) == 1
 
 
 # ===========================================================================
