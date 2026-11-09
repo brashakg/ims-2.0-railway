@@ -50,6 +50,9 @@ class FakeOrderRepo:
         self.updates.append((order_id, data))
         return True
 
+    def find_by_id(self, order_id):  # the safety net's re-read once the job stands
+        return {"order_id": order_id, "status": "CONFIRMED"}
+
 
 @pytest.fixture()
 def patched_repos(monkeypatch):

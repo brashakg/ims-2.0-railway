@@ -134,6 +134,9 @@ const titleCase = (s: string) =>
 // Page
 // ---------------------------------------------------------------------------
 
+const switchFailedMessage = (name: string) =>
+  `Could not switch to ${name}. Nothing changed - you are still on your previous store. Check the connection and try again.`;
+
 export function StoreSelectPage() {
   const { user, setActiveStore, logout } = useAuth();
   const navigate = useNavigate();
@@ -147,6 +150,10 @@ export function StoreSelectPage() {
   const [retry, setRetry] = useState(0);
   const [query, setQuery] = useState('');
   const [postures, setPostures] = useState<StorefrontPosture[] | null>(null);
+  // R41: a switch the server did not confirm keeps you on the picker, on the
+  // shop you were already on, with this message; nothing navigates meanwhile.
+  const [switchError, setSwitchError] = useState<string | null>(null);
+  const [switching, setSwitching] = useState(false);
 
   // Resolve accessible stores, then either auto-proceed (<=1) or render the grid
   // (>1). Never auto-navigates into an empty-store loop. The `cancelled` flag
@@ -160,9 +167,17 @@ export function StoreSelectPage() {
       return;
     }
 
-    const proceed = (storeId?: string) => {
+    const proceed = async (storeId?: string, offered: AccessibleStore[] = []) => {
       if (storeId && storeId !== user.activeStoreId) {
-        setActiveStore(storeId); // reuse the topbar switch-store (JWT re-issue)
+        // reuse the topbar switch-store (JWT re-issue); move on only once confirmed
+        const ok = await setActiveStore(storeId);
+        if (cancelled) return;
+        if (!ok) {
+          setStores(offered);
+          setSwitchError(switchFailedMessage(offered.find((s) => s.id === storeId)?.name ?? storeId));
+          setPhase('choose');
+          return;
+        }
       }
       navigate(from, { replace: true });
     };
@@ -189,13 +204,13 @@ export function StoreSelectPage() {
         return;
       }
       if (accessible.length === 1) {
-        proceed(accessible[0].id);
+        void proceed(accessible[0].id, accessible);
         return;
       }
       // Zero accessible stores.
       if (!hasNoActiveStore(user)) {
         // Already operating with a store somehow — don't trap them here.
-        proceed();
+        void proceed();
         return;
       }
       setPhase('empty');
@@ -242,11 +257,19 @@ export function StoreSelectPage() {
   const lastId = readLastStore(user?.id) || user?.activeStoreId;
   const resume = !q ? stores.find((s) => s.id === lastId) : undefined;
 
-  const handlePick = (storeId: string) => {
-    writeLastStore(user?.id, storeId);
+  const handlePick = async (storeId: string) => {
+    if (switching) return;
     if (storeId !== user?.activeStoreId) {
-      setActiveStore(storeId); // EXISTING mechanism — re-issues the JWT
+      setSwitchError(null);
+      setSwitching(true);
+      const ok = await setActiveStore(storeId); // EXISTING mechanism — re-issues the JWT
+      setSwitching(false);
+      if (!ok) {
+        setSwitchError(switchFailedMessage(stores.find((s) => s.id === storeId)?.name ?? storeId));
+        return;
+      }
     }
+    writeLastStore(user?.id, storeId);
     navigate(from, { replace: true });
   };
 
@@ -368,6 +391,15 @@ export function StoreSelectPage() {
             style={inputStyle}
           />
         </div>
+
+        {switchError && (
+          <p role="alert" className="chip err" style={{ margin: 0, whiteSpace: 'normal', height: 'auto', padding: '8px 12px' }}>
+            {switchError}
+          </p>
+        )}
+        {switching && (
+          <p role="status" style={{ color: 'var(--ink-3)', fontSize: 13, margin: 0 }}>Switching store…</p>
+        )}
 
         {/* Where you were: Enter */}
         {resume && (
