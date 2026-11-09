@@ -1823,6 +1823,89 @@ def _restore_late_debit(
     return {"redeemed_restored": points} if status == "applied" else None
 
 
+def points_for_rupees(rupees: float, points: int, value: float) -> int:
+    """THE conversion of a bill's points-paid rupees into its points (owner
+    2026-11-09): at the bill's OWN redemption rate (``value`` rupees bought
+    ``points``), half up. Rate 1 when the redemption carries no rupee value.
+    returns._points_paid_share prices a return's share through here and the
+    reversal gives back exactly the points it names."""
+    from decimal import ROUND_HALF_UP, Decimal
+
+    amount = Decimal(str(rupees or 0))
+    if points > 0 and value > 0:
+        amount = amount * int(points) / Decimal(str(value))
+    return int(amount.quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
+def _bill_redeemed(rows: List[Dict[str, Any]], order_id: str, claim: Optional[Dict[str, Any]] = None):
+    """(points, rupees) the bill redeemed: its REDEEM rows, plus the debit on the
+    account when its row is missing."""
+    rows = [t for t in rows if t.get("order_id") == order_id and t.get("type") == "REDEEM"]
+    points = sum(int(t.get("points") or 0) for t in rows)
+    value = sum(float(t.get("rupee_value") or 0) for t in rows)
+    if claim and claim.get("txn_id") not in {t.get("txn_id") for t in rows}:
+        points += abs(int(claim.get("delta") or 0))
+        value += float(claim.get("rupee_value") or 0)
+    return points, round(value, 2)
+
+
+def bill_redemption(order_id: str):
+    """(points, rupees) a bill redeemed, read from its REDEEM rows. Raises when
+    the ledger cannot be read; (0, 0.0) when there is no loyalty store."""
+    txns = get_loyalty_transaction_repository()
+    coll = getattr(txns, "collection", None)
+    if coll is None or not order_id:
+        return 0, 0.0
+    return _bill_redeemed(list(coll.find({"order_id": order_id, "type": "REDEEM"})), order_id)
+
+
+_RETURN_RESTORE = "return_restore_of"
+
+
+def _restore_return_share(
+    accounts, txns, customer_id: str, order_id: str, ledger: List[Dict[str, Any]],
+    claim: Optional[Dict[str, Any]], return_id: str, rupees: float,
+) -> Optional[Dict[str, Any]]:
+    """A LATER return of the bill (another return already wrote the bill's one
+    reversal and its order-wide earn claw): give back THIS return's points-paid
+    share as points, exactly once (owner 2026-11-09). Its own row, keyed by the
+    return; the applied_reversals guard on that key moves the points once. The
+    row carries no reversal-marker field, so it is never read as the bill's
+    reversal. Capped at what the bill redeemed and no reversal gave back yet.
+    None when nothing is owed."""
+    txn_id = f"return-restore:{return_id}"
+    row = next((t for t in ledger if t.get("txn_id") == txn_id), None)
+    if row is None:
+        redeemed, value = _bill_redeemed(ledger, order_id, claim)
+        given = sum(int(t.get("reversed_redeem_points") or 0) for t in ledger
+                    if t.get("type") == "ADJUST" and t.get(_REVERSAL_ORDER_FIELD) == order_id)
+        given += sum(int(t.get("points") or 0) for t in ledger if t.get(_RETURN_RESTORE))
+        points = max(0, min(points_for_rupees(rupees, redeemed, value), redeemed - given))
+        if points <= 0:
+            return None
+        try:
+            row = _save_redeem_row(txns, {
+                "txn_id": txn_id,
+                "customer_id": customer_id,
+                "type": "ADJUST",
+                "points": points,
+                "order_id": order_id,
+                _RETURN_RESTORE: return_id,
+                "reason": f"Return {return_id}: restore {points} redeemed on order {order_id}",
+                "created_at": datetime.now(),
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.error("return restore row failed: %s", exc)
+            row = None
+        if row is None:
+            return {"ok": False, "reason": "marker_write_failed"}
+    points = int(row.get("points") or 0)
+    status, _doc = _apply_reversal_balance(accounts, customer_id, txn_id, points, 0, points, None)
+    if status in ("failed", "underflow"):
+        return {"ok": False, "reason": "balance_update_failed", "unapplied_reversal": True}
+    return {"redeemed_restored": points} if status in ("applied", "unguarded") else None
+
+
 def _reverse_order_loyalty(
     *,
     order_id: str,
@@ -1833,6 +1916,7 @@ def _reverse_order_loyalty(
     extra_marker: Optional[Dict[str, Any]] = None,
     block_on_any_prior_reversal: bool = False,
     recompute_tier: bool = False,
+    restore_rupees: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Shared engine behind reverse_for_return (returns) and reverse_for_cancel
     (order cancel): claw back the points EARNED on `order_id` and restore the
@@ -1856,6 +1940,14 @@ def _reverse_order_loyalty(
     ``block_on_any_prior_reversal`` treats a reversal written by ANY flow for
     this ORDER as done, so neither cancel-after-return nor a second partial
     return can claw the same points twice.
+
+    ``restore_rupees`` (returns, owner 2026-11-09): give back only THIS
+    return's points-paid share, in points at the bill's own rate -- the share
+    returns._points_paid_share held back from the money -- instead of the whole
+    redemption. The first return's marker carries its share beside the
+    order-wide earn claw; a later return restores its share on its own row
+    (_restore_return_share). None: the whole redemption (a cancel, or a bill
+    whose points never paid a LOYALTY tender).
 
     ``recompute_tier`` is OPT-IN and belongs to the CANCEL flow only. A cancel
     un-does the whole order, so the tier it bought must come back down. A RETURN
@@ -1938,6 +2030,10 @@ def _reverse_order_loyalty(
             out.update(
                 _restore_late_debit(accounts, txns, customer_id, order_id, ledger, claim) or {}
             )
+        # A later return of the bill: the earn claw is done, its own share is not.
+        if out.get("ok") and restore_rupees is not None and not same_marker and row.get("return_id"):
+            out.update(_restore_return_share(accounts, txns, customer_id, order_id, ledger, claim,
+                                             marker_value, restore_rupees) or {})
         return out
 
     earned = sum(
@@ -1965,6 +2061,9 @@ def _reverse_order_loyalty(
         _complete_redeem_row(txns, customer_id, order_id, claim)
         redeemed += abs(int(claim.get("delta") or 0))
         redeem_txn_ids.append(claim.get("txn_id"))
+    if restore_rupees is not None:
+        redeemed = max(0, min(redeemed, points_for_rupees(
+            restore_rupees, redeemed, _bill_redeemed(redeem_rows, order_id, claim)[1])))
     if earned <= 0 and redeemed <= 0:
         return {"ok": True, "earned_clawed": 0, "redeemed_restored": 0, "net_delta": 0}
 
@@ -2282,7 +2381,7 @@ def regate_earn_after_edit(
 
 
 def reverse_for_return(
-    return_id: str, order_id: str, customer_id: str
+    return_id: str, order_id: str, customer_id: str, points_paid_share: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Reverse loyalty when goods are returned (BUG-099): claw back the points
     EARNED on the original order and restore the points REDEEMED on it.
@@ -2305,6 +2404,14 @@ def reverse_for_return(
     TIER IS NOT RECOMPUTED HERE. origin/main passed no new_tier, and because the
     claw is order-wide, one partial return of a multi-line order would otherwise
     demote a legitimately held tier and permanently cut the earn multiplier.
+
+    POINTS GIVEN BACK (owner 2026-11-09): a partial return gives back points IN
+    PROPORTION, cumulative per bill, never more than were spent. On a bill whose
+    points paid a LOYALTY tender, ``points_paid_share`` is the share the return
+    held back from its money (returns._points_paid_share) and exactly that comes
+    back as points, on every return of the bill. None: the whole redemption on
+    the bill's first return (no LOYALTY tender, or a return recorded before the
+    ruling).
     """
     if not customer_id or not order_id or not return_id:
         return {"ok": False, "reason": "missing_ids"}
@@ -2321,6 +2428,7 @@ def reverse_for_return(
         reason_prefix=f"Return {return_id}",
         block_on_any_prior_reversal=True,
         recompute_tier=False,
+        restore_rupees=points_paid_share,
     )
 
 
@@ -2560,6 +2668,16 @@ def _after_settling(coll, id_field: str, doc: Dict[str, Any], what: str, outcome
     return "reconciled"
 
 
+def _return_points_share(bills, doc: Dict[str, Any]) -> Optional[float]:
+    """The share a recorded return gives back as points, the one way the counter
+    passes it (returns.points_restore_share). An unreadable bill RAISES: the
+    row is left for the next tick, never reversed on a guess."""
+    from .returns import points_restore_share
+
+    bill = bills.find_one({"order_id": doc.get("order_id")}, {"_id": 0, "payments": 1})
+    return points_restore_share(bill, doc.get("points_paid_share"))
+
+
 def reconcile_loyalty_reversals() -> Dict[str, int]:
     """Finish every cancel and return reversal no staff door can reach. Safe to
     run from any worker at any moment, beside a press or a cancel: the engine's
@@ -2596,14 +2714,15 @@ def reconcile_loyalty_reversals() -> Dict[str, int]:
     for doc in returns.find(
         {"status": "COMPLETED", "loyalty_exception_closed": {"$ne": True},
          "$or": [{"loyalty_reversal_failed": True}, {"loyalty_exception_task": {"$exists": True}}]},
-        {**fields, "return_id": 1},
+        {**fields, "return_id": 1, "points_paid_share": 1},
     ):
         what = f"return {doc.get('return_id')}"
         try:
             if _closed_by_a_person(returns, "return_id", doc):
                 counts["clean"] += 1  # a person decided: nothing moves
                 continue
-            outcome = reverse_for_return(doc.get("return_id"), doc.get("order_id"), doc.get("customer_id"))
+            outcome = reverse_for_return(doc.get("return_id"), doc.get("order_id"), doc.get("customer_id"),
+                                         points_paid_share=_return_points_share(bills, doc))
             if _reversal_settled(outcome):
                 returns.update_one({"return_id": doc.get("return_id")}, {"$set": {"loyalty_reversal_failed": False}})
             counts[_after_settling(returns, "return_id", doc, what, outcome)] += 1

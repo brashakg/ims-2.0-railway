@@ -1204,41 +1204,85 @@ def _order_non_refundable_tenders(
     return {k: v for k, v in out.items() if v > 0}
 
 
+def _points_paid(order: Optional[Dict[str, Any]]) -> float:
+    """Rupees the bill took as a LOYALTY tender (0 when its points paid nothing)."""
+    return _order_non_refundable_tenders(order, (_POINTS_TENDER,)).get(_POINTS_TENDER, 0.0)
+
+
+def points_restore_share(order: Optional[Dict[str, Any]], share: Optional[float]) -> Optional[float]:
+    """What a return hands loyalty.reverse_for_return: its points-paid share on
+    a bill whose points paid a LOYALTY tender, else None (the engine then gives
+    the whole redemption back, as before the ruling). The counter and the
+    reconciliation sweep both pass it this way."""
+    return round(float(share or 0), 2) if _points_paid(order) > 0 else None
+
+
 def _points_paid_share(
     order: Optional[Dict[str, Any]], order_id: Optional[str], net_amount: float, *, strict: bool,
 ) -> float:
-    """THE rule (owner 2026-11-08): the part of this return the customer paid
-    with loyalty points. It comes back as points, so it is never ALSO paid out as
-    cash or store credit. The points come back the way the one engine gives them
-    (loyalty.reverse_for_return): the bill's WHOLE redemption on its first
-    return, nothing on later ones. So the money holds back exactly that: every
-    points-paid rupee not held back by an earlier return of the bill, capped at
-    this return's net (a refund cannot go below zero; whatever that cap leaves
-    is held back by the bill's next return). Not a proportional slice -- that
-    paid the rest of the redemption twice, as points now and as cash. Cash caps
-    and the partial-return rules are untouched; only the money a return pays
-    shrinks by this. Every return door prices through here (quote, POST, Needs
-    completing keeps it on the hold).
+    """THE rule (owner 2026-11-08 / 2026-11-09): the part of this return the
+    customer paid with loyalty points. It comes back as points -- exactly this
+    share, through loyalty.reverse_for_return -- so it is never ALSO paid out as
+    cash or store credit. A partial return gives back points IN PROPORTION
+    (Rs 1,000 bill, Rs 900 cash + 100 points: a Rs 50 item gives back 5 points
+    and Rs 45), cumulative per bill, never more than were spent.
 
-    "Held back by an earlier return" is the COMPLETED docs AND the live or kept
-    refund holds of returns still being written or kept for Needs completing
-    (_live_refund_holds, one read). A hold carries its return's share from the
-    moment it is reserved (_reserve_order_refund prices through here inside its
-    compare-and-set), so two returns of one bill never both hold the same
-    points back while the engine restores them once (#1397 round 7).
-    ``order`` must carry the bill's refund_holds as stored now."""
-    paid = _order_non_refundable_tenders(order, (_POINTS_TENDER,)).get(_POINTS_TENDER, 0.0)
+    Counted in whole points at the bill's own redemption rate
+    (loyalty.points_for_rupees), so the rupees held back here and the points
+    given back there are the same amount: the bill's points through this return
+    (its points x the bill's value returned so far, this return included, over
+    the bill's value) less the points earlier returns of the bill held back,
+    capped at this return's net. The share is a slice of the return's value
+    after any restocking fee. The return that reaches the whole redemption
+    takes the exact remainder. Cash caps and the partial-return rules are
+    untouched; only the money a return pays shrinks by this. Every return door
+    prices through here (quote, POST, Needs completing keeps it on the hold).
+
+    "Earlier returns" are the COMPLETED docs AND the live or kept refund holds
+    of returns still being written or kept for Needs completing
+    (_live_refund_holds). A hold carries its return's share from the moment it
+    is reserved (_reserve_order_refund prices through here inside its
+    compare-and-set). ``order`` must carry the bill's refund_holds as stored now."""
+    from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
+
+    from .loyalty import bill_redemption, points_for_rupees
+
+    paid = _points_paid(order)
     if paid <= 0 or not order_id:
         return 0.0
+    holds = (order or {}).get("refund_holds") or {}
     try:
-        live, documented = _live_refund_holds(order_id, (order or {}).get("refund_holds") or {},
-                                              field="points_paid_share")
+        live, held = _live_refund_holds(order_id, holds, field="points_paid_share")
+        live_net, returned = _live_refund_holds(order_id, holds)
+        points, value = bill_redemption(order_id)
     except HTTPException:
         if strict:
             raise
-        live, documented = {}, 0.0  # the quote is only a preview
-    held = documented + sum(float((h or {}).get("points_paid_share") or 0) for h in live.values())
-    return round(max(0.0, min(paid - held, float(net_amount))), 2)
+        live, held, live_net, returned, points, value = {}, 0.0, {}, 0.0, 0, 0.0  # a preview only
+    except Exception as exc:  # noqa: BLE001 -- unknown is not none
+        if strict:
+            logger.error("[RETURNS] loyalty points of %s unreadable: %s", order_id, exc)
+            raise HTTPException(status_code=503, detail=(
+                "Could not check the loyalty points paid on this bill - try again. Nothing was recorded."))
+        live, held, live_net, returned, points, value = {}, 0.0, {}, 0.0, 0, 0.0
+    held += sum(float((h or {}).get("points_paid_share") or 0) for h in live.values())
+    returned += sum(float((h or {}).get("amount") or 0) for h in live_net.values())
+    if points <= 0 or value <= 0:
+        points, value = 1, 1.0  # no rupee value on the redemption: a point is a rupee
+    whole = points_for_rupees(paid, points, value)
+    billed = _order_billed_total(order)
+    upto = whole
+    if billed > 0:
+        upto = min(whole, int((Decimal(whole) * Decimal(str(round(returned + float(net_amount), 2)))
+                               / Decimal(str(billed))).quantize(Decimal(1), rounding=ROUND_HALF_UP)))
+    room = int((Decimal(str(net_amount)) * points / Decimal(str(value))).quantize(Decimal(1), rounding=ROUND_FLOOR))
+    held_points = points_for_rupees(held, points, value)
+    take = max(0, min(upto - held_points, room))
+    if take <= 0:
+        return 0.0
+    if held_points + take >= whole:
+        return round(max(0.0, min(paid - held, float(net_amount))), 2)
+    return round(take * value / points, 2)
 
 
 def _prior_refund_tenders(order_id: Optional[str]) -> Dict[str, float]:
@@ -5132,7 +5176,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         try:
             from .loyalty import reverse_for_return as _reverse_loyalty
 
-            _lr = _reverse_loyalty(return_id, resolved_order_id, _cust)
+            _lr = _reverse_loyalty(return_id, resolved_order_id, _cust,
+                                   points_paid_share=points_restore_share(order, points_share))
             if _lr.get("ok"):
                 logger.info(
                     "[RETURNS] loyalty reversed for %s: clawed=%s restored=%s",

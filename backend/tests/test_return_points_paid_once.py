@@ -8,9 +8,10 @@ credit pool counted the LOYALTY tender (returns._order_non_refundable_tenders),
 the STORE_CREDIT leg drew on it, and reverse_for_return restored the points.
 
 Owner ruling 2026-11-08: the points-paid part comes back once, as points. Cash
-caps and partial-return rules unchanged. The engine gives the whole redemption
-back on the bill's first return, so that return holds the points-paid part back
-from its money (round 6: a proportional slice paid the rest twice).
+caps and partial-return rules unchanged. Owner ruling 2026-11-09: a partial
+return gives back points IN PROPORTION, cumulative per bill, never more than
+spent -- the share held back from the money is the share given back as points
+(test_return_points_proportional).
 
 Driven through the REAL quote + POST /returns over the fakes of
 test_returns_endpoint_tender_capture; the loyalty reversal is a recorder there
@@ -160,16 +161,17 @@ def test_a_return_with_no_breakdown_records_only_the_cash_part(ctx):
 def test_two_partial_returns_hold_the_points_part_back_once_and_never_more(ctx):
     c = _points_sale(ctx, qty=2)
     half = _BILLED_GROSS / 2
+    share = POINTS / 2  # owner 2026-11-09: in proportion
     q = _quote(c, items=_line(1))
-    assert q["net_refund"] == half - POINTS and q["points_paid_share"] == POINTS
-    assert _post(c, [{"method": "CASH", "amount": half - POINTS}], items=_line(1)).status_code == 201
+    assert q["net_refund"] == half - share and q["points_paid_share"] == share
+    assert _post(c, [{"method": "CASH", "amount": half - share}], items=_line(1)).status_code == 201
 
     q2 = _quote(c, items=_line(1))
-    assert q2["net_refund"] == half and q2["points_paid_share"] == 0.0
-    bad = _post(c, [{"method": "CASH", "amount": half - POINTS},
-                    {"method": "STORE_CREDIT", "amount": POINTS}], items=_line(1))
+    assert q2["net_refund"] == half - share and q2["points_paid_share"] == share
+    bad = _post(c, [{"method": "CASH", "amount": half - share},
+                    {"method": "STORE_CREDIT", "amount": share}], items=_line(1))
     assert bad.status_code in (400, 422), bad.text
-    assert _post(c, [{"method": "CASH", "amount": half}], items=_line(1)).status_code == 201
+    assert _post(c, [{"method": "CASH", "amount": half - share}], items=_line(1)).status_code == 201
 
     docs = [d for d in c["returns"].docs if d.get("status") == "COMPLETED"]
     assert sum(d["refund_amount"] for d in docs) == CASH
@@ -177,17 +179,16 @@ def test_two_partial_returns_hold_the_points_part_back_once_and_never_more(ctx):
     assert _drawer(c) == CASH and _issued(c) == []
 
 
-def test_a_small_first_return_holds_what_it_can_and_the_next_return_the_rest(ctx):
-    """The first return's net is below the points-paid part: it pays nothing,
-    and the next return of the bill holds back what is left -- never twice."""
-    c = _points_sale(ctx, qty=20)  # Rs 295 a unit, under the Rs 590 points part
-    unit = _BILLED_GROSS / 20
+def test_a_small_first_return_holds_its_share_and_the_next_return_the_rest(ctx):
+    """A small first return holds back only its own share (owner 2026-11-09);
+    the bill's next return holds back the rest -- never twice."""
+    c = _points_sale(ctx, qty=20)  # Rs 295 a unit
     q = _quote(c, items=_line(1))
-    assert q["points_paid_share"] == unit and q["net_refund"] == 0.0
-    assert _post(c, items=_line(1)).status_code == 201
+    assert q["points_paid_share"] == 30.0 and q["net_refund"] == 265.0  # 29.5 points, half up
+    assert _post(c, [{"method": "CASH", "amount": 265.0}], items=_line(1)).status_code == 201
     q2 = _quote(c, items=_line(19))
-    assert q2["points_paid_share"] == POINTS - unit
-    assert q2["net_refund"] == CASH
+    assert q2["points_paid_share"] == POINTS - 30.0
+    assert q2["net_refund"] == CASH - 265.0
     assert _post(c, [{"method": "CASH", "amount": q2["net_refund"]}], items=_line(19)).status_code == 201
     docs = [d for d in c["returns"].docs if d.get("status") == "COMPLETED"]
     assert sum(d["points_paid_share"] for d in docs) == POINTS
@@ -209,7 +210,8 @@ def test_an_identical_retry_replays_and_pays_nothing_more(ctx):
 def test_a_restocking_fee_still_comes_off_the_cash_part(ctx):
     c = _points_sale(ctx)
     q = _quote(c, restocking_fee=1000.0)
-    assert q["points_paid_share"] == POINTS and q["net_refund"] == round(_BILLED_GROSS - 1000 - POINTS, 2)
+    # In proportion of what comes back after the fee (owner 2026-11-09): 590 x 4,900 / 5,900.
+    assert q["points_paid_share"] == 490.0 and q["net_refund"] == round(_BILLED_GROSS - 1000 - 490.0, 2)
 
 
 def test_a_voucher_sale_still_refunds_its_voucher_part_as_store_credit(ctx):
@@ -224,11 +226,10 @@ def test_a_voucher_sale_still_refunds_its_voucher_part_as_store_credit(ctx):
 
 
 # ----------------------------------------------------------------------------
-# Round 6 (#1397 review): the REAL engine on a partial return. reverse_for_return
-# restores the bill's WHOLE redemption on its first return and nothing on later
-# ones (block_on_any_prior_reversal). The money side must hold back exactly what
-# the engine gives back as points -- not a proportional slice -- or the first
-# partial return pays the points-paid part twice: once as points, once as cash.
+# Round 6 (#1397 review), restated by the owner 2026-11-09: the REAL engine on a
+# partial return. The money side holds back exactly what the engine gives back
+# as points -- each return its own share, in proportion -- or the points-paid
+# part is paid twice (once as points, once as cash) or not at all.
 # ----------------------------------------------------------------------------
 
 
@@ -272,13 +273,13 @@ def test_a_first_partial_return_never_pays_more_than_the_goods_handed_back(ctx, 
     q = _quote(c, items=_line(1))
     r = _post(c, [{"method": "CASH", "amount": q["net_refund"]}], items=_line(1))
     assert r.status_code == 201, r.text
-    assert points() == POINTS  # what the real engine restored
+    assert points() == POINTS / 2  # what the real engine restored: this return's share
     assert _value_back(c, points) == half_value  # cash + points == the goods returned
-    assert q["points_paid_share"] == r.json()["points_paid_share"] == POINTS
+    assert q["points_paid_share"] == r.json()["points_paid_share"] == POINTS / 2
 
     q2 = _quote(c, items=_line(1))
-    assert q2["points_paid_share"] == 0.0 and q2["net_refund"] == half_value
-    assert _post(c, [{"method": "CASH", "amount": half_value}], items=_line(1)).status_code == 201
+    assert q2["points_paid_share"] == POINTS / 2 and q2["net_refund"] == half_value - POINTS / 2
+    assert _post(c, [{"method": "CASH", "amount": q2["net_refund"]}], items=_line(1)).status_code == 201
     assert points() == POINTS  # never restored twice
     assert _value_back(c, points) == _BILLED_GROSS
     assert _drawer(c) == CASH and _issued(c) == []

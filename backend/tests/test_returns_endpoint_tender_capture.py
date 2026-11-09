@@ -259,7 +259,7 @@ def ctx(monkeypatch):
         fake_db = _FakeDB()
         loyalty_calls = []
 
-        def _fake_reverse(return_id, order_id, customer_id):
+        def _fake_reverse(return_id, order_id, customer_id, **_kw):
             loyalty_calls.append((return_id, order_id, customer_id))
             return {"ok": True, "earned_clawed": 10, "redeemed_restored": 0}
 
@@ -1114,7 +1114,7 @@ def test_loyalty_store_unavailable_on_a_return_is_flagged_not_finished(ctx, monk
     c = ctx([{"method": "CASH", "amount": _BILLED_GROSS}])
     monkeypatch.setattr(
         "api.routers.loyalty.reverse_for_return",
-        lambda *a: {"ok": False, "reason": "loyalty_db_unavailable"},
+        lambda *a, **k: {"ok": False, "reason": "loyalty_db_unavailable"},
     )
     r = c["client"].post(
         "/api/v1/returns",
