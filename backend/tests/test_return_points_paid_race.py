@@ -72,37 +72,36 @@ def _completed(c):
 
 def test_two_returns_pressed_at_once_hold_the_points_part_back_once(ctx, monkeypatch):
     """A reserves and prices its money; before A's doc lands, B (the other unit)
-    is quoted, posted and completed. Both read the bill while neither doc was
-    COMPLETED."""
+    is pressed. B waits (owner 2026-11-09 / #1397: one return at a time on a
+    points-paid bill), then goes through once A is recorded."""
     c = _points_sale(ctx, qty=2)
     _with_compare_and_set(c)
     points = _real_engine(c, monkeypatch)
 
     qa = _quote(c, items=_line(1))
-    assert qa["net_refund"] == HALF - POINTS
+    assert qa["net_refund"] == HALF - POINTS / 2
     real_split = returns_router._normalize_refund_tenders
     seen = {}
 
-    def _b_lands_while_a_is_in_flight(tenders, pays):
+    def _b_pressed_while_a_is_in_flight(tenders, pays):
         if not seen:
             seen["a_pays"] = pays
             assert c["order"]["refund_holds"]  # A's reservation is on the bill
-            qb = _quote(c, items=_line(1))
-            seen["b_quote"] = qb
-            rb = _post(c, [{"method": "CASH", "amount": qb["net_refund"]}], items=_line(1))
-            assert rb.status_code == 201, rb.text
+            seen["b"] = _post(c, [{"method": "CASH", "amount": qa["net_refund"]}], items=_line(1))
         return real_split(tenders, pays)
 
-    monkeypatch.setattr(returns_router, "_normalize_refund_tenders", _b_lands_while_a_is_in_flight)
+    monkeypatch.setattr(returns_router, "_normalize_refund_tenders", _b_pressed_while_a_is_in_flight)
     ra = _post(c, [{"method": "CASH", "amount": qa["net_refund"]}], items=_line(1))
     assert ra.status_code == 201, ra.text
+    assert seen["b"].status_code == 409, seen["b"].text
+    qb = _quote(c, items=_line(1))
+    assert _post(c, [{"method": "CASH", "amount": qb["net_refund"]}], items=_line(1)).status_code == 201
 
     docs = _completed(c)
     assert len(docs) == 2
-    assert round(sum(d["refund_amount"] for d in docs), 2) == CASH  # Rs 4,720 before the fix
+    assert round(sum(d["refund_amount"] for d in docs), 2) == CASH  # Rs 4,720 before round 7
     assert round(sum(d["points_paid_share"] for d in docs), 2) == POINTS  # held back once
-    assert seen["b_quote"]["points_paid_share"] == 0.0 and seen["b_quote"]["net_refund"] == HALF
-    assert points() == POINTS  # the engine restored the redemption once
+    assert points() == POINTS  # the engine gave the redemption back once, in two shares
     assert _value_back(c, points) == _BILLED_GROSS  # Rs 5,310 cash + 590 points
     assert _drawer(c) == CASH and _issued(c) == []
 
@@ -137,11 +136,10 @@ def test_a_hold_carries_its_share_from_the_moment_it_is_reserved(ctx):
     _with_compare_and_set(c)
     oid = c["order"]["order_id"]
     _p, reserved, share_a = returns_router._reserve_order_refund(oid, HALF, "RET-A")
-    _p, _r, share_b = returns_router._reserve_order_refund(oid, HALF, "RET-B")
-    assert reserved and (share_a, share_b) == (POINTS, 0.0)
-    holds = c["order"]["refund_holds"]
-    assert holds["RET-A"]["points_paid_share"] == POINTS and holds["RET-B"]["points_paid_share"] == 0.0
-    assert returns_router._points_paid_share(c["order"], oid, HALF, strict=True) == 0.0
-    # A released (its return failed): its share goes back to the bill's next return.
+    assert reserved and share_a == POINTS / 2
+    assert c["order"]["refund_holds"]["RET-A"]["points_paid_share"] == POINTS / 2
+    # A's share counts for the bill's next return: B's own half only.
+    assert returns_router._points_paid_share(c["order"], oid, HALF, strict=True) == POINTS / 2
+    # A released (its return failed): B's share is still its own half, never A's too.
     assert returns_router._release_order_refund(oid, "RET-A")
-    assert returns_router._points_paid_share(c["order"], oid, HALF, strict=True) == POINTS
+    assert returns_router._points_paid_share(c["order"], oid, HALF, strict=True) == POINTS / 2

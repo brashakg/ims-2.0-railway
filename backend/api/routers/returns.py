@@ -4196,6 +4196,9 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
     return live, round(documented, 2)
 
 
+_ANOTHER_RETURN_RUNNING = "Another return of this bill is being processed - try again. Nothing was recorded."
+
+
 def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id: str,
                           bill: Optional[Dict[str, Any]] = None) -> Tuple[float, bool, float]:
     """Reserve this refund on the ORDER, atomically, BEFORE the over-refund
@@ -4227,6 +4230,11 @@ def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id:
         unfinished = _nothing_paid_ids(order_id)
         keep = {rid: h for rid, h in (order.get("refund_holds") or {}).items()
                 if rid not in live and (rid in unfinished or "*" in unfinished) and (h or {}).get("kept")}
+        if _points_paid(order) > 0 and any(rid != return_id for rid in live):
+            # One return at a time on a points-paid bill (#1397): a return that
+            # fails after reserving releases its hold, and one priced beside it
+            # would then pay the points part again.
+            raise HTTPException(status_code=409, detail=_ANOTHER_RETURN_RUNNING)
         share = _points_paid_share(order, order_id, net_amount, strict=True)
         live[return_id] = {"amount": round(float(net_amount), 2), "at": utc_now_iso(),
                            "points_paid_share": share}
