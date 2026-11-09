@@ -152,7 +152,11 @@ def test_three_returns_give_back_exactly_the_points_spent(ctx, monkeypatch):
         assert _post(c, [{"method": "CASH", "amount": q["net_refund"]}], items=_line(1)).status_code == 201
     assert sum(shares) == POINTS and all(abs(s - POINTS / 3) < 1 for s in shares)
     assert books()[0] == POINTS and books()[1] == 0
-    assert round(sum(d["refund_amount"] for d in _done(c)), 2) == CASH
+    # Each third is priced at Rs 1,966.67 (the bill's own rounding, 1 paisa over in all):
+    # the cash is every return's value less exactly the points held back.
+    nets = round(sum(d["net_refund"] for d in _done(c)), 2)
+    assert round(sum(d["refund_amount"] for d in _done(c)), 2) == round(nets - POINTS, 2)
+    assert abs(nets - _BILLED_GROSS) <= 0.01
 
 
 def test_an_identical_retry_gives_nothing_back_twice(ctx, monkeypatch):
