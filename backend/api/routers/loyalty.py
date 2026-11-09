@@ -2420,16 +2420,28 @@ def reverse_for_return(
     waived = _waived_outcome(order_id)
     if waived:
         return waived
-    return _reverse_order_loyalty(
-        order_id=order_id,
-        customer_id=customer_id,
-        marker_field="return_id",
-        marker_value=return_id,
-        reason_prefix=f"Return {return_id}",
-        block_on_any_prior_reversal=True,
-        recompute_tier=False,
-        restore_rupees=points_paid_share,
-    )
+    def reverse() -> Dict[str, Any]:
+        return _reverse_order_loyalty(
+            order_id=order_id,
+            customer_id=customer_id,
+            marker_field="return_id",
+            marker_value=return_id,
+            reason_prefix=f"Return {return_id}",
+            block_on_any_prior_reversal=True,
+            recompute_tier=False,
+            restore_rupees=points_paid_share,
+        )
+
+    out = reverse()
+    # Losing the bill's marker insert settles nothing for THIS return: its
+    # points-paid share was held back from its money (review 11-09). The
+    # winner's row is in the ledger now, so one more pass takes the marker
+    # branch, which restores this return's own share (_restore_return_share).
+    # A second lost race is not settled: answer a failure so the return stays
+    # flagged and the sweep retries it.
+    if out.get("raced"):
+        out = reverse()
+    return {"ok": False, "reason": "reversal_race_unsettled"} if out.get("raced") else out
 
 
 def reverse_for_cancel(order_id: str, customer_id: Optional[str]) -> Dict[str, Any]:

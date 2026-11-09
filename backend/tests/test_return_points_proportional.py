@@ -256,3 +256,46 @@ def test_the_sweep_gives_back_the_flagged_return_s_share_not_the_whole_redemptio
     assert rig["db"].returns.find_one({"return_id": "RET-P"})["loyalty_reversal_failed"] is False
     _tick(rig)
     assert int(_account(rig)["balance_points"]) == START - 90
+
+
+# ----------------------------------------------------------------------------
+# (A) a return that loses the reversal-marker race still gets its own share
+# ----------------------------------------------------------------------------
+
+
+def test_a_return_that_loses_the_marker_race_still_gets_its_share_back(ctx, monkeypatch):
+    """Review 11-09: R1 (its reversal failed earlier, now re-run by the sweep)
+    and R2 both read the ledger before either marker lands. R1 wins the
+    uniq_loyalty_order_reversal insert; R2 hits DuplicateKeyError. R2's share
+    was held back from its money, so it must still come back as points --
+    before, the loser answered ok/raced and its 295 points were lost, unflagged."""
+    from api.routers import loyalty as L
+
+    c = _points_sale(ctx, qty=2)
+    books = _engine(c, monkeypatch)
+    oid = c["order"]["order_id"]
+    txns = L.get_loyalty_transaction_repository()
+    # The production partial-unique index (database/connection.py).
+    txns.collection.create_index(
+        [("customer_id", 1), ("reversal_of_order_id", 1)], unique=True,
+        partialFilterExpression={"type": "ADJUST", "reversal_of_order_id": {"$type": "string"}},
+        name="uniq_loyalty_order_reversal")
+    real_create = txns.create
+    raced = {}
+
+    def _r1_lands_first(row, **kw):
+        if row.get("return_id") == "RET-2" and not raced:
+            raced["r1"] = L.reverse_for_return("RET-1", oid, "CUST-1", points_paid_share=295.0)
+        return real_create(row, **kw)
+
+    monkeypatch.setattr(txns, "create", _r1_lands_first)
+    r2 = L.reverse_for_return("RET-2", oid, "CUST-1", points_paid_share=295.0)
+    assert raced["r1"]["ok"] is True and raced["r1"]["redeemed_restored"] == 295
+    assert r2["ok"] is True, r2
+    balance, lifetime_redeemed, rows = books()
+    assert balance == POINTS and lifetime_redeemed == 0  # was 295: R2's share lost
+    assert len(rows) == 2
+    # And exactly once: a retry of either gives nothing more.
+    L.reverse_for_return("RET-2", oid, "CUST-1", points_paid_share=295.0)
+    L.reverse_for_return("RET-1", oid, "CUST-1", points_paid_share=295.0)
+    assert books()[0] == POINTS and len(books()[2]) == 2
