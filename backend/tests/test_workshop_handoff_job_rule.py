@@ -32,12 +32,6 @@ OTHER = "BV-OTHER-02"
 JOB = "LEGACY-JOB"
 
 
-@pytest.fixture(autouse=True)
-def _rule_reads_the_rig(rig, monkeypatch):  # noqa: F811
-    # THE job rule's order-shop read (helpers._jobs_in_reach) binds its own name.
-    monkeypatch.setattr("api.routers.workshop.helpers.get_order_repository", lambda: rig["orders"])
-
-
 def _legacy_job(db, order_id, shop=OTHER, job_id=JOB):
     db.workshop_jobs.insert_one({
         "job_id": job_id, "job_number": f"WS-{job_id}", "order_id": order_id,
