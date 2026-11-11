@@ -6,6 +6,7 @@
 // Suppliers and Analytics sections.
 
 import { gstinStateCode } from '../../constants/gst';
+import { formatDateIST } from '../../utils/datetime';
 import type { POItem, POStatus, Supplier, PurchaseOrder } from './purchaseTypes';
 
 // ============================================================================
@@ -120,6 +121,15 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
 
 /** What a PO line's price reads as: the rupees, or that accounts still have
  *  to agree it (a line nobody priced -- never shown as a real 0). */
+/** A purchase order's day as every screen and the downloaded copy print it.
+ *  The expected delivery date is optional: none reads 'Not set', a stored
+ *  value that is not a date reads 'Unreadable date' -- never "Invalid Date"
+ *  (audit APP-02). A real one is the app's IST day, the same in any browser
+ *  timezone. */
+export function poDay(value: string | null | undefined): string {
+  return value ? formatDateIST(value, 'Unreadable date') : 'Not set';
+}
+
 export const PRICE_NEEDED = 'Price needed';
 export function poMoney(value: number | null): string {
   return value == null ? PRICE_NEEDED : `₹${value.toLocaleString()}`;

@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import { getStatusBadge } from './statusBadge';
 import type { PurchaseOrder } from './purchaseTypes';
-import { poMoney } from './purchaseMappers';
+import { poDay, poMoney } from './purchaseMappers';
 import { POPrint } from '../../components/print/POPrint';
 import { POLifecycleDrawer } from '../../components/purchase/POLifecycleDrawer';
 import { useAuth } from '../../context/AuthContext';
@@ -211,16 +211,16 @@ export function PurchaseOrderDetail({ po, onClose, onAction }: PurchaseOrderDeta
           <div className="grid grid-cols-2 tablet:grid-cols-4 gap-4">
             <div>
               <p className="text-xs text-gray-600 mb-1">Order Date</p>
-              <p className="text-sm font-medium text-gray-900">{new Date(po.date).toLocaleDateString()}</p>
+              <p className="text-sm font-medium text-gray-900">{poDay(po.date)}</p>
             </div>
             <div>
               <p className="text-xs text-gray-600 mb-1">Expected Delivery</p>
-              <p className="text-sm font-medium text-gray-900">{new Date(po.expectedDelivery).toLocaleDateString()}</p>
+              <p className="text-sm font-medium text-gray-900">{poDay(po.expectedDelivery)}</p>
             </div>
             {po.receivedDate && (
               <div>
                 <p className="text-xs text-gray-600 mb-1">Received Date</p>
-                <p className="text-sm font-medium text-gray-900">{new Date(po.receivedDate).toLocaleDateString()}</p>
+                <p className="text-sm font-medium text-gray-900">{poDay(po.receivedDate)}</p>
               </div>
             )}
           </div>
