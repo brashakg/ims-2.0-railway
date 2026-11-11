@@ -104,18 +104,32 @@ def _row(report, integration_id):
         ("test", None, "simulated", False),
     ],
 )
+@pytest.mark.parametrize("writes_on", [True, False])
 def test_shopify_row_reports_shopifys_effective_gate(
-    monkeypatch, global_mode, override, state, armed
+    monkeypatch, global_mode, override, state, armed, writes_on
 ):
     _global_mode(monkeypatch, global_mode)
     if override is not None:
         monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", override)
+    if writes_on:
+        monkeypatch.setenv("IMS_SHOPIFY_WRITES", "1")
+    elif state == "live":
+        # Decision D11: a live gate with the writes switch off is order
+        # intake only - never the plain "live" state.
+        state = "intake_live"
 
     report = build_integration_status(db=_DB(_VAULT))
     row = _row(report, "shopify")
 
     # The reporter and the gate the write path asks must agree, always.
-    assert (row["state"] == "live") is nexus_providers._is_shopify_write_allowed()
+    assert (row["state"] in ("live", "intake_live")) is (
+        nexus_providers._is_shopify_write_allowed()
+    )
+    # Plain "live" means everything fires: the gate AND the writes switch.
+    assert (row["state"] == "live") is (
+        nexus_providers._is_shopify_write_allowed()
+        and nexus_providers.ims_shopify_writes_enabled()
+    )
     assert row["state"] == state
     assert row["armed"] is armed
     assert row["configured"] is True
@@ -172,12 +186,41 @@ def test_shopify_row_says_when_the_writes_switch_is_off(monkeypatch):
     pushes are not. The row must not read as plainly 'everything fires'."""
     _global_mode(monkeypatch, "off")
     monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", "live")
-    row = _row(build_integration_status(db=_DB(_VAULT)), "shopify")
+    report = build_integration_status(db=_DB(_VAULT))
+    row = _row(report, "shopify")
     assert "IMS_SHOPIFY_WRITES" in row["notes"]
+    # Decision D11: in the STATE the badge is drawn from, not only the note.
+    assert row["state"] == "intake_live"
+    assert row["armed"] is True and row["gate"]["mode"] == "live"
+    # Counted among the live integrations: its order intake IS live.
+    assert report["summary"]["live"] == 1
 
     monkeypatch.setenv("IMS_SHOPIFY_WRITES", "1")
-    row = _row(build_integration_status(db=_DB(_VAULT)), "shopify")
+    report = build_integration_status(db=_DB(_VAULT))
+    row = _row(report, "shopify")
     assert "IMS_SHOPIFY_WRITES" not in row["notes"]
+    assert row["state"] == "live"
+    assert report["summary"]["live"] == 1
+
+
+@pytest.mark.parametrize("gate", ["off", "test"])
+def test_the_writes_switch_alone_never_makes_the_shopify_row_live(monkeypatch, gate):
+    """IMS_SHOPIFY_WRITES on behind a gate that is not live: still simulated."""
+    _global_mode(monkeypatch, "live")
+    monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", gate)
+    monkeypatch.setenv("IMS_SHOPIFY_WRITES", "1")
+    row = _row(build_integration_status(db=_DB(_VAULT)), "shopify")
+    assert row["state"] == "simulated" and row["armed"] is False
+
+
+def test_only_shopify_can_be_intake_live(monkeypatch):
+    _global_mode(monkeypatch, "live")
+    monkeypatch.setenv("MSG91_API_KEY", "SYNTHETIC")
+    monkeypatch.setenv("MSG91_WHATSAPP_INTEGRATED_NUMBER", "SYNTHETIC")
+    report = build_integration_status(db=_DB(_VAULT))
+    states = {i["id"]: i["state"] for i in report["integrations"]}
+    assert states["msg91_whatsapp"] == "live"
+    assert [k for k, v in states.items() if v == "intake_live"] == ["shopify"]
 
 
 # ---------------------------------------------------------------------------

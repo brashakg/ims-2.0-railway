@@ -27,6 +27,19 @@ const STATE_META: Record<string, { label: string; cls: string }> = {
   not_wired: { label: 'Not wired', cls: 'bg-gray-100 text-gray-500' },
 };
 
+// A live Shopify gate with IMS_SHOPIFY_WRITES off is live for ORDER INTAKE
+// only (state 'intake_live'): the badge itself says both halves, never a
+// plain "Live". Every other state is one badge.
+const INTAKE_LIVE_BADGES = [
+  { label: 'Order intake: live', cls: STATE_META.live.cls },
+  { label: 'Catalogue/stock pushes: simulated', cls: STATE_META.simulated.cls },
+];
+
+function stateBadges(state: string): { label: string; cls: string }[] {
+  if (state === 'intake_live') return INTAKE_LIVE_BADGES;
+  return [STATE_META[state] ?? { label: state, cls: 'bg-gray-100 text-gray-600' }];
+}
+
 function dispatchBadgeCls(mode: string): string {
   if (mode === 'live') return 'bg-green-100 text-green-800';
   if (mode === 'test') return 'bg-blue-100 text-blue-800';
@@ -34,7 +47,6 @@ function dispatchBadgeCls(mode: string): string {
 }
 
 function IntegrationRow({ item }: { item: IntegrationStatusItem }) {
-  const meta = STATE_META[item.state] ?? { label: item.state, cls: 'bg-gray-100 text-gray-600' };
   return (
     <div className="py-3 border-t border-gray-100 first:border-t-0" data-testid={`integration-row-${item.id}`}>
       <div className="flex items-start justify-between gap-3">
@@ -53,9 +65,15 @@ function IntegrationRow({ item }: { item: IntegrationStatusItem }) {
               {item.gate.label}: {item.gate.mode}
             </span>
           )}
-          <span className={clsx('px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap', meta.cls)}>
-            {meta.label}
-          </span>
+          {stateBadges(item.state).map((badge) => (
+            <span
+              key={badge.label}
+              data-testid={`integration-state-${item.id}`}
+              className={clsx('px-2.5 py-0.5 rounded-full text-xs font-medium whitespace-nowrap', badge.cls)}
+            >
+              {badge.label}
+            </span>
+          ))}
         </div>
       </div>
 

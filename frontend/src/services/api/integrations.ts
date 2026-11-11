@@ -22,6 +22,9 @@ export interface IntegrationCollectionState {
 
 export type IntegrationState =
   | 'live'
+  // Shopify only: its gate is live but IMS_SHOPIFY_WRITES is off, so order
+  // intake is live and catalogue/stock pushes are still simulated.
+  | 'intake_live'
   | 'active'
   | 'test_only'
   | 'simulated'

@@ -357,7 +357,8 @@ def _shopify_status(db) -> Dict[str, Any]:
             f"Signs in with {_SHOPIFY_SOURCE_LABEL[sources[0]]}. Presence only: "
             "this screen does not test the connection."
         )
-    if not ims_shopify_writes_enabled():
+    writes_on = ims_shopify_writes_enabled()
+    if not writes_on:
         notes.append(
             "Catalogue and stock pushes stay simulated until IMS_SHOPIFY_WRITES "
             "is switched on; order intake follows the gate shown here."
@@ -367,6 +368,12 @@ def _shopify_status(db) -> Dict[str, Any]:
         "credential_source": sources[0] if sources else None,
         "mode": mode,
         "gate": {"label": "Shopify gate", "mode": mode, "rule": _SHOPIFY_GATE_RULE},
+        # The row's state when its gate is live (decision D11). With
+        # IMS_SHOPIFY_WRITES off only ORDER INTAKE is live - catalogue and
+        # stock pushes are still simulated - so the row's state is
+        # "intake_live", never plain "live", and the screen's badge says both
+        # halves (IntegrationStatusCard).
+        "live_state": "live" if writes_on else "intake_live",
         "notes": " ".join(notes),
     }
 
@@ -471,7 +478,9 @@ def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
         out["armed"] = True
     else:
         if mode == "live":
-            out["state"] = "live"
+            # A provider may be only PARTLY live behind a live gate (Shopify
+            # with IMS_SHOPIFY_WRITES off: order intake only).
+            out["state"] = provider.get("live_state", "live")
             out["armed"] = True
         elif mode == "test":
             # Only MSG91 honors an allowlist in test mode; for the others
@@ -691,7 +700,7 @@ def build_integration_status(db=None) -> Dict[str, Any]:
     mode = _dispatch_mode()
     items = [_build_one(entry, db) for entry in _REGISTRY]
     configured_count = sum(1 for i in items if i["configured"])
-    live_count = sum(1 for i in items if i["state"] in ("live", "active"))
+    live_count = sum(1 for i in items if i["state"] in ("live", "intake_live", "active"))
 
     try:
         preflight = build_messaging_preflight(db)

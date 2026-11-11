@@ -40,7 +40,11 @@ const row = (over: Partial<IntegrationStatusItem>): IntegrationStatusItem => ({
   ...over,
 });
 
-const report = (globalMode: string, shopifyMode: string): IntegrationStatusReport => ({
+const report = (
+  globalMode: string,
+  shopifyMode: string,
+  shopifyState?: IntegrationStatusItem['state'],
+): IntegrationStatusReport => ({
   generated_at: '2026-11-11T00:00:00Z',
   dispatch_mode: globalMode,
   test_phone_set: false,
@@ -50,7 +54,7 @@ const report = (globalMode: string, shopifyMode: string): IntegrationStatusRepor
     row({
       id: 'shopify',
       label: 'Shopify',
-      state: shopifyMode === 'live' ? 'live' : 'simulated',
+      state: shopifyState ?? (shopifyMode === 'live' ? 'live' : 'simulated'),
       gate: {
         label: 'Shopify gate',
         mode: shopifyMode,
@@ -83,5 +87,43 @@ describe('IntegrationStatusCard - Shopify gate', () => {
     expect(screen.getByText(/Shopify follows its own switch/i)).toBeInTheDocument();
     expect(screen.queryByText(/pushes only go live when DISPATCH_MODE=live/i)).toBeNull();
     expect(screen.getByText(`DISPATCH_MODE: ${globalMode}`).getAttribute('title')).toMatch(/Shopify/);
+  });
+
+  // Decision D11: gate live + IMS_SHOPIFY_WRITES off. Only order intake is
+  // live; catalogue and stock pushes are simulated. The badge itself must say
+  // so - it used to read a plain "Live" with the caveat only in the note.
+  it('live gate, writes switch off: the badge says what is live and what is simulated', async () => {
+    getIntegrationStatus.mockResolvedValue(report('off', 'live', 'intake_live'));
+    render(<IntegrationStatusCard />);
+    await screen.findByText('DISPATCH_MODE: off');
+
+    const shopify = screen.getByTestId('integration-row-shopify');
+    const badges = within(shopify)
+      .getAllByTestId('integration-state-shopify')
+      .map((b) => b.textContent);
+    expect(badges).toEqual(['Order intake: live', 'Catalogue/stock pushes: simulated']);
+    expect(within(shopify).queryByText('Live')).toBeNull();
+    // Not the same colour as a live badge for the simulated half.
+    const [intake, pushes] = within(shopify).getAllByTestId('integration-state-shopify');
+    expect(intake.className).toMatch(/green/);
+    expect(pushes.className).toMatch(/amber/);
+    expect(pushes.className).not.toMatch(/green/);
+  });
+
+  it('live gate, writes switch on: one plain Live badge', async () => {
+    getIntegrationStatus.mockResolvedValue(report('off', 'live', 'live'));
+    render(<IntegrationStatusCard />);
+    await screen.findByText('DISPATCH_MODE: off');
+
+    const shopify = screen.getByTestId('integration-row-shopify');
+    const badges = within(shopify)
+      .getAllByTestId('integration-state-shopify')
+      .map((b) => b.textContent);
+    expect(badges).toEqual(['Live']);
+    // Other rows keep their one badge.
+    const whatsapp = screen.getByTestId('integration-row-msg91_whatsapp');
+    expect(
+      within(whatsapp).getAllByTestId('integration-state-msg91_whatsapp').map((b) => b.textContent),
+    ).toEqual(['Simulated']);
   });
 });
