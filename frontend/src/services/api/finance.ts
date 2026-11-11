@@ -57,8 +57,12 @@ export const financeApi = {
     return response.data;
   },
 
-  lockPeriod: async (month: number, year: number) => {
-    const response = await api.post('/finance/period-lock', null, { params: { month, year } });
+  // withoutPayroll: the admin's "lock anyway" after the server answered
+  // PAYROLL_NOT_RUN (that month's wages can then never be recorded).
+  lockPeriod: async (month: number, year: number, withoutPayroll = false) => {
+    const response = await api.post('/finance/period-lock', null, {
+      params: { month, year, ...(withoutPayroll ? { without_payroll: true } : {}) },
+    });
     return response.data;
   },
 

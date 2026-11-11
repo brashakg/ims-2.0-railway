@@ -20,6 +20,7 @@ async def lock_period(
     month: int,
     year: int,
     current_user: dict = Depends(get_current_user),
+    without_payroll: bool = False,
 ):
     db = _get_db()
     if "SUPERADMIN" not in current_user.get(
@@ -52,11 +53,10 @@ async def lock_period(
     # its wages would never reach the P&L, Tally or the PF file (they count
     # APPROVED and PAID rows only). The lock is chain-wide, so any shop's
     # draft stops it.
-    drafts = list(
-        db.get_collection("payroll").find(
-            {"month": month, "year": year, "status": "DRAFT"}
-        )
+    payroll_rows = list(
+        db.get_collection("payroll").find({"month": month, "year": year})
     )
+    drafts = [r for r in payroll_rows if r.get("status") == "DRAFT"]
     if drafts:
         shops = ", ".join(sorted({str(d.get("store_id") or "no shop") for d in drafts}))
         raise HTTPException(
@@ -67,14 +67,40 @@ async def lock_period(
             "later, so its wages would never be counted.",
         )
 
-    db.get_collection("period_locks").insert_one(
-        {
-            "month": month,
-            "year": year,
-            "locked_by": current_user.get("user_id"),
-            "locked_at": utc_now_iso(),
-        }
-    )
+    # The same loss by the likelier order of events: the books are closed in
+    # the first days of the next month and payroll is run a few days later. A
+    # saving run answers 423 in a locked month, so those wages could never be
+    # recorded. Unlike a draft this can be meant (a month from before payroll
+    # was kept here), so the admin may say "lock anyway" (without_payroll).
+    from ..payroll import _scope_configs
+
+    has_row = {r.get("employee_id") for r in payroll_rows}
+    not_run = [
+        c for c in _scope_configs(db, None, None) if c.get("employee_id") not in has_row
+    ]
+    if not_run and not without_payroll:
+        shops = ", ".join(sorted({str(c.get("store_id") or "no shop") for c in not_run}))
+        raise HTTPException(
+            409,
+            {
+                "code": "PAYROLL_NOT_RUN",
+                "message": f"Payroll for {month}/{year} has not been run for "
+                f"{len(not_run)} employee(s) (shop: {shops}). Once the month is "
+                "locked it can never be run, so their wages for this month "
+                "would never be counted. Run and approve it in HR > Payroll "
+                "Run first.",
+            },
+        )
+
+    lock = {
+        "month": month,
+        "year": year,
+        "locked_by": current_user.get("user_id"),
+        "locked_at": utc_now_iso(),
+    }
+    if not_run:
+        lock["without_payroll_for"] = len(not_run)
+    db.get_collection("period_locks").insert_one(lock)
     return {"message": f"Period {month}/{year} locked", "month": month, "year": year}
 
 
