@@ -99,8 +99,10 @@ def _pin_environment(monkeypatch):
     )
 
 
-@pytest.fixture()
+@pytest.fixture(autouse=True)
 def audit_rows(monkeypatch) -> List[Dict[str, Any]]:
+    """Capture audit writes at the accessor the services use. Autouse, so no
+    test here can write an audit row into a real database."""
     rows: List[Dict[str, Any]] = []
 
     class _Repo:
