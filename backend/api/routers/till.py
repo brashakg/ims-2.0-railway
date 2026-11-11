@@ -106,8 +106,19 @@ def _validate_session_date(raw: Optional[str]) -> str:
 
 
 def _raise(res: Dict[str, Any]):
-    """Translate a service error envelope to an HTTPException."""
-    raise HTTPException(status_code=int(res.get("http", 400)), detail=res.get("error", "error"))
+    """Translate a service error envelope to an HTTPException.
+
+    Most envelopes carry only a code (``not_locked``) and go out as that bare
+    string, unchanged. One that also carries a ``message`` written for staff
+    goes out as ``{code, message, ...}`` so the screen can show the sentence
+    (the shared client reads ``detail.message``) instead of a generic toast."""
+    code = res.get("error", "error")
+    if res.get("message"):
+        extra = {k: v for k, v in res.items() if k not in ("ok", "error", "http")}
+        raise HTTPException(
+            status_code=int(res.get("http", 400)), detail={"code": code, **extra}
+        )
+    raise HTTPException(status_code=int(res.get("http", 400)), detail=code)
 
 
 # ---------------------------------------------------------------------------

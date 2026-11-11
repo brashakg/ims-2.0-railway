@@ -31,6 +31,7 @@ No emoji (Windows cp1252).
 """
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -38,6 +39,8 @@ from typing import Any, Dict, List, Optional
 from pymongo.errors import DuplicateKeyError
 
 from . import cash_denominations as _denom
+
+logger = logging.getLogger(__name__)
 
 _SESSIONS_COLLECTION = "till_sessions"
 
@@ -1089,11 +1092,16 @@ def _record_screen_close(
     )
     if not res.get("ok"):
         if res.get("error") in ("already_submitted", "already_locked"):
+            # Lost the race to count: the other door's count landed between our
+            # read and our submit. Carry the session as it stands NOW, so the
+            # caller reports the count that won (shared_counted_paisa) instead
+            # of its own.
             return {
                 "ok": True,
                 "session_id": session_id,
+                "session": get_session(db, session_id),
                 "created": created,
-            "opening_float_not_recorded": float_missing,
+                "opening_float_not_recorded": float_missing,
                 "already_counted": True,
                 "counted": True,
             }
@@ -1115,6 +1123,24 @@ def _record_screen_close(
             counted_paisa is not None and int(counted_paisa) != submitted
         ),
     }
+
+
+def shared_counted_paisa(till_link: Optional[Dict[str, Any]]) -> Optional[int]:
+    """The counted figure ON THE SHARED TILL RECORD after a close linked to it
+    (the dict ``record_screen_close`` returned), or None when nothing was
+    counted there or the link failed.
+
+    This is the ONE answer for the store-day: whichever door counted the drawer
+    first owns it, and BOTH close screens (Finance > Cash Register and the
+    Day-End Report) must report that same number."""
+    session = (till_link or {}).get("session") or {}
+    value = session.get("blind_count_paisa")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -1323,8 +1349,40 @@ def reopen_session(
             },
             return_document=ReturnDocument.AFTER,
         )
-    except Exception as exc:  # noqa: BLE001
-        return {"ok": False, "error": f"reopen_failed:{exc}", "http": 500}
+    except DuplicateKeyError:
+        # ONE active drawer per (store, date) -- the partial unique index
+        # refused to make this session active again because ANOTHER drawer for
+        # the same shop-day is open or awaiting its lock. Nothing was written.
+        # That is an ordinary conflict with a next step, not a server fault:
+        # say which drawer is in the way, never the index's own error text.
+        active = None
+        try:
+            active = coll.find_one(
+                {
+                    "store_id": store_id,
+                    "session_date": session.get("session_date"),
+                    "status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED]},
+                }
+            )
+        except Exception:  # noqa: BLE001
+            active = None
+        active = active or {}
+        return {
+            "ok": False,
+            "error": "another_drawer_open",
+            "http": 409,
+            "message": (
+                "Another cash drawer is already open for this shop on "
+                f"{session.get('session_date')}. Count and lock that drawer "
+                "first, then reopen this Z-Read."
+            ),
+            "active_session_id": active.get("_id"),
+            "active_status": active.get("status"),
+        }
+    except Exception:  # noqa: BLE001
+        # The driver's text (hosts, index names) is for the log, not the reply.
+        logger.exception("Till reopen failed for session %s", session_id)
+        return {"ok": False, "error": "reopen_failed", "http": 500}
     if reopened is None:
         status = str(session.get("status"))
         if status != STATUS_LOCKED:

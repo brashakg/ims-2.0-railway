@@ -172,13 +172,6 @@ async def create_day_end_close(
     system_cash = (
         round(float(body.system_cash), 2) if body.system_cash is not None else None
     )
-    # No count -> no variance. A fabricated variance against a fabricated zero
-    # is what made this record unreadable.
-    variance = (
-        round(closing_cash - system_cash, 2)
-        if (closing_cash is not None and system_cash is not None)
-        else None
-    )
 
     # TWO DOORS, ONE RECORD: the count also lands on the day's single till
     # session -- the same record Finance > Cash Register closes onto -- so the
@@ -203,6 +196,36 @@ async def create_day_end_close(
         actor=current_user,
     )
 
+    # ONE DRAWER, ONE COUNTED FIGURE (audit L3-12). When the drawer was ALREADY
+    # counted on the shared till -- the blind count, which is THE close (owner
+    # ruling 2026-08-25) -- that count stands: record_screen_close never
+    # restates it, so this record must REPORT it rather than the figure typed
+    # here. Storing its own is how a till LOCKED at Rs 1,000 came to read
+    # Rs 3,000 on this report for the same shop and day. Same rule, same helper
+    # as the Finance > Cash Register door (cash_drawer.close_cash_register).
+    # The grid typed here is still kept as this screen's sheet; restated
+    # against the shared figure it flags itself (matches_amount False).
+    shared_paisa = (
+        till_service.shared_counted_paisa(till_link)
+        if till_link.get("already_counted")
+        else None
+    )
+    count_adopted = shared_paisa is not None and (
+        closing_cash is None
+        or shared_paisa != cash_denom.rupees_to_paisa(closing_cash)
+    )
+    if count_adopted:
+        closing_cash = cash_denom.paisa_to_rupees(shared_paisa)
+        cash_denom.restate_amount(closing_block, shared_paisa)
+    # No count -> no variance. A fabricated variance against a fabricated zero
+    # is what made this record unreadable. Derived AFTER the adoption above, so
+    # it is the variance of the one counted figure for the day.
+    variance = (
+        round(closing_cash - system_cash, 2)
+        if (closing_cash is not None and system_cash is not None)
+        else None
+    )
+
     now = datetime.utcnow()
     doc = {
         "store_id": sid,
@@ -218,6 +241,10 @@ async def create_day_end_close(
         "till_link_error": till_link.get("error"),
         "till_already_counted": bool(till_link.get("already_counted")),
         "till_counted": bool(till_link.get("counted")),
+        # The count on this close came from the shared till record, not from
+        # what was typed on this screen -- the screen says so out loud.
+        "counted_from_shared_record": count_adopted,
+        "till_count_differs": count_adopted,
         # Nobody declared an opening float for this day, so expected cash was
         # computed from zero. The screen must say so rather than present the
         # resulting variance as a real one.
@@ -269,6 +296,7 @@ async def create_day_end_close(
                         "closing_cash": doc["closing_cash"],
                         "system_cash": doc["system_cash"],
                         "variance": variance,
+                        "counted_from_shared_record": count_adopted,
                     },
                 }
             )

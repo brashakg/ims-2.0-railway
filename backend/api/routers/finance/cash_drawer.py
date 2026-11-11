@@ -173,22 +173,6 @@ async def open_cash_register(
     return doc
 
 
-def _shared_counted_paisa(till_link: Optional[Dict[str, Any]]) -> Optional[int]:
-    """The counted figure ON THE SHARED TILL RECORD after a close linked to it,
-    or None when nothing was counted there (or the link failed).
-
-    This is the ONE answer for the store-day: whichever door counted the drawer
-    first owns it, and both screens must report that same number."""
-    session = (till_link or {}).get("session") or {}
-    value = session.get("blind_count_paisa")
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 @router.post("/cash-register/close")
 async def close_cash_register(
     body: CashRegisterClose,
@@ -357,7 +341,7 @@ async def close_cash_register(
     # shared; the expected figure below is still this window's own arithmetic.
     # The grid typed here is still stored as this screen's sheet, and a sheet
     # that disagrees with the shared count flags itself (matches_amount False).
-    shared_paisa = _shared_counted_paisa(till_link)
+    shared_paisa = till_service.shared_counted_paisa(till_link)
     count_adopted = shared_paisa is not None and (
         counted is None or shared_paisa != cash_denom.rupees_to_paisa(counted)
     )
