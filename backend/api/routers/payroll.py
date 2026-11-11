@@ -9,7 +9,7 @@ from api.utils.event_time import utc_now_iso
 
 from fastapi import APIRouter, Depends, Query, HTTPException, Body
 from pydantic import BaseModel, Field, field_validator
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Literal
 from datetime import datetime, date, timedelta
 from calendar import monthrange
 import uuid
@@ -74,6 +74,18 @@ class OtherAllowance(BaseModel):
     amount: float = 0.0
 
 
+# Owner ruling 2026-11-11 (audit L3-17): the admin records the employee's
+# gender on the salary setup and the payroll engine uses it to pick the
+# Professional Tax slab in a state whose slab differs by gender. "" (or
+# nothing) means NOT SET: the engine then uses the general (male) slab,
+# exactly as it did before this field existed.
+Gender = Optional[Literal["MALE", "FEMALE", ""]]
+_GENDER_HELP = (
+    "MALE / FEMALE, for the Professional Tax slab. Empty = not set "
+    "(the general slab applies)"
+)
+
+
 class SalaryConfig(BaseModel):
     """Employee Structured-CTC salary configuration. All amounts are MONTHLY.
 
@@ -106,6 +118,7 @@ class SalaryConfig(BaseModel):
         default=None, description="None -> auto-eligible when gross <= 21000"
     )
     pt_applicable: bool = Field(default=True)
+    gender: Gender = Field(default=None, description=_GENDER_HELP)
     tds_monthly: float = Field(default=0.0, ge=0, description="Manual monthly TDS")
     # Statutory identifiers
     uan: Optional[str] = Field(default=None, description="PF Universal Account Number")
@@ -143,6 +156,7 @@ class SalaryConfigUpdate(BaseModel):
     pf_wage_ceiling_cap: Optional[bool] = None
     esi_applicable: Optional[bool] = None
     pt_applicable: Optional[bool] = None
+    gender: Gender = Field(default=None, description=_GENDER_HELP)
     tds_monthly: Optional[float] = Field(default=None, ge=0)
     uan: Optional[str] = None
     esi_ip_number: Optional[str] = None
@@ -169,17 +183,6 @@ class AdvanceSettlement(BaseModel):
     advance_id: str
     settlement_month: int = Field(..., ge=1, le=12)
     settlement_year: int
-
-
-class MonthSalaryCalculation(BaseModel):
-    """Calculate salary for a month"""
-
-    employee_id: str
-    month: int = Field(..., ge=1, le=12)
-    year: int
-    working_days: int = Field(default=26, ge=1, le=31)
-    leave_without_pay_days: int = Field(default=0, ge=0, le=31)
-    advance_deduction: float = Field(default=0.0, ge=0)
 
 
 class PayslipRequest(BaseModel):
@@ -443,112 +446,6 @@ def _assert_self_or_salary_admin(
     )
 
 
-def _calculate_tds(gross_salary: float, month: int, year: int) -> float:
-    """
-    Calculate TDS as per Indian income tax slabs.
-    Simplified calculation for monthly payroll.
-    Full-year salary threshold: ₹250,000 (2.5L)
-
-    This is a simplified monthly calculation.
-    """
-    annual_salary = gross_salary * 12
-
-    # Simplified TDS slab (varies by regime, FY, etc.)
-    if annual_salary <= 250000:
-        return 0
-    elif annual_salary <= 500000:
-        taxable = annual_salary - 250000
-        tax = taxable * 0.05
-    elif annual_salary <= 1000000:
-        tax = 250000 * 0.05 + (annual_salary - 500000) * 0.20
-    else:
-        tax = 250000 * 0.05 + 500000 * 0.20 + (annual_salary - 1000000) * 0.30
-
-    # Monthly TDS (rough approximation)
-    return max(0, tax / 12)
-
-
-def _calculate_salary(
-    salary_config: dict,
-    working_days: int = 26,
-    leave_without_pay_days: int = 0,
-    advance_deduction: float = 0.0,
-) -> SalaryBreakdown:
-    """
-    Calculate complete salary with all components.
-
-    Indian salary structure:
-    Earnings: Basic + HRA + Conveyance + Medical + Special Allowance
-    Deductions: PF (Employee) + Professional Tax + ESI + TDS + LWP + Advances
-    """
-
-    # Bridge: read Structured-CTC (v2) fields, falling back to legacy names.
-    # (Phase 2 replaces this calculator with the full statutory engine.)
-    basic = salary_config.get("basic") or salary_config.get("basic_salary", 0)
-
-    # Earnings
-    hra = salary_config.get("hra")
-    if hra is None:
-        hra = (basic * salary_config.get("hra_percentage", 40)) / 100
-
-    conveyance = salary_config.get("conveyance")
-    if conveyance is None:
-        conveyance = salary_config.get("conveyance_allowance", 0)
-    medical = salary_config.get("medical")
-    if medical is None:
-        medical = salary_config.get("medical_allowance", 0)
-    special_allowance = salary_config.get("special_allowance", 0)
-
-    gross_salary = basic + hra + conveyance + medical + special_allowance
-
-    # Deductions
-    pf_employee_pct = salary_config.get("pf_employee_percentage", 12)
-    pf_employee = (basic * pf_employee_pct) / 100
-
-    pf_employer_pct = salary_config.get("pf_employer_percentage", 12)
-    pf_employer = (basic * pf_employer_pct) / 100
-
-    professional_tax = salary_config.get("professional_tax", 200)
-
-    esi_applicable = salary_config.get("esi_applicable", True)
-    esi_pct = salary_config.get("esi_percentage", 0.75) if esi_applicable else 0
-    esi = (gross_salary * esi_pct) / 100 if esi_applicable else 0
-
-    # TDS calculation
-    tds = _calculate_tds(gross_salary, 1, 2026)  # Simplified
-
-    # LWP Deduction: (Basic + DA) / 30 * days_absent
-    # In Indian salaries, DA is typically part of allowances or fixed
-    # Simplified: LWP = (Basic / 26) * leave_without_pay_days
-    lwp_deduction = (
-        (basic / 26) * leave_without_pay_days if leave_without_pay_days > 0 else 0
-    )
-
-    # Total deductions (including employer PF - shown for info)
-    total_deductions = (
-        pf_employee + professional_tax + esi + tds + lwp_deduction + advance_deduction
-    )
-
-    net_pay = gross_salary - total_deductions
-
-    return SalaryBreakdown(
-        basic=round(basic, 2),
-        hra=round(hra, 2),
-        conveyance=round(conveyance, 2),
-        medical=round(medical, 2),
-        special_allowance=round(special_allowance, 2),
-        gross_salary=round(gross_salary, 2),
-        pf_employee=round(pf_employee, 2),
-        pf_employer=round(pf_employer, 2),
-        professional_tax=round(professional_tax, 2),
-        esi=round(esi, 2),
-        tds=round(tds, 2),
-        lwp_deduction=round(lwp_deduction, 2),
-        advance_deduction=round(advance_deduction, 2),
-        net_pay=round(net_pay, 2),
-    )
-
-
 # ============================================================================
 # SALARY CONFIGURATION ENDPOINTS
 # ============================================================================
@@ -747,6 +644,11 @@ async def bulk_upsert_salary_config(
             doc = cfg.model_dump()
             existing = coll.find_one({"employee_id": cfg.employee_id})
             if existing:
+                # A file with no gender column must not wipe the gender an
+                # admin saved on the form (that would quietly move the
+                # employee back to the general PT slab).
+                if "gender" not in cfg.model_fields_set:
+                    doc.pop("gender", None)
                 doc["updated_at"] = utc_now_iso()
                 coll.update_one({"employee_id": cfg.employee_id}, {"$set": doc})
                 updated += 1
@@ -785,9 +687,9 @@ def _flatten_payroll_row(record: dict) -> dict:
     flat shape the salary-sheet and payslip endpoints return to the FE.
 
     The run engine stores a nested ``breakdown.earnings.*`` /
-    ``breakdown.deductions.*`` structure.  The legacy ``salary_records``
-    collection used a flat breakdown dict.  This helper bridges both so the FE
-    never sees empty rows.
+    ``breakdown.deductions.*`` structure. Feed this ONLY ``payroll`` rows: an
+    old flat ``salary_records`` row has neither key and came out as all
+    zeros beside its net pay (audit L3-16).
     """
     bd = record.get("breakdown") or {}
     earn = bd.get("earnings") or {}
@@ -864,9 +766,12 @@ async def get_salary_sheet(
 ):
     """Get monthly salary sheet for all employees in a store.
 
-    Reads from the ``payroll`` collection (written by POST /payroll/run).
-    Falls back to the legacy ``salary_records`` collection so data is never
-    silently missing on installs that still have the old schema.
+    Reads ONLY the ``payroll`` collection (written by POST /payroll/run).
+    Owner ruling 2026-11-11 (audit L3-16): the payroll engine is the official
+    salary calculation. A month with no payroll run is an empty sheet -- the
+    old ``salary_records`` rows are no longer shown here (they came out as
+    zero Basic/HRA/Gross/deductions beside a net pay). Those rows stay stored,
+    untouched.
 
     OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. A store's salary sheet is
     every colleague's pay in one table; there is no "self" version of it (staff
@@ -884,12 +789,7 @@ async def get_salary_sheet(
         if active_store:
             query["store_id"] = active_store
 
-        # Primary: payroll collection (run engine output)
         records = list(db.get_collection("payroll").find(query))
-
-        # Fallback: legacy salary_records
-        if not records:
-            records = list(db.get_collection("salary_records").find(query))
 
         salary_data = [_flatten_payroll_row(r) for r in records]
 
@@ -928,99 +828,32 @@ async def get_salary_sheet(
 # ============================================================================
 
 
-@router.post("/salary/calculate", status_code=201)
-async def calculate_salary(
-    calc_request: MonthSalaryCalculation, current_user: dict = Depends(get_current_user)
-):
-    """Calculate salary for a month with all deductions.
+# Said to anyone who still calls the old salary writer. Plain words: the owner
+# reads this on screen if an old bookmark or script hits the route.
+OLD_SALARY_CALCULATION_OFF = (
+    "The old salary calculation is switched off. Salaries are calculated in "
+    "Payroll Run (HR > Payroll Run): run the month there. Nothing was saved."
+)
 
-    OWNER RULING 2026-08-09/10, applied to the WRITE side: ADMIN/SUPERADMIN only,
-    matching its read sibling GET /payroll/salary-sheet, which falls back to the
-    very ``salary_records`` collection this route writes.
 
-    ADMIN-only rather than self-or-admin ON PURPOSE. The other salary reads allow
-    SELF because seeing your own pay is harmless; AUTHORING your own pay is not.
-    This route accepted another employee's id from any caller the mount admitted
-    and stamped the row with the CALLER's store. Its response carries no salary
-    figures, so this was never a disclosure -- it is authorship, and it is a
-    fraud vector rather than a privacy one.
+@router.post("/salary/calculate")
+async def calculate_salary(current_user: dict = Depends(get_current_user)):
+    """SWITCHED OFF (owner ruling 2026-11-11, audit L3-16). Always refuses.
+
+    This was a second salary calculator: for one and the same salary setup it
+    gave a different net pay from the payroll engine (it read "ESI: auto" as
+    "ESI: no", used a flat PT and its own TDS guess) and saved the result to
+    ``salary_records``. The owner ruled the payroll engine (POST /payroll/run)
+    the official calculation, so this door writes nothing and says where to go.
+    The calculator itself is deleted; stored ``salary_records`` rows are left
+    exactly as they are.
+
+    The route (and its rbac_policy row) stays so an old caller gets this plain
+    answer instead of a bare 404. ADMIN/SUPERADMIN are told 410; everyone else
+    is refused 403 first, as before (owner ruling 2026-08-09/10).
     """
     _assert_salary_admin(current_user, "create or recalculate a salary record")
-    db = _get_db()
-    if not db:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    try:
-        # Get salary config
-        salary_config = _get_salary_config(db, calc_request.employee_id)
-        if not salary_config:
-            raise HTTPException(
-                status_code=404, detail="Salary configuration not found"
-            )
-
-        # Get employee details
-        employee = _get_employee_details(db, calc_request.employee_id)
-        if not employee:
-            raise HTTPException(status_code=404, detail="Employee not found")
-
-        # Calculate salary breakdown
-        breakdown = _calculate_salary(
-            salary_config,
-            working_days=calc_request.working_days,
-            leave_without_pay_days=calc_request.leave_without_pay_days,
-            advance_deduction=calc_request.advance_deduction,
-        )
-
-        # Create salary record
-        salary_records_coll = db.get_collection("salary_records")
-
-        salary_record = {
-            "salary_record_id": str(uuid.uuid4()),
-            "employee_id": calc_request.employee_id,
-            "employee_name": employee.get("full_name", ""),
-            "store_id": current_user.get("active_store_id"),
-            "month": calc_request.month,
-            "year": calc_request.year,
-            "breakdown": breakdown.dict(),
-            "working_days": calc_request.working_days,
-            "leave_without_pay_days": calc_request.leave_without_pay_days,
-            "status": "calculated",
-            "created_at": utc_now_iso(),
-            "created_by": current_user.get("user_id"),
-        }
-
-        # Check if already exists
-        existing = salary_records_coll.find_one(
-            {
-                "employee_id": calc_request.employee_id,
-                "month": calc_request.month,
-                "year": calc_request.year,
-            }
-        )
-
-        if existing:
-            salary_records_coll.update_one(
-                {"salary_record_id": existing["salary_record_id"]},
-                {"$set": salary_record},
-            )
-            return {
-                "status": "updated",
-                "salary_record_id": existing["salary_record_id"],
-            }
-        else:
-            salary_records_coll.insert_one(salary_record)
-            return {
-                "status": "created",
-                "salary_record_id": salary_record["salary_record_id"],
-            }
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error("Payroll operation failed: %s", e)
-        raise HTTPException(
-            status_code=500, detail="Payroll operation failed. Please try again."
-        )
+    raise HTTPException(status_code=410, detail=OLD_SALARY_CALCULATION_OFF)
 
 
 # ============================================================================

@@ -1281,7 +1281,10 @@ def test_salary_calculate_refuses_even_your_own_id(payroll_client, role):
     assert r.status_code == 403, f"{role}: {r.text}"
 
 
-def test_salary_calculate_still_works_for_admin(payroll_client):
+def test_salary_calculate_is_switched_off_for_admin(payroll_client):
+    """Owner ruling 2026-11-11 (audit L3-16): the payroll engine is the
+    official calculation, so the old writer refuses even an admin and points
+    to Payroll Run. (It used to answer 200/201 here.)"""
     r = payroll_client.post(
         "/payroll/salary/calculate",
         json={
@@ -1293,7 +1296,8 @@ def test_salary_calculate_still_works_for_admin(payroll_client):
         },
         headers=_auth(_token(["ADMIN"], user_id="u-admin", store_ids=[])),
     )
-    assert r.status_code in (200, 201), r.text
+    assert r.status_code == 410, r.text
+    assert "Payroll Run" in r.json()["detail"]
 
 
 # ===========================================================================
