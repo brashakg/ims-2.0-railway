@@ -159,13 +159,55 @@ def test_numeric_micros_reply_reads_the_same(stub):
     assert _fetch("google").rows[0].spend == 100.0
 
 
-def test_fractional_conversions_are_used_for_cost_per_lead(stub):
+def test_fractional_conversions_are_one_figure_everywhere(stub):
+    """Decision D10: the Leads column, the cost per lead and the totals come
+    from the SAME number. (The row used to show 2 leads beside a cost per
+    lead worked out on 2.5.)"""
     stub.google = lambda url, kw: httpx.Response(
         200, request=_REQ, json=_google_reply(conversions=2.5)
     )
-    (row,) = _fetch("google").rows
+    r = _fetch("google")
+    (row,) = r.rows
+    assert row.conversions == 2.5
     assert row.cpl == 40.0             # 100 / 2.5
-    assert row.conversions == 2
+    assert r.total_conversions == 2.5 and r.total_cpl == 40.0
+
+
+@pytest.mark.parametrize("conversions", [0, 0.004, 0.4, 0.5, 1, 2.5, "3", 7.0])
+def test_a_row_never_shows_no_leads_beside_a_cost_per_lead(stub, conversions):
+    """The reviewers' complaint, as an invariant: cost per lead is non-zero
+    exactly when the leads shown are, and it is spend / the leads shown."""
+    stub.google = lambda url, kw: httpx.Response(
+        200, request=_REQ, json=_google_reply(conversions=conversions)
+    )
+    r = _fetch("google")
+    (row,) = r.rows
+    assert (row.cpl > 0) == (row.conversions > 0), (row.conversions, row.cpl)
+    if row.conversions > 0:
+        assert row.cpl == round(row.spend / row.conversions, 2)
+    assert r.total_conversions == row.conversions and r.total_cpl == row.cpl
+
+
+def test_under_half_a_lead_is_shown_as_what_google_reported(stub):
+    stub.google = lambda url, kw: httpx.Response(
+        200, request=_REQ, json=_google_reply(conversions=0.4)
+    )
+    (row,) = _fetch("google").rows
+    assert (row.conversions, row.cpl) == (0.4, 250.0)   # was (0, 250.0)
+
+
+def test_the_route_serves_fractional_leads(client, auth_headers, stub):
+    stub.google = lambda url, kw: httpx.Response(
+        200, request=_REQ, json=_google_reply(conversions=2.5)
+    )
+    resp = client.get(
+        "/api/v1/marketing/ad-performance?from=2026-11-01&to=2026-11-04&channel=google",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["rows"][0]["conversions"] == 2.5 and body["rows"][0]["cpl"] == 40.0
+    assert body["total_conversions"] == 2.5 and body["total_cpl"] == 40.0
 
 
 def test_the_report_asks_google_for_the_account_currency(stub):
@@ -265,7 +307,7 @@ def test_error_text_never_carries_a_credential(stub):
 # ---------------------------------------------------------------------------
 
 
-def _meta_row(n):
+def _meta_row(n, currency="INR"):
     return {
         "campaign_id": f"META-{n}",
         "campaign_name": f"Synthetic {n}",
@@ -273,7 +315,79 @@ def _meta_row(n):
         "impressions": "1000",
         "clicks": "10",
         "actions": [{"action_type": "lead", "value": "2"}],
+        **({"account_currency": currency} if currency is not None else {}),
     }
+
+
+def _meta_one(stub, **row):
+    stub.meta = lambda url, kw: httpx.Response(
+        200, request=_REQ, json={"data": [{**_meta_row(1), **row}]}
+    )
+    return _fetch("meta")
+
+
+# Decision D10: Meta spend is in the AD ACCOUNT's currency, read from the
+# report itself - the same rule as Google (INR as-is, USD at the saved rate,
+# anything else an error). It used to be shown as rupees whatever it was.
+
+
+def test_the_meta_report_asks_for_the_account_currency(stub):
+    _fetch("meta")
+    (call,) = [kw for m, _url, kw in stub.calls if m == "GET"]
+    assert "account_currency" in call["params"]["fields"].split(",")
+
+
+def test_meta_inr_account_spend_is_shown_as_it_is(stub):
+    r = _meta_one(stub)
+    (row,) = r.rows
+    assert (row.spend, row.currency, row.conversions, row.cpl) == (100.0, "INR", 2, 50.0)
+    assert r.meta_error == ""
+
+
+def test_meta_usd_account_spend_uses_the_saved_rate(stub):
+    (row,) = _meta_one(stub, account_currency="USD").rows
+    assert (row.spend, row.cpl) == (8400.0, 4200.0)     # default rate 84
+    stub.cfg = {**_CFG, "usd_inr_rate": 90}
+    try:
+        (row,) = _meta_one(stub, account_currency="usd").rows
+        assert (row.spend, row.cpl, row.currency) == (9000.0, 4500.0, "INR")
+    finally:
+        stub.cfg = dict(_CFG)
+
+
+@pytest.mark.parametrize("currency", ["AED", "EUR", "", None])
+def test_meta_any_other_account_currency_is_an_error_not_a_wrong_figure(stub, currency):
+    row = dict(_meta_row(1, currency=currency))
+    stub.meta = lambda url, kw: httpx.Response(200, request=_REQ, json={"data": [row]})
+    r = _fetch("meta")
+    assert r.rows == [] and r.total_spend == 0.0
+    assert r.meta_configured is True
+    assert "currency" in r.meta_error and "INR and USD" in r.meta_error
+    if currency:
+        assert currency in r.meta_error
+    else:
+        assert "was not reported" in r.meta_error
+
+
+def test_one_unreadable_meta_currency_fails_the_whole_channel(stub):
+    """A partial total is never shown: one row in a currency that cannot be
+    shown in rupees fails the channel, not just that row."""
+    stub.meta = lambda url, kw: httpx.Response(
+        200, request=_REQ,
+        json={"data": [_meta_row(1), _meta_row(2, currency="AED")]},
+    )
+    r = _fetch("meta")
+    assert r.rows == [] and "AED" in r.meta_error
+
+
+def test_google_and_meta_word_the_currency_refusal_the_same_way(stub):
+    stub.google = lambda url, kw: httpx.Response(
+        200, request=_REQ, json=_google_reply(currency="AED")
+    )
+    row = _meta_row(1, currency="AED")
+    stub.meta = lambda url, kw: httpx.Response(200, request=_REQ, json={"data": [row]})
+    r = _fetch(None)
+    assert r.google_error.replace("Google Ads", "X") == r.meta_error.replace("Meta Ads", "X")
 
 
 def test_meta_insights_follow_every_page(stub):

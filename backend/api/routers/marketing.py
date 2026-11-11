@@ -1345,7 +1345,7 @@ class CampaignRowOut(BaseModel):
     spend: float
     impressions: int
     clicks: int
-    conversions: int
+    conversions: float  # as the provider reports it (Google's can be fractional)
     ctr: float
     cpl: float
     roas: float
@@ -1358,7 +1358,7 @@ class AdPerformanceOut(BaseModel):
     total_spend: float
     total_impressions: int
     total_clicks: int
-    total_conversions: int
+    total_conversions: float
     blended_roas: float
     total_cpl: float
     google_configured: bool

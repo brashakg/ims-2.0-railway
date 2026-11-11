@@ -88,12 +88,14 @@ class CampaignRow:
     channel: str  # "google" | "meta"
     campaign_id: str
     campaign_name: str
-    spend: float  # INR (converted from USD at snapshot rate if needed)
+    spend: float  # INR (a USD account's spend at the saved rate - _inr_rate)
     impressions: int
     clicks: int
-    conversions: int  # includes leads / form fills
+    # Leads / form fills, as the provider reports them (Google's can be
+    # fractional), to 2 places. THE figure: cpl and the totals divide by it.
+    conversions: float
     ctr: float  # click-through rate 0-100 (%)
-    cpl: float  # cost-per-lead / cost-per-conversion (0 when conversions == 0)
+    cpl: float  # spend / conversions (0 when conversions == 0) - see _per_lead
     roas: float  # return-on-ad-spend (0 when spend == 0)
     currency: str = "INR"
     status: str = "ok"  # "ok" | "not_configured" | "error" (see module docstring)
@@ -107,7 +109,7 @@ class AdPerformanceResult:
     total_spend: float = 0.0
     total_impressions: int = 0
     total_clicks: int = 0
-    total_conversions: int = 0
+    total_conversions: float = 0.0
     blended_roas: float = 0.0  # 0 when spend == 0
     total_cpl: float = 0.0  # 0 when conversions == 0
     google_configured: bool = False
@@ -126,9 +128,8 @@ def _compute_totals(result: AdPerformanceResult) -> None:
     result.total_spend = round(sum(r.spend for r in result.rows), 2)
     result.total_impressions = sum(r.impressions for r in result.rows)
     result.total_clicks = sum(r.clicks for r in result.rows)
-    result.total_conversions = sum(r.conversions for r in result.rows)
-    if result.total_conversions > 0:
-        result.total_cpl = round(result.total_spend / result.total_conversions, 2)
+    result.total_conversions = round(sum(r.conversions for r in result.rows), 2)
+    result.total_cpl = _per_lead(result.total_spend, result.total_conversions)
     # blended_roas stays 0 -- requires revenue data from the ad accounts,
     # not yet available from the API surface; router can override if needed.
 
@@ -171,6 +172,31 @@ def _num(value: Any) -> float:
     strings. A value that is not a number raises, and the caller reports the
     channel as failed rather than showing a zero."""
     return float(value or 0)
+
+
+def _per_lead(spend: float, conversions: float) -> float:
+    """Cost per lead from the SAME conversions figure the row (or the total)
+    shows - never a different one, so a row cannot read 0 leads beside a
+    non-zero cost per lead. 0 when there are no conversions."""
+    return round(spend / conversions, 2) if conversions > 0 else 0.0
+
+
+def _inr_rate(cfg: Dict[str, Any], currency: Any) -> Optional[float]:
+    """Rupees per unit of an ad account's currency - THE rule for both
+    providers. INR needs no conversion; USD uses the snapshot rate saved in
+    the integration config (usd_inr_rate, default 84); any other currency, or
+    none reported, is None: a rate is never guessed."""
+    return {"INR": 1.0, "USD": float(cfg.get("usd_inr_rate", 84.0))}.get(
+        str(currency or "").strip().upper()
+    )
+
+
+def _currency_error(provider: str, currency: Any) -> str:
+    said = str(currency or "").strip().upper() or "was not reported"
+    return (
+        f"{provider} account currency {said}: only INR and USD accounts can be "
+        "shown in rupees."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -298,36 +324,25 @@ async def google_ads_performance(
                 f"(API {version}); the report was not fetched.",
             )
 
-        # cost_micros is in the ACCOUNT's currency. An INR account needs no
-        # conversion; a USD account uses the snapshot rate stored in config
-        # (default 84), as before. Any other currency - or none reported - is
-        # an error: a rate is never guessed.
-        to_inr = {"INR": 1.0, "USD": float(cfg.get("usd_inr_rate", 84.0))}
+        # cost_micros is in the ACCOUNT's currency (_inr_rate: INR as-is, USD
+        # at the saved rate, anything else an error).
         rows: List[CampaignRow] = []
 
         for batch in resp.json():
             for result in batch.get("results", []):
                 camp = result.get("campaign", {})
                 metrics = result.get("metrics", {})
-                currency = str(
-                    (result.get("customer") or {}).get("currencyCode") or ""
-                ).upper()
-                if currency not in to_inr:
-                    return _error_rows(
-                        "google",
-                        "Google Ads account currency "
-                        f"{currency or 'was not reported'}: only INR and USD "
-                        "accounts can be shown in rupees.",
-                    )
-                spend_inr = round(
-                    _num(metrics.get("costMicros")) / 1_000_000 * to_inr[currency], 2
-                )
+                currency = (result.get("customer") or {}).get("currencyCode")
+                rate = _inr_rate(cfg, currency)
+                if rate is None:
+                    return _error_rows("google", _currency_error("Google Ads", currency))
+                spend_inr = round(_num(metrics.get("costMicros")) / 1_000_000 * rate, 2)
                 impressions = int(_num(metrics.get("impressions")))
                 clicks = int(_num(metrics.get("clicks")))
-                leads = _num(metrics.get("conversions"))  # a double: may be fractional
-                conversions = int(leads)
+                # A double: may be fractional. Shown as reported, to 2 places.
+                conversions = round(_num(metrics.get("conversions")), 2)
                 ctr = round(_num(metrics.get("ctr")) * 100, 4)
-                cpl_inr = round(spend_inr / leads, 2) if leads > 0 else 0.0
+                cpl_inr = _per_lead(spend_inr, conversions)
                 rows.append(
                     CampaignRow(
                         channel="google",
@@ -361,8 +376,10 @@ async def google_ads_performance(
 # Meta (Facebook) Ads provider
 # ---------------------------------------------------------------------------
 
+# account_currency: the ad account's own currency - spend is in it.
 _META_FIELDS = (
-    "campaign_id,campaign_name,spend,impressions,clicks,actions,cost_per_action_type"
+    "campaign_id,campaign_name,account_currency,spend,impressions,clicks,"
+    "actions,cost_per_action_type"
 )
 
 _META_GRAPH = "https://graph.facebook.com"
@@ -461,18 +478,30 @@ async def meta_ads_performance(
 
         rows: List[CampaignRow] = []
         for item in data:
-            spend = round(float(item.get("spend", 0)), 2)
+            # Spend is in the AD ACCOUNT's currency, which the report names
+            # (account_currency). The same rule as Google (_inr_rate); it was
+            # shown as rupees whatever the account's currency was.
+            currency = item.get("account_currency")
+            rate = _inr_rate(cfg, currency)
+            if rate is None:
+                return _error_rows("meta", _currency_error("Meta Ads", currency))
+            spend = round(_num(item.get("spend")) * rate, 2)
             impressions = int(item.get("impressions", 0))
             clicks = int(item.get("clicks", 0))
 
-            # Extract lead conversions from the nested actions list
-            leads = 0
-            for action in item.get("actions") or []:
-                if action.get("action_type", "") in _META_LEAD_ACTION_TYPES:
-                    leads += int(float(action.get("value", 0)))
+            # Lead conversions from the nested actions list: one figure for
+            # the Leads column and the cost per lead.
+            leads = round(
+                sum(
+                    _num(action.get("value"))
+                    for action in item.get("actions") or []
+                    if action.get("action_type", "") in _META_LEAD_ACTION_TYPES
+                ),
+                2,
+            )
 
             ctr = round((clicks / impressions * 100) if impressions > 0 else 0.0, 4)
-            cpl = round((spend / leads) if leads > 0 else 0.0, 2)
+            cpl = _per_lead(spend, leads)
 
             rows.append(
                 CampaignRow(
