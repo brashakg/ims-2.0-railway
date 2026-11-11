@@ -153,9 +153,6 @@ def compute_entry_hash(prev_hash: str, seq: int, doc: Dict[str, Any]) -> str:
 # tries and writes its row unchained (fail-soft) rather than spin.
 _MAX_CLAIM_ATTEMPTS = 25
 
-# Collections whose unique seq index this process has already ensured.
-_seq_index_ensured: set = set()
-
 
 def _is_duplicate_key(exc: Exception) -> bool:
     return getattr(exc, "code", None) == 11000 or type(exc).__name__ == "DuplicateKeyError"
@@ -163,21 +160,19 @@ def _is_duplicate_key(exc: Exception) -> bool:
 
 def _ensure_seq_index(audit_collection) -> None:
     """The unique sparse `seq` index IS the serializer of concurrent appends
-    (module docstring), so make sure it exists -- once per process, the same
-    spec connection.py / schemas.py declare (a no-op where they already built
-    it). A failed build is logged loudly: without it two workers can take the
-    same seq and fork the chain."""
-    name = getattr(audit_collection, "full_name", None)
-    if not isinstance(name, str) or name in _seq_index_ensured:
+    (module docstring). App startup builds it (connection.py / schemas.py, the
+    same spec); this builds it when the FIRST row of a chain is written, so a
+    collection that startup never saw -- or one dropped and started again --
+    is still guarded before two writers can meet. Nothing is chained yet at
+    that point, so the build has no existing data to trip on. A failed build
+    is logged loudly: without the index two workers can take the same seq."""
+    create_index = getattr(audit_collection, "create_index", None)
+    if not callable(create_index):
         return
-    _seq_index_ensured.add(name)
     try:
-        audit_collection.create_index("seq", unique=True, sparse=True)
+        create_index("seq", unique=True, sparse=True)
     except Exception as exc:  # noqa: BLE001
-        logger.error(
-            "[AUDIT_CHAIN] CRITICAL: unique seq index is NOT in place on %s: %s",
-            name, exc,
-        )
+        logger.error("[AUDIT_CHAIN] CRITICAL: unique seq index is NOT in place: %s", exc)
 
 
 def _chain_tail(audit_collection) -> Tuple[int, str]:
@@ -228,13 +223,14 @@ def append_audit_entry(
     if db is None:
         db = getattr(audit_collection, "database", None)
 
-    _ensure_seq_index(audit_collection)
     for _ in range(_MAX_CLAIM_ATTEMPTS):
         try:
             seq, prev_hash = _chain_tail(audit_collection)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[AUDIT_CHAIN] chain tail unreadable: %s", exc)
             break
+        if seq == 0:
+            _ensure_seq_index(audit_collection)  # first row of the chain
         seq += 1
         doc["seq"] = seq
         doc["prev_hash"] = prev_hash

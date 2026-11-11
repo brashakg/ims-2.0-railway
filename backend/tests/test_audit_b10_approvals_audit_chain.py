@@ -219,7 +219,7 @@ def _journal_approve(db, je_id: str, approver: str = "checker", roles=("ADMIN",)
 
 
 def _audit_row(i: int) -> Dict[str, Any]:
-    return {"log_id": f"B10-{uuid.uuid4().hex[:10]}", "action": "AUDIT_SYNTHETIC_ONLY",
+    return {"log_id": f"B10-{uuid.uuid4().hex[:12]}", "action": "AUDIT_SYNTHETIC_ONLY",
             "user_id": "audit-probe", "entity_type": "probe", "entity_id": f"P-{i}",
             "severity": "INFO"}
 
