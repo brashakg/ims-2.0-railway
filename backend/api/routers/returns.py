@@ -317,16 +317,6 @@ def _order_line_index(order: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, An
     return {"by_item": by_item, "by_product": by_product}
 
 
-def _line_product_id(orig_line: Optional[Dict[str, Any]]) -> Optional[str]:
-    """THE IMS product an order line sold: an online line keeps Shopify's
-    product_id beside its ims_product_id; stock rows and return rows carry the
-    IMS one. None for a line that names no product (a fee, a made-to-order
-    line): nothing of it is tracked stock."""
-    line = orig_line or {}
-    pid = line.get("ims_product_id") or line.get("product_id")
-    return str(pid) if pid else None
-
-
 def _line_purchased_qty(line: Dict[str, Any]) -> float:
     """Purchased quantity on an original order line. Defensive -> 0 on bad input."""
     try:
@@ -558,7 +548,7 @@ def _units_already_back(
     docs = _already_returned_qty(
         order_id,
         orig_line.get("item_id") or orig_line.get("id"),
-        _line_product_id(orig_line),
+        restock_engine.line_product_id(orig_line),
         own_shopify_refund_id=own_shopify_refund_id,
     )
     if docs is None:
@@ -890,7 +880,7 @@ def _returnable_lines(
         item_id = orig_line.get("item_id") or orig_line.get("id")
         if item_id:
             ret_line.order_item_id = str(item_id)
-            ret_line.product_id = _line_product_id(orig_line)
+            ret_line.product_id = restock_engine.line_product_id(orig_line)
         # (A legacy line with no id was matched BY its product: already its own.)
         ret_line.sku = ret_line.sku or str(orig_line.get("sku") or "")
         ret_line.product_name = ret_line.product_name or str(

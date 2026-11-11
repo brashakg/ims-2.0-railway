@@ -26,7 +26,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 def returns_missing_product(db):
     """[(return_id, store_id, order_number, created_at, order_item_id,
     product_id on the bill, qty, condition)] -- reads only."""
-    from api.routers.returns import _line_product_id, _order_line_index
+    # A service, never a router: a script must run without the app's login
+    # secret (test_scripts_need_no_app_secret).
+    from api.services.restock_engine import line_product_id
 
     rows = []
     orders = db.get_collection("orders")
@@ -40,9 +42,10 @@ def returns_missing_product(db):
         if not lines:
             continue
         order = orders.find_one({"order_id": doc.get("order_id")}) or {}
-        by_item = _order_line_index(order)["by_item"]
+        by_item = {str(ln.get("item_id") or ln.get("id")): ln
+                   for ln in order.get("items") or [] if isinstance(ln, dict)}
         for it in lines:
-            product = _line_product_id(by_item.get(str(it.get("order_item_id") or "")))
+            product = line_product_id(by_item.get(str(it.get("order_item_id") or "")))
             if product:
                 rows.append((doc.get("return_id"), doc.get("store_id"),
                              doc.get("order_number") or order.get("order_number"), doc.get("created_at"),

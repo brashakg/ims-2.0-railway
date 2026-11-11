@@ -26,10 +26,21 @@ testable and never touches Mongo.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # Condition that is safe to put back on the shelf. OPENED / DAMAGED are held.
 RESELLABLE_CONDITION = "GOOD"
+
+
+def line_product_id(order_line: Optional[Dict[str, Any]]) -> Optional[str]:
+    """THE IMS product a bill line sold -- the product of the stock rows a
+    return of that line puts back. An online line keeps Shopify's product_id
+    beside its ims_product_id; stock rows and return rows carry the IMS one.
+    None for a line that names no product (a fee, a made-to-order line):
+    nothing of it is tracked stock."""
+    line = order_line or {}
+    pid = line.get("ims_product_id") or line.get("product_id")
+    return str(pid) if pid else None
 
 
 def _truthy_restock_flag(line: Dict[str, Any]) -> bool:
