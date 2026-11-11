@@ -188,7 +188,7 @@ def test_a_later_opt_in_lets_a_new_message_through(provider, monkeypatch):
 
     assert len(provider) == 1 and provider[0]["phone"] == PHONE
     assert _stored(db)["status"] == "SIMULATED"
-    assert stats["simulated"] == 1 and stats["cancelled"] == 0
+    assert stats["simulated"] == 1 and stats.get("cancelled", 0) == 0
 
 
 def test_consent_read_failure_holds_the_message_then_it_recovers(provider):
