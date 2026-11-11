@@ -266,6 +266,56 @@ def test_l3_16_every_reader_shows_the_engine_result(monkeypatch):
     assert [r["net_salary"] for r in rows] == [13247.0]
 
 
+class _RawMongoLikeDB(StrictDB):
+    """pymongo's Database refuses a truth test, exactly like this."""
+
+    def __bool__(self):
+        raise NotImplementedError(
+            "Database objects do not implement truth value testing or bool(). "
+            "Please compare with None instead: database is not None"
+        )
+
+
+def test_l3_16_staff_own_payslip_shows_the_engine_result_on_a_real_database(monkeypatch):
+    """Found by this batch's real-Mongo probe: GET /hr/me/payslip hands the
+    payslip builder the RAW Mongo database; the builder tested it with
+    ``not db``, which raises on pymongo, and the staff member was told "no
+    payslip" for a saved payroll run. Every in-memory double allowed the truth
+    test, so no earlier test could see it."""
+    from api.routers import hr_self_service
+
+    db = _RawMongoLikeDB()
+    for name in ("users", "stores", "salary_config"):
+        db.seed(name, list(_db().get_collection(name).find({})))
+    monkeypatch.setattr(hr_self_service, "_get_db", lambda: db)
+    app = FastAPI()
+    app.include_router(payroll_router.router, prefix="/api/v1/payroll")
+    app.include_router(hr_self_service.router, prefix="/api/v1/hr")
+    staff = {"user_id": EMP, "username": "staff", "roles": ["STORE_MANAGER"],
+             "store_ids": [STORE_MH], "active_store_id": STORE_MH}
+    who = {"user": ADMIN}
+    app.dependency_overrides[get_current_user] = lambda: who["user"]
+    c = TestClient(app)
+
+    monkeypatch.setattr(payroll_router, "_get_db", lambda: _Truthy(db))
+    _run(c)
+    who["user"] = staff
+    mine = c.get("/api/v1/hr/me/payslip").json()["payslip"]
+    assert mine is not None
+    assert mine["breakdown"]["net_pay"] == 13247.0
+    assert (mine["month"], mine["year"]) == (MONTH, YEAR)
+
+
+class _Truthy:
+    """The payroll router's own handle is a wrapper that allows a truth test."""
+
+    def __init__(self, db):
+        self._db = db
+
+    def get_collection(self, name):
+        return self._db.get_collection(name)
+
+
 # ===========================================================================
 # L3-17 -- gender on the salary setup feeds the PT slab
 # ===========================================================================

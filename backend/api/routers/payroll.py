@@ -274,7 +274,10 @@ def _get_db():
 
 def _get_employee_details(db, employee_id: str) -> dict:
     """Get employee details from users collection"""
-    if not db:
+    # ``is None``, never ``not db``: the staff payslip door (GET /hr/me/payslip)
+    # hands in the raw Mongo database, which refuses a truth test. That raised
+    # here and the staff member was told "no payslip" for a saved payroll run.
+    if db is None:
         return {}
     try:
         users_coll = db.get_collection("users")
@@ -287,7 +290,7 @@ def _get_employee_details(db, employee_id: str) -> dict:
 
 def _get_salary_config(db, employee_id: str) -> Optional[dict]:
     """Get salary configuration for employee"""
-    if not db:
+    if db is None:  # see _get_employee_details
         return None
     try:
         salary_config_coll = db.get_collection("salary_config")
