@@ -4,6 +4,10 @@
 // L3-06  Payroll Run sent an advance recovery of -500 to Preview (net pay UP).
 // L3-07  My Work "View / Download" payslip opened an empty about:blank tab.
 // L3-14  Salary CSV import said "Imported 1" and dropped the bad row silently.
+// L3-02  Tally JV / PF ECR are offered only once a row is approved (decided
+//        2026-11-11: a draft is not a cost and is not exported).
+// L3-23  My Work shows a payslip once it is Approved or Paid, says which, and
+//        says plainly when the newest month is not ready yet (decided 2026-11-11).
 // (L3-24, the month selector, is in payrollSections.test.tsx: it needs the
 //  real route table. The server halves are backend/tests/test_audit_b09_payroll.py.)
 //
@@ -96,6 +100,37 @@ describe('L3-06 Payroll Run: an advance recovery is never negative', () => {
       expect.objectContaining({ advances: { 'EMP-1': 500 }, dry_run: true }),
     );
     expect(toast.error).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L3-02 (screen half): a draft is not exported
+// ---------------------------------------------------------------------------
+describe('L3-02 Payroll Run: Tally JV and PF ECR wait for an approved row', () => {
+  const row = (employee_id: string, status: string) => ({
+    employee_id, employee_name: employee_id, status, net_salary: 17750, deductions: 2250,
+  });
+  async function exportButtons(rows: unknown[]) {
+    payrollApi.listRunRows.mockResolvedValue({ rows, total: rows.length, totals: {} });
+    render(<PayrollRunPage />);
+    return [
+      await screen.findByRole('button', { name: 'Tally JV' }),
+      screen.getByRole('button', { name: 'PF ECR' }),
+    ] as HTMLButtonElement[];
+  }
+
+  it('every row a draft: both exports are off and say why', async () => {
+    for (const b of await exportButtons([row('EMP-1', 'DRAFT'), row('EMP-2', 'DRAFT')])) {
+      expect(b).toBeDisabled();
+      expect(b.title).toMatch(/Approve the payroll run first/);
+    }
+  });
+
+  it.each(['APPROVED', 'PAID'])('one %s row: both exports are on', async (status) => {
+    for (const b of await exportButtons([row('EMP-1', 'DRAFT'), row('EMP-2', status)])) {
+      expect(b).toBeEnabled();
+      expect(b.title).toBe('');
+    }
   });
 });
 
@@ -195,9 +230,9 @@ describe('L3-07 My Work: View / Download opens the payslip, not an empty tab', (
     return { open, written, popup, tab };
   }
 
-  async function clickDownload() {
+  async function clickDownload(slip: unknown = SLIP) {
     currentUser = { id: 'emp-A', name: 'Sunil Kumar', roles: ['SALES_STAFF'], activeStoreId: 'ZZ-STORE' };
-    getMyPayslip.mockResolvedValue(SLIP);
+    getMyPayslip.mockResolvedValue(slip);
     render(<EmployeeSelfService />);
     fireEvent.click(await screen.findByRole('button', { name: /View \/ Download/ }));
   }
@@ -234,5 +269,60 @@ describe('L3-07 My Work: View / Download opens the payslip, not an empty tab', (
     stubWindowOpen(true);
     await clickDownload();
     expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/allow pop-ups/));
+  });
+
+  // L3-23: every payslip says whether it is Approved or Paid, on the card and
+  // on the printed slip.
+  it.each([
+    ['PAID', 'Paid'],
+    ['APPROVED', 'Approved'],
+  ])('a %s payslip says so on the card and on the printed slip', async (status, label) => {
+    const { written } = stubWindowOpen();
+    await clickDownload({ payslip: { ...SLIP.payslip, status } });
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(written.join('')).toContain(`&middot; ${label}`);
+    expect(screen.queryByText(/not ready yet/)).not.toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// L3-23 (screen half): staff are not shown a draft
+// ---------------------------------------------------------------------------
+describe('L3-23 My Work: a payslip still in draft is "not ready yet", with no figures', () => {
+  // Months well in the past, so the page's own month header never matches.
+  const NOT_READY = { month: 4, year: 2025 };
+  const MARCH = {
+    payslip_id: 'PS-1', employee_id: 'emp-A', employee_name: 'Sunil Kumar', month: 3, year: 2025,
+    status: 'APPROVED',
+    breakdown: { gross_salary: 20000, total_deductions: 2250, net_pay: 17750 },
+  };
+  async function openMyWork(answer: unknown) {
+    currentUser = { id: 'emp-A', name: 'Sunil Kumar', roles: ['SALES_STAFF'], activeStoreId: 'ZZ-STORE' };
+    getMyPayslip.mockResolvedValue(answer);
+    render(<EmployeeSelfService />);
+    await screen.findByText('Latest Payslip');
+  }
+
+  it('first payslip is a draft: the card says the month is not ready and offers nothing to open', async () => {
+    await openMyWork({ payslip: null, not_ready: NOT_READY });
+    expect(await screen.findByText(/Your April 2025 payslip is not ready yet/)).toBeInTheDocument();
+    expect(screen.queryByText('No payslip generated yet.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /View \/ Download/ })).not.toBeInTheDocument();
+    expect(screen.queryByText('Net pay')).not.toBeInTheDocument();
+  });
+
+  it('newest month is a draft: last approved payslip stays, with the not-ready line above it', async () => {
+    await openMyWork({ payslip: MARCH, not_ready: NOT_READY });
+    expect(await screen.findByText(/Your April 2025 payslip is not ready yet/)).toBeInTheDocument();
+    expect(screen.getByText('March 2025')).toBeInTheDocument();
+    expect(screen.getByText('Approved')).toBeInTheDocument();
+    expect(screen.getByText('₹17,750')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /View \/ Download/ })).toBeInTheDocument();
+  });
+
+  it('no payroll at all: the old empty line, and no not-ready claim', async () => {
+    await openMyWork({ payslip: null });
+    expect(await screen.findByText('No payslip generated yet.')).toBeInTheDocument();
+    expect(screen.queryByText(/not ready yet/)).not.toBeInTheDocument();
   });
 });
