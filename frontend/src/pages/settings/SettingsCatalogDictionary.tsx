@@ -260,6 +260,7 @@ export function CatalogDictionarySection() {
               className="input-field w-full !pl-8"
               placeholder="Search fields…"
               value={query}
+              aria-label="Search fields"
               onChange={(e) => setQuery(e.target.value)}
             />
           </div>
@@ -378,6 +379,7 @@ export function CatalogDictionarySection() {
                   className="input-field flex-1 min-w-[200px]"
                   placeholder={`Add an allowed value for ${selectedRow.label}…`}
                   value={newValue}
+                  aria-label={`Add an allowed value for ${selectedRow.label}`}
                   onChange={(e) => setNewValue(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') {
