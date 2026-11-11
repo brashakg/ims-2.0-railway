@@ -23,13 +23,15 @@ const ITEMS = [
 const needsCompleting = vi.fn(async (): Promise<any> => ({ items: ITEMS }));
 const owedPaid = vi.fn(async (..._a: unknown[]) => ({ message: 'Booked' }));
 const giveBack = vi.fn(async (..._a: unknown[]) => ({ message: 'Given back' }));
-const completeRecord = vi.fn(async () => ({ message: 'Done' }));
+const completeRecord = vi.fn(async (): Promise<any> => ({ message: 'Done' }));
+const retryStockStep = vi.fn(async (..._a: unknown[]) => ({ message: 'Restock applied' }));
 vi.mock('../../../services/api/returns', () => ({
   returnsApi: {
     needsCompleting: () => needsCompleting(),
     completeRecord: (...a: unknown[]) => (completeRecord as any)(...a),
     owedPaid: (...a: unknown[]) => owedPaid(...a),
     giveBackUnbilled: (...a: unknown[]) => giveBack(...a),
+    retryStockStep: (...a: unknown[]) => retryStockStep(...a),
     quote: vi.fn(), create: vi.fn(), list: vi.fn(async () => ({ returns: [] })),
   },
 }));
@@ -153,5 +155,37 @@ describe('money review 22: a dead voucher on a walk-in bill is paid back in cash
     fireEvent.click(screen.getByRole('button', { name: /Confirm: Rs 80.00 paid back in cash/ }));
     await waitFor(() => expect(giveBack).toHaveBeenCalledTimes(1));
     expect(giveBack.mock.calls[0]).toEqual(['POSPAY:O7:k7:leg:0', 'HQ']);
+  });
+});
+
+
+describe('NeedsCompletingPanel - Stock still to put back (L2-RETURN-F03)', () => {
+  const OPEN = { return_id: 'RET-S', order_id: 'ORD-7', order_number: 'BV/0007', store_id: 'BV-PUN-01',
+    pieces: '1 x RB-123, 2 x OAK-55' };
+
+  it('keeps the completion message on screen until it is dismissed', async () => {
+    needsCompleting.mockResolvedValue({ items: [ITEMS[2]] });
+    const message = 'Return record completed. NOT back in stock: 1 x RB-123, 2 x OAK-55. Do not add these by hand';
+    completeRecord.mockResolvedValueOnce({ message, stock_step_open: true });
+    render(<NeedsCompletingPanel standalone />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Complete the record' }));
+    fireEvent.click(screen.getByRole('button', { name: /Confirm: Complete the record/ }));
+    // Duration 0: the toast stays (ToastContext auto-dismisses only when > 0).
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith(message, 0));
+  });
+
+  it('names the pieces still out and puts them back through Retry stock step, never by hand', async () => {
+    needsCompleting.mockReset();
+    needsCompleting.mockResolvedValueOnce({ items: [], stock_open: [OPEN] }).mockResolvedValue({ items: [] });
+    retryStockStep.mockClear();
+    render(<NeedsCompletingPanel />); // shown at the desk too, though nothing else needs completing
+    expect(await screen.findByText('Not back in stock: 1 x RB-123, 2 x OAK-55')).toBeTruthy();
+    expect(screen.getByLabelText('Stock still to put back').textContent).toMatch(/Do not add them by hand/);
+    fireEvent.click(screen.getByRole('button', { name: 'Retry stock step' }));
+    await waitFor(() => expect(retryStockStep).toHaveBeenCalledTimes(1));
+    expect(retryStockStep.mock.calls[0]).toEqual(['RET-S']);
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('Restock applied', 0));
+    // Reloaded: the piece is back, the row is gone.
+    await waitFor(() => expect(screen.queryByText(/Not back in stock/)).toBeNull());
   });
 });

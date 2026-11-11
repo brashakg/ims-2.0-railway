@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   returnsApi, type CashPaidFrom, type NeedsCompletingItem, type OwedPaidMethod, type OwedReturn,
-  type UnbilledPayment,
+  type StockOpenReturn, type UnbilledPayment,
 } from '../../services/api/returns';
 import { useToast } from '../../context/ToastContext';
 import { getErrorMessage } from '../../utils/errorHandler';
@@ -46,6 +46,8 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
   const [owed, setOwed] = useState<OwedReturn[]>([]);
   // Till payments taken but never on their bill (money review 20).
   const [unbilled, setUnbilled] = useState<UnbilledPayment[]>([]);
+  // Completed returns whose pieces are still out of stock (Retry stock step).
+  const [stockOpen, setStockOpen] = useState<StockOpenReturn[]>([]);
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
   const [cashFrom, setCashFrom] = useState<Record<string, CashPaidFrom>>({});
   const focusUnbilled = typeof window !== 'undefined'
@@ -59,6 +61,7 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
       setItems(r.items || []);
       setOwed(r.owed || []);
       setUnbilled(r.unbilled || []);
+      setStockOpen(r.stock_open || []);
       setError(null);
     } catch (e) {
       setError(getErrorMessage(e, 'Could not load the returns that need completing.'));
@@ -74,7 +77,9 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
     try {
       const res = await returnsApi.completeRecord(item.return_id,
         answer === 'NOTHING' ? { nothing_paid: true } : { cash_leg_paid: answer !== 'NO' });
-      toast.success(res?.message || 'Done.');
+      // Stays until dismissed: it says what happened to each piece, and the
+      // row leaves the list (5 seconds is not enough to read and act on it).
+      toast.success(res?.message || 'Done.', 0);
       setPicked((p) => { const n = { ...p }; delete n[item.return_id]; return n; });
       await load();
     } catch (e) {
@@ -102,6 +107,20 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
     }
   };
 
+  const retryStock = async (row: StockOpenReturn) => {
+    setBusy(row.return_id);
+    try {
+      const res = await returnsApi.retryStockStep(row.return_id);
+      // stock_note: a piece that went back under a NEW barcode needs its label.
+      toast.success([res?.message || 'Stock step retried.', res?.stock_note].filter(Boolean).join(' '), 0);
+      await load();
+    } catch (e) {
+      toast.error(getErrorMessage(e, 'Could not retry the stock step.'));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const giveBack = async (row: UnbilledPayment) => {
     setBusy(row.key);
     try {
@@ -118,7 +137,8 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
     }
   };
 
-  if (!standalone && (!items || items.length === 0) && owed.length === 0 && unbilled.length === 0 && !error) {
+  if (!standalone && (!items || items.length === 0) && owed.length === 0 && unbilled.length === 0
+    && stockOpen.length === 0 && !error) {
     return null;
   }
 
@@ -194,6 +214,30 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
               })}
             </tbody>
           </table>
+        </div>
+      )}
+      {stockOpen.length > 0 && (
+        <div aria-label="Stock still to put back" className="mt-4">
+          <h3 className="text-sm font-semibold text-gray-900 mb-1">Stock still to put back</h3>
+          <p className="text-xs text-gray-500 mb-2">
+            Completed returns whose pieces are not back in stock yet. Do not add them by hand (IMS would count them
+            twice): Retry stock step puts each piece back once.
+          </p>
+          <ul className="divide-y divide-gray-100">
+            {stockOpen.map((row) => (
+              <li key={row.return_id}
+                ref={focus === row.return_id ? (el) => el?.scrollIntoView?.({ block: 'center' }) : undefined}
+                className={'py-2 flex flex-wrap items-center gap-2 text-sm' + (focus === row.return_id ? ' bg-amber-50' : '')}>
+                <span className="font-medium">{row.order_number || row.order_id || '-'}</span>
+                <span className="text-xs text-gray-400">{row.return_id}{row.store_id ? ` - ${row.store_id}` : ''}</span>
+                <span className="ml-auto">Not back in stock: {row.pieces}</span>
+                <button type="button" onClick={() => retryStock(row)} disabled={busy === row.return_id}
+                  className="px-3 py-1 text-xs rounded-md bg-bv-red-600 text-white disabled:opacity-50">
+                  {busy === row.return_id ? 'Retrying...' : 'Retry stock step'}
+                </button>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
       {unbilled.length > 0 && (
