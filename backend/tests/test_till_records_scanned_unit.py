@@ -828,8 +828,11 @@ def test_trace_keeps_the_first_sale_and_its_return_after_the_piece_is_resold(
     assert _unit(till, "SU-A")["status"] == "SOLD" and _unit(till, "SU-A")["order_id"] == o2
 
     trace = _trace(client, UNIT_A["barcode"])
-    assert [(s["order_number"], s["link"]) for s in trace["sales"]] == [(n1, "RETURN"), (n2, "LINE")]
-    assert [(r["return_id"], r["order_id"]) for r in trace["returns"]] == [(ret1["return_id"], o1)]
+    # The audit's finding: only the resale showed, and no return at all.
+    assert [s["order_number"] for s in trace["sales"]] == [n1, n2]
+    assert [r.get("return_id") for r in trace["returns"]] == [ret1["return_id"]]
+    assert [s["link"] for s in trace["sales"]] == ["RETURN", "LINE"]
+    assert trace["returns"][0]["order_id"] == o1
 
     # 4. The resale comes back DAMAGED: set aside, and the unit's own stamps now
     #    name only the SECOND bill -- the first is kept by its return alone.
@@ -839,7 +842,8 @@ def test_trace_keeps_the_first_sale_and_its_return_after_the_piece_is_resold(
     unit = _unit(till, "SU-A")
     assert unit["status"] == "QUARANTINED" and unit["returned_from_order_id"] == o2, unit
     trace = _trace(client, UNIT_A["barcode"])
-    assert [(s["order_number"], s["link"]) for s in trace["sales"]] == [(n1, "RETURN"), (n2, "LINE")]
+    assert [s["order_number"] for s in trace["sales"]] == [n1, n2]
+    assert [s["link"] for s in trace["sales"]] == ["RETURN", "LINE"]
     assert [r["return_id"] for r in trace["returns"]] == [ret1["return_id"], ret2["return_id"]]
     assert trace["returns"][1]["quarantined_stock_ids"] == ["SU-A"]
     # The other unit of the same product never left the shelf: no history.
@@ -875,9 +879,9 @@ def test_trace_links_are_explicit_and_stay_inside_the_callers_shops(client, till
         "restock_stock_ids": ["SU-B"], "quarantined_stock_ids": [],
     })
     admin = _trace(client, UNIT_B["barcode"])
-    assert [(s["order_number"], s["link"]) for s in admin["sales"]] == [
-        ("BV-THERE-1", "RETURN"), ("BV-HERE-1", "UNIT")]
-    assert [r["return_id"] for r in admin["returns"]] == ["RET-THERE"]
+    assert [s["order_number"] for s in admin["sales"]] == ["BV-THERE-1", "BV-HERE-1"]
+    assert [r.get("return_id") for r in admin["returns"]] == ["RET-THERE"]
+    assert [s["link"] for s in admin["sales"]] == ["RETURN", "UNIT"]
     shop = _trace(client, UNIT_B["barcode"], roles=("STORE_MANAGER",))
     assert [(s["order_number"], s["link"]) for s in shop["sales"]] == [("BV-HERE-1", "UNIT")]
     assert shop["returns"] == []
