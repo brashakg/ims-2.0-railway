@@ -47,6 +47,26 @@ async def lock_period(
     if existing:
         raise HTTPException(400, f"Period {month}/{year} is already locked")
 
+    # A locked month refuses payroll approval (423) and nothing unlocks a
+    # month, so a payroll run still in DRAFT would be stuck there for good and
+    # its wages would never reach the P&L, Tally or the PF file (they count
+    # APPROVED and PAID rows only). The lock is chain-wide, so any shop's
+    # draft stops it.
+    drafts = list(
+        db.get_collection("payroll").find(
+            {"month": month, "year": year, "status": "DRAFT"}
+        )
+    )
+    if drafts:
+        shops = ", ".join(sorted({str(d.get("store_id") or "no shop") for d in drafts}))
+        raise HTTPException(
+            409,
+            f"Payroll for {month}/{year} is still a draft for {len(drafts)} "
+            f"employee(s) (shop: {shops}). Approve it in HR > Payroll Run "
+            "first, then lock the month. A locked month cannot be approved "
+            "later, so its wages would never be counted.",
+        )
+
     db.get_collection("period_locks").insert_one(
         {
             "month": month,

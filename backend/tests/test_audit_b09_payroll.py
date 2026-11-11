@@ -5,14 +5,20 @@ Each test drives the REAL payroll / self-service routers (or the finance P&L
 payroll readers) over a strict in-memory Mongo double and asserts on what ended
 up STORED, not only on the reply.
 
-L3-02  a payroll draft could be rerun (rewritten) inside a locked accounting
-       month, which moved that month's P&L. (Whether a draft is a P&L cost at
-       all is an accounting decision left with the owner; not changed here.)
+L3-02  an unapproved payroll DRAFT was a cost in the P&L, and it could be
+       rerun (rewritten) inside a locked accounting month, which moved that
+       month's P&L. Decided 2026-11-11: a month's salary is a cost once the
+       run is APPROVED (APPROVED and PAID count, a DRAFT never does); the
+       Tally salary voucher and the PF file export the same rows; a month
+       cannot be locked while its payroll is still a draft.
 L3-05  the advance-history read answered 500 after the first advance existed
        (raw Mongo ``_id`` in the reply).
 L3-06  a NEGATIVE advance recovery was accepted and raised net pay.
 L3-23  the payslip was materialised once and served stale forever after the
-       payroll row changed (rerun, approve, pay).
+       payroll row changed (rerun, approve, pay). Decided 2026-11-11: staff
+       see a payslip only once it is APPROVED or PAID (a draft answers "not
+       ready"); an administrator preparing payroll still sees the draft; every
+       payslip carries its status.
 
 The frontend halves (L3-06 input, L3-07, L3-14, L3-24) are covered by vitest:
 frontend/src/pages/hr/__tests__/auditB09Payroll.test.tsx.
@@ -38,10 +44,16 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from strict_fakes import StrictCollection, StrictDB  # noqa: E402
 
+import asyncio  # noqa: E402
+from datetime import datetime  # noqa: E402
+
+from fastapi import HTTPException  # noqa: E402
+
 from api.routers import hr_self_service  # noqa: E402
 from api.routers import payroll as payroll_router  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
 from api.routers.finance import _shared as finance_shared  # noqa: E402
+from api.routers.finance import period_lock  # noqa: E402
 from api.services.payroll_engine import compute_payroll  # noqa: E402
 
 
@@ -138,37 +150,142 @@ def _pnl_payroll(db):
 
 
 # ===========================================================================
-# L3-02 -- a payroll run cannot change a locked month
-#
-# WHICH payroll rows are a cost in the P&L (draft / approved / paid) is an
-# accounting treatment that waits for the owner and the CA, so it is NOT
-# changed here: every stored row counts, as before. What is fixed is that a
-# locked month's payroll rows -- and so its P&L -- can no longer be rewritten
-# by POST /payroll/run. The old writer POST /payroll/salary/calculate is not
-# touched: the P&L does not read its rows, and it belongs to L3-16.
+# L3-02 -- a draft is not a cost; a locked month cannot be rewritten; a month
+#          with a draft cannot be locked
 # ===========================================================================
+
+SCOPE = {"month": MONTH, "year": YEAR, "entity_id": ENTITY}
+OCTOBER = f"?month={MONTH}&year={YEAR}&entity_id={ENTITY}"
 
 
 def _lock(db):
     db.get_collection("period_locks").insert_one({"month": MONTH, "year": YEAR})
 
 
+def _approve(c):
+    r = c.post("/api/v1/payroll/approve", json=SCOPE)
+    assert r.status_code == 200, r.text
+
+
+def _pay(c):
+    r = c.post("/api/v1/payroll/lock", json=SCOPE)
+    assert r.status_code == 200, r.text
+
+
+def _lock_month_through_the_route(db, monkeypatch, month=MONTH, year=YEAR):
+    """POST /finance/period-lock, as the Finance screen calls it. Returns
+    (status, detail)."""
+    monkeypatch.setattr(period_lock, "_get_db", lambda: db)
+    monkeypatch.setattr("api.utils.ist.now_ist_naive", lambda: datetime(2026, 11, 12, 12))
+    try:
+        asyncio.run(period_lock.lock_period(month, year, ADMIN))
+        return 200, ""
+    except HTTPException as exc:
+        return exc.status_code, str(exc.detail)
+
+
+def test_l3_02_a_draft_is_not_a_pnl_cost_until_it_is_approved(monkeypatch):
+    """The audit's first half: the October DRAFT already reduced the P&L."""
+    db = _db()
+    c = _client(db, monkeypatch)
+    assert _run(c, lwp_days={EMP: 3}).status_code == 200
+    cost = _stored_row(db)["breakdown"]["ctc_cost"]
+    assert cost > 0 and _stored_row(db)["status"] == "DRAFT"
+    assert _pnl_payroll(db) == (0.0, 0.0, {})  # a draft is nobody's cost yet
+
+    # Rerunning the draft moves the draft, not the P&L.
+    assert _run(c, lwp_days={EMP: 0}).status_code == 200
+    cost = _stored_row(db)["breakdown"]["ctc_cost"]
+    assert _pnl_payroll(db) == (0.0, 0.0, {})
+
+    _approve(c)
+    assert _stored_row(db)["status"] == "APPROVED"
+    assert _pnl_payroll(db) == (cost, cost, {STORE: cost})
+    _pay(c)
+    assert _stored_row(db)["status"] == "PAID"
+    assert _pnl_payroll(db) == (cost, cost, {STORE: cost})  # counted once, not twice
+
+
+def test_l3_02_tally_voucher_and_pf_file_export_only_approved_or_paid(monkeypatch):
+    db = _db()
+    c = _client(db, monkeypatch)
+    assert _run(c).status_code == 200
+
+    # All draft: nothing to send to Tally, and the PF file has no employee.
+    jv = c.get("/api/v1/payroll/tally/salary-jv" + OCTOBER)
+    assert jv.status_code == 404 and "Approve" in jv.json()["detail"]
+    ecr = c.get("/api/v1/payroll/registers/pf-ecr" + OCTOBER)
+    assert ecr.status_code == 200 and ecr.text.strip() == ""
+
+    _approve(c)
+    approved = _stored_row(db)
+    # A second employee whose row is still a DRAFT in the same month + entity.
+    draft = {
+        **{k: v for k, v in approved.items() if k != "_id"},
+        "payroll_id": "PR-DRAFT",
+        "employee_id": "EMP-DRAFT",
+        "employee_name": "ZZ Draft Only",
+        "status": "DRAFT",
+    }
+    db.get_collection("payroll").insert_one(draft)
+
+    for _ in ("APPROVED", "PAID"):
+        jv = c.get("/api/v1/payroll/tally/salary-jv" + OCTOBER)
+        assert jv.status_code == 200, jv.text
+        # Salary Payable is ONE employee's net pay, not two.
+        assert f"<AMOUNT>{approved['net_salary']:.2f}</AMOUNT>" in jv.text
+        assert f"<AMOUNT>{2 * approved['net_salary']:.2f}</AMOUNT>" not in jv.text
+        ecr = c.get("/api/v1/payroll/registers/pf-ecr" + OCTOBER)
+        assert ecr.status_code == 200
+        assert "ZZ Audit Staff" in ecr.text and "ZZ Draft Only" not in ecr.text
+        assert len(ecr.text.strip().splitlines()) == 1
+        _pay(c)  # second pass: the same row, now PAID
+    assert _stored_row(db)["status"] == "PAID"
+
+    # The preparation screen's register still lists the draft for the admin.
+    rows = c.get("/api/v1/payroll/run/rows" + OCTOBER).json()["rows"]
+    assert sorted(r["status"] for r in rows) == ["DRAFT", "PAID"]
+
+
+def test_l3_02_a_month_cannot_be_locked_while_its_payroll_is_a_draft(monkeypatch):
+    """Approve answers 423 in a locked month and nothing unlocks one, so a
+    draft locked in would never become a cost. The lock is refused instead."""
+    db = _db()
+    c = _client(db, monkeypatch)
+    assert _run(c).status_code == 200
+
+    status, detail = _lock_month_through_the_route(db, monkeypatch)
+    assert status == 409, detail
+    assert "draft" in detail and "Approve" in detail and STORE in detail
+    assert db.get_collection("period_locks").count_documents({}) == 0
+
+    # Another month, with no payroll at all, locks as before.
+    assert _lock_month_through_the_route(db, monkeypatch, month=9)[0] == 200
+
+    _approve(c)
+    assert _lock_month_through_the_route(db, monkeypatch) == (200, "")
+    assert db.get_collection("period_locks").count_documents(
+        {"month": MONTH, "year": YEAR}
+    ) == 1
+    cost = _stored_row(db)["breakdown"]["ctc_cost"]
+    assert _pnl_payroll(db) == (cost, cost, {STORE: cost})  # the closed month has its wages
+
+
 def test_l3_02_draft_rerun_refused_in_a_locked_month(monkeypatch):
     """The audit's exact move: draft with 3 unpaid days, month locked, rerun
     with 0 unpaid days. Approve/pay already answered 423; the rerun answered
-    200 and moved the locked month's P&L."""
+    200 and moved the locked month's P&L. (A month can no longer be locked
+    over a draft; a database that already holds one is seeded directly.)"""
     db = _db()
     c = _client(db, monkeypatch)
     assert _run(c, lwp_days={EMP: 3}).status_code == 200
     before = dict(_stored_row(db))
-    cost = before["breakdown"]["ctc_cost"]
-    assert _pnl_payroll(db) == (cost, cost, {STORE: cost})
     _lock(db)
 
     r = _run(c, lwp_days={EMP: 0})
     assert r.status_code == 423, r.text
     assert _stored_row(db) == before  # the stored draft is byte-for-byte unchanged
-    assert _pnl_payroll(db) == (cost, cost, {STORE: cost})  # the closed P&L did not move
+    assert _pnl_payroll(db) == (0.0, 0.0, {})  # the closed P&L did not move
 
 
 def test_l3_02_first_run_refused_in_a_locked_month(monkeypatch):
@@ -282,19 +399,36 @@ def test_l3_06_positive_recovery_still_lowers_net_pay(monkeypatch):
 
 
 # ===========================================================================
-# L3-23 -- the payslip is read from the payroll row, every time
+# L3-23 -- the payslip is read from the payroll row, every time; staff see it
+#          once it is APPROVED or PAID; an administrator also sees the draft
 # ===========================================================================
 
+BY_MONTH = f"/api/v1/payroll/payslip/{EMP}/{MONTH}/{YEAR}"
+LATEST = f"/api/v1/payroll/payslip/{EMP}"
+PRINT = BY_MONTH + "/print"
+MINE = "/api/v1/hr/me/payslip"
+NOT_READY = {"payslip": None, "not_ready": {"month": MONTH, "year": YEAR}}
 
-def _payslip_doors(db, monkeypatch):
-    """Net pay + status from every payslip door for the same payroll row."""
+
+def _seen(reply):
+    p = reply.json()["payslip"]
+    return (p["breakdown"]["net_pay"], p["status"])
+
+
+def _admin_doors(db, monkeypatch):
+    """(net pay, status) from every payslip door an ADMINISTRATOR uses
+    (HR > Payroll > Payslips, the latest read) plus the printed status."""
     admin = _client(db, monkeypatch)
-    by_month = admin.get(f"/api/v1/payroll/payslip/{EMP}/{MONTH}/{YEAR}").json()["payslip"]
-    latest = admin.get(f"/api/v1/payroll/payslip/{EMP}").json()["payslip"]
-    printed = admin.get(f"/api/v1/payroll/payslip/{EMP}/{MONTH}/{YEAR}/print")
+    printed = admin.get(PRINT)
     assert printed.status_code == 200
-    mine = _client(db, monkeypatch, user=STAFF).get("/api/v1/hr/me/payslip").json()["payslip"]
-    return [(p["breakdown"]["net_pay"], p["status"]) for p in (by_month, latest, mine)]
+    return [_seen(admin.get(BY_MONTH)), _seen(admin.get(LATEST))], printed.text
+
+
+def _staff_doors(db, monkeypatch):
+    """Every door the EMPLOYEE has to their own payslip: My Work, the two
+    self-or-admin reads, and the print."""
+    staff = _client(db, monkeypatch, user=STAFF)
+    return [staff.get(MINE), staff.get(BY_MONTH), staff.get(LATEST)], staff.get(PRINT)
 
 
 def test_l3_23_payslip_follows_a_draft_rerun_approval_and_payment(monkeypatch):
@@ -302,23 +436,77 @@ def test_l3_23_payslip_follows_a_draft_rerun_approval_and_payment(monkeypatch):
     c = _client(db, monkeypatch)
     assert _run(c).status_code == 200
     net = _stored_row(db)["net_salary"]
-    assert _payslip_doors(db, monkeypatch) == [(net, "DRAFT")] * 3
+    doors, printed = _admin_doors(db, monkeypatch)
+    assert doors == [(net, "DRAFT")] * 2
+    assert "Draft - not yet approved" in printed
 
     # Rerun the draft with a 100 recovery (the audit's move).
     assert _run(c, advances={EMP: 100}).status_code == 200
     assert _stored_row(db)["net_salary"] == net - 100
-    assert _payslip_doors(db, monkeypatch) == [(net - 100, "DRAFT")] * 3
+    assert _admin_doors(db, monkeypatch)[0] == [(net - 100, "DRAFT")] * 2
 
-    scope = {"month": MONTH, "year": YEAR, "entity_id": ENTITY}
-    assert c.post("/api/v1/payroll/approve", json=scope).status_code == 200
-    assert _payslip_doors(db, monkeypatch) == [(net - 100, "APPROVED")] * 3
-    assert c.post("/api/v1/payroll/lock", json=scope).status_code == 200
-    assert _payslip_doors(db, monkeypatch) == [(net - 100, "PAID")] * 3
+    for move, status, label in ((_approve, "APPROVED", "Approved"), (_pay, "PAID", "Paid")):
+        move(c)
+        doors, printed = _admin_doors(db, monkeypatch)
+        assert doors == [(net - 100, status)] * 2
+        assert label in printed and "Draft" not in printed
+        replies, staff_print = _staff_doors(db, monkeypatch)
+        assert [_seen(r) for r in replies] == [(net - 100, status)] * 3
+        assert all("not_ready" not in r.json() for r in replies)
+        assert staff_print.status_code == 200 and label in staff_print.text
+
+
+def test_l3_23_staff_do_not_see_a_draft_payslip_at_any_door(monkeypatch):
+    """A draft is the administrator's working figure. The employee is told the
+    month is not ready -- and is given no figure -- on My Work, on the two
+    self-or-admin reads and on the print."""
+    db = _db()
+    c = _client(db, monkeypatch)
+    assert _run(c).status_code == 200
+    net = _stored_row(db)["net_salary"]
+
+    replies, staff_print = _staff_doors(db, monkeypatch)
+    assert [r.json() for r in replies] == [NOT_READY] * 3
+    assert staff_print.status_code == 404
+    assert "not ready" in staff_print.json()["detail"]
+    assert str(int(net)) not in "".join(r.text for r in replies) + staff_print.text
+
+    # An ADMIN on My Work is on the staff door too: no draft there either.
+    admin_as_staff = _client(db, monkeypatch, user={**ADMIN, "user_id": EMP})
+    assert admin_as_staff.get(MINE).json() == NOT_READY
+    # ...but preparing payroll (HR > Payroll > Payslips) they see it, as Draft.
+    assert _admin_doors(db, monkeypatch)[0] == [(net, "DRAFT")] * 2
+
+
+def test_l3_23_staff_keep_their_last_approved_payslip_while_the_next_is_a_draft(monkeypatch):
+    db = _db()
+    c = _client(db, monkeypatch)
+    assert _run(c).status_code == 200  # October 2026
+    _approve(c)
+    october_net = _stored_row(db)["net_salary"]
+    november = {"month": 11, "year": YEAR, "entity_id": ENTITY, "advances": {EMP: 250}}
+    assert c.post("/api/v1/payroll/run", json=november).status_code == 200  # a DRAFT
+
+    staff = _client(db, monkeypatch, user=STAFF)
+    for door in (MINE, LATEST):
+        body = staff.get(door).json()
+        assert body["not_ready"] == {"month": 11, "year": YEAR}
+        assert (body["payslip"]["month"], body["payslip"]["status"]) == (MONTH, "APPROVED")
+        assert body["payslip"]["breakdown"]["net_pay"] == october_net
+    assert staff.get(f"/api/v1/payroll/payslip/{EMP}/11/{YEAR}").json() == {
+        "payslip": None,
+        "not_ready": {"month": 11, "year": YEAR},
+    }
+    # The administrator's latest read is the November draft.
+    latest = c.get(LATEST).json()
+    assert (latest["payslip"]["month"], latest["payslip"]["status"]) == (11, "DRAFT")
+    assert "not_ready" not in latest
 
 
 def test_l3_23_copy_materialised_by_the_old_code_is_not_served(monkeypatch):
-    """Databases already hold payslip copies the old code wrote on first read.
-    They are not rewritten; they are simply never preferred to the payroll row."""
+    """Databases already hold payslip copies the old code wrote on first read
+    (of a DRAFT too). They are not rewritten; they are never preferred to the
+    payroll row, and never shown to staff in place of a withheld draft."""
     db = _db()
     c = _client(db, monkeypatch)
     assert _run(c).status_code == 200
@@ -333,15 +521,21 @@ def test_l3_23_copy_materialised_by_the_old_code_is_not_served(monkeypatch):
             "breakdown": {"net_pay": net + 999, "gross_salary": 0, "total_deductions": 0},
         }
     )
-    assert _payslip_doors(db, monkeypatch) == [(net, "DRAFT")] * 3
+    assert _admin_doors(db, monkeypatch)[0] == [(net, "DRAFT")] * 2
+    replies, staff_print = _staff_doors(db, monkeypatch)
+    assert [r.json() for r in replies] == [NOT_READY] * 3
+    assert staff_print.status_code == 404
 
 
 def test_l3_23_reading_a_payslip_writes_nothing(monkeypatch):
     db = _db()
     c = _client(db, monkeypatch)
     assert _run(c).status_code == 200
-    _payslip_doors(db, monkeypatch)
+    before = dict(_stored_row(db))
+    _admin_doors(db, monkeypatch)
+    _staff_doors(db, monkeypatch)
     assert db.get_collection("payslips").count_documents({}) == 0
+    assert _stored_row(db) == before
 
 
 def test_l3_23_latest_payslip_is_the_newest_month(monkeypatch):
@@ -387,8 +581,11 @@ def test_l3_23_payslip_with_no_payroll_row_keeps_its_old_sources(monkeypatch):
     # No payroll row at all: the latest read still finds the newest materialised
     # one (March, written by the month read above -- the legacy path as it was).
     assert c.get(f"/api/v1/payroll/payslip/{EMP}").json()["payslip"]["breakdown"]["net_pay"] == 11111
+    # A month the run engine never computed has no approval step: the staff
+    # door shows it as before.
     mine = _client(db, monkeypatch, user=STAFF).get("/api/v1/hr/me/payslip").json()
     assert mine["payslip"]["breakdown"]["net_pay"] == 11111
+    assert "not_ready" not in mine
 
 
 def test_l3_23_a_newer_month_without_a_payroll_row_is_still_the_latest(monkeypatch):
