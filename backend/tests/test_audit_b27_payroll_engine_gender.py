@@ -299,6 +299,10 @@ def test_l3_16_staff_own_payslip_shows_the_engine_result_on_a_real_database(monk
 
     monkeypatch.setattr(payroll_router, "_get_db", lambda: _Truthy(db))
     _run(c)
+    # Staff see a payslip once the run is approved (batch b09's rule).
+    db.get_collection("payroll").update_one(
+        {"employee_id": EMP}, {"$set": {"status": "APPROVED"}}
+    )
     who["user"] = staff
     mine = c.get("/api/v1/hr/me/payslip").json()["payslip"]
     assert mine is not None
