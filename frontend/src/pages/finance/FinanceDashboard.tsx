@@ -233,7 +233,7 @@ export default function FinanceDashboard() {
 
   useEffect(() => {
     // R4: a login with no shop is shown NoShopNotice below and reads nothing
-    // -- budgets and the period lock are not shop-scoped, so even they would
+    // -- the period lock is not shop-scoped, so even that would
     // hand it organisation data.
     if (hasNoShop(user)) return;
     loadFinanceData();

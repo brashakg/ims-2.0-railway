@@ -317,7 +317,8 @@ export const expensesApi = {
   },
 
   // F17 petty-cash float: balance + recent ledger for a store (manager /
-  // accountant / admin). Fail-soft to a not-open envelope on the server side.
+  // accountant / admin). `exists: false` = the store has no float. A float
+  // that could not be READ rejects (503) -- it is never reported as absent.
   getPettyCashBalance: async (storeId: string): Promise<PettyCashBalance> => {
     const response = await api.get('/expenses/petty-cash/balance', { params: { store_id: storeId } });
     return response.data;
