@@ -194,6 +194,33 @@ export function PayrollRunPage() {
     }
   };
 
+  // A draft whose salary setup was switched off cannot be rerun, and a month
+  // with a draft cannot be locked: discarding it is the way out. The server
+  // removes a DRAFT only, never in a locked month, and logs who discarded it.
+  const doDiscard = async (r: PayrollRow) => {
+    const who = r.employee_name || r.employee_id;
+    const ask =
+      `Discard the payroll draft of ${who} for ${MONTHS[month - 1]} ${year} (net ${inr(r.net_salary)})?
+
+` +
+      'Only this draft is removed. You can run payroll again afterwards.';
+    if (!window.confirm(ask)) return;
+    setBusy(true);
+    try {
+      await payrollApi.discardDraft({ month, year, employee_id: r.employee_id });
+      toast.success(`Payroll draft of ${who} discarded`);
+      await loadRows();
+    } catch (e) {
+      toast.error(
+        isForbiddenError(e)
+          ? forbiddenDetail(e, 'Only an administrator may discard a payroll draft.')
+          : e instanceof Error ? e.message : 'Discard failed',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const download = (blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -390,6 +417,12 @@ export function PayrollRunPage() {
                   <td className="px-3 py-2 text-right">
                     {r.breakdown && (
                       <button className="text-bv-red-600 hover:underline" onClick={() => setPayslip(r)}>Payslip</button>
+                    )}
+                    {/* payroll_id: a saved row, not a preview. */}
+                    {canRun && r.status === 'DRAFT' && r.payroll_id && (
+                      <button className="ml-3 text-gray-600 hover:underline disabled:opacity-50" onClick={() => doDiscard(r)} disabled={busy}>
+                        Discard draft
+                      </button>
                     )}
                   </td>
                 </tr>

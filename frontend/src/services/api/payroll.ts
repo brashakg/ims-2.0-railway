@@ -131,6 +131,15 @@ export const payrollApi = {
     return res.data as { status: string; locked: number };
   },
 
+  /** Remove DRAFT payroll rows (admin only): one employee's, or every draft
+   *  of one shop, for the month. An approved or paid row is refused. */
+  discardDraft: async (
+    req: { month: number; year: number } & ({ employee_id: string } | { store_id: string }),
+  ) => {
+    const res = await api.post('/payroll/discard-draft', req);
+    return res.data as { status: string; discarded: number };
+  },
+
   // --- Exports (Phase 4) ---------------------------------------------------
   getSummary: async (params: { month: number; year: number; store_id?: string; entity_id?: string }) => {
     const res = await api.get('/payroll/registers/summary', { params });
