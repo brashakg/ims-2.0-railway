@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api.routers import admin as admin_router  # noqa: E402
 from api.routers import settings as settings_router  # noqa: E402
 from api.services import cred_crypto, shiprocket  # noqa: E402
+from agents.nexus_providers import shiprocket_track_awb  # noqa: E402
 
 ADMIN = {"user_id": "u-admin", "username": "admin", "roles": ["ADMIN"]}
 EMAIL = "ops@example.test"
@@ -82,6 +83,9 @@ def env(monkeypatch):
                 return _Resp(200, {"token": f"tok-{len(logins)}"})
             return _Resp(200, {"awb_code": "AWB777", "shipment_id": 5, "order_id": 9})
 
+        async def get(self, url, **kwargs):
+            return _Resp(200, {"tracking_data": {"shipment_track": [{"current_status": "In Transit"}]}})
+
     monkeypatch.setattr(shiprocket.httpx, "AsyncClient", _Client)
     yield db, coll, logins
     shiprocket._reset_token_cache()
@@ -128,6 +132,11 @@ def test_saved_password_reaches_the_login_as_typed(env, save, caplog):
     res = asyncio.run(shiprocket.authenticate(db))
     assert res.ok is True and res.raw["token"] == "tok-1"
     assert logins == [{"email": EMAIL, "password": PW_1}]  # never the ciphertext
+
+    # The background tracking poll (NEXUS) logs in through the same reader.
+    polled = asyncio.run(shiprocket_track_awb(db, "AWB1"))
+    assert polled.ok is True and polled.payload["latest_status"] == "In Transit"
+    assert logins[-1] == {"email": EMAIL, "password": PW_1}
 
     logged = caplog.text
     assert PW_1 not in logged and stored not in logged
@@ -176,6 +185,9 @@ def test_a_password_that_cannot_be_decrypted_is_never_sent(env, monkeypatch, cap
 
     tracked = asyncio.run(shiprocket.track(awb="AWB1", db=db))
     assert (tracked.ok, tracked.status) == (False, "FAILED")
+
+    polled = asyncio.run(shiprocket_track_awb(db, "AWB1"))  # the background tracking poll
+    assert polled.ok is False and "Settings" in polled.error
 
     assert logins == []  # nothing was sent anywhere
     assert stored not in caplog.text and stored not in str(auth) + str(booked) + str(tracked)
