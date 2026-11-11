@@ -68,7 +68,7 @@ export function PayrollLayout() {
   // State
   const [selectedMonth, setSelectedMonth] = useState(currentMonth);
   const [selectedYear, setSelectedYear] = useState(currentYear);
-  const [selectedEmployee, setSelectedEmployee] = useState<string>('');
+  const [selectedEmployee, setEmployee] = useState<string>('');
   
   // Data
   const [salarySheet, setSalarySheet] = useState<SalaryRecord[]>([]);
@@ -82,6 +82,7 @@ export function PayrollLayout() {
   // first used to decide what the Payslips section showed.
   const [payslipLoading, setPayslipLoading] = useState(false);
   const payslipRequest = useRef(0);
+  const advancesRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   // Owner ruling 2026-08-09: salary data is ADMIN-only. A 403 must show an
   // explicit access notice -- an empty table would read as "nobody was paid".
@@ -93,6 +94,16 @@ export function PayrollLayout() {
   useEffect(() => {
     loadSalarySheet();
   }, [selectedMonth, selectedYear, user?.activeStoreId]);
+
+  // Advances and Payslips share ONE picked employee, and what each of them has
+  // loaded belongs to that employee. Every change of the pick goes through
+  // here and drops both, so one person's advances or payslip can never sit
+  // under another person's name; each section then loads for the new pick.
+  const setSelectedEmployee = (employeeId: string) => {
+    setEmployee(employeeId);
+    setAdvances([]);
+    setPayslip(null);
+  };
 
   // The picked employee belongs to the shop they were picked in. The shop
   // switches in place (no page reload), so drop the pick with it: the Advances
@@ -126,14 +137,18 @@ export function PayrollLayout() {
   };
 
   const loadAdvances = async (employeeId: string) => {
+    // Same rule as loadPayslip below: drop the previous employee's list before
+    // asking, and ignore any answer that is not for the latest ask.
+    const request = ++advancesRequest.current;
+    setAdvances([]);
     setIsLoading(true);
     setError(null);
     setNoAccess(null);
     try {
       const data = await payrollApi.getAdvances(employeeId);
-      setAdvances(data?.advances || []);
+      if (request === advancesRequest.current) setAdvances(data?.advances || []);
     } catch (err) {
-      setAdvances([]);
+      if (request !== advancesRequest.current) return;
       if (isForbiddenError(err)) {
         setNoAccess(
           forbiddenDetail(err, "Another employee's salary advances are restricted to administrators.")
@@ -142,7 +157,7 @@ export function PayrollLayout() {
         setError('Failed to load advances');
       }
     } finally {
-      setIsLoading(false);
+      if (request === advancesRequest.current) setIsLoading(false);
     }
   };
 

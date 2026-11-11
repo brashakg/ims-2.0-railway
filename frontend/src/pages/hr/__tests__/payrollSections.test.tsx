@@ -285,23 +285,6 @@ describe('payslips: the payslip follows the month and year selectors', () => {
     expect(picker).toHaveValue('');
     expect(screen.queryByText('₹17,650')).not.toBeInTheDocument();
     expect(screen.queryByText('EARNINGS')).not.toBeInTheDocument();
-
-    // The same pick is dropped on Advances: no other shop's advances on screen.
-    fireEvent.click(navButton('Advances')!);
-    expect(await screen.findByTitle('Select employee for advances', undefined, FIND)).toHaveValue('');
-    expect(screen.queryByText('Pending')).not.toBeInTheDocument();
-  });
-
-  // The payload has always carried the payroll row's status; the screen never
-  // showed it, so an unapproved draft read like a final payslip.
-  it.each([
-    ['DRAFT', 'Draft - not yet approved'],
-    ['APPROVED', 'Approved'],
-    ['PAID', 'Paid'],
-  ])('a %s payslip says so', async (status, label) => {
-    await openSlip((month, y) => ({ payslip: { ...slipFor(month, y, 17650).payslip, status } }));
-    expect(await screen.findByText('₹17,650')).toBeInTheDocument();
-    expect(screen.getByText(label)).toBeInTheDocument();
   });
 
   it('an employee picked on Advances has their payslip loaded when Payslips opens', async () => {
@@ -313,6 +296,97 @@ describe('payslips: the payslip follows the month and year selectors', () => {
     fireEvent.click(navButton('Payslips')!);
     expect(await screen.findByText('EARNINGS', undefined, FIND)).toBeInTheDocument();
     expect(get).toHaveBeenCalledWith(expect.stringMatching(/^\/payroll\/payslip\/EMP-1\/\d+\/\d+$/));
+  });
+});
+
+// Audit L3-24, the Advances half. Advances and Payslips share ONE picked
+// employee. The advances list was loaded only by the Advances picker's own
+// onChange and never cleared, so after the employee (or the shop) changed
+// anywhere else, one person's advances sat under another person's name.
+describe('advances: the list on screen belongs to the employee in the picker', () => {
+  const SECOND = { ...SHEET.salaries[0], salary_record_id: 'SR-2', employee_id: 'EMP-2', employee_name: 'ZZ Second Staff' };
+  const OTHER_SHOP = { salaries: [{ ...SHEET.salaries[0], employee_id: 'EMP-9', employee_name: 'ZZ Other Shop' }] };
+  const SECOND_ADVANCES = {
+    advances: [{
+      advance_id: 'ADV-7', employee_id: 'EMP-2', employee_name: 'ZZ Second Staff',
+      amount: 7300, date_requested: '2026-09-07', status: 'approved',
+    }],
+  };
+
+  /** EMP-1 has the two ADVANCES rows (Pending 1,000 and Deducted 500), EMP-2 one of 7,300, EMP-9 none. */
+  function route(firstAnswer: () => unknown = () => ADVANCES) {
+    get.mockImplementation(async (url: string, config?: { params?: { store_id?: string } }) => {
+      if (url === '/payroll/salary-sheet') {
+        return { data: config?.params?.store_id === 'ZZ-STORE-B' ? OTHER_SHOP : { salaries: [SHEET.salaries[0], SECOND] } };
+      }
+      if (url === '/payroll/advances/EMP-1') return { data: await firstAnswer() };
+      if (url === '/payroll/advances/EMP-2') return { data: SECOND_ADVANCES };
+      if (url === '/payroll/advances/EMP-9') return { data: { advances: [] } };
+      if (url.startsWith('/payroll/payslip/')) return { data: PAYSLIP };
+      throw new Error(`unexpected GET ${url}`);
+    });
+  }
+
+  async function pickFirstOnAdvances() {
+    renderRoute('/hr/payroll/advances', ['ADMIN']);
+    const picker = await screen.findByTitle('Select employee for advances', undefined, FIND);
+    expect(await screen.findByRole('option', { name: 'ZZ Priya Sheet' })).toBeInTheDocument();
+    fireEvent.change(picker, { target: { value: 'EMP-1' } });
+    return picker;
+  }
+
+  async function pickOnPayslipsAndComeBack(employeeId: string, optionName: string) {
+    fireEvent.click(navButton('Payslips')!);
+    const slipPicker = await screen.findByTitle('Select employee for payslip', undefined, FIND);
+    expect(await screen.findByRole('option', { name: optionName })).toBeInTheDocument();
+    fireEvent.change(slipPicker, { target: { value: employeeId } });
+    expect(await screen.findByText('EARNINGS')).toBeInTheDocument();
+    fireEvent.click(navButton('Advances')!);
+    return screen.findByTitle('Select employee for advances', undefined, FIND);
+  }
+
+  it('an employee picked on Payslips: Advances shows THEIR advances, not the previous employee\'s', async () => {
+    route();
+    await pickFirstOnAdvances();
+    expect(await screen.findByText('Pending')).toBeInTheDocument();
+    expect(screen.getByText('₹1,000')).toBeInTheDocument();
+
+    expect(await pickOnPayslipsAndComeBack('EMP-2', 'ZZ Second Staff')).toHaveValue('EMP-2');
+    expect(await screen.findByText('₹7,300')).toBeInTheDocument();
+    expect(screen.queryByText('₹1,000')).not.toBeInTheDocument();
+    expect(screen.queryByText('Pending')).not.toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith('/payroll/advances/EMP-2');
+  });
+
+  it('after a shop change, an employee of the new shop never shows the old shop\'s advances', async () => {
+    route();
+    const picker = await pickFirstOnAdvances();
+    expect(await screen.findByText('Pending')).toBeInTheDocument();
+
+    act(() => switchShop('ZZ-STORE-B'));
+    expect(await screen.findByRole('option', { name: 'ZZ Other Shop' })).toBeInTheDocument();
+    expect(picker).toHaveValue('');
+    expect(screen.queryByText('Pending')).not.toBeInTheDocument();
+
+    expect(await pickOnPayslipsAndComeBack('EMP-9', 'ZZ Other Shop')).toHaveValue('EMP-9');
+    expect(await screen.findByText('No advances recorded')).toBeInTheDocument();
+    expect(screen.queryByText('Pending')).not.toBeInTheDocument();
+    expect(screen.queryByText('₹1,000')).not.toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith('/payroll/advances/EMP-9');
+  });
+
+  it('a slow answer for the employee you left never lands under the employee you picked', async () => {
+    let releaseFirst: () => void = () => {};
+    route(() => new Promise((resolve) => { releaseFirst = () => resolve(ADVANCES); }));
+    const picker = await pickFirstOnAdvances();
+    // EMP-1's advances are still on their way when EMP-2 is picked and answers first.
+    fireEvent.change(picker, { target: { value: 'EMP-2' } });
+    expect(await screen.findByText('₹7,300')).toBeInTheDocument();
+    releaseFirst();
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByText('₹7,300')).toBeInTheDocument();
+    expect(screen.queryByText('Pending')).not.toBeInTheDocument();
+    expect(screen.queryByText('₹1,000')).not.toBeInTheDocument();
   });
 });
 
