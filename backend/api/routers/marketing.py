@@ -16,7 +16,7 @@ from api.utils.event_time import utc_now, utc_now_iso
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Literal
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import re
 import uuid
 import logging
@@ -1581,49 +1581,88 @@ async def get_ad_audience_export(
 _CONSENT_LEDGER_COLL = "whatsapp_consent_ledger"
 
 
-def is_opted_out(customer_id: str, db, strict: bool = False) -> bool:
+def _consent_ts(value) -> Optional[datetime]:
+    """A stored consent timestamp as an aware UTC datetime, or None when it
+    cannot be read (the caller then treats the order of events as unproven)."""
+    try:
+        if not isinstance(value, datetime):
+            value = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def is_opted_out(
+    customer_id: str, db, strict: bool = False, phone: Optional[str] = None
+) -> bool:
     """Check if a customer is opted out via marketing_consent OR ledger.
 
     Returns True if:
     - customers.marketing_consent is explicitly False, OR
-    - the most recent whatsapp_consent_ledger entry has event in {OPT_OUT, STOP}
+    - the most recent whatsapp_consent_ledger entry has event in {OPT_OUT, STOP}, OR
+    - `phone` is given and that mobile number itself sent STOP on WhatsApp,
+      unless this customer's consent was recorded again (OPT_IN) afterwards
 
-    This unified check ensures all outbound paths honor all 3 opt-out signals:
+    This unified check ensures all outbound paths honor every opt-out signal:
     1. The customers.marketing_consent flag (direct state)
     2. INBOUND_STOP events in the ledger (TRAI/DPDP audit trail)
     3. Explicit OPT_OUT events (manual withdrawal)
+    4. The phone-keyed STOP record (whatsapp_opt_outs). The inbound STOP door
+       (whatsapp_intents._record_opt_out) flags only the FIRST customer found
+       for the number; a shared number, a number the lookup could not tie to
+       the customer, or a message with no customer is covered only by this
+       record (audit L1-F20). The newest signal wins: an OPT_IN recorded for
+       THIS customer after the STOP re-allows marketing to them.
 
     strict=True is the FAIL-CLOSED form used at the last dispatch boundary
     (MEGAPHONE's drain, L1-F20): a consent read that cannot be completed
-    RAISES instead of answering "consented", and a customer with no record at
-    all counts as opted out (there is no consent on file to rely on). The
-    default stays fail-soft for the queueing doors, which the drain re-checks.
+    RAISES instead of answering "consented". The default stays fail-soft for
+    the queueing doors, which the drain re-checks.
     """
     if db is None:
         if strict:
             raise RuntimeError("consent cannot be verified: database unavailable")
         return False
 
-    # Check the direct flag first (fast path)
-    cust = db.get_collection("customers").find_one({"customer_id": customer_id})
-    if strict and not cust:
-        return True
-    cust = cust or {}
-    if cust.get("marketing_consent") is False:
-        return True
-
-    # Check the most recent ledger entry (fail-soft: a ledger lookup error must
-    # never 500 the send path -- the marketing_consent flag above is authoritative).
-    try:
-        latest_event = db.get_collection(_CONSENT_LEDGER_COLL).find_one(
-            {"customer_id": customer_id},
-            sort=[("recorded_at", -1)]
-        )
-        if latest_event and latest_event.get("event") in {"OPT_OUT", "STOP"}:
+    latest_event = None
+    if customer_id:
+        # Check the direct flag first (fast path)
+        cust = db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+        if cust.get("marketing_consent") is False:
             return True
-    except Exception:
-        if strict:
-            raise
+
+        # Check the most recent ledger entry (fail-soft: a ledger lookup error must
+        # never 500 the send path -- the marketing_consent flag above is authoritative).
+        try:
+            latest_event = db.get_collection(_CONSENT_LEDGER_COLL).find_one(
+                {"customer_id": customer_id},
+                sort=[("recorded_at", -1)]
+            )
+            if latest_event and latest_event.get("event") in {"OPT_OUT", "STOP"}:
+                return True
+        except Exception:
+            if strict:
+                raise
+
+    if phone:
+        try:
+            from ..services.whatsapp_intents import find_phone_stop
+
+            stop = find_phone_stop(db, phone)
+        except Exception:
+            if strict:
+                raise
+            stop = None
+        if stop:
+            stopped_at = _consent_ts(stop.get("opted_out_at"))
+            opted_in_at = (
+                _consent_ts(latest_event.get("recorded_at"))
+                if latest_event and latest_event.get("event") == "OPT_IN"
+                else None
+            )
+            # Only a dated OPT_IN that is provably later than the STOP lifts it.
+            if not (stopped_at and opted_in_at and opted_in_at > stopped_at):
+                return True
 
     return False
 

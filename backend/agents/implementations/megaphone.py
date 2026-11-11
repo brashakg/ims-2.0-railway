@@ -955,7 +955,8 @@ class MegaphoneAgent(JarvisAgent):
             is never resent automatically: the provider may have accepted it.
 
           * Current consent (L1-F20). A marketing row is checked against the
-            customer's consent AS IT IS NOW, not as it was when queued. Opted
+            customer's consent AS IT IS NOW, not as it was when queued, and
+            against the STOP record of the number it is addressed to. Opted
             out -> CANCELLED, no provider call. Consent unreadable -> the row
             is held (PENDING + hold_reason) and retried next tick. OTP /
             service / transactional rows are exempt, as at queue time.
@@ -1009,15 +1010,20 @@ class MegaphoneAgent(JarvisAgent):
             message = row.get("message") or row.get("body") or ""
             template_id = row.get("template_id")
 
-            # L1-F20: re-read consent NOW for a marketing row. A row with no
-            # customer_id has no consent record to re-read (same rule as the
-            # queueing doors) and goes on.
-            if _needs_marketing_consent(row) and row.get("customer_id"):
+            # L1-F20: re-read consent NOW for a marketing row: the customer's
+            # flag and consent ledger, and the STOP record of the NUMBER the
+            # message is going to (a customer's own STOP reply is kept per
+            # phone, so it also covers a shared number and a row with no
+            # customer_id).
+            if _needs_marketing_consent(row):
                 try:
                     from api.routers.marketing import is_opted_out
 
                     opted_out = is_opted_out(
-                        row["customer_id"], getattr(self, "db", None), strict=True
+                        row.get("customer_id") or "",
+                        getattr(self, "db", None),
+                        strict=True,
+                        phone=phone,
                     )
                 except Exception as e:  # noqa: BLE001
                     # Fail closed: consent could not be read, so do not send.
@@ -1032,9 +1038,9 @@ class MegaphoneAgent(JarvisAgent):
                         row,
                         status="CANCELLED",
                         error=(
-                            "customer has no marketing consent at dispatch "
-                            "time (opted out after this was queued, or no "
-                            "customer record)"
+                            "no marketing consent at dispatch time: the "
+                            "customer opted out, or this number sent STOP, "
+                            "after the message was queued"
                         ),
                     )
                     stats["cancelled"] += 1

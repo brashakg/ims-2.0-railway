@@ -14,6 +14,7 @@ from typing import Dict, Optional, Any
 import asyncio
 import logging
 import os
+import time
 import uuid
 
 from .base import JarvisAgent
@@ -56,14 +57,15 @@ except ImportError:
 # established is not leadership: the worker waits in the leader-retry loop and
 # takes over within SCHEDULER_LEADER_RETRY seconds of Redis answering again.
 # A leader that finds ANOTHER worker's id on the lock stands down (removes its
-# jobs) instead of running beside the new leader.
+# jobs) instead of running beside the new leader. So does a leader that has
+# not been able to RENEW the lock for a whole TTL: by then its lease has run
+# out and a worker that can still reach Redis may hold the lock, so it can no
+# longer know it is the only leader. It goes back to the leader-retry loop.
 #
-# ponytail: a lock with a TTL, not a fencing token. If Redis drops for longer
-# than the TTL and returns, a second worker can win the lock up to one refresh
-# interval before the old leader notices and stands down. Work that must
-# happen once carries its own per-item claim (MEGAPHONE's drain, the campaign
-# SCHEDULED -> ACTIVE flip); add fencing tokens if a non-idempotent job ever
-# cannot.
+# ponytail: a lock with a TTL, not a fencing token. A tick that is already
+# running when the lease runs out still finishes. Work that must happen once
+# carries its own per-item claim (MEGAPHONE's drain, the campaign SCHEDULED ->
+# ACTIVE flip); add fencing tokens if a non-idempotent job ever cannot.
 
 # Redis key the scheduler leader holds. Short, namespaced.
 SCHEDULER_LEADER_KEY = os.getenv(
@@ -159,6 +161,7 @@ class AgentScheduler:
         self._instance_id = str(uuid.uuid4())      # unique per process
         self._redis = None                          # set if we hold the lock
         self._is_leader = False                     # did this process win?
+        self._lease_renewed_at = 0.0                # monotonic time of the last lock renewal
         self._leader_refresh_task: Optional[asyncio.Task] = None
         # Background retry loop for a worker that lost the startup race but must
         # take over if the current leader later exits (deploy rollover fix).
@@ -493,6 +496,7 @@ class AgentScheduler:
         # We are the leader. Hold the client + refresh the TTL while we run.
         self._redis = client
         self._is_leader = True
+        self._lease_renewed_at = time.monotonic()
         logger.info(
             "[SCHEDULER] Acquired leader lock '%s' (worker %s, ttl=%ss).",
             SCHEDULER_LEADER_KEY, self._instance_id[:8], SCHEDULER_LEADER_TTL,
@@ -525,6 +529,7 @@ class AgentScheduler:
                 current = self._redis.get(SCHEDULER_LEADER_KEY)
                 if current == self._instance_id:
                     self._redis.expire(SCHEDULER_LEADER_KEY, SCHEDULER_LEADER_TTL)
+                    self._lease_renewed_at = time.monotonic()
                     continue
                 if current is None and self._redis.set(
                     SCHEDULER_LEADER_KEY,
@@ -534,17 +539,25 @@ class AgentScheduler:
                 ):
                     # Our lock lapsed (e.g. Redis restarted) and nobody took
                     # it: we re-took it atomically, still the only leader.
+                    self._lease_renewed_at = time.monotonic()
                     continue
+                why = "now held by another worker"
             except Exception as e:
-                # Redis unreachable: no other worker can take the lock either
-                # (acquire fails closed), so keep running and ask again.
-                logger.warning(f"[SCHEDULER] Leader lock refresh error ({e}).")
-                continue
-            # Another worker holds the lock now. Two leaders would tick every
-            # job twice, so this one stands down (L1-F21) and waits its turn.
+                # Redis did not answer. The lock we last renewed is still ours
+                # until its TTL runs out, so keep running and ask again. Past
+                # the TTL the lease is gone: a worker that CAN reach Redis may
+                # have taken it (L1-F21: leadership that cannot be renewed is
+                # not leadership).
+                unrenewed = time.monotonic() - self._lease_renewed_at
+                if unrenewed < SCHEDULER_LEADER_TTL:
+                    logger.warning(f"[SCHEDULER] Leader lock refresh error ({e}).")
+                    continue
+                why = f"could not be renewed for {int(unrenewed)}s ({e})"
+            # Two leaders would tick every job twice, so this one stands down
+            # (L1-F21) and waits its turn in the leader-retry loop.
             logger.warning(
-                "[SCHEDULER] Leader lock now held by another worker -> standing "
-                "down (worker %s): scheduled jobs removed.", self._instance_id[:8],
+                "[SCHEDULER] Leader lock %s -> standing down (worker %s): "
+                "scheduled jobs removed.", why, self._instance_id[:8],
             )
             self._stand_down()
             break

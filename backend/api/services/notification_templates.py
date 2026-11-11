@@ -302,9 +302,17 @@ def effective_catalog(saved_rows: Optional[list] = None) -> list:
       builtin      the server has default wording for it
       saved        a notification_templates row exists (an owner edit/toggle)
       is_enabled   the saved row's switch (True when there is no row)
-      sendable     switched on AND a message body exists (built-in default, or
-                   a saved non-empty body). A template that is not sendable
-                   would queue the literal text "[Template X not found]".
+      sendable     the sender can build a message for it, by resolve_template's
+                   own rule: a built-in always has its default wording (a
+                   saved row that is switched off or empty only means the
+                   SAVED wording is not used), and a saved-only template needs
+                   a switched-on, non-empty body. A template that is not
+                   sendable would queue the literal text
+                   "[Template X not found]".
+
+    The switch on the Notifications screen does not stop a built-in from being
+    sent today, so this list does not pretend it does: whether "off" should
+    stop sends is an owner decision, not made here.
 
     Pure: pass the saved rows in. Order: built-ins first (declaration order),
     then saved-only templates by id.
@@ -327,7 +335,7 @@ def effective_catalog(saved_rows: Optional[list] = None) -> list:
                 "builtin": builtin,
                 "saved": row is not None,
                 "is_enabled": enabled,
-                "sendable": enabled and (builtin or _is_usable(row, "content")),
+                "sendable": builtin or _is_usable(row, "content"),
             }
         )
     return out

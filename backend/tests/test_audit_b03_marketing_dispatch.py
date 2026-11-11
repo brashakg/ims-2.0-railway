@@ -11,7 +11,9 @@ NOTHING here can send: DISPATCH_MODE is forced off and the provider functions
 are replaced by spies that record the call and return SIMULATED.
 
   L1-F20  a queued marketing message must not reach the provider after the
-          customer opts out (consent is re-read at dispatch, fail closed).
+          customer opts out (consent is re-read at dispatch, fail closed),
+          whether the opt-out came through the staff consent recorder or as
+          the customer's own STOP reply on WhatsApp (kept per phone number).
   L1-F21  two drains / two scheduler leaders must not dispatch one queued
           message twice; leadership that cannot be established is not held.
   L1-F22  cron triggers carry the India timezone, whatever the host clock.
@@ -44,6 +46,7 @@ from agents.scheduler import AgentScheduler  # noqa: E402
 from api.routers import marketing as marketing_mod  # noqa: E402
 from api.services import campaign_segments as seg  # noqa: E402
 from api.services import reminder_rail as rail  # noqa: E402
+from api.services import whatsapp_intents as wa_intents  # noqa: E402
 from api.services import notification_templates as templates_mod  # noqa: E402
 from api.services.notification_service import TEMPLATES  # noqa: E402
 from tests.strict_fakes import StrictCollection, StrictDB  # noqa: E402
@@ -85,6 +88,7 @@ def _db(rows=None, *, consent=True, customer=True):
             "customers",
             [
                 {
+                    "_id": CUST,  # real Mongo rows always carry one
                     "customer_id": CUST,
                     "name": "Synthetic only",
                     "mobile": PHONE,
@@ -246,14 +250,17 @@ def test_no_database_handle_holds_marketing(provider, monkeypatch):
     assert coll.find_one({"_id": "N1"})["status"] == "PENDING"
 
 
-def test_marketing_for_a_customer_with_no_record_is_cancelled(provider):
-    """No customer record means no consent on file to rely on."""
+def test_marketing_for_a_customer_with_no_record_follows_the_queueing_rule(provider):
+    """Unchanged rule, pinned: a customer_id with no customer record has no
+    opt-out on file, exactly as the queueing doors read it, so the message
+    goes on. Whether such a message should be cancelled instead is an owner
+    decision and is NOT made here."""
     db = _db(customer=False)
 
     _drain(db)
 
-    assert provider == []
-    assert _stored(db)["status"] == "CANCELLED"
+    assert len(provider) == 1
+    assert _stored(db)["status"] == "SIMULATED"
 
 
 @pytest.mark.parametrize(
@@ -289,8 +296,9 @@ def test_a_row_with_no_category_is_treated_as_marketing(provider):
 
 
 def test_marketing_with_no_customer_id_still_sends(provider):
-    """Unchanged rule, pinned: a row with no customer has no consent record
-    to re-read (the queueing doors treat it the same way)."""
+    """Unchanged rule, pinned: a row with no customer has no customer consent
+    record to re-read (the queueing doors treat it the same way). Only a STOP
+    from the number itself blocks it (see the inbound STOP tests below)."""
     db = _db([_row(customer_id="")])
 
     _drain(db)
@@ -300,13 +308,216 @@ def test_marketing_with_no_customer_id_still_sends(provider):
 
 def test_strict_consent_check_is_opt_in_only_for_the_dispatch_boundary():
     """The queueing doors keep the fail-soft answer; only strict=True raises
-    or treats a missing record as opted out."""
+    when consent cannot be read. Strict changes the FAILURE direction only,
+    never who counts as opted out."""
     assert marketing_mod.is_opted_out(CUST, None) is False
     with pytest.raises(RuntimeError):
         marketing_mod.is_opted_out(CUST, None, strict=True)
     empty = StrictDB()
     assert marketing_mod.is_opted_out(CUST, empty) is False
-    assert marketing_mod.is_opted_out(CUST, empty, strict=True) is True
+    assert marketing_mod.is_opted_out(CUST, empty, strict=True) is False
+
+    # the phone-keyed STOP read follows the same two failure directions
+    broken = StrictDB()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("opt-out register unreadable")
+
+    broken.get_collection("whatsapp_opt_outs").find_one = _boom
+    assert marketing_mod.is_opted_out(CUST, broken, phone=PHONE) is False
+    with pytest.raises(RuntimeError):
+        marketing_mod.is_opted_out(CUST, broken, strict=True, phone=PHONE)
+
+
+# --- the customer's own STOP reply on WhatsApp (the inbound door) ------------
+#
+# The tests above drive the staff consent recorder. A customer's STOP reply
+# comes in through whatsapp_intents instead, which flags only the FIRST
+# customer found for that mobile and keeps a phone-keyed STOP record for
+# everything else (a shared number, a number stored in another field, a row
+# with no customer). The drain must honour that record too.
+
+OTHER = "ZZ-B03-OTHER"
+
+
+def _inbound_stop(db, monkeypatch, phone="91" + PHONE):
+    """Run the REAL inbound WhatsApp door for a STOP reply (dispatch_intent ->
+    handle_opt_out -> _record_opt_out). The auto-reply stays off (policy
+    default), so nothing is sent back either."""
+    monkeypatch.setattr(wa_intents, "_get_db", lambda: db)
+    out = asyncio.run(wa_intents.dispatch_intent(phone, "STOP", None, "ZZ-STORE"))
+    assert out["intent"] == "OPT_OUT" and out["reply_sent"] is False
+    return out
+
+
+def test_whatsapp_stop_from_a_shared_number_cancels_the_other_customers_message(
+    provider, monkeypatch
+):
+    """Two customer records share one mobile. STOP flags only the first one;
+    the queued marketing for the SECOND must still not go to that number."""
+    db = _db([_row(customer_id=OTHER)])
+    db.seed(
+        "customers",
+        [{"_id": OTHER, "customer_id": OTHER, "name": "Synthetic two", "mobile": PHONE, "marketing_consent": True}],
+    )
+    out = _inbound_stop(db, monkeypatch)
+    assert out["customer_id"] == CUST  # the first match is the one flagged
+    customers = db.get_collection("customers")
+    assert customers.find_one({"customer_id": CUST})["marketing_consent"] is False
+    assert customers.find_one({"customer_id": OTHER})["marketing_consent"] is True
+
+    stats = _drain(db)
+
+    assert provider == [], "a number that sent STOP still got marketing"
+    row = _stored(db)
+    assert row["status"] == "CANCELLED" and row["delivery_status"] == "CANCELLED"
+    assert "STOP" in row["failure_reason"]
+    assert "dispatched_at" not in row
+    assert stats["cancelled"] == 1
+
+
+def test_whatsapp_stop_from_a_number_the_lookup_cannot_tie_to_the_customer(
+    provider, monkeypatch
+):
+    """The customer's number sits in a field the inbound lookup does not read,
+    so STOP flags nobody. The phone-keyed STOP record still blocks the row."""
+    db = _db(customer=False)
+    db.seed(
+        "customers",
+        [{"customer_id": CUST, "name": "Synthetic only", "phone": PHONE, "marketing_consent": True}],
+    )
+    out = _inbound_stop(db, monkeypatch)
+    assert out["customer_id"] is None
+
+    _drain(db)
+
+    assert provider == []
+    assert _stored(db)["status"] == "CANCELLED"
+
+
+def test_whatsapp_stop_blocks_marketing_that_has_no_customer_id(provider, monkeypatch):
+    db = _db([_row(customer_id="")], customer=False)
+    _inbound_stop(db, monkeypatch)
+
+    _drain(db)
+
+    assert provider == []
+    assert _stored(db)["status"] == "CANCELLED"
+
+
+@pytest.mark.parametrize(
+    "stop_from, row_phone",
+    [
+        ("91" + PHONE, PHONE),
+        (PHONE, "91" + PHONE),
+        ("+91" + PHONE, "+91 " + PHONE[:5] + " " + PHONE[5:]),
+        ("91" + PHONE, "0" + PHONE),
+    ],
+)
+def test_whatsapp_stop_matches_the_number_however_it_is_written(
+    provider, monkeypatch, stop_from, row_phone
+):
+    """One mobile is one mobile: country code, plus sign, spaces and a leading
+    zero must not let a queued message slip past the STOP."""
+    db = _db([_row(customer_id=OTHER, customer_phone=row_phone)], customer=False)
+    # the customer exists and has consent on file; STOP cannot be tied to them
+    db.seed(
+        "customers",
+        [{"_id": OTHER, "customer_id": OTHER, "phone": row_phone, "marketing_consent": True}],
+    )
+    assert _inbound_stop(db, monkeypatch, stop_from)["customer_id"] is None
+
+    _drain(db)
+
+    assert provider == []
+    assert _stored(db)["status"] == "CANCELLED"
+
+
+def test_whatsapp_stop_from_one_number_does_not_block_another(provider, monkeypatch):
+    db = _db()
+    _inbound_stop(db, monkeypatch, "919000011111")
+
+    _drain(db)
+
+    assert len(provider) == 1 and provider[0]["phone"] == PHONE
+    assert _stored(db)["status"] == "SIMULATED"
+
+
+def test_a_recorded_opt_in_after_a_whatsapp_stop_lets_marketing_through(provider, monkeypatch):
+    """Legitimate later opt-in: the number said STOP, then this customer's
+    consent was recorded again. Marketing to this customer is allowed."""
+    db = _db()
+    _inbound_stop(db, monkeypatch)
+    time.sleep(0.01)  # keep the STOP and the opt-in timestamps distinct
+    _record_consent(db, monkeypatch, "OPT_IN")
+
+    _drain(db)
+
+    assert len(provider) == 1
+    assert _stored(db)["status"] == "SIMULATED"
+
+
+def test_an_opt_in_recorded_before_the_whatsapp_stop_does_not_override_it(provider, monkeypatch):
+    """The newest signal wins: opt-in first, STOP afterwards, for a customer
+    record the STOP could not flag."""
+    db = _db(customer=False)
+    db.seed(
+        "customers",
+        [{"customer_id": CUST, "name": "Synthetic only", "phone": PHONE, "marketing_consent": True}],
+    )
+    _record_consent(db, monkeypatch, "OPT_IN")
+    time.sleep(0.01)
+    _inbound_stop(db, monkeypatch)
+
+    _drain(db)
+
+    assert provider == []
+    assert _stored(db)["status"] == "CANCELLED"
+
+
+def test_whatsapp_stop_register_read_failure_holds_the_message(provider, monkeypatch):
+    """Fail closed: the STOP register cannot be read, so the message waits."""
+    db = _db()
+    stops = db.get_collection("whatsapp_opt_outs")
+    real_find_one = stops.find_one
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("opt-out register unreadable")
+
+    stops.find_one = _boom
+    stats = _drain(db)
+
+    assert provider == []
+    row = _stored(db)
+    assert row["status"] == "PENDING"
+    assert "consent could not be verified" in row["hold_reason"]
+    assert stats["held"] == 1
+
+    stops.find_one = real_find_one
+    _drain(db)
+    assert len(provider) == 1
+
+
+def test_service_message_still_reaches_a_number_that_sent_whatsapp_stop(provider, monkeypatch):
+    """STOP ends marketing, not an order update or an OTP."""
+    db = _db([_row(template_id="ORDER_DELIVERED", category="SERVICE", consent_basis="transactional")])
+    _inbound_stop(db, monkeypatch)
+
+    _drain(db)
+
+    assert len(provider) == 1
+    assert _stored(db)["status"] == "SIMULATED"
+
+
+def test_inbound_gate_and_the_drain_read_the_same_stop_record(monkeypatch):
+    """One reader for the phone-keyed STOP record: the inbound auto-reply gate
+    recognises the number in any written form, as the drain does."""
+    db = _db()
+    _inbound_stop(db, monkeypatch, "91" + PHONE)
+
+    assert wa_intents._phone_is_opted_out(PHONE) is True
+    assert wa_intents._phone_is_opted_out("+91" + PHONE) is True
+    assert wa_intents._phone_is_opted_out("9000011111") is False
 
 
 # ===========================================================================
@@ -559,6 +770,45 @@ async def test_a_leader_whose_lock_lapsed_unclaimed_retakes_it(monkeypatch):
         await sched.shutdown()
 
 
+class _DeadRedis(_FakeRedis):
+    """A Redis that stopped answering after the lock was taken."""
+
+    def get(self, key):
+        raise ConnectionError("redis unreachable")
+
+
+@pytest.mark.asyncio
+async def test_a_leader_that_cannot_renew_keeps_running_only_while_its_lease_lasts(monkeypatch):
+    """Redis stops answering the leader. Its lock is still valid until the TTL
+    runs out, so a short blip changes nothing; once a whole TTL has passed
+    unrenewed, another worker may hold the lock, so this one stands down and
+    goes back to waiting (it does not run beside a possible new leader)."""
+    kv = {}
+    sched = await _leader_with_job(monkeypatch, kv)
+    try:
+        sched._redis = _DeadRedis(kv)
+
+        # inside the lease (TTL is 90s by default): a blip is ridden out
+        await asyncio.sleep(0.1)
+        assert sched._is_leader is True and sched._running is True
+        if sched._scheduler is not None:
+            assert [j.id for j in sched._scheduler.get_jobs()] == ["zz"]
+
+        # the lease has run out without one successful renewal (a zero TTL
+        # makes "a whole TTL unrenewed" true on the next failed refresh)
+        monkeypatch.setattr(scheduler_mod, "SCHEDULER_LEADER_TTL", 0)
+        await asyncio.sleep(0.2)
+
+        assert sched._is_leader is False
+        assert sched._running is False
+        assert sched._redis is None
+        if sched._scheduler is not None:
+            assert sched._scheduler.get_jobs() == []
+        assert sched._leader_wait_task is not None and not sched._leader_wait_task.done()
+    finally:
+        await sched.shutdown()
+
+
 # ===========================================================================
 # L1-F22 - cron jobs fire on India time whatever the host timezone
 # ===========================================================================
@@ -791,9 +1041,11 @@ def test_saved_override_and_saved_only_template_are_in_the_catalog():
     assert len(cat) == len(TEMPLATES) + 1  # nothing vanished, nothing doubled
 
 
-def test_disabled_or_empty_templates_are_listed_but_not_sendable():
-    """Explicit outcome instead of silently vanishing: a switched-off template
-    and a saved template with no body are in the list, marked not sendable."""
+def test_disabled_or_empty_templates_are_listed_with_what_the_sender_will_do(monkeypatch):
+    """Explicit outcome instead of silently vanishing, and the SAME answer the
+    sender gives: a saved template with no usable body is listed, not
+    sendable; a switched-off BUILT-IN is listed as switched off and still
+    sendable, because the sender falls back to its built-in wording."""
     rows = [
         {"template_id": "BIRTHDAY_WISH", "is_enabled": False, "content": "x"},
         {"template_id": "ZZ_EMPTY", "is_enabled": True, "content": "   "},
@@ -801,9 +1053,19 @@ def test_disabled_or_empty_templates_are_listed_but_not_sendable():
     ]
     cat = _by_id(templates_mod.effective_catalog(rows))
 
-    assert cat["BIRTHDAY_WISH"]["sendable"] is False and cat["BIRTHDAY_WISH"]["is_enabled"] is False
+    assert cat["BIRTHDAY_WISH"]["is_enabled"] is False
+    assert cat["BIRTHDAY_WISH"]["sendable"] is True
     assert cat["ZZ_EMPTY"]["sendable"] is False and cat["ZZ_EMPTY"]["is_enabled"] is True
-    assert cat["ZZ_OFF"]["sendable"] is False
+    assert cat["ZZ_OFF"]["sendable"] is False and cat["ZZ_OFF"]["is_enabled"] is False
+
+    # ...and the catalog agrees with the resolver, row by row.
+    saved = {r["template_id"]: r for r in rows}
+    monkeypatch.setattr(templates_mod, "_find_saved_template", lambda tid, _ev: saved.get(tid))
+    for tid, entry in cat.items():
+        body, _ = templates_mod.resolve_template(
+            template_id=tid, trigger_event=tid, default_content=TEMPLATES.get(tid, "")
+        )
+        assert bool(body.strip()) is entry["sendable"], tid
 
 
 def test_templates_endpoint_returns_saved_rows_and_the_catalog(monkeypatch):
