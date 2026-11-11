@@ -74,6 +74,8 @@ export function SalarySetupPage() {
 
   const [importOpen, setImportOpen] = useState(false);
   const [csvText, setCsvText] = useState('');
+  // Rows of the pasted CSV that were NOT imported, with the reason for each.
+  const [skippedRows, setSkippedRows] = useState<SkippedCsvRow[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -166,17 +168,31 @@ export function SalarySetupPage() {
   };
 
   const runImport = async () => {
-    const rows = parseCsv(csvText);
+    const { rows, skipped } = parseSalaryCsv(csvText);
+    setSkippedRows(skipped);
     if (rows.length === 0) {
-      toast.error('No valid rows found. Need a header row with at least employee_id and basic.');
+      toast.error(
+        skipped.length > 0
+          ? 'Nothing was imported: every row has a problem. They are listed below.'
+          : 'No valid rows found. Need a header row with at least employee_id and basic.',
+      );
       return;
     }
     setSaving(true);
     try {
       const r = await payrollApi.bulkConfigs(rows);
-      toast.success(`Imported ${r.total} (${r.created} new, ${r.updated} updated)`);
-      setImportOpen(false);
-      setCsvText('');
+      if (skipped.length > 0) {
+        // Say it, and KEEP the window open on the list: a row that was left
+        // out is an employee whose salary did not change.
+        toast.warning(
+          `Imported ${r.total} (${r.created} new, ${r.updated} updated). `
+          + `${skipped.length} row${skipped.length === 1 ? ' was' : 's were'} NOT imported - see the list.`,
+        );
+      } else {
+        toast.success(`Imported ${r.total} (${r.created} new, ${r.updated} updated)`);
+        setImportOpen(false);
+        setCsvText('');
+      }
       await load();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Import failed');
@@ -197,7 +213,7 @@ export function SalarySetupPage() {
         {canEdit && (
           <div className="flex flex-wrap gap-2">
             <button className="btn-secondary" onClick={seedPt}>Seed PT slabs</button>
-            <button className="btn-secondary" onClick={() => setImportOpen(true)}>Bulk import (CSV)</button>
+            <button className="btn-secondary" onClick={() => { setSkippedRows([]); setImportOpen(true); }}>Bulk import (CSV)</button>
             <button className="btn-primary" onClick={openCreate}>+ Add salary</button>
           </div>
         )}
@@ -414,6 +430,20 @@ export function SalarySetupPage() {
               value={csvText}
               onChange={(e) => setCsvText(e.target.value)}
             />
+            {skippedRows.length > 0 && (
+              <div role="alert" className="mt-3 max-h-40 overflow-y-auto rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                <p className="font-medium">
+                  {skippedRows.length === 1 ? '1 row was not imported:' : `${skippedRows.length} rows were not imported:`}
+                </p>
+                <ul className="mt-1 list-disc pl-5">
+                  {skippedRows.map((r) => (
+                    <li key={r.line}>
+                      Line {r.line}{r.employee_id ? ` (${r.employee_id})` : ''}: {r.reason}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <div className="flex justify-end gap-2 mt-4">
               <button className="btn-secondary" onClick={() => setImportOpen(false)} disabled={saving}>Cancel</button>
               <button className="btn-primary" onClick={runImport} disabled={saving}>
@@ -440,23 +470,54 @@ const NUMERIC_COLS = new Set([
   'basic', 'hra', 'conveyance', 'medical', 'special_allowance', 'tds_monthly',
 ]);
 
-/** Minimal CSV parser (no quoted-comma support) -> SalaryConfig[]. */
-function parseCsv(text: string): SalaryConfig[] {
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length < 2) return [];
-  const headers = lines[0].split(',').map((h) => h.trim());
-  const out: SalaryConfig[] = [];
-  for (let i = 1; i < lines.length; i++) {
-    const cells = lines[i].split(',').map((c) => c.trim());
+export interface SkippedCsvRow {
+  /** 1-based line of the pasted text, counting the header and blank lines. */
+  line: number;
+  employee_id: string;
+  reason: string;
+}
+
+/** Minimal CSV parser (no quoted-comma support).
+ *
+ *  A row that cannot be imported is RETURNED in `skipped` with its line and
+ *  the reason. It used to be dropped without a word, so an import of one good
+ *  and one bad row said "Imported 1" and nobody learned an employee was left
+ *  out. The checks are the server's own (basic > 0, every other amount >= 0),
+ *  so one bad row no longer costs the whole batch either. */
+export function parseSalaryCsv(text: string): { rows: SalaryConfig[]; skipped: SkippedCsvRow[] } {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l, i) => ({ line: i + 1, text: l.trim() }))
+    .filter((l) => l.text);
+  const rows: SalaryConfig[] = [];
+  const skipped: SkippedCsvRow[] = [];
+  if (lines.length < 2) return { rows, skipped };
+  const headers = lines[0].text.split(',').map((h) => h.trim());
+  for (const { line, text: lineText } of lines.slice(1)) {
+    const cells = lineText.split(',').map((c) => c.trim());
     const row: Record<string, string | number> = {};
+    let reason = '';
     headers.forEach((h, idx) => {
       const raw = cells[idx] ?? '';
-      row[h] = NUMERIC_COLS.has(h) ? Number(raw || 0) : raw;
+      if (!NUMERIC_COLS.has(h)) {
+        row[h] = raw;
+        return;
+      }
+      const n = Number(raw || 0);
+      row[h] = n;
+      if (reason) return;
+      if (!Number.isFinite(n)) reason = `${h} "${raw}" is not a number`;
+      else if (n < 0) reason = `${h} cannot be negative`;
     });
-    if (!row.employee_id || !row.basic || Number(row.basic) <= 0) continue;
-    out.push(row as unknown as SalaryConfig);
+    if (!row.employee_id) reason = 'employee_id is missing';
+    else if (!reason && !(Number(row.basic) > 0)) reason = 'basic must be greater than 0';
+    if (reason) {
+      skipped.push({ line, employee_id: String(row.employee_id || ''), reason });
+      continue;
+    }
+    rows.push(row as unknown as SalaryConfig);
   }
-  return out;
+  return { rows, skipped };
 }
 
 export default SalarySetupPage;

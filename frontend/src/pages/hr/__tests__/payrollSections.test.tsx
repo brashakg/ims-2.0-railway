@@ -183,6 +183,81 @@ describe('each payroll section renders at its own URL inside the HR module', () 
   });
 });
 
+// Audit L3-24: the payslip on screen must be the one for the month in the
+// selector. It used to load only when the EMPLOYEE was picked, so changing the
+// month left the previous month's payslip (and its net pay) on screen.
+describe('payslips: the payslip follows the month and year selectors', () => {
+  const slipFor = (month: number, year: number, netPay: number) => ({
+    payslip: {
+      ...PAYSLIP.payslip, month, year,
+      breakdown: { ...PAYSLIP.payslip.breakdown, net_pay: netPay },
+    },
+  });
+  const year = new Date().getFullYear();
+
+  async function openSlip(answer: (month: number, year: number) => unknown) {
+    get.mockImplementation(async (url: string) => {
+      if (url === '/payroll/salary-sheet') return { data: SHEET };
+      const m = /^\/payroll\/payslip\/EMP-1\/(\d+)\/(\d+)$/.exec(url);
+      if (m) return { data: await answer(Number(m[1]), Number(m[2])) };
+      throw new Error(`unexpected GET ${url}`);
+    });
+    renderRoute('/hr/payroll/payslips', ['ADMIN']);
+    fireEvent.change(await screen.findByTitle('Select payslip month', undefined, FIND), { target: { value: '2' } });
+    const picker = screen.getByTitle('Select employee for payslip');
+    expect(await screen.findByRole('option', { name: 'ZZ Priya Sheet' })).toBeInTheDocument();
+    fireEvent.change(picker, { target: { value: 'EMP-1' } });
+  }
+
+  it('changing the month loads that month and takes the old payslip off the screen', async () => {
+    await openSlip((month, y) => (month === 2 ? slipFor(2, y, 17650) : { payslip: null }));
+    expect(await screen.findByText(`February ${year}`)).toBeInTheDocument();
+    expect(screen.getByText('₹17,650')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTitle('Select payslip month'), { target: { value: '3' } });
+    expect(await screen.findByText('No payslip found for selected month')).toBeInTheDocument();
+    expect(screen.queryByText(`February ${year}`)).not.toBeInTheDocument();
+    expect(screen.queryByText('₹17,650')).not.toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith(`/payroll/payslip/EMP-1/3/${year}`);
+  });
+
+  it('changing the year reloads too', async () => {
+    await openSlip((month, y) => slipFor(month, y, y === year ? 17650 : 16000));
+    expect(await screen.findByText('₹17,650')).toBeInTheDocument();
+    fireEvent.change(screen.getByTitle('Select payslip year'), { target: { value: String(year - 1) } });
+    expect(await screen.findByText(`February ${year - 1}`)).toBeInTheDocument();
+    expect(screen.getByText('₹16,000')).toBeInTheDocument();
+  });
+
+  it('a slow answer for the month you left never lands under the month you picked', async () => {
+    let releaseFebruary: (v: unknown) => void = () => {};
+    await openSlip((month, y) => (
+      month === 2
+        ? new Promise((resolve) => { releaseFebruary = () => resolve(slipFor(2, y, 17650)); })
+        : slipFor(month, y, 15000)
+    ));
+    // February is still on its way when March is picked and answers first.
+    fireEvent.change(screen.getByTitle('Select payslip month'), { target: { value: '3' } });
+    expect(await screen.findByText(`March ${year}`)).toBeInTheDocument();
+    releaseFebruary(null);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByText(`March ${year}`)).toBeInTheDocument();
+    expect(screen.getByText('₹15,000')).toBeInTheDocument();
+    expect(screen.queryByText('₹17,650')).not.toBeInTheDocument();
+  });
+
+  it('an employee picked on Advances has their payslip loaded when Payslips opens', async () => {
+    renderRoute('/hr/payroll/advances', ['ADMIN']);
+    const advPicker = await screen.findByTitle('Select employee for advances', undefined, FIND);
+    expect(await screen.findByRole('option', { name: 'ZZ Priya Sheet' })).toBeInTheDocument();
+    fireEvent.change(advPicker, { target: { value: 'EMP-1' } });
+    expect(await screen.findByText('Pending')).toBeInTheDocument();
+    fireEvent.click(navButton('Payslips')!);
+    expect(await screen.findByText('EARNINGS', undefined, FIND)).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith(expect.stringMatching(/^\/payroll\/payslip\/EMP-1\/\d+\/\d+$/));
+  });
+});
+
 describe('the picks live in PayrollLayout, so they survive moving between sections', () => {
   it('month, year and employee picked on one section are still picked on the next', async () => {
     const year = new Date().getFullYear();

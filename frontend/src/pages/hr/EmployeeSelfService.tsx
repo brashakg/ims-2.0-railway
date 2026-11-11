@@ -217,8 +217,17 @@ export function EmployeeSelfService() {
     const monthLabel = payslip.month
       ? `${MONTH_NAMES[(payslip.month || 1) - 1]} ${payslip.year}`
       : '';
-    const w = window.open('', '_blank', 'noopener,noreferrer');
-    if (!w) return;
+    // No 'noopener' here: with it window.open returns null BY SPECIFICATION,
+    // so this function gave up and left the staff member looking at an empty
+    // about:blank tab. The tab is ours (we write the slip into it), like every
+    // other print window in the app.
+    const w = window.open('', '_blank');
+    if (!w) {
+      toast.error('Could not open the payslip. Please allow pop-ups for this site and try again.');
+      return;
+    }
+    const esc = (v: unknown) =>
+      String(v ?? '').replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
     w.document.write(`<!doctype html><html><head><meta charset="utf-8">
       <title>Payslip ${monthLabel}</title>
       <style>
@@ -231,8 +240,8 @@ export function EmployeeSelfService() {
         .net td{font-weight:bold;border-top:2px solid #111;border-bottom:none;font-size:16px;padding-top:10px;}
         @media print{button{display:none;}}
       </style></head><body>
-      <h1>${(payslip.employee_name as string) || 'Payslip'}</h1>
-      <div class="sub">${monthLabel}${payslip.employee_id ? ' &middot; ' + payslip.employee_id : ''}</div>
+      <h1>${esc(payslip.employee_name) || 'Payslip'}</h1>
+      <div class="sub">${monthLabel}${payslip.employee_id ? ' &middot; ' + esc(payslip.employee_id) : ''}</div>
       <table>
         <tr><td>Gross Salary</td><td class="r">${rupee(bd.gross_salary)}</td></tr>
         <tr><td>Total Deductions</td><td class="r">${rupee(bd.total_deductions)}</td></tr>

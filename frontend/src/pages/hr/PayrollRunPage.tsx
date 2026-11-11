@@ -125,6 +125,13 @@ export function PayrollRunPage() {
   const anyApproved = rows.some((r) => r.status === 'APPROVED');
 
   const doRun = async (dryRun: boolean) => {
+    // A recovery takes money back; a negative one would RAISE net pay. The
+    // server refuses it too -- this just says so before the round trip.
+    const negative = Object.entries(advances).find(([, amount]) => !(amount >= 0));
+    if (negative) {
+      toast.error(`Advance recovery cannot be negative (${negative[0]}). Enter 0 or a positive amount.`);
+      return;
+    }
     setBusy(true);
     try {
       const res = await payrollApi.runPayroll({

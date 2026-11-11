@@ -89,6 +89,7 @@ interface PayrollOutletContext {
   advances: SalaryAdvance[];
   payslip: Payslip | null;
   isLoading: boolean;
+  payslipLoading: boolean;
   noAccess: string | null;
   showAdvanceForm: boolean;
   setShowAdvanceForm: (open: boolean) => void;

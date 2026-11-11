@@ -2,6 +2,7 @@
 // PayrollDashboard 'payslips' tab; its state and handlers live in
 // PayrollLayout and arrive through <Outlet context>.
 
+import { useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
 import { PayrollAccessNotice } from '../../../components/hr/PayrollAccessNotice';
 import { MONTHS, usePayrollContext } from './payrollShared';
@@ -9,9 +10,17 @@ import { MONTHS, usePayrollContext } from './payrollShared';
 export function PayslipsSection() {
   const {
     currentYear, selectedMonth, setSelectedMonth, selectedYear, setSelectedYear,
-    selectedEmployee, setSelectedEmployee, salarySheet, payslip, isLoading, noAccess,
+    selectedEmployee, setSelectedEmployee, salarySheet, payslip, payslipLoading, noAccess,
     loadPayslip,
   } = usePayrollContext();
+
+  // A payslip belongs to (employee, month, year): reload it when ANY of the
+  // three changes, and when this section opens with an employee already picked
+  // on Advances. It used to load only when the employee was picked, so
+  // changing the month left the previous month's payslip on screen.
+  useEffect(() => {
+    if (selectedEmployee) loadPayslip(selectedEmployee);
+  }, [selectedEmployee, selectedMonth, selectedYear]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="space-y-4">
@@ -20,12 +29,7 @@ export function PayslipsSection() {
         <div className="flex items-center gap-4">
           <select
             value={selectedEmployee}
-            onChange={(e) => {
-              setSelectedEmployee(e.target.value);
-              if (e.target.value) {
-                loadPayslip(e.target.value);
-              }
-            }}
+            onChange={(e) => setSelectedEmployee(e.target.value)}
             title="Select employee for payslip"
             className="bg-white border border-gray-300 text-gray-900 px-4 py-2 rounded flex-1"
           >
@@ -67,7 +71,7 @@ export function PayslipsSection() {
 
       {/* Payslip display */}
       {selectedEmployee && (
-        isLoading ? (
+        payslipLoading ? (
           <div className="flex justify-center py-8">
             <Loader2 className="w-8 h-8 text-blue-600 animate-spin" />
           </div>

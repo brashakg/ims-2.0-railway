@@ -17,7 +17,7 @@
 // page's editorial header stays, as an h2 under HRLayout's h1 (one h1 per
 // page), and its tab buttons are HRLayout's nav.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Outlet } from 'react-router-dom';
 import { AlertCircle } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
@@ -77,6 +77,11 @@ export function PayrollLayout() {
   
   // UI
   const [isLoading, setIsLoading] = useState(true);
+  // The payslip has its own flag and request counter: its load runs next to
+  // the salary-sheet reload on every month change, and whichever answered
+  // first used to decide what the Payslips section showed.
+  const [payslipLoading, setPayslipLoading] = useState(false);
+  const payslipRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   // Owner ruling 2026-08-09: salary data is ADMIN-only. A 403 must show an
   // explicit access notice -- an empty table would read as "nobody was paid".
@@ -134,14 +139,19 @@ export function PayrollLayout() {
   };
 
   const loadPayslip = async (employeeId: string) => {
-    setIsLoading(true);
+    // The slip on screen belongs to the PREVIOUS employee / month / year: drop
+    // it before asking, and ignore any answer that is not for the latest ask,
+    // so one month's payslip can never sit under another month's selector.
+    const request = ++payslipRequest.current;
+    setPayslip(null);
+    setPayslipLoading(true);
     setError(null);
     setNoAccess(null);
     try {
       const data = await payrollApi.getPayslip(employeeId, selectedMonth, selectedYear);
-      setPayslip(data?.payslip || null);
+      if (request === payslipRequest.current) setPayslip(data?.payslip || null);
     } catch (err) {
-      setPayslip(null);
+      if (request !== payslipRequest.current) return;
       if (isForbiddenError(err)) {
         setNoAccess(
           forbiddenDetail(err, "Another employee's payslip is restricted to administrators.")
@@ -150,7 +160,7 @@ export function PayrollLayout() {
         setError('Failed to load payslip');
       }
     } finally {
-      setIsLoading(false);
+      if (request === payslipRequest.current) setPayslipLoading(false);
     }
   };
 
@@ -194,7 +204,7 @@ export function PayrollLayout() {
     selectedYear, setSelectedYear,
     selectedEmployee, setSelectedEmployee,
     salarySheet, advances, payslip,
-    isLoading, noAccess,
+    isLoading, payslipLoading, noAccess,
     showAdvanceForm, setShowAdvanceForm,
     advanceForm, setAdvanceForm,
     loadAdvances, loadPayslip, handleRecordAdvance, exportSalarySheet,
