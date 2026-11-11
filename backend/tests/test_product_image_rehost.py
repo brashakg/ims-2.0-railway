@@ -19,6 +19,7 @@ Run: JWT_SECRET_KEY=test python -m pytest \
        backend/tests/test_product_image_rehost.py -q
 """
 
+import io
 import os
 import sys
 
@@ -28,6 +29,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 import httpx  # noqa: E402
 import pytest  # noqa: E402
+from PIL import Image  # noqa: E402
 
 from api.services import image_rehost  # noqa: E402
 from api.services import rbac_policy as rbac  # noqa: E402
@@ -36,7 +38,10 @@ from api.services.file_store import InMemoryFileStore, set_file_store  # noqa: E
 _REHOST_PATH = "/api/v1/products/image/from-url"
 _CATALOG_SET = {"ADMIN", "CATALOG_MANAGER"}
 
-_JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 128
+# A REAL JPEG: the re-host door checks the bytes, not the remote label (L1-F41).
+_buf = io.BytesIO()
+Image.new("RGB", (8, 8), (200, 30, 30)).save(_buf, "JPEG")
+_JPEG_BYTES = _buf.getvalue()
 
 
 @pytest.fixture
@@ -198,7 +203,7 @@ def test_redirect_into_private_range_is_blocked(
     _resolve_public(monkeypatch)
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "cdn.example":
+        if request.headers["host"] == "cdn.example":
             return httpx.Response(302, headers={"location": "http://169.254.169.254/x"})
         raise AssertionError("must not fetch the private hop")
 
@@ -323,7 +328,11 @@ def test_happy_path_stores_and_serves(client, auth_headers, mem_store, monkeypat
     _resolve_public(monkeypatch)
 
     def handler(request):
-        assert request.url.host == "cdn.example"
+        # L1-F32: the wire target is the VALIDATED address; the hostname
+        # travels as the Host header and the TLS server name.
+        assert request.url.host == "93.184.216.34"
+        assert request.headers["host"] == "cdn.example"
+        assert request.extensions["sni_hostname"] == "cdn.example"
         return httpx.Response(
             200, headers={"content-type": "image/jpeg"}, content=_JPEG_BYTES
         )

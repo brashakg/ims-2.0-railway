@@ -16,8 +16,15 @@ adapted for open-web brand sites where a host allowlist is not viable):
     link-local + cloud metadata (169.254/16 incl. 169.254.169.254, fe80::/10),
     carrier-grade NAT (100.64/10), unspecified/reserved/multicast are ALL
     blocked. IP-literal hosts are checked directly.
+  * The connection is BOUND to the addresses that were checked (L1-F32): the
+    request is sent to the validated IP itself, with the original hostname
+    kept as the Host header and as the TLS server name (SNI + certificate
+    check). The hostname is never resolved a second time, so a DNS answer
+    that changes between the check and the connect (rebinding) cannot steer
+    the fetch to a private address. Proxy environment variables are ignored
+    (trust_env=False): a proxy would do its own, unchecked, resolution.
   * Redirects are NOT auto-followed: each hop (max 3) is re-validated with the
-    same host/IP checks before it is fetched.
+    same host/IP checks, and bound the same way, before it is fetched.
   * The response Content-Type must be on the caller's image mime allowlist.
   * The body is streamed with a hard byte cap - an over-size download aborts
     mid-stream (never buffers more than the cap).
@@ -33,6 +40,7 @@ import ipaddress
 import logging
 import os
 import socket
+from contextlib import closing
 from typing import FrozenSet, List, Tuple
 from urllib.parse import urljoin, urlparse
 
@@ -59,19 +67,32 @@ class ImageFetchError(Exception):
         self.detail = detail
 
 
+# NAT64 well-known prefix (RFC 6052): the low 32 bits are an IPv4 address.
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
 def _is_blocked_ip(ip_str: str) -> bool:
     """True when an address is NOT safe to fetch from the server side.
 
     `is_global` is False for every private / loopback / link-local (incl. the
-    169.254.169.254 cloud metadata endpoint) / CGNAT / reserved / multicast /
-    unspecified range, for both IPv4 and IPv6 - so anything non-global is
-    blocked. An unparsable address is blocked too (fail closed).
+    169.254.169.254 cloud metadata endpoint) / CGNAT / reserved / unspecified
+    range, for both IPv4 and IPv6 - so anything non-global is blocked.
+    Multicast is blocked EXPLICITLY: `is_global` is True for 224.0.0.0/4 and
+    ff00::/8, and a fetch target must be a unicast host. An IPv6 address that
+    only wraps an IPv4 one (IPv4-mapped, 6to4, NAT64) is judged on the IPv4
+    address it reaches. An unparsable address is blocked too (fail closed).
     """
     try:
         ip = ipaddress.ip_address(ip_str.strip("[]"))
     except ValueError:
         return True
-    return not ip.is_global
+    if ip.version == 6:
+        inner = ip.ipv4_mapped or ip.sixtofour
+        if inner is None and ip in _NAT64:
+            inner = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+        if inner is not None:
+            ip = inner
+    return ip.is_multicast or not ip.is_global
 
 
 def _resolve_host(host: str) -> List[str]:
@@ -91,9 +112,12 @@ def _resolve_host(host: str) -> List[str]:
     return addrs
 
 
-def assert_url_allowed(url: str) -> None:
+def assert_url_allowed(url: str) -> List[str]:
     """SSRF gate for ONE url (called per redirect hop). Raises ImageFetchError
-    when the scheme/host/any-resolved-IP is not safely fetchable."""
+    when the scheme/host/any-resolved-IP is not safely fetchable.
+
+    Returns the addresses that PASSED the check - the only addresses the
+    caller may connect to for this url (see _open_bound)."""
     parsed = urlparse(url or "")
     scheme = (parsed.scheme or "").lower()
     if scheme not in ("http", "https"):
@@ -114,15 +138,56 @@ def assert_url_allowed(url: str) -> None:
             raise ImageFetchError(
                 400, "Image URL resolves to a private/internal address (blocked)"
             )
-        return
+        return [host]
 
     # Hostname: EVERY resolved address must be global unicast (one private
     # record in a mixed answer is enough to block - fail closed).
-    for addr in _resolve_host(host):
+    addrs = _resolve_host(host)
+    for addr in addrs:
         if _is_blocked_ip(addr):
             raise ImageFetchError(
                 400, "Image URL resolves to a private/internal address (blocked)"
             )
+    return addrs
+
+
+_FETCH_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "image/*,*/*;q=0.5",
+}
+
+
+def _open_bound(client, url: str, addrs: List[str]):
+    """Open a streamed GET for `url` on one of its VALIDATED addresses (L1-F32).
+
+    The request is sent to the IP itself, so the HTTP client never resolves
+    the hostname again - a second lookup could answer differently from the one
+    that was checked (DNS rebinding). The hostname stays as the Host header
+    and, for https, as the TLS server name, so SNI and the certificate check
+    still run against the name, not the IP. Addresses are tried in order,
+    moving on only when one cannot be connected to (what a normal hostname
+    connect does with a multi-address answer)."""
+    import httpx  # noqa: PLC0415 - lazy, as in fetch_external_image
+
+    target = httpx.URL(url)
+    extensions = {}
+    if target.scheme == "https" and addrs != [target.host]:
+        extensions["sni_hostname"] = target.raw_host.decode("ascii")
+    headers = {**_FETCH_HEADERS, "Host": target.netloc.decode("ascii")}
+    last_error: Exception = ImageFetchError(502, "Could not fetch the image URL")
+    for addr in addrs:
+        request = client.build_request(
+            "GET", target.copy_with(host=addr), headers=headers, extensions=extensions
+        )
+        try:
+            return client.send(request, stream=True)
+        except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+            last_error = e
+    raise last_error
 
 
 def fetch_external_image(
@@ -150,22 +215,16 @@ def fetch_external_image(
     timeout = _fetch_timeout()
     for _hop in range(MAX_REDIRECTS + 1):
         # Re-validate EVERY hop - a safe first URL must not be able to bounce
-        # us into the internal network via a redirect.
-        assert_url_allowed(current)
+        # us into the internal network via a redirect. The addresses that
+        # passed are the ONLY ones this hop may connect to.
+        addrs = assert_url_allowed(current)
         try:
-            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-                with client.stream(
-                    "GET",
-                    current,
-                    headers={
-                        "User-Agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) "
-                            "Chrome/124.0 Safari/537.36"
-                        ),
-                        "Accept": "image/*,*/*;q=0.5",
-                    },
-                ) as resp:
+            # trust_env=False: no proxy from the environment - a proxy would
+            # resolve the hostname itself, outside the check above.
+            with httpx.Client(
+                timeout=timeout, follow_redirects=False, trust_env=False
+            ) as client:
+                with closing(_open_bound(client, current, addrs)) as resp:
                     if resp.status_code in (301, 302, 303, 307, 308):
                         location = resp.headers.get("location", "").strip()
                         if not location:
