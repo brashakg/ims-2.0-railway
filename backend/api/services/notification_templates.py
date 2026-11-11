@@ -284,3 +284,50 @@ def resolve_and_render(
         default_content=default_content,
     )
     return render(content, variables)
+
+
+def effective_catalog(saved_rows: Optional[list] = None) -> list:
+    """THE one list of message templates the sender can be asked for: every
+    built-in the server holds wording for (notification_service.TEMPLATES)
+    plus every saved template, each with the SAME usability rule the resolver
+    above applies when a message is actually built.
+
+    Why it exists (audit L1-F11): the Reminders picker listed only SAVED rows,
+    so on a fresh database it was empty and no reminder could be created until
+    someone toggled a template on the Notifications screen. A picker must
+    offer what can be sent, not what happens to have been edited.
+
+    Each entry:
+      template_id  the key a reminder rule / campaign stores
+      builtin      the server has default wording for it
+      saved        a notification_templates row exists (an owner edit/toggle)
+      is_enabled   the saved row's switch (True when there is no row)
+      sendable     switched on AND a message body exists (built-in default, or
+                   a saved non-empty body). A template that is not sendable
+                   would queue the literal text "[Template X not found]".
+
+    Pure: pass the saved rows in. Order: built-ins first (declaration order),
+    then saved-only templates by id.
+    """
+    from api.services.notification_service import TEMPLATES
+
+    saved = {
+        r.get("template_id"): r
+        for r in (saved_rows or [])
+        if isinstance(r, dict) and r.get("template_id")
+    }
+    out = []
+    for tid in list(TEMPLATES) + sorted(t for t in saved if t not in TEMPLATES):
+        row = saved.get(tid)
+        enabled = bool(row.get("is_enabled", True)) if row else True
+        builtin = tid in TEMPLATES
+        out.append(
+            {
+                "template_id": tid,
+                "builtin": builtin,
+                "saved": row is not None,
+                "is_enabled": enabled,
+                "sendable": enabled and (builtin or _is_usable(row, "content")),
+            }
+        )
+    return out
