@@ -47,6 +47,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
+import time
 from datetime import date, datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
@@ -150,8 +152,13 @@ def compute_entry_hash(prev_hash: str, seq: int, doc: Dict[str, Any]) -> str:
 
 
 # A writer that keeps losing the seq race gives up chaining after this many
-# tries and writes its row unchained (fail-soft) rather than spin.
-_MAX_CLAIM_ATTEMPTS = 25
+# tries and writes its row unchained (fail-soft) rather than spin. Each lost
+# race waits a short random moment first, so writers that collided once do not
+# collide again in step.
+# ponytail: optimistic retry -- ample for a handful of API workers; if audit
+# volume ever makes this many lost races plausible, serialize with a lease.
+_MAX_CLAIM_ATTEMPTS = 60
+_MAX_BACKOFF_S = 0.05
 
 
 def _is_duplicate_key(exc: Exception) -> bool:
@@ -223,7 +230,9 @@ def append_audit_entry(
     if db is None:
         db = getattr(audit_collection, "database", None)
 
-    for _ in range(_MAX_CLAIM_ATTEMPTS):
+    for attempt in range(_MAX_CLAIM_ATTEMPTS):
+        if attempt:
+            time.sleep(random.uniform(0, min(_MAX_BACKOFF_S, 0.002 * attempt)))
         try:
             seq, prev_hash = _chain_tail(audit_collection)
         except Exception as exc:  # noqa: BLE001
