@@ -35,6 +35,12 @@ ESI_WAGE_CEILING = 21000  # ESI applies only when monthly gross <= this
 
 DAYS_BASIS_DEFAULT = 30  # 30-day proration basis
 
+# A payroll row is POSTED once an administrator has approved it (and stays so
+# when it is paid). A DRAFT is a working calculation: it can be rerun freely,
+# so it is not a cost in anybody's books. The run (which rows a rerun may
+# rewrite) and the P&L (which rows are a cost) both read this one tuple.
+POSTED_PAYROLL_STATUSES = ("APPROVED", "PAID")
+
 # Map a store's state (full name / GST state code / 2-letter) -> PT slab code.
 STATE_TO_PT_CODE = {
     "jharkhand": "JH",
@@ -286,6 +292,13 @@ def compute_payroll(
 
     incentive = float(incentive or 0)
     advance_recovery = float(advance_recovery or 0)
+    # A recovery takes money back; a negative one would be a payment that no
+    # payslip line names. Refused here so no caller can use it to raise net pay.
+    if not math.isfinite(advance_recovery) or advance_recovery < 0:
+        raise ValueError(
+            "Advance recovery cannot be negative (employee '%s')."
+            % config.get("employee_id", "unknown")
+        )
 
     total_earnings = earned_gross + incentive
     total_deductions = pf["employee"] + esi_employee + pt + tds + advance_recovery

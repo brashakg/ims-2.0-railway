@@ -35,6 +35,7 @@ from ..services.payroll_engine import (
     pt_for,
     pt_code_for_state,
     compute_payroll,
+    POSTED_PAYROLL_STATUSES,
 )
 from ..services.payroll_exports import (
     statutory_summary,
@@ -1114,12 +1115,15 @@ async def get_salary_advances(
         if status:
             query["status"] = status
 
-        advances = list(salary_advances_coll.find(query))
+        # _strip_id: a stored advance carries Mongo's ObjectId, which cannot be
+        # serialised -- the raw rows made this read answer 500 from the first
+        # advance onwards (the empty list was the only case that worked).
+        advances = [_strip_id(a) for a in salary_advances_coll.find(query)]
 
         return {
             "employee_id": employee_id,
-            "advances": advances or [],
-            "total": len(advances) if advances else 0,
+            "advances": advances,
+            "total": len(advances),
         }
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
@@ -1214,6 +1218,41 @@ def _build_payslip_from_run_row(run_row: dict, employee: dict, db: object) -> di
     }
 
 
+def _latest_payslip(db, employee_id: str) -> Optional[dict]:
+    """An employee's most recent payslip. The ONE read behind both
+    GET /payroll/payslip/{employee_id} and the staff GET /hr/me/payslip.
+
+    The ``payroll`` run row is the payslip: it is rebuilt from that row on
+    every read and nothing is stored. The old code materialised a copy in
+    ``payslips`` on the first read and served that copy forever, so a draft
+    that was rerun, approved or paid afterwards kept showing its first figures.
+    A copy is served only for a month NEWER than the newest run row (a month
+    the run engine never computed); for the same month the run row wins.
+    """
+
+    def _newest(coll_name: str) -> Optional[dict]:
+        found = list(
+            db.get_collection(coll_name)
+            .find({"employee_id": employee_id})
+            .sort([("year", -1), ("month", -1)])
+            .limit(1)
+        )
+        return found[0] if found else None
+
+    def _period(doc: dict) -> tuple:
+        return (doc.get("year") or 0, doc.get("month") or 0)
+
+    run_row = _newest("payroll")
+    copy = _newest("payslips")
+    if copy and (not run_row or _period(copy) > _period(run_row)):
+        return _strip_id(copy)
+    if not run_row:
+        return None
+    return _build_payslip_from_run_row(
+        run_row, _get_employee_details(db, employee_id), db
+    )
+
+
 @router.get("/payslip/{employee_id}/{month}/{year}")
 async def get_payslip(
     employee_id: str,
@@ -1221,12 +1260,16 @@ async def get_payslip(
     year: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """Generate or retrieve payslip for an employee.
+    """Retrieve the payslip for an employee and month.
 
-    Reads from the ``payroll`` collection (run engine output) first, then falls
-    back to the legacy ``salary_records`` collection so existing data is never
-    lost.  A payslip record is materialised in ``payslips`` collection only
-    once; subsequent calls return the cached version.
+    Built from the ``payroll`` run row on EVERY read, so the payslip always
+    agrees with the payroll run, the salary sheet and the printed slip -- while
+    the run is a draft, after a rerun, and once it is approved and paid.
+    Nothing is stored for a run row (see _latest_payslip for why).
+
+    A month the run engine never computed falls back to the legacy
+    ``salary_records`` collection, materialised once in ``payslips`` exactly as
+    before, so existing data is never lost.
 
     Self-or-ADMIN: see _assert_self_or_salary_admin. Live caller is the payslip
     tab of PayrollDashboard; under the owner ruling an ACCOUNTANT / AREA_MANAGER
@@ -1240,27 +1283,23 @@ async def get_payslip(
         return {"payslip": None}
 
     try:
-        payslips_coll = db.get_collection("payslips")
+        employee = _get_employee_details(db, employee_id)
 
-        # Return cached payslip if one already exists.
+        # The run-engine ``payroll`` row IS the payslip. Never cached.
+        run_row = db.get_collection("payroll").find_one(
+            {"employee_id": employee_id, "month": month, "year": year}
+        )
+        if run_row:
+            return {"payslip": _build_payslip_from_run_row(run_row, employee, db)}
+
+        # No run row for this month: the legacy path, unchanged.
+        payslips_coll = db.get_collection("payslips")
         payslip = payslips_coll.find_one(
             {"employee_id": employee_id, "month": month, "year": year}
         )
         if payslip:
             return {"payslip": _strip_id(payslip)}
 
-        employee = _get_employee_details(db, employee_id)
-
-        # Try the run-engine ``payroll`` collection first.
-        run_row = db.get_collection("payroll").find_one(
-            {"employee_id": employee_id, "month": month, "year": year}
-        )
-        if run_row:
-            payslip = _build_payslip_from_run_row(run_row, employee, db)
-            payslips_coll.insert_one({**payslip})
-            return {"payslip": _strip_id(payslip)}
-
-        # Legacy fallback: salary_records collection.
         salary_record = db.get_collection("salary_records").find_one(
             {"employee_id": employee_id, "month": month, "year": year}
         )
@@ -1296,10 +1335,7 @@ async def get_payslip(
 async def get_latest_payslip(
     employee_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get the most recent payslip for an employee.
-
-    Searches ``payslips`` cache, then the ``payroll`` run collection, so staff
-    see their slip even before a manager has clicked 'generate payslip'.
+    """Get the most recent payslip for an employee (see _latest_payslip).
 
     Self-or-ADMIN: see _assert_self_or_salary_admin. Staff self-service on the
     /my-work page goes through GET /hr/me/payslip (self-only, mounted WITHOUT
@@ -1312,35 +1348,7 @@ async def get_latest_payslip(
         return {"payslip": None}
 
     try:
-        payslips_coll = db.get_collection("payslips")
-
-        # Cached payslips (newest first).
-        cached = list(
-            payslips_coll.find({"employee_id": employee_id})
-            .sort([("year", -1), ("month", -1)])
-            .limit(1)
-        )
-        if cached:
-            return {"payslip": _strip_id(cached[0])}
-
-        # Fall through to the run collection and synthesise a payslip.
-        run_row = (
-            list(
-                db.get_collection("payroll")
-                .find({"employee_id": employee_id})
-                .sort([("year", -1), ("month", -1)])
-                .limit(1)
-            )
-            or [None]
-        )[0]
-        if not run_row:
-            return {"payslip": None}
-
-        employee = _get_employee_details(db, employee_id)
-        payslip = _build_payslip_from_run_row(run_row, employee, db)
-        # Persist so the next call is instant.
-        payslips_coll.insert_one({**payslip})
-        return {"payslip": _strip_id(payslip)}
+        return {"payslip": _latest_payslip(db, employee_id)}
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
@@ -1377,7 +1385,7 @@ async def get_incentive_summary(
             incentive = incentives_coll.find_one(
                 {"staff_id": employee_id, "month": month, "year": year}
             )
-            return {"incentive": incentive}
+            return {"incentive": _strip_id(incentive)}
         except Exception as e:
             logger.error(f"Error fetching incentive: {str(e)}", exc_info=True)
             return {"incentive": None, "message": "Incentive data not found"}
@@ -1565,6 +1573,19 @@ class PayrollRunRequest(BaseModel):
     )  # employee_id -> recovery amount
     dry_run: bool = False  # true = preview, do not persist
 
+    @field_validator("advances")
+    @classmethod
+    def _no_negative_recovery(cls, v: Dict[str, float]) -> Dict[str, float]:
+        """A recovery takes money back. A negative one RAISED net pay, in the
+        preview and in the saved run alike (the engine refuses it too)."""
+        for emp, amount in v.items():
+            if not math.isfinite(amount) or amount < 0:
+                raise ValueError(
+                    f"Advance recovery cannot be negative (employee {emp}). "
+                    "Enter 0 or a positive amount."
+                )
+        return v
+
 
 class PayrollBatchAction(BaseModel):
     """Approve/lock all matching payroll rows for a month + scope."""
@@ -1685,7 +1706,9 @@ async def run_payroll(
     """Compute payroll for every active employee in scope.
 
     Persists DRAFT rows (idempotent per employee+month+year) unless dry_run.
-    Already APPROVED/PAID rows are never overwritten.
+    Already APPROVED/PAID rows are never overwritten. Saving is refused (423)
+    when the month's accounting period is locked; a preview writes nothing and
+    stays available.
 
     OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. This is a WRITE, but its
     RESPONSE returns ``rows`` -- the full per-employee breakdown for everyone in
@@ -1697,6 +1720,14 @@ async def run_payroll(
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
+    # Financial control: saving a run writes payroll rows into the run's month,
+    # the same as approve and lock below. Those two were gated and this was
+    # not, so a draft could still be rewritten inside a closed month. A preview
+    # (dry_run) writes nothing, so it is not gated.
+    if not req.dry_run:
+        from .finance import check_period_locked
+
+        check_period_locked(db, date(req.year, req.month, 1))
     try:
         configs = _scope_configs(db, req.store_id, req.entity_id)
         payroll_coll = db.get_collection("payroll")
@@ -1763,7 +1794,7 @@ async def run_payroll(
                 existing = payroll_coll.find_one(
                     {"employee_id": emp, "year": req.year, "month": req.month}
                 )
-                if existing and existing.get("status") in ("APPROVED", "PAID"):
+                if existing and existing.get("status") in POSTED_PAYROLL_STATUSES:
                     rows.append(
                         {
                             "employee_id": emp,
