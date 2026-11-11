@@ -6,12 +6,26 @@ import clsx from 'clsx';
 import type { BudgetData } from './financeTypes';
 import { formatCurrency } from './financeUtils';
 
-interface BudgetPanelProps {
+/** What GET /finance/budget says beside the expense heads. */
+export interface BudgetMeta {
+  /** The month the plan is for, YYYY-MM. */
+  period?: string;
+  /** The income target and the revenue so far: not an allocation to spend. */
+  revenue?: { target: number; actual: number };
+}
+
+interface BudgetPanelProps extends BudgetMeta {
   budgets: BudgetData[];
   selectedYear: string;
 }
 
-export default function BudgetPanel({ budgets, selectedYear }: BudgetPanelProps) {
+/** "2026-11" -> "November 2026". */
+function monthLabel(period: string): string {
+  const [y, m] = period.split('-').map(Number);
+  return new Date(y, m - 1, 1).toLocaleString('en-IN', { month: 'long', year: 'numeric' });
+}
+
+export default function BudgetPanel({ budgets, selectedYear, period, revenue }: BudgetPanelProps) {
   const totalAllocated = budgets.reduce((s, b) => s + b.allocated, 0);
   const totalSpent = budgets.reduce((s, b) => s + b.spent, 0);
 
@@ -39,8 +53,17 @@ export default function BudgetPanel({ budgets, selectedYear }: BudgetPanelProps)
           (/budgets, per store + period). The toast-only "Allocate Budget"
           button that previously sat here did not persist anything, so it was
           removed (SYSTEM_INTENT: fail loudly, never fake success). */}
-      <div className="flex justify-between items-center">
-        <h3 className="text-lg font-semibold text-gray-900">Budget Allocations -- FY {selectedYear}</h3>
+      <div className="flex justify-between items-center flex-wrap gap-2">
+        {/* The plan is one MONTH's (the one Budgeting saved), so the heading
+            names that month rather than the financial year. */}
+        <h3 className="text-lg font-semibold text-gray-900">
+          Budget Allocations -- {period ? monthLabel(period) : `FY ${selectedYear}`}
+        </h3>
+        {revenue && (revenue.target > 0 || revenue.actual > 0) && (
+          <p className="text-sm text-slate-600" data-testid="budget-revenue-target">
+            Revenue target {formatCurrency(revenue.target)} · so far {formatCurrency(revenue.actual)}
+          </p>
+        )}
       </div>
 
       {/* Budget Table */}

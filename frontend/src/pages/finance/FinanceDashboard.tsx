@@ -108,6 +108,15 @@ function mapBudget(d: any): BudgetData[] {
   });
 }
 
+function mapBudgetMeta(d: any): BudgetMeta {
+  return {
+    period: typeof d?.period === 'string' ? d.period : undefined,
+    revenue: d?.revenue
+      ? { target: Number(d.revenue.budget || 0), actual: Number(d.revenue.actual || 0) }
+      : undefined,
+  };
+}
+
 function mapVendorPayments(d: any): VendorPaymentData[] {
   const list = Array.isArray(d) ? d : [];
   return list.map((v: any) => {
@@ -135,7 +144,7 @@ import GSTPanel from './GSTPanel';
 import OutstandingPanel from './OutstandingPanel';
 import CashFlowPanel from './CashFlowPanel';
 import PeriodManagement from './PeriodManagement';
-import BudgetPanel from './BudgetPanel';
+import BudgetPanel, { type BudgetMeta } from './BudgetPanel';
 import RestrictedTotalsNotice from './RestrictedTotalsNotice';
 import VendorPayments from './VendorPayments';
 import JournalEntriesPanel from './JournalEntriesPanel';
@@ -181,6 +190,8 @@ export default function FinanceDashboard() {
   const [outstanding, setOutstanding] = useState<OutstandingReceivable[]>([]);
   const [cashFlow, setCashFlow] = useState<CashFlowData[]>([]);
   const [budgets, setBudgets] = useState<BudgetData[]>([]);
+  // Which month the plan is for, and its income target (not an allocation).
+  const [budgetMeta, setBudgetMeta] = useState<BudgetMeta>({});
   const [vendorPayments, setVendorPayments] = useState<VendorPaymentData[]>([]);
   const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; store_name?: string; entity_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number; net_margin?: number }>>([]);
   // Sortable per-store P&L. Default highest-revenue-first (mirrors the backend's
@@ -243,7 +254,9 @@ export default function FinanceDashboard() {
         canSeeWhatWePay ? financeApi.getGstSummary() : Promise.resolve(null),
         financeApi.getOutstanding({ store_id: storeId }),
         financeApi.getCashFlow({ period: 'month', store_id: storeId }),
-        financeApi.getBudget(),
+        // The SAME shop the rest of this dashboard reads, so the Budgets tab
+        // shows the plan Budgeting saved for it (audit L3-15).
+        financeApi.getBudget({ store_id: storeId }),
         canSeeWhatWePay ? financeApi.getVendorPayments(storeId) : Promise.resolve([]),
       ]);
 
@@ -256,6 +269,7 @@ export default function FinanceDashboard() {
       setOutstanding(out.status === 'fulfilled' ? mapOutstanding(out.value) : []);
       setCashFlow(cf.status === 'fulfilled' ? mapCashFlow(cf.value) : []);
       setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
+      setBudgetMeta(bud.status === 'fulfilled' ? mapBudgetMeta(bud.value) : {});
       setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
       // A failed/absent call must NOT leave a stale "incomplete" banner up, and
       // must not invent one either — default false on anything but an explicit
@@ -671,7 +685,7 @@ export default function FinanceDashboard() {
                 scope="budget rows and totals"
                 className="mb-4"
               />
-              <BudgetPanel budgets={budgets} selectedYear={selectedYear} />
+              <BudgetPanel budgets={budgets} selectedYear={selectedYear} {...budgetMeta} />
             </>
           )}
           {activeTab === 'vendor-payments' && canSeeWhatWePay && (
