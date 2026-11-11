@@ -30,10 +30,12 @@ between the two both chained from the same predecessor -- a "broken" chain
 nobody had edited.)
 
 The `audit_chain_head` document is no longer the source of the next seq. It
-records the newest committed row (seq + entry_hash), written AFTER the row and
-only ever forward, so verify can tell a trail whose last rows were removed
-from a whole one (R20). A lagging head (a writer died between its row and
-this note) is harmless: the next writer moves it on.
+records the newest committed row (seq + entry_hash), written AFTER the row, so
+verify can tell a trail whose last rows were removed from a whole one (R20).
+A writer moves it only off a row that is still in the trail (_note_head): a
+lagging head (a writer died between its row and this note) is moved on by the
+next writer, but a head whose row was removed stays there for good -- the
+chain regrowing over the removed rows never hides the removal.
 
 FAIL-SOFT CONTRACT: chaining must NEVER block the business action. If the tail
 can't be read (DB down, transient error, a minimal mock collection), the audit
@@ -190,20 +192,53 @@ def _chain_tail(audit_collection) -> Tuple[int, str]:
     return 0, GENESIS_HASH
 
 
-def _note_head(db, seq: int, entry_hash: str) -> None:
-    """Record the newest committed row on the head document, forward only
-    (a slower writer never moves it back). Best-effort: verify reads it to
-    notice a trail whose last rows are gone; nothing chains from it."""
+def _note_head(db, audit_collection, seq: int, prev_hash: str, entry_hash: str) -> None:
+    """Record the row just written (seq, entry_hash; chained from prev_hash)
+    as the newest committed row on the head document. Best-effort: verify
+    reads it to notice a trail whose last rows are gone; nothing chains from it.
+
+    The head only ever moves OFF a row that is still in the trail. Normally it
+    names the very row this writer chained from, and one guarded update moves
+    it. Otherwise:
+      * it is already at or past this row (a faster writer, or seqs the old
+        scheme claimed for inserts that failed) -- leave it;
+      * it names an earlier row that is still there (a writer died before its
+        note; the old scheme's half-finished commit) -- move it on;
+      * the row it names is NOT in the trail: the end of the trail was removed
+        and the chain has regrown over it. The head stays on the removed row
+        for good, so verify keeps answering head_not_in_trail however many
+        rows are written afterwards (R20).
+    """
     if db is None:
         return
+    new = {"seq": seq, "last_hash": entry_hash}
     try:
-        db.get_collection(HEAD_COLLECTION).update_one(
-            {"_id": HEAD_DOC_ID, "seq": {"$lt": seq}},
-            {"$set": {"seq": seq, "last_hash": entry_hash}},
-            upsert=True,
-        )
+        heads = db.get_collection(HEAD_COLLECTION)
+        if heads.update_one({"_id": HEAD_DOC_ID, "last_hash": prev_hash}, {"$set": new}).matched_count:
+            return
+        head = heads.find_one({"_id": HEAD_DOC_ID})
+        if head is None:  # the first row this database ever chained
+            heads.update_one({"_id": HEAD_DOC_ID}, {"$setOnInsert": new}, upsert=True)
+            return
+        head_seq, head_hash = int(head.get("seq") or 0), head.get("last_hash")
+        if head.get("row_missing") or head_seq >= seq:
+            return
+        if head_hash and head_hash != GENESIS_HASH and not list(
+            audit_collection.find({"seq": {"$lte": head_seq}, "entry_hash": head_hash})
+            .sort("seq", -1).limit(1)
+        ):
+            # Marked so later writers skip the search above (it walks the
+            # whole trail when the row is not there).
+            heads.update_one({"_id": HEAD_DOC_ID, "last_hash": head_hash},
+                             {"$set": {"row_missing": True}})
+            logger.error(
+                "[AUDIT_CHAIN] CRITICAL: audit row seq %s recorded on the chain head is "
+                "no longer in the trail -- rows were removed", head_seq)
+            return
+        heads.update_one({"_id": HEAD_DOC_ID, "seq": head_seq, "last_hash": head_hash},
+                         {"$set": new})
     except Exception as exc:  # noqa: BLE001
-        # Duplicate key = the head is already at or past this row: fine.
+        # Duplicate key = another writer created the head first: fine.
         if not _is_duplicate_key(exc):
             logger.warning("[AUDIT_CHAIN] could not note chain head: %s", exc)
 
@@ -259,7 +294,7 @@ def append_audit_entry(
             # row exactly as before -- and leaves the chain untouched.
             logger.warning("[AUDIT_CHAIN] audit insert failed: %s", exc)
             return None
-        _note_head(db, seq, doc["entry_hash"])
+        _note_head(db, audit_collection, seq, prev_hash, doc["entry_hash"])
         return doc
 
     # Unchained fail-soft path: never block the business action. verify

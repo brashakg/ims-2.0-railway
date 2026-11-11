@@ -45,6 +45,7 @@ from api.routers.auth import hash_password  # noqa: E402
 from api.routers.finance import journal_entries as je_router  # noqa: E402
 from api.services import approvals as appr  # noqa: E402
 from api.services import je_service  # noqa: E402
+from database.repositories import audit_chain  # noqa: E402
 from database.repositories.audit_chain import (  # noqa: E402
     append_audit_entry,
     verify_chain,
@@ -983,3 +984,89 @@ def test_r20_trail_missing_its_last_rows_is_not_intact(db):
     assert res["intact"] is False   # was True, entries_checked 3
     assert (res["verified"], res["reason"], res["entries_checked"]) == (
         True, "head_not_in_trail", 3)
+
+
+def _head(db) -> Dict[str, Any]:
+    return db.get_collection("audit_chain_head").find_one({"_id": "primary"}) or {}
+
+
+@pytest.mark.parametrize("removed", [1, 2])
+def test_r20_removed_tail_stays_reported_after_later_writes(db, removed):
+    """Review round: the newest rows are removed, then the shop carries on.
+    The new rows link cleanly from the surviving tail and reuse the removed
+    seqs, so once the chain regrew past the old head verify answered intact
+    again (delete K rows, wait K+1 writes). A writer must never move the head
+    off a row that is no longer in the trail: the break stays reported for
+    good, as it did before this batch."""
+    coll = db.get_collection("audit_logs")
+    repo = AuditRepository(coll)
+    for i in range(4):
+        assert repo.create(_audit_row(i)) is not None
+    lost = _chained(db)[-1]
+    assert (_head(db)["seq"], _head(db)["last_hash"]) == (4, lost["entry_hash"])
+
+    coll.delete_many({"seq": {"$gt": 4 - removed}})  # out-of-band removal of the tail
+    for n in range(removed + 3):                      # well past the old head
+        assert repo.create(_audit_row(10 + n)) is not None
+        res = verify_chain(coll)
+        assert (res["intact"], res["verified"], res["reason"]) == (
+            False, True, "head_not_in_trail"), (n, res)
+    # The surviving + new rows do link; the head still names the removed row.
+    assert [r["seq"] for r in _chained(db)] == list(range(1, 4 + 3 + 1))
+    assert (_head(db)["seq"], _head(db)["last_hash"]) == (4, lost["entry_hash"])
+
+
+@pytest.mark.parametrize("legacy", ["failed_inserts", "writer_died_before_head", "head_lagging"])
+def test_r20_a_head_left_behind_or_ahead_by_old_writes_is_not_a_removed_tail(db, legacy):
+    """The other side of the same rule: a head document that does not name
+    the tail for an INNOCENT reason must still move on, or a later removal
+    would go unseen (and an honest trail must never be called broken).
+      failed_inserts           the old writer claimed seqs on the head, the
+                               inserts failed: head.seq is ahead of the tail,
+                               its hash is the tail's
+      writer_died_before_head  the old writer inserted its row and died before
+                               committing the hash: head.seq is the tail's,
+                               its hash is the row before
+      head_lagging             a writer died between its row and the head note
+    """
+    coll = db.get_collection("audit_logs")
+    heads = db.get_collection("audit_chain_head")
+    repo = AuditRepository(coll)
+    for i in range(3):
+        assert repo.create(_audit_row(i)) is not None
+    rows = _chained(db)
+    stale = {
+        "failed_inserts": {"seq": 5, "last_hash": rows[2]["entry_hash"]},
+        "writer_died_before_head": {"seq": 3, "last_hash": rows[1]["entry_hash"]},
+        "head_lagging": {"seq": 1, "last_hash": rows[0]["entry_hash"]},
+    }[legacy]
+    heads.update_one({"_id": "primary"}, {"$set": stale})
+    assert verify_chain(coll)["intact"] is True
+
+    newest = None
+    for n in range(3):
+        newest = repo.create(_audit_row(20 + n))
+        assert newest is not None
+        res = verify_chain(coll)
+        assert (res["intact"], res["entries_checked"]) == (True, 4 + n), (n, res)
+    # The head caught up with the newest row ...
+    assert (_head(db)["seq"], _head(db)["last_hash"]) == (6, newest["entry_hash"])
+    # ... so removing that row is seen, and stays seen.
+    coll.delete_one({"seq": 6})
+    assert verify_chain(coll)["reason"] == "head_not_in_trail"
+    assert repo.create(_audit_row(30)) is not None
+    assert repo.create(_audit_row(31)) is not None
+    assert verify_chain(coll)["reason"] == "head_not_in_trail"
+
+
+def test_r20_a_slower_writer_never_moves_the_head_back(db):
+    """Two writers finish out of order: the one that wrote the earlier row
+    notes the head last. The head stays on the newer row."""
+    coll = db.get_collection("audit_logs")
+    repo = AuditRepository(coll)
+    for i in range(3):
+        assert repo.create(_audit_row(i)) is not None
+    rows = _chained(db)
+    audit_chain._note_head(db, coll, 2, rows[0]["entry_hash"], rows[1]["entry_hash"])
+    assert (_head(db)["seq"], _head(db)["last_hash"]) == (3, rows[2]["entry_hash"])
+    assert verify_chain(coll)["intact"] is True
