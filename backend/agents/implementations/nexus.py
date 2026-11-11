@@ -821,7 +821,8 @@ class NexusAgent(JarvisAgent):
     # (webhooks._duplicate_response) or the hourly retry sweep re-runs it; after
     # WEBHOOK_MAX_ATTEMPTS it parks as status=dead (dead letter: counted in the
     # failed-webhooks number on the SUPERADMIN sync-health card and listed in
-    # that route's webhooks.dead_letters) and nothing re-runs it again.
+    # that route's webhooks.dead_letters) and nothing re-runs it again; ONE
+    # open task per provider tells an admin (_raise_dead_webhook_task).
     WEBHOOK_MAX_ATTEMPTS = 5
     # A drain that died mid-run (worker killed) leaves status=processing; after
     # this lease another drain may claim it. Business handlers keep their own
@@ -905,6 +906,7 @@ class NexusAgent(JarvisAgent):
 
         done_at = datetime.now(timezone.utc).isoformat()
         attempts = int(doc.get("attempts") or 1)
+        dead = False
         if terminal:
             update = {"$set": {"processed": True, "processed_at": done_at,
                                "status": "skipped", "handler_error": handler_error}}
@@ -929,8 +931,77 @@ class NexusAgent(JarvisAgent):
                     f"[NEXUS] {webhook_id}: outcome not written -- another drain took "
                     f"the row over after this one's lease ran out"
                 )
+            elif dead:
+                # Parked dead, and stored as dead: nothing retries it again.
+                self._raise_dead_webhook_task(vendor, webhook_id, doc, handler_error, attempts)
         except Exception as e:
             logger.warning(f"[NEXUS] outcome update failed on {webhook_id}: {e}")
+
+    def _raise_dead_webhook_task(
+        self, vendor: str, webhook_id: str, doc: Dict[str, Any], handler_error: str, attempts: int
+    ) -> None:
+        """A webhook parked dead is retried by nothing, so a person must see
+        it (audit L1-F29, decision D13). ONE open task per provider for an
+        admin, on the Tasks board every other background failure uses
+        (task_triggers.create_system_task, deduped on its source_ref). While
+        that task is open a later dead webhook from the same provider opens no
+        second one: it is added as a line to the open task, so an outage that
+        parks forty rows is one item that names them. Fail-soft: the drain
+        must keep ticking.
+        ponytail: two drains parking rows dead in the same instant can each
+        open a task (read-then-write dedupe); a deterministic task id would
+        stop a NEW task after the first is closed, so the rare pair stays."""
+        try:
+            from api.services.task_triggers import (
+                _person_holding,
+                active_tasks,
+                create_system_task,
+            )
+            from database.repositories.task_repository import TaskRepository
+
+            tasks = self.get_collection("tasks")
+            if tasks is None:
+                return
+            repo = TaskRepository(tasks)
+            ref = f"webhook_dead_letter:{vendor}"
+            name = str(vendor or "provider").capitalize()
+            topic = (
+                (doc.get("headers") or {}).get("x-shopify-topic")
+                or (doc.get("payload") or {}).get("event")
+                or "unknown type"
+            )
+            line = f"{topic}, id {webhook_id}. Last error: {handler_error[:200]}"
+            for task in active_tasks(repo, ref)[:1]:
+                text = str(task.get("description") or "")
+                if len(text) < 4000:  # the board item stays readable
+                    repo.update(
+                        task.get("task_id"),
+                        {"description": f"{text} Also not processed: {line}."},
+                    )
+                return
+            create_system_task(
+                repo,
+                title=f"{name} notification not processed after {attempts} tries",
+                description=(
+                    f"IMS stopped retrying a {name} notification after {attempts} failed "
+                    "tries. What it was meant to do (book or update an order, a refund, "
+                    "a cancellation, a delivery update, a payment) has NOT been applied "
+                    f"in IMS: check that record against {name} and correct it, or ask "
+                    "for the notification to be re-run. Close this task when every "
+                    f"notification listed here is dealt with. Not processed: {line}."
+                ),
+                priority="P2",
+                category="Integrations",
+                store_id=None,
+                dedupe_ref=ref,
+                assigned_to=_person_holding("ADMIN", None, any_store=True),
+                extra={
+                    "link": "/online-store/shopify",
+                    "payload": {"vendor": vendor, "webhook_id": webhook_id, "topic": topic},
+                },
+            )
+        except Exception as e:  # noqa: BLE001 - a missing task never stops the drain
+            logger.warning(f"[NEXUS] dead-webhook task not raised for {webhook_id}: {e}")
 
     async def _retry_failed_webhooks(self, limit: int = 50):
         """Bounded retry: re-run inbox rows whose handler FAILED (not dead, not

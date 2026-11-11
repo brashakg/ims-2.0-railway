@@ -474,3 +474,118 @@ def test_the_history_import_does_not_rebook_a_refund_it_could_not_check(db):
     after = _book_historical_refund_credit_notes(db, payload, order)
     assert after["credit_notes"] == 0 and after["duplicate_refunds"] == 1
     assert db.credit_note_ledger.count_documents({}) == booked
+
+
+# ---------------------------------------------------------------------------
+# D13(a): a webhook parked dead is retried by nothing - an admin must see it.
+# ONE open task per provider on the Tasks board; later dead webhooks join it.
+# ---------------------------------------------------------------------------
+
+_DEAD_REF = "webhook_dead_letter:shopify"
+
+
+def _park_dead(db, webhook_id, topic="orders/delete", payload=None):
+    _inbox_row(db, webhook_id, topic, payload or {"id": int(_SHOPIFY_ORDER_ID)})
+    with _lookup_outage("orders"):
+        for _ in range(NexusAgent.WEBHOOK_MAX_ATTEMPTS):
+            row = _drain(db, webhook_id)
+    assert row["status"] == "dead" and row["processed"] is False, row
+    return row
+
+
+@pytest.fixture
+def an_admin(monkeypatch):
+    """The person the task goes to: task_triggers._person_holding asks the
+    user repository for an active ADMIN (any shop)."""
+    import api.dependencies as deps
+
+    class Users:
+        def find_by_role(self, role, store_id=None):
+            return [{"user_id": "U-ADMIN-1"}] if role == "ADMIN" else []
+
+    monkeypatch.setattr(deps, "get_user_repository", lambda: Users())
+
+
+def test_a_dead_webhook_raises_one_task_for_an_admin(db, an_admin):
+    _order(db)
+    _inbox_row(db, "dead-1", "orders/delete", {"id": int(_SHOPIFY_ORDER_ID)})
+    with _lookup_outage("orders"):
+        for _ in range(NexusAgent.WEBHOOK_MAX_ATTEMPTS - 1):
+            row = _drain(db, "dead-1")
+        # Still being retried: nobody is bothered yet.
+        assert row["status"] == "failed"
+        assert db.tasks.count_documents({}) == 0
+        row = _drain(db, "dead-1")
+    assert row["status"] == "dead"
+
+    tasks = list(db.tasks.find({}))
+    assert len(tasks) == 1, tasks
+    task = tasks[0]
+    assert task["source"] == "SYSTEM" and task["source_ref"] == _DEAD_REF
+    assert task["status"] == "OPEN" and task["priority"] == "P2"
+    assert task["assigned_to"] == "U-ADMIN-1" and task["store_id"] is None
+    assert task["title"] == (
+        f"Shopify notification not processed after {NexusAgent.WEBHOOK_MAX_ATTEMPTS} tries"
+    )
+    for said in ("orders/delete", "dead-1", "TimeoutError", "NOT been applied"):
+        assert said in task["description"], said
+    assert task["link"] == "/online-store/shopify"
+    assert task["payload"] == {
+        "vendor": "shopify", "webhook_id": "dead-1", "topic": "orders/delete"}
+
+    # A dead row is never drained again, so it never raises a second task.
+    _drain(db, "dead-1")
+    assert db.tasks.count_documents({}) == 1
+
+
+def test_later_dead_webhooks_join_the_open_task_and_a_closed_task_is_not_reused(db, an_admin):
+    _order(db)
+    _park_dead(db, "dead-1")
+    _park_dead(db, "dead-2", "refunds/create",
+               {"id": 82, "order_id": int(_SHOPIFY_ORDER_ID), "refund_line_items": []})
+
+    tasks = list(db.tasks.find({}))
+    assert len(tasks) == 1, [t["title"] for t in tasks]
+    text = tasks[0]["description"]
+    assert "orders/delete, id dead-1" in text and "refunds/create, id dead-2" in text
+    assert tasks[0]["status"] == "OPEN"
+
+    # The admin deals with them and closes the task. The next dead webhook is
+    # a new item, naming only itself.
+    db.tasks.update_one({"task_id": tasks[0]["task_id"]}, {"$set": {"status": "COMPLETED"}})
+    _park_dead(db, "dead-3")
+    open_tasks = list(db.tasks.find({"status": "OPEN"}))
+    assert db.tasks.count_documents({}) == 2 and len(open_tasks) == 1
+    assert "dead-3" in open_tasks[0]["description"]
+    assert "dead-1" not in open_tasks[0]["description"]
+
+
+def test_a_webhook_that_recovers_or_is_skipped_raises_no_task(db, an_admin):
+    _order(db)
+    _inbox_row(db, "ok-1", "orders/delete", {"id": int(_SHOPIFY_ORDER_ID)})
+    with _lookup_outage("orders"):
+        assert _drain(db, "ok-1")["status"] == "failed"
+    assert _drain(db, "ok-1")["status"] == "succeeded"
+
+    # An explicit terminal skip (no handler for the vendor) is not a dead letter.
+    db.webhook_inbox.insert_one({
+        "webhook_id": "skip-1", "vendor": "nobody", "processed": False,
+        "status": "received", "attempts": NexusAgent.WEBHOOK_MAX_ATTEMPTS,
+        "received_at": datetime.now(timezone.utc) - timedelta(minutes=2), "payload": {},
+    })
+    asyncio.run(NexusAgent(db=db)._handle_inbox_webhook("skip-1", "nobody"))
+    assert db.webhook_inbox.find_one({"webhook_id": "skip-1"})["status"] == "skipped"
+    assert db.tasks.count_documents({}) == 0
+
+
+def test_a_task_that_cannot_be_written_never_stops_the_drain(db, monkeypatch):
+    """Fail-soft: the row is still parked dead when the task door is broken."""
+    import api.services.task_triggers as task_triggers
+
+    def boom(*a, **kw):
+        raise RuntimeError("tasks unavailable")
+
+    monkeypatch.setattr(task_triggers, "create_system_task", boom)
+    _order(db)
+    _park_dead(db, "dead-9")
+    assert db.tasks.count_documents({}) == 0
