@@ -1581,26 +1581,37 @@ async def get_ad_audience_export(
 _CONSENT_LEDGER_COLL = "whatsapp_consent_ledger"
 
 
-def is_opted_out(customer_id: str, db) -> bool:
+def is_opted_out(customer_id: str, db, strict: bool = False) -> bool:
     """Check if a customer is opted out via marketing_consent OR ledger.
-    
+
     Returns True if:
     - customers.marketing_consent is explicitly False, OR
     - the most recent whatsapp_consent_ledger entry has event in {OPT_OUT, STOP}
-    
+
     This unified check ensures all outbound paths honor all 3 opt-out signals:
     1. The customers.marketing_consent flag (direct state)
     2. INBOUND_STOP events in the ledger (TRAI/DPDP audit trail)
     3. Explicit OPT_OUT events (manual withdrawal)
+
+    strict=True is the FAIL-CLOSED form used at the last dispatch boundary
+    (MEGAPHONE's drain, L1-F20): a consent read that cannot be completed
+    RAISES instead of answering "consented", and a customer with no record at
+    all counts as opted out (there is no consent on file to rely on). The
+    default stays fail-soft for the queueing doors, which the drain re-checks.
     """
     if db is None:
+        if strict:
+            raise RuntimeError("consent cannot be verified: database unavailable")
         return False
-    
+
     # Check the direct flag first (fast path)
-    cust = db.get_collection("customers").find_one({"customer_id": customer_id}) or {}
+    cust = db.get_collection("customers").find_one({"customer_id": customer_id})
+    if strict and not cust:
+        return True
+    cust = cust or {}
     if cust.get("marketing_consent") is False:
         return True
-    
+
     # Check the most recent ledger entry (fail-soft: a ledger lookup error must
     # never 500 the send path -- the marketing_consent flag above is authoritative).
     try:
@@ -1611,7 +1622,8 @@ def is_opted_out(customer_id: str, db) -> bool:
         if latest_event and latest_event.get("event") in {"OPT_OUT", "STOP"}:
             return True
     except Exception:
-        pass
+        if strict:
+            raise
 
     return False
 

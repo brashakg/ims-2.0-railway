@@ -349,6 +349,12 @@ def test_megaphone_drain_passes_the_rows_dlt_template_to_the_send_door(
 
     class _NotifColl:
         def __init__(self, rows):
+            # Real queue rows carry an _id and the consent_basis the queue
+            # writer stamps; the drain claims by _id (L1-F21) and re-checks
+            # consent for marketing rows (L1-F20). These are service messages.
+            for i, r in enumerate(rows):
+                r.setdefault("_id", i)
+                r.setdefault("consent_basis", "transactional")
             self.rows = rows
 
         def find(self, flt):
@@ -362,7 +368,7 @@ def test_megaphone_drain_passes_the_rows_dlt_template_to_the_send_door(
             return _Cur(self.rows)
 
         def update_one(self, flt, update):
-            return None
+            return type("R", (), {"modified_count": 1})()
 
     rows = [
         {
@@ -600,6 +606,10 @@ def test_megaphone_drains_an_email_row_through_the_email_transport(monkeypatch):
 
     class _NotifColl:
         def __init__(self, rows):
+            # Real row shape: _id + stamped consent_basis (see the SMS fake).
+            for i, r in enumerate(rows):
+                r.setdefault("_id", i)
+                r.setdefault("consent_basis", "transactional")
             self.rows = rows
             self.updates = []
 
@@ -615,6 +625,7 @@ def test_megaphone_drains_an_email_row_through_the_email_transport(monkeypatch):
 
         def update_one(self, flt, update):
             self.updates.append((flt, update))
+            return type("R", (), {"modified_count": 1})()
 
     rows = [
         {
