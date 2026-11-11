@@ -15,6 +15,16 @@ with ``status="not_configured"`` and NEVER raises. The router surfaces
 a ``configured`` flag per channel so the frontend can show the
 "connect" empty-state instead of a spinner.
 
+Three states, never merged (audit L1-F33):
+  not connected   no / incomplete creds -> sentinel row status="not_configured"
+  fetch failed    creds present but the provider timed out / refused / sent a
+                  reply we cannot read -> sentinel row status="error" carrying
+                  a plain reason (never a credential or a provider body);
+                  the channel reads configured=True with <channel>_error set
+  no campaigns    a valid empty report -> [] ; configured=True, no error
+A partial or guessed number is never shown: an unreadable currency or a page
+that cannot be fetched fails the whole channel.
+
 Credential resolution
 ---------------------
 Credentials are resolved from the ``integrations`` MongoDB collection
@@ -35,9 +45,12 @@ crashes a cold start.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -84,7 +97,7 @@ class CampaignRow:
     cpl: float  # cost-per-lead / cost-per-conversion (0 when conversions == 0)
     roas: float  # return-on-ad-spend (0 when spend == 0)
     currency: str = "INR"
-    status: str = "ok"  # "ok" | "not_configured" | "simulated"
+    status: str = "ok"  # "ok" | "not_configured" | "error" (see module docstring)
 
 
 @dataclass
@@ -100,6 +113,9 @@ class AdPerformanceResult:
     total_cpl: float = 0.0  # 0 when conversions == 0
     google_configured: bool = False
     meta_configured: bool = False
+    # Why a CONNECTED channel has no rows ("" = fetched fine). Plain words.
+    google_error: str = ""
+    meta_error: str = ""
     fetched_at: str = ""
     note: str = ""
 
@@ -118,13 +134,12 @@ def _compute_totals(result: AdPerformanceResult) -> None:
     # not yet available from the API surface; router can override if needed.
 
 
-def _not_configured_rows(channel: str) -> List[CampaignRow]:
-    """Placeholder sentinel row to signal a channel has no creds."""
+def _sentinel_rows(channel: str, campaign_id: str, name: str, status: str) -> List[CampaignRow]:
     return [
         CampaignRow(
             channel=channel,
-            campaign_id="__not_configured__",
-            campaign_name="(no credentials configured)",
+            campaign_id=campaign_id,
+            campaign_name=name,
             spend=0.0,
             impressions=0,
             clicks=0,
@@ -132,26 +147,58 @@ def _not_configured_rows(channel: str) -> List[CampaignRow]:
             ctr=0.0,
             cpl=0.0,
             roas=0.0,
-            status="not_configured",
+            status=status,
         )
     ]
+
+
+def _not_configured_rows(channel: str) -> List[CampaignRow]:
+    """Placeholder sentinel row to signal a channel has no creds."""
+    return _sentinel_rows(
+        channel, "__not_configured__", "(no credentials configured)", "not_configured"
+    )
+
+
+def _error_rows(channel: str, reason: str) -> List[CampaignRow]:
+    """Sentinel row: the channel HAS credentials but its report could not be
+    fetched. `reason` is shown to the user - plain words, no secret, no
+    provider response body."""
+    return _sentinel_rows(channel, "__error__", reason, "error")
+
+
+def _num(value: Any) -> float:
+    """A metric as a number. Google Ads REST sends int64 fields (costMicros,
+    impressions, clicks) as JSON STRINGS and doubles as numbers; Meta sends
+    strings. A value that is not a number raises, and the caller reports the
+    channel as failed rather than showing a zero."""
+    return float(value or 0)
 
 
 # ---------------------------------------------------------------------------
 # Google Ads provider
 # ---------------------------------------------------------------------------
 
+# Google Ads REST version. The adapter used /v17, which stopped serving on
+# 2025-06-04 (audit L1-F33). v26 was released 2026-10-14 and is scheduled to
+# sunset in November 2027 (developers.google.com/google-ads/api/docs/sunset-dates,
+# read 2026-11-11). The integration doc's optional `api_version` (e.g. "v27")
+# overrides it, so the next sunset is a settings change, not a deploy.
+GOOGLE_ADS_API_VERSION = "v26"
+
+# customer.currency_code: the account's own currency - cost_micros is in it.
+# Cost per lead is derived here (spend / conversions), so the unit of Google's
+# own cost_per_conversion is never relied on.
 _GOOGLE_REPORT_QUERY = """
 SELECT
   campaign.id,
   campaign.name,
   campaign.status,
+  customer.currency_code,
   metrics.cost_micros,
   metrics.impressions,
   metrics.clicks,
   metrics.conversions,
-  metrics.ctr,
-  metrics.cost_per_conversion
+  metrics.ctr
 FROM campaign
 WHERE segments.date BETWEEN '{from_date}' AND '{to_date}'
   AND campaign.status != 'REMOVED'
@@ -190,8 +237,6 @@ async def google_ads_performance(
         return _not_configured_rows("google")
 
     try:
-        import httpx
-
         # Step 1: refresh the OAuth2 access token
         async with httpx.AsyncClient(timeout=15.0) as client:
             token_resp = await client.post(
@@ -209,20 +254,29 @@ async def google_ads_performance(
                 token_resp.status_code,
                 token_resp.text[:200],
             )
-            return _not_configured_rows("google")
+            return _error_rows(
+                "google",
+                f"Google did not accept the saved Google Ads sign-in "
+                f"(HTTP {token_resp.status_code}). Reconnect the account.",
+            )
 
         access_token = token_resp.json().get("access_token", "")
         if not access_token:
             logger.warning("[AD_PROVIDERS] Google Ads token response missing access_token")
-            return _not_configured_rows("google")
+            return _error_rows(
+                "google", "Google did not return an access token for the saved sign-in."
+            )
 
-        # Step 2: run the GAQL report (searchStream returns newline-delimited JSON)
+        # Step 2: run the GAQL report (searchStream returns a JSON array of batches)
         gaql = _GOOGLE_REPORT_QUERY.format(
             from_date=date_range.get("from", ""),
             to_date=date_range.get("to", ""),
         )
+        version = str(cfg.get("api_version") or "").strip().lower()
+        if not re.fullmatch(r"v\d+", version):
+            version = GOOGLE_ADS_API_VERSION
         url = (
-            f"https://googleads.googleapis.com/v17/customers/{customer_id}"
+            f"https://googleads.googleapis.com/{version}/customers/{customer_id}"
             "/googleAds:searchStream"
         )
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -242,25 +296,42 @@ async def google_ads_performance(
                 resp.status_code,
                 resp.text[:300],
             )
-            return _not_configured_rows("google")
+            return _error_rows(
+                "google",
+                f"Google Ads answered HTTP {resp.status_code} "
+                f"(API {version}); the report was not fetched.",
+            )
 
-        # USD -> INR conversion (snapshot rate stored in config, default 84)
-        fx_rate = float(cfg.get("usd_inr_rate", 84.0))
+        # cost_micros is in the ACCOUNT's currency. An INR account needs no
+        # conversion; a USD account uses the snapshot rate stored in config
+        # (default 84), as before. Any other currency - or none reported - is
+        # an error: a rate is never guessed.
+        to_inr = {"INR": 1.0, "USD": float(cfg.get("usd_inr_rate", 84.0))}
         rows: List[CampaignRow] = []
 
         for batch in resp.json():
             for result in batch.get("results", []):
                 camp = result.get("campaign", {})
                 metrics = result.get("metrics", {})
-                spend_micros = metrics.get("costMicros", 0)
-                spend_inr = round((spend_micros / 1_000_000) * fx_rate, 2)
-                impressions = int(metrics.get("impressions", 0))
-                clicks = int(metrics.get("clicks", 0))
-                conversions = int(metrics.get("conversions", 0))
-                ctr = round(float(metrics.get("ctr", 0)) * 100, 4)
-                cpl_inr = round(
-                    float(metrics.get("costPerConversion", 0)) * fx_rate, 2
+                currency = str(
+                    (result.get("customer") or {}).get("currencyCode") or ""
+                ).upper()
+                if currency not in to_inr:
+                    return _error_rows(
+                        "google",
+                        "Google Ads account currency "
+                        f"{currency or 'was not reported'}: only INR and USD "
+                        "accounts can be shown in rupees.",
+                    )
+                spend_inr = round(
+                    _num(metrics.get("costMicros")) / 1_000_000 * to_inr[currency], 2
                 )
+                impressions = int(_num(metrics.get("impressions")))
+                clicks = int(_num(metrics.get("clicks")))
+                leads = _num(metrics.get("conversions"))  # a double: may be fractional
+                conversions = int(leads)
+                ctr = round(_num(metrics.get("ctr")) * 100, 4)
+                cpl_inr = round(spend_inr / leads, 2) if leads > 0 else 0.0
                 rows.append(
                     CampaignRow(
                         channel="google",
@@ -280,11 +351,14 @@ async def google_ads_performance(
         logger.info("[AD_PROVIDERS] Google Ads: %d campaigns fetched", len(rows))
         return rows
 
+    except httpx.TimeoutException:
+        logger.warning("[AD_PROVIDERS] Google Ads timed out")
+        return _error_rows("google", "Google Ads did not answer in time. Try again.")
     except Exception as exc:
         logger.error(
             "[AD_PROVIDERS] Google Ads fetch error (fail-soft): %s", exc, exc_info=True
         )
-        return _not_configured_rows("google")
+        return _error_rows("google", "The Google Ads report could not be read.")
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +368,11 @@ async def google_ads_performance(
 _META_FIELDS = (
     "campaign_id,campaign_name,spend,impressions,clicks,actions,cost_per_action_type"
 )
+
+_META_GRAPH = "https://graph.facebook.com"
+# ponytail: 20 pages x 50 = 1,000 campaigns per period. Past that the channel
+# reports an error instead of a partial total; raise the cap if it ever bites.
+_META_MAX_PAGES = 20
 
 _META_LEAD_ACTION_TYPES = frozenset(
     {
@@ -336,9 +415,7 @@ async def meta_ads_performance(
         ad_account_id = f"act_{ad_account_id}"
 
     try:
-        import httpx
-
-        url = f"https://graph.facebook.com/v20.0/{ad_account_id}/insights"
+        url = f"{_META_GRAPH}/v20.0/{ad_account_id}/insights"
         params: Dict[str, str] = {
             "fields": _META_FIELDS,
             "time_range": (
@@ -348,18 +425,44 @@ async def meta_ads_performance(
             "limit": "50",
             "access_token": access_token,
         }
+        # Every page (paging.next), or an honest error: a first page shown as
+        # the whole report understates the spend.
+        data: List[Dict[str, Any]] = []
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.get(url, params=params)
+            for _page in range(_META_MAX_PAGES):
+                if resp.status_code != 200:
+                    logger.warning(
+                        "[AD_PROVIDERS] Meta Ads API call failed: %s %s",
+                        resp.status_code,
+                        resp.text[:300],
+                    )
+                    return _error_rows(
+                        "meta",
+                        f"Meta Ads answered HTTP {resp.status_code}; "
+                        "the report was not fetched.",
+                    )
+                body = resp.json()
+                data.extend(body.get("data") or [])
+                next_url = str((body.get("paging") or {}).get("next") or "")
+                if not next_url:
+                    break
+                # The next link carries the access token: it is followed only
+                # on Meta's own host.
+                if not next_url.startswith(_META_GRAPH + "/"):
+                    return _error_rows(
+                        "meta",
+                        "Meta Ads sent a next-page link that is not Meta's; "
+                        "the report was not completed.",
+                    )
+                resp = await client.get(next_url)
+            else:
+                return _error_rows(
+                    "meta",
+                    f"Meta Ads has more than {_META_MAX_PAGES * 50} campaigns "
+                    "in this period; the report was not completed.",
+                )
 
-        if resp.status_code != 200:
-            logger.warning(
-                "[AD_PROVIDERS] Meta Ads API call failed: %s %s",
-                resp.status_code,
-                resp.text[:300],
-            )
-            return _not_configured_rows("meta")
-
-        data = resp.json().get("data", [])
         rows: List[CampaignRow] = []
         for item in data:
             spend = round(float(item.get("spend", 0)), 2)
@@ -394,11 +497,14 @@ async def meta_ads_performance(
         logger.info("[AD_PROVIDERS] Meta Ads: %d campaigns fetched", len(rows))
         return rows
 
+    except httpx.TimeoutException:
+        logger.warning("[AD_PROVIDERS] Meta Ads timed out")
+        return _error_rows("meta", "Meta Ads did not answer in time. Try again.")
     except Exception as exc:
         logger.error(
             "[AD_PROVIDERS] Meta Ads fetch error (fail-soft): %s", exc, exc_info=True
         )
-        return _not_configured_rows("meta")
+        return _error_rows("meta", "The Meta Ads report could not be read.")
 
 
 # ---------------------------------------------------------------------------
@@ -420,8 +526,9 @@ async def fetch_ad_performance(
     date_range = {"from": from_date, "to": to_date}
     result = AdPerformanceResult(fetched_at=datetime.now(timezone.utc).isoformat())
 
-    google_rows: List[CampaignRow] = []
-    meta_rows: List[CampaignRow] = []
+    # None = the channel was not asked for (channel filter).
+    google_rows: Optional[List[CampaignRow]] = None
+    meta_rows: Optional[List[CampaignRow]] = None
 
     if channel in (None, "google"):
         try:
@@ -430,7 +537,7 @@ async def fetch_ad_performance(
             logger.error(
                 "[AD_PROVIDERS] Unexpected error from google_ads_performance: %s", exc
             )
-            google_rows = _not_configured_rows("google")
+            google_rows = _error_rows("google", "The Google Ads report could not be read.")
 
     if channel in (None, "meta"):
         try:
@@ -439,22 +546,29 @@ async def fetch_ad_performance(
             logger.error(
                 "[AD_PROVIDERS] Unexpected error from meta_ads_performance: %s", exc
             )
-            meta_rows = _not_configured_rows("meta")
+            meta_rows = _error_rows("meta", "The Meta Ads report could not be read.")
 
-    def _is_configured(rows: List[CampaignRow]) -> bool:
-        return bool(rows) and rows[0].status not in ("not_configured",)
+    def _state(rows: Optional[List[CampaignRow]]) -> tuple:
+        """(configured, error) for one channel. Connected is about the
+        credentials; whether the fetch worked is the error. An empty report
+        from a connected account is neither."""
+        first = rows[0].status if rows else ""
+        if rows is None or first == "not_configured":
+            return False, ""
+        return True, rows[0].campaign_name if first == "error" else ""
 
-    result.google_configured = _is_configured(google_rows)
-    result.meta_configured = _is_configured(meta_rows)
+    result.google_configured, result.google_error = _state(google_rows)
+    result.meta_configured, result.meta_error = _state(meta_rows)
 
-    # Exclude the sentinel "__not_configured__" placeholder from the data table
+    # Sentinel rows (not connected / fetch failed) never reach the data table.
     result.rows = [
-        r
-        for r in (google_rows + meta_rows)
-        if r.campaign_id != "__not_configured__"
+        r for r in (google_rows or []) + (meta_rows or []) if r.status == "ok"
     ]
 
-    if not result.google_configured and not result.meta_configured:
+    errors = [e for e in (result.google_error, result.meta_error) if e]
+    if errors:
+        result.note = " ".join(errors)
+    elif not result.google_configured and not result.meta_configured:
         result.note = (
             "No ad account credentials configured. "
             "Add a 'google_ads' or 'meta_ads' integration doc to the "

@@ -1363,6 +1363,10 @@ class AdPerformanceOut(BaseModel):
     total_cpl: float
     google_configured: bool
     meta_configured: bool
+    # L1-F33: why a CONNECTED channel has no rows ("" = fetched fine). A
+    # failed fetch is not "not connected".
+    google_error: str = ""
+    meta_error: str = ""
     fetched_at: str
     note: str
 
@@ -1440,6 +1444,8 @@ async def get_ad_performance(
         total_cpl=result.total_cpl,
         google_configured=result.google_configured,
         meta_configured=result.meta_configured,
+        google_error=result.google_error,
+        meta_error=result.meta_error,
         fetched_at=result.fetched_at,
         note=result.note,
     )
