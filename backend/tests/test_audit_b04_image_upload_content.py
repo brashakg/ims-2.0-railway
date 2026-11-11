@@ -495,3 +495,89 @@ def test_a_large_jpeg_is_checked_without_a_full_size_decode():
     buf = io.BytesIO()
     Image.new("RGB", (4000, 3000), (120, 60, 30)).save(buf, "JPEG")
     assert image_mime_of(buf.getvalue()) == "image/jpeg"
+
+
+# ---------------------------------------------------------------------------
+# The brand scan is bounded (review must-fix): the ftyp box's size field is
+# the uploader's own number, never a licence to index the whole file.
+# ---------------------------------------------------------------------------
+
+
+def _oversized_ftyp(megabytes: int = 1, brand_at_end: bytes = b"") -> bytes:
+    """An 'ftyp' box that claims to span the whole file, with every 4-byte
+    slot after the header holding a DIFFERENT value - the worst case for a
+    scan that collects every slot."""
+    slots = megabytes * 1024 * 1024 // 4
+    body = b"".join(i.to_bytes(4, "big") for i in range(1, slots + 1))
+    payload = b"zzzz" + b"\x00\x00\x00\x00" + body + brand_at_end
+    return (0x7FFFFFFF).to_bytes(4, "big") + b"ftyp" + payload
+
+
+def test_an_oversized_ftyp_box_is_scanned_in_a_small_fixed_window():
+    import tracemalloc
+
+    from api.services import image_content
+
+    crafted = _oversized_ftyp(megabytes=1)  # 262,144 distinct brand slots
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        assert image_content._signature_mime(crafted) is None
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # Unbounded, this scan held every slot at once (about 25 bytes of memory
+    # per byte of file). Bounded, it holds a few dozen 4-byte brands.
+    assert peak < 64 * 1024, f"brand scan used {peak} bytes for a {len(crafted)} byte file"
+    assert image_mime_of(crafted) is None
+
+
+def test_a_brand_outside_the_scan_window_does_not_name_the_file():
+    """The window is where a real ftyp box keeps its brands; a brand planted
+    megabytes into a box that claims the whole file is not read at all."""
+    from api.services import image_content
+
+    crafted = _oversized_ftyp(megabytes=1, brand_at_end=b"avif")
+    assert image_content._signature_mime(crafted) is None
+
+
+def test_real_brand_lists_are_still_read_inside_the_window():
+    from api.services import image_content
+
+    # The image brand as the LAST of 16 compatible brands (a long real list).
+    padding = [b"iso8", b"mp41", b"dash", b"M4V ", b"isom", b"iso2", b"mp42",
+               b"MSNV", b"3gp4", b"3gp5", b"3g2a", b"qt  ", b"piff", b"iso6", b"cmfc"]
+    assert image_mime_of(_bmff(b"mif1", *padding, b"heic")) == "image/heic"
+    assert image_mime_of(_bmff(b"mif1", *padding, b"avif")) == "image/avif"
+    assert image_mime_of(_bmff(b"mif1", *padding)) == "image/heif"
+    # The window is a fixed number of bytes from the start of the file.
+    assert image_content._FTYP_SCAN_BYTES <= 1024
+
+
+def test_a_container_of_millions_of_empty_boxes_is_refused_not_walked():
+    """A 4 MB HEIC-shaped file of 8-byte boxes: the container walk stops at
+    a fixed number of top-level boxes (a real photo has a handful)."""
+    from api.services import image_content
+
+    ftyp = _box(b"ftyp", b"heic" + b"\x00\x00\x00\x00" + b"mif1heic")
+    flood = _box(b"free", b"") * (4 * 1024 * 1024 // 8)
+    crafted = ftyp + flood + _box(b"meta", b"\x00" * 40)
+
+    seen = []
+    real = int.from_bytes
+
+    class _CountingInt(int):
+        @classmethod
+        def from_bytes(cls, *a, **kw):
+            seen.append(1)
+            return real(*a, **kw)
+
+    image_content.int = _CountingInt  # module-level name shadows the builtin
+    try:
+        assert image_mime_of(crafted) is None
+    finally:
+        del image_content.int
+    assert len(seen) <= image_content._MAX_TOP_BOXES + 2, len(seen)
+    # A genuine container with a few extra boxes before `meta` still passes.
+    ok = ftyp + _box(b"free", b"") * 20 + _box(b"meta", b"\x00" * 40) + _box(b"mdat", b"\x01" * 64)
+    assert image_mime_of(ok) == "image/heic"

@@ -46,6 +46,14 @@ _HEIC_BRANDS = frozenset(
 _AVIF_BRANDS = frozenset({b"avif", b"avis"})
 _HEIF_BRANDS = frozenset({b"mif1", b"msf1"})
 
+# How far into the file the ftyp brand list is read. A real ftyp box is a few
+# dozen bytes (8 header + major + minor + a handful of 4-byte brands); 256
+# bytes holds 60 compatible brands. Without the cap a crafted box claiming the
+# whole file made the scan hold every 4-byte slot of a 25 MB upload at once.
+_FTYP_SCAN_BYTES = 256
+# Top-level ISO-BMFF boxes walked before the file is refused (see _boxes_fit).
+_MAX_TOP_BOXES = 256
+
 
 def _signature_mime(content: bytes) -> Optional[str]:
     """The format the leading bytes announce, or None."""
@@ -58,11 +66,12 @@ def _signature_mime(content: bytes) -> Optional[str]:
     if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
         return "image/webp"
     if content[4:8] == b"ftyp":
+        # Major brand + the compatible brands listed in the ftyp box. The
+        # box's size field is the uploader's own number, so it only ever
+        # SHORTENS the scan: the brands are read inside a small fixed window.
         size = int.from_bytes(content[:4], "big")
-        # major brand + every compatible brand listed in the ftyp box
-        brands = {content[8:12]} | {
-            content[i : i + 4] for i in range(16, min(size, len(content)), 4)
-        }
+        end = min(size, len(content), _FTYP_SCAN_BYTES)
+        brands = {content[8:12]} | {content[i : i + 4] for i in range(16, end, 4)}
         if brands & _AVIF_BRANDS:
             return "image/avif"
         if brands & _HEIC_BRANDS:
@@ -75,21 +84,25 @@ def _signature_mime(content: bytes) -> Optional[str]:
 def _boxes_fit(content: bytes) -> bool:
     """ISO-BMFF (HEIC/HEIF/AVIF): the file must carry its `meta` box, and no
     top-level box may run past the end of the file - a cut-short upload leaves
-    its last box overhanging."""
+    its last box overhanging. A real image has a handful of top-level boxes
+    (ftyp, meta, mdat, ...): a file with more than _MAX_TOP_BOXES is refused
+    instead of walked, so a file of millions of empty boxes costs nothing."""
     pos, end, seen_meta = 0, len(content), False
-    while pos + 8 <= end:
+    for _ in range(_MAX_TOP_BOXES):
+        if pos + 8 > end:
+            return seen_meta
         size = int.from_bytes(content[pos : pos + 4], "big")
         seen_meta = seen_meta or content[pos + 4 : pos + 8] == b"meta"
         if size == 0:  # "this box runs to the end of the file"
-            break
+            return seen_meta
         if size == 1:  # 64-bit size follows the type
             size = int.from_bytes(content[pos + 8 : pos + 16], "big")
         if size < 8:  # not a box header: trailing bytes, stop walking
-            break
+            return seen_meta
         if pos + size > end:
             return False
         pos += size
-    return seen_meta
+    return False
 
 
 def _png_complete(content: bytes) -> bool:
