@@ -31,6 +31,9 @@ export interface SalaryConfig {
   pf_wage_ceiling_cap?: boolean;
   esi_applicable?: boolean | null;
   pt_applicable?: boolean;
+  /** For the Professional Tax slab in a state whose slab differs by gender.
+   *  '' / null / absent = not set: the general slab applies. */
+  gender?: 'MALE' | 'FEMALE' | '' | null;
   tds_monthly?: number;
   // IDs
   uan?: string;

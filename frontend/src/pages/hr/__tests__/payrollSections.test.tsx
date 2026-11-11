@@ -172,6 +172,22 @@ describe('each payroll section renders at its own URL inside the HR module', () 
     expect(screen.getAllByRole('heading', { level: 1 })).toHaveLength(1);
   });
 
+  // Audit L3-16 (owner ruling 2026-11-11): the sheet shows the payroll run and
+  // nothing else. It used to say "No salary data", or list an old-calculation
+  // row as zero Basic/HRA/Gross beside a net pay.
+  it('sheet, a month with no payroll run: says so plainly and points to Payroll Run', async () => {
+    get.mockImplementation(async (url: string) => {
+      if (url === '/payroll/salary-sheet') return { data: { salaries: [], total: 0 } };
+      throw new Error(`unexpected GET ${url}`);
+    });
+    renderRoute('/hr/payroll', ['ADMIN']);
+    expect(
+      await screen.findByText(/^No payroll run is saved for \w+ \d{4}\. Salaries are calculated in \.$/, undefined, FIND),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Payroll Run' })).toHaveAttribute('href', '/hr/payroll-run');
+    expect(screen.queryByRole('table')).not.toBeInTheDocument();
+  });
+
   it('advances: the employee picker is fed by the layout load; picking one loads their advances', async () => {
     renderRoute('/hr/payroll/advances', ['ADMIN']);
     const picker = await screen.findByTitle('Select employee for advances', undefined, FIND);

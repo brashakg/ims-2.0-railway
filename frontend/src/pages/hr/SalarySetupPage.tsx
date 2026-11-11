@@ -33,6 +33,7 @@ const EMPTY_FORM: SalaryConfig = {
   pf_wage_ceiling_cap: true,
   esi_applicable: null,
   pt_applicable: true,
+  gender: '',
   tds_monthly: 0,
   uan: '',
   esi_ip_number: '',
@@ -41,6 +42,14 @@ const EMPTY_FORM: SalaryConfig = {
   bank_ifsc: '',
   bank_name: '',
 };
+
+// Owner ruling 2026-11-11 (audit L3-17): the admin fills the employee's gender
+// here and Payroll Run uses it for the Professional Tax slab. Leaving it
+// unset keeps what Payroll Run did before the field existed, and the screen
+// says so in these words wherever the field or the slabs are shown.
+const GENDER_LABEL: Record<string, string> = { MALE: 'Male', FEMALE: 'Female', '': 'Not set' };
+const GENDER_NOT_SET_NOTE =
+  'While gender is not set, Payroll Run charges Professional Tax on the general (male) slab, as before.';
 
 // esi_applicable is tri-state: null = auto (by gross), true = yes, false = no
 function esiToSelect(v: boolean | null | undefined): string {
@@ -235,6 +244,12 @@ export function SalarySetupPage() {
             ))}
           </div>
         )}
+        {ptSlabs.some((s) => s.gender_aware) && (
+          <p className="text-xs text-gray-500 mt-2">
+            {ptSlabs.filter((s) => s.gender_aware).map((s) => s.state_name || s.state_code).join(', ')}
+            {' '}has a separate slab for women. {GENDER_NOT_SET_NOTE}
+          </p>
+        )}
       </div>
 
       {/* Configs table */}
@@ -257,6 +272,7 @@ export function SalarySetupPage() {
                 <th className="px-3 py-2 text-right">Basic</th>
                 <th className="px-3 py-2 text-right">Gross</th>
                 <th className="px-3 py-2 text-center">PF/ESI/PT</th>
+                <th className="px-3 py-2 text-left">Gender</th>
                 {canEdit && <th className="px-3 py-2"></th>}
               </tr>
             </thead>
@@ -276,6 +292,7 @@ export function SalarySetupPage() {
                   <td className="px-3 py-2 text-center text-xs text-gray-500">
                     {c.pf_applicable ? 'PF' : '—'} / {c.esi_applicable === false ? '—' : 'ESI'} / {c.pt_applicable ? 'PT' : '—'}
                   </td>
+                  <td className="px-3 py-2 text-xs text-gray-500">{GENDER_LABEL[c.gender || '']}</td>
                   {canEdit && (
                     <td className="px-3 py-2 text-right">
                       <button className="text-bv-red-600 hover:underline" onClick={() => openEdit(c)}>Edit</button>
@@ -379,6 +396,15 @@ export function SalarySetupPage() {
                   <option value="no">No</option>
                 </select>
               </Field>
+              <Field label="Gender (for Professional Tax)">
+                <select className="input-field" value={form.gender || ''}
+                  onChange={(e) => setField('gender', e.target.value)}>
+                  <option value="">Not set</option>
+                  <option value="MALE">Male</option>
+                  <option value="FEMALE">Female</option>
+                </select>
+                <span className="block text-xs text-gray-500 mt-1">{GENDER_NOT_SET_NOTE}</span>
+              </Field>
               <Field label="TDS / month (manual)">
                 <input type="number" className="input-field" value={form.tds_monthly || 0}
                   onChange={(e) => setField('tds_monthly', num(e.target.value))} />
@@ -421,8 +447,9 @@ export function SalarySetupPage() {
             <h2 className="text-lg font-semibold mb-2">Bulk import (CSV)</h2>
             <p className="text-sm text-gray-500 mb-3">
               First line is the header. Supported columns: <code>employee_id, basic, hra, conveyance,
-              medical, special_allowance, designation, entity_id, store_id, pan, uan, tds_monthly</code>.
-              <code>employee_id</code> and <code>basic</code> are required.
+              medical, special_allowance, designation, entity_id, store_id, pan, uan, tds_monthly, gender</code>.
+              <code>employee_id</code> and <code>basic</code> are required. <code>gender</code> is MALE or FEMALE;
+              leave the column out to keep what is already saved.
             </p>
             <textarea
               className="input-field h-48 font-mono text-xs"
@@ -509,6 +536,11 @@ export function parseSalaryCsv(text: string): { rows: SalaryConfig[]; skipped: S
       if (!Number.isFinite(n)) reason = `${h} "${raw}" is not a number`;
       else if (n < 0) reason = `${h} cannot be negative`;
     });
+    if ('gender' in row) {
+      // The server knows MALE, FEMALE or empty (not set), nothing else.
+      row.gender = String(row.gender).toUpperCase();
+      if (!reason && !(row.gender in GENDER_LABEL)) reason = 'gender must be MALE or FEMALE (or empty)';
+    }
     if (!row.employee_id) reason = 'employee_id is missing';
     else if (!reason && !(Number(row.basic) > 0)) reason = 'basic must be greater than 0';
     if (reason) {
