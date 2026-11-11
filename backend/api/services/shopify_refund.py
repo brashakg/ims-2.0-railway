@@ -79,6 +79,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .online_order_status import GOODS_OUT
 
+from .shopify_lookup import find_by_shopify_id
+
 logger = logging.getLogger(__name__)
 
 _REVIEW_COLLECTION = "shopify_refund_review"
@@ -326,18 +328,11 @@ def _refund_auto_enabled(db) -> bool:
 
 
 def _find_ims_order(db, shopify_order_id: str) -> Optional[Dict[str, Any]]:
-    """The canonical IMS order minted for this Shopify order (shopify_ingest).
-    Fail-soft -> None."""
-    if db is None or not shopify_order_id:
-        return None
-    try:
-        coll = db.get_collection("orders")
-        if coll is None:
-            return None
-        return coll.find_one({"shopify_order_id": shopify_order_id})
-    except Exception:  # noqa: BLE001
-        logger.debug("[SHOPIFY_REFUND] order lookup failed", exc_info=True)
-        return None
+    """The canonical IMS order minted for this Shopify order (shopify_ingest),
+    or None when there is none. A lookup that FAILS raises (L1-F29: an
+    outage is not "order not found") - the handler's own except turns it
+    into a failed, retried inbox row."""
+    return find_by_shopify_id(db, "orders", "shopify_order_id", shopify_order_id)
 
 
 def _hist_refund_ref(refund_id: str) -> str:
