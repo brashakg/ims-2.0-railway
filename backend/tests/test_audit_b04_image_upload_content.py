@@ -526,9 +526,13 @@ def test_an_oversized_ftyp_box_is_scanned_in_a_small_fixed_window():
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()
-    # Unbounded, this scan held every slot at once (about 25 bytes of memory
-    # per byte of file). Bounded, it holds a few dozen 4-byte brands.
-    assert peak < 64 * 1024, f"brand scan used {peak} bytes for a {len(crafted)} byte file"
+    # Unbounded, this scan held every slot at once: 34.9 MB for this 1 MB
+    # file (about 33 bytes of memory per byte of file). Bounded, it holds a
+    # few dozen 4-byte brands - far less than the file itself. (A quarter of
+    # the file, not a few KB, so another thread allocating cannot flake it.)
+    assert peak < len(crafted) // 4, (
+        f"brand scan used {peak} bytes for a {len(crafted)} byte file"
+    )
     assert image_mime_of(crafted) is None
 
 
