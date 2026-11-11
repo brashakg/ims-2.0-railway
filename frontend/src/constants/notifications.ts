@@ -307,6 +307,11 @@ export function shouldSendNotification(
 // A template is SELECTABLE only when the server can build its message. The
 // rest stay listed, greyed out, with the reason: choosing one would queue the
 // literal text "[Template X not found]" to a customer.
+//
+// A BUILT-IN that is switched off on the Notifications screen stays
+// selectable, with a note: the server still sends its built-in wording (the
+// switch only stops the saved wording being used). The picker says what the
+// sender does; whether "off" should stop sends is not decided here.
 
 export interface TemplatePickerOption {
   id: string;
@@ -337,8 +342,15 @@ export function templatePickerOptions(resp: unknown): TemplatePickerOption[] {
     if (!id || seen.has(id)) continue;
     seen.add(id);
     const selectable = r.sendable !== false;
-    const why = r.is_enabled === false ? 'turned off in Notifications' : 'no message text saved yet';
-    out.push({ id, label: selectable ? nameOf(id) : `${nameOf(id)} (${why})`, selectable });
+    const off = r.is_enabled === false;
+    const note = selectable
+      ? off
+        ? ' (off in Notifications: built-in wording is used)'
+        : ''
+      : off
+        ? ' (turned off in Notifications)'
+        : ' (no message text saved yet)';
+    out.push({ id, label: nameOf(id) + note, selectable });
   }
   // Templates the Notifications screen lists but the server holds no wording
   // for: shown so they do not silently vanish, not selectable until saved.

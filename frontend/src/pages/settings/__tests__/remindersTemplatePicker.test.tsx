@@ -95,17 +95,30 @@ describe('templatePickerOptions', () => {
 
   it('keeps a template the server cannot send in the list, greyed out with the reason', () => {
     const catalog = [
-      ...freshCatalog().filter((c) => c.template_id !== 'BIRTHDAY_WISH'),
-      { template_id: 'BIRTHDAY_WISH', builtin: true, saved: true, is_enabled: false, sendable: false },
+      ...freshCatalog(),
+      { template_id: 'ZZ_OFF', builtin: false, saved: true, is_enabled: false, sendable: false },
       { template_id: 'ZZ_EMPTY', builtin: false, saved: true, is_enabled: true, sendable: false },
     ];
     const opts = templatePickerOptions({ catalog });
-    const off = opts.find((o) => o.id === 'BIRTHDAY_WISH');
+    const off = opts.find((o) => o.id === 'ZZ_OFF');
     expect(off?.selectable).toBe(false);
     expect(off?.label).toMatch(/turned off in Notifications/);
     const empty = opts.find((o) => o.id === 'ZZ_EMPTY');
     expect(empty?.selectable).toBe(false);
     expect(empty?.label).toMatch(/no message text saved yet/);
+  });
+
+  it('keeps a switched-off built-in selectable and says the built-in wording is sent', () => {
+    // The server still sends a built-in whose Notifications switch is off
+    // (it falls back to the built-in wording), so the picker must not claim
+    // otherwise by greying it out.
+    const catalog = [
+      ...freshCatalog().filter((c) => c.template_id !== 'BIRTHDAY_WISH'),
+      { template_id: 'BIRTHDAY_WISH', builtin: true, saved: true, is_enabled: false, sendable: true },
+    ];
+    const off = templatePickerOptions({ catalog }).find((o) => o.id === 'BIRTHDAY_WISH');
+    expect(off?.selectable).toBe(true);
+    expect(off?.label).toMatch(/off in Notifications: built-in wording is used/);
   });
 
   it('never drops a template the Notifications screen lists', () => {
@@ -155,18 +168,21 @@ describe('Reminders template picker', () => {
     expect(select.value).toBe('BIRTHDAY_WISH');
   });
 
-  it('greys out a switched-off template instead of hiding it', async () => {
+  it('greys out a template the server cannot send instead of hiding it', async () => {
     getNotificationTemplates.mockResolvedValue({
       templates: [],
       catalog: [
-        { template_id: 'BIRTHDAY_WISH', builtin: true, saved: true, is_enabled: false, sendable: false },
+        { template_id: 'ZZ_OFF', builtin: false, saved: true, is_enabled: false, sendable: false },
+        { template_id: 'BIRTHDAY_WISH', builtin: true, saved: true, is_enabled: false, sendable: true },
       ],
     });
 
     const select = await openPicker();
 
-    await waitFor(() => expect(optionById(select, 'BIRTHDAY_WISH')).toBeTruthy());
-    expect(optionById(select, 'BIRTHDAY_WISH')?.disabled).toBe(true);
+    await waitFor(() => expect(optionById(select, 'ZZ_OFF')).toBeTruthy());
+    expect(optionById(select, 'ZZ_OFF')?.disabled).toBe(true);
+    // a switched-off built-in is still sent by the server, so it can be picked
+    expect(optionById(select, 'BIRTHDAY_WISH')?.disabled).toBe(false);
   });
 
   it('says so when the template list could not be loaded, and retries', async () => {
