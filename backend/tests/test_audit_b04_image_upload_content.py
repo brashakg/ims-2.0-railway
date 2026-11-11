@@ -581,3 +581,30 @@ def test_a_container_of_millions_of_empty_boxes_is_refused_not_walked():
     # A genuine container with a few extra boxes before `meta` still passes.
     ok = ftyp + _box(b"free", b"") * 20 + _box(b"meta", b"\x00" * 40) + _box(b"mdat", b"\x01" * 64)
     assert image_mime_of(ok) == "image/heic"
+
+
+# ---------------------------------------------------------------------------
+# Decision D9, pinned: the two re-host tools do not copy an SVG (it is markup
+# that can carry script, and the image doors store raster photos only).
+# ---------------------------------------------------------------------------
+
+_SVG = (
+    b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">'
+    b"<script>window.marker=true</script><rect width=\"4\" height=\"4\"/></svg>"
+)
+
+
+def test_uploads_rehost_does_not_copy_an_svg(tmp_path, monkeypatch):
+    db, bucket = _uploads_row(tmp_path, monkeypatch, _SVG)
+    out = online_sync_health.rehost_uploads_images(db, dry_run=False)
+    assert (out["rehosted"], out["failed"]) == (0, 1), out
+    assert bucket.puts == []
+    assert db["product_images"].find_one({"image_id": "IMG1"})["url"] == "/uploads/x.jpg"
+
+
+def test_rehost_script_does_not_copy_an_svg(monkeypatch):
+    out, row, bucket = _script_rehost(monkeypatch, _SVG)
+    assert (out["rehosted"], out["failed"]) == (0, 1), out
+    assert bucket.puts == []
+    assert row["url"] == "/uploads/x.jpg"
+    assert image_mime_of(_SVG) is None
