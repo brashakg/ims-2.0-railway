@@ -194,6 +194,8 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
     setSearchFailed(false);
     if (po || q.length < 2) {
       setResults([]);
+      // The search just cancelled never reaches its own finally (SP-04).
+      setSearching(false);
       return;
     }
     let cancelled = false;

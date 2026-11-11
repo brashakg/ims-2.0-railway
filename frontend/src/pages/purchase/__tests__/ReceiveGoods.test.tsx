@@ -28,7 +28,7 @@ const api = vi.hoisted(() => ({
 const printed = vi.hoisted(() => ({ grn: null as null | Record<string, unknown> }));
 const cockpit = vi.hoisted(() => ({ uploadDoc: vi.fn(), expressReceive: vi.fn() }));
 const products = vi.hoisted(() => ({ getProduct: vi.fn(), getProducts: vi.fn() }));
-const auth = vi.hoisted(() => ({ roles: ['STORE_MANAGER'] as string[] }));
+const auth = vi.hoisted(() => ({ roles: ['STORE_MANAGER'] as string[], store: 'S1' }));
 const online = vi.hoisted(() => ({ value: false }));
 
 const inv = vi.hoisted(() => ({ getUnits: vi.fn(), printQuarantineLabel: vi.fn() }));
@@ -40,7 +40,7 @@ vi.mock('../../../services/api/products', () => ({ productApi: products }));
 vi.mock('../../../context/ToastContext', () => ({ useToast: () => toast }));
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 'u1', roles: auth.roles, activeStoreId: 'S1' },
+    user: { id: 'u1', roles: auth.roles, activeStoreId: auth.store },
     hasRole: (want: string[]) => want.some((r) => auth.roles.includes(r)),
   }),
 }));
@@ -98,6 +98,7 @@ let history: unknown[] = [];
 beforeEach(() => {
   vi.clearAllMocks();
   auth.roles = ['STORE_MANAGER'];
+  auth.store = 'S1';
   online.value = false;
   waiting = {};
   history = [];
@@ -768,5 +769,138 @@ describe('receipt history', () => {
     fireEvent.click(await screen.findByTitle('Print GRN'));
     await waitFor(() => expect(printed.grn?.vendor_name).toBe('Frames Wala'));
     expect((printed.grn?.items as Array<Record<string, unknown>>)[0].ordered_qty).toBeNull();
+  });
+});
+
+// Audit SP-05: the shop changes while this screen is open (a store switch the
+// server confirmed, or an admin narrowing the Shop filter). The old shop's
+// answer could land after the new shop's and be shown under it, and the old
+// shop's boxes stayed on offer while the new list loaded -- a receipt started
+// against the wrong shop's delivery. Every list here now belongs to the shop
+// the screen shows, or is not shown.
+describe("SP-05: a shop change never leaves the old shop's deliveries on the screen", () => {
+  const PO_B = { ...PO, po_id: 'PO-B', po_number: 'PO-0900', vendor_name: 'Pune Frames', delivery_store_id: 'S2' };
+  const GRN_A = { grn_id: 'G-A', grn_number: 'GRN-0101', status: 'PENDING', vendor_name: 'Safilo India', items: [{}] };
+  const HIST_A = { grn_id: 'G-HA', grn_number: 'GRN-0050', status: 'ACCEPTED', vendor_name: 'Safilo India', created_at: '2026-10-14T11:00:00', items: [] };
+
+  /** One answer per shop, each held until the test lets it go. */
+  function heldByShop<T>() {
+    const gates: Record<string, (v: T) => void> = {};
+    const ask = (shop: string) => new Promise<T>((done) => { gates[shop] = done; });
+    return { ask, answer: (shop: string, v: T) => act(async () => { gates[shop](v); }) };
+  }
+  const tree = () => (
+    <MemoryRouter initialEntries={['/purchase/receive']}>
+      <ReceiveGoods />
+    </MemoryRouter>
+  );
+  /** The store switch is confirmed: the sign-in's shop is now `shop`. */
+  const switchTo = (view: ReturnType<typeof render>, shop: string) => {
+    auth.store = shop;
+    view.rerender(tree());
+  };
+
+  it('a slow answer for the old shop is not shown under the new shop', async () => {
+    const orders = heldByShop<{ purchase_orders: unknown[] }>();
+    api.getPurchaseOrders.mockImplementation((p: { store_id: string }) => orders.ask(p.store_id));
+    const view = render(tree());
+    await waitFor(() => expect(api.getPurchaseOrders).toHaveBeenCalledWith({ store_id: 'S1', receipt_candidates: true }));
+    switchTo(view, 'S2');
+    await waitFor(() => expect(api.getPurchaseOrders).toHaveBeenCalledWith({ store_id: 'S2', receipt_candidates: true }));
+    await orders.answer('S2', { purchase_orders: [PO_B] });
+    expect(await screen.findByText('PO-0900')).toBeInTheDocument();
+    // S1's answer arrives last: it is for a shop the screen no longer shows.
+    await orders.answer('S1', { purchase_orders: [PO, DONE] });
+    expect(screen.getByText('PO-0900')).toBeInTheDocument();
+    expect(screen.queryByText('PO-0412')).toBeNull();
+    expect(screen.queryByRole('option', { name: /PO-0100/ })).toBeNull();
+  });
+
+  it("while the new shop loads, the old shop's boxes are not on offer", async () => {
+    const view = render(tree());
+    await screen.findByText('PO-0412');
+    expect(screen.getByRole('option', { name: /PO-0100.*count extra goods/ })).toBeInTheDocument();
+    api.getPurchaseOrders.mockImplementation(() => new Promise(() => {})); // S2 never answers
+    switchTo(view, 'S2');
+    expect(screen.queryByText('PO-0412')).toBeNull();
+    expect(screen.queryByRole('button', { name: /Receive this box/ })).toBeNull();
+    expect(screen.queryByRole('option', { name: /PO-0100/ })).toBeNull();
+    expect(screen.getByText(/Checking for deliveries/)).toBeInTheDocument();
+  });
+
+  // Held before SP-05 too (the scope-change rule in ReceiveGoods): kept pinned.
+  it("an order open for receiving is closed by the switch: it is the old shop's delivery", async () => {
+    const view = render(tree());
+    const card = (await screen.findByText('PO-0412')).closest('.card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: /Receive this box/ }));
+    await screen.findByText(/What arrived/);
+    api.getPurchaseOrders.mockResolvedValue({ purchase_orders: [PO_B] });
+    switchTo(view, 'S2');
+    expect(await screen.findByText('PO-0900')).toBeInTheDocument();
+    expect(screen.queryByText(/What arrived/)).toBeNull();
+    expect(screen.queryByText('PO-0412')).toBeNull();
+  });
+
+  it('an admin narrowing the Shop filter: a late answer for All stores is dropped', async () => {
+    auth.roles = ['ADMIN'];
+    const orders = heldByShop<{ purchase_orders: unknown[] }>();
+    api.getPurchaseOrders.mockImplementation((p: { store_id?: string }) => orders.ask(p.store_id ?? 'ALL'));
+    render(tree());
+    await waitFor(() => expect(api.getPurchaseOrders).toHaveBeenCalledWith({ receipt_candidates: true }));
+    fireEvent.change(screen.getByLabelText('Purchase shop'), { target: { value: 'S2' } });
+    try {
+      await waitFor(() => expect(api.getPurchaseOrders).toHaveBeenCalledWith({ store_id: 'S2', receipt_candidates: true }));
+      await orders.answer('S2', { purchase_orders: [PO_B] });
+      await screen.findByText('PO-0900');
+      await orders.answer('ALL', { purchase_orders: [PO, PO_B] });
+      expect(screen.queryByText('PO-0412')).toBeNull();
+      expect(screen.getByText('PO-0900')).toBeInTheDocument();
+    } finally {
+      // The pick is shared between Purchase tabs: put it back for the next test.
+      fireEvent.change(screen.getByLabelText('Purchase shop'), { target: { value: '' } });
+    }
+  });
+
+  it("receipts still waiting: the old shop's late answer is dropped", async () => {
+    const grns = heldByShop<{ grns: unknown[] }>();
+    api.getGRNs.mockImplementation((p: { store_id: string; status?: string }) =>
+      p.status === 'PENDING' ? grns.ask(p.store_id) : Promise.resolve({ grns: [] }));
+    const view = render(tree());
+    await waitFor(() => expect(api.getGRNs).toHaveBeenCalledWith({ store_id: 'S1', status: 'PENDING' }));
+    switchTo(view, 'S2');
+    await waitFor(() => expect(api.getGRNs).toHaveBeenCalledWith({ store_id: 'S2', status: 'PENDING' }));
+    await grns.answer('S2', { grns: [] });
+    await grns.answer('S1', { grns: [GRN_A] });
+    expect(screen.queryByTestId('receipts-waiting')).toBeNull();
+    expect(screen.queryByText('GRN-0101')).toBeNull();
+  });
+
+  it('receipts still waiting and the history: shown for their shop, not while the new shop loads', async () => {
+    waiting.PENDING = [GRN_A];
+    history = [HIST_A];
+    const view = render(tree());
+    expect(await screen.findByText('GRN-0101')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Receipt history/ }));
+    expect(await screen.findByText('GRN-0050')).toBeInTheDocument();
+    api.getGRNs.mockImplementation(() => new Promise(() => {})); // S2 never answers
+    switchTo(view, 'S2');
+    expect(screen.queryByText('GRN-0050')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Deliveries' }));
+    expect(screen.queryByText('GRN-0101')).toBeNull();
+  });
+});
+
+// Audit SP-04 (its "related minor state issue"): two letters typed and erased
+// before the search went out left the spinner turning on an empty box.
+describe('SP-04: the product search spinner stops when the box is cleared', () => {
+  it('typed then erased before the search goes out: no spinner on the empty box', async () => {
+    renderAt();
+    fireEvent.click(await screen.findByRole('button', { name: 'Bought without PO' }));
+    const box = screen.getByPlaceholderText(/Search a product to add/);
+    fireEvent.change(box, { target: { value: 'av' } });
+    expect(box.parentElement!.querySelector('.animate-spin')).not.toBeNull();
+    fireEvent.change(box, { target: { value: '' } });
+    expect(box.parentElement!.querySelector('.animate-spin')).toBeNull();
+    expect(products.getProducts).not.toHaveBeenCalled();
   });
 });

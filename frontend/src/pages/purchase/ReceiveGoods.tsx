@@ -47,7 +47,14 @@ export function ReceiveGoods() {
   const onlineStore = useIsOnlineStore(storeId);
   const { data: stores } = useStores();
 
-  const [orders, setOrders] = useState<CandidatePO[] | null>(null);
+  // The orders, with the shop scope they were asked for: a list for any other
+  // scope than the one on screen is not shown (audit SP-05) -- the old shop's
+  // boxes are never on offer under the new shop, not even while it loads.
+  const [loaded, setLoaded] = useState<{ scope: string; list: CandidatePO[] } | null>(null);
+  const orders = loaded && loaded.scope === storeId ? loaded.list : null;
+  // The latest read; an answer to an older one (a slow reply for the shop
+  // just left) is dropped, never written over the newer list.
+  const loadSeq = useRef(0);
   // A failed read is never "no deliveries waiting".
   const [ordersFailed, setOrdersFailed] = useState(false);
   const [form, setForm] = useState<{ po: CandidatePO | null; kind: ReceiveKind; n: number } | null>(null);
@@ -59,16 +66,19 @@ export function ReceiveGoods() {
   // Every order a receipt can be logged against, filtered by the server
   // before it pages (an old cancel-closed order never hides behind 50 drafts).
   const loadOrders = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setOrdersFailed(false);
     try {
       const res = await vendorsApi.getPurchaseOrders({ ...(storeId ? { store_id: storeId } : {}), receipt_candidates: true });
+      if (seq !== loadSeq.current) return;
       const raw = Array.isArray(res?.purchase_orders) ? (res.purchase_orders as Array<Record<string, unknown>>) : [];
       const seen = new Set<string>();
-      setOrders(
-        raw.map(toCandidate).filter((p) => p.po_id && !seen.has(p.po_id) && !!seen.add(p.po_id)),
-      );
+      setLoaded({
+        scope: storeId,
+        list: raw.map(toCandidate).filter((p) => p.po_id && !seen.has(p.po_id) && !!seen.add(p.po_id)),
+      });
     } catch {
-      setOrdersFailed(true);
+      if (seq === loadSeq.current) setOrdersFailed(true);
     }
   }, [storeId]);
 
@@ -196,10 +206,13 @@ export function ReceiveGoods() {
             }}
           />
         ) : view === 'history' ? (
-          <ReceiptHistory storeId={storeId} refreshKey={refreshKey} />
+          <ReceiptHistory key={storeId} storeId={storeId} refreshKey={refreshKey} />
         ) : (
           <>
+            {/* Keyed by shop: another shop's receipts are a fresh list, and a
+                late answer for the shop just left has nowhere to land (SP-05). */}
             <PendingReceipts
+              key={storeId}
               storeId={storeId}
               refreshKey={refreshKey}
               highlight={highlight}
