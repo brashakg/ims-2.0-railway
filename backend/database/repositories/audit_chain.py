@@ -17,19 +17,29 @@ We enforce that with two complementary guarantees:
      no longer matches the prev_hash recorded on the NEXT row -- so a single
      pass (GET /api/v1/audit/verify) detects the break and reports its seq.
 
-The chain head (last seq + last entry_hash) lives in a single
-`audit_chain_head` document. We advance it with a single atomic
-`find_one_and_update` ($inc seq, return-new) so concurrent writes from
-multiple Railway workers still chain deterministically -- each writer gets a
-unique seq and the prev_hash that was current at the moment it claimed that
-seq, with no torn reads.
+CONCURRENT WRITERS (R19). A row's place in the chain is claimed by the INSERT
+of the row itself: the writer reads the last chained row (the tail), stamps
+seq = tail.seq + 1 and prev_hash = tail.entry_hash, and inserts. The UNIQUE
+index on `audit_logs.seq` lets exactly one writer take a seq; a loser gets a
+duplicate-key error, re-reads the tail and chains from the row that won. So
+the claim and the predecessor it commits to are ONE single-document write --
+no transaction needed, and nothing to resume: a writer that dies leaves either
+a whole chained row or no row. (The old scheme claimed a seq on a head
+document and committed its hash in a second write; two workers interleaving
+between the two both chained from the same predecessor -- a "broken" chain
+nobody had edited.)
 
-FAIL-SOFT CONTRACT: chaining must NEVER block the business action. If the head
-doc can't be advanced (DB down, transient error, mock collection without
-find_one_and_update), the audit row is still inserted best-effort WITHOUT
-chain fields and a warning is logged. A missing/unchained row shows up at
-verify time as a gap, which is the correct, honest signal -- far better than
-losing the audit record entirely.
+The `audit_chain_head` document is no longer the source of the next seq. It
+records the newest committed row (seq + entry_hash), written AFTER the row and
+only ever forward, so verify can tell a trail whose last rows were removed
+from a whole one (R20). A lagging head (a writer died between its row and
+this note) is harmless: the next writer moves it on.
+
+FAIL-SOFT CONTRACT: chaining must NEVER block the business action. If the tail
+can't be read (DB down, transient error, a minimal mock collection), the audit
+row is still inserted best-effort WITHOUT chain fields and a warning is
+logged. verify counts such unchained rows separately (`unchained_rows`) --
+far better than losing the audit record entirely.
 """
 
 from __future__ import annotations
@@ -38,7 +48,7 @@ import hashlib
 import json
 import logging
 from datetime import date, datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -139,80 +149,61 @@ def compute_entry_hash(prev_hash: str, seq: int, doc: Dict[str, Any]) -> str:
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _advance_head(db) -> Optional[Dict[str, Any]]:
-    """Atomically claim the next seq + read the current head hash.
+# A writer that keeps losing the seq race gives up chaining after this many
+# tries and writes its row unchained (fail-soft) rather than spin.
+_MAX_CLAIM_ATTEMPTS = 25
 
-    Returns a dict {"seq": <new seq>, "prev_hash": <hash to chain from>} or
-    None if the head couldn't be advanced (caller then writes unchained).
+# Collections whose unique seq index this process has already ensured.
+_seq_index_ensured: set = set()
 
-    The single find_one_and_update both increments `seq` and returns the
-    post-increment document, so two concurrent writers can never receive the
-    same seq. `prev_hash` is read from the head's `last_hash` (the entry_hash
-    of the row that most recently completed); the genesis writer sees the
-    seeded GENESIS_HASH.
-    """
+
+def _is_duplicate_key(exc: Exception) -> bool:
+    return getattr(exc, "code", None) == 11000 or type(exc).__name__ == "DuplicateKeyError"
+
+
+def _ensure_seq_index(audit_collection) -> None:
+    """The unique sparse `seq` index IS the serializer of concurrent appends
+    (module docstring), so make sure it exists -- once per process, the same
+    spec connection.py / schemas.py declare (a no-op where they already built
+    it). A failed build is logged loudly: without it two workers can take the
+    same seq and fork the chain."""
+    name = getattr(audit_collection, "full_name", None)
+    if not isinstance(name, str) or name in _seq_index_ensured:
+        return
+    _seq_index_ensured.add(name)
     try:
-        head_coll = db.get_collection(HEAD_COLLECTION)
+        audit_collection.create_index("seq", unique=True, sparse=True)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[AUDIT_CHAIN] head collection unavailable: %s", exc)
-        return None
-
-    foau = getattr(head_coll, "find_one_and_update", None)
-    if not callable(foau):
-        # Mock/minimal collection without atomic ops -> skip chaining.
-        logger.warning(
-            "[AUDIT_CHAIN] collection lacks find_one_and_update; "
-            "writing audit row unchained"
+        logger.error(
+            "[AUDIT_CHAIN] CRITICAL: unique seq index is NOT in place on %s: %s",
+            name, exc,
         )
-        return None
 
+
+def _chain_tail(audit_collection) -> Tuple[int, str]:
+    """(seq, entry_hash) of the last chained row; (0, GENESIS_HASH) when the
+    chain is empty. Read from the trail itself, never from the head document."""
+    for row in audit_collection.find({"seq": {"$gt": 0}}).sort("seq", -1).limit(1):
+        return int(row["seq"]), row.get("entry_hash") or GENESIS_HASH
+    return 0, GENESIS_HASH
+
+
+def _note_head(db, seq: int, entry_hash: str) -> None:
+    """Record the newest committed row on the head document, forward only
+    (a slower writer never moves it back). Best-effort: verify reads it to
+    notice a trail whose last rows are gone; nothing chains from it."""
+    if db is None:
+        return
     try:
-        # ReturnDocument.AFTER == True for pymongo; we pass the bool directly
-        # so this works without importing pymongo (keeps the module import-light
-        # and testable against fakes that accept return_document=True).
-        try:
-            from pymongo import ReturnDocument
-
-            after = ReturnDocument.AFTER
-        except Exception:  # noqa: BLE001
-            after = True
-
-        head = foau(
-            {"_id": HEAD_DOC_ID},
-            {
-                "$inc": {"seq": 1},
-                "$setOnInsert": {"last_hash": GENESIS_HASH},
-            },
+        db.get_collection(HEAD_COLLECTION).update_one(
+            {"_id": HEAD_DOC_ID, "seq": {"$lt": seq}},
+            {"$set": {"seq": seq, "last_hash": entry_hash}},
             upsert=True,
-            return_document=after,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[AUDIT_CHAIN] could not advance head: %s", exc)
-        return None
-
-    if not head:
-        return None
-
-    seq = int(head.get("seq", 1))
-    prev_hash = head.get("last_hash") or GENESIS_HASH
-    return {"seq": seq, "prev_hash": prev_hash}
-
-
-def _commit_head_hash(db, seq: int, entry_hash: str) -> None:
-    """Record the just-written row's entry_hash as the new head, but only if
-    this row is still the latest (its seq == head.seq). The guarded update
-    keeps `last_hash` consistent with the highest committed seq even when many
-    writers interleave: a slower writer that finished out of order won't stomp
-    a newer head.
-    """
-    try:
-        head_coll = db.get_collection(HEAD_COLLECTION)
-        head_coll.update_one(
-            {"_id": HEAD_DOC_ID, "seq": seq},
-            {"$set": {"last_hash": entry_hash}},
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[AUDIT_CHAIN] could not commit head hash: %s", exc)
+        # Duplicate key = the head is already at or past this row: fine.
+        if not _is_duplicate_key(exc):
+            logger.warning("[AUDIT_CHAIN] could not note chain head: %s", exc)
 
 
 def append_audit_entry(
@@ -221,101 +212,146 @@ def append_audit_entry(
     """Insert ONE audit row into `audit_collection`, hash-chained.
 
     This is the single append point all primary-audit writes funnel through
-    (AuditRepository.create wraps it). It:
-
-      1. claims the next seq + prev_hash from the atomic head,
-      2. stamps seq / prev_hash / entry_hash onto the row,
-      3. inserts the row,
-      4. advances the head's last_hash to this row's entry_hash.
+    (AuditRepository.create wraps it). It reads the chain tail, stamps
+    seq / prev_hash / entry_hash onto the row and inserts it; the unique seq
+    index makes that insert the claim (module docstring), so a writer that
+    lost the seq to a concurrent one re-reads the tail and tries again.
 
     `db` is the database handle used to reach the head collection. When not
     supplied we derive it from the audit collection's `.database` (pymongo
-    collections expose this). If the head can't be reached, the row is still
+    collections expose this). If the tail can't be read, the row is still
     inserted WITHOUT chain fields (fail-soft) and returned.
 
     Returns the inserted document (with chain fields when chaining succeeded),
-    or None if even the best-effort insert failed.
+    or None if the insert failed.
     """
     if db is None:
         db = getattr(audit_collection, "database", None)
 
-    chain: Optional[Dict[str, Any]] = None
-    if db is not None:
-        chain = _advance_head(db)
-
-    if chain is not None:
-        seq = chain["seq"]
-        prev_hash = chain["prev_hash"]
-        entry_hash = compute_entry_hash(prev_hash, seq, doc)
+    _ensure_seq_index(audit_collection)
+    for _ in range(_MAX_CLAIM_ATTEMPTS):
+        try:
+            seq, prev_hash = _chain_tail(audit_collection)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[AUDIT_CHAIN] chain tail unreadable: %s", exc)
+            break
+        seq += 1
         doc["seq"] = seq
         doc["prev_hash"] = prev_hash
-        doc["entry_hash"] = entry_hash
-    else:
-        # Unchained fail-soft path: never block the business action. The gap
-        # is intentionally visible to verify().
-        logger.warning(
-            "[AUDIT_CHAIN] writing audit row WITHOUT chain (head unavailable)"
-        )
+        doc["entry_hash"] = compute_entry_hash(prev_hash, seq, doc)
+        try:
+            audit_collection.insert_one(doc)
+        except Exception as exc:  # noqa: BLE001
+            try:
+                seq_taken = _is_duplicate_key(exc) and (
+                    audit_collection.find_one({"seq": seq}) is not None
+                )
+            except Exception:  # noqa: BLE001
+                seq_taken = False
+            if seq_taken:
+                continue  # another writer took this seq: chain from the new tail
+            # Any other failure (a duplicate _id / log_id, the DB) loses this
+            # row exactly as before -- and leaves the chain untouched.
+            logger.warning("[AUDIT_CHAIN] audit insert failed: %s", exc)
+            return None
+        _note_head(db, seq, doc["entry_hash"])
+        return doc
 
+    # Unchained fail-soft path: never block the business action. verify
+    # counts these rows (unchained_rows).
+    for field in ("seq", "prev_hash", "entry_hash"):
+        doc.pop(field, None)
+    logger.warning("[AUDIT_CHAIN] writing audit row WITHOUT chain (tail unavailable)")
     try:
         audit_collection.insert_one(doc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[AUDIT_CHAIN] audit insert failed: %s", exc)
         return None
-
-    if chain is not None:
-        _commit_head_hash(db, chain["seq"], doc["entry_hash"])
-
     return doc
+
+
+def unverified_result(reason: str = "unreadable") -> Dict[str, Any]:
+    """The answer when the trail could not be read: NOT intact, NOT verified.
+    Nothing is known about it, which is never the same as a verified-empty
+    trail (R20)."""
+    return {
+        "intact": False,
+        "verified": False,
+        "reason": reason,
+        "broken_at_seq": None,
+        "entries_checked": 0,
+        "unchained_rows": None,
+    }
+
+
+def _head_hash(audit_collection) -> Optional[str]:
+    """entry_hash of the newest row the head document recorded, or None when
+    there is no head to compare (no database handle, or nothing chained yet)."""
+    db = getattr(audit_collection, "database", None)
+    if db is None:
+        return None
+    head = db.get_collection(HEAD_COLLECTION).find_one({"_id": HEAD_DOC_ID}) or {}
+    last = head.get("last_hash")
+    return last if last and last != GENESIS_HASH else None
 
 
 def verify_chain(audit_collection) -> Dict[str, Any]:
     """Walk the chain ordered by seq, recompute every entry_hash, and confirm
-    each row's prev_hash matches the prior row's entry_hash.
-
-    Only rows that carry a `seq` participate (unchained fail-soft rows are
-    skipped for hash-linkage but still counted as checked, and a chained row
-    whose prev_hash doesn't line up is the break we report).
+    each row's prev_hash matches the prior row's entry_hash; then confirm the
+    row the head document recorded is in the trail.
 
     Returns:
         {
-          "intact": bool,
-          "broken_at_seq": int | None,   # seq of the FIRST bad row
-          "entries_checked": int,
+          "intact": bool,              # True ONLY when every check ran and passed
+          "verified": bool,            # False = the trail could not be read
+          "reason": str | None,        # why it is not intact:
+                                       #   "unreadable"           a read failed; nothing is known
+                                       #   "prev_hash_mismatch"   a row does not link to the row before it
+                                       #   "entry_hash_mismatch"  a row's contents no longer match its hash
+                                       #   "head_not_in_trail"    the newest recorded row is missing:
+                                       #                          the end of the trail was removed
+          "broken_at_seq": int | None, # seq of the FIRST bad row
+          "entries_checked": int,      # chained rows walked
+          "unchained_rows": int | None # rows with no seq (written while the
+                                       # chain was unreachable): outside the
+                                       # hash chain, so NOT covered by "intact"
         }
     """
     try:
+        # Head first: a row appended while we walk is then already in the trail.
+        head_hash = _head_hash(audit_collection)
+        unchained = int(audit_collection.count_documents({"seq": {"$exists": False}}))
         cursor = audit_collection.find({"seq": {"$exists": True}}).sort("seq", 1)
-        rows = list(cursor)
+
+        def _broken(reason: str, seq, checked: int) -> Dict[str, Any]:
+            return {"intact": False, "verified": True, "reason": reason,
+                    "broken_at_seq": seq, "entries_checked": checked,
+                    "unchained_rows": unchained}
+
+        expected_prev = GENESIS_HASH
+        checked = 0
+        head_seen = head_hash is None
+        for row in cursor:
+            checked += 1
+            seq = row.get("seq")
+            stored_hash = row.get("entry_hash")
+            stored_prev = row.get("prev_hash")
+
+            # The link from the previous row must hold.
+            if stored_prev != expected_prev:
+                return _broken("prev_hash_mismatch", seq, checked)
+
+            # The row's own contents must still hash to its stored entry_hash.
+            if compute_entry_hash(stored_prev, seq, row) != stored_hash:
+                return _broken("entry_hash_mismatch", seq, checked)
+
+            head_seen = head_seen or stored_hash == head_hash
+            expected_prev = stored_hash
+
+        if not head_seen:
+            return _broken("head_not_in_trail", None, checked)
+        return {"intact": True, "verified": True, "reason": None, "broken_at_seq": None,
+                "entries_checked": checked, "unchained_rows": unchained}
     except Exception as exc:  # noqa: BLE001
         logger.warning("[AUDIT_CHAIN] verify could not read chain: %s", exc)
-        return {"intact": True, "broken_at_seq": None, "entries_checked": 0}
-
-    expected_prev = GENESIS_HASH
-    checked = 0
-    for row in rows:
-        checked += 1
-        seq = row.get("seq")
-        stored_hash = row.get("entry_hash")
-        stored_prev = row.get("prev_hash")
-
-        # The link from the previous row must hold.
-        if stored_prev != expected_prev:
-            return {
-                "intact": False,
-                "broken_at_seq": seq,
-                "entries_checked": checked,
-            }
-
-        # The row's own contents must still hash to its stored entry_hash.
-        recomputed = compute_entry_hash(stored_prev, seq, row)
-        if recomputed != stored_hash:
-            return {
-                "intact": False,
-                "broken_at_seq": seq,
-                "entries_checked": checked,
-            }
-
-        expected_prev = stored_hash
-
-    return {"intact": True, "broken_at_seq": None, "entries_checked": checked}
+        return unverified_result()
