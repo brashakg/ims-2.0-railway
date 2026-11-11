@@ -26,6 +26,10 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("MONGODB_URI", "")
 
+from tests.test_pos_money_doors import STORE, till  # noqa: E402,F401
+from tests.test_pos_money_doors_r9 import _ago  # noqa: E402
+from tests.test_pos_money_doors_r12 import _row, _spec, tasks  # noqa: E402,F401
+from tests.test_pos_money_doors_r13 import _bill_with_hold, _complete  # noqa: E402
 from tests.test_returns_restock import _hdr, _payload, ctx  # noqa: E402,F401
 
 pytestmark = pytest.mark.usefixtures("gst_numbers")
@@ -203,6 +207,95 @@ def test_the_quote_refuses_a_line_that_is_not_on_the_sale_like_the_create(ctx): 
     assert "does not match any line on the original order" in quote.text
     assert quote.json()["detail"] == create.json()["detail"]
     assert ctx["returns_coll"].docs == []
+
+
+# =========================================================================== #
+# L2-RETURN-F03: the recovery message follows the record's own stock state
+# =========================================================================== #
+OLD_BLANKET = "Put its units back in stock by hand"
+
+
+def _kept(till, rid, **stock):  # noqa: F811
+    """A return whose money moved and whose stock step ran, but whose record
+    could not be saved: the record rides on the bill's kept hold."""
+    doc = {
+        "return_id": rid, "order_id": "ORD-1", "order_number": "ORD-1", "store_id": STORE,
+        "customer_id": "CUST-1", "return_type": "RETURN", "status": "COMPLETED",
+        "items": [{"order_item_id": "li1", "product_id": "P1", "sku": "F1", "product_name": "Frame",
+                   "return_qty": 2.0, "unit_price": 500.0, "gst_rate": 0.0, "condition": "GOOD",
+                   "restock": True}],
+        "gross_refund": 1000.0, "net_refund": 1000.0, "refund_amount": 1000.0,
+        "refund_tenders": [{"method": "CASH", "amount": 1000.0}], "credit_note_number": "TST01/C2627/0031",
+        "restocked": [], "restock_applied": False, "restock_stock_ids": [], "quarantined_stock_ids": [],
+        "created_at": _ago(30),
+    }
+    doc.update(stock)
+    _bill_with_hold(till, rid, amount=1000.0, money_out=True, doc=dict(doc))
+    return doc
+
+
+def _row_of(product="P1", reactivated=0, minted=0):
+    return {"product_id": product, "sku": "F1", "quantity": reactivated + minted,
+            "reactivated": reactivated, "minted": minted, "applied": True}
+
+
+def test_a_fully_restored_return_never_asks_for_a_second_stock_entry(till, tasks):  # noqa: F811
+    kept = _kept(till, "RET-FULL", restock_applied=True, restock_stock_ids=["SU-1", "SU-2"],
+                 restocked=[_row_of(reactivated=2)])
+    out = _complete("RET-FULL", cash_leg_paid=True)
+    msg = out["message"]
+    assert OLD_BLANKET not in msg
+    assert "already finished" in msg and "2 piece(s) back in stock" in msg
+    assert "Do not add its pieces to stock by hand" in msg
+    # The recovered record keeps the press's own stock answer and its money.
+    saved = till["db"].get_collection("returns").find_one({"return_id": "RET-FULL"})
+    for key in ("restock_applied", "restock_stock_ids", "restocked", "net_refund", "refund_amount",
+                "refund_tenders", "credit_note_number", "items"):
+        assert saved[key] == kept[key], key
+
+
+def test_a_damaged_piece_set_aside_is_reported_as_dealt_with(till, tasks):  # noqa: F811
+    _kept(till, "RET-DMG", restock_applied=True, quarantined_stock_ids=["SU-9"])
+    msg = _complete("RET-DMG", cash_leg_paid=True)["message"]
+    assert OLD_BLANKET not in msg and "1 set aside as damaged" in msg
+    assert "Do not add its pieces to stock by hand" in msg
+
+
+def test_an_unapplied_return_names_its_pieces_and_the_one_safe_action(till, tasks):  # noqa: F811
+    _kept(till, "RET-NONE")
+    msg = _complete("RET-NONE", cash_leg_paid=True)["message"]
+    assert OLD_BLANKET not in msg
+    assert "NOT yet back in stock: 2 x F1" in msg
+    assert "Do not add them by hand" in msg and "re-run this return's restock" in msg
+    assert "Already dealt with" not in msg
+
+
+def test_a_mixed_return_separates_the_piece_already_back_from_the_one_pending(till, tasks):  # noqa: F811
+    _kept(till, "RET-MIX", restock_stock_ids=["SU-1"], restocked=[_row_of(reactivated=1)])
+    msg = _complete("RET-MIX", cash_leg_paid=True)["message"]
+    assert OLD_BLANKET not in msg
+    assert "Already dealt with: 1 piece(s) back in stock." in msg
+    assert "NOT yet back in stock: 1 x F1" in msg and "Do not add them by hand" in msg
+
+
+def test_a_rebuilt_record_with_no_stock_provenance_asks_staff_to_check_first(till, tasks):  # noqa: F811
+    """Nothing kept says whether the stock step ran (the record is rebuilt
+    from the credit line): never a blind "put them back"."""
+    from api.services import store_credit_ledger as scl
+
+    _bill_with_hold(till, "RET-REB")
+    till["db"].get_collection("credit_note_ledger").insert_one(_row(
+        "RET-REB:credit", type=scl.ISSUED, applied=True, delta=1200.0, order_id="ORD-1",
+        note_number="TST01/C2627/0040", taxable=1525.42, tax=274.58, gst_rate=18.0,
+        undo_on_void=_spec("RET-REB"), store_id=STORE))
+    out = _complete("RET-REB", cash_leg_paid=True)
+    msg = out["message"]
+    assert OLD_BLANKET not in msg
+    assert "did not keep whether its pieces went back into stock" in msg
+    assert "Check each piece in stock (scan its barcode) before adding any by hand" in msg
+    # The recovery's accounting is what it was.
+    assert out["net_refund"] == 1800.0 and out["credit_amount"] == 1200.0
+    assert out["restock_applied"] is False and out["restock_stock_ids"] == []
 
 
 # =========================================================================== #

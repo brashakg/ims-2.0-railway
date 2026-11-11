@@ -3202,6 +3202,57 @@ def _refund_takes_goods_back(refund_id: str) -> bool:
         return False
 
 
+def _units_still_out(
+    units: List[Dict[str, Any]], already_back: Optional[Dict[str, float]]
+) -> List[Dict[str, Any]]:
+    """A restock plan's units less the ones already back ({product id: units},
+    _landed_units): what is still to put back. The restock and the recovery
+    door's stock note read it."""
+    left = dict(already_back or {})
+    out: List[Dict[str, Any]] = []
+    for u in units or []:
+        pid = str(u.get("product_id"))
+        if left.get(pid, 0) >= 1:
+            left[pid] -= 1
+        else:
+            out.append(u)
+    return out
+
+
+def _recovered_stock_note(doc: Dict[str, Any], kept: bool) -> str:
+    """What a completed record tells staff about its pieces, read from the
+    record's own restock state -- never a blanket "put them back by hand"
+    (a piece the return already restored was then added a second time).
+
+    * the stock step finished (restock_applied): nothing to add, said so;
+    * a KEPT record whose stock step did not finish: the pieces already back,
+      and each one still out by name, with the one safe action -- the restock
+      retry deals with each piece once, a hand entry would be a second row;
+    * a REBUILT record (nothing kept says whether the stock step ran): check
+      each piece in stock before adding any."""
+    back = len(doc.get("restock_stock_ids") or [])
+    aside = len(doc.get("quarantined_stock_ids") or [])
+    done = ", ".join(part for part in (
+        f"{back} piece(s) back in stock" if back else "",
+        f"{aside} set aside as damaged" if aside else "") if part)
+    if doc.get("restock_applied"):
+        return ("Its stock step was already finished when the return was taken"
+                + (f" ({done})" if done else "")
+                + ". Do not add its pieces to stock by hand.")
+    if not kept:
+        return ("IMS did not keep whether its pieces went back into stock. Check each "
+                "piece in stock (scan its barcode) before adding any by hand.")
+    plan = restock_engine.plan_restock([it for it in doc.get("items") or [] if isinstance(it, dict)])
+    out: Dict[str, int] = {}
+    for u in _units_still_out(plan.get("units", []), _landed_units(doc.get("restocked"))):
+        name = str(u.get("sku") or u.get("product_name") or u.get("product_id"))
+        out[name] = out.get(name, 0) + 1
+    pending = ", ".join(f"{n} x {name}" for name, n in sorted(out.items()))
+    return ((f"Already dealt with: {done}. " if done else "")
+            + f"NOT yet back in stock: {pending or 'see the return'}. Do not add them by hand - "
+            "ask the IMS admin to re-run this return's restock, which deals with each piece once.")
+
+
 def _restock_good_items(
     items: List[ReturnLine],
     store_id: Optional[str],
@@ -3265,13 +3316,7 @@ def _restock_good_items(
         result["applied"] = True
         return result
 
-    units = plan.get("units", [])
-    left = dict(already_back or {})
-    for u in list(units):
-        pid = str(u.get("product_id"))
-        if left.get(pid, 0) >= 1:
-            left[pid] -= 1
-            units.remove(u)
+    units = _units_still_out(plan.get("units", []), already_back)
     if not units:
         # Nothing resellable -> trivially "applied" (no work left to retry).
         result["applied"] = True
@@ -5925,7 +5970,7 @@ async def complete_return_record(
         _audit_credit_event("RETURN_RECORD_REDATED", {"entry_id": f"return:{return_id}", "store_id": store_id,
                                                       "order_id": order_id})
     _audit_complete(return_id, store_id, current_user, recovered, now)
-    return {**doc, "message": "Return record completed. Put its units back in stock by hand."
+    return {**doc, "message": "Return record completed. " + _recovered_stock_note(doc, bool(doc_kept))
             + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else "")}
 
 
