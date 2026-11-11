@@ -319,41 +319,37 @@ async def get_system_audit_logs(
     return {"logs": logs, "total": len(docs)}
 
 
+# Audit L1-F14. The app has no way to take a database backup: no dump, no
+# snapshot job, no call to the hosting provider. This text is the whole truth
+# of the feature, shown wherever a backup is asked for or listed.
+_NO_APP_BACKUP = (
+    "IMS cannot create a database backup, and does not create one on a "
+    "schedule. Backups have to be set up and checked with the database "
+    "hosting provider."
+)
+
+
 @router.get("/system/backups")
 async def list_backups():
-    """Backups are an infra concern (Railway/Mongo Atlas snapshots), not
-    something the app performs. We surface any backup metadata recorded
-    in the `backups` collection but never claim to take a live DB dump."""
+    """Rows in the `backups` collection. The app writes none itself: what is
+    here is old request markers from the retired Backup Database button
+    (status "requested" - a click, never a completed backup)."""
     coll = _coll("backups")
-    if coll is None:
-        return {
-            "backups": [],
-            "note": "Backups are managed at the infrastructure layer.",
-        }
-    return {
-        "backups": [
-            _scrub(d) for d in coll.find({}).sort("created_at", -1).limit(50) if d
-        ]
-    }
+    rows = (
+        [_scrub(d) for d in coll.find({}).sort("created_at", -1).limit(50) if d]
+        if coll is not None
+        else []
+    )
+    return {"backups": rows, "note": _NO_APP_BACKUP}
 
 
-@router.post("/system/backups", status_code=202)
+@router.post("/system/backups", status_code=501)
 async def create_backup():
-    """Records a backup *request*. Actual snapshotting is done by the
-    hosting provider; this just timestamps an operator-initiated request
-    so it shows up in the list with a clear status."""
-    coll = _coll("backups")
-    backup_id = str(uuid.uuid4())
-    rec = {
-        "_id": backup_id,
-        "backup_id": backup_id,
-        "status": "requested",
-        "requested_at": _now_iso(),
-        "note": "Snapshot handled by hosting provider; this is a request marker.",
-    }
-    if coll is not None:
-        coll.insert_one(rec)
-    return _scrub(dict(rec))
+    """Not available. This used to insert a "requested" marker and answer 202,
+    which the Settings screen showed as "Backup created successfully" although
+    nothing was ever backed up and nothing ever acted on the marker. Like
+    restore and export below, it now says so and writes nothing."""
+    raise HTTPException(status_code=501, detail=_NO_APP_BACKUP)
 
 
 # ============================================================================

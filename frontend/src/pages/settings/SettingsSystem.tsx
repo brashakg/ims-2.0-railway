@@ -7,7 +7,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useState, useEffect } from 'react';
-import { RefreshCw, Database, Target, Save, ChevronRight } from 'lucide-react';
+import { RefreshCw, Database, Target, Save } from 'lucide-react';
 import clsx from 'clsx';
 import { Link } from 'react-router-dom';
 import { useToast } from '../../context/ToastContext';
@@ -46,8 +46,6 @@ export function SystemSettingsPage() {
 }
 
 function SystemSection({ systemStatus }: { systemStatus: { database: string; api: string; version: string } | null }) {
-  const toast = useToast();
-
   return (
     <div className="space-y-4">
       <div className="card">
@@ -73,36 +71,23 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
       </div>
 
       <div className="card">
-        <h2 className="text-lg font-semibold text-gray-900 mb-4">Data Management</h2>
-        <div className="space-y-3">
-          {/* Import Data (POST /admin/system/import/{type}) and Export Data
-              (GET /admin/system/export/{type}) buttons were removed: the
-              import route doesn't exist (404) and export is a hardcoded 501
-              stub. Bulk data import/export is a sensitive operation worth
-              building properly (with format + permission handling) rather
-              than shipping broken buttons. Backup Database below works. */}
-          <button
-            onClick={async () => {
-              if (window.confirm('Create a full system backup?')) {
-                try {
-                  await adminSystemApi.createBackup();
-                  toast.success('Backup created successfully');
-                } catch {
-                  toast.error('Failed to create backup');
-                }
-              }
-            }}
-            className="w-full p-4 bg-gray-50 rounded-lg text-left hover:bg-gray-200 transition-colors flex items-center justify-between"
-          >
-            <div className="flex items-center gap-3">
-              <Database className="w-5 h-5 text-gray-500" />
-              <div>
-                <p className="font-medium text-gray-900">Backup Database</p>
-                <p className="text-sm text-gray-500">Create full system backup</p>
-              </div>
-            </div>
-            <ChevronRight className="w-5 h-5 text-gray-500" />
-          </button>
+        <h2 className="text-lg font-semibold text-gray-900 mb-4">Database backups</h2>
+        {/* Import Data, Export Data and now Backup Database were removed, not
+            repaired: none of them did the thing its label said. The backup
+            button answered "Backup created successfully" after the server
+            only stored a timestamp - no backup was ever made (audit L1-F14).
+            A real backup needs the hosting provider, so this card says that
+            plainly instead of offering a button. */}
+        <div className="p-4 bg-amber-50 border border-amber-200 rounded-lg flex items-start gap-3" data-testid="backup-notice">
+          <Database className="w-5 h-5 text-amber-700 mt-0.5 shrink-0" />
+          <div>
+            <p className="font-medium text-gray-900">IMS cannot back up the database from this screen</p>
+            <p className="text-sm text-gray-700 mt-1">
+              IMS does not create a backup, on demand or on a schedule. Backups
+              have to be set up and checked with the database hosting provider.
+              Until that is confirmed there, do not assume a backup exists.
+            </p>
+          </div>
         </div>
       </div>
 
