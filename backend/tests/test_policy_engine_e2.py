@@ -279,3 +279,71 @@ def test_t10_luxury_cap_lower_only(eng):
     # there is NO per-brand registry key (Cartier/Gucci stay code constants)
     import api.services.policy_registry as reg
     assert not any("brand" in k.lower() for k in reg.REGISTRY)
+
+
+# --------------------------------------------------------------------------- T12
+# Audit L1-F01, server door. The settings SCREEN read (get_effective, behind
+# GET /settings/policies[/{key}]) must never answer the code defaults for a
+# scope it could not read: the Shopify live-sync screen showed "ON / 01:00,
+# 09:00 / 200" as the saved values and Save wrote them over a stopped schedule.
+# The runtime read (get_policy) stays fail-soft -- t11 above pins that.
+
+
+class _DownColl:
+    def find_one(self, *_a, **_k):
+        raise RuntimeError("mongo failover")
+
+
+def _saved_schedule_then_cold_cache(monkeypatch):
+    pe.set_policy("promo.ceiling_pct", 22.0, {}, actor=ADMIN)
+    monkeypatch.setattr(pe, "cache", _FakeCache())  # the policy cache TTL lapsed
+
+
+@pytest.mark.parametrize("down", [None, _DownColl()], ids=["no-connection", "read-raises"])
+def test_t12_screen_read_refuses_instead_of_answering_defaults(eng, monkeypatch, down):
+    _saved_schedule_then_cold_cache(monkeypatch)
+    monkeypatch.setattr(pe, "_coll", lambda name="policy_settings": down)
+
+    with pytest.raises(pe.PolicyError) as e:
+        pe.get_effective("promo.ceiling_pct")
+    assert e.value.status == 503
+    with pytest.raises(pe.PolicyError):
+        pe.get_policies(None)
+    # the till / runtime read still degrades to the default, never raises
+    assert pe.get_policy("promo.ceiling_pct") == 30.0
+
+    # recovery: the stored value, straight away (the failure was not cached)
+    monkeypatch.setattr(pe, "_coll", lambda name="policy_settings": eng["policy"])
+    assert pe.get_effective("promo.ceiling_pct")["value"] == 22.0
+
+
+def test_t12_store_scope_refuses_when_the_shop_to_entity_read_fails(eng, monkeypatch):
+    """A store's effective value passes through its entity. If the stores read
+    fails the entity layer is unknown, so the answer is unknown -- not 'global'."""
+    pe.set_policy("cash.variance.block", 50000, {"entity_id": "E1"}, actor=ADMIN)
+    monkeypatch.setattr(pe, "cache", _FakeCache())
+    real = eng["policy"]
+    monkeypatch.setattr(
+        pe, "_coll", lambda name="policy_settings": _DownColl() if name == "stores" else real
+    )
+    with pytest.raises(pe.PolicyError) as e:
+        pe.get_effective("cash.variance.block", {"store_id": "S1"})
+    assert e.value.status == 503
+
+
+def test_t12_policy_routes_answer_503_not_200_defaults(eng, monkeypatch):
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from api.routers import settings as settings_router
+
+    _saved_schedule_then_cold_cache(monkeypatch)
+    monkeypatch.setattr(pe, "_coll", lambda name="policy_settings": None)
+    for call in (
+        settings_router.get_policies_batch(scope=None, current_user=ADMIN),
+        settings_router.get_policy_one("promo.ceiling_pct", scope=None, current_user=ADMIN),
+    ):
+        with pytest.raises(HTTPException) as e:
+            asyncio.run(call)
+        assert e.value.status_code == 503

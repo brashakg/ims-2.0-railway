@@ -90,9 +90,16 @@ def _scope_addr(scope: Optional[dict]) -> str:
     return "global"
 
 
-def _resolve_entity_id(store_id: str) -> Optional[str]:
+def _unavailable() -> "PolicyError":
+    """A settings-SCREEN read that could not reach the store (audit L1-F01)."""
+    return PolicyError("settings store unavailable - nothing was read", status=503)
+
+
+def _resolve_entity_id(store_id: str, strict: bool = False) -> Optional[str]:
     """store_id -> entity_id (memoized). A missing/None entity_id (unassigned or
-    dirty data) returns None so resolution falls through to GLOBAL -- NEVER raises."""
+    dirty data) returns None so resolution falls through to GLOBAL -- NEVER raises,
+    unless `strict` (the settings-screen read) and the stores read itself FAILED:
+    an unknown entity layer is not "no entity"."""
     ck = f"{_SE_CACHE_PREFIX}{store_id}"
     cached = cache.get(ck)
     if cached is not None:
@@ -100,16 +107,20 @@ def _resolve_entity_id(store_id: str) -> Optional[str]:
     eid = None
     try:
         coll = _coll("stores")
+        if coll is None and strict:
+            raise _unavailable()
         if coll is not None:
             doc = coll.find_one({"store_id": store_id}) or {}
             eid = doc.get("entity_id")
     except Exception:  # noqa: BLE001
+        if strict:
+            raise _unavailable()
         eid = None
     cache.set(ck, eid or "", ttl=_TTL)
     return eid or None
 
 
-def _chain(scope: Optional[dict]) -> List[str]:
+def _chain(scope: Optional[dict], strict: bool = False) -> List[str]:
     """Scope addresses to try, most-specific first."""
     scope = scope or {}
     sid = scope.get("store_id")
@@ -117,7 +128,7 @@ def _chain(scope: Optional[dict]) -> List[str]:
     chain: List[str] = []
     if sid:
         chain.append(f"store:{sid}")
-        ent = _resolve_entity_id(sid)
+        ent = _resolve_entity_id(sid, strict)
         if ent:
             chain.append(f"entity:{ent}")
         chain.append("global")
@@ -129,19 +140,27 @@ def _chain(scope: Optional[dict]) -> List[str]:
     return chain
 
 
-def _scope_doc_values(addr: str) -> Dict[str, Any]:
+def _scope_doc_values(addr: str, strict: bool = False) -> Dict[str, Any]:
     """The `values` map for one scope address (cached per scope so in-memory
-    cache.delete fully invalidates it). Missing doc / DB down -> {}."""
+    cache.delete fully invalidates it). Missing doc -> {}. DB down -> {} for the
+    runtime read (the till keeps working on the code default), but a
+    PolicyError(503) when `strict`: the settings SCREEN must never be told the
+    code default is the saved value (audit L1-F01 -- Save then wrote the
+    defaults over a deliberately stopped Shopify schedule)."""
     ck = f"{_DOC_CACHE_PREFIX}{addr}"
     cached = cache.get(ck)
     if cached is not None:
         return cached
     coll = _coll()
     if coll is None:
+        if strict:
+            raise _unavailable()
         return {}  # DB unavailable -- do NOT cache (an empty {} would poison the scope for _TTL)
     try:
         doc = coll.find_one({"_id": addr}) or {}
     except Exception:  # noqa: BLE001
+        if strict:
+            raise _unavailable()
         return {}  # transient read failure -- do NOT cache the empty result; retry next request
     values = doc.get("values") or {}
     cache.set(ck, values, ttl=_TTL)
@@ -223,7 +242,9 @@ def get_policy(key: str, scope: Optional[dict] = None, *, default: Any = _UNSET)
 
 def get_effective(key: str, scope: Optional[dict] = None) -> dict:
     """Resolve + report the SOURCE level (store/entity/global/env/default). Secret
-    values are masked in the returned `value`."""
+    values are masked in the returned `value`. This is the settings-SCREEN read:
+    it raises PolicyError(503) when a scope could not be read, instead of
+    reporting the code default as the saved value (get_policy stays fail-soft)."""
     spec = reg.REGISTRY.get(key)
     if spec is None:
         raise KeyError(f"unknown policy key: {key}")
@@ -231,8 +252,8 @@ def get_effective(key: str, scope: Optional[dict] = None) -> dict:
     source = "default"
     value: Any = None
     found = False
-    for addr in _chain(scope):
-        values = _scope_doc_values(addr)
+    for addr in _chain(scope, strict=True):
+        values = _scope_doc_values(addr, strict=True)
         v = _nested_get(values, key)
         if v is not _MISSING:
             if spec.secret and isinstance(v, str):

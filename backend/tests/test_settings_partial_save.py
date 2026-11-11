@@ -184,6 +184,64 @@ def test_role_gates_are_unchanged(colls):
         assert exc.value.status_code == 403
 
 
+# --- L1-F05 server door: an unreachable database is not "nothing saved yet" ----
+
+GETTERS = {
+    "tax_settings": settings_router.get_tax_settings,
+    "invoice_settings": settings_router.get_invoice_settings,
+    "printer_settings": settings_router.get_printer_settings,
+    "business_settings": settings_router.get_business_settings,
+}
+
+
+@pytest.mark.parametrize("name,saved,model,handler", CASES, ids=[c[0] for c in CASES])
+def test_an_unreachable_database_is_503_on_read_and_on_save(monkeypatch, name, saved, model, handler):
+    """Production Mongo outage: _get_settings_collection gives None. The read
+    used to answer 200 with the model DEFAULTS (so the screen showed 18 / 365 /
+    80mm as the saved values, Save enabled) and the save answered 200
+    "updated (no DB)" (so the screen said "saved" with nothing stored)."""
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda _name: None)
+
+    with pytest.raises(HTTPException) as read:
+        _run(GETTERS[name](ADMIN))
+    assert read.value.status_code == 503
+
+    with pytest.raises(HTTPException) as save:
+        _run(handler(model.model_validate(saved), ADMIN))
+    assert save.value.status_code == 503
+    assert "nothing was" in save.value.detail.lower()
+
+
+@pytest.mark.parametrize("name,saved,model,handler", CASES, ids=[c[0] for c in CASES])
+def test_a_reachable_empty_database_still_reads_the_defaults(colls, name, saved, model, handler):
+    """The clean first run stays supported: reachable + no record = defaults."""
+    assert _run(GETTERS[name](ADMIN)) == model().model_dump()
+
+
+@pytest.mark.parametrize("name,saved,model,handler", CASES, ids=[c[0] for c in CASES])
+def test_a_stored_record_is_read_back_as_stored(colls, name, saved, model, handler):
+    settings_router._get_settings_collection(name).insert_one({"_id": "default", **saved})
+    assert _run(GETTERS[name](ADMIN)) == saved
+
+
+def test_system_settings_are_503_when_unreachable_and_defaults_only_when_reached(monkeypatch, colls):
+    """The Auto-logout and Website page types cards read and save this record."""
+    superadmin = {"user_id": "u-sa", "roles": ["SUPERADMIN"]}
+    assert _run(settings_router.get_system_settings(superadmin))["session_timeout_minutes"] == 480
+    _run(settings_router.update_system_settings({"session_timeout_minutes": 7}, superadmin))
+    assert _run(settings_router.get_system_settings(superadmin))["session_timeout_minutes"] == 7
+
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda _name: None)
+    for call in (
+        settings_router.get_system_settings(superadmin),
+        settings_router.update_system_settings({"session_timeout_minutes": 480}, superadmin),
+    ):
+        with pytest.raises(HTTPException) as exc:
+            _run(call)
+        assert exc.value.status_code == 503
+    assert _stored(colls, "system_settings")["session_timeout_minutes"] == 7
+
+
 # --- L1-F13: an HSN description can be cleared --------------------------------
 
 
