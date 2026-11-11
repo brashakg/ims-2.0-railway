@@ -3222,8 +3222,9 @@ def _recovered_stock_state(
 ) -> Dict[str, Any]:
     """A record's pieces by what happened to each, from its own stock state
     (the completion message and the panel's open-stock-step list read it):
-    `damaged` / `held` {name: pieces}, `out` {name: pieces} -- the GOOD
-    pieces NOT back in stock -- and `open`: its restock is still retryable
+    `damaged` {name: pieces} -- the pieces to SET ASIDE (damaged or opened)
+    --, `held` (GOOD, kept out by the return), `out` {name: pieces} -- the
+    GOOD pieces NOT back in stock -- and `open`: its restock is still retryable
     (POST /returns/{id}/restock puts each `out` piece back once).
 
     A line is read with the product of its BILL line (line_stock_product_id):
@@ -3249,7 +3250,7 @@ def _recovered_stock_state(
         line["sku"] = line.get("sku") or (orig or {}).get("sku") or ""
         name = str(line["sku"] or line.get("product_name") or (orig or {}).get("product_name")
                    or line["product_id"])
-        if str(line.get("condition") or "GOOD").upper() == "DAMAGED":
+        if str(line.get("condition") or "GOOD").upper() in _SET_ASIDE_CONDITIONS:
             damaged[name] = damaged.get(name, 0) + qty
         elif restock_engine.should_restock(line):
             good.append(line)
@@ -3285,7 +3286,7 @@ def _recovered_stock_note(
 
     A KEPT record says, each part only when it has pieces:
       * what IS dealt with: the units back in stock (restock_stock_ids) and
-        the ones set aside as damaged (quarantined_stock_ids);
+        the ones set aside, damaged or opened (quarantined_stock_ids);
       * a HISTORICAL order's pieces: IMS puts none back by rule and the store
         manager's stock-in task covers them (raise_stock_in_task) -- never a
         second entry beside that task;
@@ -3294,8 +3295,9 @@ def _recovered_stock_note(
         (_raise_restock_blocked_task's rule: a hand entry beside the retry is
         one frame counted twice); a record whose stock step reads finished
         has no retry, and still no hand entry;
-      * each DAMAGED piece not set aside;
-      * the pieces the return itself kept out of stock (opened, or restock
+      * each DAMAGED or OPENED piece not set aside (it still reads sold; no
+        screen sets a sold piece aside);
+      * the GOOD pieces the return itself kept out of stock (restock
         switched off).
 
     A REBUILT record (nothing kept says whether the stock step ran) names its
@@ -3317,7 +3319,7 @@ def _recovered_stock_note(
     not_aside = max(0, sum(damaged.values()) - aside)
     done = ", ".join(part for part in (
         f"{back} piece(s) back in stock" if back else "",
-        f"{aside} set aside as damaged" if aside else "") if part)
+        f"{aside} set aside (damaged or opened)" if aside else "") if part)
     parts = [f"Already dealt with: {done}."] if done else []
     if via_task:
         parts.append(f"{via_task} piece(s) are from an older imported order: IMS put none back - the "
@@ -3334,10 +3336,11 @@ def _recovered_stock_note(
                      "stock step cannot put them back, and a hand entry would leave each piece with "
                      "two stock records: ask the IMS admin to put them back.")
     if not_aside:
-        parts.append("Damaged and NOT set aside by IMS: "
-                     + (_named(damaged) if not aside else f"{not_aside} of {_named(damaged)}") + ".")
+        parts.append("Damaged or opened and NOT set aside by IMS: "
+                     + (_named(damaged) if not aside else f"{not_aside} of {_named(damaged)}")
+                     + ". It still reads sold: keep it off the shelf and tell the IMS admin.")
     if held:
-        parts.append(f"Left out of stock, as the return said (opened or not for resale): {_named(held)}.")
+        parts.append(f"Left out of stock, as the return said (not for resale): {_named(held)}.")
     if not (via_task or out or not_aside or held):
         parts.append("Nothing to add by hand." if done
                      else "No piece of this return is waiting to go back into stock.")
@@ -3682,6 +3685,11 @@ def _restock_good_items(
     return result
 
 
+# The conditions a returned piece is SET ASIDE for (QUARANTINED, off sale):
+# never put back on sale, never left reading SOLD.
+_SET_ASIDE_CONDITIONS = ("DAMAGED", "OPENED")
+
+
 def _quarantine_damaged_units(
     items: List[ReturnLine],
     order_id: Optional[str],
@@ -3690,14 +3698,16 @@ def _quarantine_damaged_units(
     user_id: Optional[str],
 ) -> List[Dict[str, Any]]:
     """F21-3: a returned piece marked DAMAGED comes back QUARANTINED -- off
-    sale, tracked, ready to go to the supplier -- never left SOLD. Only the
-    unit THIS order sold (never another customer's piece);
+    sale, tracked, ready to go to the supplier -- never left SOLD. So does an
+    OPENED piece (decision D6, 2026-11-11): it is in the shop, so stock shows
+    it, off sale until the manager has looked at it (it used to stay SOLD).
+    Only the unit THIS order sold (never another customer's piece);
     a line whose sold unit cannot be found (a historical import) moves
     nothing. Fail-soft per unit. Returns the units set aside.
 
     The unit stays quarantined at the shop it was sold from (an online
     order's damaged piece handed in at another counter is not moved)."""
-    lines = [it for it in items or [] if it.condition == "DAMAGED" and it.product_id]
+    lines = [it for it in items or [] if it.condition in _SET_ASIDE_CONDITIONS and it.product_id]
     if not order_id or not lines:
         return []
     try:
@@ -3718,11 +3728,11 @@ def _quarantine_damaged_units(
                     named_ids=named_ids,
                     set_aside={
                         "status": "QUARANTINED",
-                        "quarantine_reason": "CUSTOMER_RETURN_DAMAGED",
+                        "quarantine_reason": f"CUSTOMER_RETURN_{line.condition}",
                         "quarantine_at": datetime.now(timezone.utc),
                         "quarantine_by": user_id,
                         "quarantine_generation": uuid.uuid4().hex,
-                        "quarantine_notes": f"Damaged, customer return {return_id}"[:200],
+                        "quarantine_notes": f"{line.condition.capitalize()}, customer return {return_id}"[:200],
                         "quarantine_label_printed": False,
                     },
                 )
@@ -3736,7 +3746,8 @@ def _quarantine_damaged_units(
             except Exception:  # noqa: BLE001 -- the flip landed; only the shop is unknown
                 unit = {}
             out.append({"stock_id": sid, "store_id": unit.get("store_id"),
-                        "product_id": line.product_id})
+                        "product_id": line.product_id,
+                        "reason": f"CUSTOMER_RETURN_{line.condition}"})
             _audit_stock_transition(sid, "SOLD", "QUARANTINED", return_id,
                                     unit.get("store_id"), user_id)
             try:
@@ -3748,7 +3759,7 @@ def _quarantine_damaged_units(
                     from_state=ie.StockState.SOLD, to_state=ie.StockState.QUARANTINED,
                     store_id=unit.get("store_id"), product_id=line.product_id,
                     source_type="RETURN", source_id=return_id,
-                    payload={"quarantine_reason": "CUSTOMER_RETURN_DAMAGED"},
+                    payload={"quarantine_reason": f"CUSTOMER_RETURN_{line.condition}"},
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[RETURNS] damaged unit ledger row failed: %s", exc)
@@ -5399,8 +5410,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # A stock-write failure must never break the return record - leave
         # applied=False so it can be retried later.
         logger.warning("[RETURNS] restock failed (recorded, not applied): %s", exc)
-    # F21-3: a DAMAGED piece comes back QUARANTINED (tracked, can go to the
-    # supplier), and the task agent raises its 7-day follow-up.
+    # F21-3: a DAMAGED or OPENED piece comes back QUARANTINED (tracked, can
+    # go to the supplier or be cleared), and the task agent raises its 7-day
+    # follow-up.
     quarantined = _quarantine_damaged_units(
         active_lines, resolved_order_id, order, return_id, current_user.get("user_id"))
     for unit in quarantined:
@@ -5410,7 +5422,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             await dispatch_event(
                 "stock.quarantined",
                 {"stock_id": unit["stock_id"], "store_id": unit["store_id"] or store_id,
-                 "reason": "CUSTOMER_RETURN_DAMAGED", "actor_id": current_user.get("user_id")},
+                 "reason": unit["reason"], "actor_id": current_user.get("user_id")},
                 source="returns_router",
             )
         except Exception as exc:  # noqa: BLE001
@@ -5499,7 +5511,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "restocked": restocked,
         "restock_applied": restock_applied,
         "restock_stock_ids": restock_stock_ids,
-        # F21-3: the DAMAGED pieces this return set aside (QUARANTINED).
+        # F21-3: the DAMAGED / OPENED pieces this return set aside (QUARANTINED).
         "quarantined_stock_ids": [u["stock_id"] for u in quarantined],
         # F9 audit stamp: WHICH store the returned units were put back on, and
         # -- when the order billed to a stockless ONLINE store -- what it was

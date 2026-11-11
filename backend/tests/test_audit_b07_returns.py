@@ -112,6 +112,71 @@ def test_a_damaged_piece_from_the_screen_is_set_aside_not_left_sold(ctx, monkeyp
     assert saved["items"][0]["product_id"] == "PRD-1"
 
 
+def test_an_opened_piece_is_set_aside_for_the_manager_not_left_reading_sold(ctx, monkeypatch):  # noqa: F811
+    """Decision D6 (2026-11-11): an OPENED piece is in the shop, so stock
+    shows it -- QUARANTINED (off sale) for the manager to decide, with the
+    same follow-up task as a damaged piece. It used to stay SOLD."""
+    import agents.registry as registry
+    from api.services import item_events as ie
+
+    heard = []
+
+    async def _hear(event, payload, source=""):
+        heard.append((event, payload["stock_id"], payload["reason"]))
+
+    monkeypatch.setattr(registry, "dispatch_event", _hear)
+    monkeypatch.setattr(ie, "record_post_write_event", lambda db, **kw: None)
+    r = _post(ctx, _screen(condition="OPENED"), roles=("ADMIN",))
+    assert r.status_code == 201, r.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "QUARANTINED")]
+    unit = ctx["stock_repo"].units[0]
+    assert unit["quarantine_reason"] == "CUSTOMER_RETURN_OPENED"
+    assert unit["quarantine_notes"] == f"Opened, customer return {r.json()['return_id']}"
+    saved = ctx["returns_coll"].docs[-1]
+    # Set aside, never put back on sale.
+    assert saved["quarantined_stock_ids"] == ["STK-OLD-1"] and saved["restock_stock_ids"] == []
+    assert saved["restocked"] == []
+    assert heard == [("stock.quarantined", "STK-OLD-1", "CUSTOMER_RETURN_OPENED")]
+    assert [(a["prior_status"], a["new_status"]) for a in ctx["stock_audit_coll"].docs] == [("SOLD", "QUARANTINED")]
+
+
+def test_a_good_piece_marked_not_for_restock_stays_out_as_the_return_said(ctx):  # noqa: F811
+    """The till's own switch (restock False on a GOOD piece) is unchanged."""
+    r = _post(ctx, _screen(restock=False))
+    assert r.status_code == 201, r.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "SOLD")]
+    assert ctx["returns_coll"].docs[-1]["quarantined_stock_ids"] == []
+
+
+def test_a_piece_whose_own_sold_record_is_not_found_gets_a_new_record_never_another_bills(ctx):  # noqa: F811
+    """Decision D5 (2026-11-11): the bill's own sold record is not there (old
+    or untidy data), and another customer's sold piece of the same product is
+    at the shop. The return used to flip THAT customer's record back on sale.
+    It now leaves it alone and gives the returned piece a NEW record and
+    barcode, and says so (the label has to be printed)."""
+    ctx["stock_repo"].units[0]["order_id"] = "ORD-OTHER-CUSTOMER"
+    r = _post(ctx, _screen())
+    assert r.status_code == 201, r.text
+    data = r.json()
+    units = {u["stock_id"]: u for u in ctx["stock_repo"].units}
+    assert units["STK-OLD-1"]["status"] == "SOLD" and units["STK-OLD-1"]["order_id"] == "ORD-OTHER-CUSTOMER"
+    assert len(units) == 2
+    new = next(u for sid, u in units.items() if sid != "STK-OLD-1")
+    assert (new["product_id"], new["status"], new["source_type"], new["source_id"]) == (
+        "PRD-1", "AVAILABLE", "RETURN", data["return_id"])
+    assert new["returned_from_order_id"] == "ORD-1" and new["barcode"] and new["barcode_printed"] is False
+    saved = ctx["returns_coll"].docs[-1]
+    assert [(row["reactivated"], row["minted"]) for row in saved["restocked"]] == [(0, 1)]
+    assert saved["restock_applied"] is True and saved["restock_stock_ids"] == [new["stock_id"]]
+    assert data["stock_note"].startswith("1 piece(s) went back into stock under a NEW barcode")
+    assert "print the new label" in data["stock_note"]
+
+
+def test_a_piece_put_back_on_its_own_record_asks_for_no_new_label(ctx):  # noqa: F811
+    r = _post(ctx, _screen())
+    assert r.status_code == 201 and r.json()["stock_note"] == "", r.text
+
+
 def test_a_product_the_client_names_beside_the_line_never_decides_the_stock(ctx):  # noqa: F811
     """The bill line is PRD-1. A request naming PRD-9 beside that line used to
     mint a sellable PRD-9 piece nobody returned."""
@@ -368,8 +433,16 @@ def test_a_damaged_piece_set_aside_is_reported_as_dealt_with(till, tasks):  # no
     _kept(till, "RET-DMG", items=[_item(qty=1.0, condition="DAMAGED")], restock_applied=True,
           quarantined_stock_ids=["SU-9"])
     msg = _msg("RET-DMG")
-    assert "Already dealt with: 1 set aside as damaged." in msg and "Nothing to add by hand." in msg
+    assert "Already dealt with: 1 set aside (damaged or opened)." in msg and "Nothing to add by hand." in msg
     assert "NOT" not in msg
+
+
+def test_an_opened_piece_set_aside_is_reported_as_dealt_with(till, tasks):  # noqa: F811
+    _kept(till, "RET-OPN", items=[_item(qty=1.0, condition="OPENED")], restock_applied=True,
+          quarantined_stock_ids=["SU-9"])
+    msg = _msg("RET-OPN")
+    assert "Already dealt with: 1 set aside (damaged or opened)." in msg and "Nothing to add by hand." in msg
+    assert "NOT" not in msg and "Left out of stock" not in msg
 
 
 def test_an_unapplied_return_names_each_piece_still_out(till, tasks):  # noqa: F811
@@ -433,7 +506,8 @@ def test_a_damaged_piece_that_was_not_set_aside_is_named(till, tasks):  # noqa: 
           items=[_item(qty=1.0), _item("li2", "P2", "F2", 1.0, "DAMAGED")])
     msg = _msg("RET-DMG-OUT")
     assert "Already dealt with: 1 piece(s) back in stock." in msg
-    assert "Damaged and NOT set aside by IMS: 1 x F2." in msg
+    assert "Damaged or opened and NOT set aside by IMS: 1 x F2." in msg
+    assert "keep it off the shelf" in msg
     assert "Nothing to add by hand" not in msg
 
 
@@ -453,7 +527,10 @@ def test_pieces_the_return_kept_out_of_stock_are_said_so_not_called_finished(til
     _kept(till, "RET-HELD", restock_applied=True,
           items=[_item(qty=1.0, condition="OPENED"), _item("li2", "P2", "F2", 1.0, restock=False)])
     msg = _msg("RET-HELD")
-    assert "Left out of stock, as the return said (opened or not for resale): 1 x F1, 1 x F2." in msg
+    # The opened piece was to be set aside and was not; the other was kept
+    # out of stock by the return itself.
+    assert "Damaged or opened and NOT set aside by IMS: 1 x F1." in msg
+    assert "Left out of stock, as the return said (not for resale): 1 x F2." in msg
     assert "Already dealt with" not in msg and "Nothing to add by hand" not in msg
 
 
