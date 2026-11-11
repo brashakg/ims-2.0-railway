@@ -1737,6 +1737,35 @@ def test_retry_door_restocks_normally_when_the_order_is_readable(monkeypatch):
     assert all(not sid.startswith("NEW-") for sid in by_id)
 
 
+@pytest.mark.parametrize("resolved_at", [PHYSICAL_COUNTER_STORE, None])
+def test_the_accounts_retry_never_books_an_online_return_at_the_pressers_own_shop(monkeypatch, resolved_at):
+    """Needs completing > Retry stock step is pressed at head office: the
+    presser's active shop (BOK here) is not where the goods were handed back.
+    An online order that names no fulfilment shop goes back to the shop the
+    press itself resolved (kept on the record: PUN), else nowhere -- the
+    store door's "my own counter" fallback would have minted it at BOK."""
+    ctx = _build_ctx(monkeypatch, order=dict(_ONLINE_ORDER), stock_units=[],
+                     active_store=PHYSICAL_FULFILMENT_STORE)
+    ctx["returns_coll"].insert_one({
+        "return_id": "RET-REC-ONL", "order_id": "ORD-ONL-1", "store_id": ONLINE_STORE,
+        "status": "COMPLETED", "restock_applied": False, "restock_stock_ids": [], "restocked": [],
+        "restock_store_id": resolved_at, "recovered": {"by": "U-ACC", "source": "unsaved doc"},
+        "items": [{"order_item_id": "li1", "product_id": "PRD-1", "sku": "RB-1", "return_qty": 1,
+                   "unit_price": 1500, "condition": "GOOD"}],
+    })
+    r = ctx["client"].post("/api/v1/returns/RET-REC-ONL/complete-record/restock",
+                           headers={"Authorization": f"Bearer {ctx['token']}"})
+    assert r.status_code == 200, r.text
+    assert ctx["stock_repo"].units_at(PHYSICAL_FULFILMENT_STORE) == []
+    assert ctx["stock_repo"].units_at(ONLINE_STORE) == []
+    if resolved_at:
+        assert r.json()["restock_applied"] is True and r.json()["restock_store_id"] == resolved_at
+        assert [u["status"] for u in ctx["stock_repo"].units_at(resolved_at)] == ["AVAILABLE"]
+    else:
+        # No shop resolved: nothing is minted anywhere, the step stays open.
+        assert r.json()["restock_applied"] is False and ctx["stock_repo"].units == []
+
+
 def test_retry_restock_door_redirects_off_the_online_store(monkeypatch):
     """Door 2: POST /returns/{id}/restock on a return doc booked to the online
     store must land the unit at the physical fulfilment shop, not mint on the

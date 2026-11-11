@@ -3206,7 +3206,8 @@ def _units_still_out(
 
 REBUILT_STOCK_UNKNOWN = (
     "IMS did not keep whether its pieces went back into stock, and it will not move them itself. "
-    "Look each piece up in Inventory first: put back by hand only a piece that is not already in stock.")
+    "Ask the store manager to look each piece up in Inventory first, and to add by hand only a piece "
+    "that is not already in stock.")
 
 
 def _rebuilt(doc: Optional[Dict[str, Any]]) -> bool:
@@ -3329,8 +3330,8 @@ def _recovered_stock_note(
         parts.append(f"NOT back in stock: {_named(out)}. Do not add these by hand - IMS would count "
                      "them twice. Press Retry stock step on this return (Returns > Needs completing): "
                      "IMS puts each piece back once."
-                     + (" On this older imported order it adds no stock row: it raises one stock-in "
-                        "task for the store manager." if historical else ""))
+                     + (" This is an older imported order, so the retry adds no stock row itself: it "
+                        "raises one stock-in task for the store manager." if historical else ""))
     elif out:
         parts.append(f"NOT back in stock: {_named(out)}. This record's stock step is closed, so Retry "
                      "stock step cannot put them back, and a hand entry would leave each piece with "
@@ -4699,6 +4700,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                         "restocked": existing.get("restocked", []),
                         "restock_applied": existing.get("restock_applied", False),
                         "restock_stock_ids": existing.get("restock_stock_ids", []),
+                        "stock_note": _new_label_note(existing.get("restocked")),
                         "message": "Return already recorded (idempotent replay)",
                         "_idempotent_replay": True,
                     }
@@ -6295,6 +6297,15 @@ async def retry_restock(
     Also lets a transient DB failure during create() be retried without
     re-recording any money movement.
     """
+    # The retrier's own counter: where an online order's goods were handed back.
+    return _retry_restock(return_id, current_user, current_user.get("active_store_id"))
+
+
+def _retry_restock(return_id: str, current_user: dict, processing_store_id: Optional[str]) -> Dict[str, Any]:
+    """retry_restock's work, for both of its doors. `processing_store_id`: the
+    physical shop an ONLINE order's units go back to when the order names none
+    (_resolve_restock_store) -- the store door's own counter; never the shop
+    of a head-office user who was not where the goods were handed back."""
     coll = _returns_coll()
     if coll is None:
         raise HTTPException(status_code=404, detail="Return not found")
@@ -6394,7 +6405,7 @@ async def retry_restock(
             claim_order_id,
             claim_store,
             blocked_units,
-            current_user.get("active_store_id"),
+            processing_store_id,
             unread="the order",
             historical=claim.get("historical") if isinstance(claim.get("historical"), bool) else None,
             order_number=claim.get("order_number"),
@@ -6462,7 +6473,7 @@ async def retry_restock(
             user_id=current_user.get("user_id"),
             # F9: same online-store redirect as the create path -- a retry must
             # never be the door that mints a phantom unit on BV/WO-ONLINE-01.
-            processing_store_id=current_user.get("active_store_id"),
+            processing_store_id=processing_store_id,
             # VERIFIED evidence (non-None was checked above).
             order=retry_order,
             already_back=already_back,
@@ -6473,7 +6484,7 @@ async def retry_restock(
             # None: another door just put the units back -- nothing left to do.
             restock_result = _restock_booked(
                 retry_order, lines, str(refund_id), _restock,
-                processing_store_id=current_user.get("active_store_id"),
+                processing_store_id=processing_store_id,
             ) or {"applied": True}
         else:
             # Only the units still out: re-run, the units an earlier attempt
@@ -6579,17 +6590,19 @@ async def retry_completed_record_restock(
     """Returns > Needs completing > Retry stock step (decision D7, 2026-11-11):
     Accounts / Admin re-run the restock of a record they completed there --
     the ONE action for its pieces still out of stock, never a hand entry. It
-    is the store's retry (retry_restock: its claim, its units-still-out rule,
+    is the store's retry (_retry_restock: its claim, its units-still-out rule,
     its store scope), for a completed record only: an ordinary return is not
-    theirs."""
+    theirs. An online order's units go back to the shop the press itself
+    resolved (kept on the record), never to the presser's own shop."""
     coll = _returns_coll()
     try:
-        doc = coll.find_one({"return_id": return_id}, {"_id": 0, "recovered": 1}) if coll is not None else None
+        doc = (coll.find_one({"return_id": return_id}, {"_id": 0, "recovered": 1, "restock_store_id": 1})
+               if coll is not None else None)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the returns - try again.") from exc
     if not (doc or {}).get("recovered"):
         raise HTTPException(status_code=404, detail="Return not found")
-    return await retry_restock(return_id, current_user)
+    return _retry_restock(return_id, current_user, doc.get("restock_store_id"))
 
 
 # ============================================================================

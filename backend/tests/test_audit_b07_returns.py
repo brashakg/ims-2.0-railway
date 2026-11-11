@@ -155,9 +155,12 @@ def test_a_piece_whose_own_sold_record_is_not_found_gets_a_new_record_never_anot
     It now leaves it alone and gives the returned piece a NEW record and
     barcode, and says so (the label has to be printed)."""
     ctx["stock_repo"].units[0]["order_id"] = "ORD-OTHER-CUSTOMER"
-    r = _post(ctx, _screen())
+    r = _post(ctx, _screen(), key="K-NEW")
     assert r.status_code == 201, r.text
     data = r.json()
+    # A lost reply pressed again: the saved return, the same note, no third unit.
+    again = _post(ctx, _screen(), key="K-NEW")
+    assert again.json()["_idempotent_replay"] is True and again.json()["stock_note"] == data["stock_note"]
     units = {u["stock_id"]: u for u in ctx["stock_repo"].units}
     assert units["STK-OLD-1"]["status"] == "SOLD" and units["STK-OLD-1"]["order_id"] == "ORD-OTHER-CUSTOMER"
     assert len(units) == 2
