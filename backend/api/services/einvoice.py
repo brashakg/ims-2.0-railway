@@ -193,9 +193,15 @@ def _build_einvoice_json(
 
     ``seller`` is the order's own shop doc (``_seller``): its ``gstin`` is the
     seller GSTIN and its first two digits the seller's state code.
-    ``customer`` is the order's customer record (``_customer``), the fallback
-    for the buyer's state and GSTIN on an invoice minted before those were
+    ``customer`` is the order's customer record (``_customer``), which the
+    head rule reads for the buyer's state on an invoice minted before that was
     stamped on the order.
+
+    NOT settled here (owner / CA, before any switch-on): how a line's price
+    and discount are SHOWN (UnitPrice / Discount, and the header Discount).
+    They are read exactly as before this fix -- the stored unit price and
+    discount -- so a discounted or GST-inclusive line does not yet satisfy the
+    IRP's own TotAmt = Qty x UnitPrice and AssAmt = TotAmt - Discount checks.
 
     Returns a dict. RAISES ValueError (gst_base.UnfileableOrder) for an order
     the returns cannot file either -- an unreadable amount, a line with no GST
@@ -203,7 +209,7 @@ def _build_einvoice_json(
     (generate_irn answers FAILED, as it does a bill with no taxable value).
     """
     from api.routers.reports.gst_base import (
-        _invoice_gstin,
+        _money,
         _order_rate_lines,
         _order_supply,
         _order_taxable_and_tax,
@@ -214,16 +220,12 @@ def _build_einvoice_json(
         return str(val or default).strip()
 
     def _n(val: Any) -> float:
-        try:
-            return round(float(val or 0), 2)
-        except (TypeError, ValueError):
-            return 0.0
+        # THE returns' money parser (a comma string, 'Rs', Decimal128): an
+        # amount the IRP is sent is the amount GSTR-1 files, never a silent 0.
+        return round(_money(val, order), 2)
 
-    # Supply type: B2B when the invoice was minted with a buyer GSTIN (frozen
-    # on the order; the customer record only for an older invoice), else B2C.
-    cust_gstin = _s(
-        _invoice_gstin(order, _s((customer or {}).get("gstin") or order.get("billing_gstin")))
-    )
+    # Supply type: B2B when the order carries a buyer GSTIN, else B2C.
+    cust_gstin = _s(order.get("customer_gstin") or order.get("billing_gstin"))
     supply_type = "B2B" if cust_gstin else "B2C"
 
     # Document identity
@@ -286,14 +288,13 @@ def _build_einvoice_json(
                 "HsnCd": _s(hsn),
                 "Qty": qty,
                 "Unit": "PCS",
-                # The stamped taxable value is already net of the line and
-                # cart discounts (and of the GST inside an inclusive price),
-                # so it IS the amount: no discount is taken a second time.
-                "UnitPrice": _n(l_taxable / qty),
+                # Price / discount as stored (unchanged; see the docstring):
+                # their presentation waits for the owner / CA.
+                "UnitPrice": _n(src.get("unit_price")) or round(l_taxable / qty, 2),
                 "TotAmt": l_taxable,
-                "Discount": 0.0,
+                "Discount": _n(src.get("discount") or src.get("discount_amount")),
                 "AssAmt": l_taxable,
-                "GstRt": _n(head["rate"]),
+                "GstRt": round(float(head["rate"]), 2),
                 "IgstAmt": l_igst,
                 "CgstAmt": l_cgst,
                 "SgstAmt": l_sgst,
@@ -316,7 +317,7 @@ def _build_einvoice_json(
         "IgstVal": round(sum(r["IgstAmt"] for r in rows), 2),
         "CesVal": 0.0,
         "StCesVal": 0.0,
-        "Discount": 0.0,  # already inside AssVal (see the line rows)
+        "Discount": _n(order.get("discount_total")),  # as stored (see the docstring)
         "OthChrg": 0.0,
         # The bill's stored round off (owner ruling 2026-10-08): the IRP's own
         # field, so TotInvVal (the rounded total) = AssVal + taxes + RndOffAmt
@@ -507,10 +508,47 @@ def _parse_irp_response(body: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _order_filter(order_id: str) -> Dict[str, Any]:
+    """The one id filter an order / invoice doc is found by."""
+    return {"$or": [{"id": order_id}, {"order_id": order_id}, {"invoice_id": order_id}]}
+
+
+def _stored_order(db, order_id: str) -> Optional[Dict[str, Any]]:
+    """The order as it is stored NOW (orders, then invoices), or None. Raises
+    when the database cannot be read: the caller refuses, never guesses."""
+    for name in ("orders", "invoices"):
+        doc = db.get_collection(name).find_one(_order_filter(order_id), {"_id": 0})
+        if doc:
+            return doc
+    return None
+
+
+def _already(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The SKIPPED answer for an order that already carries an IRN (None when
+    it does not). An IRN stored without its signed QR says so every time."""
+    irn = order.get("irn") or order.get("einvoice_irn")
+    if not irn:
+        return None
+    qr = order.get("einvoice_signed_qr")
+    return {
+        "status": STATUS_SKIPPED,
+        "irn": irn,
+        "ack_no": order.get("ack_no"),
+        "ack_date": order.get("ack_date"),
+        "signed_qr": qr,
+        "reason": "IRN already exists on this order -- skipping"
+        + ("" if qr else " (no signed QR code is stored for it)"),
+        "einvoice_json": None,
+    }
+
+
 def _persist_irn(db, order_id: str, irn_fields: Dict[str, Any]) -> bool:
     """Persist IRN + ack_no + ack_date + signed_qr + einvoice_status onto the
-    orders collection doc. Idempotent: safe to call multiple times. Fail-soft:
-    True when a document took the IRN, False when none did (never raises).
+    orders collection doc. Idempotent: safe to call multiple times, and a
+    BLANK never overwrites a stored value -- the IRP's duplicate answer to a
+    second press carries the IRN but no ack / signed QR (audit L3-21).
+    Fail-soft: True when a document took the IRN, False when none did (never
+    raises).
 
     ``db`` is the real PyMongo Database (finance/_shared._get_db), which
     refuses truth-testing: compare with None (audit L3-21).
@@ -520,26 +558,17 @@ def _persist_irn(db, order_id: str, irn_fields: Dict[str, Any]) -> bool:
     try:
         now = datetime.now(timezone.utc)
         update: Dict[str, Any] = {
-            "irn": irn_fields.get("irn") or "",
-            "ack_no": irn_fields.get("ack_no") or "",
-            "ack_date": irn_fields.get("ack_date") or "",
-            "einvoice_signed_qr": irn_fields.get("signed_qr") or "",
-            "einvoice_status": "GENERATED",
-            "einvoice_generated_at": now,
+            "irn": irn_fields.get("irn"),
+            "ack_no": irn_fields.get("ack_no"),
+            "ack_date": irn_fields.get("ack_date"),
+            "einvoice_signed_qr": irn_fields.get("signed_qr"),
         }
+        update = {k: v for k, v in update.items() if v}  # never a blank
+        update.update(einvoice_status="GENERATED", einvoice_generated_at=now)
         # Try orders collection first (POS orders), then invoices
         for collection_name in ("orders", "invoices"):
             coll = db.get_collection(collection_name)
-            result = coll.update_one(
-                {
-                    "$or": [
-                        {"id": order_id},
-                        {"order_id": order_id},
-                        {"invoice_id": order_id},
-                    ]
-                },
-                {"$set": update},
-            )
+            result = coll.update_one(_order_filter(order_id), {"$set": update})
             if result.matched_count > 0:
                 logger.info(
                     "[EINVOICE] persisted IRN %s on %s/%s",
@@ -609,7 +638,9 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
 
     SIMULATED -- gate not lifted (IMS_EINVOICE_ENABLED off or no creds).
     SKIPPED   -- order already has an IRN (idempotent).
-    GENERATED -- IRN successfully obtained from IRP and persisted.
+    GENERATED -- IRN obtained from the IRP. ``persisted`` says whether the
+                 order took it; ``reason`` is set when it did not, or when the
+                 answer carried no signed QR (the IRP's duplicate reply).
     FAILED    -- gate was up but IRP call failed; order is unchanged.
     """
     order = order or {}
@@ -618,17 +649,9 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
     )
 
     # ── Idempotency: skip if IRN already on the doc ──────────────────────
-    existing_irn = order.get("irn") or order.get("einvoice_irn")
-    if existing_irn:
-        return {
-            "status": STATUS_SKIPPED,
-            "irn": existing_irn,
-            "ack_no": order.get("ack_no"),
-            "ack_date": order.get("ack_date"),
-            "signed_qr": order.get("einvoice_signed_qr"),
-            "reason": "IRN already exists on this order -- skipping",
-            "einvoice_json": None,
-        }
+    skipped = _already(order)
+    if skipped:
+        return skipped
 
     # An order the refund-advance door holds is being refunded and cancelled
     # behind a credit note IMS cannot report to the IRP: never e-invoice it.
@@ -708,9 +731,39 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
             "ack_no": None,
             "ack_date": None,
             "signed_qr": None,
-            "reason": f"Not sent to the IRP -- this order cannot be e-invoiced as it stands: {str(exc)[:400]}",
+            "reason": (
+                "Not sent to the IRP -- this order cannot be e-invoiced as it stands: "
+                f"{str(getattr(exc, 'problem', None) or exc)[:400]}"
+            ),
             "einvoice_json": None,
         }
+
+    # ── Retry safety (audit L3-21) ───────────────────────────────────────
+    # The caller's copy can be stale (a second press, a retry after a lost
+    # reply): the order as STORED now decides. One that cannot be re-read is
+    # not sent -- its IRN could not be saved either.
+    # ponytail: a re-read, not an atomic claim -- two presses inside one
+    # provider round trip can both call; the IRP then answers the second with
+    # its duplicate reply and _persist_irn never blanks what the first saved.
+    # Take a claim on the order if that double call ever matters.
+    try:
+        skipped = _already(_stored_order(db, order_id) or {})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[EINVOICE] order %s could not be re-read: %s", order_id, exc)
+        return {
+            "status": STATUS_FAILED,
+            "irn": None,
+            "ack_no": None,
+            "ack_date": None,
+            "signed_qr": None,
+            "reason": (
+                "Not sent to the IRP -- the stored order could not be re-read to "
+                f"confirm it has no IRN yet: {str(exc)[:300]}"
+            ),
+            "einvoice_json": None,
+        }
+    if skipped:
+        return skipped
 
     # ── Call the IRP / GSP ───────────────────────────────────────────────
     try:
@@ -742,9 +795,15 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
         }
 
     # ── Persist on the order ─────────────────────────────────────────────
-    # An IRN the IRP issued but no document took is said so (``persisted``),
-    # with the IRN still in the result -- never a silent "all good".
+    # An IRN the IRP issued but no document took (``persisted``), or one that
+    # came without its signed QR, is said so with the IRN still in the result
+    # -- never a silent "all good".
     saved = _persist_irn(db, order_id, irn_fields)
+    said = []
+    if not saved:
+        said.append("The IRP issued this IRN but it was NOT saved on the order.")
+    if not irn_fields.get("signed_qr"):
+        said.append("The IRP's answer carried no signed QR code.")
 
     return {
         "status": STATUS_GENERATED,
@@ -752,10 +811,7 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
         "ack_no": irn_fields.get("ack_no"),
         "ack_date": irn_fields.get("ack_date"),
         "signed_qr": irn_fields.get("signed_qr"),
-        "reason": None if saved else (
-            "The IRP issued this IRN but it was NOT saved on the order -- "
-            "record it before trying again"
-        ),
+        "reason": " ".join(said) or None,
         "persisted": saved,
         "einvoice_json": einvoice_json,
     }

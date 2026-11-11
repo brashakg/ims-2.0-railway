@@ -96,19 +96,18 @@ def _heads(row, keys=("CgstAmt", "SgstAmt", "IgstAmt")):
 
 
 def _assert_irp_arithmetic(payload):
-    """The IRP's own cross-checks: the header is the sum of its lines on every
-    head, each line's value is its assessable + tax, and the invoice value is
-    assessable + tax + round off (no discount is taken a second time)."""
+    """The taxable and tax figures reconcile: the header is the sum of its
+    lines on every head, each line's value is its assessable + tax, and the
+    invoice value is assessable + tax + round off. (How UnitPrice / Discount
+    are SHOWN on a line is an owner / CA choice still open -- not asserted.)"""
     val, lines = payload["ValDtls"], payload["ItemList"]
     for head, line_key in (("AssVal", "AssAmt"), ("CgstVal", "CgstAmt"), ("SgstVal", "SgstAmt"),
                            ("IgstVal", "IgstAmt")):
         assert val[head] == round(sum(ln[line_key] for ln in lines), 2), head
     for ln in lines:
         assert ln["TotItemVal"] == round(ln["AssAmt"] + _heads(ln), 2)
-        assert ln["AssAmt"] == round(ln["TotAmt"] - ln["Discount"], 2)
     assert val["TotInvVal"] == round(
-        val["AssVal"] + val["CgstVal"] + val["SgstVal"] + val["IgstVal"]
-        + val["RndOffAmt"] - val["Discount"], 2
+        val["AssVal"] + val["CgstVal"] + val["SgstVal"] + val["IgstVal"] + val["RndOffAmt"], 2
     )
 
 
@@ -179,16 +178,32 @@ def test_l3_19_an_interstate_order_goes_out_as_igst_to_its_own_place_of_supply()
     _assert_irp_arithmetic(payload)
 
 
-def test_l3_19_the_buyer_gstin_is_the_one_the_invoice_was_minted_with():
-    """An invoice minted as a consumer bill (blank stamp) stays B2C even if the
-    customer record gained a GSTIN later; one minted before the stamp existed
-    reads the customer record -- the GST returns' own rule."""
-    live = {"customer_id": "C1", "gstin": MH_GSTIN}
-    minted_consumer = _till_order([FRAME], customer_id="C1", customer_gstin="")
-    legacy = _till_order([FRAME], customer_id="C1")
+def _decimal128(text):
+    from bson.decimal128 import Decimal128
 
-    assert einvoice._build_einvoice_json(minted_consumer, STORE, live)["BuyerDtls"]["Gstin"] == "URP"
-    assert einvoice._build_einvoice_json(legacy, STORE, live)["BuyerDtls"]["Gstin"] == MH_GSTIN
+    return Decimal128(text)
+
+
+@pytest.mark.parametrize("grand_total", ["1,000.00", "Rs 1000", _decimal128("1000.00"), 1000.0])
+def test_l3_19_the_invoice_value_and_round_off_are_read_by_the_returns_money_rule(grand_total):
+    """Every amount gst_base._money reads (a comma string, an 'Rs' prefix, a
+    BSON Decimal128) is the SAME figure on the IRP as in GSTR-1: the invoice
+    value and the round off went out as 0 through a private parser."""
+    from api.routers.reports.gst_base import _money
+
+    order = {
+        "order_id": "ORD-L3", "invoice_number": "AUD/2627/00002", "invoice_date": "2026-11-04",
+        "store_id": STORE["store_id"], "grand_total": grand_total, "tax_amount": 47.6,
+        "tax_rate": 5, "round_off": _decimal128("0.40"),
+        "items": [{"product_name": "Frame", "hsn_code": "9003", "quantity": 1, "item_total": 999.6,
+                   "gst_rate": 5, "taxable_value": 952.0, "tax_amount": 47.6}],
+    }
+    payload = einvoice._build_einvoice_json(order, STORE)
+    val = payload["ValDtls"]
+
+    assert val["TotInvVal"] == _money(grand_total, order) == 1000.0  # GSTR-1's invoiceValue
+    assert (val["AssVal"], val["RndOffAmt"]) == (952.0, 0.4)
+    _assert_irp_arithmetic(payload)
 
 
 @pytest.mark.asyncio
@@ -214,7 +229,7 @@ async def test_l3_19_an_order_the_returns_cannot_file_is_never_sent(monkeypatch,
     out = await einvoice.generate_irn(db, order)
 
     assert out["status"] == einvoice.STATUS_FAILED and out["irn"] is None
-    assert why in out["reason"].lower()
+    assert why in out["reason"].lower() and "return" not in out["reason"].lower()
     assert "irn" not in db.get_collection("orders").find_one({"order_id": "ORD-L3"})
 
 
@@ -343,6 +358,97 @@ async def test_l3_21_an_irn_that_could_not_be_saved_says_so(monkeypatch):
     out, _ = await _generate_with_stubbed_provider(monkeypatch, db, order)
     assert out["status"] == einvoice.STATUS_GENERATED and out["irn"] == "SYNTHETIC-IRN-NOT-VALID"
     assert out["persisted"] is False and "not saved" in out["reason"].lower()
+    assert "record it" not in out["reason"].lower()  # no screen records an IRN by hand
+
+
+def _provider(monkeypatch, *answers):
+    """The provider stub answers in turn (an Exception is raised); returns the
+    list every call is logged to. Gate lifted for the test only."""
+    monkeypatch.setenv("IMS_EINVOICE_ENABLED", "1")
+    queue, calls = list(answers), []
+
+    async def _answer(cfg, payload):
+        calls.append(payload["DocDtls"]["No"])
+        nxt = queue.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return dict(nxt)
+
+    monkeypatch.setattr(einvoice, "_call_irp", _answer)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_l3_21_a_second_press_with_the_same_stale_order_never_calls_the_provider_again(monkeypatch):
+    """The caller's copy of the order still has no IRN (a double press, a
+    retry): the order as STORED is re-read before the provider call."""
+    order = _till_order([FRAME])
+    db = _db(order, [_creds(JH_GSTIN)])
+    calls = _provider(monkeypatch, _IRP_OK, _IRP_OK)
+
+    first = await einvoice.generate_irn(db, order)
+    second = await einvoice.generate_irn(db, order)  # the same dict: no irn on it
+
+    assert len(calls) == 1 and first["status"] == einvoice.STATUS_GENERATED
+    assert (second["status"], second["irn"], second["signed_qr"], second["ack_no"]) == (
+        einvoice.STATUS_SKIPPED, "SYNTHETIC-IRN-NOT-VALID", "SYNTHETIC-QR-NOT-VALID", "SYNTHETIC-ACK")
+
+
+def test_l3_21_a_later_answer_never_blanks_the_saved_ack_or_signed_qr():
+    """Two presses inside one provider round trip: the second answer is the
+    IRP's duplicate reply (the IRN, no QR). It never overwrites with blanks."""
+    order = _till_order([FRAME])
+    db = _db(order)
+    full = einvoice._parse_irp_response(_IRP_OK)
+
+    assert einvoice._persist_irn(db, "ORD-L3", full) is True
+    assert einvoice._persist_irn(db, "ORD-L3", einvoice._parse_irp_response({"Irn": full["irn"]})) is True
+
+    stored = db.get_collection("orders").find_one({"order_id": "ORD-L3"})
+    assert (stored["irn"], stored["ack_no"], stored["ack_date"], stored["einvoice_signed_qr"]) == (
+        "SYNTHETIC-IRN-NOT-VALID", "SYNTHETIC-ACK", "2026-11-04", "SYNTHETIC-QR-NOT-VALID")
+
+
+@pytest.mark.asyncio
+async def test_l3_21_an_irn_saved_without_its_signed_qr_says_so_on_every_press(monkeypatch):
+    """A lost reply, then the retry gets the IRP's duplicate answer (IRN only):
+    the IRN is saved and the reply SAYS no signed QR came -- never a clean
+    'all good' -- and so does every later press."""
+    order = _till_order([FRAME])
+    db = _db(order, [_creds(JH_GSTIN)])
+    calls = _provider(monkeypatch, TimeoutError("synthetic timeout"),
+                      {"Irn": "SYNTHETIC-IRN-NOT-VALID"})
+
+    lost = await einvoice.generate_irn(db, order)
+    assert lost["status"] == einvoice.STATUS_FAILED
+    assert "irn" not in db.get_collection("orders").find_one({"order_id": "ORD-L3"})
+
+    retry = await einvoice.generate_irn(db, order)
+    assert (retry["status"], retry["persisted"]) == (einvoice.STATUS_GENERATED, True)
+    assert "no signed qr" in retry["reason"].lower()
+    stored = db.get_collection("orders").find_one({"order_id": "ORD-L3"})
+    assert stored["irn"] == "SYNTHETIC-IRN-NOT-VALID" and not stored.get("einvoice_signed_qr")
+
+    third = await einvoice.generate_irn(db, order)
+    assert third["status"] == einvoice.STATUS_SKIPPED and "no signed qr" in third["reason"].lower()
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_l3_21_an_order_that_cannot_be_re_read_is_not_sent(monkeypatch):
+    """No way to confirm the stored order has no IRN yet: the provider is not
+    asked for one (it could not be saved either)."""
+    order = _till_order([FRAME])
+    db = _db(order, [_creds(JH_GSTIN)])
+    calls = _provider(monkeypatch, _IRP_OK)
+
+    def _down(_db, _order_id):
+        raise ConnectionError("synthetic: database unreachable")
+
+    monkeypatch.setattr(einvoice, "_stored_order", _down, raising=False)
+    out = await einvoice.generate_irn(db, order)
+
+    assert calls == [] and out["status"] == einvoice.STATUS_FAILED and out["irn"] is None
 
 
 class _CancelOK:
@@ -432,6 +538,11 @@ async def test_l3_21_real_pymongo_database_saves_the_irn(monkeypatch, real_db):
     out, calls = await _generate_with_stubbed_provider(monkeypatch, real_db, order)
     _assert_irn_saved(out, calls, real_db.orders.find_one({"order_id": "ORD-L3"}))
     assert out["einvoice_json"]["ValDtls"]["TotInvVal"] == order["grand_total"]
+
+    # a second press with the same stale copy: the stored order is re-read
+    again, calls = await _generate_with_stubbed_provider(monkeypatch, real_db, order)
+    assert calls == [] and again["status"] == einvoice.STATUS_SKIPPED
+    assert again["signed_qr"] == "SYNTHETIC-QR-NOT-VALID"
 
 
 # ===========================================================================

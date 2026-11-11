@@ -126,6 +126,7 @@ class UnfileableOrder(ValueError):
 
     def __init__(self, order, problem):
         self.order_id = str((order or {}).get("order_id") or (order or {}).get("order_number") or "?")
+        self.problem = problem  # the bare fault, for a door that is not a return
         super().__init__(
             f"Order {self.order_id}: {problem}; correct the order, then download "
             "the return again."
