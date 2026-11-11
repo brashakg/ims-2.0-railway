@@ -2537,7 +2537,6 @@ def _reactivate_original_unit(
     store_id: Optional[str],
     order_id: Optional[str],
     used_ids: set,
-    exact_order_only: bool = False,
     own_stock_id: Optional[str] = None,
     named_ids: Optional[set] = None,
     set_aside: Optional[Dict[str, Any]] = None,
@@ -2547,25 +2546,18 @@ def _reactivate_original_unit(
     ``set_aside`` (F21-3, a DAMAGED return) is merged over the flip instead:
     the unit comes back QUARANTINED, off sale, never left SOLD.
 
-    Preference order (most-specific first):
-      1. a unit for (product_id, store_id) tied to THIS order_id with status
-         SOLD - i.e. the exact unit that was sold on this order;
-      2. any SOLD unit for (product_id, store_id).
-    Within a step, ``own_stock_id`` (the unit the returned order line names)
-    comes first and units ``named_ids`` holds for other lines come last
-    (_line_unit_first).
+    ONLY a unit for (product_id, store_id) tied to THIS order_id with status
+    SOLD -- the unit this bill sold. ``own_stock_id`` (the unit the returned
+    order line names) comes first and units ``named_ids`` holds for other
+    lines come last (_line_unit_first).
 
-    ``exact_order_only`` DROPS step 2. It MUST be set whenever the store was not
-    the store the sale was booked against -- i.e. the F9 online-order redirect.
-    Step 2 is only safe when the caller's store IS the store the sale happened
-    at (an ordinary counter return): there, "some SOLD unit of this product at
-    this shop" is a reasonable stand-in for a lost row. On the redirected path
-    it is not: the sale was booked against the ONLINE store, so step 1 misses
-    for every historical import, and step 2 would then grab an UNRELATED
-    walk-in customer's SOLD unit -- flipping a frame that is on somebody's face
-    to AVAILABLE, erasing that customer's sale lineage, and still leaving the
-    frame that actually came back with no stock row. The caller mints instead,
-    which is the honest record for goods whose original row is untraceable.
+    Never "some SOLD unit of this product at this shop" (decision D5,
+    2026-11-11; it was the counter's stand-in for a lost row, and already
+    barred on an online order): that unit is another customer's -- a frame on
+    somebody's face flipped to AVAILABLE, their sale lineage erased. With no
+    unit of its own the caller mints, the honest record for goods whose
+    original row is untraceable, and the return says a new label is needed
+    (_new_label_note).
 
     IMPORTANT: only status=="SOLD" units are eligible. Earlier code used
     `$ne: AVAILABLE`, which would happily resurrect DAMAGED / SCRAPPED /
@@ -2592,10 +2584,6 @@ def _reactivate_original_unit(
     if order_id:
         q = dict(base)
         q["order_id"] = order_id
-        q.update(sold_only)
-        candidates = _find_stock(stock_repo, q)
-    if not candidates and not exact_order_only:
-        q = dict(base)
         q.update(sold_only)
         candidates = _find_stock(stock_repo, q)
 
@@ -3356,6 +3344,18 @@ def _recovered_stock_note(
     return " ".join(parts)
 
 
+def _new_label_note(restocked: Any) -> str:
+    """What a return says when a piece went back under a NEW stock record
+    (minted: its own sold record was not found, decision D5): the label has
+    to be printed before the piece is on the shelf. Empty when none was."""
+    minted = sum(int(row.get("minted") or 0) for row in restocked or [] if isinstance(row, dict))
+    if not minted:
+        return ""
+    return (f"{minted} piece(s) went back into stock under a NEW barcode, because the sold record of "
+            "this bill was not found. Before it goes on the shelf, print the new label: Inventory, "
+            "open the product, Labels.")
+
+
 def _restock_good_items(
     items: List[ReturnLine],
     store_id: Optional[str],
@@ -3503,18 +3503,7 @@ def _restock_good_items(
     #     line split 1+1 across two shops sends one unit to each), and
     #   * a per-PRODUCT default for anything the breakdown does not cover.
     # The physical-store path never runs this block at all.
-    # exact_order_only must be keyed on "is the store I am searching the store
-    # the sale was booked against?", not merely on "did I redirect?". A legacy
-    # ONLINE order carrying NO store_id key at all resolves to the caller's own
-    # shop, is judged physical, and would otherwise reach the order-agnostic
-    # fallback and grab an unrelated walk-in's SOLD unit. Channel/source is the
-    # cheap, precise tell for that population.
     is_redirected = bool(routing["redirected_from"])
-    is_online_order = (
-        is_redirected
-        or str((order or {}).get("channel") or "").strip().upper() == "ONLINE"
-        or bool((order or {}).get("shopify_order_id"))
-    )
     # Multi-location PR 5: a routed online order's units are exactly the ones
     # its claim SOLD to it. A line the claim never covered (a stock miss, a
     # short or empty claim) never left any shop: nothing goes back for it,
@@ -3588,14 +3577,6 @@ def _restock_good_items(
                 unit_store,
                 order_id,
                 used_ids,
-                # MUST-FIX 1: on the redirected path the sale was booked against
-                # the ONLINE store, so the order-scoped lookup legitimately
-                # misses (every historical import). Without this flag the
-                # order-AGNOSTIC fallback would grab an unrelated walk-in
-                # customer's SOLD unit at this shop -- flipping a frame that is
-                # on somebody's face to AVAILABLE and erasing their sale. Mint
-                # instead; that is the honest record.
-                exact_order_only=is_online_order,
                 own_stock_id=line_units.get(str(u.get("order_item_id") or "")),
                 named_ids=named_ids,
             )
@@ -3627,7 +3608,8 @@ def _restock_good_items(
                 user_id=user_id,
             )
             continue
-        # Mint a fresh AVAILABLE serialized unit.
+        # This bill has no SOLD unit of its own for the piece: mint a fresh
+        # AVAILABLE serialized unit, never another bill's (decision D5).
         # P1-C: stamp returned_from_order_id (the sale this return reverses) so
         # the minted unit has a forward audit link to its origin -- without it a
         # fresh return-unit has NO connection back to the reversed sale. It
@@ -3709,7 +3691,7 @@ def _quarantine_damaged_units(
 ) -> List[Dict[str, Any]]:
     """F21-3: a returned piece marked DAMAGED comes back QUARANTINED -- off
     sale, tracked, ready to go to the supplier -- never left SOLD. Only the
-    unit THIS order sold (exact_order_only: never another customer's piece);
+    unit THIS order sold (never another customer's piece);
     a line whose sold unit cannot be found (a historical import) moves
     nothing. Fail-soft per unit. Returns the units set aside.
 
@@ -3732,7 +3714,6 @@ def _quarantine_damaged_units(
             try:
                 sid = _reactivate_original_unit(
                     stock_repo, line.product_id, None, order_id, used,
-                    exact_order_only=True,
                     own_stock_id=line_units.get(str(line.order_item_id or "")),
                     named_ids=named_ids,
                     set_aside={
@@ -5645,6 +5626,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "restocked": restocked,
         "restock_applied": restock_applied,
         "restock_stock_ids": restock_stock_ids,
+        # Said on the screen: a piece that went back under a new barcode.
+        "stock_note": _new_label_note(restocked),
         "restock_store_id": restock_store_id,
         "restock_store_ids": restock_store_ids,
         "restock_store_redirected_from": restock_result.get(
@@ -6482,8 +6465,8 @@ async def retry_restock(
             ) or {"applied": True}
         else:
             # Only the units still out: re-run, the units an earlier attempt
-            # put back went again -- a counter order's order-agnostic fallback
-            # flipped another customer's SOLD unit to AVAILABLE, or minted.
+            # put back went again -- no SOLD unit of the bill was left for
+            # them, so each was minted a second time.
             restock_result = _restock(lines, _landed_units(claim.get("restocked")))
     except Exception as exc:  # noqa: BLE001
         # Even on failure we MUST release the in-progress flag so a future
@@ -6572,6 +6555,7 @@ async def retry_restock(
             if restock_result.get("reason") == "stock_in_task_not_saved"
             else "Restock partial - retry again"
         ),
+        "stock_note": _new_label_note(restocked_rows),
     }
 
 

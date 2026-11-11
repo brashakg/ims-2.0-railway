@@ -530,10 +530,11 @@ def test_redirected_return_still_reactivates_its_OWN_order_unit(monkeypatch):
     assert by_id["STK-DECOY"]["order_id"] == "ORD-OTHER-7"
 
 
-def test_ordinary_in_store_return_keeps_its_store_wide_fallback(monkeypatch):
-    """The order-agnostic fallback stays for a PHYSICAL-store return: there the
-    store IS where the sale happened, so 'some SOLD unit of this product at this
-    shop' remains a reasonable stand-in for a lost row. Byte-unchanged."""
+def test_ordinary_in_store_return_never_takes_a_sold_unit_that_is_not_its_bills(monkeypatch):
+    """Decision D5 (2026-11-11) retired the counter's order-agnostic fallback
+    ("some SOLD unit of this product at this shop"): a SOLD row that does not
+    name THIS bill is left alone, on a physical-store return too, and the
+    returned piece gets a new record."""
     order = {
         "order_id": "ORD-1",
         "order_number": "INV-1001",
@@ -545,7 +546,7 @@ def test_ordinary_in_store_return_keeps_its_store_wide_fallback(monkeypatch):
         order=order,
         stock_units=[
             {
-                # No order_id at all -> only the store-wide fallback can find it.
+                # No order_id at all: nothing says it is this bill's unit.
                 "stock_id": "STK-LEGACY",
                 "product_id": "PRD-1",
                 "store_id": PHYSICAL_COUNTER_STORE,
@@ -560,8 +561,12 @@ def test_ordinary_in_store_return_keeps_its_store_wide_fallback(monkeypatch):
         headers={"Authorization": f"Bearer {ctx['token']}"},
     )
     assert r.status_code == 201, r.text
-    assert r.json()["restock_stock_ids"] == ["STK-LEGACY"]
-    assert ctx["stock_repo"].units[0]["status"] == "AVAILABLE"
+    units = ctx["stock_repo"].units
+    assert units[0]["stock_id"] == "STK-LEGACY" and units[0]["status"] == "SOLD"
+    assert [(u["stock_id"], u["status"], u["store_id"], u["source_type"]) for u in units[1:]] == [
+        ("NEW-1", "AVAILABLE", PHYSICAL_COUNTER_STORE, "RETURN")]
+    assert r.json()["restock_stock_ids"] == ["NEW-1"]
+    assert "print the new label" in r.json()["stock_note"]
 
 
 # ---------------------------------------------------------------------------
