@@ -252,7 +252,7 @@ def _order_taxable_and_tax(order: dict) -> tuple:
 _GST_SLABS = (0, 5, 12, 18, 28)
 
 
-def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, qtys=None):
+def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, qtys=None, sources=None):
     """THE rule for splitting one order's taxable value and tax by GST rate,
     for every GSTR-1 table: the B2B / B2CL invoice item rows (one per rate,
     GSTN `itms[]`), the B2CS buckets and the HSN summary. Returns
@@ -281,6 +281,9 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, 
     ``qtys``, when a list, is filled with each returned line's quantity (the
     item's ``quantity``, 1 when blank; 0 for the order-totals fallback line) --
     the HSN summary's UQC quantity (GSTR-1 Table 12), aligned with the lines.
+    ``sources``, when a list, is filled the same way with each returned line's
+    own item dict (None for the order-totals fallback line) -- the e-invoice
+    names each IRP item row from it.
     """
     from api.services.gst_rates import GST_CATEGORY_TABLE, _normalize_category
 
@@ -295,6 +298,7 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, 
 
     raw = []
     line_qtys: list = []
+    line_items: list = []
     for it in (items or []):
         if not isinstance(it, dict):
             continue
@@ -331,6 +335,7 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, 
             tax = gross - taxable
         raw.append((rate, hsn, taxable, tax))
         line_qtys.append(_line_qty(it.get("quantity")))
+        line_items.append(it)
 
     if not raw:
         # No usable line items -> the order totals under ONE bucket, at the
@@ -356,6 +361,8 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, 
             _flag(f"Rs {order_taxable:,.2f} at 0% (nil / exempt) belongs in GSTR-1 Table 8, not built yet (batch 7) -- filed at 0% here; the CA moves it.")
         if qtys is not None:
             qtys[:] = [0.0]
+        if sources is not None:
+            sources[:] = [None]
         return [(rate, "9004", round(order_taxable, 2), round(order_tax, 2))]
     for rate, _h, taxable, _x in raw:
         if rate == 0 and taxable > 0:
@@ -370,6 +377,8 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, 
     lines[-1][3] = round(lines[-1][3] + round(order_tax, 2) - round(sum(ln[3] for ln in lines), 2), 2)
     if qtys is not None:
         qtys[:] = line_qtys
+    if sources is not None:
+        sources[:] = line_items
     return [tuple(ln) for ln in lines]
 
 
