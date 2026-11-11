@@ -8,7 +8,11 @@ and were served byte-for-byte as a product image.
 Covers the three doors that store kind="product_image":
   * the multipart upload (declared Content-Type is the client's claim),
   * the re-host from a URL (Content-Type is the remote server's claim),
-  * the background-removal edit (bytes come back from the editor).
+  * the background-removal edit (bytes come back from the editor),
+and the three that copy a product photo into image storage:
+  * the SUPERADMIN /uploads/ re-host tool,
+  * the design-queue auto-edit,
+  * the operator script scripts/rehost_bvi_uploads.py.
 The stored and served type is what the bytes ARE, never the label.
 
 Run: JWT_SECRET_KEY=test python -m pytest \
@@ -23,12 +27,27 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ.setdefault("JWT_SECRET_KEY", "test")
 os.environ.setdefault("ENVIRONMENT", "test")
 
+sys.path.insert(
+    0,
+    os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "scripts",
+    ),
+)
+
+import asyncio  # noqa: E402
+
 import httpx  # noqa: E402
+import mongomock  # noqa: E402
 import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
 
+import api.services.image_editor as ied  # noqa: E402
+import api.services.object_storage as ost  # noqa: E402
+import rehost_bvi_uploads as rehost_script  # noqa: E402
+from api.routers import online_store_images as queue_router  # noqa: E402
 from api.routers import products as products_router  # noqa: E402
-from api.services import image_rehost  # noqa: E402
+from api.services import image_rehost, online_sync_health  # noqa: E402
 from api.services.file_store import InMemoryFileStore, set_file_store  # noqa: E402
 from api.services.image_content import image_mime_of  # noqa: E402
 
@@ -307,6 +326,154 @@ def test_edit_stores_the_type_the_editor_returned(
     r = client.post(f"/api/v1/products/image/{fid}/edit", headers=auth_headers)
     assert r.status_code == 201, r.text
     assert _stored(mem_store)[r.json()["file_id"]]["mime_type"] == "image/webp"
+
+
+# ---------------------------------------------------------------------------
+# Door 4: the SUPERADMIN /uploads/ re-host tool (rehost_uploads_images)
+# Door 5: the design-queue auto-edit (POST /online-store/images/{id}/auto-edit)
+# Door 6: the operator script scripts/rehost_bvi_uploads.py
+# Each copies fetched / returned bytes into image storage and points the image
+# row at the copy. A parked or soft-404 page (the old uploads host is retired)
+# or an editor error body must not become "the photo".
+# ---------------------------------------------------------------------------
+
+
+class _Bucket:
+    name = "s3"
+
+    def __init__(self):
+        self.puts = []
+
+    def available(self):
+        return True
+
+    def put(self, key, data, content_type="image/png"):
+        self.puts.append((key, content_type))
+        return f"https://cdn.example/{key}"
+
+
+def _uploads_row(tmp_path, monkeypatch, body):
+    """One image row on /uploads/x.jpg whose file holds `body`, read through
+    the tool's real fetch (no BVI_UPLOADS_BASE_URL: the local uploads folder)."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("IMAGE_LOCAL_DIR", raising=False)
+    monkeypatch.delenv("BVI_UPLOADS_BASE_URL", raising=False)
+    (tmp_path / "uploads").mkdir()
+    (tmp_path / "uploads" / "x.jpg").write_bytes(body)
+    db = mongomock.MongoClient()["audit_b04_rehost"]
+    db["product_images"].insert_one(
+        {"image_id": "IMG1", "sku": "SKU1", "url": "/uploads/x.jpg"}
+    )
+    bucket = _Bucket()
+    monkeypatch.setattr(ost, "get_object_storage", lambda: bucket)
+    return db, bucket
+
+
+def test_uploads_rehost_does_not_store_a_page_that_is_not_an_image(
+    tmp_path, monkeypatch
+):
+    db, bucket = _uploads_row(tmp_path, monkeypatch, _HTML)
+    out = online_sync_health.rehost_uploads_images(db, dry_run=False)
+    assert (out["rehosted"], out["failed"]) == (0, 1), out
+    assert bucket.puts == []
+    assert "not an image" in out["items"][0]["error"]
+    row = db["product_images"].find_one({"image_id": "IMG1"})
+    assert row["url"] == "/uploads/x.jpg", "the row must keep its old url"
+    assert "locally_modified" not in row
+
+
+def test_uploads_rehost_stores_the_type_the_bytes_are(tmp_path, monkeypatch):
+    """A PNG saved under a .jpg name is stored as a PNG, not as its name."""
+    db, bucket = _uploads_row(tmp_path, monkeypatch, _real("PNG"))
+    out = online_sync_health.rehost_uploads_images(db, dry_run=False)
+    assert (out["rehosted"], out["failed"]) == (1, 0), out
+    assert bucket.puts == [("bvi-rehost/SKU1/IMG1_url.png", "image/png")]
+    row = db["product_images"].find_one({"image_id": "IMG1"})
+    assert row["url"] == "https://cdn.example/bvi-rehost/SKU1/IMG1_url.png"
+
+
+class _QueueRepo:
+    def __init__(self):
+        self.img = {"image_id": "IMG1", "product_id": "P1", "status": "QUEUED", "url": "u"}
+
+    def get_by_id(self, _iid):
+        return dict(self.img)
+
+    def set_status(self, _iid, target, by=None):  # noqa: ARG002
+        self.img["status"] = target
+        return dict(self.img)
+
+    def attach_edited(self, _iid, url, by=None):  # noqa: ARG002
+        self.img.update(status="REVIEW", edited_url=url, kind="EDITED")
+        return dict(self.img)
+
+
+def _auto_edit(monkeypatch, editor_reply):
+    repo, bucket = _QueueRepo(), _Bucket()
+    editor = _Editor(editor_reply)
+    editor.name = "fake"
+
+    async def _raw(_url):
+        return _real("JPEG")
+
+    monkeypatch.setattr(queue_router, "_require_repo", lambda: repo)
+    monkeypatch.setattr(queue_router, "_fetch_image_bytes", _raw)
+    monkeypatch.setattr(ied, "get_image_editor", lambda: editor)
+    monkeypatch.setattr(ost, "get_object_storage", lambda: bucket)
+    out = asyncio.run(
+        queue_router.auto_edit_image("IMG1", current_user={"user_id": "u1"})
+    )
+    return out, repo, bucket
+
+
+def test_auto_edit_does_not_store_an_editor_reply_that_is_not_an_image(monkeypatch):
+    out, repo, bucket = _auto_edit(monkeypatch, b'{"error":"quota"}')
+    assert out["auto_edit"] == "failed", out
+    assert "valid image" in out["reason"]
+    assert bucket.puts == []
+    assert not repo.img.get("edited_url")
+    assert repo.img["status"] != "REVIEW", "nothing was sent for approval"
+
+
+def test_auto_edit_stores_the_type_the_editor_returned(monkeypatch):
+    out, repo, bucket = _auto_edit(monkeypatch, _real("WEBP"))
+    assert out["auto_edit"] == "ok", out
+    ((key, content_type),) = bucket.puts
+    assert content_type == "image/webp" and key.endswith(".webp")
+    assert repo.img["status"] == "REVIEW"
+
+
+def _script_rehost(monkeypatch, body):
+    monkeypatch.setattr(rehost_script, "_fetch_bytes", lambda url, **kw: body)
+    db = mongomock.MongoClient()["audit_b04_rehost_script"]
+    db["product_images"].insert_one(
+        {"image_id": "IMG1", "product_id": "P1", "url": "/uploads/x.jpg"}
+    )
+    bucket = _Bucket()
+    out = rehost_script.run_rehost(
+        db,
+        dry_run=False,
+        durable_hosts=["cdn.example"],
+        bvi_hosts=["uniparallel.com"],
+        bvi_public_base="https://uniparallel.com",
+        storage=bucket,
+        storage_durable=True,
+    )
+    return out, db["product_images"].find_one({"image_id": "IMG1"}), bucket
+
+
+def test_rehost_script_does_not_store_a_page_that_is_not_an_image(monkeypatch):
+    out, row, bucket = _script_rehost(monkeypatch, _HTML)
+    assert (out["rehosted"], out["failed"]) == (0, 1), out
+    assert bucket.puts == []
+    assert row["url"] == "/uploads/x.jpg"
+
+
+def test_rehost_script_stores_the_type_the_bytes_are(monkeypatch):
+    out, row, bucket = _script_rehost(monkeypatch, _real("PNG"))
+    assert out["rehosted"] == 1, out
+    assert bucket.puts == [("bvi-rehost/P1/IMG1.png", "image/png")]
+    assert row["url"] == "https://cdn.example/bvi-rehost/P1/IMG1.png"
 
 
 # ---------------------------------------------------------------------------

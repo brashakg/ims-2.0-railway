@@ -16,6 +16,7 @@ Covered:
 """
 from __future__ import annotations
 
+import base64
 import os
 import sys
 
@@ -26,6 +27,7 @@ sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
 import pytest  # noqa: E402
 
 import rehost_bvi_uploads as rh  # noqa: E402
+
 from rehost_bvi_uploads import (  # noqa: E402
     BLANK,
     DURABLE,
@@ -42,6 +44,13 @@ from rehost_bvi_uploads import (  # noqa: E402
     plan_rewrite,
     resolve_fetch_url,
     run_rehost,
+)
+
+# A real 1x1 PNG: the doors under test store bytes only when they ARE an image
+# (audit L1-F41), so a made-up byte string is refused.
+_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF90A"
+    "AAAASUVORK5CYII="
 )
 
 
@@ -325,7 +334,7 @@ def _run(coll, *, dry_run, storage=None, storage_durable=None, monkeypatch=None)
     if storage_durable is None:
         storage_durable = True
     if monkeypatch is not None:
-        monkeypatch.setattr(rh, "_fetch_bytes", lambda url, **kw: b"IMGBYTES")
+        monkeypatch.setattr(rh, "_fetch_bytes", lambda url, **kw: _PNG)
     return run_rehost(
         db,
         dry_run=dry_run,

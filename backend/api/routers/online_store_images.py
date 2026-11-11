@@ -701,10 +701,18 @@ async def auto_edit_image(
 
         raw = await _fetch_image_bytes(img.get("url"))
         edited = await editor.edit(raw, EditSpec.from_env())
+        # The editor's reply is checked like an upload (audit L1-F41): an error
+        # body must not be stored as the edited photo and sent for approval.
+        from ..services.image_content import image_mime_of
+
+        edited_mime = image_mime_of(edited) or ""
+        ext = _ALLOWED_IMAGE_TYPES.get(edited_mime)
+        if ext is None:
+            raise ValueError("The photo editor did not return a valid image")
         # A NEW file name every edit: the website matches its copy of a photo
         # by file name, so a re-edit under the old name would never reach it.
-        key = f"{img.get('product_id') or 'product'}/{image_id}-{uuid.uuid4().hex}.png"
-        edited_url = storage.put(key, edited, "image/png")
+        key = f"{img.get('product_id') or 'product'}/{image_id}-{uuid.uuid4().hex}.{ext}"
+        edited_url = storage.put(key, edited, edited_mime)
 
         updated = repo.attach_edited(image_id, edited_url, by=user_id)
         if updated is None:

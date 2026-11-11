@@ -40,6 +40,7 @@ from typing import Any, Dict, List, Optional
 # "On hand" is decided by item_events.on_hand_match (its docstring says which
 # readers share it and which do not). This service used to keep its own copy of
 # the status list, "kept in sync with inventory._on_hand_by_product" by hand.
+from .image_content import image_mime_of
 from .item_events import StockState, on_hand_match, status_match
 
 logger = logging.getLogger(__name__)
@@ -1245,27 +1246,6 @@ def _is_local_url(url: str) -> bool:
 _REHOST_FIELDS = ("url", "edited_url", "raw_url", "original_url")
 
 
-def _guess_content_type(url: str) -> str:
-    u = (url or "").lower()
-    if u.endswith(".png"):
-        return "image/png"
-    if u.endswith(".webp"):
-        return "image/webp"
-    if u.endswith(".gif"):
-        return "image/gif"
-    if u.endswith(".svg"):
-        return "image/svg+xml"
-    return "image/jpeg"
-
-
-def _ext_from_url(url: str) -> str:
-    u = (url or "").split("?", 1)[0]
-    for ext in (".png", ".webp", ".gif", ".svg", ".jpeg", ".jpg"):
-        if u.lower().endswith(ext):
-            return ext
-    return ".jpg"
-
-
 def _resolve_fetch_url(local_url: str) -> Optional[str]:
     """Turn a stored image url into something fetchable. http(s) -> as-is. A local
     /uploads/ path -> {BVI_UPLOADS_BASE_URL}/uploads/... when that env is set,
@@ -1395,10 +1375,14 @@ def rehost_uploads_images(db, dry_run: bool = True, limit: int = 500) -> Dict[st
                 continue
             try:
                 data = _fetch_bytes(fetch_url)
-                key = f"bvi-rehost/{sku or 'misc'}/{image_id}_{field}{_ext_from_url(str(old_url))}"
-                new_url = storage.put(
-                    key, data, content_type=_guess_content_type(str(old_url))
-                )
+                # The url's file name is only a label (audit L1-F41): a parked
+                # or soft-404 page answers 200 too. The BYTES must be an image,
+                # and the copy is stored as the type they are.
+                mime = image_mime_of(data)
+                if mime is None:
+                    raise ValueError("the stored url's bytes are not an image")
+                key = f"bvi-rehost/{sku or 'misc'}/{image_id}_{field}.{mime.split('/')[1]}"
+                new_url = storage.put(key, data, content_type=mime)
                 coll.update_one(
                     {"image_id": image_id},
                     {"$set": {field: new_url, "locally_modified": True}},
