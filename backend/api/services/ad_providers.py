@@ -45,7 +45,6 @@ crashes a cold start.
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -181,8 +180,7 @@ def _num(value: Any) -> float:
 # Google Ads REST version. The adapter used /v17, which stopped serving on
 # 2025-06-04 (audit L1-F33). v26 was released 2026-10-14 and is scheduled to
 # sunset in November 2027 (developers.google.com/google-ads/api/docs/sunset-dates,
-# read 2026-11-11). The integration doc's optional `api_version` (e.g. "v27")
-# overrides it, so the next sunset is a settings change, not a deploy.
+# read 2026-11-11). A code pin, like Meta's below: move it before that date.
 GOOGLE_ADS_API_VERSION = "v26"
 
 # customer.currency_code: the account's own currency - cost_micros is in it.
@@ -272,9 +270,7 @@ async def google_ads_performance(
             from_date=date_range.get("from", ""),
             to_date=date_range.get("to", ""),
         )
-        version = str(cfg.get("api_version") or "").strip().lower()
-        if not re.fullmatch(r"v\d+", version):
-            version = GOOGLE_ADS_API_VERSION
+        version = GOOGLE_ADS_API_VERSION
         url = (
             f"https://googleads.googleapis.com/{version}/customers/{customer_id}"
             "/googleAds:searchStream"

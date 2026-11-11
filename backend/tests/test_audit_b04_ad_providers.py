@@ -125,14 +125,10 @@ def test_google_report_does_not_call_the_retired_v17(stub):
     assert ad_providers.GOOGLE_ADS_API_VERSION == "v26"
 
 
-def test_api_version_can_be_moved_from_config_without_a_deploy(stub):
-    stub.cfg["api_version"] = "v27"
-    _fetch("google")
-    assert "/v27/customers/" in _report_urls(stub)[0]
-
-
-def test_a_malformed_configured_version_falls_back_to_the_pinned_one(stub):
-    stub.cfg["api_version"] = "v27/../../evil"
+def test_a_stored_api_version_does_not_move_the_pin(stub):
+    """The version is a code pin. A value on the integrations doc is not a
+    setting and must not steer the request URL."""
+    stub.cfg["api_version"] = "v17"
     _fetch("google")
     assert f"/{ad_providers.GOOGLE_ADS_API_VERSION}/customers/" in _report_urls(stub)[0]
 
