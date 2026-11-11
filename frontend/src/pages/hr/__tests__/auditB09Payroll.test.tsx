@@ -195,9 +195,9 @@ describe('L3-07 My Work: View / Download opens the payslip, not an empty tab', (
     return { open, written, popup, tab };
   }
 
-  async function clickDownload(slip = SLIP) {
+  async function clickDownload() {
     currentUser = { id: 'emp-A', name: 'Sunil Kumar', roles: ['SALES_STAFF'], activeStoreId: 'ZZ-STORE' };
-    getMyPayslip.mockResolvedValue(slip);
+    getMyPayslip.mockResolvedValue(SLIP);
     render(<EmployeeSelfService />);
     fireEvent.click(await screen.findByRole('button', { name: /View \/ Download/ }));
   }
@@ -228,19 +228,6 @@ describe('L3-07 My Work: View / Download opens the payslip, not an empty tab', (
     expect(button.textContent).toBe('Print / Save as PDF');
     button.click();
     expect(popup.print).toHaveBeenCalledTimes(1);
-  });
-
-  // A payroll row is shown to its employee from the moment it is saved as a
-  // draft; the card and the printed slip must say which it is.
-  it.each([
-    ['PAID', 'Paid'],
-    ['APPROVED', 'Approved'],
-    ['DRAFT', 'Draft - not yet approved'],
-  ])('a %s payslip says so on the card and on the printed slip', async (status, label) => {
-    const { written } = stubWindowOpen();
-    await clickDownload({ payslip: { ...SLIP.payslip, status } });
-    expect(screen.getByText(label)).toBeInTheDocument();
-    expect(written.join('')).toContain(label);
   });
 
   it('says so when the browser blocks the pop-up, instead of doing nothing', async () => {

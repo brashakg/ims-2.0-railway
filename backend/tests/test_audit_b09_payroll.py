@@ -138,12 +138,14 @@ def _pnl_payroll(db):
 
 
 # ===========================================================================
-# L3-02 -- no payroll writer can change a locked month
+# L3-02 -- a payroll run cannot change a locked month
 #
 # WHICH payroll rows are a cost in the P&L (draft / approved / paid) is an
 # accounting treatment that waits for the owner and the CA, so it is NOT
 # changed here: every stored row counts, as before. What is fixed is that a
-# locked month's rows -- and so its P&L -- can no longer be rewritten.
+# locked month's payroll rows -- and so its P&L -- can no longer be rewritten
+# by POST /payroll/run. The old writer POST /payroll/salary/calculate is not
+# touched: the P&L does not read its rows, and it belongs to L3-16.
 # ===========================================================================
 
 
@@ -167,29 +169,6 @@ def test_l3_02_draft_rerun_refused_in_a_locked_month(monkeypatch):
     assert r.status_code == 423, r.text
     assert _stored_row(db) == before  # the stored draft is byte-for-byte unchanged
     assert _pnl_payroll(db) == (cost, cost, {STORE: cost})  # the closed P&L did not move
-
-
-def test_l3_02_old_salary_writer_refused_in_a_locked_month(monkeypatch):
-    """POST /payroll/salary/calculate is the other payroll writer: its row is
-    what the salary sheet and the payslip fall back to for a month with no run."""
-    db = _db()
-    c = _client(db, monkeypatch)
-    records = db.get_collection("salary_records")
-    body = {"employee_id": EMP, "month": MONTH, "year": YEAR, "leave_without_pay_days": 3}
-    assert c.post("/api/v1/payroll/salary/calculate", json=body).status_code == 201
-    before = dict(records.find_one({"employee_id": EMP}))
-    _lock(db)
-
-    r = c.post("/api/v1/payroll/salary/calculate", json={**body, "leave_without_pay_days": 0})
-    assert r.status_code == 423, r.text
-    assert records.find_one({"employee_id": EMP}) == before
-    assert records.count_documents({}) == 1
-
-    # An open month is written exactly as before, and a year no calendar has
-    # is not turned into a server error by the new check.
-    assert c.post("/api/v1/payroll/salary/calculate", json={**body, "month": 11}).status_code == 201
-    assert c.post("/api/v1/payroll/salary/calculate", json={**body, "year": 0}).status_code == 201
-    assert records.count_documents({}) == 3
 
 
 def test_l3_02_first_run_refused_in_a_locked_month(monkeypatch):

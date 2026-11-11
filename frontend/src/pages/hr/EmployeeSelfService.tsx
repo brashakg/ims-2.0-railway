@@ -26,7 +26,6 @@ import type {
 } from '../../services/api/hr';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { PAYSLIP_STATUS_LABEL, payslipStatusBadge } from './payroll/payrollShared';
 
 // Leave types offered in the picker. The SERVER's _VALID_LEAVE_TYPES whitelist
 // (backend hr.LeaveCreate) is the authority -- it also accepts LWP/LOP, which
@@ -212,8 +211,6 @@ export function EmployeeSelfService() {
     });
   }, [attendance, month, year]);
 
-  const payslipStatus = PAYSLIP_STATUS_LABEL[payslip?.status ?? ''];
-
   const downloadPayslip = () => {
     if (!payslip) return;
     const bd = (payslip.breakdown || {}) as Record<string, any>;
@@ -244,7 +241,7 @@ export function EmployeeSelfService() {
         @media print{button{display:none;}}
       </style></head><body>
       <h1>${esc(payslip.employee_name) || 'Payslip'}</h1>
-      <div class="sub">${monthLabel}${payslip.employee_id ? ' &middot; ' + esc(payslip.employee_id) : ''}${payslipStatus ? ' &middot; ' + payslipStatus : ''}</div>
+      <div class="sub">${monthLabel}${payslip.employee_id ? ' &middot; ' + esc(payslip.employee_id) : ''}</div>
       <table>
         <tr><td>Gross Salary</td><td class="r">${rupee(bd.gross_salary)}</td></tr>
         <tr><td>Total Deductions</td><td class="r">${rupee(bd.total_deductions)}</td></tr>
@@ -352,9 +349,8 @@ export function EmployeeSelfService() {
             <CardSpinner />
           ) : payslip ? (
             <div>
-              <p className="text-xs text-gray-500 flex items-center gap-2">
+              <p className="text-xs text-gray-500">
                 {payslip.month ? `${MONTH_NAMES[(payslip.month || 1) - 1]} ${payslip.year}` : 'Most recent'}
-                {payslipStatus && <span className={payslipStatusBadge(payslip.status)}>{payslipStatus}</span>}
               </p>
               <p className="text-3xl font-bold text-green-700 mt-1">
                 {rupee(payslipBd.net_pay)}

@@ -949,13 +949,6 @@ async def calculate_salary(
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
-    # The same period gate as run / approve / lock: this row is what the salary
-    # sheet and the payslip fall back to for a month with no run, so it must
-    # not be rewritten in a closed month. Passed as text because ``year`` is
-    # unbounded here; a year no calendar has is skipped by the check, not a 500.
-    from .finance import check_period_locked
-
-    check_period_locked(db, f"{calc_request.year:04d}-{calc_request.month:02d}-01")
 
     try:
         # Get salary config
