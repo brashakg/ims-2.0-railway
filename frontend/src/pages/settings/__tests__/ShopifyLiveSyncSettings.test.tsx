@@ -119,6 +119,82 @@ describe('Settings > Shopify live sync', () => {
   });
 });
 
+// Audit L1-F01: the owner had saved schedule OFF, one time 03:17, cap 37. A
+// failed read then showed ON / 01:00 + 09:00 / 200 with Save enabled, and one
+// press wrote those defaults over the saved schedule (re-enabling it).
+describe('Settings > Shopify live sync: a failed read (L1-F01)', () => {
+  beforeEach(() => {
+    toastCalls.length = 0;
+    mockGetAll.mockReset();
+    mockSet.mockReset();
+    mockSet.mockResolvedValue({});
+  });
+  const SAVED = {
+    'shopify.live_sync.enabled': false,
+    'shopify.live_sync.slots': ['03:17'],
+    'shopify.live_sync.max_products_per_run': 37,
+  };
+
+  it('shows an error with Retry and no form, defaults or Save', async () => {
+    mockGetAll.mockRejectedValue(new Error('500'));
+    render(<ShopifyLiveSyncSection />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/could not load the saved live sync settings/i);
+    expect(screen.queryByRole('button', { name: /save live sync settings/i })).toBeNull();
+    expect(screen.queryByRole('switch')).toBeNull();
+    expect(screen.queryByLabelText('Sync time 1')).toBeNull();
+    expect(screen.queryByLabelText('Max products per run')).toBeNull();
+    expect(mockSet).not.toHaveBeenCalled();
+  });
+
+  it('Retry brings back the saved schedule, not the defaults', async () => {
+    mockGetAll.mockRejectedValueOnce(new Error('500'));
+    mockGetAll.mockResolvedValue(policies(SAVED));
+    render(<ShopifyLiveSyncSection />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByRole('switch', { name: /scheduled sync enabled/i })).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByLabelText('Sync time 1')).toHaveValue('03:17');
+    expect(screen.queryByLabelText('Sync time 2')).toBeNull();
+    expect(screen.getByLabelText('Max products per run')).toHaveValue(37);
+  });
+
+  it('keeps what was just saved when the refresh after Save fails', async () => {
+    mockGetAll.mockResolvedValueOnce(policies(SAVED));
+    mockGetAll.mockRejectedValue(new Error('500'));
+    render(<ShopifyLiveSyncSection />);
+    fireEvent.change(await screen.findByLabelText('Max products per run'), { target: { value: '41' } });
+    await userEvent.click(screen.getByRole('button', { name: /save live sync settings/i }));
+
+    await waitFor(() => expect(mockGetAll).toHaveBeenCalledTimes(2));
+    expect(mockSet).toHaveBeenCalledWith('shopify.live_sync.enabled', false, null);
+    expect(mockSet).toHaveBeenCalledWith('shopify.live_sync.slots', ['03:17'], null);
+    expect(mockSet).toHaveBeenCalledWith('shopify.live_sync.max_products_per_run', 41, null);
+    // Still the saved values: no defaults, no error screen over a known state.
+    expect(screen.getByRole('switch', { name: /scheduled sync enabled/i })).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByLabelText('Sync time 1')).toHaveValue('03:17');
+    expect(screen.getByLabelText('Max products per run')).toHaveValue(41);
+  });
+
+  it('a part-failed save names what was not saved, never says saved, and keeps the entries', async () => {
+    mockGetAll.mockResolvedValue(policies(SAVED));
+    mockSet.mockImplementation((key: string) =>
+      key === 'shopify.live_sync.max_products_per_run' ? Promise.reject(new Error('cap refused')) : Promise.resolve({}),
+    );
+    render(<ShopifyLiveSyncSection />);
+    fireEvent.change(await screen.findByLabelText('Max products per run'), { target: { value: '41' } });
+    await userEvent.click(screen.getByRole('button', { name: /save live sync settings/i }));
+
+    await waitFor(() => expect(toastCalls.some((t) => t.kind === 'error')).toBe(true));
+    const err = toastCalls.find((t) => t.kind === 'error')!.msg;
+    expect(err).toMatch(/not saved: the per-run cap/i);
+    expect(err).toMatch(/the rest was saved/i);
+    expect(toastCalls.some((t) => t.kind === 'success')).toBe(false);
+    expect(screen.getByLabelText('Max products per run')).toHaveValue(41);
+    expect(mockGetAll).toHaveBeenCalledTimes(1); // no reload over the unsaved entry
+  });
+});
+
 describe('nextRunLabel (IST)', () => {
   // 2026-09-07 03:30 UTC == 09:00 IST exactly -> strictly after now -> 13:00 today.
   const at0900 = new Date('2026-09-07T03:30:00Z');

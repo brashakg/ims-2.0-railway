@@ -15,12 +15,14 @@
 // backend agents scheduler (services/shopify_live_sync); this page only
 // changes what it reads on its next tick — no restart.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import { RefreshCw, Save, Loader2, Plus, X, Info, ExternalLink } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { policiesApi } from '../../services/api/settings';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { useLoadedSettings, settingsLoadErrorText } from '../../hooks/useLoadedSettings';
+import { SettingsLoadError } from '../../components/settings/SettingsLoadError';
 
 const K_ENABLED = 'shopify.live_sync.enabled';
 const K_SLOTS = 'shopify.live_sync.slots';
@@ -35,7 +37,15 @@ interface FormState {
   maxPerRun: number;
 }
 
+// What the scheduler runs on when a key was never saved. Only ever applied
+// per key over a SUCCESSFUL read -- never shown for a read that failed.
 const DEFAULTS: FormState = { enabled: true, slots: DEFAULT_SLOTS, maxPerRun: 200 };
+
+const KEY_LABEL: Record<string, string> = {
+  [K_ENABLED]: 'the on/off switch',
+  [K_SLOTS]: 'the sync times',
+  [K_MAX]: 'the per-run cap',
+};
 
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 
@@ -69,33 +79,35 @@ export function nextRunLabel(slots: string[], now: Date = new Date()): string | 
 
 export function ShopifyLiveSyncSection() {
   const toast = useToast();
-  const [form, setForm] = useState<FormState>(DEFAULTS);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await policiesApi.getAll('global');
-      const pol = res?.policies || {};
-      const next: FormState = { ...DEFAULTS };
-      if (typeof pol[K_ENABLED]?.value === 'boolean') next.enabled = pol[K_ENABLED].value;
-      if (Array.isArray(pol[K_SLOTS]?.value) && pol[K_SLOTS].value.length > 0) {
-        next.slots = pol[K_SLOTS].value.map(String);
-      }
-      const mx = Number(pol[K_MAX]?.value);
-      if (Number.isFinite(mx) && mx >= 1) next.maxPerRun = mx;
-      setForm(next);
-    } catch {
-      setForm(DEFAULTS); // keep code defaults on a read error (page never blanks out)
-    } finally {
-      setLoading(false);
+  // Audit L1-F01: a failed read used to show the code defaults with Save on,
+  // and one press re-enabled a schedule the owner had switched off. The form
+  // now exists only after a successful read (useLoadedSettings).
+  const { data, status, reload: load, update: setForm } = useLoadedSettings<FormState>(async () => {
+    const res = await policiesApi.getAll('global');
+    const pol = res?.policies || {};
+    const next: FormState = { ...DEFAULTS };
+    if (typeof pol[K_ENABLED]?.value === 'boolean') next.enabled = pol[K_ENABLED].value;
+    if (Array.isArray(pol[K_SLOTS]?.value) && pol[K_SLOTS].value.length > 0) {
+      next.slots = pol[K_SLOTS].value.map(String);
     }
-  }, []);
+    const mx = Number(pol[K_MAX]?.value);
+    if (Number.isFinite(mx) && mx >= 1) next.maxPerRun = mx;
+    return next;
+  });
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  if (status === 'loading') {
+    return (
+      <div className="flex items-center justify-center py-16 text-gray-500">
+        <Loader2 className="w-5 h-5 animate-spin mr-2" />
+        <span className="text-sm">Loading live sync settings…</span>
+      </div>
+    );
+  }
+  if (status === 'error' || !data) {
+    return <SettingsLoadError message={settingsLoadErrorText('live sync settings')} onRetry={() => void load()} />;
+  }
+  const form = data;
 
   const slotsValid = form.slots.length >= 1 && form.slots.length <= MAX_SLOTS && form.slots.every((s) => HHMM.test(s));
   const maxValid = Number.isInteger(form.maxPerRun) && form.maxPerRun >= 1 && form.maxPerRun <= 2000;
@@ -113,28 +125,31 @@ export function ShopifyLiveSyncSection() {
     setSaving(true);
     try {
       // GLOBAL scope (scope=null); the backend dedupes + sorts the slots.
-      await Promise.all([
-        policiesApi.set(K_ENABLED, form.enabled, null),
-        policiesApi.set(K_SLOTS, [...new Set(form.slots)].sort(), null),
-        policiesApi.set(K_MAX, form.maxPerRun, null),
-      ]);
-      toast.success('Shopify live sync settings saved. The scheduler reads them on its next tick.');
-      await load();
-    } catch (e: any) {
-      toast.error(getErrorMessage(e, 'Failed to save live sync settings'));
+      // Three separate writes: say exactly which ones did not go through
+      // (never "saved" for a part-save, never "failed" for what did save).
+      const writes: [string, unknown][] = [
+        [K_ENABLED, form.enabled],
+        [K_SLOTS, [...new Set(form.slots)].sort()],
+        [K_MAX, form.maxPerRun],
+      ];
+      const results = await Promise.allSettled(writes.map(([k, v]) => policiesApi.set(k, v, null)));
+      const failed = results.flatMap((r, i) => (r.status === 'rejected' ? [{ key: writes[i][0], reason: r.reason }] : []));
+      if (failed.length === 0) {
+        toast.success('Shopify live sync settings saved. The scheduler reads them on its next tick.');
+        await load();
+      } else {
+        const why = getErrorMessage(failed[0].reason, 'Failed to save live sync settings');
+        const which = failed.map((f) => KEY_LABEL[f.key]).join(', ');
+        toast.error(
+          failed.length === writes.length
+            ? why
+            : `Not saved: ${which} (${why}). The rest was saved. Your entries are still here - press Save again.`,
+        );
+      }
     } finally {
       setSaving(false);
     }
   };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center py-16 text-gray-500">
-        <Loader2 className="w-5 h-5 animate-spin mr-2" />
-        <span className="text-sm">Loading live sync settings…</span>
-      </div>
-    );
-  }
 
   const preview = form.enabled ? nextRunLabel(form.slots) : null;
 

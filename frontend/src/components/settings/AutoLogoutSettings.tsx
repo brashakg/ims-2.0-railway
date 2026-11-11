@@ -9,12 +9,16 @@
 // the record -- so a sibling key read at page load (web_page_types_enabled,
 // maintenance_mode ...) is never written back stale.
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { LogOut } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api/settings';
+import { useLoadedSettings, settingsLoadErrorText } from '../../hooks/useLoadedSettings';
+import { SettingsLoadError } from './SettingsLoadError';
 
+// What the server runs on when a key was never saved; only ever applied per
+// key over a SUCCESSFUL read, never shown for a read that failed.
 const DEFAULTS = { enabled: true, minutes: 15, warnSeconds: 60 };
 const MINUTE_PRESETS = [5, 10, 15, 30, 60];
 
@@ -26,31 +30,28 @@ export function AutoLogoutSettings() {
   const [enabled, setEnabled] = useState(DEFAULTS.enabled);
   const [minutes, setMinutes] = useState(DEFAULTS.minutes);
   const [warnSeconds, setWarnSeconds] = useState(DEFAULTS.warnSeconds);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // Audit L1-F15: "Custom..." is its own choice. It used to be derived from the
+  // number alone, so picking Custom while a preset (15) was saved snapped
+  // straight back to the preset and the custom box never appeared.
+  const [customMode, setCustomMode] = useState(false);
 
-  useEffect(() => {
-    let alive = true;
-    settingsApi
-      .getSystemSettings()
-      .then((data: Record<string, unknown>) => {
-        if (!alive) return;
-        if (typeof data?.auto_logout_enabled === 'boolean') setEnabled(data.auto_logout_enabled);
-        const m = Number(data?.auto_logout_minutes);
-        if (Number.isFinite(m) && m > 0) setMinutes(m);
-        const w = Number(data?.auto_logout_warn_seconds);
-        if (Number.isFinite(w) && w > 0) setWarnSeconds(w);
-      })
-      .catch(() => {
-        /* keep defaults */
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
+  // The stored policy must be read before it can be saved: a failed read used
+  // to leave the code defaults on screen with Save enabled.
+  const { status, reload } = useLoadedSettings(async () => {
+    const data: Record<string, unknown> = await settingsApi.getSystemSettings();
+    if (!data || typeof data !== 'object') throw new Error('empty settings answer');
+    if (typeof data.auto_logout_enabled === 'boolean') setEnabled(data.auto_logout_enabled);
+    const m = Number(data.auto_logout_minutes);
+    if (Number.isFinite(m) && m > 0) {
+      setMinutes(m);
+      setCustomMode(!MINUTE_PRESETS.includes(m));
+    }
+    const w = Number(data.auto_logout_warn_seconds);
+    if (Number.isFinite(w) && w > 0) setWarnSeconds(w);
+    return true;
+  });
+  const loading = status !== 'ready';
 
   const save = async () => {
     const m = Math.round(Number(minutes));
@@ -75,6 +76,7 @@ export function AutoLogoutSettings() {
         auto_logout_warn_seconds: w,
       });
       setMinutes(m);
+      setCustomMode(!MINUTE_PRESETS.includes(m));
       setWarnSeconds(w);
       toast.success('Auto-logout settings saved. Applies to each user on their next sign-in / page load.');
     } catch {
@@ -84,7 +86,7 @@ export function AutoLogoutSettings() {
     }
   };
 
-  const isPreset = MINUTE_PRESETS.includes(minutes);
+  const isPreset = !customMode && MINUTE_PRESETS.includes(minutes);
 
   return (
     <div className="card mt-6">
@@ -100,6 +102,12 @@ export function AutoLogoutSettings() {
 
       {!canEdit && (
         <p className="text-xs text-gray-400 mb-3">Superadmin can change this.</p>
+      )}
+
+      {status === 'error' && (
+        <div className="mb-3">
+          <SettingsLoadError message={settingsLoadErrorText('auto-logout settings')} onRetry={() => void reload()} />
+        </div>
       )}
 
       <div className="space-y-4">
@@ -118,14 +126,20 @@ export function AutoLogoutSettings() {
 
         <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-600 mb-1">
+            <label htmlFor="autologout-log-out-after-minutes" className="block text-sm font-medium text-gray-600 mb-1">
               Log out after (minutes)
             </label>
             <select
+              id="autologout-log-out-after-minutes"
               value={isPreset ? String(minutes) : 'custom'}
               disabled={!canEdit || loading || !enabled}
               onChange={(e) => {
-                if (e.target.value !== 'custom') setMinutes(parseInt(e.target.value, 10));
+                if (e.target.value === 'custom') {
+                  setCustomMode(true); // keeps the current number as the starting value
+                } else {
+                  setCustomMode(false);
+                  setMinutes(parseInt(e.target.value, 10));
+                }
               }}
               className="input-field"
               title="Idle minutes before auto-logout"
@@ -140,9 +154,10 @@ export function AutoLogoutSettings() {
             {!isPreset && (
               <input
                 type="number"
+                aria-label="Custom log-out time in minutes"
                 min={1}
                 max={480}
-                value={minutes}
+                value={minutes || ''}
                 disabled={!canEdit || loading || !enabled}
                 onChange={(e) => setMinutes(parseInt(e.target.value, 10) || 0)}
                 placeholder="15"
@@ -154,10 +169,11 @@ export function AutoLogoutSettings() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-600 mb-1">
+            <label htmlFor="autologout-warn-before-seconds" className="block text-sm font-medium text-gray-600 mb-1">
               Warn before (seconds)
             </label>
             <input
+              id="autologout-warn-before-seconds"
               type="number"
               min={10}
               max={600}

@@ -6,46 +6,37 @@
 // bcrypt server-side, and never returned. Self-rotation requires the current
 // PIN; an ADMIN can force-set another user's PIN from User Management.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { KeyRound, Loader2, ShieldCheck, ShieldAlert } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { approvalsApi } from '../../services/api/approvals';
 import { formatDateTimeIST } from '../../utils/datetime';
+import { useLoadedSettings } from '../../hooks/useLoadedSettings';
+import { SettingsLoadError } from './SettingsLoadError';
 
 export function ApprovalPinSection() {
   const { user } = useAuth();
   const toast = useToast();
   const userId = user?.id || '';
 
-  const [loading, setLoading] = useState(true);
-  const [hasPin, setHasPin] = useState(false);
-  const [pinSetAt, setPinSetAt] = useState<string | null>(null);
   const [currentPin, setCurrentPin] = useState('');
   const [newPin, setNewPin] = useState('');
   const [confirmPin, setConfirmPin] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const loadStatus = useCallback(async () => {
-    if (!userId) {
-      setLoading(false);
-      return;
-    }
-    setLoading(true);
-    try {
-      const res = await approvalsApi.getPinStatus(userId);
-      setHasPin(!!res.has_pin);
-      setPinSetAt(res.pin_set_at ?? null);
-    } catch {
-      // Leave defaults (treated as "no PIN") on failure.
-    } finally {
-      setLoading(false);
-    }
-  }, [userId]);
-
-  useEffect(() => {
-    loadStatus();
-  }, [loadStatus]);
+  // Audit R43: a failed status read used to be shown as "No PIN set" (and the
+  // Current PIN box vanished). Whether a PIN exists is only known from a
+  // successful answer; until then the form is not offered at all.
+  const { data: pinStatus, status, reload: loadStatus, setData: setPinStatus } = useLoadedSettings(async () => {
+    if (!userId) throw new Error('no signed-in user');
+    const res = await approvalsApi.getPinStatus(userId);
+    if (typeof res?.has_pin !== 'boolean') throw new Error('PIN status not in the answer');
+    return { hasPin: res.has_pin, pinSetAt: res.pin_set_at ?? null };
+  });
+  const loading = status === 'loading';
+  const hasPin = pinStatus?.hasPin === true;
+  const pinSetAt = pinStatus?.pinSetAt ?? null;
 
   const reset = () => {
     setCurrentPin('');
@@ -72,6 +63,8 @@ export function ApprovalPinSection() {
       await approvalsApi.setPin(userId, newPin, hasPin ? currentPin : undefined);
       toast.success(hasPin ? 'Approval PIN updated' : 'Approval PIN set');
       reset();
+      // The PIN now exists whatever the refresh below manages to read.
+      setPinStatus((p) => ({ hasPin: true, pinSetAt: p?.pinSetAt ?? null }));
       await loadStatus();
     } catch (e) {
       const msg =
@@ -108,6 +101,13 @@ export function ApprovalPinSection() {
               <Loader2 className="w-4 h-4 animate-spin" />
               Checking PIN status…
             </div>
+          ) : status === 'error' || !pinStatus ? (
+            <div className="mt-3">
+              <SettingsLoadError
+                message="Could not check whether you have an approval PIN, so it cannot be set or changed right now. Press Retry."
+                onRetry={() => void loadStatus()}
+              />
+            </div>
           ) : (
             <>
               <div className="mt-2">
@@ -133,10 +133,11 @@ export function ApprovalPinSection() {
               <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-md">
                 {hasPin && (
                   <div className="sm:col-span-2">
-                    <label className="block text-xs font-medium text-gray-700 mb-1">
+                    <label htmlFor="pin-current-pin" className="block text-xs font-medium text-gray-700 mb-1">
                       Current PIN
                     </label>
                     <input
+                      id="pin-current-pin"
                       type="password"
                       inputMode="numeric"
                       autoComplete="new-password"
@@ -150,10 +151,11 @@ export function ApprovalPinSection() {
                   </div>
                 )}
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                  <label htmlFor="pin-new-pin" className="block text-xs font-medium text-gray-700 mb-1">
                     {hasPin ? 'New PIN' : 'PIN'}
                   </label>
                   <input
+                    id="pin-new-pin"
                     type="password"
                     inputMode="numeric"
                     autoComplete="new-password"
@@ -165,10 +167,11 @@ export function ApprovalPinSection() {
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-gray-700 mb-1">
+                  <label htmlFor="pin-confirm-pin" className="block text-xs font-medium text-gray-700 mb-1">
                     Confirm PIN
                   </label>
                   <input
+                    id="pin-confirm-pin"
                     type="password"
                     inputMode="numeric"
                     autoComplete="new-password"
