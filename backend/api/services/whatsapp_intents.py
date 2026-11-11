@@ -26,6 +26,15 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..utils.ist import ist_date_str
 
+# L1-F30: this module had its own `_get_db` that did
+# `getattr(d, "db", None) or d`. PyMongo refuses bool(Database), so with the
+# real connection it always raised, was swallowed, and every intent ran as if
+# there were no database (no customer lookup, no STOP record, no human handoff,
+# no follow-up). The copy is gone: the messaging services share the one helper
+# that never truth-tests a pymongo object. Tests still patch
+# `api.services.whatsapp_intents._get_db`.
+from .message_events import _get_db
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -112,18 +121,6 @@ def detect_intent(text: str, button_payload: Optional[str] = None) -> str:
 # ============================================================================
 # DB helpers (all fail-soft)
 # ============================================================================
-
-
-def _get_db():
-    try:
-        from database.connection import get_db as _gd
-        d = _gd()
-        if d is None:
-            return None
-        return getattr(d, "db", None) or d
-    except Exception as e:
-        logger.debug("[WA_INTENTS] _get_db failed: %s", e)
-        return None
 
 
 def _lookup_customer_by_phone(phone: str) -> Optional[Dict[str, Any]]:
