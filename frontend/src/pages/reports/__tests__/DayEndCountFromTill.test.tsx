@@ -64,7 +64,7 @@ async function typeAndClose(amount: string) {
 }
 
 describe('Day-End Report - the till was already counted', () => {
-  it('shows the till count and says the typed amount was not used', async () => {
+  it('shows the till count and says that count is the one recorded', async () => {
     createDayEndClose.mockImplementation(async () => ({
       closed: true,
       close: closeRecord({
@@ -77,7 +77,7 @@ describe('Day-End Report - the till was already counted', () => {
     // The count that stands, never the 3,000 that was typed.
     expect(screen.getByText(/Counted ₹1,000/)).toBeInTheDocument();
     expect(screen.queryByText(/Counted ₹3,000/)).not.toBeInTheDocument();
-    expect(screen.getByTestId(NOTE).textContent).toMatch(/already counted at the Cash Register/i);
+    expect(screen.getByTestId(NOTE).textContent).toMatch(/already counted at the till/i);
   });
 
   it('a reload of that closed day carries the same figure and the same note', async () => {

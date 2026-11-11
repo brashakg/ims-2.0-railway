@@ -72,8 +72,9 @@ async def get_budget(
 
     if mode == "survival":
         # N8: this branch used to be DEAD -- the budgets writer never stores a
-        # `mode` field, so the lookup above always missed and mode=survival
-        # returned only the empty no_budget_set skeleton. Wire it to the REAL
+        # `mode` field, so the old {month, year, mode} lookup always missed and
+        # mode=survival returned only the empty no_budget_set skeleton. Wire it
+        # to the REAL
         # survival view (kept on the existing envelope for back-compat; the
         # dedicated GET /finance/survival-cashflow is the first-class API).
         # The survival figures are org-wide owner material (AP totals +
