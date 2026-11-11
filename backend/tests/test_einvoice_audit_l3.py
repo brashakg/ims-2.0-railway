@@ -195,10 +195,14 @@ def test_l3_19_the_buyer_gstin_is_the_one_the_invoice_was_minted_with():
 @pytest.mark.parametrize("damage, why", [
     ({"grand_total": "not money"}, "unreadable"),
     ({"grand_total": 0.0, "tax_amount": 0.0, "items": []}, "no taxable value"),
+    # Rs 90 tax on Rs 1,000 with no line and no rate: 9% is no GST slab
+    ({"grand_total": 1090.0, "tax_amount": 90.0, "tax_rate": None, "items": []}, "no gst slab"),
+    ({"items": [{"product_name": "Mystery", "item_total": 1000.0}]}, "no gst rate"),
 ])
 async def test_l3_19_an_order_the_returns_cannot_file_is_never_sent(monkeypatch, damage, why):
-    """An unreadable amount or a Rs 0 bill is refused BEFORE the provider call
-    (FAILED, a reason, nothing stored) -- never sent as zeros."""
+    """An unreadable amount, a Rs 0 bill, a tax that fits no GST slab or a
+    line with no GST rate is refused BEFORE the provider call (FAILED, a
+    reason, nothing stored) -- never sent as zeros or at a guessed rate."""
     monkeypatch.setenv("IMS_EINVOICE_ENABLED", "1")
     order = {**_till_order([FRAME]), **damage}
     db = _db(order, [_creds(JH_GSTIN)])
