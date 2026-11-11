@@ -1286,18 +1286,15 @@ def _resolve_fetch_url(local_url: str) -> Optional[str]:
 
 
 def _fetch_bytes(fetch_url: str) -> bytes:
-    """Fetch image bytes from an http(s) URL or a local filesystem path. Raises
-    on failure (the caller records it per-item)."""
-    if fetch_url.startswith("http://") or fetch_url.startswith("https://"):
-        import httpx
+    """Fetch image bytes from an http(s) URL or a local /uploads/ path. Raises
+    on failure (the caller records it per-item). The url comes from a stored
+    image row, so it is read only through the shared guard (audit L1-F32):
+    public addresses, or a file inside the uploads folder - never any other
+    path on this server."""
+    from .file_store import MAX_FILE_SIZE_BYTES
+    from .image_rehost import read_stored_image
 
-        with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-            resp = client.get(fetch_url)
-        if resp.status_code != 200:
-            raise RuntimeError(f"HTTP {resp.status_code} fetching {fetch_url}")
-        return resp.content
-    with open(fetch_url.lstrip("/"), "rb") as fh:
-        return fh.read()
+    return read_stored_image(fetch_url, max_bytes=MAX_FILE_SIZE_BYTES)
 
 
 def rehost_uploads_images(db, dry_run: bool = True, limit: int = 500) -> Dict[str, Any]:

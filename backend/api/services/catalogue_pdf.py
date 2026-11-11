@@ -51,8 +51,8 @@ MAX_PRODUCTS = 500
 # Default brand shown on the cover when the caller resolves no store/brand name.
 DEFAULT_BRAND = "Better Vision"
 
-# Per-image fetch timeout + total concurrency for the image pre-fetch.
-_IMG_TIMEOUT_S = 8.0
+# Total concurrency for the image pre-fetch (the per-image timeout is the
+# shared guarded fetch's: services/image_rehost, 10s by default).
 _IMG_CONCURRENCY = 8
 # Longest edge (px) an embedded image is downscaled to (keeps the PDF small).
 _IMG_MAX_EDGE = 420
@@ -386,7 +386,7 @@ def _fetch_local_bytes(url: str) -> Optional[bytes]:
         return None
 
 
-async def _fetch_one(client, url: str) -> Optional[bytes]:
+async def _fetch_one(url: str) -> Optional[bytes]:
     u = (url or "").strip()
     if not u:
         return None
@@ -399,13 +399,19 @@ async def _fetch_one(client, url: str) -> Optional[bytes]:
         except Exception:  # noqa: BLE001
             return None
     if u.startswith("http://") or u.startswith("https://"):
+        # A product photo url is staff-typed, so it is read only through the
+        # shared guard (audit L1-F32): public addresses only, the connection
+        # bound to the checked address, every redirect re-checked, size capped.
+        # The header is not judged - the renderer decodes the bytes.
         try:
-            resp = await client.get(u)
-            if resp.status_code == 200 and resp.content:
-                return resp.content
+            from .file_store import MAX_FILE_SIZE_BYTES
+            from .image_rehost import read_stored_image
+
+            return await asyncio.to_thread(
+                read_stored_image, u, max_bytes=MAX_FILE_SIZE_BYTES
+            )
         except Exception:  # noqa: BLE001
             return None
-        return None
     # A relative / self-hosted path -> serve from GridFS in-process.
     return _fetch_local_bytes(u)
 
@@ -418,35 +424,16 @@ async def fetch_images(rows: List[Dict]) -> Dict[int, bytes]:
     targets = [(i, r.get("image")) for i, r in enumerate(rows) if r.get("image")]
     if not targets:
         return out
-    try:
-        import httpx
-    except Exception:  # noqa: BLE001
-        httpx = None  # type: ignore
 
     sem = asyncio.Semaphore(_IMG_CONCURRENCY)
 
-    async def _run(client, idx: int, url: str) -> None:
+    async def _run(idx: int, url: str) -> None:
         async with sem:
-            data = await _fetch_one(client, url)
+            data = await _fetch_one(url)
         if data:
             out[idx] = data
 
-    if httpx is not None:
-        try:
-            async with httpx.AsyncClient(
-                timeout=_IMG_TIMEOUT_S, follow_redirects=True
-            ) as client:
-                await asyncio.gather(
-                    *[_run(client, i, u) for i, u in targets], return_exceptions=True
-                )
-        except Exception:  # noqa: BLE001
-            pass
-    else:
-        # No httpx -> only self-hosted (GridFS) images resolve.
-        for i, u in targets:
-            data = _fetch_local_bytes(u)
-            if data:
-                out[i] = data
+    await asyncio.gather(*[_run(i, u) for i, u in targets], return_exceptions=True)
     return out
 
 

@@ -25,10 +25,16 @@ adapted for open-web brand sites where a host allowlist is not viable):
     (trust_env=False): a proxy would do its own, unchecked, resolution.
   * Redirects are NOT auto-followed: each hop (max 3) is re-validated with the
     same host/IP checks, and bound the same way, before it is fetched.
-  * The response Content-Type must be on the caller's image mime allowlist.
+  * The response Content-Type must be on the caller's image mime allowlist
+    (a caller that judges the BYTES itself passes allowed_mimes=None).
   * The body is streamed with a hard byte cap - an over-size download aborts
     mid-stream (never buffers more than the cap).
   * Short timeout (AUTOPILOT_IMAGE_FETCH_TIMEOUT, default 10s).
+
+Every door that reads a STORED image url on the server (the design-queue
+auto-edit, the catalogue PDF photo pre-fetch, the /uploads/ re-host tool) goes
+through read_stored_image below: http(s) through the guarded fetch above, and
+anything else only as a file inside the server's own uploads folder.
 
 No emojis in this file (Windows cp1252). Fail behaviour: raises
 ImageFetchError with an http-ready status/detail; callers map it 1:1.
@@ -41,7 +47,8 @@ import logging
 import os
 import socket
 from contextlib import closing
-from typing import FrozenSet, List, Tuple
+from pathlib import Path
+from typing import FrozenSet, List, Optional, Tuple
 from urllib.parse import urljoin, urlparse
 
 logger = logging.getLogger(__name__)
@@ -193,10 +200,13 @@ def _open_bound(client, url: str, addrs: List[str]):
 def fetch_external_image(
     url: str,
     *,
-    allowed_mimes: FrozenSet[str],
+    allowed_mimes: Optional[FrozenSet[str]],
     max_bytes: int,
 ) -> Tuple[bytes, str, str]:
     """Fetch an external image with the full SSRF guard-rail.
+
+    allowed_mimes=None skips ONLY the Content-Type header check, for a caller
+    that decides from the bytes (the header is just the remote server's label).
 
     Returns (content, mime, final_url). Raises ImageFetchError on ANY refusal:
       400  blocked scheme/host/private-IP, non-image content-type, over-size,
@@ -243,7 +253,7 @@ def fetch_external_image(
                         .strip()
                         .lower()
                     )
-                    if mime not in allowed_mimes:
+                    if allowed_mimes is not None and mime not in allowed_mimes:
                         raise ImageFetchError(
                             400,
                             f"URL did not return an image (content-type '{mime or 'unknown'}')",
@@ -277,6 +287,43 @@ def fetch_external_image(
             raise ImageFetchError(502, "Could not fetch the image URL") from e
 
     raise ImageFetchError(400, f"Too many redirects (max {MAX_REDIRECTS})")
+
+
+def _read_local_upload(path: str, max_bytes: int) -> bytes:
+    """Read a stored LOCAL image path (what LocalDiskStorage.put returns, or a
+    legacy /uploads/ path), and nothing else on the disk: after resolving
+    `..` and links the file must sit inside the uploads folder."""
+    roots = {
+        Path("uploads").resolve(),
+        Path(os.getenv("IMAGE_LOCAL_DIR", "uploads/edited")).resolve(),
+    }
+    try:
+        real = Path(path.lstrip("/")).resolve()
+        if not any(root in real.parents for root in roots) or not real.is_file():
+            raise ImageFetchError(400, "Image path is not an uploaded file (blocked)")
+        if real.stat().st_size > max_bytes:
+            raise ImageFetchError(
+                400, f"Image exceeds the {max_bytes // (1024 * 1024)} MB cap"
+            )
+        return real.read_bytes()
+    except (OSError, ValueError) as e:
+        raise ImageFetchError(400, "Image path is not an uploaded file") from e
+
+
+def read_stored_image(url: str, *, max_bytes: int) -> bytes:
+    """THE way the server reads a stored image url that staff could have typed
+    (L1-F32, alternate routes). http(s) -> fetch_external_image (address check,
+    bound connection, re-checked redirects, size cap); anything else -> a file
+    inside the uploads folder only. Blocking: call it off the event loop.
+
+    The Content-Type header is not judged here; a caller that passes the bytes
+    on (to an editor, to storage) checks what they are."""
+    u = (url or "").strip()
+    if not u:
+        raise ImageFetchError(400, "image has no source url")
+    if u.lower().startswith(("http://", "https://")):
+        return fetch_external_image(u, allowed_mimes=None, max_bytes=max_bytes)[0]
+    return _read_local_upload(u, max_bytes)
 
 
 def filename_from_url(url: str, mime: str) -> str:

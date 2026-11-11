@@ -40,6 +40,7 @@ Everything is FAIL-SOFT: no DB -> reads return empty / writes 503; never 500.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Dict, Optional
 
@@ -617,21 +618,25 @@ async def attach_edited_image(
 
 async def _fetch_image_bytes(url: str) -> bytes:
     """Fetch the RAW image bytes from its stored url -- an http(s) URL (durable
-    storage / Shopify CDN) or a local server path. Raises on failure (the
-    auto-edit route fail-softs)."""
-    u = (url or "").strip()
-    if not u:
-        raise RuntimeError("image has no source url")
-    if u.startswith("http://") or u.startswith("https://"):
-        import httpx
+    storage / Shopify CDN) or a locally stored upload. Raises on failure (the
+    auto-edit route fail-softs).
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(u)
-        if resp.status_code != 200:
-            raise RuntimeError(f"could not fetch raw image ({resp.status_code})")
-        return resp.content
-    with open(u.lstrip("/"), "rb") as fh:  # local path, e.g. /uploads/...
-        return fh.read()
+    The url is whatever staff saved on the image row, and the bytes go on to a
+    third-party editor, so (audit L1-F32) it is read ONLY through the shared
+    guard -- public addresses, or a file inside the uploads folder -- and the
+    bytes must be an image (L1-F41), whatever the url or its header claims."""
+    from ..services.file_store import MAX_FILE_SIZE_BYTES
+    from ..services.image_content import image_mime_of
+    from ..services.image_rehost import ImageFetchError, read_stored_image
+
+    # The shared file-store cap, not the 10 MB queue-upload cap: a website
+    # original can be larger than a queue upload.
+    raw = await asyncio.to_thread(
+        read_stored_image, url, max_bytes=MAX_FILE_SIZE_BYTES
+    )
+    if image_mime_of(raw) is None:
+        raise ImageFetchError(400, "The stored image url did not return an image")
+    return raw
 
 
 @router.post("/{image_id}/auto-edit")
