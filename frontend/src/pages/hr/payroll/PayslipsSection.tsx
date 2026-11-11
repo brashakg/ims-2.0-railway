@@ -5,7 +5,7 @@
 import { useEffect } from 'react';
 import { Loader2 } from 'lucide-react';
 import { PayrollAccessNotice } from '../../../components/hr/PayrollAccessNotice';
-import { MONTHS, usePayrollContext } from './payrollShared';
+import { MONTHS, PAYSLIP_STATUS_LABEL, payslipStatusBadge, usePayrollContext } from './payrollShared';
 
 export function PayslipsSection() {
   const {
@@ -83,6 +83,11 @@ export function PayslipsSection() {
               <p className="text-gray-500 text-xs">
                 {MONTHS[payslip.month - 1]} {payslip.year}
               </p>
+              {PAYSLIP_STATUS_LABEL[payslip.status ?? ''] && (
+                <span className={`${payslipStatusBadge(payslip.status)} mt-2`}>
+                  {PAYSLIP_STATUS_LABEL[payslip.status ?? '']}
+                </span>
+              )}
             </div>
 
             <div className="grid grid-cols-2 gap-8">

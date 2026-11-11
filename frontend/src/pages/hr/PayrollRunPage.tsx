@@ -123,6 +123,10 @@ export function PayrollRunPage() {
 
   const anyLocked = rows.some((r) => r.status === 'PAID');
   const anyApproved = rows.some((r) => r.status === 'APPROVED');
+  // Tally and the PF file carry APPROVED and PAID rows only (what the P&L
+  // counts as a cost); a draft is never exported.
+  const nothingToExport = !anyApproved && !anyLocked;
+  const exportHint = nothingToExport ? 'Approve the payroll run first - a draft is not exported' : undefined;
 
   const doRun = async (dryRun: boolean) => {
     // A recovery takes money back; a negative one would RAISE net pay. The
@@ -345,8 +349,8 @@ export function PayrollRunPage() {
           </span>
           {rows.length > 0 && (
             <div className="flex flex-wrap gap-2">
-              <button className="btn-secondary" onClick={exportTally} disabled={busy}>Tally JV</button>
-              <button className="btn-secondary" onClick={exportEcr} disabled={busy}>PF ECR</button>
+              <button className="btn-secondary" onClick={exportTally} disabled={busy || nothingToExport} title={exportHint}>Tally JV</button>
+              <button className="btn-secondary" onClick={exportEcr} disabled={busy || nothingToExport} title={exportHint}>PF ECR</button>
               {canApprove && (
                 <button className="btn-secondary" onClick={doApprove} disabled={busy || !rows.some((r) => r.status === 'DRAFT')}>Approve</button>
               )}

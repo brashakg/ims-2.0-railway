@@ -211,6 +211,26 @@ describe('each payroll section renders at its own URL inside the HR module', () 
     expect(get).toHaveBeenCalledWith(expect.stringMatching(/^\/payroll\/payslip\/EMP-1\/\d+\/\d+$/));
     expectActiveSection('Payslips');
   });
+
+  // Audit L3-23 (decided 2026-11-11): the administrator preparing payroll sees
+  // a draft here, clearly labelled; an approved or paid one says so too.
+  it.each([
+    ['DRAFT', 'Draft - not yet approved'],
+    ['APPROVED', 'Approved'],
+    ['PAID', 'Paid'],
+  ])('payslips: a %s payslip is labelled "%s"', async (status, label) => {
+    get.mockImplementation(async (url: string) => {
+      if (url === '/payroll/salary-sheet') return { data: SHEET };
+      if (url.startsWith('/payroll/payslip/')) return { data: { payslip: { ...PAYSLIP.payslip, status } } };
+      throw new Error(`unexpected GET ${url}`);
+    });
+    renderRoute('/hr/payroll/payslips', ['ADMIN']);
+    const picker = await screen.findByTitle('Select employee for payslip', undefined, FIND);
+    expect(await screen.findByRole('option', { name: 'ZZ Priya Sheet' })).toBeInTheDocument();
+    fireEvent.change(picker, { target: { value: 'EMP-1' } });
+    expect(await screen.findByText('EARNINGS')).toBeInTheDocument();
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
 });
 
 // Audit L3-24: the payslip on screen must be the one for the month in the

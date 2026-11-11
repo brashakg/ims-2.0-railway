@@ -35,6 +35,7 @@ from ..services.payroll_engine import (
     pt_for,
     pt_code_for_state,
     compute_payroll,
+    POSTED_PAYROLL_STATUSES,
 )
 from ..services.payroll_exports import (
     statutory_summary,
@@ -1048,14 +1049,27 @@ def _build_payslip_from_run_row(run_row: dict, employee: dict, db: object) -> di
         "generated_at": run_row.get("updated_at")
         or run_row.get("created_at")
         or datetime.now().isoformat(),
-        # Include payroll status so FE can show DRAFT/APPROVED/PAID badge.
+        # DRAFT / APPROVED / PAID: every payslip screen and print shows it.
         "status": run_row.get("status", "DRAFT"),
     }
 
 
-def _latest_payslip(db, employee_id: str) -> Optional[dict]:
-    """An employee's most recent payslip. The ONE read behind both
-    GET /payroll/payslip/{employee_id} and the staff GET /hr/me/payslip.
+def _is_posted(run_row: dict) -> bool:
+    """True once an administrator has approved the row (APPROVED or PAID)."""
+    return run_row.get("status") in POSTED_PAYROLL_STATUSES
+
+
+def _not_ready(run_row: dict) -> dict:
+    """The payslip-door answer for a DRAFT the caller may not see yet: no
+    figures, only which month is still being prepared."""
+    return {"month": run_row.get("month"), "year": run_row.get("year")}
+
+
+def _latest_payslip(db, employee_id: str, include_draft: bool) -> dict:
+    """An employee's most recent payslip, as the door's whole answer:
+    ``{"payslip": ...}`` plus ``"not_ready": {month, year}`` when a newer DRAFT
+    was withheld. The ONE read behind GET /payroll/payslip/{employee_id} and
+    the staff GET /hr/me/payslip.
 
     The ``payroll`` run row is the payslip: it is rebuilt from that row on
     every read and nothing is stored. The old code materialised a copy in
@@ -1063,12 +1077,18 @@ def _latest_payslip(db, employee_id: str) -> Optional[dict]:
     that was rerun, approved or paid afterwards kept showing its first figures.
     A copy is served only for a month NEWER than the newest run row (a month
     the run engine never computed); for the same month the run row wins.
+
+    ``include_draft`` is True only for an administrator preparing payroll.
+    Staff see a payslip once it is APPROVED or PAID: while the newest run row
+    is a DRAFT they get their newest approved one (if any) and ``not_ready``.
+    A stored copy is never the fallback then -- it may be the draft itself, as
+    the old code materialised it.
     """
 
-    def _newest(coll_name: str) -> Optional[dict]:
+    def _newest(coll_name: str, extra: Optional[dict] = None) -> Optional[dict]:
         found = list(
             db.get_collection(coll_name)
-            .find({"employee_id": employee_id})
+            .find({"employee_id": employee_id, **(extra or {})})
             .sort([("year", -1), ("month", -1)])
             .limit(1)
         )
@@ -1077,15 +1097,21 @@ def _latest_payslip(db, employee_id: str) -> Optional[dict]:
     def _period(doc: dict) -> tuple:
         return (doc.get("year") or 0, doc.get("month") or 0)
 
+    def _built(row: Optional[dict]) -> Optional[dict]:
+        if not row:
+            return None
+        return _build_payslip_from_run_row(
+            row, _get_employee_details(db, employee_id), db
+        )
+
     run_row = _newest("payroll")
     copy = _newest("payslips")
     if copy and (not run_row or _period(copy) > _period(run_row)):
-        return _strip_id(copy)
-    if not run_row:
-        return None
-    return _build_payslip_from_run_row(
-        run_row, _get_employee_details(db, employee_id), db
-    )
+        return {"payslip": _strip_id(copy)}
+    if not run_row or include_draft or _is_posted(run_row):
+        return {"payslip": _built(run_row)}
+    posted = _newest("payroll", {"status": {"$in": list(POSTED_PAYROLL_STATUSES)}})
+    return {"payslip": _built(posted), "not_ready": _not_ready(run_row)}
 
 
 @router.get("/payslip/{employee_id}/{month}/{year}")
@@ -1101,6 +1127,10 @@ async def get_payslip(
     agrees with the payroll run, the salary sheet and the printed slip -- while
     the run is a draft, after a rerun, and once it is approved and paid.
     Nothing is stored for a run row (see _latest_payslip for why).
+
+    A DRAFT is shown only to an administrator (who is preparing it). Anyone
+    else reading their OWN payslip gets ``payslip: None`` and ``not_ready``
+    until the run is approved.
 
     A month the run engine never computed falls back to the legacy
     ``salary_records`` collection, materialised once in ``payslips`` exactly as
@@ -1125,6 +1155,8 @@ async def get_payslip(
             {"employee_id": employee_id, "month": month, "year": year}
         )
         if run_row:
+            if not (_is_posted(run_row) or _is_salary_admin(current_user)):
+                return {"payslip": None, "not_ready": _not_ready(run_row)}
             return {"payslip": _build_payslip_from_run_row(run_row, employee, db)}
 
         # No run row for this month: the legacy path, unchanged.
@@ -1183,7 +1215,9 @@ async def get_latest_payslip(
         return {"payslip": None}
 
     try:
-        return {"payslip": _latest_payslip(db, employee_id)}
+        return _latest_payslip(
+            db, employee_id, include_draft=_is_salary_admin(current_user)
+        )
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
@@ -1629,7 +1663,7 @@ async def run_payroll(
                 existing = payroll_coll.find_one(
                     {"employee_id": emp, "year": req.year, "month": req.month}
                 )
-                if existing and existing.get("status") in ("APPROVED", "PAID"):
+                if existing and existing.get("status") in POSTED_PAYROLL_STATUSES:
                     rows.append(
                         {
                             "employee_id": emp,
@@ -1817,8 +1851,15 @@ async def lock_payroll(
 # ============================================================================
 
 
-def _payroll_rows(db, month: int, year: int, store_id, entity_id) -> list:
+def _payroll_rows(
+    db, month: int, year: int, store_id, entity_id, posted_only: bool = False
+) -> list:
+    """Payroll rows for a month + scope. ``posted_only`` keeps APPROVED and
+    PAID rows only: what goes to Tally and to the PF file is what the P&L
+    counts as a cost, never a DRAFT that can still be rerun."""
     query: dict = {"month": month, "year": year}
+    if posted_only:
+        query["status"] = {"$in": list(POSTED_PAYROLL_STATUSES)}
     if store_id:
         query["store_id"] = store_id
     if entity_id:
@@ -1888,10 +1929,12 @@ async def payroll_tally_jv(
     # BUG-062 tail: scope the Tally salary-JV export to the caller's store reach.
     store_id = resolve_store_scope(store_id, current_user)
     try:
-        rows = _payroll_rows(db, month, year, store_id, entity_id)
+        rows = _payroll_rows(db, month, year, store_id, entity_id, posted_only=True)
         if not rows:
             raise HTTPException(
-                status_code=404, detail="No payroll rows for this month/scope"
+                status_code=404,
+                detail="No approved payroll for this month and scope. "
+                "Approve the payroll run first - a draft is not exported.",
             )
         entity = None
         if entity_id:
@@ -1933,7 +1976,7 @@ async def payroll_pf_ecr(
     # BUG-062 tail: scope the PF ECR export to the caller's store reach.
     store_id = resolve_store_scope(store_id, current_user)
     try:
-        rows = _payroll_rows(db, month, year, store_id, entity_id)
+        rows = _payroll_rows(db, month, year, store_id, entity_id, posted_only=True)
         emps = [r.get("employee_id") for r in rows]
         cfgs = (
             {
@@ -1986,6 +2029,14 @@ async def payslip_print(
         if not row:
             raise HTTPException(
                 status_code=404, detail="Payroll row not found for this month"
+            )
+        # Same rule as the payslip reads: a DRAFT prints only for the
+        # administrator preparing it (and the print says Draft).
+        if not (_is_posted(row) or _is_salary_admin(current_user)):
+            raise HTTPException(
+                status_code=404,
+                detail="This month's payslip is not ready yet. "
+                "It can be printed once payroll is approved.",
             )
         row = _strip_id(row)
         entity = None
