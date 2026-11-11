@@ -26,7 +26,7 @@ import os
 import sys
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict
 
 import pytest
@@ -410,23 +410,231 @@ def test_l3_25_maker_can_never_be_the_checker(db, monkeypatch):
     assert _je(db, j["je_id"])["status"] == "SUBMITTED"
 
 
-def test_l3_25_manager_inbox_click_is_never_a_journal_approval(db, monkeypatch):
-    """The journal screen lets only ADMIN / SUPERADMIN approve a journal. A
-    small journal's request is still routed to store and area managers as well
-    (unchanged -- who should see it is the owner's call); the repair must not
-    turn a manager's inbox click into a journal approval or rejection."""
+def _bells(db, request_id: str) -> set:
+    return {n["user_id"] for n in db.get_collection("notifications").find({"request_id": request_id})}
+
+
+def _inbox_row(db, monkeypatch, request_id: str, user: Dict[str, Any]):
+    """The caller's inbox row for the request (None when it is not listed)."""
+    monkeypatch.setattr(approvals_router, "_get_db", lambda: db)
+    code, body = _call(approvals_router.get_inbox(store_id=None, status=None, current_user=user))
+    assert code == 200, body
+    return next((r for r in body["requests"] if r["request_id"] == request_id), None)
+
+
+def _pin_count(db, user_id: str) -> int:
+    return db.get_collection("users").find_one({"user_id": user_id})["pin_attempts"]["count"]
+
+
+def test_l3_25_a_journal_request_goes_to_admin_and_superadmin_only(db, monkeypatch):
+    """Decision D4. Only ADMIN / SUPERADMIN may approve a journal, yet a small
+    journal's request rang store and area managers and gave them Approve /
+    Reject; their click decided the request and stranded the journal SUBMITTED
+    for good. They now get neither the bell nor the buttons, and the engine
+    refuses them. Every other kind of request reaches managers as before."""
+    store_mgr = _user(db, "store-mgr", ["STORE_MANAGER"])
+    area_mgr = _user(db, "area-mgr", ["AREA_MANAGER"])
+    admin = _user(db, "admin", ["ADMIN"])
+    boss = _user(db, "boss", ["SUPERADMIN"])
+    j = _submitted_journal(db, "maker", amount=100.0)  # the manager amount tier
+    rid = j["request_id"]
+
+    assert set(_request(db, rid)["required_roles"]) == {"ADMIN", "SUPERADMIN"}
+    assert _bells(db, rid) == {"admin", "boss"}          # was all four
+
+    for manager in (store_mgr, area_mgr):
+        row = _inbox_row(db, monkeypatch, rid, manager)
+        assert row is None or row["can_approve"] is False    # no buttons
+        code, body = _inbox_approve(db, monkeypatch, rid, manager)
+        assert (code, body["error"]) == (403, "insufficient_tier")   # was 200
+        code, body = _inbox_reject(db, monkeypatch, rid, manager, "Not a valid entry")
+        assert (code, body["error"]) == (403, "insufficient_tier")   # was 200
+        assert _pin_count(db, manager["user_id"]) == 0
+    assert _request(db, rid)["status"] == "REQUESTED"
+    assert (_je(db, j["je_id"])["status"], _je(db, j["je_id"])["checker_id"]) == ("SUBMITTED", None)
+
+    # The checker roles keep the buttons, and their decision is the journal's.
+    assert _inbox_row(db, monkeypatch, rid, boss)["can_approve"] is True
+    assert _inbox_row(db, monkeypatch, rid, admin)["can_approve"] is True
+    assert _inbox_approve(db, monkeypatch, rid, admin)[0] == 200
+    assert (_je(db, j["je_id"])["status"], _je(db, j["je_id"])["checker_id"]) == ("APPROVED", "admin")
+
+    # Not widened: a journal above the Admin amount tier is still the
+    # Superadmin's alone.
+    big = _submitted_journal(db, "maker", amount=500000.0)
+    assert _request(db, big["request_id"])["required_roles"] == ["SUPERADMIN"]
+    code, body = _inbox_approve(db, monkeypatch, big["request_id"], admin)
+    assert (code, body["error"]) == (403, "insufficient_tier")
+
+    # Any other request still reaches the managers of its shop.
+    other = _engine(db).request(action_type="petty_cash", requested_by="u1",
+                                store_id="S1", amount=300)["request_id"]
+    assert {"STORE_MANAGER", "AREA_MANAGER"} <= set(_request(db, other)["required_roles"])
+    assert {"store-mgr", "area-mgr"} <= _bells(db, other)
+    assert _inbox_row(db, monkeypatch, other, store_mgr)["can_approve"] is True
+    assert _inbox_approve(db, monkeypatch, other, store_mgr)[0] == 200
+
+
+_ALL_FOUR = ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"]
+
+
+def test_l3_25_a_request_raised_before_the_change_is_held_to_the_checkers_too(db, monkeypatch):
+    """A journal request still waiting when the change lands is stored with
+    the managers among its roles. The rule reads what the request is for, not
+    those stored roles, so the manager has no buttons on it either -- and the
+    row itself is left as it was stored."""
     manager = _user(db, "manager", ["STORE_MANAGER"])
-    for decide, word in ((_inbox_approve, "APPROVED"), (_inbox_reject, "REJECTED")):
-        j = _submitted_journal(db, "maker", amount=100.0)  # the manager amount tier
-        assert "STORE_MANAGER" in _request(db, j["request_id"])["required_roles"]
-        args = (db, monkeypatch, j["request_id"], manager)
-        code, body = decide(*args) if decide is _inbox_approve else decide(*args, "Not a valid entry")
-        assert code == 200, body
-        assert _request(db, j["request_id"])["status"] == word
-        je = _je(db, j["je_id"])
-        assert (je["status"], je["checker_id"]) == ("SUBMITTED", None)
-        assert _post(db, j["je_id"])["error"] == "not_approved"
-        assert _je(db, j["je_id"])["status"] == "SUBMITTED"
+    admin = _user(db, "admin", ["ADMIN"])
+    j = _submitted_journal(db, "maker", amount=100.0)
+    rid = j["request_id"]
+    db.get_collection("approval_requests").update_one(
+        {"request_id": rid}, {"$set": {"required_roles": _ALL_FOUR}})
+
+    row = _inbox_row(db, monkeypatch, rid, manager)
+    assert row is None or row["can_approve"] is False
+    code, body = _inbox_approve(db, monkeypatch, rid, manager)
+    assert (code, body["error"]) == (403, "insufficient_tier")
+    code, body = _inbox_reject(db, monkeypatch, rid, manager, "Not a valid entry")
+    assert (code, body["error"]) == (403, "insufficient_tier")
+    assert _request(db, rid)["status"] == "REQUESTED"
+    assert _request(db, rid)["required_roles"] == _ALL_FOUR   # stored history untouched
+
+    # The Admin's own approval settles both the request and the journal.
+    assert _inbox_approve(db, monkeypatch, rid, admin)[0] == 200
+    assert _request(db, rid)["status"] == "APPROVED"
+    assert (_je(db, j["je_id"])["status"], _je(db, j["je_id"])["checker_id"]) == ("APPROVED", "admin")
+    assert _post(db, j["je_id"], "admin").get("ok") is True
+
+
+def _strand(db, how: str) -> Dict[str, Any]:
+    """A request / journal pair as the old inbox left it: the request decided,
+    the journal still SUBMITTED. Rows as main stored them (the managers among
+    the roles, no reviewed_by_roles). Returns the pair's ids plus the request
+    row as stored."""
+    j = _submitted_journal(db, "maker", amount=100.0)
+    decided = {
+        "manager approved": {"status": "APPROVED", "reviewed_by": "manager",
+                             "approval_token": f"APT-{uuid.uuid4().hex}"},
+        "manager rejected": {"status": "REJECTED", "reviewed_by": "manager", "reject_reason": ""},
+        "admin approved": {"status": "APPROVED", "reviewed_by": "old-admin",
+                           "approval_token": f"APT-{uuid.uuid4().hex}"},
+        "admin rejected, no note": {"status": "REJECTED", "reviewed_by": "old-admin",
+                                    "reject_reason": ""},
+    }[how]
+    db.get_collection("approval_requests").update_one(
+        {"request_id": j["request_id"]},
+        {"$set": {"required_roles": _ALL_FOUR, "reviewed_at": appr._now(), **decided}})
+    return {**j, "stored": _request(db, j["request_id"])}
+
+
+_STRANDED = ["manager approved", "manager rejected", "admin approved", "admin rejected, no note"]
+
+
+@pytest.mark.parametrize("how", _STRANDED)
+def test_l3_25_admin_approval_settles_a_pair_stranded_before_the_change(db, how):
+    """The pair is stuck: Post refuses not_approved and the journal's own
+    Approve refused already_reviewed for good. The Admin's own approval on the
+    journal screen now raises the journal's request again and decides THAT one
+    with their PIN: request and journal settle together, the journal posts
+    once, and the old request row is left exactly as it was stored."""
+    _user(db, "checker", ["ADMIN"])
+    s = _strand(db, how)
+    assert _post(db, s["je_id"])["error"] == "not_approved"
+    assert _je(db, s["je_id"])["status"] == "SUBMITTED"     # the earlier decision is never taken
+
+    res = _journal_approve(db, s["je_id"])
+    assert res.get("ok") is True, res                        # was 409 already_reviewed
+    je = _je(db, s["je_id"])
+    assert (je["status"], je["checker_id"]) == ("APPROVED", "checker")
+    new_id = je["approval_request_id"]
+    assert new_id != s["request_id"]
+    new = _request(db, new_id)
+    assert (new["status"], new["reviewed_by"], new["requested_by"]) == ("APPROVED", "checker", "maker")
+    assert (new["amount"], new["context"]["je_id"]) == (100.0, s["je_id"])
+    assert set(new["required_roles"]) == {"ADMIN", "SUPERADMIN"}
+    assert _request(db, s["request_id"]) == s["stored"]      # history not rewritten
+    raised = [r for r in db.get_collection("audit_logs").find({"action": "je_request_raised_again"})
+              if r.get("entity_id") == s["je_id"]]
+    assert len(raised) == 1 and raised[0]["user_id"] == "checker"
+    assert s["request_id"] in raised[0]["reason"]
+
+    assert _post(db, s["je_id"]).get("ok") is True
+    assert _je(db, s["je_id"])["status"] == "POSTED"
+    assert _request(db, new_id)["status"] == "CONSUMED"
+    assert _post(db, s["je_id"])["error"] == "already_posted"
+    assert _request(db, s["request_id"]) == s["stored"]
+
+
+@pytest.mark.parametrize("how", _STRANDED)
+def test_l3_25_admin_rejection_settles_a_pair_stranded_before_the_change(db, how):
+    _user(db, "checker", ["ADMIN"])
+    s = _strand(db, how)
+
+    res = je_service.reject_je(db, je_id=s["je_id"], approver_id="checker",
+                               approver_roles=["ADMIN"], pin=PIN, note="Wrong account head")
+    assert res.get("ok") is True, res                        # was 409 already_reviewed
+    je = _je(db, s["je_id"])
+    assert (je["status"], je["checker_id"], je["checker_note"]) == (
+        "REJECTED", "checker", "Wrong account head")
+    new = _request(db, je["approval_request_id"])
+    assert je["approval_request_id"] != s["request_id"]
+    assert (new["status"], new["reviewed_by"], new["reject_reason"]) == (
+        "REJECTED", "checker", "Wrong account head")
+    assert _request(db, s["request_id"]) == s["stored"]      # history not rewritten
+    assert _post(db, s["je_id"])["error"] == "not_approved"
+
+
+def test_l3_25_settling_a_stranded_pair_keeps_every_journal_gate(db, monkeypatch):
+    """The way forward is the Admin's own decision and nothing less: not the
+    maker's, not a manager's, not without the PIN; and a failed try leaves one
+    open request behind, not a pile."""
+    _user(db, "maker", ["ADMIN"])
+    _user(db, "manager", ["STORE_MANAGER"])
+    admin = _user(db, "checker", ["ADMIN"])
+    s = _strand(db, "manager approved")
+    requests = db.get_collection("approval_requests")
+
+    res = _journal_approve(db, s["je_id"], "maker")
+    assert (res["http"], res["error"]) == (403, "cannot_approve_own")
+    res = _journal_approve(db, s["je_id"], "manager", ("STORE_MANAGER",))
+    assert res.get("ok") is not True
+    assert requests.count_documents({}) == 1                 # neither raised anything
+    assert _je(db, s["je_id"])["approval_request_id"] == s["request_id"]
+
+    res = je_service.approve_je(db, je_id=s["je_id"], approver_id="checker",
+                                approver_roles=["ADMIN"], pin="0000")
+    assert (res["http"], res["error"]) == (403, "wrong_pin")
+    assert _je(db, s["je_id"])["status"] == "SUBMITTED"
+    res = je_service.approve_je(db, je_id=s["je_id"], approver_id="checker",
+                                approver_roles=["ADMIN"], pin="0000")
+    assert (res["http"], res["error"]) == (403, "wrong_pin")
+    assert requests.count_documents({}) == 2                 # the old one + one raised again
+    new_id = _je(db, s["je_id"])["approval_request_id"]
+    assert _request(db, new_id)["status"] == "REQUESTED"
+
+    # The request raised again is an ordinary journal request: the Admin can
+    # just as well decide it in the inbox, and the journal follows.
+    assert _inbox_row(db, monkeypatch, new_id, admin)["can_approve"] is True
+    assert _inbox_approve(db, monkeypatch, new_id, admin)[0] == 200
+    assert (_je(db, s["je_id"])["status"], _je(db, s["je_id"])["checker_id"]) == ("APPROVED", "checker")
+    assert _request(db, s["request_id"]) == s["stored"]
+
+
+def test_l3_25_a_request_that_lapsed_undecided_is_not_raised_again(db):
+    """Only a request that was DECIDED without the journal is raised again. One
+    that lapsed with nobody deciding it is refused as it always was (the
+    engine's validity window is not reopened by this change)."""
+    _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    requests = db.get_collection("approval_requests")
+    requests.update_one({"request_id": j["request_id"]},
+                        {"$set": {"expires_at": appr._now() - timedelta(minutes=5)}})
+
+    res = _journal_approve(db, j["je_id"])
+    assert (res["http"], res["error"]) == (410, "expired")
+    je = _je(db, j["je_id"])
+    assert (je["status"], je["approval_request_id"]) == ("SUBMITTED", j["request_id"])
+    assert requests.count_documents({}) == 1
 
 
 def test_l3_25_decision_with_no_recorded_checker_role_is_not_taken(db):

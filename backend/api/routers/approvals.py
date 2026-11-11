@@ -29,6 +29,13 @@ other action type refuses them (insufficient_tier), as before. Whoever raised
 an 'rtv' cannot approve it ('rtv' is maker-checker): a second accounts person
 does.
 
+A journal's request ('journal_entry') is routed to ADMIN / SUPERADMIN only,
+the roles the journal screen lets decide a journal (decision D4, 2026-11-11;
+services/approvals.approver_roles_for). A store or area manager gets no bell
+for one, sees no Approve / Reject on its inbox row (can_approve false) and is
+refused 403 insufficient_tier by id. An Admin's decision here is the
+journal's decision (je_service.sync_with_request).
+
 Approving, rejecting and spending by id (/approve, /reject, /consume) follow
 the rule GET applies (_request_in_reach): its maker or consumer, else a caller
 whose shops it is in. Anyone else gets exactly what a missing id gets (404),

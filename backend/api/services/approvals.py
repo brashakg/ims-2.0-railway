@@ -151,12 +151,30 @@ def _is_supplier_money(doc: Optional[Dict[str, Any]]) -> bool:
     return (doc or {}).get("action_type") in SUPPLIER_MONEY_ACTIONS
 
 
+# Journal approvals (decision D4, 2026-11-11; audit L3-25). Only ADMIN /
+# SUPERADMIN may approve or reject a journal -- the journal screen's rule
+# (je_service reads this same set). A small journal's request was routed by
+# its amount tier to store and area managers as well: they got the bell and
+# the Approve / Reject buttons, and their click decided the request while the
+# journal stayed SUBMITTED for good. A 'journal_entry' request is therefore
+# routed to the checker roles AMONG its tier's roles -- narrowed, never
+# widened (a journal in the Superadmin tier stays the Superadmin's). Like the
+# supplier-money rule above, the check reads the action type, so a request
+# stored with the manager roles before the decision is held to it too, and no
+# stored row is rewritten.
+JOURNAL_CHECKER_ROLES: frozenset = frozenset({"ADMIN", "SUPERADMIN"})
+
+
 def approver_roles_for(doc: Optional[Dict[str, Any]]) -> List[str]:
     """The roles a request is routed to: the accounts roles for a supplier-money
-    request, else the roles its amount tier resolved to."""
+    request, else the roles its amount tier resolved to -- for a journal, the
+    journal checker roles among them."""
     if _is_supplier_money(doc):
         return ["SUPERADMIN", *AP_ROLES]
-    return list((doc or {}).get("required_roles") or [])
+    roles = list((doc or {}).get("required_roles") or [])
+    if (doc or {}).get("action_type") == "journal_entry":
+        roles = [r for r in roles if r in JOURNAL_CHECKER_ROLES]
+    return roles
 
 
 def _may_approve_supplier_money(roles) -> bool:
@@ -166,12 +184,12 @@ def _may_approve_supplier_money(roles) -> bool:
 def may_approve(doc: Optional[Dict[str, Any]], roles) -> bool:
     """True when a caller holding ``roles`` may approve / reject ``doc`` by role
     (store scope and maker-checker are separate checks). A supplier-money
-    request asks the payables rule; any other asks its tier's roles, and
-    SUPERADMIN passes everything."""
+    request asks the payables rule; any other asks the roles it is routed to
+    (approver_roles_for), and SUPERADMIN passes everything."""
     if _is_supplier_money(doc):
         return _may_approve_supplier_money(roles)
     have = {r for r in (roles or []) if r}
-    return "SUPERADMIN" in have or bool(have & set((doc or {}).get("required_roles") or []))
+    return "SUPERADMIN" in have or bool(have & set(approver_roles_for(doc)))
 
 
 def _hidden_from(doc: Optional[Dict[str, Any]], roles) -> bool:
