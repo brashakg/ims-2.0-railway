@@ -28,6 +28,7 @@ from ..services.file_store import (
 # Imported at module level so the edit endpoint below (and its test) resolve the
 # editor through THIS module -- tests monkeypatch `get_image_editor` here.
 from ..services.image_editor import get_image_editor, EditSpec
+from ..services.image_content import image_mime_of
 from ..services import catalog_list as _catalog_list
 from ..services.catalog_flags import FLAG_TYPES as _FLAG_TYPES
 
@@ -3230,6 +3231,20 @@ async def qc_sample_verdict(
 _IMAGE_MIME_TYPES = frozenset(m for m in ALLOWED_MIME_TYPES if m.startswith("image/"))
 
 
+def _product_image_mime(content: bytes, *, status: int, refusal: str) -> str:
+    """The ONE content gate for every door that stores kind="product_image"
+    (audit L1-F41). A Content-Type is only a label - the browser's on an
+    upload, the remote server's on a re-host - so the BYTES decide: they must
+    be a complete image of an accepted type (services/image_content). Returns
+    the mime the bytes ARE; the caller stores and serves that, never the
+    label. Anything else is refused with `status` / `refusal` and nothing is
+    stored."""
+    mime = image_mime_of(content)
+    if mime is None or mime not in _IMAGE_MIME_TYPES:
+        raise HTTPException(status_code=status, detail=refusal)
+    return mime
+
+
 @router.post("/image", status_code=201)
 async def upload_product_image(
     file: UploadFile = File(...),
@@ -3259,6 +3274,15 @@ async def upload_product_image(
             status_code=400,
             detail=f"File type '{mime}' not allowed. Accepted image types: {sorted(_IMAGE_MIME_TYPES)}",
         )
+    mime = _product_image_mime(
+        content,
+        status=400,
+        refusal=(
+            "This file is not a valid image (it may be damaged, cut short, or "
+            "not a photo at all). Please upload a JPEG, PNG, WebP, GIF, HEIC "
+            "or AVIF image."
+        ),
+    )
 
     store = get_file_store()
     if store is None:
@@ -3332,6 +3356,11 @@ def rehost_product_image_from_url(
         )
     except ImageFetchError as e:
         raise HTTPException(status_code=e.status, detail=e.detail) from e
+    mime = _product_image_mime(
+        content,
+        status=400,
+        refusal="The URL did not return a valid image (not a valid image file).",
+    )
 
     filename = filename_from_url(final_url, mime)
     file_id = store.put(
@@ -3408,10 +3437,15 @@ async def edit_product_image(
             status_code=502, detail=f"Background removal failed. {err}"
         ) from e
 
+    edited_mime = _product_image_mime(
+        edited,
+        status=502,
+        refusal="Background removal failed. The editor did not return a valid image.",
+    )
     new_id = store.put(
         content=edited,
         filename=f"bg-{file_id}.png",
-        mime_type="image/png",
+        mime_type=edited_mime,
         metadata={
             "kind": "product_image",
             "edited_from": file_id,
