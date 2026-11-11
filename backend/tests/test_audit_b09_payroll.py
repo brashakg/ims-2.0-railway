@@ -10,7 +10,9 @@ L3-02  an unapproved payroll DRAFT was a cost in the P&L, and it could be
        month's P&L. Decided 2026-11-11: a month's salary is a cost once the
        run is APPROVED (APPROVED and PAID count, a DRAFT never does); the
        Tally salary voucher and the PF file export the same rows; a month
-       cannot be locked while its payroll is still a draft.
+       cannot be locked while its payroll is still a draft, and a month whose
+       payroll has not been run for someone with an active salary setup locks
+       only when the admin says "lock anyway".
 L3-05  the advance-history read answered 500 after the first advance existed
        (raw Mongo ``_id`` in the reply).
 L3-06  a NEGATIVE advance recovery was accepted and raised net pay.
@@ -172,13 +174,13 @@ def _pay(c):
     assert r.status_code == 200, r.text
 
 
-def _lock_month_through_the_route(db, monkeypatch, month=MONTH, year=YEAR):
+def _lock_month_through_the_route(db, monkeypatch, month=MONTH, year=YEAR, **said):
     """POST /finance/period-lock, as the Finance screen calls it. Returns
-    (status, detail)."""
+    (status, detail). ``without_payroll=True`` is the admin's "lock anyway"."""
     monkeypatch.setattr(period_lock, "_get_db", lambda: db)
     monkeypatch.setattr("api.utils.ist.now_ist_naive", lambda: datetime(2026, 11, 12, 12))
     try:
-        asyncio.run(period_lock.lock_period(month, year, ADMIN))
+        asyncio.run(period_lock.lock_period(month, year, ADMIN, **said))
         return 200, ""
     except HTTPException as exc:
         return exc.status_code, str(exc.detail)
@@ -259,9 +261,6 @@ def test_l3_02_a_month_cannot_be_locked_while_its_payroll_is_a_draft(monkeypatch
     assert "draft" in detail and "Approve" in detail and STORE in detail
     assert db.get_collection("period_locks").count_documents({}) == 0
 
-    # Another month, with no payroll at all, locks as before.
-    assert _lock_month_through_the_route(db, monkeypatch, month=9)[0] == 200
-
     _approve(c)
     assert _lock_month_through_the_route(db, monkeypatch) == (200, "")
     assert db.get_collection("period_locks").count_documents(
@@ -269,6 +268,74 @@ def test_l3_02_a_month_cannot_be_locked_while_its_payroll_is_a_draft(monkeypatch
     ) == 1
     cost = _stored_row(db)["breakdown"]["ctc_cost"]
     assert _pnl_payroll(db) == (cost, cost, {STORE: cost})  # the closed month has its wages
+
+
+def test_l3_02_a_month_whose_payroll_was_not_run_is_not_locked_silently(monkeypatch):
+    """The likelier order of events: the books are closed in the first days of
+    the next month and payroll is run a few days later. A saving run answers
+    423 in a locked month, so the lock would leave October with no wage cost
+    for good. It is refused until the admin runs payroll or says "lock anyway"."""
+    db = _db()
+    c = _client(db, monkeypatch)
+
+    status, detail = _lock_month_through_the_route(db, monkeypatch)
+    assert status == 409, detail
+    assert "PAYROLL_NOT_RUN" in detail and "1 employee" in detail and STORE in detail
+    assert db.get_collection("period_locks").count_documents({}) == 0
+
+    # The month is still open: payroll is run and approved, then it locks
+    # with no question asked and the closed month carries its wages.
+    assert _run(c).status_code == 200
+    _approve(c)
+    assert _lock_month_through_the_route(db, monkeypatch) == (200, "")
+    cost = _stored_row(db)["breakdown"]["ctc_cost"]
+    assert _pnl_payroll(db) == (cost, cost, {STORE: cost})
+    assert "without_payroll_for" not in db.get_collection("period_locks").find_one({})
+
+
+def test_l3_02_one_shop_not_run_stops_the_lock_until_the_admin_says_so(monkeypatch):
+    """Shop A is run and approved, shop B was never run: the lock is
+    chain-wide, so shop B's wages would be the ones lost."""
+    db = _db()
+    db.get_collection("salary_config").insert_one(
+        {"employee_id": "EMP-B", "entity_id": "ENT-B", "store_id": "ST-B",
+         "basic": 12000, "is_active": True}
+    )
+    c = _client(db, monkeypatch)
+    assert _run(c).status_code == 200  # ENTITY only
+    _approve(c)
+
+    status, detail = _lock_month_through_the_route(db, monkeypatch)
+    assert status == 409, detail
+    assert "PAYROLL_NOT_RUN" in detail and "1 employee" in detail
+    assert "ST-B" in detail and STORE not in detail
+    assert db.get_collection("period_locks").count_documents({}) == 0
+
+    # "Lock anyway": the admin was told, and the lock row keeps the count.
+    assert _lock_month_through_the_route(db, monkeypatch, without_payroll=True) == (200, "")
+    assert db.get_collection("period_locks").find_one({})["without_payroll_for"] == 1
+    r = c.post("/api/v1/payroll/run", json={"month": MONTH, "year": YEAR, "entity_id": "ENT-B"})
+    assert r.status_code == 423  # what the admin was warned about
+
+
+def test_l3_02_lock_anyway_never_overrides_a_draft(monkeypatch):
+    db = _db()
+    c = _client(db, monkeypatch)
+    assert _run(c).status_code == 200
+
+    status, detail = _lock_month_through_the_route(db, monkeypatch, without_payroll=True)
+    assert status == 409 and "draft" in detail
+    assert db.get_collection("period_locks").count_documents({}) == 0
+
+
+def test_l3_02_a_month_with_nobody_on_payroll_locks_as_before(monkeypatch):
+    """No active salary setup: nothing to run, so nothing to ask."""
+    db = _db()
+    db.get_collection("salary_config").update_one(
+        {"employee_id": EMP}, {"$set": {"is_active": False}}
+    )
+    assert _lock_month_through_the_route(db, monkeypatch, month=9) == (200, "")
+    assert "without_payroll_for" not in db.get_collection("period_locks").find_one({})
 
 
 def test_l3_02_draft_rerun_refused_in_a_locked_month(monkeypatch):
