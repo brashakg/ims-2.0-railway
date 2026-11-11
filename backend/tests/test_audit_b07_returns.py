@@ -5,7 +5,9 @@ L2-RETURN-F01  the Returns screen sends a line with no product; the GOOD piece
                was credited and left SOLD, and the return said "stock applied".
 RUN-03         the quote priced a quantity the create then refused.
 L2-RETURN-F03  Needs completing told staff to put pieces back by hand even
-               when the kept record says they are already back.
+               when the kept record says they are already back. A piece still
+               out is never added by hand (the restock retry then adds it a
+               second time): the panel's Retry stock step puts it back once.
 (L2-STOCK-F03, the barcode trace, is tested beside the till's own trace tests
 in test_till_records_scanned_unit.py.)
 
@@ -322,10 +324,28 @@ def _row_of(product="P1", reactivated=0, minted=0, **more):
             "reactivated": reactivated, "minted": minted, "applied": True, **more}
 
 
-def _msg(rid):
-    msg = _complete(rid, cash_leg_paid=True)["message"]
-    assert OLD_BLANKET not in msg
+BY_HAND = "Put these back in stock by hand"
+NEVER_BY_HAND = "Do not add these by hand - IMS would count them twice."
+RETRY = "Press Retry stock step on this return (Returns > Needs completing): IMS puts each piece back once."
+
+
+def _msg(rid, stock_step_open=False):
+    out = _complete(rid, cash_leg_paid=True)
+    msg = out["message"]
+    assert OLD_BLANKET not in msg and BY_HAND not in msg
+    # The button is offered exactly when the message sends staff to it.
+    assert out["stock_step_open"] is stock_step_open and (RETRY in msg) is stock_step_open, msg
     return msg
+
+
+def _open_rows(role="ACCOUNTANT"):
+    """The panel's "Stock still to put back" list (GET /returns/needs-completing)."""
+    import asyncio
+
+    from api.routers import returns as returns_router
+    from tests.test_pos_money_doors import _user
+
+    return asyncio.run(returns_router.needs_completing(_user(role)))["stock_open"]
 
 
 def test_a_fully_restored_return_never_asks_for_a_second_stock_entry(till, tasks):  # noqa: F811
@@ -336,6 +356,7 @@ def test_a_fully_restored_return_never_asks_for_a_second_stock_entry(till, tasks
     assert OLD_BLANKET not in msg
     assert "Already dealt with: 2 piece(s) back in stock." in msg and "Nothing to add by hand." in msg
     assert "by hand" not in msg.replace("Nothing to add by hand.", "")
+    assert out["stock_step_open"] is False and _open_rows() == []
     # The recovered record keeps the press's own stock answer and its money.
     saved = till["db"].get_collection("returns").find_one({"return_id": "RET-FULL"})
     for key in ("restock_applied", "restock_stock_ids", "restocked", "net_refund", "refund_amount",
@@ -353,16 +374,43 @@ def test_a_damaged_piece_set_aside_is_reported_as_dealt_with(till, tasks):  # no
 
 def test_an_unapplied_return_names_each_piece_still_out(till, tasks):  # noqa: F811
     _kept(till, "RET-NONE")
-    msg = _msg("RET-NONE")
-    assert "NOT back in stock: 2 x F1." in msg
+    msg = _msg("RET-NONE", stock_step_open=True)
+    assert f"NOT back in stock: 2 x F1. {NEVER_BY_HAND} {RETRY}" in msg
     assert "Already dealt with" not in msg and "Nothing to add by hand" not in msg
+    # The pieces stay on the panel, by name, until the retry puts them back.
+    assert _open_rows() == [{"return_id": "RET-NONE", "order_id": "ORD-1", "order_number": "ORD-1",
+                             "store_id": STORE, "pieces": "2 x F1"}]
+
+
+# The three ways a kept record's stock step is still open. Each is retryable
+# (POST /returns/{id}/restock puts the piece back) and the press raised its
+# own task saying so: a hand entry beside that retry is one frame counted twice.
+OPEN_STEPS = {
+    # An older imported order whose stock-in task could not be saved.
+    "historical": {"historical": True},
+    # An online order whose receiving shop could not be resolved.
+    "online": {"restock_store_reason": "ONLINE_STORE_UNRESOLVED",
+               "restocked": [{"product_id": "P1", "sku": "F1", "quantity": 2, "applied": False}]},
+    # An ordinary counter bill whose stock write failed during the press.
+    "write_failed": {},
+}
+
+
+@pytest.mark.parametrize("state", sorted(OPEN_STEPS))
+def test_an_open_stock_step_is_never_handed_to_a_manual_entry(till, tasks, state):  # noqa: F811
+    _kept(till, "RET-OPEN", **OPEN_STEPS[state])
+    msg = _msg("RET-OPEN", stock_step_open=True)
+    assert f"NOT back in stock: 2 x F1. {NEVER_BY_HAND} {RETRY}" in msg
+    assert ("raises one stock-in task for the store manager" in msg) is (state == "historical")
+    assert [row["pieces"] for row in _open_rows()] == ["2 x F1"]
 
 
 def test_a_mixed_return_separates_the_piece_already_back_from_the_one_pending(till, tasks):  # noqa: F811
     _kept(till, "RET-MIX", restock_stock_ids=["SU-1"], restocked=[_row_of(reactivated=1)])
-    msg = _msg("RET-MIX")
+    msg = _msg("RET-MIX", stock_step_open=True)
     assert "Already dealt with: 1 piece(s) back in stock." in msg
-    assert "NOT back in stock: 1 x F1." in msg and "Nothing to add by hand" not in msg
+    assert f"NOT back in stock: 1 x F1. {NEVER_BY_HAND}" in msg and "Nothing to add by hand" not in msg
+    assert [row["pieces"] for row in _open_rows()] == ["1 x F1"]
 
 
 def test_an_older_imported_orders_pieces_go_through_the_stock_in_task_only(till, tasks):  # noqa: F811
@@ -395,6 +443,10 @@ def test_a_record_saved_before_the_line_took_its_product_names_the_piece_from_th
     _kept(till, "RET-OLD", restock_applied=True, items=[_item(product=None, qty=1.0)])
     msg = _msg("RET-OLD")
     assert "NOT back in stock: 1 x F1." in msg and "Nothing to add by hand" not in msg
+    # Its stock step reads finished, so no retry can take it: never a hand
+    # entry (the sold record stays beside the new one), never a dead button.
+    assert "stock step is closed" in msg and "ask the IMS admin" in msg
+    assert _open_rows() == []
 
 
 def test_pieces_the_return_kept_out_of_stock_are_said_so_not_called_finished(till, tasks):  # noqa: F811
@@ -422,6 +474,8 @@ def test_a_rebuilt_record_with_no_stock_provenance_never_asks_for_a_blind_entry(
     from api.services import store_credit_ledger as scl
 
     _bill_with_hold(till, "RET-REB")
+    till["db"].get_collection("orders").update_one(
+        {"order_id": "ORD-1"}, {"$set": {"items": [dict(ln) for ln in BILL_LINES]}})
     till["db"].get_collection("credit_note_ledger").insert_one(_row(
         "RET-REB:credit", type=scl.ISSUED, applied=True, delta=1200.0, order_id="ORD-1",
         note_number="TST01/C2627/0040", taxable=1525.42, tax=274.58, gst_rate=18.0,
@@ -431,9 +485,90 @@ def test_a_rebuilt_record_with_no_stock_provenance_never_asks_for_a_blind_entry(
     assert OLD_BLANKET not in msg
     assert "did not keep whether its pieces went back into stock" in msg
     assert "only a piece that is not already in stock" in msg
+    assert "Its pieces: 1 x F1." in msg and BY_HAND not in msg
+    # No retry for it: nothing says which pieces the press already put back.
+    assert out["stock_step_open"] is False and RETRY not in msg and _open_rows() == []
     # The recovery's accounting is what it was.
     assert out["net_refund"] == 1800.0 and out["credit_amount"] == 1200.0
     assert out["restock_applied"] is False and out["restock_stock_ids"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Retry stock step (Needs completing): the one action for a piece still out
+# --------------------------------------------------------------------------- #
+def _recovered(ctx, rid="RET-REC", source="unsaved doc", **over):  # noqa: F811
+    """A record Accounts completed in Needs completing, as that door saves it."""
+    doc = {"return_id": rid, "order_id": "ORD-1", "order_number": "INV-1001", "store_id": "BV-PUN-01",
+           "return_type": "RETURN", "status": "COMPLETED",
+           "items": [{"order_item_id": "li1", "product_id": "PRD-1", "sku": "RB-1", "return_qty": 1.0,
+                      "unit_price": 500.0, "condition": "GOOD", "restock": True}],
+           "restocked": [], "restock_applied": False, "restock_stock_ids": [],
+           "recovered": {"by": "U-ACC", "source": source}}
+    doc.update(over)
+    ctx["returns_coll"].docs.append(doc)
+    return doc
+
+
+def _retry(ctx, rid="RET-REC", roles=("ACCOUNTANT",), door="/complete-record/restock"):  # noqa: F811
+    return ctx["client"].post(f"/api/v1/returns/{rid}{door}", headers=_hdr(list(roles)))
+
+
+def test_retry_stock_step_puts_a_piece_still_out_back_exactly_once(ctx):  # noqa: F811
+    _recovered(ctx)
+    first = _retry(ctx)
+    assert first.status_code == 200, first.text
+    assert first.json()["restock_applied"] is True and first.json()["restock_stock_ids"] == ["STK-OLD-1"]
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "AVAILABLE")]
+    saved = ctx["returns_coll"].docs[-1]
+    assert saved["restock_applied"] is True and saved["restock_stock_ids"] == ["STK-OLD-1"]
+    # Pressed again (or by the store's own retry): nothing more moves.
+    for again in (_retry(ctx), _retry(ctx, roles=("ADMIN",), door="/restock")):
+        assert again.status_code == 200 and again.json()["message"] == "Already restocked", again.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "AVAILABLE")]
+    assert len(ctx["stock_audit_coll"].docs) == 1
+
+
+def test_retry_stock_step_is_for_accounts_and_admin_on_a_completed_record_only(ctx):  # noqa: F811
+    from api.services import capabilities
+    from api.services.rbac_policy import POLICY
+
+    _recovered(ctx)
+    # The counter's roles keep their own door; they do not get this one.
+    for role in ("CASHIER", "SALES_STAFF", "STORE_MANAGER"):
+        assert _retry(ctx, roles=(role,)).status_code == 403
+    # Accounts get this door only: the store's retry door stays closed to them.
+    assert _retry(ctx, door="/restock").status_code == 403
+    # An ordinary return (never completed in Needs completing) is not theirs.
+    _recovered(ctx, "RET-PLAIN", recovered=None)
+    assert _retry(ctx, "RET-PLAIN").status_code == 404
+    assert _retry(ctx, "RET-NOT-THERE").status_code == 404
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "SOLD")]
+    assert _retry(ctx, roles=("ADMIN",)).status_code == 200
+    # Catalogued beside Complete record, on its capability (Accounts never
+    # join the counter's returns:write).
+    path = "/api/v1/returns/{return_id}/complete-record/restock"
+    row = next(r for r in POLICY if r["path"] == path and r["method"] == "POST")
+    assert sorted(row["allowed"]) == ["ACCOUNTANT", "ADMIN"]
+    assert capabilities.capability_for("POST", path) == "returns:complete-record"
+
+
+@pytest.mark.parametrize("door,roles", [("/restock", ("ADMIN",)), ("/complete-record/restock", ("ACCOUNTANT",))])
+def test_no_retry_restocks_a_rebuilt_record(ctx, door, roles):  # noqa: F811
+    """A rebuilt record keeps nothing of the press's stock step. The customer
+    bought two and returned one, which the press put back before it died
+    (STK-BACK); STK-OLD-1 is the one still worn. A retry used to flip the
+    worn one to AVAILABLE, or mint a third."""
+    ctx["stock_repo"].units.append({"stock_id": "STK-BACK", "product_id": "PRD-1", "store_id": "BV-PUN-01",
+                                    "status": "AVAILABLE", "returned_from_order_id": "ORD-1"})
+    _line(ctx)["quantity"] = 2
+    _recovered(ctx, source="credit line",
+               items=[{"order_item_id": "li1", "item_id": "li1", "product_id": "PRD-1", "return_qty": 1.0}])
+    before = _units(ctx)
+    r = _retry(ctx, roles=roles, door=door)
+    assert r.status_code == 409 and "did not keep whether its pieces went back" in r.text, r.text
+    assert _units(ctx) == before and ctx["stock_audit_coll"].docs == []
+    saved = ctx["returns_coll"].docs[-1]
+    assert saved["restock_applied"] is False and not saved.get("restock_in_progress")
 
 
 # =========================================================================== #

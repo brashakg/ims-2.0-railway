@@ -3216,34 +3216,31 @@ def _units_still_out(
     return out
 
 
-def _recovered_stock_note(
-    doc: Dict[str, Any], kept: bool, order: Optional[Dict[str, Any]] = None
-) -> str:
-    """What a completed record tells staff about its pieces, PIECE BY PIECE,
-    from the record's own stock state -- never a blanket "put them back by
-    hand" (a piece the return already restored was then added a second time),
-    and never from the one restock_applied flag (it is also True when nothing
-    was put back: an older imported order, an opened piece, a line saved
-    with no product).
+REBUILT_STOCK_UNKNOWN = (
+    "IMS did not keep whether its pieces went back into stock, and it will not move them itself. "
+    "Look each piece up in Inventory first: put back by hand only a piece that is not already in stock.")
 
-    A KEPT record says, each part only when it has pieces:
-      * what IS dealt with: the units back in stock (restock_stock_ids) and
-        the ones set aside as damaged (quarantined_stock_ids);
-      * a HISTORICAL order's pieces: IMS puts none back by rule and the store
-        manager's stock-in task covers them (raise_stock_in_task) -- never a
-        second entry beside that task;
-      * each GOOD piece NOT back in stock, by name;
-      * each DAMAGED piece not set aside;
-      * the pieces the return itself kept out of stock (opened, or restock
-        switched off).
+
+def _rebuilt(doc: Optional[Dict[str, Any]]) -> bool:
+    """A record Needs completing REBUILT (from the credit line or the held
+    refund), not the one the press composed: nothing kept says which pieces
+    the press put back, so no door restocks it (a retry would flip a piece
+    the customer still wears, or mint one beside a piece already back)."""
+    return (((doc or {}).get("recovered") or {}).get("source") or "unsaved doc") != "unsaved doc"
+
+
+def _recovered_stock_state(
+    doc: Dict[str, Any], order: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """A record's pieces by what happened to each, from its own stock state
+    (the completion message and the panel's open-stock-step list read it):
+    `damaged` / `held` {name: pieces}, `out` {name: pieces} -- the GOOD
+    pieces NOT back in stock -- and `open`: its restock is still retryable
+    (POST /returns/{id}/restock puts each `out` piece back once).
+
     A line is read with the product of its BILL line (line_stock_product_id):
     a record saved before the line took its product still names its piece,
-    and a line that was never stock (a lens, a service) names none.
-
-    A REBUILT record (nothing kept says whether the stock step ran) says so."""
-    if not kept:
-        return ("IMS did not keep whether its pieces went back into stock. Put back by hand "
-                "only a piece that is not already in stock.")
+    and a line that was never stock (a lens, a service) names none."""
     by_item = _order_line_index(order)["by_item"]
     good: List[Dict[str, Any]] = []
     damaged: Dict[str, int] = {}
@@ -3260,16 +3257,16 @@ def _recovered_stock_note(
             qty = 0
         if not line["product_id"] or qty <= 0:
             continue
-        name = str(line.get("sku") or line.get("product_name") or line["product_id"])
+        # A rebuilt line keeps no name: the bill line's.
+        line["sku"] = line.get("sku") or (orig or {}).get("sku") or ""
+        name = str(line["sku"] or line.get("product_name") or (orig or {}).get("product_name")
+                   or line["product_id"])
         if str(line.get("condition") or "GOOD").upper() == "DAMAGED":
             damaged[name] = damaged.get(name, 0) + qty
         elif restock_engine.should_restock(line):
             good.append(line)
         else:
             held[name] = held.get(name, 0) + qty
-
-    def _named(counts: Dict[str, int]) -> str:
-        return ", ".join(f"{n} x {name}" for name, n in sorted(counts.items()))
 
     # Dealt with: the units that landed, and an online order's units its claim
     # never covered (they never left a shop: nothing goes back for them).
@@ -3282,8 +3279,49 @@ def _recovered_stock_note(
     for u in _units_still_out(restock_engine.plan_restock(good).get("units", []), dealt):
         name = str(u.get("sku") or u.get("product_name") or u.get("product_id"))
         out[name] = out.get(name, 0) + 1
+    return {"damaged": damaged, "held": held, "out": out,
+            "open": bool(out) and not doc.get("restock_applied") and not _rebuilt(doc)}
+
+
+def _named(counts: Dict[str, int]) -> str:
+    return ", ".join(f"{n} x {name}" for name, n in sorted(counts.items()))
+
+
+def _recovered_stock_note(
+    doc: Dict[str, Any], kept: bool, order: Optional[Dict[str, Any]] = None
+) -> str:
+    """What a completed record tells staff about its pieces, PIECE BY PIECE,
+    from the record's own stock state (_recovered_stock_state) -- never from
+    the one restock_applied flag (it is also True when nothing was put back:
+    an older imported order, an opened piece, a line saved with no product).
+
+    A KEPT record says, each part only when it has pieces:
+      * what IS dealt with: the units back in stock (restock_stock_ids) and
+        the ones set aside as damaged (quarantined_stock_ids);
+      * a HISTORICAL order's pieces: IMS puts none back by rule and the store
+        manager's stock-in task covers them (raise_stock_in_task) -- never a
+        second entry beside that task;
+      * each GOOD piece NOT back in stock, by name, with its ONE action: the
+        panel's Retry stock step while the restock is open
+        (_raise_restock_blocked_task's rule: a hand entry beside the retry is
+        one frame counted twice); a record whose stock step reads finished
+        has no retry, and still no hand entry;
+      * each DAMAGED piece not set aside;
+      * the pieces the return itself kept out of stock (opened, or restock
+        switched off).
+
+    A REBUILT record (nothing kept says whether the stock step ran) names its
+    pieces and says so; no door restocks it (_rebuilt)."""
+    state = _recovered_stock_state(doc, order)
+    damaged, held, out = state["damaged"], state["held"], dict(state["out"])
+    if not kept:
+        pieces = dict(out)
+        for name, n in list(damaged.items()) + list(held.items()):
+            pieces[name] = pieces.get(name, 0) + n
+        return REBUILT_STOCK_UNKNOWN + (f" Its pieces: {_named(pieces)}." if pieces else "")
+    historical = bool(doc.get("historical") or (order or {}).get("historical"))
     via_task = 0
-    if doc.get("restock_applied") and (doc.get("historical") or (order or {}).get("historical")):
+    if doc.get("restock_applied") and historical:
         via_task, out = sum(out.values()), {}
 
     back = len(doc.get("restock_stock_ids") or [])
@@ -3297,8 +3335,16 @@ def _recovered_stock_note(
         parts.append(f"{via_task} piece(s) are from an older imported order: IMS put none back - the "
                      "stock-in task raised for the store manager covers them, so do not add them a "
                      "second time.")
-    if out:
-        parts.append(f"NOT back in stock: {_named(out)}. Put these back in stock by hand.")
+    if out and state["open"]:
+        parts.append(f"NOT back in stock: {_named(out)}. Do not add these by hand - IMS would count "
+                     "them twice. Press Retry stock step on this return (Returns > Needs completing): "
+                     "IMS puts each piece back once."
+                     + (" On this older imported order it adds no stock row: it raises one stock-in "
+                        "task for the store manager." if historical else ""))
+    elif out:
+        parts.append(f"NOT back in stock: {_named(out)}. This record's stock step is closed, so Retry "
+                     "stock step cannot put them back, and a hand entry would leave each piece with "
+                     "two stock records: ask the IMS admin to put them back.")
     if not_aside:
         parts.append("Damaged and NOT set aside by IMS: "
                      + (_named(damaged) if not aside else f"{not_aside} of {_named(damaged)}") + ".")
@@ -5677,6 +5723,21 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                          "owed_tenders": doc.get("owed_tenders") or []})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the owed returns - try again.") from exc
+    # Completed records whose GOOD pieces are still out of stock ("Retry stock
+    # step"): named here until the retry puts each back.
+    stock_open: List[Dict[str, Any]] = []
+    try:
+        for doc in coll.find({"status": "COMPLETED", "recovered": {"$ne": None},
+                              "restock_applied": {"$ne": True}}):
+            if not can_access_store_scoped(doc.get("store_id"), current_user):
+                continue
+            state = _recovered_stock_state(doc, _load_order_for_restock(doc.get("order_id")))
+            if state["open"]:
+                stock_open.append({"return_id": doc.get("return_id"), "order_id": doc.get("order_id"),
+                                   "order_number": doc.get("order_number"), "store_id": doc.get("store_id"),
+                                   "pieces": _named(state["out"])})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the open stock steps - try again.") from exc
     # Till store-credit / gift-voucher payments taken but never on their bill
     # (the unbilled tasks' list): each has one action, "Give back this
     # unbilled payment" (money review 20).
@@ -5702,7 +5763,8 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                                  leg.get("voucher"), order, leg["key"])})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the unbilled payments - try again.") from exc
-    return {"items": sorted(out, key=lambda r: str(r.get("at") or "")), "owed": owed, "unbilled": unbilled}
+    return {"items": sorted(out, key=lambda r: str(r.get("at") or "")), "owed": owed, "unbilled": unbilled,
+            "stock_open": stock_open}
 
 
 class GiveBackBody(BaseModel):
@@ -6028,7 +6090,9 @@ async def complete_return_record(
                                                       "order_id": order_id})
     _audit_complete(return_id, store_id, current_user, recovered, now)
     return {**doc, "message": "Return record completed. " + _recovered_stock_note(doc, bool(doc_kept), order)
-            + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else "")}
+            + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else ""),
+            # The panel offers Retry stock step exactly when the message does.
+            "stock_step_open": _recovered_stock_state(doc, order)["open"]}
 
 
 class OwedPaidBody(BaseModel):
@@ -6242,11 +6306,13 @@ async def retry_restock(
     # Another shop's return is never claimed, restocked or described: the
     # same 404 as GET /returns/{id}, before any flag or unit moves.
     try:
-        owner = coll.find_one({"return_id": return_id}, {"_id": 0, "store_id": 1})
+        owner = coll.find_one({"return_id": return_id}, {"_id": 0, "store_id": 1, "recovered": 1})
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock retry lookup failed: %s", exc)
         owner = None
     in_reach_or_404(owner, current_user, "Return not found")
+    if _rebuilt(owner):
+        raise HTTPException(status_code=409, detail=REBUILT_STOCK_UNKNOWN)
 
     # Atomic claim: succeed only if NOT already applied AND NOT in progress.
     now_iso = utc_now_iso()
@@ -6507,6 +6573,27 @@ async def retry_restock(
             else "Restock partial - retry again"
         ),
     }
+
+
+@router.post("/{return_id}/complete-record/restock")
+async def retry_completed_record_restock(
+    return_id: str = Path(..., description="Return ID"),
+    current_user: dict = Depends(require_roles(*_COMPLETE_RECORD_ROLES)),
+):
+    """Returns > Needs completing > Retry stock step (decision D7, 2026-11-11):
+    Accounts / Admin re-run the restock of a record they completed there --
+    the ONE action for its pieces still out of stock, never a hand entry. It
+    is the store's retry (retry_restock: its claim, its units-still-out rule,
+    its store scope), for a completed record only: an ordinary return is not
+    theirs."""
+    coll = _returns_coll()
+    try:
+        doc = coll.find_one({"return_id": return_id}, {"_id": 0, "recovered": 1}) if coll is not None else None
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the returns - try again.") from exc
+    if not (doc or {}).get("recovered"):
+        raise HTTPException(status_code=404, detail="Return not found")
+    return await retry_restock(return_id, current_user)
 
 
 # ============================================================================
