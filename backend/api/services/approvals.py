@@ -820,6 +820,10 @@ class ApprovalEngine:
                     "status": ApprovalStatus.APPROVED.value,
                     "approval_token": token,
                     "reviewed_by": approver_user_id,
+                    # The roles the decider held when deciding. A domain that
+                    # lets fewer roles decide than the tier routes to reads it
+                    # (je_service: a journal takes only a checker's decision).
+                    "reviewed_by_roles": sorted(roles),
                     "reviewed_at": now,
                     # Re-arm the validity window FROM THE APPROVAL (same atomic op):
                     # without this an approval minted at minute 50 of the request's
@@ -925,6 +929,7 @@ class ApprovalEngine:
                 "$set": {
                     "status": ApprovalStatus.REJECTED.value,
                     "reviewed_by": approver_user_id,
+                    "reviewed_by_roles": sorted(roles),
                     "reviewed_at": now,
                     "reject_reason": reason or "",
                 }
@@ -1579,7 +1584,6 @@ def request_approval(
     reason: str = "",
     required_tier: Optional[str] = None,
     dedupe_key: Optional[str] = None,
-    only_roles: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Module-level convenience so a domain router can open a request in one
     call. Fail-soft like create_proposal: returns None when there is no DB (or
@@ -1598,7 +1602,6 @@ def request_approval(
             reason=reason,
             required_tier=required_tier,
             dedupe_key=dedupe_key,
-            only_roles=only_roles,
         )
         # A no_db / write_failed result is surfaced as None for the fail-soft
         # agent path (matches proposals.create_proposal).

@@ -292,16 +292,14 @@ def _in_reach_or_missing(
 
 
 def _move_journal(doc: Optional[Dict[str, Any]]) -> None:
-    """A journal's request decided here moves its journal in the same call
+    """A journal's own request decided here moves its journal in the same call
     (L3-25): the inbox used to update only the request, leaving the journal
     SUBMITTED where Post refused not_approved and the journal's own Approve
-    refused already_reviewed. One rule decides it, in je_service. Fail-soft:
-    the decision stands on the request, and every journal door catches the
-    journal up from it (je_service._take_request_decision)."""
-    if (doc or {}).get("action_type") != je_service.JE_ACTION_TYPE:
-        return
+    refused already_reviewed. One rule decides whether and how, in je_service
+    (_take_request_decision). Fail-soft: the decision stands on the request,
+    and every journal door catches the journal up from it."""
     try:
-        je_service.sync_with_request(_get_db(), (doc.get("context") or {}).get("je_id"))
+        je_service.sync_with_request(_get_db(), doc)
     except Exception as e:  # noqa: BLE001
         logger.warning("[APPROVALS] journal sync after decision failed: %s", e)
 
@@ -371,9 +369,15 @@ async def reject_request(
     current_user: Dict[str, Any] = Depends(require_roles(*_DECIDE_ROLES)),
 ):
     """Reject a request with the approver's PIN. Same routing and the same
-    shop rule as approve."""
+    shop rule as approve. A rejection that rejects a journal needs the
+    journal's checker note (400 note_required without one)."""
     eng = _engine()
     doc = _in_reach_or_missing(eng, request_id, current_user)
+    # Rejecting a journal's request rejects the journal: the journal screen's
+    # checker-note rule (je_service) is held before anything is decided.
+    refusal = je_service.inbox_reject_refusal(_get_db(), doc, _roles(current_user), body.reason)
+    if refusal:
+        _decode(refusal, success_keys=())
     res = eng.reject(
         request_id,
         approver_user_id=current_user.get("user_id"),

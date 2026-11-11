@@ -370,25 +370,22 @@ def test_l3_25_journal_catches_up_when_its_own_write_was_lost(db):
     assert (je["status"], je["checker_id"]) == ("POSTED", "checker")
 
 
-def test_l3_25_post_resumes_after_its_journal_write_was_lost(db):
-    """A Post that spent the approval and then lost its journal write left the
-    journal APPROVED for good (every retry: already_consumed). The retry now
-    finishes that post -- once."""
+def test_l3_25_post_refuses_an_approval_spent_elsewhere(db):
+    """Post spends the journal's approval itself, for the journal's own total.
+    An approval already spent through another door (the generic consume route,
+    which checks neither) posts nothing: 409 already_consumed, as before."""
     _user(db, "checker", ["ADMIN"])
     j = _submitted_journal(db, "maker")
     assert _journal_approve(db, j["je_id"]).get("ok") is True
     spent = appr.ApprovalEngine(db=db).consume_approval(
-        consumed_by="checker", action_type="journal_entry",
-        request_id=j["request_id"], amount=100.0)
+        consumed_by="maker", action_type="journal_entry", request_id=j["request_id"])
     assert spent.get("ok") is True, spent
-    assert _je(db, j["je_id"])["status"] == "APPROVED"  # the interrupted state
 
-    assert _post(db, j["je_id"]).get("ok") is True
-    assert _je(db, j["je_id"])["status"] == "POSTED"
-    assert _post(db, j["je_id"])["error"] == "already_posted"
-    posted_rows = [r for r in db.get_collection("audit_logs").find({"action": "je_posted"})
-                   if r.get("entity_id") == j["je_id"]]
-    assert len(posted_rows) == 1
+    res = _post(db, j["je_id"])
+    assert (res["http"], res["error"]) == (409, "already_consumed")
+    assert _je(db, j["je_id"])["status"] == "APPROVED"
+    assert not [r for r in db.get_collection("audit_logs").find({"action": "je_posted"})
+                if r.get("entity_id") == j["je_id"]]
 
 
 def test_l3_25_maker_can_never_be_the_checker(db, monkeypatch):
@@ -407,38 +404,171 @@ def test_l3_25_maker_can_never_be_the_checker(db, monkeypatch):
     # taken as the journal's decision.
     db.get_collection("approval_requests").update_one(
         {"request_id": j["request_id"]},
-        {"$set": {"status": "APPROVED", "reviewed_by": "maker", "approval_token": "APT-forged"}})
+        {"$set": {"status": "APPROVED", "reviewed_by": "maker",
+                  "reviewed_by_roles": ["ADMIN"], "approval_token": "APT-forged"}})
     assert _post(db, j["je_id"])["error"] == "not_approved"
     assert _je(db, j["je_id"])["status"] == "SUBMITTED"
 
 
-def test_l3_25_inbox_holds_a_journal_to_the_journal_checker_roles(db, monkeypatch):
+def test_l3_25_manager_inbox_click_is_never_a_journal_approval(db, monkeypatch):
     """The journal screen lets only ADMIN / SUPERADMIN approve a journal. A
-    small journal's request used to be routed to store and area managers too;
-    the repair must not turn a manager's inbox click into a journal approval."""
+    small journal's request is still routed to store and area managers as well
+    (unchanged -- who should see it is the owner's call); the repair must not
+    turn a manager's inbox click into a journal approval or rejection."""
     manager = _user(db, "manager", ["STORE_MANAGER"])
-    j = _submitted_journal(db, "maker", amount=100.0)  # the manager amount tier
-    assert set(_request(db, j["request_id"])["required_roles"]) == {"ADMIN", "SUPERADMIN"}
+    for decide, word in ((_inbox_approve, "APPROVED"), (_inbox_reject, "REJECTED")):
+        j = _submitted_journal(db, "maker", amount=100.0)  # the manager amount tier
+        assert "STORE_MANAGER" in _request(db, j["request_id"])["required_roles"]
+        args = (db, monkeypatch, j["request_id"], manager)
+        code, body = decide(*args) if decide is _inbox_approve else decide(*args, "Not a valid entry")
+        assert code == 200, body
+        assert _request(db, j["request_id"])["status"] == word
+        je = _je(db, j["je_id"])
+        assert (je["status"], je["checker_id"]) == ("SUBMITTED", None)
+        assert _post(db, j["je_id"])["error"] == "not_approved"
+        assert _je(db, j["je_id"])["status"] == "SUBMITTED"
 
-    code, body = _inbox_approve(db, monkeypatch, j["request_id"], manager)
-    assert code == 403 and body["error"] == "insufficient_tier"
-    code, body = _inbox_reject(db, monkeypatch, j["request_id"], manager, "no")
-    assert code == 403 and body["error"] == "insufficient_tier"
-    assert _je(db, j["je_id"])["status"] == "SUBMITTED"
-    assert _request(db, j["request_id"])["status"] == "REQUESTED"
 
-
-def test_l3_25_manager_decision_on_an_older_request_is_not_taken(db):
-    """A request raised before the routing was narrowed (stored roles include
-    the managers) and approved by one: the journal does not take it."""
+def test_l3_25_decision_with_no_recorded_checker_role_is_not_taken(db):
+    """A request decided before deciders' roles were recorded on it (or by a
+    row edit): the journal cannot tell an Admin's decision from a manager's,
+    so it takes neither."""
     j = _submitted_journal(db, "maker")
     db.get_collection("approval_requests").update_one(
         {"request_id": j["request_id"]},
-        {"$set": {"required_roles": ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
-                  "status": "APPROVED", "reviewed_by": "manager",
-                  "approval_token": "APT-old"}})
+        {"$set": {"status": "APPROVED", "reviewed_by": "someone", "approval_token": "APT-old"}})
     assert _post(db, j["je_id"])["error"] == "not_approved"
     assert _je(db, j["je_id"])["status"] == "SUBMITTED"
+
+
+def _hijack_request(db, je_id: str, maker_id: str = "maker") -> str:
+    """What the generic create route lets any signed-in user raise: a Rs 1
+    journal_entry request carrying the journal's dedupe key and naming it."""
+    res = _engine(db).request(
+        action_type="journal_entry", requested_by=maker_id, store_id="S1", amount=1,
+        required_tier="super", dedupe_key=f"je:{je_id}",
+        context={"je_id": je_id, "description": "Round-off"})
+    assert res.get("ok") is True, res
+    return res["request_id"]
+
+
+def _draft_journal(db, maker_id: str = "maker", amount: float = 500000.0) -> str:
+    if db.get_collection("chart_of_accounts").find_one({}) is None:
+        je_service.seed_chart_of_accounts(db)
+    res = je_service.create_je(
+        db, store_id="S1", entity_id=None, entry_date=datetime(2026, 5, 15),
+        description="Depreciation for May 2026",
+        lines=[{"account_code": "5001", "debit": amount, "credit": 0},
+               {"account_code": "2001", "debit": 0, "credit": amount}],
+        maker_id=maker_id, maker_name=maker_id)
+    assert res["ok"], res
+    return res["je"]["je_id"]
+
+
+def test_l3_25_submit_never_links_a_request_it_did_not_raise(db, monkeypatch):
+    """A Rs 5,00,000 journal must not ride a Rs 1 request. The maker plants a
+    small request under the journal's dedupe key, then submits: the journal
+    gets its OWN request (its total, its tier), and approving the planted one
+    moves nothing."""
+    boss = _user(db, "boss", ["SUPERADMIN"])
+    je_id = _draft_journal(db)
+    planted = _hijack_request(db, je_id)
+
+    sub = je_service.submit_je(db, je_id=je_id, maker_id="maker", maker_roles=["ACCOUNTANT"])
+    assert sub["ok"], sub
+    assert sub["request_id"] != planted          # was the planted request
+    own = _request(db, sub["request_id"])
+    assert (own["amount"], own["required_tier"]) == (500000.0, "super")
+    assert own["context"]["je_id"] == je_id
+
+    assert _inbox_approve(db, monkeypatch, planted, boss)[0] == 200
+    assert _je(db, je_id)["status"] == "SUBMITTED"
+    assert _request(db, sub["request_id"])["status"] == "REQUESTED"
+
+
+@pytest.mark.parametrize("field, value", [
+    ("amount", 1.0),
+    ("requested_by", "someone-else"),
+    ("action_type", "petty_cash"),
+    ("context", {"je_id": "JE-another"}),
+])
+def test_l3_25_journal_takes_a_decision_only_from_its_own_request(db, monkeypatch, field, value):
+    """A journal already linked to a request that does not bind it (a link
+    stored before the submit guard): an inbox approval of that request is not
+    the journal's approval, and Post stays refused."""
+    boss = _user(db, "boss", ["SUPERADMIN"])
+    j = _submitted_journal(db, "maker")
+    db.get_collection("approval_requests").update_one(
+        {"request_id": j["request_id"]}, {"$set": {field: value}})
+
+    assert _inbox_approve(db, monkeypatch, j["request_id"], boss)[0] == 200
+    je = _je(db, j["je_id"])
+    assert (je["status"], je["checker_id"]) == ("SUBMITTED", None)
+    assert _post(db, j["je_id"])["error"] == "not_approved"
+    assert _je(db, j["je_id"])["status"] == "SUBMITTED"
+
+
+@pytest.mark.parametrize("reason", ["", "   ", "too short"])
+def test_l3_25_inbox_reject_of_a_journal_needs_the_journal_note(db, monkeypatch, reason):
+    """One rule, two doors: the journal screen refuses a rejection without a
+    checker note of at least 10 characters; the inbox rejected the same journal
+    with no reason at all."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+
+    code, body = _inbox_reject(db, monkeypatch, j["request_id"], checker, reason)
+    assert (code, body["error"]) == (400, "note_required")
+    assert _request(db, j["request_id"])["status"] == "REQUESTED"
+    assert _je(db, j["je_id"])["status"] == "SUBMITTED"
+    # The journal screen says the same thing.
+    res = je_service.reject_je(db, je_id=j["je_id"], approver_id="checker",
+                               approver_roles=["ADMIN"], pin=PIN, note=reason)
+    assert (res["http"], res["error"]) == (400, "note_required")
+    # A request that is no journal's approval keeps its optional reason.
+    other = _engine(db).request(action_type="petty_cash", requested_by="u1",
+                                store_id="S1", amount=300)["request_id"]
+    assert _inbox_reject(db, monkeypatch, other, checker, reason)[0] == 200
+
+
+def test_l3_25_maker_rejecting_their_own_request_does_not_strand_the_journal(db, monkeypatch):
+    """An Admin maker may reject (withdraw) their own journal on the journal
+    screen. The same rejection made on the request used to leave the journal
+    SUBMITTED for good: no door could approve, reject or post it."""
+    maker = _user(db, "maker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+
+    code, body = _inbox_reject(db, monkeypatch, j["request_id"], maker,
+                               "Entered against the wrong month")
+    assert code == 200, body
+    je = _je(db, j["je_id"])
+    assert (je["status"], je["checker_id"]) == ("REJECTED", "maker")  # was SUBMITTED
+    assert je["checker_note"] == "Entered against the wrong month"
+
+    # ... and when only the request was rejected (the journal write lost), any
+    # journal door catches the journal up.
+    j2 = _submitted_journal(db, "maker")
+    res = appr.ApprovalEngine(db=db).reject(
+        j2["request_id"], approver_user_id="maker", approver_roles=["ADMIN"], pin=PIN,
+        reason="Entered against the wrong month")
+    assert res.get("ok") is True, res
+    assert _post(db, j2["je_id"])["status"] == "REJECTED"
+    assert _je(db, j2["je_id"])["status"] == "REJECTED"
+
+
+def test_l3_25_inbox_leaves_the_journal_alone_while_manual_journals_are_off(db, monkeypatch):
+    """ENABLE_MANUAL_JE off freezes the journal screen's approve / reject /
+    post. The inbox must not move a journal behind that switch: it decides the
+    request only, as it always did; the journal catches up once the switch is
+    on again."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    monkeypatch.delenv("ENABLE_MANUAL_JE", raising=False)
+    assert _inbox_approve(db, monkeypatch, j["request_id"], checker)[0] == 200
+    assert _je(db, j["je_id"])["status"] == "SUBMITTED"
+
+    monkeypatch.setenv("ENABLE_MANUAL_JE", "1")
+    assert _post(db, j["je_id"]).get("ok") is True
+    assert _je(db, j["je_id"])["checker_id"] == "checker"
 
 
 def test_l3_25_request_naming_someone_elses_journal_changes_nothing(db, monkeypatch):
