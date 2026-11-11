@@ -575,6 +575,63 @@ def test_a_report_that_matches_no_log_row_is_not_a_failure(client, msg91):
     assert _row(msg91.real)["status"] == "succeeded"
 
 
+# The sibling door, POST /api/v1/webhooks/msg91/delivery. It keeps NO inbox
+# row, so nothing in IMS can retry for it: the only recovery is MSG91's own
+# resend, which happens only on a non-2xx answer.
+
+
+def _post_legacy(client, payload):
+    raw = json.dumps(payload).encode()
+    sig = hmac.new(MSG91_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    return client.post(
+        "/api/v1/webhooks/msg91/delivery",
+        content=raw,
+        headers={"content-type": "application/json", "x-msg91-signature": sig},
+    )
+
+
+@pytest.mark.parametrize(
+    "outage",
+    [
+        {"notification_logs": {"update_many"}},  # the log advance fails
+        {"message_events": {"insert_one"}},  # the spine event fails
+    ],
+)
+def test_legacy_delivery_door_never_acknowledges_a_report_it_could_not_store(
+    client, msg91, outage
+):
+    db = msg91.real
+    msg91.down = outage
+    r = _post_legacy(client, DELIVERED)
+    assert r.status_code == 503  # was: 200 "received", updated 0 -- lost for good
+    assert db.webhook_inbox.count_documents({}) == 0  # this door has no retry row
+
+    msg91.down = {}  # storage recovers; MSG91 resends after the 503
+    r = _post_legacy(client, DELIVERED)
+    assert r.status_code == 200 and r.json()["delivery_status"] == "DELIVERED"
+    assert db.notification_logs.find_one({})["delivery_status"] == "DELIVERED"
+    assert db.message_events.count_documents({}) == 1
+
+    # A further resend is harmless: one event, still a 200.
+    assert _post_legacy(client, DELIVERED).status_code == 200
+    assert db.message_events.count_documents({}) == 1
+
+
+def test_legacy_delivery_door_without_a_database_asks_for_a_resend(client, msg91, monkeypatch):
+    from api.services import message_events
+
+    monkeypatch.setattr(message_events, "_get_db", lambda: None)
+    assert _post_legacy(client, DELIVERED).status_code == 503
+
+
+def test_legacy_delivery_door_healthy_and_unknown_ids_still_answer_200(client, msg91):
+    r = _post_legacy(client, DELIVERED)
+    assert r.status_code == 200 and r.json()["updated"] == 1
+    # Matching no log row is not a storage failure: no retry loop.
+    r = _post_legacy(client, {"request_id": "REQ-ZZ-NOBODY", "status": "delivered"})
+    assert r.status_code == 200 and r.json()["updated"] == 0
+
+
 # ===========================================================================
 # L1-F31 -- one canonical provider number per Indian mobile
 # ===========================================================================

@@ -1281,9 +1281,11 @@ async def receive_msg91_delivery(request: Request):
     handler always did, AND records the spine event in message_events --
     the same shape the channel receiver below writes.
 
-    Fail-soft like the other receivers: over rate limit -> 429, missing
-    secret -> 200 skipped (so MSG91 won't hammer its retry queue), bad
-    signature -> 401, Mongo down -> 200.
+    Over rate limit -> 429, missing secret -> 200 skipped (so MSG91 won't
+    hammer its retry queue), bad signature -> 401. A report whose effects
+    could not be stored (Mongo down, a failed write) -> 503 so MSG91 resends:
+    this door has no inbox row for the hourly sweep to retry (L1-F26). A
+    report that matches no log row is still a plain 200.
     """
     _enforce_webhook_rate_limit(request, "msg91")
 
@@ -1337,6 +1339,18 @@ async def receive_msg91_delivery(request: Request):
             at=_first(body_obj, "timestamp", "date", "deliveredAt")
             or _first(data_obj, "timestamp", "date", "deliveredAt"),
         )
+        if applied.get("error"):
+            # L1-F26, this door: it keeps no inbox row, so nothing in IMS can
+            # retry for it. A report that could not be stored is not
+            # acknowledged -- 503 makes MSG91 resend (its retries are bounded),
+            # and the spine's (channel, id, event) dedupe makes the re-run safe.
+            logger.error(
+                "[WEBHOOKS] msg91 DLR request_id=%s NOT applied (%s) -- "
+                "returning 503 so the vendor retries",
+                request_id,
+                applied["error"],
+            )
+            raise HTTPException(status_code=503, detail="storage temporarily unavailable")
         canonical = applied["delivery_status"]
         updated = applied["logs_updated"]
     else:
