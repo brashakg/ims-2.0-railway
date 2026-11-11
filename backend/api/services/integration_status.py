@@ -26,6 +26,12 @@ keys and config field names, so a provider that renames a field can drift
 from this report without anything failing. Do not read this paragraph as a
 guarantee that the two cannot disagree - only the send gate is single-sourced.
 
+Shopify is the exception to both paragraphs (audit L1-F34): its row asks
+Shopify's own gate (nexus_providers.shopify_dispatch_mode, which
+SHOPIFY_DISPATCH_MODE can set apart from the messaging gate) and Shopify's own
+credential resolver (shopify_auth, by presence - no token is minted here).
+See _shopify_status.
+
 ASCII only (Windows cp1252).
 """
 
@@ -57,13 +63,18 @@ _REGISTRY: List[Dict[str, Any]] = [
         "id": "anthropic",
         "label": "Anthropic / Claude",
         "powers": "ORACLE narratives, JARVIS & CORTEX chat, agent copy",
-        "source": "env",
+        # integration_config.get_anthropic_config reads the saved key first,
+        # then the env var (L1-F34: this row said env-only).
+        "source": "env_or_collection",
         "env_required": ["ANTHROPIC_API_KEY"],
         "env_optional": [
             "AGENT_CLAUDE_MODEL",
             "ANTHROPIC_API_URL",
             "LLM_DEFAULT_MODEL",
         ],
+        "collection_type": "anthropic",
+        "collection_required": ["api_key"],
+        "collection_optional": ["model"],
         "dispatch_gated": False,
     },
     {
@@ -137,7 +148,20 @@ _REGISTRY: List[Dict[str, Any]] = [
         "id": "shopify",
         "label": "Shopify",
         "powers": "Catalog push / order pull (NEXUS)",
-        "source": "collection",
+        # Configured + gate come from Shopify's own resolver and gate
+        # (_shopify_status below), not from this row's key lists: those only
+        # feed the key-presence display. Listed in shopify_auth's order -
+        # OAuth client credentials, the saved token, a static env token.
+        "source": "env_or_collection",
+        "env_optional": [
+            "SHOPIFY_CLIENT_ID",
+            "SHOPIFY_CLIENT_SECRET",
+            "SHOPIFY_STORE_URL",
+            "SHOPIFY_ACCESS_TOKEN",
+            "SHOPIFY_ADMIN_TOKEN",
+            "SHOPIFY_DISPATCH_MODE",
+            "IMS_SHOPIFY_WRITES",
+        ],
         "collection_type": "shopify",
         "collection_required": ["shop_url", "access_token"],
         "dispatch_gated": True,
@@ -292,10 +316,56 @@ def _present_config_keys(
     return present
 
 
+_SHOPIFY_SOURCE_LABEL = {
+    "oauth": "OAuth client credentials (SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET)",
+    "vault": "the access token saved in Settings -> Integrations",
+    "env": "a static token in the environment (SHOPIFY_ACCESS_TOKEN / SHOPIFY_ADMIN_TOKEN)",
+}
+
+
+def _shopify_status(db) -> Dict[str, Any]:
+    """Shopify's row, asked of Shopify's own code (audit L1-F34).
+
+    mode: nexus_providers.shopify_dispatch_mode() - SHOPIFY_DISPATCH_MODE
+        overrides the global DISPATCH_MODE for Shopify writes, in either
+        direction, so the global gate says nothing reliable about Shopify.
+    configured: shopify_auth.shopify_credential_sources() - the resolver's
+        three paths by PRESENCE. No token is minted and nothing is called, so
+        "configured" is never "connection verified", and the note says so.
+    """
+    from agents.nexus_providers import ims_shopify_writes_enabled, shopify_dispatch_mode
+    from api.services.shopify_auth import shopify_credential_sources
+
+    sources = shopify_credential_sources(db)
+    notes: List[str] = []
+    if sources:
+        notes.append(
+            f"Signs in with {_SHOPIFY_SOURCE_LABEL[sources[0]]}. Presence only: "
+            "this screen does not test the connection."
+        )
+    if not ims_shopify_writes_enabled():
+        notes.append(
+            "Catalogue and stock pushes stay simulated until IMS_SHOPIFY_WRITES "
+            "is switched on; order intake follows the gate shown here."
+        )
+    return {
+        "configured": bool(sources),
+        "credential_source": sources[0] if sources else None,
+        "mode": shopify_dispatch_mode(),
+        "notes": " ".join(notes),
+    }
+
+
+# Rows whose configured / gate answer comes from the provider's own resolver
+# instead of the generic key lists.
+_PROVIDER_STATUS = {"shopify": _shopify_status}
+
+
 def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
     source = entry["source"]
     dispatch_gated = bool(entry.get("dispatch_gated"))
-    mode = _dispatch_mode()
+    provider = _PROVIDER_STATUS[entry["id"]](db) if entry["id"] in _PROVIDER_STATUS else {}
+    mode = provider.get("mode") or _dispatch_mode()
 
     out: Dict[str, Any] = {
         "id": entry["id"],
@@ -369,6 +439,10 @@ def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
         configured = coll_configured
     else:  # env_or_collection
         configured = env_configured or coll_configured
+    if provider:
+        configured = provider["configured"]
+        out["credential_source"] = provider["credential_source"]
+        out["notes"] = provider["notes"] or out["notes"]
     out["configured"] = configured
 
     if not configured:
