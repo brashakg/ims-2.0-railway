@@ -7,8 +7,9 @@
 // new Date(po.expectedDelivery).toLocaleDateString() on it and printed
 // "Invalid Date" for a perfectly valid order. One rule now (purchaseMappers
 // poDay): no date reads "Not set", a stored value that is not a date reads
-// "Unreadable date", a real one reads as the app's IST day -- the same day
-// whatever timezone the browser is in.
+// "Unreadable date", a real one reads exactly as it did before (the browser's
+// own short date) -- and a date-only value is the same day whatever timezone
+// the browser is in, in any browser (Safari reads only standard date strings).
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, within } from '@testing-library/react';
@@ -27,6 +28,13 @@ vi.mock('../../../components/print/storeIdentity', () => ({
 import { PurchaseTable } from '../PurchaseTable';
 import { PurchaseOrderDetail } from '../PurchaseOrderDetail';
 import { mapPOtoPurchaseOrder, poDay } from '../purchaseMappers';
+import { withStrictDate } from '../../../test/strictDate';
+
+/** A calendar day as this browser prints it -- what these screens always
+ *  showed for a real date (25/10/2026 on an Indian PC). */
+const shownDay = (y: number, m: number, d: number) => new Date(y, m - 1, d).toLocaleDateString();
+const OCT_20 = shownDay(2026, 10, 20);
+const OCT_25 = shownDay(2026, 10, 25);
 
 /** What GET /vendors/purchase-orders sends for one order. */
 const apiPO = (expected_date: unknown) => ({
@@ -44,8 +52,8 @@ const CASES: Array<[string, unknown, string]> = [
   ['null', null, 'Not set'],
   ['blank', '', 'Not set'],
   ['malformed', 'next week', 'Unreadable date'],
-  ['a date', '2026-10-25', '25 Oct 2026'],
-  ['a date and time', '2026-10-25T00:00:00', '25 Oct 2026'],
+  ['a date', '2026-10-25', OCT_25],
+  ['a date and time', '2026-10-25T00:00:00', OCT_25],
 ];
 
 afterEach(cleanup);
@@ -58,7 +66,7 @@ describe('APP-02: an undated purchase order never reads "Invalid Date"', () => {
       </MemoryRouter>,
     );
     expect(field(container, 'Expected Delivery')).toBe(shown);
-    expect(field(container, 'Order Date')).toBe('20 Oct 2026');
+    expect(field(container, 'Order Date')).toBe(OCT_20);
     expect(container.textContent).not.toMatch(/Invalid Date/);
   });
 
@@ -91,7 +99,7 @@ describe('APP-02: an undated purchase order never reads "Invalid Date"', () => {
       reader.readAsText(saved as unknown as Blob);
     });
     expect(text).toMatch(/Delivery\s+: Not set/);
-    expect(text).toMatch(/Date\s+: 20 Oct 2026/);
+    expect(text).toContain(`Date      : ${OCT_20}`);
     expect(text).not.toMatch(/Invalid Date/);
     click.mockRestore();
   });
@@ -101,10 +109,27 @@ describe('APP-02: an undated purchase order never reads "Invalid Date"', () => {
     try {
       for (const tz of ['Asia/Kolkata', 'America/Los_Angeles', 'Pacific/Kiritimati']) {
         process.env.TZ = tz;
-        expect(poDay('2026-10-25')).toBe('25 Oct 2026');
+        expect(poDay('2026-10-25')).toBe(shownDay(2026, 10, 25));
+        expect(poDay('2026-10-25')).toMatch(/\b25\b/);
       }
     } finally {
       process.env.TZ = was;
     }
+  });
+
+  it('a real date keeps the style these screens always had', () => {
+    // The fix is for the missing date only: how a real date is written
+    // (also on the copy a vendor may be sent) is not this change's to restyle.
+    expect(poDay('2026-10-25')).toBe(new Date('2026-10-25T00:00:00').toLocaleDateString());
+    expect(poDay('2026-10-25')).not.toMatch(/Oct/);
+  });
+
+  it('reads in a browser that parses only standard date strings (Safari)', () => {
+    withStrictDate(() => {
+      expect(poDay('2026-10-25')).toBe(shownDay(2026, 10, 25));
+      expect(poDay('2026-10-25T10:00:00')).toBe(shownDay(2026, 10, 25));
+      expect(poDay('next week')).toBe('Unreadable date');
+      expect(poDay('')).toBe('Not set');
+    });
   });
 });

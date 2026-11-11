@@ -6,7 +6,6 @@
 // Suppliers and Analytics sections.
 
 import { gstinStateCode } from '../../constants/gst';
-import { formatDateIST } from '../../utils/datetime';
 import type { POItem, POStatus, Supplier, PurchaseOrder } from './purchaseTypes';
 
 // ============================================================================
@@ -124,10 +123,13 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
 /** A purchase order's day as every screen and the downloaded copy print it.
  *  The expected delivery date is optional: none reads 'Not set', a stored
  *  value that is not a date reads 'Unreadable date' -- never "Invalid Date"
- *  (audit APP-02). A real one is the app's IST day, the same in any browser
- *  timezone. */
+ *  (audit APP-02). A real one is written as it always was (the browser's own
+ *  short date). A date-only value is a calendar day, not an instant: read at
+ *  local midnight it is the same day in any browser timezone. */
 export function poDay(value: string | null | undefined): string {
-  return value ? formatDateIST(value, 'Unreadable date') : 'Not set';
+  if (!value) return 'Not set';
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00` : value);
+  return Number.isNaN(d.getTime()) ? 'Unreadable date' : d.toLocaleDateString();
 }
 
 export const PRICE_NEEDED = 'Price needed';
