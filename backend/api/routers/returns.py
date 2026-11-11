@@ -317,6 +317,16 @@ def _order_line_index(order: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, An
     return {"by_item": by_item, "by_product": by_product}
 
 
+def _line_product_id(orig_line: Optional[Dict[str, Any]]) -> Optional[str]:
+    """THE IMS product an order line sold: an online line keeps Shopify's
+    product_id beside its ims_product_id; stock rows and return rows carry the
+    IMS one. None for a line that names no product (a fee, a made-to-order
+    line): nothing of it is tracked stock."""
+    line = orig_line or {}
+    pid = line.get("ims_product_id") or line.get("product_id")
+    return str(pid) if pid else None
+
+
 def _line_purchased_qty(line: Dict[str, Any]) -> float:
     """Purchased quantity on an original order line. Defensive -> 0 on bad input."""
     try:
@@ -548,7 +558,7 @@ def _units_already_back(
     docs = _already_returned_qty(
         order_id,
         orig_line.get("item_id") or orig_line.get("id"),
-        orig_line.get("ims_product_id") or orig_line.get("product_id"),
+        _line_product_id(orig_line),
         own_shopify_refund_id=own_shopify_refund_id,
     )
     if docs is None:
@@ -822,19 +832,71 @@ def _refuse_shipping_line(orig_line: Optional[Dict[str, Any]]) -> None:
         )
 
 
-def _refuse_counter_shipping(lines: List[ReturnLine], order: Optional[Dict[str, Any]]) -> None:
-    """The counter's shipping rule over a return's lines, matched as the
-    pricing matches them -- for the quote (the create runs it per resolved
-    line). The Shopify refund door prices through the same helpers and DOES
-    refund shipping, so the rule lives at the counter doors only."""
+def _returnable_lines(
+    lines: List[ReturnLine], order: Optional[Dict[str, Any]], order_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    """THE counter's eligibility rule for a return's lines, for the quote and
+    the create alike, so the quote never prices what the create refuses: every
+    line must be a line of the original sale (400), never a shipping line
+    (400), and its quantity never more than is still returnable -- purchased
+    less every unit already back (400, naming what is left; 503 when the
+    earlier returns cannot be read). Reads only: the create's atomic claim on
+    the order line still caps two presses racing each other.
+
+    Each line then takes its IDENTITY from the sale, never from the client:
+    the bill line's own id and product (the Returns screen sends no product,
+    so a GOOD piece was credited and left SOLD; a client-sent one could put
+    another product back in stock), and a blank sku / name is filled from the
+    line. Every later step -- pricing, the saved record, restock, quarantine,
+    the restock retry -- reads these lines, and matches them by the line id.
+
+    Returns ``[{"ret_line", "orig_line"}]`` in the lines' order."""
     idx = _order_line_index(order)
-    for ln in lines:
-        orig = None
-        if ln.order_item_id and str(ln.order_item_id) in idx["by_item"]:
-            orig = idx["by_item"][str(ln.order_item_id)]
-        elif ln.product_id and str(ln.product_id) in idx["by_product"]:
-            orig = idx["by_product"][str(ln.product_id)]
-        _refuse_shipping_line(orig)
+    resolved: List[Dict[str, Any]] = []
+    for ret_line in lines:
+        orig_line = _resolve_original_line(ret_line, idx)
+        if orig_line is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Return line does not match any line on the original order "
+                    f"(order_item_id={ret_line.order_item_id!r}, "
+                    f"product_id={ret_line.product_id!r}). Cannot refund an "
+                    "item that was not on this sale."
+                ),
+            )
+        _refuse_shipping_line(orig_line)
+        purchased = _line_purchased_qty(orig_line)
+        back = _units_already_back(order_id, orig_line)
+        if back is None:
+            raise HTTPException(
+                status_code=503,
+                detail=("Could not read this order's earlier returns just now - "
+                        "nothing was recorded. Try again."),
+            )
+        already = back[0]
+        remaining = round(purchased - already, 4)
+        if ret_line.return_qty > remaining + 1e-9:
+            name = (ret_line.product_name or orig_line.get("product_name")
+                    or orig_line.get("product_id"))
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Return quantity {ret_line.return_qty:g} exceeds the "
+                    f"returnable quantity {remaining:g} for '{name}' "
+                    f"(purchased {purchased:g}, already returned {already:g})."
+                ),
+            )
+        item_id = orig_line.get("item_id") or orig_line.get("id")
+        if item_id:
+            ret_line.order_item_id = str(item_id)
+            ret_line.product_id = _line_product_id(orig_line)
+        # (A legacy line with no id was matched BY its product: already its own.)
+        ret_line.sku = ret_line.sku or str(orig_line.get("sku") or "")
+        ret_line.product_name = ret_line.product_name or str(
+            orig_line.get("product_name") or orig_line.get("name") or "")
+        resolved.append({"ret_line": ret_line, "orig_line": orig_line})
+    return resolved
 
 
 def _priced_return_lines(
@@ -4023,7 +4085,9 @@ async def quote_return(
         raise HTTPException(status_code=400, detail="No returnable lines supplied")
 
     resolved_order_id = body.order_id or order.get("order_id")
-    _refuse_counter_shipping(active_lines, order)
+    # The create's own line rule: never a figure for a line or a quantity the
+    # create would refuse (a return made elsewhere since this form opened).
+    _returnable_lines(active_lines, order, resolved_order_id)
     priced_lines, gross_refund, refund_round_off = _price_return(
         active_lines, order, resolved_order_id
     )
@@ -4456,6 +4520,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # isinstance guard: when this endpoint is called directly (unit tests), the
     # default is the FastAPI Header(...) object, not a str -- don't .strip() it.
     idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
+    # Of the press AS SENT: taken before its lines take the sale's identity
+    # (_returnable_lines), so a retry of the same press matches it.
+    idem_fingerprint = _return_fingerprint(body) if idem_key else None
     if idem_key:
         try:
             coll = _returns_coll()
@@ -4612,49 +4679,14 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             ),
         )
 
-    line_idx = _order_line_index(order)
     resolved_order_id = body.order_id or order.get("order_id")
 
     # Resolve every line + validate the cumulative cap BEFORE touching money or
-    # claiming anything, so a bad line rejects with nothing reserved. Resolution
-    # is stashed for the atomic claim that runs only AFTER every 400/422 input
-    # check passes (so a validation error never leaves a phantom reservation).
-    resolved_lines: List[Dict[str, Any]] = []
-    for ret_line in active_lines:
-        orig_line = _resolve_original_line(ret_line, line_idx)
-        if orig_line is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Return line does not match any line on the original order "
-                    f"(order_item_id={ret_line.order_item_id!r}, "
-                    f"product_id={ret_line.product_id!r}). Cannot refund an "
-                    "item that was not on this sale."
-                ),
-            )
-        _refuse_shipping_line(orig_line)
-        purchased = _line_purchased_qty(orig_line)
-        product_id = orig_line.get("product_id")
-        back = _units_already_back(resolved_order_id, orig_line)
-        if back is None:
-            raise HTTPException(
-                status_code=503,
-                detail=("Could not read this order's earlier returns just now - "
-                        "nothing was recorded. Try again."),
-            )
-        already = back[0]
-        remaining = round(purchased - already, 4)
-        if ret_line.return_qty > remaining + 1e-9:
-            name = ret_line.product_name or orig_line.get("product_name") or product_id
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Return quantity {ret_line.return_qty:g} exceeds the "
-                    f"returnable quantity {remaining:g} for '{name}' "
-                    f"(purchased {purchased:g}, already returned {already:g})."
-                ),
-            )
-        resolved_lines.append({"ret_line": ret_line, "orig_line": orig_line})
+    # claiming anything, so a bad line rejects with nothing reserved (the rule
+    # the quote runs too). Resolution is stashed for the atomic claim that runs
+    # only AFTER every 400/422 input check passes (so a validation error never
+    # leaves a phantom reservation).
+    resolved_lines = _returnable_lines(active_lines, order, resolved_order_id)
 
     # 0b. SERIAL-MISMATCH HARD-BLOCK (E3 acceptance #8, return half). Runs after
     #     the quantity guard and BEFORE any money math / atomic claim, so a
@@ -5378,7 +5410,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # POS-14: stamp the idempotency key so a duplicate POST with the same key
         # is caught by the guard at the top of this handler without double-refunding.
         "idempotency_key": (idem_key or None),
-        "idempotency_fingerprint": _return_fingerprint(body) if idem_key else None,
+        "idempotency_fingerprint": idem_fingerprint,
     }
 
     coll = _returns_coll()

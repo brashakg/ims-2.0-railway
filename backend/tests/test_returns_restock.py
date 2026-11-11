@@ -299,13 +299,23 @@ class _FakeCustomerRepo:
 # against. The returns router now REQUIRES the return line to resolve to a real
 # original order line (over-refund guard), so each fake order is auto-seeded
 # with a generous line per identity (qty 100, returned_qty 0) unless the test
-# supplied its own items. Resolution prefers order_item_id, so product-id swaps
-# (PRD-NOPRIOR / PRD-FRESH-MINT keeping order_item_id=li1) still resolve.
+# supplied its own items. The piece that goes back is the BILL LINE's product
+# (L2-RETURN-F01), never one the client names beside another line's id, so
+# each product a test returns has its own line (_mint_line picks it).
 _DEFAULT_ORDER_ITEMS = [
     {"item_id": "li1", "product_id": "PRD-1", "quantity": 100, "returned_qty": 0},
     {"item_id": "li9", "product_id": "PRD-9", "quantity": 100, "returned_qty": 0},
     {"item_id": "li10", "product_id": "PRD-10", "quantity": 100, "returned_qty": 0},
+    {"item_id": "li-PRD-NOPRIOR", "product_id": "PRD-NOPRIOR", "quantity": 100, "returned_qty": 0},
+    {"item_id": "li-PRD-FRESH-MINT", "product_id": "PRD-FRESH-MINT", "quantity": 100, "returned_qty": 0},
+    {"item_id": "li-PRD-MINT-LINEAGE", "product_id": "PRD-MINT-LINEAGE", "quantity": 100, "returned_qty": 0},
 ]
+
+
+def _mint_line(payload, product_id):
+    """Point the payload's line at the bill line of a product that has no
+    stock row yet (so its return mints)."""
+    payload["items"][0].update(order_item_id=f"li-{product_id}", product_id=product_id)
 
 
 class _FakeOrdersColl:
@@ -536,7 +546,7 @@ def test_return_mints_when_no_original_unit(ctx):
     tok = _staff_token(["CASHIER"])
     # Product with no prior stock row -> must mint a fresh AVAILABLE unit.
     payload = _payload()
-    payload["items"][0]["product_id"] = "PRD-NOPRIOR"
+    _mint_line(payload, "PRD-NOPRIOR")
     r = ctx["client"].post(
         "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
     )
@@ -578,7 +588,7 @@ def test_return_mint_goes_through_the_one_minter(ctx, monkeypatch):
 
     monkeypatch.setattr(barcode_svc, "mint_unit_barcode", spy)
     payload = _payload()
-    payload["items"][0]["product_id"] = "PRD-NOPRIOR"
+    _mint_line(payload, "PRD-NOPRIOR")
     r = ctx["client"].post(
         "/api/v1/returns",
         json=payload,
@@ -1055,7 +1065,7 @@ def test_audit_row_written_on_mint(ctx):
     """The mint path emits an audit row recording None -> AVAILABLE (new unit)."""
     tok = _staff_token(["CASHIER"])
     payload = _payload()
-    payload["items"][0]["product_id"] = "PRD-FRESH-MINT"
+    _mint_line(payload, "PRD-FRESH-MINT")
     r = ctx["client"].post(
         "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
     )
@@ -1201,7 +1211,7 @@ def test_minted_return_unit_carries_returned_from_link(ctx):
     returned_from_order_id so its origin is auditable, and NO sold attribution."""
     tok = _staff_token(["CASHIER"])
     payload = _payload()
-    payload["items"][0]["product_id"] = "PRD-MINT-LINEAGE"
+    _mint_line(payload, "PRD-MINT-LINEAGE")
     r = ctx["client"].post(
         "/api/v1/returns", json=payload, headers={"Authorization": f"Bearer {tok}"}
     )

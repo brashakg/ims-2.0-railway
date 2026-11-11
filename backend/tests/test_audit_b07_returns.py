@@ -1,0 +1,241 @@
+"""
+IMS 2.0 - Codex audit batch b07 (returns): L2-RETURN-F01, RUN-03, L2-RETURN-F03
+===============================================================================
+L2-RETURN-F01  the Returns screen sends a line with no product; the GOOD piece
+               was credited and left SOLD, and the return said "stock applied".
+RUN-03         the quote priced a quantity the create then refused.
+L2-RETURN-F03  Needs completing told staff to put pieces back by hand even
+               when the kept record says they are already back.
+(L2-STOCK-F03, the barcode trace, is tested beside the till's own trace tests
+in test_till_records_scanned_unit.py.)
+
+The return door runs on the fakes of test_returns_restock (their order
+collection runs the real returnable-quantity claim); the recovery door on the
+StrictDB of the money-door suites. No emoji (cp1252).
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("MONGODB_URI", "")
+
+from tests.test_returns_restock import _hdr, _payload, ctx  # noqa: E402,F401
+
+pytestmark = pytest.mark.usefixtures("gst_numbers")
+
+
+# What ReturnsPage.buildPayload sends for one line: the bill line's id, never
+# a product_id (the screen's line model holds none).
+SCREEN_LINE = {
+    "order_item_id": "li1",
+    "product_name": "Ray-Ban Aviator",
+    "sku": "RB-1",
+    "return_qty": 1,
+    "unit_price": 500,
+    "gst_rate": 0,
+    "reason": "CUSTOMER_CHANGED_MIND",
+    "condition": "GOOD",
+    "notes": "",
+}
+
+
+def _screen(return_type="RETURN", **line):
+    return _payload(return_type=return_type, customer_id="CUST-1", items=[{**SCREEN_LINE, **line}])
+
+
+def _post(ctx, body, roles=("SALES_STAFF",), key=None, path=""):  # noqa: F811
+    return ctx["client"].post(f"/api/v1/returns{path}", json=body, headers=_hdr(list(roles), key=key))
+
+
+def _units(ctx):  # noqa: F811
+    return sorted((u["stock_id"], u["product_id"], u["status"]) for u in ctx["stock_repo"].units)
+
+
+def _line(ctx, item_id="li1"):  # noqa: F811
+    return next(i for i in ctx["order_repo"]._order["items"] if i["item_id"] == item_id)
+
+
+# =========================================================================== #
+# L2-RETURN-F01: the screen's line puts the GOOD piece back in stock
+# =========================================================================== #
+@pytest.mark.parametrize("return_type", ["RETURN", "CREDIT_NOTE"])
+def test_the_returns_screen_line_puts_the_good_piece_back_in_stock(ctx, return_type):  # noqa: F811
+    r = _post(ctx, _screen(return_type))
+    assert r.status_code == 201, r.text
+    data = r.json()
+    # The original unit, sellable again -- and nothing invented beside it.
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "AVAILABLE")]
+    assert data["restock_applied"] is True and data["restock_stock_ids"] == ["STK-OLD-1"]
+    saved = ctx["returns_coll"].docs[-1]
+    assert [(i["order_item_id"], i["product_id"]) for i in saved["items"]] == [("li1", "PRD-1")]
+    assert saved["restock_applied"] is True and saved["restock_stock_ids"] == ["STK-OLD-1"]
+    assert [(row["product_id"], row["reactivated"], row["minted"]) for row in saved["restocked"]] == [
+        ("PRD-1", 1, 0)]
+    # One unit transition, on the stock log, for this return.
+    assert [(a["stock_id"], a["prior_status"], a["new_status"], a["return_id"])
+            for a in ctx["stock_audit_coll"].docs] == [("STK-OLD-1", "SOLD", "AVAILABLE", data["return_id"])]
+    # One return booked on the bill line; one credit / refund, not two.
+    assert _line(ctx)["returned_qty"] == 1 and len(ctx["returns_coll"].docs) == 1
+    if return_type == "CREDIT_NOTE":
+        assert data["credit_amount"] == 500.0 and len(ctx["ledger_coll"].docs) == 1
+    else:
+        assert data["refund_amount"] == 500.0 and ctx["ledger_coll"].docs == []
+
+
+def test_a_damaged_piece_from_the_screen_is_set_aside_not_left_sold(ctx, monkeypatch):  # noqa: F811
+    import agents.registry as registry
+    from api.services import item_events as ie
+
+    async def _quiet(event, payload, source=""):
+        return None
+
+    monkeypatch.setattr(registry, "dispatch_event", _quiet)
+    monkeypatch.setattr(ie, "record_post_write_event", lambda db, **kw: None)
+    r = _post(ctx, _screen(condition="DAMAGED"), roles=("ADMIN",))
+    assert r.status_code == 201, r.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "QUARANTINED")]
+    saved = ctx["returns_coll"].docs[-1]
+    assert saved["quarantined_stock_ids"] == ["STK-OLD-1"] and saved["restock_stock_ids"] == []
+    assert saved["items"][0]["product_id"] == "PRD-1"
+
+
+def test_a_product_the_client_names_beside_the_line_never_decides_the_stock(ctx):  # noqa: F811
+    """The bill line is PRD-1. A request naming PRD-9 beside that line used to
+    mint a sellable PRD-9 piece nobody returned."""
+    r = _post(ctx, _screen(product_id="PRD-9"))
+    assert r.status_code == 201, r.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "AVAILABLE")]
+    assert ctx["returns_coll"].docs[-1]["items"][0]["product_id"] == "PRD-1"
+
+
+def test_a_line_with_no_product_on_the_bill_restocks_nothing(ctx):  # noqa: F811
+    """A fee / made-to-order line is not tracked stock: nothing is minted for
+    it, whatever product the request names."""
+    ctx["order_repo"]._order["items"].append(
+        {"item_id": "li-fee", "product_name": "Fitting", "quantity": 1, "returned_qty": 0})
+    r = _post(ctx, _screen(order_item_id="li-fee", product_id="PRD-9", product_name="Fitting", sku=""))
+    assert r.status_code == 201, r.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "SOLD")]
+    saved = ctx["returns_coll"].docs[-1]
+    assert saved["items"][0]["product_id"] is None and saved["restock_stock_ids"] == []
+
+
+def test_two_pieces_come_back_one_by_one_each_once_and_a_retry_moves_nothing(ctx):  # noqa: F811
+    ctx["stock_repo"].units.append({"stock_id": "STK-OLD-2", "product_id": "PRD-1", "store_id": "BV-PUN-01",
+                                    "status": "SOLD", "order_id": "ORD-1"})
+    _line(ctx)["quantity"] = 2
+    first = _post(ctx, _screen(), key="K-1")
+    assert first.status_code == 201, first.text
+    assert sorted(s for _, _, s in _units(ctx)) == ["AVAILABLE", "SOLD"]
+    # The same press again (a lost reply): the saved return, nothing moved.
+    again = _post(ctx, _screen(), key="K-1")
+    assert again.status_code == 201 and again.json()["_idempotent_replay"] is True, again.text
+    assert sorted(s for _, _, s in _units(ctx)) == ["AVAILABLE", "SOLD"]
+    second = _post(ctx, _screen(), key="K-2")
+    assert second.status_code == 201, second.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "AVAILABLE"), ("STK-OLD-2", "PRD-1", "AVAILABLE")]
+    assert sorted(first.json()["restock_stock_ids"] + second.json()["restock_stock_ids"]) == [
+        "STK-OLD-1", "STK-OLD-2"]
+    # Both pieces are back: a third is refused, and nothing is invented.
+    third = _post(ctx, _screen(), key="K-3")
+    assert third.status_code == 400 and "returnable quantity 0" in third.text, third.text
+    assert len(ctx["stock_repo"].units) == 2 and _line(ctx)["returned_qty"] == 2
+    assert len(ctx["returns_coll"].docs) == 2
+
+
+def test_an_online_line_returned_by_its_shop_product_restocks_the_ims_one_and_replays(ctx):  # noqa: F811
+    """An online bill line keeps Shopify's product id beside the IMS one; the
+    stock rows carry the IMS one. The press is fingerprinted as sent, so its
+    retry is still the same press after the line takes the sale's identity."""
+    ctx["order_repo"]._order["items"] = [
+        {"item_id": "li-web", "product_id": "SHOPIFY-777", "ims_product_id": "PRD-1", "quantity": 1,
+         "returned_qty": 0}]
+    body = _screen(order_item_id=None, product_id="SHOPIFY-777")
+    first = _post(ctx, body, key="K-WEB")
+    assert first.status_code == 201, first.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "AVAILABLE")]
+    saved_line = ctx["returns_coll"].docs[-1]["items"][0]
+    assert (saved_line["order_item_id"], saved_line["product_id"]) == ("li-web", "PRD-1")
+    again = _post(ctx, body, key="K-WEB")
+    assert again.status_code == 201 and again.json()["_idempotent_replay"] is True, again.text
+    assert len(ctx["returns_coll"].docs) == 1
+
+
+# =========================================================================== #
+# RUN-03: the quote never prices what the create refuses
+# =========================================================================== #
+def test_the_quote_names_what_is_left_after_a_return_made_elsewhere(ctx):  # noqa: F811
+    _line(ctx)["quantity"] = 3
+    # The form opens: all three are returnable.
+    opened = _post(ctx, _screen(return_qty=3), path="/quote")
+    assert opened.status_code == 200 and opened.json()["net_refund"] == 1500.0, opened.text
+    # Another till returns one meanwhile.
+    assert _post(ctx, _screen(return_qty=1)).status_code == 201
+    # The open form's quote refreshes: no payable figure, the remaining
+    # quantity named -- exactly what the create answers.
+    stale = _post(ctx, _screen(return_qty=3), path="/quote")
+    assert stale.status_code == 400, stale.text
+    assert "returnable quantity 2" in stale.text and "already returned 1" in stale.text
+    assert "net_refund" not in stale.text
+    create = _post(ctx, _screen(return_qty=3))
+    assert create.status_code == 400 and create.json()["detail"] == stale.json()["detail"]
+    # What is left still quotes and returns.
+    left = _post(ctx, _screen(return_qty=2), path="/quote")
+    assert left.status_code == 200 and left.json()["net_refund"] == 1000.0, left.text
+    # A quote reads only: nothing booked on the line, no return saved by it.
+    assert _line(ctx)["returned_qty"] == 1 and len(ctx["returns_coll"].docs) == 1
+    assert _post(ctx, _screen(return_qty=2)).status_code == 201
+    done = _post(ctx, _screen(return_qty=1), path="/quote")
+    assert done.status_code == 400 and "returnable quantity 0" in done.text
+
+
+def test_the_quote_refuses_a_line_that_is_not_on_the_sale_like_the_create(ctx):  # noqa: F811
+    body = _screen(order_item_id="li-not-on-this-bill")
+    quote, create = _post(ctx, body, path="/quote"), _post(ctx, body)
+    assert quote.status_code == create.status_code == 400
+    assert "does not match any line on the original order" in quote.text
+    assert quote.json()["detail"] == create.json()["detail"]
+    assert ctx["returns_coll"].docs == []
+
+
+# =========================================================================== #
+# L2-RETURN-F01: the read-only list of returns saved before the fix
+# =========================================================================== #
+def test_the_read_only_report_lists_old_returns_saved_without_a_product():
+    import copy
+
+    from scripts.count_returns_missing_product import returns_missing_product
+    from tests.strict_fakes import StrictDB
+
+    db = StrictDB()
+    db.get_collection("orders").insert_one({
+        "order_id": "ORD-1", "order_number": "BV-1",
+        "items": [{"item_id": "li1", "product_id": "P1", "quantity": 2}, {"item_id": "li-fee", "quantity": 1}]})
+
+    def _ret(rid, at, items, **over):
+        return {"return_id": rid, "order_id": "ORD-1", "store_id": "S1", "status": "COMPLETED",
+                "created_at": at, "restock_applied": True, "items": items, **over}
+
+    def _it(item="li1", product=None, condition="GOOD"):
+        return {"order_item_id": item, "product_id": product, "return_qty": 1.0, "condition": condition,
+                "restock": True}
+
+    returns = db.get_collection("returns")
+    returns.insert_one(_ret("RET-OLD", "2026-11-04T04:00:00+00:00", [_it(), _it("li-fee")]))
+    returns.insert_one(_ret("RET-DMG", "2026-11-05T04:00:00+00:00", [_it(condition="DAMAGED")]))
+    returns.insert_one(_ret("RET-OPENED", "2026-11-05T05:00:00+00:00", [_it(condition="OPENED")]))
+    returns.insert_one(_ret("RET-NEW", "2026-11-11T04:00:00+00:00", [_it(product="P1")]))
+    returns.insert_one(_ret("RET-WEB", "2026-11-06T04:00:00+00:00", [_it()], shopify_refund_id="77"))
+    before = copy.deepcopy([list(db.get_collection(n).find({})) for n in ("orders", "returns")])
+    assert returns_missing_product(db) == [
+        ("RET-OLD", "S1", "BV-1", "2026-11-04T04:00:00+00:00", "li1", "P1", 1.0, "GOOD"),
+        ("RET-DMG", "S1", "BV-1", "2026-11-05T04:00:00+00:00", "li1", "P1", 1.0, "DAMAGED"),
+    ]
+    assert [list(db.get_collection(n).find({})) for n in ("orders", "returns")] == before, "reads only"
