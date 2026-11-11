@@ -139,6 +139,39 @@ def _get_settings_collection(collection_name: str):
     return None
 
 
+def _save_singleton_settings(collection_name: str, settings: BaseModel, label: str) -> dict:
+    """Save one settings singleton as a PARTIAL update (audit L1-F05).
+
+    Only the fields the caller actually sent are written. The handlers used to
+    write `settings.model_dump()`, so a body that left a field out (the Tax,
+    Invoice and Printer screens sent `{}` after a failed read; the logo upload
+    sends only `logo_url`) replaced every other STORED value with the model
+    default. Model defaults now land only when the record is first created
+    ($setOnInsert), never over a value that is already saved. A body with no
+    known field is refused: nothing would be saved, so it must not say it was.
+    """
+    sent = settings.model_dump(exclude_unset=True)
+    if not sent:
+        raise HTTPException(
+            status_code=400,
+            detail=f"No {label.lower()} settings were sent, so nothing was saved.",
+        )
+    first_time = {k: v for k, v in type(settings)().model_dump().items() if k not in sent}
+    collection = _get_settings_collection(collection_name)
+    if collection is None:
+        return {
+            "message": f"{label} settings updated (no DB)",
+            "settings": {**first_time, **sent},
+        }
+    update: Dict[str, Any] = {"$set": sent}
+    if first_time:
+        update["$setOnInsert"] = first_time
+    collection.update_one({"_id": "default"}, update, upsert=True)
+    stored = collection.find_one({"_id": "default"}) or {}
+    stored.pop("_id", None)
+    return {"message": f"{label} settings updated", "settings": stored}
+
+
 def _get_business_settings_from_db() -> Optional[dict]:
     """Fetch business settings from database"""
     collection = _get_settings_collection("business_settings")
@@ -890,12 +923,7 @@ async def update_business_settings(
     """Update business settings (SUPERADMIN/ADMIN only)"""
     if not any(role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN"]):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    payload = settings.model_dump()
-    collection = _get_settings_collection("business_settings")
-    if collection is not None:
-        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
-        return {"message": "Business settings updated", "settings": payload}
-    return {"message": "Business settings updated (no DB)", "settings": payload}
+    return _save_singleton_settings("business_settings", settings, "Business")
 
 
 # Company logo upload constraints. Images only (no PDF) and a modest cap --
@@ -1058,12 +1086,7 @@ async def update_tax_settings(
         role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    payload = settings.model_dump()
-    collection = _get_settings_collection("tax_settings")
-    if collection is not None:
-        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
-        return {"message": "Tax settings updated", "settings": payload}
-    return {"message": "Tax settings updated (no DB)", "settings": payload}
+    return _save_singleton_settings("tax_settings", settings, "Tax")
 
 
 # ============================================================================
@@ -1090,12 +1113,7 @@ async def update_invoice_settings(
         role in current_user["roles"] for role in ["SUPERADMIN", "ADMIN", "ACCOUNTANT"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    payload = settings.model_dump()
-    collection = _get_settings_collection("invoice_settings")
-    if collection is not None:
-        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
-        return {"message": "Invoice settings updated", "settings": payload}
-    return {"message": "Invoice settings updated (no DB)", "settings": payload}
+    return _save_singleton_settings("invoice_settings", settings, "Invoice")
 
 
 # ============================================================================
@@ -1449,12 +1467,7 @@ async def update_printer_settings(
         for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
     ):
         raise HTTPException(status_code=403, detail="Insufficient permissions")
-    payload = settings.model_dump()
-    collection = _get_settings_collection("printer_settings")
-    if collection is not None:
-        collection.update_one({"_id": "default"}, {"$set": payload}, upsert=True)
-        return {"message": "Printer settings updated", "settings": payload}
-    return {"message": "Printer settings updated (no DB)", "settings": payload}
+    return _save_singleton_settings("printer_settings", settings, "Printer")
 
 
 @router.get("/printers/available")
