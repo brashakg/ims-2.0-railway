@@ -8,7 +8,7 @@ Indian salary structure with PF, ESI, PT, TDS deductions
 from api.utils.event_time import utc_now_iso
 
 from fastapi import APIRouter, Depends, Query, HTTPException, Body
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Literal
 from datetime import datetime, date, timedelta
 from calendar import monthrange
@@ -23,6 +23,7 @@ from .auth import get_current_user, require_roles
 from .points import self_only_rows
 from ..dependencies import store_in_view
 from ..dependencies import (
+    get_audit_repository,
     validate_store_access,
     resolve_store_scope,
     can_access_store_scoped,
@@ -1465,6 +1466,24 @@ class PayrollBatchAction(BaseModel):
     entity_id: Optional[str] = None
 
 
+class PayrollDiscardDraft(BaseModel):
+    """Discard DRAFT payroll rows for one month: one employee's, or every
+    draft of one shop. Exactly one of the two must be named."""
+
+    month: int = Field(..., ge=1, le=12)
+    year: int = Field(..., ge=2000, le=2100)
+    employee_id: Optional[str] = None
+    store_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _one_employee_or_one_shop(self):
+        if bool(self.employee_id) == bool(self.store_id):
+            raise ValueError(
+                "Name one employee, or one shop, whose payroll draft to discard."
+            )
+        return self
+
+
 def _incentive_feed_for_store(db, store_id: Optional[str], month: int, year: int) -> dict:
     """{staff_id: rupees} from the LOCKED/PAID payout snapshot for a store-month.
 
@@ -1844,6 +1863,122 @@ async def lock_payroll(
         raise HTTPException(
             status_code=500, detail="Payroll lock failed. Please try again."
         )
+
+
+@router.post("/discard-draft")
+async def discard_payroll_draft(
+    req: PayrollDiscardDraft,
+    current_user: dict = Depends(get_current_user),
+):
+    """Remove DRAFT payroll rows: one employee's, or every draft of one shop,
+    for one month. ADMIN / SUPERADMIN only.
+
+    Decided 2026-11-11 (D15, audit L3-02 follow-up). A month cannot be locked
+    while a payroll row is a draft, and a draft is rewritten only by a rerun,
+    which covers ACTIVE salary setups. A draft whose setup was switched off
+    afterwards was therefore stuck: the only way out was to approve a figure
+    known to be wrong. A draft is never a cost (the P&L, Tally and the PF file
+    count APPROVED and PAID rows only), so removing one cannot lose money.
+
+    An APPROVED or PAID row is never removed (409), nothing is removed in a
+    locked month (423), and every removed draft leaves an audit-log row: who,
+    which employee, which month, the draft's net figure. No trace, no discard.
+    """
+    _assert_salary_admin(current_user, "discard a payroll draft")
+    db = _get_db()
+    if not db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    from .finance import check_period_locked
+
+    check_period_locked(db, date(req.year, req.month, 1))
+    not_recorded = (
+        "The discard could not be written to the audit log, so nothing was "
+        "discarded. Please try again."
+    )
+    audit_repo = get_audit_repository()
+    if audit_repo is None:
+        raise HTTPException(status_code=503, detail=not_recorded)
+
+    period = {"month": req.month, "year": req.year}
+    whose = (
+        {"employee_id": req.employee_id}
+        if req.employee_id
+        else {"store_id": req.store_id}
+    )
+    payroll_coll = db.get_collection("payroll")
+    rows = list(payroll_coll.find({**period, **whose}))
+    drafts = [r for r in rows if r.get("status") == "DRAFT"]
+    if not drafts:
+        posted = sorted(
+            {r.get("status") for r in rows if r.get("status") in POSTED_PAYROLL_STATUSES}
+        )
+        if posted:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Payroll for {req.month}/{req.year} is already "
+                f"{' / '.join(posted)} here, not a draft. Only a draft can be "
+                "discarded: an approved or paid salary stays in the books.",
+            )
+        raise HTTPException(
+            status_code=404,
+            detail=f"There is no payroll draft to discard for {req.month}/{req.year}.",
+        )
+
+    discarded = []
+    for row in drafts:
+        emp = row.get("employee_id")
+        # Guarded on DRAFT: a row approved in the same moment is left alone.
+        gone = payroll_coll.delete_one({"employee_id": emp, **period, "status": "DRAFT"})
+        if getattr(gone, "deleted_count", 0) != 1:
+            continue
+        name = row.get("employee_name") or _get_employee_details(db, emp).get(
+            "full_name", ""
+        )
+        logged = audit_repo.create(
+            {
+                "action": "PAYROLL_DRAFT_DISCARDED",
+                "entity_type": "PAYROLL",
+                "entity_id": row.get("payroll_id"),
+                "store_id": row.get("store_id"),
+                "user_id": current_user.get("user_id"),
+                "user_name": current_user.get("full_name")
+                or current_user.get("username"),
+                "timestamp": datetime.utcnow(),
+                "severity": "WARNING",
+                "source": "domain",
+                "description": f"Discarded the payroll draft of {name or emp} for "
+                f"{req.month}/{req.year} (net {row.get('net_salary')})",
+                "detail": {
+                    "employee_id": emp,
+                    "employee_name": name,
+                    "entity_id": row.get("entity_id"),
+                    "month": req.month,
+                    "year": req.year,
+                    "net_salary": row.get("net_salary"),
+                },
+            }
+        )
+        if logged is None:
+            payroll_coll.insert_one(row)  # put the draft back: no trace, no discard
+            raise HTTPException(
+                status_code=500,
+                detail=not_recorded
+                if not discarded
+                else f"The discard of {name or emp} could not be written to the "
+                f"audit log, so that draft was kept. {len(discarded)} draft(s) "
+                "before it were discarded and logged. Please try again.",
+            )
+        # The old code kept a copy of a payroll row in ``payslips`` under the
+        # row's own id, and the payslip doors fall back to that collection when
+        # the month has no payroll row: without this the discarded figure would
+        # come back as the employee's payslip. A payslip made from the legacy
+        # salary records has its own id and is not touched.
+        if row.get("payroll_id"):
+            db.get_collection("payslips").delete_many(
+                {"employee_id": emp, **period, "payslip_id": row["payroll_id"]}
+            )
+        discarded.append({"employee_id": emp, "employee_name": name})
+    return {"status": "success", "discarded": len(discarded), "employees": discarded}
 
 
 # ============================================================================

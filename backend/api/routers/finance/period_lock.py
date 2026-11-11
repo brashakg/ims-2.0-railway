@@ -63,8 +63,9 @@ async def lock_period(
             409,
             f"Payroll for {month}/{year} is still a draft for {len(drafts)} "
             f"employee(s) (shop: {shops}). Approve it in HR > Payroll Run "
-            "first, then lock the month. A locked month cannot be approved "
-            "later, so its wages would never be counted.",
+            "first (or discard the draft there if it is wrong), then lock the "
+            "month. A locked month cannot be approved later, so its wages "
+            "would never be counted.",
         )
 
     # The same loss by the likelier order of events: the books are closed in
