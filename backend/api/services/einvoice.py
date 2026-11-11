@@ -164,8 +164,8 @@ def _seller(db, order: Dict[str, Any]):
 
 def _customer(db, order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The order's customer record as the GST returns read it (its state and
-    GSTIN, for the place of supply); None for a walk-in. A failed read raises:
-    the caller refuses rather than guess the buyer's state."""
+    GSTIN, for the place of supply and the buyer GSTIN); None for a walk-in.
+    A failed read raises: the caller refuses rather than guess the buyer."""
     cid = order.get("customer_id")
     if not cid:
         return None
@@ -197,11 +197,17 @@ def _build_einvoice_json(
     head rule reads for the buyer's state on an invoice minted before that was
     stamped on the order.
 
-    NOT settled here (owner / CA, before any switch-on): how a line's price
-    and discount are SHOWN (UnitPrice / Discount, and the header Discount).
-    They are read exactly as before this fix -- the stored unit price and
-    discount -- so a discounted or GST-inclusive line does not yet satisfy the
-    IRP's own TotAmt = Qty x UnitPrice and AssAmt = TotAmt - Discount checks.
+    Decision D2 (Claude under the owner's delegation, 2026-11-11; to confirm
+    with the CA before e-invoicing is ever enabled):
+      * a line shows its NET unit price (after every discount, GST taken out)
+        with Discount 0, and the header Discount is 0 -- the discount is
+        already inside each line's taxable value, so the IRP's own TotAmt =
+        Qty x UnitPrice and AssAmt = TotAmt - Discount always hold and the
+        e-invoice equals the bill and GSTR-1;
+      * the buyer GSTIN is GSTR-1's own rule (gst_base._invoice_gstin): the
+        GSTIN frozen on the order at the mint, else -- an invoice older than
+        that stamp -- the customer record's. The IRN and the return can never
+        disagree on B2B vs B2C.
 
     Returns a dict. RAISES ValueError (gst_base.UnfileableOrder) for an order
     the returns cannot file either -- an unreadable amount, a line with no GST
@@ -209,6 +215,7 @@ def _build_einvoice_json(
     (generate_irn answers FAILED, as it does a bill with no taxable value).
     """
     from api.routers.reports.gst_base import (
+        _invoice_gstin,
         _money,
         _order_rate_lines,
         _order_supply,
@@ -224,8 +231,9 @@ def _build_einvoice_json(
         # amount the IRP is sent is the amount GSTR-1 files, never a silent 0.
         return round(_money(val, order), 2)
 
-    # Supply type: B2B when the order carries a buyer GSTIN, else B2C.
-    cust_gstin = _s(order.get("customer_gstin") or order.get("billing_gstin"))
+    # Supply type: B2B when GSTR-1 files this sale under a buyer GSTIN, else
+    # B2C -- THE returns' rule, never a second reading of the order.
+    cust_gstin = _s(_invoice_gstin(order, (customer or {}).get("gstin") or ""))
     supply_type = "B2B" if cust_gstin else "B2C"
 
     # Document identity
@@ -288,11 +296,11 @@ def _build_einvoice_json(
                 "HsnCd": _s(hsn),
                 "Qty": qty,
                 "Unit": "PCS",
-                # Price / discount as stored (unchanged; see the docstring):
-                # their presentation waits for the owner / CA.
-                "UnitPrice": _n(src.get("unit_price")) or round(l_taxable / qty, 2),
+                # Decision D2: the NET unit price (3 decimals, the IRP's
+                # precision), no discount shown -- it is inside l_taxable.
+                "UnitPrice": round(l_taxable / qty, 3),
                 "TotAmt": l_taxable,
-                "Discount": _n(src.get("discount") or src.get("discount_amount")),
+                "Discount": 0.0,
                 "AssAmt": l_taxable,
                 "GstRt": round(float(head["rate"]), 2),
                 "IgstAmt": l_igst,
@@ -317,7 +325,7 @@ def _build_einvoice_json(
         "IgstVal": round(sum(r["IgstAmt"] for r in rows), 2),
         "CesVal": 0.0,
         "StCesVal": 0.0,
-        "Discount": _n(order.get("discount_total")),  # as stored (see the docstring)
+        "Discount": 0.0,  # decision D2: already inside every line's AssAmt
         "OthChrg": 0.0,
         # The bill's stored round off (owner ruling 2026-10-08): the IRP's own
         # field, so TotInvVal (the rounded total) = AssVal + taxes + RndOffAmt

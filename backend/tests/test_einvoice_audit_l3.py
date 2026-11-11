@@ -96,18 +96,22 @@ def _heads(row, keys=("CgstAmt", "SgstAmt", "IgstAmt")):
 
 
 def _assert_irp_arithmetic(payload):
-    """The taxable and tax figures reconcile: the header is the sum of its
-    lines on every head, each line's value is its assessable + tax, and the
-    invoice value is assessable + tax + round off. (How UnitPrice / Discount
-    are SHOWN on a line is an owner / CA choice still open -- not asserted.)"""
+    """The IRP's own checks: the header is the sum of its lines on every head;
+    on each line TotAmt = Qty x UnitPrice, AssAmt = TotAmt - Discount and the
+    line value is its assessable + tax; the invoice value is assessable + tax
+    - header Discount + round off. Decision D2 (2026-11-11): a line shows its
+    NET unit price with Discount 0, so these hold for every bill."""
     val, lines = payload["ValDtls"], payload["ItemList"]
     for head, line_key in (("AssVal", "AssAmt"), ("CgstVal", "CgstAmt"), ("SgstVal", "SgstAmt"),
                            ("IgstVal", "IgstAmt")):
         assert val[head] == round(sum(ln[line_key] for ln in lines), 2), head
     for ln in lines:
+        assert abs(ln["Qty"] * ln["UnitPrice"] - ln["TotAmt"]) < 0.01, ln
+        assert ln["AssAmt"] == round(ln["TotAmt"] - ln["Discount"], 2), ln
         assert ln["TotItemVal"] == round(ln["AssAmt"] + _heads(ln), 2)
     assert val["TotInvVal"] == round(
-        val["AssVal"] + val["CgstVal"] + val["SgstVal"] + val["IgstVal"] + val["RndOffAmt"], 2
+        val["AssVal"] + val["CgstVal"] + val["SgstVal"] + val["IgstVal"]
+        - val["Discount"] + val["RndOffAmt"], 2
     )
 
 
@@ -176,6 +180,85 @@ def test_l3_19_an_interstate_order_goes_out_as_igst_to_its_own_place_of_supply()
     assert payload["BuyerDtls"]["Pos"] == "27" and payload["BuyerDtls"]["Gstin"] == MH_GSTIN
     assert payload["TranDtls"]["SupTyp"] == "B2B" and payload["SellerDtls"]["Stcd"] == "20"
     _assert_irp_arithmetic(payload)
+
+
+# -- Decision D2 (Claude, under the owner's delegation, 2026-11-11) ----------
+# Q1-A: a line shows its NET unit price (after every discount, GST taken out)
+# with Discount 0. Q2-A: the buyer GSTIN is GSTR-1's own rule.
+
+# Three pieces at an MRP of Rs 1,000 with Rs 301 off the line: a discounted,
+# GST-inclusive line whose stored unit price is NOT its taxable value.
+DISCOUNTED = {"product_name": "Frame", "item_type": "FRAME", "category": "FRAME", "hsn_code": "9003",
+              "quantity": 3, "unit_price": 1000.0, "discount_amount": 301.0, "discount": 301.0,
+              "item_total": 2699.0}
+
+
+def test_l3_19_each_line_shows_the_net_unit_price_and_no_discount():
+    """The stored MRP and stored discount went out beside the correct taxable
+    value, so the IRP's own TotAmt = Qty x UnitPrice and AssAmt = TotAmt -
+    Discount could not hold for a discounted or GST-inclusive line. Each line
+    now shows the bill's net price, and no discount is shown twice."""
+    order = _till_order([DISCOUNTED, SUNGLASS], cart_discount_pct=10.0)
+    assert order["discount_total"] > 301.0  # a line discount AND a cart discount are in play
+    payload = einvoice._build_einvoice_json(order, STORE)
+    val, lines = payload["ValDtls"], payload["ItemList"]
+
+    for ln, item in zip(lines, order["items"]):
+        assert (ln["TotAmt"], ln["Discount"], ln["AssAmt"]) == (
+            item["taxable_value"], 0.0, item["taxable_value"])
+        assert ln["UnitPrice"] == round(item["taxable_value"] / item["quantity"], 3)
+        assert ln["UnitPrice"] < item["unit_price"]  # net of discount and of GST
+    # The discount is already inside every line: a header discount would take it twice.
+    assert val["Discount"] == 0.0
+    assert val["TotInvVal"] == order["grand_total"]  # still the bill
+    _assert_irp_arithmetic(payload)
+
+
+OLD_BUYER = {"customer_id": "CUST-B2B", "name": "Old Buyer Pvt Ltd", "gstin": MH_GSTIN,
+             "state_code": "20"}
+OTHER_GSTIN = "20CCCCC9999C1Z7"
+
+
+@pytest.mark.parametrize("stamp, record, expected", [
+    # an invoice older than the stamp: the customer record, as GSTR-1 reads it
+    ({}, OLD_BUYER, MH_GSTIN),
+    # minted B2C (a blank stamp): a GSTIN added to the record later changes nothing
+    ({"customer_gstin": ""}, OLD_BUYER, ""),
+    # minted B2B: the frozen GSTIN, never the record as edited since
+    ({"customer_gstin": OTHER_GSTIN}, OLD_BUYER, OTHER_GSTIN),
+    # no stamp and no record (a walk-in): unregistered
+    ({}, None, ""),
+    ({}, {"customer_id": "CUST-B2C", "name": "Consumer"}, ""),
+])
+def test_l3_19_the_buyer_gstin_is_the_one_gstr1_files(stamp, record, expected):
+    """One rule (gst_base._invoice_gstin) names the buyer for the IRN and for
+    GSTR-1, so the two can never disagree on B2B vs B2C."""
+    from api.routers.reports.gst_base import _invoice_gstin
+
+    order = _till_order([FRAME], customer_id="CUST-B2B", **stamp)
+    payload = einvoice._build_einvoice_json(order, STORE, record)
+
+    assert _invoice_gstin(order, (record or {}).get("gstin", "")) == expected  # GSTR-1's answer
+    assert payload["BuyerDtls"]["Gstin"] == (expected or "URP")
+    assert payload["TranDtls"]["SupTyp"] == ("B2B" if expected else "B2C")
+    _assert_irp_arithmetic(payload)
+
+
+@pytest.mark.asyncio
+async def test_l3_19_an_old_b2b_bill_reaches_the_provider_with_the_customers_gstin(monkeypatch):
+    """Through the real door (generate_irn reads the customer record itself):
+    an invoice with no GSTIN stamp goes out B2B to its customer's GSTIN. The
+    provider is a stub; nothing leaves this process."""
+    order = _till_order([FRAME], customer_id="CUST-B2B")
+    assert "customer_gstin" not in order
+    db = _db(order, [_creds(JH_GSTIN)])
+    db.seed("customers", [dict(OLD_BUYER)])
+    out, calls = await _generate_with_stubbed_provider(monkeypatch, db, order)
+
+    assert out["status"] == einvoice.STATUS_GENERATED and len(calls) == 1
+    sent = out["einvoice_json"]
+    assert (sent["BuyerDtls"]["Gstin"], sent["TranDtls"]["SupTyp"]) == (MH_GSTIN, "B2B")
+    _assert_irp_arithmetic(sent)
 
 
 def _decimal128(text):
