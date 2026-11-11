@@ -18,7 +18,12 @@ A line is RESELLABLE only when ALL of these hold:
   * the per-line `restock` flag is truthy (defaults True; lets the till
     explicitly suppress restock even for a GOOD-looking unit)
   * return_qty rounds to >= 1 unit
-  * the line carries a product_id (we cannot mint a unit without one)
+  * the line carries a product_id (we cannot mint a unit without one), and
+    it is not a virtual till item (no stock row ever left for one)
+
+It also holds THE rule for which bill lines take a serialized stock unit at
+all (takes_serialized_stock): the sale asks it before claiming a unit, the
+return before putting one back.
 
 Everything takes plain dicts/values and returns plain dicts so it is trivially
 testable and never touches Mongo.
@@ -32,15 +37,79 @@ from typing import Any, Dict, List, Optional
 RESELLABLE_CONDITION = "GOOD"
 
 
+# Item types / product_id prefixes that have NO serialized stock to mark sold.
+# SERVICE = labour line (eg fitting); EYE_TEST/etc = a clinical consultation line
+# (GST-exempt SAC 9993, see gst_rates.py) -- a service, not a stocked good;
+# custom-/lens-/lens-sug- = virtual POS items the configurator/suggestion helper
+# generates on the fly. These never carry a stock_unit row, so trying to
+# mark_sold them is a no-op (not an error).
+VIRTUAL_PID_PREFIXES = ("custom-", "lens-", "lens-sug-")
+NON_SERIALIZED_ITEM_TYPES = {
+    "SERVICE",
+    "EYE_TEST",
+    "EYE_EXAM",
+    "EYE_CHECKUP",
+    "CONSULT",
+    "CONSULTATION",
+    "OPTOMETRY",
+}
+
+# Item types whose stock is reserved by the LENS hook (reserve_for_order_item),
+# NOT by the serialized stock_units availability gate.
+LENS_RESERVED_ITEM_TYPES = {"LENS"}
+
+
+def takes_serialized_stock(line: dict) -> bool:
+    """Does this order line consume a SERIALIZED stock_units row?
+
+    THE single predicate for that question. It previously existed three times,
+    written three slightly different ways, and they drifted: the availability
+    assert and the line-release both excluded LENS lines while _mark_units_sold
+    did NOT. POSLayout maps OPTICAL_LENS to item_type 'LENS' and sends the REAL
+    catalog product_id, so a stock-lens line had its unit flipped SOLD on the
+    way in, was never availability-checked, and was never released when the line
+    was removed -- stranded permanently once the order reached DELIVERED.
+
+    Reserved-by-the-lens-hook lines and non-stocked service lines are excluded;
+    so are virtual POS ids that have no stock_units row at all.
+
+    It lives here (a service) so the return side asks the same question
+    (line_stock_product_id): a line that took no unit puts none back.
+    """
+    if not isinstance(line, dict):
+        return False
+    item_type = (line.get("item_type") or "").upper()
+    if (
+        item_type in NON_SERIALIZED_ITEM_TYPES
+        or item_type in LENS_RESERVED_ITEM_TYPES
+    ):
+        return False
+    pid = line.get("product_id") or ""
+    if not pid or pid.startswith(VIRTUAL_PID_PREFIXES):
+        return False
+    return True
+
+
 def line_product_id(order_line: Optional[Dict[str, Any]]) -> Optional[str]:
-    """THE IMS product a bill line sold -- the product of the stock rows a
-    return of that line puts back. An online line keeps Shopify's product_id
-    beside its ims_product_id; stock rows and return rows carry the IMS one.
-    None for a line that names no product (a fee, a made-to-order line):
-    nothing of it is tracked stock."""
+    """THE IMS product a bill line names -- the line's identity in the return
+    books. An online line keeps Shopify's product_id beside its
+    ims_product_id; stock rows and return rows carry the IMS one. None for a
+    line that names no product (a fee)."""
     line = order_line or {}
     pid = line.get("ims_product_id") or line.get("product_id")
     return str(pid) if pid else None
+
+
+def line_stock_product_id(order_line: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The product of the stock rows a return of this bill line puts back or
+    sets aside: line_product_id, for a line whose sale took a stock unit
+    (takes_serialized_stock). None for every other line -- a lens, a service,
+    an eye test, a virtual till item, a fee: no unit left for it, so none is
+    put back, set aside or minted."""
+    pid = line_product_id(order_line)
+    if pid and takes_serialized_stock({**order_line, "product_id": pid}):
+        return pid
+    return None
 
 
 def _truthy_restock_flag(line: Dict[str, Any]) -> bool:
@@ -77,8 +146,8 @@ def should_restock(line: Dict[str, Any]) -> bool:
     """True iff this returned line should be put back into sellable stock.
 
     Resellable = GOOD condition AND restock flag truthy AND >=1 whole unit AND
-    a product_id is present. Defensive: any malformed / missing field makes the
-    answer False rather than raising.
+    a product_id is present that is not a virtual till item. Defensive: any
+    malformed / missing field makes the answer False rather than raising.
     """
     if not isinstance(line, dict):
         return False
@@ -87,7 +156,8 @@ def should_restock(line: Dict[str, Any]) -> bool:
         return False
     if not _truthy_restock_flag(line):
         return False
-    if not line.get("product_id"):
+    pid = line.get("product_id")
+    if not pid or str(pid).startswith(VIRTUAL_PID_PREFIXES):
         return False
     return _unit_count(line) > 0
 
@@ -177,6 +247,8 @@ def _skip_reason(line: Dict[str, Any]) -> str:
         return "RESTOCK_OPTED_OUT"
     if not line.get("product_id"):
         return "NO_PRODUCT_ID"
+    if str(line.get("product_id")).startswith(VIRTUAL_PID_PREFIXES):
+        return "NOT_STOCK"
     if _unit_count(line) <= 0:
         return "ZERO_QTY"
     return "NOT_RESELLABLE"

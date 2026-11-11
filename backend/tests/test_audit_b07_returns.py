@@ -131,6 +131,79 @@ def test_a_line_with_no_product_on_the_bill_restocks_nothing(ctx):  # noqa: F811
     assert saved["items"][0]["product_id"] is None and saved["restock_stock_ids"] == []
 
 
+# The till's own shapes for a bill line that takes NO stock unit at the sale
+# (the sale's one rule, restock_engine.takes_serialized_stock): a manual Rx
+# lens ("lens-<stamp>", LensDetailsModal), a catalogue lens (its stock is the
+# lens grid's), a service, an eye test, a custom item.
+NOT_STOCK_LINES = [("LENS", "lens-1731300000000"), ("LENS", "PRD-LENS-1"), ("SERVICE", "PRD-FIT"),
+                   ("EYE_TEST", "PRD-EXAM"), ("ACCESSORY", "custom-55")]
+
+
+@pytest.mark.parametrize("condition", ["GOOD", "DAMAGED"])
+@pytest.mark.parametrize("item_type,product", NOT_STOCK_LINES)
+def test_a_line_that_took_no_stock_unit_at_the_sale_puts_none_back(ctx, item_type, product, condition):  # noqa: F811
+    """Such a line carries a product id on the bill, but no stock row left
+    for it: its return used to MINT a sellable unit per piece."""
+    ctx["order_repo"]._order["items"].append({
+        "item_id": "li-x", "item_type": item_type, "product_id": product, "product_name": "Rx lens",
+        "quantity": 2, "returned_qty": 0})
+    # The screen's payload, then a client that names the product itself.
+    for extra in ({}, {"product_id": product}):
+        r = _post(ctx, _screen(order_item_id="li-x", condition=condition, product_name="Rx lens", sku="",
+                               **extra), roles=("ADMIN",))
+        assert r.status_code == 201, r.text
+        # Not one stock row invented, moved or set aside.
+        assert _units(ctx) == [("STK-OLD-1", "PRD-1", "SOLD")]
+        saved = ctx["returns_coll"].docs[-1]
+        assert (saved["items"][0]["order_item_id"], saved["items"][0]["product_id"]) == ("li-x", None)
+        assert saved["restocked"] == [] and saved["restock_stock_ids"] == []
+        assert saved["quarantined_stock_ids"] == []
+    # No unit transition on the stock log; the return itself stands.
+    assert ctx["stock_audit_coll"].docs == []
+    assert _line(ctx, "li-x")["returned_qty"] == 2 and len(ctx["returns_coll"].docs) == 2
+
+
+def test_a_legacy_line_with_no_id_that_took_no_stock_keeps_its_product_and_restocks_nothing(ctx):  # noqa: F811
+    """A bill line with no id is matched BY its product, so the saved row
+    keeps it (the returnable-quantity book reads it) -- and moves no stock."""
+    ctx["order_repo"]._order["items"] = [
+        {"item_type": "LENS", "product_id": "PRD-LENS-1", "product_name": "Stock lens", "quantity": 1}]
+    body = _screen(order_item_id=None, product_id="PRD-LENS-1", product_name="Stock lens", sku="")
+    r = _post(ctx, body)
+    assert r.status_code == 201, r.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "SOLD")]
+    saved = ctx["returns_coll"].docs[-1]
+    assert saved["items"][0]["product_id"] == "PRD-LENS-1" and saved["items"][0]["restock"] is False
+    assert saved["restock_stock_ids"] == []
+    again = _post(ctx, body)
+    assert again.status_code == 400 and "returnable quantity 0" in again.text, again.text
+
+
+def test_the_restock_plan_never_plans_a_unit_for_a_virtual_till_item():
+    """Every door plans through restock_engine (the create, the restock retry
+    of a record saved earlier, the Shopify refund): a virtual till id is
+    never stock, whatever line carries it."""
+    from api.services import restock_engine
+
+    plan = restock_engine.plan_restock([
+        {"product_id": pid, "condition": "GOOD", "return_qty": 2}
+        for pid in ("lens-1731300000000", "lens-sug-4", "custom-55")])
+    assert plan["unit_count"] == 0 and plan["units"] == []
+    assert {row["reason"] for row in plan["skipped"]} == {"NOT_STOCK"}
+    # The sale and the return ask ONE rule which lines take a stock unit.
+    from api.routers.orders import _takes_serialized_stock
+
+    assert _takes_serialized_stock is restock_engine.takes_serialized_stock
+    for item_type, product in NOT_STOCK_LINES:
+        line = {"item_type": item_type, "product_id": product}
+        assert restock_engine.line_stock_product_id(line) is None, line
+        assert restock_engine.line_product_id(line) == product  # still the line's identity
+    assert restock_engine.line_stock_product_id({"item_type": "FRAME", "product_id": "PRD-1"}) == "PRD-1"
+    # An online line: Shopify's product id beside the IMS one the stock rows carry.
+    assert restock_engine.line_stock_product_id(
+        {"item_type": "SUNGLASS", "product_id": None, "ims_product_id": "PRD-1"}) == "PRD-1"
+
+
 def test_two_pieces_come_back_one_by_one_each_once_and_a_retry_moves_nothing(ctx):  # noqa: F811
     ctx["stock_repo"].units.append({"stock_id": "STK-OLD-2", "product_id": "PRD-1", "store_id": "BV-PUN-01",
                                     "status": "SOLD", "order_id": "ORD-1"})
@@ -310,7 +383,11 @@ def test_the_read_only_report_lists_old_returns_saved_without_a_product():
     db = StrictDB()
     db.get_collection("orders").insert_one({
         "order_id": "ORD-1", "order_number": "BV-1",
-        "items": [{"item_id": "li1", "product_id": "P1", "quantity": 2}, {"item_id": "li-fee", "quantity": 1}]})
+        "items": [{"item_id": "li1", "product_id": "P1", "quantity": 2}, {"item_id": "li-fee", "quantity": 1},
+                  # Never stock: a manual Rx lens, a catalogue lens, a service.
+                  {"item_id": "li-rx", "item_type": "LENS", "product_id": "lens-1731300000000", "quantity": 2},
+                  {"item_id": "li-cat", "item_type": "LENS", "product_id": "PRD-LENS-1", "quantity": 2},
+                  {"item_id": "li-svc", "item_type": "SERVICE", "product_id": "PRD-FIT", "quantity": 1}]})
 
     def _ret(rid, at, items, **over):
         return {"return_id": rid, "order_id": "ORD-1", "store_id": "S1", "status": "COMPLETED",
@@ -321,7 +398,8 @@ def test_the_read_only_report_lists_old_returns_saved_without_a_product():
                 "restock": True}
 
     returns = db.get_collection("returns")
-    returns.insert_one(_ret("RET-OLD", "2026-11-04T04:00:00+00:00", [_it(), _it("li-fee")]))
+    returns.insert_one(_ret("RET-OLD", "2026-11-04T04:00:00+00:00", [
+        _it(), _it("li-fee"), _it("li-rx"), _it("li-cat"), _it("li-svc")]))
     returns.insert_one(_ret("RET-DMG", "2026-11-05T04:00:00+00:00", [_it(condition="DAMAGED")]))
     returns.insert_one(_ret("RET-OPENED", "2026-11-05T05:00:00+00:00", [_it(condition="OPENED")]))
     returns.insert_one(_ret("RET-NEW", "2026-11-11T04:00:00+00:00", [_it(product="P1")]))

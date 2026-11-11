@@ -8,7 +8,8 @@ piece was never set aside, while the return said its stock was dealt with.
 New returns take the product from the bill line.
 
 This lists every completed counter return holding such a line whose bill line
-DOES name a product, so each piece can be checked against stock. Nothing is
+is a STOCK piece (its sale took a stock unit; a lens, a service or a custom
+till item never did), so each piece can be checked against stock. Nothing is
 written and nothing is corrected: any correction of stored returns or stock
 needs the owner's separate approval.
 
@@ -28,7 +29,7 @@ def returns_missing_product(db):
     product_id on the bill, qty, condition)] -- reads only."""
     # A service, never a router: a script must run without the app's login
     # secret (test_scripts_need_no_app_secret).
-    from api.services.restock_engine import line_product_id
+    from api.services.restock_engine import line_stock_product_id
 
     rows = []
     orders = db.get_collection("orders")
@@ -45,7 +46,8 @@ def returns_missing_product(db):
         by_item = {str(ln.get("item_id") or ln.get("id")): ln
                    for ln in order.get("items") or [] if isinstance(ln, dict)}
         for it in lines:
-            product = line_product_id(by_item.get(str(it.get("order_item_id") or "")))
+            # None for a line that never took a stock unit (a lens, a service).
+            product = line_stock_product_id(by_item.get(str(it.get("order_item_id") or "")))
             if product:
                 rows.append((doc.get("return_id"), doc.get("store_id"),
                              doc.get("order_number") or order.get("order_number"), doc.get("created_at"),

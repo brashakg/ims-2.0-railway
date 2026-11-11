@@ -834,11 +834,14 @@ def _returnable_lines(
     the order line still caps two presses racing each other.
 
     Each line then takes its IDENTITY from the sale, never from the client:
-    the bill line's own id and product (the Returns screen sends no product,
-    so a GOOD piece was credited and left SOLD; a client-sent one could put
-    another product back in stock), and a blank sku / name is filled from the
-    line. Every later step -- pricing, the saved record, restock, quarantine,
-    the restock retry -- reads these lines, and matches them by the line id.
+    the bill line's own id and STOCK product (the Returns screen sends no
+    product, so a GOOD piece was credited and left SOLD; a client-sent one
+    could put another product back in stock), and a blank sku / name is
+    filled from the line. A line whose sale took no stock unit (a lens, a
+    service, a virtual till item: restock_engine.line_stock_product_id) names
+    no product, so nothing is put back, set aside or minted for it. Every
+    later step -- pricing, the saved record, restock, quarantine, the restock
+    retry -- reads these lines, and matches them by the line id.
 
     Returns ``[{"ret_line", "orig_line"}]`` in the lines' order."""
     idx = _order_line_index(order)
@@ -878,10 +881,14 @@ def _returnable_lines(
                 ),
             )
         item_id = orig_line.get("item_id") or orig_line.get("id")
+        stock_product = restock_engine.line_stock_product_id(orig_line)
         if item_id:
             ret_line.order_item_id = str(item_id)
-            ret_line.product_id = restock_engine.line_product_id(orig_line)
-        # (A legacy line with no id was matched BY its product: already its own.)
+            ret_line.product_id = stock_product
+        elif not stock_product:
+            # A legacy line with no id was matched BY its product and keeps it
+            # (the returnable-quantity book reads it); it still moves no stock.
+            ret_line.restock = False
         ret_line.sku = ret_line.sku or str(orig_line.get("sku") or "")
         ret_line.product_name = ret_line.product_name or str(
             orig_line.get("product_name") or orig_line.get("name") or "")
