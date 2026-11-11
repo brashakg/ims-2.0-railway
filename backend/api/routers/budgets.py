@@ -204,6 +204,41 @@ def _expense_actuals_by_category(
     return out
 
 
+def plan_and_actuals(store_id: Optional[str], period: str):
+    """``(planned_by_head, actual_by_head)`` for a shop-month -- THE one read of
+    a budget. ``store_id`` None = every shop (an admin with no shop picked).
+
+    Budgeting (/budgets/variance) and the Finance Dashboard's Budgets tab
+    (/finance/budget) both build from these two maps, so a plan saved on one
+    screen cannot read differently on the other (audit L3-15: the dashboard
+    used to look for a document shape nobody writes and always said "no budget
+    set"). Nothing is withheld here: each caller applies the payroll-head rule
+    to these SOURCE maps before deriving anything from them."""
+    planned_by_head: Dict[str, float] = {}
+    coll = _budgets_collection()
+    if coll is not None:
+        flt: Dict[str, Any] = {"period": period}
+        if store_id:
+            flt["store_id"] = store_id
+        try:
+            for r in coll.find(flt):
+                head = r.get("head")
+                if not head:
+                    continue
+                planned_by_head[head] = planned_by_head.get(head, 0.0) + float(
+                    r.get("planned_amount") or 0.0
+                )
+        except Exception:
+            planned_by_head = {}
+
+    # Actuals are derived, never stored.
+    actual_by_head: Dict[str, float] = {}
+    actual_by_head[REVENUE_HEAD] = round(_revenue_actual(store_id, period), 2)
+    for cat, amt in _expense_actuals_by_category(store_id, period).items():
+        actual_by_head[cat] = round(amt, 2)
+    return planned_by_head, actual_by_head
+
+
 def _variance(planned: float, actual: float) -> float:
     return round(actual - planned, 2)
 
@@ -387,29 +422,8 @@ async def budget_variance(
     store_id = store_in_view(store_id, current_user)
     period = _validate_period(period)
 
-    # ---- planned lines for this (store, period) -------------------------
-    planned_by_head: Dict[str, float] = {}
-    coll = _budgets_collection()
-    if coll is not None:
-        flt: Dict[str, Any] = {"period": period}
-        if store_id:
-            flt["store_id"] = store_id
-        try:
-            for r in coll.find(flt):
-                head = r.get("head")
-                if not head:
-                    continue
-                planned_by_head[head] = planned_by_head.get(head, 0.0) + float(
-                    r.get("planned_amount") or 0.0
-                )
-        except Exception:
-            planned_by_head = {}
-
-    # ---- actuals (derived, never stored) --------------------------------
-    actual_by_head: Dict[str, float] = {}
-    actual_by_head[REVENUE_HEAD] = round(_revenue_actual(store_id, period), 2)
-    for cat, amt in _expense_actuals_by_category(store_id, period).items():
-        actual_by_head[cat] = round(amt, 2)
+    # ---- planned lines + derived actuals for this (store, period) -------
+    planned_by_head, actual_by_head = plan_and_actuals(store_id, period)
 
     # ---- the payroll strip, applied BEFORE anything is derived ----------
     #

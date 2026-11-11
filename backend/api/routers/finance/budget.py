@@ -5,11 +5,12 @@ package split): no path, method, dependency, status code, response_model
 or default was changed.
 """
 
-from datetime import datetime
 from ...utils.ist import now_ist, now_ist_naive
 from typing import Optional
 from fastapi import Depends, Query
 from ..auth import get_current_user
+from .. import budgets as _budgets
+from ...dependencies import store_in_view
 from ...services.salary_visibility import is_salary_admin
 from ._shared import _get_db, _require_finance_admin, router
 from .pnl import _is_payroll_shaped_expense
@@ -23,61 +24,51 @@ async def get_budget(
     mode: str = Query("full", pattern="^(full|survival)$"),
     month: Optional[int] = None,
     year: Optional[int] = None,
+    store_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    db = _get_db()
     now = now_ist()
     m = month or now.month
     y = year or now.year
+    period = f"{y:04d}-{m:02d}"
+    # The shop rule every store-level finance read shares: a shop login reads
+    # its own shop; an admin reads the shop he picked, or every shop.
+    shop = store_in_view(store_id, current_user)
 
-    budget = db.get_collection("budgets").find_one(
-        {"month": m, "year": y, "mode": mode}, {"_id": 0}
-    )
-    if not budget:
-        # No budget configured for this period -- return an honest empty
-        # skeleton (budget=0 for all categories) rather than fabricated
-        # allocation numbers. The UI should prompt the user to set a budget.
-        budget = {
-            "month": m,
-            "year": y,
-            "mode": mode,
-            "no_budget_set": True,
-            "categories": {
-                "rent": {"budget": 0, "actual": 0},
-                "salaries": {"budget": 0, "actual": 0},
-                "utilities": {"budget": 0, "actual": 0},
-                "marketing": {"budget": 0, "actual": 0},
-                "inventory": {"budget": 0, "actual": 0},
-                "miscellaneous": {"budget": 0, "actual": 0},
-            },
-        }
-
-    # Fill actuals from expenses. Expenses are dated on `expense_date`
-    # (date-only 'YYYY-MM-DD' string), NOT `date`; the old field name + datetime
-    # isoformat boundary matched nothing. Use date-only string bounds to match
-    # the stored values.
-    start = datetime(y, m, 1)
-    end = datetime(y, m + 1 if m < 12 else 1, 1) if m < 12 else datetime(y + 1, 1, 1)
-    actuals = list(
-        db.get_collection("expenses").aggregate(
-            [
-                {
-                    "$match": {
-                        "expense_date": {
-                            "$gte": start.date().isoformat(),
-                            "$lt": end.date().isoformat(),
-                        },
-                        "status": {"$in": ["APPROVED", "PAID", "approved", "paid"]},
-                    }
-                },
-                {"$group": {"_id": "$category", "total": {"$sum": "$amount"}}},
-            ]
-        )
-    )
-    for a in actuals:
-        cat = a["_id"].lower() if a["_id"] else "miscellaneous"
-        if cat in budget.get("categories", {}):
-            budget["categories"][cat]["actual"] = a["total"]
+    # ONE BUDGET, ONE READER (audit L3-15). The plan is whatever the Budgeting
+    # page saved -- one row per (shop, YYYY-MM, head) -- read through the same
+    # function Budgeting's own variance view uses, so the two screens cannot
+    # disagree. This used to look up a {month, year, mode} document that no
+    # code has ever written, so the Budgets tab said "no budget set" beside a
+    # saved plan; and it summed every shop's expenses for any reader.
+    planned, actual = _budgets.plan_and_actuals(shop, period)
+    heads = (set(planned) | set(actual)) - {_budgets.REVENUE_HEAD}
+    budget = {
+        "month": m,
+        "year": y,
+        "mode": mode,
+        "store_id": shop,
+        "period": period,
+        "categories": {
+            h: {
+                "budget": round(float(planned.get(h, 0.0)), 2),
+                "actual": round(float(actual.get(h, 0.0)), 2),
+            }
+            for h in sorted(heads)
+        },
+        # The income target is not an allocation to spend, so it sits beside
+        # the expense heads rather than among them.
+        "revenue": {
+            "budget": round(float(planned.get(_budgets.REVENUE_HEAD, 0.0)), 2),
+            "actual": round(float(actual.get(_budgets.REVENUE_HEAD, 0.0)), 2),
+        },
+    }
+    if not planned:
+        # Nothing planned for this shop-month: say so, and still name the usual
+        # heads at zero (never fabricated allocations) so the tab is not blank.
+        budget["no_budget_set"] = True
+        for h in ("rent", "salaries", "utilities", "marketing", "inventory", "miscellaneous"):
+            budget["categories"].setdefault(h, {"budget": 0, "actual": 0})
 
     if mode == "survival":
         # N8: this branch used to be DEAD -- the budgets writer never stores a
@@ -100,7 +91,9 @@ async def get_budget(
         survival_now = now_ist_naive()
         # The ONE shop rule (F63), as GET /finance/survival-cashflow: a shop's
         # accountant reads their own shop's AP, income and expenses here too.
-        survival = _build_survival_payload(db, survival_now, **_survival_scope(None, current_user))
+        survival = _build_survival_payload(
+            _get_db(), survival_now, **_survival_scope(None, current_user)
+        )
         budget["survival"] = survival
         budget["survival_as_of"] = survival["as_of"]
         budget["survival_month"] = f"{survival_now.year:04d}-{survival_now.month:02d}"
