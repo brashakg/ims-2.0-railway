@@ -94,6 +94,14 @@ export function PayrollLayout() {
     loadSalarySheet();
   }, [selectedMonth, selectedYear, user?.activeStoreId]);
 
+  // The picked employee belongs to the shop they were picked in. The shop
+  // switches in place (no page reload), so drop the pick with it: the Advances
+  // and Payslips sections show nothing until someone on the new shop's list is
+  // picked, instead of the previous shop's employee under the new shop's list.
+  useEffect(() => {
+    setSelectedEmployee('');
+  }, [user?.activeStoreId]);
+
   const loadSalarySheet = async () => {
     setIsLoading(true);
     setError(null);

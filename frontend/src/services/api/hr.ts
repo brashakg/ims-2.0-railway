@@ -439,6 +439,8 @@ export interface MyPayslip {
   employee_name?: string;
   month?: number;
   year?: number;
+  /** The payroll row's status: DRAFT / APPROVED / PAID. */
+  status?: string;
   breakdown?: Record<string, unknown> & {
     gross_salary?: number;
     total_deductions?: number;

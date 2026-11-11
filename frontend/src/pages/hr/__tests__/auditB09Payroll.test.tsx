@@ -178,16 +178,26 @@ describe('L3-07 My Work: View / Download opens the payslip, not an empty tab', (
    *  null (the HTML standard), which is exactly how the old code lost its tab. */
   function stubWindowOpen(blocked = false) {
     const written: string[] = [];
-    const popup = { document: { write: (h: string) => written.push(h), close: vi.fn() } };
+    // The new tab, as far as the page uses it: the written HTML is parsed into
+    // a real document so the page can find its button, and print() is spied.
+    const tab = { doc: document.implementation.createHTMLDocument('') };
+    const popup = {
+      print: vi.fn(),
+      document: {
+        write: (h: string) => { written.push(h); tab.doc = new DOMParser().parseFromString(h, 'text/html'); },
+        close: vi.fn(),
+        querySelector: (sel: string) => tab.doc.querySelector(sel),
+      },
+    };
     const open = vi.spyOn(window, 'open').mockImplementation((_url, _target, features) =>
       (blocked || String(features || '').includes('noopener') ? null : popup) as unknown as Window,
     );
-    return { open, written };
+    return { open, written, popup, tab };
   }
 
-  async function clickDownload() {
+  async function clickDownload(slip = SLIP) {
     currentUser = { id: 'emp-A', name: 'Sunil Kumar', roles: ['SALES_STAFF'], activeStoreId: 'ZZ-STORE' };
-    getMyPayslip.mockResolvedValue(SLIP);
+    getMyPayslip.mockResolvedValue(slip);
     render(<EmployeeSelfService />);
     fireEvent.click(await screen.findByRole('button', { name: /View \/ Download/ }));
   }
@@ -204,6 +214,33 @@ describe('L3-07 My Work: View / Download opens the payslip, not an empty tab', (
     expect(html).not.toContain('<b>Sunil</b>');
     expect(html).toContain('ZZ &#60;b&#62;Sunil&#60;/b&#62;');
     expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  // The live site's Content-Security-Policy (frontend/vercel.json: script-src
+  // 'self', no 'unsafe-inline') refuses inline handlers, and the new tab
+  // inherits that policy: an onclick="window.print()" button did nothing.
+  it('the Print button works without any inline script in the new tab', async () => {
+    const { written, popup, tab } = stubWindowOpen();
+    await clickDownload();
+    expect(written.join('')).not.toMatch(/\son[a-z]+\s*=|<script/i);
+    expect(popup.print).not.toHaveBeenCalled();
+    const button = tab.doc.querySelector('button')!;
+    expect(button.textContent).toBe('Print / Save as PDF');
+    button.click();
+    expect(popup.print).toHaveBeenCalledTimes(1);
+  });
+
+  // A payroll row is shown to its employee from the moment it is saved as a
+  // draft; the card and the printed slip must say which it is.
+  it.each([
+    ['PAID', 'Paid'],
+    ['APPROVED', 'Approved'],
+    ['DRAFT', 'Draft - not yet approved'],
+  ])('a %s payslip says so on the card and on the printed slip', async (status, label) => {
+    const { written } = stubWindowOpen();
+    await clickDownload({ payslip: { ...SLIP.payslip, status } });
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(written.join('')).toContain(label);
   });
 
   it('says so when the browser blocks the pop-up, instead of doing nothing', async () => {

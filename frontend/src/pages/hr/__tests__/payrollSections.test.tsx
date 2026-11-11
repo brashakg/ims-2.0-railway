@@ -12,9 +12,9 @@
 // the ones that must stay red if anyone widens SALARY_ROLES or drops the
 // allowedRoles from the /hr/payroll route.
 
-import { Suspense } from 'react';
+import { Suspense, useSyncExternalStore } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
@@ -24,9 +24,22 @@ vi.stubGlobal('requestIdleCallback', () => 0);
 
 let currentRoles: string[] = [];
 
+// The active shop changes IN PLACE in the real app (AuthContext.setActiveStore,
+// no page reload), so the mock lets a test switch it under a mounted screen.
+let currentStoreId = 'ZZ-STORE';
+const storeListeners = new Set<() => void>();
+const subscribeStore = (l: () => void) => { storeListeners.add(l); return () => { storeListeners.delete(l); }; };
+function switchShop(storeId: string) {
+  currentStoreId = storeId;
+  storeListeners.forEach((l) => l());
+}
+
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
-    user: { id: 'u-1', roles: currentRoles, activeStoreId: 'ZZ-STORE' },
+    user: {
+      id: 'u-1', roles: currentRoles,
+      activeStoreId: useSyncExternalStore(subscribeStore, () => currentStoreId),
+    },
     isAuthenticated: true,
     isLoading: false,
     // Real AuthContext.hasRole semantics: SUPERADMIN/ADMIN pass every gate,
@@ -103,6 +116,7 @@ const PAYSLIP = {
 };
 
 beforeEach(() => {
+  currentStoreId = 'ZZ-STORE';
   get.mockReset();
   get.mockImplementation(async (url: string) => {
     if (url === '/payroll/salary-sheet') return { data: SHEET };
@@ -244,6 +258,50 @@ describe('payslips: the payslip follows the month and year selectors', () => {
     expect(screen.getByText(`March ${year}`)).toBeInTheDocument();
     expect(screen.getByText('₹15,000')).toBeInTheDocument();
     expect(screen.queryByText('₹17,650')).not.toBeInTheDocument();
+  });
+
+  // Audit L3-24, the fourth selector: the shop. The picked employee belongs to
+  // the shop they were picked in; their payslip stayed on screen under a picker
+  // that already listed the new shop's staff.
+  it('changing the shop clears the picked employee and takes their payslip off the screen', async () => {
+    const OTHER_SHOP = { salaries: [{ ...SHEET.salaries[0], employee_id: 'EMP-9', employee_name: 'ZZ Other Shop' }] };
+    get.mockImplementation(async (url: string, config?: { params?: { store_id?: string } }) => {
+      if (url === '/payroll/salary-sheet') {
+        return { data: config?.params?.store_id === 'ZZ-STORE-B' ? OTHER_SHOP : SHEET };
+      }
+      if (url.startsWith('/payroll/payslip/EMP-1/')) return { data: slipFor(2, year, 17650) };
+      if (url.startsWith('/payroll/advances/')) return { data: ADVANCES };
+      throw new Error(`unexpected GET ${url}`);
+    });
+    renderRoute('/hr/payroll/payslips', ['ADMIN']);
+    const picker = await screen.findByTitle('Select employee for payslip', undefined, FIND);
+    expect(await screen.findByRole('option', { name: 'ZZ Priya Sheet' })).toBeInTheDocument();
+    fireEvent.change(picker, { target: { value: 'EMP-1' } });
+    expect(await screen.findByText('₹17,650')).toBeInTheDocument();
+
+    act(() => switchShop('ZZ-STORE-B'));
+    expect(await screen.findByRole('option', { name: 'ZZ Other Shop' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'ZZ Priya Sheet' })).not.toBeInTheDocument();
+    expect(picker).toHaveValue('');
+    expect(screen.queryByText('₹17,650')).not.toBeInTheDocument();
+    expect(screen.queryByText('EARNINGS')).not.toBeInTheDocument();
+
+    // The same pick is dropped on Advances: no other shop's advances on screen.
+    fireEvent.click(navButton('Advances')!);
+    expect(await screen.findByTitle('Select employee for advances', undefined, FIND)).toHaveValue('');
+    expect(screen.queryByText('Pending')).not.toBeInTheDocument();
+  });
+
+  // The payload has always carried the payroll row's status; the screen never
+  // showed it, so an unapproved draft read like a final payslip.
+  it.each([
+    ['DRAFT', 'Draft - not yet approved'],
+    ['APPROVED', 'Approved'],
+    ['PAID', 'Paid'],
+  ])('a %s payslip says so', async (status, label) => {
+    await openSlip((month, y) => ({ payslip: { ...slipFor(month, y, 17650).payslip, status } }));
+    expect(await screen.findByText('₹17,650')).toBeInTheDocument();
+    expect(screen.getByText(label)).toBeInTheDocument();
   });
 
   it('an employee picked on Advances has their payslip loaded when Payslips opens', async () => {
