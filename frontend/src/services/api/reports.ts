@@ -41,6 +41,10 @@ export interface DayEndClose {
   till_link_ok?: boolean;
   till_link_error?: string | null;
   till_already_counted?: boolean;
+  /** The drawer was already counted at the till; closing_cash is THAT
+   *  count, not the figure typed on the Day-End screen. */
+  counted_from_shared_record?: boolean;
+  till_count_differs?: boolean;
   till_counted?: boolean;
   till_opening_float_not_recorded?: boolean;
   notes: string | null;

@@ -517,6 +517,15 @@ export default function DayEndReport() {
                       </>
                     )}
                   </p>
+                  {/* One drawer, one count: the till's blind count is the close.
+                      Say so, or a figure the closer did not type appears
+                      unexplained (audit L3-12). */}
+                  {closeInfo.counted_from_shared_record && (
+                    <p className="text-xs text-amber-700 mt-1" data-testid="day-end-count-from-till">
+                      This drawer was already counted at the Cash Register. That count stands; the
+                      amount entered here was not used.
+                    </p>
+                  )}
                   {closeInfo.notes && <p className="text-xs text-gray-500 mt-1 italic">{closeInfo.notes}</p>}
                 </>
               ) : (
