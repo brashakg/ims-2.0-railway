@@ -16,7 +16,6 @@ import {
   type CampaignSummary,
   type CampaignAnalytics,
   type Segment,
-  type ScheduleKind,
 } from '../../services/api/marketing';
 import { getErrorMessage } from '../../utils/errorHandler';
 
@@ -251,6 +250,14 @@ export function CampaignManager() {
                     </span>
                   </div>
 
+                  {campaign.schedule && campaign.schedule.kind !== 'ONE_TIME' &&
+                    (campaign.status === 'SCHEDULED' || campaign.status === 'ACTIVE' || campaign.status === 'PAUSED') && (
+                    <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2 text-sm mb-3">
+                      This campaign has a {campaign.schedule.kind === 'RECURRING' ? 'repeating' : 'triggered'} schedule,
+                      which does not run by itself. It sends only when someone presses Send now.
+                    </p>
+                  )}
+
                   <div className="grid grid-cols-2 tablet:grid-cols-4 gap-2 mb-3 pb-3 border-b border-gray-200">
                     <Metric label="Audience" value={campaign.audience_count} />
                     <Metric label="Sent" value={campaign.sent_count} />
@@ -351,9 +358,11 @@ function CampaignBuilder({
   const [segmentKey, setSegmentKey] = useState<string>('rx_expiry');
   const [channels, setChannels] = useState<string[]>(['WHATSAPP']);
   const [templateId, setTemplateId] = useState<string>('PRESCRIPTION_EXPIRY');
-  const [scheduleKind, setScheduleKind] = useState<ScheduleKind | 'NONE'>('NONE');
+  // Only a one-time schedule exists (audit L1-F28): nothing on the server
+  // runs a repeating or event-triggered campaign, so the builder does not
+  // offer them and the server refuses them.
+  const [scheduleKind, setScheduleKind] = useState<'ONE_TIME' | 'NONE'>('NONE');
   const [sendAt, setSendAt] = useState('');
-  const [frequency, setFrequency] = useState('WEEKLY');
   const [estimate, setEstimate] = useState<number | null>(null);
   const [estimating, setEstimating] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -397,9 +406,7 @@ function CampaignBuilder({
 
   const buildSchedule = () => {
     if (scheduleKind === 'NONE') return undefined;
-    if (scheduleKind === 'ONE_TIME') return { kind: 'ONE_TIME' as const, send_at: sendAt ? new Date(sendAt).toISOString() : undefined };
-    if (scheduleKind === 'RECURRING') return { kind: 'RECURRING' as const, frequency };
-    return { kind: 'TRIGGERED' as const, trigger_event: segmentKey };
+    return { kind: 'ONE_TIME' as const, send_at: sendAt ? new Date(sendAt).toISOString() : undefined };
   };
 
   const validate = (): string | null => {
@@ -542,15 +549,16 @@ function CampaignBuilder({
             <label className="block text-gray-900 font-semibold mb-2">Schedule</label>
             <select
               value={scheduleKind}
-              onChange={(e) => setScheduleKind(e.target.value as ScheduleKind | 'NONE')}
+              onChange={(e) => setScheduleKind(e.target.value as 'ONE_TIME' | 'NONE')}
               className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900"
               title="Schedule kind"
             >
               <option value="NONE">No schedule (save as draft / send manually)</option>
               <option value="ONE_TIME">One-time (specific date/time)</option>
-              <option value="RECURRING">Recurring</option>
-              <option value="TRIGGERED">Triggered (on the segment event)</option>
             </select>
+            <p className="text-gray-500 text-xs mt-2">
+              Repeating and event-triggered campaigns are not available yet.
+            </p>
             {scheduleKind === 'ONE_TIME' && (
               <div className="mt-3">
                 <label className="block text-gray-700 text-sm mb-1">Send at</label>
@@ -562,24 +570,6 @@ function CampaignBuilder({
                   title="Send at"
                 />
               </div>
-            )}
-            {scheduleKind === 'RECURRING' && (
-              <div className="mt-3">
-                <label className="block text-gray-700 text-sm mb-1">Frequency</label>
-                <select
-                  value={frequency}
-                  onChange={(e) => setFrequency(e.target.value)}
-                  className="w-full bg-white border border-gray-300 rounded px-3 py-2 text-gray-900"
-                  title="Frequency"
-                >
-                  <option value="DAILY">Daily</option>
-                  <option value="WEEKLY">Weekly</option>
-                  <option value="MONTHLY">Monthly</option>
-                </select>
-              </div>
-            )}
-            {scheduleKind === 'TRIGGERED' && (
-              <p className="text-gray-500 text-xs mt-2">Will fire when a customer matches the "{segmentKey}" event (actioned by the MEGAPHONE agent).</p>
             )}
           </div>
 
