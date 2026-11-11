@@ -286,6 +286,15 @@ def test_the_quote_refuses_a_line_that_is_not_on_the_sale_like_the_create(ctx): 
 # L2-RETURN-F03: the recovery message follows the record's own stock state
 # =========================================================================== #
 OLD_BLANKET = "Put its units back in stock by hand"
+BILL_LINES = [{"item_id": "li1", "item_type": "FRAME", "product_id": "P1", "sku": "F1", "quantity": 2},
+              {"item_id": "li2", "item_type": "FRAME", "product_id": "P2", "sku": "F2", "quantity": 1},
+              {"item_id": "li-lens", "item_type": "LENS", "product_id": "lens-17", "quantity": 2}]
+
+
+def _item(item="li1", product="P1", sku="F1", qty=2.0, condition="GOOD", restock=True):
+    return {"order_item_id": item, "product_id": product, "sku": sku, "product_name": "Frame",
+            "return_qty": qty, "unit_price": 500.0, "gst_rate": 0.0, "condition": condition,
+            "restock": restock}
 
 
 def _kept(till, rid, **stock):  # noqa: F811
@@ -294,9 +303,7 @@ def _kept(till, rid, **stock):  # noqa: F811
     doc = {
         "return_id": rid, "order_id": "ORD-1", "order_number": "ORD-1", "store_id": STORE,
         "customer_id": "CUST-1", "return_type": "RETURN", "status": "COMPLETED",
-        "items": [{"order_item_id": "li1", "product_id": "P1", "sku": "F1", "product_name": "Frame",
-                   "return_qty": 2.0, "unit_price": 500.0, "gst_rate": 0.0, "condition": "GOOD",
-                   "restock": True}],
+        "items": [_item()],
         "gross_refund": 1000.0, "net_refund": 1000.0, "refund_amount": 1000.0,
         "refund_tenders": [{"method": "CASH", "amount": 1000.0}], "credit_note_number": "TST01/C2627/0031",
         "restocked": [], "restock_applied": False, "restock_stock_ids": [], "quarantined_stock_ids": [],
@@ -304,12 +311,21 @@ def _kept(till, rid, **stock):  # noqa: F811
     }
     doc.update(stock)
     _bill_with_hold(till, rid, amount=1000.0, money_out=True, doc=dict(doc))
+    till["db"].get_collection("orders").update_one(
+        {"order_id": "ORD-1"}, {"$set": {"items": [dict(ln) for ln in BILL_LINES],
+                                         "historical": bool(doc.get("historical"))}})
     return doc
 
 
-def _row_of(product="P1", reactivated=0, minted=0):
+def _row_of(product="P1", reactivated=0, minted=0, **more):
     return {"product_id": product, "sku": "F1", "quantity": reactivated + minted,
-            "reactivated": reactivated, "minted": minted, "applied": True}
+            "reactivated": reactivated, "minted": minted, "applied": True, **more}
+
+
+def _msg(rid):
+    msg = _complete(rid, cash_leg_paid=True)["message"]
+    assert OLD_BLANKET not in msg
+    return msg
 
 
 def test_a_fully_restored_return_never_asks_for_a_second_stock_entry(till, tasks):  # noqa: F811
@@ -318,8 +334,8 @@ def test_a_fully_restored_return_never_asks_for_a_second_stock_entry(till, tasks
     out = _complete("RET-FULL", cash_leg_paid=True)
     msg = out["message"]
     assert OLD_BLANKET not in msg
-    assert "already finished" in msg and "2 piece(s) back in stock" in msg
-    assert "Do not add its pieces to stock by hand" in msg
+    assert "Already dealt with: 2 piece(s) back in stock." in msg and "Nothing to add by hand." in msg
+    assert "by hand" not in msg.replace("Nothing to add by hand.", "")
     # The recovered record keeps the press's own stock answer and its money.
     saved = till["db"].get_collection("returns").find_one({"return_id": "RET-FULL"})
     for key in ("restock_applied", "restock_stock_ids", "restocked", "net_refund", "refund_amount",
@@ -328,30 +344,79 @@ def test_a_fully_restored_return_never_asks_for_a_second_stock_entry(till, tasks
 
 
 def test_a_damaged_piece_set_aside_is_reported_as_dealt_with(till, tasks):  # noqa: F811
-    _kept(till, "RET-DMG", restock_applied=True, quarantined_stock_ids=["SU-9"])
-    msg = _complete("RET-DMG", cash_leg_paid=True)["message"]
-    assert OLD_BLANKET not in msg and "1 set aside as damaged" in msg
-    assert "Do not add its pieces to stock by hand" in msg
+    _kept(till, "RET-DMG", items=[_item(qty=1.0, condition="DAMAGED")], restock_applied=True,
+          quarantined_stock_ids=["SU-9"])
+    msg = _msg("RET-DMG")
+    assert "Already dealt with: 1 set aside as damaged." in msg and "Nothing to add by hand." in msg
+    assert "NOT" not in msg
 
 
-def test_an_unapplied_return_names_its_pieces_and_the_one_safe_action(till, tasks):  # noqa: F811
+def test_an_unapplied_return_names_each_piece_still_out(till, tasks):  # noqa: F811
     _kept(till, "RET-NONE")
-    msg = _complete("RET-NONE", cash_leg_paid=True)["message"]
-    assert OLD_BLANKET not in msg
-    assert "NOT yet back in stock: 2 x F1" in msg
-    assert "Do not add them by hand" in msg and "re-run this return's restock" in msg
-    assert "Already dealt with" not in msg
+    msg = _msg("RET-NONE")
+    assert "NOT back in stock: 2 x F1." in msg
+    assert "Already dealt with" not in msg and "Nothing to add by hand" not in msg
 
 
 def test_a_mixed_return_separates_the_piece_already_back_from_the_one_pending(till, tasks):  # noqa: F811
     _kept(till, "RET-MIX", restock_stock_ids=["SU-1"], restocked=[_row_of(reactivated=1)])
-    msg = _complete("RET-MIX", cash_leg_paid=True)["message"]
-    assert OLD_BLANKET not in msg
+    msg = _msg("RET-MIX")
     assert "Already dealt with: 1 piece(s) back in stock." in msg
-    assert "NOT yet back in stock: 1 x F1" in msg and "Do not add them by hand" in msg
+    assert "NOT back in stock: 1 x F1." in msg and "Nothing to add by hand" not in msg
 
 
-def test_a_rebuilt_record_with_no_stock_provenance_asks_staff_to_check_first(till, tasks):  # noqa: F811
+def test_an_older_imported_orders_pieces_go_through_the_stock_in_task_only(till, tasks):  # noqa: F811
+    """A HISTORICAL order's return puts nothing back by rule and raises the
+    store manager's stock-in task (restock_applied True, no unit moved): the
+    message must not contradict that task."""
+    _kept(till, "RET-HIST", historical=True, restock_applied=True)
+    msg = _msg("RET-HIST")
+    assert "2 piece(s) are from an older imported order" in msg and "stock-in task" in msg
+    assert "do not add them a second time" in msg
+    assert "Nothing to add by hand" not in msg and "NOT back in stock" not in msg
+    assert "Already dealt with" not in msg
+
+
+def test_a_damaged_piece_that_was_not_set_aside_is_named(till, tasks):  # noqa: F811
+    """restock_applied speaks for the GOOD pieces only; a DAMAGED piece whose
+    set-aside did not happen still reads sold."""
+    _kept(till, "RET-DMG-OUT", restock_applied=True, restock_stock_ids=["SU-1"],
+          restocked=[_row_of(reactivated=1)],
+          items=[_item(qty=1.0), _item("li2", "P2", "F2", 1.0, "DAMAGED")])
+    msg = _msg("RET-DMG-OUT")
+    assert "Already dealt with: 1 piece(s) back in stock." in msg
+    assert "Damaged and NOT set aside by IMS: 1 x F2." in msg
+    assert "Nothing to add by hand" not in msg
+
+
+def test_a_record_saved_before_the_line_took_its_product_names_the_piece_from_the_bill(till, tasks):  # noqa: F811
+    """Saved before L2-RETURN-F01: no product on the line, so nothing moved
+    while the record says restock_applied. The bill line names the piece."""
+    _kept(till, "RET-OLD", restock_applied=True, items=[_item(product=None, qty=1.0)])
+    msg = _msg("RET-OLD")
+    assert "NOT back in stock: 1 x F1." in msg and "Nothing to add by hand" not in msg
+
+
+def test_pieces_the_return_kept_out_of_stock_are_said_so_not_called_finished(till, tasks):  # noqa: F811
+    _kept(till, "RET-HELD", restock_applied=True,
+          items=[_item(qty=1.0, condition="OPENED"), _item("li2", "P2", "F2", 1.0, restock=False)])
+    msg = _msg("RET-HELD")
+    assert "Left out of stock, as the return said (opened or not for resale): 1 x F1, 1 x F2." in msg
+    assert "Already dealt with" not in msg and "Nothing to add by hand" not in msg
+
+
+def test_a_line_that_was_never_stock_asks_for_nothing(till, tasks):  # noqa: F811
+    # A made-to-order lens line: no stock piece on the return at all.
+    _kept(till, "RET-LENS", restock_applied=True, items=[_item("li-lens", None, "", 2.0)])
+    assert _msg("RET-LENS").endswith("No piece of this return is waiting to go back into stock.")
+
+
+def test_an_online_orders_unit_its_claim_never_covered_is_not_asked_for(till, tasks):  # noqa: F811
+    _kept(till, "RET-NC", restock_applied=True, restocked=[_row_of(never_claimed=2)])
+    assert _msg("RET-NC").endswith("No piece of this return is waiting to go back into stock.")
+
+
+def test_a_rebuilt_record_with_no_stock_provenance_never_asks_for_a_blind_entry(till, tasks):  # noqa: F811
     """Nothing kept says whether the stock step ran (the record is rebuilt
     from the credit line): never a blind "put them back"."""
     from api.services import store_credit_ledger as scl
@@ -365,7 +430,7 @@ def test_a_rebuilt_record_with_no_stock_provenance_asks_staff_to_check_first(til
     msg = out["message"]
     assert OLD_BLANKET not in msg
     assert "did not keep whether its pieces went back into stock" in msg
-    assert "Check each piece in stock (scan its barcode) before adding any by hand" in msg
+    assert "only a piece that is not already in stock" in msg
     # The recovery's accounting is what it was.
     assert out["net_refund"] == 1800.0 and out["credit_amount"] == 1200.0
     assert out["restock_applied"] is False and out["restock_stock_ids"] == []

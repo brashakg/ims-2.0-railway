@@ -3216,38 +3216,98 @@ def _units_still_out(
     return out
 
 
-def _recovered_stock_note(doc: Dict[str, Any], kept: bool) -> str:
-    """What a completed record tells staff about its pieces, read from the
-    record's own restock state -- never a blanket "put them back by hand"
-    (a piece the return already restored was then added a second time).
+def _recovered_stock_note(
+    doc: Dict[str, Any], kept: bool, order: Optional[Dict[str, Any]] = None
+) -> str:
+    """What a completed record tells staff about its pieces, PIECE BY PIECE,
+    from the record's own stock state -- never a blanket "put them back by
+    hand" (a piece the return already restored was then added a second time),
+    and never from the one restock_applied flag (it is also True when nothing
+    was put back: an older imported order, an opened piece, a line saved
+    with no product).
 
-    * the stock step finished (restock_applied): nothing to add, said so;
-    * a KEPT record whose stock step did not finish: the pieces already back,
-      and each one still out by name, with the one safe action -- the restock
-      retry deals with each piece once, a hand entry would be a second row;
-    * a REBUILT record (nothing kept says whether the stock step ran): check
-      each piece in stock before adding any."""
+    A KEPT record says, each part only when it has pieces:
+      * what IS dealt with: the units back in stock (restock_stock_ids) and
+        the ones set aside as damaged (quarantined_stock_ids);
+      * a HISTORICAL order's pieces: IMS puts none back by rule and the store
+        manager's stock-in task covers them (raise_stock_in_task) -- never a
+        second entry beside that task;
+      * each GOOD piece NOT back in stock, by name;
+      * each DAMAGED piece not set aside;
+      * the pieces the return itself kept out of stock (opened, or restock
+        switched off).
+    A line is read with the product of its BILL line (line_stock_product_id):
+    a record saved before the line took its product still names its piece,
+    and a line that was never stock (a lens, a service) names none.
+
+    A REBUILT record (nothing kept says whether the stock step ran) says so."""
+    if not kept:
+        return ("IMS did not keep whether its pieces went back into stock. Put back by hand "
+                "only a piece that is not already in stock.")
+    by_item = _order_line_index(order)["by_item"]
+    good: List[Dict[str, Any]] = []
+    damaged: Dict[str, int] = {}
+    held: Dict[str, int] = {}
+    for it in doc.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        orig = by_item.get(str(it.get("order_item_id") or ""))
+        line = {**it, "product_id": (restock_engine.line_stock_product_id(orig) if orig
+                                     else it.get("product_id"))}
+        try:
+            qty = int(round(float(line.get("return_qty") or 0)))
+        except (TypeError, ValueError):
+            qty = 0
+        if not line["product_id"] or qty <= 0:
+            continue
+        name = str(line.get("sku") or line.get("product_name") or line["product_id"])
+        if str(line.get("condition") or "GOOD").upper() == "DAMAGED":
+            damaged[name] = damaged.get(name, 0) + qty
+        elif restock_engine.should_restock(line):
+            good.append(line)
+        else:
+            held[name] = held.get(name, 0) + qty
+
+    def _named(counts: Dict[str, int]) -> str:
+        return ", ".join(f"{n} x {name}" for name, n in sorted(counts.items()))
+
+    # Dealt with: the units that landed, and an online order's units its claim
+    # never covered (they never left a shop: nothing goes back for them).
+    dealt = _landed_units(doc.get("restocked"))
+    for row in doc.get("restocked") or []:
+        if isinstance(row, dict) and row.get("never_claimed"):
+            pid = str(row.get("product_id"))
+            dealt[pid] = dealt.get(pid, 0.0) + float(row.get("never_claimed") or 0)
+    out: Dict[str, int] = {}
+    for u in _units_still_out(restock_engine.plan_restock(good).get("units", []), dealt):
+        name = str(u.get("sku") or u.get("product_name") or u.get("product_id"))
+        out[name] = out.get(name, 0) + 1
+    via_task = 0
+    if doc.get("restock_applied") and (doc.get("historical") or (order or {}).get("historical")):
+        via_task, out = sum(out.values()), {}
+
     back = len(doc.get("restock_stock_ids") or [])
     aside = len(doc.get("quarantined_stock_ids") or [])
+    not_aside = max(0, sum(damaged.values()) - aside)
     done = ", ".join(part for part in (
         f"{back} piece(s) back in stock" if back else "",
         f"{aside} set aside as damaged" if aside else "") if part)
-    if doc.get("restock_applied"):
-        return ("Its stock step was already finished when the return was taken"
-                + (f" ({done})" if done else "")
-                + ". Do not add its pieces to stock by hand.")
-    if not kept:
-        return ("IMS did not keep whether its pieces went back into stock. Check each "
-                "piece in stock (scan its barcode) before adding any by hand.")
-    plan = restock_engine.plan_restock([it for it in doc.get("items") or [] if isinstance(it, dict)])
-    out: Dict[str, int] = {}
-    for u in _units_still_out(plan.get("units", []), _landed_units(doc.get("restocked"))):
-        name = str(u.get("sku") or u.get("product_name") or u.get("product_id"))
-        out[name] = out.get(name, 0) + 1
-    pending = ", ".join(f"{n} x {name}" for name, n in sorted(out.items()))
-    return ((f"Already dealt with: {done}. " if done else "")
-            + f"NOT yet back in stock: {pending or 'see the return'}. Do not add them by hand - "
-            "ask the IMS admin to re-run this return's restock, which deals with each piece once.")
+    parts = [f"Already dealt with: {done}."] if done else []
+    if via_task:
+        parts.append(f"{via_task} piece(s) are from an older imported order: IMS put none back - the "
+                     "stock-in task raised for the store manager covers them, so do not add them a "
+                     "second time.")
+    if out:
+        parts.append(f"NOT back in stock: {_named(out)}. Put these back in stock by hand.")
+    if not_aside:
+        parts.append("Damaged and NOT set aside by IMS: "
+                     + (_named(damaged) if not aside else f"{not_aside} of {_named(damaged)}") + ".")
+    if held:
+        parts.append(f"Left out of stock, as the return said (opened or not for resale): {_named(held)}.")
+    if not (via_task or out or not_aside or held):
+        parts.append("Nothing to add by hand." if done
+                     else "No piece of this return is waiting to go back into stock.")
+    return " ".join(parts)
 
 
 def _restock_good_items(
@@ -5967,7 +6027,7 @@ async def complete_return_record(
         _audit_credit_event("RETURN_RECORD_REDATED", {"entry_id": f"return:{return_id}", "store_id": store_id,
                                                       "order_id": order_id})
     _audit_complete(return_id, store_id, current_user, recovered, now)
-    return {**doc, "message": "Return record completed. " + _recovered_stock_note(doc, bool(doc_kept))
+    return {**doc, "message": "Return record completed. " + _recovered_stock_note(doc, bool(doc_kept), order)
             + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else "")}
 
 
