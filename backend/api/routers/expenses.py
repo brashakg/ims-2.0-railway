@@ -2045,6 +2045,14 @@ async def topup_petty_cash_float(
     return {"message": "Petty-cash float topped up", "store_id": store_id, **res}
 
 
+# Shown when the float could not be READ. Unreadable is not absent: the
+# screens must never turn a failed read into "no float is open" (audit L3-10).
+_PETTY_FLOAT_UNREADABLE = (
+    "Could not read the petty-cash float just now. Nothing has changed - "
+    "please try again."
+)
+
+
 @router.get("/petty-cash/balance")
 async def get_petty_cash_balance(
     store_id: str = Query(...),
@@ -2052,7 +2060,8 @@ async def get_petty_cash_balance(
 ):
     """Current float balance, limit, low-balance flag, and recent ledger for a
     store. Store-scoped (an accountant/manager only sees their stores; admins see
-    any). Fail-soft to a not-open envelope when no float exists."""
+    any). A store with no float gets the not-open envelope; a float that could
+    not be READ gets a 503 -- never "no float is open" (audit L3-10)."""
     scoped = store_in_view(store_id, current_user)
     if not scoped:
         raise HTTPException(status_code=400, detail="store_id required")
@@ -2060,7 +2069,10 @@ async def get_petty_cash_balance(
 
     db = get_db()
     db = getattr(db, "db", db)
-    return pcs.get_balance(db, scoped)
+    res = pcs.get_balance(db, scoped)
+    if not res.get("ok"):
+        raise HTTPException(status_code=503, detail=_PETTY_FLOAT_UNREADABLE)
+    return res
 
 
 # ============================================================================
@@ -2088,7 +2100,8 @@ async def get_petty_cash_settlement_position(
     balance -- plus the recorded settlement if the day is already closed.
 
     Store-scoped (a manager/accountant only sees their stores; admins see any).
-    Fail-soft to an exists=False envelope when no float / no DB."""
+    A store with no float gets the exists=False envelope; a float that could
+    not be READ gets a 503 -- never "no float is open" (audit L3-10)."""
     scoped = store_in_view(store_id, current_user)
     if not scoped:
         raise HTTPException(status_code=400, detail="store_id required")
@@ -2096,7 +2109,10 @@ async def get_petty_cash_settlement_position(
 
     db = get_db()
     db = getattr(db, "db", db)
-    return pcss.get_day_position(db, scoped, settle_date)
+    res = pcss.get_day_position(db, scoped, settle_date)
+    if not res.get("ok"):
+        raise HTTPException(status_code=503, detail=_PETTY_FLOAT_UNREADABLE)
+    return res
 
 
 @router.post("/petty-cash/settlement", status_code=201)

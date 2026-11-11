@@ -514,21 +514,28 @@ def live_payout_for(db, store_id: Optional[str], expense_id: Optional[str]) -> O
 
 def get_balance(db, store_id: str, *, ledger_limit: int = 20) -> Dict[str, Any]:
     """Read-only float view: balance, limit, threshold, status, is_low, and the
-    most recent ledger entries. Fail-soft -> a not_open envelope."""
+    most recent ledger entries.
+
+    UNREADABLE IS NOT ABSENT (audit L3-10). A store with no float gets the
+    ``exists: False`` envelope. A float that could not be READ (no database, a
+    failed query) gets ``{"ok": False, "error": "unavailable"}`` -- with no
+    ``exists`` and no ``balance`` -- because answering "no float is open" for a
+    float holding money invites staff to open a second one."""
     coll = _coll(db)
-    empty = {
-        "ok": True, "store_id": store_id, "exists": False, "balance": 0.0,
-        "float_limit": 0.0, "low_balance_threshold": 0.0, "status": None,
-        "is_low": False, "recent_ledger": [],
-    }
+    unavailable = {"ok": False, "store_id": store_id, "error": "unavailable"}
     if coll is None:
-        return empty
+        return unavailable
     try:
         doc = coll.find_one({"store_id": store_id}, {"_id": 0})
     except Exception:  # noqa: BLE001
-        return empty
+        logger.exception("Petty-cash float read failed for store %s", store_id)
+        return unavailable
     if not doc:
-        return empty
+        return {
+            "ok": True, "store_id": store_id, "exists": False, "balance": 0.0,
+            "float_limit": 0.0, "low_balance_threshold": 0.0, "status": None,
+            "is_low": False, "recent_ledger": [],
+        }
     balance = float(doc.get("balance") or 0.0)
     threshold = float(doc.get("low_balance_threshold") or 0.0)
     ledger = doc.get("ledger") or []

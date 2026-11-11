@@ -238,8 +238,12 @@ def get_day_position(db, store_id: str, settle_date: Optional[str] = None,
 
     Returns the opening float, the day's credit/debit totals, the expected
     closing, whether the float exists/is open, and -- if already settled --
-    the recorded settlement (counted/variance/status). Fail-soft: no DB / no
-    float -> an exists=False envelope (never raises)."""
+    the recorded settlement (counted/variance/status). Never raises.
+
+    UNREADABLE IS NOT ABSENT (audit L3-10, the float read's twin). A store with
+    no float gets the ``exists: False`` envelope; a float that could not be
+    READ gets ``{"ok": False, "error": "unavailable"}`` so the screen never
+    says "no float is open, nothing to settle" about a box holding money."""
     sd = (str(settle_date)[:10] if settle_date else _ist_today_iso())
     base = {
         "ok": True,
@@ -258,13 +262,16 @@ def get_day_position(db, store_id: str, settle_date: Optional[str] = None,
         "day_ledger": [],
     }
 
+    unavailable = {
+        "ok": False, "store_id": store_id, "settle_date": sd, "error": "unavailable",
+    }
     floats = _coll(db, FLOAT_COLLECTION)
     if floats is None:
-        return base
+        return unavailable
     try:
         fdoc = floats.find_one({"store_id": store_id}, {"_id": 0})
     except Exception:  # noqa: BLE001
-        return base
+        return unavailable
     if not fdoc:
         # No float open: still report any settlement that may have been recorded.
         settlement = _find_settlement(db, store_id, sd)
