@@ -29,7 +29,8 @@ vi.mock('../../../services/api/settings', () => ({
 }));
 
 import { SystemSettingsPage } from '../SettingsSystem';
-import { adminSystemApi } from '../../../services/api';
+// The REAL client module (only the '../../../services/api' barrel is mocked).
+import { adminSystemApi } from '../../../services/api/stores';
 import { SETTINGS_SECTIONS } from '../settingsSections';
 
 describe('Settings > System backups', () => {
