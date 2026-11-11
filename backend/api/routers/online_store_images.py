@@ -635,7 +635,9 @@ async def _fetch_image_bytes(url: str) -> bytes:
         read_stored_image, url, max_bytes=MAX_FILE_SIZE_BYTES
     )
     if image_mime_of(raw) is None:
-        raise ImageFetchError(400, "The stored image url did not return an image")
+        raise ImageFetchError(
+            400, "Image not fetched: its saved address did not return an image."
+        )
     return raw
 
 

@@ -410,7 +410,11 @@ async def _fetch_one(url: str) -> Optional[bytes]:
             return await asyncio.to_thread(
                 read_stored_image, u, max_bytes=MAX_FILE_SIZE_BYTES
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            # The PDF has nowhere to show a message: the photo is left out
+            # and the reason is logged (decision D12), not swallowed. The url
+            # itself is not logged - it may carry a signed query string.
+            logger.warning("[CATALOGUE_PDF] a product photo was left out. %s", exc)
             return None
     # A relative / self-hosted path -> serve from GridFS in-process.
     return _fetch_local_bytes(u)

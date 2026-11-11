@@ -321,3 +321,160 @@ def test_uploads_rehost_refuses_a_path_outside_the_uploads_folder(uploads, path)
 
 def test_uploads_rehost_still_reads_an_uploaded_file(uploads):
     assert online_sync_health._fetch_bytes("/uploads/edited/p1/photo.png") == _PNG
+
+
+# ---------------------------------------------------------------------------
+# Decision D12: the refusal stays at READ time (no new rule when a url is
+# saved). So the message at use must say, in plain words, WHY the image was
+# not fetched - at every door that reads a stored url.
+# ---------------------------------------------------------------------------
+
+_PLAIN = "Image not fetched: "
+_PRIVATE = "private or internal network address"
+
+
+def _refusal(url, max_bytes=1024 * 1024):
+    with pytest.raises(image_rehost.ImageFetchError) as ei:
+        image_rehost.read_stored_image(url, max_bytes=max_bytes)
+    return ei.value.detail
+
+
+@pytest.mark.parametrize(
+    "url,why",
+    [
+        ("http://127.0.0.1:{port}/a.png", _PRIVATE),
+        ("http://localhost:{port}/a.png", _PRIVATE),
+        ("http://169.254.169.254/latest/meta-data/", _PRIVATE),
+        ("http://[::ffff:10.0.0.5]/a.png", _PRIVATE),
+        ("https:///a.png", "has no host name"),
+        ("", "no web address is saved"),
+    ],
+)
+def test_a_refused_read_says_plainly_why(server, url, why):
+    detail = _refusal(url.format(port=server.port))
+    assert detail.startswith(_PLAIN), detail
+    assert why in detail, detail
+    assert server.requests == []
+
+
+def test_a_refused_web_address_is_still_called_blocked(server):
+    """The word the Add-Product screen and its tests already key on."""
+    assert "(blocked)" in _refusal(f"http://127.0.0.1:{server.port}/a.png")
+
+
+def test_a_non_web_scheme_is_refused_in_plain_words():
+    with pytest.raises(image_rehost.ImageFetchError) as ei:
+        image_rehost.fetch_external_image(
+            "ftp://cdn.example/a.png", allowed_mimes=None, max_bytes=1024
+        )
+    assert ei.value.detail.startswith(_PLAIN)
+    assert "http:// or https://" in ei.value.detail
+
+
+def test_an_unknown_host_is_refused_in_plain_words(monkeypatch):
+    import socket
+
+    def no_such_host(*a, **kw):
+        raise socket.gaierror("synthetic: no such host")
+
+    monkeypatch.setattr(socket, "getaddrinfo", no_such_host)
+    detail = _refusal("https://no-such-host.audit-b04.invalid/a.png")
+    assert detail.startswith(_PLAIN)
+    assert "no-such-host.audit-b04.invalid" in detail and "could not be found" in detail
+
+
+def test_a_file_outside_the_uploads_folder_is_refused_in_plain_words(uploads):
+    for path in ("/uploads/../secret.env", "secret.env"):
+        detail = _refusal(path)
+        assert detail.startswith(_PLAIN), detail
+        assert "uploads folder" in detail
+        assert "secret" not in detail.lower()  # never echoes what it would not read
+
+
+def test_an_oversize_or_empty_or_failed_download_says_which(server, monkeypatch):
+    host = _as_public_host(monkeypatch, "cdn.audit-b04.invalid")
+    detail = _refusal(f"http://{host}:{server.port}/a.png", max_bytes=10)
+    assert detail.startswith(_PLAIN) and "larger than" in detail and "cap" in detail
+    # Nothing listening on the port: a network failure, said as one.
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        dead_port = probe.getsockname()[1]
+    detail = _refusal(f"http://{host}:{dead_port}/a.png")
+    assert detail.startswith(_PLAIN) and "could not be reached" in detail
+
+
+@pytest.mark.parametrize(
+    "stored,why",
+    [
+        ("http://127.0.0.1:{port}/secret", _PRIVATE),
+        ("/uploads/../secret.env", "uploads folder"),
+    ],
+)
+def test_the_auto_edit_reply_carries_the_plain_reason(
+    server, uploads, monkeypatch, stored, why
+):
+    repo = _Repo({"image_id": "IMG1", "product_id": "P1", "status": "QUEUED",
+                  "url": stored.format(port=server.port)})
+    monkeypatch.setattr(imod, "_require_repo", lambda: repo)
+    monkeypatch.setattr(ied, "get_image_editor", lambda: _Editor())
+    monkeypatch.setattr(ost, "get_object_storage", lambda: _Storage())
+
+    out = asyncio.run(imod.auto_edit_image("IMG1", current_user=USER))
+
+    assert out["auto_edit"] == "failed"
+    assert out["reason"].startswith(_PLAIN) and why in out["reason"], out["reason"]
+
+
+def test_the_auto_edit_reply_says_when_the_address_is_not_an_image(
+    server, uploads, monkeypatch
+):
+    host = _as_public_host(monkeypatch, "cdn.audit-b04.invalid")
+    repo = _Repo({"image_id": "IMG1", "product_id": "P1", "status": "QUEUED",
+                  "url": f"http://{host}:{server.port}/secret"})
+    monkeypatch.setattr(imod, "_require_repo", lambda: repo)
+    monkeypatch.setattr(ied, "get_image_editor", lambda: _Editor())
+    monkeypatch.setattr(ost, "get_object_storage", lambda: _Storage())
+
+    out = asyncio.run(imod.auto_edit_image("IMG1", current_user=USER))
+
+    assert out["auto_edit"] == "failed"
+    assert out["reason"].startswith(_PLAIN) and "did not return an image" in out["reason"]
+
+
+def test_the_catalogue_photo_fetch_records_why_a_photo_is_missing(server, caplog):
+    """The PDF has nowhere to show a message: the photo is left out, and the
+    reason is written to the server log instead of being swallowed."""
+    import logging
+
+    rows = [{"image": f"http://127.0.0.1:{server.port}/a.png"}]
+    with caplog.at_level(logging.WARNING, logger=catalogue_pdf.__name__):
+        assert asyncio.run(catalogue_pdf.fetch_images(rows)) == {}
+    said = " ".join(r.getMessage() for r in caplog.records)
+    assert _PLAIN in said and _PRIVATE in said
+
+
+def test_the_uploads_rehost_tool_reports_the_plain_reason(server):
+    with pytest.raises(image_rehost.ImageFetchError) as ei:
+        online_sync_health._fetch_bytes(f"http://127.0.0.1:{server.port}/secret")
+    assert str(ei.value).startswith(_PLAIN) and _PRIVATE in str(ei.value)
+
+
+def test_no_refusal_text_is_left_unexplained():
+    """Every refusal image_rehost can raise starts the same plain way."""
+    import inspect
+    import re
+
+    source = inspect.getsource(image_rehost)
+    raised = re.findall(r"ImageFetchError\(\s*\d{3},\s*f?\"([^\"]*)", source)
+    assert len(raised) >= 8, raised
+    assert [text for text in raised if not text.startswith(_PLAIN)] == []
+    # ...and the refusals kept as shared constants.
+    for text in (
+        image_rehost._PRIVATE_ADDRESS,
+        image_rehost._UNREACHABLE,
+        image_rehost._NOT_AN_UPLOAD,
+        image_rehost._too_big(25 * 1024 * 1024),
+    ):
+        assert text.startswith(_PLAIN), text

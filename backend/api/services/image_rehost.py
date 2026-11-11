@@ -38,6 +38,10 @@ anything else only as a file inside the server's own uploads folder.
 
 No emojis in this file (Windows cp1252). Fail behaviour: raises
 ImageFetchError with an http-ready status/detail; callers map it 1:1.
+
+The refusal is made when a url is READ, not when it is saved (decision D12:
+no save-time rule), so the detail is what staff see at use: every one starts
+"Image not fetched: " and says the reason in plain words.
 """
 
 from __future__ import annotations
@@ -108,15 +112,30 @@ def _resolve_host(host: str) -> List[str]:
     try:
         infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
     except socket.gaierror as e:
-        raise ImageFetchError(400, f"Could not resolve host '{host}'") from e
+        raise ImageFetchError(
+            400, f"Image not fetched: the site '{host}' could not be found."
+        ) from e
     addrs: List[str] = []
     for info in infos:
         addr = info[4][0]
         if addr not in addrs:
             addrs.append(addr)
     if not addrs:
-        raise ImageFetchError(400, f"Host '{host}' resolved to no addresses")
+        raise ImageFetchError(
+            400, f"Image not fetched: the site '{host}' could not be found."
+        )
     return addrs
+
+
+# Said wherever an address is refused for where it points (IP literal or DNS).
+_PRIVATE_ADDRESS = (
+    "Image not fetched: its web address points to a private or internal "
+    "network address, which IMS does not read (blocked). Use a public image "
+    "link, or upload the photo instead."
+)
+_UNREACHABLE = (
+    "Image not fetched: the site could not be reached (network error or timeout)."
+)
 
 
 def assert_url_allowed(url: str) -> List[str]:
@@ -128,10 +147,14 @@ def assert_url_allowed(url: str) -> List[str]:
     parsed = urlparse(url or "")
     scheme = (parsed.scheme or "").lower()
     if scheme not in ("http", "https"):
-        raise ImageFetchError(400, "Only http/https image URLs are allowed")
+        raise ImageFetchError(
+            400,
+            "Image not fetched: only a web address starting http:// or https:// "
+            "can be read (blocked).",
+        )
     host = parsed.hostname or ""
     if not host:
-        raise ImageFetchError(400, "Image URL has no host")
+        raise ImageFetchError(400, "Image not fetched: the web address has no host name.")
 
     # IP-literal host: check it directly (no DNS involved).
     try:
@@ -142,9 +165,7 @@ def assert_url_allowed(url: str) -> List[str]:
 
     if is_literal:
         if _is_blocked_ip(host):
-            raise ImageFetchError(
-                400, "Image URL resolves to a private/internal address (blocked)"
-            )
+            raise ImageFetchError(400, _PRIVATE_ADDRESS)
         return [host]
 
     # Hostname: EVERY resolved address must be global unicast (one private
@@ -152,9 +173,7 @@ def assert_url_allowed(url: str) -> List[str]:
     addrs = _resolve_host(host)
     for addr in addrs:
         if _is_blocked_ip(addr):
-            raise ImageFetchError(
-                400, "Image URL resolves to a private/internal address (blocked)"
-            )
+            raise ImageFetchError(400, _PRIVATE_ADDRESS)
     return addrs
 
 
@@ -185,7 +204,7 @@ def _open_bound(client, url: str, addrs: List[str]):
     if target.scheme == "https" and addrs != [target.host]:
         extensions["sni_hostname"] = target.raw_host.decode("ascii")
     headers = {**_FETCH_HEADERS, "Host": target.netloc.decode("ascii")}
-    last_error: Exception = ImageFetchError(502, "Could not fetch the image URL")
+    last_error: Exception = ImageFetchError(502, _UNREACHABLE)
     for addr in addrs:
         request = client.build_request(
             "GET", target.copy_with(host=addr), headers=headers, extensions=extensions
@@ -216,11 +235,13 @@ def fetch_external_image(
     try:
         import httpx  # noqa: PLC0415 - lazy so a missing dep fails per-call
     except Exception as e:  # noqa: BLE001  # pragma: no cover - dep present
-        raise ImageFetchError(503, "httpx unavailable on the server") from e
+        raise ImageFetchError(
+            503, "Image not fetched: the server's web client is unavailable."
+        ) from e
 
     current = (url or "").strip()
     if not current:
-        raise ImageFetchError(400, "url is required")
+        raise ImageFetchError(400, "Image not fetched: no web address was given.")
 
     timeout = _fetch_timeout()
     for _hop in range(MAX_REDIRECTS + 1):
@@ -239,13 +260,16 @@ def fetch_external_image(
                         location = resp.headers.get("location", "").strip()
                         if not location:
                             raise ImageFetchError(
-                                502, "Upstream redirect with no Location header"
+                                502,
+                                "Image not fetched: the site redirected without "
+                                "saying where to.",
                             )
                         current = urljoin(current, location)
                         continue  # next hop re-validated at loop top
                     if resp.status_code != 200:
                         raise ImageFetchError(
-                            502, f"Upstream returned HTTP {resp.status_code}"
+                            502,
+                            f"Image not fetched: the site answered HTTP {resp.status_code}.",
                         )
                     mime = (
                         (resp.headers.get("content-type") or "")
@@ -256,37 +280,49 @@ def fetch_external_image(
                     if allowed_mimes is not None and mime not in allowed_mimes:
                         raise ImageFetchError(
                             400,
-                            f"URL did not return an image (content-type '{mime or 'unknown'}')",
+                            "Image not fetched: the address did not return an image "
+                            f"(it returned '{mime or 'unknown'}').",
                         )
                     # Cheap early refusal when the server declares its size.
                     declared = resp.headers.get("content-length")
                     if declared and declared.isdigit() and int(declared) > max_bytes:
-                        raise ImageFetchError(
-                            400,
-                            f"Image exceeds the {max_bytes // (1024 * 1024)} MB cap",
-                        )
+                        raise ImageFetchError(400, _too_big(max_bytes))
                     # Stream with a hard cap - abort mid-download if exceeded.
                     chunks: List[bytes] = []
                     total = 0
                     for chunk in resp.iter_bytes():
                         total += len(chunk)
                         if total > max_bytes:
-                            raise ImageFetchError(
-                                400,
-                                f"Image exceeds the {max_bytes // (1024 * 1024)} MB cap",
-                            )
+                            raise ImageFetchError(400, _too_big(max_bytes))
                         chunks.append(chunk)
                     content = b"".join(chunks)
                     if not content:
-                        raise ImageFetchError(400, "URL returned an empty body")
+                        raise ImageFetchError(
+                            400, "Image not fetched: the address returned nothing."
+                        )
                     return content, mime, current
         except ImageFetchError:
             raise
         except Exception as e:  # noqa: BLE001 - network/timeout/protocol errors
             logger.warning("[IMAGE-REHOST] fetch failed for a candidate url: %s", e)
-            raise ImageFetchError(502, "Could not fetch the image URL") from e
+            raise ImageFetchError(502, _UNREACHABLE) from e
 
-    raise ImageFetchError(400, f"Too many redirects (max {MAX_REDIRECTS})")
+    raise ImageFetchError(
+        400, f"Image not fetched: the site redirected more than {MAX_REDIRECTS} times."
+    )
+
+
+_NOT_AN_UPLOAD = (
+    "Image not fetched: its saved address is not a web address and is not a "
+    "file in the server's uploads folder (blocked)."
+)
+
+
+def _too_big(max_bytes: int) -> str:
+    return (
+        "Image not fetched: it is larger than the "
+        f"{max_bytes // (1024 * 1024)} MB cap."
+    )
 
 
 def _read_local_upload(path: str, max_bytes: int) -> bytes:
@@ -300,14 +336,12 @@ def _read_local_upload(path: str, max_bytes: int) -> bytes:
     try:
         real = Path(path.lstrip("/")).resolve()
         if not any(root in real.parents for root in roots) or not real.is_file():
-            raise ImageFetchError(400, "Image path is not an uploaded file (blocked)")
+            raise ImageFetchError(400, _NOT_AN_UPLOAD)
         if real.stat().st_size > max_bytes:
-            raise ImageFetchError(
-                400, f"Image exceeds the {max_bytes // (1024 * 1024)} MB cap"
-            )
+            raise ImageFetchError(400, _too_big(max_bytes))
         return real.read_bytes()
     except (OSError, ValueError) as e:
-        raise ImageFetchError(400, "Image path is not an uploaded file") from e
+        raise ImageFetchError(400, _NOT_AN_UPLOAD) from e
 
 
 def read_stored_image(url: str, *, max_bytes: int) -> bytes:
@@ -320,7 +354,9 @@ def read_stored_image(url: str, *, max_bytes: int) -> bytes:
     on (to an editor, to storage) checks what they are."""
     u = (url or "").strip()
     if not u:
-        raise ImageFetchError(400, "image has no source url")
+        raise ImageFetchError(
+            400, "Image not fetched: no web address is saved for this image."
+        )
     if u.lower().startswith(("http://", "https://")):
         return fetch_external_image(u, allowed_mimes=None, max_bytes=max_bytes)[0]
     return _read_local_upload(u, max_bytes)
