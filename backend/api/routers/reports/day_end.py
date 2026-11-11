@@ -214,6 +214,9 @@ async def create_day_end_close(
         closing_cash is None
         or shared_paisa != cash_denom.rupees_to_paisa(closing_cash)
     )
+    # What THIS screen sent, kept when it is set aside: a figure someone typed
+    # against an already-counted drawer is evidence, not noise.
+    entered_cash = closing_cash if count_adopted else None
     if count_adopted:
         closing_cash = cash_denom.paisa_to_rupees(shared_paisa)
         cash_denom.restate_amount(closing_block, shared_paisa)
@@ -245,6 +248,9 @@ async def create_day_end_close(
         # what was typed on this screen -- the screen says so out loud.
         "counted_from_shared_record": count_adopted,
         "till_count_differs": count_adopted,
+        # The figure entered on this screen that was NOT used (None when no
+        # figure was entered, or when this screen's own count stands).
+        "entered_closing_cash": entered_cash,
         # Nobody declared an opening float for this day, so expected cash was
         # computed from zero. The screen must say so rather than present the
         # resulting variance as a real one.
@@ -297,6 +303,7 @@ async def create_day_end_close(
                         "system_cash": doc["system_cash"],
                         "variance": variance,
                         "counted_from_shared_record": count_adopted,
+                        "entered_closing_cash": entered_cash,
                     },
                 }
             )

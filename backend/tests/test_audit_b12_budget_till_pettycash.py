@@ -193,6 +193,8 @@ class TestL312DayEndCannotRestateALockedTill:
         assert stored["variance"] == -3000.0
         assert stored["counted_from_shared_record"] is True
         assert stored["closing_count"]["amount_paisa"] == 100000
+        # The figure that was typed is kept as evidence, not as the count.
+        assert stored["entered_closing_cash"] == 3000.0
 
         # ... and on the read the screen makes after a reload.
         reread = asyncio.run(
@@ -227,6 +229,7 @@ class TestL312DayEndCannotRestateALockedTill:
         assert close["closing_cash"] == 1000.0
         assert close["variance"] == 0.0
         assert close["counted_from_shared_record"] is True
+        assert close["entered_closing_cash"] is None  # nothing was typed
 
     def test_the_same_figure_typed_again_is_not_flagged(self, db, day_end):
         _blind_count(db, rupees=1000, lock=True)
@@ -243,6 +246,7 @@ class TestL312DayEndCannotRestateALockedTill:
         assert close["variance"] == 0.0
         assert close["counted_from_shared_record"] is False
         assert close["till_count_differs"] is False
+        assert close["entered_closing_cash"] is None
         sessions = list(db.get_collection("till_sessions").find({}))
         assert len(sessions) == 1
         assert sessions[0]["blind_count_paisa"] == 300000
@@ -257,6 +261,7 @@ class TestL312DayEndCannotRestateALockedTill:
         assert closed[0]["details"]["closing_cash"] == 1000.0
         assert closed[0]["details"]["variance"] == -3000.0
         assert closed[0]["details"]["counted_from_shared_record"] is True
+        assert closed[0]["details"]["entered_closing_cash"] == 3000.0
         assert closed[0]["severity"] == "WARNING"
 
     def test_a_lost_race_to_count_still_reports_the_count_that_won(
