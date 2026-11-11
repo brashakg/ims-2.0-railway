@@ -402,6 +402,22 @@ async def upload_image(
             detail=f"Image exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB cap",
         )
 
+    # 2b. The declared content-type is only a label (audit L1-F41): the BYTES
+    # must be a complete image of an allowed type, and the stored type +
+    # extension are what the bytes are. Same gate as the product-image doors.
+    from ..services.image_content import image_mime_of
+
+    content_type = image_mime_of(data) or ""
+    ext = _ALLOWED_IMAGE_TYPES.get(content_type)
+    if ext is None:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                "This file is not a valid image (it may be damaged, cut short, "
+                f"or not a photo at all). Allowed: {sorted(_ALLOWED_IMAGE_TYPES)}"
+            ),
+        )
+
     # 3. Generate a SAFE storage key -- never trust the client filename. The path
     # is product-scoped (when given) + a uuid + the validated extension, so two
     # uploads never collide and there is no traversal vector.
