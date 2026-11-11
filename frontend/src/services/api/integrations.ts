@@ -45,6 +45,10 @@ export interface IntegrationStatusItem {
   armed?: boolean;
   /** Vendor docs / product page for hook-only rows. */
   docs?: string;
+  /** Only on a row that follows its OWN send gate instead of the report's
+   *  global dispatch_mode (Shopify): the value it is using and which switch
+   *  sets it. */
+  gate?: { label: string; mode: string; rule: string };
 }
 
 // MSG91 + Coexistence messaging preflight: honest per-item readiness rows,

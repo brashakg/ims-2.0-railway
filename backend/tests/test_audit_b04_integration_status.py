@@ -123,6 +123,41 @@ def test_shopify_row_reports_shopifys_effective_gate(
     assert report["dispatch_mode"] == global_mode
 
 
+@pytest.mark.parametrize(
+    "global_mode,override,gate_mode",
+    [("off", "live", "live"), ("live", "off", "off"), ("test", None, "test")],
+)
+def test_shopify_row_shows_the_gate_it_is_using(
+    monkeypatch, global_mode, override, gate_mode
+):
+    """The header shows the GLOBAL gate. The Shopify row must carry its own
+    gate value and say which switch it is, or the screen contradicts itself
+    in exactly the two audit cases (header 'off', Shopify badge 'Live')."""
+    _global_mode(monkeypatch, global_mode)
+    if override is not None:
+        monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", override)
+
+    report = build_integration_status(db=_DB(_VAULT))
+    row = _row(report, "shopify")
+
+    assert row["gate"]["mode"] == gate_mode == nexus_providers.shopify_dispatch_mode()
+    assert row["gate"]["label"] == "Shopify gate"
+    assert "SHOPIFY_DISPATCH_MODE" in row["gate"]["rule"]
+    assert "SHOPIFY_DISPATCH_MODE" in row["notes"]
+    differs = f"({global_mode}) does not apply to Shopify"
+    assert (differs in row["notes"]) is (gate_mode != global_mode)
+    # Rows on the global gate carry no gate of their own.
+    assert "gate" not in _row(report, "msg91_whatsapp")
+
+
+def test_unconfigured_shopify_row_still_names_its_gate(monkeypatch):
+    _global_mode(monkeypatch, "live")
+    monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", "off")
+    row = _row(build_integration_status(db=_DB()), "shopify")
+    assert row["state"] == "dormant"
+    assert row["gate"]["mode"] == "off" and "SHOPIFY_DISPATCH_MODE" in row["notes"]
+
+
 def test_messaging_rows_ignore_the_shopify_override(monkeypatch):
     _global_mode(monkeypatch, "off")
     monkeypatch.setenv("SHOPIFY_DISPATCH_MODE", "live")

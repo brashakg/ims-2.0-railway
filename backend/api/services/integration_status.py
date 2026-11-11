@@ -323,12 +323,17 @@ _SHOPIFY_SOURCE_LABEL = {
 }
 
 
+_SHOPIFY_GATE_RULE = "SHOPIFY_DISPATCH_MODE when it is set, otherwise DISPATCH_MODE"
+
+
 def _shopify_status(db) -> Dict[str, Any]:
     """Shopify's row, asked of Shopify's own code (audit L1-F34).
 
     mode: nexus_providers.shopify_dispatch_mode() - SHOPIFY_DISPATCH_MODE
         overrides the global DISPATCH_MODE for Shopify writes, in either
         direction, so the global gate says nothing reliable about Shopify.
+        The row carries that value (`gate`) and its note names the switch,
+        because the screen's header badge is the GLOBAL gate.
     configured: shopify_auth.shopify_credential_sources() - the resolver's
         three paths by PRESENCE. No token is minted and nothing is called, so
         "configured" is never "connection verified", and the note says so.
@@ -337,7 +342,16 @@ def _shopify_status(db) -> Dict[str, Any]:
     from api.services.shopify_auth import shopify_credential_sources
 
     sources = shopify_credential_sources(db)
-    notes: List[str] = []
+    mode = shopify_dispatch_mode()
+    # The gate first: the header badge shows the GLOBAL gate, which this row
+    # may not be following. shopify_dispatch_mode() differs from the global
+    # gate only when SHOPIFY_DISPATCH_MODE is in force.
+    notes: List[str] = [f"Shopify gate: {mode} ({_SHOPIFY_GATE_RULE})."]
+    if mode != _dispatch_mode():
+        notes.append(
+            f"The DISPATCH_MODE shown at the top ({_dispatch_mode()}) does not "
+            "apply to Shopify."
+        )
     if sources:
         notes.append(
             f"Signs in with {_SHOPIFY_SOURCE_LABEL[sources[0]]}. Presence only: "
@@ -351,7 +365,8 @@ def _shopify_status(db) -> Dict[str, Any]:
     return {
         "configured": bool(sources),
         "credential_source": sources[0] if sources else None,
-        "mode": shopify_dispatch_mode(),
+        "mode": mode,
+        "gate": {"label": "Shopify gate", "mode": mode, "rule": _SHOPIFY_GATE_RULE},
         "notes": " ".join(notes),
     }
 
@@ -384,6 +399,11 @@ def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
         "docs": entry.get("docs", ""),
         "notes": entry.get("notes", ""),
     }
+    if provider:
+        # This row's OWN gate value: the report's dispatch_mode is the global
+        # gate, which a provider with its own switch may not be following.
+        out["gate"] = provider["gate"]
+        out["notes"] = provider["notes"]
 
     # --- env side -----------------------------------------------------------
     env_required = entry.get("env_required", [])
@@ -442,7 +462,6 @@ def _build_one(entry: Dict[str, Any], db) -> Dict[str, Any]:
     if provider:
         configured = provider["configured"]
         out["credential_source"] = provider["credential_source"]
-        out["notes"] = provider["notes"] or out["notes"]
     out["configured"] = configured
 
     if not configured:
