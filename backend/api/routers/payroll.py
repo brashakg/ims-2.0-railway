@@ -35,7 +35,6 @@ from ..services.payroll_engine import (
     pt_for,
     pt_code_for_state,
     compute_payroll,
-    POSTED_PAYROLL_STATUSES,
 )
 from ..services.payroll_exports import (
     statutory_summary,
@@ -950,6 +949,13 @@ async def calculate_salary(
     db = _get_db()
     if not db:
         raise HTTPException(status_code=503, detail="Database not available")
+    # The same period gate as run / approve / lock: this row is what the salary
+    # sheet and the payslip fall back to for a month with no run, so it must
+    # not be rewritten in a closed month. Passed as text because ``year`` is
+    # unbounded here; a year no calendar has is skipped by the check, not a 500.
+    from .finance import check_period_locked
+
+    check_period_locked(db, f"{calc_request.year:04d}-{calc_request.month:02d}-01")
 
     try:
         # Get salary config
@@ -1794,7 +1800,7 @@ async def run_payroll(
                 existing = payroll_coll.find_one(
                     {"employee_id": emp, "year": req.year, "month": req.month}
                 )
-                if existing and existing.get("status") in POSTED_PAYROLL_STATUSES:
+                if existing and existing.get("status") in ("APPROVED", "PAID"):
                     rows.append(
                         {
                             "employee_id": emp,

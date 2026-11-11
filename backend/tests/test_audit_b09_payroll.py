@@ -5,8 +5,9 @@ Each test drives the REAL payroll / self-service routers (or the finance P&L
 payroll readers) over a strict in-memory Mongo double and asserts on what ended
 up STORED, not only on the reply.
 
-L3-02  a payroll DRAFT reduced the P&L, and a draft could be rerun (rewritten)
-       inside a locked accounting month.
+L3-02  a payroll draft could be rerun (rewritten) inside a locked accounting
+       month, which moved that month's P&L. (Whether a draft is a P&L cost at
+       all is an accounting decision left with the owner; not changed here.)
 L3-05  the advance-history read answered 500 after the first advance existed
        (raw Mongo ``_id`` in the reply).
 L3-06  a NEGATIVE advance recovery was accepted and raised net pay.
@@ -137,56 +138,64 @@ def _pnl_payroll(db):
 
 
 # ===========================================================================
-# L3-02 -- a draft is not a posting
+# L3-02 -- no payroll writer can change a locked month
+#
+# WHICH payroll rows are a cost in the P&L (draft / approved / paid) is an
+# accounting treatment that waits for the owner and the CA, so it is NOT
+# changed here: every stored row counts, as before. What is fixed is that a
+# locked month's rows -- and so its P&L -- can no longer be rewritten.
 # ===========================================================================
 
 
-def test_l3_02_draft_payroll_does_not_reduce_pnl(monkeypatch):
-    db = _db()
-    c = _client(db, monkeypatch)
-    assert _run(c).status_code == 200
-    row = _stored_row(db)
-    assert row["status"] == "DRAFT"
-    assert row["breakdown"]["ctc_cost"] > 0
-
-    # A draft is a working calculation nobody has signed off: no P&L door may
-    # count it (org-wide total, one store's total, the per-store table).
-    assert _pnl_payroll(db) == (0.0, 0.0, {})
-
-
-def test_l3_02_approved_and_paid_payroll_still_count(monkeypatch):
-    db = _db()
-    c = _client(db, monkeypatch)
-    assert _run(c).status_code == 200
-    cost = _stored_row(db)["breakdown"]["ctc_cost"]
-    scope = {"month": MONTH, "year": YEAR, "entity_id": ENTITY}
-
-    assert c.post("/api/v1/payroll/approve", json=scope).json()["approved"] == 1
-    assert _pnl_payroll(db) == (cost, cost, {STORE: cost})
-
-    assert c.post("/api/v1/payroll/lock", json=scope).json()["locked"] == 1
-    assert _stored_row(db)["status"] == "PAID"
-    assert _pnl_payroll(db) == (cost, cost, {STORE: cost})
+def _lock(db):
+    db.get_collection("period_locks").insert_one({"month": MONTH, "year": YEAR})
 
 
 def test_l3_02_draft_rerun_refused_in_a_locked_month(monkeypatch):
     """The audit's exact move: draft with 3 unpaid days, month locked, rerun
-    with 0 unpaid days. Approve/pay already answered 423; the rerun did not."""
+    with 0 unpaid days. Approve/pay already answered 423; the rerun answered
+    200 and moved the locked month's P&L."""
     db = _db()
     c = _client(db, monkeypatch)
     assert _run(c, lwp_days={EMP: 3}).status_code == 200
     before = dict(_stored_row(db))
-    db.get_collection("period_locks").insert_one({"month": MONTH, "year": YEAR})
+    cost = before["breakdown"]["ctc_cost"]
+    assert _pnl_payroll(db) == (cost, cost, {STORE: cost})
+    _lock(db)
 
     r = _run(c, lwp_days={EMP: 0})
     assert r.status_code == 423, r.text
     assert _stored_row(db) == before  # the stored draft is byte-for-byte unchanged
+    assert _pnl_payroll(db) == (cost, cost, {STORE: cost})  # the closed P&L did not move
+
+
+def test_l3_02_old_salary_writer_refused_in_a_locked_month(monkeypatch):
+    """POST /payroll/salary/calculate is the other payroll writer: its row is
+    what the salary sheet and the payslip fall back to for a month with no run."""
+    db = _db()
+    c = _client(db, monkeypatch)
+    records = db.get_collection("salary_records")
+    body = {"employee_id": EMP, "month": MONTH, "year": YEAR, "leave_without_pay_days": 3}
+    assert c.post("/api/v1/payroll/salary/calculate", json=body).status_code == 201
+    before = dict(records.find_one({"employee_id": EMP}))
+    _lock(db)
+
+    r = c.post("/api/v1/payroll/salary/calculate", json={**body, "leave_without_pay_days": 0})
+    assert r.status_code == 423, r.text
+    assert records.find_one({"employee_id": EMP}) == before
+    assert records.count_documents({}) == 1
+
+    # An open month is written exactly as before, and a year no calendar has
+    # is not turned into a server error by the new check.
+    assert c.post("/api/v1/payroll/salary/calculate", json={**body, "month": 11}).status_code == 201
+    assert c.post("/api/v1/payroll/salary/calculate", json={**body, "year": 0}).status_code == 201
+    assert records.count_documents({}) == 3
 
 
 def test_l3_02_first_run_refused_in_a_locked_month(monkeypatch):
     db = _db()
     c = _client(db, monkeypatch)
-    db.get_collection("period_locks").insert_one({"month": MONTH, "year": YEAR})
+    _lock(db)
 
     r = _run(c)
     assert r.status_code == 423, r.text
@@ -197,7 +206,7 @@ def test_l3_02_preview_still_works_in_a_locked_month(monkeypatch):
     """A preview writes nothing, so the lock has nothing to protect it from."""
     db = _db()
     c = _client(db, monkeypatch)
-    db.get_collection("period_locks").insert_one({"month": MONTH, "year": YEAR})
+    _lock(db)
 
     r = _run(c, dry_run=True)
     assert r.status_code == 200, r.text
