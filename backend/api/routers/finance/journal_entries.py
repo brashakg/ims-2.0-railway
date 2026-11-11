@@ -40,7 +40,7 @@ from ._shared import (
 # Roles allowed to draft + submit a JE (the maker side).
 _JE_MAKER_ROLES = {"ACCOUNTANT", "ADMIN", "SUPERADMIN"}
 # Roles allowed to approve / reject / post / reverse a JE (the checker side).
-_JE_CHECKER_ROLES = {"ADMIN", "SUPERADMIN"}
+_JE_CHECKER_ROLES = je_service.JE_CHECKER_ROLES
 # Roles allowed to READ the vouchers: the accounts roles (owner decision
 # 2026-10-18, audit FU-17). The store managers' read was dropped.
 _JE_READER_ROLES = COST_VISIBLE_ROLES

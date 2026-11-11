@@ -45,6 +45,7 @@ from pydantic import BaseModel, Field
 
 from .auth import get_current_user, require_roles
 from ..dependencies import user_store_scope, validate_store_access
+from ..services import je_service
 from ..services.approvals import ApprovalEngine, may_approve
 from ..services.cost_mask import AP_ROLES
 from ..services.payables_mask import SUPPLIER_MONEY_ACTIONS, strip_approval_money
@@ -276,14 +277,33 @@ def _request_in_reach(eng: ApprovalEngine, doc: Dict[str, Any], user: Dict[str, 
     return eng._store_scope_ok(doc.get("store_id"), set(_roles(user)), sorted(stores))
 
 
-def _in_reach_or_missing(eng: ApprovalEngine, request_id: str, user: Dict[str, Any]) -> None:
+def _in_reach_or_missing(
+    eng: ApprovalEngine, request_id: str, user: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
     """approve / reject: a request the caller may not open by id (the rule GET
     applies, _request_in_reach) answers exactly what a missing id answers --
     the engine's 404 not_found -- before the engine's tier, maker-checker,
-    store or PIN gate can tell another shop's request from no request (F63)."""
+    store or PIN gate can tell another shop's request from no request (F63).
+    Returns the request (None when there is none)."""
     doc = eng.get(request_id)
     if doc is not None and not _request_in_reach(eng, doc, user):
         _decode({"ok": False, "http": 404, "error": "not_found"}, success_keys=())
+    return doc
+
+
+def _move_journal(doc: Optional[Dict[str, Any]]) -> None:
+    """A journal's request decided here moves its journal in the same call
+    (L3-25): the inbox used to update only the request, leaving the journal
+    SUBMITTED where Post refused not_approved and the journal's own Approve
+    refused already_reviewed. One rule decides it, in je_service. Fail-soft:
+    the decision stands on the request, and every journal door catches the
+    journal up from it (je_service._take_request_decision)."""
+    if (doc or {}).get("action_type") != je_service.JE_ACTION_TYPE:
+        return
+    try:
+        je_service.sync_with_request(_get_db(), (doc.get("context") or {}).get("je_id"))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[APPROVALS] journal sync after decision failed: %s", e)
 
 
 @router.get("/requests/{request_id}")
@@ -331,7 +351,7 @@ async def approve_request(
     accounts roles' at any tier (R1); a manager gets 404 for one, and so does
     anyone for another shop's request (_in_reach_or_missing)."""
     eng = _engine()
-    _in_reach_or_missing(eng, request_id, current_user)
+    doc = _in_reach_or_missing(eng, request_id, current_user)
     res = eng.approve(
         request_id,
         approver_user_id=current_user.get("user_id"),
@@ -339,6 +359,8 @@ async def approve_request(
         pin=body.pin,
         approver_store_ids=_store_ids(current_user),
     )
+    if res.get("ok"):
+        _move_journal(doc)
     return _decode(res, success_keys=("approval_token", "status", "reviewed_at", "request_id"))
 
 
@@ -351,7 +373,7 @@ async def reject_request(
     """Reject a request with the approver's PIN. Same routing and the same
     shop rule as approve."""
     eng = _engine()
-    _in_reach_or_missing(eng, request_id, current_user)
+    doc = _in_reach_or_missing(eng, request_id, current_user)
     res = eng.reject(
         request_id,
         approver_user_id=current_user.get("user_id"),
@@ -360,6 +382,8 @@ async def reject_request(
         reason=body.reason,
         approver_store_ids=_store_ids(current_user),
     )
+    if res.get("ok"):
+        _move_journal(doc)
     return _decode(res, success_keys=("status", "request_id"))
 
 

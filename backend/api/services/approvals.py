@@ -621,7 +621,11 @@ class ApprovalEngine:
             "reviewed_by": None,
             "reviewed_at": None,
             "reject_reason": None,
-            "approval_token": None,
+            # NO "approval_token" key until approve() mints one (L3-01). The
+            # unique SPARSE index on approval_token skips a row only when the
+            # field is MISSING: an explicit null IS indexed, so a second
+            # pending request collided E11000 with the first one's null (and a
+            # rejected / expired request held the null slot for good).
             "consumed": False,
             "consumed_at": None,
             "consumed_by": None,
@@ -1575,6 +1579,7 @@ def request_approval(
     reason: str = "",
     required_tier: Optional[str] = None,
     dedupe_key: Optional[str] = None,
+    only_roles: Optional[List[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Module-level convenience so a domain router can open a request in one
     call. Fail-soft like create_proposal: returns None when there is no DB (or
@@ -1593,6 +1598,7 @@ def request_approval(
             reason=reason,
             required_tier=required_tier,
             dedupe_key=dedupe_key,
+            only_roles=only_roles,
         )
         # A no_db / write_failed result is surfaced as None for the fail-soft
         # agent path (matches proposals.create_proposal).
