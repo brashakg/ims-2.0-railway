@@ -240,3 +240,237 @@ def test_sibling_doors_still_treat_a_genuine_miss_as_not_found(
     result = handler(db, payload)
     assert result["status"] == verdict
     _raise_if_failed(result)  # a business outcome, not a failure
+
+
+# ---------------------------------------------------------------------------
+# D13(b): "is this refund already booked?" fails CLOSED. A refund is money: a
+# read that FAILED is not "not booked yet", on any of the three doors that ask
+# (the webhook, the hourly status sweep, the order-history import).
+# ---------------------------------------------------------------------------
+
+_REFUND_ID = "81"
+
+
+def _refund_order(db):
+    db.orders.insert_one({
+        "order_id": "ORD-AUDIT-1",
+        "shopify_order_id": _SHOPIFY_ORDER_ID,
+        "order_number": "ONL-5550001",
+        "channel": "ONLINE",
+        "source": "shopify",
+        "customer_id": "CUST-1",
+        "store_id": "BV-ONLINE-01",
+        "status": "CONFIRMED",
+        "payment_status": "PAID",
+        "grand_total": 1000.0,
+        "amount_paid": 1000.0,
+        "items": [{
+            "item_id": "it-1", "product_id": "7001", "ims_product_id": "IMS-P-1",
+            "shopify_line_item_id": 9001, "sku": "RB-1", "product_name": "RB",
+            "quantity": 1, "gst_rate": 5.0, "taxable_value": 952.38, "tax_amount": 47.62,
+        }],
+    })
+
+
+def _refund_payload():
+    return {
+        "id": int(_REFUND_ID),
+        "order_id": int(_SHOPIFY_ORDER_ID),
+        "restock": True,
+        "refund_line_items": [{
+            "id": 1, "quantity": 1, "line_item_id": 9001, "restock_type": "return",
+            "subtotal": 952.38, "total_tax": 47.62,
+            "line_item": {"id": 9001, "sku": "RB-1", "quantity": 1},
+        }],
+    }
+
+
+def _booked_by_returns_doc(db):
+    """Credited through a returns doc (an AUTO post, or a confirmed review
+    whose row was since cleared)."""
+    db.returns.insert_one({
+        "return_id": "RET-1", "order_id": "ORD-AUDIT-1", "shopify_refund_id": _REFUND_ID,
+        "status": "COMPLETED", "credit_note_issued": True, "net_refund": 1000.0,
+        "credit_entry": {"entry_id": "CN-1", "delta": 1000.0},
+    })
+    db.credit_note_ledger.insert_one({
+        "entry_id": "CN-1", "ref": "RET-1", "type": "ISSUED", "delta": 1000.0,
+        "customer_id": "CUST-1", "order_id": "ORD-AUDIT-1",
+    })
+
+
+def _booked_by_history_import(db):
+    """Credited by the order-history import: its ledger row is written first,
+    and its returns stamp may never land."""
+    db.credit_note_ledger.insert_one({
+        "entry_id": "CN-H", "ref": f"SHOPIFY-HIST-REFUND-{_REFUND_ID}", "type": "ISSUED",
+        "delta": 0.0, "customer_id": "CUST-1", "order_id": "ORD-AUDIT-1",
+    })
+
+
+def _rejected_by_the_accountant(db):
+    db.shopify_refund_review.insert_one({
+        "review_id": "REV-1", "shopify_refund_id": _REFUND_ID, "order_id": "ORD-AUDIT-1",
+        "status": "REJECTED", "resolved": True,
+    })
+
+
+_MONEY_COLLECTIONS = ("returns", "credit_note_ledger", "shopify_refund_review", "tasks")
+
+
+def _money_rows(db):
+    """Every stored row a refund can write, without Mongo's _id."""
+    return {
+        name: sorted(
+            repr(sorted((k, v) for k, v in d.items() if k != "_id"))
+            for d in db[name].find({})
+        )
+        for name in _MONEY_COLLECTIONS
+    }
+
+
+_BOOKED = [
+    pytest.param(_booked_by_returns_doc, "returns", id="returns-doc"),
+    pytest.param(_booked_by_history_import, "credit_note_ledger", id="history-import-ledger-row"),
+    pytest.param(_rejected_by_the_accountant, "shopify_refund_review", id="rejected-review-row"),
+]
+
+
+@pytest.mark.parametrize("seed,outage", _BOOKED)
+def test_refund_already_processed_raises_when_its_read_fails(db, seed, outage):
+    from api.services.shopify_refund import _refund_already_processed
+
+    seed(db)
+    assert _refund_already_processed(db, _REFUND_ID) is True
+    with _lookup_outage(outage):
+        with pytest.raises(TimeoutError):
+            _refund_already_processed(db, _REFUND_ID)
+
+
+def test_refund_already_processed_raises_when_the_database_is_disconnected():
+    from api.services.shopify_refund import _refund_already_processed
+
+    class Disconnected:
+        def get_collection(self, name):
+            return None
+
+    with pytest.raises(RuntimeError):
+        _refund_already_processed(Disconnected(), _REFUND_ID)
+
+
+def test_refund_already_processed_still_answers_when_the_reads_work(db):
+    from api.services.shopify_refund import _refund_already_processed
+
+    assert _refund_already_processed(db, _REFUND_ID) is False
+    assert _refund_already_processed(None, _REFUND_ID) is False
+    # An UNMATCHED row (the refund arrived before its order) stays reprocessable.
+    db.shopify_refund_review.insert_one(
+        {"shopify_refund_id": _REFUND_ID, "status": "UNMATCHED"})
+    assert _refund_already_processed(db, _REFUND_ID) is False
+    db.shopify_refund_review.update_one(
+        {"shopify_refund_id": _REFUND_ID}, {"$set": {"status": "PENDING"}})
+    assert _refund_already_processed(db, _REFUND_ID) is True
+
+
+@pytest.mark.parametrize("seed,outage", _BOOKED)
+def test_a_booked_refund_redelivered_during_a_read_outage_books_nothing_twice(
+    db, monkeypatch, seed, outage
+):
+    """The webhook door, by its STORED rows. Before: the failed read answered
+    "not booked yet", the refund was worked again, a second PENDING review row
+    was queued for money already settled and the inbox row was acknowledged."""
+    monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
+    _refund_order(db)
+    seed(db)
+    before = _money_rows(db)
+    order_before = db.orders.find_one({"order_id": "ORD-AUDIT-1"})
+    _inbox_row(db, "refund-1", "refunds/create", _refund_payload())
+
+    with _lookup_outage(outage):
+        row = _drain(db, "refund-1")
+
+    assert row["processed"] is False and row["status"] == "failed", row
+    assert "exception:TimeoutError" in row["handler_error"]
+    assert _money_rows(db) == before
+    assert db.orders.find_one({"order_id": "ORD-AUDIT-1"}) == order_before
+
+    # The outage ends: the retry finds the refund booked and changes nothing.
+    row = _drain(db, "refund-1")
+    assert row["processed"] is True and row["status"] == "succeeded", row
+    assert _money_rows(db) == before
+    assert db.orders.find_one({"order_id": "ORD-AUDIT-1"}) == order_before
+
+
+@pytest.mark.parametrize("seed,outage", _BOOKED)
+def test_the_auto_post_books_nothing_twice_after_a_read_failure(
+    db, monkeypatch, seed, outage
+):
+    """Same, with the automatic credit-note post switched on in the test (it
+    is off in production): no second credit note, no second return."""
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _refund_order(db)
+    seed(db)
+    before = _money_rows(db)
+
+    with _lookup_outage(outage):
+        result = handle_shopify_refund(db, _refund_payload(), topic="refunds/create")
+    assert result == {"status": "skipped", "reason": "exception:TimeoutError"}
+    with pytest.raises(RuntimeError):
+        _raise_if_failed(result)
+    assert _money_rows(db) == before
+
+    assert handle_shopify_refund(db, _refund_payload())["status"] == "duplicate"
+    assert _money_rows(db) == before
+
+
+@pytest.mark.parametrize("seed,outage", _BOOKED)
+def test_the_hourly_sweep_does_not_feed_a_refund_it_could_not_check(db, seed, outage):
+    from agents import nexus_providers
+
+    _refund_order(db)
+    seed(db)
+    before = _money_rows(db)
+    raw = {"id": int(_SHOPIFY_ORDER_ID), "updated_at": "2026-11-10T10:00:00Z",
+           "refunds": [_refund_payload()]}
+    existing = {"order_id": "ORD-AUDIT-1", "historical": True}
+
+    with _lookup_outage(outage):
+        buckets, reason = asyncio.run(nexus_providers._sweep_booked_order(
+            db, raw, raw, existing, _SHOPIFY_ORDER_ID, True))
+
+    assert buckets == ["status_failed"] and "TimeoutError" in reason
+    assert _money_rows(db) == before
+    # Next hour, reads working: nothing to do.
+    buckets, reason = asyncio.run(nexus_providers._sweep_booked_order(
+        db, raw, raw, existing, _SHOPIFY_ORDER_ID, True))
+    assert buckets == [] and reason is None
+    assert _money_rows(db) == before
+
+
+def test_the_history_import_does_not_rebook_a_refund_it_could_not_check(db):
+    """The order-history import asks the same rule before it writes a credit
+    note. A failed read is a FAILED booking (healed on the next run), never a
+    second credit note."""
+    from api.services.shopify_ingest import _book_historical_refund_credit_notes
+
+    _refund_order(db)
+    order = db.orders.find_one({"order_id": "ORD-AUDIT-1"})
+    payload = {"id": int(_SHOPIFY_ORDER_ID), "financial_status": "partially_refunded",
+               "refunds": [dict(_refund_payload(), created_at="2024-02-01T10:00:00Z")]}
+
+    first = _book_historical_refund_credit_notes(db, payload, order)
+    assert first["credit_notes"] == 1
+    booked = db.credit_note_ledger.count_documents({})
+    assert booked == 1
+    # The returns stamp did not land (it is fail-soft): only the ledger row
+    # says this refund is booked.
+    db.returns.delete_many({})
+
+    with _lookup_outage("credit_note_ledger"):
+        during = _book_historical_refund_credit_notes(db, payload, order)
+    assert during["credit_notes"] == 0 and during["cn_failed"] == 1
+    assert db.credit_note_ledger.count_documents({}) == booked
+
+    after = _book_historical_refund_credit_notes(db, payload, order)
+    assert after["credit_notes"] == 0 and after["duplicate_refunds"] == 1
+    assert db.credit_note_ledger.count_documents({}) == booked

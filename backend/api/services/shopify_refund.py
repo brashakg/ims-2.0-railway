@@ -351,34 +351,25 @@ def _refund_already_processed(db, refund_id: str) -> bool:
 
     An UNMATCHED review row is DELIBERATELY not treated as processed: it means
     the refund arrived before its order was ingested, so once the order exists a
-    redelivery (or a re-drive) must be able to reprocess it. Fail-soft -> False
-    (the caller then proceeds; a stray double is preferable to dropping a real
-    refund)."""
+    redelivery (or a re-drive) must be able to reprocess it.
+
+    FAIL CLOSED (audit L1-F29, decision D13): a read that FAILED -- or a
+    database that is not connected -- is NOT "not booked yet". It RAISES
+    (find_by_shopify_id, the lookup every Shopify handler shares), so the
+    caller books nothing and the refund stays retryable: the webhook's inbox
+    row is recorded failed and retried, the sweep reports status_failed and
+    asks again next hour, the history import counts a failed booking its next
+    run heals. A refund is money: a late credit note is recoverable, a second
+    one is not. (This used to answer False on a failed read, and the refund
+    was then worked a second time.)"""
     if db is None or not refund_id:
         return False
-    try:
-        returns_coll = db.get_collection(_RETURNS_COLLECTION)
-        if returns_coll is not None and returns_coll.find_one(
-            {"shopify_refund_id": refund_id}
-        ):
-            return True
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        ledger = db.get_collection("credit_note_ledger")
-        if ledger is not None and ledger.find_one({"ref": _hist_refund_ref(refund_id)}):
-            return True
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        review_coll = db.get_collection(_REVIEW_COLLECTION)
-        if review_coll is not None:
-            row = review_coll.find_one({"shopify_refund_id": refund_id})
-            if row is not None and _norm(row.get("status")).upper() != "UNMATCHED":
-                return True
-    except Exception:  # noqa: BLE001
-        pass
-    return False
+    if find_by_shopify_id(db, _RETURNS_COLLECTION, "shopify_refund_id", refund_id):
+        return True
+    if find_by_shopify_id(db, "credit_note_ledger", "ref", _hist_refund_ref(refund_id)):
+        return True
+    row = find_by_shopify_id(db, _REVIEW_COLLECTION, "shopify_refund_id", refund_id)
+    return row is not None and _norm(row.get("status")).upper() != "UNMATCHED"
 
 
 def _supersede_unmatched(db, refund_id: str) -> None:
