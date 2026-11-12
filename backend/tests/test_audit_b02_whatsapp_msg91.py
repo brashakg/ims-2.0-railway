@@ -7,10 +7,20 @@
   L1-F31  a national Indian number beginning 91 was sent with no country code
   L1-F35  two ONDC callbacks ignored a failed signature check
 
-Every test runs on an in-memory mongomock database behind the REAL routes and
-services, with signed synthetic payloads. No provider is contacted and
-DISPATCH_MODE is never armed: the send doors are observed at their dispatch
-gate, the ONDC publisher is a stub.
+Codex round 1 on PR #1416 (2026-11-12):
+
+  1416-P2a  a saved message made an unapplied intent permanently "duplicate"
+  1416-P2b  a failed thread write let the intent run again on the retry
+  1416-P2c  D20: ONDC off refuses EVERY callback, correctly signed or not
+
+Every test runs behind the REAL routes and services, with signed synthetic
+payloads, on an in-memory mongomock database. The inbound state-machine tests
+(the `wa` fixture) run on mongomock AND on a native PyMongo Database: CI's
+Mongo service on 127.0.0.1:27017, or the port given in IMS_TEST_MONGO_PORT
+(the convention of test_workshop_handoff_recovery; the test owns and drops
+IMS_TEST_MONGO_DB). No provider is contacted and DISPATCH_MODE is never armed:
+the send doors are observed at their dispatch gate, the ONDC publisher is a
+stub.
 """
 
 from __future__ import annotations
@@ -21,10 +31,12 @@ import hmac
 import json
 import os
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import mongomock
+import pymongo
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -263,6 +275,359 @@ def test_meta_redelivery_of_the_same_message_runs_the_intent_once(client, inboun
     _post_inbound(client, _meta_body("book for my son too", wa_id="wamid.ZZ-NEXT"))
     assert db.follow_ups.count_documents({}) == 2
     assert db.whatsapp_conversations.count_documents({}) == 1
+
+# ===========================================================================
+# 1416-P2a / 1416-P2b -- one durable inbox row per inbound message
+# ===========================================================================
+# Codex reproduced both on native Mongo: (a) the message was saved to the
+# thread, the intent then failed, and the retry was answered "duplicate" for
+# ever; (b) the thread write failed, the intent ran, and the retry ran it
+# again. The thread is no longer the idempotency record: each message has its
+# own webhook_inbox row (received -> intent applied -> done).
+
+REAL_HOST = "127.0.0.1"
+REAL_PORT = os.environ.get("IMS_TEST_MONGO_PORT") or ("27017" if os.environ.get("CI") else "")
+# IMS_TEST_MONGO_DB: a builder's own scratch name. The test DROPS it.
+REAL_DB = os.environ.get("IMS_TEST_MONGO_DB") or f"ims_test_b02_inbound_{os.getpid()}"
+PHONE = "9876543210"
+
+BOOK = ("book an eye test", "BOOK")
+AGENT = ("I need an agent please", "AGENT")
+STOP = ("STOP", "OPT_OUT")
+INTENTS = pytest.mark.parametrize("text,intent", [BOOK, AGENT, STOP], ids=["booking", "handoff", "stop"])
+
+
+@pytest.fixture(params=["mongomock", "real"])
+def wa(request, monkeypatch):
+    """The signed Meta door over ONE database, handed to the app the way
+    production hands it: a Database on the connection's ``.db`` ("real" = a
+    native PyMongo Database, nothing wrapped). A re-dispatch runs NEXUS's real
+    drain; the reply door is a stub that must never be reached."""
+    mongo_client = None
+    if request.param == "real":
+        if not REAL_PORT:
+            pytest.skip("no local Mongo given (IMS_TEST_MONGO_PORT)")
+        mongo_client = pymongo.MongoClient(REAL_HOST, int(REAL_PORT), serverSelectionTimeoutMS=2000)
+        mongo_client.admin.command("ping")
+        assert mongo_client.address[0] == REAL_HOST
+        mongo_client.drop_database(REAL_DB)
+        db = mongo_client[REAL_DB]
+        assert isinstance(db, pymongo.database.Database) and db.name == REAL_DB
+    else:
+        db = mongomock.MongoClient()["zz_b02_inbound"]
+    monkeypatch.setattr(db_connection, "get_db", lambda: _Conn(db))
+    monkeypatch.setenv("WABA_APP_SECRET", WA_SECRET)
+    db.customers.insert_one(
+        {"customer_id": "CUST-ZZ-A", "name": "Asha Synthetic", "mobile": PHONE,
+         "home_store_id": "ST-A"}
+    )
+    try:
+        with patch.object(providers, "send_whatsapp", new=AsyncMock()) as send, \
+                _nexus_drains_redeliveries(db):
+            yield db
+            send.assert_not_called()
+    finally:
+        if mongo_client is not None:
+            mongo_client.drop_database(REAL_DB)
+            mongo_client.close()
+
+
+@contextmanager
+def _outage(db, coll_name, op):
+    """`op` on ONE collection of this database fails while the block runs
+    (patched on the driver's own Collection class, so the app still holds the
+    untouched Database)."""
+    cls = type(db.get_collection(coll_name))
+    real = getattr(cls, op)
+
+    def broken(self, *a, **k):
+        if self.name == coll_name and self.database.name == db.name:
+            raise RuntimeError("synthetic storage outage")
+        return real(self, *a, **k)
+
+    with patch.object(cls, op, broken):
+        yield
+
+
+def _wa_row(db, wa_id):
+    rows = list(db.webhook_inbox.find({"vendor": "whatsapp", "event_id": wa_id}))
+    assert len(rows) == 1, rows
+    return rows[0]
+
+
+def _effects(db):
+    """Everything an intent may have written, as stored."""
+    cust = db.customers.find_one({"customer_id": "CUST-ZZ-A"}, {"_id": 0})
+    thread = db.whatsapp_conversations.find_one({"phone": PHONE}, {"_id": 0}) or {}
+    return {
+        "follow_ups": sorted(
+            (f["follow_up_id"], f["follow_up_type"], f.get("source_message_id"))
+            for f in db.follow_ups.find({})
+        ),
+        "opted_out": (cust.get("whatsapp_opted_out"), cust.get("whatsapp_opted_out_at"),
+                      cust.get("marketing_consent")),
+        "opt_out_rows": sorted(
+            (o["phone"], o["opted_out_at"]) for o in db.whatsapp_opt_outs.find({})
+        ),
+        "handoff": (thread.get("needs_human"), thread.get("needs_human_since")),
+        "thread_messages": [m["wa_message_id"] for m in thread.get("messages") or []],
+    }
+
+
+def _assert_applied_once(db, intent, wa_id):
+    got = _effects(db)
+    assert got["thread_messages"] == [wa_id]
+    if intent == "BOOK":
+        assert [(t, m) for _id, t, m in got["follow_ups"]] == [("eye_test_reminder", wa_id)]
+    else:
+        assert got["follow_ups"] == []
+    if intent == "AGENT":
+        assert got["handoff"][0] is True and got["handoff"][1]
+    else:
+        assert got["handoff"][0] is False
+    if intent == "OPT_OUT":
+        assert got["opted_out"][0] is True and got["opted_out"][2] is False
+        assert len(got["opt_out_rows"]) == 1
+    else:
+        assert got["opted_out"][0] is None and got["opt_out_rows"] == []
+    row = _wa_row(db, wa_id)
+    assert row["processed"] is True and row["status"] == "succeeded"
+    # (A STOP whose writes had landed before a re-run is met by the opt-out
+    # gate, which answers "opted out" without naming the intent again.)
+    recorded = row["intent_result"]
+    assert row["intent_applied_at"]
+    assert recorded["intent"] == intent or (intent == "OPT_OUT" and recorded["opted_out"])
+    return got
+
+
+def _age_the_lease(db, wa_id):
+    db.webhook_inbox.update_one(
+        {"event_id": wa_id},
+        {"$set": {"processing_at": datetime.now(timezone.utc)
+                  - NexusAgent.WEBHOOK_PROCESSING_LEASE - timedelta(minutes=1)}},
+    )
+
+
+@INTENTS
+def test_healthy_inbound_applies_the_intent_once_and_records_it(client, wa, text, intent):
+    wa_id = f"wamid.ZZ-OK-{intent}"
+    r = _post_inbound(client, _meta_body(text, wa_id=wa_id))
+    assert r.status_code == 200, r.text
+    assert r.json()["results"][0]["intent"] == intent
+    _assert_applied_once(wa, intent, wa_id)
+    row = _wa_row(wa, wa_id)
+    assert row["attempts"] == 1 and row["signature_verified"] is True
+    assert row["payload"]["wa_message_id"] == wa_id
+
+
+@INTENTS
+def test_duplicate_redelivery_of_an_applied_message_changes_nothing(client, wa, text, intent):
+    wa_id = f"wamid.ZZ-DUP-{intent}"
+    body = _meta_body(text, wa_id=wa_id)
+    _post_inbound(client, body)
+    before = _assert_applied_once(wa, intent, wa_id)
+    for _ in range(2):
+        again = _post_inbound(client, body)
+        assert again.status_code == 200
+        assert again.json()["results"] == [{"duplicate": True, "phone": "3210"}]
+    asyncio.run(NexusAgent(db=wa)._retry_failed_webhooks())  # nothing is owed
+    assert _assert_applied_once(wa, intent, wa_id) == before
+    assert _wa_row(wa, wa_id)["attempts"] == 1
+
+
+@INTENTS
+def test_crash_after_the_message_is_saved_still_applies_the_intent_on_redelivery(
+    client, wa, text, intent
+):
+    """1416-P2a, Codex's injection: the message is saved, then the run fails
+    just before the intent. It used to be acknowledged, and the redelivery
+    answered "duplicate" with the intent never applied and nothing pending."""
+    wa_id = f"wamid.ZZ-LOST-{intent}"
+    body = _meta_body(text, wa_id=wa_id)
+    with patch.object(whatsapp_intents, "dispatch_intent",
+                      new=AsyncMock(side_effect=RuntimeError("crash before intent"))):
+        first = _post_inbound(client, body)
+    assert first.status_code == 200
+    assert first.json()["results"][0]["error"] == "crash before intent"
+    saved = _effects(wa)
+    assert saved["thread_messages"] == [wa_id]  # the message WAS saved
+    assert saved["follow_ups"] == [] and saved["handoff"][0] is False
+    assert saved["opted_out"][0] is None
+    pending = _wa_row(wa, wa_id)  # ...and the intent is still owed, on record
+    assert pending["processed"] is False and pending["status"] == "failed"
+    assert "intent_applied_at" not in pending
+
+    second = _post_inbound(client, body)  # Meta's identical redelivery
+    assert second.json()["results"] == [{"duplicate": True, "phone": "3210", "redispatched": True}]
+    applied = _assert_applied_once(wa, intent, wa_id)
+    assert _wa_row(wa, wa_id)["attempts"] == 2
+
+    third = _post_inbound(client, body)
+    assert third.json()["results"] == [{"duplicate": True, "phone": "3210"}]
+    assert _assert_applied_once(wa, intent, wa_id) == applied
+
+
+def test_hourly_sweep_applies_an_unapplied_intent_without_any_redelivery(client, wa):
+    wa_id = "wamid.ZZ-SWEEP"
+    with patch.object(whatsapp_intents, "dispatch_intent",
+                      new=AsyncMock(side_effect=RuntimeError("crash before intent"))):
+        _post_inbound(client, _meta_body("book an eye test", wa_id=wa_id))
+    assert wa.follow_ups.count_documents({}) == 0
+    asyncio.run(NexusAgent(db=wa)._retry_failed_webhooks())
+    applied = _assert_applied_once(wa, "BOOK", wa_id)
+    asyncio.run(NexusAgent(db=wa)._retry_failed_webhooks())  # second sweep is inert
+    assert _assert_applied_once(wa, "BOOK", wa_id) == applied
+
+
+def test_a_run_that_died_mid_message_is_taken_over_after_the_lease(client, wa):
+    """A real crash records nothing at all: the row is left exactly as it was
+    claimed (status=processing). A redelivery inside the lease must not start
+    a second run beside it; after the lease the sweep finishes the message."""
+    wa_id = "wamid.ZZ-DIED"
+    body = _meta_body("book an eye test", wa_id=wa_id)
+    with patch.object(whatsapp_intents, "dispatch_intent",
+                      new=AsyncMock(side_effect=RuntimeError("worker killed"))), \
+            patch.object(webhooks, "_write_inline_outcome"):
+        _post_inbound(client, body)
+    assert _wa_row(wa, wa_id)["status"] == "processing"
+
+    during = _post_inbound(client, body)
+    assert during.json()["results"] == [{"duplicate": True, "phone": "3210"}]
+    assert wa.follow_ups.count_documents({}) == 0
+
+    _age_the_lease(wa, wa_id)
+    asyncio.run(NexusAgent(db=wa)._retry_failed_webhooks())
+    _assert_applied_once(wa, "BOOK", wa_id)
+
+
+@INTENTS
+def test_failed_thread_write_then_retries_apply_the_intent_exactly_once(
+    client, wa, text, intent
+):
+    """1416-P2b, Codex's injection: only whatsapp_conversations.update_one
+    fails. The intent used to run anyway (nothing recorded the message), and
+    the identical retry ran it a second time: follow-ups 1 -> 2."""
+    wa_id = f"wamid.ZZ-THREAD-{intent}"
+    body = _meta_body(text, wa_id=wa_id)
+    with _outage(wa, "whatsapp_conversations", "update_one"):
+        first = _post_inbound(client, body)
+    assert first.status_code == 200 and "error" in first.json()["results"][0]
+    row = _wa_row(wa, wa_id)
+    assert row["processed"] is False and row["status"] == "failed"
+
+    second = _post_inbound(client, body)
+    assert second.json()["results"][0]["redispatched"] is True
+    applied = _assert_applied_once(wa, intent, wa_id)
+
+    for _ in range(2):  # and any number of further identical retries
+        _post_inbound(client, body)
+    asyncio.run(NexusAgent(db=wa)._retry_failed_webhooks())
+    assert _assert_applied_once(wa, intent, wa_id) == applied
+
+
+@INTENTS
+def test_intent_that_landed_but_could_not_be_marked_is_not_applied_twice(
+    client, wa, text, intent
+):
+    """The other side of the same window: the intent's writes land, then the
+    inbox row cannot be updated (neither the "applied" mark nor the outcome).
+    The re-run meets writes keyed on the message, so nothing is written twice
+    and no stored time moves."""
+    wa_id = f"wamid.ZZ-MARK-{intent}"
+    body = _meta_body(text, wa_id=wa_id)
+    with _outage(wa, "webhook_inbox", "update_one"):
+        first = _post_inbound(client, body)
+    assert first.status_code == 200 and "error" in first.json()["results"][0]
+    landed = _effects(wa)  # the business effect is already stored...
+    row = _wa_row(wa, wa_id)  # ...but the row could not say so
+    assert row["status"] == "processing" and "intent_applied_at" not in row
+
+    _age_the_lease(wa, wa_id)
+    asyncio.run(NexusAgent(db=wa)._retry_failed_webhooks())
+    assert _assert_applied_once(wa, intent, wa_id) == landed
+    assert _post_inbound(client, body).json()["results"] == [{"duplicate": True, "phone": "3210"}]
+    assert _effects(wa) == landed
+
+
+def test_an_applied_intent_is_skipped_when_a_later_step_makes_the_row_run_again(client, wa):
+    """Row state "intent applied, not yet done": the re-run must not call the
+    intent at all (a reply would otherwise go out twice once replies are on)."""
+    wa_id = "wamid.ZZ-APPLIED"
+    body = _meta_body("book an eye test", wa_id=wa_id)
+    _post_inbound(client, body)
+    applied = _assert_applied_once(wa, "BOOK", wa_id)
+    wa.webhook_inbox.update_one(
+        {"event_id": wa_id}, {"$set": {"processed": False, "status": "failed"}}
+    )
+    with patch.object(whatsapp_intents, "dispatch_intent", new=AsyncMock()) as intent_door:
+        assert _post_inbound(client, body).json()["results"][0]["redispatched"] is True
+        intent_door.assert_not_called()
+    assert _assert_applied_once(wa, "BOOK", wa_id) == applied
+
+
+def test_a_message_that_cannot_be_recorded_is_not_acknowledged(client, wa):
+    """No inbox row, no 200: Meta is asked to resend, and nothing is done for
+    a message nothing would remember."""
+    wa_id = "wamid.ZZ-NOROW"
+    body = _meta_body("book an eye test", wa_id=wa_id)
+    with _outage(wa, "webhook_inbox", "insert_one"):
+        assert _post_inbound(client, body).status_code == 503
+    assert wa.follow_ups.count_documents({}) == 0
+    assert wa.whatsapp_conversations.count_documents({}) == 0
+    assert wa.webhook_inbox.count_documents({}) == 0
+
+    assert _post_inbound(client, body).status_code == 200
+    _assert_applied_once(wa, "BOOK", wa_id)
+
+
+def test_two_messages_in_one_delivery_each_keep_their_own_state(client, wa):
+    body = _meta_body("book an eye test", wa_id="wamid.ZZ-PAIR-1")
+    value = body["entry"][0]["changes"][0]["value"]
+    value["messages"].append({**value["messages"][0], "id": "wamid.ZZ-PAIR-2",
+                              "text": {"body": "I need an agent please"}})
+    calls = {"n": 0}
+    real = whatsapp_intents.dispatch_intent
+
+    async def second_fails(**kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("only the second message fails")
+        return await real(**kw)
+
+    with patch.object(whatsapp_intents, "dispatch_intent", new=second_fails):
+        first = _post_inbound(client, body).json()["results"]
+    assert first[0]["intent"] == "BOOK" and "error" in first[1]
+
+    again = _post_inbound(client, body).json()["results"]
+    assert again == [{"duplicate": True, "phone": "3210"},
+                     {"duplicate": True, "phone": "3210", "redispatched": True}]
+    assert wa.follow_ups.count_documents({}) == 1
+    thread = wa.whatsapp_conversations.find_one({"phone": PHONE})
+    assert thread["needs_human"] is True
+    assert [m["wa_message_id"] for m in thread["messages"]] == ["wamid.ZZ-PAIR-1", "wamid.ZZ-PAIR-2"]
+    assert {r["status"] for r in wa.webhook_inbox.find({"vendor": "whatsapp"})} == {"succeeded"}
+
+
+def test_reply_goes_out_at_most_once_and_only_after_the_intent_is_marked(client, wa, monkeypatch):
+    """With auto-reply allowed (policy stubbed; the provider is still the
+    stub), the reply follows the "applied" mark -- so a run that fails before
+    the mark sends nothing, and the re-run sends exactly one."""
+    monkeypatch.setattr(whatsapp_intents, "auto_reply_allowed", lambda _s: (True, "test"))
+    sent = AsyncMock(return_value=MagicMock(ok=True, status="SIMULATED"))
+    wa_id = "wamid.ZZ-REPLY"
+    body = _meta_body("book an eye test", wa_id=wa_id)
+    with patch.object(providers, "send_whatsapp", new=sent):
+        with _outage(wa, "webhook_inbox", "update_one"):
+            _post_inbound(client, body)
+        assert sent.await_count == 0  # effect stored, mark failed: no reply yet
+        _age_the_lease(wa, wa_id)
+        asyncio.run(NexusAgent(db=wa)._retry_failed_webhooks())
+        assert sent.await_count == 1
+        _post_inbound(client, body)
+        asyncio.run(NexusAgent(db=wa)._retry_failed_webhooks())
+        assert sent.await_count == 1
+    assert wa.follow_ups.count_documents({}) == 1
+
 
 
 # ===========================================================================
@@ -715,6 +1080,9 @@ ONDC_BODY = {
 
 @pytest.fixture
 def ondc_world(monkeypatch):
+    """A configured signing key, one ONDC order, a stub publisher and a spy on
+    order ingestion. ONDC itself is OFF, as it is by default."""
+    monkeypatch.delenv("IMS_ONDC_ENABLED", raising=False)
     db = mongomock.MongoClient()["zz_b02_ondc"]
     db.integrations.insert_one({"type": "ondc", "enabled": True, "config": {"ukp": UKP}})
     db.orders.insert_one(
@@ -724,7 +1092,15 @@ def ondc_world(monkeypatch):
     monkeypatch.setattr(ondc, "_get_db", lambda: db)
     publish = AsyncMock(return_value={"ok": True, "mode": "SIMULATED", "item_count": 0})
     monkeypatch.setattr(ondc.ondc_seller, "publish_catalog", publish)
-    return db, publish
+    ingest = MagicMock(return_value={"ok": True, "order_id": "ORD-ZZ-NEW", "mode": "SIMULATED"})
+    monkeypatch.setattr(ondc.ondc_seller, "ingest_ondc_order", ingest)
+    return db, publish, ingest
+
+
+def _switch_ondc_on(monkeypatch):
+    """The shared enabled rule answers "on" (a stand-in for the env flag plus
+    stored SNP credentials; nothing real is armed and the publisher is a stub)."""
+    monkeypatch.setattr(ondc.ondc_seller, "ondc_enabled", lambda _db: True)
 
 
 def _call(client, door, signature=None):
@@ -737,45 +1113,69 @@ def _call(client, door, signature=None):
     return client.post(f"/api/v1/ondc/{door}", content=raw, headers=headers).json()
 
 
-def _assert_refused(reply, db, publish):
+def _assert_refused(reply, world, why="Invalid signature"):
+    db, publish, ingest = world
     assert reply["message"] == {"ack": {"status": "NACK"}}
-    assert reply["error"]["message"] == "Invalid signature"
+    assert reply["error"]["message"] == why
     assert "DELIVERED" not in json.dumps(reply)
     publish.assert_not_called()
+    ingest.assert_not_called()
     assert db.orders.find_one({})["status"] == "DELIVERED"
     assert db.orders.count_documents({}) == 1
+    assert db.audit_logs.count_documents({}) == 0
 
 
 @pytest.mark.parametrize("door", DOORS)
 @pytest.mark.parametrize("signature", [None, "0" * 64])
+@pytest.mark.parametrize("switched_on", [False, True], ids=["ondc_off", "ondc_on"])
 def test_unsigned_or_wrongly_signed_callback_is_refused_at_every_door(
-    client, ondc_world, door, signature
+    client, ondc_world, monkeypatch, door, signature, switched_on
 ):
     """The audit reproduction: on_search still published and on_status still
-    disclosed the order after the signature check failed."""
-    db, publish = ondc_world
-    _assert_refused(_call(client, door, signature), db, publish)
+    disclosed the order after the signature check failed. Refused whether
+    ONDC is off or on, and never told which."""
+    if switched_on:
+        _switch_ondc_on(monkeypatch)
+    _assert_refused(_call(client, door, signature), ondc_world)
 
 
 @pytest.mark.parametrize("door", DOORS)
-def test_no_signing_key_configured_refuses_every_door(client, ondc_world, door):
+def test_no_signing_key_configured_refuses_every_door(client, ondc_world, monkeypatch, door):
     """Missing configuration fails closed, even for a 'correctly' signed call."""
-    db, publish = ondc_world
-    db.integrations.delete_many({})
-    _assert_refused(_call(client, door, "valid"), db, publish)
+    _switch_ondc_on(monkeypatch)
+    ondc_world[0].integrations.delete_many({})
+    _assert_refused(_call(client, door, "valid"), ondc_world)
 
 
-def test_signed_callbacks_still_work(client, ondc_world):
-    db, publish = ondc_world
+@pytest.mark.parametrize("door", DOORS)
+def test_correctly_signed_callback_is_refused_at_every_door_while_ondc_is_off(
+    client, ondc_world, door
+):
+    """D20 / 1416-P2c, Codex's native-route probe: with the enable flag off a
+    signed on_search still called the publisher, on_status answered with an
+    order state and on_confirm / on_cancel ACKed. Off means every door NACKs
+    and nothing is published, read, ingested, cancelled or audited."""
+    _assert_refused(_call(client, door, "valid"), ondc_world, why="ONDC is switched off")
+
+
+def test_the_env_flag_alone_does_not_open_the_doors(client, ondc_world, monkeypatch):
+    """The gate is the SHARED rule (flag AND stored SNP credentials), not a
+    second reading of the flag: this config has a signing key but no SNP."""
+    monkeypatch.setenv("IMS_ONDC_ENABLED", "1")
+    for door in DOORS:
+        _assert_refused(_call(client, door, "valid"), ondc_world, why="ONDC is switched off")
+
+
+def test_signed_callbacks_work_once_ondc_is_switched_on(client, ondc_world, monkeypatch):
+    """The gate refuses nothing it should let through."""
+    db, publish, ingest = ondc_world
+    _switch_ondc_on(monkeypatch)
     assert _call(client, "on_search", "valid")["message"]["ack"]["status"] == "ACK"
     publish.assert_awaited_once()
     status = _call(client, "on_status", "valid")
     assert status["message"]["order"] == {"id": "ONDC-ZZ-1", "state": "DELIVERED"}
-    for door in ("on_select", "on_init"):
+    for door in ("on_select", "on_init", "on_confirm"):
         assert _call(client, door, "valid")["message"]["ack"]["status"] == "ACK"
-    # Dark mode (IMS_ONDC_ENABLED off): a signed confirm/cancel is acknowledged
-    # and writes nothing -- the earlier fix, preserved.
-    for door in ("on_confirm", "on_cancel"):
-        assert _call(client, door, "valid")["message"]["ack"]["status"] == "ACK"
-    assert db.orders.find_one({})["status"] == "DELIVERED"
-    assert db.orders.count_documents({}) == 1
+    ingest.assert_called_once()
+    assert _call(client, "on_cancel", "valid")["message"]["ack"]["status"] == "ACK"
+    assert db.orders.find_one({})["status"] == "CANCELLED"
