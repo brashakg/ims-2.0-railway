@@ -336,8 +336,9 @@ def compute_payroll(
             "This month's locked incentive payout for employee '%s' is a "
             "clawback of Rs %s, more than the pay left after other deductions "
             "(Rs %s). Payroll never takes pay below zero, so nothing was "
-            "calculated. Ask head office support to spread this clawback over "
-            "later months, then run payroll again."
+            "calculated or saved. IMS does not carry a clawback into later "
+            "months: ask head office support, who can run this month without "
+            "it; the payroll row then records the amount still owed."
             % (who, f"{incentive_clawback:,.2f}", f"{max(0.0, left):,.2f}")
         )
     incentive -= incentive_clawback

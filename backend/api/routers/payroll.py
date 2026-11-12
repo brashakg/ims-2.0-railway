@@ -1803,6 +1803,7 @@ async def run_payroll(
         # P0-4: incentive feed comes from the LOCKED payout snapshot ONLY, one
         # store-scoped fetch per store (cached across configs in the loop).
         _feed_cache: Dict[str, dict] = {}
+        consumed: set = set()  # stores whose locked payout this run paid from
 
         def _store_feed(store_id: Optional[str]) -> dict:
             if not store_id:
@@ -1821,19 +1822,26 @@ async def run_payroll(
             cfg_store = cfg.get("store_id")
             lwp = float(req.lwp_days.get(emp, 0) or 0)
             incentive = (req.incentives or {}).get(emp)
-            clawback = 0.0
+            clawback = set_aside = 0.0
+            try:
+                locked = round(float(_store_feed(cfg_store).get(emp, 0.0)), 2)
+            except (TypeError, ValueError):
+                locked = 0.0
             if incentive is None:
-                feed = _store_feed(cfg_store)
-                try:
-                    incentive = round(float(feed.get(emp, 0.0)), 2)
-                except (TypeError, ValueError):
-                    incentive = 0.0
+                consumed.add(cfg_store)
+                incentive = locked
                 # A net clawback in the LOCKED payout (roadmap decision #31:
                 # returns took back more kicker than was earned) is not a
                 # typed negative incentive. The engine takes it off pay under
                 # its own name, never below zero; a typed negative is refused.
                 if incentive < 0:
                     incentive, clawback = 0.0, -incentive
+            elif locked < 0:
+                # An override replaces the locked payout figure, as it always
+                # has. When that figure is a clawback, this run does not take
+                # it back and nothing carries it to a later month, so the
+                # amount is kept on the row instead of vanishing.
+                set_aside = -locked
             advance = float(req.advances.get(emp, 0) or 0)
             pt_slab = _resolve_pt_slab(db, cfg)
             employee_name = _get_employee_details(db, emp).get("full_name", "")
@@ -1869,6 +1877,7 @@ async def run_payroll(
                     2,
                 ),
                 "incentives": breakdown["earnings"]["incentive"],
+                "incentive_clawback_not_recovered": set_aside,
                 "deductions": breakdown["deductions"]["total_deductions"],
                 "advance_deduction": breakdown["deductions"]["advance_recovery"],
                 "net_salary": breakdown["net_pay"],
@@ -1966,8 +1975,13 @@ async def run_payroll(
         # already stamped and the (re-read) feed is NOT added twice -- the
         # rows above already reflect the same single snapshot total.
         if not req.dry_run:
-            _stamp_consumed_snapshots(db, _feed_cache, req.month, req.year,
-                                      current_user.get("user_id"))
+            _stamp_consumed_snapshots(
+                db,
+                {s: f for s, f in _feed_cache.items() if s in consumed},
+                req.month,
+                req.year,
+                current_user.get("user_id"),
+            )
         totals = {k: round(v, 2) for k, v in totals.items()}
         return {
             "status": "success",

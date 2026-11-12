@@ -743,6 +743,42 @@ def test_d30_a_payout_clawback_bigger_than_the_months_pay_is_refused(rig):
     assert rig.rows() == [] and _fed(rig) is None  # nothing saved, payout not consumed
     g = rig.guard()
     assert g is None or g.get("runs") == 0
+    # The message promises nothing IMS cannot do: no clawback is carried into
+    # a later month, so it does not tell the Admin to have it "spread".
+    said = _detail(reply)
+    assert "spread" not in said and "does not carry a clawback into later months" in said
+    assert "head office support" in said and "still owed" in said
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_d30_a_clawback_an_override_sets_aside_is_kept_on_the_row(rig, dry_run):
+    """The one way past a clawback bigger than the month's pay is the incentive
+    override (support, by API), which replaces the locked payout figure as it
+    always has. The clawback it did not take back is written on the payroll
+    row, so it is never dropped without a trace."""
+    _lock_payout(rig, **{EMP: -90000.0, EMP2: 300.0})
+    reply = rig.run(dry_run=dry_run, incentives={EMP: 0})
+    assert reply.status_code == 200, reply.text
+
+    def owed(rows):
+        return {r["employee_id"]: (r["incentives"], r["incentive_clawback_not_recovered"]) for r in rows}
+
+    assert owed(reply.json()["rows"]) == {EMP: (0, 90000), EMP2: (300, 0)}
+    assert owed(rig.rows()) == ({} if dry_run else {EMP: (0, 90000), EMP2: (300, 0)})
+    assert all(r["net_salary"] >= 0 for r in reply.json()["rows"])
+    # an override where the locked figure is not a clawback sets nothing aside
+    both = rig.run(dry_run=True, incentives={EMP: 0, EMP2: 100})
+    assert owed(both.json()["rows"]) == {EMP: (0, 90000), EMP2: (100, 0)}
+
+
+def test_d30_a_rerun_that_takes_the_clawback_clears_the_amount_set_aside(rig):
+    _lock_payout(rig, **{EMP: -500.0})
+    assert rig.run(incentives={EMP: 0, EMP2: 0}).status_code == 200
+    assert [(r["incentives"], r["incentive_clawback_not_recovered"]) for r in rig.rows()] == [(0, 500), (0, 0)]
+    assert _fed(rig) is None  # every figure was overridden: the payout is not marked as fed, as before
+    assert rig.run().status_code == 200  # no override: the clawback comes off this month's pay
+    assert [(r["incentives"], r["incentive_clawback_not_recovered"]) for r in rig.rows()] == [(-500, 0), (0, 0)]
+    assert _fed(rig) is not None  # now the payout was used
 
 
 # ---------------------------------------------------------------------------

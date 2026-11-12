@@ -22,7 +22,10 @@ single-document update on ``payroll_period_guards``, ``_id`` = "YYYY-MM"):
 A run that died holding its claim stops counting after LEASE_SECONDS without
 a renewal (a live run renews before every row). If such a run was only
 stalled and comes back after the month was locked, its next renew / release
-is refused and the caller removes the rows it inserted in that call.
+is refused and the caller removes the rows it inserted in that call. A row
+it RE-writes needs no clean-up: that write only matches a row whose status is
+still what the run read, and the lock is refused while any row is a DRAFT, so
+a late re-write cannot turn an approved row into a DRAFT behind the lock.
 
 The period lock row in ``period_locks`` is still what every other posting
 reads; it is written straight after the commit. If the server dies between
