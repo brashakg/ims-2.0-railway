@@ -63,7 +63,7 @@ from api.routers.auth import get_current_user  # noqa: E402
 from api.routers.finance import _shared as finance_shared  # noqa: E402
 from api.routers.finance import period_lock  # noqa: E402
 from api.services import payroll_period_guard as guard  # noqa: E402
-from api.services.payroll_engine import PayrollInputError, compute_payroll  # noqa: E402
+from api.services.payroll_engine import compute_payroll  # noqa: E402
 
 REAL_HOST = "127.0.0.1"
 REAL_PORT = os.environ.get("IMS_TEST_MONGO_PORT") or ("27017" if os.environ.get("CI") else "")
@@ -562,21 +562,21 @@ def _engine(**typed):
 def test_d30_engine_refuses_what_would_take_pay_below_zero():
     net = _engine()["net_pay"]
     assert net > 0
-    with pytest.raises(PayrollInputError, match="Enter a smaller recovery"):
+    with pytest.raises(ValueError, match="Enter a smaller recovery"):
         _engine(advance_recovery=net + 0.01)
-    with pytest.raises(PayrollInputError, match="stays outstanding"):
+    with pytest.raises(ValueError, match="stays outstanding"):
         _engine(advance_recovery=50000)
-    with pytest.raises(PayrollInputError, match="entered as a deduction"):
+    with pytest.raises(ValueError, match="entered as a deduction"):
         _engine(incentive=-1)
-    with pytest.raises(PayrollInputError, match="Incentive cannot be negative"):
+    with pytest.raises(ValueError, match="Incentive cannot be negative"):
         _engine(incentive=-(net + 5000))  # the one that made EARNINGS negative
-    with pytest.raises(PayrollInputError):
+    with pytest.raises(ValueError):
         _engine(incentive=float("nan"))
     # the whole of the month's pay may be recovered, and an incentive adds room
     assert _engine(advance_recovery=net)["net_pay"] == 0
     assert _engine(incentive=500, advance_recovery=net + 500)["net_pay"] == 0
     # nothing left to recover from: the message says so instead of "Rs 0.00 or less"
-    with pytest.raises(PayrollInputError, match="Enter 0"):
+    with pytest.raises(ValueError, match="Enter 0"):
         compute_payroll({**_CONFIG, "tds_monthly": 99999}, month=MONTH, year=YEAR, advance_recovery=1)
     # a month with no recovery typed is not refused by this rule
     assert compute_payroll({**_CONFIG, "tds_monthly": 99999}, month=MONTH, year=YEAR)["net_pay"] < 0
