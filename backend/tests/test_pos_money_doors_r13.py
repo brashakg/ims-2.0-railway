@@ -573,4 +573,5 @@ def test_the_scheduled_tick_also_sweeps_stuck_holds(monkeypatch):
 
     monkeypatch.setattr(asyncio, "to_thread", _to_thread)
     asyncio.run(cust_router.scheduled_credit_reconcile())
-    assert seen == ["reconcile_pending_credits", "sweep_stuck_return_holds", "reconcile_loyalty_reversals"]
+    assert seen == ["reconcile_pending_credits", "sweep_stuck_return_holds",
+                    "finish_unfinished_refunds", "reconcile_loyalty_reversals"]
