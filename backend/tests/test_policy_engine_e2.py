@@ -331,6 +331,116 @@ def test_t12_store_scope_refuses_when_the_shop_to_entity_read_fails(eng, monkeyp
     assert e.value.status == 503
 
 
+# --------------------------------------------------------------------------- T13
+# 1417-P2 (Codex review of PR #1417). The store->entity memo is SHARED by the
+# runtime read (get_policy, fail-soft), the settings-screen read (get_effective,
+# strict) and the tender map. The runtime read used to cache a FAILED stores
+# lookup as "" -- the sentinel for "this shop has no entity" -- so the next
+# settings read took the failure for a verified absence and answered 200 with
+# the code default over a stored entity value, during the outage and after the
+# database came back, until the memo expired. A t12 cold strict read never
+# showed it: the runtime read has to come FIRST.
+
+_KEY = "cash.variance.block"
+
+
+def _route_single(store_id):
+    import asyncio
+
+    from api.routers import settings as settings_router
+
+    return asyncio.run(
+        settings_router.get_policy_one(_KEY, scope=f"store:{store_id}", current_user=ADMIN)
+    )
+
+
+def _route_batch(store_id):
+    import asyncio
+
+    from api.routers import settings as settings_router
+
+    out = asyncio.run(
+        settings_router.get_policies_batch(scope=f"store:{store_id}", current_user=ADMIN)
+    )
+    return out["policies"][_KEY]
+
+
+def _refused(read, store_id):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as e:
+        read(store_id)
+    return e.value.status_code
+
+
+@pytest.mark.parametrize("down", [None, _DownColl()], ids=["no-connection", "read-raises"])
+def test_t13_failed_entity_lookup_is_never_remembered_as_no_entity(eng, monkeypatch, down):
+    from api.services import tender_reconciliation as tr
+
+    default = pe.reg.REGISTRY[_KEY].default
+    monkeypatch.delenv(pe.reg.REGISTRY[_KEY].env or "_NO_ENV_", raising=False)
+    healthy = pe._coll
+    pe.set_policy(_KEY, 12345, {"entity_id": "E1"}, actor=ADMIN)
+
+    # 1. healthy: the shop's value is its entity's stored value
+    assert (_route_single("S1")["value"], _route_single("S1")["source"]) == (12345, "entity")
+
+    # 2. the memo lapses, then the stores lookup starts failing
+    monkeypatch.setattr(pe, "cache", _FakeCache())
+    monkeypatch.setattr(
+        pe, "_coll", lambda name="policy_settings": down if name == "stores" else healthy(name)
+    )
+    assert _refused(_route_single, "S1") == 503  # cold strict read (t12)
+
+    # 3. the till / runtime read keeps working on the default...
+    assert pe.get_policy(_KEY, {"store_id": "S1"}) == default
+    assert tr._scope_chain("S1", None) == ["GLOBAL", "STORE:S1"]
+    # ...but the failure is NOT remembered as "no entity"
+    assert "policy_se:S1" not in pe.cache.store
+
+    # 4. so the settings reads still refuse during the fault -- never the default
+    assert _refused(_route_single, "S1") == 503
+    assert _refused(_route_batch, "S1") == 503
+
+    # 5. fault removed: the stored entity value at once, nothing evicted by hand
+    monkeypatch.setattr(pe, "_coll", healthy)
+    single, batch = _route_single("S1"), _route_batch("S1")
+    assert (single["value"], single["source"]) == (12345, "entity")
+    assert (batch["value"], batch["source"]) == (12345, "entity")
+    assert pe.get_policy(_KEY, {"store_id": "S1"}) == 12345
+    assert tr._scope_chain("S1", None) == ["GLOBAL", "ENTITY:E1", "STORE:S1"]
+    assert pe.cache.store["policy_se:S1"] == "E1"  # the successful lookup IS memoized
+
+
+@pytest.mark.parametrize("store_id", ["S_ORPHAN", "S_NO_SUCH_SHOP"], ids=["no-entity", "no-row"])
+def test_t13_confirmed_absence_is_still_memoized_after_a_successful_lookup(
+    eng, monkeypatch, store_id
+):
+    """Control: a shop that really has no entity resolves to global / default and
+    that answer IS cached -- the correction must not turn it into a refusal or a
+    stores read on every request."""
+    default = pe.reg.REGISTRY[_KEY].default
+    monkeypatch.delenv(pe.reg.REGISTRY[_KEY].env or "_NO_ENV_", raising=False)
+    healthy = pe._coll
+    orphan = _StoresColl({"S_ORPHAN": None})
+    monkeypatch.setattr(
+        pe, "_coll", lambda name="policy_settings": orphan if name == "stores" else healthy(name)
+    )
+
+    out = _route_single(store_id)
+    assert (out["value"], out["source"]) == (default, "default")
+    assert pe.cache.store[f"policy_se:{store_id}"] == ""
+
+    # the stores read now fails: the verified absence answers from the memo
+    monkeypatch.setattr(
+        pe, "_coll",
+        lambda name="policy_settings": _DownColl() if name == "stores" else healthy(name),
+    )
+    assert _route_single(store_id)["source"] == "default"
+    assert _route_batch(store_id)["source"] == "default"
+    assert pe.get_policy(_KEY, {"store_id": store_id}) == default
+
+
 def test_t12_policy_routes_answer_503_not_200_defaults(eng, monkeypatch):
     import asyncio
 

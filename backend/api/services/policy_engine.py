@@ -17,7 +17,8 @@ BINDING CORRECTIONS (CORRECTIONS.md P1 -- outrank the E2 packet):
     writing worker's in-process store, so sibling workers may serve the prior value
     until the (short) TTL expires -- eventually consistent, bounded by _TTL. A
     DB-unavailable read is NEVER cached (caching an empty {} would poison the scope,
-    silently dropping all overrides for the TTL).
+    silently dropping all overrides for the TTL). The same holds for the
+    store->entity memo: only a stores read that SUCCEEDED is remembered.
   * pricing.category_caps.* overrides may only LOWER the pricing_caps code constant,
     never raise it (luxury brand caps are NOT E2 keys at all).
   * A store with a MISSING entity_id (dirty prod data / unassigned) resolves to
@@ -99,23 +100,28 @@ def _resolve_entity_id(store_id: str, strict: bool = False) -> Optional[str]:
     """store_id -> entity_id (memoized). A missing/None entity_id (unassigned or
     dirty data) returns None so resolution falls through to GLOBAL -- NEVER raises,
     unless `strict` (the settings-screen read) and the stores read itself FAILED:
-    an unknown entity layer is not "no entity"."""
+    an unknown entity layer is not "no entity".
+
+    Only a stores read that SUCCEEDED is memoized (an entity id, or the ""
+    sentinel for a shop that really has none). A FAILED read answers None for
+    this one runtime call and is never cached: the memo is shared with the
+    strict settings read and with the tender map, and a cached failure reads as
+    a verified "no entity" -- the settings screen then showed the code default
+    over a stored entity value, even after the database came back (1417-P2)."""
     ck = f"{_SE_CACHE_PREFIX}{store_id}"
     cached = cache.get(ck)
     if cached is not None:
         return cached or None  # "" sentinel -> None
-    eid = None
     try:
         coll = _coll("stores")
-        if coll is None and strict:
+        if coll is None:
             raise _unavailable()
-        if coll is not None:
-            doc = coll.find_one({"store_id": store_id}) or {}
-            eid = doc.get("entity_id")
+        doc = coll.find_one({"store_id": store_id}) or {}
     except Exception:  # noqa: BLE001
         if strict:
             raise _unavailable()
-        eid = None
+        return None  # unknown, NOT "no entity" -- do not cache; retry next request
+    eid = doc.get("entity_id")
     cache.set(ck, eid or "", ttl=_TTL)
     return eid or None
 
