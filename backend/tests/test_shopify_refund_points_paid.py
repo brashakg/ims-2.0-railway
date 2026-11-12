@@ -544,7 +544,7 @@ def test_the_auto_door_answers_a_failure_the_inbox_retries_until_the_return_is_f
     monkeypatch.setattr(coll, "update_one", no_finalize)
     first = S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
     monkeypatch.setattr(coll, "update_one", real_update)
-    assert (first["status"], first["reason"]) == ("error", S.NOT_FINALIZED), first
+    assert (first["status"], first.get("reason")) == ("error", S.NOT_FINALIZED), first
     with pytest.raises(RuntimeError):
         _raise_if_failed(first)  # the drain records the inbox row as failed
     assert [r["delta"] for r in _ledger(env)] == [1000.0]
