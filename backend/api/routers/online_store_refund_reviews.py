@@ -349,6 +349,23 @@ async def confirm_refund_review(
 
     _write_audit("SHOPIFY_REFUND_REVIEW_CONFIRM", review_id, row, result, current_user)
 
+    from ..services.shopify_refund import NOT_FINALIZED, _unfinished_claim
+
+    if not posted and (result.get("reason") == NOT_FINALIZED or (
+            post_status == "duplicate"
+            and _unfinished_claim(db, str(row.get("shopify_refund_id") or "")) is not None)):
+        # The return's record is unfinished (this press could not save it, or
+        # an earlier one is still open); its credit may ALREADY be booked. Say
+        # so: "could not be issued" would send the accountant to book it by hand.
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "This refund is not finished yet: its record could not be saved as "
+                "finished, though its store credit may already be booked. Nothing is "
+                "lost and nothing will be booked twice. Do not book anything by hand: "
+                "confirm it again here after 15 minutes. The row stays open until then."
+            ),
+        )
     if not posted:
         # The post could not issue the credit note (e.g. no customer / ledger
         # error). Surface it so the accountant retries after fixing the cause.

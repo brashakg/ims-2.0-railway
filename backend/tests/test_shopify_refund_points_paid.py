@@ -434,3 +434,131 @@ def test_the_review_note_never_promises_points_on_a_bill_an_admin_closed(env, po
     assert stored["points"] == (50, 100, 50) and stored["restore_rows"] == []
     assert stored["credit_rows"] == [900.0]
     assert stored["returns"] == [("COMPLETED", True, False)]  # settled by the waiver: no retry
+
+
+# ----------------------------------------------------------------------------
+# Round 6 review: the write that marks the return COMPLETED fails (its credit
+# is already posted) and the post still answered `credited`. The review row
+# closed on a return that still read PENDING; with the points step failing in
+# the same run nothing ever came back for it -- the sweep and the resend finish
+# COMPLETED returns only, and nobody could confirm a closed row again. The post
+# now answers a failure, the row stays open, and the same confirmation finishes
+# the SAME return once its claim is stale: one credit, the points once.
+# ----------------------------------------------------------------------------
+
+
+def _confirm(review_id):
+    """The real accountant confirm route -> (http status, body or detail)."""
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from api.routers.online_store_refund_reviews import confirm_refund_review
+
+    try:
+        return 200, asyncio.run(confirm_refund_review(
+            review_id, current_user={"user_id": "acc-1", "roles": ["ACCOUNTANT"]}))
+    except HTTPException as exc:
+        return exc.status_code, exc.detail
+
+
+@pytest.mark.parametrize("restore", ["fails", "works"])
+def test_a_refund_whose_record_was_not_saved_stays_open_and_is_finished_once(
+        env, points, monkeypatch, restore):
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    _order(env, payments=PAYS)
+    assert S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")["status"] == "queued"
+    reviews = env.get_collection("shopify_refund_review")
+    review_id = reviews.find_one({"shopify_refund_id": "700001"})["review_id"]
+    coll = env.get_collection("returns")
+    real_restore, real_update = L.restore_return_points, coll.update_one
+
+    def no_finalize(query, update, *a, **k):
+        if "status" in (update.get("$set") or {}):
+            raise RuntimeError("returns write unavailable")
+        return real_update(query, update, *a, **k)
+
+    monkeypatch.setattr(coll, "update_one", no_finalize)
+    if restore == "fails":
+        monkeypatch.setattr(L, "restore_return_points",
+                            lambda *a, **k: {"ok": False, "reason": "ledger_read_failed"})
+    code, detail = _confirm(review_id)
+    monkeypatch.setattr(L, "restore_return_points", real_restore)
+    monkeypatch.setattr(coll, "update_one", real_update)
+
+    # The credit is on the books, the return is not finalized: never `credited`.
+    owed = (50, 100, 50) if restore == "fails" else (150, 0, 50)
+    assert code == 422 and "confirm it again" in str(detail).lower(), (code, detail)
+    row = reviews.find_one({"review_id": review_id})
+    assert (row["status"], row["resolved"]) == ("CREDIT_FAILED", False)
+    first = _stored(env, points)
+    assert first["credit_rows"] == [900.0] and first["credit_balance"] == (900.0, 900.0)
+    assert first["points"] == owed
+    assert first["returns"] == [("PENDING", None, restore == "fails")]
+
+    # Fault lifted. The sweep finishes COMPLETED returns only; a second press
+    # while the claim is fresh books nothing and leaves the row open.
+    _sweep_reads(env, monkeypatch, points)
+    assert [L.reconcile_loyalty_reversals() for _ in range(2)] == [
+        {"reconciled": 0, "unresolved": 0, "clean": 0}] * 2
+    assert _confirm(review_id)[0] == 422
+    assert reviews.find_one({"review_id": review_id})["resolved"] is False
+    assert _stored(env, points) == first
+
+    # The claim goes stale (15 minutes): the same confirmation finishes it.
+    real_update({"shopify_refund_id": "700001"}, {"$set": {"created_at": "2026-01-01T00:00:00+00:00"}})
+    code, body = _confirm(review_id)
+    assert code == 200 and body["status"] == "POSTED" and body["result"]["status"] == "credited", (code, body)
+    done = _stored(env, points)
+    assert _less_rows(done) == _SETTLED  # one credit row, the return COMPLETED
+    assert [p for _t, p in done["restore_rows"]] == [100]  # the 100 points, once
+
+    # Nothing twice afterwards: sweeps, the route, the service, a redelivery.
+    assert [L.reconcile_loyalty_reversals() for _ in range(2)] == [
+        {"reconciled": 0, "unresolved": 0, "clean": 0}] * 2
+    assert _confirm(review_id)[0] == 409
+    assert S.post_from_review(env, row)["status"] == "duplicate"
+    assert S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")["status"] == "duplicate"
+    assert _stored(env, points) == done
+
+
+def test_the_auto_door_answers_a_failure_the_inbox_retries_until_the_return_is_finished(env, monkeypatch):
+    """The same rule on the automatic (webhook) door, no points involved: an
+    unsaved return is a FAILURE to the inbox drain (it retries hourly), never
+    `credited` (inbox row done, return PENDING for good)."""
+    from agents.implementations.nexus import _raise_if_failed
+    from api.services import shopify_refund as S
+
+    monkeypatch.setenv("SHOPIFY_REFUND_AUTO", "1")
+    _order(env)
+    coll = env.get_collection("returns")
+    real_update = coll.update_one
+
+    def no_finalize(query, update, *a, **k):
+        if "status" in (update.get("$set") or {}):
+            raise RuntimeError("returns write unavailable")
+        return real_update(query, update, *a, **k)
+
+    monkeypatch.setattr(coll, "update_one", no_finalize)
+    first = S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
+    monkeypatch.setattr(coll, "update_one", real_update)
+    assert (first["status"], first["reason"]) == ("error", S.NOT_FINALIZED), first
+    with pytest.raises(RuntimeError):
+        _raise_if_failed(first)  # the drain records the inbox row as failed
+    assert [r["delta"] for r in _ledger(env)] == [1000.0]
+    assert coll.find_one({"shopify_refund_id": "700001"})["status"] == "PENDING"
+
+    # Retried while the claim is fresh: still a failure, nothing booked.
+    fresh = S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
+    assert fresh["status"] == "error", fresh
+    # Retried once it is stale (the drain's hourly tick): finished, once.
+    real_update({"shopify_refund_id": "700001"}, {"$set": {"created_at": "2026-01-01T00:00:00+00:00"}})
+    done = S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
+    assert done["status"] == "credited", done
+    doc = coll.find_one({"shopify_refund_id": "700001"})
+    assert (doc["status"], doc["credit_note_issued"]) == ("COMPLETED", True)
+    assert [r["delta"] for r in _ledger(env)] == [1000.0] and _balance(env) == (1000.0, 1000.0)
+    assert S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")["status"] == "duplicate"
+    assert [r["delta"] for r in _ledger(env)] == [1000.0]

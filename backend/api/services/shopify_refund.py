@@ -91,6 +91,11 @@ _RETURNS_COLLECTION = "returns"
 _CLAIM_STALE_SECONDS = 15 * 60
 
 
+# A post's `reason` when its credit landed but the return's own record could
+# not be saved as finished (status "error": retried, never read as done).
+NOT_FINALIZED = "return_not_finalized"
+
+
 def _stale_cutoff() -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=_CLAIM_STALE_SECONDS)).isoformat()
 
@@ -2136,13 +2141,15 @@ def _post_locked(
         "reprocessing_at": None,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    finalized = True
     if returns_coll is not None and claimed:
         try:
             returns_coll.update_one(
                 {"shopify_refund_id": refund_id}, {"$set": update_fields}
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("[SHOPIFY_REFUND] returns doc finalize failed: %s", exc)
+            finalized = False
+            logger.error("[SHOPIFY_REFUND] returns doc finalize failed: %s", exc)
     elif returns_coll is not None:
         # The claim insert did not land (a non-dup DB error) -> best-effort persist
         # so the credit/restock is still auditable (no idempotency protection).
@@ -2171,6 +2178,16 @@ def _post_locked(
                 # nothing twice) and clears it.
                 logger.error("[SHOPIFY_REFUND] refund=%s points flag not cleared: %s", refund_id, exc)
 
+    if credit_ok and not finalized:
+        # The credit is posted but the return still reads PENDING. Answering
+        # "credited" closed the review row (or the inbox row) on a return no
+        # sweep, resend or second Confirm finishes -- its points step with it.
+        # A failure keeps that row open: the same refund sent again re-claims
+        # this return once the claim is stale (_claim_stale_refund_for_retry),
+        # finds the credit already posted (_posted_credit), books restock per
+        # order line and finalizes it -- nothing twice.
+        result_status, fail_reason = "error", NOT_FINALIZED
+
     logger.info(
         "[SHOPIFY_REFUND] AUTO-posted refund=%s order=%s credit=%s tax=%s "
         "credit_issued=%s settled_externally=%s restock_applied=%s",
@@ -2185,6 +2202,8 @@ def _post_locked(
     return {
         "status": result_status,
         **({"reason": fail_reason} if fail_reason else {}),
+        # What the inbox drain logs for a failure (nexus._raise_if_failed).
+        **({"error": "refund claim not finalized yet"} if fail_reason == NOT_FINALIZED else {}),
         "refund_id": refund_id,
         "shopify_order_id": _norm(order.get("shopify_order_id")),
         "order_id": order_id,
