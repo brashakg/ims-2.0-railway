@@ -373,37 +373,56 @@ def _refused(read, store_id):
     return e.value.status_code
 
 
-@pytest.mark.parametrize("down", [None, _DownColl()], ids=["no-connection", "read-raises"])
-def test_t13_failed_entity_lookup_is_never_remembered_as_no_entity(eng, monkeypatch, down):
+_DOWN = pytest.mark.parametrize(
+    "down", [None, _DownColl()], ids=["no-connection", "read-raises"]
+)
+
+
+def _runtime_read_while_the_stores_lookup_fails(monkeypatch, down):
+    """Healthy read -> memo lapses -> stores lookup fails -> cold strict read
+    refuses -> the RUNTIME read falls back (the step that used to poison the
+    memo). Returns the healthy `_coll` so a test can remove the fault."""
     from api.services import tender_reconciliation as tr
 
     default = pe.reg.REGISTRY[_KEY].default
     monkeypatch.delenv(pe.reg.REGISTRY[_KEY].env or "_NO_ENV_", raising=False)
     healthy = pe._coll
     pe.set_policy(_KEY, 12345, {"entity_id": "E1"}, actor=ADMIN)
+    out = _route_single("S1")
+    assert (out["value"], out["source"]) == (12345, "entity")  # healthy
 
-    # 1. healthy: the shop's value is its entity's stored value
-    assert (_route_single("S1")["value"], _route_single("S1")["source"]) == (12345, "entity")
-
-    # 2. the memo lapses, then the stores lookup starts failing
-    monkeypatch.setattr(pe, "cache", _FakeCache())
+    monkeypatch.setattr(pe, "cache", _FakeCache())  # the memo lapsed
     monkeypatch.setattr(
         pe, "_coll", lambda name="policy_settings": down if name == "stores" else healthy(name)
     )
     assert _refused(_route_single, "S1") == 503  # cold strict read (t12)
-
-    # 3. the till / runtime read keeps working on the default...
+    # the till / runtime read and the tender map keep working without the entity
     assert pe.get_policy(_KEY, {"store_id": "S1"}) == default
     assert tr._scope_chain("S1", None) == ["GLOBAL", "STORE:S1"]
-    # ...but the failure is NOT remembered as "no entity"
-    assert "policy_se:S1" not in pe.cache.store
+    return healthy
 
-    # 4. so the settings reads still refuse during the fault -- never the default
+
+@_DOWN
+def test_t13_settings_reads_still_refuse_after_a_runtime_read_hit_the_fault(
+    eng, monkeypatch, down
+):
+    _runtime_read_while_the_stores_lookup_fails(monkeypatch, down)
+    # single AND batch: 503, never 200 with the code default
     assert _refused(_route_single, "S1") == 503
     assert _refused(_route_batch, "S1") == 503
+    # the failure was not remembered as "no entity"
+    assert "policy_se:S1" not in pe.cache.store
 
-    # 5. fault removed: the stored entity value at once, nothing evicted by hand
-    monkeypatch.setattr(pe, "_coll", healthy)
+
+@_DOWN
+def test_t13_stored_entity_value_is_back_the_moment_the_fault_is_removed(
+    eng, monkeypatch, down
+):
+    from api.services import tender_reconciliation as tr
+
+    healthy = _runtime_read_while_the_stores_lookup_fails(monkeypatch, down)
+    monkeypatch.setattr(pe, "_coll", healthy)  # fault removed; nothing evicted by hand
+
     single, batch = _route_single("S1"), _route_batch("S1")
     assert (single["value"], single["source"]) == (12345, "entity")
     assert (batch["value"], batch["source"]) == (12345, "entity")
