@@ -20,6 +20,7 @@ from typing import Optional
 
 from ...dependencies import is_no_shop_scope
 from ...services.cost_mask import can_see_cost, mask_purchase
+from ..workshop.helpers import _jobs_in_reach
 
 
 def _at_shop(scope: Optional[str], key: str = "store_id") -> dict:
@@ -70,7 +71,7 @@ def _vendor_mtd_spend(db, vendor_id: str, current_user: dict) -> float:
     return billed_in_month(db, vendor_id, scope, now_ist().strftime("%Y-%m"))
 
 
-def _vendor_qc_pass_rate(db, vendor_id: str, scope: Optional[str] = None):
+def _vendor_qc_pass_rate(db, vendor_id: str, scope: Optional[str], current_user: dict):
     """Quality pass-rate for a vendor, joining GRN QC + workshop QC outcomes.
 
     Two QC signals are unioned into one pass-rate:
@@ -86,7 +87,9 @@ def _vendor_qc_pass_rate(db, vendor_id: str, scope: Optional[str] = None):
 
     ``scope`` is the caller's shop (resolve_store_scope): both signals are
     that shop's receipts and jobs -- every shop only for an admin with none
-    picked, no shop for R4's no-shop login (F63: a manager keeps his shop)."""
+    picked, no shop for R4's no-shop login (F63: a manager keeps his shop).
+    The jobs then pass THE workshop job rule (job shop AND its order's shop,
+    PR #1376 round 3), so a job the caller cannot open is never counted."""
     if db is None:
         return None, 0
     passed = 0
@@ -112,9 +115,17 @@ def _vendor_qc_pass_rate(db, vendor_id: str, scope: Optional[str] = None):
     try:
         jobs = db.get_collection("workshop_jobs").find(
             {"vendor_id": vendor_id, **_at_shop(scope)},
-            {"_id": 0, "qc_passed": 1, "qc_waived": 1, "qc_history": 1},
+            {
+                "_id": 0,
+                "job_id": 1,
+                "store_id": 1,
+                "order_id": 1,
+                "qc_passed": 1,
+                "qc_waived": 1,
+                "qc_history": 1,
+            },
         )
-        for j in jobs:
+        for j in _jobs_in_reach(list(jobs), current_user):
             history = [h for h in (j.get("qc_history") or []) if isinstance(h, dict)]
             had_qc = bool(history) or (j.get("qc_passed") is not None)
             if not had_qc:
@@ -184,7 +195,7 @@ async def vendor_performance(
     )
     # QC pass-rate joins GRN QC (accepted/received) + workshop QC (job pass/fail)
     # for this vendor. Fail-soft: returns None when there is no QC signal at all.
-    qc_pass_rate, qc_sample = _vendor_qc_pass_rate(db, vendor_id, scope)
+    qc_pass_rate, qc_sample = _vendor_qc_pass_rate(db, vendor_id, scope, current_user)
 
     empty = {
         "vendor_id": vendor_id,

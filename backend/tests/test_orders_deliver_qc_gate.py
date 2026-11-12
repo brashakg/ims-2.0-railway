@@ -38,6 +38,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 from api.routers import orders as om  # noqa: E402
 from api.routers import workshop as wm  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from strict_fakes import OrdersAt  # noqa: E402
 
 STORE = "BV-TEST-01"
 
@@ -689,6 +690,8 @@ def test_lens_status_channel_end_to_end_through_the_real_endpoints(monkeypatch):
     monkeypatch.setattr(wm, "get_workshop_repository", lambda: _Repo())
     monkeypatch.setattr(wm, "get_audit_repository", lambda: None)
     monkeypatch.setattr(wm, "get_db", lambda: None)
+    # The job's order is this shop's (PR #1376: a job's canonical shop).
+    monkeypatch.setattr(wm.helpers, "get_order_repository", lambda: OrdersAt(STORE))
 
     async def _user():
         return {
@@ -854,6 +857,8 @@ def test_unconfirmed_pending_remedy_is_actually_performable(monkeypatch):
     monkeypatch.setattr(wm, "get_workshop_repository", lambda: _Repo())
     monkeypatch.setattr(wm, "get_audit_repository", lambda: None)
     monkeypatch.setattr(wm, "get_db", lambda: None)
+    # The job's order is this shop's (PR #1376: a job's canonical shop).
+    monkeypatch.setattr(wm.helpers, "get_order_repository", lambda: OrdersAt(STORE))
 
     async def _user():
         return {

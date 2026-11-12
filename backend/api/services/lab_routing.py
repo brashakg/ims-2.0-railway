@@ -608,11 +608,13 @@ def dwell_chip(target_minutes: Optional[int], dwell_minutes: float) -> str:
     return "green"
 
 
-def station_queue(db, store_id: str, code: str) -> List[dict]:
+def station_queue(db, store_id: str, code: str, in_reach) -> List[dict]:
     """Jobs currently AT `code` for a store, oldest-first (most urgent first).
 
-    Each row carries the time-at-station (minutes) + an SLA chip computed from
-    the station's target_dwell_minutes. Fail-soft []."""
+    `in_reach` keeps the raw job rows the caller may see (the workshop job
+    rule, helpers._jobs_in_reach: it needs each job's order, which these rows
+    drop). Each row carries the time-at-station (minutes) + an SLA chip computed
+    from the station's target_dwell_minutes. Fail-soft []."""
     if db is None or not store_id:
         return []
     code_u = (code or "").strip().upper()
@@ -622,9 +624,11 @@ def station_queue(db, store_id: str, code: str) -> List[dict]:
             target = int(s.get("target_dwell_minutes") or 0)
             break
     try:
-        rows = list(
-            db.get_collection("workshop_jobs").find(
-                {"store_id": store_id, "current_station": code_u}
+        rows = in_reach(
+            list(
+                db.get_collection("workshop_jobs").find(
+                    {"store_id": store_id, "current_station": code_u}
+                )
             )
         )
     except Exception:  # noqa: BLE001
