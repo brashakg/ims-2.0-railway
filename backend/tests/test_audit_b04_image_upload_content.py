@@ -587,6 +587,42 @@ def test_a_container_of_millions_of_empty_boxes_is_refused_not_walked():
     assert image_mime_of(ok) == "image/heic"
 
 
+def _png_chunk(kind: bytes, data: bytes = b"") -> bytes:
+    return len(data).to_bytes(4, "big") + kind + data + b"\x00\x00\x00\x00"
+
+
+def test_a_png_of_millions_of_empty_chunks_is_refused_not_walked():
+    """The same bound on the PNG chunk walk: a 4 MB file of 12-byte chunks
+    (350,000 of them, then a valid tail) stops at a fixed number of chunks."""
+    from api.services import image_content
+
+    head = b"\x89PNG\r\n\x1a\n" + _png_chunk(b"IHDR", b"\x00" * 13)
+    tail = _png_chunk(b"IDAT", b"\x00" * 16) + _png_chunk(b"IEND")
+    crafted = head + _png_chunk(b"tEXt") * (4 * 1024 * 1024 // 12) + tail
+
+    seen = []
+    real = int.from_bytes
+
+    class _CountingInt(int):
+        @classmethod
+        def from_bytes(cls, *a, **kw):
+            seen.append(1)
+            return real(*a, **kw)
+
+    image_content.int = _CountingInt  # module-level name shadows the builtin
+    try:
+        assert image_mime_of(crafted) is None
+    finally:
+        del image_content.int
+    assert len(seen) <= image_content._MAX_PNG_CHUNKS, len(seen)
+    # Real PNGs are far inside the bound: a genuine file with 5,000 extra
+    # chunks (more than a 25 MB photo written in small pieces) still passes,
+    # and so does an ordinary one.
+    assert image_mime_of(head + _png_chunk(b"tEXt") * 5000 + tail) == "image/png"
+    assert image_mime_of(_real("PNG")) == "image/png"
+    assert image_content._MAX_PNG_CHUNKS <= 100_000
+
+
 # ---------------------------------------------------------------------------
 # Decision D9, pinned: the two re-host tools do not copy an SVG (it is markup
 # that can carry script, and the image doors store raster photos only).

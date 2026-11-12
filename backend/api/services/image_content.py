@@ -53,6 +53,10 @@ _HEIF_BRANDS = frozenset({b"mif1", b"msf1"})
 _FTYP_SCAN_BYTES = 256
 # Top-level ISO-BMFF boxes walked before the file is refused (see _boxes_fit).
 _MAX_TOP_BOXES = 256
+# PNG chunks walked before the file is refused (see _png_complete). Encoders
+# write image data in chunks of 2 KB to 64 KB+, so a 25 MB photo (the upload
+# cap) has at most about 13,000; 65,536 leaves room and still bounds the walk.
+_MAX_PNG_CHUNKS = 65536
 
 
 def _signature_mime(content: bytes) -> Optional[str]:
@@ -108,9 +112,13 @@ def _boxes_fit(content: bytes) -> bool:
 def _png_complete(content: bytes) -> bool:
     """PNG: chunks from IHDR, through some IDAT, to an IEND that lies inside
     the file. A cut-short PNG has no IEND; padding after a signature has no
-    IHDR."""
+    IHDR. A file with more than _MAX_PNG_CHUNKS chunks is refused instead of
+    walked (a 25 MB file of empty chunks was 2.1 million steps on the request
+    path)."""
     pos, end, seen_idat = 8, len(content), False
-    while pos + 12 <= end:
+    for _ in range(_MAX_PNG_CHUNKS):
+        if pos + 12 > end:
+            return False
         kind = content[pos + 4 : pos + 8]
         if pos == 8 and kind != b"IHDR":
             return False
