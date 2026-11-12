@@ -323,9 +323,10 @@ def _admin_closed_the_bills_points(c, monkeypatch):
     monkeypatch.setattr(L, "get_order_repository", lambda: _Orders())
 
 
-def test_a_return_on_a_bill_an_admin_closed_never_promises_points(ctx, monkeypatch):
-    from api.routers.returns import POINTS_WAIVED_NOTE
+_HEAD_OFFICE = "points for this bill are settled by head office and are not returned automatically"
 
+
+def test_a_return_on_a_bill_an_admin_closed_never_promises_points(ctx, monkeypatch):
     c = _points_sale(ctx, qty=2)
     books = _engine(c, monkeypatch)
     _admin_closed_the_bills_points(c, monkeypatch)
@@ -337,7 +338,7 @@ def test_a_return_on_a_bill_an_admin_closed_never_promises_points(ctx, monkeypat
     assert r.status_code == 201, r.text
     body = r.json()
     assert body["points_waived"] is True and body["points_paid_share"] == POINTS / 2
-    assert POINTS_WAIVED_NOTE in body["message"]
+    assert _HEAD_OFFICE in body["message"]
     assert "goes back to the customer's points" not in body["message"]
     balance, lifetime_redeemed, rows = books()
     assert (balance, lifetime_redeemed, rows) == (0, int(POINTS), [])  # no point moved
@@ -348,16 +349,14 @@ def test_a_return_on_a_bill_an_admin_closed_never_promises_points(ctx, monkeypat
 
 def test_an_unwaived_return_says_what_it_always_said(ctx, monkeypatch):
     """Control: the wording and the points are unchanged when no admin closed."""
-    from api.routers.returns import POINTS_WAIVED_NOTE
-
     c = _points_sale(ctx, qty=2)
     books = _engine(c, monkeypatch)
     q = _quote(c, items=_line(1))
-    assert q["points_waived"] is False
+    assert not q.get("points_waived")
     r = _post(c, [{"method": "CASH", "amount": q["net_refund"]}], items=_line(1))
     assert r.status_code == 201, r.text
     body = r.json()
-    assert body["points_waived"] is False
+    assert not body.get("points_waived")
     assert f"Rs {POINTS / 2} paid with points goes back to the customer's points" in body["message"]
-    assert POINTS_WAIVED_NOTE not in body["message"]
+    assert _HEAD_OFFICE not in body["message"]
     assert books()[0] == POINTS / 2
