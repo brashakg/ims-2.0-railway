@@ -450,3 +450,52 @@ def test_l3_17_setting_gender_does_not_recalculate_a_saved_month(monkeypatch):
     (row,) = _run(c)["rows"]
     assert row["skipped"] is True
     assert payroll.find_one({"employee_id": EMP}) == approved
+
+
+# ===========================================================================
+# D30 holds through this PR's engine path: the gender-aware PT slab
+# ===========================================================================
+
+
+def _run_with_recovery(c, recovery, dry_run=False):
+    return c.post(
+        "/api/v1/payroll/run",
+        json={"month": MONTH, "year": YEAR, "entity_id": ENTITY, "dry_run": dry_run,
+              "advances": {EMP: recovery}},
+    )
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_d30_recovery_is_capped_at_the_pay_the_gender_slab_leaves(monkeypatch, dry_run):
+    """D30 (no typed figure takes net pay below zero) is measured on the net
+    AFTER the gender-aware PT. Female in Maharashtra pays 0 PT on 15,000, so
+    her whole 13,447 can be recovered; 1 rupee more is refused and nothing is
+    saved. The same 13,447 for an employee whose gender is not set (charged
+    the 200 general slab) would take net to -200 and is refused too."""
+    female = _db(gender="FEMALE")
+    c = _client(female, monkeypatch)
+    assert _preview_pt(c) == 0.0
+    net = _run(c, dry_run=True)["rows"][0]["net_salary"]
+    assert net == 13447.0
+
+    over = _run_with_recovery(c, net + 1, dry_run)
+    assert over.status_code == 422, over.text
+    assert "Enter a smaller recovery, Rs 13,447.00 or less" in over.json()["detail"]
+    assert female.get_collection("payroll").find_one({"employee_id": EMP}) is None
+
+    ok = _run_with_recovery(c, net, dry_run)
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["rows"][0]["net_salary"] == 0
+    stored = female.get_collection("payroll").find_one({"employee_id": EMP})
+    if dry_run:
+        assert stored is None
+    else:
+        assert stored["net_salary"] == 0 and stored["advance_deduction"] == net
+        assert stored["breakdown"]["deductions"]["professional_tax"] == 0.0
+
+    unset = _db()
+    c2 = _client(unset, monkeypatch)
+    refused = _run_with_recovery(c2, net, dry_run)
+    assert refused.status_code == 422, refused.text
+    assert "Rs 13,247.00 or less" in refused.json()["detail"]
+    assert unset.get_collection("payroll").find_one({"employee_id": EMP}) is None

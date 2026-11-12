@@ -343,6 +343,74 @@ def test_a_shop_discard_that_loses_the_audit_log_halfway_says_what_happened(monk
     assert logged["detail"]["employee_id"] != kept["employee_id"]
 
 
+def _lock_in_another_request(db, monkeypatch):
+    """The Finance screen's "lock anyway", sent while the discard is mid-way.
+    The route is async; this runs it on its own thread so it can be fired
+    from inside the discard's audit write."""
+    import threading
+
+    said = {}
+    t = threading.Thread(
+        target=lambda: said.update(
+            r=b09._lock_month_through_the_route(db, monkeypatch, without_payroll=True)
+        )
+    )
+    t.start()
+    t.join()
+    return said["r"]
+
+
+def test_a_lock_cannot_slip_in_while_a_discard_is_putting_a_draft_back(monkeypatch):
+    """The discard deletes the draft, then writes the audit row. If the month is
+    locked in between and the audit write then fails, the draft is put back:
+    without the shared payroll guard it lands INSIDE the locked month, where it
+    can never be approved or discarded (423 both) -- the dead end D15 exists to
+    remove. The discard holds the month exactly like a saving run does."""
+    db, c = _drafted(monkeypatch)
+    before = copy.deepcopy(b09._stored_row(db))
+    seen = {}
+
+    class _LockThenFail:
+        def create(self, _doc):
+            seen["lock"] = _lock_in_another_request(db, monkeypatch)
+            return None  # the audit write fails
+
+    monkeypatch.setattr(payroll_router, "get_audit_repository", _LockThenFail, raising=False)
+
+    r = c.post(DISCARD, json=ONE)
+
+    assert r.status_code == 500 and "nothing was discarded" in r.json()["detail"].lower()
+    assert seen["lock"][0] == 409, seen  # the lock waited for the discard
+    assert db.get_collection("period_locks").count_documents({}) == 0
+    restored = b09._stored_row(db)
+    assert {k: v for k, v in restored.items() if k != "_id"} == {
+        k: v for k, v in before.items() if k != "_id"
+    }
+    # The month is free again: the draft can now be discarded and the month locked.
+    monkeypatch.setattr(
+        payroll_router, "get_audit_repository",
+        lambda: AuditRepository(db.get_collection("audit_logs")), raising=False,
+    )
+    assert c.post(DISCARD, json=ONE).status_code == 200
+    assert b09._lock_month_through_the_route(db, monkeypatch, without_payroll=True) == (200, "")
+
+
+def test_a_discard_is_refused_once_the_month_guard_is_locked(monkeypatch):
+    """A lock that committed its guard but stopped before writing the
+    period_locks row: payroll is closed from that moment, and so is a discard."""
+    from api.services import payroll_period_guard as guard
+
+    db, c = _drafted(monkeypatch)
+    before = copy.deepcopy(b09._stored_row(db))
+    assert guard.commit_lock(db, YEAR, MONTH, guard.read(db, YEAR, MONTH), {"locked_by": "x"})
+
+    r = c.post(DISCARD, json=ONE)
+
+    assert r.status_code == 423, r.text
+    assert b09._stored_row(db) == before
+    assert _audits(db) == []
+
+
 # ---------------------------------------------------------------------------
 # The other doors: a discarded draft is not served from an old copy
 # ---------------------------------------------------------------------------

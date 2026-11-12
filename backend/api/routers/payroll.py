@@ -2007,7 +2007,7 @@ async def discard_payroll_draft(
     """
     _assert_salary_admin(current_user, "discard a payroll draft")
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     from .finance import check_period_locked
 
@@ -2045,6 +2045,22 @@ async def discard_payroll_draft(
             detail=f"There is no payroll draft to discard for {req.month}/{req.year}.",
         )
 
+    # A discard is a payroll write: it holds the month through the same guard
+    # as a saving run (payroll_period_guard), so the period lock cannot commit
+    # between the delete and the audit row -- else a draft put back after a
+    # failed audit write would sit behind the lock for good. The claim is also
+    # refused (423) once the guard is locked, before period_locks is written.
+    payroll_period_guard.claim_run(db, req.year, req.month)
+    try:
+        return _discard_drafts(db, req, drafts, audit_repo, current_user, not_recorded)
+    finally:
+        payroll_period_guard.release_run(db, req.year, req.month)
+
+
+def _discard_drafts(db, req, drafts, audit_repo, current_user, not_recorded) -> dict:
+    """The body of POST /discard-draft, run while the month is held."""
+    period = {"month": req.month, "year": req.year}
+    payroll_coll = db.get_collection("payroll")
     discarded = []
     for row in drafts:
         emp = row.get("employee_id")
@@ -2080,7 +2096,11 @@ async def discard_payroll_draft(
             }
         )
         if logged is None:
-            payroll_coll.insert_one(row)  # put the draft back: no trace, no discard
+            # Put the draft back: no trace, no discard. The month is held, so
+            # it cannot have been locked meanwhile. ponytail: unless this one
+            # request stalled past the guard's lease (LEASE_SECONDS), the same
+            # ceiling as a saving run's.
+            payroll_coll.insert_one(row)
             raise HTTPException(
                 status_code=500,
                 detail=not_recorded
