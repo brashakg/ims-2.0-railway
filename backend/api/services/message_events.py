@@ -475,7 +475,7 @@ def stamp_ctwa_attribution(
     raises instead (the msg91 inbox drain uses it so a failed stamp leaves the
     inbox row retryable, audit L1-F26). Callers (the complete enumeration):
 
-      1. webhooks.receive_whatsapp_inbound   (Meta direct inbound)
+      1. webhooks._process_whatsapp_message  (Meta direct inbound)
       2. webhooks._process_msg91_events      (MSG91 whatsapp channel inbound)
     """
     if not isinstance(referral, dict) or not referral:

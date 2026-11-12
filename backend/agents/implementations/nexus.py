@@ -905,6 +905,14 @@ class NexusAgent(JarvisAgent):
                 outcome = _process_msg91_events(
                     str(doc.get("channel") or ""), webhook_payload
                 )
+            elif vendor == "whatsapp":
+                # 1416-P2a/P2b: one row per inbound Meta message. The receiver
+                # runs this interpreter inline; a message it could not finish
+                # is finished here, and its intent is applied exactly once
+                # (the row carries intent_applied_at). Raises when unapplied.
+                from api.routers.webhooks import _process_whatsapp_message
+
+                outcome = await _process_whatsapp_message(coll, doc)
             else:
                 # Explicit terminal skip: no retry can grow a handler.
                 terminal = True
