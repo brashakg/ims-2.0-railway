@@ -143,6 +143,12 @@ def pt_for(
 # ---------------------------------------------------------------------------
 
 
+class PayrollInputError(ValueError):
+    """An amount typed for one employee's run (incentive, advance recovery)
+    that payroll refuses. The message is plain English for the Admin; callers
+    answer 422 with it. One rule for preview, save and every other caller."""
+
+
 def _earnings(config: dict) -> dict:
     """Full (un-prorated) monthly earning components + gross.
 
@@ -227,6 +233,7 @@ def compute_payroll(
     year: int,
     lwp_days: float = 0.0,
     incentive: float = 0.0,
+    incentive_clawback: float = 0.0,
     advance_recovery: float = 0.0,
     pt_slab: Optional[dict] = None,
     gender: str = "ANY",
@@ -238,6 +245,12 @@ def compute_payroll(
     contributions are computed on the EARNED (prorated) wages; ESI eligibility
     and the PT slab bracket are determined on the FULL contracted gross.
     Incentive is paid on top of gross and is NOT part of the PF/ESI/PT base.
+
+    ``incentive_clawback`` is the month's NET clawback in the locked incentive
+    payout (kickers taken back on returns exceeded the incentive earned): a
+    positive amount that comes off the incentive line. It is the only way an
+    incentive goes below zero -- a negative ``incentive`` is refused -- and it
+    never takes pay below zero.
     """
     e = _earnings(config)
     full_gross = e["gross"]
@@ -291,18 +304,63 @@ def compute_payroll(
     tds = float(config.get("tds_monthly", 0) or 0)
 
     incentive = float(incentive or 0)
+    incentive_clawback = float(incentive_clawback or 0)
     advance_recovery = float(advance_recovery or 0)
+    who = config.get("employee_id", "unknown")
     # A recovery takes money back; a negative one would be a payment that no
     # payslip line names. Refused here so no caller can use it to raise net pay.
     if not math.isfinite(advance_recovery) or advance_recovery < 0:
-        raise ValueError(
-            "Advance recovery cannot be negative (employee '%s')."
-            % config.get("employee_id", "unknown")
+        raise PayrollInputError(
+            "Advance recovery cannot be negative (employee '%s')." % who
+        )
+    # An incentive is an earning. A negative one is a deduction nobody named,
+    # and it can take earnings below zero.
+    if not math.isfinite(incentive) or incentive < 0:
+        raise PayrollInputError(
+            "Incentive cannot be negative (employee '%s'). Money taken off pay "
+            "is entered as a deduction, not as a negative incentive." % who
         )
 
+    if not math.isfinite(incentive_clawback) or incentive_clawback < 0:
+        raise PayrollInputError(
+            "Incentive clawback cannot be negative (employee '%s')." % who
+        )
+
+    before_recovery = pf["employee"] + esi_employee + pt + tds
+    # A clawback comes off pay like any deduction, down to zero and no further.
+    # Nobody typed it (it is in the locked incentive payout), so the message
+    # cannot ask for a smaller figure: it says who has to act.
+    left = round(earned_gross + incentive - before_recovery, 2)
+    if incentive_clawback > 0 and round(left - incentive_clawback, 2) < 0:
+        raise PayrollInputError(
+            "This month's locked incentive payout for employee '%s' is a "
+            "clawback of Rs %s, more than the pay left after other deductions "
+            "(Rs %s). Payroll never takes pay below zero, so nothing was "
+            "calculated or saved. IMS does not carry a clawback into later "
+            "months: ask head office support, who can run this month without "
+            "it; the payroll row then records the amount still owed."
+            % (who, f"{incentive_clawback:,.2f}", f"{max(0.0, left):,.2f}")
+        )
+    incentive -= incentive_clawback
+
     total_earnings = earned_gross + incentive
-    total_deductions = pf["employee"] + esi_employee + pt + tds + advance_recovery
+    total_deductions = before_recovery + advance_recovery
     net_pay = total_earnings - total_deductions
+    # A recovery can take pay down to zero, never below it: the employee would
+    # end the month owing the shop, and nothing records that debt.
+    if advance_recovery > 0 and round(net_pay, 2) < 0:
+        room = max(0.0, round(total_earnings - before_recovery, 2))
+        smaller = (
+            f"Enter a smaller recovery, Rs {room:,.2f} or less."
+            if room > 0
+            else "Enter 0: nothing can be recovered from this month's pay."
+        )
+        raise PayrollInputError(
+            "Advance recovery of Rs %s is more than this month's pay after "
+            "other deductions (Rs %s) for employee '%s'. %s The rest of the "
+            "advance stays outstanding and is recovered in later months."
+            % (f"{advance_recovery:,.2f}", f"{room:,.2f}", who, smaller)
+        )
     employer_cost = total_earnings + pf["employer_total"] + esi_employer
 
     return {
