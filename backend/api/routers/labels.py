@@ -49,6 +49,7 @@ from ..services.rx_print_values import (
     is_absent_rx_value,
 )
 from .auth import get_current_user, require_roles
+from .workshop.helpers import _job_in_reach
 from ..dependencies import (
     get_db,
     get_workshop_repository,
@@ -262,7 +263,7 @@ async def scan_advance(
 
     # NEW-IDOR-by-id: a store-scoped caller may only scan-advance a job at a store
     # it can access -- existence-hide a cross-store job (same NOT_FOUND contract).
-    if not can_access_store_scoped(job.get("store_id"), current_user):
+    if not _job_in_reach(job, current_user):
         return {
             "ok": False,
             "reason": "NOT_FOUND",
@@ -557,7 +558,7 @@ async def get_job_label(
     # NEW-IDOR-LABEL: the label carries customer phone + medical Rx (SPH/CYL).
     # Existence-hide a job whose store the caller cannot access (cross-store
     # medical-PII leak). Admins / area-managers pass.
-    if not can_access_store_scoped(job.get("store_id"), current_user):
+    if not _job_in_reach(job, current_user):
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
     # Rx summary (best-effort).

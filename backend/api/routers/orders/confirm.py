@@ -47,7 +47,8 @@ async def confirm_order(order_id: str, current_user: dict = Depends(get_current_
         # POS client may already have created it).
         try:
             stored, workshop_job_id = confirm_and_hand_off(
-                repo, order_id, current_user.get("user_id")
+                repo, order_id, current_user.get("user_id"),
+                current_user=current_user,
             )
         except RuntimeError:  # still DRAFT or unreadable: not confirmed
             stored, workshop_job_id = None, None
