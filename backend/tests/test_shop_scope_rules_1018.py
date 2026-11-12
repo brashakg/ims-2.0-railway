@@ -90,7 +90,7 @@ def world(monkeypatch):
         db.bank_statements.insert_one({"statement_id": f"BS-{code}", "store_id": sid,
                                        "uploaded_at": now.isoformat(), "rows": []})
         db.shifts.insert_one({"shift_id": f"SH-{code}", "store_id": sid, "is_active": True})
-        db.workshop_jobs.insert_one({"job_id": f"J-{code}", "store_id": sid,
+        db.workshop_jobs.insert_one({"job_id": f"J-{code}", "store_id": sid, "order_id": f"O-{code}",
                                      "status": "PENDING", "expected_date": TODAY})
         db.stock_counts.insert_one({"count_id": f"SC-{code}", "store_id": sid,
                                     "status": "COMPLETED", "created_at": now})
