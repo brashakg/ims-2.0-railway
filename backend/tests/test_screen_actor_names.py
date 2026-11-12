@@ -284,6 +284,9 @@ class _JobRepo:
     def find_many(self, filters, skip=0, limit=50, sort=None):
         return [dict(d) for d in self.docs]
 
+    def count(self, filters):
+        return len(self.docs)
+
     def find_by_id(self, job_id):
         for d in self.docs:
             if d.get("job_id") == job_id:

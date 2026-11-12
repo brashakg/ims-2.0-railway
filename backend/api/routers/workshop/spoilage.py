@@ -15,6 +15,7 @@ from ...dependencies import store_in_view
 from ...services.cost_mask import mask_cost
 from ...dependencies import get_db, get_workshop_repository, validate_store_access
 from ._shared import logger, router
+from .helpers import _jobs_in_reach
 
 
 # ============================================================================
@@ -136,7 +137,7 @@ async def get_spoilage_analytics(
     if repo is not None:
         try:
             if active_store:
-                jobs = repo.find_by_store(active_store)
+                jobs = _jobs_in_reach(repo.find_by_store(active_store), current_user)
             elif roles.intersection({"ADMIN", "SUPERADMIN"}):
                 # Chain-wide margin bleed for the owner's roles.
                 jobs = repo.find_many({}, limit=0)

@@ -460,3 +460,107 @@ def test_audit_returns_movements_desc(fake_db):
     actions = [a["action"] for a in out["audit"]]
     assert "reserve" in actions
     assert "release" in actions
+
+
+# ---------------------------------------------------------------------------
+# L2-LENS-F02: the movement history is the same stock-access door as the cell
+# ---------------------------------------------------------------------------
+
+
+def _seed_audit_for_first_cell(fake_db):
+    admin = _user(["SUPERADMIN"])
+    _seed_cell(fake_db, on_hand=10, reserved=0)
+    asyncio.run(stock_router.reserve_cell(LINE_ID, _payload(qty=2), admin))
+    return fake_db["lens_stock_lines"]._docs[0]["line_stock_id"]
+
+
+def test_audit_other_shop_cell_denied(fake_db):
+    """A shop-B-only login must get no movement rows for a STR-001 cell --
+    the cell detail door already refuses it."""
+    lsid = _seed_audit_for_first_cell(fake_db)
+    other = _user(["SALES_STAFF"], store_id="STR-OTHER")
+    with pytest.raises(HTTPException) as cell_exc:
+        asyncio.run(stock_router.get_cell(lsid, other))
+    assert cell_exc.value.status_code in (403, 404)
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(stock_router.stock_audit(lsid, 100, other))
+    assert exc.value.status_code in (403, 404)
+
+
+def test_audit_orphan_rows_hidden_from_store_staff(fake_db):
+    """History rows whose cell cannot be resolved carry no authorizable shop:
+    a store login sees nothing (404), never the rows."""
+    fake_db["lens_stock_audit"].insert_one(
+        {"audit_id": "a1", "line_stock_id": "ghost", "store_id": "STR-OTHER",
+         "action": "reserve", "at": "2026-11-01"}
+    )
+    staff = _user(["SALES_STAFF"])
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(stock_router.stock_audit("ghost", 100, staff))
+    assert exc.value.status_code == 404
+
+
+def test_audit_same_shop_and_area_manager_ok(fake_db):
+    lsid = _seed_audit_for_first_cell(fake_db)
+    own = _user(["SALES_STAFF"])  # STR-001, the cell's shop
+    assert asyncio.run(stock_router.stock_audit(lsid, 100, own))["total"] == 1
+    am = _user(["AREA_MANAGER"], store_id="STR-002")
+    am["store_ids"] = ["STR-002", "STR-001"]
+    assert asyncio.run(stock_router.stock_audit(lsid, 100, am))["total"] == 1
+    assert asyncio.run(stock_router.get_cell(lsid, am))["cell"]["line_stock_id"] == lsid
+
+
+# ---------------------------------------------------------------------------
+# PR #1376 F2: PATCH is the same cell door as GET /cell and /audit
+# ---------------------------------------------------------------------------
+
+
+def _seed_legacy_cell(fake_db):
+    """A legacy cell stamped with NO shop (store_id null)."""
+    fake_db["lens_stock_lines"].insert_one(
+        {"line_stock_id": "LEGACY-CELL", "lens_line_id": LINE_ID, "store_id": None,
+         "sph": -1.0, "cyl": 0.0, "add": None, "on_hand": 3, "reserved": 0,
+         "reorder_point": 0}
+    )
+    return fake_db["lens_stock_lines"]
+
+
+def _patch(lsid, user, **body):
+    return asyncio.run(
+        stock_router.update_cell(lsid, stock_router.StockCellUpdate(**body), user)
+    )
+
+
+@pytest.mark.parametrize("body", [{"notes": "no change"}, {"reorder_point": 9}])
+def test_patch_unattributed_cell_refused_for_store_manager(fake_db, body):
+    """The no-op reply and a real edit must both 404 (no cell echoed, no write),
+    exactly as GET /cell already refuses the same login."""
+    coll = _seed_legacy_cell(fake_db)
+    before = copy.deepcopy(coll._docs)
+    mgr = _user(["STORE_MANAGER"])
+    with pytest.raises(HTTPException) as exc:
+        _patch("LEGACY-CELL", mgr, **body)
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Stock cell not found"  # no cell echoed
+    assert coll._docs == before
+
+
+@pytest.mark.parametrize("body", [{"notes": "no change"}, {"reorder_point": 9}])
+def test_patch_other_shop_cell_refused_writes_nothing(fake_db, body):
+    lsid = _seed_audit_for_first_cell(fake_db)
+    coll = fake_db["lens_stock_lines"]
+    before = copy.deepcopy(coll._docs)
+    with pytest.raises(HTTPException) as exc:
+        _patch(lsid, _user(["STORE_MANAGER"], store_id="STR-OTHER"), **body)
+    assert exc.value.status_code in (403, 404)
+    assert coll._docs == before
+
+
+def test_patch_same_shop_and_admin_still_edit(fake_db):
+    lsid = _seed_audit_for_first_cell(fake_db)
+    mgr = _user(["STORE_MANAGER"])  # STR-001, the cell's shop
+    assert _patch(lsid, mgr, notes="x")["status"] == "no_changes"
+    assert _patch(lsid, mgr, reorder_point=9)["cell"]["reorder_point"] == 9
+    _seed_legacy_cell(fake_db)
+    admin = _user(["ADMIN"], store_id="HQ")
+    assert _patch("LEGACY-CELL", admin, reorder_point=4)["cell"]["reorder_point"] == 4
