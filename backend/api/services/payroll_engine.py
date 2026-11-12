@@ -233,6 +233,7 @@ def compute_payroll(
     year: int,
     lwp_days: float = 0.0,
     incentive: float = 0.0,
+    incentive_clawback: float = 0.0,
     advance_recovery: float = 0.0,
     pt_slab: Optional[dict] = None,
     gender: str = "ANY",
@@ -244,6 +245,12 @@ def compute_payroll(
     contributions are computed on the EARNED (prorated) wages; ESI eligibility
     and the PT slab bracket are determined on the FULL contracted gross.
     Incentive is paid on top of gross and is NOT part of the PF/ESI/PT base.
+
+    ``incentive_clawback`` is the month's NET clawback in the locked incentive
+    payout (kickers taken back on returns exceeded the incentive earned): a
+    positive amount that comes off the incentive line. It is the only way an
+    incentive goes below zero -- a negative ``incentive`` is refused -- and it
+    never takes pay below zero.
     """
     e = _earnings(config)
     full_gross = e["gross"]
@@ -297,6 +304,7 @@ def compute_payroll(
     tds = float(config.get("tds_monthly", 0) or 0)
 
     incentive = float(incentive or 0)
+    incentive_clawback = float(incentive_clawback or 0)
     advance_recovery = float(advance_recovery or 0)
     who = config.get("employee_id", "unknown")
     # A recovery takes money back; a negative one would be a payment that no
@@ -313,8 +321,28 @@ def compute_payroll(
             "is entered as a deduction, not as a negative incentive." % who
         )
 
-    total_earnings = earned_gross + incentive
+    if not math.isfinite(incentive_clawback) or incentive_clawback < 0:
+        raise PayrollInputError(
+            "Incentive clawback cannot be negative (employee '%s')." % who
+        )
+
     before_recovery = pf["employee"] + esi_employee + pt + tds
+    # A clawback comes off pay like any deduction, down to zero and no further.
+    # Nobody typed it (it is in the locked incentive payout), so the message
+    # cannot ask for a smaller figure: it says who has to act.
+    left = round(earned_gross + incentive - before_recovery, 2)
+    if incentive_clawback > 0 and round(left - incentive_clawback, 2) < 0:
+        raise PayrollInputError(
+            "This month's locked incentive payout for employee '%s' is a "
+            "clawback of Rs %s, more than the pay left after other deductions "
+            "(Rs %s). Payroll never takes pay below zero, so nothing was "
+            "calculated. Ask head office support to spread this clawback over "
+            "later months, then run payroll again."
+            % (who, f"{incentive_clawback:,.2f}", f"{max(0.0, left):,.2f}")
+        )
+    incentive -= incentive_clawback
+
+    total_earnings = earned_gross + incentive
     total_deductions = before_recovery + advance_recovery
     net_pay = total_earnings - total_deductions
     # A recovery can take pay down to zero, never below it: the employee would

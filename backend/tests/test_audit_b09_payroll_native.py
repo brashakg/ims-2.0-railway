@@ -614,3 +614,88 @@ def test_d30_recovery_up_to_the_months_pay_is_saved(rig):
     assert stored[EMP2]["net_salary"] == net
     assert rig.run(advances={EMP: net + 1}).status_code == 422
     assert {r["employee_id"]: r["net_salary"] for r in rig.rows()} == {EMP: 0, EMP2: net}
+
+
+# ---------------------------------------------------------------------------
+# D30 and the LOCKED incentive payout. Roadmap decision #31: a clawback (a
+# kicker taken back on a return) is a negative line folded into the locked
+# payout snapshot, the one incentive feed payroll reads. Nobody types it, so
+# it is not D30's "negative incentive override": it still comes off that
+# month's pay as it always did -- but never below zero.
+# ---------------------------------------------------------------------------
+
+SNAPSHOT = "SNAP-B09-N"
+
+
+def _lock_payout(rig, **product_incentive):
+    rig.db.get_collection("payout_snapshots").insert_one({
+        "snapshot_id": SNAPSHOT, "store_id": STORE, "year": YEAR, "month": MONTH, "status": "LOCKED",
+        "staff_payouts": [{"user_id": emp, "total_payout": 0, "product_incentive": rupees}
+                          for emp, rupees in product_incentive.items()]})
+
+
+def _fed(rig):
+    return rig.db.get_collection("payout_snapshots").find_one({"snapshot_id": SNAPSHOT}).get("payroll_fed_at")
+
+
+def test_d30_engine_takes_a_payout_clawback_off_pay_but_never_below_zero():
+    net = _engine()["net_pay"]
+    clawed = _engine(incentive_clawback=500)
+    assert clawed["earnings"]["incentive"] == -500 and clawed["net_pay"] == net - 500
+    assert _engine(incentive=200, incentive_clawback=500)["earnings"]["incentive"] == -300
+    assert _engine(incentive_clawback=net)["net_pay"] == 0
+    with pytest.raises(ValueError, match="clawback"):
+        _engine(incentive_clawback=net + 0.01)
+    with pytest.raises(ValueError):
+        _engine(incentive_clawback=-1)  # a clawback is an amount taken back
+    # with a recovery typed as well, the recovery is what the Admin can change
+    with pytest.raises(ValueError, match="Enter a smaller recovery"):
+        _engine(incentive_clawback=500, advance_recovery=net)
+    assert _engine(incentive_clawback=500, advance_recovery=net - 500)["net_pay"] == 0
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_d30_a_clawback_in_the_locked_payout_does_not_stop_the_shops_payroll(rig, dry_run):
+    plain = {r["employee_id"]: r["net_salary"] for r in rig.run(dry_run=True).json()["rows"]}
+    _lock_payout(rig, **{EMP: -500.0, EMP2: 300.0})
+
+    reply = rig.run(dry_run=dry_run)
+    assert reply.status_code == 200, reply.text
+    got = {r["employee_id"]: (r["incentives"], r["net_salary"]) for r in reply.json()["rows"]}
+    assert got == {EMP: (-500, plain[EMP] - 500), EMP2: (300, plain[EMP2] + 300)}
+    assert [(r["incentives"], r["net_salary"]) for r in rig.rows()] == (
+        [] if dry_run else [got[EMP], got[EMP2]])
+    # a TYPED negative incentive is still refused, even a small one
+    assert rig.run(dry_run=dry_run, incentives={EMP: -1}).status_code == 422
+
+
+def test_d30_a_payout_clawback_bigger_than_the_months_pay_is_refused(rig):
+    _lock_payout(rig, **{EMP: -90000.0, EMP2: 300.0})
+    for dry_run in (True, False):
+        reply = rig.run(dry_run=dry_run)
+        assert reply.status_code == 422, reply.text
+        assert "clawback" in _detail(reply) and "ZZ Native One" in _detail(reply)
+    assert rig.rows() == [] and _fed(rig) is None  # nothing saved, payout not consumed
+    g = rig.guard()
+    assert g is None or g.get("runs") == 0
+
+
+# ---------------------------------------------------------------------------
+# P1, the lock's own last write: one period_locks row, however many requests
+# finish the same lock.
+# ---------------------------------------------------------------------------
+
+
+def test_p1_second_lock_arriving_before_the_first_has_written_leaves_one_lock_row(rig, monkeypatch):
+    pause = Pause()
+    _pause_first_insert(monkeypatch, rig, "period_locks", pause)
+    t, first = _in_thread(lambda: rig.lock(without_payroll=True))
+    assert pause.reached.wait(30), "the lock never reached its last write"
+    second = rig.lock()  # the same press again: finishes the committed lock
+    pause.go.set()
+    t.join(30)
+
+    assert first["reply"].status_code == 200 and second.status_code == 200
+    (row,) = rig.lock_rows()
+    assert row["locked_by"] == ADMIN["user_id"] and row["without_payroll_for"] == 2
+    assert rig.lock().status_code == 400  # already locked, as before

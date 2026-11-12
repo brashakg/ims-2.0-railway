@@ -63,8 +63,8 @@ async def lock_period(
     if payroll_period_guard.run_in_flight(guard):
         raise HTTPException(
             409,
-            f"Payroll for {month}/{year} is being saved right now. Wait a "
-            "minute, then lock the month again.",
+            f"Payroll for {month}/{year} is being saved right now. Wait two "
+            "minutes, then lock the month again.",
         )
 
     # A locked month refuses payroll approval (423) and nothing unlocks a
@@ -132,11 +132,18 @@ async def lock_period(
 def _write_lock(db, month: int, year: int, decided: dict) -> dict:
     """Write the period_locks row every posting reads, from what the guard
     commit decided (who, when, and how many staff had no payroll)."""
-    lock = {"month": month, "year": year}
+    from pymongo.errors import DuplicateKeyError
+
+    # One row per month, whoever writes it: the month is the row's _id, so a
+    # second request finishing the same committed lock cannot add another.
+    lock = {"_id": f"{int(year)}-{int(month):02d}", "month": month, "year": year}
     for field in ("locked_by", "locked_at", "without_payroll_for"):
         if decided.get(field) is not None:
             lock[field] = decided[field]
-    db.get_collection("period_locks").insert_one(lock)
+    try:
+        db.get_collection("period_locks").insert_one(lock)
+    except DuplicateKeyError:
+        pass  # the other request finishing this same lock wrote it
     return {"message": f"Period {month}/{year} locked", "month": month, "year": year}
 
 

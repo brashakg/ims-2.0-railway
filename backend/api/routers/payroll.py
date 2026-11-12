@@ -1821,12 +1821,19 @@ async def run_payroll(
             cfg_store = cfg.get("store_id")
             lwp = float(req.lwp_days.get(emp, 0) or 0)
             incentive = (req.incentives or {}).get(emp)
+            clawback = 0.0
             if incentive is None:
                 feed = _store_feed(cfg_store)
                 try:
                     incentive = round(float(feed.get(emp, 0.0)), 2)
                 except (TypeError, ValueError):
                     incentive = 0.0
+                # A net clawback in the LOCKED payout (roadmap decision #31:
+                # returns took back more kicker than was earned) is not a
+                # typed negative incentive. The engine takes it off pay under
+                # its own name, never below zero; a typed negative is refused.
+                if incentive < 0:
+                    incentive, clawback = 0.0, -incentive
             advance = float(req.advances.get(emp, 0) or 0)
             pt_slab = _resolve_pt_slab(db, cfg)
             employee_name = _get_employee_details(db, emp).get("full_name", "")
@@ -1837,6 +1844,7 @@ async def run_payroll(
                     year=req.year,
                     lwp_days=lwp,
                     incentive=incentive,
+                    incentive_clawback=clawback,
                     advance_recovery=advance,
                     pt_slab=pt_slab,
                     gender=cfg.get("gender", "ANY"),
