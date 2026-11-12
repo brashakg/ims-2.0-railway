@@ -48,6 +48,25 @@ async def lock_period(
     if existing:
         raise HTTPException(400, f"Period {month}/{year} is already locked")
 
+    # The payroll run and this lock share one guard document per month, so a
+    # run that is being saved can never land behind the lock (see
+    # payroll_period_guard). Read it BEFORE payroll: the commit below is
+    # refused if any run touched the month after this read.
+    from ...services import payroll_period_guard
+
+    guard = payroll_period_guard.read(db, year, month)
+    if guard and guard.get("locked"):
+        # An earlier lock passed every check and committed, then stopped
+        # before its period_locks row was written. Payroll has been refused
+        # since, so nothing below can have changed: finish that lock.
+        return _write_lock(db, month, year, guard)
+    if payroll_period_guard.run_in_flight(guard):
+        raise HTTPException(
+            409,
+            f"Payroll for {month}/{year} is being saved right now. Wait a "
+            "minute, then lock the month again.",
+        )
+
     # A locked month refuses payroll approval (423) and nothing unlocks a
     # month, so a payroll run still in DRAFT would be stuck there for good and
     # its wages would never reach the P&L, Tally or the PF file (they count
@@ -93,13 +112,30 @@ async def lock_period(
         )
 
     lock = {
-        "month": month,
-        "year": year,
         "locked_by": current_user.get("user_id"),
         "locked_at": utc_now_iso(),
     }
     if not_run:
         lock["without_payroll_for"] = len(not_run)
+    # The one atomic step: lock the guard only if no payroll run claimed,
+    # wrote or finished since it was read above. From here every saving run is
+    # refused, so the payroll that was just checked is the payroll that stays.
+    if not payroll_period_guard.commit_lock(db, year, month, guard, lock):
+        raise HTTPException(
+            409,
+            f"Payroll for {month}/{year} changed while the month was being "
+            "locked. Check HR > Payroll Run, then lock the month again.",
+        )
+    return _write_lock(db, month, year, lock)
+
+
+def _write_lock(db, month: int, year: int, decided: dict) -> dict:
+    """Write the period_locks row every posting reads, from what the guard
+    commit decided (who, when, and how many staff had no payroll)."""
+    lock = {"month": month, "year": year}
+    for field in ("locked_by", "locked_at", "without_payroll_for"):
+        if decided.get(field) is not None:
+            lock[field] = decided[field]
     db.get_collection("period_locks").insert_one(lock)
     return {"message": f"Period {month}/{year} locked", "month": month, "year": year}
 

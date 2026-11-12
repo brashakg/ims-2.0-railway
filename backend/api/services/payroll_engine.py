@@ -143,6 +143,12 @@ def pt_for(
 # ---------------------------------------------------------------------------
 
 
+class PayrollInputError(ValueError):
+    """An amount typed for one employee's run (incentive, advance recovery)
+    that payroll refuses. The message is plain English for the Admin; callers
+    answer 422 with it. One rule for preview, save and every other caller."""
+
+
 def _earnings(config: dict) -> dict:
     """Full (un-prorated) monthly earning components + gross.
 
@@ -292,17 +298,40 @@ def compute_payroll(
 
     incentive = float(incentive or 0)
     advance_recovery = float(advance_recovery or 0)
+    who = config.get("employee_id", "unknown")
     # A recovery takes money back; a negative one would be a payment that no
     # payslip line names. Refused here so no caller can use it to raise net pay.
     if not math.isfinite(advance_recovery) or advance_recovery < 0:
-        raise ValueError(
-            "Advance recovery cannot be negative (employee '%s')."
-            % config.get("employee_id", "unknown")
+        raise PayrollInputError(
+            "Advance recovery cannot be negative (employee '%s')." % who
+        )
+    # An incentive is an earning. A negative one is a deduction nobody named,
+    # and it can take earnings below zero.
+    if not math.isfinite(incentive) or incentive < 0:
+        raise PayrollInputError(
+            "Incentive cannot be negative (employee '%s'). Money taken off pay "
+            "is entered as a deduction, not as a negative incentive." % who
         )
 
     total_earnings = earned_gross + incentive
-    total_deductions = pf["employee"] + esi_employee + pt + tds + advance_recovery
+    before_recovery = pf["employee"] + esi_employee + pt + tds
+    total_deductions = before_recovery + advance_recovery
     net_pay = total_earnings - total_deductions
+    # A recovery can take pay down to zero, never below it: the employee would
+    # end the month owing the shop, and nothing records that debt.
+    if advance_recovery > 0 and round(net_pay, 2) < 0:
+        room = max(0.0, round(total_earnings - before_recovery, 2))
+        smaller = (
+            f"Enter a smaller recovery, Rs {room:,.2f} or less."
+            if room > 0
+            else "Enter 0: nothing can be recovered from this month's pay."
+        )
+        raise PayrollInputError(
+            "Advance recovery of Rs %s is more than this month's pay after "
+            "other deductions (Rs %s) for employee '%s'. %s The rest of the "
+            "advance stays outstanding and is recovered in later months."
+            % (f"{advance_recovery:,.2f}", f"{room:,.2f}", who, smaller)
+        )
     employer_cost = total_earnings + pf["employer_total"] + esi_employer
 
     return {
