@@ -2416,8 +2416,12 @@ def ingest_shopify_order(
         # GUEST-SAFE: `cust` is {} when payload["customer"] is None (a Shopify
         # guest checkout). payload.get("customer", {}) would return that None and
         # crash on .get("id"), skipping the whole paid order. A guest books with
-        # customer_id=None (the mapper then marks it is_guest_order).
+        # customer_id=None.
         "customer_id": str(cust.get("id") or "") or None,
+        # What online_order_mapper resolved (canonical customer_id, guest and
+        # link-failed marks): written WITH the order, so no later failure can
+        # leave a booked order with the raw Shopify id and no flag.
+        **(payload.get("_ims_customer_link") or {}),
         "customer_name": customer_name,
         "customer_phone": (cust.get("phone") if cust else "")
         or payload.get("phone")

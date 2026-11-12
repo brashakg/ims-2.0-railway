@@ -18,6 +18,7 @@ from ...dependencies import (
     resolve_store_scope,
     validate_store_access,
 )
+from ..workshop.helpers import _board_jobs, _jobs_in_reach
 from ...services import stock_value
 from ...services.cost_mask import mask_cost
 from ...services.name_resolver import order_actor_id, order_actor_name_map
@@ -145,9 +146,8 @@ async def pending_workshop_jobs(
         }
 
     repo = WorkshopJobRepository(db.get_collection("workshop_jobs"))
-    jobs = repo.find_pending(
-        active_store
-    )  # PENDING + IN_PROGRESS, sorted by expected_date
+    # PENDING + IN_PROGRESS, sorted by expected_date
+    jobs = _board_jobs(repo.find_pending, active_store, current_user)
 
     now = now_ist_naive()
     data = []
@@ -314,7 +314,7 @@ async def workshop_productivity(
 
     try:
         repo = WorkshopJobRepository(db.get_collection("workshop_jobs"))
-        all_jobs = repo.find_by_store(active_store)
+        all_jobs = _jobs_in_reach(repo.find_by_store(active_store), current_user)
     except Exception:
         return empty
 

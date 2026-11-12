@@ -345,15 +345,22 @@ def _get_repo(db=None):
     Falls back to the shared ``dependencies.get_customer_repository`` accessor when
     no usable handle is supplied. Returns None when the DB is unavailable (the
     caller then proceeds with a null customer link / fall-through)."""
-    # 1) Build straight off the passed handle when it's a connected DB exposing the
-    #    customers collection (matches dependencies.get_customer_repository's shape).
-    if db is not None and getattr(db, "is_connected", False):
+    # 1) Build straight off the passed handle: the connection WRAPPER or a RAW
+    #    pymongo Database (the online doors pass ``conn.db``). A raw Database
+    #    answers ``db.is_connected`` with a Collection whose truth test RAISES, so
+    #    the old ``getattr(db, "is_connected")`` check threw before any fallback
+    #    and every phone-bearing online buyer became a guest order (RUN-01).
+    #    online_delist._raw_db tells the two apart statically.
+    if db is not None:
         try:
             from database.repositories.customer_repository import CustomerRepository
+            from .online_delist import _raw_db
 
-            return CustomerRepository(db.customers)
+            raw = _raw_db(db)
+            if raw is not None:
+                return CustomerRepository(raw["customers"])
         except Exception:  # noqa: BLE001 -- fall through to the shared accessor
-            logger.debug("[ENSURE_CUSTOMER] repo-from-handle failed", exc_info=True)
+            logger.warning("[ENSURE_CUSTOMER] repo-from-handle failed", exc_info=True)
     # 2) Shared accessor (its own get_db()).
     try:
         from ..dependencies import get_customer_repository

@@ -1454,7 +1454,10 @@ async def test_workshop_handover_is_undone_when_a_refund_lands_mid_write(till, m
 
     monkeypatch.setattr(wrepo, "update_status", _refund_lands_first)
     monkeypatch.setattr(wstatus, "get_workshop_repository", lambda: wrepo)
+    from api.routers.workshop import helpers as whelpers
     monkeypatch.setattr(gates, "get_order_repository", lambda: till["orders"])
+    # The job's own shop rule resolves the same order (PR #1376).
+    monkeypatch.setattr(whelpers, "get_order_repository", lambda: till["orders"])
     with pytest.raises(HTTPException) as exc:
         await wstatus.update_job_status("J1", StatusBody(status="DELIVERED"), None, None, _user("STORE_MANAGER"))
     assert exc.value.status_code == 409
@@ -1537,7 +1540,10 @@ async def test_pickup_scan_is_undone_when_a_refund_lands_mid_write(till, monkeyp
 
     monkeypatch.setattr(wrepo, "update_status", _refund_lands_first)
     monkeypatch.setattr(labels, "get_workshop_repository", lambda: wrepo)
+    from api.routers.workshop import helpers as whelpers
     monkeypatch.setattr(gates, "get_order_repository", lambda: till["orders"])
+    # The job's own shop rule resolves the same order (PR #1376).
+    monkeypatch.setattr(whelpers, "get_order_repository", lambda: till["orders"])
     out = await labels.scan_advance("J3", labels.ScanAdvanceBody(scanned_code="J3", station="PICKUP"),
                                     _user("STORE_MANAGER"))
     assert out["ok"] is False and out["reason"] == "ORDER_REFUNDED", out
@@ -1566,7 +1572,10 @@ async def test_a_pickup_scan_then_an_advance_refund_is_refused(till, monkeypatch
                      "status": "IN_PROGRESS"})
     wrepo = WorkshopJobRepository(jobs)
     monkeypatch.setattr(labels, "get_workshop_repository", lambda: wrepo)
+    from api.routers.workshop import helpers as whelpers
     monkeypatch.setattr(gates, "get_order_repository", lambda: till["orders"])
+    # The job's own shop rule resolves the same order (PR #1376).
+    monkeypatch.setattr(whelpers, "get_order_repository", lambda: till["orders"])
     out = await labels.scan_advance("P1", labels.ScanAdvanceBody(scanned_code="P1", station="PICKUP"),
                                     _user("STORE_MANAGER"))
     assert out["ok"] is True, out

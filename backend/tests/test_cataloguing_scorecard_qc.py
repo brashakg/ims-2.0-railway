@@ -241,12 +241,17 @@ def _rows_by_user(out):
 
 class TestScorecardBasics:
     def test_counts_rate_coverage_and_today(self, monkeypatch):
+        # "Today" is read when the test runs, not from the import-time NOW: a
+        # run that starts before IST midnight and reaches this test after it
+        # would otherwise see p3 as yesterday's.
+        from api.utils.ist import ist_day_start_utc
+
         db = FakeDB(
             products=[
                 _product("p1", "u-a", name="asha", category="FRAME"),
                 _product("p2", "u-a", name="asha", category="SUNGLASS"),
                 _product("p3", "u-a", name="asha", category="FRAME",
-                         created_days_ago=0),
+                         created_at=ist_day_start_utc()),
                 _product("p4", "u-b", name="bala", category="FRAME"),
                 # outside the window -> ignored entirely
                 _product("p5", "u-a", name="asha", created_days_ago=40),
