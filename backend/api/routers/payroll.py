@@ -1910,10 +1910,29 @@ async def run_payroll(
                         break
                     if existing:
                         doc["payroll_id"] = existing.get("payroll_id")
-                        payroll_coll.update_one(
-                            {"employee_id": emp, "year": req.year, "month": req.month},
-                            {"$set": doc},
+                        # Written only if the row still has the status it was
+                        # read with. Approve is one atomic update per row, so
+                        # an approval given since that read wins: the row is
+                        # never put back to DRAFT (D1: it is a cost from the
+                        # moment it is approved), in an open month or behind a
+                        # lock that this run stalled past.
+                        key = {"employee_id": emp, "year": req.year, "month": req.month}
+                        written = payroll_coll.update_one(
+                            {**key, "status": existing.get("status")}, {"$set": doc}
                         )
+                        if not getattr(written, "matched_count", 1):
+                            now = payroll_coll.find_one(key)
+                            rows.append(
+                                {
+                                    "employee_id": emp,
+                                    "skipped": True,
+                                    "reason": f"already {now.get('status')}"
+                                    if now
+                                    else "removed while this run was saving",
+                                    "net_salary": (now or {}).get("net_salary"),
+                                }
+                            )
+                            continue
                     else:
                         doc["payroll_id"] = str(uuid.uuid4())
                         doc["created_at"] = utc_now_iso()

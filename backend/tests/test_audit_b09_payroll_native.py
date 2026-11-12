@@ -379,6 +379,71 @@ def test_p1_run_that_stalled_past_the_lease_leaves_no_draft_behind_the_lock(
     assert rig.rows() == [] and not rig.stranded()
 
 
+def _between_read_and_rewrite(monkeypatch, rig, meanwhile):
+    """Runs ``meanwhile`` once, after a saving re-run has READ an existing
+    payroll row and just before it writes that row back."""
+    original = rig.coll_cls.update_one
+    done = []
+
+    def update_one(self, *a, **k):
+        if self.name == "payroll" and not done:
+            done.append(None)
+            done[0] = meanwhile()
+        return original(self, *a, **k)
+
+    monkeypatch.setattr(rig.coll_cls, "update_one", update_one)
+    return done
+
+
+def _saved_figures(rig):
+    return [(r["employee_id"], r["status"], r["net_salary"], r.get("approved_by")) for r in rig.rows()]
+
+
+def test_p1_rerun_never_takes_back_an_approval_given_while_it_was_saving(rig, monkeypatch):
+    """A re-run reads a DRAFT row; the payroll is approved (a P&L cost from
+    that moment, D1); the re-run then writes. The approved row and its figures
+    stay; the re-run reports the row as already approved."""
+    assert rig.run().status_code == 200
+    cost = sum(r["breakdown"]["ctc_cost"] for r in rig.rows())
+    approved = _between_read_and_rewrite(monkeypatch, rig, rig.approve)
+    ran = rig.run(lwp_days={EMP: 10, EMP2: 10})  # different figures, to show which survive
+
+    assert approved[0].status_code == 200 and approved[0].json()["approved"] == 2
+    figures = _saved_figures(rig)
+    assert [f[1] for f in figures] == ["APPROVED", "APPROVED"]
+    assert rig.pnl() == cost > 0
+    assert ran.status_code == 200
+    assert [(r.get("skipped"), r.get("reason")) for r in ran.json()["rows"]] == [(True, "already APPROVED")] * 2
+    assert ran.json()["totals"]["net"] == 0  # nothing of this re-run was saved
+    # and the approved rows are the ones a later re-run and "paid" still see
+    assert rig.run(lwp_days={EMP: 10}).status_code == 200 and _saved_figures(rig) == figures
+    assert rig.pay().status_code == 200 and rig.statuses() == ["PAID", "PAID"] and rig.pnl() == cost
+
+
+def test_p1_rerun_that_stalled_past_the_lease_cannot_put_a_draft_behind_the_lock(rig, monkeypatch):
+    """The same re-run stalls for longer than the guard's lease before that
+    write; meanwhile the payroll is approved and the month is locked. The
+    stalled write must not turn the approved row back into a DRAFT inside the
+    locked month (no row of this run was inserted, so nothing takes it back)."""
+    assert rig.run().status_code == 200
+    cost = sum(r["breakdown"]["ctc_cost"] for r in rig.rows())
+
+    def meanwhile():
+        rig.db.get_collection(guard.COLLECTION).update_one(
+            {"_id": f"{YEAR}-{MONTH:02d}"},
+            {"$set": {"beat": time.time() - guard.LEASE_SECONDS - 1}},
+        )
+        return rig.approve(), rig.lock()
+
+    done = _between_read_and_rewrite(monkeypatch, rig, meanwhile)
+    ran = rig.run(lwp_days={EMP: 10, EMP2: 10})
+
+    assert [reply.status_code for reply in done[0]] == [200, 200] and len(rig.lock_rows()) == 1
+    assert ran.status_code == 423
+    assert rig.statuses() == ["APPROVED", "APPROVED"] and not rig.stranded()
+    assert rig.pnl() == cost > 0
+
+
 def test_p1_run_that_died_holding_the_month_blocks_the_lock_only_for_the_lease(rig):
     guard.claim_run(rig.db, YEAR, MONTH)  # a run that never came back
     assert rig.lock(without_payroll=True).status_code == 409
