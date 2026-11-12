@@ -46,6 +46,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api.routers import workshop as workshop_module  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from strict_fakes import OrdersAt  # noqa: E402
 from api.services import spoilage_analytics as svc  # noqa: E402
 from database.repositories.workshop_repository import WorkshopJobRepository  # noqa: E402
 
@@ -223,6 +224,7 @@ def _mk_job(job_id="j1", status="QC_FAILED", store=STORE, **extra) -> Dict[str, 
         "_id": job_id,
         "job_id": job_id,
         "job_number": f"WS-{job_id}",
+        "order_id": f"ORD-{job_id}",
         "status": status,
         "store_id": store,
         "created_at": datetime.now().isoformat(),
@@ -265,6 +267,7 @@ def _client(monkeypatch, roles: List[str], repo, db, active_store: Optional[str]
 
     app.dependency_overrides[get_current_user] = _fake_user
     monkeypatch.setattr(workshop_module, "get_workshop_repository", lambda: repo)
+    monkeypatch.setattr(workshop_module.helpers, "get_order_repository", lambda: OrdersAt(STORE))
     monkeypatch.setattr(workshop_module, "get_db", lambda: db)
     return TestClient(app)
 

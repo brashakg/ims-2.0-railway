@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from api.routers import workshop as wm  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from strict_fakes import OrdersAt  # noqa: E402
 
 
 class _Repo:
@@ -33,6 +34,7 @@ def _client(monkeypatch, job):
     app.include_router(wm.router, prefix="/workshop")
     repo = _Repo(job)
     monkeypatch.setattr(wm, "get_workshop_repository", lambda: repo)
+    monkeypatch.setattr(wm.helpers, "get_order_repository", lambda: OrdersAt("BV-TEST-01"))
 
     async def _u():
         return {"user_id": "u1", "roles": ["WORKSHOP_STAFF"], "active_store_id": "BV-TEST-01"}
@@ -42,7 +44,7 @@ def _client(monkeypatch, job):
 
 
 def _job(**kw):
-    d = {"job_id": "J1", "status": "COMPLETED", "store_id": "BV-TEST-01"}
+    d = {"job_id": "J1", "order_id": "ORD-1", "status": "COMPLETED", "store_id": "BV-TEST-01"}
     d.update(kw)
     return d
 
