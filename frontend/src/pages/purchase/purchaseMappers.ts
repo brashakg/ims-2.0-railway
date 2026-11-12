@@ -6,6 +6,7 @@
 // Suppliers and Analytics sections.
 
 import { gstinStateCode } from '../../constants/gst';
+import { istDayString } from '../../utils/datetime';
 import type { POItem, POStatus, Supplier, PurchaseOrder } from './purchaseTypes';
 
 // ============================================================================
@@ -98,7 +99,10 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     supplierId: po.vendor_id ?? '',
     supplierName: po.vendor_name ?? '',
     deliveryStoreId: po.delivery_store_id || undefined,
-    date: po.created_at ? po.created_at.split('T')[0] : '',
+    // The India calendar day the order was raised on (the stored instant is
+    // UTC: its first ten letters are the wrong day after 18:30 UTC). A stored
+    // value that is not a date is passed on as it is, for poDay to name.
+    date: istDayString(po.created_at) ?? (po.created_at ? String(po.created_at) : ''),
     expectedDelivery: po.expected_date ?? '',
     status: (po.status ?? 'DRAFT') as POStatus,
     items,

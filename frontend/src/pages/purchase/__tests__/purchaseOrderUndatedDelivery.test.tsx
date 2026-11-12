@@ -133,3 +133,100 @@ describe('APP-02: an undated purchase order never reads "Invalid Date"', () => {
     });
   });
 });
+
+// Decision D34 (Codex review of PR #1414, limit 2): the Order Date was the
+// first ten letters of the stored instant -- its UTC day. An order raised at
+// 01:30 on 2 November in India is stored as 2026-11-01T20:00:00 (UTC) and
+// read "1 November". The mapper now asks the app's one India-day rule
+// (utils/datetime istDayString); the list card, the detail, the downloaded
+// copy and the print all read that mapped day.
+describe('D34: the Order Date is the India calendar day, not the UTC one', () => {
+  const TZS = ['Asia/Kolkata', 'America/Los_Angeles', 'Pacific/Kiritimati'];
+  const inEveryTimezone = (check: () => void) => {
+    const was = process.env.TZ;
+    try {
+      for (const tz of TZS) {
+        process.env.TZ = tz;
+        check();
+        cleanup();
+      }
+    } finally {
+      process.env.TZ = was;
+    }
+  };
+  const orderDay = (created_at: unknown) => mapPOtoPurchaseOrder({ ...apiPO(null), created_at }).date;
+
+  it('an order at 20:00 UTC on 1 November is dated 2 November, in every browser timezone', () => {
+    inEveryTimezone(() => {
+      expect(orderDay('2026-11-01T20:00:00Z')).toBe('2026-11-02');
+      // What the server really sends: its UTC wall clock, no zone, microseconds.
+      expect(orderDay('2026-11-01T20:00:00')).toBe('2026-11-02');
+      expect(orderDay('2026-11-01T20:00:00.836000')).toBe('2026-11-02');
+      expect(orderDay('2026-11-02T01:30:00+05:30')).toBe('2026-11-02');
+      // The India midnight itself: 18:30 UTC.
+      expect(orderDay('2026-11-01T18:29:59Z')).toBe('2026-11-01');
+      expect(orderDay('2026-11-01T18:30:00Z')).toBe('2026-11-02');
+      // A morning order was never wrong and still is not.
+      expect(orderDay('2026-11-01T04:00:00Z')).toBe('2026-11-01');
+      expect(poDay(orderDay('2026-11-01T20:00:00Z'))).toBe(shownDay(2026, 11, 2));
+    });
+  });
+
+  it('the list card, the detail and the downloaded copy all show 2 November', async () => {
+    const po = () => mapPOtoPurchaseOrder({ ...apiPO('2026-11-10'), created_at: '2026-11-01T20:00:00Z' });
+    inEveryTimezone(() => {
+      const NOV_2 = shownDay(2026, 11, 2);
+      const list = render(
+        <MemoryRouter>
+          <PurchaseTable purchaseOrders={[po()]} onViewPO={() => {}} />
+        </MemoryRouter>,
+      );
+      expect(field(list.container, 'Order Date')).toBe(NOV_2);
+      list.unmount();
+      const detail = render(<PurchaseOrderDetail po={po()} onClose={() => {}} onAction={() => {}} />);
+      expect(field(detail.container, 'Order Date')).toBe(NOV_2);
+    });
+
+    let saved: Blob | null = null;
+    URL.createObjectURL = vi.fn((b: Blob) => {
+      saved = b;
+      return 'blob:po';
+    }) as unknown as typeof URL.createObjectURL;
+    URL.revokeObjectURL = vi.fn();
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    render(
+      <MemoryRouter>
+        <PurchaseTable purchaseOrders={[po()]} onViewPO={() => {}} />
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByTitle('Download PO'));
+    const text = await new Promise<string>((done) => {
+      const reader = new FileReader();
+      reader.onload = () => done(String(reader.result));
+      reader.readAsText(saved as unknown as Blob);
+    });
+    expect(text).toContain(`Date      : ${shownDay(2026, 11, 2)}`);
+    click.mockRestore();
+  });
+
+  it('a day with no time stays that day; no date reads "Not set"; a stored non-date reads "Unreadable date"', () => {
+    inEveryTimezone(() => {
+      expect(orderDay('2026-11-01')).toBe('2026-11-01');
+      expect(poDay(orderDay('2026-11-01'))).toBe(shownDay(2026, 11, 1));
+      for (const none of [undefined, null, '']) {
+        expect(orderDay(none)).toBe('');
+        expect(poDay(orderDay(none))).toBe('Not set');
+      }
+      // As before this change: never "Invalid Date", never a made-up day.
+      expect(poDay(orderDay('last tuesday'))).toBe('Unreadable date');
+    });
+  });
+
+  it('reads in a browser that parses only standard date strings (Safari)', () => {
+    withStrictDate(() => {
+      expect(orderDay('2026-11-01T20:00:00Z')).toBe('2026-11-02');
+      expect(orderDay('2026-11-01T20:00:00')).toBe('2026-11-02');
+      expect(orderDay('2026-11-01')).toBe('2026-11-01');
+    });
+  });
+});

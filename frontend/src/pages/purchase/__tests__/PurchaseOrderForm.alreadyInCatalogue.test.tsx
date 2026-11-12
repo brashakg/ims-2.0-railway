@@ -112,6 +112,23 @@ describe('Create PO - a typed-in item that is already in the catalogue (audit C2
     await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
   });
 
+  // Decision D34: the order just created is dated the India day, as the
+  // mapper dates it once it is read back (01:30 on 2 November in India is
+  // still 1 November in UTC).
+  it('an order created at 20:00 UTC on 1 November is dated 2 November', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(new Date('2026-11-01T20:00:00Z'));
+      createPO.mockResolvedValueOnce({ po_id: 'po-1', po_number: 'PO-BV-DHN-02-0001' });
+      const onCreated = vi.fn();
+      await typeCarreraAndSubmit(onCreated);
+      await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+      expect(onCreated.mock.calls[0][0].date).toBe('2026-11-02');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('offers a size box only where the catalogue records one', async () => {
     render(<PurchaseOrderForm suppliers={[vendor]} existingPOCount={0} onClose={() => {}} onCreated={() => {}} />);
     await act(async () => {
