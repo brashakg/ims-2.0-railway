@@ -18,11 +18,11 @@ from ...dependencies import (
     get_workshop_repository,
     get_audit_repository,
     validate_store_access,
-    can_access_store_scoped,
 )
 from ._shared import logger, router
 from .models import LabScanBody, LabStationUpsert
 from .lens import _perform_ready_notify
+from .helpers import _job_in_reach, _jobs_in_reach
 
 
 # ============================================================================
@@ -168,7 +168,9 @@ async def get_station_queue(
     db = get_db()
     if db is None or not active_store:
         return {"station": code.upper(), "store_id": active_store, "jobs": [], "total": 0}
-    jobs = lab_routing.station_queue(db, active_store, code)
+    jobs = lab_routing.station_queue(
+        db, active_store, code, lambda rows: _jobs_in_reach(rows, current_user)
+    )
     return {
         "station": code.upper(),
         "store_id": active_store,
@@ -224,7 +226,7 @@ async def lab_scan(
         }
 
     # Store-scope guard: existence-hide a cross-store job (medical PII / IDOR).
-    if not can_access_store_scoped(job.get("store_id"), current_user):
+    if not _job_in_reach(job, current_user):
         return {
             "ok": False,
             "reason": "NOT_FOUND",
@@ -285,7 +287,7 @@ async def print_job_card(
     job = repo.find_by_id(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Workshop job not found")
-    if not can_access_store_scoped(job.get("store_id"), current_user):
+    if not _job_in_reach(job, current_user):
         raise HTTPException(status_code=404, detail="Workshop job not found")
 
     now = utc_now().replace(tzinfo=None)
