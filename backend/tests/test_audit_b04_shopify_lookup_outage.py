@@ -43,9 +43,28 @@ from api.services.shopify_refund import handle_shopify_refund  # noqa: E402
 _SHOPIFY_ORDER_ID = "5550001"
 
 
+@pytest.fixture(autouse=True)
+def _handles_refuse_truth_tests_like_pymongo(monkeypatch):
+    """A real pymongo Database / Collection raises on `if db:` / `if coll:`.
+    mongomock's are quietly truthy, which hid that class of defect in other
+    PRs - so the doubles here carry pymongo's own __bool__."""
+    from pymongo.collection import Collection
+    from pymongo.database import Database
+
+    monkeypatch.setattr(
+        mongomock.collection.Collection, "__bool__", Collection.__bool__, raising=False)
+    monkeypatch.setattr(
+        mongomock.database.Database, "__bool__", Database.__bool__, raising=False)
+
+
 @pytest.fixture
 def db():
-    return mongomock.MongoClient()["audit_b04_lookup"]
+    handle = mongomock.MongoClient()["audit_b04_lookup"]
+    with pytest.raises(NotImplementedError):
+        bool(handle)
+    with pytest.raises(NotImplementedError):
+        bool(handle.orders)
+    return handle
 
 
 def _order(db, **extra):
@@ -420,6 +439,48 @@ def test_the_auto_post_books_nothing_twice_after_a_read_failure(
     assert _money_rows(db) == before
 
     assert handle_shopify_refund(db, _refund_payload())["status"] == "duplicate"
+    assert _money_rows(db) == before
+
+
+def test_a_claim_whose_finished_read_failed_is_not_acknowledged_as_done(db, monkeypatch):
+    """The second read of the same rule: "was that claim FINISHED?". A run
+    claimed the refund (returns doc PENDING, no credit note) and died. On the
+    redelivery the first read works (a returns doc exists) and the second one
+    fails. Before: the failed read answered "finished", the webhook was
+    acknowledged as a duplicate and nothing ever finished the refund."""
+    monkeypatch.delenv("SHOPIFY_REFUND_AUTO", raising=False)
+    _refund_order(db)
+    db.returns.insert_one({
+        "return_id": "RET-CLAIM", "order_id": "ORD-AUDIT-1", "shopify_refund_id": _REFUND_ID,
+        "status": "PENDING", "credit_note_issued": False,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    })
+    before = _money_rows(db)
+    _inbox_row(db, "refund-claim", "refunds/create", _refund_payload())
+
+    real = mongomock.collection.Collection.find_one
+    reads = []
+
+    def second_read_fails(self, *args, **kwargs):
+        if self.name == "returns":
+            reads.append(1)
+            if len(reads) == 2:
+                raise TimeoutError("synthetic storage outage")
+        return real(self, *args, **kwargs)
+
+    with patch.object(mongomock.collection.Collection, "find_one", second_read_fails):
+        row = _drain(db, "refund-claim")
+
+    assert len(reads) >= 2
+    assert row["processed"] is False and row["status"] == "failed", row
+    assert "exception:TimeoutError" in row["handler_error"]
+    assert _money_rows(db) == before
+
+    # Reads working again: the fresh claim is still reported unfinished (the
+    # row stays retryable), exactly as it is without any outage.
+    row = _drain(db, "refund-claim")
+    assert row["processed"] is False and row["status"] == "failed", row
+    assert "not finalized" in row["handler_error"]
     assert _money_rows(db) == before
 
 

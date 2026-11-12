@@ -99,12 +99,11 @@ def _stale_cutoff() -> str:
 
 def _unfinished_claim(db, refund_id: str) -> Optional[Dict[str, Any]]:
     """The refund's returns doc when a run claimed it and never finalized it
-    (status PENDING, no credit note), else None. Fail-soft -> None."""
-    try:
-        coll = db.get_collection(_RETURNS_COLLECTION)
-        doc = coll.find_one({"shopify_refund_id": refund_id}) if coll is not None else None
-    except Exception:  # noqa: BLE001
-        return None
+    (status PENDING, no credit note), else None. A read that FAILS raises
+    (decision D13, the lookup _refund_already_processed uses): "could not
+    check" is not "finished" -- that answer acknowledged the webhook as a
+    duplicate and nothing ever finished the refund."""
+    doc = find_by_shopify_id(db, _RETURNS_COLLECTION, "shopify_refund_id", refund_id)
     if doc and doc.get("status") == "PENDING" and doc.get("credit_note_issued") is not True:
         return doc
     return None
