@@ -359,7 +359,7 @@ def finish_unfinished_refunds() -> Dict[str, int]:
     db = _get_db()
     if db is None:
         return counts
-    from ..services.shopify_refund import raise_unfinished_task, stale_unfinished_claims
+    from ..services.shopify_refund import _unfinished_claim, raise_unfinished_task, stale_unfinished_claims
 
     try:
         claims = stale_unfinished_claims(db)
@@ -367,12 +367,17 @@ def finish_unfinished_refunds() -> Dict[str, int]:
         logger.error("[REFUND_REVIEWS] unfinished refunds could not be read: %s", exc)
         return counts
     for claim in claims:
-        posted = False
+        refund_id = claim["shopify_refund_id"]
+        posted = busy = False
         try:
             row = db.get_collection(_REVIEW_COLLECTION).find_one(
-                {"shopify_refund_id": claim["shopify_refund_id"], "resolved": {"$ne": True}})
+                {"shopify_refund_id": refund_id, "resolved": {"$ne": True}})
             if row and str(row.get("status") or "").upper() in _CONFIRMABLE and row.get("credit_note"):
                 posted, post_status, result = _post(db, row)
+                # Another post holds the order or the claim at this moment (a
+                # person's Confirm, the inbox retry): it is being finished
+                # there -- no task for that; the next tick looks again.
+                busy = not posted and (post_status == "duplicate" or result.get("reason") == "order_busy")
                 if posted:
                     # The person who confirmed it stays on the row; a failed
                     # attempt leaves the row as it reads (still open).
@@ -380,10 +385,12 @@ def finish_unfinished_refunds() -> Dict[str, int]:
                     _write_audit("SHOPIFY_REFUND_REVIEW_AUTO_FINISH", row["review_id"], row, result,
                                  {"user_id": "system"})
         except Exception as exc:  # noqa: BLE001
-            logger.error("[REFUND_REVIEWS] refund %s not finished: %s", claim.get("shopify_refund_id"), exc)
+            logger.error("[REFUND_REVIEWS] refund %s not finished: %s", refund_id, exc)
         if posted:
             counts["finished"] += 1
-        else:
+        elif not busy and _unfinished_claim(db, refund_id) is not None:
+            # Still unfinished after the tick's own look (asked again: another
+            # door may have finished it meanwhile).
             counts["unresolved"] += 1
             raise_unfinished_task(claim)
     if counts["finished"] or counts["unresolved"]:

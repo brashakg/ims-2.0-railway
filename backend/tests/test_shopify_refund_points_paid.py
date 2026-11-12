@@ -810,6 +810,32 @@ def test_a_refund_the_tick_cannot_finish_raises_one_task_and_closes_it_itself(en
     assert reviews.find_one({"review_id": review_id})["status"] == "POSTED"
 
 
+def test_the_tick_raises_no_task_while_another_post_holds_the_order(env, points, monkeypatch):
+    """A person's Confirm (or the inbox retry) is finishing the refund at the
+    tick's moment: the tick books nothing and tells nobody; it looks again."""
+    import api.dependencies as deps
+    from api.services import shopify_refund as S
+    from database.repositories.task_repository import TaskRepository
+
+    tasks = points.db.get_collection("tasks")
+    monkeypatch.setattr(deps, "get_task_repository", lambda: TaskRepository(tasks))
+    _reviews, review_id = _queued(env)
+    coll = env.get_collection("returns")
+    real_update = _no_finalize(monkeypatch, coll)
+    assert _confirm(review_id)[0] == 422
+    monkeypatch.setattr(coll, "update_one", real_update)
+    _age(coll)
+    real_lock = S._lock_order_credit
+    monkeypatch.setattr(S, "_lock_order_credit", lambda *_a, **_k: (False, None))
+    before = _stored(env, points)
+    assert _tick() == {"finished": 0, "unresolved": 0}
+    assert tasks.count_documents({"source_ref": "shopify_refund_unfinished:700001"}) == 0
+    assert _stored(env, points) == before
+    monkeypatch.setattr(S, "_lock_order_credit", real_lock)
+    assert _tick() == {"finished": 1, "unresolved": 0}
+    assert tasks.count_documents({"source_ref": "shopify_refund_unfinished:700001"}) == 0
+
+
 def test_the_tick_leaves_a_claim_older_than_its_reach_to_a_person(env, points, monkeypatch):
     """History is not booked by itself: a claim older than the tick's seven
     days is left alone (no post, no task); a person's Confirm still finishes it."""
