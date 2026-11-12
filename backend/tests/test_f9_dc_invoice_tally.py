@@ -429,7 +429,16 @@ def _workshop_client(
 
     class _OrderRepo:
         def find_by_id(self, _id):
-            return {"order_id": _id, "customer_id": "C1"} if order_exists else None
+            # A real order always carries its shop; create_job authorizes it
+            # (L2-WS-F01) -- an unattributed order is admin-only.
+            return (
+                {"order_id": _id, "customer_id": "C1", "store_id": "S1"}
+                if order_exists
+                else None
+            )
+
+        def ids_in_stores(self, order_ids, store_ids):
+            return set(order_ids) if order_exists and "S1" in store_ids else set()
 
         def update(self, *a, **k):
             return True
@@ -762,6 +771,7 @@ class TestWorkshopHardlock:
     def _seed_ordered_job(self, wrepo, lens_status="ORDERED", product_id="L1", store_id="S1"):
         wrepo._jobs.append({
             "job_id": "JOB-1", "job_number": "WS-1", "status": "PENDING",
+            "order_id": "O1",  # a job sits on an order of its shop (PR #1376)
             "store_id": store_id, "lens_status": lens_status,          # TOP-LEVEL
             "lens_details": {"product_id": product_id},                # spec; no lens_status
             "fitting_details": {"confirmed_by_sales": True},           # passes the sales gate
