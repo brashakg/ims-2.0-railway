@@ -214,3 +214,223 @@ def test_first_counter_return_prices_at_the_bills_rate_not_the_reduced_one(point
     out = L.reverse_for_return("RET-2", "ord-1", "CUST-1", points_paid_share=share)
     assert out["ok"] is True, out
     assert points() == (50 + shopify_pts + restored - 50, 100 - shopify_pts - restored, 0)
+
+
+# ----------------------------------------------------------------------------
+# Codex round 5, 1397-P1: a credited refund whose points step never ran, or
+# failed with its failure note lost, was never found again -- the sweep reads
+# only FLAGGED returns and the flag was written after the attempt. The marker
+# is now written with the claim, before anything posts, and only cleared once
+# the points are settled. Every test below reads the STORED books.
+# ----------------------------------------------------------------------------
+
+
+class _WorkerDeath(BaseException):
+    """Not an Exception: nothing in the post may catch it (a killed process)."""
+
+
+def _sweep_reads(env, monkeypatch, points):
+    """The scheduled sweep reads bills + returns through the order repository
+    and writes its audit row through the real audit repository (mongomock)."""
+    from api.routers import loyalty as L
+    from database.repositories.audit_repository import AuditRepository
+
+    class _Orders:
+        collection = env.get_collection("orders")
+
+    _Orders.collection.database = env
+    audit = AuditRepository(points.db.get_collection("audit_logs"))
+    monkeypatch.setattr(L, "get_order_repository", lambda: _Orders())
+    monkeypatch.setattr(L, "get_audit_repository", lambda: audit)
+
+
+def _stored(env, points):
+    """Everything a refund leaves behind: points books, the credit ledger, the
+    customer's credit balance, the points restore rows and the return doc(s)."""
+    from api.routers import loyalty as L
+
+    docs = list(env.get_collection("returns").find({"shopify_refund_id": "700001"}))
+    return {
+        "points": points(),
+        "credit_rows": [r["delta"] for r in _ledger(env)],
+        "credit_balance": _balance(env),
+        "restore_rows": sorted((t["txn_id"], int(t["points"]))
+                               for t in points.db.loyalty_transactions.find({}) if t.get(L._RETURN_RESTORE)),
+        "returns": [(d["status"], d.get("credit_note_issued"), d.get("loyalty_reversal_failed")) for d in docs],
+        "restock_stock_ids": [sid for d in docs for sid in d.get("restock_stock_ids") or []],
+        "sweep_audits": points.db.audit_logs.count_documents({"action": "loyalty.reversal_reconciled"}),
+    }
+
+
+def _post_with_fault(env, monkeypatch, mode):
+    """Queue refund 700001 and confirm it under `mode`, then lift the fault.
+    worker_death: the process dies right before the points step, after the
+    COMPLETED return and its credit are stored. lost_failure_flag: the restore
+    fails AND every write that would note the failure on the return fails."""
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    _order(env, payments=PAYS)
+    assert S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")["status"] == "queued"
+    review = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "700001"})
+    coll = env.get_collection("returns")
+    real_restore, real_update = L.restore_return_points, coll.update_one
+    if mode == "worker_death":
+        def die(*_a, **_k):
+            raise _WorkerDeath("after the durable COMPLETED, before the points step")
+
+        monkeypatch.setattr(L, "restore_return_points", die)
+    elif mode == "lost_failure_flag":
+        monkeypatch.setattr(L, "restore_return_points",
+                            lambda *a, **k: {"ok": False, "reason": "balance_update_failed"})
+
+        def no_failure_note(query, update, *a, **k):
+            if (update.get("$set") or {}).get("loyalty_reversal_failed"):
+                raise RuntimeError("failure flag write unavailable")
+            return real_update(query, update, *a, **k)
+
+        monkeypatch.setattr(coll, "update_one", no_failure_note)
+    try:
+        first = S.post_from_review(env, review)
+    except _WorkerDeath:
+        first = {"died": True}
+    monkeypatch.setattr(L, "restore_return_points", real_restore)
+    monkeypatch.setattr(coll, "update_one", real_update)
+    return review, first
+
+
+_SETTLED = {
+    "points": (150, 0, 50),  # the 100 points back, once; the 50 earned untouched
+    "credit_rows": [900.0],  # one credit row, never a second
+    "credit_balance": (900.0, 900.0),
+    "returns": [("COMPLETED", True, False)],
+    "restock_stock_ids": [],  # no stock repository in this rig: nothing minted, ever
+}
+
+
+def _less_rows(stored):
+    return {k: v for k, v in stored.items() if k not in ("restore_rows", "sweep_audits")}
+
+
+@pytest.mark.parametrize("mode", ["healthy", "worker_death", "lost_failure_flag"])
+def test_points_owed_by_a_credited_refund_are_never_lost(env, points, monkeypatch, mode):
+    """Codex's two schedules + the healthy control, through two sweeps and an
+    identical confirmation. Before: both faults left 50 points for good (the
+    sweeps answered 0/0/0, the confirmation `duplicate`)."""
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    review, first = _post_with_fault(env, monkeypatch, mode)
+    after_first = _stored(env, points)
+    assert after_first["credit_rows"] == [900.0] and after_first["credit_balance"] == (900.0, 900.0)
+    if mode == "healthy":
+        assert first["status"] == "credited" and first["points_restored"] == 100
+        assert _less_rows(after_first) == _SETTLED
+    else:
+        # The refund is terminal and credited, its points are still owed, and
+        # the STORED return says so (the sweep's row).
+        assert after_first["points"] == (50, 100, 50) and after_first["restore_rows"] == []
+        assert after_first["returns"] == [("COMPLETED", True, True)]
+
+    _sweep_reads(env, monkeypatch, points)
+    sweeps = [L.reconcile_loyalty_reversals() for _ in range(2)]
+    assert sweeps[0]["reconciled"] == (0 if mode == "healthy" else 1), sweeps
+    assert sweeps[1] == {"reconciled": 0, "unresolved": 0, "clean": 0}, sweeps
+    after_sweeps = _stored(env, points)
+    assert _less_rows(after_sweeps) == _SETTLED
+    assert [p for _t, p in after_sweeps["restore_rows"]] == [100]  # ONE restore row
+    assert after_sweeps["sweep_audits"] == (0 if mode == "healthy" else 1)
+
+    again = S.post_from_review(env, review)  # the identical confirmation
+    assert again["status"] == "duplicate", again
+    assert _stored(env, points) == after_sweeps  # nothing twice: points, credit, rows, units
+    assert L.reconcile_loyalty_reversals() == {"reconciled": 0, "unresolved": 0, "clean": 0}
+    assert _stored(env, points) == after_sweeps
+
+
+@pytest.mark.parametrize("door", ["confirm", "webhook"])
+@pytest.mark.parametrize("mode", ["worker_death", "lost_failure_flag"])
+def test_the_refund_sent_again_finishes_its_points_step_without_a_second_credit(
+        env, points, monkeypatch, mode, door):
+    """No sweep at all (a stopped scheduler): the same refund confirmed again,
+    or redelivered by Shopify, is still `duplicate` for its credit and its
+    stock -- and finishes the one step left."""
+    from api.services import shopify_refund as S
+
+    review, _first = _post_with_fault(env, monkeypatch, mode)
+    assert points() == (50, 100, 50)
+    _sweep_reads(env, monkeypatch, points)
+    for _ in range(2):
+        again = (S.post_from_review(env, review) if door == "confirm"
+                 else S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create"))
+        assert again["status"] == "duplicate", again
+        stored = _stored(env, points)
+        assert _less_rows(stored) == _SETTLED
+        assert [p for _t, p in stored["restore_rows"]] == [100]
+
+
+def test_an_admins_close_stops_the_unfinished_points_step_for_good(env, points, monkeypatch):
+    """Owner 2026-11-08: once an Admin closed the recovery exception nothing is
+    given back on its own -- not by the sweep, not by the refund sent again."""
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    review, _first = _post_with_fault(env, monkeypatch, "worker_death")
+    env.get_collection("returns").update_one(
+        {"shopify_refund_id": "700001"}, {"$set": {"loyalty_exception_closed": True}})
+    _sweep_reads(env, monkeypatch, points)
+    before = _stored(env, points)
+    assert before["points"] == (50, 100, 50)
+    assert [L.reconcile_loyalty_reversals() for _ in range(2)] == [
+        {"reconciled": 0, "unresolved": 0, "clean": 0}] * 2
+    assert S.post_from_review(env, review)["status"] == "duplicate"
+    assert S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")["status"] == "duplicate"
+    assert _stored(env, points) == before  # nothing moved, nothing rewritten
+
+
+def test_a_refund_posted_before_the_marker_existed_is_left_alone(env, points, monkeypatch):
+    """Owner exclusion: a return recorded before this change carries no marker
+    and is never swept or rewritten (its points are not judged again)."""
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    review, _first = _post_with_fault(env, monkeypatch, "worker_death")
+    env.get_collection("returns").update_one(  # as the old code left it
+        {"shopify_refund_id": "700001"}, {"$unset": {"loyalty_reversal_failed": ""}})
+    _sweep_reads(env, monkeypatch, points)
+    before = _stored(env, points)
+    assert before["returns"] == [("COMPLETED", True, None)]
+    assert [L.reconcile_loyalty_reversals() for _ in range(2)] == [
+        {"reconciled": 0, "unresolved": 0, "clean": 0}] * 2
+    assert S.post_from_review(env, review)["status"] == "duplicate"
+    assert _stored(env, points) == before
+
+
+def test_a_refund_with_no_points_part_carries_no_marker(env, points):
+    """Positive control: nothing owed, nothing flagged (the doc is unchanged)."""
+    _order(env)
+    _row, res = _queue_and_confirm(env, _payload(txns=[]))
+    assert res["status"] == "credited"
+    doc = env.get_collection("returns").find_one({"shopify_refund_id": "700001"})
+    assert "loyalty_reversal_failed" not in doc
+
+
+# ----------------------------------------------------------------------------
+# D28: a refund on a bill whose points an Admin closed still holds its points
+# share back from the store credit, but nothing promises that points go back.
+# ----------------------------------------------------------------------------
+
+
+def test_the_review_note_never_promises_points_on_a_bill_an_admin_closed(env, points, monkeypatch):
+    from api.routers.returns import POINTS_WAIVED_NOTE
+
+    _order(env, payments=PAYS, loyalty_exception_closed=True)
+    _sweep_reads(env, monkeypatch, points)
+    row, res = _queue_and_confirm(env, _payload(txns=[]))
+    assert row["credit_note"]["store_credit"] == 900.0  # the share is still held back
+    assert POINTS_WAIVED_NOTE in row["note"] and "goes back as points" not in row["note"]
+    assert res["status"] == "credited" and res["points_restored"] == 0
+    stored = _stored(env, points)
+    assert stored["points"] == (50, 100, 50) and stored["restore_rows"] == []
+    assert stored["credit_rows"] == [900.0]
+    assert stored["returns"] == [("COMPLETED", True, False)]  # settled by the waiver: no retry

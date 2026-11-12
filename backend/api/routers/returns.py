@@ -1209,6 +1209,12 @@ def _points_paid(order: Optional[Dict[str, Any]]) -> float:
     return _order_non_refundable_tenders(order, (_POINTS_TENDER,)).get(_POINTS_TENDER, 0.0)
 
 
+# D28: what every door says about the points-paid part of a return on a bill
+# whose points exception an admin closed (loyalty.points_waived). The share is
+# still held back from the money; nothing promises that points go back.
+POINTS_WAIVED_NOTE = "points for this bill are settled by head office and are not returned automatically"
+
+
 def points_restore_share(order: Optional[Dict[str, Any]], share: Optional[float]) -> Optional[float]:
     """What a return hands loyalty.reverse_for_return: its points-paid share on
     a bill whose points paid a LOYALTY tender, else None (the engine then gives
@@ -4051,6 +4057,8 @@ async def quote_return(
         _gate_exchange_settlement(settlement, replacement_priced, gross_refund)
 
     # The points-paid part goes back as points: the split covers the rest.
+    from .loyalty import points_waived as _points_waived
+
     points_share = _points_paid_share(order, resolved_order_id, net_amount, strict=False)
     return_value, net_amount = net_amount, round(net_amount - points_share, 2)
 
@@ -4114,6 +4122,9 @@ async def quote_return(
         "net_refund": net_amount,
         # The part paid with points, given back as points (never as money).
         "points_paid_share": points_share,
+        # D28: True = an admin closed this bill's points; the share is still
+        # held back from the money but no points go back automatically.
+        "points_waived": points_share > 0 and _points_waived(resolved_order_id),
         "return_value": return_value,
         "gst_breakup": engine.gst_breakup_lines(priced_lines),
         "settlement": settlement,
@@ -5179,6 +5190,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # it. A genuine failure flags the return doc for reconciliation. Walk-in /
     # no customer -> skip (walk-ins never earn loyalty).
     loyalty_reversal_failed = False
+    points_waived = False  # D28: an admin closed this bill's points; none go back
     _cust = customer_id
     if _cust and _cust != "walk-in" and not str(_cust).startswith("walkin-"):
         try:
@@ -5186,6 +5198,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
 
             _lr = _reverse_loyalty(return_id, resolved_order_id, _cust,
                                    points_paid_share=points_restore_share(order, points_share))
+            points_waived = bool(_lr.get("waived"))
             if _lr.get("ok"):
                 logger.info(
                     "[RETURNS] loyalty reversed for %s: clawed=%s restored=%s",
@@ -5428,11 +5441,12 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         if restocking_fee > 0
         else ""
     )
-    points_note = (
-        f"; Rs {points_share} paid with points goes back to the customer's points"
-        if points_share > 0
-        else ""
-    )
+    points_note = ""
+    if points_share > 0:
+        points_note = (
+            f"; Rs {points_share} was paid with points: {POINTS_WAIVED_NOTE}" if points_waived
+            else f"; Rs {points_share} paid with points goes back to the customer's points"
+        )
     message = {
         "RETURN": f"Refund of Rs {pays} recorded{fee_note}{points_note}",
         "CREDIT_NOTE": f"Store credit of Rs {pays} issued{fee_note}{points_note}",
@@ -5449,6 +5463,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
         "points_paid_share": points_share,
+        # D28: True = this bill's points are settled by head office; none went back.
+        "points_waived": points_waived,
         "gst_breakup": gst_view,
         "credit_note_number": credit_note_number,
         "refund_amount": refund_amount,

@@ -108,6 +108,28 @@ def _unfinished_claim(db, refund_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _finish_points_step(db, refund_id: str) -> None:
+    """A refund already credited is finished EXCEPT, perhaps, its points step:
+    the post stores that obligation with its claim, before anything posts
+    (loyalty_reversal_failed), and clears it once the points are back. The
+    refund sent again (a webhook redelivery, a second Confirm) runs that one
+    step through the loyalty sweep's own per-return rule -- never a second
+    credit note or restock. A return made before the flag existed carries
+    none and is left alone. Never raises."""
+    try:
+        coll = db.get_collection(_RETURNS_COLLECTION)
+        doc = coll.find_one({"shopify_refund_id": refund_id, "status": "COMPLETED",
+                             "loyalty_reversal_failed": True,
+                             "loyalty_exception_closed": {"$ne": True}})
+        if doc:
+            from ..routers.loyalty import settle_return_points
+
+            settle_return_points(coll, doc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[SHOPIFY_REFUND] refund=%s points step not finished (the sweep retries): %s",
+                     refund_id, exc)
+
+
 def _raise_s34_task(order: Dict[str, Any], return_id: Optional[str], refund_id: Any, why: str) -> None:
     """The CA's task for a Shopify refund past the credit-note window. Fail-soft."""
     try:
@@ -230,7 +252,8 @@ def _ensure_unique_refund_index(db, collection: str) -> None:
         logger.debug("[SHOPIFY_REFUND] index build skipped for %s", collection, exc_info=True)
 
 
-def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
+def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str,
+                                  also_set: Optional[Dict[str, Any]] = None):
     """The claim-first insert hit the unique index -- a `returns` doc ALREADY
     carries this refund id. Decide ATOMICALLY whether that is a genuine duplicate
     (a credit note was already issued -> the caller must NOT re-issue) or a STALE
@@ -253,7 +276,10 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
     Returns the existing doc when THIS caller won the right to re-process a
     never-credited row (the caller falls through to the credit-issue + finalize
     path, which update_one's this same doc); returns None for a TRUE duplicate -- a
-    credit note really exists, OR another worker is mid-reprocess. Never raises."""
+    credit note really exists, OR another worker is mid-reprocess. Never raises.
+
+    `also_set` rides on the winning claim's own write (the points-step marker a
+    re-drive owes, see _post_locked): durable before anything posts."""
     # SF03: a claim whose run stopped is re-claimable once STALE -- a PENDING
     # doc older than _CLAIM_STALE_SECONDS (the first run died between its claim
     # and its finalize) or a re-drive's reprocessing_at that old. A fresh one
@@ -275,7 +301,7 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
                 # A re-drive that took the claim and died.
                 {"reprocessing_at": {"$lt": stale}},
             ):
-                won = fou({**base, **extra}, {"$set": {"reprocessing_at": now}})
+                won = fou({**base, **extra}, {"$set": {"reprocessing_at": now, **(also_set or {})}})
                 if won is not None:
                     return won
             return None
@@ -1107,8 +1133,15 @@ def _store_credit_allowance(
     # Money Shopify sent back covers this refund first; only what is left of
     # the points part comes back as points.
     points = round(max(0.0, min(share, rest, held)), 2)
-    points_note = (f" Rs {points:.2f} of this refund was paid with loyalty points; it goes back "
-                   "as points, not store credit.") if points > 0 else ""
+    points_note = ""
+    if points > 0:
+        from ..routers.loyalty import points_waived
+        from ..routers.returns import POINTS_WAIVED_NOTE
+
+        # D28: on a bill whose points an admin closed, nothing promises points.
+        points_note = (f" Rs {points:.2f} of this refund was paid with loyalty points; " + (
+            f"{POINTS_WAIVED_NOTE}, and it is not given as store credit." if points_waived(order_id)
+            else "it goes back as points, not store credit."))
     rest, held = round(rest - points, 2), round(held - points, 2)
     if rest <= 0 or held <= 0:
         return 0.0, f"{said + '; ' if said else ''}No store credit is given.{points_note}", "PARTIAL", False, points
@@ -1226,6 +1259,7 @@ def handle_shopify_refund(
             # it without posting either leg twice.
             unfinished = _unfinished_claim(db, refund_id)
             if unfinished is None:
+                _finish_points_step(db, refund_id)
                 return {
                     "status": "duplicate",
                     "refund_id": refund_id,
@@ -1741,6 +1775,14 @@ def _post_locked(
     _mark_order(db, order_id)
     _ensure_unique_refund_index(db, _RETURNS_COLLECTION)
     now = datetime.now(timezone.utc).isoformat()
+    # The points step is OWED once this refund is credited. Its marker (the
+    # flag the loyalty sweep reads on a COMPLETED return) is written with the
+    # CLAIM -- before the credit, the finalize and the points step -- and is
+    # cleared only once the points are settled (c). A worker that dies before
+    # the points step, or a failure whose own note cannot be written, still
+    # leaves the sweep its row. Only a refund posted from now on carries it.
+    points_marker = ({"loyalty_reversal_failed": True}
+                     if _f(allowance[4]) > 0 and customer_id else {})
     claim_doc = {
         "return_id": return_id,
         "shopify_refund_id": refund_id,
@@ -1779,6 +1821,7 @@ def _post_locked(
         "reason_summary": "Shopify refund",
         "created_by": "SYSTEM_SHOPIFY_REFUND",
         "created_at": now,
+        **points_marker,
     }
     returns_coll = None
     claimed = False
@@ -1804,12 +1847,13 @@ def _post_locked(
                 # is mid-reprocess -- so a genuinely-posted refund is still a true
                 # duplicate but an unposted one gets re-driven (not silently
                 # swallowed while the GST reversal is lost).
-                existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now)
+                existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now, points_marker)
                 prior_doc = existing
                 if existing is None:
                     logger.info(
                         "[SHOPIFY_REFUND] refund=%s already credited -- duplicate", refund_id
                     )
+                    _finish_points_step(db, refund_id)
                     return {
                         "status": "duplicate",
                         "refund_id": refund_id,
@@ -2110,19 +2154,22 @@ def _post_locked(
     # (c) The points-paid part goes back AS POINTS, once the refund is booked
     #     (a CREDIT_FAILED post is re-driven under the same return id, so the
     #     restore -- keyed on it -- runs exactly once). Not restored now: the
-    #     doc stays flagged and the scheduled loyalty sweep finishes it.
+    #     doc stays flagged (points_marker, written with the claim) and the
+    #     scheduled loyalty sweep finishes it. The flag only goes DOWN here.
     points_restored = 0
     if credit_ok and _f(points_share) > 0 and customer_id:
         from ..routers.loyalty import restore_return_points
 
         restored = restore_return_points(return_id, order_id, customer_id, _f(points_share))
         points_restored = int(restored.get("redeemed_restored") or 0)
-        if returns_coll is not None:
+        if restored.get("ok") and returns_coll is not None:
             try:
                 returns_coll.update_one({"shopify_refund_id": refund_id}, {"$set": {
-                    "loyalty_reversal_failed": not restored.get("ok")}})
+                    "loyalty_reversal_failed": False}})
             except Exception as exc:  # noqa: BLE001
-                logger.error("[SHOPIFY_REFUND] refund=%s points flag not saved: %s", refund_id, exc)
+                # Still flagged: the sweep runs the restore again (it moves
+                # nothing twice) and clears it.
+                logger.error("[SHOPIFY_REFUND] refund=%s points flag not cleared: %s", refund_id, exc)
 
     logger.info(
         "[SHOPIFY_REFUND] AUTO-posted refund=%s order=%s credit=%s tax=%s "
