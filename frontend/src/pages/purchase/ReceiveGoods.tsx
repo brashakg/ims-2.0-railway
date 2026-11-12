@@ -96,14 +96,8 @@ export function ReceiveGoods() {
   const extraOrders = (orders ?? []).filter((p) => p.status === 'RECEIVED' && !isRejectOnlyOrder(p));
   const rejectedOrders = (orders ?? []).filter(isRejectOnlyOrder);
 
-  // An admin narrowing the shop: an order the screen no longer shows is
-  // dropped, never received against.
-  const shownScope = useRef(storeId);
-  useEffect(() => {
-    if (shownScope.current === storeId) return;
-    shownScope.current = storeId;
-    setForm((f) => (f?.po && storeId && f.po.delivery_store_id && f.po.delivery_store_id !== storeId ? null : f));
-  }, [storeId]);
+  // A shop change under an open form: the form closes itself (ReceiveForm's
+  // shop-change rule -- one rule for an order, a walk-in and a challan).
 
   const openOrder = (po: CandidatePO) => {
     setHighlight(null);

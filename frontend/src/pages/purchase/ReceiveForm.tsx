@@ -10,7 +10,7 @@
 // also drafts the bill and runs the 3-way match for accounts); anything else
 // is created and accepted in two calls -- the rules live in receiveLines.ts.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AlertCircle, Camera, CheckCircle2, Loader2, Package, Printer, ScanLine, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -118,6 +118,26 @@ export function ReceiveForm({ po, initialKind, storeId, ownStoreId, onClose, onS
   const [uploading, setUploading] = useState(false);
   const [notes, setNotes] = useState('');
   const [submitting, setSubmitting] = useState(false);
+
+  // THE shop-change rule for every receipt (an order, bought without PO, a
+  // challan). The server books a receipt at the shop signed in to (only a
+  // standard receipt follows its order's delivery shop), so a form opened for
+  // shop A and still open under shop B would be posted to B. When the shop
+  // signed in to changes -- or the Shop filter moves off the order's delivery
+  // shop -- a form not yet sent is closed and says so; nothing is saved. A
+  // receipt already sent keeps its screen: its answer is the old shop's. One
+  // whose send failed comes back unsent, and is closed then.
+  const openedFor = useRef({ storeId, ownStoreId });
+  const unsent = stage.kind === 'form' && !submitting;
+  useEffect(() => {
+    const was = openedFor.current;
+    const orderLeftTheFilter =
+      was.storeId !== storeId && !!po?.delivery_store_id && !!storeId && po.delivery_store_id !== storeId;
+    if (!unsent || (was.ownStoreId === ownStoreId && !orderLeftTheFilter)) return;
+    toast.warning('The shop changed, so this receipt was closed and nothing was saved. Start it again for the new shop.', 12000);
+    onClose();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId, ownStoreId, unsent]);
 
   // Lines: product search (no order), scan box, batch rows opened by hand.
   const [query, setQuery] = useState('');

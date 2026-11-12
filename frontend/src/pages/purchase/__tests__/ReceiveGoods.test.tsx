@@ -890,6 +890,159 @@ describe("SP-05: a shop change never leaves the old shop's deliveries on the scr
   });
 });
 
+// Decision D34 (Codex review of PR #1414, limit 1): the server books a receipt
+// with no order, a delivery challan and an order with no delivery shop at the
+// shop signed in to. Such a form, opened in shop A and still open after a
+// switch to shop B, would have been posted to B. ONE rule (ReceiveForm) now
+// closes any receiving form not yet sent when its shop changes, says so, and
+// sends nothing; a receipt already sent keeps its screen for its answer.
+describe('D34: a shop change closes any receiving form not yet sent', () => {
+  const PO_B = { ...PO, po_id: 'PO-B', po_number: 'PO-0900', vendor_name: 'Pune Frames', delivery_store_id: 'S2' };
+  const NO_SHOP_PO = { ...PO, po_id: 'PO-U', po_number: 'PO-0777', vendor_name: 'Titan Eye', delivery_store_id: undefined };
+  const tree = () => (
+    <MemoryRouter initialEntries={['/purchase/receive']}>
+      <ReceiveGoods />
+    </MemoryRouter>
+  );
+  /** The store switch is confirmed: the sign-in's shop is now `shop`. */
+  const switchTo = (view: ReturnType<typeof render>, shop: string) => {
+    auth.store = shop;
+    view.rerender(tree());
+  };
+  const toldShopChanged = () =>
+    toast.warning.mock.calls.filter(([m]) => /shop changed.*nothing was saved.*again for the new shop/i.test(String(m))).length;
+  /** Nothing that writes went out. */
+  const nothingSent = () => {
+    expect(api.createGRN).not.toHaveBeenCalled();
+    expect(api.acceptGRN).not.toHaveBeenCalled();
+    expect(cockpit.expressReceive).not.toHaveBeenCalled();
+  };
+  /** A receipt with no order, filled in and ready to send. */
+  async function fillWithoutOrder(door: RegExp) {
+    fireEvent.click(await screen.findByRole('button', { name: door }));
+    fireEvent.change(await screen.findByLabelText(/Supplier/), { target: { value: 'V-77' } });
+    fireEvent.change(screen.getByPlaceholderText(/Search a product to add/), { target: { value: 'frame' } });
+    fireEvent.click(await screen.findByText('Acme Aviator'));
+    fireEvent.change(screen.getByLabelText('Arrived on line 1'), { target: { value: '2' } });
+    fireEvent.click(screen.getByLabelText(/I counted line 1/));
+  }
+  const formIsClosed = async () => {
+    await waitFor(() => expect(screen.queryByLabelText('Scan a barcode')).toBeNull());
+    expect(screen.queryByRole('button', { name: /^Receive \d+ piece/ })).toBeNull();
+    // Back on the deliveries landing, for the new shop.
+    expect(screen.getByRole('button', { name: 'Bought without PO' })).toBeInTheDocument();
+  };
+
+  it('bought without PO, filled in for shop A: the switch to B closes it, says why, sends nothing', async () => {
+    const view = render(tree());
+    await fillWithoutOrder(/^Bought without PO$/);
+    await attachBill('');
+    expect(receiveBtn()).toBeEnabled();
+    const uploads = cockpit.uploadDoc.mock.calls.length;
+    switchTo(view, 'S2');
+    await formIsClosed();
+    expect(toldShopChanged()).toBe(1);
+    nothingSent();
+    expect(cockpit.uploadDoc).toHaveBeenCalledTimes(uploads);
+  });
+
+  it('a delivery challan, filled in for shop A: the switch to B closes it, says why, sends nothing', async () => {
+    const view = render(tree());
+    await fillWithoutOrder(/Delivery challan, invoice comes later/);
+    fireEvent.change(screen.getByLabelText('Challan no. *'), { target: { value: 'DC/26/10/4' } });
+    await attachBill('');
+    expect(receiveBtn()).toBeEnabled();
+    switchTo(view, 'S2');
+    await formIsClosed();
+    expect(toldShopChanged()).toBe(1);
+    nothingSent();
+  });
+
+  it('an order with no delivery shop, open in shop A: the switch to B closes it, says why, sends nothing', async () => {
+    api.getPurchaseOrders.mockResolvedValue({ purchase_orders: [NO_SHOP_PO] });
+    const view = render(tree());
+    const card = (await screen.findByText('PO-0777')).closest('.card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: /Receive this box/ }));
+    await screen.findByText(/What arrived/);
+    fireEvent.click(screen.getByRole('button', { name: /Everything arrived as ordered/ }));
+    await attachBill();
+    expect(receiveBtn()).toBeEnabled();
+    api.getPurchaseOrders.mockResolvedValue({ purchase_orders: [PO_B] });
+    switchTo(view, 'S2');
+    await formIsClosed();
+    expect(screen.queryByText(/What arrived/)).toBeNull();
+    expect(toldShopChanged()).toBe(1);
+    nothingSent();
+  });
+
+  it("an order that delivers to shop A (the rule held before): closed by the switch, and now it says why", async () => {
+    const view = render(tree());
+    const card = (await screen.findByText('PO-0412')).closest('.card') as HTMLElement;
+    fireEvent.click(within(card).getByRole('button', { name: /Receive this box/ }));
+    await screen.findByText(/What arrived/);
+    api.getPurchaseOrders.mockResolvedValue({ purchase_orders: [PO_B] });
+    switchTo(view, 'S2');
+    expect(await screen.findByText('PO-0900')).toBeInTheDocument();
+    expect(screen.queryByText(/What arrived/)).toBeNull();
+    expect(toldShopChanged()).toBe(1);
+    nothingSent();
+  });
+
+  it('an admin whose sign-in shop changes (Shop filter on All stores): the open form closes too', async () => {
+    auth.roles = ['ADMIN'];
+    const view = render(tree());
+    await fillWithoutOrder(/^Bought without PO$/);
+    switchTo(view, 'S2');
+    await formIsClosed();
+    expect(toldShopChanged()).toBe(1);
+    nothingSent();
+  });
+
+  it('a receipt already sent for shop A is left alone: its answer lands and is shown', async () => {
+    let answer: (v: unknown) => void = () => undefined;
+    api.createGRN.mockImplementation(() => new Promise((r) => { answer = r; }));
+    const view = render(tree());
+    await fillWithoutOrder(/^Bought without PO$/);
+    await attachBill('');
+    fireEvent.click(receiveBtn());
+    await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
+    switchTo(view, 'S2');
+    // Still on screen, nothing said about the shop, nothing sent twice.
+    expect(screen.getByLabelText('Scan a barcode')).toBeInTheDocument();
+    expect(toldShopChanged()).toBe(0);
+    await act(async () => { answer({ grn_id: 'G-NEW', grn_number: 'GRN-0400' }); });
+    expect(await screen.findByText(/Sent to accounts: a task to book this bill/)).toBeInTheDocument();
+    expect(api.createGRN).toHaveBeenCalledTimes(1);
+    expect(api.acceptGRN).toHaveBeenCalledTimes(1);
+    expect(api.acceptGRN).toHaveBeenCalledWith('G-NEW');
+    expect(toldShopChanged()).toBe(0);
+  });
+
+  it('a send for shop A that fails after the switch: the form does not come back to be sent to B', async () => {
+    let refuse: (e: unknown) => void = () => undefined;
+    api.createGRN.mockImplementation(() => new Promise((_r, no) => { refuse = no; }));
+    const view = render(tree());
+    await fillWithoutOrder(/^Bought without PO$/);
+    await attachBill('');
+    fireEvent.click(receiveBtn());
+    await waitFor(() => expect(api.createGRN).toHaveBeenCalledTimes(1));
+    switchTo(view, 'S2');
+    await act(async () => { refuse(serverSaid(503, 'The stock store is not answering.')); });
+    await formIsClosed();
+    expect(toldShopChanged()).toBe(1);
+    expect(api.createGRN).toHaveBeenCalledTimes(1);
+    expect(api.acceptGRN).not.toHaveBeenCalled();
+  });
+
+  it('the same shop confirmed again changes nothing: the form and what was typed stay', async () => {
+    const view = render(tree());
+    await fillWithoutOrder(/^Bought without PO$/);
+    switchTo(view, 'S1');
+    expect((screen.getByLabelText('Arrived on line 1') as HTMLInputElement).value).toBe('2');
+    expect(toldShopChanged()).toBe(0);
+  });
+});
+
 // Audit SP-04 (its "related minor state issue"): two letters typed and erased
 // before the search went out left the spinner turning on an empty box.
 describe('SP-04: the product search spinner stops when the box is cleared', () => {
