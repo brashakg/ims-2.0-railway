@@ -42,7 +42,7 @@ export function QuickAddPage() {
   const form = useQuickAddForm();
   const {
     canAddProduct, queueClear, setQueueClear, setSearchParams, navigate,
-    editMode, isReviewMode, reviewSnapshot, handleBackToQueue, editListPath,
+    editMode, isReviewMode, reviewSnapshot, handleBackToQueue, handleEditCancel,
     variantCtx, exitVariantMode, leaveFamily, familyHint, optedOutLeadId,
     dupInfo, setDupInfo, dupBusy, handleDupAddVariant, handleDupOpenExisting,
     dupMaybe, handleDupDifferent, attributes,
@@ -121,7 +121,7 @@ export function QuickAddPage() {
           )}
           <button
             type="button"
-            onClick={() => navigate(editListPath)}
+            onClick={handleEditCancel}
             className="btn-secondary !py-1.5 !px-3 text-xs"
           >
             Cancel

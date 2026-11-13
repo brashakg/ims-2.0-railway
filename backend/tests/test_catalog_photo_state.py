@@ -351,9 +351,28 @@ def test_catalog_counts_tally_the_population_with_the_row_rule():
         "own": 3,
         "no_photo": 1,
         "live": 1,
+        "published": 1,
         "pending": 3,
         "needs_review": 1,
     }
+
+
+def test_catalog_counts_published_leaves_out_a_shopify_draft():
+    """CAT-08: a product linked to Shopify but still a Shopify DRAFT is on
+    Shopify (it syncs stock) -- it is NOT a page a shopper can open. `live`
+    keeps the linked tally; `published` is only the PUBLISHED (ACTIVE) ones."""
+    db = StrictDB()
+    db.seed(
+        "catalog_products",
+        [
+            {"id": "P", "category": "SUNGLASS", "images": [HTTP],
+             "ecom": {"shopify_product_id": "gid://x/1", "status": "PUBLISHED"}},
+            {"id": "D", "category": "SUNGLASS", "images": [HTTP],
+             "ecom": {"shopify_product_id": "gid://x/2", "status": "DRAFT"}},
+        ],
+    )
+    out = catalog_counts(db)
+    assert (out["live"], out["published"]) == (2, 1)
 
 
 def test_online_summary_carries_the_catalog_block():

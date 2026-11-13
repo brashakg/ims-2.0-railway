@@ -226,14 +226,18 @@ function CountsRow({ counts }: { counts: CatalogCounts | null }) {
         <div className={sub}>cannot go online</div>
       </Link>
       <div className={card}>
-        <div className={eyebrow}>Live online</div>
+        {/* CAT-08: linked to Shopify is not the same as a shopper can see it
+            -- a Shopify draft is linked (it syncs stock) but not published. */}
+        <div className={eyebrow}>On Shopify</div>
         <div className={figure}>{fmtN(counts?.live)}</div>
-        <div className={sub}>on bettervision.in</div>
+        <div className={sub} data-testid="catalog-counts-published">
+          {fmtN(counts?.published)} published for shoppers · rest are drafts
+        </div>
       </div>
       <div className={card}>
         <div className={eyebrow}>Waiting to push</div>
         <div className={figure}>{fmtN(counts?.pending)}</div>
-        <div className={sub}>queued, needs a human</div>
+        <div className={sub}>queued for the next sync</div>
       </div>
     </div>
   );
@@ -1168,7 +1172,7 @@ export function CatalogManagerPage({
                           <button
                             type="button"
                             onClick={() => toggleExpanded(family.lead_id)}
-                            className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-500 hover:bg-gray-100"
+                            className="-my-2 -ml-2 flex h-9 w-9 shrink-0 items-center justify-center rounded text-gray-500 hover:bg-gray-100"
                             aria-expanded={isOpen}
                             aria-label={`${isOpen ? 'Hide' : 'Show'} the ${family.count} colours and sizes of ${name}`}
                             data-testid="family-toggle"

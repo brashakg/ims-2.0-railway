@@ -457,9 +457,11 @@ export interface CatalogCounts {
   own: number;
   /** No usable photo — cannot go online. */
   no_photo: number;
-  /** On bettervision.in. */
+  /** Linked to a Shopify listing -- INCLUDES Shopify drafts (CAT-08). */
   live: number;
-  /** Queued for the manual push — needs a human. */
+  /** Of `live`: published (Shopify ACTIVE), a page a shopper can open. */
+  published?: number;
+  /** Queued for the next sync (the scheduled run first-publishes too). */
   pending: number;
   /** Imports awaiting review (the review queue's total). */
   needs_review: number;
