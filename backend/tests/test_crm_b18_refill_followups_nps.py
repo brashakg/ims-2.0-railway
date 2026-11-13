@@ -104,7 +104,8 @@ def test_newer_order_without_goods_does_not_reset_supply(monkeypatch, newer_stat
     assert row is not None and row["last_cl_order_id"] == "OLD" and row["overdue"] is True
 
 
-@pytest.mark.parametrize("done", ["DELIVERED", "SHIPPED", "COMPLETED", "completed", "FULFILLED"])
+@pytest.mark.parametrize("done", ["DELIVERED", "SHIPPED", "COMPLETED", "completed", "FULFILLED",
+                                  "HISTORICAL"])
 def test_newer_received_order_does_reset_supply(monkeypatch, done):
     _wire_refill(monkeypatch, [_cl("OLD", "C1", 40, "DELIVERED"), _cl("NEW", "C1", 1, done)])
     one, row = _both_doors("C1")

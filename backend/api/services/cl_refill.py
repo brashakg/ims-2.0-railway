@@ -56,8 +56,10 @@ BIWEEKLY_MODALITIES = {"BIWEEKLY", "2-WEEK", "FORTNIGHTLY"}
 # L1-F18: only goods the customer RECEIVED are supply. A draft, a quote, a
 # cancelled / refunded / void order, or one still being made (CONFIRMED /
 # PROCESSING / READY) supplied nothing, so it must not restart the refill
-# clock. The done-sale set the reports use (any case, FULFILLED included).
-SUPPLIED_STATUSES = SALE_DONE_ANY_CASE
+# clock. The done-sale set the reports use (any case, FULFILLED included),
+# plus HISTORICAL: a pre-IMS order imported for customer history was settled
+# outside IMS books, but the customer DID receive those lenses.
+SUPPLIED_STATUSES = SALE_DONE_ANY_CASE + ("HISTORICAL", "historical", "Historical")
 
 # Refill priority bands -> task priority. Overdue is the loudest follow-up.
 DEFAULT_DUE_WITHIN_DAYS = 14
@@ -206,8 +208,8 @@ def scan_due_refills(
     """Worklist of customers whose CL refill is DUE (<= horizon) or overdue.
 
     Scans recent RECEIVED orders (optionally store-scoped; latest_supplies),
-    keeps the most-recent supplied CL line PER customer (orders are scanned newest-first; the first CL hit per
-    customer wins), computes the refill, and keeps rows where
+    keeps the most-recent supplied CL line PER customer (newest first; the
+    first supplied CL order per customer wins), computes the refill, keeps rows where
     days_remaining <= due_within_days. Sorted most-overdue first.
 
     db None -> []. An orders read that FAILS raises (the router turns it into
