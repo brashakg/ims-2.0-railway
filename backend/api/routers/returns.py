@@ -2560,6 +2560,71 @@ def _with_removed_lines(order: Optional[Dict[str, Any]]) -> Optional[Dict[str, A
     return {**order, "items": [*(order.get("items") or []), *(order.get("removed_lines") or [])]}
 
 
+class _SlotTaken(Exception):
+    """The return slot a write carried is already held (decision D45a): a
+    concurrent attempt of this return moved this piece. `holder` is its unit."""
+
+    def __init__(self, holder: Dict[str, Any]):
+        super().__init__(str(holder.get("stock_id") or holder.get("_id")))
+        self.holder = holder
+
+
+def _credit_landed(row: Dict[str, Any], result: Dict[str, Any], landed_stores: List[str],
+                   holder: Dict[str, Any], return_id: str) -> None:
+    """A piece whose slot another attempt already filled (_SlotTaken): it is
+    back, on the holder's record -- counted, never moved again, its audit row
+    the other attempt's."""
+    store = holder.get("store_id")
+    for stores in (landed_stores, row["store_ids"]):
+        if store and store not in stores:
+            stores.append(store)
+    minted = holder.get("source_type") == "RETURN" and holder.get("source_id") == return_id
+    row["minted" if minted else "reactivated"] += 1
+    row["quantity"] += 1
+    result["restock_stock_ids"].append(str(holder.get("stock_id") or holder.get("_id")))
+
+
+def _slot_holder(stock_repo: Any, slot: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The unit holding return slot `slot`, or None."""
+    coll = getattr(stock_repo, "collection", None)
+    if not slot or coll is None:
+        return None
+    return coll.find_one({"return_slot": slot})
+
+
+def _return_slot_keys(stock_repo: Any, return_id: str, kind: str,
+                      units: List[Dict[str, Any]], moved_ids: Optional[set]) -> List[str]:
+    """One key per unit still to move: "<return>|<kind>|<product>|<n>", the
+    lowest n the return's units do not hold yet (decision D45a). Every put-back
+    or set-aside carries its key in `return_slot`, unique in the database
+    (uniq_stock_unit_return_slot), so one piece can never become two stock
+    records: two live retries of a return read the same pieces still out and
+    pick the same keys, and the second write of a key fails instead of
+    flipping a second unit or minting a second record.
+
+    Pieces of one product in one return are interchangeable and credited per
+    product (_units_still_out), so n counts per product, not per line. The
+    keys held are read from `moved_ids` -- the units the retry already
+    counted as moved, the same snapshot its pieces-still-out came from (a
+    unit that landed after it is not in it, and its key is the one this
+    retry picks too) -- or, with no snapshot (the press, the Shopify doors),
+    from every unit this return moved. RAISES when they cannot be read."""
+    if moved_ids is None:
+        rows = [*_find_stock(stock_repo, {"returned_by_return_id": return_id}),
+                *_find_stock(stock_repo, {"source_type": "RETURN", "source_id": return_id})]
+    else:
+        rows = _find_stock(stock_repo, {"stock_id": {"$in": sorted(map(str, moved_ids))}}) if moved_ids else []
+    held = {u.get("return_slot") for u in rows}
+    keys: List[str] = []
+    for u in units:
+        n = 0
+        while (key := f"{return_id}|{kind}|{u.get('product_id')}|{n}") in held:
+            n += 1
+        held.add(key)
+        keys.append(key)
+    return keys
+
+
 def _reactivate_original_unit(
     stock_repo: Any,
     product_id: str,
@@ -2570,6 +2635,7 @@ def _reactivate_original_unit(
     named_ids: Optional[set] = None,
     set_aside: Optional[Dict[str, Any]] = None,
     return_id: Optional[str] = None,
+    slot: Optional[str] = None,
 ) -> Optional[str]:
     """Find the original serialized unit sold for this product and flip it back
     to AVAILABLE. Returns its stock_id, or None when no candidate is found.
@@ -2609,6 +2675,10 @@ def _reactivate_original_unit(
     asks for that piece again (_units_still_out). A line whose own unit an
     EARLIER return took back (a quantity-2 line naming one scanned unit)
     takes the bill's next SOLD unit, as before.
+
+    `slot` (_return_slot_keys, decision D45a) is written with the flip; a
+    flip refused because another unit already holds it raises _SlotTaken:
+    a concurrent attempt of this return moved this piece, never a second unit.
     """
     if stock_repo is None or not product_id:
         return None
@@ -2664,11 +2734,15 @@ def _reactivate_original_unit(
                     # the unit resold) never makes THIS put-back read as a
                     # set-aside (_units_moved_by_return); a set-aside writes its own.
                     "quarantine_reason": None,
+                    **({"return_slot": slot} if slot else {}),
                     **(set_aside or {}),
                 },
                 id_field="stock_id" if unit.get("stock_id") else "_id",
             )
         except Exception as exc:  # noqa: BLE001
+            holder = _slot_holder(stock_repo, slot) if type(exc).__name__ == "DuplicateKeyError" else None
+            if holder:
+                raise _SlotTaken(holder) from exc
             logger.warning("[RETURNS] stock reactivate failed: %s", exc)
             failed = True
             continue
@@ -3726,12 +3800,15 @@ def _restock_good_items(
             if hit["store_id"]:
                 per_product_default[pid] = hit["store_id"]
 
-    # We have a stock repo - actually re-add each unit.
+    # We have a stock repo - actually re-add each unit, each under its own
+    # return slot (decision D45a).
+    slots = iter(_return_slot_keys(stock_repo, return_id, "back", units, moved_ids))
     used_ids: set = set()
     per_line_applied: Dict[str, Dict[str, Any]] = {}
     landed_stores: List[str] = []
     all_ok = True
     for u in units:
+        slot = next(slots)
         pid = u.get("product_id")
         row = per_line_applied.setdefault(
             pid,
@@ -3770,7 +3847,11 @@ def _restock_good_items(
                 own_stock_id=line_units.get(str(u.get("order_item_id") or "")),
                 named_ids=named_ids,
                 return_id=return_id,
+                slot=slot,
             )
+        except _SlotTaken as taken:
+            _credit_landed(row, result, landed_stores, taken.holder, return_id)
+            continue
         except Exception as exc:  # noqa: BLE001
             # A stock read or write that failed is no answer: never a mint
             # beside a unit that may still be SOLD (a phantom). Not applied,
@@ -3827,11 +3908,24 @@ def _restock_good_items(
                     # because the order billed to a stockless online store.
                     "restocked_from_store_id": routing["redirected_from"],
                     "restock_route_reason": routing["reason"],
+                    # One record per piece (D45a): a second mint of the slot is refused.
+                    "return_slot": slot,
                 }
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] stock mint failed: %s", exc)
             created = None
+        if not created:
+            # Refused (the repository answers None): the slot's holder is
+            # the piece, moved by a concurrent attempt -- or by this mint,
+            # its reply lost.
+            try:
+                holder = _slot_holder(stock_repo, slot)
+            except Exception:  # noqa: BLE001
+                holder = None
+            if holder:
+                _credit_landed(row, result, landed_stores, holder, return_id)
+                continue
         if created:
             new_id = created.get("stock_id") or created.get("_id")
             row["minted"] += 1
@@ -3917,10 +4011,15 @@ def _quarantine_damaged_units(
         [{"product_id": line.product_id, "order_item_id": line.order_item_id, "line": line}
          for line in lines for _ in range(int(round(line.return_qty)))],
         already_aside, moved_ids, line_units)
+    try:
+        keys = _return_slot_keys(stock_repo, return_id, "aside", slots, moved_ids)
+    except Exception as exc:  # noqa: BLE001 -- unread is never "nothing held"
+        logger.warning("[RETURNS] damaged units not set aside, return slots unread: %s", exc)
+        return [], False
     used: set = set()
     out: List[Dict[str, Any]] = []
     ok = True
-    for slot in slots:
+    for slot, key in zip(slots, keys):
         line = slot["line"]
         try:
             sid = _reactivate_original_unit(
@@ -3928,6 +4027,7 @@ def _quarantine_damaged_units(
                 own_stock_id=line_units.get(str(line.order_item_id or "")),
                 named_ids=named_ids,
                 return_id=return_id,
+                slot=key,
                 set_aside={
                     "status": "QUARANTINED",
                     "quarantine_reason": f"CUSTOMER_RETURN_{line.condition}",
@@ -3938,6 +4038,11 @@ def _quarantine_damaged_units(
                     "quarantine_label_printed": False,
                 },
             )
+        except _SlotTaken as taken:  # a concurrent attempt set this piece aside (D45a)
+            h = taken.holder
+            out.append({"stock_id": str(h.get("stock_id") or h.get("_id")), "store_id": h.get("store_id"),
+                        "product_id": line.product_id, "reason": f"CUSTOMER_RETURN_{line.condition}"})
+            continue
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] damaged unit not set aside: %s", exc)
             ok = False
@@ -6564,8 +6669,13 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
             "Nothing was paid on this return and its goods were never taken back: it has no stock step."))
 
     # Atomic claim: succeed only if NOT already applied AND NOT in progress.
+    # Its token (D45a): every later write of this attempt to the record --
+    # its release, its result -- lands only while the claim is still its own,
+    # so a retry that stalled past a takeover never overwrites its taker.
     now_iso = utc_now_iso()
-    take = {"$set": {"restock_in_progress": True, "restock_started_at": now_iso}}
+    token = uuid.uuid4().hex
+    mine = {"return_id": return_id, "restock_claim": token}
+    take = {"$set": {"restock_in_progress": True, "restock_started_at": now_iso, "restock_claim": token}}
     try:
         claim = coll.find_one_and_update(
             {
@@ -6579,11 +6689,11 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
         if claim is None:
             # A retry killed between its claim and its release (OOM, a hard
             # restart) left the flag up for good, and this door is the only
-            # remedy (D7): a claim older than a retry runs is taken over. Safe
-            # because every stock write is per unit and credited once
-            # (_units_moved_by_return). ponytail: a retry still alive past
-            # _STALE_CLAIM_SECONDS runs beside its taker; per-claim tokens on
-            # the releases if retries ever run that long.
+            # remedy (D7): a claim older than a retry runs is taken over. A
+            # retry still alive past it (a hung socket) runs beside its taker:
+            # each piece's write carries its return slot, so the second write
+            # of a piece is refused (_return_slot_keys), and the stale one's
+            # record writes miss on the token.
             from datetime import timedelta
 
             stale = (datetime.now(timezone.utc) - timedelta(seconds=_STALE_CLAIM_SECONDS)).isoformat()
@@ -6621,12 +6731,12 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
             "message": "Restock in progress - retry shortly",
         }
     try:
-        return _retry_claimed(coll, return_id, claim, current_user, processing_store_id)
+        return _retry_claimed(coll, mine, claim, current_user, processing_store_id)
     except Exception:
         # The claim goes back whatever failed (a line that cannot be read, an
         # unreadable stock answer): the panel keeps its Retry stock step.
         try:
-            coll.update_one({"return_id": return_id}, {"$set": {"restock_in_progress": False}})
+            coll.update_one(mine, {"$set": {"restock_in_progress": False}})
         except Exception:  # noqa: BLE001
             logger.error("[RETURNS] restock claim of %s NOT released", return_id)
         raise
@@ -6659,9 +6769,11 @@ def _retry_lines(doc: Dict[str, Any], order: Optional[Dict[str, Any]]) -> List[R
     return out
 
 
-def _retry_claimed(coll: Any, return_id: str, claim: Dict[str, Any], current_user: dict,
+def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], current_user: dict,
                    processing_store_id: Optional[str]) -> Dict[str, Any]:
-    """_retry_restock once it holds the claim."""
+    """_retry_restock once it holds the claim. `mine`: the record while the
+    claim is still this attempt's -- the filter of every write to it."""
+    return_id = mine["return_id"]
     # We hold the claim. Already-restocked units are tracked in restock_stock_ids
     # on the doc; we re-run plan_restock fresh, then mark sold+commit.
     existing_ids = list(claim.get("restock_stock_ids") or [])
@@ -6721,7 +6833,7 @@ def _retry_claimed(coll: Any, return_id: str, claim: Dict[str, Any], current_use
             "restock_store_reason": _RESTOCK_ROUTE_UNRESOLVED,
         }
         try:
-            coll.update_one({"return_id": return_id}, {"$set": blocked_update})
+            coll.update_one(mine, {"$set": blocked_update})
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] blocked-retry persist failed: %s", exc)
         return {
@@ -6751,7 +6863,7 @@ def _retry_claimed(coll: Any, return_id: str, claim: Dict[str, Any], current_use
         lines, _, unknown = _cap_restock_to_returnable(lines, retry_order, str(refund_id))
         if unknown:
             try:
-                coll.update_one({"return_id": return_id}, {"$set": {"restock_in_progress": False}})
+                coll.update_one(mine, {"$set": {"restock_in_progress": False}})
             except Exception:  # noqa: BLE001
                 pass
             return {
@@ -6811,10 +6923,7 @@ def _retry_claimed(coll: Any, return_id: str, claim: Dict[str, Any], current_use
         # retry isn't deadlocked.
         logger.warning("[RETURNS] restock retry stock writes failed: %s", exc)
         try:
-            coll.update_one(
-                {"return_id": return_id},
-                {"$set": {"restock_in_progress": False}},
-            )
+            coll.update_one(mine, {"$set": {"restock_in_progress": False}})
         except Exception:  # noqa: BLE001
             pass
         raise HTTPException(status_code=500, detail="Restock retry failed")
@@ -6850,12 +6959,12 @@ def _retry_claimed(coll: Any, return_id: str, claim: Dict[str, Any], current_use
         update["quarantined_stock_ids"] = [*(claim.get("quarantined_stock_ids") or []),
                                            *(row["stock_id"] for row in set_aside)]
     try:
-        coll.update_one({"return_id": return_id}, {"$set": update})
+        coll.update_one(mine, {"$set": update})
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock retry persist failed: %s", exc)
         # The stock rows are the truth (_units_moved_by_return): a later
         # press finds what moved. The claim is given back either way.
-        coll.update_one({"return_id": return_id}, {"$set": {"restock_in_progress": False}})
+        coll.update_one(mine, {"$set": {"restock_in_progress": False}})
 
     # A successful retry raised the shelf count exactly like the create path
     # did, so Shopify has to hear about it too. Without this the online path --
