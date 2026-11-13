@@ -35,6 +35,7 @@ No ASCII-tag prints in this module - everything goes through `logger`.
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 import logging
+import math
 import os
 
 import httpx
@@ -110,6 +111,15 @@ def _build_slack_payload(severity: str, title: str, body: str,
     }
 
 
+def _slack_timeout_seconds() -> float:
+    """SLACK_TIMEOUT in seconds; malformed, non-finite or <= 0 falls back to 10."""
+    try:
+        value = float(os.getenv("SLACK_TIMEOUT", "10.0"))
+    except (TypeError, ValueError):
+        return 10.0
+    return value if math.isfinite(value) and value > 0 else 10.0
+
+
 async def notify_slack(severity: str, title: str, body: str,
                        metadata: Optional[Dict[str, Any]] = None) -> bool:
     """
@@ -126,10 +136,9 @@ async def notify_slack(severity: str, title: str, body: str,
         logger.debug(f"[OBSERVABILITY] slack: {severity} below threshold; skipping")
         return False
 
-    payload = _build_slack_payload(severity, title, body, metadata)
-    timeout = httpx.Timeout(float(os.getenv("SLACK_TIMEOUT", "10.0")))
-
     try:
+        payload = _build_slack_payload(severity, title, body, metadata)
+        timeout = httpx.Timeout(_slack_timeout_seconds())
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.post(webhook, json=payload)
             if 200 <= resp.status_code < 300:
