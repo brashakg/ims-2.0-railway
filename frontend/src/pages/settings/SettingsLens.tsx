@@ -6,7 +6,19 @@ import { useState, useEffect } from 'react';
 import { Plus, Edit2, Trash2 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { adminLensApi } from '../../services/api';
+import { getErrorMessage } from '../../utils/errorHandler';
 import type { LensBrand, LensIndex, LensCoating, LensAddon } from './settingsTypes';
+
+// L1-F08: a price must be a plain non-negative rupee amount (up to 2 decimals).
+// Anything else (blank, "banana", "12abc", "-5", "1e3") is refused - never
+// turned into 0, which made the item free. A deliberate "0" is kept.
+export function parseLensPrice(raw: string | null): number | null {
+  const t = (raw ?? '').trim();
+  return /^\d+(\.\d{1,2})?$/.test(t) ? Number(t) : null;
+}
+
+// Icon buttons (were bare SVGs with no role or name).
+const ICON_BTN = 'p-1 rounded text-gray-500 hover:bg-gray-200';
 
 // ============================================================================
 // Lens Master Section
@@ -82,8 +94,11 @@ export function LensMasterSection() {
                 <div key={brand.id} className="p-3 bg-gray-50 border border-gray-200 rounded-lg flex items-center justify-between">
                   <span className="text-sm">{brand.name}</span>
                   <div className="flex items-center gap-1">
-                    <Edit2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600"
+                    <button
+                      type="button"
+                      aria-label={`Rename lens brand ${brand.name}`}
+                      title={`Rename lens brand ${brand.name}`}
+                      className={ICON_BTN}
                       onClick={async () => {
                         const name = prompt('Rename lens brand:', brand.name);
                         if (name && name.trim() && name.trim() !== brand.name) {
@@ -96,21 +111,28 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    />
-                    <Trash2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
+                    >
+                      <Edit2 className="w-3 h-3" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Delete lens brand ${brand.name}`}
+                      title={`Delete lens brand ${brand.name}`}
+                      className={ICON_BTN}
                       onClick={async () => {
                         if (window.confirm(`Delete lens brand "${brand.name}"?`)) {
                           try {
                             await adminLensApi.deleteLensBrand(brand.id);
                             toast.success('Lens brand deleted');
                             loadLensData();
-                          } catch {
-                            toast.error('Failed to delete lens brand');
+                          } catch (e) {
+                            toast.error(getErrorMessage(e, 'Failed to delete lens brand'));
                           }
                         }
                       }}
-                    />
+                    >
+                      <Trash2 className="w-3 h-3" aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
               ))
@@ -124,9 +146,10 @@ export function LensMasterSection() {
             <h3 className="text-sm font-medium text-gray-600">Lens Indices</h3>
             <button
               onClick={async () => {
-                const value = prompt('Enter index value (e.g., 1.56):');
-                const name = prompt('Enter index name (e.g., Standard):');
-                if (value && name) {
+                const value = prompt('Enter index value (e.g., 1.56):')?.trim();
+                if (!value) return;
+                const name = prompt('Enter index name (e.g., Standard):')?.trim();
+                if (name) {
                   try {
                     await adminLensApi.createLensIndex({ value, multiplier: 1.0, description: name });
                     toast.success('Lens index added');
@@ -154,20 +177,25 @@ export function LensMasterSection() {
                     <span className="text-sm font-medium">{idx.value}</span>
                     <span className="text-xs text-gray-500 ml-2">{idx.name}</span>
                   </div>
-                  <Trash2
-                    className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
+                  <button
+                    type="button"
+                    aria-label={`Delete lens index ${idx.value}`}
+                    title={`Delete lens index ${idx.value}`}
+                    className={ICON_BTN}
                     onClick={async () => {
                       if (window.confirm(`Delete lens index "${idx.value}"?`)) {
                         try {
                           await adminLensApi.deleteLensIndex(idx.id);
                           toast.success('Lens index deleted');
                           loadLensData();
-                        } catch {
-                          toast.error('Failed to delete lens index');
+                        } catch (e) {
+                          toast.error(getErrorMessage(e, 'Failed to delete lens index'));
                         }
                       }
                     }}
-                  />
+                  >
+                    <Trash2 className="w-3 h-3" aria-hidden="true" />
+                  </button>
                 </div>
               ))
             )}
@@ -180,20 +208,25 @@ export function LensMasterSection() {
             <h3 className="text-sm font-medium text-gray-600">Coatings</h3>
             <button
               onClick={async () => {
-                const name = prompt('Enter coating name:');
-                const priceStr = prompt('Enter coating price:');
-                if (name && priceStr) {
-                  try {
-                    await adminLensApi.createLensCoating({
-                      name,
-                      code: name.toUpperCase().replace(/\s+/g, '_'),
-                      price: parseFloat(priceStr) || 0,
-                    });
-                    toast.success('Coating added');
-                    loadLensData();
-                  } catch {
-                    toast.error('Failed to add coating');
-                  }
+                const name = prompt('Enter coating name:')?.trim();
+                if (!name) return;
+                const priceStr = prompt('Enter coating price (Rs., e.g. 500 or 0):');
+                if (priceStr === null) return;
+                const price = parseLensPrice(priceStr);
+                if (price === null) {
+                  toast.error('Coating not added: enter the price as a number like 500 or 0');
+                  return;
+                }
+                try {
+                  await adminLensApi.createLensCoating({
+                    name,
+                    code: name.toUpperCase().replace(/\s+/g, '_'),
+                    price,
+                  });
+                  toast.success('Coating added');
+                  loadLensData();
+                } catch {
+                  toast.error('Failed to add coating');
                 }
               }}
               className="text-sm text-bv-red-600 hover:underline flex items-center gap-1"
@@ -215,8 +248,11 @@ export function LensMasterSection() {
                     <span className="text-xs text-gray-500 ml-2">Rs.{Number(coating.price).toFixed(2)}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Edit2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600"
+                    <button
+                      type="button"
+                      aria-label={`Rename coating ${coating.name}`}
+                      title={`Rename coating ${coating.name}`}
+                      className={ICON_BTN}
                       onClick={async () => {
                         const name = prompt('Rename coating:', coating.name);
                         if (name && name.trim() && name.trim() !== coating.name) {
@@ -229,9 +265,14 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    />
-                    <Trash2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
+                    >
+                      <Edit2 className="w-3 h-3" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Delete coating ${coating.name}`}
+                      title={`Delete coating ${coating.name}`}
+                      className={ICON_BTN}
                       onClick={async () => {
                         if (window.confirm(`Delete coating "${coating.name}"?`)) {
                           try {
@@ -243,7 +284,9 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    />
+                    >
+                      <Trash2 className="w-3 h-3" aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
               ))
@@ -257,21 +300,26 @@ export function LensMasterSection() {
             <h3 className="text-sm font-medium text-gray-600">Add-ons</h3>
             <button
               onClick={async () => {
-                const name = prompt('Enter add-on name:');
-                const priceStr = prompt('Enter add-on price:');
-                if (name && priceStr) {
-                  try {
-                    await adminLensApi.createLensAddon({
-                      name,
-                      code: name.toUpperCase().replace(/\s+/g, '_'),
-                      price: parseFloat(priceStr) || 0,
-                      type: 'ADDON',
-                    });
-                    toast.success('Add-on added');
-                    loadLensData();
-                  } catch {
-                    toast.error('Failed to add add-on');
-                  }
+                const name = prompt('Enter add-on name:')?.trim();
+                if (!name) return;
+                const priceStr = prompt('Enter add-on price (Rs., e.g. 300 or 0):');
+                if (priceStr === null) return;
+                const price = parseLensPrice(priceStr);
+                if (price === null) {
+                  toast.error('Add-on not added: enter the price as a number like 300 or 0');
+                  return;
+                }
+                try {
+                  await adminLensApi.createLensAddon({
+                    name,
+                    code: name.toUpperCase().replace(/\s+/g, '_'),
+                    price,
+                    type: 'ADDON',
+                  });
+                  toast.success('Add-on added');
+                  loadLensData();
+                } catch {
+                  toast.error('Failed to add add-on');
                 }
               }}
               className="text-sm text-bv-red-600 hover:underline flex items-center gap-1"
@@ -293,8 +341,11 @@ export function LensMasterSection() {
                     <span className="text-xs text-gray-500 ml-2">Rs.{Number(addon.price).toFixed(2)}</span>
                   </div>
                   <div className="flex items-center gap-1">
-                    <Edit2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-bv-red-600"
+                    <button
+                      type="button"
+                      aria-label={`Rename add-on ${addon.name}`}
+                      title={`Rename add-on ${addon.name}`}
+                      className={ICON_BTN}
                       onClick={async () => {
                         const name = prompt('Rename add-on:', addon.name);
                         if (name && name.trim() && name.trim() !== addon.name) {
@@ -307,9 +358,14 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    />
-                    <Trash2
-                      className="w-3 h-3 text-gray-500 cursor-pointer hover:text-red-600"
+                    >
+                      <Edit2 className="w-3 h-3" aria-hidden="true" />
+                    </button>
+                    <button
+                      type="button"
+                      aria-label={`Delete add-on ${addon.name}`}
+                      title={`Delete add-on ${addon.name}`}
+                      className={ICON_BTN}
                       onClick={async () => {
                         if (window.confirm(`Delete add-on "${addon.name}"?`)) {
                           try {
@@ -321,7 +377,9 @@ export function LensMasterSection() {
                           }
                         }
                       }}
-                    />
+                    >
+                      <Trash2 className="w-3 h-3" aria-hidden="true" />
+                    </button>
                   </div>
                 </div>
               ))

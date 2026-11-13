@@ -963,11 +963,26 @@ export const adminBrandApi = {
 // Admin API - Lens Master
 // ============================================================================
 
+// L1-F07: the server keys each Lens Master row by brand_id / index_id /
+// coating_id / addon_id and stores an index's label in `description`. Every
+// screen read `.id` / `.name`, so rename/delete hit `/undefined`. Give each
+// row the generic `id` (and an index its `name`) here, once, for all readers.
+type LensRow = Record<string, unknown>;
+const withLensIds = (data: unknown, listKey: string, idKey: string) => {
+  const rows = (Array.isArray(data) ? data : (data as Record<string, unknown>)?.[listKey]) as LensRow[] | undefined;
+  const norm = (rows || []).map((r) => ({
+    ...r,
+    id: r.id ?? r[idKey],
+    ...(listKey === 'indices' ? { name: r.name ?? r.description ?? '' } : {}),
+  }));
+  return { ...(Array.isArray(data) ? {} : (data as object)), [listKey]: norm };
+};
+
 export const adminLensApi = {
   // Lens Brands
   getLensBrands: async () => {
     const response = await api.get('/admin/lens/brands');
-    return response.data;
+    return withLensIds(response.data, 'brands', 'brand_id');
   },
 
   createLensBrand: async (data: { name: string; code: string; tier?: string }) => {
@@ -988,7 +1003,7 @@ export const adminLensApi = {
   // Lens Indices
   getLensIndices: async () => {
     const response = await api.get('/admin/lens/indices');
-    return response.data;
+    return withLensIds(response.data, 'indices', 'index_id');
   },
 
   createLensIndex: async (data: { value: string; multiplier: number; description?: string }) => {
@@ -1009,7 +1024,7 @@ export const adminLensApi = {
   // Lens Coatings
   getLensCoatings: async () => {
     const response = await api.get('/admin/lens/coatings');
-    return response.data;
+    return withLensIds(response.data, 'coatings', 'coating_id');
   },
 
   createLensCoating: async (data: { name: string; code: string; price: number; description?: string }) => {
@@ -1030,7 +1045,7 @@ export const adminLensApi = {
   // Lens Add-ons
   getLensAddons: async () => {
     const response = await api.get('/admin/lens/addons');
-    return response.data;
+    return withLensIds(response.data, 'addons', 'addon_id');
   },
 
   createLensAddon: async (data: { name: string; code: string; price: number; type: string; description?: string }) => {

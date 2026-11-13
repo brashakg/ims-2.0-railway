@@ -712,7 +712,7 @@ class LensIndexCreate(BaseModel):
 
 class LensIndexUpdate(BaseModel):
     value: Optional[str] = None
-    multiplier: Optional[float] = None
+    multiplier: Optional[float] = Field(None, gt=0, le=10)
     description: Optional[str] = None
 
 
@@ -726,7 +726,8 @@ class LensCoatingCreate(BaseModel):
 class LensCoatingUpdate(BaseModel):
     name: Optional[str] = None
     code: Optional[str] = None
-    price: Optional[float] = None
+    # L1-F08: same floor as create (an edit could save a negative / NaN price).
+    price: Optional[float] = Field(None, ge=0)
     description: Optional[str] = None
 
 
@@ -741,7 +742,7 @@ class LensAddonCreate(BaseModel):
 class LensAddonUpdate(BaseModel):
     name: Optional[str] = None
     code: Optional[str] = None
-    price: Optional[float] = None
+    price: Optional[float] = Field(None, ge=0)
     type: Optional[str] = None
     description: Optional[str] = None
 
@@ -814,8 +815,26 @@ async def update_lens_brand(brand_id: str, payload: LensBrandUpdate):
     )
 
 
+def _refuse_if_lens_priced(legacy_key: str, range_key: str, doc_id: str, what: str) -> None:
+    """L1-F07 safeguard: a lens brand / index that a price row still points at
+    (legacy matrix or an ACTIVE range) is not deleted out from under it - the
+    price would be left pointing at nothing. Remove or retire the prices first."""
+    matrix = _coll("lens_pricing_masters")
+    ranges = _coll("lens_pricing_ranges")
+    used = (matrix is not None and matrix.find_one({legacy_key: doc_id}) is not None) or (
+        ranges is not None
+        and ranges.find_one({range_key: doc_id, "is_active": {"$ne": False}}) is not None
+    )
+    if used:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This lens {what} still has prices set against it. Remove those prices first.",
+        )
+
+
 @router.delete("/lens/brands/{brand_id}")
 async def delete_lens_brand(brand_id: str):
+    _refuse_if_lens_priced("brandId", "brand_id", brand_id, "brand")
     return _delete_doc("lens_brand_masters", "brand_id", brand_id)
 
 
@@ -849,6 +868,7 @@ async def update_lens_index(index_id: str, payload: LensIndexUpdate):
 
 @router.delete("/lens/indices/{index_id}")
 async def delete_lens_index(index_id: str):
+    _refuse_if_lens_priced("indexId", "index_id", index_id, "index")
     return _delete_doc("lens_index_masters", "index_id", index_id)
 
 
