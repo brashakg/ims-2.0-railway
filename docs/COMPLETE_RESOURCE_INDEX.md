@@ -225,7 +225,7 @@ ims-2.0-railway/
 │   ├── Dockerfile.backend            ... Backend container image
 │   └── docker-compose.yml            ... Local development environment
 │
-└── k6-load-test.js .......................... Load testing script (10,000 users)
+└── k6-load-test.js .......................... Read-only k6 load test; loopback target + synthetic login required (INFRA-01)
 ```
 
 ---
