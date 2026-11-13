@@ -97,3 +97,57 @@ def test_malformed_email_or_short_username_is_rejected(monkeypatch):
     assert c.put("/api/v1/users/u1", json={"username": "has space"}).status_code == 422
     doc = repo.find_by_id("u1")
     assert (doc["username"], doc["email"]) == ("ravi", "ravi@example.com")
+
+
+def test_an_unrelated_edit_never_rechecks_an_existing_legacy_login(monkeypatch):
+    """The edit form always re-sends the username and email it loaded. A user
+    stored with a legacy value (an email the strict check would refuse, or a
+    mixed-case username) must still be editable, and is not rewritten."""
+    repo = _repo()
+    repo._docs["u1"].update({"username": "Ravi K", "email": "Ravi@Shop.local"})
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.put("/api/v1/users/u1",
+              json={"username": "Ravi K", "email": "Ravi@Shop.local", "phone": "9876543210"})
+    assert r.status_code == 200, r.text
+    assert "username" not in repo.last_update and "email" not in repo.last_update
+    doc = repo.find_by_id("u1")
+    assert (doc["username"], doc["email"]) == ("Ravi K", "Ravi@Shop.local")
+
+
+def test_a_case_only_twin_is_left_alone_not_a_500(monkeypatch):
+    """Create only refused exact duplicates, so "Ravi" and "ravi" can coexist.
+    Editing "Ravi" while re-sending its own name must not try to write "ravi"
+    (that hits the unique index and answers 500)."""
+    repo = _repo()
+    repo._docs["u1"]["username"] = "Ravi"
+    repo._docs["u3"] = {"user_id": "u3", "username": "ravi", "email": "r3@example.com",
+                        "roles": ["SALES_STAFF"], "store_ids": ["S1"], "is_active": True}
+    c = _client(repo, _ADMIN, monkeypatch)
+    r = c.put("/api/v1/users/u1", json={"username": "ravi", "full_name": "Ravi One"})
+    assert r.status_code == 200, r.text
+    assert "username" not in repo.last_update
+    assert repo.find_by_id("u1")["username"] == "Ravi"
+
+
+def test_a_login_rename_leaves_an_audit_row(monkeypatch):
+    import api.routers.users as users_mod
+
+    rows = []
+
+    class _Audit:
+        def create(self, row):
+            rows.append(row)
+            return row
+
+    monkeypatch.setattr(users_mod, "get_audit_repository", lambda: _Audit())
+    repo = _repo()
+    c = _client(repo, _ADMIN, monkeypatch)
+    assert c.put("/api/v1/users/u1", json={"email": "ravi.new@example.com"}).status_code == 200
+    login_rows = [r for r in rows if r.get("action") == "USER_LOGIN_CHANGED"]
+    assert len(login_rows) == 1
+    assert login_rows[0]["email"] == {"from": "ravi@example.com", "to": "ravi.new@example.com"}
+    assert login_rows[0]["target_user_id"] == "u1"
+    # a plain edit leaves no login row
+    rows.clear()
+    assert c.put("/api/v1/users/u1", json={"full_name": "R"}).status_code == 200
+    assert not [r for r in rows if r.get("action") == "USER_LOGIN_CHANGED"]
