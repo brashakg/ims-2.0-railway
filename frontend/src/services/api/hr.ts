@@ -723,6 +723,8 @@ export const tasksApi = {
     attachment_file_id?: string;
     attachment_filename?: string;
     attachment_mime?: string;
+    /** Same key on a retry -> the server returns the task it already made. */
+    client_request_id?: string;
   }) => {
     const payload = {
       title: task.title,
@@ -734,6 +736,7 @@ export const tasksApi = {
       attachment_file_id: task.attachment_file_id,
       attachment_filename: task.attachment_filename,
       attachment_mime: task.attachment_mime,
+      client_request_id: task.client_request_id,
     };
     const response = await api.post('/tasks', payload);
     return response.data;
