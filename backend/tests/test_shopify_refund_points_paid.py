@@ -1324,3 +1324,170 @@ def test_an_error_inside_the_credit_door_is_unfinished_only_once_a_row_exists(en
         assert code == 422 and "could not be issued" in str(detail), (code, detail)
         stored = _stored(env, points)
         assert stored["returns"] == [("CREDIT_FAILED", False, True)] and stored["credit_rows"] == [], stored
+
+
+# ----------------------------------------------------------------------------
+# Round 10 (the lead's reviewers at 3a516c95). The credit door can also answer
+# a plain None while a ledger row of this return exists or cannot be read: the
+# re-drive's own ledger read fails (_posted_credit / the door's lookup by ref),
+# the posting door refuses because it cannot read the row it would resume, or
+# a zero-store-credit note (Shopify sent the money back) lands with its
+# acknowledgement lost. The post read that None as "not issued" and finalized
+# CREDIT_FAILED: no tick, no task, no points, Reject allowed, "could not be
+# issued" -- over a credit that is (or may be) on the books. A None with a
+# live or unreadable row of the return is UNFINISHED, like a raise.
+# ----------------------------------------------------------------------------
+
+
+def _ledger_blind(monkeypatch, env, hit=lambda _q: True):
+    """credit_note_ledger.find_one raises on every read `hit` picks."""
+    ledger = env.get_collection("credit_note_ledger")
+    real = ledger.find_one
+
+    def blind(query=None, *a, **k):
+        if hit(query or {}):
+            raise RuntimeError("credit ledger unreachable")
+        return real(query, *a, **k)
+
+    monkeypatch.setattr(ledger, "find_one", blind)
+    return lambda: monkeypatch.setattr(ledger, "find_one", real)
+
+
+def _held_while_blind(env, points, monkeypatch, review_id, first, task_states):
+    """The fault holds: the tick, a person's identical Confirm, Reject and two
+    sweeps leave the refund unfinished and the books exactly as they were."""
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    coll = env.get_collection("returns")
+    _age(coll)
+    assert _tick() == {"finished": 0, "unresolved": 1}  # never 'credit failed' on an unread ledger
+    assert _confirm(review_id) == (422, S.NOT_FINISHED_NOTE)
+    code, detail = _reject(review_id)
+    assert code == 409 and "cannot be rejected" in str(detail), (code, detail)
+    _sweep_reads(env, monkeypatch, points)
+    assert [L.reconcile_loyalty_reversals() for _ in range(2)] == [_ZERO] * 2
+    assert _stored(env, points) == first
+    assert coll.find_one({"shopify_refund_id": "700001"})["points_paid_share"] == 100.0
+    row = env.get_collection("shopify_refund_review").find_one({"review_id": review_id})
+    assert (row["status"], row["resolved"], row["note"]) == ("CREDIT_FAILED", False, S.NOT_FINISHED_NOTE)
+    assert task_states() == ["OPEN"]  # the visible exception
+
+
+@pytest.mark.parametrize("schedule", ["ledger_unreadable", "issuing_row_unreadable", "posted_note_unreadable"])
+def test_a_retry_that_cannot_read_the_credit_ledger_never_reads_as_credit_failed(
+        env, points, monkeypatch, schedule):
+    """Sequence 1 of the round-10 review. ledger_unreadable: credit Rs 900
+    ISSUED, the finalize write and the points step failed; the stale re-drive
+    runs while credit_note_ledger.find_one fails (_posted_credit and the door's
+    lookup answer None). issuing_row_unreadable: the first press left the
+    credit row ISSUING (its move unconfirmed); the re-drive finds it by ref but
+    cannot read it by entry_id, so the posting door answers REFUSED. Before:
+    the tick finalized CREDIT_FAILED / credit_note_issued False -> nothing ever
+    looked again, Reject 200 over the credit, 100 points stranded.
+    posted_note_unreadable: only the re-drive's look for its posted note fails
+    and the bill has meanwhile passed its section 34 deadline; read as "no
+    note", the door looked for an ADJUSTED row, found none, and moved a second
+    Rs 900 onto the balance."""
+    from api.routers import customers as C
+
+    task_states = _tasks(monkeypatch, points)
+    _reviews, review_id = _queued(env)
+    coll = env.get_collection("returns")
+    if schedule != "issuing_row_unreadable":
+        real_update = _no_finalize(monkeypatch, coll)
+        lift_restore = _fail_restore(monkeypatch)
+        assert _confirm(review_id)[0] == 422
+        lift_restore()
+        monkeypatch.setattr(coll, "update_one", real_update)
+        first = _stored(env, points)
+        assert first["credit_rows"] == [900.0] and first["returns"] == [("PENDING", None, True)], first
+        if schedule == "ledger_unreadable":
+            lift_blind = _ledger_blind(monkeypatch, env)
+        else:
+            env.get_collection("orders").update_one(
+                {"order_id": "ord-1"}, {"$set": {"invoice_date": "2020-01-01", "created_at": "2020-01-01"}})
+            lift_blind = _ledger_blind(monkeypatch, env, hit=lambda q: q.get("type") == "ISSUED")
+    else:
+        lift = _unconfirmed_credit(monkeypatch, moves=True)
+        assert _confirm(review_id)[0] == 422
+        lift(True)  # the move did land; the reconciler has not looked yet
+        first = _stored(env, points)
+        assert [r["type"] for r in _ledger(env)] == [C.PENDING] and first["returns"] == [("PENDING", None, True)]
+        lift_blind = _ledger_blind(monkeypatch, env, hit=lambda q: "entry_id" in q)
+    assert first["points"] == (50, 100, 50), first
+
+    _held_while_blind(env, points, monkeypatch, review_id, first, task_states)
+
+    # The ledger reads again: the next stale tick finishes it, once.
+    lift_blind()
+    _age(coll)
+    assert _tick() == {"finished": 1, "unresolved": 0}
+    assert _tick() == {"finished": 0, "unresolved": 0}
+    done = _stored(env, points)
+    assert _less_rows(done) == _SETTLED and [p for _t, p in done["restore_rows"]] == [100], done
+    assert [r["type"] for r in _ledger(env)] == ["ISSUED"]
+    assert task_states() == ["COMPLETED"]
+    _nothing_twice(env, points, monkeypatch, review_id, done)
+
+
+def test_a_zero_store_credit_note_whose_acknowledgement_was_lost_leaves_the_refund_unfinished(
+        env, points, monkeypatch):
+    """Sequence 2 of the round-10 review, one fault on the first attempt: the
+    card-refund shape (Shopify sent Rs 900 back to the card; Rs 100 was paid
+    with points), so the credit note moves no balance (delta 0) and is a plain
+    ledger insert. The insert lands, its acknowledgement is lost. Before: the
+    door answered None, the return finalized CREDIT_FAILED next to an ISSUED
+    credit-note row (the GST reversal), 'could not be issued', Reject 200 and
+    the 100 points never returned -- no tick, no task."""
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    task_states = _tasks(monkeypatch, points)
+    _order(env, payments=PAYS)
+    queued = S.handle_shopify_refund(env, _payload(txns=[_txn(900, "razorpay")]), topic="refunds/create")
+    assert queued["status"] == "queued", queued
+    reviews = env.get_collection("shopify_refund_review")
+    row = reviews.find_one({"shopify_refund_id": "700001"})
+    review_id = row["review_id"]
+    assert row["credit_note"]["store_credit"] == 0.0, row["credit_note"]
+    coll = env.get_collection("returns")
+
+    ledger = env.get_collection("credit_note_ledger")
+    real_insert = ledger.insert_one
+    lost = []
+
+    def lands_unacknowledged(doc, *a, **k):
+        real_insert(doc, *a, **k)
+        if not lost:
+            lost.append(1)
+            raise RuntimeError("socket reset before the acknowledgement")
+
+    monkeypatch.setattr(ledger, "insert_one", lands_unacknowledged)
+    code, detail = _confirm(review_id)
+    monkeypatch.setattr(ledger, "insert_one", real_insert)
+    assert (code, detail) == (422, S.NOT_FINISHED_NOTE), (code, detail)
+    first = _stored(env, points)
+    assert [(r["type"], r["delta"]) for r in _ledger(env)] == [("ISSUED", 0.0)], _ledger(env)
+    assert first["returns"] == [("PENDING", None, True)] and first["points"] == (50, 100, 50), first
+
+    # Fresh: nothing finishes or closes it; nothing moves.
+    assert _tick() == {"finished": 0, "unresolved": 0}
+    assert _confirm(review_id) == (422, S.NOT_FINISHED_NOTE)
+    assert _reject(review_id)[0] == 409
+    _sweep_reads(env, monkeypatch, points)
+    assert [L.reconcile_loyalty_reversals() for _ in range(2)] == [_ZERO] * 2
+    assert _stored(env, points) == first
+
+    # Stale: the tick finishes it at the SAME credit-note row, the points once.
+    _age(coll)
+    assert _tick() == {"finished": 1, "unresolved": 0}
+    assert _tick() == {"finished": 0, "unresolved": 0}
+    done = _stored(env, points)
+    assert [(r["type"], r["delta"]) for r in _ledger(env)] == [("ISSUED", 0.0)], _ledger(env)
+    assert done["returns"] == [("COMPLETED", True, False)] and done["points"] == (150, 0, 50), done
+    assert [p for _t, p in done["restore_rows"]] == [100], done
+    assert coll.find_one({"shopify_refund_id": "700001"})["points_paid_share"] == 100.0
+    assert reviews.find_one({"review_id": review_id})["status"] == "POSTED"
+    assert task_states() == []
+    _nothing_twice(env, points, monkeypatch, review_id, done)

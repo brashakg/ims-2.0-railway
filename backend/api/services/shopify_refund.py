@@ -324,16 +324,14 @@ def _raise_unreadable_date_task(order: Dict[str, Any], refund_id: Any) -> None:
 def _posted_credit(db, return_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """The credit-note ledger row an earlier attempt of this return already
     wrote (its ref is the return id), so a re-drive never posts it twice.
-    Fail-soft -> None."""
+    RAISES when the ledger cannot be read: "unreadable" is no answer, and a
+    None here sends the re-drive on to post (or to finalize CREDIT_FAILED)."""
     if not return_id:
         return None
-    try:
-        ledger = db.get_collection("credit_note_ledger")
-        from . import store_credit_ledger as scl
+    ledger = db.get_collection("credit_note_ledger")
+    from . import store_credit_ledger as scl
 
-        row = ledger.find_one({"ref": return_id, "type": scl.CREDIT_NOTE_TYPE}) if ledger is not None else None
-    except Exception:  # noqa: BLE001
-        return None
+    row = ledger.find_one({"ref": return_id, "type": scl.CREDIT_NOTE_TYPE}) if ledger is not None else None
     if row:
         row = dict(row)
         row.pop("_id", None)
@@ -2104,7 +2102,16 @@ def _post_locked(
     #     BILLING store with the real GST split; card refunds skip the balance bump.
     #     A re-drive first looks for the note an earlier attempt of this return
     #     already posted (SF03: a run that died after posting it): never twice.
-    credit_entry = _posted_credit(db, return_id) if prior_doc is not None else None
+    # The credit's balance move may have landed but could not be confirmed
+    # (CreditNotConfirmed; or the ledger cannot be read; or no credit came back
+    # while a ledger row of this return exists): the refund is UNFINISHED,
+    # never "not issued" -- see below.
+    credit_unclear = False
+    try:
+        credit_entry = _posted_credit(db, return_id) if prior_doc is not None else None
+    except Exception as exc:  # noqa: BLE001 -- an earlier attempt's note may be there
+        logger.error("[SHOPIFY_REFUND] refund=%s: its earlier credit note cannot be read: %s", refund_id, exc)
+        credit_entry, credit_unclear = None, True
     money_back = credit_note.get("money_back")
     store_credit, credit_why, settlement, _, points_share = allowance
     if prior_doc is not None and prior_doc.get("points_paid_share") is not None:
@@ -2112,10 +2119,6 @@ def _post_locked(
         # claim. A re-drive never lowers, zeroes or recalculates it.
         points_share = _f(prior_doc.get("points_paid_share"))
     s34_unreadable = False
-    # The credit's balance move may have landed but could not be confirmed
-    # (CreditNotConfirmed, or an error after its ledger row was written): the
-    # refund is UNFINISHED, never "not issued" -- see below.
-    credit_unclear = False
     try:
         from ..routers.returns import S34_UNREADABLE, _credit_note_window_closed, _issue_store_credit
 
@@ -2127,7 +2130,7 @@ def _post_locked(
         # never read as "past the deadline".
         s34_closed = None
         s34_unreadable = False
-        if credit_entry is None:
+        if credit_entry is None and not credit_unclear:
             try:
                 _dated = db.get_collection("orders").find_one(
                     {"order_id": order_id}, {"invoice_date": 1, "created_at": 1}) or {}
@@ -2144,9 +2147,8 @@ def _post_locked(
             _raise_s34_task(order, return_id, refund_id, s34_closed)
             # The return doc files no tax reversal either (GSTR reads its breakup).
             gst_view = {**gst_view, "taxable": 0.0, "tax": 0.0, "by_rate": {}, "section34_closed": True}
-        if (credit_entry is None and customer_id and gross_refund > 0 and store_credit is not None
-                and not s34_unreadable):
-            credit_unclear = True  # until _issue_store_credit answers
+        if (credit_entry is None and not credit_unclear and customer_id and gross_refund > 0
+                and store_credit is not None and not s34_unreadable):
             credit_entry = _issue_store_credit(
                 customer_id,
                 gross_refund,
@@ -2173,14 +2175,17 @@ def _post_locked(
                 ),
                 credit_note=not s34_closed,
             )
-            credit_unclear = False  # it answered: issued, or a clean refusal (None)
     except Exception as exc:  # noqa: BLE001
-        if credit_unclear and type(exc).__name__ != "CreditNotConfirmed":
-            # Any other error out of the credit door: unclear only if a ledger
-            # row of this return was written (or cannot be read) -- the
-            # counter door's rule (returns.py, "one owner per outcome").
-            credit_unclear = _credit_row_written(db, return_id)
-        logger.warning("[SHOPIFY_REFUND] credit note post failed (unclear=%s): %s", credit_unclear, exc)
+        credit_unclear = credit_unclear or type(exc).__name__ == "CreditNotConfirmed"
+        logger.warning("[SHOPIFY_REFUND] credit note post failed: %s", exc)
+    if not credit_unclear and credit_entry is None and gross_refund > 0:
+        # No credit came back -- a None answer or any other error: "not
+        # issued" only if no ledger row of this return exists. A live row (a
+        # lost acknowledgement, a row the door could not read or resume) or an
+        # unreadable ledger means its balance move or its GST reversal may be
+        # on the books -- the counter door's rule (returns.py, "one owner per
+        # outcome").
+        credit_unclear = _credit_row_written(db, return_id)
 
     if credit_unclear:
         # The store credit may already be on the customer's balance: its
