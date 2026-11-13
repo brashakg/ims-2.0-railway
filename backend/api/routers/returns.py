@@ -6701,7 +6701,8 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
     now_iso = utc_now_iso()
     token = uuid.uuid4().hex
     mine = {"return_id": return_id, "restock_claim": token}
-    take = {"$set": {"restock_in_progress": True, "restock_started_at": now_iso, "restock_claim": token}}
+    take = {"$set": {"restock_in_progress": True, "restock_started_at": now_iso, "restock_claim": token,
+                     "restock_booking_released": False}}
     try:
         claim = coll.find_one_and_update(
             {
@@ -6771,19 +6772,33 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
 def _reopen_by_booking(coll: Any, return_id: str, write: Any) -> None:
     """A Shopify refund's retry whose units did not all land, and whose claim
     was taken over meanwhile (`write`, its own record write, matched
-    nothing). Its booking already made the taker read "another door put them
-    back" and save 'applied' (restock_applied_by_booking) -- and a taker
-    still running reads the same. The un-booked pieces are out of stock, so
-    the record is reopened and any claim in flight dropped: the Retry stock
-    step stays (D7), and the next retry books them again. Never a unit moved
-    here: the bookings keep every door from putting a piece back twice."""
+    nothing). Its booking may already have made the taker save 'applied' on
+    it (restock_applied_by_booking: the taker found this refund's mark on
+    the order and restocked less for it). The un-booked pieces are out of
+    stock, so that record is reopened: the Retry stock step stays (D7), and
+    the next retry books them again. A taker still running keeps its claim
+    -- its own landed pieces still reach the record -- and is told instead
+    (restock_booking_released): it reopens what it saves on a booking
+    (_reopen_if_released). Never a unit moved here: the bookings keep every
+    door from putting a piece back twice."""
     if getattr(write, "matched_count", 1):
         return
     coll.update_one(
-        {"return_id": return_id,
-         "$or": [{"restock_applied_by_booking": True}, {"restock_in_progress": True}]},
+        {"return_id": return_id, "restock_applied_by_booking": True},
+        {"$set": {"restock_applied": False, "restock_applied_by_booking": False}})
+    coll.update_one(
+        {"return_id": return_id, "restock_in_progress": True},
+        {"$set": {"restock_booking_released": True}})
+
+
+def _reopen_if_released(coll: Any, return_id: str) -> None:
+    """A taker that saved 'applied' on a booking a stale retry released while
+    it ran (_reopen_by_booking's flag): reopened, as that retry would have."""
+    coll.update_one(
+        {"return_id": return_id, "restock_booking_released": True,
+         "restock_applied_by_booking": True, "restock_in_progress": False},
         {"$set": {"restock_applied": False, "restock_applied_by_booking": False,
-                  "restock_in_progress": False, "restock_claim": None}})
+                  "restock_booking_released": False}})
 
 
 def _retry_lines(doc: Dict[str, Any], order: Optional[Dict[str, Any]]) -> List[ReturnLine]:
@@ -6940,13 +6955,19 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
     try:
         if refund_id and retry_order is not None:
             # None: another door just put the units back -- nothing left to do.
-            # Marked: if that door was a stale retry of this record whose
-            # writes then failed, it reopens the record (_reopen_by_booking).
+            # A mark of this refund already on the order (read before this
+            # retry booked anything) made the cap restock less for it. Either
+            # way the record's 'applied' rests on a booking this retry did not
+            # land: if it was a stale retry of this record whose writes then
+            # failed, that retry reopens the record (_reopen_by_booking).
+            from ..services.shopify_refund import _booked_for
+
+            booked_before = _booked_for(retry_order, str(refund_id))
             restock_result = _restock_booked(
                 retry_order, lines, str(refund_id), _restock,
                 processing_store_id=processing_store_id,
             )
-            by_booking = restock_result is None
+            by_booking = restock_result is None or booked_before
             restock_result = restock_result or {"applied": True}
         else:
             # Only the units still out: re-run, the units an earlier attempt
@@ -7016,6 +7037,8 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
         saved = coll.update_one(mine, {"$set": update})
         if refund_id and not update["restock_applied"]:
             _reopen_by_booking(coll, return_id, saved)
+        if by_booking and update["restock_applied"]:
+            _reopen_if_released(coll, return_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock retry persist failed: %s", exc)
         # The stock rows are the truth (_units_moved_by_return): a later

@@ -273,3 +273,111 @@ def test_a_shopify_retry_never_reads_a_stale_booking_that_failed_as_applied(nati
 def test_the_return_slot_backstop_is_in_the_apps_index_set(native):
     idx = native.stock_units.index_information()["uniq_stock_unit_return_slot"]
     assert idx["unique"] is True and idx["key"] == [("return_slot", 1)]
+
+
+def _shopify_race(native, monkeypatch, wake):
+    """Real cap, real booking, real stock writes. Retry A books U1 for refund
+    RF-1 and stalls in its flip; B takes over and runs to the end on A's
+    booking. Then A wakes and `wake()` decides its flip."""
+    _seed(native, units=["U1"])
+    native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": "RF-1"}})
+    real, seen = R._flip_sold_unit, {}
+
+    def stalled(*a, **k):
+        if not seen:
+            seen["b"] = "running"
+            native.returns.update_one({"return_id": RID}, {"$set": {
+                "restock_started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()}})
+            seen["b"] = R._retry_restock(RID, USER, STORE)
+            return wake(real, *a, **k)
+        return real(*a, **k)
+
+    monkeypatch.setattr(R, "_flip_sold_unit", stalled)
+    try:
+        a = R._retry_restock(RID, USER, STORE)
+    except Exception as exc:  # noqa: BLE001 -- A's failed writes answer 500
+        a = exc
+    return a, seen["b"]
+
+
+def test_a_shopify_taker_on_a_stale_booking_that_then_fails_keeps_the_step_open(native, monkeypatch):
+    """1413-R7-SHOPIFY-BOOKING on the real path (no cap or booking mocked):
+    B's own cap reads A's booking and trims its restock to nothing, so B
+    answers 'applied' -- not None. A's flip then fails and A un-books. The
+    record must reopen: U1 is still SOLD and no longer booked (D7)."""
+    def fails(real, *a, **k):
+        raise RuntimeError("socket reset")
+
+    a, b = _shopify_race(native, monkeypatch, fails)
+    assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
+    line = native.orders.find_one({"order_id": OID})["items"][0]
+    assert float((line.get("restocked_refunds") or {}).get("RF-1") or 0) == 0
+    doc = native.returns.find_one({"return_id": RID})
+    assert doc["restock_applied"] is False, "record reads applied, the piece is SOLD and un-booked"
+    assert doc["restock_in_progress"] is False
+    # The next retry puts the one piece back, once.
+    again = R._retry_restock(RID, USER, STORE)
+    assert again["restock_applied"] is True
+    assert _back(native) == ["U1"]
+    assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+
+
+def test_a_shopify_taker_on_a_stale_booking_that_lands_stays_applied(native, monkeypatch):
+    """The same race where A's flip lands: one piece back, the record applied,
+    nothing reopened, no second unit."""
+    a, b = _shopify_race(native, monkeypatch, lambda real, *a, **k: real(*a, **k))
+    assert _back(native) == ["U1"]
+    assert native.stock_units.count_documents({}) == 1
+    doc = native.returns.find_one({"return_id": RID})
+    assert doc["restock_applied"] is True and doc["restock_in_progress"] is False
+
+
+def test_a_stale_shopify_retry_that_fails_while_its_taker_runs_keeps_the_takers_save(native, monkeypatch):
+    """Two threads, real Mongo, real cap and booking. A books U1 and stalls in
+    its flip; B takes over and reads A's booking. While B is still running, A
+    wakes, its flip fails and it un-books. A never drops B's claim: B's own
+    save reaches the record (its ids would be lost otherwise), then the
+    record reopens because B's 'applied' rested on the booking A released."""
+    import threading
+
+    _seed(native, units=["U1"])
+    native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": "RF-1"}})
+    a_booked, b_loaded = threading.Event(), threading.Event()
+    real_flip, real_goods = R._flip_sold_unit, R._restock_good_items
+    out = {}
+
+    def flip(*a, **k):
+        if threading.current_thread().name == "retry-a":
+            a_booked.set()
+            assert b_loaded.wait(30)
+            raise RuntimeError("socket reset")
+        return real_flip(*a, **k)
+
+    def goods(*a, **k):
+        if threading.current_thread().name != "retry-a":
+            b_loaded.set()
+            thread_a.join(30)  # A fails and releases while B holds the claim
+        return real_goods(*a, **k)
+
+    def run_a():
+        try:
+            out["a"] = R._retry_restock(RID, USER, STORE)
+        except Exception as exc:  # noqa: BLE001
+            out["a"] = exc
+
+    monkeypatch.setattr(R, "_flip_sold_unit", flip)
+    monkeypatch.setattr(R, "_restock_good_items", goods)
+    thread_a = threading.Thread(target=run_a, name="retry-a")
+    thread_a.start()
+    assert a_booked.wait(30)
+    native.returns.update_one({"return_id": RID}, {"$set": {
+        "restock_started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()}})
+    b = R._retry_restock(RID, USER, STORE)
+    assert not thread_a.is_alive()
+    assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
+    doc = native.returns.find_one({"return_id": RID})
+    assert doc.get("restock_completed_at"), "the taker's save never reached the record"
+    assert doc["restock_applied"] is False and doc["restock_in_progress"] is False
+    again = R._retry_restock(RID, USER, STORE)
+    assert again["restock_applied"] is True and _back(native) == ["U1"]
+    assert b["return_id"] == RID
