@@ -158,16 +158,17 @@ def _raise_unreadable_date_task(order: Dict[str, Any], refund_id: Any) -> None:
 def _posted_credit(db, return_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """The credit-note ledger row an earlier attempt of this return already
     wrote (its ref is the return id), so a re-drive never posts it twice.
-    Fail-soft -> None."""
+    A read that FAILS raises (decision D13, as _refund_already_processed and
+    _unfinished_claim): "could not check" is not "the dead run posted
+    nothing". That answer let the re-drive book the credit again whenever the
+    credit door's own same-type lookup could not see the dead run's note --
+    past the section 34 window the new row is ADJUSTED, the old one ISSUED."""
     if not return_id:
         return None
-    try:
-        ledger = db.get_collection("credit_note_ledger")
-        from . import store_credit_ledger as scl
+    from . import store_credit_ledger as scl
 
-        row = ledger.find_one({"ref": return_id, "type": scl.CREDIT_NOTE_TYPE}) if ledger is not None else None
-    except Exception:  # noqa: BLE001
-        return None
+    ledger = db.get_collection("credit_note_ledger")
+    row = ledger.find_one({"ref": return_id, "type": scl.CREDIT_NOTE_TYPE}) if ledger is not None else None
     if row:
         row = dict(row)
         row.pop("_id", None)
@@ -1785,7 +1786,16 @@ def _post_locked(
     #     BILLING store with the real GST split; card refunds skip the balance bump.
     #     A re-drive first looks for the note an earlier attempt of this return
     #     already posted (SF03: a run that died after posting it): never twice.
-    credit_entry = _posted_credit(db, return_id) if prior_doc is not None else None
+    #     That read failing books NOTHING (D13): the refund finalizes
+    #     CREDIT_FAILED, its claim is released and the next press asks again.
+    credit_entry, ledger_unread = None, False
+    if prior_doc is not None:
+        try:
+            credit_entry = _posted_credit(db, return_id)
+        except Exception as exc:  # noqa: BLE001
+            ledger_unread = True
+            logger.error("[SHOPIFY_REFUND] refund=%s: the credit an earlier attempt may have posted "
+                         "cannot be read; no credit posted: %s", refund_id, exc)
     money_back = credit_note.get("money_back")
     store_credit, credit_why, settlement, _ = allowance
     s34_unreadable = False
@@ -1800,7 +1810,7 @@ def _post_locked(
         # never read as "past the deadline".
         s34_closed = None
         s34_unreadable = False
-        if credit_entry is None:
+        if credit_entry is None and not ledger_unread:
             try:
                 _dated = db.get_collection("orders").find_one(
                     {"order_id": order_id}, {"invoice_date": 1, "created_at": 1}) or {}
@@ -1818,7 +1828,7 @@ def _post_locked(
             # The return doc files no tax reversal either (GSTR reads its breakup).
             gst_view = {**gst_view, "taxable": 0.0, "tax": 0.0, "by_rate": {}, "section34_closed": True}
         if (credit_entry is None and customer_id and gross_refund > 0 and store_credit is not None
-                and not s34_unreadable):
+                and not s34_unreadable and not ledger_unread):
             credit_entry = _issue_store_credit(
                 customer_id,
                 gross_refund,

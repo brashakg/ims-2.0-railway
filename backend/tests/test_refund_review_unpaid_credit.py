@@ -850,11 +850,18 @@ def test_redrive_does_not_count_its_own_dead_run_credit(env):
     assert [r["entry_id"] for r in _ledger(env)] == ["own-1"]
 
 
-def test_redrive_books_the_credit_once_whichever_reads_fail(env, monkeypatch):
+@pytest.mark.parametrize("invoice_date", [None, "2025-01-15"],
+                         ids=["window-open", "window-closed-since-the-dead-run"])
+def test_redrive_books_the_credit_once_whichever_reads_fail(env, monkeypatch, invoice_date):
     """Decision D13 (audit L1-F29): a refund is never booked twice after a
     read failure. The dead run's own Rs 1000 note is already in the ledger and
     the re-drive is pressed again and again, each time with different reads
-    failing (find_one / find / count / aggregate, on any collection):
+    failing (find_one / find / count / aggregate, on any collection).
+    Run twice: with the invoice's section 34 window open, and with it CLOSED
+    since the dead run posted its note (the re-drive would then book the
+    credit as ADJUSTED -- a row of another type than the dead run's ISSUED
+    note, so the credit door's own same-type lookup cannot catch a repeat and
+    the "what did the dead run post?" read is the only guard):
       * every single read of the press, failing once;
       * every PAIR of reads (the second chosen from the reads the press makes
         AFTER the first failed - the guard behind a guard);
@@ -863,7 +870,7 @@ def test_redrive_books_the_credit_once_whichever_reads_fail(env, monkeypatch):
     bumped again; and the press after the outage books nothing more."""
     import copy
 
-    _order(env)
+    _order(env, **({"invoice_date": invoice_date} if invoice_date else {}))
     from api.services import shopify_refund as sr
 
     sr.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
