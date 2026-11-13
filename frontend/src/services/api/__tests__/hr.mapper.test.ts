@@ -47,7 +47,8 @@ describe('hrApi.getAttendance -> camelCase BE keys mapped to FE keys', () => {
     const result = await hrApi.getAttendance('store_1', '2026-05-01');
 
     expect(mockGet).toHaveBeenCalledWith('/hr/attendance', {
-      params: { store_id: 'store_1', date: '2026-05-01' },
+      // The backend filters on from_date/to_date; a bare `date` was ignored.
+      params: { store_id: 'store_1', from_date: '2026-05-01', to_date: '2026-05-01' },
     });
 
     const rec = result.records[0];
