@@ -183,7 +183,11 @@ describe('the printed card reflects what the eye test actually recorded', () => 
   }, SLOW);
 
   it('prints the IPD the exam recorded (L2-CLIN-F02: was hard-coded null)', async () => {
-    const { container } = await printCardFor({ sphere: 0 }, { sphere: -1 }, { ipd: '62.0' });
+    const { container } = await printCardFor({ sphere: 0 }, { sphere: -1 }, {
+      // The REAL list shape: GET /clinical/tests camelCases the exam's stored
+      // Final-Rx block, so the IPD sits at prescription.ipd.
+      prescription: { ipd: '62.0', pd: null },
+    });
 
     expect(container.textContent).toContain('62mm');
     expect(container.textContent).toContain('Asha Kumari');

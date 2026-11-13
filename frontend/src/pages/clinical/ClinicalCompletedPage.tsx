@@ -139,7 +139,7 @@ export function ClinicalCompletedPage() {
                       // L2-CLIN-F02: the exam's recorded binocular IPD
                       // (was hard-coded null, so this card never carried it).
                       // Blank stays blank; nothing is derived from the eyes.
-                      pd: powerNumberOrNull(test.ipd),
+                      pd: powerNumberOrNull(test.prescription?.ipd),
                       visualAcuity: '',
                       notes: '',
                       storeName: storeInfo?.storeName || storeInfo?.storeCode || '',
