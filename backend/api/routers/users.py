@@ -223,6 +223,16 @@ class UserUpdate(BaseModel):
     uan_no: Optional[str] = None
     pf_no: Optional[str] = None
     esic_no: Optional[str] = None
+    # Login identity. Both were missing here, so pydantic dropped them and an
+    # edit "saved" without changing anything. Stored trimmed + lower-cased: the
+    # login form looks both up lower-cased (auth.login).
+    username: Optional[str] = Field(default=None, min_length=3, max_length=50)
+    email: Optional[EmailStr] = None
+
+    @field_validator("username", "email", mode="before")
+    @classmethod
+    def _v_login_identity(cls, v):
+        return v.strip().lower() if isinstance(v, str) else v
 
     @field_validator("phone")
     @classmethod
@@ -632,19 +642,45 @@ def _is_admin_user(user: dict) -> bool:
 
 
 def _find_by_email_ci(repo, email: str):
-    """Case-insensitive email-existence lookup. Tries a regex match against the
-    Mongo collection (anchored, escaped); falls back to the repo's exact
-    find_by_email when the collection isn't available (e.g. a fake test repo).
+    """Case-insensitive email-existence lookup (see _find_ci)."""
+    return _find_ci(repo, "email", email)
+
+
+def _find_ci(repo, field: str, value: str):
+    """Case-insensitive lookup of a user by ``field`` (email / username). Tries
+    an anchored, escaped regex against the Mongo collection; falls back to the
+    repo's exact find_by_<field> when the collection isn't available (e.g. a
+    fake test repo).
     """
     try:
         coll = getattr(repo, "collection", None)
         if coll is not None:
             return coll.find_one(
-                {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}}
+                {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
             )
     except Exception:
         pass
-    return repo.find_by_email(email)
+    return getattr(repo, f"find_by_{field}")(value)
+
+
+def _refuse_login_identity_clash(repo, user_id: str, existing: dict, update_data: dict):
+    """An edit may change a user's username / email (both are login keys), but
+    never to one another user already holds, compared case-insensitively.
+    Re-sending the user's own value is a no-op, not a clash."""
+    for field, label in (("username", "Username"), ("email", "Email")):
+        if field in update_data and update_data[field] is None:
+            update_data.pop(field)  # an explicit null never wipes a login key
+        value = update_data.get(field)
+        if value is None or value == (existing.get(field) or "").strip().lower():
+            continue
+        if field == "username" and not re.fullmatch(r"[a-z0-9._-]+", value):
+            raise HTTPException(
+                status_code=422,
+                detail="Username may use only letters, digits, dot, dash and underscore",
+            )
+        other = _find_ci(repo, field, value)
+        if other and other.get("user_id") != user_id:
+            raise HTTPException(status_code=400, detail=f"{label} already exists")
 
 
 # ============================================================================
@@ -1031,6 +1067,7 @@ async def update_user(
         # an unrelated edit can't wipe module_access (or any other field). When
         # module_access IS sent it round-trips through (sanitized) and overwrites.
         update_data = user.model_dump(exclude_unset=True)
+        _refuse_login_identity_clash(repo, user_id, existing, update_data)
 
         # PRIVILEGE GUARD 2: if roles are being changed, the actor must be
         # allowed to assign the NEW set (can't escalate a user -- or themselves
