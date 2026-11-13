@@ -243,6 +243,9 @@ class TaskCreate(BaseModel):
     attachment_file_id: Optional[str] = Field(default=None, max_length=128)
     attachment_filename: Optional[str] = Field(default=None, max_length=255)
     attachment_mime: Optional[str] = Field(default=None, max_length=128)
+    # R44: the screen's key for ONE create. A retry with the same key (a lost
+    # reply, a second key press) returns the task already made.
+    client_request_id: Optional[str] = Field(default=None, max_length=64)
 
     @model_validator(mode="after")
     def _validate_fields(self) -> "TaskCreate":
@@ -554,6 +557,14 @@ async def create_task(
         raise HTTPException(status_code=422, detail="due_at (or due_date) is required")
     now = datetime.now()
 
+    request_key = (task.client_request_id or "").strip() or None
+    if request_key:
+        # ponytail: find-then-insert, no unique index (no migrations in this
+        # batch); the screen's in-flight guard covers simultaneous presses.
+        already = repo.find_one({"client_request_id": request_key, "assigned_by": current_user.get("user_id")})
+        if already:
+            return {"task_id": already.get("task_id"), "message": "Task already created", "replayed": True}
+
     # Optional attachment: validate the referenced file actually exists in the
     # store BEFORE persisting (a forged/missing id -> 400, not a later 404 at
     # download time -- mirrors the GRN attachment gate). Storage-down -> 503.
@@ -567,6 +578,16 @@ async def create_task(
             "mime_type": task.attachment_mime,
         }
 
+    store_id = current_user.get("active_store_id")
+    # A role name ("cashier") is stored as the role ("CASHIER"); anyone else
+    # named must pass the SAME rule the edit / reassign / escalate doors use
+    # (R27) -- checked before anything is written, so no orphan task.
+    assignee = task.assigned_to.strip()
+    if assignee.upper() in VALID_ROLES:
+        assignee = assignee.upper()
+    else:
+        _named_target(assignee, {"store_id": store_id})
+
     task_data = {
         "task_id": generate_task_id(),
         "title": task.title,
@@ -575,19 +596,15 @@ async def create_task(
         "priority": task.priority,  # P0-P4
         "status": "OPEN",
         "source": canon_source(task.source or task.type),  # SYSTEM | USER | SOP
-        # A role name ("cashier") is stored as the role ("CASHIER").
-        "assigned_to": (
-            task.assigned_to.strip().upper()
-            if task.assigned_to.strip().upper() in VALID_ROLES
-            else task.assigned_to
-        ),
+        "assigned_to": assignee,
         "assigned_by": current_user.get("user_id"),
         # Raised by hand: the one marker that makes assigned_by the task's
         # creator, who keeps seeing it (services/task_visibility.py).
         "created_via": MANUAL,
-        "store_id": current_user.get("active_store_id"),
+        "store_id": store_id,
         "due_at": due_at,
         "attachment": attachment,
+        "client_request_id": request_key,
         "created_at": now,
         "updated_at": now,
         "escalation_level": 0,
@@ -880,7 +897,23 @@ async def update_task(
                 "at": datetime.now(),
             }
         ]
+    note_push = None
     if update.notes:
+        # R05: a note is ADDED to an attributed trail, never written over the
+        # last one. `notes` keeps the latest text for older readers; a note
+        # stored before the trail existed is carried into it first.
+        entry = {
+            "text": update.notes,
+            "by": current_user.get("user_id"),
+            "by_name": current_user.get("full_name") or current_user.get("name")
+            or current_user.get("username"),
+            "at": datetime.now(),
+        }
+        entries = [entry]
+        if existing.get("notes") and not existing.get("notes_log"):
+            entries.insert(0, {"text": existing["notes"], "by": None, "at": existing.get("updated_at"),
+                               "legacy": True})
+        note_push = {"notes_log": {"$each": entries}}
         update_data["notes"] = update.notes
     if update.assigned_to:
         update_data["assigned_to"] = update.assigned_to
@@ -907,7 +940,8 @@ async def update_task(
 
     if update_data:
         update_data["updated_at"] = datetime.now()
-        if repo.update(task_id, update_data):
+        # push only when there is a note: other repository doubles take (id, data).
+        if repo.update(task_id, update_data, **({"push": note_push} if note_push else {})):
             if update_data.get("status") == "CANCELLED":
                 # A catalogue-flag task: cancelling it withdraws its open flags
                 # (services/catalog_flags, the one rule; fail-soft).
@@ -1626,6 +1660,24 @@ async def scan_payment_variance(
     }
 
 
+def _integrity_candidates(repo, filters: dict) -> list:
+    """The tasks an integrity check reads (R45). A read that fails is a 503,
+    never an empty list: "0 suspect tasks" must mean none were found. Reads
+    the collection directly because BaseRepository.find_many turns a driver
+    error into []."""
+    if repo is None:
+        raise HTTPException(status_code=503, detail="Task records are not available right now. Try again.")
+    try:
+        coll = getattr(repo, "collection", None)
+        if coll is None:
+            return repo.find_many(filters, limit=1000) or []
+        return [repo._clean_id(d) for d in coll.find(filters).limit(1000)]
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503, detail="Could not read tasks for this check. Try again."
+        ) from exc
+
+
 @router.get("/integrity/fake-closures")
 async def list_fake_closures(
     days: int = Query(30, ge=1, le=180),
@@ -1635,9 +1687,6 @@ async def list_fake_closures(
 ):
     """Tasks marked complete implausibly fast (possible box-ticking). Read-only."""
     repo = get_task_repository()
-    if repo is None:
-        return {"flagged": [], "count": 0}
-
     active_store = store_in_view(store_id, current_user)
     cutoff = datetime.now() - timedelta(days=days)
     filters: dict = {
@@ -1656,10 +1705,7 @@ async def list_fake_closures(
     if active_store:
         filters["store_id"] = active_store
 
-    try:
-        candidates = repo.find_many(visible(filters, current_user), limit=1000) or []
-    except Exception:  # noqa: BLE001
-        candidates = []
+    candidates = _integrity_candidates(repo, visible(filters, current_user))
 
     flagged = []
     for t in candidates:
@@ -1680,18 +1726,12 @@ async def list_silent_tasks(
     """OPEN tasks never acknowledged within their ack-SLA window. Read-only;
     the auto-escalator acts on these, this just surfaces them for a manager."""
     repo = get_task_repository()
-    if repo is None:
-        return {"silent": [], "count": 0}
-
     active_store = store_in_view(store_id, current_user)
     filters: dict = {"status": {"$in": ["OPEN", "open"]}}
     if active_store:
         filters["store_id"] = active_store
 
-    try:
-        candidates = repo.find_many(visible(filters, current_user), limit=1000) or []
-    except Exception:  # noqa: BLE001
-        candidates = []
+    candidates = _integrity_candidates(repo, visible(filters, current_user))
 
     silent = silent_tasks(candidates, now=datetime.now(), sla_config=_load_sla_config())
     return {"silent": [_canon_task_out(t) for t in silent], "count": len(silent)}
