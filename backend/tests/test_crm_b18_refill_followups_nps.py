@@ -275,6 +275,37 @@ def test_rescheduled_saves_the_new_date_and_stays_pending(fu):
     assert [x["outcome"] for x in _doc(coll)["attempts"]] == ["rescheduled", "called_interested"]
 
 
+@pytest.mark.parametrize("kind", ["prescription_expiry", "eye_test_reminder", "frame_replacement"])
+def test_auto_generate_after_a_reschedule_does_not_raise_a_second_call(fu, monkeypatch, kind):
+    # A moved follow-up still answers for its original event date: Auto-generate
+    # must not insert a second pending follow-up back on that date.
+    from datetime import date as _date
+    client, coll, h = fu
+    sdb = fu_mod._get_db()
+    day = _date.today()  # the generator's own clock
+    coll.update_one({"follow_up_id": "FU-1"},
+                    {"$set": {"type": kind, "scheduled_date": day.isoformat()}})
+    if kind == "prescription_expiry":
+        sdb.seed("prescriptions", [{"customer_id": "C1", "store_id": STORE,
+                                    "issue_date": (day - timedelta(days=365)).isoformat()}])
+    elif kind == "eye_test_reminder":
+        sdb.seed("eye_tests", [{"customer_id": "C1", "store_id": STORE,
+                                "created_at": (day - timedelta(days=365)).isoformat()}])
+    else:
+        sdb.seed("orders", [{"order_id": "O1", "customer_id": "C1", "store_id": STORE,
+                             "created_at": (day - timedelta(days=730)).isoformat()}])
+    new =(ist_today() + timedelta(days=7)).isoformat()
+    for _ in range(2):  # moved twice: the first attempt still carries the event date
+        r = client.patch("/api/v1/follow-ups/FU-1/complete", headers=h,
+                         json={"outcome": "rescheduled", "notes": "", "next_date": new})
+        assert r.status_code == 200, r.text
+        new = (ist_today() + timedelta(days=9)).isoformat()
+    r = client.post(f"/api/v1/follow-ups/auto-generate?store_id={STORE}", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["generated_count"] == 0
+    assert len(list(coll.find({"customer_id": "C1", "type": kind}))) == 1
+
+
 def test_a_closed_follow_up_is_not_overwritten(fu):
     client, coll, h = fu
     client.patch("/api/v1/follow-ups/FU-1/complete", headers=h,

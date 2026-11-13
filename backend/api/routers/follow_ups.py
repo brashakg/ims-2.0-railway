@@ -198,6 +198,21 @@ def close_follow_up_update(status: str, outcome: str, notes: str, user_id, now_i
     }
 
 
+def _already_generated(collection, customer_id, fu_type: str, event_date: str) -> bool:
+    """THE dedupe for Auto-generate: a follow-up already exists for this event.
+
+    A Rescheduled follow-up moves ``scheduled_date`` (L1-F50) but keeps the
+    date it was raised for in ``event_date`` (set on the first move, never
+    rewritten), so it still answers for that event and is not raised twice."""
+    return collection.find_one(
+        {
+            "customer_id": customer_id,
+            "type": fu_type,
+            "$or": [{"scheduled_date": event_date}, {"event_date": event_date}],
+        }
+    ) is not None
+
+
 def _valid_future_date(raw: Optional[str], field: str) -> str:
     """A YYYY-MM-DD date that is today (IST) or later: the create door's own
     date policy, shared by Rescheduled. 422 otherwise."""
@@ -363,8 +378,11 @@ async def complete_follow_up(
         if not request.next_date:
             raise HTTPException(status_code=422, detail="Rescheduled needs the new date")
         next_date = _valid_future_date(request.next_date, "next_date")
+        # event_date: the date this follow-up was raised for, kept through every
+        # move so Auto-generate's dedupe still finds it (_already_generated).
+        event_date = follow_up.get("event_date") or _iso(follow_up.get("scheduled_date")) or ""
         update = {
-            "$set": {"scheduled_date": next_date, "status": "pending"},
+            "$set": {"scheduled_date": next_date, "status": "pending", "event_date": event_date},
             "$push": {
                 "attempts": outcome_attempt(
                     "rescheduled", request.notes, user_id, now_iso,
@@ -482,12 +500,8 @@ async def auto_generate_follow_ups(
 
                     if reminder_date >= today:
                         # Check if reminder already exists
-                        existing = follow_ups_collection.find_one(
-                            {
-                                "customer_id": order.get("customer_id"),
-                                "type": "frame_replacement",
-                                "scheduled_date": reminder_date.isoformat(),
-                            }
+                        existing = _already_generated(
+                            follow_ups_collection, order.get("customer_id"), "frame_replacement", reminder_date.isoformat()
                         )
 
                         if not existing:
@@ -533,12 +547,8 @@ async def auto_generate_follow_ups(
                     reminder_date = test_date + timedelta(days=365)  # 1 year
 
                     if reminder_date >= today:
-                        existing = follow_ups_collection.find_one(
-                            {
-                                "customer_id": test.get("customer_id"),
-                                "type": "eye_test_reminder",
-                                "scheduled_date": reminder_date.isoformat(),
-                            }
+                        existing = _already_generated(
+                            follow_ups_collection, test.get("customer_id"), "eye_test_reminder", reminder_date.isoformat()
                         )
 
                         if not existing:
@@ -573,12 +583,8 @@ async def auto_generate_follow_ups(
                     expiry_date = issue_date + timedelta(days=365)
 
                     if expiry_date >= today:
-                        existing = follow_ups_collection.find_one(
-                            {
-                                "customer_id": prescription.get("customer_id"),
-                                "type": "prescription_expiry",
-                                "scheduled_date": expiry_date.isoformat(),
-                            }
+                        existing = _already_generated(
+                            follow_ups_collection, prescription.get("customer_id"), "prescription_expiry", expiry_date.isoformat()
                         )
 
                         if not existing:
