@@ -54,6 +54,8 @@ export interface CompletedTest {
   customerPhone: string;
   customerId?: string;
   completedAt: string;
+  /** The exam's recorded binocular IPD (stored as a string, e.g. "62.0"). */
+  ipd?: string | number | null;
   rightEye: { sphere: number | null; cylinder: number | null; axis: number | null };
   leftEye: { sphere: number | null; cylinder: number | null; axis: number | null };
 }

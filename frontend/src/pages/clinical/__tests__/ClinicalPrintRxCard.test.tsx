@@ -79,7 +79,11 @@ function renderPage() {
 }
 
 /** Load the page with ONE completed test and open its printed Rx card. */
-async function printCardFor(right: Record<string, unknown>, left: Record<string, unknown>) {
+async function printCardFor(
+  right: Record<string, unknown>,
+  left: Record<string, unknown>,
+  extra: Record<string, unknown> = {},
+) {
   H.getTodayTests.mockResolvedValue({
     tests: [
       {
@@ -90,6 +94,7 @@ async function printCardFor(right: Record<string, unknown>, left: Record<string,
         completedAt: '2026-08-01T10:00:00.000Z',
         rightEye: right,
         leftEye: left,
+        ...extra,
       },
     ],
   });
@@ -175,6 +180,13 @@ describe('the printed card reflects what the eye test actually recorded', () => 
 
     expect(container.textContent).not.toContain('0mm');
     expect(container.textContent).not.toContain('Invalid Date');
+  }, SLOW);
+
+  it('prints the IPD the exam recorded (L2-CLIN-F02: was hard-coded null)', async () => {
+    const { container } = await printCardFor({ sphere: 0 }, { sphere: -1 }, { ipd: '62.0' });
+
+    expect(container.textContent).toContain('62mm');
+    expect(container.textContent).toContain('Asha Kumari');
   }, SLOW);
 });
 
