@@ -720,6 +720,41 @@ async def test_1409_p2_a_cancel_the_irp_took_but_the_order_did_not_save_converge
     assert _row(cancel_db, "orders", order_id="ORD-L3")["einvoice_cancelled_at"] == stored["einvoice_cancelled_at"]
 
 
+_IRP_TOKEN = {"Status": "0", "ErrorDetails": [{"ErrorCode": "1005", "ErrorMessage": "Invalid Token"}]}
+
+
+@pytest.mark.asyncio
+async def test_1409_p2_an_unrelated_refusal_between_presses_keeps_the_earlier_request(
+    monkeypatch, cancel_db
+):
+    """Reviewer's sequence: the IRP took the cancel but the order did not
+    save; the next press got an unrelated "no" (expired token). That "no"
+    says nothing about the EARLIER accepted request, so its record must stay
+    and the press after records CANCELLED once."""
+    order = _issued(cancel_db, order_id="ORD-L3")
+    posts = _cancel_irp(monkeypatch, {"Status": "1"}, _IRP_TOKEN, _IRP_ALREADY)
+    broken = _break_writes(monkeypatch, cancel_db, _cancel_write)
+
+    first = await einvoice.cancel_irn(cancel_db, order)
+    assert (first["status"], first["persisted"]) == ("CANCELLED", False)
+    broken["on"] = False
+
+    second = await einvoice.cancel_irn(cancel_db, order)
+    stored = _row(cancel_db, "orders", order_id="ORD-L3")
+    assert second["status"] == einvoice.STATUS_FAILED
+    assert stored["einvoice_status"] == "GENERATED"
+    assert stored["einvoice_cancel_pending"]["irn"] == "SYNTHETIC-IRN-NOT-VALID"
+
+    third = await einvoice.cancel_irn(cancel_db, order)
+    stored = _row(cancel_db, "orders", order_id="ORD-L3")
+    assert (third["status"], third["persisted"]) == ("CANCELLED", True)
+    assert stored["einvoice_status"] == "CANCELLED" and "einvoice_cancel_pending" not in stored
+
+    fourth = await einvoice.cancel_irn(cancel_db, order)
+    assert (fourth["status"], fourth["persisted"], len(posts)) == ("CANCELLED", True, 3)
+    assert _row(cancel_db, "orders", order_id="ORD-L3")["einvoice_cancelled_at"] == stored["einvoice_cancelled_at"]
+
+
 @pytest.mark.asyncio
 async def test_1409_p2_the_same_lost_save_on_an_invoice_id_only_record(monkeypatch, cancel_db):
     inv = _issued(cancel_db, "invoices", invoice_id="INV-L3-ONLY")

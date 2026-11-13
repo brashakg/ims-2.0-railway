@@ -924,8 +924,9 @@ async def cancel_irn(
     it (``einvoice_cancel_pending``) BEFORE the IRP is asked; an order that
     cannot take that record is not sent. So a cancel the IRP accepted but the
     order did not save is never silent: the identical retry gets the IRP's
-    "already cancelled" answer for an IRN IMS itself asked to cancel (a
-    request the IRP answered with a definite "no" is cleared) and records
+    "already cancelled" answer for an IRN IMS itself asked to cancel (only a
+    "no" to the request marked in the same call clears it; an earlier
+    press's request outlives a later unrelated "no") and records
     CANCELLED then, once; a later press answers from the stored order without
     asking the IRP again.
     """
@@ -1008,12 +1009,16 @@ async def cancel_irn(
     elif asked_before and _irp_says_already_cancelled(body):
         note = "The IRP says this IRN is already cancelled (IMS asked earlier); recorded now."
     else:
-        # A definite "no": this request is settled, so a later "already
-        # cancelled" is not taken as the answer to it.
-        try:
-            _set_on_order(db, order_id, {}, unset=("einvoice_cancel_pending",))
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[EINVOICE] cancel marker of %s not cleared: %s", order_id, exc)
+        # A "no" to the request marked in THIS call settles it, so a later
+        # "already cancelled" is not taken as the answer to it. A marker from
+        # an EARLIER press stays: that request may have been accepted (a save
+        # that failed, a timeout), and this "no" (e.g. an expired token) says
+        # nothing about it.
+        if not asked_before:
+            try:
+                _set_on_order(db, order_id, {}, unset=("einvoice_cancel_pending",))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[EINVOICE] cancel marker of %s not cleared: %s", order_id, exc)
         return failed(f"IRP cancel: unexpected response: {str(body)[:300]}")
 
     # ── Record it on the order; a save that did not happen is said so
