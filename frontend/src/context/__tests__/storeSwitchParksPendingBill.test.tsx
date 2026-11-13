@@ -47,7 +47,7 @@ const signIn = async () => {
 describe('a store switch with a pending bill', () => {
   it('parks the pending bill and clears the till before the switch', async () => {
     await signIn();
-    act(() => auth.setActiveStore('S2'));
+    await act(() => auth.setActiveStore('S2'));
     expect(parkIfPending).toHaveBeenCalledWith('u1');
     expect(resetTransaction).toHaveBeenCalledTimes(1);
   });
@@ -55,7 +55,7 @@ describe('a store switch with a pending bill', () => {
   it('a bill with nothing pending is left as it is', async () => {
     parkIfPending.mockReturnValueOnce('not-pending');
     await signIn();
-    act(() => auth.setActiveStore('S2'));
+    await act(() => auth.setActiveStore('S2'));
     expect(resetTransaction).not.toHaveBeenCalled();
   });
 });

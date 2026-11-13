@@ -2,7 +2,7 @@
 // IMS 2.0 - Authentication Context
 // ============================================================================
 
-import { createContext, useContext, useReducer, useEffect } from 'react';
+import { createContext, useContext, useReducer, useEffect, useRef } from 'react';
 import type { ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { User, AuthState, LoginCredentials, LoginResponse, UserRole } from '../types';
@@ -15,6 +15,8 @@ import { dropPaletteRecents } from '../services/api/signOutEvent';
 import { getSessionPolicy } from '../constants/sessionPolicy';
 import { LAST_ACTIVITY_KEY, storedSessionIdleExpired } from '../hooks/useIdleLogout';
 import { IDLE_LOGIN_PATH, autoParkForIdleLogout } from '../hooks/idleSignOut';
+// Own line: keeps clear of #1379's import added beside the one above.
+import { decodeJwtClaims, sameSession, syncCachedUserShops } from '../services/api/client';
 
 // ============================================================================
 // Types
@@ -36,7 +38,10 @@ interface AuthContextType extends AuthState {
    *  false and the app gate lifts without a full re-login. */
   refreshUser: () => Promise<void>;
   setActiveRole: (role: UserRole) => void;
-  setActiveStore: (storeId: string) => void;
+  /** Switch shop. Resolves true once the server confirmed it (screen, cache
+   *  and token now all on the new shop); false when refused or failed (all
+   *  three still on the old shop) or overtaken by a newer switch. */
+  setActiveStore: (storeId: string) => Promise<boolean>;
   hasPermission: (permission: string) => boolean;
   hasRole: (role: UserRole | UserRole[]) => boolean;
   canAccessStore: (storeId: string) => boolean;
@@ -126,6 +131,32 @@ function authReducer(state: AuthState, action: AuthAction): AuthState {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+/** The id of the person in the shared cache (ims_user), if readable. */
+function storedUserId(): string | undefined {
+  try {
+    return (JSON.parse(localStorage.getItem('ims_user') || 'null') as User | null)?.id;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The profile of the token stored NOW, or null once none is. The stored token
+ *  is the session: an answer (or refusal) to a token replaced while it travelled
+ *  -- another tab's shop switch, sign-out or sign-in -- is out of date, so it is
+ *  thrown away and the live token is asked instead (#1372 review). */
+async function currentProfile(): Promise<User | null> {
+  for (;;) {
+    const token = localStorage.getItem('ims_token');
+    if (!token) return null;
+    try {
+      const profile = await authApi.getProfile();
+      if (localStorage.getItem('ims_token') === token) return profile;
+    } catch (e) {
+      if (localStorage.getItem('ims_token') === token) throw e;
+    }
+  }
+}
+
 // ============================================================================
 // Provider Component
 // ============================================================================
@@ -137,6 +168,11 @@ interface AuthProviderProps {
 export function AuthProvider({ children }: AuthProviderProps) {
   const [state, dispatch] = useReducer(authReducer, initialState);
   const queryClient = useQueryClient();
+  // Latest store switch; an answer to an older one is stale (R41).
+  const switchSeq = useRef(0);
+  // The person and shop on THIS tab's screen, read by async/event handlers.
+  const userRef = useRef<User | null>(null);
+  useEffect(() => { userRef.current = state.user; }, [state.user]);
 
   // A token refresh re-reads the login's shops from the new token
   // (services/api/client syncCachedUserShops): follow it on screen at once.
@@ -211,35 +247,20 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
           // Try to verify token is still valid with API
           try {
-            const profile = await authApi.getProfile();
+            const profile = await currentProfile();
+            if (!profile) {
+              // Signed out in another tab while this one was loading.
+              dispatch({ type: 'LOGOUT' });
+              return;
+            }
 
-            // Restore client-side selections (activeStoreId + activeRole) from
-            // the cached user. The server's /auth/me returns active_store_id
-            // from the JWT — which defaults to storeIds[0] at LOGIN TIME and
-            // is NOT updated when the user picks a different store via the
-            // topbar dropdown (that's a pure client-side change persisted to
-            // localStorage). So on every browser refresh, the server hands
-            // back the original-login store, overwriting the user's pick.
-            // We must prefer the cached value over the server's "default"
-            // whenever the user still has access to it.
-            //
-            // First attempt (#278) only restored when !profile.activeStoreId,
-            // which failed because the server's default is always populated.
-            // Owner verified: F5 still reset to Bokaro (their first assigned
-            // store). This fix always overrides with the cached pick when
-            // it's still permitted.
+            // The shop is the server's: /auth/me answers with the token's
+            // active_store_id, which a store switch re-issues (R41), so an
+            // F5 keeps the pick. An older cache naming another shop (a switch
+            // that failed before R41) is set back to it, never trusted.
+            // Only the role pick is client-side and restored from the cache.
             try {
-              const cached = JSON.parse(userJson) as User;
-              const cachedStoreId = cached?.activeStoreId;
-              if (cachedStoreId) {
-                // The server's reach (switch-store, validate_store_access):
-                // only ADMIN / SUPERADMIN reach a shop they were not given.
-                const hasCrossStoreAccess = userSeesAllStores(profile.roles);
-                const isAssigned = (profile.storeIds || []).includes(cachedStoreId);
-                if (hasCrossStoreAccess || isAssigned) {
-                  profile.activeStoreId = cachedStoreId;
-                }
-              }
+              const cached = JSON.parse(localStorage.getItem('ims_user') || 'null') as User | null;
               const cachedRole = cached?.activeRole;
               if (cachedRole && (profile.roles || []).includes(cachedRole)) {
                 profile.activeRole = cachedRole;
@@ -264,7 +285,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
             dispatch({
               type: 'LOGIN_SUCCESS',
-              payload: { user: profile, token },
+              payload: { user: profile, token: localStorage.getItem('ims_token') ?? token },
             });
             return;
           } catch (apiError) {
@@ -308,6 +329,26 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
     initializeAuth();
   }, []);
+
+  // Another tab of the SAME person switched shop: the shared token now acts
+  // for that shop, so this tab shows it too and drops its shop data (#1372
+  // review). A different person or a sign-out is the sign-out listener's.
+  useEffect(() => {
+    const follow = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== 'ims_token' && e.key !== 'ims_user') return;
+      const me = userRef.current;
+      const token = localStorage.getItem('ims_token');
+      const claims = decodeJwtClaims(token);
+      if (!me || !token || !claims || claims.user_id !== me.id || storedUserId() !== me.id) return;
+      const shop = claims.active_store_id || '';
+      syncCachedUserShops(token); // the cache follows the token too
+      if (shop === me.activeStoreId) return;
+      dispatch({ type: 'UPDATE_USER', payload: { activeStoreId: shop, storeIds: Array.isArray(claims.store_ids) ? claims.store_ids : me.storeIds } });
+      void queryClient.resetQueries();
+    };
+    window.addEventListener('storage', follow);
+    return () => window.removeEventListener('storage', follow);
+  }, [queryClient]);
 
   // Login function
   const login = async (credentials: LoginCredentials): Promise<LoginResponse> => {
@@ -359,20 +400,26 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   // Logout function
   const logout = async () => {
+    const ending = localStorage.getItem('ims_token');
     try {
       await authApi.logout();
     } catch {
       // Ignore logout errors
     } finally {
-      localStorage.removeItem('ims_token');
-      localStorage.removeItem('ims_refresh_token');
-      localStorage.removeItem('ims_user');
-      localStorage.removeItem('ims_login_time');
-      localStorage.removeItem('ims_active_module');
+      // The idle sign-out does not wait for this answer, so the next person may
+      // already be signed in: their session is not the one being ended.
+      const now = localStorage.getItem('ims_token');
+      if (!now || sameSession(ending, now)) {
+        localStorage.removeItem('ims_token');
+        localStorage.removeItem('ims_refresh_token');
+        localStorage.removeItem('ims_user');
+        localStorage.removeItem('ims_login_time');
+        localStorage.removeItem('ims_active_module');
+        // Clear POS state to prevent data leaking between users
+        try { usePOSStore.getState().clearAllOnLogout(state.user?.id, state.user?.activeStoreId); } catch { /* ignore if store not ready */ }
+        dispatch({ type: 'LOGOUT' });
+      }
       dropPaletteRecents();
-      // Clear POS state to prevent data leaking between users
-      try { usePOSStore.getState().clearAllOnLogout(state.user?.id, state.user?.activeStoreId); } catch { /* ignore if store not ready */ }
-      dispatch({ type: 'LOGOUT' });
       // Every screen's cached server data goes too, so the next person on a
       // shared tablet is never shown the last person's (tasks or anything
       // else). Every sign-out path - the menu, idle, store picker, forced
@@ -382,19 +429,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
   };
 
   // Re-fetch the signed-in user from the server (e.g. after a forced password
-  // change) and merge into state + cache. Preserves the client-side active
-  // store / role picks, which the server's /auth/me default would otherwise
-  // overwrite (same reasoning as the mount path above).
+  // change) and merge into state + cache. The shop is the server's (the
+  // token's, as on mount); only the client-side role pick is preserved.
   const refreshUser = async () => {
-    const profile = await authApi.getProfile();
-    const current = state.user;
-    if (current?.activeStoreId) {
-      const hasCrossStoreAccess = userSeesAllStores(profile.roles);
-      const isAssigned = (profile.storeIds || []).includes(current.activeStoreId);
-      if (hasCrossStoreAccess || isAssigned) {
-        profile.activeStoreId = current.activeStoreId;
-      }
-    }
+    const profile = await currentProfile();
+    const current = userRef.current;
+    // Another person's token now: the sign-out listener takes this tab down.
+    if (!profile || profile.id !== current?.id) return;
     if (current?.activeRole && (profile.roles || []).includes(current.activeRole)) {
       profile.activeRole = current.activeRole;
     } else if (!profile.activeRole && profile.roles && profile.roles.length > 0) {
@@ -423,12 +464,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
   };
 
   // Set active store
-  const setActiveStore = (storeId: string) => {
+  const setActiveStore = async (storeId: string): Promise<boolean> => {
     // The server's switch-store rule: an assigned shop, or any shop for
-    // ADMIN / SUPERADMIN. Anything else would leave an optimistic shop on
-    // screen that every read then answers with a 403.
+    // ADMIN / SUPERADMIN.
     if (!(state.user?.storeIds?.includes(storeId) || userSeesAllStores(state.user?.roles))) {
-      return;
+      return false;
     }
 
     // A bill whose press is pending is parked under ITS store before the
@@ -440,56 +480,42 @@ export function AuthProvider({ children }: AuthProviderProps) {
       if (!reason) {
         // It could not be put aside: the switch is refused, the bill stays.
         window.alert('Could not put this bill aside - it may already be paid. It stays on the till; check Orders.');
-        return;
+        return false;
       }
       if (reason === 'parked') pos.resetTransaction('parked');
     } catch { /* never block a store switch */ }
 
-    // Optimistic local update for a snappy switch.
-    dispatch({ type: 'SET_ACTIVE_STORE', payload: storeId });
-    const userJson = localStorage.getItem('ims_user');
-    if (userJson) {
-      try {
-        const user = JSON.parse(userJson);
-        user.activeStoreId = storeId;
-        localStorage.setItem('ims_user', JSON.stringify(user));
-      } catch {
-        /* ignore malformed cache */
+    // QA F9 / R41: the token's active_store_id is what store-scoped endpoints
+    // act on, so the screen moves ONLY when the server has re-issued the token
+    // for the new shop. Until then (and if the switch fails) screen, cache and
+    // token all stay on the old shop. A newer switch makes an older answer
+    // stale: it is ignored, never applied over the newer choice.
+    const seq = ++switchSeq.current;
+    try {
+      const { access_token, active_store_id, sent_with } = await authApi.switchStore(storeId);
+      if (seq !== switchSeq.current || !access_token) return false;
+      // The answer is good only for the token that asked. Anything that moved
+      // it since -- sign-out, a sign-in, another tab's later shop choice, even
+      // a refresh, as the order can't be told -- wins: the switch is reported
+      // failed, the person picks again (#1372 review).
+      if (localStorage.getItem('ims_token') !== sent_with) return false;
+      const confirmed = active_store_id || storeId;
+      localStorage.setItem('ims_token', access_token);
+      dispatch({ type: 'SET_ACTIVE_STORE', payload: confirmed });
+      const userJson = localStorage.getItem('ims_user');
+      if (userJson) {
+        try {
+          const user = JSON.parse(userJson);
+          user.activeStoreId = confirmed;
+          localStorage.setItem('ims_user', JSON.stringify(user));
+        } catch {
+          /* ignore malformed cache */
+        }
       }
+      return true;
+    } catch {
+      return false;
     }
-
-    // QA F9: re-issue the JWT so the token's active_store_id matches the UI.
-    // The backend bakes active_store_id INTO the token and most store-scoped
-    // endpoints resolve the store from the token; flipping only client state
-    // left the token on the OLD store -> reads/writes could hit the wrong
-    // store in a multi-store chain. The request interceptor reads `ims_token`
-    // per request, so persisting the new token takes effect on the next call.
-    // Fire-and-forget (keeps the void signature); failures leave the optimistic
-    // state and re-sync on the next refresh/login.
-    authApi
-      .switchStore(storeId)
-      .then(({ access_token, active_store_id }) => {
-        if (access_token) {
-          localStorage.setItem('ims_token', access_token);
-        }
-        if (active_store_id && active_store_id !== storeId) {
-          // Server normalized the store — reconcile UI + cache to match.
-          dispatch({ type: 'SET_ACTIVE_STORE', payload: active_store_id });
-          const uj = localStorage.getItem('ims_user');
-          if (uj) {
-            try {
-              const u = JSON.parse(uj);
-              u.activeStoreId = active_store_id;
-              localStorage.setItem('ims_user', JSON.stringify(u));
-            } catch {
-              /* ignore */
-            }
-          }
-        }
-      })
-      .catch(() => {
-        /* non-fatal: optimistic state stands; backend 403s if no store access */
-      });
   };
 
   // Permission check based on role hierarchy

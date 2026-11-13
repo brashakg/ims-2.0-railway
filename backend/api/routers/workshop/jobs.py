@@ -19,18 +19,23 @@ from ...dependencies import (
     get_order_repository,
     get_audit_repository,
     validate_store_access,
-    can_access_store_scoped,
+    in_reach_or_404,
+    user_store_scope,
 )
 from ._shared import _FITTING_ROLES, _check_dc_hardlock, logger, router
 from ...utils.ist import now_ist
+from database.repositories.workshop_repository import end_job_if_order_cancelled, job_id_for_order
 from .models import FittingDetailsUpdate, WorkshopJobCreate, WorkshopJobUpdate
 from .helpers import (
     _assert_job_store_access,
+    _reachable_page,
     _stamp_job_actor_names,
     _verify_job_prescription,
     generate_job_number,
     job_to_frontend,
 )
+
+CANCELLED_ORDER_NO_JOB = "This order is cancelled, so it cannot go to the workshop."
 
 
 @router.get("/jobs/by-vendor/{vendor_id}")
@@ -54,19 +59,28 @@ async def list_jobs_by_vendor(
         return {"vendor_id": vendor_id, "jobs": [], "total": 0}
 
     filter_dict: dict = {"vendor_id": vendor_id}
+    # PR #1376 F1: the vendor queue is the same jobs the shop list scopes --
+    # a non-admin reads only its own shops' (none for a no-shop login).
+    is_cross, stores = user_store_scope(current_user)
+    if not is_cross:
+        filter_dict["store_id"] = {"$in": sorted(stores)}
     if not include_delivered:
         filter_dict["status"] = {"$nin": ["DELIVERED", "CANCELLED"]}
 
-    jobs = (
-        repo.find_many(filter_dict, skip=skip, limit=limit, sort=[("expected_date", 1)])
-        or []
+    jobs, total = _reachable_page(
+        repo,
+        filter_dict,
+        current_user,
+        sort=[("expected_date", 1), ("job_id", 1)],
+        skip=skip,
+        limit=limit,
     )
     _stamp_job_actor_names(jobs)
 
     return {
         "vendor_id": vendor_id,
         "jobs": [job_to_frontend(j, current_user) for j in jobs],
-        "total": len(jobs),
+        "total": total,
     }
 
 
@@ -92,14 +106,66 @@ async def list_jobs(
         if technician_id:
             filter_dict["technician_id"] = technician_id
 
-        jobs = repo.find_many(
-            filter_dict, skip=skip, limit=limit, sort=[("created_at", -1)]
+        jobs, total = _reachable_page(
+            repo,
+            filter_dict,
+            current_user,
+            sort=[("created_at", -1), ("job_id", 1)],
+            skip=skip,
+            limit=limit,
         )
         _stamp_job_actor_names(jobs)
         jobs_formatted = [job_to_frontend(j, current_user) for j in jobs]
-        return {"jobs": jobs_formatted, "total": len(jobs_formatted)}
+        return {"jobs": jobs_formatted, "total": total}
 
     return {"jobs": [], "total": 0}
+
+
+def _existing_job_answer(existing_jobs, order, order_id, order_repo, response, current_user):
+    """The answer when a job already covers this order.
+
+    PR #1376: every job already on the order must pass THE job rule (its shop
+    AND its order's shop) before this links or shows one -- a legacy job
+    stamped with another shop is refused (404), not repaired. Checked HERE so
+    both dedup reads of create_job (before the insert, and after an insert
+    refused by a row a failed first read hid) go through it.
+
+    WHICH job to return when more than one already exists. This is not
+    hypothetical: a read-only prod query found 1 of 4 live jobs is already a
+    duplicate pair, created before this dedup existed. The rule is deliberate,
+    because returning an arbitrary one would hand the client a job the ORDER
+    does not reference -- the exact harm being fixed:
+      1. the job order.workshop_job_id points at, when that pointer is set AND
+         still resolves to one of this order's jobs; else
+      2. the OLDEST job (find_by_order does not sort, so sort here -- Mongo
+         natural order is not a guarantee).
+    """
+    for on_order in existing_jobs:
+        _assert_job_store_access(on_order, current_user)
+    pointed_id = order.get("workshop_job_id") if isinstance(order, dict) else None
+    oldest = sorted(existing_jobs, key=lambda j: str(j.get("created_at") or ""))[0]
+    chosen = next((j for j in existing_jobs if j.get("job_id") == pointed_id), oldest)
+    # Backfill the reverse pointer when the order has none, so the order and
+    # the client agree on which job carries the Rx.
+    if order_repo is not None and isinstance(order, dict) and not pointed_id:
+        try:
+            order_repo.update(
+                order_id,
+                {
+                    "workshop_job_id": chosen.get("job_id"),
+                    "workshop_job_number": chosen.get("job_number"),
+                },
+            )
+        except Exception:  # noqa: BLE001 -- best effort
+            pass
+    response.status_code = 200
+    return {
+        "job_id": chosen.get("job_id"),
+        "job_number": chosen.get("job_number"),
+        "dc_hardlock_override": False,
+        "existing": True,
+        "message": "Workshop job already exists for this order",
+    }
 
 
 @router.post("/jobs", status_code=201)
@@ -120,9 +186,14 @@ async def create_job(
         # Verify order exists
         order = None
         if order_repo is not None:
-            order = order_repo.find_by_id(job.order_id)
-            if order is None:
-                raise HTTPException(status_code=404, detail="Order not found")
+            # L2-WS-F01: authorize the ORDER's shop before the dedup return,
+            # the reverse-pointer backfill and the create -- a missing order
+            # and another shop's (or an unattributed legacy) one get the same
+            # 404, so a store login can neither attach a job to a foreign
+            # order nor read its existing job back through the dedup.
+            order = in_reach_or_404(
+                order_repo.find_by_id(job.order_id), current_user, "Order not found"
+            )
 
         # ------------------------------------------------------------------
         # DEDUP: one order, one lab job. MUST come before every other check.
@@ -158,45 +229,12 @@ async def create_job(
             logger.warning("[WORKSHOP] create dedup lookup failed: %s", _dedup_exc)
             existing_jobs = []
         if existing_jobs:
-            # WHICH job to return when more than one already exists. This is not
-            # hypothetical: a read-only prod query found 1 of 4 live jobs is
-            # already a duplicate pair, created before this dedup existed. The
-            # rule is deliberate, because returning an arbitrary one would hand
-            # the client a job the ORDER does not reference -- the exact harm
-            # being fixed:
-            #   1. the job order.workshop_job_id points at, when that pointer is
-            #      set AND still resolves to one of this order's jobs; else
-            #   2. the OLDEST job (find_by_order does not sort, so sort here --
-            #      Mongo natural order is not a guarantee).
-            pointed_id = order.get("workshop_job_id") if isinstance(order, dict) else None
-            oldest = sorted(
-                existing_jobs, key=lambda j: str(j.get("created_at") or "")
-            )[0]
-            chosen = next(
-                (j for j in existing_jobs if j.get("job_id") == pointed_id),
-                oldest,
+            return _existing_job_answer(
+                existing_jobs, order, job.order_id, order_repo, response, current_user
             )
-            # Backfill the reverse pointer when the order has none, so the order
-            # and the client agree on which job carries the Rx.
-            if order_repo is not None and isinstance(order, dict) and not pointed_id:
-                try:
-                    order_repo.update(
-                        job.order_id,
-                        {
-                            "workshop_job_id": chosen.get("job_id"),
-                            "workshop_job_number": chosen.get("job_number"),
-                        },
-                    )
-                except Exception:  # noqa: BLE001 -- best effort
-                    pass
-            response.status_code = 200
-            return {
-                "job_id": chosen.get("job_id"),
-                "job_number": chosen.get("job_number"),
-                "dc_hardlock_override": False,
-                "existing": True,
-                "message": "Workshop job already exists for this order",
-            }
+
+        if (order or {}).get("status") == "CANCELLED":
+            raise HTTPException(status_code=409, detail=CANCELLED_ORDER_NO_JOB)
 
         # PATIENT SAFETY: the prescription_id stored on the job is what the bench
         # grinds -- verify it EXISTS, belongs to THIS order's customer, and is not
@@ -204,7 +242,10 @@ async def create_job(
         # canonical POS Rx gate's rules; see _verify_job_prescription.
         _verify_job_prescription(job.prescription_id, order, current_user)
 
-        store_id = current_user.get("active_store_id")
+        # The job belongs to the ORDER's shop (as the confirm safety net,
+        # orders._ensure_workshop_job_for_order, stamps it), not to whichever
+        # shop an admin / area manager has open in the top bar.
+        store_id = (order or {}).get("store_id") or current_user.get("active_store_id")
         created_at = utc_now_iso()
 
         # F9 -- LENS DC HARDLOCK. An external-lab lens (lens_status=ORDERED) may
@@ -227,6 +268,8 @@ async def create_job(
         )
 
         job_data = {
+            # One _id per order: a contender's insert is refused by Mongo.
+            "job_id": job_id_for_order(job.order_id),
             "job_number": generate_job_number(repo),
             "order_id": job.order_id,
             "store_id": store_id,
@@ -274,6 +317,9 @@ async def create_job(
                         )
                 except Exception:
                     pass
+            # A cancel that landed after the read above ends this job here.
+            if end_job_if_order_cancelled(order_repo, repo, job.order_id):
+                raise HTTPException(status_code=409, detail=CANCELLED_ORDER_NO_JOB)
             # Stamp the reverse pointer on the order so an order can find its
             # workshop job directly (the link was previously one-way: job ->
             # order only). Best-effort: a stamp failure never fails job create.
@@ -294,6 +340,13 @@ async def create_job(
                 "dc_hardlock_override": bool(hardlock.get("override_applied")),
                 "message": "Workshop job created",
             }
+
+        # create() answers None for a contender's row as for an outage.
+        existing_jobs = repo.find_by_order(job.order_id)
+        if existing_jobs:
+            return _existing_job_answer(
+                existing_jobs, order, job.order_id, order_repo, response, current_user
+            )
 
         raise HTTPException(status_code=500, detail="Failed to create workshop job")
 
@@ -354,8 +407,7 @@ async def get_job(job_id: str, current_user: dict = Depends(get_current_user)):
             # NEW-IDOR-by-id: a workshop job carries customer + medical Rx data;
             # existence-hide one whose store the caller can't access (cross-store
             # PII leak). Admins / area-managers pass.
-            if not can_access_store_scoped(job.get("store_id"), current_user):
-                raise HTTPException(status_code=404, detail="Workshop job not found")
+            _assert_job_store_access(job, current_user)
             _stamp_job_actor_names([job])
             return job_to_frontend(job, current_user)
         raise HTTPException(status_code=404, detail="Workshop job not found")
@@ -375,8 +427,7 @@ async def update_job(
         if existing is None:
             raise HTTPException(status_code=404, detail="Workshop job not found")
         # NEW-IDOR-by-id: don't let a store-scoped caller mutate another store's job.
-        if not can_access_store_scoped(existing.get("store_id"), current_user):
-            raise HTTPException(status_code=404, detail="Workshop job not found")
+        _assert_job_store_access(existing, current_user)
 
         # Bug fix: READY and QC_FAILED were missing from the immutable-status
         # guard. A job in READY or CANCELLED state must not have its details

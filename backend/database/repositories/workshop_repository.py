@@ -4,12 +4,51 @@ IMS 2.0 - Workshop Repository
 Workshop job data access operations
 """
 
-from api.utils.event_time import utc_event_iso, utc_now
+from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
+import uuid
 from typing import List, Optional, Dict, Any
 from datetime import datetime, date, timedelta
 from api.utils.ist import ist_today
 from api.utils.dates import iso_date_window
 from .base_repository import BaseRepository
+
+
+def job_id_for_order(order_id: str) -> str:
+    """The one job_id an order's lab job can carry. create() stores it as _id,
+    so two doors inserting for one order collide in Mongo itself -- whether or
+    not uniq_workshop_job_per_order built, which it cannot while legacy
+    duplicates exist."""
+    return str(uuid.uuid5(uuid.NAMESPACE_OID, f"workshop-job:{order_id}"))
+
+
+def end_jobs_of_cancelled_order(jobs, order_id: str, reason: Optional[str]) -> int:
+    """THE rule (PR #1264): a cancelled order's open job ends with it -- the lab
+    must not finish, nor the pickup scan hand over, glasses for an order that is
+    cancelled. A job already DELIVERED stays as the record of what left."""
+    res = jobs.update_many(
+        {"order_id": order_id, "status": {"$nin": ["DELIVERED", "CANCELLED"]}},
+        {"$set": {
+            "status": "CANCELLED",
+            "cancelled_with_order": True,
+            "cancellation_reason": reason,
+            "updated_at": utc_now_iso(),
+        }},
+    )
+    return int(getattr(res, "modified_count", 0) or 0)
+
+
+def end_job_if_order_cancelled(order_repo, wrepo, order_id: str) -> bool:
+    """The re-check every job insert owes: True when the order reads CANCELLED
+    now, its job ended. Job and order are different collections, so write-then-
+    read is the compare-and-set: the cancel writes the order and then sweeps the
+    jobs, a door writes the job and then reads the order, and at least one of
+    the two sees the other. A read or write that fails here is the hourly
+    repair's (repair_workshop_handoffs)."""
+    order = order_repo.find_by_id(order_id) if order_repo is not None else None
+    if (order or {}).get("status") != "CANCELLED":
+        return False
+    end_jobs_of_cancelled_order(wrepo.collection, order_id, order.get("cancellation_reason"))
+    return True
 
 
 class WorkshopJobRepository(BaseRepository):
@@ -27,7 +66,9 @@ class WorkshopJobRepository(BaseRepository):
         return self.find_one({"job_number": job_number})
 
     def find_by_order(self, order_id: str) -> List[Dict]:
-        return self.find_many({"order_id": order_id})
+        """Raises on a failed read: [] means "no job", and callers create one
+        on that answer."""
+        return [self._clean_id(d) for d in self.collection.find({"order_id": order_id})]
 
     def find_by_store(self, store_id: str, status: str = None) -> List[Dict]:
         # BUG-061: limit=0 -> full-store rollup (workshop dashboard KPIs sum/count
@@ -39,19 +80,27 @@ class WorkshopJobRepository(BaseRepository):
             filter_dict["status"] = status
         return self.find_many(filter_dict, sort=[("created_at", -1)], limit=0)
 
-    def find_pending(self, store_id: str = None) -> List[Dict]:
+    def find_reach_keys(self, filter_dict: Dict) -> List[Dict]:
+        """The id fields the store rule needs, of every job matching the filter."""
+        return list(
+            self.collection.find(
+                filter_dict, {"_id": 0, "job_id": 1, "order_id": 1, "store_id": 1}
+            )
+        )
+
+    def find_pending(self, store_id: str = None, limit: int = 100) -> List[Dict]:
         filter_dict = {"status": {"$in": ["PENDING", "IN_PROGRESS"]}}
         if store_id:
             filter_dict["store_id"] = store_id
-        return self.find_many(filter_dict, sort=[("expected_date", 1)])
+        return self.find_many(filter_dict, sort=[("expected_date", 1)], limit=limit)
 
-    def find_ready(self, store_id: str = None) -> List[Dict]:
+    def find_ready(self, store_id: str = None, limit: int = 100) -> List[Dict]:
         filter_dict = {"status": "READY"}
         if store_id:
             filter_dict["store_id"] = store_id
-        return self.find_many(filter_dict, sort=[("completed_at", -1)])
+        return self.find_many(filter_dict, sort=[("completed_at", -1)], limit=limit)
 
-    def find_overdue(self, store_id: str = None) -> List[Dict]:
+    def find_overdue(self, store_id: str = None, limit: int = 100) -> List[Dict]:
         # expected_date is a date-only ISO STRING ("2026-05-30", written by
         # create_job / update_job), so the bound is a string too, and it is
         # day-granular: a job due TODAY is not overdue until the IST day rolls
@@ -67,7 +116,7 @@ class WorkshopJobRepository(BaseRepository):
         }
         if store_id:
             filter_dict["store_id"] = store_id
-        return self.find_many(filter_dict, sort=[("expected_date", 1)])
+        return self.find_many(filter_dict, sort=[("expected_date", 1)], limit=limit)
 
     def update_status(
         self,
@@ -185,11 +234,14 @@ class WorkshopJobRepository(BaseRepository):
             return False
         return self.update_status(job_id, target_status, by_user)
 
-    def get_technician_workload(self, store_id: str) -> List[Dict]:
+    def get_technician_workload(
+        self, store_id: str, exclude_job_ids: Optional[List[str]] = None
+    ) -> List[Dict]:
         pipeline = [
             {
                 "$match": {
                     **({"store_id": store_id} if store_id else {}),
+                    **({"job_id": {"$nin": exclude_job_ids}} if exclude_job_ids else {}),
                     "status": {"$in": ["PENDING", "IN_PROGRESS"]},
                 }
             },

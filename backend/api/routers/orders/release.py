@@ -304,7 +304,9 @@ def _claim_order_status(
 ) -> bool:
     """Atomically move an order to `new_status` ONLY while its status is still
     one of `required_status`. Returns False when the precondition no longer
-    holds. `required_status` may be a single status or any collection of them.
+    holds, and when a write failed with its outcome unknown: False never says
+    the order did not move, so a caller that must know reads the stored order.
+    `required_status` may be a single status or any collection of them.
 
     THE PRECONDITION IS THE POINT. OrderRepository.update_status writes
     update_one({order_id}, ...) filtered on the id ALONE, so every door that
@@ -372,35 +374,35 @@ def _claim_order_status(
             # leave the unit SOLD; now that cancel releases it, it leaves a frame
             # in the customer's bag reading AVAILABLE.
             return doc is not None
-    # NON-ATOMIC FALLBACK -- only for a collection with no find_one_and_update.
-    # Real pymongo has it and so does MockCollection, so this is unreachable in
-    # production and in local no-Mongo mode alike; it exists for hand-rolled
-    # doubles. We still narrow it as far as the surface allows: a guarded
-    # update_one carrying the SAME status precondition, so the window is the
-    # read-modify-write of one statement rather than two round trips. Only when
-    # even that is missing do we fall back to a bare read-check.
+    # SECOND TRY -- the atomic claim raised (its write may have landed), or the
+    # collection has none. The same precondition rides this update_one, so a
+    # write that landed, or a cancel, simply fails to match it.
     existing = repo.find_by_id(order_id)
     if not existing or existing.get("status") not in wanted:
         return False
     if new_status == "DELIVERED" and existing.get("advance_refund_id"):
         return False
     guarded = getattr(coll, "update_one", None) if coll is not None else None
-    if callable(guarded):
-        try:
-            res = guarded(
-                {"order_id": order_id, "status": {"$in": wanted}, **_handover_guard(new_status)},
-                {"$set": payload, "$push": {"status_history": history_entry}},
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "[ORDERS] guarded %s fallback failed for %s: %s",
-                new_status,
-                order_id,
-                exc,
-            )
-        else:
-            return bool(getattr(res, "modified_count", 0))
-    return bool(repo.update_status(order_id, new_status, user_id))
+    if not callable(guarded):  # a hand-rolled double; real Mongo never gets here
+        return bool(repo.update_status(order_id, new_status, user_id))
+    try:
+        res = guarded(
+            {"order_id": order_id, "status": {"$in": wanted}, **_handover_guard(new_status)},
+            {"$set": payload, "$push": {"status_history": history_entry}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        # FAIL CLOSED (Codex PR-1387 round 4): a plain update_status here wrote
+        # over a cancel that landed between the two faults -- CONFIRMED, paid 0,
+        # balance 0, a pending job. The outcome is unknown, so the caller reads
+        # the stored bill or the staff member presses again; both are guarded.
+        logger.warning(
+            "[ORDERS] guarded %s claim failed for %s: %s",
+            new_status,
+            order_id,
+            exc,
+        )
+        return False
+    return bool(getattr(res, "modified_count", 0))
 
 
 # The statuses the counter cancel door may cancel: the staff transition table's

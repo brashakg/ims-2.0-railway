@@ -50,6 +50,9 @@ class FakeOrderRepo:
         self.updates.append((order_id, data))
         return True
 
+    def find_by_id(self, order_id):  # the safety net's re-read once the job stands
+        return {"order_id": order_id, "status": "CONFIRMED"}
+
 
 @pytest.fixture()
 def patched_repos(monkeypatch):
@@ -98,8 +101,9 @@ def test_idempotent_when_job_already_exists(patched_repos):
 
     wrepo, orepo = patched_repos
     # POS client already created the job (no reverse pointer yet on the order).
-    wrepo.jobs.append({"order_id": "ORD-2", "job_id": "JID-existing", "job_number": "WS-1"})
-    order = {"order_id": "ORD-2", "items": [{"item_type": "LENS"}]}
+    # PR #1376 round 4: the job and its order share a shop (the system rule).
+    wrepo.jobs.append({"order_id": "ORD-2", "job_id": "JID-existing", "job_number": "WS-1", "store_id": "BV-BOK-01"})
+    order = {"order_id": "ORD-2", "store_id": "BV-BOK-01", "items": [{"item_type": "LENS"}]}
     jid = _ensure_workshop_job_for_order(order, "user-1")
     assert jid == "JID-existing"
     assert len(wrepo.jobs) == 1  # NO duplicate created
@@ -111,8 +115,8 @@ def test_no_backfill_when_order_already_linked(patched_repos):
     from api.routers.orders import _ensure_workshop_job_for_order
 
     wrepo, orepo = patched_repos
-    wrepo.jobs.append({"order_id": "ORD-3", "job_id": "JID-x", "job_number": "WS-2"})
-    order = {"order_id": "ORD-3", "workshop_job_id": "JID-x", "items": [{"item_type": "LENS"}]}
+    wrepo.jobs.append({"order_id": "ORD-3", "job_id": "JID-x", "job_number": "WS-2", "store_id": "BV-BOK-01"})
+    order = {"order_id": "ORD-3", "store_id": "BV-BOK-01", "workshop_job_id": "JID-x", "items": [{"item_type": "LENS"}]}
     jid = _ensure_workshop_job_for_order(order, "user-1")
     assert jid == "JID-x"
     assert orepo.updates == []  # already linked -> no redundant write
