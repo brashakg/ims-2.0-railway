@@ -249,7 +249,7 @@ export interface SopTemplate {
   assignedUsers: string[];
   createdDate: string;
   lastUpdated: string;
-  steps: { id: string; stepNumber: number; instruction: string; warning?: string }[];
+  steps: { id: string; stepId?: string; stepNumber: number; instruction: string; warning?: string }[];
 }
 
 /**
@@ -282,6 +282,7 @@ export function useSopTemplates(storeId: string | undefined) {
         lastUpdated: t.updated_at?.slice(0, 10) || '',
         steps: (t.steps || []).map((s) => ({
           id: String(s.step_number),
+          stepId: s.step_id,
           stepNumber: s.step_number,
           instruction: s.instruction,
           warning: s.warning,

@@ -606,7 +606,7 @@ export const tasksApi = {
         category: string;
         frequency: string;
         estimated_time: number;
-        steps: Array<{ step_number: number; instruction: string; warning?: string }>;
+        steps: Array<{ step_id?: string; step_number: number; instruction: string; warning?: string }>;
         assigned_roles: string[];
         assigned_users: string[];
         store_id: string | null;
@@ -624,7 +624,7 @@ export const tasksApi = {
     category?: string;
     frequency?: string;
     estimated_time?: number;
-    steps?: Array<{ step_number: number; instruction: string; warning?: string }>;
+    steps?: Array<{ step_id?: string; step_number: number; instruction: string; warning?: string }>;
     assigned_roles?: string[];
     assigned_users?: string[];
     store_id?: string;
@@ -639,7 +639,7 @@ export const tasksApi = {
     category: string;
     frequency: string;
     estimated_time: number;
-    steps: Array<{ step_number: number; instruction: string; warning?: string }>;
+    steps: Array<{ step_id?: string; step_number: number; instruction: string; warning?: string }>;
     assigned_roles: string[];
     assigned_users: string[];
     is_active: boolean;

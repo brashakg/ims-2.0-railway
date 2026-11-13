@@ -9,12 +9,14 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Icon } from './Icon';
 import { notificationsApi, type AppNotification } from '../../services/api/notifications';
+import { formatDateIST, toDate } from '../../utils/datetime';
 
+// Audit R06: the bell reads a zone-less server instant as UTC, the same rule
+// as the full Notifications screen (toDate), not as the browser's local time.
 function relativeTime(iso?: string): string {
-  if (!iso) return '';
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return '';
-  const diff = Date.now() - t;
+  const at = toDate(iso);
+  if (!at) return '';
+  const diff = Date.now() - at.getTime();
   const m = Math.floor(diff / 60000);
   if (m < 1) return 'now';
   if (m < 60) return `${m}m ago`;
@@ -22,7 +24,7 @@ function relativeTime(iso?: string): string {
   if (h < 24) return `${h}h ago`;
   const d = Math.floor(h / 24);
   if (d < 7) return `${d}d ago`;
-  return new Date(iso).toLocaleDateString();
+  return formatDateIST(at);
 }
 
 const UNREAD = new Set(['PENDING', 'SENT', 'DELIVERED']);
@@ -33,6 +35,8 @@ export function NotificationBell() {
   const [items, setItems] = useState<AppNotification[]>([]);
   const [unread, setUnread] = useState(0);
   const [loading, setLoading] = useState(false);
+  // Audit R40: a failed read is "unavailable", never "No notifications".
+  const [failed, setFailed] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   const refreshCount = useCallback(async () => {
@@ -66,8 +70,10 @@ export function NotificationBell() {
       const res = await notificationsApi.list({ limit: 20 });
       setItems(res?.notifications || []);
       setUnread(res?.unread_count ?? 0);
+      setFailed(false);
     } catch {
-      setItems([]);
+      // Keep what was last loaded (shown as possibly out of date) and the count.
+      setFailed(true);
     } finally {
       setLoading(false);
     }
@@ -162,11 +168,21 @@ export function NotificationBell() {
           </div>
 
           <div style={{ maxHeight: 360, overflowY: 'auto' }}>
+            {failed && !loading && (
+              <div role="alert" style={{ padding: '10px 12px', fontSize: 12, color: 'var(--ink-2)', background: '#FFFBEB', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                <span>
+                  {items.length > 0
+                    ? "Couldn't refresh - showing what was last loaded."
+                    : "Couldn't load notifications."}
+                </span>
+                <button type="button" className="btn sm" onClick={loadList}>Retry</button>
+              </div>
+            )}
             {loading ? (
               <div style={{ padding: 20, textAlign: 'center', color: 'var(--ink-4)', fontSize: 12 }}>
                 Loading…
               </div>
-            ) : items.length === 0 ? (
+            ) : items.length === 0 && !failed ? (
               <div style={{ padding: 24, textAlign: 'center', color: 'var(--ink-4)', fontSize: 12 }}>
                 No notifications
               </div>

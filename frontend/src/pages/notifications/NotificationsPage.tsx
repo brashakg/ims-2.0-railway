@@ -43,6 +43,8 @@ export function NotificationsPage() {
   const toast = useToast();
   const [items, setItems] = useState<AppNotification[]>([]);
   const [loading, setLoading] = useState(true);
+  // Audit R40: a failed read is shown as unavailable, never as "0 unread".
+  const [failed, setFailed] = useState(false);
   const [filter, setFilter] = useState<Filter>('all');
   const [snoozeFor, setSnoozeFor] = useState<string | null>(null);
   const [customTime, setCustomTime] = useState('');
@@ -53,7 +55,9 @@ export function NotificationsPage() {
       // include_snoozed so the full screen shows snoozed items (labelled).
       const res = await notificationsApi.list({ includeSnoozed: true, limit: 100 });
       setItems(res.notifications || []);
+      setFailed(false);
     } catch {
+      setFailed(true); // keep what was last loaded
       toast.error('Failed to load notifications');
     } finally {
       setLoading(false);
@@ -90,7 +94,9 @@ export function NotificationsPage() {
           <h1 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
             <Bell className="w-5 h-5" /> Notifications
           </h1>
-          <p className="text-sm text-gray-500">{unreadCount} unread · snooze up to {MAX_SNOOZE}× each</p>
+          <p className="text-sm text-gray-500">
+            {failed && items.length === 0 ? 'Unread count unavailable' : `${unreadCount} unread`} · snooze up to {MAX_SNOOZE}× each
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <div className="flex rounded-lg border border-gray-200 overflow-hidden">
@@ -104,9 +110,19 @@ export function NotificationsPage() {
         </div>
       </div>
 
+      {failed && !loading && (
+        <div role="alert" className="card p-3 flex items-center justify-between gap-3 bg-amber-50 border border-amber-200 text-sm text-amber-800">
+          <span>
+            {items.length > 0
+              ? "Couldn't refresh notifications - showing what was last loaded."
+              : "Couldn't load notifications. Anything waiting for you is not shown here."}
+          </span>
+          <button type="button" onClick={load} className="btn-outline text-sm px-3 py-1">Retry</button>
+        </div>
+      )}
       {loading ? (
         <div className="flex items-center justify-center py-16"><Loader2 className="w-7 h-7 animate-spin text-bv-red-600" /></div>
-      ) : filtered.length === 0 ? (
+      ) : failed && items.length === 0 ? null : filtered.length === 0 ? (
         <div className="card p-12 text-center text-gray-500">
           <Bell className="w-10 h-10 mx-auto mb-2 opacity-40" />
           <p>{filter === 'unread' ? 'No unread notifications' : 'No notifications yet'}</p>

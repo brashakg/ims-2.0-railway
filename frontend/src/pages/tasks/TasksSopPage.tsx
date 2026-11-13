@@ -32,6 +32,7 @@ function toForm(sop: SopTemplate): SopTemplateForm {
     frequency: sop.frequency as SopTemplateForm['frequency'],
     estimated_time: sop.estimatedTime,
     steps: sop.steps.map((s) => ({
+      step_id: s.stepId,
       step_number: s.stepNumber,
       instruction: s.instruction,
       warning: s.warning,
