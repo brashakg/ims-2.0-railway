@@ -192,6 +192,8 @@ export default function FinanceDashboard() {
   const [budgets, setBudgets] = useState<BudgetData[]>([]);
   // Which month the plan is for, and its income target (not an allocation).
   const [budgetMeta, setBudgetMeta] = useState<BudgetMeta>({});
+  // The budget read FAILED: not the same as "no budget" (a total of Rs 0).
+  const [budgetError, setBudgetError] = useState(false);
   const [vendorPayments, setVendorPayments] = useState<VendorPaymentData[]>([]);
   const [pnlByStore, setPnlByStore] = useState<Array<{ store_id?: string; store_name?: string; entity_id?: string; revenue?: number; cogs?: number; expenses?: number; payroll?: number; net_profit?: number; net_margin?: number }>>([]);
   // Sortable per-store P&L. Default highest-revenue-first (mirrors the backend's
@@ -270,6 +272,7 @@ export default function FinanceDashboard() {
       setCashFlow(cf.status === 'fulfilled' ? mapCashFlow(cf.value) : []);
       setBudgets(bud.status === 'fulfilled' ? mapBudget(bud.value) : []);
       setBudgetMeta(bud.status === 'fulfilled' ? mapBudgetMeta(bud.value) : {});
+      setBudgetError(bud.status !== 'fulfilled');
       setVendorPayments(vend.status === 'fulfilled' ? mapVendorPayments(vend.value) : []);
       // A failed/absent call must NOT leave a stale "incomplete" banner up, and
       // must not invent one either — default false on anything but an explicit
@@ -685,7 +688,15 @@ export default function FinanceDashboard() {
                 scope="budget rows and totals"
                 className="mb-4"
               />
-              <BudgetPanel budgets={budgets} selectedYear={selectedYear} {...budgetMeta} />
+              {budgetError ? (
+                // Unreadable is not "Total Budget Rs 0" beside a saved plan.
+                <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900" data-testid="budget-unreadable">
+                  Could not load the budget. Nothing has changed. Please try again.
+                  <button type="button" className="btn sm ml-3" onClick={() => loadFinanceData()}>Try again</button>
+                </div>
+              ) : (
+                <BudgetPanel budgets={budgets} selectedYear={selectedYear} {...budgetMeta} />
+              )}
             </>
           )}
           {activeTab === 'vendor-payments' && canSeeWhatWePay && (

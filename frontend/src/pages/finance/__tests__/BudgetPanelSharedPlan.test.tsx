@@ -69,6 +69,23 @@ describe('Finance Dashboard - Budgets tab', () => {
     expect(screen.getByTestId('budget-revenue-target').textContent).toMatch(/2,500/);
     expect(screen.getByText(/November 2026/)).toBeInTheDocument();
   });
+
+  it('a FAILED budget read says so, never "Total Budget Rs 0", and recovers on retry', async () => {
+    // Every load fails (the dashboard may load more than once on mount).
+    fin.getBudget.mockRejectedValue(new Error('503'));
+    render(<ToastProvider><FinanceDashboard /></ToastProvider>);
+    await waitFor(() => expect(fin.getBudget).toHaveBeenCalled());
+    fireEvent.click(await screen.findByRole('button', { name: /budgets/i }));
+
+    expect((await screen.findByTestId('budget-unreadable')).textContent).toMatch(/Could not load the budget/);
+    expect(screen.queryByText('Total Budget')).not.toBeInTheDocument();
+
+    fin.getBudget.mockResolvedValue(SAVED_PLAN);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    const total = await screen.findByText('Total Budget');
+    expect(total.parentElement!.textContent).toMatch(/1,000/);
+    expect(screen.queryByTestId('budget-unreadable')).not.toBeInTheDocument();
+  });
 });
 
 describe('BudgetPanel', () => {
