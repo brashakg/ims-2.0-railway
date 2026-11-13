@@ -739,6 +739,97 @@ class TestD40BothDrawersLockedLinksTheLatest:
         assert _till(db, a)["blind_count_paisa"] == 100000
 
 
+def _reopen_older_drawer(db, *, a_rupees: int, b_rupees: int):
+    """Both drawers counted and locked, then the OLDER drawer A is reopened
+    (allowed: no other drawer is active). A is BLIND_SUBMITTED again -- already
+    counted, never recountable -- while the day's latest drawer B is LOCKED."""
+    a, b = _two_locked_drawers(db, a_rupees=a_rupees, b_rupees=b_rupees)
+    res = till.reopen_session(db, a, reason="recount the morning drawer", actor=MANAGER)
+    assert res["ok"] and res["session"]["status"] == till.STATUS_BLIND_SUBMITTED, res
+    return a, b
+
+
+class TestD40ReopenedOlderDrawerDoesNotOutrankTheLatest:
+    """Reviewer round 6: a REOPENED drawer is not 'the drawer still open'. It
+    was counted before its lock and blind_submit refuses to count it again, so
+    D40's reason does not apply. Only an uncounted (OPEN) drawer outranks the
+    day's latest drawer; otherwise the latest-opened drawer is acted on."""
+
+    def test_day_end_records_the_latest_drawer_not_the_reopened_one(self, db, day_end):
+        a, b = _reopen_older_drawer(db, a_rupees=1000, b_rupees=3000)
+
+        close = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
+
+        assert close["till_session_id"] == b
+        assert (close["closing_cash"], close["variance"]) == (3000.0, 0.0)
+        assert close["counted_from_shared_record"] is False
+        assert close["entered_closing_cash"] is None
+        assert close["till_drawers_on_day"] == 2
+        stored = _stored_close(db)
+        assert (stored["closing_cash"], stored["variance"]) == (3000.0, 0.0)
+        # Nothing on the till moved: A still reopened with its count, B locked.
+        ra, rb = _till(db, a), _till(db, b)
+        assert (ra["status"], ra["blind_count_paisa"]) == (till.STATUS_BLIND_SUBMITTED, 100000)
+        assert (rb["status"], rb["blind_count_paisa"]) == (till.STATUS_LOCKED, 300000)
+        assert len(list(db.get_collection("till_sessions").find({}))) == 2
+
+    def test_mirror_a_real_shortage_on_the_last_drawer_is_not_hidden(self, db, day_end):
+        a, b = _reopen_older_drawer(db, a_rupees=3000, b_rupees=1000)
+
+        close = day_end(closing_cash=1000.0, system_cash=3000.0)["close"]
+
+        assert close["till_session_id"] == b
+        assert (close["closing_cash"], close["variance"]) == (1000.0, -2000.0)
+
+    def test_cash_register_links_the_latest_drawer_not_the_reopened_one(
+        self, db, monkeypatch
+    ):
+        a, b = _reopen_older_drawer(db, a_rupees=1000, b_rupees=3000)
+
+        out = _cr_close_two_drawers(
+            db, monkeypatch,
+            denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+            closing_count_state="COUNTED",
+            note="d40 fixture - opening float not declared",
+        )
+
+        assert out["counted"] == 3000.0
+        stored = db.get_collection("cash_register_sessions").find_one({"_id": "CR-D40"})
+        assert stored["till_session_id"] == b
+        assert stored["till_drawers_on_day"] == 2
+
+    def test_both_doors_agree_across_the_reopen(self, db, day_end, monkeypatch):
+        """Day-End closes with both locked; A is then reopened; Cash Register
+        closes. Both records must name drawer B."""
+        a, b = _two_locked_drawers(db, a_rupees=1000, b_rupees=3000)
+        de = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
+        assert de["till_session_id"] == b
+        assert till.reopen_session(db, a, reason="recount", actor=MANAGER)["ok"]
+
+        out = _cr_close_two_drawers(
+            db, monkeypatch,
+            denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+            closing_count_state="COUNTED",
+            note="d40 fixture - opening float not declared",
+        )
+
+        assert out["counted"] == 3000.0 == de["closing_cash"]
+        stored = db.get_collection("cash_register_sessions").find_one({"_id": "CR-D40"})
+        assert stored["till_session_id"] == b
+
+    def test_control_a_single_reopened_drawer_is_still_the_one_linked(self, db):
+        """CONTROL: one drawer, reopened -> it is still the day's drawer."""
+        sid = _blind_count(db, rupees=1000, lock=True)
+        assert till.reopen_session(db, sid, reason="recount", actor=MANAGER)["ok"]
+        link = till.record_screen_close(
+            db, store_id=STORE, session_date=DATE, counted_paisa=300000, actor=MANAGER
+        )
+        assert link["ok"] and link["session_id"] == sid
+        assert link["already_counted"] is True
+        assert till.shared_counted_paisa(link) == 100000
+        assert link["drawers_on_day"] == 1
+
+
 def _real_till_db():
     """A throwaway database on a real MongoDB with the REAL till indexes, or
     skip. CI runs this against its mongo service; a PC without Mongo skips."""
@@ -825,6 +916,31 @@ def test_d40_two_locked_drawers_link_the_latest_on_real_mongo():
         assert till.shared_counted_paisa(link) == 300000
         assert link["drawers_on_day"] == 2
         assert real_db.get_collection("till_sessions").count_documents({}) == 2
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+def test_d40_reopened_older_drawer_does_not_outrank_the_latest_on_real_mongo():
+    """The round-6 state on a native PyMongo Database with the real partial
+    unique index: older drawer A reopened (BLIND_SUBMITTED), B LOCKED. The
+    close links B; A's count is never adopted."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        a, b = _reopen_older_drawer(real_db, a_rupees=1000, b_rupees=3000)
+
+        link = till.record_screen_close(
+            real_db, store_id=STORE, session_date=DATE,
+            counted_paisa=300000, actor=MANAGER,
+        )
+
+        assert link["ok"] and link["session_id"] == b, link
+        assert link["already_counted"] is True
+        assert till.shared_counted_paisa(link) == 300000
+        coll = real_db.get_collection("till_sessions")
+        assert coll.find_one({"_id": a})["status"] == till.STATUS_BLIND_SUBMITTED
+        assert coll.count_documents({}) == 2
     finally:
         client.drop_database(name)
         client.close()
