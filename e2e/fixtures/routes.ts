@@ -442,9 +442,6 @@ export const KNOWN_BROKEN: ReadonlyArray<{
   { path: '/incentive/settings', rule: 'too-wide', width: 360 },
   { path: '/incentive/settings', rule: 'too-wide', width: 390 },
   { path: '/incentive/settings', rule: 'too-wide', width: 430 },
-  { path: '/inventory/power-grid', rule: 'too-wide', width: 360 },
-  { path: '/inventory/power-grid', rule: 'too-wide', width: 390 },
-  { path: '/inventory/power-grid', rule: 'too-wide', width: 430 },
   { path: '/pos/footfall', rule: 'too-wide', width: 360 },
   { path: '/pos/footfall', rule: 'too-wide', width: 390 },
   { path: '/promotions', rule: 'too-wide', width: 360 },
@@ -453,10 +450,6 @@ export const KNOWN_BROKEN: ReadonlyArray<{
   { path: '/reports/promotions', rule: 'too-wide', width: 430 },
   { path: '/settings/business', rule: 'overlap', width: 360 },
   { path: '/settings/business', rule: 'overlap', width: 390 },
-  { path: '/walkouts', rule: 'too-wide', width: 360 },
-  { path: '/walkouts', rule: 'too-wide', width: 390 },
-  { path: '/walkouts', rule: 'too-wide', width: 430 },
-  { path: '/walkouts/dashboard', rule: 'too-wide', width: 360 },
 ];
 
 /** True when this screen is already known to break this way at this width.

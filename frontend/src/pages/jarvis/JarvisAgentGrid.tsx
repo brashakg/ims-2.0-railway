@@ -12,7 +12,7 @@ export function JarvisAgentGrid({ page }: { page: JarvisPageState }) {
   return (
     <>
       {/* ── Agent grid ── */}
-      <div className="eyebrow" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div id="jarvis-agents" className="eyebrow" style={{ marginBottom: 10, display: 'flex', alignItems: 'center', gap: 10, scrollMarginTop: 12 }}>
         <span>Agents · {enabledCount}/{agentsForGrid.length} enabled</span>
         {agentsErr && (
           <span className="chip err" style={{ marginLeft: 'auto' }}>Live fetch failed: {agentsErr}</span>

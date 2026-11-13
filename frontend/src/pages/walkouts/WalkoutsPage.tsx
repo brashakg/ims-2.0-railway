@@ -95,8 +95,9 @@ export function WalkoutsPage() {
 
   return (
     <div className="p-6">
-      <div className="flex items-center justify-between mb-6">
-        <div>
+      {/* L2-UI-F02: title and actions wrap on a phone, never widening the page. */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-6">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
             <UserX className="w-6 h-6 text-bv-red-500" />
             Walkouts
@@ -105,7 +106,7 @@ export function WalkoutsPage() {
             Customers who left without buying. {total} total in the current view.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Link
             to="/walkouts/dashboard"
             className="btn-secondary inline-flex items-center gap-2"

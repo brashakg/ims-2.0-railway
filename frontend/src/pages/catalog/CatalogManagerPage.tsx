@@ -328,6 +328,9 @@ export function CatalogManagerPage({
 
   // Counts row + review badge — the server's tally, one fetch.
   const [counts, setCounts] = useState<CatalogCounts | null>(null);
+  // UI-03: the figures could not be read (request failed, or the server
+  // answered without them) -- said in words, never four silent dashes.
+  const [countsFailed, setCountsFailed] = useState(false);
   const reviewCount = counts?.needs_review ?? 0;
   // Filter options with counts + the open-flag counts (red banner).
   const [facets, setFacets] = useState<CatalogFacets | null>(null);
@@ -483,10 +486,16 @@ export function CatalogManagerPage({
   const refreshCounts = useCallback(async () => {
     try {
       const res = await catalogApi.getOnlineSummary();
-      setCounts(res?.catalog ?? null);
+      if (res?.catalog) {
+        setCounts(res.catalog);
+        setCountsFailed(false);
+      } else {
+        setCountsFailed(true);
+      }
       void refreshNavCounts();
     } catch {
-      /* fail-soft — the row just goes stale */
+      // Keep any figures already shown; the notice says they are not current.
+      setCountsFailed(true);
     }
   }, []);
 
@@ -930,6 +939,21 @@ export function CatalogManagerPage({
       </div>
 
       {/* Counts row — the catalog's truth, from the server */}
+      {segment === 'catalog' && countsFailed && (
+        <div
+          role="status"
+          data-testid="catalog-counts-unavailable"
+          className="mb-2 flex flex-wrap items-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900"
+        >
+          {counts
+            ? 'The figures below could not be refreshed and may be out of date.'
+            : 'The catalogue figures could not be loaded, so the cards show dashes.'}{' '}
+          The product list is unaffected.
+          <button type="button" onClick={() => void refreshCounts()} className="font-medium underline">
+            Retry
+          </button>
+        </div>
+      )}
       {segment === 'catalog' && <CountsRow counts={counts} />}
 
       {/* Amber review banner — links to the queue's own address */}

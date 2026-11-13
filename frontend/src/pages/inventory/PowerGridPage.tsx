@@ -251,8 +251,10 @@ export default function PowerGridPage() {
 
   return (
     <div className="p-6 max-w-full">
-      <div className="flex items-center justify-between mb-3">
-        <div>
+      {/* L2-UI-F02: on a phone the title and its actions wrap onto lines of
+          their own instead of pushing the whole page sideways. */}
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+        <div className="min-w-0">
           <h1 className="text-xl font-semibold text-ink flex items-center gap-2">
             <Grid3x3 className="w-5 h-5 text-bv" /> Power Grid
             <span className="text-xs font-normal text-ink-4">v2 - lens catalog</span>
@@ -261,7 +263,7 @@ export default function PowerGridPage() {
             Filter by brand / index / coating / material / lens type to drill into a SPH x CYL matrix.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <select
             value={storeId}
             onChange={(e) => setStoreId(e.target.value)}

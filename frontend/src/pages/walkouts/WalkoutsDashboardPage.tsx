@@ -112,8 +112,8 @@ export function WalkoutsDashboardPage() {
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
           <Link to="/walkouts" className="inline-flex items-center gap-1 text-sm text-gray-600 hover:text-gray-900 mb-2">
             <ArrowLeft className="w-4 h-4" /> Back to walkouts
           </Link>
@@ -135,7 +135,7 @@ export function WalkoutsDashboardPage() {
             days.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {/* #949-4: on an ONLINE store (no door) the intake button is replaced
               by a visible note below rather than shown disabled with a tooltip. */}
           {canTopup && !isOnlineStoreActive && (
