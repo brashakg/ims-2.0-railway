@@ -446,12 +446,19 @@ async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) ->
             try:
                 res = call()  # the orders/* door is async, the others sync
                 res = (await res if inspect.isawaitable(res) else res) or {}
-                applied = (
-                    bool(res.get("status_synced")) if family == "orders"
+                # A status that landed never hides a customer link that did
+                # not: the mapper's own failure verdict wins (PR #1388).
+                unsettled = family == "orders" and (
+                    res.get("sync_failed")
+                    or ("customer link not repaired" if res.get("customer_link_failed") else None)
+                )
+                applied = not unsettled and (
+                    bool(res.get("status_synced") or res.get("customer_link_repaired"))
+                    if family == "orders"
                     else res.get("status") in _SWEEP_OK[family]
                 )
                 if not applied and (res.get("status"), res.get("reason")) not in _SWEEP_SETTLED:
-                    detail = res.get("reason") or res.get("error") or ""
+                    detail = unsettled or res.get("reason") or res.get("error") or ""
                     error = f"{topic}:{res.get('status')}:{detail}".rstrip(":")
             except Exception as e:  # noqa: BLE001 - one handler never aborts the order
                 error = f"{topic}:{type(e).__name__}: {e}"
@@ -523,6 +530,10 @@ async def _sweep_booked_order(db, order, raw, existing, sid: str, live: bool) ->
                 if check and (check["status"], check["shopify_total"]) != (
                     stored.get("status"), stored.get("shopify_total")
                 ):
+                    topic = "orders/updated"
+                # A customer link that failed at booking: the mapper's replay
+                # repairs it, with no other fact to wait for.
+                elif existing.get("customer_link_failed"):
                     topic = "orders/updated"
             if topic:
                 res = await feed(topic, raw, lambda: map_routed_order(order, db, webhook_id=None, topic=topic))
