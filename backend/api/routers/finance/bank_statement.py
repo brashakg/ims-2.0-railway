@@ -151,6 +151,73 @@ def _parse_bank_csv(content: str) -> List[dict]:
     return rows
 
 
+# Order payment tenders that land in the bank as their own credit (cash goes
+# to the drawer; store credit, vouchers, loyalty and pay-later are not money
+# received; a marketplace payout settles outside IMS in one lump).
+_BANK_TENDERS = ("UPI", "CARD", "BANK_TRANSFER")
+_DEAD_LEG_STATUSES = ("VOID", "VOIDED", "REVERSED", "FAILED", "REFUNDED", "CANCELLED")
+_LEG_DATE_FIELDS = ("received_at", "recorded_at", "paid_at", "created_at", "payment_date")
+
+
+def bank_receipt_legs(db, min_date: str, max_date: str, store_id: Optional[str]) -> List[dict]:
+    """The money an order actually RECEIVED into the bank, one row per
+    payment leg (audit L3-22): ``{receipt_id, order_id, amount, receipt_date,
+    reference}``, the leg's own amount on the leg's own IST day.
+
+    The matcher used to read whole orders: their grand_total (so a part-paid
+    Rs 1,000 invoice "matched" a Rs 1,000 credit that was never received while
+    the Rs 100 really received matched nothing) and their created_at compared
+    as a STRING (so every current BSON-dated order was skipped). The window is
+    widened by the matcher's 3-day tolerance on both sides."""
+    from datetime import timedelta
+    from ...services.tender_routing import canonicalize_tender
+    from ...utils.event_time import parse_event_utc_naive
+    from ...utils.ist import ist_date_str, ist_day_start_utc
+
+    lo_day = (datetime.fromisoformat(min_date) - timedelta(days=3)).date()
+    hi_day = (datetime.fromisoformat(max_date) + timedelta(days=4)).date()
+    lo_dt, hi_dt = ist_day_start_utc(lo_day), ist_day_start_utc(hi_day)
+    lo_s, hi_s = (lo_dt - timedelta(days=1)).date().isoformat(), (hi_dt + timedelta(days=1)).date().isoformat()
+    in_window = [
+        {f: {"$gte": v_lo, "$lt": v_hi}}
+        for f in _LEG_DATE_FIELDS
+        for v_lo, v_hi in ((lo_dt, hi_dt), (lo_s, hi_s))
+    ]
+    query = {"payments": {"$elemMatch": {"$or": in_window}}}
+    if store_id:
+        query["store_id"] = store_id
+    out: List[dict] = []
+    for o in db.get_collection("orders").find(
+        query, {"_id": 0, "order_id": 1, "order_number": 1, "payments": 1}
+    ):
+        for i, leg in enumerate(o.get("payments") or []):
+            if not isinstance(leg, dict):
+                continue
+            if canonicalize_tender(leg.get("method"), leg.get("mode")) not in _BANK_TENDERS:
+                continue
+            if str(leg.get("status") or "").upper() in _DEAD_LEG_STATUSES or leg.get("settled_outside_ims"):
+                continue
+            when = next(
+                (parse_event_utc_naive(leg.get(f)) for f in _LEG_DATE_FIELDS if leg.get(f)), None
+            )
+            if when is None or not (lo_dt <= when < hi_dt):
+                continue
+            try:
+                amount = round(float(leg.get("amount") or 0), 2)
+            except (TypeError, ValueError):
+                continue
+            if amount <= 0:
+                continue
+            out.append({
+                "receipt_id": leg.get("payment_id") or f"{o.get('order_id')}:{i}",
+                "order_id": o.get("order_id"),
+                "amount": amount,
+                "receipt_date": ist_date_str(when),
+                "reference": leg.get("reference") or o.get("order_number") or o.get("order_id") or "",
+            })
+    return out
+
+
 def _auto_match_statement(
     statement_rows: List[dict],
     receipts: List[dict],
@@ -318,29 +385,7 @@ async def import_bank_statement(
     payments: List[dict] = []
     if db is not None:
         try:
-            # Order receipts (payments against orders): look in orders where
-            # payment_status is PAID, using created_at within the statement window.
-            receipts = list(
-                db.get_collection("orders").find(
-                    {
-                        "payment_status": {
-                            "$in": ["PAID", "paid", "PARTIAL", "partial"]
-                        },
-                        "created_at": {
-                            "$gte": min_date,
-                            "$lte": max_date + "T23:59:59",
-                        },
-                        **({"store_id": effective_store} if effective_store else {}),
-                    },
-                    {
-                        "order_id": 1,
-                        "grand_total": 1,
-                        "total_amount": 1,
-                        "created_at": 1,
-                        "_id": 0,
-                    },
-                )
-            )
+            receipts = bank_receipt_legs(db, min_date, max_date, effective_store)
         except Exception:
             pass
         try:
