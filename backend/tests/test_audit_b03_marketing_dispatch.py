@@ -753,6 +753,29 @@ async def test_a_leader_that_lost_the_lock_to_another_worker_stands_down(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_a_worker_that_stood_down_leads_again_once_the_lock_is_free(monkeypatch):
+    """Recovery after a stand-down: when the other worker's lock goes away,
+    the waiting worker takes the lock itself and schedules again (it does not
+    stay idle for good, and it never runs while the other one holds it)."""
+    kv = {}
+    sched = await _leader_with_job(monkeypatch, kv)
+    try:
+        monkeypatch.setattr(scheduler_mod, "SCHEDULER_LEADER_RETRY", 0.02)
+        kv[scheduler_mod.SCHEDULER_LEADER_KEY] = "another-worker"
+        await asyncio.sleep(0.2)
+        assert sched._is_leader is False and sched._running is False
+        assert kv[scheduler_mod.SCHEDULER_LEADER_KEY] == "another-worker"
+
+        del kv[scheduler_mod.SCHEDULER_LEADER_KEY]  # the other worker exited
+        await asyncio.sleep(0.3)
+
+        assert sched._is_leader is True and sched._running is True
+        assert kv[scheduler_mod.SCHEDULER_LEADER_KEY] == sched._instance_id
+    finally:
+        await sched.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_a_leader_whose_lock_lapsed_unclaimed_retakes_it(monkeypatch):
     """The key vanished (Redis restarted) and nobody took it: the leader
     re-takes it atomically and keeps its jobs."""
