@@ -88,8 +88,12 @@ export const marketingApi = {
     const response = await api.post('/marketing/nps-response', data);
     return response.data;
   },
-  getNpsDashboard: async (storeId?: string) => {
-    const response = await api.get('/marketing/nps-dashboard', { params: { store_id: storeId } });
+  // customerId narrows the whole dashboard to one customer (Customer 360's
+  // last score), so it is not limited to the shop's latest twenty responses.
+  getNpsDashboard: async (storeId?: string, customerId?: string) => {
+    const response = await api.get('/marketing/nps-dashboard', {
+      params: { store_id: storeId, ...(customerId ? { customer_id: customerId } : {}) },
+    });
     return response.data;
   },
 

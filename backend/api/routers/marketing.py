@@ -1044,10 +1044,20 @@ async def submit_nps_response(
 @router.get("/nps-dashboard")
 async def get_nps_dashboard(
     store_id: Optional[str] = Query(None),
+    customer_id: Optional[str] = Query(
+        None, description="Only this customer's surveys (Customer 360's last score)"
+    ),
     current_user: dict = Depends(get_current_user),
 ):
-    """Get NPS dashboard data"""
+    """NPS dashboard for a shop (optionally one customer of it).
+
+    L1-F51: the summary AND the score distribution are counted over the SAME
+    population -- every survey in scope, uncapped (a count and a $group, not a
+    200-row read). Only the verbatim ``responses`` list is the latest twenty.
+    A response is a survey whose score is 0-10.
+    """
     active_store = validate_store_access(store_id, current_user) or current_user.get("active_store_id", "")
+    empty_dist = {str(n): 0 for n in range(11)}
     db = _get_db()
     if db is None:
         return {
@@ -1056,26 +1066,35 @@ async def get_nps_dashboard(
             "passives": 0,
             "detractors": 0,
             "response_rate": 0,
+            "score_distribution": empty_dist,
             "responses": [],
         }
 
     coll = db.get_collection("nps_responses")
-    all_surveys = list(
-        coll.find({"store_id": active_store}).sort("created_at", -1).limit(200)
-    )
+    scope = {"store_id": active_store}
+    if customer_id:
+        scope["customer_id"] = customer_id
+    answered = {**scope, "score": {"$ne": None}}
 
-    responded = [s for s in all_surveys if s.get("score") is not None]
-    scores = [s["score"] for s in responded]
+    total_surveys = coll.count_documents(scope)
+    dist = dict(empty_dist)
+    for row in coll.aggregate([{"$match": answered}, {"$group": {"_id": "$score", "n": {"$sum": 1}}}]):
+        try:
+            score = int(row.get("_id"))
+        except (TypeError, ValueError):
+            continue
+        if 0 <= score <= 10 and float(row.get("_id")) == score:
+            dist[str(score)] += int(row.get("n") or 0)
 
-    promoters = len([s for s in scores if s >= 9])
-    passives = len([s for s in scores if 7 <= s <= 8])
-    detractors = len([s for s in scores if s <= 6])
-    avg_score = round(sum(scores) / len(scores), 1) if scores else 0
-    response_rate = (
-        round(len(responded) / len(all_surveys) * 100, 1) if all_surveys else 0
-    )
+    total_responses = sum(dist.values())
+    promoters = dist["9"] + dist["10"]
+    passives = dist["7"] + dist["8"]
+    detractors = total_responses - promoters - passives
+    score_sum = sum(int(k) * v for k, v in dist.items())
+    avg_score = round(score_sum / total_responses, 1) if total_responses else 0
+    response_rate = round(total_responses / total_surveys * 100, 1) if total_surveys else 0
 
-    recent = responded[:20]
+    recent = list(coll.find(answered).sort("created_at", -1).limit(20))
     for r in recent:
         r.pop("_id", None)
 
@@ -1085,13 +1104,14 @@ async def get_nps_dashboard(
         "passives": passives,
         "detractors": detractors,
         "response_rate": response_rate,
-        "total_surveys": len(all_surveys),
-        "total_responses": len(responded),
+        "total_surveys": total_surveys,
+        "total_responses": total_responses,
         "nps_score": (
-            round(((promoters - detractors) / len(responded) * 100), 1)
-            if responded
+            round(((promoters - detractors) / total_responses * 100), 1)
+            if total_responses
             else 0
         ),
+        "score_distribution": dist,
         "responses": recent,
     }
 
