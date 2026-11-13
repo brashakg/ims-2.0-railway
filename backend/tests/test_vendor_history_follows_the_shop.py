@@ -29,6 +29,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 from api.dependencies import NO_SHOP_DETAIL  # noqa: E402
 from api.routers import vendors  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from api.routers.workshop import helpers as workshop_helpers  # noqa: E402
+from database.repositories.order_repository import OrderRepository  # noqa: E402
 
 DHN, PUN = "BV-DHN-01", "WO-PUN-01"
 
@@ -60,9 +62,12 @@ def call(monkeypatch):
         "status": "ACCEPTED", "created_at": now, "total_received": 2,
         "total_accepted": 2,
     })
-    db["workshop_jobs"].insert_one({"job_id": "J-D", "vendor_id": "V1",
+    db["workshop_jobs"].insert_one({"job_id": "J-D", "vendor_id": "V1", "order_id": "O-D",
                                     "store_id": DHN, "qc_passed": True})
+    db["orders"].insert_one({"order_id": "O-D", "store_id": DHN})
     monkeypatch.setattr(vendors, "_get_db", lambda: db)
+    monkeypatch.setattr(workshop_helpers, "get_order_repository",
+                        lambda: OrderRepository(db["orders"]))
     monkeypatch.setattr(vendors, "get_vendor_repository", lambda: _VendorRepo())
     app = FastAPI()
     app.include_router(vendors.router, prefix="/vendors")
@@ -78,6 +83,7 @@ def call(monkeypatch):
         who["user"] = user
         return client.get(path, params=params)
 
+    _call.db = db
     return _call
 
 
@@ -141,3 +147,32 @@ def test_a_named_shop_from_a_login_with_no_shop_is_refused(call, path):
     assert r.json()["detail"] == NO_SHOP_DETAIL
     r = call(_user("STORE_MANAGER", [PUN]), path, store_id=DHN)
     assert r.status_code == 403
+
+
+# PR #1376 round 3: the workshop QC signal passes THE job rule (job shop AND
+# its order's shop). Codex repro: a job stamped AUDTA on an AUDTB order, the
+# only QC record of a vendor, gave the AUDTA-only manager qc_sample_size=1 /
+# qc_pass_rate=0 while GET of that job was 404 to him.
+
+
+def _mismatched_qc(db, order_shop):
+    db["workshop_jobs"].insert_one({"job_id": "J-X", "vendor_id": "V2", "order_id": "O-X",
+                                    "store_id": DHN, "qc_passed": False,
+                                    "qc_history": [{"passed": False}]})
+    if order_shop:
+        db["orders"].insert_one({"order_id": "O-X", "store_id": order_shop})
+
+
+@pytest.mark.parametrize("order_shop", (PUN, None), ids=("other-shop-order", "missing-order"))
+def test_a_job_the_manager_cannot_open_is_not_in_his_qc(call, order_shop):
+    _mismatched_qc(call.db, order_shop)
+    body = call(_user("STORE_MANAGER", [DHN]), "/vendors/V2/performance").json()
+    assert body["qc_sample_size"] == 0 and body["qc_pass_rate"] is None, body
+
+
+@pytest.mark.parametrize("user", (_user("AREA_MANAGER", [DHN, PUN]), _user("ADMIN")),
+                         ids=lambda u: u["roles"][0])
+def test_area_manager_of_both_shops_and_hq_still_count_it(call, user):
+    _mismatched_qc(call.db, PUN)
+    body = call(user, "/vendors/V2/performance", store_id=DHN).json()
+    assert body["qc_sample_size"] == 1 and body["qc_pass_rate"] == 0.0, body

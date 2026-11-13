@@ -119,6 +119,10 @@ class FakeOrderRepo:
             return dict(self._order)
         return None
 
+    def ids_in_stores(self, order_ids, store_ids):
+        o = self._order or {}
+        return {o.get("order_id")} & set(order_ids) if o.get("store_id") in store_ids else set()
+
 
 class RecordingApprovalEngine:
     """Stands in for services.approvals.ApprovalEngine. Configured per-test to
@@ -274,8 +278,14 @@ def test_patch_delivered_skips_gate_when_order_already_delivered(monkeypatch):
 
 def test_patch_delivered_failsoft_when_order_unresolvable(monkeypatch):
     """Infrastructure/data fail-soft: no linked order found -> the QC-cleared
-    delivery proceeds (logged), matching assert_linked_job_qc_cleared."""
+    delivery proceeds (logged) for HQ, matching assert_linked_job_qc_cleared.
+    A store login cannot act on such a job at all (PR #1376 F3: a job whose
+    order does not resolve has no authorizable shop) -- 404, nothing written."""
     client, jrepo = _patch_client(monkeypatch, _job(), None)
+    resp = client.patch("/workshop/jobs/J1/status", json={"status": "DELIVERED"})
+    assert resp.status_code == 404, resp.text
+    assert jrepo.status_writes == []
+    client, jrepo = _patch_client(monkeypatch, _job(), None, roles=("ADMIN",))
     resp = client.patch("/workshop/jobs/J1/status", json={"status": "DELIVERED"})
     assert resp.status_code == 200, resp.text
     assert jrepo.status_writes == ["DELIVERED"]

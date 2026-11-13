@@ -57,13 +57,13 @@ def _order_needs_fitting(order: dict) -> bool:
 
 
 def _ensure_workshop_job_for_order(
-    order: dict, by_user: Optional[str]
+    order: dict, by_user: Optional[str], current_user: Optional[dict] = None
 ) -> Optional[str]:
     """ensure_workshop_job for a door that must not fail on it: a workshop-job
     hiccup never blocks confirming a paid order. A failure here is finished by
     repair_workshop_handoffs. Returns the job_id, else None."""
     try:
-        return ensure_workshop_job(order, by_user)
+        return ensure_workshop_job(order, by_user, current_user=current_user)
     except Exception as e:  # never block a confirm
         logger.warning(
             "[ORDERS] workshop auto-link skipped for %s: %s", order.get("order_id"), e
@@ -71,8 +71,22 @@ def _ensure_workshop_job_for_order(
         return None
 
 
+def _jobs_linkable(jobs, order: dict, current_user: Optional[dict]) -> bool:
+    """PR #1376 round 4: THE job rule before the handoff shows or links a job
+    already on the order. A door's caller must reach EVERY one of them
+    (workshop.helpers._jobs_in_reach, as POST /workshop/jobs checks); a system
+    actor (repair, Razorpay reconcile) only a job of its order's own shop. A
+    legacy mismatch is left as it stands: not shown, not linked, not restamped."""
+    if current_user is not None:
+        from ..workshop.helpers import _jobs_in_reach
+
+        return len(_jobs_in_reach(jobs, current_user)) == len(jobs)
+    shop = order.get("store_id")
+    return bool(shop) and all(j.get("store_id") == shop for j in jobs)
+
+
 def ensure_workshop_job(
-    order: dict, by_user: Optional[str], wrepo=None, order_repo=None
+    order: dict, by_user: Optional[str], wrepo=None, order_repo=None, current_user=None
 ) -> Optional[str]:
     """Idempotently ensure a CONFIRMED fitting order has a workshop/lab job, and
     that the order carries the reverse `workshop_job_id` pointer.
@@ -87,6 +101,8 @@ def ensure_workshop_job(
     read again once the job stands, and its job ends with it. RAISES when it
     cannot say the job and its pointer are stored, so a caller with a retry
     keeps retrying. `wrepo` / `order_repo` default to the global repositories.
+    `current_user` is the door's caller (None for a system actor): a job already
+    on the order that fails _jobs_linkable answers None and is never linked.
     """
     if not _order_needs_fitting(order):
         return None
@@ -128,6 +144,8 @@ def ensure_workshop_job(
 
     existing = wrepo.find_by_order(order_id)
     if existing:
+        if not _jobs_linkable(existing, order, current_user):
+            return None
         # Backfill the reverse pointer if the client created the job but never
         # stamped it back onto the order.
         if order.get("workshop_job_id"):
@@ -202,6 +220,8 @@ def ensure_workshop_job(
         stored = wrepo.find_by_order(order_id)
         if not stored:
             raise RuntimeError(f"workshop job not stored for order {order_id}")
+        if not _jobs_linkable(stored, order, current_user):
+            return None
         created = stored[0]
     return settle(created)
 
@@ -219,7 +239,7 @@ def _confirmed_at_a_door(order: dict) -> bool:
 
 
 def confirm_and_hand_off(
-    repo, order_id: str, by_user: Optional[str], hand_off=_ensure_workshop_job_for_order
+    repo, order_id: str, by_user: Optional[str], hand_off=None, current_user=None
 ) -> Tuple[dict, Optional[str]]:
     """THE lifecycle step of every confirm door: a DRAFT bill becomes CONFIRMED
     and a fitting bill reaches the lab, whichever worker wins the status.
@@ -231,7 +251,8 @@ def confirm_and_hand_off(
     None for a failed read, and None must not pass as 'no longer DRAFT'); a
     DRAFT holding a tender comes back through repair_workshop_handoffs.
     Returns (stored bill, job_id). A bill another door moved on, or cancelled,
-    is left standing and gets no job.
+    is left standing and gets no job. A staff door passes its `current_user`
+    so the default handoff links only a job that caller reaches.
     """
     from .release import _claim_order_status
 
@@ -245,6 +266,8 @@ def confirm_and_hand_off(
         raise RuntimeError(f"order {order_id} took its payment but is still DRAFT")
     if not _confirmed_at_a_door(order):
         return order, None
+    if hand_off is None:
+        return order, _ensure_workshop_job_for_order(order, by_user, current_user)
     return order, hand_off(order, by_user)
 
 
