@@ -173,3 +173,99 @@ describe('TopNav group dropdowns (tap/click)', () => {
     expect(screen.queryByRole('menu')).not.toBeInTheDocument();
   });
 });
+
+// R11 (audit): ArrowDown on a focused group trigger threw "Cannot read
+// properties of null (reading 'parentElement')" because the frame callback
+// read React's event.currentTarget after the handler returned; focus stayed
+// on the trigger.
+describe('TopNav keyboard (R11)', () => {
+  const nextFrame = () => new Promise((r) => requestAnimationFrame(() => r(null)));
+
+  it.each(['{ArrowDown}', '{Enter}', ' '])('%s opens the group and focuses its first entry without an error', async (key) => {
+    const user = userEvent.setup();
+    const errors: unknown[] = [];
+    const onErr = (e: ErrorEvent) => { errors.push(e.error ?? e.message); e.preventDefault(); };
+    window.addEventListener('error', onErr);
+    try {
+      renderTopNav();
+      trigger('Operations').focus();
+      await user.keyboard(key);
+      await nextFrame();
+      const items = screen.getAllByRole('menuitem');
+      expect(document.activeElement).toBe(items[0]);
+      expect(errors).toEqual([]);
+    } finally {
+      window.removeEventListener('error', onErr);
+    }
+  });
+
+  it('arrows move through the entries (wrapping), Esc closes and returns focus to the trigger', async () => {
+    const user = userEvent.setup();
+    renderTopNav();
+    trigger('Operations').focus();
+    await user.keyboard('{ArrowDown}');
+    await nextFrame();
+    const items = screen.getAllByRole('menuitem');
+    await user.keyboard('{ArrowDown}');
+    expect(document.activeElement).toBe(items[1]);
+    await user.keyboard('{ArrowUp}{ArrowUp}');
+    expect(document.activeElement).toBe(items[items.length - 1]);
+    await user.keyboard('{Home}');
+    expect(document.activeElement).toBe(items[0]);
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+    expect(document.activeElement).toBe(trigger('Operations'));
+  });
+});
+
+// R38 (audit): at 1024px the bar hid groups past its right edge with the
+// scrollbar hidden and nothing saying so. jsdom has no layout, so the bar's
+// sizes are given here: 1000px of groups in a 600px-wide bar.
+describe('TopNav overflow arrows (R38)', () => {
+  const proto = HTMLElement.prototype;
+  const saved = {
+    sw: Object.getOwnPropertyDescriptor(proto, 'scrollWidth'),
+    cw: Object.getOwnPropertyDescriptor(proto, 'clientWidth'),
+  };
+  function sized(scrollWidth: number, clientWidth: number) {
+    Object.defineProperty(proto, 'scrollWidth', {
+      configurable: true,
+      get() { return (this as HTMLElement).classList?.contains('top-nav-menu') ? scrollWidth : 0; },
+    });
+    Object.defineProperty(proto, 'clientWidth', {
+      configurable: true,
+      get() { return (this as HTMLElement).classList?.contains('top-nav-menu') ? clientWidth : 0; },
+    });
+  }
+  function restore() {
+    if (saved.sw) Object.defineProperty(proto, 'scrollWidth', saved.sw);
+    if (saved.cw) Object.defineProperty(proto, 'clientWidth', saved.cw);
+  }
+
+  it('a bar wider than its space shows a "more" arrow that scrolls to the hidden groups', () => {
+    sized(1000, 600);
+    try {
+      const { container } = renderTopNav();
+      const bar = container.querySelector<HTMLElement>('.top-nav-menu')!;
+      expect(screen.queryByRole('button', { name: 'Show earlier menus' })).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Show more menus' }));
+      expect(bar.scrollLeft).toBeGreaterThan(0);
+      fireEvent.scroll(bar);
+      expect(screen.getByRole('button', { name: 'Show earlier menus' })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Show earlier menus' }));
+      expect(bar.scrollLeft).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('a bar that fits shows no arrows', () => {
+    sized(600, 600);
+    try {
+      renderTopNav();
+      expect(screen.queryByRole('button', { name: /Show (more|earlier) menus/ })).not.toBeInTheDocument();
+    } finally {
+      restore();
+    }
+  });
+});
