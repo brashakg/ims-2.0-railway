@@ -91,6 +91,26 @@ export function isMultiStoreCapable(user: User | null | undefined): boolean {
   return userSeesAllStores(user?.roles) || (user?.storeIds?.length ?? 0) > 1;
 }
 
+/** The screen where a head-office user creates the legal entity and the first
+ *  store. It is org-wide (no store context), so it is the one screen reachable
+ *  before a store is chosen -- otherwise an empty install traps the owner on
+ *  "No store available" with nowhere to create a store (APP-01). */
+export const ORG_SETUP_PATH = '/organization';
+
+/** Who may set the organization up: the same roles the /organization route
+ *  and POST /stores admit (SUPERADMIN / ADMIN). */
+export const canSetUpOrganization = (user: User | null | undefined): boolean =>
+  userSeesAllStores(user?.roles);
+
+/** The AppLayout guard: send a multi-store user with no active store to the
+ *  picker first -- except an org-setup user on the Organization screen. Every
+ *  store-scoped screen stays guarded. */
+export function mustPickStoreFirst(user: User | null | undefined, pathname: string): boolean {
+  if (!user || !isMultiStoreCapable(user) || !hasNoActiveStore(user)) return false;
+  const onOrgSetup = pathname.replace(/\/+$/, '') === ORG_SETUP_PATH;
+  return !(onOrgSetup && canSetUpOrganization(user));
+}
+
 /** The ONE "show the store picker now" decision, used after sign-in
  *  (LoginPage) and after a first-password change (ForcePasswordChange), so a
  *  multi-store user always picks before work and a single-store user goes

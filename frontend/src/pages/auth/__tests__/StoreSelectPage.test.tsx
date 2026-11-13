@@ -114,16 +114,58 @@ describe('StoreSelectPage - auto-proceed / retry (unchanged behaviour)', () => {
     expect(screen.queryByRole('heading', { name: 'Choose your store' })).toBeNull();
   });
 
-  it('shows the empty state after a failed load and "Try again" re-fetches', async () => {
+  it('shows the failed state after a failed load and "Try again" re-fetches', async () => {
     mockUser = admin({ activeStoreId: '' });
     getStores.mockRejectedValueOnce(new Error('network'));
     render(<StoreSelectPage />);
-    await screen.findByRole('heading', { name: 'No store available' });
+    await screen.findByRole('heading', { name: 'Could not load your stores' });
     expect(navigateSpy).not.toHaveBeenCalled();
+    // APP-01: an outage never looks like a new install -- no setup offer.
+    expect(screen.queryByRole('button', { name: 'Set up organization' })).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
     await heading();
     expect(getStores).toHaveBeenCalledTimes(2);
+  });
+});
+
+// APP-01: an empty install. Before the fix the owner saw "ask your
+// administrator" with only Try again / Sign out and could never reach the
+// Organization screen to create the first store.
+describe('StoreSelectPage - empty install (APP-01)', () => {
+  it('a SUPERADMIN on a confirmed-empty store list is offered Organization setup', async () => {
+    mockUser = admin({ activeStoreId: '' });
+    getStores.mockResolvedValue({ stores: [], total: 0 });
+    render(<StoreSelectPage />);
+    await screen.findByRole('heading', { name: 'No store available' });
+    expect(screen.queryByText(/ask your administrator/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Set up organization' }));
+    expect(navigateSpy).toHaveBeenCalledWith('/organization');
+    expect(setActiveStore).not.toHaveBeenCalled();
+  });
+
+  it('an ADMIN gets the same offer', async () => {
+    mockUser = admin({ roles: ['ADMIN'], activeRole: 'ADMIN', activeStoreId: '' });
+    getStores.mockResolvedValue({ stores: [], total: 0 });
+    render(<StoreSelectPage />);
+    expect(await screen.findByRole('button', { name: 'Set up organization' })).toBeTruthy();
+  });
+
+  it('an unassigned staff user is still told to ask an administrator, with no setup offer', async () => {
+    mockUser = admin({ roles: ['SALES_STAFF'], activeRole: 'SALES_STAFF', storeIds: [], activeStoreId: '' });
+    getStores.mockResolvedValue({ stores: RAW, total: RAW.length });
+    render(<StoreSelectPage />);
+    await screen.findByRole('heading', { name: 'No store available' });
+    expect(screen.getByText(/ask your administrator/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Set up organization' })).toBeNull();
+  });
+
+  it('a malformed store-list body is a failed read, not an empty install', async () => {
+    mockUser = admin({ activeStoreId: '' });
+    getStores.mockResolvedValue({ detail: 'Store list unavailable' });
+    render(<StoreSelectPage />);
+    await screen.findByRole('heading', { name: 'Could not load your stores' });
+    expect(screen.queryByRole('button', { name: 'Set up organization' })).toBeNull();
   });
 });
 

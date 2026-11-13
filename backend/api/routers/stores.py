@@ -845,7 +845,10 @@ async def list_stores(
 
         return {"stores": stores, "total": len(stores)}
 
-    return {"stores": [], "total": 0}
+    # APP-01: an unreachable database is NOT "this install has no stores" --
+    # an empty list here would offer the owner first-store setup during an
+    # outage. Say the list is unavailable so the picker shows Retry.
+    raise HTTPException(status_code=503, detail="Store list unavailable")
 
 
 @router.post("", status_code=201)
