@@ -907,3 +907,270 @@ def test_the_auto_door_leaves_a_row_so_an_unfinished_refund_is_finished_either_w
     assert S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")["status"] == "duplicate"
     assert _tick() == {"finished": 0, "unresolved": 0}
     assert [r["delta"] for r in _ledger(env)] == [1000.0]
+
+
+# ----------------------------------------------------------------------------
+# Round 8 (the lead's money reviewer at 3afa4be9). Each earlier round fixed one
+# window between the first attempt and the retry, because the two recomputed
+# things on their own. (1) A RETRY that could not read the figures it needs
+# (the loyalty ledger, earlier refunds, the order) still finalized a refund
+# whose credit was already booked -- with points share 0.0 over the stored 100,
+# so the sweep cleared the marker on a zero share and the 100 points were lost
+# for good. (2) A RE-DRIVE of a refund that had finalized CREDIT_FAILED kept
+# status CREDIT_FAILED while in flight: when it stopped after booking its
+# credit nothing saw it as unfinished (no tick, no task, Reject allowed, a
+# 'could not be issued (duplicate)' answer). Now: the re-drive takes the claim
+# back to PENDING (one in-flight state, one definition: is_unfinished), the
+# share stored with the claim is THE share, a post that cannot read its figures
+# books and finalizes nothing, and the counter's readers count an unfinished
+# online refund exactly as a finished one (D38).
+# ----------------------------------------------------------------------------
+
+
+_ZERO = {"reconciled": 0, "unresolved": 0, "clean": 0}
+
+
+def _tasks(monkeypatch, points):
+    import api.dependencies as deps
+    from database.repositories.task_repository import TaskRepository
+
+    tasks = points.db.get_collection("tasks")
+    monkeypatch.setattr(deps, "get_task_repository", lambda: TaskRepository(tasks))
+    return lambda: [t["status"] for t in tasks.find({"source_ref": "shopify_refund_unfinished:700001"})]
+
+
+def _fail_restore(monkeypatch):
+    from api.routers import loyalty as L
+
+    real = L.restore_return_points
+    monkeypatch.setattr(L, "restore_return_points", lambda *a, **k: {"ok": False, "reason": "ledger_read_failed"})
+    return lambda: monkeypatch.setattr(L, "restore_return_points", real)
+
+
+def _loyalty_unreadable(monkeypatch):
+    """The loyalty ledger cannot be read: the points paid on the bill are unknown."""
+    from api.routers import loyalty as L
+
+    real = L.bill_redemption
+
+    def down(*_a, **_k):
+        raise RuntimeError("loyalty ledger unreachable")
+
+    monkeypatch.setattr(L, "bill_redemption", down)
+    return lambda: monkeypatch.setattr(L, "bill_redemption", real)
+
+
+def _nothing_twice(env, points, monkeypatch, review_id, done):
+    """Two sweeps, the tick, an identical confirmation, Reject, the service and
+    a webhook redelivery afterwards: the stored books do not move."""
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    _sweep_reads(env, monkeypatch, points)
+    assert [L.reconcile_loyalty_reversals() for _ in range(2)] == [_ZERO] * 2
+    assert _tick() == {"finished": 0, "unresolved": 0}
+    assert _confirm(review_id)[0] == 409 and _reject(review_id)[0] == 409
+    row = env.get_collection("shopify_refund_review").find_one({"review_id": review_id})
+    assert S.post_from_review(env, row)["status"] == "duplicate"
+    assert S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")["status"] == "duplicate"
+    assert _stored(env, points) == done
+
+
+def test_a_retry_that_cannot_read_its_figures_never_finishes_the_refund_or_lowers_its_points(
+        env, points, monkeypatch):
+    """Must-fix 1: credit 900 booked, the finalize write failed, the points step
+    failed. The tick (and a person's Confirm) then retry while the loyalty
+    ledger cannot be read. Before: the tick finalized the return COMPLETED with
+    points share 0.0, the sweep cleared its marker on that zero share, and the
+    books ended 50 / 100 with no restore row and no task."""
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    task_states = _tasks(monkeypatch, points)
+    reviews, review_id = _queued(env)
+    coll = env.get_collection("returns")
+    real_update = _no_finalize(monkeypatch, coll)
+    lift_restore = _fail_restore(monkeypatch)
+    assert _confirm(review_id)[0] == 422
+    lift_restore()
+    monkeypatch.setattr(coll, "update_one", real_update)
+    first = _stored(env, points)
+    assert first["returns"] == [("PENDING", None, True)], first
+    assert first["credit_rows"] == [900.0] and first["points"] == (50, 100, 50), first
+
+    _age(coll)
+    lift_ledger = _loyalty_unreadable(monkeypatch)
+    assert _tick() == {"finished": 0, "unresolved": 1}  # never finished on unknown figures
+    code, detail = _confirm(review_id)
+    assert (code, detail) == (422, S.NOT_FINISHED_NOTE), (code, detail)
+    lift_ledger()
+    assert _stored(env, points) == first  # nothing finalized, nothing recalculated
+    assert coll.find_one({"shopify_refund_id": "700001"})["points_paid_share"] == 100.0
+    row = reviews.find_one({"review_id": review_id})
+    assert (row["status"], row["resolved"], row["note"]) == ("CREDIT_FAILED", False, S.NOT_FINISHED_NOTE)
+    assert task_states() == ["OPEN"]  # the visible exception
+    assert _reject(review_id)[0] == 409
+    _sweep_reads(env, monkeypatch, points)
+    assert [L.reconcile_loyalty_reversals() for _ in range(2)] == [_ZERO] * 2  # a PENDING return is not the sweep's
+    assert _stored(env, points)["points"] == (50, 100, 50)
+
+    # The figures can be read again: the next tick finishes it at the STORED share.
+    _age(coll)
+    assert _tick() == {"finished": 1, "unresolved": 0}
+    done = _stored(env, points)
+    assert _less_rows(done) == _SETTLED and [p for _t, p in done["restore_rows"]] == [100], done
+    assert coll.find_one({"shopify_refund_id": "700001"})["points_paid_share"] == 100.0
+    assert task_states() == ["COMPLETED"]
+    _nothing_twice(env, points, monkeypatch, review_id, done)
+
+
+def test_a_redrive_of_a_failed_credit_that_stops_part_way_is_unfinished_like_a_first_attempt(
+        env, points, monkeypatch):
+    """Must-fix 2: the first Confirm could not issue the credit (CREDIT_FAILED,
+    nothing booked); the second Confirm re-drives it, books the 900 credit, and
+    then its finalize write and its points step fail. Before: the return stayed
+    CREDIT_FAILED with reprocessing_at set -- the tick never saw it, a Confirm
+    answered 'could not be issued (duplicate)', Reject closed the row over the
+    booked credit and the 100 points were stranded for good."""
+    import api.routers.returns as R
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    task_states = _tasks(monkeypatch, points)
+    reviews, review_id = _queued(env)
+    coll = env.get_collection("returns")
+    real_issue = R._issue_store_credit
+    monkeypatch.setattr(R, "_issue_store_credit", lambda *a, **k: None)  # e.g. the credit balance not set up
+    code, detail = _confirm(review_id)
+    monkeypatch.setattr(R, "_issue_store_credit", real_issue)
+    assert code == 422 and "could not be issued" in str(detail), (code, detail)
+    failed = _stored(env, points)
+    assert failed["returns"] == [("CREDIT_FAILED", False, True)] and failed["credit_rows"] == [], failed
+
+    # Cause fixed; Confirm again: the credit books, the finalize and the points step fail.
+    real_update = _no_finalize(monkeypatch, coll)
+    lift_restore = _fail_restore(monkeypatch)
+    code, detail = _confirm(review_id)
+    lift_restore()
+    monkeypatch.setattr(coll, "update_one", real_update)
+    assert (code, detail) == (422, S.NOT_FINISHED_NOTE), (code, detail)
+    first = _stored(env, points)
+    assert first["credit_rows"] == [900.0] and first["points"] == (50, 100, 50), first
+    assert first["returns"] == [("PENDING", False, True)], first  # in flight, like a first attempt
+
+    # Inside the 15 minutes: the tick leaves it, Confirm says 'not finished', Reject is refused.
+    assert _tick() == {"finished": 0, "unresolved": 0}
+    code, detail = _confirm(review_id)
+    assert (code, detail) == (422, S.NOT_FINISHED_NOTE), (code, detail)
+    code, detail = _reject(review_id)
+    assert code == 409 and "cannot be rejected" in str(detail), (code, detail)
+    row = reviews.find_one({"review_id": review_id})
+    assert (row["status"], row["resolved"], row["note"]) == ("CREDIT_FAILED", False, S.NOT_FINISHED_NOTE)
+    _sweep_reads(env, monkeypatch, points)
+    assert [L.reconcile_loyalty_reversals() for _ in range(2)] == [_ZERO] * 2
+    assert _stored(env, points) == first
+
+    # Stale: the tick finishes it, nobody presses.
+    _age(coll)
+    assert _tick() == {"finished": 1, "unresolved": 0}
+    done = _stored(env, points)
+    assert _less_rows(done) == _SETTLED and [p for _t, p in done["restore_rows"]] == [100], done
+    assert task_states() == []  # finished on its first stale tick: no task needed
+    _nothing_twice(env, points, monkeypatch, review_id, done)
+
+
+def test_an_unfinished_online_refund_counts_against_the_counter_like_a_finished_one(env, points, monkeypatch):
+    """D38 / the reviewer's grey area: Rs 1,000 bill (Rs 900 cash + Rs 100
+    points), the online refund booked its 900 credit and gave the 100 points
+    back, its record still PENDING. The counter's shared readers saw a 900
+    credit and no points share, so a later counter return of a Rs 100 item
+    paid Rs 90 cash: Rs 1,090 back on a Rs 1,000 bill. Unfinished and finished
+    must read the same."""
+    import api.routers.returns as R
+
+    _reviews, review_id = _queued(env)
+    coll = env.get_collection("returns")
+    real_update = _no_finalize(monkeypatch, coll)
+    assert _confirm(review_id)[0] == 422
+    monkeypatch.setattr(coll, "update_one", real_update)
+    assert coll.find_one({"shopify_refund_id": "700001"})["status"] == "PENDING"
+    assert _stored(env, points)["points"] == (150, 0, 50)  # its points step ran
+
+    def readers():
+        order = env.get_collection("orders").find_one({"order_id": "ord-1"})
+        return (R._sum_prior_refunds("ord-1", strict=True), R.credit_notes_outside_returns("ord-1"),
+                R.refundable_ceiling(order), R._points_paid_share(order, "ord-1", 100.0, strict=True))
+
+    unfinished = readers()
+    _age(coll)
+    assert _tick() == {"finished": 1, "unresolved": 0}
+    assert readers() == unfinished == (1000.0, 0.0, 1000.0, 0.0), unfinished  # nothing left to refund
+
+
+def test_a_claim_whose_run_died_before_its_credit_is_finished_at_the_claims_figures(env, points, monkeypatch):
+    """The retry re-asks the store credit with the claim's own return counted
+    as itself, never as money given back elsewhere: the claim died before its
+    credit, the tick books 900 credit and 100 points, not more, not less."""
+    import api.routers.returns as R
+
+    _reviews, review_id = _queued(env)
+    coll = env.get_collection("returns")
+    real_issue = R._issue_store_credit
+
+    def die(*_a, **_k):
+        raise _WorkerDeath("after the claim, before the credit")
+
+    monkeypatch.setattr(R, "_issue_store_credit", die)
+    with pytest.raises(_WorkerDeath):
+        _confirm(review_id)
+    monkeypatch.setattr(R, "_issue_store_credit", real_issue)
+    assert _stored(env, points)["returns"] == [("PENDING", None, True)]
+    _age(coll)
+    assert _tick() == {"finished": 1, "unresolved": 0}
+    done = _stored(env, points)
+    assert _less_rows(done) == _SETTLED and [p for _t, p in done["restore_rows"]] == [100], done
+    _nothing_twice(env, points, monkeypatch, review_id, done)
+
+
+def test_a_claim_ims_cannot_read_back_tells_staff_not_to_book_it_by_hand(env, points, monkeypatch):
+    """(D) The claim insert lands with its acknowledgement lost AND the read-back
+    fails: IMS cannot tell whether the claim was saved. Nothing is booked by
+    this press, and the answer and the row say not to give the credit by hand,
+    because IMS may still complete it (it does: the claim is there)."""
+    from api.services import shopify_refund as S
+
+    reviews, review_id = _queued(env)
+    coll = env.get_collection("returns")
+    real_insert = coll.insert_one
+    real_find = coll.find_one
+    blinded = []
+
+    def lost_then_blind(doc, *a, **k):
+        real_insert(doc, *a, **k)  # the claim lands ...
+        if not blinded:  # ... its answer is lost, and the read-back right after it fails
+            blinded.append(1)
+
+            def blind(*fa, **fk):
+                monkeypatch.setattr(coll, "find_one", real_find)
+                raise RuntimeError("socket reset on the read-back")
+
+            monkeypatch.setattr(coll, "find_one", blind)
+        raise RuntimeError("socket reset before the acknowledgement")
+
+    monkeypatch.setattr(coll, "insert_one", lost_then_blind)
+    code, detail = _confirm(review_id)
+    monkeypatch.setattr(coll, "insert_one", real_insert)
+    monkeypatch.setattr(coll, "find_one", real_find)
+    assert (code, detail) == (422, S.CLAIM_UNKNOWN_NOTE), (code, detail)
+    assert "do not give the credit by hand" in detail.lower() and "may still complete" in detail.lower()
+    first = _stored(env, points)
+    assert first["credit_rows"] == [] and first["points"] == (50, 100, 50), first  # nothing booked by this press
+    assert first["returns"] == [("PENDING", None, True)], first  # ... but the claim did land
+    row = reviews.find_one({"review_id": review_id})
+    assert (row["status"], row["resolved"], row["note"]) == ("CREDIT_FAILED", False, S.CLAIM_UNKNOWN_NOTE)
+    assert _reject(review_id)[0] == 409
+    _age(coll)
+    assert _tick() == {"finished": 1, "unresolved": 0}  # IMS completes it
+    done = _stored(env, points)
+    assert _less_rows(done) == _SETTLED and [p for _t, p in done["restore_rows"]] == [100], done
+    _nothing_twice(env, points, monkeypatch, review_id, done)

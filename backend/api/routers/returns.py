@@ -344,12 +344,24 @@ def _resolve_original_line(
     return None
 
 
+def _counts_as_refunded(doc: Dict[str, Any], own_refund: Optional[str] = None) -> bool:
+    """THE test every refund reader of a bill uses: a COMPLETED return, or an
+    online refund that is unfinished (shopify_refund.is_unfinished) -- counted
+    exactly as if it were finished (D38: its credit may be booked, its points
+    given back). ``own_refund``: a retry of that online refund pricing itself."""
+    from ..services.shopify_refund import is_unfinished
+
+    if own_refund and doc.get("shopify_refund_id") == own_refund:
+        return False
+    return doc.get("status") == "COMPLETED" or is_unfinished(doc)
+
+
 def _sum_prior_refunds(
     order_id: Optional[str], field: str = "net_refund", *, strict: bool = False
 ) -> float:
     """Total ``field`` (net_refund by default) already issued for an order across
-    COMPLETED returns (BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when
-    unavailable.
+    COMPLETED returns and unfinished online refunds (_counts_as_refunded;
+    BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when unavailable.
 
     ``strict`` (the refund door: the Rs 2,000 approval rule and the over-refund
     cap, owner ruling 2026-10-23 -- FAIL CLOSED): a READ ERROR raises 503
@@ -364,7 +376,7 @@ def _sum_prior_refunds(
     total = 0.0
     try:
         for doc in coll.find({"order_id": order_id}, {"_id": 0}):
-            if doc.get("status") != "COMPLETED":
+            if not _counts_as_refunded(doc):
                 continue
             net = doc.get(field)
             if net is not None:
@@ -1225,6 +1237,7 @@ def points_restore_share(order: Optional[Dict[str, Any]], share: Optional[float]
 
 def _points_paid_share(
     order: Optional[Dict[str, Any]], order_id: Optional[str], net_amount: float, *, strict: bool,
+    own_refund: Optional[str] = None,
 ) -> float:
     """THE rule (owner 2026-11-08 / 2026-11-09): the part of this return the
     customer paid with loyalty points. It comes back as points -- exactly this
@@ -1244,7 +1257,8 @@ def _points_paid_share(
     untouched; only the money a return pays shrinks by this. Every return door
     prices through here (quote, POST, Needs completing keeps it on the hold).
 
-    "Earlier returns" are the COMPLETED docs AND the live or kept refund holds
+    "Earlier returns" are the COMPLETED docs (and unfinished online refunds,
+    _counts_as_refunded; never ``own_refund``'s own claim) AND the live or kept refund holds
     of returns still being written or kept for Needs completing
     (_live_refund_holds). A hold carries its return's share from the moment it
     is reserved (_reserve_order_refund prices through here inside its
@@ -1258,8 +1272,8 @@ def _points_paid_share(
         return 0.0
     holds = (order or {}).get("refund_holds") or {}
     try:
-        live, held = _live_refund_holds(order_id, holds, field="points_paid_share")
-        live_net, returned = _live_refund_holds(order_id, holds)
+        live, held = _live_refund_holds(order_id, holds, field="points_paid_share", own_refund=own_refund)
+        live_net, returned = _live_refund_holds(order_id, holds, own_refund=own_refund)
         points, value = bill_redemption(order_id)
     except HTTPException:
         if strict:
@@ -1732,7 +1746,7 @@ def credit_notes_outside_returns(order_id: Optional[str]) -> float:
     try:
         rows = list(ledger.find({"order_id": order_id, "type": {"$in": [scl.ISSUED, "ISSUING"]}}))
         coll = _returns_coll()
-        documented = ({d.get("return_id") for d in coll.find({"order_id": order_id, "status": "COMPLETED"})}
+        documented = ({d.get("return_id") for d in coll.find({"order_id": order_id}) if _counts_as_refunded(d)}
                       if coll is not None and rows else set())
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] credit notes unreadable for %s: %s", order_id, exc)
@@ -4163,8 +4177,9 @@ def _refund_hold_ttl_seconds() -> int:
 
 
 def _live_refund_holds(order_id: str, holds: Dict[str, Any],
-                       field: str = "net_refund") -> Tuple[Dict[str, Any], float]:
+                       field: str = "net_refund", own_refund: Optional[str] = None) -> Tuple[Dict[str, Any], float]:
     """(holds still counting, the COMPLETED returns' total of ``field``) -- read together.
+    COMPLETED here is _counts_as_refunded (an unfinished online refund too).
     A hold counts only while its return has no COMPLETED doc (the doc's own
     total counts it then). A hold whose money went out is KEPT (marked by
     _keep_order_refund_hold) and never ages out: it stays the record of that
@@ -4182,7 +4197,7 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
                 if doc.get("status") == "NOTHING_PAID":
                     done.add(doc.get("return_id"))  # finished, no money: its hold no longer counts
                     continue
-                if doc.get("status") != "COMPLETED":
+                if not _counts_as_refunded(doc, own_refund):
                     continue
                 done.add(doc.get("return_id"))
                 try:

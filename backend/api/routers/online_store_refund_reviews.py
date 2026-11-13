@@ -294,21 +294,32 @@ def _post(db, row: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
     return posted, post_status, result
 
 
-def _is_unfinished(db, row: Dict[str, Any], posted: bool, post_status: str, result: Dict[str, Any]) -> bool:
-    """Not posted because the return's own record is unfinished: this post
-    could not save it, or an earlier one's claim is still open. Its credit
-    may already be booked."""
-    from ..services.shopify_refund import NOT_FINALIZED, _unfinished_claim
+def _unfinished_note(db, row: Dict[str, Any], posted: bool, post_status: str,
+                     result: Dict[str, Any]) -> Optional[str]:
+    """What the row and the answer say when a post did not finish its refund
+    and the credit may be (or may still be) booked, else None: the return is
+    unfinished (shopify_refund.is_unfinished -- this post could not save it,
+    or another post's claim is open), or IMS cannot tell whether the claim
+    was saved at all."""
+    from ..services.shopify_refund import (
+        CLAIM_UNKNOWN_NOTE, NOT_CLAIMED, NOT_FINALIZED, NOT_FINISHED_NOTE, _unfinished_claim)
 
-    return not posted and (result.get("reason") == NOT_FINALIZED or (
-        post_status == "duplicate"
-        and _unfinished_claim(db, str(row.get("shopify_refund_id") or "")) is not None))
+    if posted:
+        return None
+    if result.get("reason") == NOT_CLAIMED and result.get("claim_unknown"):
+        return CLAIM_UNKNOWN_NOTE
+    if result.get("reason") == NOT_FINALIZED or (
+            post_status == "duplicate"
+            and _unfinished_claim(db, str(row.get("shopify_refund_id") or "")) is not None):
+        return NOT_FINISHED_NOTE
+    return None
 
 
 def _stamp(db, row: Dict[str, Any], posted: bool, post_status: str, result: Dict[str, Any],
-           user_id: Optional[str], unfinished: bool = False) -> str:
-    """Write a post's outcome on its review row -> the row's new status."""
-    from ..services.shopify_refund import NOT_FINISHED_NOTE
+           user_id: Optional[str], unfinished: Optional[str] = None) -> str:
+    """Write a post's outcome on its review row -> the row's new status.
+    ``unfinished``: the note an unfinished post leaves (_unfinished_note)."""
+    from ..services.shopify_refund import CLAIM_UNKNOWN_NOTE, NOT_FINISHED_NOTE
 
     new_status = "POSTED" if posted else "CREDIT_FAILED"
     update = {
@@ -317,7 +328,8 @@ def _stamp(db, row: Dict[str, Any], posted: bool, post_status: str, result: Dict
         "resolved_by": user_id,
         "resolved_at": _now(),
         "updated_at": _now(),
-        "return_id": result.get("return_id"),
+        # A 'duplicate' answer names no return: the row keeps the one it has.
+        "return_id": result.get("return_id") or row.get("return_id"),
         "post_result": post_status,
     }
     if post_status == "credited":
@@ -332,8 +344,8 @@ def _stamp(db, row: Dict[str, Any], posted: bool, post_status: str, result: Dict
     elif unfinished:
         # The ROW says it, not only this one answer: a later reader of "credit
         # failed" would book the credit by hand, or reject the row.
-        update["note"] = NOT_FINISHED_NOTE
-    elif posted and row.get("note") == NOT_FINISHED_NOTE:
+        update["note"] = unfinished
+    elif posted and row.get("note") in (NOT_FINISHED_NOTE, CLAIM_UNKNOWN_NOTE):
         update["note"] = "Posted."
     try:
         coll = db.get_collection(_REVIEW_COLLECTION)
@@ -439,18 +451,17 @@ async def confirm_refund_review(
         )
 
     posted, post_status, result = _post(db, row)
-    unfinished = _is_unfinished(db, row, posted, post_status, result)
+    unfinished = _unfinished_note(db, row, posted, post_status, result)
     new_status = _stamp(db, row, posted, post_status, result, current_user.get("user_id"), unfinished)
 
     _write_audit("SHOPIFY_REFUND_REVIEW_CONFIRM", review_id, row, result, current_user)
 
     if unfinished:
         # The return's record is unfinished (this press could not save it, or
-        # an earlier one is still open); its credit may ALREADY be booked. Say
-        # so: "could not be issued" would send the accountant to book it by hand.
-        from ..services.shopify_refund import NOT_FINISHED_NOTE
-
-        raise HTTPException(status_code=422, detail=NOT_FINISHED_NOTE)
+        # an earlier one is still open), or IMS cannot tell whether it was
+        # saved; its credit may be booked, now or by IMS later. Say so: "could
+        # not be issued" would send the accountant to book it by hand.
+        raise HTTPException(status_code=422, detail=unfinished)
     if not posted:
         # The post could not issue the credit note (e.g. no customer / ledger
         # error). Surface it so the accountant retries after fixing the cause.
@@ -538,7 +549,9 @@ async def reject_refund_review(
             status_code=503,
             detail="This refund's record cannot be read right now, so it was not rejected. Try again.",
         )
-    if doc and (doc.get("status") == "PENDING" or doc.get("credit_note_issued") is True):
+    from ..services.shopify_refund import is_unfinished
+
+    if is_unfinished(doc) or (doc and doc.get("credit_note_issued") is True):
         raise HTTPException(
             status_code=409,
             detail=(
