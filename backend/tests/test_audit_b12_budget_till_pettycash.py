@@ -621,7 +621,122 @@ class TestD40TwoDrawersCloseTheOpenOne:
         assert link["ok"] and link["already_counted"] is True
         assert link["session_id"] == sid
         assert till.shared_counted_paisa(link) == 100000
+        assert link["drawers_on_day"] == 1
         assert len(list(db.get_collection("till_sessions").find({}))) == 1
+
+
+def _lock_open_drawer(db, sid, *, rupees: int) -> None:
+    """Count drawer ``sid`` blind (unless already counted) and lock it."""
+    if _till(db, sid)["status"] == till.STATUS_OPEN:
+        assert till.blind_submit(
+            db, sid,
+            blind_denominations=[{"face": 500, "kind": "note", "pieces": rupees // 500}],
+            actor=CASHIER,
+        )["ok"]
+    assert till.lock_session(db, sid, actor=MANAGER, variance_note="b12 d40 fixture")["ok"]
+
+
+def _two_locked_drawers(db, *, a_rupees: int, b_rupees: int):
+    a = _blind_count(db, rupees=a_rupees, lock=True)
+    b = till.open_session(
+        db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+        shift="PM", actor=CASHIER,
+    )["session"]["session_id"]
+    _lock_open_drawer(db, b, rupees=b_rupees)
+    return a, b
+
+
+class TestD40BothDrawersLockedLinksTheLatest:
+    """Reviewer round 5: when BOTH drawers of the day are LOCKED, the fallback
+    used find_one with no sort and returned the OLDER drawer A, and the Day-End
+    record then adopted A's count (a Rs 2,000 shortage that does not exist, or
+    'Matches' over a real one). The day's latest drawer is the one acted on."""
+
+    def test_day_end_after_both_locked_records_the_latest_drawer(self, db, day_end):
+        a, b = _two_locked_drawers(db, a_rupees=1000, b_rupees=3000)
+
+        close = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
+
+        assert close["till_session_id"] == b
+        assert (close["closing_cash"], close["variance"]) == (3000.0, 0.0)
+        assert close["counted_from_shared_record"] is False
+        assert close["entered_closing_cash"] is None
+        assert close["till_drawers_on_day"] == 2
+        assert _till(db, a)["blind_count_paisa"] == 100000
+        assert _till(db, b)["blind_count_paisa"] == 300000
+        assert len(list(db.get_collection("till_sessions").find({}))) == 2
+
+    def test_mirror_a_real_shortage_on_the_last_drawer_is_not_hidden(self, db, day_end):
+        a, b = _two_locked_drawers(db, a_rupees=3000, b_rupees=1000)
+
+        close = day_end(closing_cash=1000.0, system_cash=3000.0)["close"]
+
+        assert close["till_session_id"] == b
+        assert (close["closing_cash"], close["variance"]) == (1000.0, -2000.0)
+        assert close["counted_from_shared_record"] is False
+
+    def test_cash_register_after_both_locked_links_the_latest_drawer(
+        self, db, monkeypatch
+    ):
+        a, b = _two_locked_drawers(db, a_rupees=1000, b_rupees=3000)
+
+        out = _cr_close_two_drawers(
+            db, monkeypatch,
+            denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+            closing_count_state="COUNTED",
+            note="d40 fixture - opening float not declared",
+        )
+
+        assert out["counted"] == 3000.0
+        stored = db.get_collection("cash_register_sessions").find_one({"_id": "CR-D40"})
+        assert stored["till_session_id"] == b
+        assert stored["till_drawers_on_day"] == 2
+
+    def test_both_doors_agree_when_the_second_closes_after_the_lock(
+        self, db, day_end, monkeypatch
+    ):
+        """The builder's own D40 sequence, then B is locked, then the other door
+        closes: both records must name drawer B and Rs 3,000."""
+        a, b = _locked_then_second_drawer(db)
+        de = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
+        assert de["till_session_id"] == b
+        _lock_open_drawer(db, b, rupees=3000)
+
+        out = _cr_close_two_drawers(
+            db, monkeypatch,
+            denominations=[{"face": 500, "kind": "note", "pieces": 2}],
+            closing_count_state="COUNTED",
+            note="d40 fixture - opening float not declared",
+        )
+
+        assert out["counted"] == 3000.0 == de["closing_cash"]
+        stored = db.get_collection("cash_register_sessions").find_one({"_id": "CR-D40"})
+        assert stored["till_session_id"] == b
+
+    def test_a_lost_acknowledgement_retry_after_the_lock_keeps_the_latest_drawer(
+        self, db, day_end, monkeypatch
+    ):
+        a, b = _locked_then_second_drawer(db)
+        closes = db.get_collection("day_end_closes")
+        real_insert = closes.insert_one
+        calls = {"n": 0}
+
+        def _fail_once(doc, *args, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("write acknowledgement lost")
+            return real_insert(doc, *args, **kw)
+
+        monkeypatch.setattr(closes, "insert_one", _fail_once)
+        with pytest.raises(HTTPException):
+            day_end(closing_cash=3000.0, system_cash=3000.0)
+        _lock_open_drawer(db, b, rupees=3000)  # B locked before the retry
+
+        close = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
+        assert close["till_session_id"] == b
+        assert (close["closing_cash"], close["variance"]) == (3000.0, 0.0)
+        assert _stored_close(db)["closing_cash"] == 3000.0
+        assert _till(db, a)["blind_count_paisa"] == 100000
 
 
 def _real_till_db():
@@ -686,6 +801,30 @@ def test_d40_two_drawers_the_shared_lookup_picks_the_open_one_on_real_mongo():
         assert (b["status"], b["blind_count_paisa"]) == (till.STATUS_BLIND_SUBMITTED, 300000)
         assert (a["status"], a["blind_count_paisa"]) == (till.STATUS_LOCKED, 100000)
         assert coll.count_documents({}) == 2
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+def test_d40_two_locked_drawers_link_the_latest_on_real_mongo():
+    """Both drawers LOCKED on a native PyMongo Database with the real indexes
+    (equal index keys come back in insertion order): the close must link the
+    LATEST drawer B, never the older A."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        a, b = _two_locked_drawers(real_db, a_rupees=1000, b_rupees=3000)
+
+        link = till.record_screen_close(
+            real_db, store_id=STORE, session_date=DATE,
+            counted_paisa=300000, actor=MANAGER,
+        )
+
+        assert link["ok"] and link["session_id"] == b, link
+        assert link["already_counted"] is True
+        assert till.shared_counted_paisa(link) == 300000
+        assert link["drawers_on_day"] == 2
+        assert real_db.get_collection("till_sessions").count_documents({}) == 2
     finally:
         client.drop_database(name)
         client.close()

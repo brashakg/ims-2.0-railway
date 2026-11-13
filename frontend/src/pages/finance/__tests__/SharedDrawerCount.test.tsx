@@ -152,5 +152,13 @@ describe('CashRegisterPage - a count that came from the other door says so', () 
     expect(await screen.findByText('ZZ-CR-2')).toBeInTheDocument();
     expect(screen.getAllByText('₹2,000')).not.toHaveLength(0);
     expect(screen.queryByTestId(BADGE)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('several-drawers')).not.toBeInTheDocument();
+  });
+
+  it('D40: a day with two drawers marks the count as the last drawer only', async () => {
+    primeHistory({ ...CLOSED_OWN, till_drawers_on_day: 2 });
+    render(<CashRegisterPage />);
+
+    expect((await screen.findByTestId('several-drawers')).textContent).toMatch(/Last of 2 drawers/);
   });
 });

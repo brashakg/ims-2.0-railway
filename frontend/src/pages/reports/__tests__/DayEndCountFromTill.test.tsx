@@ -142,5 +142,20 @@ describe('Day-End Report - the till was already counted', () => {
 
     expect(screen.getByText(/Counted ₹3,000/)).toBeInTheDocument();
     expect(screen.queryByTestId(NOTE)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('day-end-several-drawers')).not.toBeInTheDocument();
+  });
+
+  it('D40: a day with two drawers says the count is the last drawer only', async () => {
+    getDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({
+        closing_cash: 3000, system_cash: 3000, variance: 0, till_drawers_on_day: 2,
+      }),
+    }));
+    render(<DayEndReport />);
+    await waitFor(() => expect(screen.getByText('Day Closed')).toBeInTheDocument());
+    const note = screen.getByTestId('day-end-several-drawers').textContent ?? '';
+    expect(note).toMatch(/2 cash drawers/);
+    expect(note).toMatch(/last drawer only/);
   });
 });

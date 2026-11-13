@@ -61,6 +61,9 @@ export interface CashRegisterSession {
   till_count_differs?: boolean;
   counted_from_shared_record?: boolean;
   till_opening_float_not_recorded?: boolean;
+  // Cash drawers on this shop-day. Above 1, `counted` is the latest drawer's
+  // count only, not the day's total (D40).
+  till_drawers_on_day?: number | null;
   // The day already carried a declared opening float; that one stands.
   till_float_already_declared?: boolean;
 }

@@ -50,6 +50,9 @@ export interface DayEndClose {
   entered_closing_cash?: number | null;
   till_counted?: boolean;
   till_opening_float_not_recorded?: boolean;
+  /** Cash drawers on this shop-day. Above 1, closing_cash is the latest
+   *  drawer's count only, not the day's total (D40). */
+  till_drawers_on_day?: number | null;
   notes: string | null;
   closed_by: string | null;
   closed_at: string;

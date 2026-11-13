@@ -1015,16 +1015,26 @@ def _record_screen_close(
         return {"ok": False, "error": "no_db"}
     # TWO DRAWERS ON ONE DAY (D40): a second drawer can be opened once the
     # first is LOCKED (open_session only joins OPEN / BLIND_SUBMITTED). The
-    # drawer still open is the one being closed, so it is looked for FIRST; a
-    # LOCKED drawer is only the answer when no drawer is open. A day with one
-    # drawer finds that drawer either way, exactly as before.
-    day = {"store_id": store_id, "session_date": session_date}
+    # drawer still open is the one being closed, so it is taken FIRST. When
+    # every drawer is LOCKED, the day's LATEST drawer (last opened) is the one
+    # the day ended on -- never whichever row the database returns first, which
+    # is the oldest. On an opened_at tie the later-inserted row wins. A day
+    # with one drawer finds that drawer either way, exactly as before.
     try:
-        existing = coll.find_one(
-            {**day, "status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED]}}
-        ) or coll.find_one({**day, "status": STATUS_LOCKED})
+        on_day = [
+            s
+            for s in coll.find({"store_id": store_id, "session_date": session_date})
+            if s.get("status") in (STATUS_OPEN, STATUS_BLIND_SUBMITTED, STATUS_LOCKED)
+        ]
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"read_failed:{exc}"}
+    active = [s for s in on_day if s.get("status") != STATUS_LOCKED]
+    existing = active[0] if active else max(
+        reversed(on_day), key=lambda s: str(s.get("opened_at") or ""), default=None
+    )
+    # How many drawers the day has. More than one means the count linked here
+    # is ONE drawer's, not the day's total; the close records say so.
+    drawers_on_day = max(len(on_day), 1)
 
     created = False
     if existing is None:
@@ -1056,6 +1066,7 @@ def _record_screen_close(
             "session": existing,
             "created": created,
             "opening_float_not_recorded": float_missing,
+            "drawers_on_day": drawers_on_day,
             "already_counted": True,
         }
 
@@ -1074,6 +1085,7 @@ def _record_screen_close(
             "session": existing,
             "created": created,
             "opening_float_not_recorded": float_missing,
+            "drawers_on_day": drawers_on_day,
             "already_counted": False,
             "counted": False,
             "not_captured": True,
@@ -1104,6 +1116,7 @@ def _record_screen_close(
                 "session": get_session(db, session_id),
                 "created": created,
                 "opening_float_not_recorded": float_missing,
+                "drawers_on_day": drawers_on_day,
                 "already_counted": True,
                 "counted": True,
             }
@@ -1115,6 +1128,7 @@ def _record_screen_close(
         "session": res["session"],
         "created": created,
         "opening_float_not_recorded": float_missing,
+        "drawers_on_day": drawers_on_day,
         "already_counted": False,
         "counted": True,
         "submitted_paisa": submitted,

@@ -546,6 +546,14 @@ export default function DayEndReport() {
                       )}
                     </p>
                   )}
+                  {/* Two drawers on one day (D40): the figure above is ONE
+                      drawer's count, not the day's total. Say so. */}
+                  {(closeInfo.till_drawers_on_day ?? 1) > 1 && (
+                    <p className="text-xs text-amber-700 mt-1" data-testid="day-end-several-drawers">
+                      This day had {closeInfo.till_drawers_on_day} cash drawers. The count above is the
+                      last drawer only, not the day's total; check each drawer's Z-Read on Blind EOD.
+                    </p>
+                  )}
                   {closeInfo.notes && <p className="text-xs text-gray-500 mt-1 italic">{closeInfo.notes}</p>}
                 </>
               ) : (

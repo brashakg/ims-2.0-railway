@@ -255,6 +255,9 @@ async def create_day_end_close(
         "till_opening_float_not_recorded": bool(
             till_link.get("opening_float_not_recorded")
         ),
+        # Drawers on this shop-day. Above 1, closing_cash is the latest
+        # drawer's count only, not the day's total (D40); the screen says so.
+        "till_drawers_on_day": till_link.get("drawers_on_day"),
         "notes": (body.notes or "").strip() or None,
         "closed_by": current_user.get("user_id"),
         "closed_at": utc_event_iso(now),

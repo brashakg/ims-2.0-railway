@@ -402,6 +402,9 @@ async def close_cash_register(
         "till_opening_float_not_recorded": bool(
             till_link.get("opening_float_not_recorded")
         ),
+        # Drawers on this shop-day. Above 1, `counted` is the latest drawer's
+        # count only, not the day's total (D40); the screen says so.
+        "till_drawers_on_day": till_link.get("drawers_on_day"),
         # True when this screen's counted figure and the shared record's differ
         # -- a manual override typed over the notes, or a drawer the other door
         # had already counted. Either way the shared figure is what is stored

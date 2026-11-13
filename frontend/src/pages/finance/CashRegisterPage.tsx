@@ -288,6 +288,15 @@ export default function CashRegisterPage() {
                             Day-End
                           </span>
                         )}
+                        {(s.till_drawers_on_day ?? 1) > 1 && (
+                          <span
+                            data-testid="several-drawers"
+                            title={`This day had ${s.till_drawers_on_day} cash drawers. This is the last drawer's count only, not the day's total; check each drawer's Z-Read on Blind EOD.`}
+                            className="ml-1 text-[10px] font-medium text-amber-700"
+                          >
+                            Last of {s.till_drawers_on_day} drawers
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-2 text-right text-gray-500">
                         {s.status === 'CLOSED' ? inr(s.expected) : '—'}
