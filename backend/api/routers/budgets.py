@@ -25,6 +25,9 @@ always matches what those modules report:
                       conventions).
 
 Fail-soft contract: no DB -> empty list / zeroed variance, never a 500.
+A query that FAILS is different: unreadable is not "no plan" and not zero
+(audit L3-15, the L3-10 rule), so the variance and the Finance Dashboard's
+Budgets read answer 503 instead of a plan of nothing.
 """
 
 from api.utils.event_time import utc_now_iso
@@ -117,6 +120,18 @@ def _budgets_collection():
         return None
 
 
+_BUDGET_UNREADABLE = (
+    "Could not read the budget just now. Nothing has changed - please try again."
+)
+
+
+def _unreadable(what: str) -> HTTPException:
+    """A budget read that FAILED. Never answered as "no budget set" or as an
+    actual of zero: both are statements about the shop that nobody checked."""
+    logger.exception("Budget read failed (%s)", what)
+    return HTTPException(status_code=503, detail=_BUDGET_UNREADABLE)
+
+
 def _validate_period(period: str) -> str:
     """Validate YYYY-MM or raise 400. Returns the period unchanged."""
     if not period or not _PERIOD_RE.match(period):
@@ -150,7 +165,7 @@ def _revenue_actual(store_id: Optional[str], period: str) -> float:
 
     REUSES reports._orders_in_window (non-CANCELLED/non-DRAFT date-window
     filter) + reports._order_revenue (grand_total -> final_amount ->
-    total_amount fallback). Fail-soft -> 0.0.
+    total_amount fallback). No repository -> 0.0; a failed read -> 503.
     """
     order_repo = get_order_repository()
     if order_repo is None:
@@ -165,8 +180,8 @@ def _revenue_actual(store_id: Optional[str], period: str) -> float:
             end_exclusive=True,
         )
         return float(sum(_reports._order_revenue(o) for o in orders))
-    except Exception:
-        return 0.0
+    except Exception as exc:
+        raise _unreadable("revenue actual") from exc
 
 
 def _expense_actuals_by_category(
@@ -176,7 +191,7 @@ def _expense_actuals_by_category(
 
     Mirrors expenses.py conventions: `expense_date` is an ISO string filtered
     by the ^YYYY-MM prefix, `status` is APPROVED, grouped by `category`,
-    summing `amount`. Fail-soft -> {}.
+    summing `amount`. No repository -> {}; a failed read -> 503.
     """
     repo = get_expense_repository()
     if repo is None:
@@ -191,8 +206,8 @@ def _expense_actuals_by_category(
     out: Dict[str, float] = {}
     try:
         rows = repo.find_many(flt, limit=100000) or []
-    except Exception:
-        return {}
+    except Exception as exc:
+        raise _unreadable("expense actuals") from exc
     for row in rows:
         cat = row.get("category") or "Uncategorized"
         amt = row.get("amount")
@@ -228,8 +243,8 @@ def plan_and_actuals(store_id: Optional[str], period: str):
                 planned_by_head[head] = planned_by_head.get(head, 0.0) + float(
                     r.get("planned_amount") or 0.0
                 )
-        except Exception:
-            planned_by_head = {}
+        except Exception as exc:
+            raise _unreadable("planned lines") from exc
 
     # Actuals are derived, never stored.
     actual_by_head: Dict[str, float] = {}
@@ -351,8 +366,8 @@ async def list_budgets(
         flt["period"] = period
     try:
         rows = list(coll.find(flt))
-    except Exception:
-        return {"budgets": [], "total": 0}
+    except Exception as exc:
+        raise _unreadable("budget list") from exc
 
     budgets = [_clean_budget_doc(r) for r in rows]
     # A planned "Salaries" head is the PLANNED wage bill, which in a 1-5 person

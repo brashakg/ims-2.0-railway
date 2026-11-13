@@ -655,6 +655,46 @@ class TestL315OneBudgetAcrossBothScreens:
         assert manager["categories"]["rent"]["budget"] == 1000
         assert "41000" not in str(manager)
 
+    @pytest.mark.parametrize("broken", ["plan", "expenses", "revenue"])
+    def test_a_failed_read_is_a_503_never_no_budget_set(
+        self, budget_world, monkeypatch, broken
+    ):
+        """Unreadable is not "no plan" (the L3-10 rule on the budget twin). The
+        shared reader used to swallow a failed query into an empty plan or a
+        zero actual, so the Budgets tab said `no_budget_set` / total 0 beside a
+        saved plan. Every reader of it -- the dashboard, the variance view and
+        the plan list -- now answers 503 instead, and the plan is untouched."""
+        _save("rent", 1000)
+
+        def boom(*_a, **_k):
+            raise RuntimeError("injected read failure")
+
+        if broken == "plan":
+            monkeypatch.setattr(budget_world.get_collection("budgets"), "find", boom)
+        elif broken == "expenses":
+            class _Broken:
+                find_many = staticmethod(boom)
+            monkeypatch.setattr(budgets_router, "get_expense_repository", lambda: _Broken())
+        else:
+            class _Orders:
+                pass
+            monkeypatch.setattr(budgets_router, "get_order_repository", lambda: _Orders())
+            monkeypatch.setattr(budgets_router._reports, "_orders_in_window", boom)
+
+        readers = [_dashboard, _variance]
+        if broken == "plan":
+            readers.append(lambda: asyncio.run(budgets_router.list_budgets(
+                store_id=STORE, period=PERIOD, current_user=ADMIN)))
+        for read in readers:
+            with pytest.raises(HTTPException) as exc:
+                read()
+            assert exc.value.status_code == 503
+            assert "Could not read the budget" in str(exc.value.detail)
+            assert "injected" not in str(exc.value.detail)
+        monkeypatch.undo()
+        # Nothing was lost: the plan reads back once the read works.
+        assert budget_world.get_collection("budgets").find_one({"head": "rent"})["planned_amount"] == 1000
+
 
 def test_l3_15_no_reader_still_looks_for_the_shape_nobody_writes():
     """The dashboard reader used to query {month, year, mode}; the only writer
