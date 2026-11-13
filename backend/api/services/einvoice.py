@@ -9,6 +9,18 @@ NOTHING (no network, no DB write) until ALL THREE conditions hold:
      config.username, config.password / config.client_id / config.client_secret)
   3. The order does NOT already have an IRN on it (idempotency skip)
 
+DO NOT SWITCH ON (decision D31, 2026-11-12) until ALL SIX known gaps are
+closed -- each is a MANDATORY blocker, none is fixed here:
+  1. no atomic claim: two servers can submit the same invoice at once
+     (generate_irn re-reads the stored order; it does not claim it);
+  2. a consumer (B2C) bill is accepted for submission;
+  3. placeholder addresses go out in the seller / buyer details;
+  4. Settings holds one e-invoice configuration only, not one per GSTIN;
+  5. no screen fetches a signed QR the IRP's reply did not carry;
+  6. the government sandbox has never accepted a payload from this module
+     (rounding tolerance, reply formats incl. the cancel "already cancelled"
+     answer _irp_says_already_cancelled trusts).
+
 Credential shape (integrations.config for type="einvoice"):
   {
     "gstin": "20XXXXXXX...",   # which GSTIN these creds belong to
@@ -62,6 +74,7 @@ STATUS_SIMULATED = "SIMULATED"
 STATUS_GENERATED = "GENERATED"
 STATUS_SKIPPED = "SKIPPED"
 STATUS_FAILED = "FAILED"
+STATUS_CANCELLED = "CANCELLED"
 
 
 # ---------------------------------------------------------------------------
@@ -516,9 +529,31 @@ def _parse_irp_response(body: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _order_key(order: Dict[str, Any]) -> str:
+    """The one id an order / invoice is known by (paired with _order_filter);
+    generation and cancellation both use it (audit 1409-P2)."""
+    return str(order.get("id") or order.get("order_id") or order.get("invoice_id") or "")
+
+
 def _order_filter(order_id: str) -> Dict[str, Any]:
     """The one id filter an order / invoice doc is found by."""
     return {"$or": [{"id": order_id}, {"order_id": order_id}, {"invoice_id": order_id}]}
+
+
+def _set_on_order(
+    db, order_id: str, fields: Dict[str, Any], unset: tuple = ()
+) -> Optional[str]:
+    """Write ``fields`` on the stored order (orders, then invoices) found by
+    the one id filter. Returns the collection that took it, or None when no
+    document matched. Raises when the database refuses the write: the
+    caller says so, never "saved"."""
+    update: Dict[str, Any] = {"$set": fields} if fields else {}
+    if unset:
+        update["$unset"] = {k: "" for k in unset}
+    for name in ("orders", "invoices"):
+        if db.get_collection(name).update_one(_order_filter(order_id), update).matched_count > 0:
+            return name
+    return None
 
 
 def _stored_order(db, order_id: str) -> Optional[Dict[str, Any]]:
@@ -573,18 +608,12 @@ def _persist_irn(db, order_id: str, irn_fields: Dict[str, Any]) -> bool:
         }
         update = {k: v for k, v in update.items() if v}  # never a blank
         update.update(einvoice_status="GENERATED", einvoice_generated_at=now)
-        # Try orders collection first (POS orders), then invoices
-        for collection_name in ("orders", "invoices"):
-            coll = db.get_collection(collection_name)
-            result = coll.update_one(_order_filter(order_id), {"$set": update})
-            if result.matched_count > 0:
-                logger.info(
-                    "[EINVOICE] persisted IRN %s on %s/%s",
-                    irn_fields.get("irn"),
-                    collection_name,
-                    order_id,
-                )
-                return True
+        took = _set_on_order(db, order_id, update)
+        if took:
+            logger.info(
+                "[EINVOICE] persisted IRN %s on %s/%s", irn_fields.get("irn"), took, order_id
+            )
+            return True
         logger.warning(
             "[EINVOICE] order/invoice %s not found for IRN persist", order_id
         )
@@ -652,9 +681,7 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
     FAILED    -- gate was up but IRP call failed; order is unchanged.
     """
     order = order or {}
-    order_id = str(
-        order.get("id") or order.get("order_id") or order.get("invoice_id") or ""
-    )
+    order_id = _order_key(order)
 
     # ── Idempotency: skip if IRN already on the doc ──────────────────────
     skipped = _already(order)
@@ -830,6 +857,54 @@ async def generate_irn(db, order: Dict[str, Any]) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _irp_cancel_ok(body: Dict[str, Any]) -> bool:
+    """The IRP / GSP accepted the cancel (NIC Status 1, as a string or int)."""
+    return str(body.get("Status")) == "1" or body.get("status") == "success"
+
+
+def _irp_says_already_cancelled(body: Dict[str, Any]) -> bool:
+    """The IRP refused a cancel because the IRN is already cancelled (NIC
+    error 9999 "Invoice is not active"). Only trusted when IMS's OWN earlier
+    request for this IRN is on record (cancel_irn). The exact sandbox reply is
+    not yet verified -- D31 blocker (6)."""
+    details = body.get("ErrorDetails") or []
+    if isinstance(details, dict):
+        details = [details]
+    for d in details if isinstance(details, list) else []:
+        if not isinstance(d, dict):
+            continue
+        msg = str(d.get("ErrorMessage") or "").lower()
+        if str(d.get("ErrorCode") or "") == "9999" or "already cancel" in msg or "not active" in msg:
+            return True
+    return False
+
+
+async def _post_cancel(cfg: Dict[str, Any], cancel_payload: Dict[str, Any]) -> Dict[str, Any]:
+    """POST the cancel to the GSP/IRP; the parsed body. Raises on transport
+    failure or a non-2xx answer."""
+    gsp_url = str(cfg.get("gsp_url") or "").rstrip("/")
+    username = cfg.get("username") or ""
+    password = cfg.get("password") or ""
+    bearer = cfg.get("bearer_token") or ""
+
+    headers: Dict[str, str] = {"Content-Type": "application/json"}
+    if bearer:
+        headers["Authorization"] = f"Bearer {bearer}"
+    elif username and password:
+        import base64
+
+        cred = base64.b64encode(f"{username}:{password}".encode()).decode()
+        headers["Authorization"] = f"Basic {cred}"
+
+    async with httpx.AsyncClient(timeout=_EINVOICE_TIMEOUT) as client:
+        resp = await client.post(
+            f"{gsp_url}/einvoice/cancel", headers=headers, content=json.dumps(cancel_payload)
+        )
+    if resp.status_code not in (200, 201):
+        raise ValueError(f"IRP cancel failed ({resp.status_code}): {resp.text[:300]}")
+    return resp.json() or {}
+
+
 async def cancel_irn(
     db, order: Dict[str, Any], cancel_reason_code: int = 1, cancel_remark: str = ""
 ) -> Dict[str, Any]:
@@ -838,8 +913,21 @@ async def cancel_irn(
     cancel_reason_code: 1=Duplicate, 2=Data Entry Mistake, 3=Order cancelled,
                         4=Others (NIC codes).
 
-    Returns {status, reason} dict. SIMULATED when gate is off or IRN missing.
-    NEVER raises.
+    Returns {status, reason, persisted?}. NEVER raises.
+      SIMULATED -- gate off, no creds, or no IRN.
+      CANCELLED -- the IRP cancelled the IRN. ``persisted`` says whether the
+                   stored order took it; ``reason`` is set when it did not.
+      FAILED    -- not cancelled (or not sent); ``reason`` says why.
+
+    Retry safety (audit 1409-P2): the order is found by the SAME id rule as
+    generation (_order_key / _order_filter), and the request is recorded on
+    it (``einvoice_cancel_pending``) BEFORE the IRP is asked; an order that
+    cannot take that record is not sent. So a cancel the IRP accepted but the
+    order did not save is never silent: the identical retry gets the IRP's
+    "already cancelled" answer for an IRN IMS itself asked to cancel (a
+    request the IRP answered with a definite "no" is cleared) and records
+    CANCELLED then, once; a later press answers from the stored order without
+    asking the IRP again.
     """
     order = order or {}
     irn = str(order.get("irn") or order.get("einvoice_irn") or "").strip()
@@ -864,69 +952,86 @@ async def cancel_irn(
             "reason": f"DARK: no GSP creds for GSTIN={gstin!r}",
         }
 
-    cancel_payload = {
-        "Irn": irn,
-        "CnlRsn": cancel_reason_code,
-        "CnlRem": cancel_remark or "Cancelled via IMS",
-    }
+    def failed(reason: str) -> Dict[str, Any]:
+        return {"status": STATUS_FAILED, "reason": reason[:400], "persisted": False}
 
+    # ── The order as STORED decides; the request is recorded before it is sent
+    order_id = _order_key(order)
+    if not order_id or db is None:  # a PyMongo Database: never truth-tested
+        return failed("Not sent to the IRP -- the order has no id to record the cancel on.")
     try:
-        gsp_url = str(cfg.get("gsp_url") or "").rstrip("/")
-        endpoint = f"{gsp_url}/einvoice/cancel"
-        username = cfg.get("username") or ""
-        password = cfg.get("password") or ""
-        bearer = cfg.get("bearer_token") or ""
-
-        headers: Dict[str, str] = {"Content-Type": "application/json"}
-        if bearer:
-            headers["Authorization"] = f"Bearer {bearer}"
-        elif username and password:
-            import base64
-
-            cred = base64.b64encode(f"{username}:{password}".encode()).decode()
-            headers["Authorization"] = f"Basic {cred}"
-
-        async with httpx.AsyncClient(timeout=_EINVOICE_TIMEOUT) as client:
-            resp = await client.post(
-                endpoint, headers=headers, content=json.dumps(cancel_payload)
+        stored = _stored_order(db, order_id)
+        stored_irn = str((stored or {}).get("irn") or (stored or {}).get("einvoice_irn") or "")
+        if stored_irn != irn:
+            return failed(
+                "Not sent to the IRP -- the stored order does not carry this IRN "
+                f"(stored: {stored_irn or 'none'})."
             )
-
-        if resp.status_code not in (200, 201):
+        if stored.get("einvoice_status") == STATUS_CANCELLED:
             return {
-                "status": STATUS_FAILED,
-                "reason": f"IRP cancel failed ({resp.status_code}): {resp.text[:300]}",
+                "status": STATUS_CANCELLED,
+                "reason": "Already recorded as cancelled -- not sent again.",
+                "persisted": True,
             }
+        asked_before = (stored.get("einvoice_cancel_pending") or {}).get("irn") == irn
+        if not asked_before and not _set_on_order(
+            db,
+            order_id,
+            {
+                "einvoice_cancel_pending": {
+                    "irn": irn,
+                    "reason_code": cancel_reason_code,
+                    "requested_at": datetime.now(timezone.utc),
+                }
+            },
+        ):
+            return failed("Not sent to the IRP -- the stored order was not found.")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[EINVOICE] cancel of %s not sent, order unreadable/unwritable: %s", order_id, exc)
+        return failed(
+            "Not sent to the IRP -- the stored order could not be read or marked "
+            f"for the cancel: {exc}"
+        )
 
-        body = resp.json() or {}
-        if body.get("Status") == "1" or body.get("status") == "success":
-            # Mark cancelled on the order doc
-            order_id = str(order.get("id") or order.get("order_id") or "")
-            if order_id and db is not None:  # a PyMongo Database: never truth-tested
-                try:
-                    for cn in ("orders", "invoices"):
-                        result = db.get_collection(cn).update_one(
-                            {"$or": [{"id": order_id}, {"order_id": order_id}]},
-                            {
-                                "$set": {
-                                    "einvoice_status": "CANCELLED",
-                                    "einvoice_cancelled_at": datetime.now(timezone.utc),
-                                }
-                            },
-                        )
-                        if result.matched_count > 0:
-                            break
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("[EINVOICE] cancel persist failed: %s", exc)
-            return {"status": "CANCELLED", "reason": None}
-
-        return {
-            "status": STATUS_FAILED,
-            "reason": f"IRP cancel: unexpected response: {str(body)[:300]}",
-        }
-
+    # ── Ask the IRP
+    try:
+        body = await _post_cancel(
+            cfg,
+            {"Irn": irn, "CnlRsn": cancel_reason_code, "CnlRem": cancel_remark or "Cancelled via IMS"},
+        )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[EINVOICE] cancel_irn failed: %s", exc)
-        return {
-            "status": STATUS_FAILED,
-            "reason": f"cancel error: {str(exc)[:300]}",
-        }
+        return failed(f"cancel error: {exc}")
+
+    if _irp_cancel_ok(body):
+        note = None
+    elif asked_before and _irp_says_already_cancelled(body):
+        note = "The IRP says this IRN is already cancelled (IMS asked earlier); recorded now."
+    else:
+        # A definite "no": this request is settled, so a later "already
+        # cancelled" is not taken as the answer to it.
+        try:
+            _set_on_order(db, order_id, {}, unset=("einvoice_cancel_pending",))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[EINVOICE] cancel marker of %s not cleared: %s", order_id, exc)
+        return failed(f"IRP cancel: unexpected response: {str(body)[:300]}")
+
+    # ── Record it on the order; a save that did not happen is said so
+    try:
+        saved = bool(
+            _set_on_order(
+                db,
+                order_id,
+                {"einvoice_status": STATUS_CANCELLED, "einvoice_cancelled_at": datetime.now(timezone.utc)},
+                unset=("einvoice_cancel_pending",),
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[EINVOICE] cancel persist failed for %s: %s", order_id, exc)
+        saved = False
+    if not saved:
+        note = (
+            "The IRP cancelled this IRN but it was NOT saved on the order; "
+            "press cancel again to record it."
+        )
+    return {"status": STATUS_CANCELLED, "reason": note, "persisted": saved}

@@ -569,9 +569,203 @@ async def test_l3_21_an_accepted_cancel_is_saved_on_the_order(monkeypatch):
 
     out = await einvoice.cancel_irn(db, order, 3, "synthetic")
 
-    assert out == {"status": "CANCELLED", "reason": None}
+    assert out == {"status": "CANCELLED", "reason": None, "persisted": True}
     stored = db.get_collection("orders").find_one({"order_id": "ORD-L3"})
     assert stored["einvoice_status"] == "CANCELLED" and stored["einvoice_cancelled_at"] is not None
+    assert "einvoice_cancel_pending" not in stored
+
+
+# --- 1409-P2: a cancel is never reported done while the stored order says
+# GENERATED. Each case runs on the strict fake AND a native PyMongo Database.
+
+_IRP_ALREADY = {"Status": "0", "ErrorDetails": [{"ErrorCode": "9999", "ErrorMessage": "Invoice is not active"}]}
+
+
+def _cancel_irp(monkeypatch, *replies):
+    """httpx.AsyncClient stand-in for the cancel call: answers ``replies`` in
+    turn and records every post. No network."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("IMS_EINVOICE_ENABLED", "1")
+    queue, posts = list(replies), []
+
+    class _IRP:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, *a, **k):
+            posts.append(url)
+            body = queue.pop(0)
+            return SimpleNamespace(status_code=200, text="", json=lambda: body)
+
+    monkeypatch.setattr(einvoice.httpx, "AsyncClient", _IRP)
+    return posts
+
+
+def _break_writes(monkeypatch, db, when):
+    """Every update_one on this database whose update matches ``when`` raises,
+    as a refused write does (the real pymongo Collection class on Mongo)."""
+    broken = {"on": True}
+    cls = type(db.get_collection("orders"))
+    real = cls.update_one
+
+    def update_one(self, flt, update, *a, **k):
+        if broken["on"] and when(update):
+            raise ConnectionError("synthetic: the local save is unavailable")
+        return real(self, flt, update, *a, **k)
+
+    monkeypatch.setattr(cls, "update_one", update_one)
+    return broken
+
+
+def _cancel_write(update):
+    return (update.get("$set") or {}).get("einvoice_status") == "CANCELLED"
+
+
+@pytest.fixture(params=["strict_fake", "native_pymongo"])
+def cancel_db(request):
+    db = PyMongoLikeDB() if request.param == "strict_fake" else request.getfixturevalue("real_db")
+    db.get_collection("stores").insert_one(dict(STORE))
+    db.get_collection("integrations").insert_one(_creds(JH_GSTIN))
+    return db
+
+
+def _issued(db, coll="orders", **ids):
+    order = {k: v for k, v in _till_order([FRAME]).items() if k != "order_id"}
+    order.update(ids, irn="SYNTHETIC-IRN-NOT-VALID", einvoice_status="GENERATED")
+    db.get_collection(coll).insert_one(dict(order))
+    return order
+
+
+def _row(db, coll, **ids):
+    return db.get_collection(coll).find_one(ids, {"_id": 0})
+
+
+@pytest.mark.asyncio
+async def test_1409_p2_order_id_cancel_is_saved_once(monkeypatch, cancel_db):
+    order = _issued(cancel_db, order_id="ORD-L3")
+    posts = _cancel_irp(monkeypatch, {"Status": "1"})
+
+    out = await einvoice.cancel_irn(cancel_db, order, 3, "synthetic")
+    stored = _row(cancel_db, "orders", order_id="ORD-L3")
+    assert out == {"status": "CANCELLED", "reason": None, "persisted": True}
+    assert stored["einvoice_status"] == "CANCELLED" and "einvoice_cancel_pending" not in stored
+
+    again = await einvoice.cancel_irn(cancel_db, order, 3, "synthetic")
+    assert (again["status"], again["persisted"], len(posts)) == ("CANCELLED", True, 1)
+    assert _row(cancel_db, "orders", order_id="ORD-L3")["einvoice_cancelled_at"] == stored["einvoice_cancelled_at"]
+
+
+@pytest.mark.asyncio
+async def test_1409_p2_an_invoice_id_only_record_is_cancelled_by_the_generation_id_rule(
+    monkeypatch, cancel_db
+):
+    """Codex's case: generate_irn saved the IRN on an invoice known only by
+    invoice_id; cancel answered CANCELLED but its own filter had no
+    invoice_id, so the stored invoice still read GENERATED."""
+    inv = {k: v for k, v in _till_order([FRAME]).items() if k != "order_id"}
+    inv["invoice_id"] = "INV-L3-ONLY"
+    cancel_db.get_collection("invoices").insert_one(dict(inv))
+    gen, _calls = await _generate_with_stubbed_provider(monkeypatch, cancel_db, inv)
+    assert (gen["status"], gen["persisted"]) == (einvoice.STATUS_GENERATED, True)
+    saved = _row(cancel_db, "invoices", invoice_id="INV-L3-ONLY")
+    posts = _cancel_irp(monkeypatch, {"Status": "1"})
+
+    out = await einvoice.cancel_irn(cancel_db, saved)
+    stored = _row(cancel_db, "invoices", invoice_id="INV-L3-ONLY")
+    assert out == {"status": "CANCELLED", "reason": None, "persisted": True}
+    assert stored["einvoice_status"] == "CANCELLED" and stored["einvoice_cancelled_at"] is not None
+
+    retry = await einvoice.cancel_irn(cancel_db, saved)  # the identical (stale) copy
+    assert (retry["status"], retry["persisted"], len(posts)) == ("CANCELLED", True, 1)
+    assert _row(cancel_db, "invoices", invoice_id="INV-L3-ONLY")["einvoice_cancelled_at"] == stored[
+        "einvoice_cancelled_at"]
+
+
+@pytest.mark.asyncio
+async def test_1409_p2_a_cancel_the_irp_took_but_the_order_did_not_save_converges_on_retry(
+    monkeypatch, cancel_db
+):
+    """Codex's case: the IRP cancelled, the local write raised, and the
+    answer was still CANCELLED / reason None; the identical retry got the
+    IRP's "already cancelled" and answered FAILED for ever. Now the first
+    answer says NOT saved, the request is on the order, and the retry
+    records CANCELLED exactly once."""
+    order = _issued(cancel_db, order_id="ORD-L3")
+    posts = _cancel_irp(monkeypatch, {"Status": "1"}, _IRP_ALREADY)
+    broken = _break_writes(monkeypatch, cancel_db, _cancel_write)
+
+    first = await einvoice.cancel_irn(cancel_db, order)
+    stored = _row(cancel_db, "orders", order_id="ORD-L3")
+    assert (first["status"], first["persisted"]) == ("CANCELLED", False)
+    assert "NOT saved" in first["reason"]
+    assert stored["einvoice_status"] == "GENERATED"
+    assert stored["einvoice_cancel_pending"]["irn"] == "SYNTHETIC-IRN-NOT-VALID"
+
+    broken["on"] = False
+    retry = await einvoice.cancel_irn(cancel_db, order)
+    stored = _row(cancel_db, "orders", order_id="ORD-L3")
+    assert (retry["status"], retry["persisted"]) == ("CANCELLED", True)
+    assert "already cancelled" in retry["reason"]
+    assert stored["einvoice_status"] == "CANCELLED" and "einvoice_cancel_pending" not in stored
+
+    third = await einvoice.cancel_irn(cancel_db, order)
+    assert (third["status"], third["persisted"], len(posts)) == ("CANCELLED", True, 2)
+    assert _row(cancel_db, "orders", order_id="ORD-L3")["einvoice_cancelled_at"] == stored["einvoice_cancelled_at"]
+
+
+@pytest.mark.asyncio
+async def test_1409_p2_the_same_lost_save_on_an_invoice_id_only_record(monkeypatch, cancel_db):
+    inv = _issued(cancel_db, "invoices", invoice_id="INV-L3-ONLY")
+    posts = _cancel_irp(monkeypatch, {"Status": "1"}, _IRP_ALREADY)
+    broken = _break_writes(monkeypatch, cancel_db, _cancel_write)
+
+    first = await einvoice.cancel_irn(cancel_db, inv)
+    assert (first["status"], first["persisted"]) == ("CANCELLED", False)
+    assert _row(cancel_db, "invoices", invoice_id="INV-L3-ONLY")["einvoice_status"] == "GENERATED"
+
+    broken["on"] = False
+    retry = await einvoice.cancel_irn(cancel_db, inv)
+    assert (retry["status"], retry["persisted"], len(posts)) == ("CANCELLED", True, 2)
+    assert _row(cancel_db, "invoices", invoice_id="INV-L3-ONLY")["einvoice_status"] == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_1409_p2_a_cancel_that_cannot_be_recorded_first_is_not_sent(monkeypatch, cancel_db):
+    """No record of the request, no request: the IRP is never asked."""
+    order = _issued(cancel_db, order_id="ORD-L3")
+    posts = _cancel_irp(monkeypatch, {"Status": "1"})
+    _break_writes(monkeypatch, cancel_db, lambda update: True)
+
+    out = await einvoice.cancel_irn(cancel_db, order)
+    assert (out["status"], out["persisted"], posts) == (einvoice.STATUS_FAILED, False, [])
+    assert _row(cancel_db, "orders", order_id="ORD-L3")["einvoice_status"] == "GENERATED"
+
+    stale = await einvoice.cancel_irn(cancel_db, {**order, "irn": "ANOTHER-IRN"})
+    assert (stale["status"], posts) == (einvoice.STATUS_FAILED, [])
+
+
+@pytest.mark.asyncio
+async def test_1409_p2_an_already_cancelled_answer_ims_never_asked_for_is_not_trusted(
+    monkeypatch, cancel_db
+):
+    """Only an unsettled request of IMS's own makes "already cancelled" an
+    answer; otherwise the stored order is left as it is."""
+    order = _issued(cancel_db, order_id="ORD-L3")
+    posts = _cancel_irp(monkeypatch, _IRP_ALREADY, _IRP_ALREADY)
+
+    for _ in range(2):
+        out = await einvoice.cancel_irn(cancel_db, order)
+        stored = _row(cancel_db, "orders", order_id="ORD-L3")
+        assert out["status"] == einvoice.STATUS_FAILED
+        assert stored["einvoice_status"] == "GENERATED" and "einvoice_cancel_pending" not in stored
+    assert len(posts) == 2
 
 
 # --- the same proof on a REAL MongoDB (CI's mongo:7.0; skipped on a PC without one)
