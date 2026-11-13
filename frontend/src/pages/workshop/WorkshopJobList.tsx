@@ -5,7 +5,7 @@
 
 import { Wrench, AlertTriangle, Eye, Phone, User, Loader2 } from 'lucide-react';
 import clsx from 'clsx';
-import { resolveLensConfig, resolveStatusConfig, resolvePriorityConfig } from './shared';
+import { resolveLensConfig, resolveStatusConfig, resolvePriorityConfig, NOT_ON_FILE } from './shared';
 import type { WorkshopPageState } from './useWorkshopPage';
 
 export function WorkshopJobList({ page }: { page: WorkshopPageState }) {
@@ -39,11 +39,14 @@ export function WorkshopJobList({ page }: { page: WorkshopPageState }) {
                   overdue && job.priority !== 'URGENT' && 'border-amber-300 bg-amber-50'
                 )}
               >
-                <div className="flex items-start justify-between gap-4">
+                {/* L2-UI-F01: on a phone the date/actions stack under the job
+                    info and the badges wrap, so nothing overlaps; from sm up
+                    it is the side-by-side card it always was. */}
+                <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4">
                   {/* Job Info */}
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-3 mb-2">
-                      <span className="font-bold text-gray-900">{job.jobNumber}</span>
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 mb-2">
+                      <span className="font-bold text-gray-900 break-all">{job.jobNumber}</span>
                       <span className={clsx('px-2 py-0.5 rounded-full text-xs font-medium', statusConfig.class)}>
                         {statusConfig.label}
                       </span>
@@ -63,21 +66,21 @@ export function WorkshopJobList({ page }: { page: WorkshopPageState }) {
                     </div>
 
                     <div className="grid grid-cols-2 gap-4 text-sm">
-                      <div>
+                      <div className="min-w-0 break-words">
                         <p className="text-gray-500">Customer</p>
                         <p className="font-medium flex items-center gap-1">
                           <User className="w-3 h-3" />
-                          {job.customerName}
+                          {job.customerName || NOT_ON_FILE}
                         </p>
                         <p className="text-gray-500 flex items-center gap-1">
                           <Phone className="w-3 h-3" />
-                          {job.customerPhone}
+                          {job.customerPhone || NOT_ON_FILE}
                         </p>
                       </div>
-                      <div>
+                      <div className="min-w-0 break-words">
                         <p className="text-gray-500">Frame & Lens</p>
-                        <p className="font-medium">{job.frameName}</p>
-                        <p className="text-gray-500">{job.lensType}</p>
+                        <p className="font-medium">{job.frameName || NOT_ON_FILE}</p>
+                        <p className="text-gray-500">{job.lensType || NOT_ON_FILE}</p>
                       </div>
                     </div>
 
@@ -89,8 +92,8 @@ export function WorkshopJobList({ page }: { page: WorkshopPageState }) {
                   </div>
 
                   {/* Dates & Actions */}
-                  <div className="text-right">
-                    <div className="mb-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 sm:block sm:text-right sm:shrink-0">
+                    <div className="sm:mb-3">
                       <p className="text-xs text-gray-500">Promise Date</p>
                       <p className={clsx(
                         'font-medium',
@@ -100,7 +103,7 @@ export function WorkshopJobList({ page }: { page: WorkshopPageState }) {
                       </p>
                     </div>
                     {job.assignedTo && (
-                      <p className="text-xs text-gray-500 mb-3">
+                      <p className="text-xs text-gray-500 sm:mb-3">
                         Assigned: {job.assignedToName || job.assignedTo}
                       </p>
                     )}
