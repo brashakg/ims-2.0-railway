@@ -5,7 +5,8 @@
 // ============================================================================
 
 import { beforeAll, describe, expect, it, vi } from 'vitest';
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 
 beforeAll(() => {
@@ -41,5 +42,25 @@ describe('opening the login page', () => {
     );
     view.unmount();
     Object.entries(signedIn).forEach(([k, v]) => expect(localStorage.getItem(k)).toBe(v));
+  });
+});
+
+// R10 (audit): a refused password must leave the typed username and a reason
+// on screen (the client no longer sends a refused sign-in to /login; see
+// tokenRefreshSession.test.ts).
+describe('a wrong password', () => {
+  it('shows the server reason and keeps the username', async () => {
+    const login = vi.fn().mockRejectedValue(new Error('Invalid username or password'));
+    const value = { login, isLoading: false } as unknown as React.ContextType<typeof AuthContext>;
+    render(
+      <AuthContext.Provider value={value}><MemoryRouter initialEntries={['/login']}><LoginPage /></MemoryRouter></AuthContext.Provider>,
+    );
+    const user = userEvent.setup();
+    await user.type(document.getElementById('username')!, 'cashier1');
+    await user.type(document.getElementById('password')!, 'wrong');
+    await user.click(screen.getByRole('button', { name: /sign in|log in/i }));
+    expect(await screen.findByText('Invalid username or password')).toBeInTheDocument();
+    expect(document.getElementById('username')!).toHaveValue('cashier1');
+    expect(login).toHaveBeenCalledTimes(1);
   });
 });
