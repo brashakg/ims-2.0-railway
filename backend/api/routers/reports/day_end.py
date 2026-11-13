@@ -196,26 +196,24 @@ async def create_day_end_close(
         actor=current_user,
     )
 
-    # ONE DRAWER, ONE COUNTED FIGURE (audit L3-12). When the drawer was ALREADY
-    # counted on the shared till -- the blind count, which is THE close (owner
-    # ruling 2026-08-25) -- that count stands: record_screen_close never
-    # restates it, so this record must REPORT it rather than the figure typed
-    # here. Storing its own is how a till LOCKED at Rs 1,000 came to read
-    # Rs 3,000 on this report for the same shop and day. Same rule, same helper
-    # as the Finance > Cash Register door (cash_drawer.close_cash_register).
-    # The grid typed here is still kept as this screen's sheet; restated
-    # against the shared figure it flags itself (matches_amount False).
-    shared_paisa = (
-        till_service.shared_counted_paisa(till_link)
-        if till_link.get("already_counted")
-        else None
-    )
+    # ONE DRAWER, ONE COUNTED FIGURE (audit L3-12). Whatever the shared till
+    # session holds after this close linked to it IS the day's count, and this
+    # record REPORTS it. Two ways it can differ from the figure typed here:
+    # the drawer was ALREADY counted (the blind count is THE close, owner ruling
+    # 2026-08-25, and record_screen_close never restates it), or THIS close
+    # counted first with a grid and a different typed total (the till's own
+    # rule lets the notes rule). Either way storing the typed figure is how one
+    # drawer read Rs 1,000 on the Z-Read and Rs 3,000 here. Same rule, same
+    # helper, no gate -- exactly as the Finance > Cash Register door
+    # (cash_drawer.close_cash_register). The grid typed here is still kept as
+    # this screen's sheet; restated against the shared figure it flags itself.
+    shared_paisa = till_service.shared_counted_paisa(till_link)
     count_adopted = shared_paisa is not None and (
         closing_cash is None
         or shared_paisa != cash_denom.rupees_to_paisa(closing_cash)
     )
     # What THIS screen sent, kept when it is set aside: a figure someone typed
-    # against an already-counted drawer is evidence, not noise.
+    # that is not the drawer's count is evidence, not noise.
     entered_cash = closing_cash if count_adopted else None
     if count_adopted:
         closing_cash = cash_denom.paisa_to_rupees(shared_paisa)
@@ -247,7 +245,7 @@ async def create_day_end_close(
         # The count on this close came from the shared till record, not from
         # what was typed on this screen -- the screen says so out loud.
         "counted_from_shared_record": count_adopted,
-        "till_count_differs": count_adopted,
+        "till_count_differs": bool(till_link.get("count_differs")) or count_adopted,
         # The figure entered on this screen that was NOT used (None when no
         # figure was entered, or when this screen's own count stands).
         "entered_closing_cash": entered_cash,

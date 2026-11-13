@@ -251,6 +251,40 @@ class TestL312DayEndCannotRestateALockedTill:
         assert len(sessions) == 1
         assert sessions[0]["blind_count_paisa"] == 300000
 
+    def test_a_day_end_that_counts_first_with_a_grid_and_a_different_typed_total(
+        self, db, day_end
+    ):
+        """REVIEW MUST-FIX (L3-12, other order of events). Nothing counted yet;
+        the Day-End screen sends a typed Rs 3,000 AND a grid of one Rs 500 note
+        (the screen sends both when a typed total sits beside a half-filled
+        grid). The till's own rule lets the notes rule, so the shared session
+        records Rs 500. This record used to keep Rs 3,000 with
+        till_count_differs False: Z-Read short Rs 2,500, Day-End 'matches'."""
+        close = day_end(
+            closing_cash=3000.0,
+            system_cash=3000.0,
+            closing_count={
+                "state": "COUNTED",
+                "rows": [{"face": 500, "kind": "note", "pieces": 1}],
+            },
+        )["close"]
+        sessions = list(db.get_collection("till_sessions").find({}))
+        assert len(sessions) == 1
+        till_paisa = sessions[0]["blind_count_paisa"]
+        assert till_paisa == 50000  # the till took the notes
+
+        # ONE counted figure for the drawer: the Day-End record matches the till.
+        assert close["closing_cash"] == 500.0
+        assert close["variance"] == -2500.0
+        assert close["counted_from_shared_record"] is True
+        assert close["till_count_differs"] is True
+        assert close["till_already_counted"] is False  # this screen counted first
+        assert close["entered_closing_cash"] == 3000.0  # kept as evidence
+        stored = _stored_close(db)
+        assert stored["closing_cash"] * 100 == till_paisa
+        assert stored["closing_count"]["amount_paisa"] == till_paisa
+        assert stored["till_count_differs"] is True
+
     def test_the_audit_row_carries_the_count_that_stands(
         self, db, day_end, audit_rows
     ):
