@@ -797,16 +797,21 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
     by its lines AND by its unit). Each give-back is dated when the unit
     FIRST went back, and never before the return itself, so an earlier month
     is never changed: a unit the return's restock put back (restock_stock_ids,
-    once restock_applied), by the restock retry (restock_completed_at) else
-    the return; a piece the return set aside in quarantine, by its first
-    release back to sale (item_events quarantine.out -> AVAILABLE, the ledger
-    both release doors write); a Shopify refund's unit put back through Goods
-    back (its review row's goods_restock units, by goods_back_at). A set-aside
-    piece written off or sent to the supplier stays in the cost of goods.
-    A HISTORICAL order (our Shopify order-history import; IMS never held its
-    stock, no unit ever goes back) gives back the cost its sale recorded with
-    each credit note, at the note's date (decision D42(c)). Fail-soft: {} on
-    a read error."""
+    a partial restock still waiting for its retry too), by its own restock
+    audit row (stock_audit RETURN_RESTOCK for this return), else the retry
+    (restock_completed_at), else the return; a piece the return set aside in
+    quarantine, by its first release back to sale (item_events quarantine.out
+    -> AVAILABLE, the ledger both release doors write); a Shopify refund's
+    unit put back through Goods back (its review row's goods_landed, one
+    entry per landed unit of every press, a partial one too; a legacy row's
+    goods_restock by goods_back_at). A set-aside piece written off or sent to
+    the supplier stays in the cost of goods. A HISTORICAL order (our Shopify
+    order-history import; IMS never held its stock, no unit ever goes back)
+    gives back the cost its sale recorded with a credit note that brought
+    goods back, at the note's date (decisions D42(c), D45(b)): its goods
+    lines, or the whole-order note scaled to its value; never an
+    amount-only, goodwill or shipping refund. Fail-soft: {} on a read
+    error."""
     lo = _parse_range_dt(from_date, end=False)
     hi = _parse_range_dt(to_date, end=True)
 
@@ -828,18 +833,24 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
         # created_at as ISO strings AND BSON dates; returns are few.
         rets = [r for r in db.get_collection("returns").find(match, {"_id": 0})
                 if parse_event_utc_naive(r.get("created_at")) is not None]
-        # Goods back on a Shopify refund (stamped on the review row only).
+        # Goods back on a Shopify refund (stamped on the review row only):
+        # every unit a press landed, with when it landed -- goods_landed (each
+        # press, a partial one too), else a legacy row's goods_restock.
         refund_ids = [r["shopify_refund_id"] for r in rets if r.get("shopify_refund_id")]
-        goods: Dict[str, tuple] = {}
+        goods: Dict[str, list] = {}
         if refund_ids:
             for row in db.get_collection("shopify_refund_review").find(
-                {"shopify_refund_id": {"$in": refund_ids}, "goods_restock.restock_applied": True},
-                {"_id": 0, "shopify_refund_id": 1, "goods_back_at": 1, "goods_restock": 1},
+                {"shopify_refund_id": {"$in": refund_ids},
+                 "$or": [{"goods_restock.restock_applied": True}, {"goods_landed.0": {"$exists": True}}]},
+                {"_id": 0, "shopify_refund_id": 1, "goods_back_at": 1, "goods_restock": 1, "goods_landed": 1},
             ):
                 at = parse_event_utc_naive(row.get("goods_back_at"))
-                if at is not None:
-                    goods[row["shopify_refund_id"]] = (
-                        at, (row.get("goods_restock") or {}).get("restock_stock_ids") or [])
+                rs = row.get("goods_restock") or {}
+                landed = [(sid, at) for sid in (rs.get("restock_stock_ids") or [])
+                          if rs.get("restock_applied") and at is not None]
+                landed += [(e.get("stock_id"), parse_event_utc_naive(e.get("at")))
+                           for e in row.get("goods_landed") or [] if isinstance(e, dict)]
+                goods.setdefault(row["shopify_refund_id"], []).extend(landed)
         picked = []  # (return, when, taxable, tax, gross, its own credit note in range)
         for ret in rets:
             when = parse_event_utc_naive(ret.get("created_at"))
@@ -847,10 +858,9 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
             taxable = float(gb.get("taxable") or 0)
             tax = float(gb.get("tax") or 0)
             noted = _in_range(when) and (taxable > 0 or tax > 0)
-            back = goods.get(ret.get("shopify_refund_id"))
-            if (noted or ret.get("quarantined_stock_ids")
-                    or (ret.get("restock_applied") and _in_range(_restocked_at(ret, when)))
-                    or (back and _in_range(max(when, back[0])))):
+            # Each unit is range-tested on its own below.
+            if (noted or ret.get("quarantined_stock_ids") or ret.get("restock_stock_ids")
+                    or goods.get(ret.get("shopify_refund_id"))):
                 picked.append((ret, when, taxable, tax, float(gb.get("gross") or (taxable + tax)), noted))
         order_ids = list({r[0].get("order_id") for r in picked if r[0].get("order_id")})
         orders = {
@@ -874,6 +884,20 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 at = parse_event_utc_naive(ev.get("at"))
                 if at is not None:
                     releases.setdefault(ev["stock_id"], []).append(at)
+        # When each unit a return's own restock put back landed: its per-unit
+        # audit row, written by the one restock every door runs
+        # (returns._audit_stock_transition), keyed on the return it was for.
+        own = {sid for p in picked for sid in (p[0].get("restock_stock_ids") or [])}
+        landed_at: Dict[tuple, datetime] = {}
+        if own:
+            for ev in db.get_collection("stock_audit").find(
+                {"stock_id": {"$in": list(own)}, "source": "RETURN_RESTOCK", "new_status": "AVAILABLE"},
+                {"_id": 0, "stock_id": 1, "return_id": 1, "at": 1},
+            ):
+                at = parse_event_utc_naive(ev.get("at"))
+                key = (ev.get("stock_id"), ev.get("return_id"))
+                if at is not None and (key not in landed_at or at < landed_at[key]):
+                    landed_at[key] = at
         units = db.get_collection("stock_units")
         empty = {"gross": 0.0, "taxable": 0.0, "tax": 0.0, "cogs_reversal": 0.0, "count": 0}
         for ret, when, taxable, tax, gross, noted in picked:
@@ -881,6 +905,13 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
             by_item = {str(i.get("item_id")): i for i in lines if i.get("item_id")}
             by_product = {str(i.get("product_id")): i for i in lines if i.get("product_id")}
             items = ret.get("items") or []
+            # A note stamped with no lines (RET-HIST) is the order's lines,
+            # whole, for its category split.
+            whole = [{"order_item_id": li.get("item_id"), "product_id": li.get("product_id"),
+                      "return_qty": float(li.get("quantity", 1) or 1),
+                      "unit_price": line_revenue_ex_gst(li) / float(li.get("quantity", 1) or 1)}
+                     for li in lines]
+            split = items or ret.get("goods_lines") or whole
 
             def _line(it, by_item=by_item, by_product=by_product):
                 return by_item.get(str(it.get("order_item_id"))) or by_product.get(str(it.get("product_id")))
@@ -913,27 +944,33 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
 
             if orders[ret["order_id"]].get("historical"):
                 # Decision D42(c): IMS never held an imported Shopify order's
-                # stock, so its credit note gives back the cost the sale
-                # recorded, at the note's date, once -- whatever came back. A
-                # note stamped with no lines (RET-HIST) is the order's lines
-                # scaled to the note's taxable value.
+                # stock, so a credit note that brought its goods back gives
+                # back the cost the sale recorded, at the note's date, once.
+                # D45(b): only such a note -- its goods lines (the live
+                # refund's, or those the importer stamped as goods_lines), or
+                # the whole-order note (orderfull:, the whole sale reversed:
+                # the order's lines scaled to the note's taxable value). A
+                # lines-less note for one refund (an amount-only, goodwill or
+                # shipping refund looks the same) and a shipping line give
+                # back no cost.
                 if noted:
-                    if not items:
+                    goods_back = [it for it in (items or ret.get("goods_lines") or [])
+                                  if (_line(it) or {}).get("item_type") != "SHIPPING"]
+                    if not (items or ret.get("goods_lines")) and str(
+                            ret.get("shopify_refund_id") or "").startswith("orderfull:"):
                         base = sum(line_revenue_ex_gst(li) for li in lines)
                         share = min(1.0, taxable / base) if base > 0 else 0.0
-                        items = [{"order_item_id": li.get("item_id"), "product_id": li.get("product_id"),
-                                  "return_qty": float(li.get("quantity", 1) or 1) * share,
-                                  "unit_price": line_revenue_ex_gst(li) / float(li.get("quantity", 1) or 1)}
-                                 for li in lines]
-                    for it in items:
+                        goods_back = [{**it, "return_qty": it["return_qty"] * share} for it in whole]
+                    for it in goods_back:
                         _give_back(it, float(it.get("return_qty") or 0))
             else:
                 # Keyed on the physical unit: each piece back on sale gives its
                 # cost back once, on the day it FIRST went back, whichever door
                 # moved it -- the return's own restock (its restock_stock_ids:
-                # every unit it reactivated or minted; "applied" with none is a
-                # restock that put nothing back), a set-aside piece's first
-                # release, or Goods back on a Shopify refund.
+                # every unit it reactivated or minted, a partial restock still
+                # waiting for its retry too; "applied" with none put nothing
+                # back), a set-aside piece's first release, or Goods back on a
+                # Shopify refund (every press, a partial one too).
                 landed: Dict[str, tuple] = {}
 
                 def _lands(sid, at, among, landed=landed):
@@ -941,16 +978,17 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                         landed[sid] = (at, among)
 
                 good = [it for it in items if str(it.get("condition") or "").upper() == "GOOD"]
-                if ret.get("restock_applied"):
-                    for sid in ret.get("restock_stock_ids") or []:
-                        _lands(sid, _restocked_at(ret, when), good or items)
+                for sid in ret.get("restock_stock_ids") or []:
+                    at = min((landed_at[(sid, k)] for k in (ret.get("return_id"), ret.get("shopify_refund_id"))
+                              if (sid, k) in landed_at), default=None)
+                    _lands(sid, max(when, at) if at is not None else _restocked_at(ret, when), good or items)
                 set_aside = [it for it in items if str(it.get("condition") or "").upper() != "GOOD"]
                 for sid in ret.get("quarantined_stock_ids") or []:
                     _lands(sid, min((t for t in releases.get(sid, []) if t >= when), default=None),
                            set_aside or items)
-                back = goods.get(ret.get("shopify_refund_id"))
-                for sid in (back[1] if back else []):
-                    _lands(sid, max(when, back[0]), items)
+                for sid, at in goods.get(ret.get("shopify_refund_id")) or []:
+                    if sid and at is not None:
+                        _lands(sid, max(when, at), items)
                 for sid, (at, among) in landed.items():
                     if _in_range(at):
                         _give_back(_unit_item(sid, among))
@@ -959,10 +997,10 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
             shares = [(ret.get("store_id"), 1.0)]
             if noted and by == "category":
                 worth = [(_key(it), float(it.get("unit_price") or 0) * float(it.get("return_qty") or 0))
-                         for it in items]
+                         for it in split]
                 total = sum(w for _k, w in worth)
                 shares = ([(k, w / total) for k, w in worth if w] if total > 0
-                          else [(_key(items[0]) if items else "OTHER", 1.0)])
+                          else [(_key(split[0]) if split else "OTHER", 1.0)])
             if noted:
                 for key, share in shares:
                     row = out.setdefault(key, dict(empty))

@@ -1695,10 +1695,13 @@ def _book_historical_refund_credit_notes(
 
     def _stamp_returns_doc(
         refund_id: str, gross: float, gst_view: Dict[str, Any], cn_date: str,
-        covered_by: Optional[str] = None,
+        covered_by: Optional[str] = None, goods_lines: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Minimal returns doc stamped with the refund id so a FUTURE real refund
-        webhook for this same refund is recognised as already-credited."""
+        webhook for this same refund is recognised as already-credited.
+        `goods_lines`: the goods this note refunded (read by the P&L only, for
+        the cost it gives back -- decision D45(b)); kept off `items`, which the
+        restock caps read."""
         if returns_coll is None:
             return
         try:
@@ -1724,6 +1727,8 @@ def _book_historical_refund_credit_notes(
             }
             if covered_by:
                 doc["covered_by_ref"] = covered_by
+            if goods_lines:
+                doc["goods_lines"] = goods_lines
             returns_coll.insert_one(doc)
         except Exception:  # noqa: BLE001
             pass
@@ -1936,7 +1941,15 @@ def _book_historical_refund_credit_notes(
             )
             return "skipped"
 
-        _stamp_returns_doc(refund_id, gross, gst_view, cn_date)
+        # D45(b): a refund of goods lines for their full billed value brought
+        # those goods back; one Shopify refunded LESS for (a partial or
+        # goodwill amount) is money only. The whole-order note is read by its
+        # orderfull: id.
+        goods = [] if refund.get("_reverse_whole_order") or (reconciled and not clamped) else [
+            {"order_item_id": ln.get("order_item_id"), "product_id": ln.get("product_id"),
+             "return_qty": float(ln.get("return_qty") or 0), "unit_price": float(ln.get("unit_price") or 0)}
+            for ln in priced if ln.get("product_id")]
+        _stamp_returns_doc(refund_id, gross, gst_view, cn_date, goods_lines=goods)
 
         summary["credit_notes"] += 1
         summary["gross"] = round(summary["gross"] + gross, 2)
