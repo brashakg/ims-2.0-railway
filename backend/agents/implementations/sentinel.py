@@ -135,30 +135,82 @@ class SentinelAgent(JarvisAgent):
         # and guarded to fire once per IST day; NEVER takes down the scheduler.
         await self._maybe_daily_stock_parity()
 
-        # Auto-alert state transitions — first time we drop below 70,
-        # file a HIGH alert with the failing components so the UI/Slack
-        # surface it. Above 70 stays quiet.
-        if self._health_score < 70:
-            failing = []
-            for domain in ("database", "api", "frontend", "agents"):
-                d = results.get(domain) or {}
-                if d.get("status") in ("unhealthy", "degraded"):
-                    failing.append(domain)
-            await self._create_alert(
-                severity="HIGH" if self._health_score >= 40 else "CRITICAL",
-                domain="system",
-                message=(
-                    f"System health {self._health_score}/100 — "
-                    f"{', '.join(failing) if failing else 'multiple components'} degraded"
-                ),
-                details={"score": self._health_score, "failing": failing},
+        # Incident lifecycle (INFRA-05): one alert when health first drops
+        # below 70, another only on a meaningful change (failing set or
+        # severity) or as an hourly reminder; recovery is stamped on the
+        # incident's latest row. Identical consecutive ticks stay quiet.
+        await self._record_health_transition(results)
+
+    # An unchanged open incident is re-alerted at most this often.
+    DEGRADED_REMINDER = timedelta(hours=1)
+
+    def _latest_system_alert(self) -> Optional[Dict]:
+        """Newest domain=system alert: alert_history first, memory tail if the store is unreadable."""
+        try:
+            col = self.get_collection("alert_history")
+            if col is not None:
+                return col.find_one({"domain": "system"}, sort=[("timestamp", -1), ("_id", -1)])
+        except Exception as e:
+            logger.warning(f"[SENTINEL] Failed to read last system alert: {e}")
+        return next((a for a in reversed(self._alerts) if a.get("domain") == "system"), None)
+
+    async def _record_health_transition(self, results: Dict[str, Any]):
+        last = self._latest_system_alert()
+        open_incident = last is not None and not last.get("recovered_at")
+        now = datetime.now(timezone.utc)
+
+        if self._health_score >= 70:
+            if open_incident:
+                last["recovered_at"] = now
+                last["recovered_score"] = self._health_score
+                try:
+                    col = self.get_collection("alert_history")
+                    if col is not None and last.get("_id") is not None:
+                        col.update_one(
+                            {"_id": last["_id"]},
+                            {"$set": {"recovered_at": now, "recovered_score": self._health_score}},
+                        )
+                except Exception as e:
+                    logger.warning(f"[SENTINEL] Failed to record recovery: {e}")
+                logger.info(f"[SENTINEL] System health recovered: {self._health_score}/100")
+            return
+
+        failing = []
+        for domain in ("database", "api", "frontend", "agents"):
+            d = results.get(domain) or {}
+            if d.get("status") in ("unhealthy", "degraded"):
+                failing.append(domain)
+        severity = "HIGH" if self._health_score >= 40 else "CRITICAL"
+
+        kind = "opened"
+        if open_incident:
+            same = (
+                last.get("severity") == severity
+                and sorted((last.get("details") or {}).get("failing") or []) == sorted(failing)
             )
-            await self.emit_event("system.degraded", {
-                "score": self._health_score,
-                "failing": failing,
-                "details": results,
-            })
-            logger.warning(f"[SENTINEL] System health DEGRADED: {self._health_score}/100 — {failing}")
+            ts = last.get("timestamp")
+            if isinstance(ts, datetime) and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if same and isinstance(ts, datetime) and now - ts < self.DEGRADED_REMINDER:
+                return
+            kind = "reminder" if same else "changed"
+
+        await self._create_alert(
+            severity=severity,
+            domain="system",
+            message=(
+                f"System health {self._health_score}/100 — "
+                f"{', '.join(failing) if failing else 'multiple components'} degraded"
+            ),
+            details={"score": self._health_score, "failing": failing, "incident": kind},
+        )
+        await self.emit_event("system.degraded", {
+            "score": self._health_score,
+            "failing": failing,
+            "incident": kind,
+            "details": results,
+        })
+        logger.warning(f"[SENTINEL] System health DEGRADED ({kind}): {self._health_score}/100 — {failing}")
 
     async def _maybe_daily_stock_parity(self):
         """Run the Shopify stock-parity check once per IST day at ~03:00 IST.

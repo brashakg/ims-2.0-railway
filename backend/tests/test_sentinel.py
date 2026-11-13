@@ -258,3 +258,94 @@ class TestPymongoTruthTestBugFixed:
             # them. Just confirm the test's guard works:
             assert ("is None" in line or "is not None" in line or
                     not bad.search(line)), f"v2 false-positive on: {line!r}"
+
+
+# ----- INFRA-05: incident lifecycle, no duplicate alerts per tick ----------
+
+class TestDegradedIncidentLifecycle:
+    """Identical degraded ticks must not insert one alert per tick."""
+
+    def _agent(self, db):
+        from unittest.mock import AsyncMock
+        from agents.implementations.sentinel import SentinelAgent
+        a = SentinelAgent(db=db)
+        a._run_count = 1  # skip the every-10th integrity probe
+        self.state = {
+            "database": {"status": "unhealthy"},
+            "api": {"status": "unhealthy"},
+        }
+        healthy = {"status": "healthy"}
+        a._check_db_health = AsyncMock(side_effect=lambda: self.state["database"])
+        a._check_api_health = AsyncMock(side_effect=lambda: self.state["api"])
+        a._check_frontend_health = AsyncMock(return_value=healthy)
+        a._check_agent_health = AsyncMock(return_value={"status": "healthy", "total": 1, "unhealthy": 0})
+        a._maybe_daily_stock_parity = AsyncMock()
+        self.emitted = []
+
+        async def emit(event, payload):
+            self.emitted.append(event)
+        a.emit_event = emit
+        return a
+
+    @pytest.mark.asyncio
+    async def test_open_change_reminder_recover(self):
+        import mongomock
+        from datetime import timedelta
+        db = mongomock.MongoClient()["sentinel_infra05"]
+        a = self._agent(db)
+        alerts = db["alert_history"]
+
+
+        await a._do_background_work()
+        await a._do_background_work()
+        assert alerts.count_documents({"domain": "system"}) == 1, "identical tick duplicated the alert"
+        assert db["health_checks"].count_documents({}) == 2  # every tick still snapshotted
+        assert self.emitted == ["system.degraded"]
+        first = alerts.find_one({"domain": "system"})
+        assert first["details"]["incident"] == "opened"
+
+        # Meaningful change (failing set) -> a new alert.
+        self.state["api"] = {"status": "healthy"}
+        self.state["database"] = {"status": "unhealthy"}
+        a._check_frontend_health.return_value = {"status": "unhealthy"}
+        await a._do_background_work()
+        await a._do_background_work()
+        assert alerts.count_documents({"domain": "system"}) == 2
+        latest = alerts.find_one({"domain": "system"}, sort=[("timestamp", -1), ("_id", -1)])
+        assert latest["details"]["incident"] == "changed"
+
+        # Unchanged for over an hour -> exactly one reminder.
+        for row in list(alerts.find({"domain": "system"})):
+            alerts.update_one({"_id": row["_id"]}, {"$set": {"timestamp": row["timestamp"] - timedelta(hours=2)}})
+        await a._do_background_work()
+        await a._do_background_work()
+        assert alerts.count_documents({"domain": "system"}) == 3
+        latest = alerts.find_one({"domain": "system"}, sort=[("timestamp", -1), ("_id", -1)])
+        assert latest["details"]["incident"] == "reminder"
+
+        # Recovery: stamped on the incident row, no new alert, history kept.
+        self.state["database"] = {"status": "healthy"}
+        a._check_frontend_health.return_value = {"status": "healthy"}
+        await a._do_background_work()
+        await a._do_background_work()
+        assert alerts.count_documents({"domain": "system"}) == 3
+        assert alerts.count_documents({"domain": "system", "recovered_at": {"$exists": True}}) == 1
+        assert alerts.find_one({"_id": latest["_id"]})["recovered_score"] == a._health_score
+        assert alerts.count_documents({"acknowledged": False}) == 3  # not auto-acknowledged
+
+        # A new drop after recovery opens a new incident.
+        self.state["database"] = {"status": "unhealthy"}
+        self.state["api"] = {"status": "unhealthy"}
+        await a._do_background_work()
+        assert alerts.count_documents({"domain": "system"}) == 4
+        latest = alerts.find_one({"domain": "system"}, sort=[("timestamp", -1), ("_id", -1)])
+        assert latest["details"]["incident"] == "opened"
+
+    @pytest.mark.asyncio
+    async def test_unreadable_store_falls_back_to_memory(self):
+        """No DB at all: the in-memory tail still suppresses repeats."""
+        a = self._agent(None)
+        a.get_collection = lambda name: None
+        await a._do_background_work()
+        await a._do_background_work()
+        assert len([x for x in a._alerts if x["domain"] == "system"]) == 1
