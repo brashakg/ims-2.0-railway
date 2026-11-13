@@ -26,6 +26,7 @@ import { DashboardNotifications } from '../DashboardNotifications';
 import { NotificationsPage } from '../../../pages/notifications/NotificationsPage';
 
 const list = notificationsApi.list as unknown as ReturnType<typeof vi.fn>;
+const count = notificationsApi.unreadCount as unknown as ReturnType<typeof vi.fn>;
 const down = async () => { throw new Error('503'); };
 
 // A UTC instant written the way Mongo hands it back: no zone suffix.
@@ -63,6 +64,18 @@ describe('notifications (audit b21)', () => {
     expect(screen.queryByText('No notifications')).toBeNull();
     // the last known count is kept, not zeroed
     await waitFor(() => expect(screen.getByLabelText('1 unread')).toBeTruthy());
+  });
+
+  it('R40: bell count failure shows "unavailable", never a clear bell; a good read clears it', async () => {
+    count.mockImplementation(down);
+    wrap(<NotificationBell />);
+    expect(await screen.findByLabelText('Unread count unavailable')).toBeTruthy();
+    expect(screen.queryByLabelText(/unread$/)).toBeNull();
+    list.mockResolvedValue({ notifications: [item(naiveUtcMinutesAgo(1))], unread_count: 1, total: 1 });
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications' }));
+    await waitFor(() => expect(screen.getByLabelText('1 unread')).toBeTruthy());
+    expect(screen.queryByLabelText('Unread count unavailable')).toBeNull();
+    count.mockImplementation(async () => ({ unread_count: 1 }));
   });
 
   it('R40: Hub widget failure is not "all caught up", and Retry recovers', async () => {

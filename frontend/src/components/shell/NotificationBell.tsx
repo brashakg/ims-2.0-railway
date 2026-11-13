@@ -37,14 +37,17 @@ export function NotificationBell() {
   const [loading, setLoading] = useState(false);
   // Audit R40: a failed read is "unavailable", never "No notifications".
   const [failed, setFailed] = useState(false);
+  // Audit R40: a failed count read is "unavailable", never a clear bell.
+  const [countFailed, setCountFailed] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   const refreshCount = useCallback(async () => {
     try {
       const res = await notificationsApi.unreadCount();
       setUnread(res?.unread_count ?? 0);
+      setCountFailed(false);
     } catch {
-      /* offline / unauthed — leave count as-is */
+      setCountFailed(true);
     }
   }, []);
 
@@ -70,6 +73,7 @@ export function NotificationBell() {
       const res = await notificationsApi.list({ limit: 20 });
       setItems(res?.notifications || []);
       setUnread(res?.unread_count ?? 0);
+      setCountFailed(false);
       setFailed(false);
     } catch {
       // Keep what was last loaded (shown as possibly out of date) and the count.
@@ -111,9 +115,10 @@ export function NotificationBell() {
         style={{ position: 'relative' }}
       >
         <Icon.bell />
-        {unread > 0 && (
+        {(countFailed || unread > 0) && (
           <span
-            aria-label={`${unread} unread`}
+            aria-label={countFailed ? 'Unread count unavailable' : `${unread} unread`}
+            title={countFailed ? 'Unread count unavailable' : undefined}
             style={{
               position: 'absolute',
               top: 2,
@@ -130,7 +135,7 @@ export function NotificationBell() {
               textAlign: 'center',
             }}
           >
-            {unread > 9 ? '9+' : unread}
+            {countFailed ? '!' : unread > 9 ? '9+' : unread}
           </span>
         )}
       </button>
