@@ -929,17 +929,15 @@ async def dismiss_nba_card(
     # Resolve the linked follow_up (single-document update on follow_ups).
     if follow_up_id:
         try:
+            from .follow_ups import close_follow_up_update
+
             db.get_collection("follow_ups").find_one_and_update(
                 {"follow_up_id": follow_up_id, "store_id": store_id},
-                {
-                    "$set": {
-                        "status": "skipped",
-                        "outcome": body.reason,
-                        "completed_at": utc_now_iso(),
-                        "completed_by": current_user.get("user_id")
-                        or current_user.get("id"),
-                    }
-                },
+                close_follow_up_update(
+                    "skipped", body.reason, "",
+                    current_user.get("user_id") or current_user.get("id"),
+                    utc_now_iso(),
+                ),
             )
         except Exception:  # noqa: BLE001
             pass
@@ -990,17 +988,15 @@ async def complete_nba_card(
     user_id = current_user.get("user_id") or current_user.get("id")
     if follow_up_id:
         try:
+            from .follow_ups import close_follow_up_update
+
+            # L1-F48: the call's notes go into the attempt history; the card's
+            # headline stays as the follow-up's context note.
             db.get_collection("follow_ups").find_one_and_update(
                 {"follow_up_id": follow_up_id, "store_id": store_id},
-                {
-                    "$set": {
-                        "status": "completed",
-                        "outcome": "completed",
-                        "notes": body.outcome_notes,
-                        "completed_at": now_iso,
-                        "completed_by": user_id,
-                    }
-                },
+                close_follow_up_update(
+                    "completed", "completed", body.outcome_notes, user_id, now_iso
+                ),
             )
         except Exception:  # noqa: BLE001
             pass
@@ -1185,17 +1181,14 @@ async def log_reactivation_outcome(
 
     if follow_up_id:
         try:
+            from .follow_ups import close_follow_up_update
+
             db.get_collection("follow_ups").find_one_and_update(
                 {"follow_up_id": follow_up_id, "store_id": store_id},
-                {
-                    "$set": {
-                        "status": "completed" if reached else "skipped",
-                        "outcome": body.outcome,
-                        "notes": body.notes,
-                        "completed_at": now_iso,
-                        "completed_by": user_id,
-                    }
-                },
+                close_follow_up_update(
+                    "completed" if reached else "skipped",
+                    body.outcome, body.notes, user_id, now_iso,
+                ),
             )
         except Exception:  # noqa: BLE001
             pass
@@ -1358,8 +1351,8 @@ async def get_cl_refill_status(
     or pack_size/30 days for monthlies) to predict when they will run out,
     and returns a refill_due_date + days_remaining.
 
-    Fail-soft: returns a safe empty result when the DB is unavailable or no
-    CL orders are found.
+    No supplied CL order -> has_cl_history false. Orders that cannot be read
+    (no DB, a failed query) -> 503, so "no history" is never a guess.
 
     GET /crm/customers/{customer_id}/cl-refill-status
     """
@@ -1376,84 +1369,55 @@ async def get_cl_refill_status(
         "pack_size": None,
         "note": "No contact-lens order history found",
     }
-    if db_conn is None:
-        return empty
     # Object-level store scope, the SAME rule + non-disclosing 404 as the 360
     # view (L1-F17): this payload is the customer's last order id/date, SKU and
     # pack -- a guessed id from another shop must not even confirm it exists.
     customer = db.query_customer(customer_id)
     if not customer or not customer_in_scope(customer, current_user):
         raise HTTPException(status_code=404, detail="Customer not found")
+    from ..services import cl_refill as clr
 
+    # THE supply rule + CL categories the store worklist uses (L1-F18/F19):
+    # newest RECEIVED order with a CL line still held. An unreadable history is
+    # a 503, never "No contact-lens order history found".
+    if db_conn is None:
+        raise HTTPException(status_code=503, detail="Order history unavailable; try again")
     try:
-        # CL categories used across the codebase (see inventory.py _CL_CATEGORIES).
-        cl_categories = {
-            "CONTACT_LENS",
-            "CONTACT_LENSES",
-            "CONTACT LENS",
-            "CONTACT LENSES",
-            "CL",
-            "CONTACTS",
-        }
-
-        # Find the customer's most recent order that contains a CL line item.
-        # Scan orders newest-first; stop on the first CL hit.
-        orders_coll = db_conn.get_collection("orders")
-        cursor = (
-            orders_coll.find(
-                {"customer_id": customer_id},
-                {"_id": 0, "order_id": 1, "created_at": 1, "items": 1, "order_date": 1},
-            )
-            .sort("created_at", -1)
-            .limit(50)
+        supplies = clr.latest_supplies(
+            db_conn.get_collection("orders"), {"customer_id": customer_id}, 50
         )
-
-        cl_line = None
-        cl_order = None
-        for order in cursor:
-            for item in order.get("items") or []:
-                cat = str(item.get("category") or item.get("item_type") or "").upper()
-                if cat in cl_categories:
-                    cl_line = item
-                    cl_order = order
-                    break
-            if cl_line is not None:
-                break
-
-        if cl_line is None:
-            return empty
-
-        # Refill maths via the shared pure helper so this per-customer view and
-        # the store worklist (GET /crm/cl-refill/{store_id}/due) never diverge.
-        from ..services import cl_refill as clr
-
-        order_date_raw = cl_order.get("created_at") or cl_order.get("order_date")
-        refill = clr.compute_refill(cl_line, order_date_raw)
-        days_remaining = refill["days_remaining"]
-
-        return {
-            "customer_id": customer_id,
-            "has_cl_history": True,
-            "refill_due_date": refill["refill_due_date"],
-            "days_remaining": days_remaining,
-            "last_cl_order_id": cl_order.get("order_id"),
-            "last_cl_order_date": refill["last_cl_order_date"],
-            "sku": refill["sku"] or "",
-            "modality": refill["modality"],
-            "pack_size": refill["pack_size"],
-            "note": (
-                "Refill overdue"
-                if days_remaining < 0
-                else (
-                    "Refill due within 7 days"
-                    if days_remaining <= 7
-                    else "Refill due within 30 days" if days_remaining <= 30 else None
-                )
-            ),
-        }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("[CRM] cl-refill-status failed for %s: %s", customer_id, exc)
+        raise HTTPException(status_code=503, detail="Order history unavailable; try again")
+    if not supplies:
         return empty
+    cl_order, cl_line = supplies[0]
+    # Refill maths via the shared pure helper so this per-customer view and
+    # the store worklist (GET /crm/cl-refill/{store_id}/due) never diverge.
+    order_date_raw = cl_order.get("created_at") or cl_order.get("order_date")
+    refill = clr.compute_refill(cl_line, order_date_raw)
+    days_remaining = refill["days_remaining"]
+
+    return {
+        "customer_id": customer_id,
+        "has_cl_history": True,
+        "refill_due_date": refill["refill_due_date"],
+        "days_remaining": days_remaining,
+        "last_cl_order_id": cl_order.get("order_id"),
+        "last_cl_order_date": refill["last_cl_order_date"],
+        "sku": refill["sku"] or "",
+        "modality": refill["modality"],
+        "pack_size": refill["pack_size"],
+        "note": (
+            "Refill overdue"
+            if days_remaining < 0
+            else (
+                "Refill due within 7 days"
+                if days_remaining <= 7
+                else "Refill due within 30 days" if days_remaining <= 30 else None
+            )
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1474,6 +1438,22 @@ class CLRefillReminderBody(BaseModel):
     )
 
 
+def _due_refills_or_503(store_id: str, due_within_days: int) -> List[dict]:
+    """The store's refill-due rows, or 503 when the orders cannot be read: an
+    empty worklist must mean nobody is due (L1-F19), and the reminder creator
+    must not report "0 candidates" for an outage."""
+    from ..services import cl_refill as clr
+
+    db_conn = _crm_get_db()
+    if db_conn is None:
+        raise HTTPException(status_code=503, detail="Order history unavailable; try again")
+    try:
+        return clr.scan_due_refills(db_conn, store_id, due_within_days=due_within_days)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CRM] cl-refill worklist failed for %s: %s", store_id, exc)
+        raise HTTPException(status_code=503, detail="Order history unavailable; try again")
+
+
 @router.get("/cl-refill/{store_id}/due")
 async def get_cl_refill_worklist(
     store_id: str = Path(..., description="Store ID"),
@@ -1487,14 +1467,12 @@ async def get_cl_refill_worklist(
     most-overdue first. Read-only -- NO message sent.
 
     Store-scoped (validate_store_access): a store-scoped role gets 403 for
-    another store. Fail-soft: no DB -> empty list.
+    another store. Orders that cannot be read -> 503, never an empty list.
     """
     from ..dependencies import validate_store_access
-    from ..services import cl_refill as clr
 
     store_id = validate_store_access(store_id, current_user)
-    db = _crm_get_db()
-    rows = clr.scan_due_refills(db, store_id, due_within_days=due_within_days)
+    rows = _due_refills_or_503(store_id, due_within_days)
     return {
         "store_id": store_id,
         "due_within_days": due_within_days,
@@ -1530,8 +1508,7 @@ async def create_cl_refill_reminders(
         )
 
     store_id = validate_store_access(store_id, current_user)
-    db = _crm_get_db()
-    rows = clr.scan_due_refills(db, store_id, due_within_days=body.due_within_days)
+    rows = _due_refills_or_503(store_id, body.due_within_days)
 
     repo = get_task_repository()
     assigned_to = body.assigned_to or current_user.get("user_id")

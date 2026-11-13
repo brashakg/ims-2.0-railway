@@ -93,10 +93,18 @@ class CreateFollowUpRequest(BaseModel):
 
 
 class CompleteFollowUpRequest(BaseModel):
-    """Request to complete a follow-up"""
+    """Record a call outcome on a follow-up.
+
+    ``notes`` is the note for THIS attempt: it is kept in the follow-up's
+    ``attempts`` history, never written over the follow-up's own context notes
+    (L1-F48). ``next_date`` is required for ``rescheduled`` (owner ruling
+    2026-11-04, L1-F50) and ignored otherwise."""
 
     outcome: FollowUpOutcome = Field(..., description="Outcome of follow-up")
-    notes: str = Field(default="", description="Additional notes")
+    notes: str = Field(default="", description="Note for this call attempt")
+    next_date: Optional[str] = Field(
+        default=None, description="Rescheduled only: the new date (YYYY-MM-DD)"
+    )
 
 
 class FollowUpResponse(BaseModel):
@@ -115,6 +123,7 @@ class FollowUpResponse(BaseModel):
     created_at: str
     completed_at: Optional[str] = None
     completed_by: Optional[str] = None
+    attempts: List[dict] = Field(default_factory=list)
 
 
 class FollowUpSummary(BaseModel):
@@ -161,7 +170,46 @@ def _to_response(fu: dict) -> FollowUpResponse:
         created_at=(_iso(fu.get("created_at")) or ""),
         completed_at=_iso(fu.get("completed_at")),
         completed_by=(str(fu["completed_by"]) if fu.get("completed_by") else None),
+        attempts=[a for a in (fu.get("attempts") or []) if isinstance(a, dict)],
     )
+
+
+def outcome_attempt(outcome: str, notes: str, user_id, now_iso: str, **extra) -> dict:
+    """One call attempt for a follow-up's ``attempts`` history."""
+    return {"outcome": outcome, "notes": notes or "", "at": now_iso, "by": user_id, **extra}
+
+
+def close_follow_up_update(status: str, outcome: str, notes: str, user_id, now_iso: str) -> dict:
+    """THE update that closes a follow-up with a call outcome (L1-F48).
+
+    Every door that closes one (this router, the NBA call list, the
+    reactivation work-list) uses it: status / outcome / completed_* are set and
+    the attempt (with its note) is APPENDED to ``attempts``. The follow-up's own
+    ``notes`` -- the context staff were given for the call -- is never touched;
+    correcting it is a separate, deliberate edit."""
+    return {
+        "$set": {
+            "status": status,
+            "outcome": outcome,
+            "completed_at": now_iso,
+            "completed_by": user_id,
+        },
+        "$push": {"attempts": outcome_attempt(outcome, notes, user_id, now_iso)},
+    }
+
+
+def _valid_future_date(raw: Optional[str], field: str) -> str:
+    """A YYYY-MM-DD date that is today (IST) or later: the create door's own
+    date policy, shared by Rescheduled. 422 otherwise."""
+    try:
+        day = date.fromisoformat(str(raw or ""))
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail=f"{field} must be a valid YYYY-MM-DD date, got: {raw!r}"
+        )
+    if day < ist_today():
+        raise HTTPException(status_code=422, detail=f"{field} cannot be in the past (got {raw})")
+    return day.isoformat()
 
 
 # ============================================================================
@@ -237,18 +285,7 @@ async def create_follow_up(
     # Validate that scheduled_date is not in the past.  Follow-ups scheduled
     # for yesterday would appear overdue immediately and never be worked — they
     # should be rejected at creation time so staff notice the error.
-    try:
-        sched = date.fromisoformat(request.scheduled_date)
-    except ValueError:
-        raise HTTPException(
-            status_code=422,
-            detail=f"scheduled_date must be a valid YYYY-MM-DD date, got: {request.scheduled_date!r}",
-        )
-    if sched < ist_today():
-        raise HTTPException(
-            status_code=422,
-            detail=f"scheduled_date cannot be in the past (got {request.scheduled_date})",
-        )
+    _valid_future_date(request.scheduled_date, "scheduled_date")
 
     collection = db.get_collection("follow_ups")
 
@@ -286,7 +323,8 @@ async def complete_follow_up(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Mark a follow-up as completed with outcome.
+    Record a call outcome. Rescheduled moves the date and stays pending; every
+    other outcome closes the follow-up. Context notes are never overwritten.
     """
     db = _get_db()
     if not db or not db.is_connected:
@@ -309,21 +347,41 @@ async def complete_follow_up(
     if not can_access_store_scoped(follow_up.get("store_id"), current_user):
         raise HTTPException(status_code=403, detail="No access to this follow-up's store")
 
-    # Update the follow-up, including store_id in the filter to prevent accidental
-    # updates due to concurrent deletes or ID collisions.
-    result = collection.find_one_and_update(
-        {"follow_up_id": follow_up_id, "store_id": follow_up.get("store_id")},
-        {
-            "$set": {
-                "status": "completed",
-                "outcome": request.outcome.value,
-                "notes": request.notes,
-                "completed_at": utc_now_iso(),
-                "completed_by": current_user.get("user_id") or current_user.get("id"),
-            }
-        },
-        return_document=True,
-    )
+    # Only an OPEN follow-up takes an outcome: a closed one keeps the outcome
+    # it was closed with (a second click / a stale screen gets 409).
+    open_filter = {
+        "follow_up_id": follow_up_id,
+        "store_id": follow_up.get("store_id"),
+        "status": {"$nin": ["completed", "skipped"]},
+    }
+    now_iso = utc_now_iso()
+    user_id = current_user.get("user_id") or current_user.get("id")
+    if request.outcome == FollowUpOutcome.rescheduled:
+        # Owner ruling 2026-11-04 (L1-F50): Rescheduled asks a new date, saves
+        # it and KEEPS THE FOLLOW-UP PENDING; the attempt is kept in history.
+        # Validated before any write, so a bad date changes nothing.
+        if not request.next_date:
+            raise HTTPException(status_code=422, detail="Rescheduled needs the new date")
+        next_date = _valid_future_date(request.next_date, "next_date")
+        update = {
+            "$set": {"scheduled_date": next_date, "status": "pending"},
+            "$push": {
+                "attempts": outcome_attempt(
+                    "rescheduled", request.notes, user_id, now_iso,
+                    previous_date=_iso(follow_up.get("scheduled_date")) or "",
+                    next_date=next_date,
+                )
+            },
+        }
+    else:
+        update = close_follow_up_update(
+            "completed", request.outcome.value, request.notes, user_id, now_iso
+        )
+    result = collection.find_one_and_update(open_filter, update, return_document=True)
+    if not result and collection.find_one({"follow_up_id": follow_up_id}):
+        raise HTTPException(
+            status_code=409, detail="This follow-up is already closed; reload the list"
+        )
 
     if not result:
         # This should never happen (we already fetched it), but handle gracefully.

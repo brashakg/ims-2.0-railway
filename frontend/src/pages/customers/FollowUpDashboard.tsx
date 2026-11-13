@@ -9,7 +9,10 @@
 
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
+import { useToast } from '../../context/ToastContext';
 import api from '../../services/api/client';
+import { getErrorMessage } from '../../utils/errorHandler';
+import { istDayString } from '../../utils/datetime';
 import { Phone, Clock, AlertCircle, CheckCircle2, RotateCcw, Calendar } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -72,10 +75,20 @@ export function FollowUpDashboard() {
     pending_total: 0,
   });
   const [loading, setLoading] = useState(true);
+  // L1-F49: a failed read is shown as a failure with Retry, never as an empty
+  // queue or a row of zero counts.
+  const [listError, setListError] = useState<string | null>(null);
+  const [summaryError, setSummaryError] = useState(false);
   const [completing, setCompleting] = useState<string | null>(null);
   const [selectedOutcome, setSelectedOutcome] = useState<Record<string, string>>({});
+  // L1-F50 (owner ruling 2026-11-04): Rescheduled asks for the new date.
+  const [nextDate, setNextDate] = useState<Record<string, string>>({});
+  const [rowError, setRowError] = useState<Record<string, string>>({});
+  const [generating, setGenerating] = useState(false);
   const { user } = useAuth();
+  const toast = useToast();
   const storeId = user?.activeStoreId;
+  const todayIst = istDayString(new Date()) || '';
 
   // NOTE: the "no store selected" guard lives BELOW this useEffect (and
   // every other hook) so React's "hooks must be called in the same order
@@ -93,9 +106,10 @@ export function FollowUpDashboard() {
     try {
       setLoading(true);
       const { data } = await api.get('/follow-ups/', { params: { store_id: storeId } });
-      setFollowUps(data);
+      setFollowUps(Array.isArray(data) ? data : []);
+      setListError(null);
     } catch (error) {
-      // silently handle error
+      setListError(getErrorMessage(error, 'Could not load follow-ups.'));
     } finally {
       setLoading(false);
     }
@@ -105,42 +119,62 @@ export function FollowUpDashboard() {
     try {
       const { data } = await api.get('/follow-ups/summary', { params: { store_id: storeId } });
       setSummary(data);
-    } catch (error) {
-      // silently handle error
+      setSummaryError(false);
+    } catch {
+      setSummaryError(true);
     }
+  };
+
+  const reload = async () => {
+    await Promise.all([loadFollowUps(), loadSummary()]);
   };
 
   const handleAutoGenerate = async () => {
     try {
+      setGenerating(true);
       await api.post('/follow-ups/auto-generate', null, { params: { store_id: storeId } });
-      await loadFollowUps();
-      await loadSummary();
+      await reload();
     } catch (error) {
-      // silently handle error
+      toast.error(`Auto-generate failed: ${getErrorMessage(error, 'please try again.')}`);
+    } finally {
+      setGenerating(false);
     }
   };
+
+  const clearRow = (setter: typeof setRowError, followUpId: string) =>
+    setter((prev) => {
+      const next = { ...prev };
+      delete next[followUpId];
+      return next;
+    });
 
   const handleComplete = async (followUpId: string) => {
     const outcome = selectedOutcome[followUpId];
     if (!outcome) return;
+    const isReschedule = outcome === 'rescheduled';
+    const newDate = nextDate[followUpId] || '';
+    if (isReschedule && (!newDate || newDate < todayIst)) {
+      setRowError((prev) => ({ ...prev, [followUpId]: 'Pick the new date (today or later).' }));
+      return;
+    }
 
     try {
       setCompleting(followUpId);
-      const response = await api.patch(`/follow-ups/${followUpId}/complete`, {
+      clearRow(setRowError, followUpId);
+      await api.patch(`/follow-ups/${followUpId}/complete`, {
         outcome,
         notes: '',
+        ...(isReschedule ? { next_date: newDate } : {}),
       });
-      if (response.status >= 200 && response.status < 300) {
-        await loadFollowUps();
-        await loadSummary();
-        setSelectedOutcome((prev) => {
-          const newState = { ...prev };
-          delete newState[followUpId];
-          return newState;
-        });
-      }
+      clearRow(setSelectedOutcome, followUpId);
+      clearRow(setNextDate, followUpId);
+      await reload();
     } catch (error) {
-      // silently handle error
+      // Keep the chosen outcome / date so a deliberate retry is one click.
+      setRowError((prev) => ({
+        ...prev,
+        [followUpId]: `Not saved: ${getErrorMessage(error, 'please try again.')}`,
+      }));
     } finally {
       setCompleting(null);
     }
@@ -202,8 +236,8 @@ export function FollowUpDashboard() {
           <h1>The nudge queue.</h1>
           <div className="hint">Rx expiry · frame replacement · delivery confirm · NPS · birthday. Auto-generate from event triggers, staff-owned with due dates.</div>
         </div>
-        <button onClick={handleAutoGenerate} className="btn sm primary">
-          <RotateCcw className="w-4 h-4" /> Auto-generate
+        <button onClick={handleAutoGenerate} disabled={generating} className="btn sm primary">
+          <RotateCcw className="w-4 h-4" /> {generating ? 'Generating...' : 'Auto-generate'}
         </button>
       </div>
 
@@ -213,7 +247,7 @@ export function FollowUpDashboard() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-red-700 text-sm font-medium">Due Today</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary.due_today}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{summaryError ? '—' : summary.due_today}</p>
             </div>
             <AlertCircle className="w-8 h-8 text-red-500" />
           </div>
@@ -223,7 +257,7 @@ export function FollowUpDashboard() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-yellow-700 text-sm font-medium">This Week</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary.this_week}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{summaryError ? '—' : summary.this_week}</p>
             </div>
             <Calendar className="w-8 h-8 text-yellow-500" />
           </div>
@@ -233,7 +267,7 @@ export function FollowUpDashboard() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-orange-700 text-sm font-medium">Overdue</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary.overdue}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{summaryError ? '—' : summary.overdue}</p>
             </div>
             <Clock className="w-8 h-8 text-orange-500" />
           </div>
@@ -243,7 +277,7 @@ export function FollowUpDashboard() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-green-700 text-sm font-medium">Completed</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary.completed_this_month}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{summaryError ? '—' : summary.completed_this_month}</p>
             </div>
             <CheckCircle2 className="w-8 h-8 text-green-500" />
           </div>
@@ -253,12 +287,19 @@ export function FollowUpDashboard() {
           <div className="flex items-center justify-between">
             <div>
               <p className="text-blue-700 text-sm font-medium">Pending</p>
-              <p className="text-2xl font-bold text-gray-900 mt-1">{summary.pending_total}</p>
+              <p className="text-2xl font-bold text-gray-900 mt-1">{summaryError ? '—' : summary.pending_total}</p>
             </div>
             <Phone className="w-8 h-8 text-blue-500" />
           </div>
         </div>
       </div>
+
+      {summaryError && !listError && (
+        <div role="alert" className="bg-amber-50 border border-amber-200 text-amber-800 rounded-lg p-3 text-sm">
+          The counts could not be loaded.{' '}
+          <button className="underline font-medium" onClick={loadSummary}>Retry</button>
+        </div>
+      )}
 
       {/* Type Filter */}
       <div className="flex gap-2 overflow-x-auto pb-2">
@@ -283,6 +324,11 @@ export function FollowUpDashboard() {
       <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
         {loading ? (
           <div className="p-8 text-center text-gray-500">Loading follow-ups...</div>
+        ) : listError ? (
+          <div role="alert" className="p-8 text-center text-red-700">
+            <p>Could not load follow-ups: {listError}</p>
+            <button onClick={reload} className="btn sm mt-3">Retry</button>
+          </div>
         ) : filteredFollowUps.length === 0 ? (
           <div className="p-8 text-center text-gray-500">No follow-ups found</div>
         ) : (
@@ -328,31 +374,57 @@ export function FollowUpDashboard() {
                     </td>
                     <td className="px-4 py-3">
                       {fu.status === 'pending' ? (
-                        <div className="flex items-center gap-2">
-                          <select
-                            value={selectedOutcome[fu.follow_up_id] || ''}
-                            onChange={(e) =>
-                              setSelectedOutcome((prev) => ({
-                                ...prev,
-                                [fu.follow_up_id]: e.target.value,
-                              }))
-                            }
-                            className="bg-white border border-gray-300 text-gray-900 text-sm rounded px-2 py-1"
-                          >
-                            <option value="">Select outcome...</option>
-                            {OUTCOMES.map((outcome) => (
-                              <option key={outcome.value} value={outcome.value}>
-                                {outcome.label}
-                              </option>
-                            ))}
-                          </select>
-                          <button
-                            onClick={() => handleComplete(fu.follow_up_id)}
-                            disabled={!selectedOutcome[fu.follow_up_id] || completing === fu.follow_up_id}
-                            className="bg-green-600 hover:bg-green-700 disabled:bg-gray-200 disabled:text-gray-500 text-gray-900 px-3 py-1 rounded text-sm transition"
-                          >
-                            {completing === fu.follow_up_id ? 'Saving...' : 'Complete'}
-                          </button>
+                        <div className="flex flex-col gap-1">
+                          <div className="flex items-center gap-2">
+                            <select
+                              aria-label={`Outcome for ${fu.customer_name}`}
+                              value={selectedOutcome[fu.follow_up_id] || ''}
+                              onChange={(e) =>
+                                setSelectedOutcome((prev) => ({
+                                  ...prev,
+                                  [fu.follow_up_id]: e.target.value,
+                                }))
+                              }
+                              className="bg-white border border-gray-300 text-gray-900 text-sm rounded px-2 py-1"
+                            >
+                              <option value="">Select outcome...</option>
+                              {OUTCOMES.map((outcome) => (
+                                <option key={outcome.value} value={outcome.value}>
+                                  {outcome.label}
+                                </option>
+                              ))}
+                            </select>
+                            {selectedOutcome[fu.follow_up_id] === 'rescheduled' && (
+                              <input
+                                type="date"
+                                aria-label={`New date for ${fu.customer_name}`}
+                                min={todayIst}
+                                value={nextDate[fu.follow_up_id] || ''}
+                                onChange={(e) =>
+                                  setNextDate((prev) => ({ ...prev, [fu.follow_up_id]: e.target.value }))
+                                }
+                                className="bg-white border border-gray-300 text-gray-900 text-sm rounded px-2 py-1"
+                              />
+                            )}
+                            <button
+                              onClick={() => handleComplete(fu.follow_up_id)}
+                              disabled={
+                                !selectedOutcome[fu.follow_up_id] ||
+                                completing === fu.follow_up_id ||
+                                (selectedOutcome[fu.follow_up_id] === 'rescheduled' && !nextDate[fu.follow_up_id])
+                              }
+                              className="bg-green-600 hover:bg-green-700 disabled:bg-gray-200 disabled:text-gray-500 text-gray-900 px-3 py-1 rounded text-sm transition"
+                            >
+                              {completing === fu.follow_up_id
+                                ? 'Saving...'
+                                : selectedOutcome[fu.follow_up_id] === 'rescheduled'
+                                  ? 'Save new date'
+                                  : 'Complete'}
+                            </button>
+                          </div>
+                          {rowError[fu.follow_up_id] && (
+                            <p role="alert" className="text-xs text-red-700">{rowError[fu.follow_up_id]}</p>
+                          )}
                         </div>
                       ) : (
                         <span className={`text-xs px-2 py-1 rounded ${OUTCOMES.find((o) => o.value === fu.outcome)?.color || 'bg-gray-100'}`}>
