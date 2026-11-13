@@ -47,27 +47,43 @@ class CustomerRepository(BaseRepository):
     def find_by_gstin(self, gstin: str) -> Optional[Dict]:
         return self.find_one({"gstin": gstin})
     
-    def search_customers(self, query: str, store_id: str = None) -> List[Dict]:
-        # Match the account holder's name + both phone fields + email, AND any
-        # family member under the account (patients[].name / .mobile) -- searching
-        # a patient's name or number must surface their customer record (the bug:
-        # patient data was never searched). Native docs store the number in
-        # `mobile`; TechCherry-imported docs in `phone`. Store scope matches
-        # home_store_id (native) or preferred_store_id (import).
-        store_filter = None
+    # Match the account holder's name + both phone fields + email, AND any
+    # family member under the account (patients[].name / .mobile) -- searching
+    # a patient's name or number must surface their customer record (the bug:
+    # patient data was never searched). Native docs store the number in
+    # `mobile`; TechCherry-imported docs in `phone`.
+    SEARCH_FIELDS = ["name", "mobile", "phone", "email", "patients.name", "patients.mobile"]
+
+    @staticmethod
+    def _search_scope(store_id: str = None, filter: Dict = None) -> Optional[Dict]:
+        """Store scope matches home_store_id (native) or preferred_store_id
+        (import), ANDed with the caller's own filter."""
+        clauses = [filter] if filter else []
         if store_id:
-            store_filter = {
-                "$or": [
-                    {"home_store_id": store_id},
-                    {"preferred_store_id": store_id},
-                ]
-            }
-        return self.search(
-            query,
-            ["name", "mobile", "phone", "email", "patients.name", "patients.mobile"],
-            store_filter,
+            clauses.append(
+                {"$or": [{"home_store_id": store_id}, {"preferred_store_id": store_id}]}
+            )
+        if not clauses:
+            return None
+        return clauses[0] if len(clauses) == 1 else {"$and": clauses}
+
+    def search_customers(
+        self, query: str, store_id: str = None, filter: Dict = None,
+        skip: int = 0, limit: int = 100,
+    ) -> List[Dict]:
+        """One page of matches, in a stable order (_id) so skip/limit pages
+        are disjoint (audit R31)."""
+        return self.find_many(
+            self._search_query(query, self.SEARCH_FIELDS, self._search_scope(store_id, filter)),
+            sort=[("_id", 1)],
+            skip=skip,
+            limit=limit,
         )
-    
+
+    def count_search_customers(self, query: str, store_id: str = None, filter: Dict = None) -> int:
+        """Total the SAME search_customers query matches, before skip/limit."""
+        return self.search_count(query, self.SEARCH_FIELDS, self._search_scope(store_id, filter))
+
     def find_b2b_customers(self, store_id: str = None) -> List[Dict]:
         filter = {"customer_type": "B2B"}
         if store_id:

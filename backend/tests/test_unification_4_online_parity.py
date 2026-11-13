@@ -100,7 +100,11 @@ class _Cursor:
         self._docs = docs
 
     def sort(self, key, direction=-1):
-        self._docs.sort(key=lambda d: d.get(key) or "", reverse=(direction == -1))
+        # pymongo also takes a list of (field, direction) pairs; apply the
+        # last key first so the first key wins (stable sort).
+        pairs = key if isinstance(key, list) else [(key, direction)]
+        for k, d in reversed(pairs):
+            self._docs.sort(key=lambda doc: str(doc.get(k) or ""), reverse=(d == -1))
         return self
 
     def skip(self, n):
