@@ -9,6 +9,7 @@ from fastapi import HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime, timedelta
+from api.utils.event_time import utc_now_naive
 from ..auth import get_current_user
 from ...services import spoilage_analytics
 from ...dependencies import store_in_view
@@ -95,7 +96,7 @@ async def put_remake_reason_codes(
                     "codes": codes,
                     "seeded_default": False,
                     "updated_by": current_user.get("user_id"),
-                    "updated_at": datetime.now(),
+                    "updated_at": utc_now_naive(),
                 }
             },
             upsert=True,

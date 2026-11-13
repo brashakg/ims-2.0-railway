@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 # --- shift slots + roster status -------------------------------------------
@@ -467,5 +468,5 @@ def build_coverage_breach_notification(
         "status": "SENT",
         "dedupe_key": dedupe_key,
         "store_id": store,
-        "created_at": datetime.now(),
+        "created_at": utc_now_naive(),
     }

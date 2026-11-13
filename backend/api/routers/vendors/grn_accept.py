@@ -4,6 +4,7 @@ from api.utils.event_time import utc_now, utc_now_iso
 
 from contextvars import ContextVar
 from datetime import timedelta
+from api.utils.event_time import utc_now_naive
 from typing import Tuple
 from urllib.parse import quote
 
@@ -1549,7 +1550,7 @@ def _raise_once(
                         for k, v in (task.get("extra") or {}).items()
                         if k == "product_ids"
                     },
-                    "updated_at": datetime.now(),
+                    "updated_at": utc_now_naive(),
                 }
             },
         )

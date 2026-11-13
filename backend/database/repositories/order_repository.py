@@ -4,7 +4,7 @@ IMS 2.0 - Order Repository
 Order data access operations
 """
 
-from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso
+from api.utils.event_time import utc_event_iso, utc_now, utc_now_iso, utc_now_naive
 from api.utils.real_sale import EXCLUDED_ORDER_STATUSES
 import logging
 import re
@@ -660,7 +660,7 @@ class OrderRepository(BaseRepository):
                     # Owner ruling 2026-08-30: bill type follows the money.
                     "bill_type": derive_bill_type(payment_status),
                     "credit_sale": credit_sale,
-                    "updated_at": datetime.now(),
+                    "updated_at": utc_now_naive(),
                 }})
                 if result.matched_count:
                     return True
@@ -693,7 +693,7 @@ class OrderRepository(BaseRepository):
             {"invoice_number": {"$in": [None, ""]}, "advance_refund_id": None,
              "status": {"$nin": ["CANCELLED", "CANCELED", "Cancelled", "cancelled"]},
              "is_test": {"$ne": True}},
-            {"invoice_number": invoice_number, "invoice_date": datetime.now(), **(stamp or {})},
+            {"invoice_number": invoice_number, "invoice_date": utc_now_naive(), **(stamp or {})},
         ):
             return invoice_number
         fresh = self.find_by_id(order_id) or {}

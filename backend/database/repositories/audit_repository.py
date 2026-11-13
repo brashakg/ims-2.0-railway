@@ -17,6 +17,7 @@ reached the row is still written best-effort (the business action never blocks).
 """
 from typing import List, Optional, Dict
 from datetime import datetime, date, timedelta
+from api.utils.event_time import utc_now_naive
 from .base_repository import BaseRepository
 from .audit_chain import append_audit_entry
 
@@ -92,7 +93,7 @@ class AuditRepository(BaseRepository):
         return self.find_many(filter, sort=[("timestamp", -1)])
     
     def find_warnings_and_critical(self, store_id: str = None, days: int = 7) -> List[Dict]:
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = utc_now_naive() - timedelta(days=days)
         filter = {
             "severity": {"$in": ["WARNING", "CRITICAL"]},
             "timestamp": {"$gte": cutoff}
@@ -119,7 +120,7 @@ class AuditRepository(BaseRepository):
         return {r["_id"]: r["count"] for r in results}
     
     def get_user_activity_count(self, user_id: str, days: int = 7) -> int:
-        cutoff = datetime.now() - timedelta(days=days)
+        cutoff = utc_now_naive() - timedelta(days=days)
         return self.count({"user_id": user_id, "timestamp": {"$gte": cutoff}})
 
 
@@ -152,13 +153,13 @@ class NotificationRepository(BaseRepository):
     def mark_read(self, notification_id: str) -> bool:
         return self.update(notification_id, {
             "status": "READ",
-            "read_at": datetime.now()
+            "read_at": utc_now_naive()
         })
     
     def mark_all_read(self, user_id: str) -> int:
         return self.update_many(
             {"user_id": user_id, "status": {"$ne": "READ"}},
-            {"status": "READ", "read_at": datetime.now()}
+            {"status": "READ", "read_at": utc_now_naive()}
         )
     
     def find_pending(self) -> List[Dict]:
@@ -167,5 +168,5 @@ class NotificationRepository(BaseRepository):
     def mark_sent(self, notification_id: str) -> bool:
         return self.update(notification_id, {
             "status": "SENT",
-            "sent_at": datetime.now()
+            "sent_at": utc_now_naive()
         })

@@ -1,6 +1,6 @@
 """GRN void and escalate."""
 
-from api.utils.event_time import utc_now_iso
+from api.utils.event_time import utc_now_iso, utc_now_naive
 
 from ._shared import (
     Depends,
@@ -73,7 +73,7 @@ def _reopen_po_if_nothing_received(grn, current_user=None) -> Optional[str]:
                 "status": {"$in": ["PARTIALLY_RECEIVED", "PARTIAL"]},
                 "total_received_qty": {"$in": [0, None]},
             },
-            {"$set": {"status": "SENT", "updated_at": datetime.now()}},
+            {"$set": {"status": "SENT", "updated_at": utc_now_naive()}},
         )
         if not getattr(result, "modified_count", 0):
             return
@@ -83,7 +83,7 @@ def _reopen_po_if_nothing_received(grn, current_user=None) -> Optional[str]:
         if _live_receipts(po_id):
             po_repo.collection.update_one(
                 {"po_id": po_id, "status": "SENT"},
-                {"$set": {"status": po.get("status"), "updated_at": datetime.now()}},
+                {"$set": {"status": po.get("status"), "updated_at": utc_now_naive()}},
             )
             return None
         reopened = "SENT"

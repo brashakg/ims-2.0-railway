@@ -5,6 +5,7 @@ Task and SOP data access operations
 """
 from typing import List, Optional, Dict
 from datetime import datetime, timedelta
+from api.utils.event_time import utc_now_naive
 from .base_repository import BaseRepository
 
 
@@ -94,13 +95,13 @@ class TaskRepository(BaseRepository):
     def start_task(self, task_id: str) -> bool:
         return self.update(task_id, {
             "status": "IN_PROGRESS",
-            "started_at": datetime.now()
+            "started_at": utc_now_naive()
         })
     
     def complete_task(self, task_id: str, notes: str = "") -> bool:
         return self.update(task_id, {
             "status": "COMPLETED",
-            "completed_at": datetime.now(),
+            "completed_at": utc_now_naive(),
             "completion_notes": notes
         })
     
@@ -108,7 +109,7 @@ class TaskRepository(BaseRepository):
         return self.update(task_id, {
             "status": "ESCALATED",
             "escalated_to": escalate_to,
-            "escalated_at": datetime.now(),
+            "escalated_at": utc_now_naive(),
             "escalation_level": level
         })
     
@@ -116,5 +117,5 @@ class TaskRepository(BaseRepository):
         return self.update(task_id, {
             "assigned_to": new_assignee,
             "reassigned_by": reassigned_by,
-            "reassigned_at": datetime.now()
+            "reassigned_at": utc_now_naive()
         })

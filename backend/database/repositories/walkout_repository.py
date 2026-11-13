@@ -13,6 +13,7 @@ Design notes (from docs/PUNE_INCENTIVE_BUILD_PLAN.md):
     populated by Phase 3
 """
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Dict, List, Optional
 import uuid
 
@@ -73,7 +74,7 @@ class WalkoutRepository(BaseRepository):
 
         Returns the stored doc on success, None on insertion failure.
         """
-        now = datetime.now()
+        now = utc_now_naive()
         walkout_id = self._generate_walkout_id(data.get("store_id", ""))
 
         doc = {
@@ -236,7 +237,7 @@ class WalkoutRepository(BaseRepository):
         if not diff:
             return self.find_by_walkout_id(walkout_id)
         update_doc = dict(diff)
-        update_doc["updated_at"] = datetime.now()
+        update_doc["updated_at"] = utc_now_naive()
         if updated_by is not None:
             update_doc["updated_by"] = updated_by
         try:
@@ -266,10 +267,10 @@ class WalkoutRepository(BaseRepository):
                 {"walkout_id": walkout_id},
                 {
                     "$set": {
-                        "deleted_at": datetime.now(),
+                        "deleted_at": utc_now_naive(),
                         "deleted_by": deleted_by,
                         "delete_reason": reason,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                         "updated_by": deleted_by,
                     }
                 },
@@ -295,7 +296,7 @@ class WalkoutRepository(BaseRepository):
                 {"walkout_id": walkout_id, "deleted_at": None},
                 {
                     "$push": {"followups": followup},
-                    "$set": {"updated_at": datetime.now()},
+                    "$set": {"updated_at": utc_now_naive()},
                 },
             )
         except Exception as e:
@@ -328,7 +329,7 @@ class WalkoutRepository(BaseRepository):
                 {
                     "$set": {
                         "followups": followups,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                         "updated_by": updated_by,
                     }
                 },
@@ -369,7 +370,7 @@ class WalkoutRepository(BaseRepository):
         )
         if idx is None:
             return None
-        now = datetime.now()
+        now = utc_now_naive()
         followups[idx] = {
             **followups[idx],
             "approval_required": True,
@@ -407,9 +408,9 @@ class WalkoutRepository(BaseRepository):
         converted_order_id (pass None)."""
         update_doc = {
             "result": result,
-            "result_set_at": datetime.now(),
+            "result_set_at": utc_now_naive(),
             "result_set_by": set_by,
-            "updated_at": datetime.now(),
+            "updated_at": utc_now_naive(),
             "updated_by": set_by,
         }
         if result == "CONVERTED":
@@ -528,7 +529,7 @@ class WalkoutRepository(BaseRepository):
                 {
                     "$set": {
                         "followups": followups,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
             )
@@ -552,7 +553,7 @@ class WalkoutRepository(BaseRepository):
                 {
                     "$set": {
                         "policy_suggestion": suggestion,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
             )
@@ -577,7 +578,7 @@ class WalkoutRepository(BaseRepository):
                 {
                     "$set": {
                         "sale_credits": credits,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
             )

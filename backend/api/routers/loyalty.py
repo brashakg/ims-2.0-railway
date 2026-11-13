@@ -24,6 +24,7 @@ from __future__ import annotations
 from api.utils.event_time import utc_now_iso
 
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, List, Literal, Optional
 import logging
 import uuid
@@ -403,7 +404,7 @@ async def earn(
             "tier_at_earn": earn_result.get("tier_at_earn"),
             "tier_multiplier": earn_result.get("tier_multiplier"),
             "created_by": current_user.get("user_id"),
-            "created_at": datetime.now(),
+            "created_at": utc_now_naive(),
         },
     )
     if claimed is None:
@@ -715,7 +716,7 @@ async def redeem(
             "expires_at": None,
             "was_capped": result.get("was_capped", False),
             "created_by": current_user.get("user_id"),
-            "created_at": datetime.now(),
+            "created_at": utc_now_naive(),
         }
     )
 
@@ -806,7 +807,7 @@ async def adjust(
             "reason": body.reason,
             "expires_at": None,
             "created_by": current_user.get("user_id"),
-            "created_at": datetime.now(),
+            "created_at": utc_now_naive(),
         }
     )
 
@@ -1001,7 +1002,7 @@ async def expire_sweep(
                     "source_earn_txn_id": lot_id,
                     "expires_at": None,
                     "created_by": current_user.get("user_id"),
-                    "created_at": datetime.now(),
+                    "created_at": utc_now_naive(),
                 }
             )
             accounts.adjust_balance(customer_id, delta_points=-expirable)
@@ -1269,7 +1270,7 @@ def earn_for_order_internal(
                 "tier_multiplier": result.get("tier_multiplier"),
                 "store_id": store_id,
                 "created_by": user_id,
-                "created_at": datetime.now(),
+                "created_at": utc_now_naive(),
             },
         )
         if claimed is None:
@@ -1405,7 +1406,7 @@ def _apply_reversal_balance(
         inc["lifetime_earned"] = -earned
     if redeemed:
         inc["lifetime_redeemed"] = -redeemed
-    set_block: Dict[str, Any] = {"updated_at": datetime.now()}
+    set_block: Dict[str, Any] = {"updated_at": utc_now_naive()}
     if new_tier:
         set_block["tier"] = new_tier
     update: Dict[str, Any] = {
@@ -1711,7 +1712,7 @@ def _reverse_order_loyalty(
             f"{reason_prefix}: claw {earned} earned + restore {redeemed} "
             f"redeemed on order {order_id}"
         ),
-        "created_at": datetime.now(),
+        "created_at": utc_now_naive(),
     }
     if extra_marker:
         marker.update(extra_marker)
@@ -1948,7 +1949,7 @@ def regate_earn_after_edit(
                     f"eligible for {min(target, net)} of {net} earned points"
                 ),
                 "created_by": user_id,
-                "created_at": datetime.now(),
+                "created_at": utc_now_naive(),
             }
         )
         accounts.adjust_balance(

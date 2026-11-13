@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 import uuid
 
 from .base_repository import BaseRepository
@@ -245,7 +246,7 @@ class ProductImageRepository(BaseRepository):
             return None
 
         patch: Dict = {"status": target}
-        now = datetime.now()
+        now = utc_now_naive()
         if target == "APPROVED":
             patch["approved_at"] = now
             patch["reviewed_by"] = by
@@ -295,7 +296,7 @@ class ProductImageRepository(BaseRepository):
         """
         try:
             patch = dict(fields)
-            patch["updated_at"] = datetime.now()
+            patch["updated_at"] = utc_now_naive()
             self.collection.update_one({self.id_field: image_id}, {"$set": patch})
         except Exception as e:  # noqa: BLE001 -- fail-soft
             print(f"Error updating {self.entity_name} {image_id}: {e}")

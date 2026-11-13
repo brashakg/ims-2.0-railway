@@ -24,6 +24,7 @@ Side effects on POST:
 """
 
 from datetime import datetime, date as date_type, timedelta
+from api.utils.event_time import utc_now_naive
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Tuple
 import logging
@@ -705,7 +706,7 @@ def _create_manager_escalation_task(
         "store_id": store_id,
         "type": "system",
         "due_date": datetime.now(),
-        "created_at": datetime.now(),
+        "created_at": utc_now_naive(),
         "escalation_level": 0,
         "source": {
             "type": "walkout_staff_behaviour",
@@ -1265,7 +1266,7 @@ async def escalate_overdue_followups(
             "store_id": row.get("store_id"),
             "type": "system",
             "due_date": datetime.now(),
-            "created_at": datetime.now(),
+            "created_at": utc_now_naive(),
             "escalation_level": 0,
             "source": {
                 "type": "walkout_followup",
@@ -2128,7 +2129,7 @@ async def append_followup(
         "approved_by_name": None,
         "approved_at": None,
         "manager_note": None,
-        "created_at": datetime.now(),
+        "created_at": utc_now_naive(),
     }
 
     updated = repo.append_followup(walkout_id, fu_doc)

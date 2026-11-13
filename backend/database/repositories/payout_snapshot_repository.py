@@ -15,6 +15,7 @@ Lifecycle: DRAFT → LOCKED → PAID (no transitions backwards).
 from __future__ import annotations
 
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Dict, List, Optional
 import uuid
 
@@ -51,7 +52,7 @@ class PayoutSnapshotRepository(BaseRepository):
         month, plus the full computed envelope. Raises on
         DuplicateKeyError so the router can map to 409 — that's the
         DB-level enforcement of "only one LOCKED per month"."""
-        now = datetime.now()
+        now = utc_now_naive()
         snapshot_id = self._generate_snapshot_id(
             data.get("store_id", ""),
             int(data.get("year") or 0),
@@ -127,7 +128,7 @@ class PayoutSnapshotRepository(BaseRepository):
         THIS call did the stamping (i.e. the run is the first consumer); False
         if it was already fed (a re-run must NOT re-add the incentive).
         """
-        now = datetime.now()
+        now = utc_now_naive()
         try:
             from pymongo import ReturnDocument
 
@@ -159,9 +160,9 @@ class PayoutSnapshotRepository(BaseRepository):
                 {
                     "$set": {
                         "status": "PAID",
-                        "paid_at": datetime.now(),
+                        "paid_at": utc_now_naive(),
                         "paid_by": paid_by,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
             )

@@ -11,6 +11,7 @@ Distinct from marketing /notifications/* (customer-facing notification_logs).
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Optional
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 
 from .auth import get_current_user
 from ..dependencies import get_db
@@ -115,7 +116,7 @@ async def mark_read(
         raise HTTPException(status_code=503, detail="DB unavailable")
     res = col.update_one(
         {"notification_id": notification_id, "user_id": uid},
-        {"$set": {"status": "READ", "read_at": datetime.now()}},
+        {"$set": {"status": "READ", "read_at": utc_now_naive()}},
     )
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Notification not found")
@@ -131,7 +132,7 @@ async def mark_all_read(current_user: dict = Depends(get_current_user)):
         return {"updated": 0}
     res = col.update_many(
         {"user_id": uid, "status": {"$in": _UNREAD_STATUSES}},
-        {"$set": {"status": "READ", "read_at": datetime.now()}},
+        {"$set": {"status": "READ", "read_at": utc_now_naive()}},
     )
     return {"updated": res.modified_count}
 
@@ -174,7 +175,7 @@ async def snooze_notification(
     col.update_one(
         {"notification_id": notification_id, "user_id": uid},
         {
-            "$set": {"snoozed_until": until_dt, "snoozed_at": datetime.now()},
+            "$set": {"snoozed_until": until_dt, "snoozed_at": utc_now_naive()},
             "$inc": {"snooze_count": 1},
         },
     )
