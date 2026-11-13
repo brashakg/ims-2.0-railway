@@ -1014,12 +1014,16 @@ def _record_screen_close(
     if coll is None:
         return {"ok": False, "error": "no_db"}
     # TWO DRAWERS ON ONE DAY (D40): a second drawer can be opened once the
-    # first is LOCKED (open_session only joins OPEN / BLIND_SUBMITTED). The
-    # drawer still open is the one being closed, so it is taken FIRST. When
-    # every drawer is LOCKED, the day's LATEST drawer (last opened) is the one
-    # the day ended on -- never whichever row the database returns first, which
-    # is the oldest. On an opened_at tie the later-inserted row wins. A day
-    # with one drawer finds that drawer either way, exactly as before.
+    # first is LOCKED (open_session only joins OPEN / BLIND_SUBMITTED). An
+    # UNCOUNTED (OPEN) drawer is the one being closed, so it is taken FIRST.
+    # Otherwise the day's LATEST drawer (last opened) is the one the day ended
+    # on -- never whichever row the database returns first, which is the
+    # oldest. A BLIND_SUBMITTED drawer does NOT outrank it: an older drawer can
+    # only be BLIND_SUBMITTED beside a later one through a reopen (the partial
+    # unique index allows one active drawer), and a reopened drawer was
+    # already counted and can never be recounted. On an opened_at tie the
+    # later-inserted row wins. A day with one drawer finds that drawer either
+    # way, exactly as before.
     try:
         on_day = [
             s
@@ -1028,8 +1032,8 @@ def _record_screen_close(
         ]
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"read_failed:{exc}"}
-    active = [s for s in on_day if s.get("status") != STATUS_LOCKED]
-    existing = active[0] if active else max(
+    uncounted = [s for s in on_day if s.get("status") == STATUS_OPEN]
+    existing = uncounted[0] if uncounted else max(
         reversed(on_day), key=lambda s: str(s.get("opened_at") or ""), default=None
     )
     # How many drawers the day has. More than one means the count linked here
