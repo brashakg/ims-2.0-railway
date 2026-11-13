@@ -177,9 +177,9 @@ export default function DayEndReport() {
     return s;
   }, [orders]);
 
-  // WHAT WAS ACTUALLY COUNTED, or null if nobody counted. A typed figure
-  // wins (a manager may know the drawer better than a half-filled grid);
-  // otherwise the notes ARE the count -- that is what is in the drawer.
+  // The figure SENT as closing_cash, or null if nobody counted: the typed one
+  // when there is one (kept by the server as evidence if the notes overrule
+  // it), otherwise the notes -- that is what is in the drawer.
   const gridTotal = denomTotal(closeDenoms);
   const countedCash: number | null =
     closingCash !== '' && !Number.isNaN(parseFloat(closingCash))
@@ -187,11 +187,19 @@ export default function DayEndReport() {
       : hasCount(closeDenoms)
         ? gridTotal
         : null;
+  // WHAT WILL BE RECORDED. Both figures are sent (the typed one is kept as
+  // evidence), but when the grid holds notes the till takes the notes and so
+  // does this report (audit L3-12: one drawer, one count). Preview THAT, and
+  // warn when the typed figure disagrees, so "Matches" never turns into a
+  // shortage after Close.
+  const recordedCash: number | null = hasCount(closeDenoms) ? gridTotal : countedCash;
+  const typedDisagrees =
+    countedCash !== null && recordedCash !== null && countedCash !== recordedCash;
   // NO COUNT -> NO VARIANCE. A variance against a drawer nobody counted is
   // a number invented out of a blank field, and it used to read as the
   // whole day's cash having walked out.
   const cashVariance =
-    countedCash === null ? null : Math.round(countedCash - summary.cashCollected);
+    recordedCash === null ? null : Math.round(recordedCash - summary.cashCollected);
   const setClosePieces = (i: number, pieces: number) => {
     setShowCount(true);
     setCloseDenoms((rows) => setRowPieces(rows, i, pieces));
@@ -374,7 +382,13 @@ export default function DayEndReport() {
                 <input type="number" value={closingCash} onChange={e => setClosingCash(e.target.value)}
                   placeholder={hasCount(closeDenoms) ? fc(gridTotal) : 'Enter actual cash in drawer'}
                   className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm print:hidden" />
-                {countedCash !== null && <p className="text-sm font-medium mt-1 print:block hidden">{fc(countedCash)}</p>}
+                {recordedCash !== null && <p className="text-sm font-medium mt-1 print:block hidden">{fc(recordedCash)}</p>}
+                {typedDisagrees && (
+                  <p className="text-xs text-amber-700 mt-1" data-testid="day-end-typed-vs-notes">
+                    The notes and coins add up to {fc(gridTotal)}, not {fc(countedCash ?? 0)}. The notes
+                    count is what will be recorded.
+                  </p>
+                )}
               </div>
               <div>
                 {cashBlind ? (

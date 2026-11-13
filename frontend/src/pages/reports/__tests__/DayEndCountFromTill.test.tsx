@@ -110,6 +110,25 @@ describe('Day-End Report - the till was already counted', () => {
     expect(note).toMatch(/₹3,000/);
   });
 
+  it('before Close: a typed total that disagrees with the notes is warned and the notes are previewed', async () => {
+    render(<DayEndReport />);
+    await waitFor(() => expect(screen.getByText('Close Day')).toBeInTheDocument());
+    const box = document.querySelector('input[type="number"]') as HTMLInputElement;
+    fireEvent.change(box, { target: { value: '3000' } });
+    expect(screen.queryByTestId('day-end-typed-vs-notes')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByText(/Count the notes and coins/));
+    fireEvent.change(screen.getByLabelText('note of 500 rupees, pieces'), { target: { value: '1' } });
+    const warn = screen.getByTestId('day-end-typed-vs-notes').textContent ?? '';
+    expect(warn).toMatch(/₹500/);
+    expect(warn).toMatch(/₹3,000/);
+    // Both figures still go to the server: the typed one is kept as evidence.
+    fireEvent.click(screen.getByRole('button', { name: /Confirm Day Closing/i }));
+    await waitFor(() => expect(createDayEndClose).toHaveBeenCalled());
+    const sent = createDayEndClose.mock.calls.at(-1)![0];
+    expect(sent.closing_cash).toBe(3000);
+    expect(sent.closing_count.rows).toEqual([expect.objectContaining({ face: 500, pieces: 1 })]);
+  });
+
   it('POSITIVE CONTROL: a day this screen counted itself carries no such note', async () => {
     createDayEndClose.mockImplementation(async () => ({
       closed: true,
