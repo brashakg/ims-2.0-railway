@@ -501,6 +501,12 @@ def sanitize_user(user: dict, viewer: Optional[dict] = None) -> dict:
     if user is None:
         return user
     out = {f: user[f] for f in _SANITIZED_USER_FIELDS if f in user}
+    # The cap the till actually enforces (role standard vs the per-user
+    # override), from the ONE shared rule -- so Settings > Users shows what is
+    # enforced instead of guessing from the stored override (L1-F03).
+    out["effective_discount_cap"] = effective_discount_cap(
+        user.get("roles") or [], user.get("discount_cap")
+    )
     if "documents" in out:
         # GridFS handles are capabilities, not data -- metadata only, always.
         out["documents"] = _safe_documents(out.get("documents"))

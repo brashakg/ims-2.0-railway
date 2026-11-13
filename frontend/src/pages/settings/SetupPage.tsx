@@ -38,7 +38,7 @@ import { adminStoreApi, adminUserApi } from '../../services/api';
 import { employeeDocApi } from '../../services/api/hr';
 import type { EmployeeDocType } from '../../services/api/hr';
 import { validatePhone } from '../../utils/validators';
-import { ROLE_HIERARCHY } from './settingsTypes';
+import { ROLE_HIERARCHY, ROLE_CATALOGUE, ROLE_LABEL, assignableRolesFor } from './settingsTypes';
 import { PermissionDeltaEditor } from '../../components/permissions/PermissionDeltaEditor';
 import {
   Building, Users, Plus, Shield, X, ChevronRight, ChevronLeft, CheckCircle,
@@ -60,40 +60,8 @@ interface StoreConfig {
   isActive: boolean;
 }
 
-// ---------------------------------------------------------------------------
-// Friendly, plain-English role catalogue. The owner is NOT a developer, so the
-// list reads as sentences, not role codes. `level` mirrors ROLE_HIERARCHY so we
-// can hide anything above the creating admin's own level (UI half of the backend
-// can_assign_roles guard — the server is still the source of truth).
-// `geoFenced` marks the store-staff tiers (roles 4-7) whose login is fenced to
-// their assigned store automatically (SYSTEM_INTENT geo-fence).
-// ---------------------------------------------------------------------------
-interface RoleOption {
-  id: string;
-  label: string;
-  desc: string;
-  level: number;
-  geoFenced: boolean;
-}
-
-const ROLE_CATALOGUE: RoleOption[] = [
-  // Sales Cashier was merged into Sales Staff (backlog #12) -- one floor-sales
-  // role now: rings up sales, takes payments, opens the drawer, discount up to 10%.
-  { id: 'SALES_STAFF', label: 'Sales Staff', desc: 'Rings up sales, takes payments, opens the cash drawer, and searches the catalogue. Discount up to 10%.', level: ROLE_HIERARCHY.SALES_STAFF, geoFenced: true },
-  { id: 'CASHIER', label: 'Cashier', desc: 'Takes payments only — no selling, no discounts.', level: ROLE_HIERARCHY.CASHIER ?? 3, geoFenced: true },
-  { id: 'OPTOMETRIST', label: 'Optometrist', desc: 'Runs eye tests and writes prescriptions. No selling.', level: ROLE_HIERARCHY.OPTOMETRIST, geoFenced: true },
-  { id: 'WORKSHOP_STAFF', label: 'Workshop / Fitting', desc: 'Updates job status — frame fitting, lens mounting. No selling.', level: ROLE_HIERARCHY.WORKSHOP_STAFF, geoFenced: true },
-  { id: 'STORE_MANAGER', label: 'Store Manager', desc: 'Runs one store end-to-end. Discount up to 20%.', level: ROLE_HIERARCHY.STORE_MANAGER, geoFenced: false },
-  { id: 'ACCOUNTANT', label: 'Accountant', desc: 'Finance, GST and reconciliation. No POS or inventory.', level: ROLE_HIERARCHY.ACCOUNTANT, geoFenced: false },
-  { id: 'CATALOG_MANAGER', label: 'Catalog Manager', desc: 'Owns the head-office product catalogue and pricing.', level: ROLE_HIERARCHY.CATALOG_MANAGER, geoFenced: false },
-  { id: 'AREA_MANAGER', label: 'Area Manager', desc: 'Oversees several stores. Discount up to 25%.', level: ROLE_HIERARCHY.AREA_MANAGER, geoFenced: false },
-  { id: 'ADMIN', label: 'Admin (Director)', desc: 'Head-office administration across all stores and staff.', level: ROLE_HIERARCHY.ADMIN, geoFenced: false },
-  { id: 'SUPERADMIN', label: 'Superadmin (CEO)', desc: 'Full control of the entire system, including AI.', level: ROLE_HIERARCHY.SUPERADMIN, geoFenced: false },
-];
-
-const ROLE_LABEL: Record<string, string> = Object.fromEntries(
-  ROLE_CATALOGUE.map((r) => [r.id, r.label]),
-);
+// The role catalogue + who may assign what live in settingsTypes.ts, shared
+// with Settings > Users so both staff doors offer the same roles (L1-F04).
 
 // ---------------------------------------------------------------------------
 // New-employee form state.
@@ -360,10 +328,8 @@ function OnboardingWizard({
   // Roles the creating admin is actually allowed to assign (UI mirror of the
   // backend can_assign_roles ceiling). Anything strictly above the actor's level
   // is hidden so the owner is never offered an account they cannot create.
-  const assignableRoles = useMemo(
-    () => ROLE_CATALOGUE.filter((r) => r.level <= actorLevel),
-    [actorLevel],
-  );
+  const { user } = useAuth();
+  const assignableRoles = useMemo(() => assignableRolesFor(user?.roles), [user?.roles]);
 
   const set = (patch: Partial<NewEmployee>) => setForm((p) => ({ ...p, ...patch }));
 
