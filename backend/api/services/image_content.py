@@ -11,8 +11,11 @@ staff saw "uploaded" for a permanently broken image.
     AVIF - the image types file_store.ALLOWED_MIME_TYPES permits);
   * a cheap structural check then refuses a file that only STARTS like an
     image or was cut short:
-      JPEG      decoded by Pillow at 1/8 scale (bounded memory; a truncated or
-                corrupt stream fails to decode)
+      JPEG      decoded by Pillow at 1/8 scale (a truncated or corrupt stream
+                fails to decode). A JPEG whose header declares more than
+                _MAX_JPEG_PIXELS is refused BEFORE any decode: the scale only
+                shrinks the output, and a multi-scan (progressive) file makes
+                the decoder hold 2 bytes per sample of the FULL frame.
       PNG       the chunk list must start with IHDR, hold image data and end
                 with IEND inside the file (no pixel decode; chunk checksums
                 are not enforced - browsers show such files)
@@ -57,6 +60,15 @@ _MAX_TOP_BOXES = 256
 # write image data in chunks of 2 KB to 64 KB+, so a 25 MB photo (the upload
 # cap) has at most about 13,000; 65,536 leaves room and still bounds the walk.
 _MAX_PNG_CHUNKS = 65536
+# The largest JPEG frame that is decoded (see _decodes). The 1/8-scale decode
+# is cheap for a one-scan file, but for a multi-scan one (progressive, or a
+# baseline file with one scan per colour) libjpeg holds every coefficient of
+# the full frame whatever the scale: measured 2 bytes per pixel grey, 3 at
+# 4:2:0, 6 at 4:4:4 - a 250 KB file with an 8000 x 8000 header took 129 MB,
+# and Pillow's own limit only refuses above 178 megapixels (about 1 GB). This
+# cap holds every "50 megapixel" camera frame (8160 x 6120, 8192 x 6144,
+# 8688 x 5792) and bounds the worst case at about 315 MB (4:4:4).
+_MAX_JPEG_PIXELS = 50 * 1024 * 1024
 
 
 def _signature_mime(content: bytes) -> Optional[str]:
@@ -132,7 +144,8 @@ def _png_complete(content: bytes) -> bool:
 
 
 def _decodes(content: bytes, mime: str) -> bool:
-    """Pillow integrity check for JPEG (bounded decode), GIF and WebP (header)."""
+    """Pillow integrity check for JPEG (decode, up to _MAX_JPEG_PIXELS), GIF
+    and WebP (header)."""
     try:
         from PIL import Image  # noqa: PLC0415 - lazy: never an import-time dep
     except Exception:  # noqa: BLE001  # pragma: no cover - Pillow is pinned
@@ -141,7 +154,10 @@ def _decodes(content: bytes, mime: str) -> bool:
     try:
         with Image.open(io.BytesIO(content)) as im:
             if mime == "image/jpeg":
-                # 1/8-scale decode: reads the whole stream, ~1/64 the memory.
+                # The header's own numbers, read by open() without decoding.
+                if im.size[0] * im.size[1] > _MAX_JPEG_PIXELS:
+                    return False
+                # 1/8-scale decode: reads the whole stream; the OUTPUT is 1/64.
                 im.draft("RGB", (1, 1))
                 im.load()
             # GIF / WebP: open() has parsed the header.

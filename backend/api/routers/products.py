@@ -3278,9 +3278,9 @@ async def upload_product_image(
         content,
         status=400,
         refusal=(
-            "This file is not a valid image (it may be damaged, cut short, or "
-            "not a photo at all). Please upload a JPEG, PNG, WebP, GIF, HEIC "
-            "or AVIF image."
+            "This file is not a valid image (it may be damaged, cut short, a "
+            "JPEG larger than 50 megapixels, or not a photo at all). Please "
+            "upload a JPEG, PNG, WebP, GIF, HEIC or AVIF image."
         ),
     )
 

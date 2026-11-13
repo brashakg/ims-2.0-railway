@@ -498,6 +498,71 @@ def test_a_large_jpeg_is_checked_without_a_full_size_decode():
 
 
 # ---------------------------------------------------------------------------
+# The JPEG decode is bounded (review must-fix): the 1/8 scale only shrinks
+# the OUTPUT. A multi-scan (progressive) file makes the decoder hold 2 bytes
+# per sample of the FULL frame, so a few hundred KB with a large header took
+# hundreds of MB. A frame over the cap is refused on the header's own numbers.
+# ---------------------------------------------------------------------------
+
+
+def _jpeg_claiming(width: int, height: int) -> bytes:
+    """A small, real progressive JPEG whose frame header (SOF2) is rewritten
+    to claim `width` x `height`: the crafted upload, a few hundred bytes."""
+    buf = io.BytesIO()
+    Image.new("L", (64, 64), 128).save(buf, "JPEG", progressive=True)
+    data = bytearray(buf.getvalue())
+    sof = data.index(b"\xff\xc2")
+    # marker(2) length(2) precision(1) height(2) width(2)
+    assert data[sof + 4] == 8 and bytes(data[sof + 5 : sof + 9]) == b"\x00\x40\x00\x40"
+    data[sof + 5 : sof + 9] = height.to_bytes(2, "big") + width.to_bytes(2, "big")
+    return bytes(data)
+
+
+def test_a_jpeg_with_a_huge_frame_header_is_refused_before_any_decode(monkeypatch):
+    """13,000 x 13,000 (169 megapixels: under Pillow's own refusal at 178) in
+    a progressive file. The decoder is never started: its two entry points
+    are replaced by recorders, so this test allocates nothing even on code
+    without the cap - there it fails because they WERE called."""
+    from PIL import ImageFile, JpegImagePlugin
+
+    crafted = _jpeg_claiming(13000, 13000)
+    assert len(crafted) < 2048
+    with Image.open(io.BytesIO(crafted)) as im:  # Pillow reads the claim, no decode
+        assert im.size == (13000, 13000) and im.info.get("progressive")
+    started = []
+    monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft",
+                        lambda self, *a, **k: started.append("draft"))
+    monkeypatch.setattr(ImageFile.ImageFile, "load", lambda self, *a, **k: started.append("load"))
+    assert image_mime_of(crafted) is None
+    assert started == []
+    # the recorders do see a decode: the same file under the cap reaches them
+    assert image_mime_of(_jpeg_claiming(4000, 3000)) == "image/jpeg"
+    assert started == ["draft", "load"]
+
+
+def test_the_jpeg_frame_cap_keeps_a_50_megapixel_photo_and_refuses_the_next_size_up():
+    """Real, complete baseline files either side of the cap: the largest
+    '50 megapixel' camera frame (8192 x 6144) still uploads; a frame one
+    block row over the cap is refused although it would decode."""
+    def photo(height):
+        buf = io.BytesIO()
+        Image.new("L", (8192, height), 128).save(buf, "JPEG")
+        return buf.getvalue()
+
+    assert image_mime_of(photo(6144)) == "image/jpeg"
+    assert image_mime_of(photo(6408)) is None
+
+
+def test_upload_door_refuses_a_huge_frame_jpeg_with_a_plain_reason(
+    client, auth_headers, mem_store
+):
+    r = _upload(client, auth_headers, _jpeg_claiming(13000, 13000), "image/jpeg")
+    assert r.status_code == 400, r.text
+    assert "larger than 50 megapixels" in r.json()["detail"]
+    assert _stored(mem_store) == {}
+
+
+# ---------------------------------------------------------------------------
 # The brand scan is bounded (review must-fix): the ftyp box's size field is
 # the uploader's own number, never a licence to index the whole file.
 # ---------------------------------------------------------------------------

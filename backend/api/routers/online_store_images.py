@@ -415,7 +415,8 @@ async def upload_image(
             status_code=415,
             detail=(
                 "This file is not a valid image (it may be damaged, cut short, "
-                f"or not a photo at all). Allowed: {sorted(_ALLOWED_IMAGE_TYPES)}"
+                "a JPEG larger than 50 megapixels, or not a photo at all). "
+                f"Allowed: {sorted(_ALLOWED_IMAGE_TYPES)}"
             ),
         )
 
