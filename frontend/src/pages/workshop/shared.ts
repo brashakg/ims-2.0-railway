@@ -5,10 +5,22 @@
 
 import { Clock, Timer, Zap } from 'lucide-react';
 import type { JobStatus, JobPriority } from '../../types';
+import { istDayString } from '../../utils/datetime';
 
 /** L2-WS-F02: what a screen or job card shows for a detail that is not on
  *  file, so a missing value reads as missing, never as a blank. */
 export const NOT_ON_FILE = 'Not on file';
+
+/** A job is overdue only from the IST day after its promise date -- the same
+ *  rule as the backend's WorkshopJobRepository.find_overdue
+ *  (expected_date < IST today). Compares IST day strings, never instants: a
+ *  bare '2026-11-09' parses as UTC midnight (05:30 IST that day). No promise
+ *  date on file is not overdue. */
+export function isPastDueIst(promisedDate: string | null | undefined, now: Date = new Date()): boolean {
+  const due = promisedDate ? istDayString(promisedDate) : null;
+  const today = istDayString(now);
+  return !!due && !!today && due < today;
+}
 
 // Job type
 export interface Job {
