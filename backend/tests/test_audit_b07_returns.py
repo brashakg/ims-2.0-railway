@@ -462,7 +462,7 @@ def test_an_unapplied_return_names_each_piece_still_out(till, tasks):  # noqa: F
     assert "Already dealt with" not in msg and "Nothing to add by hand" not in msg
     # The pieces stay on the panel, by name, until the retry puts them back.
     assert _open_rows() == [{"return_id": "RET-NONE", "order_id": "ORD-1", "order_number": "ORD-1",
-                             "store_id": STORE, "pieces": "2 x F1"}]
+                             "store_id": STORE, "pieces": "2 x F1", "aside_pieces": ""}]
 
 
 # The three ways a kept record's stock step is still open. Each is retryable
@@ -580,7 +580,10 @@ def test_a_rebuilt_record_names_its_piece_and_offers_the_retry_never_a_blind_ent
     assert OLD_BLANKET not in msg and BY_HAND not in msg
     assert "Still reading sold: 1 x F1" in msg and "press Retry stock step" in msg, msg
     assert out["stock_step_open"] is True
-    assert [r["return_id"] for r in _open_rows()] == ["RET-REB"]
+    # #1413 round 6: its only open piece is one to set aside -- the panel row
+    # names it as that, never an empty "Not back in stock: ".
+    assert [(r["return_id"], r["pieces"], r["aside_pieces"]) for r in _open_rows()] == [
+        ("RET-REB", "", "1 x F1")]
     # The recovery's accounting is what it was.
     assert out["net_refund"] == 1800.0 and out["credit_amount"] == 1200.0
     assert out["restock_applied"] is False and out["restock_stock_ids"] == []
@@ -959,6 +962,65 @@ def test_an_unreadable_stock_answer_moves_nothing_and_keeps_the_retry(ctx, monke
     assert r.status_code == 500, r.text
     assert _units(ctx) == [("STK-A", "PRD-1", "SOLD"), ("STK-B", "PRD-1", "SOLD")]
     assert ctx["returns_coll"].docs[-1]["restock_in_progress"] is False
+
+
+def test_a_piece_put_back_good_reads_back_though_an_earlier_return_once_set_it_aside(ctx):  # noqa: F811
+    """#1413 round 6: STK-A was set aside by an earlier return, the manager
+    lifted the quarantine (its reason kept) and this bill sold it again. This
+    return takes it back GOOD; the press dies before its record is saved and
+    Complete record rebuilds it (condition GOOD kept, no restocked rows). The
+    stale quarantine_reason used to read STK-A as "set aside", so the retry
+    minted a second record for the frame and the panel said "1 set aside"."""
+    from api.routers import returns as returns_router
+
+    _two_lines_same_product(ctx)
+    next(u for u in ctx["stock_repo"].units if u["stock_id"] == "STK-A")[
+        "quarantine_reason"] = "CUSTOMER_RETURN_OPENED"
+    first = _post(ctx, _screen())
+    assert first.status_code == 201, first.text
+    rid = first.json()["return_id"]
+    assert _units(ctx) == [("STK-A", "PRD-1", "AVAILABLE"), ("STK-B", "PRD-1", "SOLD")]
+    doc = next(d for d in ctx["returns_coll"].docs if d["return_id"] == rid)
+    doc.update(items=[{**REBUILT_ITEM, "condition": "GOOD"}], restocked=[], restock_applied=False,
+               restock_stock_ids=[], quarantined_stock_ids=[],
+               recovered={"by": "U-ACC", "source": "credit line"})
+    state = returns_router._recovered_stock_state(doc, ctx["order_repo"]._order)
+    assert state["open"] is False and (state["back"], state["aside"]) == (1, 0), state
+    before = _units(ctx)
+    r = _retry(ctx, rid)
+    assert r.status_code == 200 and r.json()["restock_applied"] is True, r.text
+    assert _units(ctx) == before and len(ctx["stock_repo"].units) == 2, "nothing minted, nothing flipped"
+
+
+def test_a_put_back_clears_an_old_set_aside_reason(ctx):  # noqa: F811
+    """The flip back to AVAILABLE clears quarantine_reason (a set-aside writes
+    its own over it), so the unit never reads as set aside by this return."""
+    _two_lines_same_product(ctx)
+    a = next(u for u in ctx["stock_repo"].units if u["stock_id"] == "STK-A")
+    a["quarantine_reason"] = "CUSTOMER_RETURN_DAMAGED"
+    assert _post(ctx, _screen()).status_code == 201
+    assert a["status"] == "AVAILABLE" and a["quarantine_reason"] is None
+
+
+@pytest.mark.parametrize("started", ["stale", "missing"])
+def test_a_claim_left_by_a_retry_that_died_is_taken_over_once_stale(ctx, started):  # noqa: F811
+    """D7: the retry stays recoverable. A retry killed between its claim and
+    its release (OOM, hard restart) left restock_in_progress True for good:
+    every later press read "Restock in progress" and the piece stayed SOLD."""
+    _recovered(ctx, restock_in_progress=True,
+               **({"restock_started_at": _ago(10)} if started == "stale" else {}))
+    r = _retry(ctx)
+    assert r.status_code == 200 and r.json()["restock_applied"] is True, r.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "AVAILABLE")]
+    saved = ctx["returns_coll"].docs[-1]
+    assert saved["restock_in_progress"] is False and saved["restock_applied"] is True
+
+
+def test_a_claim_a_retry_took_a_moment_ago_is_still_respected(ctx):  # noqa: F811
+    _recovered(ctx, restock_in_progress=True, restock_started_at=_ago(0.5))
+    r = _retry(ctx)
+    assert r.status_code == 200 and r.json()["message"] == "Restock in progress - retry shortly", r.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "SOLD")]
 
 
 def test_a_nothing_paid_record_has_no_stock_step(ctx):  # noqa: F811

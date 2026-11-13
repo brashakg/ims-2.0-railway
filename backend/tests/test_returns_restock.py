@@ -230,12 +230,24 @@ class _FakeResult:
         self.modified_count = matched
 
 
+_OPS = {
+    "$ne": lambda val, x: val != x,
+    "$lt": lambda val, x: val is not None and val < x,
+    "$gte": lambda val, x: val is not None and val >= x,
+    "$not": lambda val, x: not _ops_hold(val, x),
+}
+
+
+def _ops_hold(val, ops):
+    return all(_OPS[op](val, x) for op, x in ops.items())
+
+
 def _doc_matches(d, query):
-    """Tiny mongo-like matcher: scalar equality + $ne. All other operators
-    are not used by the returns flow today, so we keep this minimal."""
+    """Tiny mongo-like matcher: scalar equality, $ne, $lt, $gte, $not (the
+    retry's claim). Any other operator matches nothing, as before."""
     for k, v in (query or {}).items():
-        if isinstance(v, dict) and "$ne" in v:
-            if d.get(k) == v["$ne"]:
+        if isinstance(v, dict) and v and set(v) <= set(_OPS):
+            if not _ops_hold(d.get(k), v):
                 return False
         elif d.get(k) != v:
             return False
@@ -978,10 +990,14 @@ def test_retry_when_already_in_progress_returns_busy(ctx, monkeypatch):
     assert created["restock_applied"] is False
     rid = created["return_id"]
 
-    # 2) Simulate worker A having taken the claim - flip the in-progress flag.
+    # 2) Simulate worker A having taken the claim - the flag and its time, as
+    #    the claim writes them (a flag with no time, or an old one, is a dead
+    #    retry's and is taken over: #1413).
+    from api.utils.event_time import utc_now_iso
+
     ctx["returns_coll"].update_one(
         {"return_id": rid},
-        {"$set": {"restock_in_progress": True}},
+        {"$set": {"restock_in_progress": True, "restock_started_at": utc_now_iso()}},
     )
 
     # 3) Worker B's retry must see "in progress" and not touch stock.

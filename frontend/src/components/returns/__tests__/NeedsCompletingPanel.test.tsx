@@ -188,4 +188,12 @@ describe('NeedsCompletingPanel - Stock still to put back (L2-RETURN-F03)', () =>
     // Reloaded: the piece is back, the row is gone.
     await waitFor(() => expect(screen.queryByText(/Not back in stock/)).toBeNull());
   });
+
+  it('names a piece to set aside as that, never an empty "Not back in stock"', async () => {
+    needsCompleting.mockReset();
+    needsCompleting.mockResolvedValue({ items: [], stock_open: [{ ...OPEN, pieces: '', aside_pieces: '1 x F1' }] });
+    render(<NeedsCompletingPanel />);
+    expect(await screen.findByText('To set aside in Quarantine (damaged or opened): 1 x F1')).toBeTruthy();
+    expect(screen.queryByText(/Not back in stock/)).toBeNull();
+  });
 });

@@ -2660,6 +2660,10 @@ def _reactivate_original_unit(
                     "prior_sold_order_id": prior_order_id,
                     # Which return moved it, written with the flip (D43).
                     **({"returned_by_return_id": return_id} if return_id else {}),
+                    # An earlier return's set-aside reason (kept by the lift,
+                    # the unit resold) never makes THIS put-back read as a
+                    # set-aside (_units_moved_by_return); a set-aside writes its own.
+                    "quarantine_reason": None,
                     **(set_aside or {}),
                 },
                 id_field="stock_id" if unit.get("stock_id") else "_id",
@@ -3292,7 +3296,11 @@ def _units_moved_by_return(return_id: str) -> Tuple[Dict[str, float], Dict[str, 
     audit = db.get_collection("stock_audit") if db is not None else None
     for row in (list(audit.find({"return_id": return_id})) if audit is not None else []):
         sid = str(row.get("stock_id") or "")
-        if sid and sid not in units:
+        if sid in units:
+            # THIS return's own row says what it did with a stamped unit too:
+            # its quarantine_reason may be an earlier return's.
+            units[sid] = (units[sid][0], row.get("new_status") or units[sid][1])
+        elif sid:
             for u in _find_stock(stock_repo, {"stock_id": sid}):
                 units[sid] = (u, row.get("new_status"))
     back: Dict[str, float] = {}
@@ -5934,8 +5942,9 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                          "owed_tenders": doc.get("owed_tenders") or []})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the owed returns - try again.") from exc
-    # Completed records whose GOOD pieces are still out of stock ("Retry stock
-    # step"): named here until the retry puts each back.
+    # Completed records with pieces still reading sold ("Retry stock step"):
+    # GOOD ones to put back and ones to set aside, named until the retry
+    # deals with each.
     stock_open: List[Dict[str, Any]] = []
     try:
         for doc in coll.find({"status": "COMPLETED", "recovered": {"$ne": None},
@@ -5946,7 +5955,10 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
             if state["open"]:
                 stock_open.append({"return_id": doc.get("return_id"), "order_id": doc.get("order_id"),
                                    "order_number": doc.get("order_number"), "store_id": doc.get("store_id"),
-                                   "pieces": _named(state["out"])})
+                                   "pieces": _named(state["out"]),
+                                   # Damaged or opened (or condition not kept):
+                                   # the retry sets these aside, never on sale.
+                                   "aside_pieces": _named(state["aside_out"])})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the open stock steps - try again.") from exc
     # Till store-credit / gift-voucher payments taken but never on their bill
@@ -6553,6 +6565,7 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
 
     # Atomic claim: succeed only if NOT already applied AND NOT in progress.
     now_iso = utc_now_iso()
+    take = {"$set": {"restock_in_progress": True, "restock_started_at": now_iso}}
     try:
         claim = coll.find_one_and_update(
             {
@@ -6560,14 +6573,26 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
                 "restock_applied": {"$ne": True},
                 "restock_in_progress": {"$ne": True},
             },
-            {
-                "$set": {
-                    "restock_in_progress": True,
-                    "restock_started_at": now_iso,
-                }
-            },
+            take,
             return_document=ReturnDocument.AFTER,
         )
+        if claim is None:
+            # A retry killed between its claim and its release (OOM, a hard
+            # restart) left the flag up for good, and this door is the only
+            # remedy (D7): a claim older than a retry runs is taken over. Safe
+            # because every stock write is per unit and credited once
+            # (_units_moved_by_return). ponytail: a retry still alive past
+            # _STALE_CLAIM_SECONDS runs beside its taker; per-claim tokens on
+            # the releases if retries ever run that long.
+            from datetime import timedelta
+
+            stale = (datetime.now(timezone.utc) - timedelta(seconds=_STALE_CLAIM_SECONDS)).isoformat()
+            claim = coll.find_one_and_update(
+                {"return_id": return_id, "restock_applied": {"$ne": True}, "restock_in_progress": True,
+                 "restock_started_at": {"$not": {"$gte": stale}}},
+                take,
+                return_document=ReturnDocument.AFTER,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock claim failed: %s", exc)
         claim = None

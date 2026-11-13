@@ -220,8 +220,8 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
         <div aria-label="Stock still to put back" className="mt-4">
           <h3 className="text-sm font-semibold text-gray-900 mb-1">Stock still to put back</h3>
           <p className="text-xs text-gray-500 mb-2">
-            Completed returns whose pieces are not back in stock yet. Do not add them by hand (IMS would count them
-            twice): Retry stock step puts each piece back once.
+            Completed returns whose pieces still read sold. Do not add them by hand (IMS would count them
+            twice): Retry stock step puts each piece back, or sets a damaged or opened one aside, once.
           </p>
           <ul className="divide-y divide-gray-100">
             {stockOpen.map((row) => (
@@ -230,7 +230,11 @@ export function NeedsCompletingPanel({ standalone = false }: { standalone?: bool
                 className={'py-2 flex flex-wrap items-center gap-2 text-sm' + (focus === row.return_id ? ' bg-amber-50' : '')}>
                 <span className="font-medium">{row.order_number || row.order_id || '-'}</span>
                 <span className="text-xs text-gray-400">{row.return_id}{row.store_id ? ` - ${row.store_id}` : ''}</span>
-                <span className="ml-auto">Not back in stock: {row.pieces}</span>
+                <span className="ml-auto">
+                  {[row.pieces && `Not back in stock: ${row.pieces}`,
+                    row.aside_pieces && `To set aside in Quarantine (damaged or opened): ${row.aside_pieces}`]
+                    .filter(Boolean).join('; ')}
+                </span>
                 <button type="button" onClick={() => retryStock(row)} disabled={busy === row.return_id}
                   className="px-3 py-1 text-xs rounded-md bg-bv-red-600 text-white disabled:opacity-50">
                   {busy === row.return_id ? 'Retrying...' : 'Retry stock step'}

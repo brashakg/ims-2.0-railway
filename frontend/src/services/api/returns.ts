@@ -185,8 +185,11 @@ export interface StockOpenReturn {
   order_id?: string;
   order_number?: string;
   store_id?: string;
-  /** The pieces still out, by name: "2 x RB-123, 1 x OAK-55". */
+  /** The GOOD pieces still out, by name: "2 x RB-123, 1 x OAK-55" ('' for none). */
   pieces: string;
+  /** Damaged or opened pieces still reading sold, which the retry sets aside
+   *  in Quarantine ('' for none). */
+  aside_pieces?: string;
 }
 
 export const returnsApi = {
