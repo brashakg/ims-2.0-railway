@@ -5547,7 +5547,7 @@ def test_order_drain_that_failed_after_booking_is_retried_without_a_second_booki
     from datetime import datetime, timezone
 
     from agents.implementations.nexus import NexusAgent
-    from api.services import online_order_mapper
+    from api.services import online_order_status
 
     db = world["db"]
     _stock(db, "BV-BOK-01", "P-RB", 2)
@@ -5558,7 +5558,7 @@ def test_order_drain_that_failed_after_booking_is_retried_without_a_second_booki
         "payload": _order(53001),
         "headers": {"x-shopify-topic": "orders/create", "x-shopify-webhook-id": "WH-53001"},
     })
-    real = online_order_mapper._stamp_order_customer
+    real = online_order_status.order_fact
     calls = []
 
     def fail_once(*a, **k):
@@ -5567,7 +5567,7 @@ def test_order_drain_that_failed_after_booking_is_retried_without_a_second_booki
             raise RuntimeError("crash after booking")
         return real(*a, **k)
 
-    monkeypatch.setattr(online_order_mapper, "_stamp_order_customer", fail_once)
+    monkeypatch.setattr(online_order_status, "order_fact", fail_once)
     agent = NexusAgent(db=db)
 
     asyncio.run(agent._handle_inbox_webhook("inbox-1", "shopify"))
@@ -6105,3 +6105,84 @@ def test_a_test_order_replayed_after_the_settle_window_claims_no_stock(world, mo
     # Re-map / clear-hold reach the same claim directly: it claims nothing either.
     assert route_mod.finish_crashed_booking(db, order) is None
     assert db.stock_units.count_documents({"store_id": "BV-BOK-01", "status": "AVAILABLE"}) == 2
+
+
+def _customer_door_down(monkeypatch):
+    from api.services import customer_service
+
+    down = {"on": True}
+    real = customer_service._get_repo
+    monkeypatch.setattr(
+        customer_service, "_get_repo", lambda db=None: None if down["on"] else real(db)
+    )
+    return down
+
+
+def _link_books(db):
+    """The money and stock a customer-link repair must leave exactly as they are."""
+    return (
+        sorted((o["order_id"], o["invoice_number"], o["grand_total"], o["amount_paid"],
+                o["balance_due"]) for o in db.orders.find({})),
+        sorted((u["stock_id"], u["status"], u.get("order_id")) for u in db.stock_units.find({})),
+        sorted(map(str, db.counters.find({}))),
+    )
+
+
+def test_a_lost_link_write_on_a_new_order_is_repaired_on_the_row_by_the_drain_retry(
+    world, monkeypatch
+):
+    """PR #1388 P2 through the real drain: door down + a write fault on every
+    customer-link update. The order books once, flagged on insert; the repair
+    delivery fails and is RETRIED by the inbox; the retry links the stored row.
+    One order, one invoice, one unit, no counter step."""
+    db = world["db"]
+    _stock(db, "BV-BOK-01", "P-RB", 2)
+    world["shop"].fo(FO_1, LOC_BOK)
+    down = _customer_door_down(monkeypatch)
+    res, order = _book(world, _order(53901))
+    assert res["customer_link_failed"] is True
+    assert (order["customer_id"], order["is_guest_order"], order["customer_link_failed"]) == (
+        None, True, True,
+    )
+    assert order["invoice_number"]
+    books = _link_books(db)
+
+    down["on"] = False
+    faults = []
+    real_update = db.orders.update_one
+
+    def lost_once(query, update, *a, **k):
+        if "customer_link_failed" in update.get("$set", {}) and not faults:
+            faults.append(query)
+            raise RuntimeError("synthetic link write failure")
+        return real_update(query, update, *a, **k)
+
+    monkeypatch.setattr(db.orders, "update_one", lost_once)
+    _sf03_inbox(db, "link-retry", _order(53901), topic="orders/updated")
+    row = _sf03_drain(db, "link-retry")
+    assert faults and row["status"] == "failed" and row["processed"] is False
+    assert db.orders.find_one({"order_id": order["order_id"]})["customer_link_failed"] is True
+
+    row = _sf03_drain(db, "link-retry")
+    assert row["status"] == "succeeded" and row["processed"] is True
+    fixed = db.orders.find_one({"order_id": order["order_id"]})
+    assert db.customers.find_one({"customer_id": fixed["customer_id"]})
+    assert fixed["is_guest_order"] is False and fixed["customer_link_failed"] is False
+    assert _link_books(db) == books
+
+
+def test_remap_says_it_linked_the_customer_and_says_when_it_could_not(world, monkeypatch):
+    world["shop"].fo(FO_1, LOC_BOK)
+    _stock(world["db"], "BV-BOK-01", "P-RB", 1)
+    down = _customer_door_down(monkeypatch)
+    payload = _order(53902)
+    res, _ = _book(world, payload)
+
+    out = _remap(world, monkeypatch, payload)
+    assert out["ok"] is False and "no customer linked" in out["message"]
+
+    down["on"] = False
+    out = _remap(world, monkeypatch, payload)
+    assert out["ok"] is True and "linked this order" in out["message"]
+    fixed = world["db"].orders.find_one({"order_id": res["order_id"]})
+    assert fixed["customer_id"] == out["result"]["customer_id"] and fixed["customer_id"]

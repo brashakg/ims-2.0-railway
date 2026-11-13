@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from api.routers import workshop as wm  # noqa: E402
 from api.routers import labels as lm  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from strict_fakes import OrdersAt  # noqa: E402
 
 
 class _Repo:
@@ -43,6 +44,7 @@ def _client(monkeypatch, roles, store):
     app.include_router(lm.router, prefix="")  # labels paths already include /workshop
     repo = _Repo(_JOB)
     monkeypatch.setattr(wm, "get_workshop_repository", lambda: repo)
+    monkeypatch.setattr(wm.helpers, "get_order_repository", lambda: OrdersAt("BV-BOK-01"))
     monkeypatch.setattr(lm, "get_workshop_repository", lambda: repo)
     monkeypatch.setattr(lm, "get_prescription_repository", lambda: None)
     monkeypatch.setattr(lm, "get_store_repository", lambda: None)
@@ -80,3 +82,16 @@ def test_admin_cross_store_ok(monkeypatch):
     c = _client(monkeypatch, ["ADMIN"], "BV-HQ")  # admin reaches any store
     assert c.get("/workshop/jobs/J1").status_code == 200
     assert c.get("/workshop/jobs/J1/label").status_code == 200
+
+
+def test_mismatched_order_job_and_label_hidden_from_store_staff(monkeypatch):
+    """PR #1376 F3: a BOK-stamped job on a PUN order (the L2-WS-F01 legacy
+    shape) is neither readable nor label-printable by BOK staff; HQ keeps it."""
+    c = _client(monkeypatch, ["STORE_MANAGER"], "BV-BOK-01")
+    monkeypatch.setattr(wm.helpers, "get_order_repository", lambda: OrdersAt("BV-PUN-01"))
+    assert c.get("/workshop/jobs/J1").status_code == 404
+    assert c.get("/workshop/jobs/J1/label").status_code == 404
+    a = _client(monkeypatch, ["ADMIN"], "BV-HQ")
+    monkeypatch.setattr(wm.helpers, "get_order_repository", lambda: OrdersAt("BV-PUN-01"))
+    assert a.get("/workshop/jobs/J1").status_code == 200
+    assert a.get("/workshop/jobs/J1/label").status_code == 200

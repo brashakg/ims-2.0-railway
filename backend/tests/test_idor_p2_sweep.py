@@ -46,6 +46,7 @@ from api.routers import hr as hr_mod  # noqa: E402
 from api.routers import inventory as inventory_mod  # noqa: E402
 from api.routers import vendor_returns as vendor_returns_mod  # noqa: E402
 from api.routers import workshop as workshop_mod  # noqa: E402
+from strict_fakes import OrdersAt  # noqa: E402
 
 OWN_STORE = "BV-PUN-01"
 OTHER_STORE = "BV-BOK-01"
@@ -129,6 +130,7 @@ def _seed_job(**over):
     base = {
         "job_id": "WS-1",
         "job_number": "WS-260601-AAAA01",
+        "order_id": "ORD-1",
         "store_id": OTHER_STORE,
         "status": "PENDING",
         "customer_id": "CUST-1",
@@ -145,6 +147,9 @@ class TestWorkshopJobStoreGuard:
     def _install(self, monkeypatch, job):
         repo = _WorkshopRepo(job)
         monkeypatch.setattr(workshop_mod, "get_workshop_repository", lambda: repo)
+        monkeypatch.setattr(
+            workshop_mod.helpers, "get_order_repository", lambda: OrdersAt(OTHER_STORE)
+        )
         # /assign validates the technician via a lazily-imported user repo;
         # None disables that branch so the test isolates the store guard.
         monkeypatch.setattr(
