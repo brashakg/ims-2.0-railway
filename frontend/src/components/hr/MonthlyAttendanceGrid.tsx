@@ -19,6 +19,15 @@ import type { AttendanceCode, AttendanceGrid, LwpReport } from '../../services/a
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import clsx from 'clsx';
+import { getErrorMessage } from '../../utils/errorHandler';
+
+// Stored ISO instant -> 'HH:MM' IST for an <input type="time"> ('' if none).
+function istHHMM(value: string | null | undefined): string {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: 'Asia/Kolkata' });
+}
 
 // Statuses an admin can set from the edit modal. Maps 1:1 to the codes the
 // grid renders (server normalises any of these on POST /attendance/mark).
@@ -103,6 +112,10 @@ export function MonthlyAttendanceGrid({
   const [editStatus, setEditStatus] = useState<string>('PRESENT');
   const [editCheckIn, setEditCheckIn] = useState<string>('');
   const [editCheckOut, setEditCheckOut] = useState<string>('');
+  // R14: the times as recorded when the modal opened. A time box left equal to
+  // these is NOT sent (the server keeps the stored time); emptied = cleared.
+  const [origTimes, setOrigTimes] = useState<{ in: string; out: string }>({ in: '', out: '' });
+  const [timesNote, setTimesNote] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   // The store this grid reads. Explicit prop wins so the page can drive it.
@@ -144,38 +157,56 @@ export function MonthlyAttendanceGrid({
     setEditStatus(match?.value || 'PRESENT');
     setEditCheckIn('');
     setEditCheckOut('');
+    setOrigTimes({ in: '', out: '' });
+    setTimesNote(null);
+    const date = dateForDay(month, day);
     setEdit({
       employeeId: emp.employee_id,
       employeeName: emp.name,
       day,
-      date: dateForDay(month, day),
+      date,
       currentCode: code,
     });
-  }, [canEdit, grid, month]);
+    // R14: reopen shows the recorded times (same store as the grid, R15).
+    if (code !== '-' && effectiveStore) {
+      hrApi.getAttendance(effectiveStore, date, emp.employee_id)
+        .then((data) => {
+          const rec = (data?.records || []).find((r: any) => r.employeeId === emp.employee_id && r.date === date);
+          const t = { in: istHHMM(rec?.checkIn), out: istHHMM(rec?.checkOut) };
+          setOrigTimes(t);
+          setEditCheckIn(t.in);
+          setEditCheckOut(t.out);
+        })
+        .catch(() => setTimesNote('Recorded times could not be loaded. Leave the boxes empty to keep them unchanged.'));
+    }
+  }, [canEdit, grid, month, effectiveStore]);
 
   const saveEdit = useCallback(async () => {
     if (!edit) return;
     setSaving(true);
     try {
-      // check_in / check_out are optional times (HH:MM); send full ISO so the
-      // backend's datetime parser accepts them. Omitted when blank.
+      // check_in / check_out are HH:MM; sent as full ISO only when CHANGED from
+      // what was recorded (R14): unchanged -> omitted (server keeps it),
+      // emptied -> null (deliberate clear, audited server-side).
       const toIso = (t: string) => (t ? `${edit.date}T${t}:00` : null);
       await hrApi.markAttendance({
         employee_id: edit.employeeId,
         date: edit.date,
         status: editStatus,
-        check_in: toIso(editCheckIn),
-        check_out: toIso(editCheckOut),
+        check_in: editCheckIn === origTimes.in ? undefined : toIso(editCheckIn),
+        check_out: editCheckOut === origTimes.out ? undefined : toIso(editCheckOut),
+        // R15: write to the store this grid is showing, not the login's store.
+        store_id: effectiveStore || undefined,
       });
       toast.success(`Attendance updated for ${edit.employeeName}`);
       setEdit(null);
       await load();
-    } catch {
-      toast.error('Could not update attendance. Please try again.');
+    } catch (e) {
+      toast.error(getErrorMessage(e, 'Could not update attendance. Please try again.'));
     } finally {
       setSaving(false);
     }
-  }, [edit, editStatus, editCheckIn, editCheckOut, load, toast]);
+  }, [edit, editStatus, editCheckIn, editCheckOut, origTimes, effectiveStore, load, toast]);
 
   const days = grid?.days ?? [];
   const employees = grid?.employees ?? [];
@@ -476,6 +507,7 @@ export function MonthlyAttendanceGrid({
                   />
                 </div>
               </div>
+              {timesNote && <p className="text-xs text-amber-700">{timesNote}</p>}
             </div>
             <div className="flex justify-end gap-2 border-t border-gray-200 px-5 py-3">
               <button

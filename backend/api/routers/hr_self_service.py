@@ -43,10 +43,20 @@ from ..services.online_order_status import SALE_DONE_STATUSES
 # hr_router is mounted behind the _FINANCE_ROLES gate. /me/leaves POST below
 # DELEGATES to it -- no second implementation of the apply rule.
 from .hr import LeaveCreate, apply_leave as _hr_apply_leave
+from .hr import check_in as _hr_check_in, check_out as _hr_check_out
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# R13: self check-in / check-out. The ONE implementation (geo-fence, late
+# mark, idempotent day row) stays in hr.py; it is registered HERE, outside the
+# finance-role gate, so floor staff can record their own attendance. Both are
+# pinned to current_user (no employee_id), and the store goes through
+# validate_store_access, so a caller can only clock themselves in at a store
+# they belong to. Same paths as before -> no client change for managers.
+router.add_api_route("/attendance/check-in", _hr_check_in, methods=["POST"])
+router.add_api_route("/attendance/check-out", _hr_check_out, methods=["POST"])
 
 
 def _applied_day(raw) -> str:
@@ -112,6 +122,9 @@ async def my_attendance(
     empty = {
         "month": mon,
         "year": yr,
+        # R01: today's own row (or None) so the check-in card shows what the
+        # server holds, not what the browser remembers.
+        "today": None,
         "days": {},
         "summary": {
             "present": 0,
@@ -170,7 +183,26 @@ async def my_attendance(
             if r.get("is_late"):
                 summary["late"] += 1
 
-        return {"month": mon, "year": yr, "days": days, "summary": summary}
+        today_iso = now_ist().date().isoformat()
+        t = db.get_collection("attendance").find_one(
+            {"employee_id": caller, "date": today_iso}, {"_id": 0}
+        )
+        today = t and {
+            "attendance_id": t.get("attendance_id"),
+            "date": today_iso,
+            "status": t.get("status"),
+            "check_in": t.get("check_in"),
+            "check_out": t.get("check_out"),
+            "is_late": bool(t.get("is_late")),
+            "store_id": t.get("store_id"),
+        }
+        return {
+            "month": mon,
+            "year": yr,
+            "today": today,
+            "days": days,
+            "summary": summary,
+        }
     except Exception as e:
         logger.error("Self attendance read failed: %s", e)
         return empty

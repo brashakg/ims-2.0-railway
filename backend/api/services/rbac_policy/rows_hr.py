@@ -171,15 +171,23 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/hr/attendance-compliance",
         "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
     },
+    # R13: own attendance for EVERY role (hr_self_service registers it outside
+    # the finance gate). Pinned to the caller; store via validate_store_access;
+    # geo-fence unchanged. hr:write already carries AUTHENTICATED (/me/leaves),
+    # so this widens no capability union.
     {
         "method": "POST",
         "path": "/api/v1/hr/attendance/check-in",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": AUTHENTICATED,
     },
+    # R13: own attendance for EVERY role (hr_self_service registers it outside
+    # the finance gate). Pinned to the caller; store via validate_store_access;
+    # geo-fence unchanged. hr:write already carries AUTHENTICATED (/me/leaves),
+    # so this widens no capability union.
     {
         "method": "POST",
         "path": "/api/v1/hr/attendance/check-out",
-        "allowed": ["ACCOUNTANT", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"],
+        "allowed": AUTHENTICATED,
     },
     {
         "method": "GET",

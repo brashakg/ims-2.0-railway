@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .auth import get_current_user
+from ..services.name_resolver import user_name_map
 from ..services.phone import normalize_indian_mobile
 from ..utils.ist import ist_today, now_ist
 from ..dependencies import (
@@ -1617,6 +1618,9 @@ async def walkins_status(
             {"staff_id": sp, "walk_ins": n} for sp, n in sorted(per_staff.items())
         ],
         "staff_missing": staff_missing,
+        # L2-POS-F02: names for every row on the capture sheet, from the staff
+        # directory -- a new employee with no activity yet is still named.
+        "staff_names": user_name_map(get_db(), entered_ids | expected_ids),
         "total_walk_ins": total_walk_ins,
         "store_conversion_pct": store_conversion_pct,
     }

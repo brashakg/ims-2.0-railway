@@ -233,6 +233,9 @@ class AttendanceMarkRequest(BaseModel):
     status: str  # PRESENT, ABSENT, HALF_DAY, LEAVE, LWP, HOLIDAY, WEEK_OFF
     check_in: Optional[datetime] = None
     check_out: Optional[datetime] = None
+    # R15: the store the screen is showing. Omitted -> the login's active store
+    # (the old behaviour). Authorised by validate_store_access in the route.
+    store_id: Optional[str] = None
 
     @field_validator("status")
     @classmethod
@@ -955,7 +958,9 @@ def _half_day_rule(store_id: Optional[str]) -> dict:
         return {"auto": False, "min_hours": None, "late_after": None}
 
 
-@router.post("/attendance/check-in")
+# Self check-in / check-out are registered on hr_self_service's router (no
+# finance-role gate) so every employee can record their OWN attendance (R13).
+# They stay defined here beside the day-row helpers they use.
 async def check_in(
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
@@ -1113,7 +1118,6 @@ async def check_in(
     }
 
 
-@router.post("/attendance/check-out")
 async def check_out(
     store_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
@@ -1235,36 +1239,95 @@ async def mark_attendance(
     De-dupes on (employee_id, date) via the shared day-row helpers so a re-mark
     UPDATES the one row (also catching a legacy datetime-stored date) and a race
     can't slip a duplicate past the unique index.
+
+    R15: the row is written to the store the caller names (the Attendance
+    page's store filter), authorised like every store read, and the employee
+    must belong to that store. A day already recorded at another store is
+    refused (409) rather than silently moved.
+    R14: a time the request OMITS keeps the stored value; only an explicit null
+    clears it. A change to an existing row writes an ATTENDANCE_EDIT audit row
+    with before/after, like the PUT correction door.
     """
     attendance_repo = get_attendance_repository()
-    active_store = current_user.get("active_store_id")
+    target_store = validate_store_access(request.store_id, current_user)
+    sent = request.model_fields_set
 
     if attendance_repo is not None:
         date_iso = request.date.isoformat()
+        _require_employee_at_store(request.employee_id, target_store)
         existing = _find_day_row(
-            attendance_repo, request.employee_id, active_store, date_iso
+            attendance_repo, request.employee_id, target_store, date_iso
         )
+        row_store = (existing or {}).get("store_id")
+        if row_store and target_store and row_store != target_store:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This day is already recorded at store {row_store}. "
+                    "Open that store to correct it."
+                ),
+            )
 
         data = {
             "employee_id": request.employee_id,
-            "store_id": active_store,
+            "store_id": target_store or row_store,
             "date": date_iso,
             "status": request.status,
-            "check_in": ist_event_iso(request.check_in) if request.check_in else None,
-            "check_out": ist_event_iso(request.check_out) if request.check_out else None,
             "marked_by": current_user.get("user_id"),
             "marked_at": utc_now_iso(),
         }
+        for field in ("check_in", "check_out"):
+            if existing is None or field in sent:
+                value = getattr(request, field)
+                data[field] = ist_event_iso(value) if value else None
 
         if existing is not None:
-            attendance_repo.update(
-                existing.get("attendance_id") or existing.get("_id"), data
-            )
+            eff_ci = data.get("check_in", existing.get("check_in"))
+            eff_co = data.get("check_out", existing.get("check_out"))
+            if eff_ci and eff_co:
+                ci_dt = attendance_engine._coerce_check_in(eff_ci)
+                co_dt = attendance_engine._coerce_check_in(eff_co)
+                if ci_dt and co_dt and co_dt <= ci_dt:
+                    raise HTTPException(
+                        status_code=422, detail="check_out must be after check_in"
+                    )
+            row_id = existing.get("attendance_id") or existing.get("_id")
+            before = {k: v for k, v in existing.items() if k != "_id"}
+            attendance_repo.update(row_id, data)
+            changed = [
+                k
+                for k in ("store_id", "status", "check_in", "check_out")
+                if k in data and data[k] != existing.get(k)
+            ]
+            if changed:
+                _audit_attendance_edit(
+                    current_user, row_id, before, {**before, **data}, changed
+                )
         else:
             data["attendance_id"] = str(uuid.uuid4())
             _create_day_row_safe(attendance_repo, data)
 
     return {"message": "Attendance marked", "date": request.date.isoformat()}
+
+
+def _require_employee_at_store(employee_id: str, store_id: Optional[str]) -> None:
+    """R15: a manager may only mark someone who works at the store being
+    written -- the same membership the grid roster uses (users.store_ids).
+    Inactive staff still count (corrections for leavers). Skipped only when
+    there is no store to check or no user store (demo mode)."""
+    if not store_id:
+        return
+    user_repo = get_user_repository()
+    if user_repo is None:
+        return
+    emp = user_repo.find_one({"user_id": employee_id})
+    if emp is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    if store_id not in (emp.get("store_ids") or []):
+        raise HTTPException(
+            status_code=422,
+            detail=f"This employee does not work at store {store_id}.",
+        )
 
 
 # Roles allowed to EDIT/correct an existing attendance row. Stricter than the
