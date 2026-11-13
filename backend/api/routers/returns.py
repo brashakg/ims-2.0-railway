@@ -3267,10 +3267,12 @@ def _units_moved_by_return(return_id: str) -> Tuple[Dict[str, float], Dict[str, 
     `source_id`, and an older flip its stock_audit row. So a record whose
     `restocked` rows were never saved (the press died, or Needs completing
     rebuilt it) never moves a unit twice. RAISES when the stock cannot be
-    read: an unread answer is never "nothing moved yet"."""
+    read: an unread answer is never "nothing moved yet". With no stock
+    repository at all nothing can move either (the restock records intent,
+    unapplied), so the answer is empty."""
     stock_repo = get_stock_repository()
     if stock_repo is None:
-        raise RuntimeError("stock repository unavailable")
+        return {}, {}
     units: Dict[str, Tuple[Dict[str, Any], Optional[str]]] = {}
     for query in ({"returned_by_return_id": return_id}, {"source_type": "RETURN", "source_id": return_id}):
         for u in _find_stock(stock_repo, query):
