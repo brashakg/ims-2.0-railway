@@ -43,7 +43,7 @@ afterEach(() => vi.useRealTimers());
 
 async function openModal() {
   const utils = render(<NewTaskModal isOpen onClose={vi.fn()} onCreated={vi.fn()} />);
-  await screen.findByText('Cashier One');
+  await screen.findAllByText('Cashier One');
   return utils;
 }
 
@@ -121,6 +121,7 @@ describe('R44 one create in flight', () => {
     );
     fireEvent.click(screen.getByRole('button', { name: /Create task/ }));
     await waitFor(() => expect(createTask).toHaveBeenCalledTimes(2));
+    expect(createTask.mock.calls[0][0].client_request_id).toBeTruthy();
     expect(createTask.mock.calls[1][0].client_request_id).toBe(
       createTask.mock.calls[0][0].client_request_id,
     );
