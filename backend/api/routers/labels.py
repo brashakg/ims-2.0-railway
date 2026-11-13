@@ -36,6 +36,7 @@ import base64
 import logging
 import os
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
@@ -637,7 +638,7 @@ async def get_job_label(
         # Drives the handwriting / follow-up sections on the frontend label.
         "next_stage": next_stage(status),
         "include_followup": type == "ready",
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": utc_now_naive().isoformat(),
     }
     return payload
 
@@ -724,7 +725,7 @@ async def get_quarantine_label(
         "store_code": store_code,
         "store_brand": store_brand,
         "rtv_vendor_id": rtv_vendor_id,
-        "generated_at": datetime.now().isoformat(),
+        "generated_at": utc_now_naive().isoformat(),
     }
 
     brand = (product.get("brand") or "").strip().upper()

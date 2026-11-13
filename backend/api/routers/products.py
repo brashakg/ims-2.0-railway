@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from typing import Any, Dict, List, Optional, Tuple, Union
 from datetime import datetime, timedelta
+from api.utils.event_time import utc_now_naive
 import logging
 import random
 import uuid
@@ -3172,7 +3173,7 @@ async def qc_sample_verdict(
         }
         update["overwritten_by"] = current_user.get("user_id")
         update["overwritten_by_name"] = current_user.get("username")
-        update["overwritten_at"] = datetime.now()
+        update["overwritten_at"] = utc_now_naive()
 
     update.update(
         {
@@ -3182,7 +3183,7 @@ async def qc_sample_verdict(
             "note": body.note,
             "reviewed_by": current_user.get("user_id"),
             "reviewed_by_name": current_user.get("username"),
-            "reviewed_at": datetime.now(),
+            "reviewed_at": utc_now_naive(),
             "status": "REVIEWED",
         }
     )

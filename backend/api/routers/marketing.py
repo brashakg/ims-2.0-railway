@@ -17,6 +17,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Literal
 from datetime import datetime, date, timedelta
+from api.utils.event_time import utc_now_naive
 import re
 import uuid
 import logging
@@ -881,7 +882,7 @@ async def redeem_referral(
                         "tier_multiplier": 1.0,
                         "store_id": referral.get("store_id"),
                         "created_by": current_user.get("user_id"),
-                        "created_at": datetime.now(),
+                        "created_at": utc_now_naive(),
                     }
                 )
                 new_lifetime = int(account.get("lifetime_earned", 0)) + points

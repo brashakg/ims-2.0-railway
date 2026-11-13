@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
+from api.utils.event_time import utc_now_naive
 import uuid
 
 from .auth import get_current_user, require_roles
@@ -906,7 +907,7 @@ async def update_task(
             update_data["attachment"] = None
 
     if update_data:
-        update_data["updated_at"] = datetime.now()
+        update_data["updated_at"] = utc_now_naive()
         if repo.update(task_id, update_data):
             if update_data.get("status") == "CANCELLED":
                 # A catalogue-flag task: cancelling it withdraws its open flags
@@ -2085,7 +2086,7 @@ async def update_sop_template(
             s.model_dump() if hasattr(s, "model_dump") else s
             for s in update_data["steps"]
         ]
-    update_data["updated_at"] = datetime.now()
+    update_data["updated_at"] = utc_now_naive()
     update_data["updated_by"] = current_user.get("user_id")
 
     result = col.update_one({"template_id": template_id}, {"$set": update_data})
@@ -2117,7 +2118,7 @@ async def delete_sop_template(
         {
             "$set": {
                 "is_active": False,
-                "archived_at": datetime.now(),
+                "archived_at": utc_now_naive(),
                 "archived_by": current_user.get("user_id"),
             }
         },
@@ -2150,7 +2151,7 @@ async def assign_sop(
     _sop_people(payload.assigned_users, tpl)
 
     update: dict = {
-        "updated_at": datetime.now(),
+        "updated_at": utc_now_naive(),
         "updated_by": current_user.get("user_id"),
     }
     if payload.assigned_roles is not None:
@@ -2422,7 +2423,7 @@ async def reassign_task(
         task_id,
         {
             "assigned_to": body.assigned_to,
-            "reassigned_at": datetime.now(),
+            "reassigned_at": utc_now_naive(),
             "reassigned_by": current_user.get("user_id"),
             "history": (task.get("history") or []) + [history_entry],
         },

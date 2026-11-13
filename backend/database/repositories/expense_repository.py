@@ -5,6 +5,7 @@ Expense and Advance data access operations
 """
 from typing import List, Optional, Dict
 from datetime import datetime, date
+from api.utils.event_time import utc_now_naive
 from .base_repository import BaseRepository
 
 
@@ -50,7 +51,7 @@ class ExpenseRepository(BaseRepository):
         return self.update(expense_id, {
             "status": "APPROVED",
             "approved_by": approved_by,
-            "approved_at": datetime.now()
+            "approved_at": utc_now_naive()
         })
     
     def reject(self, expense_id: str, rejected_by: str, reason: str) -> bool:
@@ -63,7 +64,7 @@ class ExpenseRepository(BaseRepository):
     def mark_paid(self, expense_id: str, payment_reference: str) -> bool:
         return self.update(expense_id, {
             "status": "PAID",
-            "paid_at": datetime.now(),
+            "paid_at": utc_now_naive(),
             "payment_reference": payment_reference
         })
     
@@ -117,13 +118,13 @@ class AdvanceRepository(BaseRepository):
         return self.update(advance_id, {
             "status": "APPROVED",
             "approved_by": approved_by,
-            "approved_at": datetime.now()
+            "approved_at": utc_now_naive()
         })
     
     def disburse(self, advance_id: str, reference: str) -> bool:
         return self.update(advance_id, {
             "status": "DISBURSED",
-            "disbursed_at": datetime.now(),
+            "disbursed_at": utc_now_naive(),
             "disbursement_reference": reference
         })
     

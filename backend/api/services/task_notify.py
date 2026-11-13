@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -104,7 +105,7 @@ def build_escalation_notification(
         "channels": ["IN_APP"],
         "priority": notification_priority(priority),
         "status": "SENT",
-        "created_at": datetime.now(),
+        "created_at": utc_now_naive(),
     }
 
 

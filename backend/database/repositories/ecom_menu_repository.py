@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 import uuid
 
 from .base_repository import BaseRepository
@@ -394,7 +395,7 @@ class EcomMenuRepository(BaseRepository):
                         "items": items,
                         "locally_modified": True,
                         "edit_rev": new_edit_rev(),  # SF-04: the push clears only this
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
             )

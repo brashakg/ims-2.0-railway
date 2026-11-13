@@ -7,6 +7,7 @@ Abstract base class for all repositories
 from abc import ABC, abstractmethod
 from typing import List, Optional, Dict, Any, TypeVar, Generic
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 import re
 import uuid
 
@@ -61,7 +62,7 @@ class BaseRepository(ABC, Generic[T]):
 
     def _add_timestamps(self, data: Dict, is_update: bool = False) -> Dict:
         """Add created_at/updated_at timestamps"""
-        now = datetime.now()
+        now = utc_now_naive()
         if not is_update:
             data["created_at"] = now
         data["updated_at"] = now
@@ -207,7 +208,7 @@ class BaseRepository(ABC, Generic[T]):
         """
         try:
             # Add updated timestamp
-            data["updated_at"] = datetime.now()
+            data["updated_at"] = utc_now_naive()
 
             result = self.collection.update_one({self.id_field: id}, {"$set": data})
             return result.modified_count > 0
@@ -223,7 +224,7 @@ class BaseRepository(ABC, Generic[T]):
         False when another write got there first -- the caller refuses rather
         than overwriting it. A database error RAISES: it is never reported as
         a lost race."""
-        data["updated_at"] = datetime.now()
+        data["updated_at"] = utc_now_naive()
         update: Dict = {"$set": data}
         if unset:
             update["$unset"] = {field: "" for field in unset}
@@ -260,7 +261,7 @@ class BaseRepository(ABC, Generic[T]):
         Returns:
             Success boolean
         """
-        return self.update(id, {"is_active": False, "deleted_at": datetime.now()})
+        return self.update(id, {"is_active": False, "deleted_at": utc_now_naive()})
 
     def count(self, filter: Dict = None) -> int:
         """
@@ -329,7 +330,7 @@ class BaseRepository(ABC, Generic[T]):
             Number updated
         """
         try:
-            data["updated_at"] = datetime.now()
+            data["updated_at"] = utc_now_naive()
             result = self.collection.update_many(filter, {"$set": data})
             return result.modified_count
         except Exception as e:

@@ -16,6 +16,7 @@ Design notes (docs/PUNE_INCENTIVE_BUILD_PLAN.md):
     the dashboard response shape so it doesn't leak)
 """
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Dict, List, Optional
 
 from api.utils.ist import IST, ist_today
@@ -72,7 +73,7 @@ class WalkInCounterRepository(BaseRepository):
             "total": 0,
             "per_staff": {},
             "mobiles_seen": [],
-            "updated_at": datetime.now(),
+            "updated_at": utc_now_naive(),
         }
         try:
             self.collection.insert_one(skeleton)
@@ -123,7 +124,7 @@ class WalkInCounterRepository(BaseRepository):
                         "mobiles_seen": mobiles,
                         "per_staff": per_staff,
                         "total": new_total,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
             )
@@ -161,7 +162,7 @@ class WalkInCounterRepository(BaseRepository):
         manual_log = list(doc.get("manual_log") or [])
         manual_log.append({
             "added_by": added_by,
-            "added_at": datetime.now(),
+            "added_at": utc_now_naive(),
             "delta": delta,
             "reason": reason,
             "sales_person_id": sales_person_id,
@@ -181,7 +182,7 @@ class WalkInCounterRepository(BaseRepository):
                         "manual_log": manual_log,
                         "per_staff": per_staff,
                         "total": new_total,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
             )
@@ -259,7 +260,7 @@ class WalkInCounterRepository(BaseRepository):
                 "old_val": old_val,
                 "new_val": new_val,
                 "updated_by": updated_by,
-                "updated_at": datetime.now(),
+                "updated_at": utc_now_naive(),
                 "reason": reason,
             }
         )
@@ -274,7 +275,7 @@ class WalkInCounterRepository(BaseRepository):
                         "per_staff": per_staff,
                         "per_staff_log": log,
                         "entry_status": status,
-                        "updated_at": datetime.now(),
+                        "updated_at": utc_now_naive(),
                     }
                 },
                 return_document=True,

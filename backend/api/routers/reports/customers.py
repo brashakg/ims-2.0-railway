@@ -3,6 +3,7 @@
 from fastapi import Depends, Query
 from typing import Optional
 from datetime import date, datetime, timedelta
+from api.utils.event_time import utc_now_naive
 from ...utils.ist import (
     now_ist,
     ist_day_start_utc,
@@ -290,7 +291,7 @@ async def get_targets(
         "monthly_target": 1500000,
         "currency": "INR",
         "period": now_ist().strftime("%Y-%m"),
-        "created_at": datetime.now().isoformat(),
+        "created_at": utc_now_naive().isoformat(),
     }
 
     # Fetch from targets collection in database if available

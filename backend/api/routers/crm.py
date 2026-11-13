@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, Path, Body
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional, Literal
 from datetime import datetime, date, timedelta, timezone
+from api.utils.event_time import utc_now_naive
 import re
 import uuid
 import logging
@@ -763,7 +764,7 @@ async def intervene_vip_churn(
                         "customer_id": customer_id,
                         "customer_phone": phone,
                         "status": "PENDING",
-                        "created_at": datetime.now(),
+                        "created_at": utc_now_naive(),
                     }
                 )
             except Exception:  # noqa: BLE001

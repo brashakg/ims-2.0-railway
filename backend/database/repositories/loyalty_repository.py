@@ -12,6 +12,7 @@ Fail-soft: every helper returns a sensible default on any DB error so a
 loyalty failure can NEVER block POS.
 """
 from datetime import datetime
+from api.utils.event_time import utc_now_naive
 from typing import Any, Dict, List, Optional
 
 from .base_repository import BaseRepository
@@ -38,7 +39,7 @@ class LoyaltyAccountRepository(BaseRepository):
         existing = self.find_by_id(customer_id)
         if existing is not None:
             return existing
-        now = datetime.now()
+        now = utc_now_naive()
         seed = {
             "customer_id": customer_id,
             "_id": customer_id,
@@ -81,8 +82,8 @@ class LoyaltyAccountRepository(BaseRepository):
                 inc["lifetime_redeemed"] = int(delta_lifetime_redeemed)
 
             set_block: Dict[str, Any] = {
-                "last_activity_at": datetime.now(),
-                "updated_at": datetime.now(),
+                "last_activity_at": utc_now_naive(),
+                "updated_at": utc_now_naive(),
             }
             if new_tier:
                 set_block["tier"] = new_tier
@@ -140,8 +141,8 @@ class LoyaltyAccountRepository(BaseRepository):
             inc_extra["lifetime_earned"] = int(delta_lifetime_earned)
 
         set_extra: Dict[str, Any] = {
-            "last_activity_at": datetime.now(),
-            "updated_at": datetime.now(),
+            "last_activity_at": utc_now_naive(),
+            "updated_at": utc_now_naive(),
         }
         if new_tier:
             set_extra["tier"] = new_tier
@@ -276,7 +277,7 @@ class LoyaltyTransactionRepository(BaseRepository):
         try:
             self.collection.update_one(
                 {"txn_id": txn_id},
-                {"$set": {"expired": True, "expired_at": datetime.now()}},
+                {"$set": {"expired": True, "expired_at": utc_now_naive()}},
             )
             return True
         except Exception:
@@ -407,7 +408,7 @@ class LoyaltySettingsRepository(BaseRepository):
                     merged["category_multipliers"]
                 )
             merged["_id"] = self.SINGLETON_ID
-            merged["updated_at"] = datetime.now()
+            merged["updated_at"] = utc_now_naive()
             # upsert
             self.collection.update_one(
                 {"_id": self.SINGLETON_ID},

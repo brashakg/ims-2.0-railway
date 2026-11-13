@@ -17,6 +17,14 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def utc_now_naive() -> datetime:
+    """Current instant in the stored BSON frame: naive UTC (RUN-02).
+
+    Same shape every legacy row already has (Railway runs UTC), but correct on a
+    host in any timezone, unlike ``datetime.now()``."""
+    return utc_now().replace(tzinfo=None)
+
+
 def utc_now_iso() -> str:
     """New persisted event timestamp, including its explicit UTC offset."""
     return utc_now().isoformat()
