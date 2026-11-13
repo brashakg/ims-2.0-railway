@@ -2769,24 +2769,44 @@ def reconcile_loyalty_reversals() -> Dict[str, int]:
          "$or": [{"loyalty_reversal_failed": True}, {"loyalty_exception_task": {"$exists": True}}]},
         {**fields, "return_id": 1, "points_paid_share": 1, "shopify_refund_id": 1},
     ):
-        what = f"return {doc.get('return_id')}"
         try:
-            if _closed_by_a_person(returns, "return_id", doc):
-                counts["clean"] += 1  # a person decided: nothing moves
-                continue
-            if doc.get("shopify_refund_id"):
-                # The Shopify refund door restores its points share only.
-                outcome = restore_return_points(doc.get("return_id"), doc.get("order_id"),
-                                                doc.get("customer_id"), doc.get("points_paid_share") or 0)
-            else:
-                outcome = reverse_for_return(doc.get("return_id"), doc.get("order_id"), doc.get("customer_id"),
-                                             points_paid_share=_return_points_share(bills, doc))
-            if _reversal_settled(outcome):
-                returns.update_one({"return_id": doc.get("return_id")}, {"$set": {"loyalty_reversal_failed": False}})
-            counts[_after_settling(returns, "return_id", doc, what, outcome)] += 1
+            counts[settle_return_points(returns, doc, bills)] += 1
         except Exception as exc:  # noqa: BLE001
             counts["unresolved"] += 1
-            logger.error("loyalty reconcile failed on %s: %s", what, exc)
+            logger.error("loyalty reconcile failed on return %s: %s", doc.get("return_id"), exc)
     if counts["reconciled"] or counts["unresolved"]:
         logger.warning("loyalty reversals reconciled: %s", counts)
     return counts
+
+
+def settle_return_points(returns, doc: Dict[str, Any], bills=None) -> str:
+    """ONE recorded return's unfinished points step: the sweep's per-return
+    step, also run when a Shopify refund already credited is sent again
+    (shopify_refund._finish_points_step). The return's flag is cleared only
+    once the points are settled; an admin's close (the waiver) moves nothing.
+    Returns the sweep's count key. May raise: the caller leaves the row flagged."""
+    what = f"return {doc.get('return_id')}"
+    if _closed_by_a_person(returns, "return_id", doc):
+        return "clean"  # a person decided: nothing moves
+    if doc.get("shopify_refund_id"):
+        # The Shopify refund door restores its points share only.
+        outcome = restore_return_points(doc.get("return_id"), doc.get("order_id"),
+                                        doc.get("customer_id"), doc.get("points_paid_share") or 0)
+    else:
+        outcome = reverse_for_return(doc.get("return_id"), doc.get("order_id"), doc.get("customer_id"),
+                                     points_paid_share=_return_points_share(bills, doc))
+    if _reversal_settled(outcome):
+        returns.update_one({"return_id": doc.get("return_id")}, {"$set": {"loyalty_reversal_failed": False}})
+    return _after_settling(returns, "return_id", doc, what, outcome)
+
+
+def points_waived(order_id: Optional[str]) -> bool:
+    """True when an admin closed a points exception on this bill (the waiver,
+    owner 2026-11-08): its points are settled by head office and nothing gives
+    them back automatically, so no door may promise that they go back (D28).
+    An unreadable answer is not a waiver. Never raises."""
+    try:
+        return bool(order_id) and bool((_waived_outcome(order_id) or {}).get("waived"))
+    except Exception as exc:  # noqa: BLE001
+        logger.error("points waiver check failed for order %s: %s", order_id, exc)
+        return False

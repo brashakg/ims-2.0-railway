@@ -344,12 +344,24 @@ def _resolve_original_line(
     return None
 
 
+def _counts_as_refunded(doc: Dict[str, Any], own_refund: Optional[str] = None) -> bool:
+    """THE test every refund reader of a bill uses: a COMPLETED return, or an
+    online refund that is unfinished (shopify_refund.is_unfinished) -- counted
+    exactly as if it were finished (D38: its credit may be booked, its points
+    given back). ``own_refund``: a retry of that online refund pricing itself."""
+    from ..services.shopify_refund import is_unfinished
+
+    if own_refund and doc.get("shopify_refund_id") == own_refund:
+        return False
+    return doc.get("status") == "COMPLETED" or is_unfinished(doc)
+
+
 def _sum_prior_refunds(
     order_id: Optional[str], field: str = "net_refund", *, strict: bool = False
 ) -> float:
     """Total ``field`` (net_refund by default) already issued for an order across
-    COMPLETED returns (BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when
-    unavailable.
+    COMPLETED returns and unfinished online refunds (_counts_as_refunded;
+    BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when unavailable.
 
     ``strict`` (the refund door: the Rs 2,000 approval rule and the over-refund
     cap, owner ruling 2026-10-23 -- FAIL CLOSED): a READ ERROR raises 503
@@ -364,7 +376,7 @@ def _sum_prior_refunds(
     total = 0.0
     try:
         for doc in coll.find({"order_id": order_id}, {"_id": 0}):
-            if doc.get("status") != "COMPLETED":
+            if not _counts_as_refunded(doc):
                 continue
             net = doc.get(field)
             if net is not None:
@@ -1268,6 +1280,12 @@ def _points_paid(order: Optional[Dict[str, Any]]) -> float:
     return _order_non_refundable_tenders(order, (_POINTS_TENDER,)).get(_POINTS_TENDER, 0.0)
 
 
+# D28: what every door says about the points-paid part of a return on a bill
+# whose points exception an admin closed (loyalty.points_waived). The share is
+# still held back from the money; nothing promises that points go back.
+POINTS_WAIVED_NOTE = "points for this bill are settled by head office and are not returned automatically"
+
+
 def points_restore_share(order: Optional[Dict[str, Any]], share: Optional[float]) -> Optional[float]:
     """What a return hands loyalty.reverse_for_return: its points-paid share on
     a bill whose points paid a LOYALTY tender, else None (the engine then gives
@@ -1278,6 +1296,7 @@ def points_restore_share(order: Optional[Dict[str, Any]], share: Optional[float]
 
 def _points_paid_share(
     order: Optional[Dict[str, Any]], order_id: Optional[str], net_amount: float, *, strict: bool,
+    own_refund: Optional[str] = None,
 ) -> float:
     """THE rule (owner 2026-11-08 / 2026-11-09): the part of this return the
     customer paid with loyalty points. It comes back as points -- exactly this
@@ -1297,7 +1316,8 @@ def _points_paid_share(
     untouched; only the money a return pays shrinks by this. Every return door
     prices through here (quote, POST, Needs completing keeps it on the hold).
 
-    "Earlier returns" are the COMPLETED docs AND the live or kept refund holds
+    "Earlier returns" are the COMPLETED docs (and unfinished online refunds,
+    _counts_as_refunded; never ``own_refund``'s own claim) AND the live or kept refund holds
     of returns still being written or kept for Needs completing
     (_live_refund_holds). A hold carries its return's share from the moment it
     is reserved (_reserve_order_refund prices through here inside its
@@ -1311,8 +1331,8 @@ def _points_paid_share(
         return 0.0
     holds = (order or {}).get("refund_holds") or {}
     try:
-        live, held = _live_refund_holds(order_id, holds, field="points_paid_share")
-        live_net, returned = _live_refund_holds(order_id, holds)
+        live, held = _live_refund_holds(order_id, holds, field="points_paid_share", own_refund=own_refund)
+        live_net, returned = _live_refund_holds(order_id, holds, own_refund=own_refund)
         points, value = bill_redemption(order_id)
     except HTTPException:
         if strict:
@@ -1785,7 +1805,7 @@ def credit_notes_outside_returns(order_id: Optional[str]) -> float:
     try:
         rows = list(ledger.find({"order_id": order_id, "type": {"$in": [scl.ISSUED, "ISSUING"]}}))
         coll = _returns_coll()
-        documented = ({d.get("return_id") for d in coll.find({"order_id": order_id, "status": "COMPLETED"})}
+        documented = ({d.get("return_id") for d in coll.find({"order_id": order_id}) if _counts_as_refunded(d)}
                       if coll is not None and rows else set())
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] credit notes unreadable for %s: %s", order_id, exc)
@@ -4256,6 +4276,8 @@ async def quote_return(
         _gate_exchange_settlement(settlement, replacement_priced, gross_refund)
 
     # The points-paid part goes back as points: the split covers the rest.
+    from .loyalty import points_waived as _points_waived
+
     points_share = _points_paid_share(order, resolved_order_id, net_amount, strict=False)
     return_value, net_amount = net_amount, round(net_amount - points_share, 2)
 
@@ -4319,6 +4341,9 @@ async def quote_return(
         "net_refund": net_amount,
         # The part paid with points, given back as points (never as money).
         "points_paid_share": points_share,
+        # D28: True = an admin closed this bill's points; the share is still
+        # held back from the money but no points go back automatically.
+        "points_waived": points_share > 0 and _points_waived(resolved_order_id),
         "return_value": return_value,
         "gst_breakup": engine.gst_breakup_lines(priced_lines),
         "settlement": settlement,
@@ -4357,8 +4382,9 @@ def _refund_hold_ttl_seconds() -> int:
 
 
 def _live_refund_holds(order_id: str, holds: Dict[str, Any],
-                       field: str = "net_refund") -> Tuple[Dict[str, Any], float]:
+                       field: str = "net_refund", own_refund: Optional[str] = None) -> Tuple[Dict[str, Any], float]:
     """(holds still counting, the COMPLETED returns' total of ``field``) -- read together.
+    COMPLETED here is _counts_as_refunded (an unfinished online refund too).
     A hold counts only while its return has no COMPLETED doc (the doc's own
     total counts it then). A hold whose money went out is KEPT (marked by
     _keep_order_refund_hold) and never ages out: it stays the record of that
@@ -4376,7 +4402,7 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
                 if doc.get("status") == "NOTHING_PAID":
                     done.add(doc.get("return_id"))  # finished, no money: its hold no longer counts
                     continue
-                if doc.get("status") != "COMPLETED":
+                if not _counts_as_refunded(doc, own_refund):
                     continue
                 done.add(doc.get("return_id"))
                 try:
@@ -5353,6 +5379,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # it. A genuine failure flags the return doc for reconciliation. Walk-in /
     # no customer -> skip (walk-ins never earn loyalty).
     loyalty_reversal_failed = False
+    points_waived = False  # D28: an admin closed this bill's points; none go back
     _cust = customer_id
     if _cust and _cust != "walk-in" and not str(_cust).startswith("walkin-"):
         try:
@@ -5360,6 +5387,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
 
             _lr = _reverse_loyalty(return_id, resolved_order_id, _cust,
                                    points_paid_share=points_restore_share(order, points_share))
+            points_waived = bool(_lr.get("waived"))
             if _lr.get("ok"):
                 logger.info(
                     "[RETURNS] loyalty reversed for %s: clawed=%s restored=%s",
@@ -5603,11 +5631,12 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         if restocking_fee > 0
         else ""
     )
-    points_note = (
-        f"; Rs {points_share} paid with points goes back to the customer's points"
-        if points_share > 0
-        else ""
-    )
+    points_note = ""
+    if points_share > 0:
+        points_note = (
+            f"; Rs {points_share} was paid with points: {POINTS_WAIVED_NOTE}" if points_waived
+            else f"; Rs {points_share} paid with points goes back to the customer's points"
+        )
     message = {
         "RETURN": f"Refund of Rs {pays} recorded{fee_note}{points_note}",
         "CREDIT_NOTE": f"Store credit of Rs {pays} issued{fee_note}{points_note}",
@@ -5624,6 +5653,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
         "points_paid_share": points_share,
+        # D28: True = this bill's points are settled by head office; none went back.
+        "points_waived": points_waived,
         "gst_breakup": gst_view,
         "credit_note_number": credit_note_number,
         "refund_amount": refund_amount,

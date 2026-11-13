@@ -37,8 +37,9 @@ confirm + reject write a chained audit_logs row (fail-soft). No emojis (cp1252).
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -46,6 +47,7 @@ from .auth import require_roles
 from ..dependencies import user_store_scope
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # The books are the accountant's -> ACCOUNTANT is first-class here (SUPERADMIN is
 # auto-granted by require_roles; ADMIN is HQ). Keep in lock-step with the POLICY
@@ -266,6 +268,149 @@ def _load_review(db, review_id: str, current_user: dict) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Shared: post a stored row and stamp it (the Confirm route and the tick)
+# ---------------------------------------------------------------------------
+
+
+def _post(db, row: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+    """Post the credit note + restock from a stored row -> (posted,
+    post_status, result). Never raises."""
+    try:
+        from ..services.shopify_refund import post_from_review
+
+        result = post_from_review(db, row)
+    except Exception as exc:  # noqa: BLE001 - post_from_review is fail-soft; belt-and-braces
+        result = {"status": "error", "error": str(exc)}
+
+    post_status = str(result.get("status") or "")
+    if post_status == "duplicate":
+        # A 'duplicate' only counts as POSTED when a real credit note actually
+        # exists behind it. Re-read the returns doc: a duplicate whose row was
+        # never credited (credit_note_issued != True) is a stale claim, NOT a
+        # posted refund -> keep the review open instead of falsely closing it.
+        posted = _duplicate_has_credit_note(db, row)
+    else:
+        posted = post_status == "credited"
+    return posted, post_status, result
+
+
+def _unfinished_note(db, row: Dict[str, Any], posted: bool, post_status: str,
+                     result: Dict[str, Any]) -> Optional[str]:
+    """What the row and the answer say when a post did not finish its refund
+    and the credit may be (or may still be) booked, else None: the return is
+    unfinished (shopify_refund.is_unfinished -- this post could not save it,
+    or another post's claim is open), or IMS cannot tell whether the claim
+    was saved at all."""
+    from ..services.shopify_refund import (
+        CLAIM_UNKNOWN_NOTE, NOT_CLAIMED, NOT_FINALIZED, NOT_FINISHED_NOTE, _unfinished_claim)
+
+    if posted:
+        return None
+    if result.get("reason") == NOT_CLAIMED and result.get("claim_unknown"):
+        return CLAIM_UNKNOWN_NOTE
+    if result.get("reason") == NOT_FINALIZED or (
+            post_status == "duplicate"
+            and _unfinished_claim(db, str(row.get("shopify_refund_id") or "")) is not None):
+        return NOT_FINISHED_NOTE
+    return None
+
+
+def _stamp(db, row: Dict[str, Any], posted: bool, post_status: str, result: Dict[str, Any],
+           user_id: Optional[str], unfinished: Optional[str] = None) -> str:
+    """Write a post's outcome on its review row -> the row's new status.
+    ``unfinished``: the note an unfinished post leaves (_unfinished_note)."""
+    from ..services.shopify_refund import CLAIM_UNKNOWN_NOTE, NOT_FINISHED_NOTE
+
+    new_status = "POSTED" if posted else "CREDIT_FAILED"
+    update = {
+        "status": new_status,
+        "resolved": posted,
+        "resolved_by": user_id,
+        "resolved_at": _now(),
+        "updated_at": _now(),
+        # A 'duplicate' answer names no return: the row keeps the one it has.
+        "return_id": result.get("return_id") or row.get("return_id"),
+        "post_result": post_status,
+    }
+    if post_status == "credited":
+        # The row shows what was BOOKED (the post asks the store-credit rule
+        # again), never the queue-time proposal it replaced.
+        update["credit_note"] = {
+            **(row.get("credit_note") or {}),
+            "store_credit": result.get("store_credit"),
+            "store_credit_reason": result.get("store_credit_reason"),
+        }
+        update["note"] = f"Posted. {result.get('store_credit_reason') or ''}".strip()
+    elif unfinished:
+        # The ROW says it, not only this one answer: a later reader of "credit
+        # failed" would book the credit by hand, or reject the row.
+        update["note"] = unfinished
+    elif posted and row.get("note") in (NOT_FINISHED_NOTE, CLAIM_UNKNOWN_NOTE):
+        update["note"] = "Posted."
+    try:
+        coll = db.get_collection(_REVIEW_COLLECTION)
+        if coll is not None:
+            coll.update_one({"review_id": row.get("review_id")}, {"$set": update})
+    except Exception:  # noqa: BLE001
+        pass
+    return new_status
+
+
+def finish_unfinished_refunds() -> Dict[str, int]:
+    """The scheduled money tick's refund step (customers.scheduled_credit_
+    reconcile; owner 2026-11-07: automatic reconciliation, a visible exception
+    for what stays unresolved, no new staff control). A refund whose post was
+    claimed and never finished -- its record could not be saved, or its run
+    died -- is posted again from its stored review row once the claim is
+    stale: the post re-claims the SAME return, finds the credit it already
+    booked and books nothing twice (shopify_refund._post_locked). What the
+    tick cannot finish (the write still fails, or no open row holds the
+    refund) gets ONE task. Beside a person's Confirm one of the two wins the
+    claim. Never raises. Returns counts for the log."""
+    counts = {"finished": 0, "unresolved": 0}
+    db = _get_db()
+    if db is None:
+        return counts
+    from ..services.shopify_refund import _unfinished_claim, raise_unfinished_task, stale_unfinished_claims
+
+    try:
+        claims = stale_unfinished_claims(db)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[REFUND_REVIEWS] unfinished refunds could not be read: %s", exc)
+        return counts
+    for claim in claims:
+        refund_id = claim["shopify_refund_id"]
+        posted = busy = False
+        try:
+            row = db.get_collection(_REVIEW_COLLECTION).find_one(
+                {"shopify_refund_id": refund_id, "resolved": {"$ne": True}})
+            if row and str(row.get("status") or "").upper() in _CONFIRMABLE and row.get("credit_note"):
+                posted, post_status, result = _post(db, row)
+                # Another post holds the order or the claim at this moment (a
+                # person's Confirm, the inbox retry): it is being finished
+                # there -- no task for that; the next tick looks again.
+                busy = not posted and (post_status == "duplicate" or result.get("reason") == "order_busy")
+                if posted:
+                    # The person who confirmed it stays on the row; a failed
+                    # attempt leaves the row as it reads (still open).
+                    _stamp(db, row, posted, post_status, result, row.get("resolved_by") or "system")
+                    _write_audit("SHOPIFY_REFUND_REVIEW_AUTO_FINISH", row["review_id"], row, result,
+                                 {"user_id": "system"})
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[REFUND_REVIEWS] refund %s not finished: %s", refund_id, exc)
+        if posted:
+            counts["finished"] += 1
+        elif not busy and _unfinished_claim(db, refund_id) is not None:
+            # Still unfinished after the tick's own look (asked again: another
+            # door may have finished it meanwhile).
+            counts["unresolved"] += 1
+            raise_unfinished_task(claim)
+    if counts["finished"] or counts["unresolved"]:
+        logger.warning("[REFUND_REVIEWS] unfinished refunds: %s", counts)
+    return counts
+
+
+# ---------------------------------------------------------------------------
 # POST /{review_id}/confirm
 # ---------------------------------------------------------------------------
 
@@ -305,50 +450,18 @@ async def confirm_refund_review(
             detail="This refund review has no computed credit note to post.",
         )
 
-    try:
-        from ..services.shopify_refund import post_from_review
-
-        result = post_from_review(db, row)
-    except Exception as exc:  # noqa: BLE001 - post_from_review is fail-soft; belt-and-braces
-        result = {"status": "error", "error": str(exc)}
-
-    post_status = str(result.get("status") or "")
-    if post_status == "duplicate":
-        # A 'duplicate' only counts as POSTED when a real credit note actually
-        # exists behind it. Re-read the returns doc: a duplicate whose row was
-        # never credited (credit_note_issued != True) is a stale claim, NOT a
-        # posted refund -> keep the review open instead of falsely closing it.
-        posted = _duplicate_has_credit_note(db, row)
-    else:
-        posted = post_status == "credited"
-    new_status = "POSTED" if posted else "CREDIT_FAILED"
-    update = {
-        "status": new_status,
-        "resolved": posted,
-        "resolved_by": current_user.get("user_id"),
-        "resolved_at": _now(),
-        "updated_at": _now(),
-        "return_id": result.get("return_id"),
-        "post_result": post_status,
-    }
-    if post_status == "credited":
-        # The row shows what was BOOKED (the post asks the store-credit rule
-        # again), never the queue-time proposal it replaced.
-        update["credit_note"] = {
-            **(row.get("credit_note") or {}),
-            "store_credit": result.get("store_credit"),
-            "store_credit_reason": result.get("store_credit_reason"),
-        }
-        update["note"] = f"Posted. {result.get('store_credit_reason') or ''}".strip()
-    try:
-        coll = db.get_collection(_REVIEW_COLLECTION)
-        if coll is not None:
-            coll.update_one({"review_id": review_id}, {"$set": update})
-    except Exception:  # noqa: BLE001
-        pass
+    posted, post_status, result = _post(db, row)
+    unfinished = _unfinished_note(db, row, posted, post_status, result)
+    new_status = _stamp(db, row, posted, post_status, result, current_user.get("user_id"), unfinished)
 
     _write_audit("SHOPIFY_REFUND_REVIEW_CONFIRM", review_id, row, result, current_user)
 
+    if unfinished:
+        # The return's record is unfinished (this press could not save it, or
+        # an earlier one is still open), or IMS cannot tell whether it was
+        # saved; its credit may be booked, now or by IMS later. Say so: "could
+        # not be issued" would send the accountant to book it by hand.
+        raise HTTPException(status_code=422, detail=unfinished)
     if not posted:
         # The post could not issue the credit note (e.g. no customer / ledger
         # error). Surface it so the accountant retries after fixing the cause.
@@ -425,6 +538,28 @@ async def reject_refund_review(
     row = _load_review(db, review_id, current_user)
     if row.get("resolved"):
         raise HTTPException(status_code=409, detail="This refund review is already resolved")
+    # A refund someone already confirmed is part-way through (or finished)
+    # under its returns record: rejecting the row would close it on a credit
+    # that may be booked, and strand what the return still owes (its points).
+    try:
+        doc = db.get_collection(_RETURNS_COLLECTION).find_one(
+            {"shopify_refund_id": str(row.get("shopify_refund_id") or "")})
+    except Exception:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503,
+            detail="This refund's record cannot be read right now, so it was not rejected. Try again.",
+        )
+    from ..services.shopify_refund import is_unfinished
+
+    if is_unfinished(doc) or (doc and doc.get("credit_note_issued") is True):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This refund was already confirmed and is being finished (its store credit may "
+                "already be booked), so it cannot be rejected. The system finishes it by itself; "
+                "you can also confirm it again here."
+            ),
+        )
 
     update = {
         "status": "REJECTED",

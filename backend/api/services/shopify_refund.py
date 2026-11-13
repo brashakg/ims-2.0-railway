@@ -91,21 +91,188 @@ _RETURNS_COLLECTION = "returns"
 _CLAIM_STALE_SECONDS = 15 * 60
 
 
+# A post's `reason` when its credit landed but the return's own record could
+# not be saved as finished (status "error": retried, never read as done).
+NOT_FINALIZED = "return_not_finalized"
+# A post's `reason` when no claim could be saved or read back: nothing booked.
+NOT_CLAIMED = "refund_not_claimed"
+
+# What an unfinished refund's review row (and its Confirm answer) says, so
+# nobody books the credit by hand or rejects the row meanwhile.
+NOT_FINISHED_NOTE = (
+    "Not finished yet: this refund's record could not be saved as finished, though its "
+    "store credit may already be booked. Nothing is lost and nothing will be booked twice. "
+    "Do not book anything by hand. The system finishes it by itself within about half an "
+    "hour; you can also confirm it again here after 15 minutes. The row stays open until then."
+)
+# ... and when IMS cannot tell whether the refund's record (its claim) was
+# saved at all: nothing was booked by this press, but IMS may still finish it.
+CLAIM_UNKNOWN_NOTE = (
+    "Not finished yet: IMS could not tell whether this refund's record was saved. Do not give "
+    "the credit by hand: IMS may still complete it by itself. Nothing will be booked twice. "
+    "Confirm it again here after 15 minutes if the row is still open."
+)
+
+
+def is_unfinished(doc: Optional[Dict[str, Any]]) -> bool:
+    """THE definition of an online refund that is unfinished: a post claimed it
+    (a first attempt's claim, or a re-drive's re-claim, which puts the return
+    back to PENDING too) and it is not yet credited. The tick, the duplicate
+    answer, the Reject guard and the counter's refund readers all ask this."""
+    return (bool(doc) and isinstance(doc.get("shopify_refund_id"), str)
+            and doc.get("status") == "PENDING" and doc.get("credit_note_issued") is not True)
+
+
+def _claim_touched(doc: Dict[str, Any]) -> str:
+    """When the claim was last taken: its insert, or a re-drive's re-claim."""
+    return max(str(doc.get("created_at") or ""), str(doc.get("reprocessing_at") or ""))
+
+# How far back the scheduled tick looks for a refund to finish (the loyalty
+# sweep's reach): an older claim is history, left to a person's Confirm.
+_FINISH_REACH_DAYS = 7
+_UNFINISHED_REF = "shopify_refund_unfinished:"
+
+
 def _stale_cutoff() -> str:
     return (datetime.now(timezone.utc) - timedelta(seconds=_CLAIM_STALE_SECONDS)).isoformat()
 
 
+def _claim(returns_coll, claim_doc: Dict[str, Any]) -> str:
+    """Insert the claim-first returns doc. "claimed": this run holds the claim.
+    "exists": a returns doc of another run already carries the refund id.
+    "none": no claim was saved -- the caller books NOTHING. "unknown": the
+    insert's answer was lost and the read-back failed too -- the caller books
+    nothing, and says the claim may exist (a stale claim is finished later).
+
+    A write error that is not a duplicate key does not say whether the write
+    landed (a lost acknowledgement), so the stored doc decides: this run's own
+    return id and claim stamp on it mean the claim is held, and the post goes
+    on under it exactly as if the insert had answered."""
+    try:
+        returns_coll.insert_one(dict(claim_doc))
+        return "claimed"
+    except Exception as exc:  # noqa: BLE001
+        if _is_dup_key(exc):
+            return "exists"
+        logger.warning("[SHOPIFY_REFUND] claim insert not acknowledged: %s", exc)
+    try:
+        doc = returns_coll.find_one({"shopify_refund_id": claim_doc["shopify_refund_id"]})
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[SHOPIFY_REFUND] claim cannot be read back: %s", exc)
+        return "unknown"
+    if not doc:
+        return "none"
+    mine = all(doc.get(k) == claim_doc[k] for k in ("return_id", "created_at"))
+    return "claimed" if mine else "exists"
+
+
+def _finalize_landed(returns_coll, refund_id: str, stamp: str) -> bool:
+    """True when the finalize write whose answer was lost is on the stored doc
+    (its own updated_at stamp). Unreadable -> False (not finished: retried)."""
+    try:
+        doc = returns_coll.find_one({"shopify_refund_id": refund_id})
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(doc) and doc.get("updated_at") == stamp and doc.get("status") != "PENDING"
+
+
+def stale_unfinished_claims(db) -> List[Dict[str, Any]]:
+    """The unfinished refunds (is_unfinished) whose claim is old enough to be
+    claimed again (_claim_stale_refund_for_retry's own staleness) and was taken
+    inside the tick's reach. May raise (the tick logs it)."""
+    stale = _stale_cutoff()
+    reach = (datetime.now(timezone.utc) - timedelta(days=_FINISH_REACH_DAYS)).isoformat()
+    docs = db.get_collection(_RETURNS_COLLECTION).find({
+        "source": "shopify", "status": "PENDING", "credit_note_issued": {"$ne": True}})
+    return [d for d in docs if is_unfinished(d) and reach <= _claim_touched(d) < stale]
+
+
+def raise_unfinished_task(claim: Dict[str, Any]) -> None:
+    """The visible exception (owner 2026-11-07) for a refund the scheduled tick
+    could not finish. ONE task per refund, ever (its id is the refund's): a
+    person who closed it is not told again every tick. Fail-soft."""
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import _person_holding, create_system_task
+
+        refund_id = claim.get("shopify_refund_id")
+        ref = claim.get("order_number") or claim.get("order_id")
+        # To a person who can open Online Refunds (the books are the
+        # accountant's; an admin when nobody holds that role).
+        holder = (_person_holding("ACCOUNTANT", None, any_store=True)
+                  or _person_holding("ADMIN", None, any_store=True))
+        create_system_task(
+            get_task_repository(),
+            title=f"Shopify refund on order {ref}: not finished - do not book it by hand",
+            description=(
+                f"Shopify refund {refund_id} on order {ref} was confirmed but its record could "
+                "not be saved as finished; its store credit may already be booked. The system "
+                "tries again every few minutes, books nothing twice and closes this task itself "
+                "once the refund is finished. Do not book the credit by hand and do not reject "
+                "the refund. If Online Refunds shows it, you can also press Confirm there again. "
+                "If this task stays open for a day, tell support."
+            ),
+            priority="P1",
+            category="Accounts",
+            store_id=claim.get("store_id"),
+            dedupe_ref=f"{_UNFINISHED_REF}{refund_id}",
+            assigned_to=holder,
+            task_id=f"TSK-REFUND-{refund_id}",
+            extra={"link": "/online-store/refund-reviews",
+                   "payload": {"order_id": claim.get("order_id"), "return_id": claim.get("return_id"),
+                               "refund_id": refund_id}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[SHOPIFY_REFUND] unfinished-refund task not raised for %s: %s",
+                     claim.get("shopify_refund_id"), exc)
+
+
+def _close_unfinished_task(refund_id: str) -> None:
+    """The refund is finished: its open task, if any, closes. Fail-soft."""
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import active_tasks
+
+        repo = get_task_repository()
+        if repo is None:
+            return
+        for task in active_tasks(repo, f"{_UNFINISHED_REF}{refund_id}"):
+            repo.complete_task(task["task_id"], notes="The refund was finished; nothing was booked twice.")
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[SHOPIFY_REFUND] unfinished-refund task not closed for %s: %s", refund_id, exc)
+
+
 def _unfinished_claim(db, refund_id: str) -> Optional[Dict[str, Any]]:
-    """The refund's returns doc when a run claimed it and never finalized it
-    (status PENDING, no credit note), else None. Fail-soft -> None."""
+    """The refund's returns doc when it is unfinished (is_unfinished), else
+    None. Fail-soft -> None."""
     try:
         coll = db.get_collection(_RETURNS_COLLECTION)
         doc = coll.find_one({"shopify_refund_id": refund_id}) if coll is not None else None
     except Exception:  # noqa: BLE001
         return None
-    if doc and doc.get("status") == "PENDING" and doc.get("credit_note_issued") is not True:
-        return doc
-    return None
+    return doc if is_unfinished(doc) else None
+
+
+def _finish_points_step(db, refund_id: str) -> None:
+    """A refund already credited is finished EXCEPT, perhaps, its points step:
+    the post stores that obligation with its claim, before anything posts
+    (loyalty_reversal_failed), and clears it once the points are back. The
+    refund sent again (a webhook redelivery, a second Confirm) runs that one
+    step through the loyalty sweep's own per-return rule -- never a second
+    credit note or restock. A return made before the flag existed carries
+    none and is left alone. Never raises."""
+    try:
+        coll = db.get_collection(_RETURNS_COLLECTION)
+        doc = coll.find_one({"shopify_refund_id": refund_id, "status": "COMPLETED",
+                             "loyalty_reversal_failed": True,
+                             "loyalty_exception_closed": {"$ne": True}})
+        if doc:
+            from ..routers.loyalty import settle_return_points
+
+            settle_return_points(coll, doc)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[SHOPIFY_REFUND] refund=%s points step not finished (the sweep retries): %s",
+                     refund_id, exc)
 
 
 def _raise_s34_task(order: Dict[str, Any], return_id: Optional[str], refund_id: Any, why: str) -> None:
@@ -157,20 +324,29 @@ def _raise_unreadable_date_task(order: Dict[str, Any], refund_id: Any) -> None:
 def _posted_credit(db, return_id: Optional[str]) -> Optional[Dict[str, Any]]:
     """The credit-note ledger row an earlier attempt of this return already
     wrote (its ref is the return id), so a re-drive never posts it twice.
-    Fail-soft -> None."""
+    RAISES when the ledger cannot be read: "unreadable" is no answer, and a
+    None here sends the re-drive on to post (or to finalize CREDIT_FAILED)."""
     if not return_id:
         return None
-    try:
-        ledger = db.get_collection("credit_note_ledger")
-        from . import store_credit_ledger as scl
+    ledger = db.get_collection("credit_note_ledger")
+    from . import store_credit_ledger as scl
 
-        row = ledger.find_one({"ref": return_id, "type": scl.CREDIT_NOTE_TYPE}) if ledger is not None else None
-    except Exception:  # noqa: BLE001
-        return None
+    row = ledger.find_one({"ref": return_id, "type": scl.CREDIT_NOTE_TYPE}) if ledger is not None else None
     if row:
         row = dict(row)
         row.pop("_id", None)
     return row
+
+
+def _credit_row_written(db, return_id: Optional[str]) -> bool:
+    """A live (not VOID) credit ledger row of this return exists, or the
+    ledger cannot be read: its balance move may have landed. Never raises."""
+    try:
+        return db.get_collection("credit_note_ledger").find_one(
+            {"ref": return_id, "type": {"$ne": "VOID"}}) is not None
+    except Exception:  # noqa: BLE001 -- unreadable is no answer, never "nothing"
+        return True
+
 
 # Rupee tolerance when reconciling the computed credit-note gross against what
 # Shopify actually refunded. Absorbs GST rounding dust (a paisa or two on a
@@ -230,7 +406,8 @@ def _ensure_unique_refund_index(db, collection: str) -> None:
         logger.debug("[SHOPIFY_REFUND] index build skipped for %s", collection, exc_info=True)
 
 
-def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
+def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str,
+                                  also_set: Optional[Dict[str, Any]] = None):
     """The claim-first insert hit the unique index -- a `returns` doc ALREADY
     carries this refund id. Decide ATOMICALLY whether that is a genuine duplicate
     (a credit note was already issued -> the caller must NOT re-issue) or a STALE
@@ -253,7 +430,15 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
     Returns the existing doc when THIS caller won the right to re-process a
     never-credited row (the caller falls through to the credit-issue + finalize
     path, which update_one's this same doc); returns None for a TRUE duplicate -- a
-    credit note really exists, OR another worker is mid-reprocess. Never raises."""
+    credit note really exists, OR another worker is mid-reprocess. Never raises.
+
+    `also_set` rides on the winning claim's own write (the points-step marker a
+    re-drive owes, see _post_locked): durable before anything posts.
+
+    The winning write also puts the return back to PENDING -- the SAME
+    in-flight state a first attempt's claim is in -- so a re-drive that stops
+    part-way is unfinished by the one rule (is_unfinished): the tick finishes
+    it, Reject is refused, the sweep leaves it; its finalize sets the status."""
     # SF03: a claim whose run stopped is re-claimable once STALE -- a PENDING
     # doc older than _CLAIM_STALE_SECONDS (the first run died between its claim
     # and its finalize) or a re-drive's reprocessing_at that old. A fresh one
@@ -275,7 +460,8 @@ def _claim_stale_refund_for_retry(returns_coll, refund_id: str, now: str):
                 # A re-drive that took the claim and died.
                 {"reprocessing_at": {"$lt": stale}},
             ):
-                won = fou({**base, **extra}, {"$set": {"reprocessing_at": now}})
+                won = fou({**base, **extra},
+                          {"$set": {"reprocessing_at": now, "status": "PENDING", **(also_set or {})}})
                 if won is not None:
                     return won
             return None
@@ -1100,15 +1286,23 @@ def _store_credit_allowance(
     from ..routers.returns import _points_paid_share
 
     try:
-        share = _points_paid_share(order, order.get("order_id"), gross, strict=True)
+        # This refund's own claim (a retry) is this refund, never an earlier one.
+        share = _points_paid_share(order, order.get("order_id"), gross, strict=True, own_refund=refund_id)
     except HTTPException:
         return None, ("IMS could not read the loyalty points paid on this order just now, so no "
                       "store credit is given yet."), None, False, 0.0
     # Money Shopify sent back covers this refund first; only what is left of
     # the points part comes back as points.
     points = round(max(0.0, min(share, rest, held)), 2)
-    points_note = (f" Rs {points:.2f} of this refund was paid with loyalty points; it goes back "
-                   "as points, not store credit.") if points > 0 else ""
+    points_note = ""
+    if points > 0:
+        from ..routers.loyalty import points_waived
+        from ..routers.returns import POINTS_WAIVED_NOTE
+
+        # D28: on a bill whose points an admin closed, nothing promises points.
+        points_note = (f" Rs {points:.2f} of this refund was paid with loyalty points; " + (
+            f"{POINTS_WAIVED_NOTE}, and it is not given as store credit." if points_waived(order_id)
+            else "it goes back as points, not store credit."))
     rest, held = round(rest - points, 2), round(held - points, 2)
     if rest <= 0 or held <= 0:
         return 0.0, f"{said + '; ' if said else ''}No store credit is given.{points_note}", "PARTIAL", False, points
@@ -1226,12 +1420,13 @@ def handle_shopify_refund(
             # it without posting either leg twice.
             unfinished = _unfinished_claim(db, refund_id)
             if unfinished is None:
+                _finish_points_step(db, refund_id)
                 return {
                     "status": "duplicate",
                     "refund_id": refund_id,
                     "shopify_order_id": shopify_order_id,
                 }
-            if str(unfinished.get("created_at") or "") >= _stale_cutoff():
+            if _claim_touched(unfinished) >= _stale_cutoff():
                 return {
                     "status": "error",
                     "error": "refund claim not finalized yet",
@@ -1551,11 +1746,44 @@ def handle_shopify_refund(
                 ).strip(),
             )
             result["queue_status"] = queue_status
+        if result.get("reason") == NOT_FINALIZED:
+            # Unfinished: the inbox retries it, and it gets a review row too,
+            # so the scheduled tick (finish_unfinished_refunds) or a person
+            # can finish it once the inbox has given up.
+            _queue_review(
+                db,
+                refund_id=refund_id,
+                shopify_order_id=shopify_order_id,
+                order=order,
+                credit_note=credit_note,
+                restock_lines=return_lines,
+                restock_store=restock_store,
+                status="CREDIT_FAILED",
+                note=NOT_FINISHED_NOTE,
+            )
+        elif result.get("status") == "credited":
+            _close_open_review(db, refund_id, result)
         result.setdefault("shopify_order_id", _norm(order.get("shopify_order_id")))
         return result
     except Exception as exc:  # noqa: BLE001 -- the drain loop must never die here
         logger.warning("[SHOPIFY_REFUND] handle_shopify_refund failed soft: %s", exc)
         return {"status": "skipped", "reason": f"exception:{type(exc).__name__}"}
+
+
+def _close_open_review(db, refund_id: str, result: Dict[str, Any]) -> None:
+    """AUTO just finished a refund whose earlier unfinished attempt left a
+    review row open (the only way AUTO posts beside a row): the row closes
+    with it, so nobody is asked to confirm a finished refund. Fail-soft."""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        db.get_collection(_REVIEW_COLLECTION).update_one(
+            {"shopify_refund_id": refund_id, "resolved": {"$ne": True}},
+            {"$set": {"status": "POSTED", "resolved": True, "resolved_by": "SYSTEM_SHOPIFY_REFUND",
+                      "resolved_at": now, "updated_at": now, "return_id": result.get("return_id"),
+                      "post_result": "credited",
+                      "note": f"Posted. {result.get('store_credit_reason') or ''}".strip()}})
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] refund=%s open review row not closed: %s", refund_id, exc)
 
 
 def _mark_order(db, order_id: Optional[str]) -> None:
@@ -1721,12 +1949,36 @@ def _post_locked(
     failed just now issues nothing (credit_failed: the row stays open).
 
     Shared by the AUTO webhook path and the accountant CONFIRM route. Fully
-    fail-soft. Returns {"status": "credited"|"credit_failed"|"duplicate", ...}."""
+    fail-soft. Returns {"status": "credited"|"credit_failed"|"duplicate", ...},
+    or "error" with a reason: NOT_CLAIMED (no claim could be saved: nothing
+    booked) or NOT_FINALIZED (booked, the return's record not saved as
+    finished: retried under the same claim)."""
     order_id = _norm(order.get("order_id"))
     customer_id = _norm(order.get("customer_id")) or None
     billing_store = _norm(order.get("store_id")) or None
     gross_refund = _f(credit_note.get("gross_refund"))
     gst_view = credit_note.get("gst_breakup") or {}
+
+    if allowance[0] is None:
+        # D38: the figures this post needs (the order, its earlier refunds, the
+        # loyalty points paid) could not be read just now. Book nothing, claim
+        # nothing, finalize nothing: a stored claim keeps its own figures and
+        # stays for the next try. A refund already credited is still answered
+        # as the duplicate it is (below, through the claim).
+        try:
+            doc = db.get_collection(_RETURNS_COLLECTION).find_one({"shopify_refund_id": refund_id})
+        except Exception:  # noqa: BLE001
+            doc = False  # unknown
+        if not (doc and doc.get("credit_note_issued") is True):
+            base = {"refund_id": refund_id, "order_id": order_id, "customer_id": customer_id,
+                    "credit_note_issued": False, "store_credit_reason": allowance[1]}
+            if doc is False:
+                return {**base, "status": "error", "reason": NOT_CLAIMED, "claim_unknown": True,
+                        "error": "the refund's record could not be read"}
+            if is_unfinished(doc):
+                return {**base, "status": "error", "reason": NOT_FINALIZED,
+                        "error": "refund claim not finalized yet", "return_id": doc.get("return_id")}
+            return {**base, "status": "credit_failed", "reason": "figures_unreadable"}
 
     try:
         from ..routers.returns import generate_return_id
@@ -1741,6 +1993,14 @@ def _post_locked(
     _mark_order(db, order_id)
     _ensure_unique_refund_index(db, _RETURNS_COLLECTION)
     now = datetime.now(timezone.utc).isoformat()
+    # The points step is OWED once this refund is credited. Its marker (the
+    # flag the loyalty sweep reads on a COMPLETED return) is written with the
+    # CLAIM -- before the credit, the finalize and the points step -- and is
+    # cleared only once the points are settled (c). A worker that dies before
+    # the points step, or a failure whose own note cannot be written, still
+    # leaves the sweep its row. Only a refund posted from now on carries it.
+    points_marker = ({"loyalty_reversal_failed": True}
+                     if _f(allowance[4]) > 0 and customer_id else {})
     claim_doc = {
         "return_id": return_id,
         "shopify_refund_id": refund_id,
@@ -1779,9 +2039,9 @@ def _post_locked(
         "reason_summary": "Shopify refund",
         "created_by": "SYSTEM_SHOPIFY_REFUND",
         "created_at": now,
+        **points_marker,
     }
     returns_coll = None
-    claimed = False
     # The already-finalized doc when this call is a RE-drive of a never-credited
     # refund (e.g. a guest confirm that finished CREDIT_FAILED). Its restock may
     # already have happened -- re-running it would mint a SECOND set of units.
@@ -1790,49 +2050,74 @@ def _post_locked(
         returns_coll = db.get_collection(_RETURNS_COLLECTION)
     except Exception:  # noqa: BLE001
         returns_coll = None
-    if returns_coll is not None:
-        try:
-            returns_coll.insert_one(dict(claim_doc))
-            claimed = True
-        except Exception as exc:  # noqa: BLE001
-            if _is_dup_key(exc):
-                # A returns doc already carries this refund id. Do NOT blindly call
-                # it a duplicate: it may be a STALE claim from an earlier attempt
-                # that never issued the credit note (e.g. a no-customer online
-                # order that finalized CREDIT_FAILED). Atomically claim the retry --
-                # only when the existing row was never credited AND no other worker
-                # is mid-reprocess -- so a genuinely-posted refund is still a true
-                # duplicate but an unposted one gets re-driven (not silently
-                # swallowed while the GST reversal is lost).
-                existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now)
-                prior_doc = existing
-                if existing is None:
-                    logger.info(
-                        "[SHOPIFY_REFUND] refund=%s already credited -- duplicate", refund_id
-                    )
-                    return {
-                        "status": "duplicate",
-                        "refund_id": refund_id,
-                        "order_id": order_id,
-                    }
-                logger.info(
-                    "[SHOPIFY_REFUND] refund=%s re-attempting previously-unposted refund",
-                    refund_id,
-                )
-                claimed = True
-                # A re-drive is the same return: its credit ref, its blocked
-                # task and its retry door name the doc's id, never a new one.
-                return_id = existing.get("return_id") or return_id
-            else:
-                logger.warning("[SHOPIFY_REFUND] claim insert failed: %s", exc)
+    held = _claim(returns_coll, claim_doc) if returns_coll is not None else "none"
+    if held in ("none", "unknown"):
+        # CLAIM-FIRST means it: with no claim nothing is booked. A credit
+        # posted without one had no returns doc to finish, to re-drive or to
+        # carry its points step, and a retry could post it a second time.
+        # "unknown": the claim may have landed -- if so it is finished later
+        # (the tick, or the same Confirm once stale), so nobody books by hand.
+        logger.error("[SHOPIFY_REFUND] refund=%s order=%s: no claim held (%s) -- nothing booked",
+                     refund_id, order_id, held)
+        return {
+            "status": "error",
+            "reason": NOT_CLAIMED,
+            "error": "refund claim could not be saved",
+            "refund_id": refund_id,
+            "order_id": order_id,
+            "customer_id": customer_id,
+            "credit_note_issued": False,
+            **({"claim_unknown": True} if held == "unknown" else {}),
+        }
+    if held == "exists":
+        # A returns doc already carries this refund id. Do NOT blindly call
+        # it a duplicate: it may be a STALE claim from an earlier attempt
+        # that never issued the credit note (e.g. a no-customer online
+        # order that finalized CREDIT_FAILED). Atomically claim the retry --
+        # only when the existing row was never credited AND no other worker
+        # is mid-reprocess -- so a genuinely-posted refund is still a true
+        # duplicate but an unposted one gets re-driven (not silently
+        # swallowed while the GST reversal is lost).
+        existing = _claim_stale_refund_for_retry(returns_coll, refund_id, now, points_marker)
+        prior_doc = existing
+        if existing is None:
+            logger.info(
+                "[SHOPIFY_REFUND] refund=%s already credited -- duplicate", refund_id
+            )
+            _finish_points_step(db, refund_id)
+            return {
+                "status": "duplicate",
+                "refund_id": refund_id,
+                "order_id": order_id,
+            }
+        logger.info(
+            "[SHOPIFY_REFUND] refund=%s re-attempting previously-unposted refund",
+            refund_id,
+        )
+        # A re-drive is the same return: its credit ref, its blocked
+        # task and its retry door name the doc's id, never a new one.
+        return_id = existing.get("return_id") or return_id
 
     # (a) GST credit note -> credit_note_ledger (the CDNR source). Booked under the
     #     BILLING store with the real GST split; card refunds skip the balance bump.
     #     A re-drive first looks for the note an earlier attempt of this return
     #     already posted (SF03: a run that died after posting it): never twice.
-    credit_entry = _posted_credit(db, return_id) if prior_doc is not None else None
+    # The credit's balance move may have landed but could not be confirmed
+    # (CreditNotConfirmed; or the ledger cannot be read; or no credit came back
+    # while a ledger row of this return exists): the refund is UNFINISHED,
+    # never "not issued" -- see below.
+    credit_unclear = False
+    try:
+        credit_entry = _posted_credit(db, return_id) if prior_doc is not None else None
+    except Exception as exc:  # noqa: BLE001 -- an earlier attempt's note may be there
+        logger.error("[SHOPIFY_REFUND] refund=%s: its earlier credit note cannot be read: %s", refund_id, exc)
+        credit_entry, credit_unclear = None, True
     money_back = credit_note.get("money_back")
     store_credit, credit_why, settlement, _, points_share = allowance
+    if prior_doc is not None and prior_doc.get("points_paid_share") is not None:
+        # D38: ONE source of the points share -- the one stored with the
+        # claim. A re-drive never lowers, zeroes or recalculates it.
+        points_share = _f(prior_doc.get("points_paid_share"))
     s34_unreadable = False
     try:
         from ..routers.returns import S34_UNREADABLE, _credit_note_window_closed, _issue_store_credit
@@ -1845,7 +2130,7 @@ def _post_locked(
         # never read as "past the deadline".
         s34_closed = None
         s34_unreadable = False
-        if credit_entry is None:
+        if credit_entry is None and not credit_unclear:
             try:
                 _dated = db.get_collection("orders").find_one(
                     {"order_id": order_id}, {"invoice_date": 1, "created_at": 1}) or {}
@@ -1862,8 +2147,8 @@ def _post_locked(
             _raise_s34_task(order, return_id, refund_id, s34_closed)
             # The return doc files no tax reversal either (GSTR reads its breakup).
             gst_view = {**gst_view, "taxable": 0.0, "tax": 0.0, "by_rate": {}, "section34_closed": True}
-        if (credit_entry is None and customer_id and gross_refund > 0 and store_credit is not None
-                and not s34_unreadable):
+        if (credit_entry is None and not credit_unclear and customer_id and gross_refund > 0
+                and store_credit is not None and not s34_unreadable):
             credit_entry = _issue_store_credit(
                 customer_id,
                 gross_refund,
@@ -1891,7 +2176,33 @@ def _post_locked(
                 credit_note=not s34_closed,
             )
     except Exception as exc:  # noqa: BLE001
+        credit_unclear = credit_unclear or type(exc).__name__ == "CreditNotConfirmed"
         logger.warning("[SHOPIFY_REFUND] credit note post failed: %s", exc)
+    if not credit_unclear and credit_entry is None and gross_refund > 0:
+        # No credit came back -- a None answer or any other error: "not
+        # issued" only if no ledger row of this return exists. A live row (a
+        # lost acknowledgement, a row the door could not read or resume) or an
+        # unreadable ledger means its balance move or its GST reversal may be
+        # on the books -- the counter door's rule (returns.py, "one owner per
+        # outcome").
+        credit_unclear = _credit_row_written(db, return_id)
+
+    if credit_unclear:
+        # The store credit may already be on the customer's balance: its
+        # ledger row stays ISSUING and the ten-minute reconciler settles it.
+        # Finalizing CREDIT_FAILED here read as "not issued" (no tick, no
+        # task, no points, Reject allowed, a hand credit invited) while the
+        # reconciler made the credit real behind it. The claim stays in
+        # flight instead (PENDING: is_unfinished): the answer and the row say
+        # "not finished", Reject is refused, and the tick re-drives it once
+        # stale -- resuming the SAME ledger row by its ref, or issuing afresh
+        # if the reconciler voided it. Nothing else (restock, finalize,
+        # points) runs now.
+        logger.error("[SHOPIFY_REFUND] refund=%s order=%s: store credit not confirmed -- left unfinished",
+                     refund_id, order_id)
+        return {"status": "error", "reason": NOT_FINALIZED, "error": "store credit not confirmed yet",
+                "refund_id": refund_id, "order_id": order_id, "return_id": return_id,
+                "customer_id": customer_id, "credit_note_issued": False}
 
     # (b) Restock the refunded serialized units back to the fulfilling store --
     # unless the IMS cancel door already put them back. Asked HERE, at post
@@ -2092,37 +2403,49 @@ def _post_locked(
         "reprocessing_at": None,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    if returns_coll is not None and claimed:
-        try:
-            returns_coll.update_one(
-                {"shopify_refund_id": refund_id}, {"$set": update_fields}
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SHOPIFY_REFUND] returns doc finalize failed: %s", exc)
-    elif returns_coll is not None:
-        # The claim insert did not land (a non-dup DB error) -> best-effort persist
-        # so the credit/restock is still auditable (no idempotency protection).
-        try:
-            returns_coll.insert_one({**claim_doc, **update_fields})
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[SHOPIFY_REFUND] returns doc persist failed: %s", exc)
+    finalized = True
+    try:
+        returns_coll.update_one(
+            {"shopify_refund_id": refund_id}, {"$set": update_fields}
+        )
+    except Exception as exc:  # noqa: BLE001
+        # The same rule as the claim: an error does not say the write did not
+        # land, so the stored doc decides (this very write's own stamp on it).
+        finalized = _finalize_landed(returns_coll, refund_id, update_fields["updated_at"])
+        logger.error("[SHOPIFY_REFUND] returns doc finalize not acknowledged (landed=%s): %s",
+                     finalized, exc)
+    if finalized and credit_ok and prior_doc is not None:
+        _close_unfinished_task(refund_id)
 
     # (c) The points-paid part goes back AS POINTS, once the refund is booked
     #     (a CREDIT_FAILED post is re-driven under the same return id, so the
     #     restore -- keyed on it -- runs exactly once). Not restored now: the
-    #     doc stays flagged and the scheduled loyalty sweep finishes it.
+    #     doc stays flagged (points_marker, written with the claim) and the
+    #     scheduled loyalty sweep finishes it. The flag only goes DOWN here.
     points_restored = 0
     if credit_ok and _f(points_share) > 0 and customer_id:
         from ..routers.loyalty import restore_return_points
 
         restored = restore_return_points(return_id, order_id, customer_id, _f(points_share))
         points_restored = int(restored.get("redeemed_restored") or 0)
-        if returns_coll is not None:
+        if restored.get("ok") and returns_coll is not None:
             try:
                 returns_coll.update_one({"shopify_refund_id": refund_id}, {"$set": {
-                    "loyalty_reversal_failed": not restored.get("ok")}})
+                    "loyalty_reversal_failed": False}})
             except Exception as exc:  # noqa: BLE001
-                logger.error("[SHOPIFY_REFUND] refund=%s points flag not saved: %s", refund_id, exc)
+                # Still flagged: the sweep runs the restore again (it moves
+                # nothing twice) and clears it.
+                logger.error("[SHOPIFY_REFUND] refund=%s points flag not cleared: %s", refund_id, exc)
+
+    if not finalized:
+        # The return still reads PENDING (its credit posted, or not). Answering
+        # "credited" closed the review row (or the inbox row) on a return no
+        # sweep, resend or second Confirm finishes -- its points step with it.
+        # A failure keeps that row open: the same refund sent again re-claims
+        # this return once the claim is stale (_claim_stale_refund_for_retry),
+        # finds the credit already posted (_posted_credit), books restock per
+        # order line and finalizes it -- nothing twice.
+        result_status, fail_reason = "error", NOT_FINALIZED
 
     logger.info(
         "[SHOPIFY_REFUND] AUTO-posted refund=%s order=%s credit=%s tax=%s "
@@ -2138,6 +2461,8 @@ def _post_locked(
     return {
         "status": result_status,
         **({"reason": fail_reason} if fail_reason else {}),
+        # What the inbox drain logs for a failure (nexus._raise_if_failed).
+        **({"error": "refund claim not finalized yet"} if fail_reason == NOT_FINALIZED else {}),
         "refund_id": refund_id,
         "shopify_order_id": _norm(order.get("shopify_order_id")),
         "order_id": order_id,

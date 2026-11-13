@@ -3256,15 +3256,19 @@ def _task_leg_not_billed(leg: Dict[str, Any]) -> bool:
 
 async def scheduled_credit_reconcile() -> None:
     """Scheduler tick (agents/scheduler): blocking pymongo off the event loop.
-    Then the kept refund holds no one owns (returns.sweep_stuck_return_holds)
-    and the loyalty reversals no staff door can reach."""
+    Then the kept refund holds no one owns (returns.sweep_stuck_return_holds),
+    the online refunds a post claimed and never finished (before the points
+    sweep: a return it finishes is that sweep's the same tick) and the loyalty
+    reversals no staff door can reach."""
     import asyncio
 
+    from . import online_store_refund_reviews as refund_reviews
     from .loyalty import reconcile_loyalty_reversals
     from .returns import sweep_stuck_return_holds
 
     await asyncio.to_thread(reconcile_pending_credits)
     await asyncio.to_thread(sweep_stuck_return_holds)
+    await asyncio.to_thread(refund_reviews.finish_unfinished_refunds)
     await asyncio.to_thread(reconcile_loyalty_reversals)
 
 

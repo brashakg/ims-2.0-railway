@@ -1009,8 +1009,10 @@ function ReturnsDesk({ canComplete }: { canComplete: boolean }) {
                   </div>
                   {(quote?.points_paid_share ?? 0) > 0 && (
                     <p className="mt-1 text-xs text-gray-500">
-                      {fp(quote?.points_paid_share ?? 0)} was paid with loyalty points: it goes back to the
-                      customer's points by itself, not as money or store credit.
+                      {/* D28: an admin closed this bill's points -- no promise that points go back. */}
+                      {quote?.points_waived
+                        ? `${fp(quote?.points_paid_share ?? 0)} was paid with loyalty points: points for this bill are settled by head office and are not returned automatically. It is not paid as money or store credit.`
+                        : `${fp(quote?.points_paid_share ?? 0)} was paid with loyalty points: it goes back to the customer's points by itself, not as money or store credit.`}
                     </p>
                   )}
 
