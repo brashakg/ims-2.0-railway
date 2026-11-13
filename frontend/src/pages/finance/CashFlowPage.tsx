@@ -646,6 +646,8 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
           amount: Number(f.amount) || 0, date: String(f.date || today), reason: String(f.reason || ''),
           store_id: moneyShop || undefined,
           cn_type: creditType as 'SCHEME_CN' | 'DISCOUNT_CN' | 'QUALITY_CN',
+          // A retried save answers the note already recorded (audit L3-27).
+          request_id: requestId,
         });
         toast.success(bookedTo('Debit note', saved, shopName));
       }
