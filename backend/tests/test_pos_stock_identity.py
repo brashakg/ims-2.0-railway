@@ -84,6 +84,12 @@ def _product(pid, name, category, sku, price):
 
 @pytest.fixture
 def shop(monkeypatch):
+    return seed_shop(mongomock.MongoClient()["pos_stock_identity"], monkeypatch)
+
+
+def seed_shop(db, monkeypatch):
+    """The shop on `db` (mongomock here; a real Mongo database in the native
+    modules): the real repositories wired in, its products, units and Rx."""
     from api import dependencies as dm
     from api.routers import orders as om
     from database.repositories.audit_repository import AuditRepository
@@ -94,7 +100,6 @@ def shop(monkeypatch):
         StockRepository,
     )
 
-    db = mongomock.MongoClient()["pos_stock_identity"]
     order_repo = OrderRepository(db.get_collection("orders"))
     cust_repo = CustomerRepository(db.get_collection("customers"))
     prod_repo = ProductRepository(db.get_collection("products"))

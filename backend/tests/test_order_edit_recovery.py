@@ -981,3 +981,114 @@ def test_a_refused_revision_is_recorded_unused_and_not_reused(client, shop, invo
     assert [row["status"] for row in _revisions(shop, oid)] == ["REFUSED_SERIAL_UNUSED"]
     assert _revise(client, oid, lines).status_code == 200
     assert _order(shop, oid)["invoice_number"] == "BV-INV-REV-2"
+
+
+# ---------------------------------------------------------------------------
+# 9 -- Codex round 5 (12 Nov): the serial rule on a removed piece, the
+# customer change, and an unreadable revision link. (The removed piece's
+# durable record runs on real Mongo: test_removed_goods_return_native.py.)
+# ---------------------------------------------------------------------------
+
+
+def test_a_wrong_serial_on_a_removed_piece_is_refused_like_a_billed_one(client, shop, invoiced, counter):
+    """P2b: the removed-goods door entered before the serial guard, so a wrong
+    scan freed the original unit (201). The guard now runs before EITHER door."""
+    shop["db"].get_collection("stock_units").update_one({"stock_id": "SU-FR-A"}, {"$set": {"serial": "SN-A"}})
+    oid, frame = _parcel_with_a_piece_removed(client, shop, invoiced)
+    r = _return_piece(client, oid, frame["item_id"], serial="WRONG-PIECE")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["reason"] == "SERIAL_MISMATCH"
+    unit = _unit(shop, "SU-FR-A")
+    assert (unit["status"], unit.get("order_id")) == ("SOLD", oid)
+    assert not _order(shop, oid)["removed_lines"][0].get("returned_qty")
+    assert shop["db"].get_collection("returns").count_documents({"order_id": oid}) == 0
+    r = _return_piece(client, oid, frame["item_id"], serial="sn-a")
+    assert r.status_code == 201, r.text
+    assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
+
+
+@pytest.fixture
+def other_customer(shop):
+    shop["db"].get_collection("customers").insert_one(
+        {"customer_id": "cust-other", "name": "Ravi", "mobile": "9100000072", "phone": "9100000072"})
+    return "cust-other"
+
+
+def test_moving_a_bill_to_another_customer_rechecks_its_prescription(client, shop, cells, door, other_customer):
+    """P2c: an unchanged Rx line stayed on the bill when its customer changed (200).
+    The till's ownership rule now runs on every Rx line when the customer moves."""
+    oid, stored = _lens_bill(client, shop, cells)
+    door.arm(oid)
+    bill = _order(shop, oid)
+    lines = [_other_line(shop, oid), _lens_sent(stored)]
+    r = _edit(client, oid, lines, route=door.name, customer_id=other_customer, **DOORS[door.name])
+    assert r.status_code == 422, r.text
+    assert "does not belong" in r.json()["detail"]
+    assert _order(shop, oid) == bill
+    assert cells.read() == (5, 1)
+
+
+def test_a_customer_correction_with_that_customers_rx_saves(client, shop, cells, door, other_customer):
+    shop["db"].get_collection("prescriptions").insert_one(
+        {"prescription_id": "RX-OTHER-1", "customer_id": other_customer, "prescription_date": "2026-11-01"})
+    oid, stored = _lens_bill(client, shop, cells)
+    door.arm(oid)
+    lines = [_other_line(shop, oid), _lens_sent(stored, prescription_id="RX-OTHER-1")]
+    r = _edit(client, oid, lines, route=door.name, customer_id=other_customer, **DOORS[door.name])
+    assert r.status_code == 200, r.text
+    saved = _order(shop, oid)
+    assert saved["customer_id"] == other_customer
+    assert _lens_line(shop, oid)["prescription_id"] == "RX-OTHER-1"
+
+
+def test_a_price_only_correction_of_an_old_rx_line_needs_no_new_check(client, shop, cells, door):
+    """Same customer, nothing clinical changed: a historical Rx line whose Rx is
+    no longer on file still takes a price correction."""
+    oid, stored = _lens_bill(client, shop, cells)
+    door.arm(oid)
+    shop["db"].get_collection("prescriptions").delete_many({"prescription_id": "RX-PSI-1"})
+    r = _edit(client, oid, [_other_line(shop, oid), _lens_sent(stored, unit_price=900.0)],
+              route=door.name, customer_id="cust-psi", **DOORS[door.name])
+    assert r.status_code == 200, r.text
+
+
+def test_an_unreadable_revision_link_takes_no_second_number(client, shop, invoiced, serials, monkeypatch):
+    """P2d: a failed read of the saved link was read as 'no revision', so the
+    retry minted a second number. It refuses (503) and takes nothing; the next
+    retry reuses the first number (owner ruling 2026-11-07)."""
+    import mongomock
+    from database.repositories.order_repository import OrderRepository
+
+    oid, lines = _revised_bill(client, shop, invoiced, serials)
+
+    def failed(self, *a, **k):
+        raise TimeoutError("write failed")
+
+    quiet = type(client)(client.app, raise_server_exceptions=False)
+    body = {"reason": "correcting this bill", "items": lines, "mode": "REVISED_INVOICE"}
+    url = f"/api/v1/orders/{oid}/superadmin-invoice-change"
+    with monkeypatch.context() as m:
+        m.setattr(OrderRepository, "update_if", failed)
+        assert quiet.put(url, json=body, headers=_token(ADMIN)).status_code >= 500
+    assert serials == ["BV-INV-REV-1"] and len(_revisions(shop, oid)) == 1
+    real_find_one = mongomock.collection.Collection.find_one
+
+    def unreadable(self, *a, **k):
+        if self.name == "revised_invoices":
+            raise TimeoutError("link row unreadable")
+        return real_find_one(self, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(mongomock.collection.Collection, "find_one", unreadable)
+        r = quiet.put(url, json={**body, "reason": "retyped"}, headers=_token(ADMIN))
+    assert r.status_code == 503, r.text
+    assert serials == ["BV-INV-REV-1"], "no second number"
+    assert _order(shop, oid)["invoice_number"] == "BV-INV-1"
+    assert [row["revised_invoice_number"] for row in _revisions(shop, oid)] == ["BV-INV-REV-1"]
+    assert _unit(shop, "SU-FR-A")["status"] == "SOLD", "the refused press moved nothing"
+    r = client.put(url, json=body, headers=_token(ADMIN))
+    assert r.status_code == 200, r.text
+    assert r.json()["revised_invoice_number"] == "BV-INV-REV-1"
+    assert serials == ["BV-INV-REV-1"] and len(_revisions(shop, oid)) == 1
+    assert _order(shop, oid)["invoice_number"] == "BV-INV-REV-1"
+    assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
