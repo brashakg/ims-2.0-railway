@@ -24,7 +24,9 @@ import { moduleForPath } from '../../context/ModuleContext';
 import { filterVisibleGroups, hasAnyRole } from './navConfig';
 import { Icon } from './Icon';
 import { RETURN_READERS } from '../../pages/purchase/purchaseRoles';
-import { INVENTORY_MANAGE_ROLES, POWER_GRID_ROLES } from '../../pages/inventory/inventoryRoles';
+import { INVENTORY_MANAGE_ROLES, POWER_GRID_ROLES, canManageInventory } from '../../pages/inventory/inventoryRoles';
+import { visibleInventoryGroups } from '../../pages/inventory/inventoryNav';
+import { SETTINGS_SECTIONS } from '../../pages/settings/settingsSections';
 import type { UserRole } from '../../types';
 import { PALETTE_RECENT_PREFIX } from '../../services/api/signOutEvent';
 
@@ -105,6 +107,15 @@ interface JumpPage {
   route: string;
   /** Nav group title (e.g. "Growth") — shown as context, and searchable. */
   hint?: string;
+  /** Extra words staff search with (searchable, not shown). */
+  keywords?: string;
+}
+
+/** Every word of the query appears in the page's label, hint or keywords
+ *  ("stock transfer" finds Transfers under Inventory). */
+export function pageMatches(page: JumpPage, query: string): boolean {
+  const hay = `${page.label} ${page.hint ?? ''} ${page.keywords ?? ''}`.toLowerCase();
+  return query.toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
 }
 
 // ----------------------------------------------------------------------------
@@ -223,6 +234,12 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [products, setProducts] = useState<ProductHit[]>([]);
   const [productsLoading, setProductsLoading] = useState(false);
+  // R16: a search that FAILED is not a search that found nothing. Each section
+  // remembers its failure; Retry runs the searches again.
+  const [failed, setFailed] = useState({ customers: false, orders: false, products: false });
+  const [retryTick, setRetryTick] = useState(0);
+  const markFailed = (key: keyof typeof failed, value: boolean) =>
+    setFailed((f) => (f[key] === value ? f : { ...f, [key]: value }));
 
   // Reset query + reload recent on each open. cmdk autofocuses its <Command.Input>
   // when mounted, so the explicit focus() below is a belt-and-braces fallback
@@ -245,6 +262,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     if (q.length < 2) {
       setCustomers([]);
       setCustomersLoading(false);
+      markFailed('customers', false);
       return;
     }
     let cancelled = false;
@@ -262,6 +280,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     promise
       .then((res: any) => {
         if (cancelled) return;
+        markFailed('customers', false);
         const list = res?.customers || res?.results || (Array.isArray(res) ? res : []);
         const normalized: CustomerHit[] = (Array.isArray(list) ? list : [])
           .slice(0, 8)
@@ -274,7 +293,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         setCustomers(normalized);
       })
       .catch(() => {
-        if (!cancelled) setCustomers([]);
+        if (!cancelled) {
+          setCustomers([]);
+          markFailed('customers', true);
+        }
       })
       .finally(() => {
         if (!cancelled) setCustomersLoading(false);
@@ -283,7 +305,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     return () => {
       cancelled = true;
     };
-  }, [open, debouncedQuery]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- markFailed is a stable setter wrapper
+  }, [open, debouncedQuery, retryTick]);
 
   useEffect(() => {
     if (!open) return;
@@ -291,6 +314,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     if (q.length < 2) {
       setOrders([]);
       setOrdersLoading(false);
+      markFailed('orders', false);
       return;
     }
     let cancelled = false;
@@ -304,6 +328,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       .getOrders({ limit: 50 })
       .then((res: any) => {
         if (cancelled) return;
+        markFailed('orders', false);
         const list = res?.orders || (Array.isArray(res) ? res : []);
         const ql = q.toLowerCase();
         const matched: OrderHit[] = (Array.isArray(list) ? list : [])
@@ -333,7 +358,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         setOrders(matched);
       })
       .catch(() => {
-        if (!cancelled) setOrders([]);
+        if (!cancelled) {
+          setOrders([]);
+          markFailed('orders', true);
+        }
       })
       .finally(() => {
         if (!cancelled) setOrdersLoading(false);
@@ -342,7 +370,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     return () => {
       cancelled = true;
     };
-  }, [open, debouncedQuery]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- markFailed is a stable setter wrapper
+  }, [open, debouncedQuery, retryTick]);
 
   useEffect(() => {
     if (!open) return;
@@ -350,6 +379,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     if (q.length < 2) {
       setProducts([]);
       setProductsLoading(false);
+      markFailed('products', false);
       return;
     }
     let cancelled = false;
@@ -358,6 +388,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
       .searchProducts(q)
       .then((res: any) => {
         if (cancelled) return;
+        markFailed('products', false);
         const list = res?.products || (Array.isArray(res) ? res : []);
         const normalized: ProductHit[] = (Array.isArray(list) ? list : [])
           .slice(0, 8)
@@ -372,7 +403,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         setProducts(normalized);
       })
       .catch(() => {
-        if (!cancelled) setProducts([]);
+        if (!cancelled) {
+          setProducts([]);
+          markFailed('products', true);
+        }
       })
       .finally(() => {
         if (!cancelled) setProductsLoading(false);
@@ -381,7 +415,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
     return () => {
       cancelled = true;
     };
-  }, [open, debouncedQuery]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- markFailed is a stable setter wrapper
+  }, [open, debouncedQuery, retryTick]);
 
   // Jump list derived from the nav model through the shared visibility filter
   // (role ceiling + per-user module deny) — identical to what TopNav/Rail
@@ -398,6 +433,31 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
         if (seen.has(item.to)) continue;
         seen.add(item.to);
         pages.push({ label: item.label, route: item.to, hint: group.title });
+      }
+    }
+    // R39: the child pages of a menu entry this person can open -- the
+    // Inventory section tabs and the Settings sections -- from the SAME lists
+    // those screens draw their own menus from, with the same gates.
+    if (seen.has('/inventory/stock')) {
+      for (const g of visibleInventoryGroups(canManageInventory(user?.roles))) {
+        for (const e of g.entries) {
+          if (seen.has(e.path)) continue;
+          seen.add(e.path);
+          pages.push({ label: e.label, route: e.path, hint: `Inventory · ${g.label}`, keywords: e.keywords });
+        }
+      }
+    }
+    if (seen.has('/settings')) {
+      const mine = user?.roles?.length ? user.roles : user?.activeRole ? [user.activeRole] : [];
+      for (const sec of SETTINGS_SECTIONS) {
+        const route = `/settings/${sec.id}`;
+        const ok =
+          sec.role.includes('ALL') ||
+          sec.role.some((r) => (mine as string[]).includes(r)) ||
+          user?.activeRole === 'SUPERADMIN';
+        if (!ok || seen.has(route)) continue;
+        seen.add(route);
+        pages.push({ label: sec.label, route, hint: 'Settings', keywords: sec.description });
       }
     }
     // #949-2: merge palette-only pages AFTER the derived list, gated the SAME
@@ -512,7 +572,10 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
           !productsLoading &&
           customers.length === 0 &&
           orders.length === 0 &&
-          products.length === 0 && (
+          products.length === 0 &&
+          !failed.customers &&
+          !failed.orders &&
+          !failed.products && (
             <Command.Empty className="cmdk-empty">
               No results for &ldquo;{trimmedQuery}&rdquo;
             </Command.Empty>
@@ -542,6 +605,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
           <Command.Group heading="Customers" className="cmdk-group">
             {customersLoading && customers.length === 0 ? (
               <div className="cmdk-loading">Searching customers...</div>
+            ) : failed.customers && customers.length === 0 ? (
+              <SearchFailed what="customers" onRetry={() => setRetryTick((t) => t + 1)} />
             ) : customers.length === 0 ? (
               <div className="cmdk-empty-inline">No customer matches</div>
             ) : (
@@ -568,6 +633,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
           <Command.Group heading="Orders" className="cmdk-group">
             {ordersLoading && orders.length === 0 ? (
               <div className="cmdk-loading">Searching orders...</div>
+            ) : failed.orders && orders.length === 0 ? (
+              <SearchFailed what="orders" onRetry={() => setRetryTick((t) => t + 1)} />
             ) : orders.length === 0 ? (
               <div className="cmdk-empty-inline">No order matches</div>
             ) : (
@@ -600,6 +667,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
           <Command.Group heading="Products" className="cmdk-group">
             {productsLoading && products.length === 0 ? (
               <div className="cmdk-loading">Searching products...</div>
+            ) : failed.products && products.length === 0 ? (
+              <SearchFailed what="products" onRetry={() => setRetryTick((t) => t + 1)} />
             ) : products.length === 0 ? (
               <div className="cmdk-empty-inline">No product matches</div>
             ) : (
@@ -632,11 +701,7 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
             // Local fuzzy filter for page titles - case-insensitive substring
             // match plus a tiny acronym match (e.g. "gst" matches "GST Credit").
             const q = trimmedQuery.toLowerCase();
-            const matched = q
-              ? visiblePages.filter((p) =>
-                  `${p.label} ${p.hint ?? ''}`.toLowerCase().includes(q),
-                )
-              : visiblePages;
+            const matched = q ? visiblePages.filter((p) => pageMatches(p, q)) : visiblePages;
             const sliced = matched.slice(0, q ? 8 : 12);
             if (sliced.length === 0) {
               return <div className="cmdk-empty-inline">No page matches</div>;
@@ -684,6 +749,17 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
 // ----------------------------------------------------------------------------
 // Subcomponents
 // ----------------------------------------------------------------------------
+
+function SearchFailed({ what, onRetry }: { what: string; onRetry: () => void }) {
+  return (
+    <div className="cmdk-empty-inline" role="alert">
+      Could not search {what} just now - this is not a "no match".{' '}
+      <button type="button" className="underline font-medium" onClick={onRetry}>
+        Retry
+      </button>
+    </div>
+  );
+}
 
 function labelForType(t: RecentItem['type']): string {
   switch (t) {
