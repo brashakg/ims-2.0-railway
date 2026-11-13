@@ -91,6 +91,25 @@ describe('Day-End Report - the till was already counted', () => {
     expect(screen.getByTestId(NOTE)).toBeInTheDocument();
   });
 
+  it('counted first, typed total disagrees with the notes: says the notes count stands, not "already counted"', async () => {
+    createDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({
+        closing_cash: 500, system_cash: 3000, variance: -2500,
+        till_already_counted: false, counted_from_shared_record: true, till_count_differs: true,
+        entered_closing_cash: 3000,
+      }),
+    }));
+
+    await typeAndClose('3000');
+
+    expect(screen.getByText(/Counted ₹500/)).toBeInTheDocument();
+    const note = screen.getByTestId(NOTE).textContent ?? '';
+    expect(note).not.toMatch(/already counted at the till/i);
+    expect(note).toMatch(/notes count is the one recorded/i);
+    expect(note).toMatch(/₹3,000/);
+  });
+
   it('POSITIVE CONTROL: a day this screen counted itself carries no such note', async () => {
     createDayEndClose.mockImplementation(async () => ({
       closed: true,
