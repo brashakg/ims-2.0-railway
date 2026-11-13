@@ -444,12 +444,11 @@ def test_l3_25_a_journal_request_goes_to_admin_and_superadmin_only(db, monkeypat
     assert _bells(db, rid) == {"admin", "boss"}          # was all four
 
     for manager in (store_mgr, area_mgr):
-        row = _inbox_row(db, monkeypatch, rid, manager)
-        assert row is None or row["can_approve"] is False    # no buttons
+        assert _inbox_row(db, monkeypatch, rid, manager) is None   # no row, no buttons
         code, body = _inbox_approve(db, monkeypatch, rid, manager)
-        assert (code, body["error"]) == (403, "insufficient_tier")   # was 200
+        assert (code, body["error"]) == (404, "not_found")   # was 200
         code, body = _inbox_reject(db, monkeypatch, rid, manager, "Not a valid entry")
-        assert (code, body["error"]) == (403, "insufficient_tier")   # was 200
+        assert (code, body["error"]) == (404, "not_found")   # was 200
         assert _pin_count(db, manager["user_id"]) == 0
     assert _request(db, rid)["status"] == "REQUESTED"
     assert (_je(db, j["je_id"])["status"], _je(db, j["je_id"])["checker_id"]) == ("SUBMITTED", None)
@@ -476,6 +475,62 @@ def test_l3_25_a_journal_request_goes_to_admin_and_superadmin_only(db, monkeypat
     assert _inbox_approve(db, monkeypatch, other, store_mgr)[0] == 200
 
 
+def _inbox_ids(db, monkeypatch, user: Dict[str, Any], status=None) -> set:
+    monkeypatch.setattr(approvals_router, "_get_db", lambda: db)
+    code, body = _call(approvals_router.get_inbox(store_id=None, status=status, current_user=user))
+    assert code == 200, body
+    return {r["request_id"] for r in body["requests"]}
+
+
+def _get_by_id(db, monkeypatch, request_id: str, user: Dict[str, Any]):
+    monkeypatch.setattr(approvals_router, "_get_db", lambda: db)
+    return _call(approvals_router.get_request(request_id, current_user=user))
+
+
+def test_l3_25_a_journal_request_is_read_only_by_the_journal_readers(db, monkeypatch):
+    """D4 follow-through (DECISION, owner ruling 2026-10-18 FU-17: store and
+    area managers no longer read journal vouchers). A manager who may not act
+    on a journal's request no longer finds it listed, counted or opened by id
+    -- it answers what a missing request answers, as an 'rtv' does for them.
+    The journal readers (Admin, Superadmin, Accountant) still see it; the
+    maker still opens their own; every other request reaches managers as
+    before."""
+    store_mgr = _user(db, "store-mgr", ["STORE_MANAGER"])
+    area_mgr = _user(db, "area-mgr", ["AREA_MANAGER"])
+    staff = _user(db, "staff", ["SALES_STAFF"])
+    accountant = _user(db, "acct", ["ACCOUNTANT"])
+    admin = _user(db, "admin", ["ADMIN"])
+    j = _submitted_journal(db, "maker", amount=100.0)
+    rid = j["request_id"]
+    other = _engine(db).request(action_type="petty_cash", requested_by="u1",
+                                store_id="S1", amount=300)["request_id"]
+
+    for manager in (store_mgr, area_mgr):
+        for status in (None, "ALL"):
+            ids = _inbox_ids(db, monkeypatch, manager, status)
+            assert rid not in ids          # was listed (without buttons)
+            assert other in ids            # unchanged
+        assert _engine(db).pending_count(manager["roles"], ["S1"]) == 1   # was 2
+    for reader in (store_mgr, area_mgr, staff):
+        code, body = _get_by_id(db, monkeypatch, rid, reader)
+        assert code == 404, body           # was 200 with number, description, amount
+
+    # The journal readers and the maker keep what they had.
+    assert _inbox_row(db, monkeypatch, rid, accountant)["can_approve"] is False
+    assert _inbox_row(db, monkeypatch, rid, admin)["can_approve"] is True
+    assert _get_by_id(db, monkeypatch, rid, accountant)[0] == 200
+    assert _get_by_id(db, monkeypatch, rid,
+                      {"user_id": "maker", "roles": ["ACCOUNTANT"], "store_ids": ["S1"]})[0] == 200
+
+    # Spending it by id is refused to a manager the same way, approval untouched.
+    assert _inbox_approve(db, monkeypatch, rid, admin)[0] == 200
+    code, body = _call(approvals_router.consume_request(
+        rid, approvals_router.ConsumeAction(action_type="journal_entry"), current_user=store_mgr))
+    assert code == 404, body
+    assert _request(db, rid)["status"] == "APPROVED"
+    assert _post(db, j["je_id"], "admin").get("ok") is True
+
+
 _ALL_FOUR = ["SUPERADMIN", "ADMIN", "AREA_MANAGER", "STORE_MANAGER"]
 
 
@@ -491,12 +546,11 @@ def test_l3_25_a_request_raised_before_the_change_is_held_to_the_checkers_too(db
     db.get_collection("approval_requests").update_one(
         {"request_id": rid}, {"$set": {"required_roles": _ALL_FOUR}})
 
-    row = _inbox_row(db, monkeypatch, rid, manager)
-    assert row is None or row["can_approve"] is False
+    assert _inbox_row(db, monkeypatch, rid, manager) is None
     code, body = _inbox_approve(db, monkeypatch, rid, manager)
-    assert (code, body["error"]) == (403, "insufficient_tier")
+    assert (code, body["error"]) == (404, "not_found")
     code, body = _inbox_reject(db, monkeypatch, rid, manager, "Not a valid entry")
-    assert (code, body["error"]) == (403, "insufficient_tier")
+    assert (code, body["error"]) == (404, "not_found")
     assert _request(db, rid)["status"] == "REQUESTED"
     assert _request(db, rid)["required_roles"] == _ALL_FOUR   # stored history untouched
 

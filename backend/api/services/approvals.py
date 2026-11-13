@@ -50,7 +50,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from .cost_mask import AP_ROLES
+from .cost_mask import AP_ROLES, COST_VISIBLE_ROLES
 from .payables_mask import SUPPLIER_MONEY_ACTIONS, can_see_payables
 
 logger = logging.getLogger(__name__)
@@ -192,10 +192,24 @@ def may_approve(doc: Optional[Dict[str, Any]], roles) -> bool:
     return "SUPERADMIN" in have or bool(have & set(approver_roles_for(doc)))
 
 
+def _journal_hidden(doc: Optional[Dict[str, Any]], roles) -> bool:
+    """A journal's request is read only by the journal readers -- the accounts
+    roles (owner decision 2026-10-18, audit FU-17: the store managers' read of
+    journal vouchers was dropped; the journal routes' _JE_READER_ROLES is this
+    same set). Decision D4 already took the managers' bell and buttons away."""
+    return (doc or {}).get("action_type") == "journal_entry" and not (
+        {r for r in (roles or []) if r} & COST_VISIBLE_ROLES
+    )
+
+
 def _hidden_from(doc: Optional[Dict[str, Any]], roles) -> bool:
-    """A supplier-money request the caller may not approve answers them exactly
-    like a request that does not exist (404 not_found), never 'not your tier'."""
-    return _is_supplier_money(doc) and not may_approve(doc, roles)
+    """A request the caller may not see answers them exactly like a request
+    that does not exist (404 not_found), never 'not your tier': a
+    supplier-money request they may not approve (R1), a journal's request
+    they may not read (_journal_hidden)."""
+    if _is_supplier_money(doc):
+        return not may_approve(doc, roles)
+    return _journal_hidden(doc, roles)
 
 
 def _is_maker_checker(doc: Optional[Dict[str, Any]]) -> bool:
@@ -1188,10 +1202,12 @@ class ApprovalEngine:
         if status and status.upper() != "ALL":
             q["status"] = status.upper()
         roles = set(approver_roles or [])
-        if not _may_approve_supplier_money(roles):
-            # Named positively (ACTION_TYPES is the closed set request() admits)
-            # so the filter is a plain $in.
-            q["action_type"] = {"$in": sorted(ACTION_TYPES - SUPPLIER_MONEY_ACTIONS)}
+        # The action types _hidden_from keeps from this caller, named positively
+        # (ACTION_TYPES is the closed set request() admits) so the filter is a
+        # plain $in.
+        hidden = {a for a in ACTION_TYPES if _hidden_from({"action_type": a}, roles)}
+        if hidden:
+            q["action_type"] = {"$in": sorted(ACTION_TYPES - hidden)}
         if not (roles & _HQ_ROLES):
             scoped = list(store_ids or [])
             # A scoped approver sees their stores' requests plus store-less ones.

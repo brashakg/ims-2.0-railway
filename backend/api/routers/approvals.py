@@ -31,10 +31,12 @@ does.
 
 A journal's request ('journal_entry') is routed to ADMIN / SUPERADMIN only,
 the roles the journal screen lets decide a journal (decision D4, 2026-11-11;
-services/approvals.approver_roles_for). A store or area manager gets no bell
-for one, sees no Approve / Reject on its inbox row (can_approve false) and is
-refused 403 insufficient_tier by id. An Admin's decision here is the
-journal's decision (je_service.sync_with_request).
+services/approvals.approver_roles_for), and read only by the journal readers
+(ADMIN / SUPERADMIN / ACCOUNTANT; owner decision 2026-10-18, FU-17). A store
+or area manager gets no bell for one, does not find it in the inbox, and
+opening, approving, rejecting or spending it by id answers 404, as an 'rtv'
+does (services/approvals._hidden_from). An ACCOUNTANT sees it without buttons.
+An Admin's decision here is the journal's decision (je_service.sync_with_request).
 
 Approving, rejecting and spending by id (/approve, /reject, /consume) follow
 the rule GET applies (_request_in_reach): its maker or consumer, else a caller
@@ -53,9 +55,9 @@ from pydantic import BaseModel, Field
 from .auth import get_current_user, require_roles
 from ..dependencies import user_store_scope, validate_store_access
 from ..services import je_service
-from ..services.approvals import ApprovalEngine, may_approve
+from ..services.approvals import ApprovalEngine, _hidden_from
 from ..services.cost_mask import AP_ROLES
-from ..services.payables_mask import SUPPLIER_MONEY_ACTIONS, strip_approval_money
+from ..services.payables_mask import strip_approval_money
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -276,7 +278,7 @@ def _request_in_reach(eng: ApprovalEngine, doc: Dict[str, Any], user: Dict[str, 
     uid = user.get("user_id")
     if uid and uid in (doc.get("requested_by"), doc.get("consumed_by")):
         return True
-    if doc.get("action_type") in SUPPLIER_MONEY_ACTIONS and not may_approve(doc, _roles(user)):
+    if _hidden_from(doc, _roles(user)):
         return False
     _cross, stores = user_store_scope(user)
     # The engine's one shop rule, reused rather than copied.
