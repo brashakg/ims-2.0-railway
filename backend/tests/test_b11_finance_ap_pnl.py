@@ -311,3 +311,100 @@ def test_l3_27_a_retried_request_answers_the_credit_it_recorded(ap):
     changed = _credit(cli, "req-b11-0001", amount=99.0)
     assert changed.status_code == 409
     assert d.vendor_debit_notes.count_documents({}) == 1
+
+
+# --------------------------------------------------------------------------
+# Round 2 (review of a7979233)
+# --------------------------------------------------------------------------
+
+MGR = {"user_id": "m", "roles": ["STORE_MANAGER"], "store_ids": ["S1"], "active_store_id": "S1"}
+AREA = {"user_id": "a", "roles": ["AREA_MANAGER"], "store_ids": ["S1", "S2"], "active_store_id": "S1"}
+ACCT = {"user_id": "c", "roles": ["ACCOUNTANT"], "store_ids": ["S1", "S2"], "active_store_id": "S1"}
+
+
+def _order(oid, **kw):
+    doc = {"order_id": oid, "store_id": "S1", "status": "DELIVERED", "payment_status": "PAID",
+           "created_at": datetime(2026, 10, 4, 5, 0), "grand_total": 1000.0, "tax_amount": 47.62,
+           "items": [{"item_id": "L1", "product_id": "P1", "quantity": 1, "unit_price": 1000.0,
+                      "item_total": 1000.0, "taxable_value": 952.38, "gst_rate": 5.0, "cost_at_sale": 500.0}]}
+    doc.update(kw)
+    return doc
+
+
+def test_run_04_a_return_on_an_order_the_books_already_dropped_is_not_reversed_twice(db):
+    db.orders.insert_many([
+        # Invoiced counter order, advance refunded through the whole-invoice
+        # credit note, then cancelled (returns.py _finish_advance_refund).
+        _order("ADV", status="CANCELLED", invoice_number="INV-1", advance_refund_status="COMPLETED",
+               advance_refund_credit_note="CN-1", created_at=datetime(2026, 11, 3, 5, 0)),
+        # The same with the cancel still pending.
+        _order("ADV-PENDING", status="CONFIRMED", invoice_number="INV-2", advance_refund_status="COMPLETED",
+               advance_refund_credit_note="CN-2", created_at=datetime(2026, 11, 3, 5, 0)),
+        # Shopify order imported cancelled + refunded (RET-HIST credit note).
+        _order("SHOP-CANCELLED", status="CANCELLED", created_at=datetime(2026, 11, 3, 5, 0)),
+        # A pre-IMS historical order: never in the IMS books.
+        _order("HIST", status="HISTORICAL"),
+    ])
+    for oid in ("ADV", "ADV-PENDING", "SHOP-CANCELLED", "HIST", "MISSING-ORDER"):
+        db.returns.insert_one({**_ret(f"R-{oid}", "2026-11-06T05:00:00+00:00"), "order_id": oid,
+                               "advance_refund": oid.startswith("ADV")})
+    pnl = _pnl()
+    assert (pnl["returns_taxable"], pnl["returns_tax"], pnl["returns_gross"]) == (0.0, 0.0, 0.0)
+    assert (pnl["revenue"], pnl["tax_collected"], pnl["gross_sales_incl_gst"]) == (0, 0, 0)
+    assert pnl["cogs"] == 0
+    assert _by_store().get("S1", {}).get("revenue", 0) == 0
+
+
+def test_run_04_a_damaged_piece_put_back_on_sale_gives_its_cost_back_when_released(db):
+    db.orders.insert_one(_order("O9"))
+    db.returns.insert_one({**_ret("R9", "2026-10-20T05:00:00+00:00", condition="DAMAGED", applied=False),
+                           "order_id": "O9", "quarantined_stock_ids": ["U9", "U10"]})
+    db.item_events.insert_many([
+        # Released to sale in November: the cost comes back then (once).
+        {"stock_id": "U9", "event_type": "quarantine.out", "to_state": "AVAILABLE", "product_id": "P1",
+         "at": datetime(2026, 11, 8, 5, 0)},
+        {"stock_id": "U9", "event_type": "quarantine.out", "to_state": "AVAILABLE", "product_id": "P1",
+         "at": datetime(2026, 11, 20, 5, 0)},
+        # Written off / sent back to the supplier: stays a cost.
+        {"stock_id": "U10", "event_type": "quarantine.out", "to_state": "DAMAGED", "product_id": "P1",
+         "at": datetime(2026, 11, 8, 5, 0)},
+    ])
+    pnl = _pnl()
+    assert pnl["returns_taxable"] == 0.0  # the credit note was October's
+    assert pnl["returns_cogs_reversal"] == 500.0 and pnl["cogs"] == -500.0
+    assert _by_store()["S1"]["cogs"] == -500.0
+
+
+def test_l3_04_a_supplier_credit_on_a_services_bill_lowers_its_cost(db):
+    db.vendor_bills.insert_many([
+        _bill("RENT", expense_type="RENT", taxable_amount=500.0, tax_amount=90.0, total_amount=590.0,
+              itc_eligible=True),
+        _bill("GOODS", bill_kind="GOODS", grn_id="G1"),
+    ])
+    db.vendor_debit_notes.insert_many([
+        {"debit_note_id": "DN1", "bill_id": "RENT", "vendor_id": "V", "store_id": "S1", "amount": 118.0,
+         "date": "2026-11-10", "cn_type": "DISCOUNT_CN"},
+        {"debit_note_id": "DN-DEC", "bill_id": "RENT", "vendor_id": "V", "store_id": "S1", "amount": 59.0,
+         "date": "2026-12-01", "cn_type": "DISCOUNT_CN"},
+        {"debit_note_id": "DN-GOODS", "bill_id": "GOODS", "vendor_id": "V", "store_id": "S1", "amount": 50.0,
+         "date": "2026-11-10", "cn_type": "QUALITY_CN"},
+    ])
+    pnl = _pnl()
+    # 500 cost, less the credit's cost share 118 * 500 / 590 = 100.
+    assert pnl["expenses"]["Supplier bills: Rent / lease"] == 400.0
+    assert pnl["total_expenses"] == 400.0
+    assert _by_store()["S1"]["expenses"] == 400.0
+
+
+@pytest.mark.parametrize("user", [MGR, AREA])
+def test_l3_04_supplier_bill_money_stays_with_the_accounts_roles(db, user):
+    db.vendor_bills.insert_one(_bill("RENT", expense_type="RENT", taxable_amount=50000.0, total_amount=50000.0))
+    db.expenses.insert_one({"expense_id": "E1", "store_id": "S1", "category": "supplies", "amount": 100.0,
+                            "status": "APPROVED", "expense_date": "2026-11-05"})
+    seen = asyncio.run(pnl_mod.get_pnl(store_id="S1", current_user=user, **RANGE))
+    assert not any(h.startswith("Supplier bills") for h in seen["expenses"])
+    assert seen["total_expenses"] == 100.0
+    assert seen["expenses_partially_restricted"] is True
+    acct = asyncio.run(pnl_mod.get_pnl(store_id="S1", current_user=ACCT, **RANGE))
+    assert acct["expenses"]["Supplier bills: Rent / lease"] == 50000.0
+    assert acct["total_expenses"] == 50100.0

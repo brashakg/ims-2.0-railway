@@ -702,7 +702,10 @@ def services_bill_costs(db, store_ids=None, from_date=None, to_date=None) -> Lis
     answer, unclaimed GST is cost). Goods bills (a goods receipt, or
     bill_kind GOODS / unstated) are stock, already costed through COGS when
     the pieces sell, and an inter-shop transfer mirror bill is never a cost.
-    Fail-soft: [] on a read error, as the other P&L legs."""
+    A supplier credit (debit note) against such a bill lowers its cost in the
+    credit's own period, by the bill's cost share of the credit (cost /
+    bill total: a credit's input-credit GST is not cost). Fail-soft: [] on a
+    read error, as the other P&L legs."""
     match: dict = {
         "bill_kind": ap_engine.BILL_KIND_SERVICES,
         "status": {"$nin": list(_NOT_A_COST_BILL_STATUSES)},
@@ -711,23 +714,41 @@ def services_bill_costs(db, store_ids=None, from_date=None, to_date=None) -> Lis
     }
     if store_ids is not None:
         match["store_id"] = {"$in": list(store_ids)}
+    days: dict = {}
     if from_date:
-        match.setdefault("bill_date", {})["$gte"] = str(from_date)[:10]
+        days["$gte"] = str(from_date)[:10]
     if to_date:
-        match.setdefault("bill_date", {})["$lte"] = str(to_date)[:10]
+        days["$lte"] = str(to_date)[:10]
     labels = {key: label for key, label, _blocked in ap_engine.EXPENSE_TYPES}
+
+    def _cost(b) -> float:
+        amount = float(b.get("taxable_amount") or 0)
+        if b.get("itc_eligible") is False:
+            amount += float(b.get("tax_amount") or 0)
+        return amount
+
+    def _row(b, amount) -> dict:
+        head = labels.get(b.get("expense_type") or "", "Other business expense")
+        return {"store_id": b.get("store_id"), "head": f"Supplier bills: {head}", "amount": round(amount, 2)}
+
     rows: List[dict] = []
     try:
-        for b in db.get_collection("vendor_bills").find(match, {"_id": 0}):
-            amount = float(b.get("taxable_amount") or 0)
-            if b.get("itc_eligible") is False:
-                amount += float(b.get("tax_amount") or 0)
-            head = labels.get(b.get("expense_type") or "", "Other business expense")
-            rows.append({
-                "store_id": b.get("store_id"),
-                "head": f"Supplier bills: {head}",
-                "amount": round(amount, 2),
-            })
+        bills = db.get_collection("vendor_bills")
+        for b in bills.find({**match, **({"bill_date": days} if days else {})}, {"_id": 0}):
+            rows.append(_row(b, _cost(b)))
+        credits = list(db.get_collection("vendor_debit_notes").find(
+            {"bill_id": {"$nin": [None, ""]}, **({"date": days} if days else {})},
+            {"_id": 0, "bill_id": 1, "amount": 1},
+        ))
+        if credits:
+            credited = {b["bill_id"]: b for b in bills.find(
+                {**match, "bill_id": {"$in": list({c["bill_id"] for c in credits})}}, {"_id": 0})}
+            for c in credits:
+                b = credited.get(c["bill_id"])
+                total = float((b or {}).get("total_amount") or 0)
+                if b is None or total <= 0:
+                    continue
+                rows.append(_row(b, -float(c.get("amount") or 0) * _cost(b) / total))
     except Exception:  # noqa: BLE001
         logger.warning("[PNL] services bills could not be read", exc_info=True)
         return []
@@ -742,67 +763,109 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
     return in a later month reduces THAT month, and the sale's own month is
     left as it was. The money is the return's own ``gst_breakup`` -- the same
     figures GSTR-3B nets off output tax, whatever the refund tender (cash, UPI,
-    card or store credit). The cost of goods comes back only for a piece that
-    really went back on sale: a GOOD line restocked (restock_applied), at the
-    cost the original sale line was charged at (cost_at_sale, else the live
-    cost, else the same 60% estimate the sale used), so one piece is never
-    costed twice. A DAMAGED piece stays in the cost of goods (it is not
-    sellable stock; a supplier credit for it is booked on the supplier side).
-    A return with no credit-note value (an advance refunded on a cancelled
-    order, never revenue) adds nothing. Fail-soft: {} on a read error."""
+    card or store credit).
+
+    Only a return whose order is still a sale in the BOOKS (utils/real_sale,
+    the rule the P&L reads its orders by): an order the books already drop --
+    cancelled (an invoiced advance refunded through its whole-invoice credit
+    note, a Shopify order imported cancelled and refunded), refund completed,
+    a pre-IMS import, or no order on record -- adds no revenue, so its credit
+    note must not be taken off a second time.
+
+    The cost of goods comes back for a piece that really went back on sale,
+    at the cost the original sale line was charged at (cost_at_sale, else the
+    live cost, else the same 60% estimate the sale used), so one piece is
+    never costed twice: a GOOD line restocked (restock_applied), dated by the
+    return; a piece the return set aside in quarantine, dated by its FIRST
+    release back to sale after the return (item_events quarantine.out ->
+    AVAILABLE, the ledger both release doors write). A set-aside piece written
+    off or sent to the supplier stays in the cost of goods. Fail-soft: {} on a
+    read error."""
     lo = _parse_range_dt(from_date, end=False)
     hi = _parse_range_dt(to_date, end=True)
+
+    def _in_range(when) -> bool:
+        return when is not None and not (lo is not None and when < lo) and not (hi is not None and when > hi)
+
     match: dict = {"status": {"$in": ["COMPLETED", "completed"]}}
     if store_ids is not None:
         match["store_id"] = {"$in": list(store_ids)}
     out: Dict[str, dict] = {}
     try:
         from ...utils.event_time import parse_event_utc_naive
+        from ...utils.real_sale import is_real_sale
 
         # ponytail: the date test runs in Python because returns store
         # created_at as ISO strings AND BSON dates; returns are few.
-        picked = []
+        picked = []  # (return, taxable, tax, gross, its own credit note in range)
         for ret in db.get_collection("returns").find(match, {"_id": 0}):
             when = parse_event_utc_naive(ret.get("created_at"))
-            if when is None or (lo is not None and when < lo) or (hi is not None and when > hi):
-                continue
             gb = ret.get("gst_breakup") if isinstance(ret.get("gst_breakup"), dict) else {}
             taxable = float(gb.get("taxable") or 0)
             tax = float(gb.get("tax") or 0)
-            if taxable <= 0 and tax <= 0:
-                continue
-            picked.append((ret, taxable, tax, float(gb.get("gross") or (taxable + tax))))
-        order_ids = list({r.get("order_id") for r, *_ in picked if r.get("order_id")})
+            noted = _in_range(when) and (taxable > 0 or tax > 0)
+            if noted or (ret.get("quarantined_stock_ids") and when is not None):
+                picked.append((ret, when, taxable, tax, float(gb.get("gross") or (taxable + tax)), noted))
+        order_ids = list({r[0].get("order_id") for r in picked if r[0].get("order_id")})
         orders = {
             o["order_id"]: o
             for o in db.get_collection("orders").find(
-                {"order_id": {"$in": order_ids}}, {"_id": 0, "order_id": 1, "items": 1}
+                {"order_id": {"$in": order_ids}},
+                {"_id": 0, "order_id": 1, "items": 1, "status": 1, "advance_refund_status": 1,
+                 "advance_refund_credit_note": 1, "invoice_number": 1, "status_before_void": 1},
             )
         } if order_ids else {}
-        for ret, taxable, tax, gross in picked:
-            lines = (orders.get(ret.get("order_id")) or {}).get("items") or []
+        picked = [p for p in picked if p[0].get("order_id") in orders and is_real_sale(orders[p[0]["order_id"]])]
+        # The first release back to sale of each set-aside piece.
+        held = {sid for p in picked for sid in (p[0].get("quarantined_stock_ids") or [])}
+        releases: Dict[str, list] = {}
+        if held:
+            for ev in db.get_collection("item_events").find(
+                {"stock_id": {"$in": list(held)}, "event_type": "quarantine.out", "to_state": "AVAILABLE"},
+                {"_id": 0, "stock_id": 1, "at": 1},
+            ):
+                at = parse_event_utc_naive(ev.get("at"))
+                if at is not None:
+                    releases.setdefault(ev["stock_id"], []).append(at)
+        for ret, when, taxable, tax, gross, noted in picked:
+            lines = orders[ret["order_id"]].get("items") or []
             by_item = {str(i.get("item_id")): i for i in lines if i.get("item_id")}
             by_product = {str(i.get("product_id")): i for i in lines if i.get("product_id")}
+
+            def _piece_cost(it) -> float:
+                line = by_item.get(str(it.get("order_item_id"))) or by_product.get(str(it.get("product_id")))
+                if line is None:
+                    return 0.0
+                cost = _item_cost(line, cost_by_product)
+                if cost is None:  # the sale's own 60% estimate, per piece
+                    cost = line_revenue_ex_gst(line) * 0.6 / float(line.get("quantity", 1) or 1)
+                return cost
+
             reversal = 0.0
-            if ret.get("restock_applied"):
+            if noted and ret.get("restock_applied"):
                 for it in ret.get("items") or []:
-                    if str(it.get("condition") or "").upper() != "GOOD" or not it.get("restock"):
-                        continue
-                    line = by_item.get(str(it.get("order_item_id"))) or by_product.get(str(it.get("product_id")))
-                    if line is None:
-                        continue
-                    qty = float(it.get("return_qty") or 0)
-                    cost = _item_cost(line, cost_by_product)
-                    if cost is None:  # the sale's own 60% estimate, per piece
-                        sold = float(line.get("quantity", 1) or 1)
-                        cost = line_revenue_ex_gst(line) * 0.6 / sold
-                    reversal += cost * qty
+                    if str(it.get("condition") or "").upper() == "GOOD" and it.get("restock"):
+                        reversal += _piece_cost(it) * float(it.get("return_qty") or 0)
+            # A set-aside piece released back to sale in the range. The unit
+            # carries its product; the line is found by it.
+            set_aside = [it for it in ret.get("items") or [] if str(it.get("condition") or "").upper() != "GOOD"]
+            for sid in ret.get("quarantined_stock_ids") or []:
+                first = min((t for t in releases.get(sid, []) if t >= when), default=None)
+                if not _in_range(first):
+                    continue
+                unit = db.get_collection("stock_units").find_one({"stock_id": sid}, {"_id": 0, "product_id": 1}) or {}
+                it = next((i for i in set_aside if str(i.get("product_id")) == str(unit.get("product_id"))),
+                          set_aside[0] if set_aside else {})
+                reversal += _piece_cost(it)
+            if not noted and not reversal:
+                continue
             row = out.setdefault(ret.get("store_id"), {"gross": 0.0, "taxable": 0.0, "tax": 0.0, "cogs_reversal": 0.0, "count": 0})
-            row["gross"] += gross
-            row["taxable"] += taxable
-            row["tax"] += tax
+            if noted:
+                row["gross"] += gross
+                row["taxable"] += taxable
+                row["tax"] += tax
+                row["count"] += 1
             row["cogs_reversal"] += reversal
-            row["count"] += 1
     except Exception:  # noqa: BLE001
         logger.warning("[PNL] customer returns could not be read", exc_info=True)
         return {}
