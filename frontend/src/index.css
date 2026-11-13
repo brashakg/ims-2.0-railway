@@ -3751,7 +3751,10 @@ main input[type="date"] { background-color: #fff; border-color: #d1d5db; color: 
    status badges, count pills, the store-pill, or real CTAs.
    Usage: <button className="ims-chip">…  selected → add "ims-chip--on".
    Components must carry ONLY these classes plus layout utilities (margins,
-   flex-position) — no competing bg-*/text-*/border-* Tailwind utilities.
+   flex-position) — no competing Tailwind background, text-colour or border
+   utilities. (UI-02: never write a glob that ends in a star followed by a
+   slash in a comment here: it closes the comment early, the rest of the
+   sentence becomes this rule's selector, and the browser drops the rule.)
    NO dark fills here on purpose: the light-theme bridge bleaches dark
    backgrounds, which is exactly how the old white-on-white pills happened.
    ============================================================================ */
