@@ -101,17 +101,21 @@ def test_malformed_email_or_short_username_is_rejected(monkeypatch):
 
 def test_an_unrelated_edit_never_rechecks_an_existing_legacy_login(monkeypatch):
     """The edit form always re-sends the username and email it loaded. A user
-    stored with a legacy value (an email the strict check would refuse, or a
-    mixed-case username) must still be editable, and is not rewritten."""
+    stored with a legacy value (an email the strict check would refuse, a
+    username with a space) must still be editable; a case-only difference is
+    stored lower-cased, which is what lets login (it lower-cases) find it."""
     repo = _repo()
     repo._docs["u1"].update({"username": "Ravi K", "email": "Ravi@Shop.local"})
     c = _client(repo, _ADMIN, monkeypatch)
     r = c.put("/api/v1/users/u1",
               json={"username": "Ravi K", "email": "Ravi@Shop.local", "phone": "9876543210"})
     assert r.status_code == 200, r.text
-    assert "username" not in repo.last_update and "email" not in repo.last_update
     doc = repo.find_by_id("u1")
-    assert (doc["username"], doc["email"]) == ("Ravi K", "Ravi@Shop.local")
+    assert (doc["username"], doc["email"]) == ("ravi k", "ravi@shop.local")
+    # the exact stored value is not rewritten at all
+    r = c.put("/api/v1/users/u1", json={"username": "ravi k", "full_name": "R K"})
+    assert r.status_code == 200, r.text
+    assert "username" not in repo.last_update
 
 
 def test_a_case_only_twin_is_left_alone_not_a_500(monkeypatch):
@@ -145,7 +149,10 @@ def test_a_login_rename_leaves_an_audit_row(monkeypatch):
     assert c.put("/api/v1/users/u1", json={"email": "ravi.new@example.com"}).status_code == 200
     login_rows = [r for r in rows if r.get("action") == "USER_LOGIN_CHANGED"]
     assert len(login_rows) == 1
-    assert login_rows[0]["email"] == {"from": "ravi@example.com", "to": "ravi.new@example.com"}
+    assert login_rows[0]["before_state"] == {"email": "ravi@example.com"}
+    assert login_rows[0]["after_state"] == {"email": "ravi.new@example.com"}
+    # never a non-string at the top-level actor keys the Activity Log renders
+    assert "username" not in login_rows[0] and "email" not in login_rows[0]
     assert login_rows[0]["target_user_id"] == "u1"
     # a plain edit leaves no login row
     rows.clear()

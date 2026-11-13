@@ -669,11 +669,14 @@ def _apply_login_identity_edit(repo, user_id: str, existing: dict, update_data: 
     """An edit may change a user's username / email (both are login keys).
     Mutates ``update_data`` and returns {field: (old, new)} for what really changes.
 
-    * an explicit null, or a value equal to the stored one ignoring case, is
-      dropped: no write (a case-only rewrite could collide with a legacy
-      "Ravi"/"ravi" pair on the unique index and surface as a 500);
-    * a changed value must be well-formed (username 3-50 of [a-z0-9._-], a valid
-      email) and not held by another user, compared case-insensitively.
+    * an explicit null, or the exact stored value, is dropped: no write;
+    * a case-only difference (a legacy "Ravi" that login, which lower-cases,
+      cannot find) is written lower-cased, which repairs that login -- unless
+      another user already holds exactly the lower-cased value (a legacy
+      "Ravi"/"ravi" pair), when it is left alone instead of hitting the unique
+      index as a 500;
+    * any other change must be well-formed (username 3-50 of [a-z0-9._-], a
+      valid email) and not held by another user, compared case-insensitively.
     """
     changed = {}
     for field, label in (("username", "Username"), ("email", "Email")):
@@ -681,8 +684,15 @@ def _apply_login_identity_edit(repo, user_id: str, existing: dict, update_data: 
             continue
         value = update_data[field]
         old = existing.get(field) or ""
-        if value is None or value == old.strip().lower():
+        if value is None or value == old:
             update_data.pop(field)
+            continue
+        if value == old.strip().lower():
+            twin = getattr(repo, f"find_by_{field}")(value)
+            if twin and twin.get("user_id") != user_id:
+                update_data.pop(field)
+            else:
+                changed[field] = (old, value)
             continue
         if field == "username" and not re.fullmatch(r"[a-z0-9._-]{3,50}", value):
             raise HTTPException(
@@ -1170,7 +1180,11 @@ async def update_user(
             if _login_changed:
                 _write_password_reset_audit(
                     current_user, existing, action="USER_LOGIN_CHANGED",
-                    extra={f: {"from": o, "to": n} for f, (o, n) in _login_changed.items()},
+                    extra={
+                        # the shape the Activity Log's change panel already reads
+                        "before_state": {f: o for f, (o, _n) in _login_changed.items()},
+                        "after_state": {f: n for f, (_o, n) in _login_changed.items()},
+                    },
                 )
             return {"user_id": user_id, "message": "User updated successfully"}
 
@@ -1358,7 +1372,7 @@ def _write_password_reset_audit(
                 "severity": "INFO",
                 "timestamp": datetime.now(),
                 # Deliberately NO password field of any kind. ``extra`` carries
-                # the from/to of a login rename (USER_LOGIN_CHANGED).
+                # a login rename's before_state/after_state (USER_LOGIN_CHANGED).
                 **(extra or {}),
             }
         )
