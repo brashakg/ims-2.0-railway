@@ -6,7 +6,12 @@
 import { useState, useEffect } from 'react';
 import { ShoppingBag, Calendar, Loader2 } from 'lucide-react';
 import { orderApi } from '../../services/api';
-import { CUSTOMER_SPEND_ORDER_LIMIT, summariseCustomerSpend } from '../../utils/customerSpend';
+import {
+  CUSTOMER_SPEND_LABEL,
+  CUSTOMER_SPEND_NOTE,
+  CUSTOMER_SPEND_ORDER_LIMIT,
+  summariseCustomerSpend,
+} from '../../utils/customerSpend';
 
 interface PurchaseHistoryData {
   totalSpend: number;
@@ -104,8 +109,9 @@ export function CustomerPurchaseHistory({ customerId }: CustomerPurchaseHistoryP
       <div className="grid grid-cols-2 gap-4 mb-4">
         {/* Total Spend */}
         <div className="bg-white rounded-lg p-3 border border-bv-red-100">
-          <p className="text-xs text-gray-600 uppercase font-semibold">Total Spend</p>
+          <p className="text-xs text-gray-600 uppercase font-semibold">{CUSTOMER_SPEND_LABEL}</p>
           <p className="text-2xl font-bold text-bv-red-600">₹{data.totalSpend.toLocaleString('en-IN')}</p>
+          <p className="text-[11px] text-gray-400">{CUSTOMER_SPEND_NOTE}</p>
         </div>
 
         {/* Order Count */}

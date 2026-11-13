@@ -21,6 +21,9 @@ describe('CustomerPurchaseHistory', () => {
     render(<CustomerPurchaseHistory customerId="C1" />);
     expect(await screen.findByText('₹3,000')).toBeInTheDocument();
     expect(screen.getByText('₹1,500')).toBeInTheDocument(); // average of the two counted
+    // labelled as gross ordered value, not settled net spend
+    expect(screen.getByText('Total ordered (gross)')).toBeInTheDocument();
+    expect(screen.getByText(/returns not deducted/)).toBeInTheDocument();
     expect(getOrders).toHaveBeenCalledWith({ customerId: 'C1', limit: 500 });
   });
 });

@@ -32,7 +32,12 @@ import {
 import type { Customer } from '../../types';
 import { customerApi, prescriptionApi } from '../../services/api';
 import { fetchCustomerOrders } from '../../hooks/useCustomerDues';
-import { CUSTOMER_SPEND_ORDER_LIMIT, summariseCustomerSpend } from '../../utils/customerSpend';
+import {
+  CUSTOMER_SPEND_LABEL,
+  CUSTOMER_SPEND_NOTE,
+  CUSTOMER_SPEND_ORDER_LIMIT,
+  summariseCustomerSpend,
+} from '../../utils/customerSpend';
 import { buildCustomerSearchHits } from '../../utils/customerSearchHits';
 import { loyaltyApi } from '../../services/api/loyalty';
 import { marketingApi } from '../../services/api/marketing';
@@ -552,8 +557,9 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
             <p className="text-gray-900 font-semibold">{new Date(stats.customerSinceDate).toLocaleDateString()}</p>
           </div>
           <div className="text-center">
-            <p className="text-gray-500 text-sm">Lifetime Value</p>
+            <p className="text-gray-500 text-sm">{CUSTOMER_SPEND_LABEL}</p>
             <p className="text-green-600 font-semibold">₹{stats.totalLifetimeValue.toLocaleString('en-IN')}</p>
+            <p className="text-[11px] text-gray-400">{CUSTOMER_SPEND_NOTE}</p>
           </div>
           <div className="text-center">
             <p className="text-gray-500 text-sm">Visit Frequency</p>

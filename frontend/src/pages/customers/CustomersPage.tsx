@@ -30,7 +30,13 @@ import {
 } from 'lucide-react';
 import type { Customer, Patient, Prescription } from '../../types';
 import { customerApi, prescriptionApi, orderApi } from '../../services/api';
-import { CUSTOMER_SPEND_ORDER_LIMIT, summariseCustomerSpend, type CustomerSpend } from '../../utils/customerSpend';
+import {
+  CUSTOMER_SPEND_LABEL,
+  CUSTOMER_SPEND_NOTE,
+  CUSTOMER_SPEND_ORDER_LIMIT,
+  summariseCustomerSpend,
+  type CustomerSpend,
+} from '../../utils/customerSpend';
 import { loyaltyApi, type LoyaltyAccount } from '../../services/api/loyalty';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -781,8 +787,9 @@ export function CustomersPage() {
       {/* Customer Summary Stats Row */}
       <div className="grid grid-cols-2 tablet:grid-cols-5 gap-4">
         <div className="card text-center">
-          <p className="text-xs text-gray-500 uppercase tracking-wide">Total Spend</p>
+          <p className="text-xs text-gray-500 uppercase tracking-wide">{CUSTOMER_SPEND_LABEL}</p>
           <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(totalSpend)}</p>
+          <p className="text-[11px] text-gray-400">{CUSTOMER_SPEND_NOTE}</p>
         </div>
         <div className="card text-center">
           <p className="text-xs text-gray-500 uppercase tracking-wide">Total Orders</p>

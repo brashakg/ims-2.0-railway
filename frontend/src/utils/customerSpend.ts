@@ -12,6 +12,11 @@
 // customers list uses (customers._CUSTOMER_STATS_EXCLUDED_STATUSES). Partial
 // returns are not netted (gross ordered value), as on that list.
 
+/** The on-screen name and footnote of this figure on every customer door: it
+ *  is GROSS ORDERED value, not settled net spend (audit: keep labels clear). */
+export const CUSTOMER_SPEND_LABEL = 'Total ordered (gross)';
+export const CUSTOMER_SPEND_NOTE = 'Excludes draft, cancelled, refunded; returns not deducted';
+
 /** GET /orders allows at most 500 per call; a customer-scoped read is not
  *  date-limited, so this is the customer's latest 500 orders. */
 export const CUSTOMER_SPEND_ORDER_LIMIT = 500;
