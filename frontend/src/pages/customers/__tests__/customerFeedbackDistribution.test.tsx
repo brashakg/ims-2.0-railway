@@ -22,7 +22,8 @@ describe('CustomerFeedback score distribution', () => {
       responses: Array.from({ length: 20 }, (_, i) => ({ nps_id: `P${i}`, score: 10 })),
     });
     render(<CustomerFeedback />);
-    const counts = await screen.findAllByText(/^\d+ responses$/);
+    await screen.findByText('Score Distribution');
+    const counts = screen.getAllByText(/^\d+ responses$/);
     // distribution rows render 10 -> 0, after the summary card's total
     expect(counts.map((c) => c.textContent)).toContain('20 responses');
     expect(counts[counts.length - 1].textContent).toBe('1 responses');
