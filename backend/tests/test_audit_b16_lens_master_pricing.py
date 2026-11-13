@@ -115,9 +115,7 @@ def ldb(monkeypatch):
 @pytest.mark.parametrize(
     "kind,coll,id_field,ref_coll,ref",
     [
-        ("brand", "lens_brand_masters", "brand_id", "lens_pricing_masters", {"brandId": "X1"}),
         ("brand", "lens_brand_masters", "brand_id", "lens_pricing_ranges", {"brand_id": "X1", "is_active": True}),
-        ("index", "lens_index_masters", "index_id", "lens_pricing_masters", {"indexId": "X1"}),
         ("index", "lens_index_masters", "index_id", "lens_pricing_ranges", {"index_id": "X1", "is_active": True}),
     ],
 )
@@ -128,7 +126,27 @@ def test_lens_delete_refused_while_prices_point_at_it(ldb, kind, coll, id_field,
     with pytest.raises(HTTPException) as exc:
         run(fn("X1"))
     assert exc.value.status_code == 409
+    assert "Lens range pricing" in exc.value.detail  # names a screen staff can act on
     assert ldb[coll].count_documents({id_field: "X1"}) == 1
+
+
+@pytest.mark.parametrize(
+    "kind,coll,id_field,ref",
+    [
+        ("brand", "lens_brand_masters", "brand_id", {"brandId": "X1", "indexId": "I", "basePrice": 900}),
+        ("index", "lens_index_masters", "index_id", {"brandId": "B", "indexId": "X1", "basePrice": 900}),
+    ],
+)
+def test_legacy_matrix_row_does_not_block_delete_and_is_kept(ldb, kind, coll, id_field, ref):
+    """Review must-fix: no screen or route can remove a legacy matrix row, so it
+    must not block the delete (a 409 staff cannot act on). The row itself is
+    left untouched - stored price history is never rewritten."""
+    ldb[coll].insert_one({id_field: "X1", "name": "Ref"})
+    ldb["lens_pricing_masters"].insert_one(dict(ref))
+    fn = admin_catalog.delete_lens_brand if kind == "brand" else admin_catalog.delete_lens_index
+    run(fn("X1"))
+    assert ldb[coll].count_documents({id_field: "X1"}) == 0
+    assert ldb["lens_pricing_masters"].count_documents({}) == 1
 
 
 def test_lens_delete_unreferenced_removes_only_that_row(ldb):
