@@ -277,8 +277,17 @@ async def get_pnl(
     expenses = list(db.get_collection("expenses").aggregate(exp_pipeline))
     # Supplier SERVICES bills are the same costs booked on the supplier side
     # (audit L3-04): one head per expense type, beside the expense heads.
+    # What a supplier is paid is for the accounts roles only (owner ruling
+    # 2026-10-12, cost_mask 'payables'): anyone else gets no supplier-bill
+    # head and a total without them, flagged -- never a figure to subtract.
     shop_ids = [store_id] if store_id else None
-    for row in services_bill_costs(db, shop_ids, from_date, to_date):
+    bill_rows = services_bill_costs(db, shop_ids, from_date, to_date)
+    if bill_rows and not can_see_cost(current_user, "payables"):
+        bill_rows = []
+        payables_hidden = True
+    else:
+        payables_hidden = False
+    for row in bill_rows:
         expenses.append({"_id": row["head"], "amount": row["amount"]})
     merged: dict = {}
     for e in expenses:
@@ -376,6 +385,8 @@ async def get_pnl(
         "net_margin": round(net_profit / revenue * 100, 1) if revenue > 0 else 0,
         "tax_collected": tax,
     }
+    if payables_hidden:
+        pnl["expenses_partially_restricted"] = True
     # F35 / GAP_ANALYSIS G1: /pnl is store-scoped only (NO role gate), so the cost,
     # profit and margin economics must be stripped for any role not in
     # COST_VISIBLE_ROLES (excludes AREA_MANAGER per DECISIONS sec 9). Revenue + tax
