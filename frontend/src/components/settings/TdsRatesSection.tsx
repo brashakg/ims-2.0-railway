@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import { Save, RefreshCw, AlertCircle, Loader2, Info, RotateCcw } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { isSuperAdmin } from '../../utils/capabilities';
 import { settingsApi } from '../../services/api/settings';
 import { getErrorMessage } from '../../utils/errorHandler';
 
@@ -28,8 +29,8 @@ const SECTION_LABELS: Record<string, string> = {
 
 export function TdsRatesSection() {
   const toast = useToast();
-  const { hasRole } = useAuth();
-  const canEdit = hasRole?.(['SUPERADMIN']);
+  const { user } = useAuth();
+  const canEdit = isSuperAdmin(user?.roles);
 
   const [rates, setRates] = useState<Record<string, number>>({});
   const [defaults, setDefaults] = useState<Record<string, number>>({});

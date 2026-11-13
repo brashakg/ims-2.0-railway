@@ -12,6 +12,7 @@
 import { useEffect, useState } from 'react';
 import { LogOut } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { isSuperAdmin } from '../../utils/capabilities';
 import { useToast } from '../../context/ToastContext';
 import { settingsApi } from '../../services/api/settings';
 
@@ -20,8 +21,8 @@ const MINUTE_PRESETS = [5, 10, 15, 30, 60];
 
 export function AutoLogoutSettings() {
   const toast = useToast();
-  const { hasRole } = useAuth();
-  const canEdit = hasRole(['SUPERADMIN']);
+  const { user } = useAuth();
+  const canEdit = isSuperAdmin(user?.roles); // PUT /settings/system is SUPERADMIN-only
 
   const [enabled, setEnabled] = useState(DEFAULTS.enabled);
   const [minutes, setMinutes] = useState(DEFAULTS.minutes);

@@ -16,6 +16,7 @@ import { financeApi } from '../../services/api/finance';
 import { AutoLogoutSettings } from '../../components/settings/AutoLogoutSettings';
 import { settingsApi } from '../../services/api/settings';
 import { useAuth } from '../../context/AuthContext';
+import { isSuperAdmin } from '../../utils/capabilities';
 
 export function SystemSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
@@ -136,8 +137,8 @@ function SystemSection({ systemStatus }: { systemStatus: { database: string; api
 // merges). Switching it off runs the stock pass at once (settings.py).
 export function WebPageTypesSetting() {
   const toast = useToast();
-  const { hasRole } = useAuth();
-  const canEdit = hasRole(['SUPERADMIN']);
+  const { user } = useAuth();
+  const canEdit = isSuperAdmin(user?.roles); // PUT /settings/system is SUPERADMIN-only
   const [current, setCurrent] = useState<Record<string, unknown> | null>(null);
 
   useEffect(() => {
