@@ -274,10 +274,17 @@ def test_the_restock_plan_never_plans_a_unit_for_a_virtual_till_item():
         {"item_type": "SUNGLASS", "product_id": None, "ims_product_id": "PRD-1"}) == "PRD-1"
 
 
-def test_two_pieces_come_back_one_by_one_each_once_and_a_retry_moves_nothing(ctx):  # noqa: F811
+@pytest.mark.parametrize("scanned", [False, True])
+def test_two_pieces_come_back_one_by_one_each_once_and_a_retry_moves_nothing(ctx, scanned):  # noqa: F811
+    """`scanned`: the line names its scanned unit (STK-OLD-1); the second piece
+    sold first-available (orders/stock.py). The second return used to read
+    "Restock applied" and leave STK-OLD-2 SOLD for good (the line's own unit
+    was already back from the FIRST return)."""
     ctx["stock_repo"].units.append({"stock_id": "STK-OLD-2", "product_id": "PRD-1", "store_id": "BV-PUN-01",
                                     "status": "SOLD", "order_id": "ORD-1"})
     _line(ctx)["quantity"] = 2
+    if scanned:
+        _line(ctx)["stock_id"] = "STK-OLD-1"
     first = _post(ctx, _screen(), key="K-1")
     assert first.status_code == 201, first.text
     assert sorted(s for _, _, s in _units(ctx)) == ["AVAILABLE", "SOLD"]
@@ -685,11 +692,13 @@ def test_retry_stock_step_is_for_accounts_and_admin_on_a_completed_record_only(c
 REBUILT_ITEM = {"order_item_id": "li1", "item_id": "li1", "product_id": "PRD-1", "return_qty": 1.0}
 
 
-def _frames(ctx, a_status="AVAILABLE", removed=False):  # noqa: F811
+def _frames(ctx, a_status="AVAILABLE", removed=False, trace="stamp"):  # noqa: F811
     """The bill named a unit per line: li1 -> STK-A, li2 -> STK-B, both PRD-1.
     The customer returned li1; STK-B is still on the customer's face.
-    `a_status` AVAILABLE: the press put STK-A back before it died. `removed`:
-    an edit took li1 off the bill after the goods left (#1393's removed_lines)."""
+    `a_status` AVAILABLE: the press put STK-A back before it died, leaving
+    its `trace` -- the stamp the flip writes, or (an older press) its
+    stock_audit row. `removed`: an edit took li1 off the bill after the goods
+    left (#1393's removed_lines)."""
     order = ctx["order_repo"]._order
     li1 = {"item_id": "li1", "product_id": "PRD-1", "quantity": 1, "returned_qty": 1, "stock_id": "STK-A"}
     li2 = {"item_id": "li2", "product_id": "PRD-1", "quantity": 1, "returned_qty": 0, "stock_id": "STK-B"}
@@ -699,6 +708,11 @@ def _frames(ctx, a_status="AVAILABLE", removed=False):  # noqa: F811
     a = {"stock_id": "STK-A", "product_id": "PRD-1", "store_id": "BV-PUN-01", "status": a_status}
     a.update({"order_id": "ORD-1"} if a_status == "SOLD"
              else {"returned_from_order_id": "ORD-1", "prior_sold_order_id": "ORD-1"})
+    if a_status != "SOLD" and trace == "stamp":
+        a["returned_by_return_id"] = "RET-REC"
+    elif a_status != "SOLD":
+        ctx["stock_audit_coll"].docs.append({"stock_id": "STK-A", "prior_status": "SOLD",
+                                             "new_status": a_status, "return_id": "RET-REC"})
     ctx["stock_repo"].units[:] = [a, {"stock_id": "STK-B", "product_id": "PRD-1", "store_id": "BV-PUN-01",
                                       "status": "SOLD", "order_id": "ORD-1"}]
 
@@ -707,13 +721,15 @@ def _rebuilt_doc(ctx, **item):  # noqa: F811
     return _recovered(ctx, source="credit line", items=[{**REBUILT_ITEM, **item}])
 
 
+@pytest.mark.parametrize("trace", ["stamp", "audit row"])
 @pytest.mark.parametrize("removed", [False, True])
 @pytest.mark.parametrize("rebuilt", [False, True])
-def test_the_retry_never_flips_another_lines_piece_nor_mints_when_its_own_is_back(ctx, rebuilt, removed):  # noqa: F811
+def test_the_retry_never_flips_another_lines_piece_nor_mints_when_its_own_is_back(
+        ctx, rebuilt, removed, trace):  # noqa: F811
     """D43 (a): the press put STK-A back and died before its record kept it.
     The retry used to flip STK-B -- the frame the customer still wears -- to
     AVAILABLE (and a rebuilt record could not be retried at all)."""
-    _frames(ctx, removed=removed)
+    _frames(ctx, removed=removed, trace=trace)
     if rebuilt:
         _rebuilt_doc(ctx, condition="GOOD")
     else:
@@ -725,7 +741,7 @@ def test_the_retry_never_flips_another_lines_piece_nor_mints_when_its_own_is_bac
     assert r.json()["restock_applied"] is True and r.json()["restock_stock_ids"] == []
     saved = ctx["returns_coll"].docs[-1]
     assert saved["restock_applied"] is True and saved["restock_in_progress"] is False
-    assert [row.get("already_back") for row in saved["restocked"]] == [1]
+    assert saved["restocked"] == [], "no unit counted as moved by this retry"
 
 
 @pytest.mark.parametrize("removed", [False, True])
@@ -758,11 +774,17 @@ def test_a_rebuilt_piece_whose_condition_was_not_kept_is_set_aside_never_put_on_
     assert _units(ctx) == [("STK-A", "PRD-1", "QUARANTINED"), ("STK-B", "PRD-1", "SOLD")]
 
 
+@pytest.mark.parametrize("condition", ["GOOD", None])
 @pytest.mark.parametrize("trace", ["stamp", "audit row"])
-def test_a_rebuilt_retry_reads_what_its_press_already_moved_from_the_stock(ctx, trace):  # noqa: F811
+def test_a_rebuilt_retry_reads_what_its_press_already_moved_from_the_stock(ctx, trace, condition):  # noqa: F811
     """Line li1 names no unit and sold two; the customer returned one, which
     the press put back (STK-BACK) before it died; STK-OLD-1 is still worn. A
-    retry used to flip the worn one, or mint a third."""
+    retry used to flip the worn one, or mint a third. `condition` None: an
+    older press kept none, so the piece is one to set aside -- and the piece
+    the press already put back is that piece (it used to set aside the worn
+    STK-OLD-1 as well)."""
+    from api.routers import returns as returns_router
+
     back = {"stock_id": "STK-BACK", "product_id": "PRD-1", "store_id": "BV-PUN-01", "status": "AVAILABLE",
             "returned_from_order_id": "ORD-1"}
     if trace == "stamp":
@@ -772,11 +794,136 @@ def test_a_rebuilt_retry_reads_what_its_press_already_moved_from_the_stock(ctx, 
                                              "new_status": "AVAILABLE", "return_id": "RET-REC"})
     ctx["stock_repo"].units.append(back)
     _line(ctx)["quantity"] = 2
-    _rebuilt_doc(ctx, condition="GOOD")
+    doc = _rebuilt_doc(ctx, **({"condition": condition} if condition else {}))
+    # The panel does not send staff to press the retry for it.
+    state = returns_router._recovered_stock_state(doc, ctx["order_repo"]._order)
+    assert state["out"] == {} and state["aside_out"] == {} and state["open"] is False, state
     before = _units(ctx)
     r = _retry(ctx)
     assert r.status_code == 200 and r.json()["restock_applied"] is True, r.text
     assert _units(ctx) == before
+
+
+def test_each_unit_this_return_moved_is_credited_once_its_own_line_first():
+    from api.routers.returns import _units_still_out
+
+    plan = [{"product_id": "P", "order_item_id": li} for li in ("li1", "li2", "li3")]
+    lines = {"li1": "A", "li2": "B"}  # li3 names no unit (sold first-available)
+    # B is li2's own; the other moved unit no line names is li3's: li1 is out.
+    assert [u["order_item_id"] for u in _units_still_out(plan, {"P": 2}, {"B"}, lines)] == ["li1"]
+    # Credited once: li2's own unit never also takes li1's slot.
+    assert [u["order_item_id"] for u in _units_still_out(plan, {"P": 1}, {"B"}, lines)] == ["li1", "li3"]
+    # A unit an EARLIER return moved is no credit at all.
+    assert [u["order_item_id"] for u in _units_still_out(plan, {}, {"Z"}, lines)] == ["li1", "li2", "li3"]
+
+
+def test_a_retry_credits_the_unit_its_kept_record_names_when_the_stock_kept_no_trace(ctx):  # noqa: F811
+    """An older press stamped no unit; its record kept the id it put back."""
+    _frames(ctx, trace="none")
+    ctx["stock_audit_coll"].docs.clear()
+    _recovered(ctx, restock_stock_ids=["STK-A"])
+    before = _units(ctx)
+    r = _retry(ctx)
+    assert r.status_code == 200 and r.json()["restock_applied"] is True, r.text
+    assert _units(ctx) == before, "nothing flipped, nothing minted"
+
+
+def _two_lines_same_product(ctx):  # noqa: F811
+    """li1 -> STK-A, li2 -> STK-B, both PRD-1, neither returned yet."""
+    _frames(ctx, a_status="SOLD")
+    for line in ctx["order_repo"]._order["items"]:
+        line["returned_qty"] = 0
+
+
+def _flip_fails_for(monkeypatch, sid, times=1):
+    """The stock write of unit `sid` raises (controlled), `times` times."""
+    from api.routers import returns as returns_router
+
+    real, left = returns_router._flip_sold_unit, {"n": times}
+
+    def _flip(stock_repo, unit_id, fields, **kw):
+        if unit_id == sid and left["n"] > 0:
+            left["n"] -= 1
+            raise RuntimeError("controlled stock write failure")
+        return real(stock_repo, unit_id, fields, **kw)
+
+    monkeypatch.setattr(returns_router, "_flip_sold_unit", _flip)
+
+
+@pytest.mark.parametrize("condition", ["GOOD", "DAMAGED"])
+def test_a_retry_puts_back_the_failed_lines_piece_when_a_later_line_of_the_product_landed(
+        ctx, monkeypatch, condition):  # noqa: F811
+    """Both lines come back in one press; li1's stock write fails, li2's
+    lands (STK-B). The retry used to credit STK-B twice -- once per product,
+    once as li2's own unit -- and close the step with STK-A still SOLD."""
+    _two_lines_same_product(ctx)
+    _flip_fails_for(monkeypatch, "STK-A")
+    body = _screen(condition=condition)
+    body["items"].append({**SCREEN_LINE, "order_item_id": "li2", "condition": condition})
+    first = _post(ctx, body)
+    assert first.status_code == 201, first.text
+    landed = "AVAILABLE" if condition == "GOOD" else "QUARANTINED"
+    assert _units(ctx) == [("STK-A", "PRD-1", "SOLD"), ("STK-B", "PRD-1", landed)]
+    assert first.json()["restock_applied"] is False, "a piece still reads sold: the step stays open"
+    rid = first.json()["return_id"]
+    r = _retry(ctx, rid, roles=("SALES_STAFF",), door="/restock")
+    assert r.status_code == 200 and r.json()["restock_applied"] is True, r.text
+    assert _units(ctx) == [("STK-A", "PRD-1", landed), ("STK-B", "PRD-1", landed)]
+    again = _retry(ctx, rid, roles=("SALES_STAFF",), door="/restock")
+    assert again.json()["message"] == "Already restocked"
+    assert _units(ctx) == [("STK-A", "PRD-1", landed), ("STK-B", "PRD-1", landed)]
+
+
+def test_a_scanned_two_piece_line_whose_second_write_failed_is_finished_by_the_retry(ctx, monkeypatch):  # noqa: F811
+    """One line, quantity 2, names its scanned unit STK-OLD-1; STK-OLD-2 sold
+    first-available. Both come back; STK-OLD-1 lands, STK-OLD-2's write fails.
+    The retry used to answer "own unit already back" and leave STK-OLD-2 SOLD."""
+    ctx["stock_repo"].units.append({"stock_id": "STK-OLD-2", "product_id": "PRD-1", "store_id": "BV-PUN-01",
+                                    "status": "SOLD", "order_id": "ORD-1"})
+    _line(ctx).update(quantity=2, stock_id="STK-OLD-1")
+    _flip_fails_for(monkeypatch, "STK-OLD-2")
+    first = _post(ctx, _screen(return_qty=2))
+    assert first.status_code == 201 and first.json()["restock_applied"] is False, first.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "AVAILABLE"), ("STK-OLD-2", "PRD-1", "SOLD")]
+    rid = first.json()["return_id"]
+    r = _retry(ctx, rid, roles=("SALES_STAFF",), door="/restock")
+    assert r.status_code == 200 and r.json()["restock_applied"] is True, r.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "AVAILABLE"), ("STK-OLD-2", "PRD-1", "AVAILABLE")]
+    assert len(ctx["stock_repo"].units) == 2, "nothing minted"
+
+
+def test_a_kept_record_saved_without_a_product_is_retried_from_its_bill_line(ctx):  # noqa: F811
+    """A press composed before the screen sent a product: the panel names the
+    piece from its bill line, so the retry must read it the same way (it used
+    to plan nothing and close the step with the piece SOLD)."""
+    doc = _recovered(ctx)
+    del doc["items"][0]["product_id"]
+    assert returns_router_state(ctx, doc)["out"] == {"RB-1": 1}
+    r = _retry(ctx)
+    assert r.status_code == 200 and r.json()["restock_stock_ids"] == ["STK-OLD-1"], r.text
+    assert _units(ctx) == [("STK-OLD-1", "PRD-1", "AVAILABLE")]
+
+
+def returns_router_state(ctx, doc):  # noqa: F811
+    from api.routers import returns as returns_router
+
+    return returns_router._recovered_stock_state(doc, ctx["order_repo"]._order)
+
+
+def test_a_set_aside_that_failed_on_the_retry_keeps_the_step_open(ctx, monkeypatch):  # noqa: F811
+    """D7: the retry deals with each piece once and stays recoverable. A
+    set-aside whose stock write failed used to close the step anyway."""
+    _frames(ctx, a_status="SOLD")
+    _rebuilt_doc(ctx)
+    _flip_fails_for(monkeypatch, "STK-A")
+    r = _retry(ctx)
+    assert r.status_code == 200 and r.json()["restock_applied"] is False, r.text
+    assert _units(ctx) == [("STK-A", "PRD-1", "SOLD"), ("STK-B", "PRD-1", "SOLD")]
+    saved = ctx["returns_coll"].docs[-1]
+    assert saved["restock_applied"] is False and saved["restock_in_progress"] is False
+    again = _retry(ctx)
+    assert again.status_code == 200 and again.json()["restock_applied"] is True, again.text
+    assert _units(ctx) == [("STK-A", "PRD-1", "QUARANTINED"), ("STK-B", "PRD-1", "SOLD")]
 
 
 def test_a_retry_that_fails_after_its_claim_gives_the_claim_back(ctx, monkeypatch):  # noqa: F811
