@@ -1013,14 +1013,16 @@ def _record_screen_close(
     coll = _sessions_coll(db)
     if coll is None:
         return {"ok": False, "error": "no_db"}
+    # TWO DRAWERS ON ONE DAY (D40): a second drawer can be opened once the
+    # first is LOCKED (open_session only joins OPEN / BLIND_SUBMITTED). The
+    # drawer still open is the one being closed, so it is looked for FIRST; a
+    # LOCKED drawer is only the answer when no drawer is open. A day with one
+    # drawer finds that drawer either way, exactly as before.
+    day = {"store_id": store_id, "session_date": session_date}
     try:
         existing = coll.find_one(
-            {
-                "store_id": store_id,
-                "session_date": session_date,
-                "status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED, STATUS_LOCKED]},
-            }
-        )
+            {**day, "status": {"$in": [STATUS_OPEN, STATUS_BLIND_SUBMITTED]}}
+        ) or coll.find_one({**day, "status": STATUS_LOCKED})
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"read_failed:{exc}"}
 

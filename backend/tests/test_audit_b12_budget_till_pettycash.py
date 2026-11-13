@@ -492,6 +492,138 @@ class TestL328ReopenConflictIsAPlainConflict:
         assert exc.value.detail == "not_locked"
 
 
+# ===========================================================================
+# D40  Two drawers on one shop-day: both close doors act on the OPEN drawer
+# ===========================================================================
+
+
+def _cr_close_two_drawers(db, monkeypatch, **body_kw):
+    """Drive Finance > Cash Register's real close handler for DATE."""
+    monkeypatch.setattr(finance_router, "_get_db", lambda: db)
+    monkeypatch.setattr(finance_router, "_iso_now", lambda: f"{DATE}T12:00:00")
+    db.get_collection("cash_register_sessions").insert_one(
+        {
+            "_id": "CR-D40",
+            "session_id": "CR-D40",
+            "store_id": STORE,
+            "status": "OPEN",
+            "opening_float": 0.0,
+            "opening_denominations": [],
+            "opened_at": f"{DATE}T04:00:00",
+        }
+    )
+    body = finance_router.CashRegisterClose(session_id="CR-D40", **body_kw)
+    return asyncio.run(
+        finance_router.close_cash_register(body=body, current_user=MANAGER)
+    )
+
+
+class TestD40TwoDrawersCloseTheOpenOne:
+    """The reviewer's sequence: drawer A blind-counted Rs 1,000 and LOCKED,
+    then drawer B opened for the same shop-day (allowed -- the open joins only
+    an OPEN / BLIND_SUBMITTED drawer). The day is then closed with Rs 3,000.
+    The shared lookup used to return locked A: the close said 'already
+    counted', B stayed OPEN and uncounted, and the Day-End record stored A's
+    Rs 1,000 with variance -2,000 instead of the Rs 3,000 just counted."""
+
+    def test_day_end_counts_the_open_drawer_not_the_locked_one(self, db, day_end):
+        locked_sid, open_sid = _locked_then_second_drawer(db)
+
+        close = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
+
+        assert close["till_session_id"] == open_sid
+        assert close["till_already_counted"] is False
+        assert close["closing_cash"] == 3000.0
+        assert close["variance"] == 0.0
+        assert close["counted_from_shared_record"] is False
+        assert close["till_count_differs"] is False
+        assert close["entered_closing_cash"] is None
+        stored = _stored_close(db)
+        assert (stored["closing_cash"], stored["variance"]) == (3000.0, 0.0)
+        assert stored["till_session_id"] == open_sid
+        # B is counted; A is untouched; no third drawer.
+        b, a = _till(db, open_sid), _till(db, locked_sid)
+        assert (b["status"], b["blind_count_paisa"]) == (till.STATUS_BLIND_SUBMITTED, 300000)
+        assert (a["status"], a["blind_count_paisa"]) == (till.STATUS_LOCKED, 100000)
+        assert len(list(db.get_collection("till_sessions").find({}))) == 2
+
+    def test_an_identical_retry_writes_nothing_new(self, db, day_end):
+        locked_sid, open_sid = _locked_then_second_drawer(db)
+        day_end(closing_cash=3000.0, system_cash=3000.0)
+        before = [dict(d) for d in db.get_collection("till_sessions").find({})]
+
+        with pytest.raises(HTTPException) as exc:
+            day_end(closing_cash=3000.0, system_cash=3000.0)
+        assert exc.value.status_code == 409
+        assert exc.value.detail["close"]["closing_cash"] == 3000.0
+        assert _stored_close(db)["closing_cash"] == 3000.0  # still one row
+        assert [dict(d) for d in db.get_collection("till_sessions").find({})] == before
+
+    def test_a_lost_acknowledgement_retry_adopts_the_open_drawer_count(
+        self, db, day_end, monkeypatch
+    ):
+        """The till count landed on B but the Day-End row was not written. The
+        retry must find B (now BLIND_SUBMITTED), not locked A."""
+        locked_sid, open_sid = _locked_then_second_drawer(db)
+        closes = db.get_collection("day_end_closes")
+        real_insert = closes.insert_one
+        calls = {"n": 0}
+
+        def _fail_once(doc, *a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("write acknowledgement lost")
+            return real_insert(doc, *a, **k)
+
+        monkeypatch.setattr(closes, "insert_one", _fail_once)
+        with pytest.raises(HTTPException) as exc:
+            day_end(closing_cash=3000.0, system_cash=3000.0)
+        assert exc.value.status_code == 500
+        assert _till(db, open_sid)["blind_count_paisa"] == 300000
+
+        close = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
+        assert close["till_session_id"] == open_sid
+        assert close["till_already_counted"] is True
+        assert (close["closing_cash"], close["variance"]) == (3000.0, 0.0)
+        assert close["counted_from_shared_record"] is False
+        assert _till(db, locked_sid)["blind_count_paisa"] == 100000
+
+    def test_cash_register_counts_the_open_drawer_not_the_locked_one(
+        self, db, monkeypatch
+    ):
+        locked_sid, open_sid = _locked_then_second_drawer(db)
+
+        out = _cr_close_two_drawers(
+            db, monkeypatch,
+            denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+            closing_count_state="COUNTED",
+            note="d40 fixture - opening float not declared",
+        )
+
+        assert out["counted"] == 3000.0
+        assert out["counted_from_shared_record"] is False
+        stored = db.get_collection("cash_register_sessions").find_one({"_id": "CR-D40"})
+        assert stored["till_session_id"] == open_sid
+        assert stored["till_already_counted"] is False
+        b, a = _till(db, open_sid), _till(db, locked_sid)
+        assert (b["status"], b["blind_count_paisa"]) == (till.STATUS_BLIND_SUBMITTED, 300000)
+        assert (a["status"], a["blind_count_paisa"]) == (till.STATUS_LOCKED, 100000)
+
+    def test_control_a_day_whose_drawers_are_all_locked_is_still_already_counted(
+        self, db
+    ):
+        """CONTROL: no open drawer -> the lookup still finds a locked one, says
+        'already counted', and never opens another drawer."""
+        sid = _blind_count(db, rupees=1000, lock=True)
+        link = till.record_screen_close(
+            db, store_id=STORE, session_date=DATE, counted_paisa=300000, actor=MANAGER
+        )
+        assert link["ok"] and link["already_counted"] is True
+        assert link["session_id"] == sid
+        assert till.shared_counted_paisa(link) == 100000
+        assert len(list(db.get_collection("till_sessions").find({}))) == 1
+
+
 def _real_till_db():
     """A throwaway database on a real MongoDB with the REAL till indexes, or
     skip. CI runs this against its mongo service; a PC without Mongo skips."""
@@ -527,6 +659,33 @@ def test_l3_28_real_index_conflict_is_a_409_on_real_mongo():
         assert row["status"] == till.STATUS_LOCKED
         assert int(row.get("reopen_count") or 0) == 0
         assert not [h for h in (row.get("history") or []) if h.get("action") == "reopen"]
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+def test_d40_two_drawers_the_shared_lookup_picks_the_open_one_on_real_mongo():
+    """D40 on a native PyMongo Database with the real indexes: whatever order
+    Mongo returns the two sessions in, the close lands on the OPEN drawer."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        locked_sid, open_sid = _locked_then_second_drawer(real_db)
+
+        link = till.record_screen_close(
+            real_db, store_id=STORE, session_date=DATE,
+            counted_paisa=300000, actor=MANAGER,
+        )
+
+        assert link["ok"] and link["session_id"] == open_sid, link
+        assert link["already_counted"] is False
+        assert till.shared_counted_paisa(link) == 300000
+        coll = real_db.get_collection("till_sessions")
+        b = coll.find_one({"_id": open_sid})
+        a = coll.find_one({"_id": locked_sid})
+        assert (b["status"], b["blind_count_paisa"]) == (till.STATUS_BLIND_SUBMITTED, 300000)
+        assert (a["status"], a["blind_count_paisa"]) == (till.STATUS_LOCKED, 100000)
+        assert coll.count_documents({}) == 2
     finally:
         client.drop_database(name)
         client.close()
