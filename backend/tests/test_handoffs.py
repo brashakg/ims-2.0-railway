@@ -38,6 +38,10 @@ def _doc_matches(doc, filter_):
         if "." in k:
             head, tail = k.split(".", 1)
             arr = doc.get(head)
+            if isinstance(arr, dict):  # embedded sub-doc, e.g. "file.file_id"
+                if not _doc_matches(arr, {tail: expected}):
+                    return False
+                continue
             if isinstance(arr, list):
                 if not any(_doc_matches(item, {tail: expected}) for item in arr if isinstance(item, dict)):
                     return False
@@ -115,7 +119,7 @@ class FakeCollection:
     def find(self, filter_=None, projection=None):
         return _FakeCursor(d for d in self.docs if _doc_matches(d, filter_))
 
-    def count_documents(self, filter_=None):
+    def count_documents(self, filter_=None, **_kw):
         return sum(1 for d in self.docs if _doc_matches(d, filter_))
 
     def update_one(self, filter_, update, array_filters=None, upsert=False):
@@ -557,3 +561,55 @@ def test_download_file_streams_content_with_disposition(client, patched_handoffs
     assert r.headers["content-type"].startswith("application/pdf")
     assert "april-bill.pdf" in r.headers["content-disposition"]
     assert b"%PDF-1.4 actual bytes" in r.content
+
+
+# ============================================================================
+# Audit R23 -- revoking a forwarded copy must not break the original's file
+# ============================================================================
+
+
+def _download(client, hid, token):
+    return client.get(f"/api/v1/handoffs/{hid}/file",
+                      headers={"Authorization": f"Bearer {token}"})
+
+
+def test_r23_revoking_a_forwarded_copy_keeps_the_original_file(client, patched_handoffs):
+    cashier = _token("u-uploader", "Anil", ["SALES_STAFF"])
+    mgr = _token("u-store-mgr", "Smita", ["STORE_MANAGER"])
+    acct = _token("u-acct", "Asha", ["ACCOUNTANT"])
+    parent = _upload(client, cashier, recipients=["u-store-mgr"], content=b"%PDF-1.4 bill").json()
+    child = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare",
+                        headers={"Authorization": f"Bearer {mgr}"},
+                        json={"recipient_user_ids": ["u-acct"]}).json()
+    assert _download(client, child["handoff_id"], acct).status_code == 200
+
+    r = client.delete(f"/api/v1/handoffs/{child['handoff_id']}",
+                      headers={"Authorization": f"Bearer {mgr}"})
+    assert r.status_code == 200
+    # The original is untouched: its record AND its bytes still open.
+    got = _download(client, parent["handoff_id"], cashier)
+    assert got.status_code == 200 and b"%PDF-1.4 bill" in got.content
+    assert _download(client, parent["handoff_id"], mgr).status_code == 200
+    # The revoked copy is gone.
+    assert _download(client, child["handoff_id"], acct).status_code == 404
+
+
+def test_r23_revoking_the_original_keeps_a_live_forwarded_copy_and_last_revoke_cleans(client, patched_handoffs):
+    cashier = _token("u-uploader", "Anil", ["SALES_STAFF"])
+    mgr = _token("u-store-mgr", "Smita", ["STORE_MANAGER"])
+    acct = _token("u-acct", "Asha", ["ACCOUNTANT"])
+    parent = _upload(client, cashier, recipients=["u-store-mgr"]).json()
+    file_id = parent["file"]["file_id"]
+    child = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare",
+                        headers={"Authorization": f"Bearer {mgr}"},
+                        json={"recipient_user_ids": ["u-acct"]}).json()
+    fs = patched_handoffs["file_store"]
+
+    assert client.delete(f"/api/v1/handoffs/{parent['handoff_id']}",
+                         headers={"Authorization": f"Bearer {cashier}"}).status_code == 200
+    assert file_id in fs._files
+    assert _download(client, child["handoff_id"], acct).status_code == 200
+
+    assert client.delete(f"/api/v1/handoffs/{child['handoff_id']}",
+                         headers={"Authorization": f"Bearer {mgr}"}).status_code == 200
+    assert file_id not in fs._files  # last reference gone -> bytes cleaned

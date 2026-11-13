@@ -47,6 +47,7 @@ from ..dependencies import (
     get_prescription_repository,
     get_audit_repository,
 )
+from ..utils.event_time import parse_event_utc
 from ..services.file_store import (
     ANY_KIND,
     get_file_store,
@@ -212,18 +213,12 @@ def _is_visible_on_hub(my_recipient: Dict, now: datetime) -> bool:
         return True  # explicit keep overrides everything
     if my_recipient.get("dismissed"):
         return False
-    snooze = my_recipient.get("snooze_until")
-    if snooze:
-        try:
-            snooze_dt = (
-                snooze
-                if isinstance(snooze, datetime)
-                else datetime.fromisoformat(str(snooze).replace("Z", "+00:00"))
-            )
-            if snooze_dt > now:
-                return False
-        except Exception:
-            pass
+    # Audit R22: ordinary PyMongo hands snooze_until back NAIVE (UTC), and
+    # comparing that with the aware `now` raised a TypeError that was
+    # swallowed -- so every snoozed card stayed on the Hub. Read it as UTC.
+    snooze_dt = parse_event_utc(my_recipient.get("snooze_until"))
+    if snooze_dt is not None and snooze_dt > now:
+        return False
     return True
 
 
@@ -723,7 +718,10 @@ async def revoke_handoff(
 
     file_id = (handoff.get("file") or {}).get("file_id")
     repo.delete(handoff_id)
-    if file_id:
+    # Audit R23: a reshare points its child at the SAME blob. Revoking one
+    # handoff removes the bytes only when no other handoff still uses them,
+    # so the original sender's (or a forwarded) copy never silently breaks.
+    if file_id and not repo.file_still_referenced(file_id):
         fs = get_file_store()
         if fs is not None:
             try:
