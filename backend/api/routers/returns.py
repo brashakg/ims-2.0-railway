@@ -3435,16 +3435,20 @@ def _recovered_stock_state(
         name = str(u.get("sku") or u.get("product_name") or u.get("product_id"))
         out[name] = out.get(name, 0) + 1
     aside_out: Dict[str, int] = {}
+    # The same credit the retry gives (_retry_claimed): a blind rebuilt
+    # record's pieces include the ones its press already put back.
+    blind = _condition_not_kept(doc)
     if step_open:
-        # The same credit the retry gives (_retry_claimed): a blind rebuilt
-        # record's pieces include the ones its press already put back.
-        blind = _condition_not_kept(doc)
         for u in _units_still_out(aside_units, _plus(moved_aside, moved_back) if blind else moved_aside,
                                   aside_ids | back_ids if blind else aside_ids, line_units):
             aside_out[u["sku"]] = aside_out.get(u["sku"], 0) + 1
+    back = max(len(doc.get("restock_stock_ids") or []), int(sum(moved_back.values())))
+    aside = max(len(doc.get("quarantined_stock_ids") or []), int(sum(moved_aside.values())))
     return {"damaged": damaged, "held": held, "out": out, "aside_out": aside_out,
-            "back": max(len(doc.get("restock_stock_ids") or []), int(sum(moved_back.values()))),
-            "aside": max(len(doc.get("quarantined_stock_ids") or []), int(sum(moved_aside.values()))),
+            "back": back, "aside": aside,
+            # The pieces to set aside that are dealt with: on a blind record
+            # the ones its press put back are those pieces too.
+            "aside_dealt": aside + (back if blind else 0),
             "open": bool(out or aside_out) and not doc.get("restock_applied")}
 
 
@@ -3483,7 +3487,7 @@ def _recovered_stock_note(doc: Dict[str, Any], order: Optional[Dict[str, Any]] =
         via_task, out = sum(out.values()), {}
 
     back, aside = state["back"], state["aside"]
-    not_aside = 0 if aside_out else max(0, sum(damaged.values()) - aside)
+    not_aside = 0 if aside_out else max(0, sum(damaged.values()) - state["aside_dealt"])
     done = ", ".join(part for part in (
         f"{back} piece(s) back in stock" if back else "",
         f"{aside} set aside (damaged or opened)" if aside else "") if part)
@@ -3508,7 +3512,7 @@ def _recovered_stock_note(doc: Dict[str, Any], order: Optional[Dict[str, Any]] =
                      "Quarantine for the store manager to check, once.")
     if not_aside:
         parts.append("Damaged or opened and NOT set aside by IMS: "
-                     + (_named(damaged) if not aside else f"{not_aside} of {_named(damaged)}")
+                     + (_named(damaged) if not state["aside_dealt"] else f"{not_aside} of {_named(damaged)}")
                      + ". It still reads sold: keep it off the shelf and tell the IMS admin.")
     if held:
         parts.append(f"Left out of stock, as the return said (not for resale): {_named(held)}.")

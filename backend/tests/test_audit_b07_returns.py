@@ -798,6 +798,9 @@ def test_a_rebuilt_retry_reads_what_its_press_already_moved_from_the_stock(ctx, 
     # The panel does not send staff to press the retry for it.
     state = returns_router._recovered_stock_state(doc, ctx["order_repo"]._order)
     assert state["out"] == {} and state["aside_out"] == {} and state["open"] is False, state
+    # Nor tells them it was never dealt with: the piece is back in stock.
+    note = returns_router._recovered_stock_note(doc, ctx["order_repo"]._order)
+    assert "1 piece(s) back in stock" in note and "NOT" not in note and "Nothing to add by hand." in note, note
     before = _units(ctx)
     r = _retry(ctx)
     assert r.status_code == 200 and r.json()["restock_applied"] is True, r.text
