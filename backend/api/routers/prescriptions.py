@@ -22,6 +22,7 @@ from ..services.rx_print_values import (
     is_absent_rx_value,
     rx_axis_or,
     rx_binocular_pd,
+    rx_date_ymd,
     rx_issue_date_value,
     rx_power_or,
     rx_text_or,
@@ -1887,8 +1888,7 @@ def _rx_card_date(prescription: dict) -> str:
     """The recorded issue date (shared rule: prescription_date, else the
     clinical exam's test_date), YYYY-MM-DD. A clinical exam Rx carries only
     test_date, so reading prescription_date alone printed a blank date."""
-    raw = rx_issue_date_value(prescription)
-    return "" if raw is None else str(raw)[:10]
+    return rx_date_ymd(rx_issue_date_value(prescription))
 
 
 def _patient_line_html(patient: Optional[dict]) -> str:

@@ -215,3 +215,31 @@ def rx_issue_date_value(rx: Any) -> Any:
     return first_present_rx_value(
         rx.get("prescription_date"), rx.get("test_date"), rx.get("testDate")
     )
+
+
+def rx_date_ymd(raw: Any) -> str:
+    """A stored Rx date as the IST calendar day 'YYYY-MM-DD' ('' when absent).
+
+    BUG-104 VALUE rule, shared by the print doors: the clinical exam stamps
+    `test_date` as a UTC instant ('...+00:00'), so slicing [:10] printed
+    YESTERDAY for an exam recorded 00:00-05:30 IST. Offset-bearing strings and
+    datetimes are shifted to IST; a naive string is a business date already
+    and passes through; an unparseable string falls back to its first 10 chars.
+    """
+    from datetime import datetime
+
+    from ..utils.ist import ist_date_str
+
+    if is_absent_rx_value(raw):
+        return ""
+    if isinstance(raw, datetime):
+        return ist_date_str(raw)
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return raw[:10]
+        if parsed.tzinfo is not None:
+            return ist_date_str(parsed)
+        return parsed.strftime("%Y-%m-%d")
+    return str(raw)

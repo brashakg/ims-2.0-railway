@@ -215,3 +215,10 @@ def test_portal_issue_date_aliases(stored, expected):
 )
 def test_portal_binocular_pd_aliases(stored, expected):
     assert portal._safe_prescription_view(stored)["pd"] == expected
+
+
+def test_canonical_print_date_is_the_ist_day_of_the_exam(monkeypatch):
+    """An exam at 02:00 IST is stamped '...T20:30:00+00:00' the day before;
+    a [:10] slice printed the UTC (previous) day (BUG-104 rule)."""
+    html = _canonical_html(_client(monkeypatch, _exam_rx(test_date="2026-11-11T20:30:00+00:00")))
+    assert "Date: 2026-11-12" in html

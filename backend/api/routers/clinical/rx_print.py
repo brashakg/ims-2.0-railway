@@ -11,7 +11,6 @@ from fastapi import HTTPException, Depends, Path
 from fastapi.responses import HTMLResponse
 from typing import Optional
 from datetime import datetime
-from ...utils.ist import ist_date_str
 from html import escape as _html_escape
 import uuid
 from ..auth import require_roles
@@ -25,6 +24,7 @@ from ...services.rx_print_values import (
     format_axis_value,
     format_rx_value,
     rx_binocular_pd,
+    rx_date_ymd,
     rx_issue_date_value,
     rx_text_or,
 )
@@ -71,23 +71,11 @@ def _rx_date(rx: dict) -> str:
     raw = rx_issue_date_value(rx)
     if raw is None:
         raw = rx.get("created_at")
-    if raw is None:
-        return ""
-    if isinstance(raw, datetime):
-        return datetime.strptime(ist_date_str(raw), "%Y-%m-%d").strftime("%d %b %Y")
-    if isinstance(raw, str):
-        # ISO strings -> dd Mon YYYY; fall back to the raw string on parse fail.
-        try:
-            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-            if parsed.tzinfo is not None:
-                # An offset-bearing string has an exact frame: use it.
-                return datetime.strptime(
-                    ist_date_str(parsed), "%Y-%m-%d"
-                ).strftime("%d %b %Y")
-            return parsed.strftime("%d %b %Y")
-        except ValueError:
-            return raw[:10]
-    return str(raw)
+    ymd = rx_date_ymd(raw)
+    try:
+        return datetime.strptime(ymd, "%Y-%m-%d").strftime("%d %b %Y")
+    except ValueError:
+        return ymd
 
 
 def _build_rx_card_html(
