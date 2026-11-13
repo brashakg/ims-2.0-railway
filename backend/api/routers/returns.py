@@ -2592,6 +2592,18 @@ def _slot_holder(stock_repo: Any, slot: Optional[str]) -> Optional[Dict[str, Any
     return coll.find_one({"return_slot": slot})
 
 
+def _own_moved_units(stock_repo: Any, return_id: str, ids: Optional[set] = None) -> List[Dict[str, Any]]:
+    """The units THIS return stamped: flipped (`returned_by_return_id`) or
+    minted (`source_id`) -- every return_slot write carries one of the two.
+    `ids` keeps only those, by str(stock_id or _id): a legacy unit has only a
+    BSON _id. RAISES when they cannot be read."""
+    rows = [*_find_stock(stock_repo, {"returned_by_return_id": return_id}),
+            *_find_stock(stock_repo, {"source_type": "RETURN", "source_id": return_id})]
+    if ids is None:
+        return rows
+    return [u for u in rows if str(u.get("stock_id") or u.get("_id")) in ids]
+
+
 def _return_slot_keys(stock_repo: Any, return_id: str, kind: str,
                       units: List[Dict[str, Any]], moved_ids: Optional[set]) -> List[str]:
     """One key per unit still to move: "<return>|<kind>|<product>|<n>", the
@@ -2609,12 +2621,7 @@ def _return_slot_keys(stock_repo: Any, return_id: str, kind: str,
     unit that landed after it is not in it, and its key is the one this
     retry picks too) -- or, with no snapshot (the press, the Shopify doors),
     from every unit this return moved. RAISES when they cannot be read."""
-    if moved_ids is None:
-        rows = [*_find_stock(stock_repo, {"returned_by_return_id": return_id}),
-                *_find_stock(stock_repo, {"source_type": "RETURN", "source_id": return_id})]
-    else:
-        rows = _find_stock(stock_repo, {"stock_id": {"$in": sorted(map(str, moved_ids))}}) if moved_ids else []
-    held = {u.get("return_slot") for u in rows}
+    held = {u.get("return_slot") for u in _own_moved_units(stock_repo, return_id, moved_ids)}
     keys: List[str] = []
     for u in units:
         n = 0
@@ -3362,10 +3369,8 @@ def _units_moved_by_return(return_id: str) -> Tuple[Dict[str, float], Dict[str, 
     stock_repo = get_stock_repository()
     if stock_repo is None:
         return {}, {}, set(), set()
-    units: Dict[str, Tuple[Dict[str, Any], Optional[str]]] = {}
-    for query in ({"returned_by_return_id": return_id}, {"source_type": "RETURN", "source_id": return_id}):
-        for u in _find_stock(stock_repo, query):
-            units[str(u.get("stock_id") or u.get("_id"))] = (u, None)
+    units: Dict[str, Tuple[Dict[str, Any], Optional[str]]] = {
+        str(u.get("stock_id") or u.get("_id")): (u, None) for u in _own_moved_units(stock_repo, return_id)}
     db = _get_db()
     audit = db.get_collection("stock_audit") if db is not None else None
     for row in (list(audit.find({"return_id": return_id})) if audit is not None else []):
@@ -3412,9 +3417,28 @@ def _condition_not_kept(doc: Optional[Dict[str, Any]]) -> bool:
                                  for it in (doc or {}).get("items") or [])
 
 
-def _most(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
-    """Per product, the larger of two counts of the SAME units."""
-    return {k: max(a.get(k, 0.0), b.get(k, 0.0)) for k in {*a, *b}}
+def _back_since_record(return_id: str, doc: Dict[str, Any], landed: Dict[str, float],
+                       moved_back: Dict[str, float], back_ids: set) -> Dict[str, float]:
+    """Per product, the pieces this return put back -- the retry and the
+    panel read it (one rule): the larger of what the record's `restocked`
+    rows say landed (`landed`; an older record's rows may count a unit the
+    stock cannot trace) and the stock's count (`moved_back`, `back_ids`,
+    _units_moved_by_return), PLUS every unit a retry put back after the
+    record was saved -- a back slot of this return, its id not on the record
+    (rows and ids are saved together). Those are never inside the larger-of:
+    a taker reads the landing of the attempt it took over as one more piece
+    back, never as the gap's, so it never moves a second unit (D45a).
+    RAISES when the stock cannot be read."""
+    recorded = set(map(str, doc.get("restock_stock_ids") or []))
+    fresh: Dict[str, float] = {}
+    stock_repo = get_stock_repository()
+    for u in _own_moved_units(stock_repo, return_id, back_ids) if stock_repo is not None else []:
+        if (str(u.get("stock_id") or u.get("_id")) not in recorded
+                and str(u.get("return_slot") or "").startswith(f"{return_id}|back|")):
+            pid = str(u.get("product_id"))
+            fresh[pid] = fresh.get(pid, 0.0) + 1
+    return {k: max(landed.get(k, 0.0), moved_back.get(k, 0.0) - fresh.get(k, 0.0)) + fresh.get(k, 0.0)
+            for k in {*landed, *moved_back}}
 
 
 def _rebuilt(doc: Optional[Dict[str, Any]]) -> bool:
@@ -3504,15 +3528,17 @@ def _recovered_stock_state(
     back_ids: set = set()
     aside_ids: set = set()
     step_open = not doc.get("restock_applied")
+    credit = dealt
     if step_open:
         try:
             moved_back, moved_aside, back_ids, aside_ids = _units_moved_by_return(str(doc.get("return_id")))
+            credit = _back_since_record(str(doc.get("return_id")), doc, dealt, moved_back, back_ids)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] %s: what moved could not be read: %s", doc.get("return_id"), exc)
         back_ids, aside_ids = _with_recorded_ids(doc, back_ids, aside_ids)
     line_units = _order_line_units(order)[0]
     out: Dict[str, int] = {}
-    for u in _units_still_out(restock_engine.plan_restock(good).get("units", []), _most(dealt, moved_back),
+    for u in _units_still_out(restock_engine.plan_restock(good).get("units", []), credit,
                               back_ids, line_units):
         name = str(u.get("sku") or u.get("product_name") or u.get("product_id"))
         out[name] = out.get(name, 0) + 1
@@ -6742,6 +6768,24 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
         raise
 
 
+def _reopen_by_booking(coll: Any, return_id: str, write: Any) -> None:
+    """A Shopify refund's retry whose units did not all land, and whose claim
+    was taken over meanwhile (`write`, its own record write, matched
+    nothing). Its booking already made the taker read "another door put them
+    back" and save 'applied' (restock_applied_by_booking) -- and a taker
+    still running reads the same. The un-booked pieces are out of stock, so
+    the record is reopened and any claim in flight dropped: the Retry stock
+    step stays (D7), and the next retry books them again. Never a unit moved
+    here: the bookings keep every door from putting a piece back twice."""
+    if getattr(write, "matched_count", 1):
+        return
+    coll.update_one(
+        {"return_id": return_id,
+         "$or": [{"restock_applied_by_booking": True}, {"restock_in_progress": True}]},
+        {"$set": {"restock_applied": False, "restock_applied_by_booking": False,
+                  "restock_in_progress": False, "restock_claim": None}})
+
+
 def _retry_lines(doc: Dict[str, Any], order: Optional[Dict[str, Any]]) -> List[ReturnLine]:
     """A return's lines for its stock step. No money moves here, so a line
     with no price reads Rs 0. A record Needs completing REBUILT (_rebuilt)
@@ -6892,13 +6936,18 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
 
     set_aside: List[Dict[str, Any]] = []
     aside_ok = True
+    by_booking = False
     try:
         if refund_id and retry_order is not None:
             # None: another door just put the units back -- nothing left to do.
+            # Marked: if that door was a stale retry of this record whose
+            # writes then failed, it reopens the record (_reopen_by_booking).
             restock_result = _restock_booked(
                 retry_order, lines, str(refund_id), _restock,
                 processing_store_id=processing_store_id,
-            ) or {"applied": True}
+            )
+            by_booking = restock_result is None
+            restock_result = restock_result or {"applied": True}
         else:
             # Only the units still out: re-run, the units an earlier attempt
             # put back went again -- no SOLD unit of the bill was left for
@@ -6917,13 +6966,16 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
                     lines, claim_order_id, retry_order, return_id, current_user.get("user_id"),
                     already_aside=_plus(moved_aside, moved_back) if blind else moved_aside,
                     moved_ids=aside_ids | back_ids if blind else aside_ids)
-            restock_result = _restock(lines, _most(_landed_units(claim.get("restocked")), moved_back), back_ids)
+            restock_result = _restock(lines, _back_since_record(
+                return_id, claim, _landed_units(claim.get("restocked")), moved_back, back_ids), back_ids)
     except Exception as exc:  # noqa: BLE001
         # Even on failure we MUST release the in-progress flag so a future
         # retry isn't deadlocked.
         logger.warning("[RETURNS] restock retry stock writes failed: %s", exc)
         try:
-            coll.update_one(mine, {"$set": {"restock_in_progress": False}})
+            released = coll.update_one(mine, {"$set": {"restock_in_progress": False}})
+            if refund_id:
+                _reopen_by_booking(coll, return_id, released)
         except Exception:  # noqa: BLE001
             pass
         raise HTTPException(status_code=500, detail="Restock retry failed")
@@ -6958,8 +7010,12 @@ def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], curre
     if set_aside:
         update["quarantined_stock_ids"] = [*(claim.get("quarantined_stock_ids") or []),
                                            *(row["stock_id"] for row in set_aside)]
+    if refund_id:
+        update["restock_applied_by_booking"] = by_booking
     try:
-        coll.update_one(mine, {"$set": update})
+        saved = coll.update_one(mine, {"$set": update})
+        if refund_id and not update["restock_applied"]:
+            _reopen_by_booking(coll, return_id, saved)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock retry persist failed: %s", exc)
         # The stock rows are the truth (_units_moved_by_return): a later

@@ -182,6 +182,94 @@ def test_a_retry_after_a_partial_mint_adds_only_the_piece_still_out(native, monk
     assert len(_back(native)) == 2
 
 
+@pytest.mark.parametrize("condition,status", [("GOOD", "AVAILABLE"), ("DAMAGED", "QUARANTINED")])
+def test_a_retry_after_a_partial_flip_of_legacy_units_moves_the_piece_still_out(native, monkeypatch,
+                                                                               condition, status):
+    """Sequential, no race: legacy units carry only a BSON _id (no stock_id).
+    The first attempt moves U1 under slot 0 and U2's write fails; the next
+    retry must move U2 under the next slot, never read U1's slot as free and
+    count U2 as landed on U1 (U2 left SOLD, the record 'applied')."""
+    from bson import ObjectId
+
+    _seed(native, units=[], qty=2)
+    native.returns.update_one({"return_id": RID}, {"$set": {"items.0.return_qty": 2,
+                                                             "items.0.condition": condition}})
+    u1, u2 = ObjectId(), ObjectId()
+    for oid in (u1, u2):
+        native.stock_units.insert_one({"_id": oid, "product_id": PID, "store_id": STORE,
+                                       "status": "SOLD", "order_id": OID, "quantity": 1})
+    real, calls = R._flip_sold_unit, []
+
+    def second_fails(*a, **k):
+        calls.append(1)
+        if len(calls) == 2:
+            raise RuntimeError("socket reset")
+        return real(*a, **k)
+
+    monkeypatch.setattr(R, "_flip_sold_unit", second_fails)
+    first = R._retry_restock(RID, USER, STORE)
+    assert first["restock_applied"] is False
+    assert native.stock_units.find_one({"_id": u2})["status"] == "SOLD"
+    second = R._retry_restock(RID, USER, STORE)
+    assert second["restock_applied"] is True
+    assert native.stock_units.find_one({"_id": u2})["status"] == status, "the piece still out stayed SOLD"
+    assert native.stock_units.count_documents({"status": status}) == 2
+    assert native.stock_units.count_documents({}) == 2  # nothing minted
+    kind = "back" if condition == "GOOD" else "aside"
+    assert sorted(u["return_slot"] for u in native.stock_units.find({})) == [
+        f"{RID}|{kind}|{PID}|0", f"{RID}|{kind}|{PID}|1"]
+
+
+def test_a_taker_after_a_stalled_landing_never_adds_a_second_unit_over_a_trace_gap(native, monkeypatch):
+    """A record saved before this PR whose `restocked` rows count MORE pieces
+    back than the stock shows (U2 went back unstamped). Retry A puts the last
+    piece (U3) back, then stalls before it saves; B takes over. B must read
+    U3 as A's -- one more piece back -- never mint a fourth record."""
+    _seed(native, units=["U3"], qty=3)
+    native.stock_units.insert_many([
+        {"_id": "U1", "stock_id": "U1", "product_id": PID, "store_id": STORE, "status": "AVAILABLE",
+         "returned_by_return_id": RID, "quantity": 1},
+        {"_id": "U2", "stock_id": "U2", "product_id": PID, "store_id": STORE, "status": "AVAILABLE",
+         "quantity": 1}])
+    native.returns.update_one({"return_id": RID}, {"$set": {
+        "items.0.return_qty": 3, "restock_stock_ids": ["U1"],
+        "restocked": [{"product_id": PID, "sku": "F1", "quantity": 2, "reactivated": 2, "minted": 0,
+                       "applied": False}]}})
+    a, b = _interleave(native, monkeypatch, R, "_audit_stock_transition")
+    assert native.stock_units.count_documents({}) == 3, "a fourth record was minted for one piece"
+    assert native.stock_units.count_documents({"status": "AVAILABLE"}) == 3
+    assert native.returns.find_one({"return_id": RID})["restock_in_progress"] is False
+
+
+def test_a_shopify_retry_never_reads_a_stale_booking_that_failed_as_applied(native, monkeypatch):
+    """A Shopify refund's retry A books its units, then stalls; B takes over and
+    finds A's booking (None: 'another door booked them'). A then wakes and its
+    stock writes fail, so A un-books. The record must not stay 'applied' with
+    the piece out of stock: the Retry stock step stays."""
+    from api.services import shopify_refund as SR
+
+    _seed(native, units=["U1"])
+    native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": "RF-1"}})
+    monkeypatch.setattr(SR, "_cap_restock_to_returnable", lambda lines, order, rid: (lines, None, []))
+    seen = {}
+
+    def booked(order, lines, rid, restock, processing_store_id=None):
+        if seen:
+            return None  # B: A's booking fills the refund's mark
+        seen["a"] = True
+        native.returns.update_one({"return_id": RID}, {"$set": {
+            "restock_started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()}})
+        seen["b"] = R._retry_restock(RID, USER, STORE)
+        return {"applied": False, "restocked": [], "restock_stock_ids": []}  # A woke; its writes failed
+
+    monkeypatch.setattr(SR, "_restock_booked", booked)
+    R._retry_restock(RID, USER, STORE)
+    assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
+    doc = native.returns.find_one({"return_id": RID})
+    assert doc["restock_applied"] is False, "record reads applied, the piece is not in stock"
+    assert doc["restock_in_progress"] is False
+
+
 def test_the_return_slot_backstop_is_in_the_apps_index_set(native):
     idx = native.stock_units.index_information()["uniq_stock_unit_return_slot"]
     assert idx["unique"] is True and idx["key"] == [("return_slot", 1)]
