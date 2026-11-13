@@ -230,6 +230,50 @@ function PreviewTable({ rows, kind }: { rows: BulkRowResult[]; kind: 'price' | '
 }
 
 // ----------------------------------------------------------------------------
+// Preview -> apply gate (shared by both tabs)
+// ----------------------------------------------------------------------------
+// L1-F47: Apply used to stay enabled after the scope changed, committing the
+// NEW scope against the OLD preview's count. Now the shown preview carries the
+// exact inputs it was made for (`key`); Apply is allowed only while the current
+// inputs still equal them, and a late answer for older inputs is dropped.
+// ponytail: the server re-selects rows at apply time, so a product edited
+// between preview and apply can still differ; bind a server version if needed.
+function useReviewedBulk(
+  inputKey: string,
+  call: (apply: boolean) => Promise<BulkResponse>,
+  onApplied: (res: BulkResponse) => void,
+) {
+  const [shown, setShown] = useState<{ key: string; res: BulkResponse; applied: boolean } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const latest = useRef(0);
+  const inFlight = useRef(0);
+  const result = shown && shown.key === inputKey ? shown.res : null;
+  // After an apply the shown table is the RESULT, not a preview: a second
+  // Apply needs a fresh Preview (no double +10 from a stray second click).
+  const canApply = !!result && !shown?.applied && result.summary.counts.valid > 0 && !busy;
+
+  const run = useCallback(async (apply: boolean, fail: (e: unknown) => void) => {
+    if (apply && !canApply) return; // never apply inputs nobody previewed
+    const key = inputKey;
+    const seq = ++latest.current;
+    inFlight.current += 1;
+    setBusy(true);
+    try {
+      const res = await call(apply);
+      if (apply) onApplied(res);
+      if (seq === latest.current) setShown({ key, res, applied: apply });
+    } catch (e) {
+      if (apply || seq === latest.current) fail(e);
+    } finally {
+      inFlight.current -= 1;
+      if (inFlight.current === 0) setBusy(false);
+    }
+  }, [inputKey, call, onApplied, canApply]);
+
+  return { result, busy, canApply, run };
+}
+
+// ----------------------------------------------------------------------------
 // Bulk price tab
 // ----------------------------------------------------------------------------
 
@@ -240,38 +284,28 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
   const [mode, setMode] = useState<'PERCENT' | 'FLAT'>('PERCENT');
   const [target, setTarget] = useState<'OFFER' | 'MRP' | 'BOTH'>('OFFER');
   const [amount, setAmount] = useState<number>(-5);
-  const [result, setResult] = useState<BulkResponse | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const validCount = result?.summary.counts.valid ?? 0;
-
-  const run = useCallback(async (apply: boolean) => {
-    setBusy(true);
-    try {
-      const res = await pricingApi.bulkPrice({
-        category: scope.category || undefined,
-        brand: scope.brand || undefined,
-        store_id: scope.storeId || undefined,
-        mode,
-        target,
-        amount,
-        apply,
-        reason: apply ? `Bulk price ${mode} ${amount} to ${target} by ${user?.name || 'user'}` : undefined,
-      });
-      setResult(res);
-      if (apply) {
-        toast.success(`Applied ${res.summary.committed} price change${res.summary.committed === 1 ? '' : 's'}` +
-          (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : ''));
-        if (res.summary.website_failed) {
-          toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
-        }
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Bulk price operation failed');
-    } finally {
-      setBusy(false);
+  const inputKey = JSON.stringify([scope, mode, target, amount]);
+  const call = useCallback((apply: boolean) => pricingApi.bulkPrice({
+    category: scope.category || undefined,
+    brand: scope.brand || undefined,
+    store_id: scope.storeId || undefined,
+    mode,
+    target,
+    amount,
+    apply,
+    reason: apply ? `Bulk price ${mode} ${amount} to ${target} by ${user?.name || 'user'}` : undefined,
+  }), [scope, mode, target, amount, user]);
+  const onApplied = useCallback((res: BulkResponse) => {
+    toast.success(`Applied ${res.summary.committed} price change${res.summary.committed === 1 ? '' : 's'}` +
+      (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : ''));
+    if (res.summary.website_failed) {
+      toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
     }
-  }, [scope, mode, target, amount, user, toast]);
+  }, [toast]);
+  const { result, busy, canApply, run: gateRun } = useReviewedBulk(inputKey, call, onApplied);
+  const validCount = result?.summary.counts.valid ?? 0;
+  const run = useCallback((apply: boolean) => gateRun(apply, (e) =>
+    toast.error(e instanceof Error ? e.message : 'Bulk price operation failed')), [gateRun, toast]);
 
   // Auto-run a dry-run preview so the SKU list populates on load and stays live
   // as the scope/operation changes -- the operator shouldn't have to discover
@@ -313,7 +347,7 @@ function BulkPriceTab({ categories, brands, stores }: { categories: string[]; br
           className="inline-flex items-center gap-1.5 border border-gray-600 text-gray-200 hover:bg-gray-800 rounded px-3.5 py-1.5 text-sm disabled:opacity-50">
           {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Preview
         </button>
-        <button type="button" onClick={() => run(true)} disabled={busy || !result || validCount === 0}
+        <button type="button" onClick={() => run(true)} disabled={!canApply}
           className="inline-flex items-center gap-1.5 bg-bv hover:bg-bv-600 text-white rounded px-3.5 py-1.5 text-sm font-medium disabled:opacity-40">
           Apply {validCount} valid row{validCount === 1 ? '' : 's'}
         </button>
@@ -350,38 +384,28 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
   const [valueMode, setValueMode] = useState<'PERCENT' | 'FLAT'>('PERCENT');
   const [discountPct, setDiscountPct] = useState<number>(10);
   const [flatPrice, setFlatPrice] = useState<number>(0);
-  const [result, setResult] = useState<BulkResponse | null>(null);
-  const [busy, setBusy] = useState(false);
-
-  const validCount = result?.summary.counts.valid ?? 0;
-
-  const run = useCallback(async (apply: boolean) => {
-    setBusy(true);
-    try {
-      const res = await pricingApi.bulkOffer({
-        category: scope.category || undefined,
-        brand: scope.brand || undefined,
-        store_id: scope.storeId || undefined,
-        action,
-        discount_percent: action === 'SET' && valueMode === 'PERCENT' ? discountPct : undefined,
-        offer_price: action === 'SET' && valueMode === 'FLAT' ? flatPrice : undefined,
-        apply,
-        reason: apply ? `Bulk offer ${action} by ${user?.name || 'user'}` : undefined,
-      });
-      setResult(res);
-      if (apply) {
-        toast.success(`Applied ${res.summary.committed} offer change${res.summary.committed === 1 ? '' : 's'}` +
-          (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : ''));
-        if (res.summary.website_failed) {
-          toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
-        }
-      }
-    } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Bulk offer operation failed');
-    } finally {
-      setBusy(false);
+  const inputKey = JSON.stringify([scope, action, valueMode, discountPct, flatPrice]);
+  const call = useCallback((apply: boolean) => pricingApi.bulkOffer({
+    category: scope.category || undefined,
+    brand: scope.brand || undefined,
+    store_id: scope.storeId || undefined,
+    action,
+    discount_percent: action === 'SET' && valueMode === 'PERCENT' ? discountPct : undefined,
+    offer_price: action === 'SET' && valueMode === 'FLAT' ? flatPrice : undefined,
+    apply,
+    reason: apply ? `Bulk offer ${action} by ${user?.name || 'user'}` : undefined,
+  }), [scope, action, valueMode, discountPct, flatPrice, user]);
+  const onApplied = useCallback((res: BulkResponse) => {
+    toast.success(`Applied ${res.summary.committed} offer change${res.summary.committed === 1 ? '' : 's'}` +
+      (res.summary.counts.violations ? ` · ${res.summary.counts.violations} skipped (cap)` : ''));
+    if (res.summary.website_failed) {
+      toast.warning(`${res.summary.website_failed} saved for billing but not on the website yet: save those products again`);
     }
-  }, [scope, action, valueMode, discountPct, flatPrice, user, toast]);
+  }, [toast]);
+  const { result, busy, canApply, run: gateRun } = useReviewedBulk(inputKey, call, onApplied);
+  const validCount = result?.summary.counts.valid ?? 0;
+  const run = useCallback((apply: boolean) => gateRun(apply, (e) =>
+    toast.error(e instanceof Error ? e.message : 'Bulk offer operation failed')), [gateRun, toast]);
 
   // Auto-run a dry-run preview (read-only) so the SKU list is never mysteriously
   // empty -- mirrors the price tab. Debounced; latest `run` held in a ref.
@@ -444,7 +468,7 @@ function BulkOfferTab({ categories, brands, stores }: { categories: string[]; br
               className="inline-flex items-center gap-1.5 border border-gray-300 text-gray-600 hover:bg-gray-50 rounded-lg px-3.5 py-1.5 text-sm disabled:opacity-50">
               {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />} Preview
             </button>
-            <button type="button" onClick={() => run(true)} disabled={busy || !result || validCount === 0}
+            <button type="button" onClick={() => run(true)} disabled={!canApply}
               className="inline-flex items-center gap-1.5 bg-bv hover:bg-bv-600 text-white rounded-lg px-3.5 py-1.5 text-sm font-medium disabled:opacity-40">
               Apply {validCount} valid row{validCount === 1 ? '' : 's'}
             </button>
