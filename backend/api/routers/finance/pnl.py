@@ -18,6 +18,7 @@ from ...services.salary_visibility import (
 )
 from ...dependencies import resolve_store_scope
 from ...services import je_service, product_cost
+from ...utils.expense_status import COMMITTED_EXPENSE_STATUS_MATCH
 from ._shared import (
     _DISCOUNT_EXPR,
     real_sale_match,
@@ -30,7 +31,9 @@ from ._shared import (
     _payroll_cost,
     _ORDER_REVENUE_PROJECTION,
     compute_cogs_with_flag,
+    customer_return_adjustments,
     router,
+    services_bill_costs,
 )
 from ...services.margin_basis import order_revenue_ex_gst
 
@@ -164,6 +167,7 @@ async def get_revenue(
 COST_ONLY_PNL_FIELDS = (
     "cogs",
     "cogs_variance",
+    "returns_cogs_reversal",
     "cogs_is_estimated",
     "cogs_estimated_lines",
     "cogs_total_lines",
@@ -265,12 +269,21 @@ async def get_pnl(
         exp_match.setdefault("expense_date", {})["$gte"] = from_date
     if to_date:
         exp_match.setdefault("expense_date", {})["$lte"] = to_date
-    exp_match["status"] = {"$in": ["APPROVED", "PAID", "approved", "paid"]}
+    exp_match["status"] = {"$in": COMMITTED_EXPENSE_STATUS_MATCH}
     exp_pipeline = [
         {"$match": exp_match},
         {"$group": {"_id": "$category", "amount": {"$sum": "$amount"}}},
     ]
     expenses = list(db.get_collection("expenses").aggregate(exp_pipeline))
+    # Supplier SERVICES bills are the same costs booked on the supplier side
+    # (audit L3-04): one head per expense type, beside the expense heads.
+    shop_ids = [store_id] if store_id else None
+    for row in services_bill_costs(db, shop_ids, from_date, to_date):
+        expenses.append({"_id": row["head"], "amount": row["amount"]})
+    merged: dict = {}
+    for e in expenses:
+        merged[e["_id"]] = round(merged.get(e["_id"], 0.0) + float(e["amount"] or 0), 2)
+    expenses = [{"_id": k, "amount": v} for k, v in merged.items()]
     total_expenses = sum(e["amount"] for e in expenses)
 
     # Real COGS from product cost_price (fallback 60% of line total if a
@@ -289,11 +302,21 @@ async def get_pnl(
     cogs_variance = product_cost.variance_by(
         db, store_ids=[store_id] if store_id else None, from_day=from_date, to_day=to_date
     ).get(None, 0.0)
-    cogs = round(cogs + cogs_variance, 2)
+    # Completed customer returns in the range (audit RUN-04), dated by the
+    # return: their taxable value and GST come off sales, and a GOOD piece
+    # back on sale gives its cost back. Never netted into the original sale.
+    rets = customer_return_adjustments(db, cost_map, shop_ids, from_date, to_date).values()
+    returns_gross = round(sum(r["gross"] for r in rets), 2)
+    returns_taxable = round(sum(r["taxable"] for r in rets), 2)
+    returns_tax = round(sum(r["tax"] for r in rets), 2)
+    returns_cogs_reversal = round(sum(r["cogs_reversal"] for r in rets), 2)
+    gross_sales = round((gross_sales or 0) - returns_gross, 2)
+    tax = round((tax or 0) - returns_tax, 2)
+    cogs = round(cogs + cogs_variance - returns_cogs_reversal, 2)
     cogs_is_estimated = cogs_est_lines > 0
     # Revenue net of GST (the GST is owed to the government): COGS is ex-GST,
     # so gross profit and both margins are measured on the same side of GST.
-    revenue = round(sum(order_revenue_ex_gst(o) for o in period_orders), 2)
+    revenue = round(sum(order_revenue_ex_gst(o) for o in period_orders) - returns_taxable, 2)
     gross_profit = revenue - cogs
 
     # Payroll cost-to-company for the period's months.
@@ -329,6 +352,12 @@ async def get_pnl(
         # Inside cogs: the cost-of-goods variance of pieces sold before
         # their supplier bill (product_cost.variance_by).
         "cogs_variance": cogs_variance,
+        # Inside cogs: the cost given back by GOOD returned pieces restocked.
+        "returns_cogs_reversal": returns_cogs_reversal,
+        # Already taken off revenue / gross_sales_incl_gst / tax_collected.
+        "returns_taxable": returns_taxable,
+        "returns_tax": returns_tax,
+        "returns_gross": returns_gross,
         # When cogs_is_estimated=True, some cost lines used a 60%-of-revenue
         # fallback because the product cost_price is not set. Gross margin shown
         # should be treated as approximate until all products have a cost_price.

@@ -681,3 +681,132 @@ def _je_cal_day(s, *, end: bool = False) -> Optional[datetime]:
     if end:
         return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
     return dt
+
+
+# -- Supplier services bills and customer returns in the P&L ----------------
+# Bill states that never were (or no longer are) a cost. Stored header bills
+# are OUTSTANDING / PARTIAL / PAID; the rest are tolerated legacy spellings.
+_NOT_A_COST_BILL_STATUSES = ("DRAFT", "CANCELLED", "CANCELED", "VOID", "VOIDED", "REJECTED")
+
+
+def services_bill_costs(db, store_ids=None, from_date=None, to_date=None) -> List[dict]:
+    """Supplier SERVICES bills (rent, repairs, freight, ...) as P&L costs
+    (audit L3-04): one row ``{store_id, head, amount}`` per bill dated in the
+    range (``bill_date``, a 'YYYY-MM-DD' string, like ``expense_date``).
+
+    A services bill is the same cost whether the accounts team records it as
+    an Expense or as a supplier bill, so it is recognised when it is BOOKED,
+    as an approved expense is -- paying it later is a cash event, not a second
+    cost. Its value is the taxable amount; its GST too when that GST is NOT
+    input credit (17(5) tick or unregistered supplier: the CA's 2026-10-23
+    answer, unclaimed GST is cost). Goods bills (a goods receipt, or
+    bill_kind GOODS / unstated) are stock, already costed through COGS when
+    the pieces sell, and an inter-shop transfer mirror bill is never a cost.
+    Fail-soft: [] on a read error, as the other P&L legs."""
+    match: dict = {
+        "bill_kind": ap_engine.BILL_KIND_SERVICES,
+        "status": {"$nin": list(_NOT_A_COST_BILL_STATUSES)},
+        "grn_id": {"$in": [None, ""]},
+        "source_transfer_id": {"$in": [None, ""]},
+    }
+    if store_ids is not None:
+        match["store_id"] = {"$in": list(store_ids)}
+    if from_date:
+        match.setdefault("bill_date", {})["$gte"] = str(from_date)[:10]
+    if to_date:
+        match.setdefault("bill_date", {})["$lte"] = str(to_date)[:10]
+    labels = {key: label for key, label, _blocked in ap_engine.EXPENSE_TYPES}
+    rows: List[dict] = []
+    try:
+        for b in db.get_collection("vendor_bills").find(match, {"_id": 0}):
+            amount = float(b.get("taxable_amount") or 0)
+            if b.get("itc_eligible") is False:
+                amount += float(b.get("tax_amount") or 0)
+            head = labels.get(b.get("expense_type") or "", "Other business expense")
+            rows.append({
+                "store_id": b.get("store_id"),
+                "head": f"Supplier bills: {head}",
+                "amount": round(amount, 2),
+            })
+    except Exception:  # noqa: BLE001
+        logger.warning("[PNL] services bills could not be read", exc_info=True)
+        return []
+    return rows
+
+
+def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_date=None, to_date=None) -> Dict[str, dict]:
+    """store_id -> what COMPLETED customer returns take back off the P&L in
+    the range (audit RUN-04): ``{gross, taxable, tax, cogs_reversal, count}``.
+
+    Dated by the return (its credit note), never by the original sale: a
+    return in a later month reduces THAT month, and the sale's own month is
+    left as it was. The money is the return's own ``gst_breakup`` -- the same
+    figures GSTR-3B nets off output tax, whatever the refund tender (cash, UPI,
+    card or store credit). The cost of goods comes back only for a piece that
+    really went back on sale: a GOOD line restocked (restock_applied), at the
+    cost the original sale line was charged at (cost_at_sale, else the live
+    cost, else the same 60% estimate the sale used), so one piece is never
+    costed twice. A DAMAGED piece stays in the cost of goods (it is not
+    sellable stock; a supplier credit for it is booked on the supplier side).
+    A return with no credit-note value (an advance refunded on a cancelled
+    order, never revenue) adds nothing. Fail-soft: {} on a read error."""
+    lo = _parse_range_dt(from_date, end=False)
+    hi = _parse_range_dt(to_date, end=True)
+    match: dict = {"status": {"$in": ["COMPLETED", "completed"]}}
+    if store_ids is not None:
+        match["store_id"] = {"$in": list(store_ids)}
+    out: Dict[str, dict] = {}
+    try:
+        from ...utils.event_time import parse_event_utc_naive
+
+        # ponytail: the date test runs in Python because returns store
+        # created_at as ISO strings AND BSON dates; returns are few.
+        picked = []
+        for ret in db.get_collection("returns").find(match, {"_id": 0}):
+            when = parse_event_utc_naive(ret.get("created_at"))
+            if when is None or (lo is not None and when < lo) or (hi is not None and when > hi):
+                continue
+            gb = ret.get("gst_breakup") if isinstance(ret.get("gst_breakup"), dict) else {}
+            taxable = float(gb.get("taxable") or 0)
+            tax = float(gb.get("tax") or 0)
+            if taxable <= 0 and tax <= 0:
+                continue
+            picked.append((ret, taxable, tax, float(gb.get("gross") or (taxable + tax))))
+        order_ids = list({r.get("order_id") for r, *_ in picked if r.get("order_id")})
+        orders = {
+            o["order_id"]: o
+            for o in db.get_collection("orders").find(
+                {"order_id": {"$in": order_ids}}, {"_id": 0, "order_id": 1, "items": 1}
+            )
+        } if order_ids else {}
+        for ret, taxable, tax, gross in picked:
+            lines = (orders.get(ret.get("order_id")) or {}).get("items") or []
+            by_item = {str(i.get("item_id")): i for i in lines if i.get("item_id")}
+            by_product = {str(i.get("product_id")): i for i in lines if i.get("product_id")}
+            reversal = 0.0
+            if ret.get("restock_applied"):
+                for it in ret.get("items") or []:
+                    if str(it.get("condition") or "").upper() != "GOOD" or not it.get("restock"):
+                        continue
+                    line = by_item.get(str(it.get("order_item_id"))) or by_product.get(str(it.get("product_id")))
+                    if line is None:
+                        continue
+                    qty = float(it.get("return_qty") or 0)
+                    cost = _item_cost(line, cost_by_product)
+                    if cost is None:  # the sale's own 60% estimate, per piece
+                        sold = float(line.get("quantity", 1) or 1)
+                        cost = line_revenue_ex_gst(line) * 0.6 / sold
+                    reversal += cost * qty
+            row = out.setdefault(ret.get("store_id"), {"gross": 0.0, "taxable": 0.0, "tax": 0.0, "cogs_reversal": 0.0, "count": 0})
+            row["gross"] += gross
+            row["taxable"] += taxable
+            row["tax"] += tax
+            row["cogs_reversal"] += reversal
+            row["count"] += 1
+    except Exception:  # noqa: BLE001
+        logger.warning("[PNL] customer returns could not be read", exc_info=True)
+        return {}
+    for row in out.values():
+        for k in ("gross", "taxable", "tax", "cogs_reversal"):
+            row[k] = round(row[k], 2)
+    return out
