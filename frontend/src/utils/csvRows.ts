@@ -31,9 +31,11 @@ export function csvRows(text: string): string[][] {
 }
 
 /** A money cell as a number: '1,250.50', 'Rs 1250', '₹ 18' and '(18)' read;
- *  blank or anything else is null -- never a silent 0. */
+ *  a blank cell is 0 (a nil cell, as a GSTR-2B sheet leaves it); anything
+ *  else is null -- an unreadable amount is never a silent 0. */
 export function csvMoney(cell: string | undefined): number | null {
   let v = (cell ?? '').replace(/₹|rs\.?|inr|,|\s/gi, '');
+  if (v === '') return 0;
   const neg = /^\(.*\)$/.test(v);
   if (neg) v = v.slice(1, -1);
   if (!/^-?\d+(\.\d+)?$/.test(v)) return null;

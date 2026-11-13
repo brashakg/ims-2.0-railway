@@ -62,4 +62,12 @@ describe('GSTR-2B paste is read as real CSV', () => {
     expect(String(toastMock.error.mock.calls[0][0])).toMatch(/row 3/i);
     expect(itc.reconcile).not.toHaveBeenCalled();
   });
+
+  it('reads a blank tax or taxable cell as 0, as before (a nil cell is not an error)', async () => {
+    await paste('GSTIN,Invoice,Taxable,Tax\n27AABCA1234A1ZJ,INV-NIL,500,\n27AABCA1234A1ZJ,INV-B,,\n');
+    await waitFor(() => expect(itc.reconcile).toHaveBeenCalledTimes(1));
+    expect(itc.reconcile.mock.calls[0][0].map((r: { taxable: number; tax: number }) => [r.taxable, r.tax]))
+      .toEqual([[500, 0], [0, 0]]);
+    expect(toastMock.error).not.toHaveBeenCalled();
+  });
 });
