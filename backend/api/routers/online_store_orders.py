@@ -126,6 +126,8 @@ _LIST_PROJECTION: Dict[str, int] = {
     "customer_name": 1,
     "customer_phone": 1,
     "customer_email": 1,
+    # RUN-01: a phone buyer the customer door could not link (not a real guest).
+    "customer_link_failed": 1,
     "grand_total": 1,
     "currency": 1,
     "status": 1,
@@ -672,6 +674,12 @@ async def remap_online_order(
         result = {**result, "nothing_done": True, "message": (
             "This order's booking has not finished claiming its stock yet (it may "
             "still be running). Press Re-map again in a few minutes.")}
+    elif (result or {}).get("customer_link_repaired"):
+        result = {**result, "message": "Re-map linked this order to its customer."}
+    elif booked and (result or {}).get("customer_link_failed"):
+        result = {**result, "nothing_done": True, "message": (
+            "This order is in the books but still has no customer linked. "
+            "Press Re-map again in a few minutes.")}
     elif (
         booked
         and str((result or {}).get("status")) in ("duplicate", "replayed")
@@ -899,10 +907,10 @@ async def clear_rx_hold(
     # A stock miss released: its missing units are claimed FIRST, at the
     # shops its route names (claim_the_missing) -- or the hold stands. Under
     # Re-map's lease, which a Re-map running or stopped mid-way holds.
+    from ..services.online_fulfillment_route import claim_the_missing
+
     lease = None
     if order.get("stock_miss_reason") and not stock_left:
-        from ..services.online_fulfillment_route import claim_the_missing
-
         lease = datetime.now(timezone.utc).isoformat()
         try:
             took = coll.find_one_and_update(
