@@ -9,7 +9,7 @@ every reader in api/utils/ist.py assumes). Before the fix the repositories wrote
 The clock below simulates an IST host deterministically on any CI machine: a bare
 ``now()`` returns the IST wall clock, ``now(tz)`` returns the true instant.
 """
-import re
+import ast
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -95,13 +95,36 @@ _ALLOWED = {
 }
 
 
+def _bare_now_calls(source):
+    """Lines holding a real zero-argument ``datetime.now()`` call (the host's local
+    wall clock). AST, so docstring prose and comments never count, and
+    ``utcnow()`` / ``now(tz)`` (already the UTC instant) are not offenders."""
+    lines = source.splitlines()
+    for node in ast.walk(ast.parse(source)):
+        if (isinstance(node, ast.Call) and not node.args and not node.keywords
+                and isinstance(node.func, ast.Attribute) and node.func.attr == "now"
+                and isinstance(node.func.value, ast.Name) and node.func.value.id == "datetime"):
+            yield lines[node.lineno - 1].strip()
+
+
 def test_no_repository_writes_the_host_local_clock():
     root = Path(base_mod.__file__).parent
-    offenders = []
-    for path in sorted(root.glob("*.py")):
-        for line in path.read_text(encoding="utf-8").splitlines():
-            code = line.split("#", 1)[0]
-            if re.search(r"datetime\.(now|utcnow)\(\)", code):
-                if (path.name, code.strip()) not in _ALLOWED:
-                    offenders.append(f"{path.name}: {line.strip()}")
+    offenders = [
+        f"{path.name}: {line}"
+        for path in sorted(root.glob("*.py"))
+        for line in _bare_now_calls(path.read_text(encoding="utf-8"))
+        if (path.name, line) not in _ALLOWED
+    ]
     assert offenders == []
+
+
+def test_the_guard_sees_a_bare_now_but_not_prose_or_utc():
+    src = (
+        'def f():\n'
+        '    """a plain datetime.now() in prose"""\n'
+        '    # datetime.now() in a comment\n'
+        '    a = datetime.utcnow().year\n'
+        '    b = datetime.now(timezone.utc)\n'
+        '    return {"at": datetime.now()}\n'
+    )
+    assert list(_bare_now_calls(src)) == ['return {"at": datetime.now()}']
