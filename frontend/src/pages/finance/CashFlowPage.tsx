@@ -708,7 +708,8 @@ function RecordForm({ kind, vendorId, onClose, onSaved }: { kind: RecordKind; ve
               data-testid="bill-expense-type"
             >
               <option value="">What is this expense for…</option>
-              {(expenseTypes ?? []).map((t) => (
+              {/* Stock never goes on a services bill (decision D42(b); the server refuses it). */}
+              {(expenseTypes ?? []).filter((t) => billKind !== 'SERVICES' || t.value !== 'STOCK').map((t) => (
                 <option key={t.value} value={t.value}>{t.label}{t.blocked_by_default ? ' (credit not claimable)' : ''}</option>
               ))}
             </select>

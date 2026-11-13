@@ -156,6 +156,20 @@ def expense_itc_blocked(expense_type, ticked=None) -> bool:
     return _EXPENSE_BLOCKED.get(expense_type or "", False)
 
 
+def services_stock_refusal(bill_kind, expense_type) -> Optional[str]:
+    """Decision D42(b): a SERVICES bill is never typed "Stock purchases" --
+    goods go on a goods bill with its goods receipt (counted either way such a
+    bill misstated cost: twice, or not at all). None when the bill may be
+    booked, else the refusal the form shows."""
+    if bill_kind == BILL_KIND_SERVICES and expense_type == "STOCK":
+        return (
+            "Stock purchases cannot go on a services bill. Goods go on a goods "
+            "bill with a goods receipt: pick 'Goods' and link the receipt. "
+            + NO_RECEIPT_WAY_OUT
+        )
+    return None
+
+
 def normalize_bill_kind(value):
     """None when absent/blank (a legacy client or stored row); the canonical
     'GOODS' / 'SERVICES' for a recognized declaration; ValueError otherwise

@@ -161,8 +161,11 @@ def _sale(db):
 
 
 def _ret(rid, created_at, condition="GOOD", restock=True, status="COMPLETED", applied=True):
+    # A restock that put a GOOD piece back names its unit (returns.
+    # _restock_good_items: every reactivated or minted unit).
+    landed = [f"U-{rid}"] if applied and restock and condition == "GOOD" else []
     return {"return_id": rid, "order_id": "O1", "store_id": "S1", "status": status,
-            "created_at": created_at, "restock_applied": applied,
+            "created_at": created_at, "restock_applied": applied, "restock_stock_ids": landed,
             "items": [{"order_item_id": "L1", "product_id": "P1", "return_qty": 1.0,
                        "condition": condition, "restock": restock}],
             "gst_breakup": {"gross": 1000.0, "taxable": 952.38, "tax": 47.62}}
@@ -438,7 +441,7 @@ def test_run_04_category_totals_agree_with_the_whole_business_pnl(db):
     # One lens back, GOOD and restocked: its value and its cost leave LENS only.
     db.returns.insert_one({
         "return_id": "RC", "order_id": "O2", "store_id": "S1", "status": "COMPLETED",
-        "created_at": "2026-11-06T05:00:00+00:00", "restock_applied": True,
+        "created_at": "2026-11-06T05:00:00+00:00", "restock_applied": True, "restock_stock_ids": ["UL"],
         "items": [{"order_item_id": "L", "product_id": "PL", "return_qty": 1.0, "unit_price": 952.38,
                    "condition": "GOOD", "restock": True}],
         "gst_breakup": {"gross": 1000.0, "taxable": 952.38, "tax": 47.62},
@@ -503,3 +506,134 @@ def test_l3_04_a_stock_typed_services_bill_is_not_charged_twice(db):
     db.vendor_bills.insert_many([_bill("STOCK", expense_type="STOCK"), _bill("REPAIRS")])
     assert _pnl()["total_expenses"] == 1000.0
     assert _by_store()["S1"]["expenses"] == 1000.0
+
+
+# --------------------------------------------------------------------------
+# Review round 3 (PR #1423, 1423-MF2) and decision D42
+# --------------------------------------------------------------------------
+
+
+def _confirmed_online_return(rid, refund_id, created_at, **kw):
+    # As the real confirm / restock retry writes it when Goods back had put
+    # the unit back first: the webhook's lines (GOOD, restock True) kept,
+    # restock "applied" with nothing left to restock, no unit of its own.
+    doc = {**_ret(rid, created_at), "order_id": "O9", "shopify_refund_id": refund_id,
+           "restock_stock_ids": []}
+    doc.update(kw)
+    return doc
+
+
+def test_run_04_one_piece_gives_its_cost_back_once_whichever_door_moved_it(db):
+    db.orders.insert_one(_order("O9", items=[
+        {"item_id": "L1", "product_id": "P1", "item_type": "FRAME", "quantity": 4, "unit_price": 1000.0,
+         "item_total": 4000.0, "taxable_value": 3809.52, "gst_rate": 5.0, "cost_at_sale": 500.0}]))
+    db.stock_units.insert_many([{"stock_id": u, "product_id": "P1"} for u in ("U1", "U2", "U3", "U4")])
+    db.returns.insert_many([
+        # Route B: Goods back pressed BEFORE the November confirm.
+        _confirmed_online_return("RB", "RF-B", "2026-11-02T05:00:00+00:00"),
+        # Route A: refunded in October, restock blocked; Goods back in November,
+        # then the restock retry marked it applied with nothing to restock.
+        _confirmed_online_return("RA", "RF-A", "2026-10-20T05:00:00+00:00",
+                                 restock_completed_at="2026-11-10T05:00:00+00:00"),
+        # The return's own restock and a Goods-back row name the same unit.
+        _confirmed_online_return("RS", "RF-S", "2026-11-03T05:00:00+00:00", restock_stock_ids=["U3"]),
+        # A counter return whose unit really went back: still given back.
+        {**_ret("RC", "2026-11-04T05:00:00+00:00"), "order_id": "O9", "restock_stock_ids": ["U4"]},
+    ])
+    db.shopify_refund_review.insert_many([
+        {"review_id": "VB", "shopify_refund_id": "RF-B", "goods_back_at": "2026-10-25T05:00:00+00:00",
+         "goods_restock": {"restock_applied": True, "restock_stock_ids": ["U1"]}},
+        {"review_id": "VA", "shopify_refund_id": "RF-A", "goods_back_at": "2026-11-08T05:00:00+00:00",
+         "goods_restock": {"restock_applied": True, "restock_stock_ids": ["U2"]}},
+        {"review_id": "VS", "shopify_refund_id": "RF-S", "goods_back_at": "2026-11-05T05:00:00+00:00",
+         "goods_restock": {"restock_applied": True, "restock_stock_ids": ["U3"]}},
+    ])
+    nov = _pnl()
+    # Four physical pieces back on sale (U1..U4), Rs 500 each, once.
+    assert nov["returns_cogs_reversal"] == 2000.0
+    assert _by_store()["S1"]["cogs"] == round(nov["cogs"], 2)
+    cat = _by_category()
+    assert round(sum(c["cogs"] for c in cat["categories"]), 2) == nov["cogs"]
+    assert _pnl_range("2026-10-01", "2026-10-31")["returns_cogs_reversal"] == 0.0
+
+
+def test_run_04_a_restock_that_put_nothing_back_gives_no_cost_back(db):
+    # restock_applied with no unit landed (nothing resellable, a line the
+    # online claim never covered): the piece is not on sale, its cost stays.
+    db.orders.insert_one(_order("O9"))
+    db.returns.insert_one({**_ret("RN", "2026-11-04T05:00:00+00:00"), "order_id": "O9",
+                           "restock_stock_ids": []})
+    assert _pnl()["returns_cogs_reversal"] == 0.0
+
+
+def _historical(oid, **kw):
+    # Our Shopify order-history import: a real sale, no cost snapshot (the
+    # P&L used the 60% estimate: 0.6 x 952.38 = 571.43 a piece).
+    doc = _order(oid, status="REFUNDED", historical=True, import_source="shopify_order_history",
+                 items=[{"item_id": f"{oid}-L1", "product_id": "PH", "quantity": 2, "unit_price": 1000.0,
+                         "item_total": 2000.0, "taxable_value": 1904.76, "gst_rate": 5.0}],
+                 grand_total=2000.0, tax_amount=95.24)
+    doc.update(kw)
+    return doc
+
+
+def _hist_note(oid, refund_id, created_at, taxable, tax, **kw):
+    # As shopify_ingest._book_historical_refund_credit_notes stamps it: no lines.
+    doc = {"return_id": f"RET-HIST-{refund_id}", "shopify_refund_id": refund_id, "order_id": oid,
+           "store_id": "S1", "return_type": "CREDIT_NOTE", "source": "shopify_order_history",
+           "status": "COMPLETED", "historical": True, "created_at": created_at,
+           "gst_breakup": {"gross": round(taxable + tax, 2), "taxable": taxable, "tax": tax}}
+    doc.update(kw)
+    return doc
+
+
+def test_d42_c_a_refunded_historical_order_gives_its_estimated_cost_back_with_its_credit_note(db):
+    db.orders.insert_many([_historical("H1"), _historical("H2"), _historical("H3")])
+    db.returns.insert_many([
+        # The whole order refunded, credit note in November.
+        _hist_note("H1", "RH1", "2026-11-06T05:00:00+00:00", 1904.76, 95.24),
+        # A refund covered by the whole-order note: no money of its own.
+        {**_hist_note("H1", "RH1b", "2026-11-06T05:00:00+00:00", 0, 0), "gst_breakup": {},
+         "covered_by_ref": "SHOPIFY-HIST-REFUND-orderfull:1"},
+        # Half the order refunded (one of two pieces).
+        _hist_note("H2", "RH2", "2026-11-07T05:00:00+00:00", 952.38, 47.62),
+        # A later refund through the live review on an imported order: its
+        # lines, any condition; Goods back hands it to stock-in (no unit).
+        {**_ret("RH3", "2026-11-08T05:00:00+00:00", condition="DAMAGED", restock=False),
+         "order_id": "H3", "shopify_refund_id": "RF-H3",
+         "items": [{"order_item_id": "H3-L1", "product_id": "PH", "return_qty": 1.0, "unit_price": 952.38,
+                    "condition": "DAMAGED", "restock": False}]},
+        # December's note is December's.
+        _hist_note("H3", "RH3-DEC", "2026-12-02T05:00:00+00:00", 952.38, 47.62),
+    ])
+    db.shopify_refund_review.insert_one(
+        {"review_id": "VH3", "shopify_refund_id": "RF-H3", "goods_back_at": "2026-11-09T05:00:00+00:00",
+         "goods_restock": {"restock_applied": True, "restock_stock_ids": [], "stock_in_task": "T1"}})
+    piece = 0.6 * 952.38  # the sale's own 60% estimate, a piece
+    nov = _pnl()
+    assert nov["returns_taxable"] == round(1904.76 + 952.38 + 952.38, 2)
+    assert nov["returns_cogs_reversal"] == round(4 * piece, 2)  # H1 whole, H2 half, H3 one
+    assert _by_store()["S1"]["cogs"] == nov["cogs"]
+    cat = _by_category()
+    assert cat["total_revenue"] == nov["revenue"]
+    assert round(sum(c["cogs"] for c in cat["categories"]), 2) == nov["cogs"]
+    # The sale's month is untouched; December gets its own note's cost.
+    assert _pnl_range("2026-12-01", "2026-12-31")["returns_cogs_reversal"] == round(piece, 2)
+
+
+def test_d42_b_a_services_bill_typed_stock_is_refused_at_the_bill_door():
+    from fastapi import HTTPException
+
+    from api.routers import vendors as vd
+    from api.services import ap_engine
+
+    bill = vd.VendorBillCreate(bill_number="S-1", bill_date="2026-11-04", taxable_amount=1000.0,
+                               total_amount=1000.0, bill_kind="SERVICES", expense_type="stock")
+    with pytest.raises(HTTPException) as err:
+        asyncio.run(vd.create_vendor_bill("V", bill, current_user=ACCT))
+    assert err.value.status_code == 422
+    assert err.value.detail["code"] == "SERVICES_BILL_NOT_STOCK"
+    assert "goods bill" in err.value.detail["message"] and "goods receipt" in err.value.detail["message"]
+    # One rule: goods with a receipt may still be typed STOCK.
+    assert ap_engine.services_stock_refusal(ap_engine.BILL_KIND_GOODS, "STOCK") is None
+    assert ap_engine.services_stock_refusal(ap_engine.BILL_KIND_SERVICES, "REPAIRS") is None

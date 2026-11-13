@@ -69,7 +69,8 @@ def test_the_table_names_every_owner_listed_type_with_its_default():
     assert {k for k, b in table.items() if not b} == CLAIMABLE_BY_DEFAULT
 
 
-@pytest.mark.parametrize("expense_type", sorted(BLOCKED_BY_DEFAULT | CLAIMABLE_BY_DEFAULT))
+# STOCK is refused on a services bill (decision D42(b), test_b11_finance_ap_pnl).
+@pytest.mark.parametrize("expense_type", sorted((BLOCKED_BY_DEFAULT | CLAIMABLE_BY_DEFAULT) - {"STOCK"}))
 def test_a_bill_with_no_tick_sent_takes_its_expense_types_default(world, expense_type):
     bill = _expense_bill(f"EXP-{expense_type}", expense_type.lower())
     blocked = expense_type in BLOCKED_BY_DEFAULT

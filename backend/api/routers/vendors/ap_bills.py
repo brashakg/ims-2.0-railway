@@ -342,6 +342,11 @@ async def create_vendor_bill(
 ):
     """Record a vendor bill (purchase invoice) as a payable. Due date is
     derived from the vendor's credit terms."""
+    # Decision D42(b). The only door that sets expense_type (no bill edit door
+    # changes it), so the combination can never be stored.
+    refusal = ap_engine.services_stock_refusal(bill.bill_kind, bill.expense_type)
+    if refusal:
+        raise HTTPException(status_code=422, detail={"code": "SERVICES_BILL_NOT_STOCK", "message": refusal})
     vendor_repo = get_vendor_repository()
     vendor = vendor_repo.find_by_id(vendor_id) if vendor_repo is not None else None
     if vendor_repo is not None and vendor is None:

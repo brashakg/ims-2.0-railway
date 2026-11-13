@@ -791,16 +791,22 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
     The cost of goods comes back for a piece that really went back on sale,
     at the cost the original sale line was charged at (cost_at_sale, else the
     live cost, else the same 60% estimate the sale used), so one piece is
-    never costed twice. Each give-back is dated when the piece went back, and
-    never before the return itself, so an earlier month is never changed:
-    a GOOD line restocked (restock_applied), by the restock retry
-    (restock_completed_at) else the return; a piece the return set aside in
-    quarantine, by its FIRST release back to sale (item_events quarantine.out
-    -> AVAILABLE, the ledger both release doors write); a Shopify refund's
-    goods put back through Goods back (its review row's goods_restock units,
-    by goods_back_at; a historical order's frame goes to a stock-in task and
-    puts no unit back). A set-aside piece written off or sent to the supplier
-    stays in the cost of goods. Fail-soft: {} on a read error."""
+    never costed twice. It is keyed on the physical UNIT, so one piece gives
+    its cost back once whichever door moved it (PR #1423 review: a Shopify
+    refund whose unit Goods back put back before the confirm was given back
+    by its lines AND by its unit). Each give-back is dated when the unit
+    FIRST went back, and never before the return itself, so an earlier month
+    is never changed: a unit the return's restock put back (restock_stock_ids,
+    once restock_applied), by the restock retry (restock_completed_at) else
+    the return; a piece the return set aside in quarantine, by its first
+    release back to sale (item_events quarantine.out -> AVAILABLE, the ledger
+    both release doors write); a Shopify refund's unit put back through Goods
+    back (its review row's goods_restock units, by goods_back_at). A set-aside
+    piece written off or sent to the supplier stays in the cost of goods.
+    A HISTORICAL order (our Shopify order-history import; IMS never held its
+    stock, no unit ever goes back) gives back the cost its sale recorded with
+    each credit note, at the note's date (decision D42(c)). Fail-soft: {} on
+    a read error."""
     lo = _parse_range_dt(from_date, end=False)
     hi = _parse_range_dt(to_date, end=True)
 
@@ -852,7 +858,8 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
             for o in db.get_collection("orders").find(
                 {"order_id": {"$in": order_ids}},
                 {"_id": 0, "order_id": 1, "items": 1, "status": 1, "advance_refund_status": 1,
-                 "advance_refund_credit_note": 1, "invoice_number": 1, "status_before_void": 1},
+                 "advance_refund_credit_note": 1, "invoice_number": 1, "status_before_void": 1,
+                 "historical": 1},
             )
         } if order_ids else {}
         picked = [p for p in picked if p[0].get("order_id") in orders and is_real_sale(orders[p[0]["order_id"]])]
@@ -904,24 +911,49 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
             def _give_back(it, qty=1.0, reversal=reversal, _key=_key, _piece_cost=_piece_cost):
                 reversal[_key(it)] = reversal.get(_key(it), 0.0) + _piece_cost(it) * qty
 
-            if ret.get("restock_applied") and _in_range(_restocked_at(ret, when)):
-                for it in items:
-                    if str(it.get("condition") or "").upper() == "GOOD" and it.get("restock"):
+            if orders[ret["order_id"]].get("historical"):
+                # Decision D42(c): IMS never held an imported Shopify order's
+                # stock, so its credit note gives back the cost the sale
+                # recorded, at the note's date, once -- whatever came back. A
+                # note stamped with no lines (RET-HIST) is the order's lines
+                # scaled to the note's taxable value.
+                if noted:
+                    if not items:
+                        base = sum(line_revenue_ex_gst(li) for li in lines)
+                        share = min(1.0, taxable / base) if base > 0 else 0.0
+                        items = [{"order_item_id": li.get("item_id"), "product_id": li.get("product_id"),
+                                  "return_qty": float(li.get("quantity", 1) or 1) * share,
+                                  "unit_price": line_revenue_ex_gst(li) / float(li.get("quantity", 1) or 1)}
+                                 for li in lines]
+                    for it in items:
                         _give_back(it, float(it.get("return_qty") or 0))
-            # A set-aside piece released back to sale in the range.
-            set_aside = [it for it in items if str(it.get("condition") or "").upper() != "GOOD"]
-            for sid in ret.get("quarantined_stock_ids") or []:
-                first = min((t for t in releases.get(sid, []) if t >= when), default=None)
-                if _in_range(first):
-                    _give_back(_unit_item(sid, set_aside))
-            # Goods back on a Shopify refund: its own units, never one the
-            # return's restock already put back.
-            back = goods.get(ret.get("shopify_refund_id"))
-            if back and _in_range(max(when, back[0])):
-                done = set(ret.get("restock_stock_ids") or []) if ret.get("restock_applied") else set()
-                for sid in dict.fromkeys(back[1]):
-                    if sid not in done:
-                        _give_back(_unit_item(sid, items))
+            else:
+                # Keyed on the physical unit: each piece back on sale gives its
+                # cost back once, on the day it FIRST went back, whichever door
+                # moved it -- the return's own restock (its restock_stock_ids:
+                # every unit it reactivated or minted; "applied" with none is a
+                # restock that put nothing back), a set-aside piece's first
+                # release, or Goods back on a Shopify refund.
+                landed: Dict[str, tuple] = {}
+
+                def _lands(sid, at, among, landed=landed):
+                    if at is not None and (sid not in landed or at < landed[sid][0]):
+                        landed[sid] = (at, among)
+
+                good = [it for it in items if str(it.get("condition") or "").upper() == "GOOD"]
+                if ret.get("restock_applied"):
+                    for sid in ret.get("restock_stock_ids") or []:
+                        _lands(sid, _restocked_at(ret, when), good or items)
+                set_aside = [it for it in items if str(it.get("condition") or "").upper() != "GOOD"]
+                for sid in ret.get("quarantined_stock_ids") or []:
+                    _lands(sid, min((t for t in releases.get(sid, []) if t >= when), default=None),
+                           set_aside or items)
+                back = goods.get(ret.get("shopify_refund_id"))
+                for sid in (back[1] if back else []):
+                    _lands(sid, max(when, back[0]), items)
+                for sid, (at, among) in landed.items():
+                    if _in_range(at):
+                        _give_back(_unit_item(sid, among))
             if not noted and not reversal:
                 continue
             shares = [(ret.get("store_id"), 1.0)]
