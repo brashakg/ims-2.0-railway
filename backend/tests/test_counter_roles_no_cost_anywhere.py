@@ -253,6 +253,7 @@ def _seed(db):
         {
             "job_id": "J1",
             "job_number": "WJ-1",
+            "order_id": "O1",  # a job sits on an order of its shop (PR #1376)
             "store_id": STORE,
             "status": "PENDING",
             "vendor_id": "V1",
@@ -657,6 +658,7 @@ def _qc_failed_job(db, job_id):
         {
             "job_id": job_id,
             "job_number": f"WJ-{job_id}",
+            "order_id": "O1",  # a job sits on an order of its shop (PR #1376)
             "store_id": STORE,
             "status": "QC_FAILED",
             "lens_details": {"product_id": "P1"},

@@ -92,6 +92,9 @@ def rig(request, monkeypatch):
     monkeypatch.setattr(om, "get_order_repository", lambda: orders)
     monkeypatch.setattr(om, "get_stock_repository", lambda: None)
     monkeypatch.setattr("api.dependencies.get_order_repository", lambda: orders)
+    # THE job rule's order-shop read (workshop.helpers._jobs_in_reach, #1376)
+    # binds its own name: point it at this rig's orders too.
+    monkeypatch.setattr("api.routers.workshop.helpers.get_order_repository", lambda: orders)
     monkeypatch.setattr("api.dependencies.get_workshop_repository", lambda: jobs)
     monkeypatch.setattr("api.dependencies.get_audit_repository", lambda: None, raising=False)
 

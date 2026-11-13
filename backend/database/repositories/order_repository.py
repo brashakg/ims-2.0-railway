@@ -389,6 +389,22 @@ class OrderRepository(BaseRepository):
     # Order-specific queries
     # =========================================================================
     
+    def ids_in_stores(self, order_ids, store_ids) -> set:
+        """Which of `order_ids` belong to one of `store_ids`, in one id-only
+        read. An unreadable store answers none (callers authorize on this)."""
+        try:
+            rows = self.collection.find(
+                {
+                    "order_id": {"$in": list(order_ids)},
+                    "store_id": {"$in": list(store_ids)},
+                },
+                {"_id": 0, "order_id": 1},
+            )
+            return {r.get("order_id") for r in rows}
+        except Exception as e:
+            print(f"Error reading order shops: {e}")
+            return set()
+
     def find_by_order_number(self, order_number: str) -> Optional[Dict]:
         """Find order by order number"""
         return self.find_one({"order_number": order_number})
