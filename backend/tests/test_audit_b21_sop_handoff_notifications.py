@@ -226,3 +226,28 @@ def test_r40_no_database_is_unavailable_not_empty(monkeypatch):
     c = _client(notif_mod.router, "/notifications", {"user_id": "u1", "roles": ["STORE_MANAGER"]})
     assert c.get("/notifications").status_code == 503
     assert c.get("/notifications/unread-count").status_code == 503
+
+
+def test_r06_oracle_milestone_bell_row_is_stored_as_naive_utc():
+    """ORACLE writes TARGET_MILESTONE rows into the same notifications
+    collection the bell reads as UTC; an IST wall clock would show 5h30m ahead."""
+    from agents.implementations.oracle import OracleAgent
+
+    class _Users:
+        def find(self, *_a, **_k):
+            return [{"user_id": "u-floor"}]
+
+    class _Notifs:
+        docs = []
+
+        def insert_many(self, docs, **_k):
+            self.docs.extend(docs)
+
+    notifs = _Notifs()
+    agent = OracleAgent(db=None)
+    agent.get_collection = lambda name: {"users": _Users(), "notifications": notifs}[name]
+    agent._notify_floor_staff("S1", 50)
+    assert len(notifs.docs) == 1
+    stored = notifs.docs[0]["created_at"]
+    assert stored.tzinfo is None
+    assert abs(stored - datetime.now(timezone.utc).replace(tzinfo=None)) < timedelta(minutes=1)
