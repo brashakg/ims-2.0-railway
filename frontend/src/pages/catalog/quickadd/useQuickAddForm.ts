@@ -14,6 +14,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../context/AuthContext';
 import { useUnsavedGuard } from '../../../hooks/useUnsavedGuard';
+import { getErrorStatus } from '../../../utils/errorHandler';
 import { useToast } from '../../../context/ToastContext';
 import { COST_ROLES } from '../../../components/common/CostCell';
 import {
@@ -1703,7 +1704,7 @@ export function useQuickAddForm() {
           // CAT-03: the address still names this product and the form stays
           // locked (editBusy) -- a failed load never turns into Add Product.
           loadFailed = true;
-          const notFound = (err as { response?: { status?: number } })?.response?.status === 404;
+          const notFound = getErrorStatus(err) === 404;
           toast.error(
             notFound
               ? `Product ${editId} does not exist any more.`
