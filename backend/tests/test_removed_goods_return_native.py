@@ -196,6 +196,56 @@ def test_a_failure_before_the_piece_moves_gives_the_claim_back(client, shop, inv
     assert rows["unit"] == ("AVAILABLE", None) and rows["returned_qty"] == 1 and len(rows["returns"]) == 1
 
 
+def test_a_give_back_that_did_not_finish_is_finished_by_nothing_was_paid(client, shop, invoiced, monkeypatch):
+    """Review of round 6: the press fails before the piece moves AND its give-back
+    does not finish (one short outage across two writes), so the hold is kept with
+    the claimed line. 'Nothing was paid' must give the claim back on the REMOVED
+    line (not the billed items), so the piece can be recorded again."""
+    from api.routers import returns
+
+    oid, frame = _parcel_with_a_piece_removed(client, shop, invoiced)
+    real_keep, real_release = returns._keep_order_refund_hold, returns._release_returnable_qty
+    keeps, releases = [], []
+
+    def keep(*a, **k):
+        keeps.append(1)
+        if len(keeps) == 1:  # the keep before the restock
+            raise TimeoutError("orders write timed out")
+        return real_keep(*a, **k)
+
+    def release(*a, **k):
+        releases.append(1)
+        return False if len(releases) == 1 else real_release(*a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(returns, "_keep_order_refund_hold", keep)
+        m.setattr(returns, "_release_returnable_qty", release)
+        first = _press(client, oid, frame["item_id"])
+    assert first.status_code == 500
+    rows = _rows(shop, oid)
+    (rid,) = rows["holds"]
+    assert rows["unit"] == ("SOLD", oid) and rows["returned_qty"] == 1, "the claim is still held"
+    assert rows["returns"] == [] and rows["holds"][rid]["kept"] is True
+    assert not rows["holds"][rid].get("money_out")
+    assert rows["holds"][rid]["lines"][0].get("removed_from_bill") is True, "the hold says which array"
+    assert rows["holds"][rid].get("claims_released") and not rows["holds"][rid].get("claims_released_done")
+    # An hour passes: the hold and its lost give-back are both stale.
+    old = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    shop["db"].get_collection("orders").update_one({"order_id": oid}, {"$set": {
+        f"refund_holds.{rid}.at": old, f"refund_holds.{rid}.claims_released_at": old}})
+    done = client.post(f"/api/v1/returns/{rid}/complete-record", json={"nothing_paid": True},
+                       headers=_token(ADMIN))
+    assert done.status_code == 201, done.text
+    rows = _rows(shop, oid)
+    assert rows["returned_qty"] == 0, "the removed line's claim was given back"
+    assert rows["unit"] == ("SOLD", oid) and rows["holds"] == {}
+    assert [(r[0], r[1]) for r in rows["returns"]] == [(rid, "NOTHING_PAID")]
+    again = _press(client, oid, frame["item_id"], key="press-removed-piece-2")
+    assert again.status_code == 201, again.text
+    rows = _rows(shop, oid)
+    assert rows["unit"] == ("AVAILABLE", None) and rows["returned_qty"] == 1
+
+
 def test_a_press_that_died_after_the_piece_moved_is_finished_once(client, shop, invoiced, monkeypatch):
     """Stopped after the restock and before any doc existed: the retry is refused
     with the Needs-completing pointer (never a second restock); Complete record
@@ -203,6 +253,7 @@ def test_a_press_that_died_after_the_piece_moved_is_finished_once(client, shop, 
     from api.routers import returns
 
     oid, frame = _parcel_with_a_piece_removed(client, shop, invoiced)
+    units = shop["db"].get_collection("stock_units").count_documents({"product_id": frame["product_id"]})
 
     def died(*a, **k):
         raise TimeoutError("worker died")
@@ -224,8 +275,14 @@ def test_a_press_that_died_after_the_piece_moved_is_finished_once(client, shop, 
     done = client.post(f"/api/v1/returns/{rid}/complete-record", json={"cash_leg_paid": True},
                        headers=_token(ADMIN))
     assert done.status_code == 201, done.text
+    # The piece is already on the shelf: the rebuilt record says so (from the
+    # restock kept on the hold) and never asks for a second, hand-made unit.
+    assert done.json()["restock_applied"] is True, done.json()
+    assert "by hand" not in done.json()["message"], done.json()["message"]
     rows = _rows(shop, oid)
     assert rows["returns"] == [(rid, "COMPLETED", True, 0.0)]
+    assert shop["db"].get_collection("returns").find_one({"return_id": rid})["restock_applied"] is True
+    assert shop["db"].get_collection("stock_units").count_documents({"product_id": frame["product_id"]}) == units
     again = _press(client, oid, frame["item_id"])
     assert again.status_code == 201 and again.json()["return_id"] == rid
     assert len(_rows(shop, oid)["returns"]) == 1 and _rows(shop, oid)["unit"] == ("AVAILABLE", None)

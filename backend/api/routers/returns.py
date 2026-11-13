@@ -1782,7 +1782,8 @@ def _reassert_return_claims(row: Dict[str, Any]) -> None:
     lost = []
     for line in spec.get("lines") or []:
         orig = {"item_id": line.get("item_id"), "product_id": line.get("product_id"),
-                "quantity": line.get("purchased") or line.get("qty")}
+                "quantity": line.get("purchased") or line.get("qty"),
+                "removed_from_bill": line.get("removed_from_bill")}
         try:
             if not _claim_returnable_qty(order_id, orig, float(line.get("qty") or 0), token=line.get("token")):
                 lost.append(line)
@@ -1915,14 +1916,24 @@ def _undo_return_claims(spec: Dict[str, Any], *, note_number: Optional[str] = No
                       finisher=False, sole_owner=False)
 
 
+def _held_line(orig_line: Dict[str, Any], qty: float, token: Optional[str]) -> Dict[str, Any]:
+    """A claimed line as a kept hold (or a credit line's undo) records it: enough
+    for a later give-back to find the SAME element -- on the bill's removed lines
+    when the piece was taken off the invoice (_line_array)."""
+    return {"item_id": orig_line.get("item_id") or orig_line.get("id"), "product_id": orig_line.get("product_id"),
+            "qty": qty, "token": token, **({"removed_from_bill": True} if orig_line.get("removed_from_bill") else {})}
+
+
 def _release_lines(order_id: Optional[str], lines: List[Dict[str, Any]]) -> bool:
     """Give back every claimed line; True only when each release landed. A
     line carrying its claim's token releases BY that token (exactly once: a
-    re-run of a release that landed matches nothing). No lines: the facts are
-    missing, so nothing is known to give back -- never "done" (money review 17)."""
+    re-run of a release that landed matches nothing), on the array it was
+    claimed on. No lines: the facts are missing, so nothing is known to give
+    back -- never "done" (money review 17)."""
     if not lines:
         return False
-    results = [_release_returnable_qty(order_id, {"item_id": ln.get("item_id"), "product_id": ln.get("product_id")},
+    results = [_release_returnable_qty(order_id, {"item_id": ln.get("item_id"), "product_id": ln.get("product_id"),
+                                                  "removed_from_bill": ln.get("removed_from_bill")},
                                        float(ln.get("qty") or 0), token=ln.get("token")) for ln in lines]
     return all(results)
 
@@ -4320,9 +4331,7 @@ async def create_return(
                 # Kept WITH its facts: "Nothing was paid" knows which units
                 # and which number to give back (money review 17).
                 _keep_order_refund_hold(hoid, rid, extra={
-                    "lines": [{"item_id": orig_line.get("item_id") or orig_line.get("id"),
-                               "product_id": orig_line.get("product_id"), "qty": qty, "token": tok}
-                              for _oid, orig_line, qty, tok in claimed],
+                    "lines": [_held_line(orig_line, qty, tok) for _oid, orig_line, qty, tok in claimed],
                     "note_number": number, "store_id": held.get("store_id")})
         if held.get("approval_request_id"):
             # The approval this failed return spent is given back, not burned.
@@ -4482,9 +4491,7 @@ def _return_removed_goods(
     # until its doc exists.
     if held.get("return_id"):
         _keep_order_refund_hold(order_id, return_id, extra={
-            "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
-                       "product_id": d["orig_line"].get("product_id"),
-                       "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in taken],
+            "lines": [_held_line(d["orig_line"], float(d["ret_line"].return_qty), d["token"]) for d in taken],
             "tenders": None, "note_number": None, "store_id": store_id, "return_type": body.return_type,
             "net_amount": 0.0, "gross_refund": 0.0, "restocking_fee": 0.0, "round_off": 0.0, "gst_view": {},
             "order_number": order.get("order_number"),
@@ -4501,6 +4508,14 @@ def _return_removed_goods(
         )
     except Exception as exc:  # noqa: BLE001 -- recorded, not applied: retry-restock finishes it
         logger.warning("[RETURNS] goods-only restock of %s failed (recorded, not applied): %s", return_id, exc)
+    if restock and held.get("return_id"):
+        # What the shelf now holds, kept on the hold: a record rebuilt from it
+        # (Complete record) says the piece is back, never "add it by hand".
+        try:
+            _keep_order_refund_hold(order_id, return_id, extra={"restock": {
+                k: restock.get(k) for k in ("restocked", "applied", "restock_stock_ids", "restock_store_id")}})
+        except Exception as exc:  # noqa: BLE001 -- the rebuild then says: check the piece first
+            logger.warning("[RETURNS] goods-only restock of %s not kept on its hold: %s", return_id, exc)
     quarantined = _quarantine_damaged_units(
         lines, order_id, billed_and_removed, return_id, current_user.get("user_id"))
     doc = {
@@ -5029,9 +5044,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         """What the kept hold records for Needs completing: the claimed lines,
         the tenders, the credit-note number, the store."""
         return {
-            "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
-                       "product_id": d["orig_line"].get("product_id"),
-                       "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in claimed],
+            "lines": [_held_line(d["orig_line"], float(d["ret_line"].return_qty), d["token"]) for d in claimed],
             "tenders": refund_tenders,
             "note_number": credit_note_number,
             "store_id": store_id,
@@ -5129,10 +5142,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                 undo_on_void={
                     "order_id": resolved_order_id,
                     "return_id": held.get("return_id"),
-                    "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
-                               "product_id": d["orig_line"].get("product_id"),
-                               "purchased": _line_purchased_qty(d["orig_line"]),
-                               "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in claimed],
+                    "lines": [{**_held_line(d["orig_line"], float(d["ret_line"].return_qty), d["token"]),
+                               "purchased": _line_purchased_qty(d["orig_line"])} for d in claimed],
                     "refund_tenders": refund_tenders,
                     "net_amount": round(float(net_amount), 2),
                     "return_type": body.return_type,
@@ -5913,6 +5924,7 @@ async def complete_return_record(
         # The whole refund: its credit note covers all of it; the reserved
         # amount, never more (it stays inside the cap).
         net = facts.get("net_amount") if facts.get("net_amount") is not None else round(credit + drawer, 2)
+        kept_restock = facts.get("restock") or {}
         doc = {
             "return_id": return_id,
             "order_id": order_id,
@@ -5941,9 +5953,12 @@ async def complete_return_record(
             "drawer_auto_netted": bool(rtype == "RETURN" and _drawer(tenders)),
             "credit_amount": credit,
             "credit_entry": {k: v for k, v in base.items() if k != "_id"} or None,
-            "restocked": [],
-            "restock_applied": False,
-            "restock_stock_ids": [],
+            # A goods-only press keeps its restock on the hold: the rebuilt
+            # record carries it (the piece is on the shelf already).
+            "restocked": kept_restock.get("restocked") or [],
+            "restock_applied": bool(kept_restock.get("applied")),
+            "restock_stock_ids": kept_restock.get("restock_stock_ids") or [],
+            **({"restock_store_id": kept_restock["restock_store_id"]} if kept_restock.get("restock_store_id") else {}),
             "created_by": current_user.get("user_id"),
             # A goods-only press (a piece already taken off the invoice) stays
             # one: Rs 0, never read as a refund.
@@ -5969,7 +5984,16 @@ async def complete_return_record(
         _audit_credit_event("RETURN_RECORD_REDATED", {"entry_id": f"return:{return_id}", "store_id": store_id,
                                                       "order_id": order_id})
     _audit_complete(return_id, store_id, current_user, recovered, now)
-    return {**doc, "message": "Return record completed. Put its units back in stock by hand."
+    if doc.get("restock_applied"):
+        stock_note = " Its units are already back in stock."
+    elif doc.get("goods_only"):
+        # A piece taken off the invoice goes back on the shelf BEFORE its record
+        # is written: a second, hand-made stock row would be a phantom unit.
+        stock_note = (" Check the piece before adding any stock: it was probably put back on the shelf "
+                      "already. Add it by hand only if it still shows as sold.")
+    else:
+        stock_note = " Put its units back in stock by hand."
+    return {**doc, "message": "Return record completed." + stock_note
             + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else "")}
 
 
