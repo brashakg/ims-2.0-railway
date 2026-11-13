@@ -282,7 +282,14 @@ def test_auto_generate_after_a_reschedule_does_not_raise_a_second_call(fu, monke
     from datetime import date as _date
     client, coll, h = fu
     sdb = fu_mod._get_db()
-    day = _date.today()  # the generator's own clock
+    day = ist_today()
+
+    class _PinnedDate(_date):  # pin the generator's own clock to the seeded day
+        @classmethod
+        def today(cls):
+            return day
+
+    monkeypatch.setattr(fu_mod, "date", _PinnedDate)
     coll.update_one({"follow_up_id": "FU-1"},
                     {"$set": {"type": kind, "scheduled_date": day.isoformat()}})
     if kind == "prescription_expiry":
