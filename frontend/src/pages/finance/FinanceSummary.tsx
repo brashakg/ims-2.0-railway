@@ -35,6 +35,9 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
       : plStatement && netProfit === null
         ? 'Administrators only (includes salaries)'
         : 'After tax & opex';
+  // A loss is red, a profit green, in the statement as in the store table
+  // (audit L3-11: a -Rs 40,226.72 net profit was shown in green).
+  const loss = (v: number | null) => v !== null && v < 0;
   const opexPct =
     revenue && revenue > 0 && operatingExpenses !== null
       ? `${((operatingExpenses / revenue) * 100).toFixed(1)}% of revenue`
@@ -115,7 +118,7 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
 
               <div className="col-span-2 bg-gray-100 p-4 rounded border border-gray-200">
                 <p className="text-slate-700 text-sm">Gross Profit</p>
-                <p className="text-green-600 text-xl font-semibold mt-1">
+                <p className={`${loss(plStatement.gross_profit) ? 'text-red-600' : 'text-green-600'} text-xl font-semibold mt-1`}>
                   {money(plStatement.gross_profit)}
                 </p>
               </div>
@@ -137,14 +140,20 @@ export default function FinanceSummary({ revenueData, plStatement }: FinanceSumm
                   payroll-derived figure and the backend withholds it below
                   ADMIN (owner ruling 2026-08-09). Say so in plain English
                   rather than rendering a zero or a payroll-free stand-in. */}
-              <div className="col-span-2 bg-green-50 p-4 rounded border border-green-200">
-                <p className="text-green-700 text-sm font-medium">Net Profit</p>
-                <p className="text-green-700 text-2xl font-bold mt-1">
+              <div
+                className={`col-span-2 p-4 rounded border ${
+                  loss(plStatement.net_profit) ? 'bg-red-50 border-red-200' : 'bg-green-50 border-green-200'
+                }`}
+              >
+                <p className={`${loss(plStatement.net_profit) ? 'text-red-700' : 'text-green-700'} text-sm font-medium`}>
+                  {loss(plStatement.net_profit) ? 'Net Loss' : 'Net Profit'}
+                </p>
+                <p className={`${loss(plStatement.net_profit) ? 'text-red-700' : 'text-green-700'} text-2xl font-bold mt-1`}>
                   {plStatement.net_profit === null
                     ? dash
                     : formatCurrency(plStatement.net_profit)}
                 </p>
-                <p className="text-green-600 text-xs mt-2">
+                <p className={`${loss(plStatement.net_profit) ? 'text-red-600' : 'text-green-600'} text-xs mt-2`}>
                   {plStatement.net_profit === null
                     ? 'Net profit is after salaries, so it is shown to administrators only.'
                     : `Profit Margin: ${(plStatement.profit_margin ?? 0).toFixed(2)}%`}
