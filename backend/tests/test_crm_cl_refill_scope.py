@@ -47,6 +47,7 @@ class _Orders:
                 {
                     "order_id": f"ORD-{cid}",
                     "customer_id": cid,
+                    "status": "DELIVERED",
                     "created_at": (datetime.utcnow() - timedelta(days=5)).isoformat(),
                     "items": [{"sku": "CL-SKU", "category": "CONTACT_LENS",
                                "modality": "DAILY", "pack_size": 30, "quantity": 2}],

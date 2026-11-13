@@ -28,10 +28,13 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+from .online_order_status import SALE_DONE_ANY_CASE
+
 logger = logging.getLogger(__name__)
 
-# CL categories used across the codebase (mirrors inventory.py _CL_CATEGORIES
-# and the existing crm.py cl-refill-status endpoint).
+# THE contact-lens categories for refill and the CL reorder segment. The
+# per-customer status (crm.py), the store worklist and the campaign segment all
+# read this set; never a local copy (L1-F19).
 CL_CATEGORIES = {
     "CONTACT_LENS",
     "CONTACT_LENSES",
@@ -39,6 +42,7 @@ CL_CATEGORIES = {
     "CONTACT LENSES",
     "CL",
     "CONTACTS",
+    "CONTACTLENS",
     # Colour contact lenses are contact lenses too -> same refill reminders.
     "COLORED_CONTACT_LENS",
     "COLOUR_CONTACT_LENS",
@@ -48,6 +52,12 @@ CL_CATEGORIES = {
 DAILY_MODALITIES = {"DAILY", "DAILY DISPOSABLE", "1-DAY"}
 MONTHLY_MODALITIES = {"MONTHLY", "MONTHLY DISPOSABLE", "30-DAY"}
 BIWEEKLY_MODALITIES = {"BIWEEKLY", "2-WEEK", "FORTNIGHTLY"}
+
+# L1-F18: only goods the customer RECEIVED are supply. A draft, a quote, a
+# cancelled / refunded / void order, or one still being made (CONFIRMED /
+# PROCESSING / READY) supplied nothing, so it must not restart the refill
+# clock. The done-sale set the reports use (any case, FULFILLED included).
+SUPPLIED_STATUSES = SALE_DONE_ANY_CASE
 
 # Refill priority bands -> task priority. Overdue is the loudest follow-up.
 DEFAULT_DUE_WITHIN_DAYS = 14
@@ -127,6 +137,64 @@ def _is_cl_line(item: Dict[str, Any]) -> bool:
     return cat in CL_CATEGORIES
 
 
+def supplied_cl_line(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The contact-lens line this order actually left with the customer, or
+    None. THE supply rule for every refill door (L1-F18).
+
+    The order must be a received sale (SUPPLIED_STATUSES). Returned boxes are
+    not supply: the line's quantity is reduced by its ``returned_qty`` (the
+    count the Returns door increments), and a fully returned line is skipped.
+    The first CL line still held wins (one line per order drives the date, as
+    before: a two-eye order is one supply). Pure.
+    """
+    if order.get("status") not in SUPPLIED_STATUSES:
+        return None
+    for item in order.get("items") or []:
+        if not _is_cl_line(item):
+            continue
+        try:
+            qty = float(item.get("quantity") or 1)
+            returned = float(item.get("returned_qty") or 0)
+        except (TypeError, ValueError):
+            qty, returned = 1.0, 0.0
+        kept = int(qty - returned)
+        if kept > 0:
+            return {**item, "quantity": kept}
+    return None
+
+
+def latest_supplies(
+    orders_coll, query: Dict[str, Any], limit: int
+) -> List[tuple]:
+    """(order, supplied CL line) pairs, newest order first, for the orders
+    matching ``query``. Only received sales are read (the status filter is in
+    the query so cancelled rows never use up the scan limit). RAISES when the
+    orders cannot be read: an unreadable history is not "no history"."""
+    cursor = (
+        orders_coll.find(
+            {**query, "status": {"$in": list(SUPPLIED_STATUSES)}},
+            {
+                "_id": 0,
+                "order_id": 1,
+                "customer_id": 1,
+                "customer_name": 1,
+                "created_at": 1,
+                "order_date": 1,
+                "status": 1,
+                "items": 1,
+            },
+        )
+        .sort("created_at", -1)
+        .limit(int(limit))
+    )
+    out = []
+    for order in cursor:
+        line = supplied_cl_line(order)
+        if line is not None:
+            out.append((order, line))
+    return out
+
+
 def scan_due_refills(
     db,
     store_id: Optional[str] = None,
@@ -137,22 +205,18 @@ def scan_due_refills(
 ) -> List[Dict[str, Any]]:
     """Worklist of customers whose CL refill is DUE (<= horizon) or overdue.
 
-    Scans recent orders (optionally store-scoped), keeps the most-recent CL
-    line PER customer (orders are scanned newest-first; the first CL hit per
+    Scans recent RECEIVED orders (optionally store-scoped; latest_supplies),
+    keeps the most-recent supplied CL line PER customer (orders are scanned newest-first; the first CL hit per
     customer wins), computes the refill, and keeps rows where
     days_remaining <= due_within_days. Sorted most-overdue first.
 
-    Fail-soft: db None / no orders collection -> []. Never raises.
+    db None -> []. An orders read that FAILS raises (the router turns it into
+    a 503): an empty worklist must mean nobody is due, not "could not read".
     """
     if db is None:
         return []
     now = now or datetime.utcnow()
-    try:
-        orders_coll = db.get_collection("orders")
-    except Exception:  # noqa: BLE001
-        orders_coll = None
-    if orders_coll is None:
-        return []
+    orders_coll = db.get_collection("orders")
 
     query: Dict[str, Any] = {}
     if store_id:
@@ -164,42 +228,17 @@ def scan_due_refills(
             {"preferred_store_id": store_id},
         ]
 
-    try:
-        cursor = (
-            orders_coll.find(
-                query,
-                {
-                    "_id": 0,
-                    "order_id": 1,
-                    "customer_id": 1,
-                    "customer_name": 1,
-                    "created_at": 1,
-                    "order_date": 1,
-                    "items": 1,
-                },
-            )
-            .sort("created_at", -1)
-            .limit(int(scan_limit))
-        )
-        orders = list(cursor)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("[CL-REFILL] scan failed: %s", exc)
-        return []
+    # Raises on a read failure: the router answers 503, never an empty list
+    # that looks like "nobody is due" (L1-F19).
+    supplies = latest_supplies(orders_coll, query, scan_limit)
 
     seen: set = set()
     out: List[Dict[str, Any]] = []
-    for order in orders:
+    for order, cl_line in supplies:
         cid = order.get("customer_id")
         if not cid or cid in seen:
             continue
-        cl_line = None
-        for item in order.get("items") or []:
-            if _is_cl_line(item):
-                cl_line = item
-                break
-        if cl_line is None:
-            continue
-        # First (newest) CL order for this customer is authoritative.
+        # First (newest) supplied CL order for this customer is authoritative.
         seen.add(cid)
         order_date_raw = order.get("created_at") or order.get("order_date")
         refill = compute_refill(cl_line, order_date_raw, now=now)

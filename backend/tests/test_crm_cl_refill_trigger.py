@@ -108,6 +108,7 @@ def _order(cid, days_ago, *, modality="MONTHLY", pack=1, qty=1, store="BV-1", oi
         "customer_id": cid,
         "customer_name": f"Cust {cid}",
         "store_id": store,
+        "status": "DELIVERED",  # b18: only received goods are supply
         "created_at": (datetime.utcnow() - timedelta(days=days_ago)).isoformat(),
         "items": [
             {
