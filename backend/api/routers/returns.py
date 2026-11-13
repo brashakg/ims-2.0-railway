@@ -4336,6 +4336,96 @@ async def create_return(
         raise
 
 
+def _replay_reply(existing: Dict[str, Any]) -> Dict[str, Any]:
+    """The answer to a press already recorded: read off its saved return."""
+    return {
+        "return_id": existing.get("return_id"),
+        "return_type": existing.get("return_type"),
+        "returned_value": existing.get("returned_value"),
+        "gross_refund": existing.get("gross_refund"),
+        "restocking_fee": existing.get("restocking_fee"),
+        "net_refund": existing.get("net_refund"),
+        "gst_breakup": existing.get("gst_breakup"),
+        "refund_amount": existing.get("refund_amount"),
+        "refund_method": existing.get("refund_method"),
+        "credit_amount": existing.get("credit_amount"),
+        "collect_amount": existing.get("collect_amount"),
+        "settlement": existing.get("settlement"),
+        "restocked": existing.get("restocked", []),
+        "restock_applied": existing.get("restock_applied", False),
+        "restock_stock_ids": existing.get("restock_stock_ids", []),
+        "goods_only": existing.get("goods_only"),
+        "message": "Return already recorded (idempotent replay)",
+        "_idempotent_replay": True,
+    }
+
+
+def _record_return_doc(doc: Dict[str, Any]) -> bool:
+    """THE save of a counter return's doc, for both doors (billed goods and goods
+    taken off the bill). A write that errors is read back by its return_id (a lost
+    reply that landed is saved). Not there, or no answer: the doc rides on the
+    return's KEPT refund hold with a P1 task, and the press's identical retry
+    (_finish_unsaved_return) or Returns > Needs completing saves it. True when
+    the doc is stored."""
+    coll = _returns_coll()
+    if coll is None:
+        return True
+    try:
+        coll.insert_one(dict(doc))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        try:
+            if coll.find_one({"return_id": doc.get("return_id")}) is not None:
+                return True
+        except Exception:  # noqa: BLE001 -- no answer: kept on the hold below
+            pass
+        logger.error("[RETURNS] return %s recorded at the counter but its doc was NOT saved: %s",
+                     doc.get("return_id"), exc)
+        _keep_order_refund_hold(doc.get("order_id"), doc.get("return_id"), extra={"doc": dict(doc)})
+        _task_return_doc_missing(doc)
+        return False
+
+
+def _finish_unsaved_return(order: Dict[str, Any], idem_key: str, body: "ReturnCreate",
+                           current_user: dict) -> Optional[Dict[str, Any]]:
+    """The identical retry of a press whose return doc never saved (its kept hold
+    on this bill carries the press's Idempotency-Key). A goods-only return moved no
+    money, so its retry saves the doc the hold carries and replays it -- one record,
+    one physical effect. A press whose doc is not on the hold (it stopped before the
+    doc existed), or whose return moved money (the cash question is a person's), is
+    refused with the Needs-completing pointer; never redone. None: no such hold."""
+    if not idem_key or _returns_coll() is None:
+        return None
+    for rid, hold in (order.get("refund_holds") or {}).items():
+        hold = hold or {}
+        doc = dict(hold.get("doc") or {})
+        if not hold.get("kept") or (doc.get("idempotency_key") or hold.get("idempotency_key")) != idem_key:
+            continue
+        if not _replay_matches(doc or hold, body):
+            raise HTTPException(status_code=409, detail=(
+                f"This press already started return {rid} with different items. Reload the bill "
+                "before starting a new return."))
+        coll = _returns_coll()
+        try:
+            saved = coll.find_one({"return_id": rid}) if coll is not None else None
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail=(
+                "Could not read this bill's earlier return just now - nothing was recorded. Try again.")) from exc
+        if saved is not None:
+            continue  # recorded: the key lookup above replays it
+        if not doc.get("goods_only"):
+            raise HTTPException(status_code=409, detail=_unfinished_return_message(rid, None, hold))
+        doc.pop("_id", None)
+        try:
+            coll.insert_one(dict(doc))
+        except Exception as exc:  # noqa: BLE001 -- a twin wrote it (unique return_id), or it failed
+            _replay_or_503(coll, rid, exc)
+        _close_task(f"return_doc_missing:{rid}", current_user, "Record saved by the identical retry")
+        logger.info("[RETURNS] identical retry saved the unsaved goods-only return %s", rid)
+        return _replay_reply(doc)
+    return None
+
+
 def _return_removed_goods(
     body: "ReturnCreate",
     order: Dict[str, Any],
@@ -4344,12 +4434,25 @@ def _return_removed_goods(
     resolved: List[Dict[str, Any]],
     current_user: dict,
     idem_key: str,
+    held: Dict[str, Any],
+    serial_override_by: Optional[str] = None,
 ) -> Dict[str, Any]:
     """A physical piece comes back that an edit had already taken off this bill (a
     revised invoice on a parcel). The revision took it off what the customer owes,
     so the return moves goods only: no refund, no credit note, no tax reversal.
-    The unit stayed SOLD to this bill for exactly this; the restock frees it once."""
+    The unit stayed SOLD to this bill for exactly this; the restock frees it once.
+
+    Recorded under THE counter return's durable protocol, not a second one: the
+    refund hold on the bill (Rs 0) is the press's intent; create_return gives back
+    the units it claimed if it fails before any unit moves; the hold is KEPT with
+    the press's facts (its key included) BEFORE the restock; the doc is saved by
+    _record_return_doc (an unsaved doc rides on the hold, and the identical retry
+    saves it -- _finish_unsaved_return)."""
+    _refuse_while_a_return_settles(order, order_id)
     return_id = generate_return_id()
+    _prior, reserved = _reserve_order_refund(order_id, 0.0, return_id)
+    if reserved:
+        held.update(order_id=order_id, return_id=return_id)
     taken: List[Dict[str, Any]] = []
     for idx, rl in enumerate(resolved):
         rl["token"] = f"{return_id}:{idx}"
@@ -4361,6 +4464,9 @@ def _return_removed_goods(
             raise HTTPException(status_code=409, detail=(
                 "This piece was just returned by another transaction. Reload the bill and check."))
         taken.append(rl)
+    # Every error from here until a unit moves gives these back (create_return).
+    held["claimed"] = [(order_id, d["orig_line"], float(d["ret_line"].return_qty), d["token"]) for d in taken]
+    held["store_id"] = store_id
     lines = [
         rl["ret_line"].model_copy(update={
             "product_id": rl["orig_line"].get("product_id"), "unit_price": 0.0, "gst_rate": 0.0,
@@ -4369,10 +4475,32 @@ def _return_removed_goods(
         for rl in resolved
     ]
     billed_and_removed = {**order, "items": [*(order.get("items") or []), *(order.get("removed_lines") or [])]}
-    restock = _restock_good_items(
-        lines, store_id, return_id, order_id=order_id, user_id=current_user.get("user_id"),
-        processing_store_id=current_user.get("active_store_id"), order=billed_and_removed,
-    )
+    fingerprint = _return_fingerprint(body) if idem_key else None
+    # The units move from here: the hold is KEPT with what this press did (its
+    # Rs 0 figures, the claimed lines, its key), so no failure from now on gives
+    # anything back by itself, and the bill shows the return in Needs completing
+    # until its doc exists.
+    if held.get("return_id"):
+        _keep_order_refund_hold(order_id, return_id, extra={
+            "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
+                       "product_id": d["orig_line"].get("product_id"),
+                       "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in taken],
+            "tenders": None, "note_number": None, "store_id": store_id, "return_type": body.return_type,
+            "net_amount": 0.0, "gross_refund": 0.0, "restocking_fee": 0.0, "round_off": 0.0, "gst_view": {},
+            "order_number": order.get("order_number"),
+            "customer_id": order.get("customer_id") or order.get("customerId"),
+            "goods_only": True, "idempotency_key": idem_key or None, "idempotency_fingerprint": fingerprint,
+            "money_out": True,
+        })
+    held["money_out"] = True
+    restock: Dict[str, Any] = {}
+    try:
+        restock = _restock_good_items(
+            lines, store_id, return_id, order_id=order_id, user_id=current_user.get("user_id"),
+            processing_store_id=current_user.get("active_store_id"), order=billed_and_removed,
+        )
+    except Exception as exc:  # noqa: BLE001 -- recorded, not applied: retry-restock finishes it
+        logger.warning("[RETURNS] goods-only restock of %s failed (recorded, not applied): %s", return_id, exc)
     quarantined = _quarantine_damaged_units(
         lines, order_id, billed_and_removed, return_id, current_user.get("user_id"))
     doc = {
@@ -4398,14 +4526,13 @@ def _return_removed_goods(
         "quarantined_stock_ids": [u["stock_id"] for u in quarantined],
         "status": "COMPLETED",
         "reason_summary": _reason_summary([rl["ret_line"] for rl in resolved]),
+        "serial_override_by": serial_override_by,
         "created_by": current_user.get("user_id"),
         "created_at": datetime.now(),
         "idempotency_key": (idem_key or None),
-        "idempotency_fingerprint": _return_fingerprint(body) if idem_key else None,
+        "idempotency_fingerprint": fingerprint,
     }
-    coll = _returns_coll()
-    if coll is not None:
-        coll.insert_one(dict(doc))
+    _record_return_doc(doc)
     return {
         **{k: doc[k] for k in ("return_id", "return_type", "returned_value", "gross_refund", "restocking_fee",
                                "net_refund", "refund_amount", "credit_amount", "restocked", "restock_applied",
@@ -4452,25 +4579,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                         idem_key,
                         existing.get("return_id"),
                     )
-                    return {
-                        "return_id": existing.get("return_id"),
-                        "return_type": existing.get("return_type"),
-                        "returned_value": existing.get("returned_value"),
-                        "gross_refund": existing.get("gross_refund"),
-                        "restocking_fee": existing.get("restocking_fee"),
-                        "net_refund": existing.get("net_refund"),
-                        "gst_breakup": existing.get("gst_breakup"),
-                        "refund_amount": existing.get("refund_amount"),
-                        "refund_method": existing.get("refund_method"),
-                        "credit_amount": existing.get("credit_amount"),
-                        "collect_amount": existing.get("collect_amount"),
-                        "settlement": existing.get("settlement"),
-                        "restocked": existing.get("restocked", []),
-                        "restock_applied": existing.get("restock_applied", False),
-                        "restock_stock_ids": existing.get("restock_stock_ids", []),
-                        "message": "Return already recorded (idempotent replay)",
-                        "_idempotent_replay": True,
-                    }
+                    return _replay_reply(existing)
         except HTTPException:
             raise
         except Exception as _exc:  # noqa: BLE001
@@ -4553,6 +4662,12 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             ),
         )
 
+    # The identical retry of a press whose doc never saved finishes THAT press
+    # (or names where it is finished) before anything is counted again.
+    _finished = _finish_unsaved_return(order, idem_key, body, current_user)
+    if _finished is not None:
+        return _finished
+
     # BUG-096: only a completed sale is returnable. Reject a CANCELLED / DRAFT /
     # REFUNDED / VOID order -- you cannot refund a sale that never completed or was
     # already fully refunded. Legacy orders with no status field fall through to
@@ -4633,27 +4748,31 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         resolved_lines.append({"ret_line": ret_line, "orig_line": orig_line})
 
     removed = [rl for rl in resolved_lines if rl["orig_line"].get("removed_from_bill")]
-    if removed:
-        if len(removed) != len(resolved_lines):
-            raise HTTPException(
-                status_code=400,
-                detail=("A piece taken off this invoice is returned on its own: nothing is refunded "
-                        "for it, so return the billed items separately. Nothing was recorded."),
-            )
-        return _return_removed_goods(
-            body, order, resolved_order_id, store_id, removed, current_user, idem_key
+    if removed and len(removed) != len(resolved_lines):
+        raise HTTPException(
+            status_code=400,
+            detail=("A piece taken off this invoice is returned on its own: nothing is refunded "
+                    "for it, so return the billed items separately. Nothing was recorded."),
         )
 
     # 0b. SERIAL-MISMATCH HARD-BLOCK (E3 acceptance #8, return half). Runs after
-    #     the quantity guard and BEFORE any money math / atomic claim, so a
-    #     mismatched return rejects with nothing reserved. Permissive: skipped
-    #     when either the scanned or the recorded serial is absent. A consumed
-    #     manager override (E4) lets it proceed; `serial_override_by` is stamped
-    #     on the return doc below.
+    #     the quantity guard and BEFORE any money math / atomic claim -- and
+    #     before EITHER door (billed goods, or goods taken off the bill) moves a
+    #     unit -- so a mismatched return rejects with nothing reserved.
+    #     Permissive: skipped when either the scanned or the recorded serial is
+    #     absent. A consumed manager override (E4) lets it proceed;
+    #     `serial_override_by` is stamped on the return doc. A removed line's
+    #     own unit is found through the bill's removed lines.
     serial_override_by = _guard_return_serial_mismatch(
         resolved_lines, body, resolved_order_id, store_id, current_user,
-        order=order,
+        order=({**order, "items": [*(order.get("items") or []), *(order.get("removed_lines") or [])]}
+               if removed else order),
     )
+    if removed:
+        return _return_removed_goods(
+            body, order, resolved_order_id, store_id, removed, current_user, idem_key, held,
+            serial_override_by=serial_override_by,
+        )
 
     # 1. Money math (pure engine; validates negatives). returned_value is the
     #    GST-INCLUSIVE gross the customer paid: the original order line's
@@ -5352,17 +5471,10 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "idempotency_fingerprint": _return_fingerprint(body) if idem_key else None,
     }
 
-    coll = _returns_coll()
-    if coll is not None:
-        try:
-            coll.insert_one(dict(doc))
-        except Exception as exc:  # noqa: BLE001
-            # The money already went out: the KEPT hold keeps this refund in the
-            # bill's refunded total (Rs 2,000 rule, cap) -- loud, for the admin:
-            # the doc rides on the hold and on a P1 task, for Complete record.
-            logger.error("[RETURNS] return %s money recorded but its doc was NOT saved: %s", return_id, exc)
-            _keep_order_refund_hold(resolved_order_id, return_id, extra={"doc": dict(doc)})
-            _task_return_doc_missing(doc)
+    # The money already went out: an unsaved doc rides on the KEPT hold, which
+    # keeps this refund in the bill's refunded total (Rs 2,000 rule, cap) --
+    # loud, for the admin: on a P1 task, for Complete record.
+    _record_return_doc(doc)
 
     # Audit log (optional, fail-soft).
     try:
@@ -5833,6 +5945,13 @@ async def complete_return_record(
             "restock_applied": False,
             "restock_stock_ids": [],
             "created_by": current_user.get("user_id"),
+            # A goods-only press (a piece already taken off the invoice) stays
+            # one: Rs 0, never read as a refund.
+            **({"goods_only": True} if facts.get("goods_only") else {}),
+            # The press's own key (kept on its hold): its identical retry
+            # replays this record instead of counting the piece again.
+            "idempotency_key": facts.get("idempotency_key"),
+            "idempotency_fingerprint": facts.get("idempotency_fingerprint"),
         }
         source = "credit line" if credit_landed else "held refund"
     if owed:
