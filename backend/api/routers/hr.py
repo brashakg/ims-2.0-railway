@@ -1293,12 +1293,12 @@ async def mark_attendance(
                     )
             row_id = existing.get("attendance_id") or existing.get("_id")
             before = {k: v for k, v in existing.items() if k != "_id"}
-            attendance_repo.update(row_id, data)
             changed = [
                 k
                 for k in ("store_id", "status", "check_in", "check_out")
-                if k in data and data[k] != existing.get(k)
+                if k in data and data[k] != before.get(k)
             ]
+            attendance_repo.update(row_id, data)
             if changed:
                 _audit_attendance_edit(
                     current_user, row_id, before, {**before, **data}, changed
