@@ -21,9 +21,12 @@ from ..services.rx_print_values import (
     format_rx_value,
     is_absent_rx_value,
     rx_axis_or,
+    rx_binocular_pd,
+    rx_issue_date_value,
     rx_power_or,
     rx_text_or,
 )
+from ..services.rx_patient import load_rx_patient
 from ..dependencies import (
     get_prescription_repository,
     get_customer_repository,
@@ -1880,12 +1883,44 @@ def _text(value, fallback: str = "-") -> str:
     return rx_text_or(value, fallback)
 
 
-def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> str:
+def _rx_card_date(prescription: dict) -> str:
+    """The recorded issue date (shared rule: prescription_date, else the
+    clinical exam's test_date), YYYY-MM-DD. A clinical exam Rx carries only
+    test_date, so reading prescription_date alone printed a blank date."""
+    raw = rx_issue_date_value(prescription)
+    return "" if raw is None else str(raw)[:10]
+
+
+def _patient_line_html(patient: Optional[dict]) -> str:
+    """L2-CLIN-F02: name the person examined (shared rule, services.rx_patient)
+    on the card. Escaped -- the name is free text typed at the counter."""
+    from html import escape
+
+    patient = patient or {}
+    name = escape(_text(patient.get("name"), "Not recorded"))
+    phone = patient.get("phone")
+    phone_html = (
+        "" if _is_absent_rx_value(phone) else f" &nbsp; <strong>Phone:</strong> {escape(str(phone))}"
+    )
+    return f"<p><strong>Patient:</strong> {name}{phone_html}</p>"
+
+
+def _build_spectacle_print_html(
+    prescription: dict, identity_html: str = "", patient: Optional[dict] = None
+) -> str:
     """Spectacle Rx card. `identity_html` is the issuing store/entity supplier
     block (legal name, address, GSTIN, NCAHP/DMC reg, logo) prepended above the
     Rx so a customer-facing prescription always shows WHO issued it."""
     right = prescription.get("right_eye", {}) or {}
     left = prescription.get("left_eye", {}) or {}
+    # The PD column is each eye's MONOCULAR PD; the binocular IPD is its own
+    # line and is never copied into an eye's cell (L2-CLIN-F02).
+    ipd = rx_binocular_pd(prescription)
+    ipd_html = (
+        ""
+        if _is_absent_rx_value(ipd)
+        else f"<p><strong>IPD (binocular):</strong> {_text(ipd)} mm</p>"
+    )
     return f"""
         <!DOCTYPE html>
         <html>
@@ -1898,11 +1933,12 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
             <div class="header">
                 <h2>Eye Prescription</h2>
                 <p class="rx-number">{_text(prescription.get('prescription_number'), '')}</p>
-                <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
+                <p>Date: {_rx_card_date(prescription)}</p>
             </div>
+            {_patient_line_html(patient)}
             <table>
                 <tr>
-                    <th></th><th>SPH</th><th>CYL</th><th>AXIS</th><th>ADD</th><th>PD</th>
+                    <th></th><th>SPH</th><th>CYL</th><th>AXIS</th><th>ADD</th><th>PD (mono)</th>
                 </tr>
                 <tr>
                     <td><strong>RE</strong></td>
@@ -1921,6 +1957,7 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
                     <td>{_cell(left.get('pd'))}</td>
                 </tr>
             </table>
+            {ipd_html}
             <p><strong>Lens Recommendation:</strong> {_text(prescription.get('lens_recommendation'), 'N/A')}</p>
             <p><strong>Coating:</strong> {_text(prescription.get('coating_recommendation'), 'N/A')}</p>
             <p><strong>Remarks:</strong> {_text(prescription.get('remarks'))}</p>
@@ -1932,7 +1969,9 @@ def _build_spectacle_print_html(prescription: dict, identity_html: str = "") -> 
         """
 
 
-def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
+def _build_cl_print_html(
+    prescription: dict, identity_html: str = "", patient: Optional[dict] = None
+) -> str:
     """Contact-lens Rx card: brand/series/modality header + per-eye
     power/CYL/AXIS/ADD/BC/DIA (no PD -- a CL is fit by base-curve+diameter).
     `identity_html` prepends the issuing store/entity supplier block."""
@@ -1958,8 +1997,9 @@ def _build_cl_print_html(prescription: dict, identity_html: str = "") -> str:
             <div class="header">
                 <h2>Contact Lens Prescription</h2>
                 <p class="rx-number">{_text(prescription.get('prescription_number'), '')}</p>
-                <p>Date: {prescription.get('prescription_date', '')[:10]}</p>
+                <p>Date: {_rx_card_date(prescription)}</p>
             </div>
+            {_patient_line_html(patient)}
             <p><strong>Brand:</strong> {brand} &nbsp; <strong>Series:</strong> {series}
                &nbsp; <strong>Modality:</strong> {modality}</p>
             {color_row}
@@ -2046,10 +2086,11 @@ async def print_prescription(
             raise HTTPException(status_code=404, detail="Prescription not found")
 
         identity_html = _rx_identity_html(prescription)
+        patient = load_rx_patient(prescription)
         if (prescription.get("rx_kind") or "SPECTACLE") == "CONTACT_LENS":
-            html = _build_cl_print_html(prescription, identity_html)
+            html = _build_cl_print_html(prescription, identity_html, patient)
         else:
-            html = _build_spectacle_print_html(prescription, identity_html)
+            html = _build_spectacle_print_html(prescription, identity_html, patient)
 
         return {
             "html": html,

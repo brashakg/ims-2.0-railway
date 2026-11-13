@@ -47,6 +47,8 @@ import jwt
 from fastapi import APIRouter, HTTPException, Path, Request
 from pydantic import BaseModel, Field
 
+from ..services.rx_print_values import rx_binocular_pd, rx_issue_date_value
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -748,17 +750,21 @@ def _safe_prescription_view(rx: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "prescription_id": rx.get("prescription_id") or rx.get("id"),
         "prescription_number": rx.get("prescription_number"),
-        "prescription_date": rx.get("prescription_date"),
+        # L2-CLIN-F03: the shared reader rule (services/rx_print_values) -- a
+        # clinical exam's Rx records its date as `test_date` and its binocular
+        # PD as `ipd`, so reading one spelling each showed the patient
+        # "Issued -" and no PD for an exam that recorded both.
+        "prescription_date": rx_issue_date_value(rx),
         "expiry_date": rx.get("expiry_date"),
         "type": rx.get("type") or rx.get("prescription_type"),
         "right_eye": _safe_eye_view(rx.get("right_eye") or rx.get("od")),
         "left_eye": _safe_eye_view(rx.get("left_eye") or rx.get("os")),
-        "pd": rx.get("pd") or rx.get("pupillary_distance"),
+        "pd": rx_binocular_pd(rx),
         # PATIENT SAFETY: `or` is a truthiness test, and a recorded ADD of 0 is
         # falsy -- so a patient whose prescription says "no reading addition"
         # had that finding silently dropped and read a blank on their own Rx
-        # page. A 0 is a RECORDED value here (unlike `pd`, where 0mm is
-        # anatomically impossible, so the `or` above is safe). Fall through to
+        # page. A 0 is a RECORDED value here (`pd` above goes through the shared
+        # present-value rule too). Fall through to
         # the alias only when the canonical key holds nothing at all.
         "add_power": _first_recorded(rx.get("add_power"), rx.get("add")),
         "notes": rx.get("remarks") or rx.get("notes"),

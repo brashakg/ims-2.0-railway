@@ -178,3 +178,40 @@ def rx_axis_or(value, fallback: str = "-") -> str:
         return fallback
     rendered = format_axis_value(value)
     return rendered if rendered != "" else fallback
+
+
+# ---------------------------------------------------------------------------
+# Binocular IPD and the recorded issue date (audit L2-CLIN-F02 / L2-CLIN-F03)
+# ---------------------------------------------------------------------------
+# Every Rx writer stores these under different keys: the clinical exam writes
+# `ipd` + `test_date`, the counter/POS create writes `ipd` + `prescription_date`
+# (and mirrors test_date), the 4-version finalize mirrors a top-level `pd`, and
+# older imports carry `pupillary_distance`. Each reader picked ONE spelling, so
+# the same saved exam printed without its IPD and reached the patient portal as
+# "Issued -". One reader rule, used by every print door and the portal.
+#
+# The binocular IPD is NEVER derived from the per-eye monocular PDs (and never
+# the reverse): a missing measurement stays missing.
+
+
+def rx_binocular_pd(rx: Any) -> Any:
+    """The recorded binocular (inter-pupillary) distance, else None."""
+    if not isinstance(rx, dict):
+        return None
+    return first_present_rx_value(
+        rx.get("ipd"), rx.get("pd"), rx.get("pupillary_distance")
+    )
+
+
+def rx_issue_date_value(rx: Any) -> Any:
+    """The recorded issue date of an Rx (raw stored value), else None.
+
+    `prescription_date` (counter/POS Rx) first, then `test_date` (the clinical
+    exam's Rx). `created_at` is deliberately NOT here: it is when the row was
+    written, not a date a clinician recorded.
+    """
+    if not isinstance(rx, dict):
+        return None
+    return first_present_rx_value(
+        rx.get("prescription_date"), rx.get("test_date"), rx.get("testDate")
+    )
