@@ -968,7 +968,9 @@ export const adminBrandApi = {
 // screen read `.id` / `.name`, so rename/delete hit `/undefined`. Give each
 // row the generic `id` (and an index its `name`) here, once, for all readers.
 type LensRow = Record<string, unknown>;
-const withLensIds = (data: unknown, listKey: string, idKey: string) => {
+// Returns the same loose shape axios gave the callers before (any).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const withLensIds = (data: unknown, listKey: string, idKey: string): any => {
   const rows = (Array.isArray(data) ? data : (data as Record<string, unknown>)?.[listKey]) as LensRow[] | undefined;
   const norm = (rows || []).map((r) => ({
     ...r,

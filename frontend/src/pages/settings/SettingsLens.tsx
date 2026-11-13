@@ -12,7 +12,7 @@ import type { LensBrand, LensIndex, LensCoating, LensAddon } from './settingsTyp
 // L1-F08: a price must be a plain non-negative rupee amount (up to 2 decimals).
 // Anything else (blank, "banana", "12abc", "-5", "1e3") is refused - never
 // turned into 0, which made the item free. A deliberate "0" is kept.
-export function parseLensPrice(raw: string | null): number | null {
+function parseLensPrice(raw: string | null): number | null {
   const t = (raw ?? '').trim();
   return /^\d+(\.\d{1,2})?$/.test(t) ? Number(t) : null;
 }
