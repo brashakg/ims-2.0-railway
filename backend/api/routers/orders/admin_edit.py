@@ -324,18 +324,23 @@ def _stamp_master(line: dict, product: dict) -> None:
 
 
 def _gate_clinical_lines(
-    added: List[dict], new_items: List[dict], existing_items: list, customer_id, user: dict
+    added: List[dict], new_items: List[dict], existing_items: list, customer_id, user: dict,
+    prior_customer_id=None,
 ) -> None:
     """THE spectacle-prescription gate the till runs (rx._validate_order_line_rx), on
-    the lines this edit decides anything clinical about: the goods it adds, and a
-    stored line whose Rx or power it changes. A correction of an old line that
-    changes neither answers to no clinical rule, so a historical bill stays
-    correctable. Only doors that save lines call this: a note changes none."""
+    the lines this edit decides anything clinical about: the goods it adds, a
+    stored line whose Rx or power it changes, and -- when the edit moves the bill
+    to another customer -- every line that names a prescription (it must belong
+    to the customer now billed). A correction of an old line that changes none of
+    these answers to no clinical rule, so a historical bill stays correctable.
+    Only doors that save lines call this: a note changes none."""
     stored = {ln.get("item_id"): ln for ln in existing_items or []}
+    rebilled = str(customer_id or "") != str(prior_customer_id or "")
     changed = [
         ln for ln in new_items
         if ln.get("item_id") in stored
-        and any(ln.get(f) != stored[ln["item_id"]].get(f) for f in _CLINICAL_FIELDS)
+        and ((rebilled and ln.get("prescription_id"))
+             or any(ln.get(f) != stored[ln["item_id"]].get(f) for f in _CLINICAL_FIELDS))
     ]
     product_repo = get_product_repository()
     for line in [*added, *changed]:
@@ -532,7 +537,8 @@ async def superadmin_edit_order(
     )
     _gate_added_lines(added, order.get("store_id"))
     _gate_clinical_lines(
-        added, new_items, order.get("items"), body.customer_id or order.get("customer_id"), current_user
+        added, new_items, order.get("items"), body.customer_id or order.get("customer_id"), current_user,
+        prior_customer_id=order.get("customer_id"),
     )
     cart_discount_pct = (
         body.cart_discount_percent
@@ -659,7 +665,10 @@ def _revision_key(body: SuperadminInvoiceChange) -> str:
 
 def _unlanded_revision(db, order_id: str, original_invoice: str, revision_key: str) -> Optional[dict]:
     """A link row this same edit wrote against this same invoice, with a number
-    the bill never took. An unreadable row reads as none: only a spare serial."""
+    the bill never took. None only when the read SAYS there is none: an unreadable
+    row is no answer, and reading it as none would spend a second serial on the
+    same edit (owner ruling 2026-11-07, REUSE THE FIRST NUMBER) -- refused, 503,
+    nothing taken; the retry reuses the first number once the row reads."""
     if db is None:
         return None
     try:
@@ -670,7 +679,11 @@ def _unlanded_revision(db, order_id: str, original_invoice: str, revision_key: s
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[ORDERS] revised_invoices read failed: %s", exc)
-        return None
+        raise HTTPException(
+            status_code=503,
+            detail=("This invoice's earlier revision could not be read just now, so no new "
+                    "number was taken and nothing changed. Try again."),
+        ) from exc
 
 
 def _revision_reply(order: dict) -> dict:
@@ -766,7 +779,8 @@ async def superadmin_invoice_change(
     _gate_added_lines(added, order.get("store_id"))
     if body.mode == "REVISED_INVOICE":
         _gate_clinical_lines(
-            added, new_items, order.get("items"), body.customer_id or order.get("customer_id"), current_user
+            added, new_items, order.get("items"), body.customer_id or order.get("customer_id"), current_user,
+            prior_customer_id=order.get("customer_id"),
         )
     if body.mode != "REVISED_INVOICE" and any(
         _takes_serialized_stock(ln) or takes_lens_cell(ln) for ln in added
@@ -864,12 +878,14 @@ async def superadmin_invoice_change(
             raise HTTPException(
                 status_code=400, detail=f"Cannot issue a revised invoice: {exc}"
             ) from exc
+        # A first press that wrote its link row but never landed its save left
+        # a number nothing printed: this press is that edit, so it is that number.
+        # Read before anything is written or taken: an unreadable row refuses
+        # (503) with nothing to give back.
+        unlanded = _unlanded_revision(db, order_id, original_invoice, revision_key)
         op = open_op(order, added, removed, new_items, current_user)
         # Before the number is minted, so a lost unit burns no serial.
         soft_failed = await _take_added_stock(order, added, current_user, op)
-        # A first press that wrote its link row but never landed its save left
-        # a number nothing printed: this press is that edit, so it is that number.
-        unlanded = _unlanded_revision(db, order_id, original_invoice, revision_key)
         try:
             new_invoice_number = (unlanded or {}).get("revised_invoice_number") or (
                 repo.next_invoice_number(order.get("store_id"), store_doc=store_doc)
