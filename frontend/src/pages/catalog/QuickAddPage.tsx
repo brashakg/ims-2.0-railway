@@ -45,7 +45,7 @@ export function QuickAddPage() {
     editMode, isReviewMode, reviewSnapshot, handleBackToQueue, handleEditCancel,
     variantCtx, exitVariantMode, leaveFamily, familyHint, optedOutLeadId,
     dupInfo, setDupInfo, dupBusy, handleDupAddVariant, handleDupOpenExisting,
-    dupMaybe, handleDupDifferent, attributes,
+    dupMaybe, handleDupDifferent, attributes, editLoadError, retryEditLoad,
   } = form;
 
   if (!canAddProduct) {
@@ -54,6 +54,43 @@ export function QuickAddPage() {
         <div className="card text-center py-12">
           <h2 className="text-xl font-semibold text-gray-700">Access Denied</h2>
           <p className="text-gray-500 mt-1">You don't have permission to add products.</p>
+        </div>
+      </div>
+    );
+  }
+
+  // CAT-03: the ?edit= product would not open. Said here, for as long as it
+  // is true -- never an editable create form behind a dead Save button.
+  if (editLoadError) {
+    return (
+      <div className="inv-body">
+        <div role="alert" className="card max-w-lg mx-auto text-center py-14">
+          <AlertTriangle className="w-10 h-10 mx-auto text-amber-600" />
+          <h2 className="mt-3 text-xl font-semibold text-gray-900">
+            Could not open product {editLoadError.id}
+          </h2>
+          <p className="mt-1 text-sm text-gray-500">
+            {editLoadError.notFound
+              ? 'No product has this id. It may have been deleted, or the link is wrong.'
+              : 'The server did not send this product. Check the connection and try again.'}
+          </p>
+          <div className="mt-5 flex flex-wrap items-center justify-center gap-2">
+            {!editLoadError.notFound && (
+              <button type="button" onClick={retryEditLoad} className="btn-primary">
+                Try again
+              </button>
+            )}
+            <button type="button" onClick={() => navigate('/catalog')} className="btn-secondary">
+              Back to catalogue
+            </button>
+            <button
+              type="button"
+              onClick={() => setSearchParams(new URLSearchParams(), { replace: true })}
+              className="btn-secondary"
+            >
+              Add a new product instead
+            </button>
+          </div>
         </div>
       </div>
     );

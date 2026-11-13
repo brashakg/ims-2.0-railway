@@ -10,7 +10,7 @@
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
+import { Link, MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 
 vi.mock('../../../context/AuthContext', () => ({
   useAuth: () => ({
@@ -87,6 +87,8 @@ function Where() {
       <output data-testid="where">{l.pathname + l.search}</output>
       {/* What the sidebar's "Add product" link does. */}
       <button type="button" onClick={() => navigate('/catalog/add')}>sidebar add</button>
+      {/* Any other sidebar menu link. */}
+      <Link to="/stock">sidebar stock</Link>
     </>
   );
 }
@@ -192,8 +194,12 @@ describe('L1-F45 / CAT-01: no save while a photo is uploading', () => {
     await sleep(30);
     pickPhoto('photo-of-A.png');
     await waitFor(() => expect(release.length).toBe(1));
+    // A photo still uploading asks first (CAT-04); the staff member leaves.
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
     fireEvent.click(screen.getByRole('button', { name: 'sidebar add' }));
     await screen.findByRole('button', { name: /Save product/ });
+    expect(confirm).toHaveBeenCalledTimes(1);
+    confirm.mockRestore();
     await act(async () => { release[0](undefined); });
     await sleep(30);
     expect(document.querySelector('img[src*="photo-of-A"]')).toBeNull();
@@ -211,14 +217,38 @@ describe('CAT-03: the edit address names the product', () => {
     expect(new URLSearchParams(where().split('?')[1]).get('edit')).toBe('P-A');
   });
 
-  it('a product that will not load stays an edit address and cannot be saved as new', async () => {
-    productSpies.getProduct.mockRejectedValue(new Error('500'));
+  it('a product that will not load stays an edit address, says so on screen, cannot be saved', async () => {
+    productSpies.getProduct.mockRejectedValue(Object.assign(new Error('500'), { response: { status: 500 } }));
     renderAt('/catalog/add?edit=P-A');
-    await waitFor(() => expect(toast.error).toHaveBeenCalledWith(expect.stringMatching(/Could not load the product/)));
+    const panel = await screen.findByRole('alert');
+    expect(panel.textContent).toMatch(/Could not open product P-A/);
     await sleep(30);
     expect(where()).toBe('/catalog/add?edit=P-A');
-    expect(screen.getByRole('button', { name: /Save product/ })).toBeDisabled();
+    // No editable create form and no Save behind the message.
+    expect(screen.queryByRole('button', { name: /Save product/ })).toBeNull();
+    expect(screen.queryByLabelText(/^MRP/)).toBeNull();
+    fireEvent.keyDown(window, { key: 'Enter', ctrlKey: true });
+    await sleep(30);
     expect(productSpies.createProduct).not.toHaveBeenCalled();
+    expect(productSpies.updateProduct).not.toHaveBeenCalled();
+    // The server is back: Try again opens the product for editing.
+    productSpies.getProduct.mockImplementation(async (id: unknown) => product(String(id)));
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    await screen.findByRole('button', { name: /Save changes/ });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('a product id that does not exist: no "try again", a way out to a new product', async () => {
+    productSpies.getProduct.mockRejectedValue(Object.assign(new Error('404'), { response: { status: 404 } }));
+    renderAt('/catalog/add?edit=DOES-NOT-EXIST');
+    const panel = await screen.findByRole('alert');
+    expect(panel.textContent).toMatch(/No product has this id/);
+    expect(panel.textContent).not.toMatch(/[Rr]efresh/);
+    expect(screen.queryByRole('button', { name: 'Try again' })).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: 'Add a new product instead' }));
+    const save = await screen.findByRole('button', { name: /Save product/ });
+    expect(where()).toBe('/catalog/add');
+    expect(save).toBeEnabled();
   });
 
   it('leaving the address (sidebar Add product) opens a blank create form', async () => {
@@ -256,6 +286,72 @@ describe('CAT-04: Cancel asks before dropping unsaved changes', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Cancel' })[0]);
     await waitFor(() => expect(where()).toMatch(/^\/catalog\?/));
     expect(confirm).not.toHaveBeenCalled();
+    confirm.mockRestore();
+  });
+});
+
+describe('CAT-04: refresh and other menus ask before dropping unsaved changes', () => {
+  const dirtyEdit = async () => {
+    renderAt('/catalog/add?edit=P-A');
+    await screen.findByRole('button', { name: /Save changes/ });
+    await sleep(30);
+    fireEvent.change(screen.getByLabelText(/^MRP/), { target: { value: '9990' } });
+    await sleep(30);
+  };
+  const unload = () => {
+    const ev = new Event('beforeunload', { cancelable: true });
+    window.dispatchEvent(ev);
+    return ev.defaultPrevented;
+  };
+
+  it('refresh / tab close with an unsaved change is held by the browser prompt', async () => {
+    await dirtyEdit();
+    expect(unload()).toBe(true);
+  });
+
+  it('nothing changed: refresh is not held', async () => {
+    renderAt('/catalog/add?edit=P-A');
+    await screen.findByRole('button', { name: /Save changes/ });
+    await sleep(30);
+    expect(unload()).toBe(false);
+  });
+
+  it('another menu link asks; staying keeps the page', async () => {
+    await dirtyEdit();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('link', { name: 'sidebar stock' }));
+    expect(confirm).toHaveBeenCalledTimes(1);
+    await sleep(30);
+    expect(where()).toMatch(/^\/catalog\/add\?edit=P-A/);
+    confirm.mockRestore();
+  });
+
+  it('"Add product" on the edit page asks; staying keeps the typed edit (no reload)', async () => {
+    await dirtyEdit();
+    const loads = productSpies.getProduct.mock.calls.length;
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'sidebar add' }));
+    await sleep(50);
+    expect(confirm).toHaveBeenCalledTimes(1);
+    expect(where()).toBe('/catalog/add?edit=P-A');
+    expect((screen.getByLabelText(/^MRP/) as HTMLInputElement).value).toBe('9990');
+    expect(screen.getByRole('button', { name: /Save changes/ })).toBeInTheDocument();
+    expect(productSpies.getProduct.mock.calls.length).toBe(loads);
+    // The kept edit still saves to the same product.
+    confirm.mockRestore();
+    fireEvent.click(screen.getByRole('button', { name: /Save changes/ }));
+    await waitFor(() => expect(productSpies.updateProduct).toHaveBeenCalledTimes(1));
+    expect(productSpies.updateProduct.mock.calls[0][0]).toBe('P-A');
+    expect(productSpies.updateProduct.mock.calls[0][1]).toMatchObject({ mrp: 9990 });
+  });
+
+  it('"Add product" on the edit page, confirmed: a blank create form', async () => {
+    await dirtyEdit();
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    fireEvent.click(screen.getByRole('button', { name: 'sidebar add' }));
+    await screen.findByRole('button', { name: /Save product/ });
+    expect(where()).toBe('/catalog/add');
+    expect((screen.getByLabelText(/^MRP/) as HTMLInputElement).value).toBe('');
     confirm.mockRestore();
   });
 });
