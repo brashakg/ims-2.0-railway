@@ -3,8 +3,9 @@
 // ============================================================================
 // Lifted verbatim out of the old ReportsPage. It rendered on every tab,
 // filtered to the active tab's category, so it now renders on every section
-// page with the category fixed by that page. The export + print handlers are
-// unchanged, including their quirks.
+// page with the category fixed by that page. Export CSV and Print read the
+// card's own dataset (audit L3-08 / L3-13: they used to emit a sales summary
+// for every card, and Print returned early on a selector the split pages lack).
 //
 // Two links changed target because the thing they opened moved: the GST card
 // used to open the GSTR-1 MODAL; it now navigates to the GSTR-1 PAGE. The
@@ -29,47 +30,43 @@ import {
   Printer,
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
-import {
-  exportToCSV,
-  SALES_REPORT_COLUMNS,
-  INVENTORY_REPORT_COLUMNS,
-  CUSTOMER_REPORT_COLUMNS,
-  GST_REPORT_COLUMNS,
-} from '../../utils/exportUtils';
+import { exportToCSV } from '../../utils/exportUtils';
 import { useReportsContext } from './ReportsLayout';
-import { useSalesSummary, type ReportSection, type SalesSummary } from './reportsQueries';
+import {
+  useCustomerAcquisition,
+  useSalesSummary,
+  useStockCount,
+  type ReportSection,
+} from './reportsQueries';
 
-const EMPTY_SUMMARY: SalesSummary = {
-  totalSales: 0,
-  orderCount: 0,
-  averageOrderValue: 0,
-  topCategory: '-',
-  grossProfit: 0,
-  gstCollected: 0,
-};
-
-// Report cards
+// Report cards. Only a card with a real dataset (`data: true`) offers Export
+// CSV / Print, and both read the SAME rows (audit L3-08 / L3-13). Stock
+// Movement and GST have no dataset of their own here: their View opens the
+// screen that has (the transfers ledger, the GSTR-1 page with its downloads).
 const REPORT_CARDS = [
   {
     id: 'daily-sales',
     title: 'Daily Sales Report',
-    description: 'Day-wise sales breakdown with payment modes',
+    description: 'Day-wise sales and order count for the period',
     icon: BarChart3,
     category: 'sales' as ReportSection,
+    data: true,
   },
   {
     id: 'monthly-sales',
     title: 'Monthly Sales Summary',
-    description: 'Monthly sales with category and brand analysis',
+    description: 'Sales by category for the period',
     icon: TrendingUp,
     category: 'sales' as ReportSection,
+    data: true,
   },
   {
     id: 'stock-report',
     title: 'Stock Report',
-    description: 'Current stock levels by category and brand',
+    description: 'Current stock levels by category',
     icon: Package,
     category: 'inventory' as ReportSection,
+    data: true,
   },
   {
     id: 'stock-movement',
@@ -77,13 +74,15 @@ const REPORT_CARDS = [
     description: 'Stock in/out movements and transfers',
     icon: Package,
     category: 'inventory' as ReportSection,
+    data: false,
   },
   {
     id: 'customer-report',
     title: 'Customer Report',
-    description: 'Customer acquisition and purchase patterns',
+    description: 'New and returning customers for the period',
     icon: Users,
     category: 'customers' as ReportSection,
+    data: true,
   },
   {
     id: 'gst-report',
@@ -93,102 +92,150 @@ const REPORT_CARDS = [
     description: 'GSTR-1 data for filing',
     icon: FileText,
     category: 'gst' as ReportSection,
+    data: false,
   },
 ];
+
+type Column = { key: string; label: string };
+type Table = { columns: Column[]; rows: Record<string, string | number>[] };
+
+const esc = (v: unknown) =>
+  String(v ?? '').replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`);
 
 export function ReportCardsGrid({ category }: { category: ReportSection }) {
   const navigate = useNavigate();
   const toast = useToast();
   const { storeId, startDate, endDate, dateRange, canExport } = useReportsContext();
-  const salesSummary = useSalesSummary({ storeId, startDate, endDate }).data?.summary ?? EMPTY_SUMMARY;
+  // Each section loads only its own cards' data (same query keys as the
+  // section's widgets, so nothing is fetched twice).
+  const only = (c: ReportSection) => ({ storeId: category === c ? storeId : undefined, startDate, endDate });
+  const salesQ = useSalesSummary(only('sales'));
+  const stockQ = useStockCount(only('inventory'));
+  const acqQ = useCustomerAcquisition(only('customers'));
 
   const filteredReports = REPORT_CARDS.filter(r => r.category === category);
 
-  const handleExportReport = (reportId: string) => {
-    // Export current summary data based on report type
-    const reportData: Record<string, any>[] = [];
-    let columns: { key: string; label: string }[] = [];
-
+  /** The report's rows, or null while its data has not loaded. */
+  const reportTable = (reportId: string): Table | null => {
     switch (reportId) {
-      case 'daily-sales':
-      case 'monthly-sales':
-        reportData.push({
-          period: dateRange,
-          totalSales: salesSummary.totalSales.toFixed(2),
-          orderCount: salesSummary.orderCount,
-          averageOrderValue: salesSummary.averageOrderValue.toFixed(2),
-          grossProfit: salesSummary.grossProfit.toFixed(2),
-          gstCollected: salesSummary.gstCollected.toFixed(2),
-          topCategory: salesSummary.topCategory,
-        });
-        columns = SALES_REPORT_COLUMNS.slice(0, 4).concat([
-          { key: 'totalSales', label: 'Total Sales (₹)' },
-          { key: 'orderCount', label: 'Orders' },
-          { key: 'averageOrderValue', label: 'Avg Order Value (₹)' },
-          { key: 'grossProfit', label: 'Gross Profit (₹)' },
-          { key: 'gstCollected', label: 'GST Collected (₹)' },
-        ]);
-        break;
-      case 'stock-report':
-      case 'stock-movement':
-        columns = INVENTORY_REPORT_COLUMNS;
-        break;
-      case 'customer-report':
-        columns = CUSTOMER_REPORT_COLUMNS;
-        break;
-      case 'gst-report':
-        columns = GST_REPORT_COLUMNS;
-        break;
-    }
-
-    if (reportData.length > 0) {
-      exportToCSV(reportData, reportId, columns);
-      toast.success(`${reportId.replace('-', ' ')} exported`);
-    } else {
-      // For reports without local data, export what we have
-      const summaryData = [{
-        period: dateRange,
-        totalSales: salesSummary.totalSales.toFixed(2),
-        orderCount: salesSummary.orderCount,
-        averageOrderValue: salesSummary.averageOrderValue.toFixed(2),
-        gstCollected: salesSummary.gstCollected.toFixed(2),
-      }];
-      exportToCSV(summaryData, reportId);
-      toast.success(`${reportId.replace(/-/g, ' ')} summary exported`);
+      case 'daily-sales': {
+        const trend = salesQ.data?.dailyTrend as Array<{ date: string; sales: number; orders?: number }> | undefined;
+        if (!trend) return null;
+        return {
+          columns: [
+            { key: 'date', label: 'Date' },
+            { key: 'orders', label: 'Orders' },
+            { key: 'sales', label: 'Sales (₹)' },
+          ],
+          rows: trend.map(d => ({ date: d.date, orders: d.orders ?? '', sales: d.sales.toFixed(2) })),
+        };
+      }
+      case 'monthly-sales': {
+        const cats = salesQ.data?.categoryBreakdown;
+        if (!cats) return null;
+        return {
+          columns: [
+            { key: 'category', label: 'Category' },
+            { key: 'units', label: 'Units' },
+            { key: 'sales', label: 'Sales (₹)' },
+            { key: 'percentage', label: 'Share (%)' },
+          ],
+          rows: cats.map(c => ({ category: c.category, units: c.units, sales: c.sales.toFixed(2), percentage: c.percentage })),
+        };
+      }
+      case 'stock-report': {
+        const sc = stockQ.data;
+        if (!sc) return null;
+        // Stock at cost is sent to admin + accounts only (server cost_mask):
+        // no value column for anyone else.
+        const withValue = sc.summary?.total_value != null;
+        return {
+          columns: [
+            { key: 'category', label: 'Category' },
+            { key: 'item_count', label: 'Items' },
+            { key: 'total_quantity', label: 'Units' },
+            ...(withValue ? [{ key: 'total_value', label: 'Value at cost (₹)' }] : []),
+          ],
+          rows: (sc.data ?? []).map(r => ({
+            category: r.category,
+            item_count: r.item_count,
+            total_quantity: r.total_quantity,
+            ...(withValue ? { total_value: (r.total_value ?? 0).toFixed(2) } : {}),
+          })),
+        };
+      }
+      case 'customer-report': {
+        const a = acqQ.data;
+        if (!a) return null;
+        return {
+          columns: [
+            { key: 'period', label: 'Period' },
+            { key: 'new_customers', label: 'New customers' },
+            { key: 'returning_customers', label: 'Returning customers' },
+            { key: 'total_customers', label: 'Total customers' },
+            { key: 'retention_percent', label: 'Retention (%)' },
+          ],
+          rows: [{
+            period: `${startDate} to ${endDate}`,
+            new_customers: a.new_customers,
+            returning_customers: a.returning_customers,
+            total_customers: a.total_customers,
+            retention_percent: a.retention_percent,
+          }],
+        };
+      }
+      default:
+        return null;
     }
   };
 
-  const handlePrintReport = (reportTitle: string) => {
-    // Print current page content
-    const printContent = document.querySelector('.space-y-4');
-    if (printContent) {
-      const printWindow = window.open('', '_blank');
-      if (printWindow) {
-        printWindow.document.write(`
-          <!DOCTYPE html><html><head><title>${reportTitle}</title>
-          <style>
-            body { font-family: sans-serif; padding: 20px; }
-            .card { border: 1px solid #ddd; padding: 16px; margin: 8px 0; border-radius: 8px; }
-            table { width: 100%; border-collapse: collapse; }
-            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 12px; }
-            th { background: #f5f5f5; }
-          </style></head><body>
-          <h1>${reportTitle}</h1>
-          <p>Date: ${new Date().toLocaleDateString('en-IN')}</p>
-          <table><tr><th>Metric</th><th>Value</th></tr>
-          <tr><td>Total Sales</td><td>₹${salesSummary.totalSales.toLocaleString('en-IN')}</td></tr>
-          <tr><td>Orders</td><td>${salesSummary.orderCount}</td></tr>
-          <tr><td>Avg Order Value</td><td>₹${salesSummary.averageOrderValue.toLocaleString('en-IN')}</td></tr>
-          <tr><td>GST Collected</td><td>₹${salesSummary.gstCollected.toLocaleString('en-IN')}</td></tr>
-          </table>
-          </body></html>
-        `);
-        printWindow.document.close();
-        printWindow.focus();
-        printWindow.print();
-        printWindow.close();
-      }
+  /** The table, or null after telling the user why there is nothing. */
+  const readyTable = (reportId: string): Table | null => {
+    const t = reportTable(reportId);
+    if (!t) {
+      toast.error('Report data is still loading. Try again in a moment.');
+      return null;
     }
+    if (t.rows.length === 0) {
+      toast.error('Nothing to report for this period.');
+      return null;
+    }
+    return t;
+  };
+
+  const handleExportReport = (reportId: string) => {
+    const t = readyTable(reportId);
+    if (!t) return;
+    exportToCSV(t.rows, `${reportId}_${startDate}_${endDate}`, t.columns);
+    toast.success(`${reportId.replace(/-/g, ' ')} exported`);
+  };
+
+  const handlePrintReport = (reportId: string, reportTitle: string) => {
+    const t = readyTable(reportId);
+    if (!t) return;
+    const printWindow = window.open('', '_blank');
+    if (!printWindow) {
+      toast.error('The print window was blocked. Allow pop-ups for this site and try again.');
+      return;
+    }
+    const head = t.columns.map(c => `<th>${esc(c.label)}</th>`).join('');
+    const body = t.rows
+      .map(r => `<tr>${t.columns.map(c => `<td>${esc(r[c.key])}</td>`).join('')}</tr>`)
+      .join('');
+    printWindow.document.write(`<!DOCTYPE html><html><head><title>${esc(reportTitle)}</title>
+      <style>
+        body { font-family: sans-serif; padding: 20px; }
+        table { width: 100%; border-collapse: collapse; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; font-size: 12px; }
+        th { background: #f5f5f5; }
+      </style></head><body>
+      <h1>${esc(reportTitle)}</h1>
+      <p>Period: ${esc(startDate)} to ${esc(endDate)} (${esc(dateRange)})</p>
+      <table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>
+      </body></html>`);
+    printWindow.document.close();
+    printWindow.focus();
+    printWindow.print();
   };
 
   return (
@@ -246,7 +293,7 @@ export function ReportCardsGrid({ category }: { category: ReportSection }) {
                       View
                     </button>
                   )}
-                  {canExport && (
+                  {report.data && canExport && (
                     <button
                       onClick={() => handleExportReport(report.id)}
                       className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1"
@@ -255,13 +302,15 @@ export function ReportCardsGrid({ category }: { category: ReportSection }) {
                       Export CSV
                     </button>
                   )}
-                  <button
-                    onClick={() => handlePrintReport(report.title)}
-                    className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1"
-                  >
-                    <Printer className="w-4 h-4" />
-                    Print
-                  </button>
+                  {report.data && (
+                    <button
+                      onClick={() => handlePrintReport(report.id, report.title)}
+                      className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1"
+                    >
+                      <Printer className="w-4 h-4" />
+                      Print
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
