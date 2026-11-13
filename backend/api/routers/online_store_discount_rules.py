@@ -319,7 +319,15 @@ async def update_rule(
         raise HTTPException(status_code=404, detail="Rule not found")
     existing = _clean(existing)
 
-    data = payload.model_dump(exclude_none=True)
+    # L1-F37: an explicit null on brand / sub_brand means CLEAR that level
+    # (broaden the rule); an omitted field is left alone. A null on any other
+    # field still changes nothing (it used to drop every None, so a clear
+    # reported success while keeping the old scope).
+    data = {
+        k: v
+        for k, v in payload.model_dump(exclude_unset=True).items()
+        if v is not None or k in ("brand", "sub_brand")
+    }
     if not data:
         return {"rule": existing, "recompute": {"ok": True, "products": 0}}
 
