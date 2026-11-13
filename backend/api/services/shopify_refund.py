@@ -339,6 +339,17 @@ def _posted_credit(db, return_id: Optional[str]) -> Optional[Dict[str, Any]]:
         row.pop("_id", None)
     return row
 
+
+def _credit_row_written(db, return_id: Optional[str]) -> bool:
+    """A live (not VOID) credit ledger row of this return exists, or the
+    ledger cannot be read: its balance move may have landed. Never raises."""
+    try:
+        return db.get_collection("credit_note_ledger").find_one(
+            {"ref": return_id, "type": {"$ne": "VOID"}}) is not None
+    except Exception:  # noqa: BLE001 -- unreadable is no answer, never "nothing"
+        return True
+
+
 # Rupee tolerance when reconciling the computed credit-note gross against what
 # Shopify actually refunded. Absorbs GST rounding dust (a paisa or two on a
 # multi-line refund) while still catching a real mismatch (a Rs 200 goodwill
@@ -2101,6 +2112,10 @@ def _post_locked(
         # claim. A re-drive never lowers, zeroes or recalculates it.
         points_share = _f(prior_doc.get("points_paid_share"))
     s34_unreadable = False
+    # The credit's balance move may have landed but could not be confirmed
+    # (CreditNotConfirmed, or an error after its ledger row was written): the
+    # refund is UNFINISHED, never "not issued" -- see below.
+    credit_unclear = False
     try:
         from ..routers.returns import S34_UNREADABLE, _credit_note_window_closed, _issue_store_credit
 
@@ -2131,6 +2146,7 @@ def _post_locked(
             gst_view = {**gst_view, "taxable": 0.0, "tax": 0.0, "by_rate": {}, "section34_closed": True}
         if (credit_entry is None and customer_id and gross_refund > 0 and store_credit is not None
                 and not s34_unreadable):
+            credit_unclear = True  # until _issue_store_credit answers
             credit_entry = _issue_store_credit(
                 customer_id,
                 gross_refund,
@@ -2157,8 +2173,31 @@ def _post_locked(
                 ),
                 credit_note=not s34_closed,
             )
+            credit_unclear = False  # it answered: issued, or a clean refusal (None)
     except Exception as exc:  # noqa: BLE001
-        logger.warning("[SHOPIFY_REFUND] credit note post failed: %s", exc)
+        if credit_unclear and type(exc).__name__ != "CreditNotConfirmed":
+            # Any other error out of the credit door: unclear only if a ledger
+            # row of this return was written (or cannot be read) -- the
+            # counter door's rule (returns.py, "one owner per outcome").
+            credit_unclear = _credit_row_written(db, return_id)
+        logger.warning("[SHOPIFY_REFUND] credit note post failed (unclear=%s): %s", credit_unclear, exc)
+
+    if credit_unclear:
+        # The store credit may already be on the customer's balance: its
+        # ledger row stays ISSUING and the ten-minute reconciler settles it.
+        # Finalizing CREDIT_FAILED here read as "not issued" (no tick, no
+        # task, no points, Reject allowed, a hand credit invited) while the
+        # reconciler made the credit real behind it. The claim stays in
+        # flight instead (PENDING: is_unfinished): the answer and the row say
+        # "not finished", Reject is refused, and the tick re-drives it once
+        # stale -- resuming the SAME ledger row by its ref, or issuing afresh
+        # if the reconciler voided it. Nothing else (restock, finalize,
+        # points) runs now.
+        logger.error("[SHOPIFY_REFUND] refund=%s order=%s: store credit not confirmed -- left unfinished",
+                     refund_id, order_id)
+        return {"status": "error", "reason": NOT_FINALIZED, "error": "store credit not confirmed yet",
+                "refund_id": refund_id, "order_id": order_id, "return_id": return_id,
+                "customer_id": customer_id, "credit_note_issued": False}
 
     # (b) Restock the refunded serialized units back to the fulfilling store --
     # unless the IMS cancel door already put them back. Asked HERE, at post

@@ -1174,3 +1174,153 @@ def test_a_claim_ims_cannot_read_back_tells_staff_not_to_book_it_by_hand(env, po
     done = _stored(env, points)
     assert _less_rows(done) == _SETTLED and [p for _t, p in done["restore_rows"]] == [100], done
     _nothing_twice(env, points, monkeypatch, review_id, done)
+
+
+# ----------------------------------------------------------------------------
+# Round 9 (the lead's reviewers at eb898a55). The credit's balance move landed
+# but could not be confirmed (its answer lost, the guard read-back failed):
+# _issue_store_credit raises CreditNotConfirmed, and the post swallowed it as
+# 'not issued' -- the return finalized CREDIT_FAILED (not unfinished), the
+# ten-minute reconciler then made the Rs 900 credit real behind it, and nothing
+# finished it: no tick, no task, no points sweep, Reject allowed, and a 'could
+# not be issued' answer that invited a second credit by hand. An unconfirmed
+# credit is an unfinished refund: the claim stays in flight, the answer is
+# 'not finished', and the re-drive resumes the SAME ledger row (or issues
+# afresh if the reconciler voided it).
+# ----------------------------------------------------------------------------
+
+
+def _unconfirmed_credit(monkeypatch, moves):
+    """The credit's guarded balance move raises after landing (`moves`) or
+    before it, and the guard cannot be read back: post_ledger_credit answers
+    UNCLEAR. Returns lift(landed): the guard reads again, answering `landed`."""
+    from api.routers import customers as C
+
+    real_apply, real_guard = C.apply_store_credit_delta, C._guard_landed
+
+    def apply(repo, cid, delta, **kw):
+        if moves:
+            real_apply(repo, cid, delta, **kw)
+        raise RuntimeError("socket reset before the acknowledgement")
+
+    monkeypatch.setattr(C, "apply_store_credit_delta", apply)
+    monkeypatch.setattr(C, "_guard_landed", lambda *_a, **_k: None)
+
+    def lift(landed):
+        monkeypatch.setattr(C, "apply_store_credit_delta", real_apply)
+        monkeypatch.setattr(C, "_guard_landed", lambda *_a, **_k: landed)
+        return real_guard
+
+    return lift
+
+
+def _reconcile_credits(env):
+    """The ten-minute reconciler, its row past the timeout."""
+    import api.routers.returns as R
+    from api.routers import customers as C
+
+    ledger = env.get_collection("credit_note_ledger")
+    old = "2000-01-01T00:00:00+00:00"
+    ledger.update_many({"type": C.PENDING}, {"$set": {"pending_at": old}})
+    return C.reconcile_pending_credits(R.get_customer_repository(), ledger=ledger)
+
+
+@pytest.mark.parametrize("schedule", ["landed", "never_landed", "still_issuing"])
+def test_a_credit_whose_balance_move_was_not_confirmed_leaves_the_refund_unfinished(
+        env, points, monkeypatch, schedule):
+    """The reviewer's steps (Rs 1,000 = Rs 900 cash + Rs 100 points, refund
+    700001). landed: the move landed, the reconciler finishes the row ISSUED.
+    never_landed: it never landed, the reconciler voids it. still_issuing: the
+    tick re-drives before the reconciler has looked. Before: 422 'could not be
+    issued (credit_failed)', the return CREDIT_FAILED, Reject 200 over a booked
+    Rs 900 and the 100 points stranded for good."""
+    from api.routers import customers as C
+    from api.routers import loyalty as L
+    from api.services import shopify_refund as S
+
+    task_states = _tasks(monkeypatch, points)
+    reviews, review_id = _queued(env)
+    coll = env.get_collection("returns")
+    lift = _unconfirmed_credit(monkeypatch, moves=schedule != "never_landed")
+    code, detail = _confirm(review_id)
+    lift(schedule != "never_landed")
+
+    assert (code, detail) == (422, S.NOT_FINISHED_NOTE), (code, detail)
+    first = _stored(env, points)
+    assert first["returns"] == [("PENDING", None, True)], first  # in flight: unfinished
+    assert [r["type"] for r in _ledger(env)] == [C.PENDING], _ledger(env)  # the ISSUING row, left as it is
+    assert first["points"] == (50, 100, 50) and first["restore_rows"] == [], first
+    row = reviews.find_one({"review_id": review_id})
+    assert (row["status"], row["resolved"], row["note"]) == ("CREDIT_FAILED", False, S.NOT_FINISHED_NOTE)
+
+    # Nobody can close it over a credit that may be booked; nothing else moves it.
+    code, detail = _reject(review_id)
+    assert code == 409 and "cannot be rejected" in str(detail), (code, detail)
+    assert _confirm(review_id) == (422, S.NOT_FINISHED_NOTE)
+    # A webhook redelivery: a failure, so the inbox retries it later.
+    assert S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")["status"] == "error"
+    _sweep_reads(env, monkeypatch, points)
+    assert [L.reconcile_loyalty_reversals() for _ in range(2)] == [_ZERO] * 2  # a PENDING return is not the sweep's
+    assert _tick() == {"finished": 0, "unresolved": 0}  # a fresh claim: its run may still be alive
+
+    if schedule != "still_issuing":
+        settled = _reconcile_credits(env)
+        assert settled["finished" if schedule == "landed" else "voided"] == 1, settled
+    # Two ticks once stale: the first finishes it (the same ledger row, or a
+    # fresh one if the reconciler voided it), the second finds nothing.
+    _age(coll)
+    assert _tick() == {"finished": 1, "unresolved": 0}
+    assert _tick() == {"finished": 0, "unresolved": 0}
+    done = _stored(env, points)
+    issued = [r for r in _ledger(env) if r["type"] == "ISSUED"]
+    assert len(issued) == 1 and issued[0]["delta"] == 900.0, _ledger(env)
+    assert done["credit_balance"] == (900.0, 900.0), done  # Rs 900 once, never twice
+    assert done["points"] == (150, 0, 50) and [p for _t, p in done["restore_rows"]] == [100], done
+    assert done["returns"] == [("COMPLETED", True, False)], done
+    assert [r["type"] for r in _ledger(env)] == (["VOID", "ISSUED"] if schedule == "never_landed" else ["ISSUED"])
+    assert reviews.find_one({"review_id": review_id})["status"] == "POSTED"
+    assert task_states() == []  # finished on its first stale tick
+    _nothing_twice(env, points, monkeypatch, review_id, done)
+
+
+@pytest.mark.parametrize("when", ["after_its_row", "before_any_row"])
+def test_an_error_inside_the_credit_door_is_unfinished_only_once_a_row_exists(env, points, monkeypatch, when):
+    """Any other error out of the credit door follows the counter door's rule:
+    with a ledger row of this return written (its balance may have moved) the
+    refund is unfinished and the tick finishes it at the same row; with none,
+    nothing was booked -- CREDIT_FAILED, confirmable again, as before."""
+    import api.routers.returns as R
+    from api.routers import customers as C
+    from api.services import shopify_refund as S
+
+    reviews, review_id = _queued(env)
+    coll = env.get_collection("returns")
+    if when == "after_its_row":
+        real_post = C.post_ledger_credit
+
+        def post_then_raise(*a, **k):
+            real_post(*a, **k)
+            raise RuntimeError("an unexpected error after the ledger row was written")
+
+        monkeypatch.setattr(C, "post_ledger_credit", post_then_raise)
+        code, detail = _confirm(review_id)
+        monkeypatch.setattr(C, "post_ledger_credit", real_post)
+        assert (code, detail) == (422, S.NOT_FINISHED_NOTE), (code, detail)
+        assert _stored(env, points)["returns"] == [("PENDING", None, True)]
+        assert _reject(review_id)[0] == 409
+        _age(coll)
+        assert _tick() == {"finished": 1, "unresolved": 0}
+        done = _stored(env, points)
+        assert _less_rows(done) == _SETTLED and [p for _t, p in done["restore_rows"]] == [100], done
+    else:
+        real_issue = R._issue_store_credit
+
+        def boom(*_a, **_k):
+            raise RuntimeError("an unexpected error before any ledger row")
+
+        monkeypatch.setattr(R, "_issue_store_credit", boom)
+        code, detail = _confirm(review_id)
+        monkeypatch.setattr(R, "_issue_store_credit", real_issue)
+        assert code == 422 and "could not be issued" in str(detail), (code, detail)
+        stored = _stored(env, points)
+        assert stored["returns"] == [("CREDIT_FAILED", False, True)] and stored["credit_rows"] == [], stored
