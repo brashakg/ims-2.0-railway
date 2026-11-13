@@ -244,7 +244,7 @@ def _notify_handover_recipients(
         return
     if coll is None:
         return
-    now = datetime.now()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)  # naive UTC (audit R06)
     for r in recipients:
         uid = r.get("user_id")
         if not uid:
