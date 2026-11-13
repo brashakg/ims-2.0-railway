@@ -159,6 +159,10 @@ class DebitNoteCreate(BaseModel):
     # The shop the note is for (F63) when no bill is named; a named bill's
     # shop wins. See ap_payments._money_shop.
     store_id: Optional[str] = None
+    # One id per note the form records (as VendorPaymentCreate.request_id): a
+    # retried request answers the note it already recorded, never a second
+    # credit off the supplier's balance. See ap_payments.create_debit_note.
+    request_id: Optional[str] = Field(default=None, min_length=8, max_length=64)
 
     @field_validator("cn_type")
     @classmethod

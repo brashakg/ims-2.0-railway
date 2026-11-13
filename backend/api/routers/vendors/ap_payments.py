@@ -13,7 +13,6 @@ from ._shared import (
     _AP_ROLES,
     _get_db,
     ap_engine,
-    datetime,
     get_vendor_repository,
     require_roles,
     resolve_store_scope,
@@ -30,6 +29,7 @@ from .ap_bills import (
     _rejected_goods_hold,
 )
 from ._shared import in_reach_or_404
+from .numbering import generate_supplier_credit_number
 from ...dependencies import NO_SHOP_DETAIL, is_no_shop_scope
 
 # The answer for a named bill that is not there for the caller -- the words
@@ -404,15 +404,18 @@ async def create_vendor_payment(
     return _clean(doc)
 
 
-def _replayed_payment(db, request_id: str, sent: dict, current_user: dict) -> Optional[dict]:
-    """The payment this request id already recorded, answered again -- only
+def _replayed_payment(
+    db, request_id: str, sent: dict, current_user: dict, collection: str = "vendor_payments"
+) -> Optional[dict]:
+    """The payment (with collection="vendor_debit_notes": the supplier credit)
+    this request id already recorded, answered again -- only
     to a caller who can see it (in_reach_or_404, as any payment read) and only
     when it is the same payment: supplier, amount, bill, date, TDS, reference.
     The same id with anything else is a stale form saved twice with different
     details: 409, never the earlier payment passed off as this one. None when
     the id recorded nothing."""
     try:
-        row = db.get_collection("vendor_payments").find_one({"request_id": request_id}, {"_id": 0})
+        row = db.get_collection(collection).find_one({"request_id": request_id}, {"_id": 0})
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Database unavailable") from exc
     if row is None:
@@ -432,16 +435,16 @@ def _replayed_payment(db, request_id: str, sent: dict, current_user: dict) -> Op
     return _clean(row)
 
 
-def _ensure_request_index(db) -> None:
+def _ensure_request_index(db, collection: str = "vendor_payments") -> None:
     """Unique on request_id (sparse: older payments carry none), so the same
     request racing itself can record only one payment. create_index is a
     no-op once the index exists; payments are few, so it runs each time.
     Never blocks a payment: without it the read-first check still answers a
     retry that arrives after the save."""
     try:
-        db.get_collection("vendor_payments").create_index("request_id", unique=True, sparse=True)
+        db.get_collection(collection).create_index("request_id", unique=True, sparse=True)
     except Exception:  # noqa: BLE001
-        logger.warning("[AP] vendor_payments.request_id index could not be ensured", exc_info=True)
+        logger.warning("[AP] %s.request_id index could not be ensured", collection, exc_info=True)
 
 
 class AdvanceApply(BaseModel):
@@ -612,6 +615,16 @@ async def create_debit_note(
     # shop (a receipt with no shop on record: the shop asked for; an admin's
     # naming none: the supplier's shop by its bills).
     db_early = _get_db()
+    # A retried request (a 5xx retried, a 504 after the save) answers the note
+    # it already recorded -- the same note only (audit L3-27).
+    sent = {
+        "vendor_id": vendor_id, "amount": round(note.amount, 2), "bill_id": note.bill_id,
+        "date": note.date, "cn_type": note.cn_type, "reason": note.reason,
+    }
+    if note.request_id and db_early is not None:
+        done = _replayed_payment(db_early, note.request_id, sent, current_user, "vendor_debit_notes")
+        if done is not None:
+            return done
     named = _named_bill_in_scope_or_404(db_early, vendor_id, note.bill_id, current_user)
     receipt = _named_receipt_in_scope_or_404(db_early, vendor_id, note.grn_id, current_user)
     created_at = utc_now_iso()
@@ -627,10 +640,12 @@ async def create_debit_note(
     )
 
     dn_id = str(uuid.uuid4())
-    prefix = vendor_id[:3].upper() if vendor_id else "DN"
     doc = {
+        **({"request_id": note.request_id} if note.request_id else {}),
         "debit_note_id": dn_id,
-        "debit_note_number": f"DN-{prefix}-{datetime.now().strftime('%y%m%d%H%M')}",
+        # One consecutive reference per shop and year (L3-27); it was the
+        # supplier id plus the minute, shared by same-minute credits.
+        "debit_note_number": generate_supplier_credit_number(shop),
         "vendor_id": vendor_id,
         "vendor_name": (vendor or {}).get("trade_name")
         or (vendor or {}).get("legal_name"),
@@ -652,8 +667,17 @@ async def create_debit_note(
     db = _get_db()
     if db is not None:
         try:
+            if note.request_id:
+                _ensure_request_index(db, "vendor_debit_notes")
             db.get_collection("vendor_debit_notes").insert_one(dict(doc))
         except Exception as exc:
+            # The same request racing itself: the unique index let one through.
+            done = (
+                _replayed_payment(db, note.request_id, sent, current_user, "vendor_debit_notes")
+                if note.request_id else None
+            )
+            if done is not None:
+                return done
             raise HTTPException(
                 status_code=500, detail="Failed to save debit note"
             ) from exc
