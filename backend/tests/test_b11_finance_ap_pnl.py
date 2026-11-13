@@ -408,3 +408,98 @@ def test_l3_04_supplier_bill_money_stays_with_the_accounts_roles(db, user):
     acct = asyncio.run(pnl_mod.get_pnl(store_id="S1", current_user=ACCT, **RANGE))
     assert acct["expenses"]["Supplier bills: Rent / lease"] == 50000.0
     assert acct["total_expenses"] == 50100.0
+
+
+# --------------------------------------------------------------------------
+# Review round 2 (PR #1423): RUN-04 on the category P&L, the Goods-back door,
+# a retried restock's month; L3-04 a STOCK-typed services bill
+# --------------------------------------------------------------------------
+
+
+def _pnl_range(frm, to):
+    return asyncio.run(pnl_mod.get_pnl(store_id=None, current_user=SU, from_date=frm, to_date=to))
+
+
+def _by_category():
+    return asyncio.run(pb.get_pnl_by_category(store_id=None, entity_id=None, current_user=SU, **RANGE))
+
+
+def test_run_04_category_totals_agree_with_the_whole_business_pnl(db):
+    db.orders.insert_one({
+        "order_id": "O2", "store_id": "S1", "status": "DELIVERED", "payment_status": "PAID",
+        "created_at": datetime(2026, 11, 4, 5, 0), "grand_total": 3000.0, "tax_amount": 142.86,
+        "items": [
+            {"item_id": "F", "product_id": "PF", "item_type": "FRAME", "quantity": 1, "unit_price": 952.38,
+             "item_total": 1000.0, "taxable_value": 952.38, "gst_rate": 5.0, "cost_at_sale": 400.0},
+            {"item_id": "L", "product_id": "PL", "item_type": "LENS", "quantity": 2, "unit_price": 952.38,
+             "item_total": 2000.0, "taxable_value": 1904.76, "gst_rate": 5.0, "cost_at_sale": 300.0},
+        ],
+    })
+    # One lens back, GOOD and restocked: its value and its cost leave LENS only.
+    db.returns.insert_one({
+        "return_id": "RC", "order_id": "O2", "store_id": "S1", "status": "COMPLETED",
+        "created_at": "2026-11-06T05:00:00+00:00", "restock_applied": True,
+        "items": [{"order_item_id": "L", "product_id": "PL", "return_qty": 1.0, "unit_price": 952.38,
+                   "condition": "GOOD", "restock": True}],
+        "gst_breakup": {"gross": 1000.0, "taxable": 952.38, "tax": 47.62},
+    })
+    pnl = _pnl()
+    cat = _by_category()
+    rows = {c["category"]: c for c in cat["categories"]}
+    assert cat["total_revenue"] == pnl["revenue"] == 1904.76
+    assert round(sum(c["cogs"] for c in rows.values()), 2) == pnl["cogs"] == 700.0
+    assert (rows["FRAME"]["revenue"], rows["FRAME"]["cogs"]) == (952.38, 400.0)
+    assert (rows["LENS"]["revenue"], rows["LENS"]["cogs"]) == (952.38, 300.0)
+
+
+def _online_return(rid, refund_id, created_at, **kw):
+    doc = {**_ret(rid, created_at, restock=False), "order_id": "O9", "shopify_refund_id": refund_id}
+    doc.update(kw)
+    return doc
+
+
+def test_run_04_goods_back_on_a_shopify_refund_gives_the_cost_back(db):
+    db.orders.insert_one(_order("O9"))  # October sale, cost 500 a piece
+    db.stock_units.insert_many([{"stock_id": u, "product_id": "P1"} for u in ("U1", "U2")])
+    db.returns.insert_many([
+        # Refunded in October with the goods still out; the goods came back in November.
+        _online_return("RA", "RF-A", "2026-10-20T05:00:00+00:00"),
+        # Goods back pressed in October BEFORE the November confirm: November's.
+        _online_return("RB", "RF-B", "2026-11-02T05:00:00+00:00"),
+        # A historical order: booked to a stock-in task, no unit put back.
+        _online_return("RC", "RF-C", "2026-10-20T05:00:00+00:00"),
+        # Goods back in December: not November's.
+        _online_return("RD", "RF-D", "2026-10-20T05:00:00+00:00"),
+    ])
+    db.shopify_refund_review.insert_many([
+        {"review_id": "VA", "shopify_refund_id": "RF-A", "goods_back_at": "2026-11-08T05:00:00+00:00",
+         "goods_restock": {"restock_applied": True, "restock_stock_ids": ["U1"]}},
+        {"review_id": "VB", "shopify_refund_id": "RF-B", "goods_back_at": "2026-10-25T05:00:00+00:00",
+         "goods_restock": {"restock_applied": True, "restock_stock_ids": ["U2"]}},
+        {"review_id": "VC", "shopify_refund_id": "RF-C", "goods_back_at": "2026-11-08T05:00:00+00:00",
+         "goods_restock": {"restock_applied": True, "restock_stock_ids": [], "stock_in_task": "T1"}},
+        {"review_id": "VD", "shopify_refund_id": "RF-D", "goods_back_at": "2026-12-01T05:00:00+00:00",
+         "goods_restock": {"restock_applied": True, "restock_stock_ids": ["U9"]}},
+    ])
+    nov = _pnl()
+    assert nov["returns_taxable"] == 952.38  # RB's credit note only
+    assert nov["returns_cogs_reversal"] == 1000.0  # U1 and U2, once each
+    assert _by_store()["S1"]["cogs"] == -1000.0
+    oct_ = _pnl_range("2026-10-01", "2026-10-31")
+    assert oct_["returns_cogs_reversal"] == 0.0  # October is never changed
+
+
+def test_run_04_a_retried_restock_gives_the_cost_back_in_the_retry_month(db):
+    db.orders.insert_one(_order("O9"))
+    db.returns.insert_one({**_ret("RR", "2026-10-20T05:00:00+00:00"), "order_id": "O9",
+                           "restock_completed_at": "2026-11-08T05:00:00+00:00"})
+    oct_ = _pnl_range("2026-10-01", "2026-10-31")
+    assert (oct_["returns_taxable"], oct_["returns_cogs_reversal"]) == (952.38, 0.0)
+    nov = _pnl()
+    assert (nov["returns_taxable"], nov["returns_cogs_reversal"]) == (0.0, 500.0)
+
+
+def test_l3_04_a_stock_typed_services_bill_is_not_charged_twice(db):
+    db.vendor_bills.insert_many([_bill("STOCK", expense_type="STOCK"), _bill("REPAIRS")])
+    assert _pnl()["total_expenses"] == 1000.0
+    assert _by_store()["S1"]["expenses"] == 1000.0

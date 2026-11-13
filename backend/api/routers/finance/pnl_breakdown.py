@@ -191,8 +191,12 @@ async def get_pnl_by_category(
     _apply_created_at_range(match, from_date, to_date)
 
     orders = list(db.get_collection("orders").find(match, {"_id": 0, "items": 1}))
-    cats = pnl_by_category(orders, _cost_by_product(db), product_cost.variance_by(
-        db, "item_type", store_ids=store_ids, from_day=from_date, to_day=to_date))
+    cost_map = _cost_by_product(db)
+    # Completed customer returns (RUN-04): the reader GET /pnl uses, keyed by
+    # the sale line's category, so the categories add up to the statement.
+    cats = pnl_by_category(orders, cost_map, product_cost.variance_by(
+        db, "item_type", store_ids=store_ids, from_day=from_date, to_day=to_date),
+        customer_return_adjustments(db, cost_map, store_ids, from_date, to_date, by="category"))
     # COGS and gross profit are worked out from product cost: the accounts
     # roles' only, as on GET /pnl and /reports/profit/by-category (owner ruling
     # 2026-10-12). The managers keep the revenue.
