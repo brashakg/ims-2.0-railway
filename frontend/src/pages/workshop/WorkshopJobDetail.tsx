@@ -13,7 +13,7 @@ import {
   handoverBlockerMessage,
   QC_ACTIONABLE_STATUSES,
 } from './qcHandover';
-import { resolveLensConfig, resolveStatusConfig, resolvePriorityConfig } from './shared';
+import { resolveLensConfig, resolveStatusConfig, resolvePriorityConfig, NOT_ON_FILE } from './shared';
 import type { LensStatus } from './shared';
 import { VendorCaptureBlock } from './VendorCaptureBlock';
 import type { WorkshopPageState } from './useWorkshopPage';
@@ -57,10 +57,10 @@ export function WorkshopJobDetail({ page }: { page: WorkshopPageState }) {
                 <div className="bg-gray-50 border border-gray-200 rounded-lg p-4 space-y-2">
                   <h3 className="text-sm font-medium text-gray-500">Customer</h3>
                   <p className="font-medium text-gray-900 flex items-center gap-2">
-                    <User className="w-4 h-4" /> {selectedJob.customerName}
+                    <User className="w-4 h-4" /> {selectedJob.customerName || NOT_ON_FILE}
                   </p>
                   <p className="text-sm text-gray-500 flex items-center gap-2">
-                    <Phone className="w-4 h-4" /> {selectedJob.customerPhone}
+                    <Phone className="w-4 h-4" /> {selectedJob.customerPhone || NOT_ON_FILE}
                   </p>
                 </div>
 
@@ -68,15 +68,15 @@ export function WorkshopJobDetail({ page }: { page: WorkshopPageState }) {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <p className="text-sm text-gray-500">Order Number</p>
-                    <p className="font-medium">{selectedJob.orderNumber}</p>
+                    <p className="font-medium">{selectedJob.orderNumber || NOT_ON_FILE}</p>
                   </div>
                   <div>
                     <p className="text-sm text-gray-500">Frame</p>
-                    <p className="font-medium">{selectedJob.frameName}</p>
+                    <p className="font-medium">{selectedJob.frameName || NOT_ON_FILE}</p>
                   </div>
                   <div>
                     <p className="text-sm text-gray-500">Lens Type</p>
-                    <p className="font-medium">{selectedJob.lensType}</p>
+                    <p className="font-medium">{selectedJob.lensType || NOT_ON_FILE}</p>
                   </div>
                   {selectedJob.frameBarcode && (
                     <div>

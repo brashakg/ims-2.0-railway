@@ -21,6 +21,7 @@ import type { LensFittingFormValue } from '../../components/pos/LensFittingFormM
 import { resolveItemPrescriptionId, dcHardlockMessage } from './qcHandover';
 import type { EntityLike } from '../../components/print/legalPrimitives';
 import type { Job, LensStatus } from './shared';
+import { NOT_ON_FILE } from './shared';
 import { getErrorMessage } from '../../utils/errorHandler';
 import { istDayString } from '../../utils/datetime';
 
@@ -192,17 +193,21 @@ const loadJobs = async () => {
   const activeJobs = jobs.filter(j => !['DELIVERED', 'CANCELLED'].includes(j.status));
   const urgentJobs = activeJobs.filter(j => j.priority === 'URGENT');
   const readyJobs = jobs.filter(j => j.status === 'READY');
-  const overdueJobs = activeJobs.filter(j => new Date(j.promisedDate) < new Date());
+  const overdueJobs = activeJobs.filter(j => !!j.promisedDate && new Date(j.promisedDate) < new Date());
 
-  const formatDate = (dateStr: string) => {
-    return new Date(dateStr).toLocaleDateString('en-IN', {
+  // L2-WS-F02: a missing or unreadable date says so -- never "Invalid Date".
+  const formatDate = (dateStr: string | null | undefined) => {
+    const d = dateStr ? new Date(dateStr) : null;
+    if (!d || Number.isNaN(d.getTime())) return NOT_ON_FILE;
+    return d.toLocaleDateString('en-IN', {
       day: '2-digit',
       month: 'short',
     });
   };
 
-  const isOverdue = (promisedDate: string) => {
-    return new Date(promisedDate) < new Date();
+  // No promise date on file is not overdue (new Date(null) is 1970).
+  const isOverdue = (promisedDate: string | null | undefined) => {
+    return !!promisedDate && new Date(promisedDate) < new Date();
   };
 
   const [showCreateJob, setShowCreateJob] = useState(false);

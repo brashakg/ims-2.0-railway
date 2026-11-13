@@ -6,6 +6,10 @@
 import { Clock, Timer, Zap } from 'lucide-react';
 import type { JobStatus, JobPriority } from '../../types';
 
+/** L2-WS-F02: what a screen or job card shows for a detail that is not on
+ *  file, so a missing value reads as missing, never as a blank. */
+export const NOT_ON_FILE = 'Not on file';
+
 // Job type
 export interface Job {
   id: string;
