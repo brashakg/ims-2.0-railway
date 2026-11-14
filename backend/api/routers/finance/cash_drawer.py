@@ -481,8 +481,9 @@ async def close_cash_register(
         )
 
     # Manager alert above the band (owner ruling 2026-08-25). SAME helper and
-    # SAME (store, day) dedupe as the blind Z-Read lock, so the two doors raise
-    # ONE task for one drawer-day. Fail-soft inside the helper.
+    # SAME per-drawer dedupe (D63) as the blind Z-Read lock, so the two doors
+    # raise ONE task for one drawer, and another drawer of the day out of band
+    # raises its own. Fail-soft inside the helper.
     if variance_out_of_band:
         till_service.raise_variance_task(
             store_id=store_id,
@@ -491,6 +492,7 @@ async def close_cash_register(
             tolerance_paisa=judged_band_paisa,
             note=close_note,
             source="Finance cash-register close",
+            session_id=till_link.get("session_id"),
         )
 
     merged = dict(session)

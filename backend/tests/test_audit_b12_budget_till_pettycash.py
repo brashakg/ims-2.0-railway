@@ -2019,3 +2019,136 @@ def test_d60_second_drawer_own_cash_through_cash_register_on_real_mongo(monkeypa
     finally:
         client.drop_database(name)
         client.close()
+
+
+# ===========================================================================
+# D63  A manager alert per drawer (owner ruling 2026-08-25: alert above band)
+# ===========================================================================
+
+
+def _real_task_repo(monkeypatch, task_db):
+    """The REAL TaskRepository / UserRepository behind the real
+    raise_variance_task -- nothing on the alert path is monkeypatched except
+    the accessor that hands out the repository."""
+    import api.dependencies as deps
+    from database.repositories.task_repository import TaskRepository
+    from database.repositories.user_repository import UserRepository
+
+    task_db.users.insert_one({
+        "user_id": "u-mgr", "roles": ["STORE_MANAGER"], "store_ids": [STORE], "is_active": True,
+    })
+    monkeypatch.setattr(deps, "get_task_repository", lambda: TaskRepository(task_db.tasks))
+    monkeypatch.setattr(deps, "get_user_repository", lambda: UserRepository(task_db.users))
+    return task_db.tasks
+
+
+def _a_short_and_locked_then_b(db, at=("2026-11-04T05:00:00", "2026-11-04T10:00:00")):
+    """Drawer A takes Rs 1,000, is counted at Rs 500 (out of band) and LOCKED
+    with a note, so its alert task is raised and stays OPEN. Drawer B is then
+    opened and takes Rs 3,000."""
+    _cash_sale(db, 1000, at[0])
+    a = till.open_session(
+        db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER
+    )["session"]["session_id"]
+    assert till.blind_submit(
+        db, a, blind_denominations=[{"face": 500, "kind": "note", "pieces": 1}], actor=CASHIER
+    )["ok"]
+    assert till.lock_session(db, a, actor=MANAGER, variance_note="A Rs 500 short")["ok"]
+    b = till.open_session(
+        db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+        shift="PM", actor=CASHIER,
+    )["session"]["session_id"]
+    _cash_sale(db, 3000, at[1])
+    return a, b
+
+
+def _alert_rows(tasks):
+    return sorted(
+        ((t["payload"].get("session_id"), t["payload"]["variance_paisa"], t["source_ref"], t["status"])
+         for t in tasks.find({})),
+        key=lambda r: r[1],
+    )
+
+
+class TestD63AnAlertPerDrawer:
+    """Lead's hold on head af3039c0: raise_variance_task deduped on
+    till_variance:{store}:{day}, so while drawer A's alert task was open, drawer
+    B's real shortage beyond the band raised no task and the manager saw only
+    A's figure."""
+
+    def test_b_short_through_cash_register_alerts_its_own_figure(self, db, monkeypatch):
+        import mongomock
+
+        tasks = _real_task_repo(monkeypatch, mongomock.MongoClient().db)
+        a, b = _a_short_and_locked_then_b(db)
+        assert tasks.count_documents({}) == 1
+
+        _cr_close_b(db, monkeypatch, 4, note="Rs 1,000 missing from the PM drawer")
+
+        rows = _alert_rows(tasks)
+        assert [(r[0], r[1]) for r in rows] == [(b, -100000), (a, -50000)]
+        assert {r[2] for r in rows} == {
+            f"till_variance:{STORE}:{DATE}:{a}", f"till_variance:{STORE}:{DATE}:{b}"}
+        assert all(r[3] == "OPEN" for r in rows)
+        b_task = tasks.find_one({"payload.session_id": b})
+        assert b_task["assigned_to"] == "u-mgr"
+        assert "1000.00" in b_task["title"] and b in b_task["description"]
+
+    def test_b_short_through_the_zread_lock_alerts_its_own_figure(self, db, monkeypatch):
+        import mongomock
+
+        tasks = _real_task_repo(monkeypatch, mongomock.MongoClient().db)
+        a, b = _a_short_and_locked_then_b(db)
+        assert till.blind_submit(
+            db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 4}], actor=CASHIER
+        )["ok"]
+        assert till.lock_session(db, b, actor=MANAGER, variance_note="B Rs 1,000 short")["ok"]
+        assert [(r[0], r[1]) for r in _alert_rows(tasks)] == [(b, -100000), (a, -50000)]
+
+    def test_control_b_balanced_raises_nothing_more(self, db, monkeypatch):
+        import mongomock
+
+        tasks = _real_task_repo(monkeypatch, mongomock.MongoClient().db)
+        a, b = _a_short_and_locked_then_b(db)
+        assert till.blind_submit(
+            db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}], actor=CASHIER
+        )["ok"]
+        assert till.lock_session(db, b, actor=MANAGER)["ok"]
+        assert [r[1] for r in _alert_rows(tasks)] == [-50000]  # A's only
+
+    def test_control_one_drawer_both_doors_and_a_relock_keep_one_alert(self, db, monkeypatch):
+        import mongomock
+
+        tasks = _real_task_repo(monkeypatch, mongomock.MongoClient().db)
+        a = till.open_session(
+            db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER
+        )["session"]["session_id"]
+        _cash_sale(db, 1000)
+        _cr_close_b(db, monkeypatch, 1, note="Rs 500 short")  # links and counts A
+        assert tasks.count_documents({}) == 1
+        assert till.lock_session(db, a, actor=MANAGER, variance_note="Rs 500 short")["ok"]
+        assert till.reopen_session(db, a, reason="recount", actor=MANAGER)["ok"]
+        assert till.lock_session(db, a, actor=MANAGER, variance_note="still short")["ok"]
+        assert [r[1] for r in _alert_rows(tasks)] == [-50000]  # one drawer, one alert
+
+
+def test_d63_second_drawer_alert_on_real_mongo(monkeypatch):
+    """The lead's reproduction on a native PyMongo Database: the real
+    raise_variance_task and the real TaskRepository over a native tasks
+    collection, drawer B closed short through Finance > Cash Register while
+    drawer A's task is open."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        a, b = _a_short_and_locked_then_b(
+            real_db, at=(datetime(2026, 11, 4, 5, 0), datetime(2026, 11, 4, 10, 0)))
+        assert tasks.count_documents({}) == 1
+
+        _cr_close_b(_NativeDB(real_db), monkeypatch, 4, note="Rs 1,000 missing from the PM drawer")
+
+        assert real_db.till_sessions.find_one({"_id": b})["variance_paisa"] == -100000
+        assert [(r[0], r[1]) for r in _alert_rows(tasks)] == [(b, -100000), (a, -50000)]
+    finally:
+        client.drop_database(name)
+        client.close()

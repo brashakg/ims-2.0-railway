@@ -214,14 +214,19 @@ def raise_variance_task(
     tolerance_paisa: Any,
     note: Optional[str] = None,
     source: str = "day-end close",
+    session_id: Optional[str] = None,
 ) -> None:
     """A SYSTEM task on the store manager's worklist for an out-of-band
     day-end cash variance (owner ruling 2026-08-25: manager alert above the
     band). REUSES ``task_triggers.create_system_task`` -- the in-app bell
     already feeds from the tasks stream, so no new notification mechanism.
-    Deduped per (store, day): the blind lock and the Finance close raise ONE
-    task for one drawer-day. Fail-soft: an alert failure never undoes the
-    lock/close that triggered it."""
+    Deduped per DRAWER (D63): the blind lock and the Finance close of the same
+    till session raise ONE task, while each other drawer of the day that is out
+    of band raises its own (it used to be per (store, day), so a second
+    drawer's shortage was swallowed while the first drawer's task was open).
+    No session id (a Finance close whose till link failed) keeps the old
+    (store, day) key. Fail-soft: an alert failure never undoes the lock/close
+    that triggered it."""
     try:
         v = int(variance_paisa or 0)
     except (TypeError, ValueError):
@@ -247,6 +252,7 @@ def raise_variance_task(
                 f"The {day} day-end cash count at store {store_id} is "
                 f"{direction} by Rs {rupees:.2f} - beyond the allowed band of "
                 f"Rs {band_rupees:.2f}. Recorded at the {source}. "
+                + (f"Drawer {session_id}. " if session_id else "")
                 + (
                     f"Explanation given: {str(note).strip()}"
                     if str(note or "").strip()
@@ -257,12 +263,17 @@ def raise_variance_task(
             category="Finance",
             store_id=store_id,
             assigned_to="STORE_MANAGER",
-            dedupe_ref=f"till_variance:{store_id}:{day}",
+            dedupe_ref=(
+                f"till_variance:{store_id}:{day}:{session_id}"
+                if session_id
+                else f"till_variance:{store_id}:{day}"
+            ),
             extra={
                 "link": "/finance/cash-register",
                 "payload": {
                     "store_id": store_id,
                     "session_date": day,
+                    "session_id": session_id,
                     "variance_paisa": v,
                     "tolerance_paisa": int(tolerance_paisa or 0),
                 },
@@ -1432,6 +1443,7 @@ def lock_session(
             tolerance_paisa=tolerance_paisa,
             note=clean_note,
             source="blind EOD Z-Read lock",
+            session_id=session_id,
         )
     locked["session_id"] = locked.get("_id")
     return {"ok": True, "session": locked}
