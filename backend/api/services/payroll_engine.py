@@ -331,6 +331,25 @@ def compute_payroll(
     # Nobody typed it (it is in the locked incentive payout), so the message
     # cannot ask for a smaller figure: it says who has to act.
     left = round(earned_gross + incentive - before_recovery, 2)
+    # D58: net pay below zero is refused whatever takes it there. Here it is
+    # the fixed deductions (TDS, PF, ESI, PT) against pay cut by unpaid leave.
+    if left < 0:
+        raise PayrollInputError(
+            "This month's pay for employee '%s' (Rs %s after %s unpaid leave "
+            "day(s)) is less than the fixed deductions (TDS Rs %s, PF Rs %s, "
+            "ESI Rs %s, PT Rs %s). Payroll never takes pay below zero, so "
+            "nothing was calculated or saved. Check the unpaid leave days, or "
+            "lower this month's TDS in the employee's salary setup."
+            % (
+                who,
+                f"{earned_gross + incentive:,.2f}",
+                f"{lwp:g}",
+                f"{tds:,.2f}",
+                f"{pf['employee']:,.2f}",
+                f"{esi_employee:,.2f}",
+                f"{pt:,.2f}",
+            )
+        )
     if incentive_clawback > 0 and round(left - incentive_clawback, 2) < 0:
         raise PayrollInputError(
             "This month's locked incentive payout for employee '%s' is a "
