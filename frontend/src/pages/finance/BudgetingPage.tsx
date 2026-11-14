@@ -154,12 +154,26 @@ export default function BudgetingPage() {
       toast.info('Nothing to save');
       return;
     }
+    // Check EVERY amount before saving ANY. An invalid row used to be skipped
+    // silently and the toast still said "Budget saved" (audit L3-09), so a
+    // head the user believed was planned was never stored. Nothing is saved
+    // until every entered amount is a number of zero or more.
+    const invalid = toSave.filter((h) => {
+      const amount = Number(planned[h]);
+      return !Number.isFinite(amount) || amount < 0;
+    });
+    if (invalid.length > 0) {
+      toast.error(
+        `Budget not saved. Enter an amount of zero or more for: ${invalid.join(', ')}.`,
+      );
+      return;
+    }
     setSaving(true);
     try {
       for (const head of toSave) {
-        const amount = Number(planned[head]);
-        if (Number.isNaN(amount) || amount < 0) continue;
-        await budgetsApi.upsert({ store_id: sid, period, head, planned_amount: amount });
+        await budgetsApi.upsert({
+          store_id: sid, period, head, planned_amount: Number(planned[head]),
+        });
       }
       toast.success('Budget saved');
       await load();

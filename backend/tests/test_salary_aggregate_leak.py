@@ -26,7 +26,6 @@ on a shared CI database. No emoji (Windows cp1252).
 
 from __future__ import annotations
 
-import copy
 import itertools
 import os
 import sys
@@ -951,59 +950,48 @@ PLANNED_SALARIES = 41000.0
 ACTUAL_SALARIES = 37500.0
 PLANNED_RENT = 26000.0
 
-_BUDGET_DOC = {
-    "month": 3,
-    "year": 2026,
-    "mode": "full",
-    "categories": {
-        "rent": {"budget": PLANNED_RENT, "actual": 0},
-        "salaries": {"budget": PLANNED_SALARIES, "actual": 0},
-        "utilities": {"budget": 9000.0, "actual": 0},
-    },
-}
-
-_BUDGET_EXPENSES = [
-    {
-        "expense_id": "ZZ-B-RENT",
-        "store_id": SOLO_STORE,
-        "category": "rent",
-        "amount": PLANNED_RENT,
-        "status": "APPROVED",
-        "expense_date": "2026-03-05",
-    },
-    {
-        "expense_id": "ZZ-B-SAL",
-        "store_id": SOLO_STORE,
-        "category": "Salaries",
-        "amount": ACTUAL_SALARIES,
-        "status": "APPROVED",
-        "expense_date": "2026-03-06",
-    },
+# The plan, in the ONE shape that is ever written (Budgeting's upsert): a row
+# per (shop, YYYY-MM, head). /finance/budget used to look for a {month, year,
+# mode, categories} document that no code writes (audit L3-15); it now reads
+# these rows through budgets.plan_and_actuals, the same read Budgeting uses.
+_BUDGET_ROWS = [
+    {"budget_id": "ZZ-D1", "store_id": SOLO_STORE, "period": "2026-03",
+     "head": "rent", "planned_amount": PLANNED_RENT},
+    {"budget_id": "ZZ-D2", "store_id": SOLO_STORE, "period": "2026-03",
+     "head": "salaries", "planned_amount": PLANNED_SALARIES},
+    {"budget_id": "ZZ-D3", "store_id": SOLO_STORE, "period": "2026-03",
+     "head": "utilities", "planned_amount": 9000.0},
 ]
 
-
-class _BudgetCol(_Col):
-    def find_one(self, query=None, projection=None, *a, **k):
-        # DEEP copy, deliberately. A shallow dict() shares the nested
-        # `categories` object between calls, so the first request's strip
-        # mutates the fixture and every later request sees a head that was
-        # never there -- the tests then pass for the wrong reason. Caught by
-        # the flag assertion below failing while the head assertions "passed".
-        return copy.deepcopy(_BUDGET_DOC)
+# What the month's APPROVED expenses add up to, by head as stored. The pay
+# head is spelt differently from the planned one ON PURPOSE: the strip must
+# catch a pay head however it is cased.
+_BUDGET_ACTUALS = {"rent": PLANNED_RENT, "Salaries": ACTUAL_SALARIES}
 
 
-class _BudgetDB(_FakeDB):
-    def get_collection(self, name):
-        if name == "budgets":
-            return _BudgetCol([])
-        if name == "expenses":
-            return _Col(_BUDGET_EXPENSES)
-        return _Col([])
+class _BudgetRowsCol:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def find(self, query=None, *a, **k):
+        return [dict(r) for r in self._rows]
+
+
+def _wire_budget(monkeypatch, rows, actuals):
+    from api.routers import budgets as budgets_router
+
+    monkeypatch.setattr(
+        budgets_router, "_budgets_collection", lambda: _BudgetRowsCol(rows)
+    )
+    monkeypatch.setattr(budgets_router, "_revenue_actual", lambda s, p: 0.0)
+    monkeypatch.setattr(
+        budgets_router, "_expense_actuals_by_category", lambda s, p: dict(actuals)
+    )
 
 
 @pytest.fixture
 def budget_db(monkeypatch):
-    monkeypatch.setattr(finance, "_get_db", lambda: _BudgetDB())
+    _wire_budget(monkeypatch, _BUDGET_ROWS, _BUDGET_ACTUALS)
 
 
 def _budget(role):
@@ -1016,7 +1004,9 @@ def test_an_admin_still_sees_the_salaries_budget_line(budget_db, role):
     that does it must keep working."""
     cats = _budget(role).json()["categories"]
     assert cats["salaries"]["budget"] == PLANNED_SALARIES
-    assert cats["salaries"]["actual"] == ACTUAL_SALARIES
+    # The actual sits under the head as the expense stored it -- exactly what
+    # the Budgeting page shows for the same shop and month.
+    assert cats["Salaries"]["actual"] == ACTUAL_SALARIES
     assert cats["rent"]["budget"] == PLANNED_RENT
 
 
@@ -1028,6 +1018,7 @@ def test_the_salaries_budget_line_is_withheld_below_admin(budget_db, role):
     r = _budget(role)
     assert r.status_code == 200, r.text
     assert "salaries" not in r.json()["categories"], f"{role} kept the head"
+    assert "Salaries" not in r.json()["categories"], f"{role} kept the head"
     assert str(PLANNED_SALARIES) not in r.text
     assert str(int(PLANNED_SALARIES)) not in r.text
     assert str(ACTUAL_SALARIES) not in r.text
@@ -1050,21 +1041,13 @@ def test_the_budget_reader_is_told_a_head_was_withheld(budget_db, role):
     assert body["categories_partially_restricted"] is True
 
 
-class _NoBudgetDB(_FakeDB):
-    """No budget document for the period -- so /finance/budget falls through to
-    the hard-coded skeleton at finance.py:2374, whose `salaries` head is
-    {"budget": 0, "actual": 0}. This is the LIVE state of the business today:
-    payroll has never been run and no expense has been booked."""
-
-    def get_collection(self, name):
-        if name == "budgets":
-            return _Col([])
-        return _Col([])
-
-
 @pytest.fixture
 def no_budget_db(monkeypatch):
-    monkeypatch.setattr(finance, "_get_db", lambda: _NoBudgetDB())
+    """Nothing planned for the period -- so /finance/budget names the usual
+    heads at zero, and its `salaries` head is {"budget": 0, "actual": 0}. This
+    is the LIVE state of the business today: payroll has never been run and no
+    expense has been booked."""
+    _wire_budget(monkeypatch, [], {})
 
 
 @pytest.mark.parametrize("role", ["ACCOUNTANT", "AREA_MANAGER", "STORE_MANAGER"])

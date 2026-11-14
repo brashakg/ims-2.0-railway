@@ -417,22 +417,6 @@ ALLOWED = {
         "never compared against a stored instant."
     ),
     (
-        "api/routers/finance/budget.py",
-        "start = datetime(y, m, 1)",
-    ): (
-        "Budget actuals: expenses are dated on expense_date, a date-only "
-        "'YYYY-MM-DD' STRING; these datetimes only seed date-string month "
-        "bounds in the $match below (see the comment at the site). Calendar "
-        "frame on both sides."
-    ),
-    (
-        "api/routers/finance/budget.py",
-        "end = datetime(y, m + 1 if m < 12 else 1, 1) if m < 12 else datetime(y + 1, 1, 1)",
-    ): (
-        "Upper half of the budget-actuals expense_date calendar bound above "
-        "-- same ruling."
-    ),
-    (
         "api/routers/finance/journal_entries.py",
         "fy_start = datetime(fy_year, 4, 1)",
     ): (

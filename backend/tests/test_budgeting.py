@@ -349,3 +349,61 @@ def test_variance_no_data_is_zeroed_not_error(wired):
     assert out["totals"]["net_actual"] == 0
     rev = next(ln for ln in out["lines"] if ln["head"] == "REVENUE")
     assert rev["planned"] == 0 and rev["actual"] == 0
+
+
+def test_finance_dashboard_reads_the_plan_budgeting_saved(wired):
+    """Audit L3-15, against a real Mongo and the real repositories.
+
+    Budgeting saved a revenue target of 10,000 and rent 1,000; the Finance
+    Dashboard's reader (GET /finance/budget) said total budget 0 and
+    `no_budget_set: true`, because it looked for a document shape nobody
+    writes. Both screens now build from budgets.plan_and_actuals, so every
+    head must carry the same plan AND the same actual on both."""
+    from api.routers import finance as finance_router
+
+    db = wired["db"]
+    for head, amount in (("REVENUE", 10000), ("rent", 1000)):
+        asyncio.run(
+            budgets.upsert_budget(
+                budgets.BudgetUpsert(
+                    store_id=STORE, period=PERIOD, head=head, planned_amount=amount
+                ),
+                current_user=_ADMIN,
+            )
+        )
+    _seed_order(db, STORE, 2500)
+    _seed_expense(db, STORE, "rent", 400)
+    _seed_expense(db, STORE, "travel", 75)  # an actual with no plan
+    # Never counted for this shop: another shop's rent, a pending claim.
+    _seed_expense(db, OTHER_STORE, "rent", 7000)
+    _seed_expense(db, STORE, "rent", 5000, status="PENDING")
+
+    dashboard = asyncio.run(
+        finance_router.get_budget(
+            mode="full", month=5, year=2026, store_id=STORE, current_user=_ADMIN
+        )
+    )
+    variance = asyncio.run(
+        budgets.budget_variance(store_id=STORE, period=PERIOD, current_user=_ADMIN)
+    )
+    lines = {ln["head"]: ln for ln in variance["lines"]}
+
+    assert dashboard.get("no_budget_set") is not True, dashboard
+    assert dashboard["categories"]["rent"] == {"budget": 1000.0, "actual": 400.0}
+    assert dashboard["categories"]["travel"] == {"budget": 0.0, "actual": 75.0}
+    assert dashboard["revenue"] == {"budget": 10000.0, "actual": 2500.0}
+    expense_lines = {h: ln for h, ln in lines.items() if h != "REVENUE"}
+    assert set(dashboard["categories"]) == set(expense_lines)
+    for head, ln in expense_lines.items():
+        assert dashboard["categories"][head]["budget"] == ln["planned"], head
+        assert dashboard["categories"][head]["actual"] == ln["actual"], head
+
+    # Another shop, and another month of this shop, hold no plan.
+    for kwargs in ({"store_id": OTHER_STORE, "month": 5}, {"store_id": STORE, "month": 4}):
+        empty = asyncio.run(
+            finance_router.get_budget(
+                mode="full", year=2026, current_user=_ADMIN, **kwargs
+            )
+        )
+        assert empty["no_budget_set"] is True
+        assert all(c["budget"] == 0 for c in empty["categories"].values())

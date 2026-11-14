@@ -15,6 +15,7 @@ from ...dependencies import (
 )
 from ...services import cash_denominations as cash_denom
 from ...services import eod_tally as till_service
+from ..till import _is_cashier_only
 from ._shared import (
     logger,
     router,
@@ -71,12 +72,25 @@ class DayEndCloseBody(BaseModel):
     notes: Optional[str] = Field(None, max_length=2000)
 
 
-def _day_end_doc_public(doc: dict) -> dict:
-    """Strip the Mongo _id for a JSON-safe response."""
+def day_end_close_key(store_id: str, day: str) -> str:
+    """The _id of a shop-day's close: one per (store_id, date), enforced by
+    Mongo's own unique _id index."""
+    return f"DAYEND:{store_id}:{day}"
+
+
+def _day_end_doc_public(doc: dict, user: Optional[dict] = None) -> dict:
+    """Strip the Mongo _id for a JSON-safe response. A cashier-only caller
+    never sees a drawer's till variance (blind enforcement, as on every till
+    read): the per-drawer counts stay, the variances go."""
     if not doc:
         return {}
     out = dict(doc)
     out.pop("_id", None)
+    if user is not None and out.get("till_drawers") and _is_cashier_only(user):
+        out["till_drawers"] = [
+            {k: v for k, v in d.items() if k not in ("variance_paisa", "variance_status")}
+            for d in out["till_drawers"]
+        ]
     return out
 
 
@@ -100,7 +114,7 @@ async def get_day_end_close(
         "closed": bool(doc),
         "store_id": sid,
         "date": date,
-        "close": _day_end_doc_public(doc) if doc else None,
+        "close": _day_end_doc_public(doc, current_user) if doc else None,
     }
 
 
@@ -143,7 +157,7 @@ async def create_day_end_close(
             status_code=409,
             detail={
                 "message": f"Day {body.date} already closed for store {sid}",
-                "close": _day_end_doc_public(existing),
+                "close": _day_end_doc_public(existing, current_user),
             },
         )
 
@@ -172,13 +186,6 @@ async def create_day_end_close(
     system_cash = (
         round(float(body.system_cash), 2) if body.system_cash is not None else None
     )
-    # No count -> no variance. A fabricated variance against a fabricated zero
-    # is what made this record unreadable.
-    variance = (
-        round(closing_cash - system_cash, 2)
-        if (closing_cash is not None and system_cash is not None)
-        else None
-    )
 
     # TWO DOORS, ONE RECORD: the count also lands on the day's single till
     # session -- the same record Finance > Cash Register closes onto -- so the
@@ -203,6 +210,45 @@ async def create_day_end_close(
         actor=current_user,
     )
 
+    # ONE DRAWER, ONE COUNTED FIGURE (audit L3-12). Whatever the shared till
+    # session holds after this close linked to it IS the day's count, and this
+    # record REPORTS it. Two ways it can differ from the figure typed here:
+    # the drawer was ALREADY counted (the blind count is THE close, owner ruling
+    # 2026-08-25, and record_screen_close never restates it), or THIS close
+    # counted first with a grid and a different typed total (the till's own
+    # rule lets the notes rule). Either way storing the typed figure is how one
+    # drawer read Rs 1,000 on the Z-Read and Rs 3,000 here. Same rule, same
+    # helper, no gate -- exactly as the Finance > Cash Register door
+    # (cash_drawer.close_cash_register). The grid typed here is still kept as
+    # this screen's sheet; restated against the shared figure it flags itself.
+    shared_paisa = till_service.shared_counted_paisa(till_link)
+    count_adopted = shared_paisa is not None and (
+        closing_cash is None
+        or shared_paisa != cash_denom.rupees_to_paisa(closing_cash)
+    )
+    # What THIS screen sent, kept when it is set aside: a figure someone typed
+    # that is not the drawer's count is evidence, not noise.
+    entered_cash = closing_cash if count_adopted else None
+    if count_adopted:
+        closing_cash = cash_denom.paisa_to_rupees(shared_paisa)
+        cash_denom.restate_amount(closing_block, shared_paisa)
+    # No count -> no variance. A fabricated variance against a fabricated zero
+    # is what made this record unreadable. Derived AFTER the adoption above, so
+    # it is the variance of the one counted figure for the day.
+    #
+    # SEVERAL DRAWERS ON THE DAY (D53): closing_cash is ONE drawer's count and
+    # system_cash is the whole day's, so their difference is no variance at
+    # all (two drawers of Rs 1,000 and Rs 3,000 read "Rs 1,000 short").
+    # Drawers are never added together either -- cash carried from one drawer
+    # to the next is not recorded. So no whole-day variance is stored; each
+    # drawer's own count and variance are (till_drawers).
+    several_drawers = int(till_link.get("drawers_on_day") or 1) > 1
+    variance = (
+        round(closing_cash - system_cash, 2)
+        if (closing_cash is not None and system_cash is not None and not several_drawers)
+        else None
+    )
+
     now = datetime.utcnow()
     doc = {
         "store_id": sid,
@@ -218,29 +264,51 @@ async def create_day_end_close(
         "till_link_error": till_link.get("error"),
         "till_already_counted": bool(till_link.get("already_counted")),
         "till_counted": bool(till_link.get("counted")),
+        # The count on this close came from the shared till record, not from
+        # what was typed on this screen -- the screen says so out loud.
+        "counted_from_shared_record": count_adopted,
+        "till_count_differs": bool(till_link.get("count_differs")) or count_adopted,
+        # The figure entered on this screen that was NOT used (None when no
+        # figure was entered, or when this screen's own count stands).
+        "entered_closing_cash": entered_cash,
         # Nobody declared an opening float for this day, so expected cash was
         # computed from zero. The screen must say so rather than present the
         # resulting variance as a real one.
         "till_opening_float_not_recorded": bool(
             till_link.get("opening_float_not_recorded")
         ),
+        # Drawers on this shop-day. Above 1, closing_cash is the latest
+        # drawer's count only, not the day's total (D40); the screen says so.
+        "till_drawers_on_day": till_link.get("drawers_on_day"),
+        # D53: each drawer's own count and (once locked) variance, oldest
+        # first; None on a one-drawer day or when the list could not be read.
+        "till_drawers": till_link.get("drawers") if several_drawers else None,
+        "variance_withheld_several_drawers": several_drawers,
         "notes": (body.notes or "").strip() or None,
         "closed_by": current_user.get("user_id"),
         "closed_at": utc_event_iso(now),
     }
 
     try:
-        closes.insert_one(dict(doc))
+        # ONE CLOSE PER SHOP-DAY, ATOMICALLY. The find_one above is only a
+        # fast path: two closes that both read "not closed" used to both
+        # insert, leaving two different close records for one day. The key is
+        # now the record's _id, which Mongo keeps unique on every collection,
+        # so the second insert is refused by the database itself -- no index
+        # to build and nothing stored rewritten. Older closes keep their
+        # random ids; the find_one above still finds them.
+        closes.insert_one({"_id": day_end_close_key(sid, body.date), **doc})
     except Exception:  # pragma: no cover - surfaced as 500 by FastAPI
-        # A duplicate-key race (two closes at once) lands here too; re-read and
-        # report the winner as a 409 rather than a 500.
+        # The race loser (or a retry whose first insert landed but whose
+        # acknowledgement was lost) lands here; re-read and report the one
+        # stored close as a 409 rather than a 500.
         winner = closes.find_one({"store_id": sid, "date": body.date})
         if winner:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "message": f"Day {body.date} already closed for store {sid}",
-                    "close": _day_end_doc_public(winner),
+                    "close": _day_end_doc_public(winner, current_user),
                 },
             )
         logger.exception("Day-end close record failed")
@@ -269,6 +337,8 @@ async def create_day_end_close(
                         "closing_cash": doc["closing_cash"],
                         "system_cash": doc["system_cash"],
                         "variance": variance,
+                        "counted_from_shared_record": count_adopted,
+                        "entered_closing_cash": entered_cash,
                     },
                 }
             )
@@ -279,5 +349,5 @@ async def create_day_end_close(
         "closed": True,
         "store_id": sid,
         "date": body.date,
-        "close": _day_end_doc_public(doc),
+        "close": _day_end_doc_public(doc, current_user),
     }

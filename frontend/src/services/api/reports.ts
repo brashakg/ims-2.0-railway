@@ -25,6 +25,17 @@ export interface CashCountBlock {
   captured_at: string | null;
 }
 
+/** One cash drawer of a shop-day (D53). Paisa. variance_paisa is null until a
+ *  manager locks that drawer, and absent for a cashier-only reader. */
+export interface TillDrawerSummary {
+  session_id: string;
+  status: string;
+  opened_at?: string | null;
+  counted_paisa: number | null;
+  variance_paisa?: number | null;
+  variance_status?: string | null;
+}
+
 export interface DayEndClose {
   store_id: string;
   date: string;
@@ -41,8 +52,23 @@ export interface DayEndClose {
   till_link_ok?: boolean;
   till_link_error?: string | null;
   till_already_counted?: boolean;
+  /** closing_cash is the shared till's count, not the figure typed on the
+   *  Day-End screen (the till was already counted, or the typed total did not
+   *  match the note grid this screen sent). */
+  counted_from_shared_record?: boolean;
+  till_count_differs?: boolean;
+  /** The typed figure that was set aside; null when it was used. */
+  entered_closing_cash?: number | null;
   till_counted?: boolean;
   till_opening_float_not_recorded?: boolean;
+  /** Cash drawers on this shop-day. Above 1, closing_cash is the latest
+   *  drawer's count only, not the day's total (D40). */
+  till_drawers_on_day?: number | null;
+  /** D53: each drawer of a several-drawer day, oldest first, with its OWN
+   *  count and (once a manager locked it) its own variance. Never summed. */
+  till_drawers?: TillDrawerSummary[] | null;
+  /** D53: the day had several drawers, so no whole-day variance was stored. */
+  variance_withheld_several_drawers?: boolean;
   notes: string | null;
   closed_by: string | null;
   closed_at: string;

@@ -33,6 +33,7 @@ import {
   type ZRead,
   type VarianceStatus,
 } from '../../services/api/till';
+import { ApiError } from '../../services/api/client';
 import DenomGrid from '../../components/cash/DenominationGrid';
 import FaceTallyTable from '../../components/cash/FaceTallyTable';
 import {
@@ -225,8 +226,11 @@ export default function BlindEodTallyPage() {
       toast.success('Z-Read reopened');
       setReopenReason('');
       await load();
-    } catch {
-      toast.error('Could not reopen');
+    } catch (err) {
+      // A refusal the server explains (it carries a code and a sentence for
+      // staff, e.g. another drawer is still open for the day) is shown as
+      // written; anything else keeps the plain fallback (audit L3-28).
+      toast.error(err instanceof ApiError && err.code ? err.message : 'Could not reopen');
     } finally {
       setBusy(false);
     }

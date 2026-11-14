@@ -15,7 +15,7 @@ import {
 } from '../../../services/api/expenses';
 import { formatDateIST, istDayString } from '../../../utils/datetime';
 import { fc, useExpensesContext, type ApiError } from './expenseShared';
-import { Card, Row, Labeled } from './expenseWidgets';
+import { Card, Row, Labeled, FloatUnavailable } from './expenseWidgets';
 
 export function DaySettlementSection() {
   const { user } = useAuth();
@@ -28,6 +28,8 @@ export function DaySettlementSection() {
   const [settlePos, setSettlePos] = useState<PettyCashSettlementPosition | null>(null);
   const [settleHistory, setSettleHistory] = useState<PettyCashSettlementRecord[]>([]);
   const [settleLoading, setSettleLoading] = useState(false);
+  // The position read FAILED -- not the same thing as "no float to settle".
+  const [settleError, setSettleError] = useState(false);
   const [showSettleModal, setShowSettleModal] = useState(false);
   const [countedClosing, setCountedClosing] = useState('');
   const [settleNote, setSettleNote] = useState('');
@@ -35,7 +37,7 @@ export function DaySettlementSection() {
 
   // F17 EOD settlement: load the day's position + recent settlement history.
   const loadSettlement = useCallback(async () => {
-    if (!user?.activeStoreId) { setSettlePos(null); setSettleHistory([]); return; }
+    if (!user?.activeStoreId) { setSettlePos(null); setSettleHistory([]); setSettleError(false); return; }
     setSettleLoading(true);
     try {
       const [pos, hist] = await Promise.all([
@@ -44,8 +46,10 @@ export function DaySettlementSection() {
       ]);
       setSettlePos(pos);
       setSettleHistory(hist?.settlements || []);
+      setSettleError(false);
     } catch {
       setSettlePos(null);
+      setSettleError(true);
     } finally {
       setSettleLoading(false);
     }
@@ -110,9 +114,11 @@ export function DaySettlementSection() {
           <div className="bg-white rounded-lg border border-gray-200 p-10 text-center text-gray-500 text-sm">
             Select an active store to settle its petty-cash day.
           </div>
-        ) : settleLoading ? (
+        ) : settleLoading || (!settlePos && !settleError) ? (
           <div className="flex items-center justify-center h-40"><Loader2 className="w-6 h-6 text-bv-red-600 animate-spin" /></div>
-        ) : !settlePos?.exists ? (
+        ) : settleError || !settlePos ? (
+          <FloatUnavailable onRetry={loadSettlement} />
+        ) : !settlePos.exists ? (
           <div className="bg-white rounded-lg border border-gray-200 p-8 text-center text-sm text-gray-600">
             No petty-cash float is open for this store, so there is nothing to settle.
           </div>

@@ -25,6 +25,9 @@ always matches what those modules report:
                       conventions).
 
 Fail-soft contract: no DB -> empty list / zeroed variance, never a 500.
+A query that FAILS is different: unreadable is not "no plan" and not zero
+(audit L3-15, the L3-10 rule), so the variance and the Finance Dashboard's
+Budgets read answer 503 instead of a plan of nothing.
 """
 
 from api.utils.event_time import utc_now_iso
@@ -55,6 +58,7 @@ from ..services.salary_visibility import (
 # budget variance can never drift from what the Reports module shows.
 from ..utils.ist import ist_month_window_utc
 from . import reports as _reports
+from ..services import product_master as _pm
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +121,18 @@ def _budgets_collection():
         return None
 
 
+_BUDGET_UNREADABLE = (
+    "Could not read the budget just now. Nothing has changed - please try again."
+)
+
+
+def _unreadable(what: str) -> HTTPException:
+    """A budget read that FAILED. Never answered as "no budget set" or as an
+    actual of zero: both are statements about the shop that nobody checked."""
+    logger.exception("Budget read failed (%s)", what)
+    return HTTPException(status_code=503, detail=_BUDGET_UNREADABLE)
+
+
 def _validate_period(period: str) -> str:
     """Validate YYYY-MM or raise 400. Returns the period unchanged."""
     if not period or not _PERIOD_RE.match(period):
@@ -150,11 +166,12 @@ def _revenue_actual(store_id: Optional[str], period: str) -> float:
 
     REUSES reports._orders_in_window (non-CANCELLED/non-DRAFT date-window
     filter) + reports._order_revenue (grand_total -> final_amount ->
-    total_amount fallback). Fail-soft -> 0.0.
+    total_amount fallback). No repository (no database) or a failed read
+    -> 503, never a revenue of 0.
     """
     order_repo = get_order_repository()
     if order_repo is None:
-        return 0.0
+        raise _unreadable("revenue actual: database not connected")
     start_dt, end_dt = _month_window(period)
     try:
         orders = _reports._orders_in_window(
@@ -163,10 +180,12 @@ def _revenue_actual(store_id: Optional[str], period: str) -> float:
             start_dt=start_dt,
             end_dt=end_dt,
             end_exclusive=True,
+            # A failed read RAISES (-> 503), never [] (-> a revenue of 0).
+            strict=True,
         )
         return float(sum(_reports._order_revenue(o) for o in orders))
-    except Exception:
-        return 0.0
+    except Exception as exc:
+        raise _unreadable("revenue actual") from exc
 
 
 def _expense_actuals_by_category(
@@ -176,11 +195,11 @@ def _expense_actuals_by_category(
 
     Mirrors expenses.py conventions: `expense_date` is an ISO string filtered
     by the ^YYYY-MM prefix, `status` is APPROVED, grouped by `category`,
-    summing `amount`. Fail-soft -> {}.
+    summing `amount`. No repository (no database) or a failed read -> 503.
     """
     repo = get_expense_repository()
     if repo is None:
-        return {}
+        raise _unreadable("expense actuals: database not connected")
     flt: Dict[str, Any] = {
         # expense_date is stored as an ISO string -> month prefix match.
         "expense_date": {"$regex": f"^{re.escape(period)}"},
@@ -190,9 +209,11 @@ def _expense_actuals_by_category(
         flt["store_id"] = store_id
     out: Dict[str, float] = {}
     try:
-        rows = repo.find_many(flt, limit=100000) or []
-    except Exception:
-        return {}
+        # find_many prints a failed read and answers [] -- an actual of zero
+        # nobody measured. The strict read raises instead (-> 503).
+        rows = _pm.strict_find_many(repo, flt)
+    except Exception as exc:
+        raise _unreadable("expense actuals") from exc
     for row in rows:
         cat = row.get("category") or "Uncategorized"
         amt = row.get("amount")
@@ -202,6 +223,43 @@ def _expense_actuals_by_category(
             amt = 0.0
         out[cat] = out.get(cat, 0.0) + amt
     return out
+
+
+def plan_and_actuals(store_id: Optional[str], period: str):
+    """``(planned_by_head, actual_by_head)`` for a shop-month -- THE one read of
+    a budget. ``store_id`` None = every shop (an admin with no shop picked).
+
+    Budgeting (/budgets/variance) and the Finance Dashboard's Budgets tab
+    (/finance/budget) both build from these two maps, so a plan saved on one
+    screen cannot read differently on the other (audit L3-15: the dashboard
+    used to look for a document shape nobody writes and always said "no budget
+    set"). Nothing is withheld here: each caller applies the payroll-head rule
+    to these SOURCE maps before deriving anything from them."""
+    planned_by_head: Dict[str, float] = {}
+    coll = _budgets_collection()
+    if coll is None:
+        # No database is UNREADABLE, never "no budget set" with zero actuals.
+        raise _unreadable("planned lines: database not connected")
+    flt: Dict[str, Any] = {"period": period}
+    if store_id:
+        flt["store_id"] = store_id
+    try:
+        for r in coll.find(flt):
+            head = r.get("head")
+            if not head:
+                continue
+            planned_by_head[head] = planned_by_head.get(head, 0.0) + float(
+                r.get("planned_amount") or 0.0
+            )
+    except Exception as exc:
+        raise _unreadable("planned lines") from exc
+
+    # Actuals are derived, never stored.
+    actual_by_head: Dict[str, float] = {}
+    actual_by_head[REVENUE_HEAD] = round(_revenue_actual(store_id, period), 2)
+    for cat, amt in _expense_actuals_by_category(store_id, period).items():
+        actual_by_head[cat] = round(amt, 2)
+    return planned_by_head, actual_by_head
 
 
 def _variance(planned: float, actual: float) -> float:
@@ -316,8 +374,8 @@ async def list_budgets(
         flt["period"] = period
     try:
         rows = list(coll.find(flt))
-    except Exception:
-        return {"budgets": [], "total": 0}
+    except Exception as exc:
+        raise _unreadable("budget list") from exc
 
     budgets = [_clean_budget_doc(r) for r in rows]
     # A planned "Salaries" head is the PLANNED wage bill, which in a 1-5 person
@@ -387,29 +445,8 @@ async def budget_variance(
     store_id = store_in_view(store_id, current_user)
     period = _validate_period(period)
 
-    # ---- planned lines for this (store, period) -------------------------
-    planned_by_head: Dict[str, float] = {}
-    coll = _budgets_collection()
-    if coll is not None:
-        flt: Dict[str, Any] = {"period": period}
-        if store_id:
-            flt["store_id"] = store_id
-        try:
-            for r in coll.find(flt):
-                head = r.get("head")
-                if not head:
-                    continue
-                planned_by_head[head] = planned_by_head.get(head, 0.0) + float(
-                    r.get("planned_amount") or 0.0
-                )
-        except Exception:
-            planned_by_head = {}
-
-    # ---- actuals (derived, never stored) --------------------------------
-    actual_by_head: Dict[str, float] = {}
-    actual_by_head[REVENUE_HEAD] = round(_revenue_actual(store_id, period), 2)
-    for cat, amt in _expense_actuals_by_category(store_id, period).items():
-        actual_by_head[cat] = round(amt, 2)
+    # ---- planned lines + derived actuals for this (store, period) -------
+    planned_by_head, actual_by_head = plan_and_actuals(store_id, period)
 
     # ---- the payroll strip, applied BEFORE anything is derived ----------
     #

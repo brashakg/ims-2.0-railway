@@ -173,22 +173,6 @@ async def open_cash_register(
     return doc
 
 
-def _shared_counted_paisa(till_link: Optional[Dict[str, Any]]) -> Optional[int]:
-    """The counted figure ON THE SHARED TILL RECORD after a close linked to it,
-    or None when nothing was counted there (or the link failed).
-
-    This is the ONE answer for the store-day: whichever door counted the drawer
-    first owns it, and both screens must report that same number."""
-    session = (till_link or {}).get("session") or {}
-    value = session.get("blind_count_paisa")
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 @router.post("/cash-register/close")
 async def close_cash_register(
     body: CashRegisterClose,
@@ -357,7 +341,7 @@ async def close_cash_register(
     # shared; the expected figure below is still this window's own arithmetic.
     # The grid typed here is still stored as this screen's sheet, and a sheet
     # that disagrees with the shared count flags itself (matches_amount False).
-    shared_paisa = _shared_counted_paisa(till_link)
+    shared_paisa = till_service.shared_counted_paisa(till_link)
     count_adopted = shared_paisa is not None and (
         counted is None or shared_paisa != cash_denom.rupees_to_paisa(counted)
     )
@@ -375,6 +359,39 @@ async def close_cash_register(
             else cash_register.variance_status(summary["variance"], tolerance_rupees)
         )
 
+    # SEVERAL DRAWERS ON THE DAY (D53): `counted` is ONE drawer's count and
+    # `expected` is this window's arithmetic, so no single variance or
+    # "balanced" verdict is true for the day, and drawers are never added
+    # together. Withhold it; the record carries each drawer's own count and
+    # variance (till_drawers).
+    several_drawers = int(till_link.get("drawers_on_day") or 1) > 1
+    if several_drawers:
+        summary["variance"] = None
+        summary["variance_status"] = cash_register.SEVERAL_DRAWERS
+
+    # WHAT THE BAND JUDGES. One drawer: the one counted figure for the day.
+    # Several drawers (D53): no whole-day figure, so the drawer THIS close
+    # counted is judged on ITS OWN variance (stored by the till at its blind
+    # count) -- unless a manager already LOCKED it, in which case its lock
+    # already took the note and raised the alert. Without this the note and
+    # the manager alert (owner ruling 2026-08-25) waited for a lock that might
+    # never come, and a shortage outside the band raised nothing.
+    judged_variance_paisa = (
+        cash_denom.rupees_to_paisa(summary["variance"])
+        if summary["variance"] is not None
+        else None
+    )
+    judged_band_paisa = cash_denom.rupees_to_paisa(tolerance_rupees)
+    if several_drawers:
+        drawer = till_link.get("session") or {}
+        judged_variance_paisa = (
+            drawer.get("variance_paisa")
+            if drawer.get("status") != till_service.STATUS_LOCKED
+            else None
+        )
+        if drawer.get("tolerance_paisa") is not None:
+            judged_band_paisa = int(drawer["tolerance_paisa"])
+
     # MANDATORY NOTE ABOVE THE BAND (owner ruling 2026-08-25). Checked AFTER
     # the shared-record adoption so the figure judged is the ONE counted figure
     # for the day. Same rule, same helper as the blind Z-Read lock. Refusing
@@ -382,20 +399,15 @@ async def close_cash_register(
     # and a resubmit with the note adopts it back (already_counted) unchanged.
     close_note = (body.note or "").strip()
     variance_out_of_band = till_service.needs_variance_note(
-        (
-            cash_denom.rupees_to_paisa(summary["variance"])
-            if summary["variance"] is not None
-            else None
-        ),
-        cash_denom.rupees_to_paisa(tolerance_rupees),
+        judged_variance_paisa, judged_band_paisa
     )
     if variance_out_of_band and not close_note:
         raise HTTPException(
             status_code=400,
             detail=(
                 "variance_note_required: the drawer is over/short beyond the "
-                f"allowed band of Rs {tolerance_rupees:.0f} - a note explaining "
-                "the variance is required to close."
+                f"allowed band of Rs {judged_band_paisa / 100:.0f} - a note "
+                "explaining the variance is required to close."
             ),
         )
 
@@ -418,6 +430,11 @@ async def close_cash_register(
         "till_opening_float_not_recorded": bool(
             till_link.get("opening_float_not_recorded")
         ),
+        # Drawers on this shop-day. Above 1, `counted` is the latest drawer's
+        # count only, not the day's total (D40); the screen says so.
+        "till_drawers_on_day": till_link.get("drawers_on_day"),
+        # D53: each drawer's own count and (once locked) variance.
+        "till_drawers": till_link.get("drawers") if several_drawers else None,
         # True when this screen's counted figure and the shared record's differ
         # -- a manual override typed over the notes, or a drawer the other door
         # had already counted. Either way the shared figure is what is stored
@@ -464,16 +481,18 @@ async def close_cash_register(
         )
 
     # Manager alert above the band (owner ruling 2026-08-25). SAME helper and
-    # SAME (store, day) dedupe as the blind Z-Read lock, so the two doors raise
-    # ONE task for one drawer-day. Fail-soft inside the helper.
+    # SAME per-drawer dedupe (D63) as the blind Z-Read lock, so the two doors
+    # raise ONE task for one drawer, and another drawer of the day out of band
+    # raises its own. Fail-soft inside the helper.
     if variance_out_of_band:
         till_service.raise_variance_task(
             store_id=store_id,
             session_date=ist_date_str(_to_dt(end_iso)) or str(end_iso)[:10],
-            variance_paisa=cash_denom.rupees_to_paisa(summary["variance"]),
-            tolerance_paisa=cash_denom.rupees_to_paisa(tolerance_rupees),
+            variance_paisa=judged_variance_paisa,
+            tolerance_paisa=judged_band_paisa,
             note=close_note,
             source="Finance cash-register close",
+            session_id=till_link.get("session_id"),
         )
 
     merged = dict(session)

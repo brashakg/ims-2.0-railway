@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import DenominationGrid from '../../components/cash/DenominationGrid';
+import TillDrawerList from '../../components/cash/TillDrawerList';
 import {
   blankDenoms,
   denomTotal,
@@ -177,9 +178,9 @@ export default function DayEndReport() {
     return s;
   }, [orders]);
 
-  // WHAT WAS ACTUALLY COUNTED, or null if nobody counted. A typed figure
-  // wins (a manager may know the drawer better than a half-filled grid);
-  // otherwise the notes ARE the count -- that is what is in the drawer.
+  // The figure SENT as closing_cash, or null if nobody counted: the typed one
+  // when there is one (kept by the server as evidence if the notes overrule
+  // it), otherwise the notes -- that is what is in the drawer.
   const gridTotal = denomTotal(closeDenoms);
   const countedCash: number | null =
     closingCash !== '' && !Number.isNaN(parseFloat(closingCash))
@@ -187,11 +188,34 @@ export default function DayEndReport() {
       : hasCount(closeDenoms)
         ? gridTotal
         : null;
+  // WHAT WILL BE RECORDED. Both figures are sent (the typed one is kept as
+  // evidence), but when the grid holds notes the till takes the notes and so
+  // does this report (audit L3-12: one drawer, one count). Preview THAT, and
+  // warn when the typed figure disagrees, so "Matches" never turns into a
+  // shortage after Close.
+  const recordedCash: number | null = hasCount(closeDenoms) ? gridTotal : countedCash;
+  const typedDisagrees =
+    countedCash !== null && recordedCash !== null && countedCash !== recordedCash;
   // NO COUNT -> NO VARIANCE. A variance against a drawer nobody counted is
   // a number invented out of a blank field, and it used to read as the
   // whole day's cash having walked out.
   const cashVariance =
-    countedCash === null ? null : Math.round(countedCash - summary.cashCollected);
+    recordedCash === null ? null : Math.round(recordedCash - summary.cashCollected);
+  // AFTER CLOSE THE CARD SHOWS THE RECORD, never what is still in the inputs
+  // (D53, audit L3-12). The typed box may hold a figure the server set aside
+  // (the till's count stood) or a single drawer of a several-drawer day; a
+  // verdict worked out from it contradicted the close record below.
+  const severalDrawers =
+    !!closeInfo &&
+    ((closeInfo.till_drawers_on_day ?? 1) > 1 || !!closeInfo.variance_withheld_several_drawers);
+  const shownSystemCash =
+    isClosed && closeInfo?.system_cash != null ? closeInfo.system_cash : summary.cashCollected;
+  const shownCash = isClosed ? (closeInfo?.closing_cash ?? null) : recordedCash;
+  const shownVariance = isClosed
+    ? closeInfo?.closing_cash != null && closeInfo.variance != null && !severalDrawers
+      ? Math.round(closeInfo.variance)
+      : null
+    : cashVariance;
   const setClosePieces = (i: number, pieces: number) => {
     setShowCount(true);
     setCloseDenoms((rows) => setRowPieces(rows, i, pieces));
@@ -366,15 +390,29 @@ export default function DayEndReport() {
                     <EyeOff className="w-4 h-4 inline mr-1" />Hidden
                   </p>
                 ) : (
-                  <p className="text-2xl font-bold text-gray-900">{fc(summary.cashCollected)}</p>
+                  <p className="text-2xl font-bold text-gray-900">{fc(shownSystemCash)}</p>
                 )}
               </div>
               <div>
                 <label className="text-xs text-gray-500 mb-1 block">Physical Cash Count</label>
-                <input type="number" value={closingCash} onChange={e => setClosingCash(e.target.value)}
-                  placeholder={hasCount(closeDenoms) ? fc(gridTotal) : 'Enter actual cash in drawer'}
-                  className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm print:hidden" />
-                {countedCash !== null && <p className="text-sm font-medium mt-1 print:block hidden">{fc(countedCash)}</p>}
+                {isClosed ? (
+                  <p className="text-2xl font-bold text-gray-900" data-testid="day-end-card-counted">
+                    {severalDrawers ? 'Per drawer, below' : shownCash === null ? 'Not counted' : fc(shownCash)}
+                  </p>
+                ) : (
+                  <>
+                    <input type="number" value={closingCash} onChange={e => setClosingCash(e.target.value)}
+                      placeholder={hasCount(closeDenoms) ? fc(gridTotal) : 'Enter actual cash in drawer'}
+                      className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm print:hidden" />
+                    {recordedCash !== null && <p className="text-sm font-medium mt-1 print:block hidden">{fc(recordedCash)}</p>}
+                  </>
+                )}
+                {!isClosed && typedDisagrees && (
+                  <p className="text-xs text-amber-700 mt-1" data-testid="day-end-typed-vs-notes">
+                    The notes and coins add up to {fc(gridTotal)}, not {fc(countedCash ?? 0)}. The notes
+                    count is what will be recorded.
+                  </p>
+                )}
               </div>
               <div>
                 {cashBlind ? (
@@ -387,8 +425,20 @@ export default function DayEndReport() {
                       Count what is actually in the drawer &mdash; the system figure stays hidden until you close.
                     </p>
                   </div>
-                ) : cashVariance === null ? (
-                  <div className="p-3 rounded-lg bg-gray-50 border border-gray-200">
+                ) : isClosed && (severalDrawers || !closeInfo) ? (
+                  <div className="p-3 rounded-lg bg-gray-50 border border-gray-200" data-testid="day-end-card-variance">
+                    <p className="text-xs text-gray-500">Variance</p>
+                    <p className="text-sm font-semibold text-gray-600">
+                      {severalDrawers ? 'Shown for each drawer below' : 'See the close record'}
+                    </p>
+                    {severalDrawers && (
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        This day had several cash drawers. No whole-day variance is worked out.
+                      </p>
+                    )}
+                  </div>
+                ) : shownVariance === null ? (
+                  <div className="p-3 rounded-lg bg-gray-50 border border-gray-200" data-testid="day-end-card-variance">
                     <p className="text-xs text-gray-500">Variance</p>
                     <p className="text-sm font-semibold text-gray-600">Not counted</p>
                     <p className="text-xs text-gray-500 mt-0.5">
@@ -396,12 +446,12 @@ export default function DayEndReport() {
                     </p>
                   </div>
                 ) : (
-                  <div className={clsx('p-3 rounded-lg', cashVariance === 0 ? 'bg-green-50' : 'bg-red-50')}>
+                  <div className={clsx('p-3 rounded-lg', shownVariance === 0 ? 'bg-green-50' : 'bg-red-50')} data-testid="day-end-card-variance">
                     <p className="text-xs text-gray-500">Variance</p>
-                    <p className={clsx('text-xl font-bold', cashVariance === 0 ? 'text-green-600' : 'text-red-600')}>
-                      {cashVariance === 0 ? '✓ Matches' : `${cashVariance > 0 ? '+' : ''}${fc(cashVariance)}`}
+                    <p className={clsx('text-xl font-bold', shownVariance === 0 ? 'text-green-600' : 'text-red-600')}>
+                      {shownVariance === 0 ? '✓ Matches' : `${shownVariance > 0 ? '+' : ''}${fc(shownVariance)}`}
                     </p>
-                    {cashVariance !== 0 && <p className="text-xs text-red-500 mt-0.5">{cashVariance > 0 ? 'Excess cash' : 'Cash short'}</p>}
+                    {shownVariance !== 0 && <p className="text-xs text-red-500 mt-0.5">{shownVariance > 0 ? 'Excess cash' : 'Cash short'}</p>}
                   </div>
                 )}
               </div>
@@ -410,6 +460,7 @@ export default function DayEndReport() {
             {/* WHICH notes and coins. A drawer that balances to the rupee can
                 still hide two mistakes that cancelled out; counting note by
                 note is the only way anyone ever sees them. */}
+            {!isClosed && (
             <div className="mt-4 pt-4 border-t border-gray-100">
               <button
                 type="button"
@@ -435,6 +486,7 @@ export default function DayEndReport() {
                 </div>
               )}
             </div>
+            )}
           </div>
           )}
 
@@ -503,6 +555,17 @@ export default function DayEndReport() {
                   <p className="text-sm text-green-600 mt-1">
                     Closed {new Date(closeInfo.closed_at).toLocaleString('en-IN')}
                   </p>
+                  {(closeInfo.till_drawers_on_day ?? 1) > 1 ? (
+                    // D53: several drawers. No whole-day comparison: each
+                    // drawer's own count and variance, never added together.
+                    <div className="text-sm mt-1 text-gray-600" data-testid="day-end-several-drawers">
+                      <p>
+                        This day had {closeInfo.till_drawers_on_day} cash drawers. Drawers are not added
+                        together and no whole-day variance is shown. System cash {fc(closeInfo.system_cash ?? 0)}.
+                      </p>
+                      <TillDrawerList drawers={closeInfo.till_drawers} testId="day-end-drawer-list" />
+                    </div>
+                  ) : (
                   <p className="text-sm mt-1 text-gray-600">
                     {closeInfo.closing_cash == null ? (
                       <>Cash was not counted. System cash {fc(closeInfo.system_cash ?? 0)}.</>
@@ -517,6 +580,22 @@ export default function DayEndReport() {
                       </>
                     )}
                   </p>
+                  )}
+                  {/* One drawer, one count: the till's blind count is the close.
+                      Say so, or a figure the closer did not type appears
+                      unexplained (audit L3-12). */}
+                  {closeInfo.counted_from_shared_record && (
+                    <p className="text-xs text-amber-700 mt-1" data-testid="day-end-count-from-till">
+                      {closeInfo.till_already_counted ? (
+                        <>This drawer was already counted at the till. That count stands and is the
+                        one recorded for the day.</>
+                      ) : (
+                        <>The notes and coins you counted do not add up to the figure you typed
+                        {closeInfo.entered_closing_cash != null && <> ({fc(closeInfo.entered_closing_cash)})</>}.
+                        The notes count is the one recorded for the day, here and at the till.</>
+                      )}
+                    </p>
+                  )}
                   {closeInfo.notes && <p className="text-xs text-gray-500 mt-1 italic">{closeInfo.notes}</p>}
                 </>
               ) : (

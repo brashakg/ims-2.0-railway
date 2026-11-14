@@ -18,7 +18,10 @@ export type ReconStatus =
   | 'OVERAGE'
   | 'SHORTAGE'
   | 'NEGATIVE_EXPECTED'
-  | 'NOT_COUNTED';
+  | 'NOT_COUNTED'
+  // D53: a Cash Register close on a day with several drawers; no single
+  // variance is true for it (each drawer has its own Z-Read row).
+  | 'SEVERAL_DRAWERS';
 export type ReconSource = 'CASH_REGISTER' | 'BLIND_EOD';
 
 export interface ReconByModeRow {

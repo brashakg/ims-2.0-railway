@@ -31,6 +31,7 @@ import {
 } from '../../services/api/cashRegister';
 import { OFF_TILL_EXPENSE_NOTICE } from './offTillExpenseCopy';
 import DenominationGrid from '../../components/cash/DenominationGrid';
+import TillDrawerList from '../../components/cash/TillDrawerList';
 import {
   blankDenoms,
   denomTotal,
@@ -152,6 +153,11 @@ export default function CashRegisterPage() {
         // a shortfall that was never measured.
         toast.warning(
           'Closed without a count — recorded as NOT COUNTED, not as an empty drawer. No variance was calculated.',
+        );
+      } else if (closed.variance_status === 'SEVERAL_DRAWERS') {
+        // D53: no single variance is true for a day with several drawers.
+        toast.warning(
+          `Closed. This day had ${closed.till_drawers_on_day} cash drawers, so no single variance is shown; each drawer's own count and variance is recorded.`,
         );
       } else if (closed.counted_from_shared_record) {
         // The drawer was already counted at POS Day-End. That count stands --
@@ -286,6 +292,15 @@ export default function CashRegisterPage() {
                             className="ml-1 text-[10px] font-medium text-amber-700"
                           >
                             Day-End
+                          </span>
+                        )}
+                        {(s.till_drawers_on_day ?? 1) > 1 && (
+                          <span
+                            data-testid="several-drawers"
+                            title={`This day had ${s.till_drawers_on_day} cash drawers. This is the last drawer's count only; drawers are not added together. Each drawer's own count and variance is under the variance column.`}
+                            className="ml-1 text-[10px] font-medium text-amber-700"
+                          >
+                            Last of {s.till_drawers_on_day} drawers
                           </span>
                         )}
                       </td>
@@ -540,6 +555,22 @@ function Stat({
 
 function VarianceChip({ session }: { session: CashRegisterSession }) {
   const status = session.variance_status;
+  // D53: several drawers on the day -- no single variance or "balanced". The
+  // drawers' own counts and variances, never added together.
+  if (status === 'SEVERAL_DRAWERS') {
+    return (
+      <div className="text-left inline-block">
+        <span
+          data-testid="several-drawers-verdict"
+          title="This day had several cash drawers, so no single variance is true for it."
+          className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600"
+        >
+          {session.till_drawers_on_day} drawers
+        </span>
+        <TillDrawerList drawers={session.till_drawers} testId="cash-register-drawer-list" />
+      </div>
+    );
+  }
   // A drawer nobody counted has no variance to show. Showing "−₹2,000" here
   // was the whole day reported missing because the grid was left untouched.
   if (status === 'NOT_COUNTED' || session.variance == null) {
