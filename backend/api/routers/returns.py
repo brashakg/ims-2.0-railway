@@ -5851,7 +5851,10 @@ async def complete_return_record(
         existing = dict(existing)
         existing.pop("_id", None)
         if existing.get("status") == "NOTHING_PAID":
-            _nothing_paid_steps(return_id, line, existing, current_user)
+            if not _nothing_paid_steps(return_id, line, existing, current_user):
+                return {**existing, "replayed": True, "hold_released": False, "message": NOTHING_PAID_PENDING}
+            return {**existing, "replayed": True, "hold_released": True,
+                    "message": "This return's record already exists."}
         return {**existing, "replayed": True, "message": "This return's record already exists."}
     if line is not None and line.get("type") == "ISSUING":
         raise HTTPException(status_code=409, detail=(
@@ -6136,19 +6139,32 @@ def _complete_nothing_paid(return_id, line, order, hold, store_id, recovered, cu
         coll.insert_one({**tomb, "_id": f"recovered:{return_id}"})
     except Exception as exc:  # noqa: BLE001 -- the other press owns it
         return _replay_or_503(coll, return_id, exc)
-    _nothing_paid_steps(return_id, line, tomb, current_user)
+    released = _nothing_paid_steps(return_id, line, tomb, current_user)
     _audit_complete(return_id, store_id, current_user, recovered, now)
-    return {**tomb, "message": "Nothing was paid on this return: its units and the bill were released, "
-                               "and its credit-note number was written off."}
+    if not released:
+        return {**tomb, "hold_released": False, "message": NOTHING_PAID_PENDING}
+    return {**tomb, "hold_released": True,
+            "message": "Nothing was paid on this return: its units and the bill were released, "
+                       "and its credit-note number was written off."}
+
+
+# D59: said only while the hold is still kept (a step another pass claimed is
+# younger than the reconciler's timeout, or a step did not finish): never
+# "released" before it is.
+NOTHING_PAID_PENDING = (
+    "Nothing was paid on this return, and that is recorded. Its release is PENDING: a step is still "
+    "being finished, so its units and the bill stay held for now. IMS finishes it by itself; press "
+    "Complete record again later to check.")
 
 
 def _nothing_paid_steps(return_id: str, line: Optional[Dict[str, Any]], tomb: Dict[str, Any],
-                        current_user) -> None:
+                        current_user) -> bool:
     """The give-backs of a nothing-paid return on THE one set of marks
     (_give_back): a step the counter or the reconciler already did is not done
     again; one they claimed but lost is finished here, once. The hold is
     released only when every step is done (the release is idempotent, so a
-    replay finishes a lost one); then the VOID line settles."""
+    replay finishes a lost one); then the VOID line settles. True only when
+    the hold is released (or there was no bill to hold)."""
     order_id, store_id = tomb.get("order_id"), tomb.get("store_id")
     acts: Dict[str, Any] = {"claims_released": lambda: _release_lines(order_id, tomb.get("items") or [])}
     number = tomb.get("credit_note_number")
@@ -6157,7 +6173,7 @@ def _nothing_paid_steps(return_id: str, line: Optional[Dict[str, Any]], tomb: Di
             number, {"order_id": order_id, "store_id": store_id}, return_id, current_user,
             "return finished with nothing paid")
     if not _give_back(order_id, return_id, store_id, acts, finisher=True, sole_owner=False):
-        return  # the hold stays: the return stays in Needs completing
+        return False  # the hold stays: the return stays in Needs completing
     store = _step_store(order_id, return_id)
     if order_id:
         if _release_order_refund(order_id, return_id):
@@ -6166,7 +6182,7 @@ def _nothing_paid_steps(return_id: str, line: Optional[Dict[str, Any]], tomb: Di
                 _step_done(store, "hold_released")
         else:
             _step_lost(store, return_id, "hold_released", {"order_id": order_id}, store_id)
-            return
+            return False
     if line is not None:
         try:
             # Settled only while no step is claimed-but-unstamped (the same
@@ -6176,6 +6192,7 @@ def _nothing_paid_steps(return_id: str, line: Optional[Dict[str, Any]], tomb: Di
                 {"$set": {"void_settled": True}})
         except Exception as exc:  # noqa: BLE001
             logger.error("[RETURNS] void %s not marked settled: %s", line.get("entry_id"), exc)
+    return True
 
 
 GIVE_BACK_STEPS = ("claims_released", "hold_released", "number_written_off")

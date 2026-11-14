@@ -296,3 +296,50 @@ def test_a_wrong_serial_on_a_removed_piece_moves_nothing_on_real_mongo(client, s
     rows = _rows(shop, oid)
     assert rows["unit"] == ("SOLD", oid) and rows["returned_qty"] == 0
     assert rows["returns"] == [] and rows["holds"] == {}
+
+
+def test_nothing_was_paid_says_pending_while_the_age_guard_keeps_the_hold(client, shop, invoiced, monkeypatch):
+    """Codex round 6 / D59: the give-back's claim is younger than the reconciler's
+    timeout (another pass may still be acting), so the hold is kept. The answer
+    says the release is PENDING, never 'released'; once the claim ages, the next
+    press finishes it and says so."""
+    from api.routers import returns
+
+    oid, frame = _parcel_with_a_piece_removed(client, shop, invoiced)
+    real_keep, real_release = returns._keep_order_refund_hold, returns._release_returnable_qty
+    keeps, releases = [], []
+
+    def keep(*a, **k):
+        keeps.append(1)
+        if len(keeps) == 1:
+            raise TimeoutError("orders write timed out")
+        return real_keep(*a, **k)
+
+    def release(*a, **k):
+        releases.append(1)
+        return False if len(releases) == 1 else real_release(*a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(returns, "_keep_order_refund_hold", keep)
+        m.setattr(returns, "_release_returnable_qty", release)
+        assert _press(client, oid, frame["item_id"]).status_code == 500
+    (rid,) = _rows(shop, oid)["holds"]
+    old = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    young = datetime.now(timezone.utc).isoformat()
+    shop["db"].get_collection("orders").update_one({"order_id": oid}, {"$set": {
+        f"refund_holds.{rid}.at": old, f"refund_holds.{rid}.claims_released_at": young}})
+    first = client.post(f"/api/v1/returns/{rid}/complete-record", json={"nothing_paid": True},
+                        headers=_token(ADMIN))
+    assert first.status_code == 201, first.text
+    rows = _rows(shop, oid)
+    assert rid in rows["holds"] and rows["returned_qty"] == 1, "the age guard kept the hold"
+    assert "PENDING" in first.json()["message"] and "released," not in first.json()["message"]
+    assert first.json()["hold_released"] is False
+    shop["db"].get_collection("orders").update_one(
+        {"order_id": oid}, {"$set": {f"refund_holds.{rid}.claims_released_at": old}})
+    done = client.post(f"/api/v1/returns/{rid}/complete-record", json={"nothing_paid": True},
+                       headers=_token(ADMIN))
+    assert done.status_code == 201 and done.json()["hold_released"] is True, done.text
+    rows = _rows(shop, oid)
+    assert rows["holds"] == {} and rows["returned_qty"] == 0
+    assert [(r[0], r[1]) for r in rows["returns"]] == [(rid, "NOTHING_PAID")]
