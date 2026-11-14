@@ -256,6 +256,7 @@ export const adminUserApi = {
 
   updateUser: async (userId: string, data: Partial<{
     name: string;
+    username: string;
     email: string;
     phone: string;
     role: string;
@@ -272,6 +273,10 @@ export const adminUserApi = {
     // UserUpdate expects. Prefers the multi-select arrays the forms collect.
     const payload: Record<string, unknown> = {};
     if (data.name !== undefined) payload.full_name = data.name;
+    // Login identity: previously never sent, so an edit "saved" unchanged.
+    // Blank means "not edited" (both are required on the account).
+    if (data.username?.trim()) payload.username = data.username.trim();
+    if (data.email?.trim()) payload.email = data.email.trim();
     if (data.phone !== undefined) payload.phone = data.phone;
     const roles =
       data.roles && data.roles.length ? data.roles : data.role ? [data.role] : undefined;
