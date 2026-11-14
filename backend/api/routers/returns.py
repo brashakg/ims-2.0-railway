@@ -6675,6 +6675,29 @@ async def retry_restock(
     return _retry_restock(return_id, current_user, current_user.get("active_store_id"))
 
 
+def _return_slot_index_ok() -> bool:
+    """Is uniq_stock_unit_return_slot on the stock? It IS the D45(a)
+    guarantee (_return_slot_keys): without it a stalled retry and its taker
+    can both move one piece. ensure_indexes builds it fail-soft, so the
+    Retry stock step checks before every claim and refuses when it is
+    missing or cannot be read. An in-memory double (no pymongo collection)
+    runs in one process and has no index to check."""
+    from pymongo.collection import Collection
+
+    stock_repo = get_stock_repository()
+    coll = getattr(stock_repo, "collection", None)
+    if not isinstance(coll, Collection):
+        return True
+    try:
+        ok = "uniq_stock_unit_return_slot" in (coll.index_information() or {})
+    except Exception:  # noqa: BLE001
+        ok = False
+    if not ok:
+        logger.critical("[RETURNS] Retry stock step REFUSED: unique index uniq_stock_unit_return_slot "
+                        "is missing (or unreadable) on stock_units -- rebuild it (ensure_indexes)")
+    return ok
+
+
 def _retry_restock(return_id: str, current_user: dict, processing_store_id: Optional[str],
                    panel: bool = False) -> Dict[str, Any]:
     """retry_restock's work, for both of its doors. `processing_store_id`: the
@@ -6705,6 +6728,10 @@ def _retry_restock(return_id: str, current_user: dict, processing_store_id: Opti
     if owner.get("status") == "NOTHING_PAID":
         raise HTTPException(status_code=409, detail=(
             "Nothing was paid on this return and its goods were never taken back: it has no stock step."))
+    if not _return_slot_index_ok():
+        raise HTTPException(status_code=503, detail=(
+            "The Retry stock step is paused: the database check that keeps one returned piece to "
+            "one stock record is not installed. Nothing was changed. Tell head office."))
 
     # Atomic claim: succeed only if NOT already applied AND NOT in progress.
     # Its token (D45a): every later write of this attempt to the record --
@@ -6792,15 +6819,22 @@ def _reopen_by_booking(coll: Any, return_id: str, write: Any) -> None:
     -- its own landed pieces still reach the record -- and is told instead
     (restock_booking_released): it reopens what it saves on a booking
     (_reopen_if_released). Never a unit moved here: the bookings keep every
-    door from putting a piece back twice."""
+    door from putting a piece back twice.
+
+    ORDER MATTERS: the flag first, then the reopen. The taker's save and its
+    _reopen_if_released can land between the two writes; flag-first, every
+    interleaving ends reopened (a save before the flag is caught by the
+    reopen, a save after it by the taker's own check). Reopen-first, a save
+    between them matched neither and the record stayed 'applied' with the
+    piece SOLD (#1413 round 9 review)."""
     if getattr(write, "matched_count", 1):
         return
     coll.update_one(
-        {"return_id": return_id, "restock_applied_by_booking": True},
-        {"$set": {"restock_applied": False, "restock_applied_by_booking": False}})
-    coll.update_one(
         {"return_id": return_id, "restock_in_progress": True},
         {"$set": {"restock_booking_released": True}})
+    coll.update_one(
+        {"return_id": return_id, "restock_applied_by_booking": True},
+        {"$set": {"restock_applied": False, "restock_applied_by_booking": False}})
 
 
 def _reopen_if_released(coll: Any, return_id: str) -> None:

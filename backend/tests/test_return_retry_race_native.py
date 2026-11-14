@@ -381,3 +381,133 @@ def test_a_stale_shopify_retry_that_fails_while_its_taker_runs_keeps_the_takers_
     again = R._retry_restock(RID, USER, STORE)
     assert again["restock_applied"] is True and _back(native) == ["U1"]
     assert b["return_id"] == RID
+
+
+class _PausingReturns:
+    """The returns collection as the retry sees it, except that retry A
+    (thread "retry-a") pauses right after the FIRST of _reopen_by_booking's
+    two writes -- the record writes that are not its own (no claim token in
+    the filter) -- until `resume` is set."""
+
+    def __init__(self, real, between, resume):
+        self._real, self._between, self._resume, self._paused = real, between, resume, False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def update_one(self, flt, *a, **k):
+        import threading
+
+        res = self._real.update_one(flt, *a, **k)
+        if (threading.current_thread().name == "retry-a" and not self._paused
+                and "restock_claim" not in flt):
+            self._paused = True
+            self._between.set()
+            assert self._resume.wait(30)
+        return res
+
+
+def test_a_taker_that_saves_between_the_stale_retrys_two_reopen_writes_still_reopens(native, monkeypatch):
+    """Round-9 must-fix (correctness + money-stock lenses). A books U1, stalls
+    in its flip; B takes over on A's booking. A's flip fails, it un-books, and
+    its reopen runs its FIRST write while B is still running; B then saves
+    'applied' on the booking and checks for a release; only then does A run
+    its SECOND write. Whatever the order, the record must reopen: U1 is SOLD
+    and no longer booked, so the Retry stock step must stay (D7)."""
+    import threading
+
+    _seed(native, units=["U1"])
+    native.returns.update_one({"return_id": RID}, {"$set": {"shopify_refund_id": "RF-1"}})
+    a_booked, b_loaded, a_between, b_done = (threading.Event() for _ in range(4))
+    real_flip, real_goods, real_coll = R._flip_sold_unit, R._restock_good_items, R._returns_coll
+    out = {}
+
+    def flip(*a, **k):
+        if threading.current_thread().name == "retry-a":
+            a_booked.set()
+            assert b_loaded.wait(30)
+            raise RuntimeError("socket reset")
+        return real_flip(*a, **k)
+
+    def goods(*a, **k):
+        if threading.current_thread().name != "retry-a":
+            b_loaded.set()
+            assert a_between.wait(30), "A never reached its reopen"
+        return real_goods(*a, **k)
+
+    def run_a():
+        try:
+            out["a"] = R._retry_restock(RID, USER, STORE)
+        except Exception as exc:  # noqa: BLE001
+            out["a"] = exc
+
+    monkeypatch.setattr(R, "_flip_sold_unit", flip)
+    monkeypatch.setattr(R, "_restock_good_items", goods)
+    monkeypatch.setattr(R, "_returns_coll", lambda: _PausingReturns(real_coll(), a_between, b_done))
+    thread_a = threading.Thread(target=run_a, name="retry-a")
+    thread_a.start()
+    assert a_booked.wait(30)
+    native.returns.update_one({"return_id": RID}, {"$set": {
+        "restock_started_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()}})
+    try:
+        R._retry_restock(RID, USER, STORE)  # B: its save lands between A's two writes
+    finally:
+        b_done.set()
+        thread_a.join(30)
+    assert not thread_a.is_alive()
+    assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
+    line = native.orders.find_one({"order_id": OID})["items"][0]
+    assert float((line.get("restocked_refunds") or {}).get("RF-1") or 0) == 0
+    doc = native.returns.find_one({"return_id": RID})
+    assert doc.get("restock_completed_at"), "the taker's save never reached the record"
+    assert doc["restock_applied"] is False, "record reads applied, the piece is SOLD and un-booked"
+    assert doc["restock_in_progress"] is False
+    again = R._retry_restock(RID, USER, STORE)
+    assert again["restock_applied"] is True and _back(native) == ["U1"]
+    assert R._retry_restock(RID, USER, STORE)["message"] == "Already restocked"
+
+
+def test_two_live_retries_over_a_trace_gap_put_back_one_unit_for_the_last_piece(native, monkeypatch):
+    """Limit 3 (the old _most path), the other interleaving: a pre-PR record
+    whose `restocked` rows count more pieces back than the stock shows. A and
+    B both read the pieces still out BEFORE either lands (A stalls before its
+    flip; B takes over and finishes). They pick the same slot, so A's late
+    write is refused: never a fourth record, never a second unit for the
+    last piece (D45a)."""
+    _seed(native, units=["U3"], qty=3)
+    native.stock_units.insert_many([
+        {"_id": "U1", "stock_id": "U1", "product_id": PID, "store_id": STORE, "status": "AVAILABLE",
+         "returned_by_return_id": RID, "quantity": 1},
+        {"_id": "U2", "stock_id": "U2", "product_id": PID, "store_id": STORE, "status": "AVAILABLE",
+         "quantity": 1}])
+    native.returns.update_one({"return_id": RID}, {"$set": {
+        "items.0.return_qty": 3, "restock_stock_ids": ["U1"],
+        "restocked": [{"product_id": PID, "sku": "F1", "quantity": 2, "reactivated": 2, "minted": 0,
+                       "applied": False}]}})
+    a, b = _interleave(native, monkeypatch, R, "_flip_sold_unit")
+    assert b["restock_applied"] is True
+    assert native.stock_units.count_documents({}) == 3, "a fourth record was minted for one piece"
+    assert native.stock_units.count_documents({"status": "AVAILABLE"}) == 3
+    assert native.stock_units.count_documents({"return_slot": {"$type": "string"}}) == 1
+    doc = native.returns.find_one({"return_id": RID})
+    assert doc["restock_applied"] is True and doc["restock_in_progress"] is False
+
+
+def test_the_retry_refuses_when_the_return_slot_index_is_missing(native):
+    """The slot guarantee (D45a) IS the index: without it two live retries can
+    both move one piece. So the Retry stock step refuses -- nothing claimed,
+    nothing moved -- until the index is back, rather than running unguarded."""
+    from fastapi import HTTPException
+
+    _seed(native, units=["U1"])
+    native.stock_units.drop_index("uniq_stock_unit_return_slot")
+    with pytest.raises(HTTPException) as err:
+        R._retry_restock(RID, USER, STORE, panel=True)
+    assert err.value.status_code == 503
+    assert native.stock_units.find_one({"_id": "U1"})["status"] == "SOLD"
+    doc = native.returns.find_one({"return_id": RID})
+    assert doc["restock_in_progress"] is False and not doc.get("restock_claim")
+    native.stock_units.create_index("return_slot", unique=True, name="uniq_stock_unit_return_slot",
+                                    partialFilterExpression={"return_slot": {"$type": "string"}})
+    assert R._retry_restock(RID, USER, STORE)["restock_applied"] is True
+    assert _back(native) == ["U1"]
