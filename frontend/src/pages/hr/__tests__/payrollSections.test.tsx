@@ -472,3 +472,73 @@ describe('HRLayout offers the payroll sections only to the salary roles', () => 
     for (const label of PAYROLL_LABELS) expect(navButton(label)).toBeInTheDocument();
   });
 });
+
+// Codex round 2 on PR #1410 (L3-24): the ONE salary-sheet load feeds the
+// sheet table, its export and both employee pickers. An older month's answer
+// that arrived after the selected month's replaced the list, so the picker
+// under "January" offered November's (empty) staff list. The selected month's
+// list must survive any later answer (or failure) for a month already left.
+describe('salary sheet: the list and the pickers it feeds belong to the selected month', () => {
+  const thisMonth = new Date().getMonth() + 1;
+  const picked = thisMonth === 1 ? 2 : 1;
+  const PICKED = { salaries: [{ ...SHEET.salaries[0], employee_id: 'EMP-7', employee_name: 'ZZ Picked Month' }] };
+
+  async function pickWhileOldMonthIsHeld(oldAnswer: 'empty' | 'error') {
+    let releaseOld: () => void = () => {};
+    get.mockImplementation(async (url: string, config?: { params?: { month?: number } }) => {
+      if (url === '/payroll/salary-sheet') {
+        if (config?.params?.month === thisMonth) {
+          // The month the screen opened on: its answer is held, then arrives LAST.
+          return new Promise((resolve, reject) => {
+            releaseOld = () => (oldAnswer === 'empty'
+              ? resolve({ data: { salaries: [] } })
+              : reject(new Error('network')));
+          });
+        }
+        return { data: PICKED };
+      }
+      if (url.startsWith('/payroll/payslip/')) return { data: { payslip: null } };
+      throw new Error(`unexpected GET ${url}`);
+    });
+    renderRoute('/hr/payroll/payslips', ['ADMIN']);
+    fireEvent.change(await screen.findByTitle('Select payslip month', undefined, FIND), { target: { value: String(picked) } });
+    expect(await screen.findByRole('option', { name: 'ZZ Picked Month' })).toBeInTheDocument();
+    await act(async () => {
+      releaseOld();
+      await new Promise((r) => setTimeout(r, 50));
+    });
+  }
+
+  it("an older month's empty answer arriving last does not empty the picked month's employee list", async () => {
+    await pickWhileOldMonthIsHeld('empty');
+    expect(screen.getByTitle('Select payslip month')).toHaveValue(String(picked));
+    expect(screen.getByRole('option', { name: 'ZZ Picked Month' })).toBeInTheDocument();
+    fireEvent.change(screen.getByTitle('Select employee for payslip'), { target: { value: 'EMP-7' } });
+    expect(get).toHaveBeenCalledWith(`/payroll/payslip/EMP-7/${picked}/${new Date().getFullYear()}`);
+  });
+
+  it("an older month's failure arriving last neither empties the list nor shows an error", async () => {
+    await pickWhileOldMonthIsHeld('error');
+    expect(screen.getByRole('option', { name: 'ZZ Picked Month' })).toBeInTheDocument();
+    expect(screen.queryByText('Failed to load salary sheet')).not.toBeInTheDocument();
+  });
+
+  it("changing the month takes the old month's list off the screen before the new one answers", async () => {
+    let releasePicked: () => void = () => {};
+    get.mockImplementation(async (url: string, config?: { params?: { month?: number } }) => {
+      if (url === '/payroll/salary-sheet') {
+        if (config?.params?.month === thisMonth) return { data: SHEET };
+        return new Promise((resolve) => { releasePicked = () => resolve({ data: PICKED }); });
+      }
+      throw new Error(`unexpected GET ${url}`);
+    });
+    renderRoute('/hr/payroll/payslips', ['ADMIN']);
+    const monthPicker = await screen.findByTitle('Select payslip month', undefined, FIND);
+    expect(await screen.findByRole('option', { name: 'ZZ Priya Sheet' })).toBeInTheDocument();
+    fireEvent.change(monthPicker, { target: { value: String(picked) } });
+    await act(async () => { await new Promise((r) => setTimeout(r, 20)); });
+    expect(screen.queryByRole('option', { name: 'ZZ Priya Sheet' })).not.toBeInTheDocument();
+    await act(async () => { releasePicked(); await new Promise((r) => setTimeout(r, 20)); });
+    expect(await screen.findByRole('option', { name: 'ZZ Picked Month' })).toBeInTheDocument();
+  });
+});

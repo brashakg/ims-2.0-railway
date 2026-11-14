@@ -83,6 +83,7 @@ export function PayrollLayout() {
   const [payslipLoading, setPayslipLoading] = useState(false);
   const payslipRequest = useRef(0);
   const advancesRequest = useRef(0);
+  const salarySheetRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   // Owner ruling 2026-08-09: salary data is ADMIN-only. A 403 must show an
   // explicit access notice -- an empty table would read as "nobody was paid".
@@ -114,6 +115,12 @@ export function PayrollLayout() {
   }, [user?.activeStoreId]);
 
   const loadSalarySheet = async () => {
+    // Same rule as the payslip and advances loads: the list on screen (and the
+    // employee pickers it feeds) belongs to the month / year / shop it was
+    // asked for. Drop it before asking again and ignore any answer that is not
+    // for the latest ask, so an older month's late answer never replaces it.
+    const request = ++salarySheetRequest.current;
+    setSalarySheet([]);
     setIsLoading(true);
     setError(null);
     setNoAccess(null);
@@ -123,8 +130,9 @@ export function PayrollLayout() {
         selectedYear,
         user?.activeStoreId
       );
-      setSalarySheet(data?.salaries || []);
+      if (request === salarySheetRequest.current) setSalarySheet(data?.salaries || []);
     } catch (err) {
+      if (request !== salarySheetRequest.current) return;
       setSalarySheet([]);
       if (isForbiddenError(err)) {
         setNoAccess(forbiddenDetail(err, 'The salary sheet is restricted to administrators.'));
@@ -132,7 +140,7 @@ export function PayrollLayout() {
         setError('Failed to load salary sheet');
       }
     } finally {
-      setIsLoading(false);
+      if (request === salarySheetRequest.current) setIsLoading(false);
     }
   };
 
