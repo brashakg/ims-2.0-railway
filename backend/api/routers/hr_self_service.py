@@ -106,6 +106,9 @@ def _month_year(month: Optional[int], year: Optional[int]) -> tuple:
 # ============================================================================
 
 
+_ATTENDANCE_READ_FAILED = "Your attendance could not be loaded just now. Please try again."
+
+
 @router.get("/me/attendance")
 async def my_attendance(
     month: Optional[int] = Query(None, ge=1, le=12),
@@ -140,9 +143,13 @@ async def my_attendance(
             "late": 0,
         },
     }
-    db = _get_db()
-    if db is None or not caller:
+    if not caller:
         return empty
+    db = _get_db()
+    if db is None:
+        # #1433 review: production with Mongo unreachable -- "unavailable",
+        # never an empty month that reads as "you haven't checked in today".
+        raise HTTPException(status_code=503, detail=_ATTENDANCE_READ_FAILED)
 
     try:
         n_days = monthrange(yr, mon)[1]
@@ -224,10 +231,7 @@ async def my_attendance(
         }
     except Exception as e:
         logger.error("Self attendance read failed: %s", e)
-        raise HTTPException(
-            status_code=503,
-            detail="Your attendance could not be loaded just now. Please try again.",
-        ) from e
+        raise HTTPException(status_code=503, detail=_ATTENDANCE_READ_FAILED) from e
 
 
 # ============================================================================

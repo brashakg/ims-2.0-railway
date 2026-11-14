@@ -375,3 +375,40 @@ def test_d48_store_less_day_is_not_adopted_and_shows_read_only(real):
     r = c.post("/api/v1/hr/attendance/mark", headers=sm, json={**body, "assign_store_id": "S1"})
     assert r.status_code == 200, r.text
     assert coll.find_one({"_id": "N1"})["store_id"] == "S1"
+
+
+# --------------------------------------------------------------------------- no repository
+# #1433 internal review: in production an unreachable Mongo at boot leaves the
+# seeded connection disconnected, so get_attendance_repository() is None. Every
+# attendance writer used to skip the write and still answer 200 "recorded",
+# and the own read answered an empty day ("You haven't checked in today").
+
+
+@pytest.fixture
+def prod_db_down(monkeypatch):
+    """The real production path: Railway marker set, real Mongo disconnected,
+    the real get_attendance_repository / _get_db (no lambda override)."""
+    from api.main import app
+    from database import connection
+
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setattr(connection.db, "_connected", False)
+    monkeypatch.setattr(connection.db, "connect", lambda *a, **kw: False)
+    assert hr.get_attendance_repository() is None
+    assert hr_self_service._get_db() is None
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_no_repository_writers_and_own_read_are_503_not_recorded(prod_db_down):
+    c = prod_db_down
+    staff = _headers(["SALES_STAFF"], user_id="u-s", store_id="S1")
+    calls = [
+        c.post("/api/v1/hr/attendance/mark", headers=_admin(), json={"employee_id": "emp-a", "store_id": "S1", "date": DAY, "status": "ABSENT"}),
+        c.post("/api/v1/hr/attendance/check-in", params=GEO, headers=staff),
+        c.post("/api/v1/hr/attendance/check-out", params=GEO, headers=staff),
+        c.post("/api/v1/hr/attendance/att-1/check-out", headers=_admin()),
+        c.put("/api/v1/hr/attendance/att-1", headers=_admin(), json={"status": "ABSENT"}),
+        c.get("/api/v1/hr/me/attendance", headers=staff),
+    ]
+    assert [r.status_code for r in calls] == [503] * len(calls), [r.text for r in calls]
+    assert not any("recorded" in r.text or "marked" in r.text for r in calls)
