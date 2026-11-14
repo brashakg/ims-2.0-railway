@@ -785,7 +785,10 @@ def test_approve_rearms_validity_window(db):
 
 def test_requested_expiry_still_enforced(db):
     """Companion to the re-arm: a REQUESTED approval past its TTL still cannot
-    be approved (the re-arm happens only ON approval, never resurrects)."""
+    be approved (the re-arm happens only ON approval, never resurrects).
+    Decision D54 (2026-11-14): the JOURNAL is not stranded by it -- a checker's
+    Approve raises the journal's request again and decides that one; the lapsed
+    request itself stays lapsed, never approved."""
     _seed_user(db, "user_A", pin="1111", roles=["ADMIN"])
     _seed_user(db, "user_B", pin="2222", roles=["ADMIN"])
     je_id = _draft(db, "user_A", amount=700.0)
@@ -793,9 +796,15 @@ def test_requested_expiry_still_enforced(db):
     past = appr._now() - timedelta(minutes=1)
     db.get_collection("approval_requests").update_one(
         {"request_id": request_id}, {"$set": {"expires_at": past}})
+    eng = appr.ApprovalEngine(db=db)
+    res = eng.approve(request_id, approver_user_id="user_B", approver_roles=["ADMIN"], pin="2222")
+    assert (res["ok"], res["error"]) == (False, "expired")
     res = je_service.approve_je(db, je_id=je_id, approver_id="user_B",
                                 approver_roles=["ADMIN"], pin="2222")
-    assert res["ok"] is False
+    assert res["ok"] is True, res
+    lapsed = db.get_collection("approval_requests").find_one({"request_id": request_id})
+    assert (lapsed["status"], lapsed.get("reviewed_by")) == ("EXPIRED", None)
+    assert res["je"]["approval_request_id"] != request_id
 
 
 def test_hq_je_not_readable_by_store_roles():
