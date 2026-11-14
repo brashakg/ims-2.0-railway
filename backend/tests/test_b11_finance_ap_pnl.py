@@ -949,3 +949,142 @@ def test_d65_goods_back_gives_back_only_the_pieces_it_booked_never_one_a_counter
     assert dec["returns_cogs_reversal"] == 6000.0
     # Four pieces came back in all: four costs, across both months.
     assert nov["returns_cogs_reversal"] + dec["returns_cogs_reversal"] == 4 * 6000.0
+
+
+# --------------------------------------------------------------------------
+# Decision D66, PR #1423 round 10: one source for a historical piece's cost
+# --------------------------------------------------------------------------
+
+# Every order the counter return, the webhook, the confirm (or AUTO post) and
+# Goods back can run in. counter: B at the counter; webhook: Shopify refunds A
+# and B; confirm: the accountant confirms the queued row (blocked: the confirm
+# could not book and left the restock open); goods: Goods back is pressed.
+D66_DOORS = [
+    ("off", "counter webhook confirm"), ("off", "counter webhook confirm goods"),
+    ("off", "webhook counter confirm"), ("off", "webhook counter confirm goods"),
+    ("off", "webhook counter goods confirm"), ("off", "webhook goods counter confirm"),
+    ("off", "webhook confirm counter"), ("off", "webhook confirm goods counter"),
+    ("off", "webhook blocked counter goods"), ("off", "webhook counter blocked goods"),
+    ("on", "counter webhook confirm"), ("on", "counter webhook confirm goods"),
+    ("on", "webhook counter"), ("on", "webhook counter goods"),
+]
+
+
+class _Positional:
+    """mongomock writes items.$ to the FIRST element whatever $elemMatch
+    matched (real Mongo writes the matched one) and cannot $addToSet by
+    index, so the real order-line claims run through this: the element is
+    found the way Mongo finds it, then written."""
+
+    def __init__(self, coll):
+        self.coll = coll
+
+    def __getattr__(self, name):
+        return getattr(self.coll, name)
+
+    def find_one_and_update(self, match, update, **_kw):
+        doc = self.coll.find_one(match)
+        if doc is None:
+            return None
+        probe = mongomock.MongoClient().p.items
+        probe.insert_many([{"_i": i, **it} for i, it in enumerate(doc["items"])])
+        el = doc["items"][probe.find_one(match["items"]["$elemMatch"])["_i"]]
+        for op, body in update.items():  # $inc / $addToSet / $pull on items.$.<path>
+            for key, v in body.items():
+                *path, last = key.split(".")[2:]
+                tgt = el
+                for p in path:
+                    tgt = tgt.setdefault(p, {})
+                if op == "$inc":
+                    tgt[last] = tgt.get(last, 0) + v
+                elif op == "$addToSet":
+                    tgt[last] = tgt.get(last, []) + ([] if v in tgt.get(last, []) else [v])
+                else:
+                    tgt[last] = [x for x in tgt.get(last, []) if x != v]
+        self.coll.replace_one({"_id": doc["_id"]}, doc)
+        return doc
+
+
+@pytest.mark.parametrize("a_kept", ["return", "no_restock"])
+@pytest.mark.parametrize("auto, doors", D66_DOORS)
+def test_d66_each_piece_cost_comes_back_once_whatever_order_the_doors_run(db, monkeypatch, auto, doors, a_kept):
+    """Each door books through the REAL code (the counter's atomic claim,
+    the Shopify caps and _hold_returned_qty's per-refund mark); the doc
+    inserts mirror the doors. A (FRAME) and B (SUNGLASS) are one piece each,
+    cost 6,000. B always comes back once (the counter, or the refund). A
+    comes back when Shopify restocked it or Goods back booked it. Each door
+    runs on its own day; no door may change a day already closed."""
+    from api.routers import returns as rr
+    from api.routers.finance._shared import customer_return_adjustments
+    from api.services import shopify_refund as sr
+
+    monkeypatch.setattr(rr, "_orders_coll", lambda: _Positional(db.orders))
+    monkeypatch.setattr(rr, "_returns_coll", lambda: db.returns)
+    line = {"quantity": 1, "unit_price": 10000.0, "item_total": 10000.0, "taxable_value": 9523.81,
+            "gst_rate": 5.0, "cost_at_sale": 6000.0}
+    db.orders.insert_one(_historical("D66", items=[
+        {**line, "item_id": "D66-A", "product_id": "PA", "item_type": "FRAME"},
+        {**line, "item_id": "D66-B", "product_id": "PB", "item_type": "SUNGLASS"}]))
+    money = {"gross": 10000.0, "taxable": 9523.81, "tax": 476.19}
+    st = {"day": 1, "queued": False, "posted": False, "pressed": False, "proposed": []}
+
+    def order():
+        return db.orders.find_one({"order_id": "D66"}, {"_id": 0})
+
+    def cap(lines):
+        return sr._cap_restock_to_returnable(lines, order(), "RF-D66")
+
+    def post(at, blocked=False):
+        st["posted"] = True
+        db.returns.insert_one({
+            "return_id": "RS-D66", "order_id": "D66", "store_id": "S1", "status": "COMPLETED",
+            "shopify_refund_id": "RF-D66", "created_at": at, "restock_applied": not blocked,
+            "items": [ln.model_dump() for ln in st["proposed"]],
+            "gst_breakup": {k: 2 * v for k, v in money.items()}})
+        if not blocked:  # _post_locked: re-capped, then booked (_restock_booked)
+            sr._hold_returned_qty(order(), cap(st["proposed"])[0], "RF-D66")
+
+    def run(door, at):
+        if door == "counter":
+            b = order()["items"][1]
+            if rr._line_purchased_qty(b) - rr._units_already_back("D66", b)[0] >= 1 \
+                    and rr._claim_returnable_qty("D66", b, 1.0):
+                db.returns.insert_one({
+                    "return_id": "RC-D66", "order_id": "D66", "store_id": "S1", "status": "COMPLETED",
+                    "created_at": at, "gst_breakup": money,
+                    "items": [{"order_item_id": "D66-B", "product_id": "PB", "return_qty": 1.0,
+                               "unit_price": 9523.81, "condition": "GOOD"}]})
+        elif door == "webhook":
+            lines = [rr.ReturnLine(order_item_id="D66-A", product_id="PA", return_qty=1, unit_price=9523.81,
+                                   restock=a_kept == "return"),
+                     rr.ReturnLine(order_item_id="D66-B", product_id="PB", return_qty=1, unit_price=9523.81)]
+            st["proposed"], overlapped, _ = cap(lines)
+            st["queued"] = auto == "off" or overlapped
+            if st["queued"]:
+                db.shopify_refund_review.insert_one({"review_id": "V-D66", "shopify_refund_id": "RF-D66",
+                                                     "goods_back_at": None})
+            else:
+                post(at)
+        elif door in ("confirm", "blocked"):
+            if st["queued"] and not st["posted"]:
+                post(at, blocked=door == "blocked")
+        elif door == "goods" and st["queued"]:
+            lines = cap([ln.model_copy(update={"restock": True}) for ln in st["proposed"]])[0]
+            if sr._hold_returned_qty(order(), lines, "RF-D66"):
+                st["pressed"] = True
+                db.shopify_refund_review.update_one({"review_id": "V-D66"}, {"$set": {
+                    "goods_back_at": at,
+                    "goods_restock": {"restock_applied": True, "restock_stock_ids": [], "stock_in_task": "T"}}})
+
+    closed = []
+    for door in doors.split():
+        st["day"] += 1
+        run(door, f"2026-11-{st['day']:02d}T05:00:00+00:00")
+        to = f"2026-11-{st['day']:02d}"
+        closed.append((to, customer_return_adjustments(db, {}, from_date="2026-11-01", to_date=to)))
+    out = customer_return_adjustments(db, {}, by="category")
+    a_back = a_kept == "return" or st["pressed"]
+    assert out.get("FRAME", {}).get("cogs_reversal", 0.0) == (6000.0 if a_back else 0.0)
+    assert out["SUNGLASS"]["cogs_reversal"] == 6000.0, "B's cost comes back exactly once"
+    for to, then in closed:  # D64 b: a closed day is never changed after the fact
+        assert customer_return_adjustments(db, {}, from_date="2026-11-01", to_date=to) == then, to

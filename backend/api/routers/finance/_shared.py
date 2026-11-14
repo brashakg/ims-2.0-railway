@@ -812,7 +812,10 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
     lines; never a lines-less note (the whole-order note made from
     amount-only refunds included), a goodwill or shipping refund, or a
     Shopify line not restocked unless Goods back brought it back -- that one
-    dated when the goods landed, max(note, Goods back) (D64).
+    dated when the goods landed, max(note, Goods back) (D64). A live Shopify
+    refund's cost comes back only for the units its order-line mark says it
+    booked, so a piece the counter also took back gives its cost once,
+    whichever door ran first (D65, D66).
     Fail-soft: {} on a read error."""
     lo = _parse_range_dt(from_date, end=False)
     hi = _parse_range_dt(to_date, end=True)
@@ -890,6 +893,7 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
             # Each unit is range-tested on its own below.
             if (noted or ret.get("quarantined_stock_ids") or ret.get("restock_stock_ids")
                     or goods.get(ret.get("shopify_refund_id")) or ret.get("shopify_refund_id") in goods_at
+                    or ret.get("restock_completed_at")
                     or audited.get(ret.get("return_id")) or audited.get(ret.get("shopify_refund_id"))):
                 picked.append((ret, when, taxable, tax, float(gb.get("gross") or (taxable + tax)), noted))
         order_ids = list({r[0].get("order_id") for r in picked if r[0].get("order_id")})
@@ -972,40 +976,47 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 # physically came back (D64 a); then dated when they landed,
                 # max(note, Goods back), so an earlier month is never changed
                 # (D64 b). A press with no landing date gives no cost back.
-                # D65: per piece, never per refund. The press gives back only
-                # the pieces it booked on each order line: the line's mark
-                # for this refund (restocked_refunds, written by every door
-                # that booked a unit of it) less the units its restocked
-                # lines hold. A line the cap left not restocked because a
-                # counter return already took that piece back has no mark,
-                # so its cost never comes back a second time.
+                # D65/D66: per piece, never per refund. A live Shopify refund
+                # (its doc's items are the webhook's lines, which no later
+                # door rewrites) gives cost back ONLY for the units its order
+                # line's mark says this refund booked (restocked_refunds:
+                # the confirm, AUTO post, retry and Goods back all book
+                # through it), restocked lines first, then the lines Goods
+                # back rescued. A piece the counter took back is never in the
+                # mark, whichever door ran first, so its cost comes back once.
+                # The counter's own note and an imported note (goods_lines)
+                # give back what their own door booked, at the note's date.
                 rid = ret.get("shopify_refund_id")
                 back_at = goods_at.get(rid)
-                goods_items = items or ret.get("goods_lines") or []
-                rescue: Dict[int, float] = {}
-                if rid and back_at is not None:
-                    for it in goods_items:
+                give: list = []
+                if rid and items:
+                    # Booked at the confirm: dated at the note. Left open there
+                    # (a blocked restock), booked later by the retry or Goods
+                    # back: dated when that booking happened (D64 b).
+                    late = [t for t in (parse_event_utc_naive(ret.get("restock_completed_at")), back_at) if t]
+                    booked_at = (max(when, min(late)) if late and (
+                        ret.get("restock_completed_at") or ret.get("restock_applied") is False) else when)
+                    mark: Dict[int, float] = {}
+                    for it in items:
                         line = _line(it)
-                        if line is not None and id(line) not in rescue:
-                            rescue[id(line)] = float((line.get("restocked_refunds") or {}).get(str(rid)) or 0)
-                    for it in goods_items:
-                        line = _line(it)
-                        if line is not None and it.get("restock") is not False:
-                            rescue[id(line)] -= float(it.get("return_qty") or 0)
-                if taxable > 0 or tax > 0:
-                    for it in goods_items:
-                        line = _line(it)
-                        if (line or {}).get("item_type") == "SHIPPING":
-                            continue
-                        at = when
-                        qty = float(it.get("return_qty") or 0)
-                        if it.get("restock") is False and rid:
-                            qty = min(qty, max(0.0, rescue.get(id(line), 0.0))) if line is not None else 0.0
-                            if qty <= 0:
+                        if line is not None and id(line) not in mark:
+                            mark[id(line)] = float((line.get("restocked_refunds") or {}).get(str(rid)) or 0)
+                    for restocked in (True, False):
+                        for it in items:
+                            line = _line(it)
+                            if line is None or (it.get("restock") is not False) is not restocked:
                                 continue
-                            rescue[id(line)] -= qty
-                            at = max(when, back_at)
-                        if _in_range(at):
+                            if not restocked and back_at is None:
+                                continue  # only Goods back books a line not restocked
+                            qty = min(float(it.get("return_qty") or 0), mark[id(line)])
+                            if qty > 0:
+                                mark[id(line)] -= qty
+                                give.append((it, qty, booked_at if restocked else max(when, back_at)))
+                else:
+                    give = [(it, float(it.get("return_qty") or 0), when) for it in items or ret.get("goods_lines") or []]
+                if taxable > 0 or tax > 0:
+                    for it, qty, at in give:
+                        if (_line(it) or {}).get("item_type") != "SHIPPING" and _in_range(at):
                             _give_back(it, qty)
             else:
                 # Keyed on the physical unit: each piece back on sale gives its
