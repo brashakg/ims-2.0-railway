@@ -277,7 +277,10 @@ def test_second_refund_after_earlier_credit_is_capped(env):
     assert _balance(env) == (1000.0, 1000.0)
     row, res = _queue_and_confirm(env, _payload(refund_id="700002", txns=[]))
     assert row["credit_note"]["store_credit"] == 0.0
-    assert [r["delta"] for r in _ledger(env)] == [1000.0, 0.0]
+    # The same unit, refunded again: no second GST credit note either (#1397
+    # round 8 -- the first one already reversed its tax); the reviewer rejects.
+    assert res["status"] == "already_returned", res
+    assert [r["delta"] for r in _ledger(env)] == [1000.0]
     assert _balance(env) == (1000.0, 1000.0)
 
 
