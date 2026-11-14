@@ -14,7 +14,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { financeApi } from '../../services/api/finance';
 import type { JournalEntry, JeStatus, ChartAccount } from './financeTypes';
-import { getErrorMessage } from '../../utils/errorHandler';
+import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
 import { istDayString } from '../../utils/datetime';
 
 const STATUS_STYLE: Record<JeStatus, string> = {
@@ -202,7 +202,7 @@ export default function JournalEntriesPanel() {
     } catch (e: any) {
       toast.error(getErrorMessage(e, 'Post failed'));
       // The approval lapsed or can no longer be used: offer approving again.
-      if (['expired', 'already_consumed', 'not_approved'].includes(e?.response?.data?.detail?.error)) {
+      if (['expired', 'already_consumed', 'not_approved'].includes((getErrorDetail(e) as { error?: string } | undefined)?.error ?? '')) {
         setSelected({ ...je, needs_reapproval: true });
         load();
       }
