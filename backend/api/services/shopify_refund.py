@@ -1218,6 +1218,18 @@ def _already_back_value(order: Dict[str, Any], lines: List[Dict[str, Any]], refu
     the counter's own quantity rule). A unit is paid for once, whichever door
     takes it first: the bill's total alone let a counter return and an online
     refund of the SAME line each pay for it (#1397 round 7). None: unreadable."""
+    kept = _unreturned_lines(order, lines, refund_id)
+    if kept is None:
+        return None
+    worth = lambda ls: sum(_f(ln.get("return_qty")) * _f(ln.get("unit_price")) for ln in ls)  # noqa: E731
+    return round(worth(lines or []) - worth(kept), 2)
+
+
+def _unreturned_lines(order: Dict[str, Any], lines: List[Dict[str, Any]],
+                      refund_id: str) -> Optional[List[Dict[str, Any]]]:
+    """This refund's priced lines cut to the units no other door took back
+    (_already_back_value's rule, line by line): the lines its credit note may
+    file. A line no order line names stays whole. None: unreadable."""
     from types import SimpleNamespace
 
     from ..routers.returns import (
@@ -1229,13 +1241,14 @@ def _already_back_value(order: Dict[str, Any], lines: List[Dict[str, Any]], refu
 
     idx = _order_line_index(order)
     left: Dict[int, float] = {}
-    cut = 0.0
+    kept: List[Dict[str, Any]] = []
     for ln in lines or []:
-        qty, unit = _f(ln.get("return_qty")), _f(ln.get("unit_price"))
+        qty = _f(ln.get("return_qty"))
         orig = _resolve_original_line(
             SimpleNamespace(order_item_id=ln.get("order_item_id"), product_id=ln.get("product_id")), idx)
         if orig is None:
-            continue  # a line no order line names: the bill's cap only
+            kept.append(ln)  # a line no order line names: the bill's cap only
+            continue
         if id(orig) not in left:
             got = _units_already_back(order.get("order_id"), orig, own_shopify_refund_id=refund_id)
             if got is None:
@@ -1243,8 +1256,11 @@ def _already_back_value(order: Dict[str, Any], lines: List[Dict[str, Any]], refu
             left[id(orig)] = _line_purchased_qty(orig) - (got[0] - got[1])
         out = max(0.0, min(qty, left[id(orig)]))
         left[id(orig)] -= out
-        cut += (qty - out) * unit
-    return round(cut, 2)
+        if out >= qty:
+            kept.append(ln)
+        elif out > 0:
+            kept.append({**ln, "return_qty": int(out) if float(out).is_integer() else out})
+    return kept
 
 
 def _store_credit_allowance(
@@ -1514,7 +1530,7 @@ def handle_shopify_refund(
             # review queue as UNMATCHED so a live business never silently loses a
             # refund (an accountant investigates), then return. The row stays
             # reprocessable once the order is ingested.
-            _queue_review(
+            queued = _queue_review(
                 db,
                 refund_id=refund_id,
                 shopify_order_id=shopify_order_id,
@@ -1525,6 +1541,8 @@ def handle_shopify_refund(
                 status="UNMATCHED",
                 note="No IMS order found for this Shopify order id.",
             )
+            if queued["status"] == "error":
+                return queued
             logger.warning(
                 "[SHOPIFY_REFUND] no IMS order for shopify_order_id=%s refund=%s "
                 "-- queued UNMATCHED",
@@ -1796,12 +1814,28 @@ def handle_shopify_refund(
                       f"was booked automatically. {result.get('store_credit_reason') or ''}"
                       ).strip(),
             )
+        if result.get("status") == ALREADY_RETURNED:
+            # Every unit was already taken back elsewhere, so nothing is booked
+            # -- but the money Shopify sent back for it left the business: the
+            # review row is its record (every bill cap counts it) and a person
+            # sees it (D62).
+            return _queue_review(
+                db,
+                refund_id=refund_id,
+                shopify_order_id=shopify_order_id,
+                order=order,
+                credit_note=credit_note,
+                restock_lines=return_lines,
+                restock_store=restock_store,
+                status="PENDING",
+                note=ALREADY_RETURNED_NOTE,
+            )
         if result.get("status") == "credit_failed":
             # A credit note SHOULD have issued but didn't (guest / no customer /
             # ledger failure). Do NOT leave it silently COMPLETED -- give the
             # accountant a surface (the returns doc already keeps the refund id).
             queue_status = "NO_CUSTOMER" if not result.get("customer_id") else "CREDIT_FAILED"
-            _queue_review(
+            queued = _queue_review(
                 db,
                 refund_id=refund_id,
                 shopify_order_id=shopify_order_id,
@@ -1819,6 +1853,8 @@ def handle_shopify_refund(
                     f"{result.get('store_credit_reason') or ''}"
                 ).strip(),
             )
+            if queued["status"] == "error":
+                return queued  # no row saved: the inbox retries it
             result["queue_status"] = queue_status
         if result.get("reason") == NOT_FINALIZED:
             # Unfinished: the inbox retries it, and it gets a review row too,
@@ -1926,7 +1962,13 @@ def _queue_review(
                 refund_id,
             )
         else:
-            logger.warning("[SHOPIFY_REFUND] review-queue write failed: %s", exc)
+            # No record of this refund was saved (D62: every refund leaves one):
+            # a failure, so the inbox retries it -- never read as done. A write
+            # that landed anyway is found by the retry (_refund_already_processed).
+            logger.error("[SHOPIFY_REFUND] review-queue write failed: %s", exc)
+            return {"status": "error", "reason": "review_not_saved",
+                    "error": "the refund's review row could not be saved",
+                    "refund_id": refund_id, "shopify_order_id": shopify_order_id}
     logger.info(
         "[SHOPIFY_REFUND] refund=%s order=%s queued for accountant review "
         "(status=%s, gross=%s)",
@@ -1955,20 +1997,31 @@ ALREADY_RETURNED_NOTE = (
     "also sent money back for it, recover that by hand.")
 
 
-def _all_taken_back_elsewhere(db, order_id: str, refund_id: str, credit_note: Dict[str, Any]) -> bool:
-    """True when the refund's priced lines are wholly units another door
-    already took back (_already_back_value covers its whole gross). False
-    when it cannot tell (the post's own rules then decide)."""
-    gross = _f(credit_note.get("gross_refund"))
+def _note_for_unreturned(db, order_id: str, refund_id: str,
+                         credit_note: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The credit note this refund may file: only its units no other door
+    already took back (_unreturned_lines), priced again -- a unit the counter
+    or another refund took back has its own note, so its output tax is never
+    reversed twice (D62). The same note when nothing was cut; a note with no
+    lines and gross 0 when everything was; None when it cannot be read."""
     lines = credit_note.get("lines")
-    if not lines or gross <= 0 or not order_id:
-        return False
+    if not lines or _f(credit_note.get("gross_refund")) <= 0 or not order_id:
+        return credit_note
     try:
         order = db.get_collection("orders").find_one({"order_id": order_id})
     except Exception:  # noqa: BLE001
-        return False
-    cut = _already_back_value(order, lines, refund_id) if order else None
-    return cut is not None and cut >= round(gross - 0.01, 2)
+        return None
+    kept = _unreturned_lines(order, lines, refund_id) if order else None
+    if kept is None:
+        return None
+    if kept == lines:
+        return credit_note
+    from . import returns_engine as engine
+
+    gross = engine.returned_value(kept)
+    return {**credit_note, "lines": kept, "gross_refund": gross, "net_refund": gross,
+            "gst_breakup": engine.gst_breakup_lines(kept),
+            "already_back": round(_f(credit_note.get("gross_refund")) - gross, 2)}
 
 
 def _post_credit_and_restock(
@@ -2008,23 +2061,40 @@ def _post_credit_and_restock(
             db, order_id, refund_id, _f(credit_note.get("gross_refund")))
         if not held:
             return busy
-        allowance = _store_credit_allowance(
-            db, order_id, refund_id, _f(credit_note.get("gross_refund")),
-            credit_note.get("money_back"), _f(credit_note.get("money_pending")),
-            lines=credit_note.get("lines"))
+        def ask(note: Dict[str, Any]):
+            return _store_credit_allowance(
+                db, order_id, refund_id, _f(note.get("gross_refund")),
+                note.get("money_back"), _f(note.get("money_pending")), lines=note.get("lines"))
+
+        allowance = ask(credit_note)
+        # A full credit (no settlement label) had nothing cut: skip the read.
+        if allowance[0] is not None and allowance[2] is not None:
+            note = _note_for_unreturned(db, order_id, refund_id, credit_note)
+            if note is None:
+                allowance = (None, ("IMS could not read this order's earlier returns just now, so "
+                                    "nothing is booked yet."), None, False, 0.0)
+            elif note.get("gross_refund", 0) <= 0.01:
+                # Every unit of this refund was already returned (and its GST
+                # reversed) at the counter or by another refund: a second credit
+                # note would reverse that output tax again (#1397 round 8). Book
+                # nothing; the reviewer rejects the row.
+                return {"status": ALREADY_RETURNED, "refund_id": refund_id, "order_id": order_id,
+                        "customer_id": _norm(order.get("customer_id")) or None,
+                        "credit_note_issued": False, "store_credit_reason": ALREADY_RETURNED_NOTE}
+            elif note is not credit_note:
+                # Some units were taken back elsewhere: the note files only the
+                # rest (D62), and the credit is asked on what it files.
+                credit_note = note
+                allowance = ask(note)
+                if allowance[0] is not None:
+                    allowance = (allowance[0], (
+                        f"This credit note covers only the items not already taken back (Rs "
+                        f"{note['gross_refund']:.2f}); Rs {note['already_back']:.2f} of this refund was "
+                        "already credited, with its own credit note, at the counter or by another refund. "
+                        f"{allowance[1]}"), allowance[2], allowance[3], allowance[4])
         if expect_store_credit is not None and allowance[0] != expect_store_credit:
             return {"status": "review", "refund_id": refund_id, "order_id": order_id,
                     "store_credit": allowance[0], "store_credit_reason": allowance[1]}
-        # A full credit (no settlement label) had nothing cut: skip the read.
-        if (allowance[0] is not None and allowance[2] is not None
-                and _all_taken_back_elsewhere(db, order_id, refund_id, credit_note)):
-            # Every unit of this refund was already returned (and its GST
-            # reversed) at the counter or by another refund: a second credit
-            # note would reverse that output tax again (#1397 round 8). Book
-            # nothing; the reviewer rejects the row.
-            return {"status": ALREADY_RETURNED, "refund_id": refund_id, "order_id": order_id,
-                    "customer_id": _norm(order.get("customer_id")) or None,
-                    "credit_note_issued": False, "store_credit_reason": ALREADY_RETURNED_NOTE}
         return _post_locked(
             db, refund_id=refund_id, order=order, return_lines=return_lines,
             credit_note=credit_note, restock_store=restock_store,

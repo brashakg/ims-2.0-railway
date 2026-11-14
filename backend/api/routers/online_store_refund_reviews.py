@@ -319,7 +319,7 @@ def _stamp(db, row: Dict[str, Any], posted: bool, post_status: str, result: Dict
            user_id: Optional[str], unfinished: Optional[str] = None) -> str:
     """Write a post's outcome on its review row -> the row's new status.
     ``unfinished``: the note an unfinished post leaves (_unfinished_note)."""
-    from ..services.shopify_refund import CLAIM_UNKNOWN_NOTE, NOT_FINISHED_NOTE
+    from ..services.shopify_refund import ALREADY_RETURNED, ALREADY_RETURNED_NOTE, CLAIM_UNKNOWN_NOTE, NOT_FINISHED_NOTE
 
     new_status = "POSTED" if posted else "CREDIT_FAILED"
     update = {
@@ -340,7 +340,15 @@ def _stamp(db, row: Dict[str, Any], posted: bool, post_status: str, result: Dict
             "store_credit": result.get("store_credit"),
             "store_credit_reason": result.get("store_credit_reason"),
         }
+        if result.get("gross_refund") is not None:
+            # The note it filed: only the items not taken back elsewhere (D62).
+            update["credit_note"].update(gross_refund=result["gross_refund"],
+                                         gst_breakup=result.get("gst_breakup"))
+            update["gross_refund"] = result["gross_refund"]
         update["note"] = f"Posted. {result.get('store_credit_reason') or ''}".strip()
+    elif post_status == ALREADY_RETURNED:
+        # The row says why nothing was filed, not only the presser's answer.
+        update["note"] = ALREADY_RETURNED_NOTE
     elif unfinished:
         # The ROW says it, not only this one answer: a later reader of "credit
         # failed" would book the credit by hand, or reject the row.
