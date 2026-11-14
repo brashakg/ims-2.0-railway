@@ -850,6 +850,9 @@ export const tasksApi = {
   toggleSopChecklistItem: async (payload: {
     template_id: string;
     step_number: number;
+    /** D47: the step the page showed and the checklist revision it was opened on. */
+    step_id?: string | null;
+    revision?: string;
     completed: boolean;
     date?: string;
     store_id?: string;
@@ -867,6 +870,7 @@ export const tasksApi = {
 };
 
 export interface SopChecklistItem {
+  step_id?: string | null;
   step_number: number;
   instruction: string;
   warning?: string | null;
@@ -883,4 +887,6 @@ export interface SopChecklist {
   items: SopChecklistItem[];
   progress: { done: number; total: number; percent: number };
   status: string;
+  /** Fingerprint of the steps this checklist was read with (decision D47). */
+  revision?: string;
 }
