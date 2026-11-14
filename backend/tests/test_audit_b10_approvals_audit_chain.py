@@ -1259,6 +1259,102 @@ def test_d54_a_previous_version_writer_mid_deploy_keeps_its_row(db):
     assert verify_chain(coll)["intact"] is True
 
 
+class _FlakyRows:
+    """The audit collection as one writer sees it: ``find_one`` on a seq fails
+    ``fail_reads`` times (a transient read error), ``insert_one`` waits
+    ``insert_delay`` seconds first (a slow round trip). Everything else is the
+    real collection."""
+
+    def __init__(self, coll, *, fail_reads: int = 0, insert_delay: float = 0.0):
+        self._coll, self._fail, self._delay = coll, fail_reads, insert_delay
+
+    def __getattr__(self, name):
+        return getattr(self._coll, name)
+
+    def find_one(self, flt=None, *a, **k):
+        if self._fail and "seq" in (flt or {}):
+            self._fail -= 1
+            from pymongo.errors import AutoReconnect
+            raise AutoReconnect("audit read lost")
+        return self._coll.find_one(flt, *a, **k)
+
+    def insert_one(self, doc, *a, **k):
+        if self._delay:
+            threading.Event().wait(self._delay)
+        return self._coll.insert_one(doc, *a, **k)
+
+
+def _old_writer_with_new_writer_meanwhile(db, new_repo, stall: float):
+    """An ordinary first row, then a previous-version writer that claims its
+    seq and takes ``stall`` seconds to insert while ``new_repo`` writes."""
+    coll = db.get_collection("audit_logs")
+    coll.create_index("seq", unique=True, sparse=True)
+    assert AuditRepository(coll).create(_audit_row(0)) is not None
+    new = {}
+
+    def _meanwhile():
+        new["t"] = threading.Thread(target=lambda: new.update(row=new_repo.create(_audit_row(2))))
+        new["t"].start()
+        threading.Event().wait(stall)
+
+    old = _previous_version_append(db, coll, _audit_row(1), between=_meanwhile)
+    new["t"].join(timeout=30)
+    return old, new.get("row"), coll
+
+
+def test_d54_a_previous_version_writer_stalled_past_the_grace_keeps_its_row(db, monkeypatch):
+    """Review round 2 (D54 'must not lose a chain row'): the new writer waited
+    _HOLDER_GRACE_S for the old writer's row, then took its seq over, so an
+    old writer slower than the grace had its insert refused (E11000) and its
+    audit row lost. Now a seq an old writer holds is never taken: the new
+    writer claims a fresh seq above the counter. Both rows are stored; a late
+    old row can at worst show as a chain break, never as a lost row."""
+    monkeypatch.setattr(audit_chain, "_HOLDER_GRACE_S", 0.1)
+    coll = db.get_collection("audit_logs")
+    old, new, coll = _old_writer_with_new_writer_meanwhile(db, AuditRepository(coll), stall=0.6)
+    assert old is not None                                     # was None: refused, row lost
+    assert new is not None
+    seqs = [r["seq"] for r in _chained(db)]
+    assert sorted(r["entity_id"] for r in _chained(db)) == ["P-0", "P-1", "P-2"]
+    assert len(set(seqs)) == 3
+
+
+def test_d54_a_read_error_while_waiting_is_not_an_abandoned_seq(db, monkeypatch):
+    """Review round 2: one failed read of the old writer's seq made the new
+    writer treat that seq as abandoned at once and take it, losing the old
+    row. A read error now just means 'not seen yet': the new writer keeps
+    waiting, the old row lands, and the chain stays one chain."""
+    monkeypatch.setattr(audit_chain, "_HOLDER_GRACE_S", 2.0)
+    flaky = _FlakyRows(db.get_collection("audit_logs"), fail_reads=1)
+    old, new, coll = _old_writer_with_new_writer_meanwhile(db, AuditRepository(flaky), stall=0.3)
+    assert old is not None                                     # was None: taken over on the read error
+    assert new is not None
+    assert [r["entity_id"] for r in _chained(db)] == ["P-0", "P-1", "P-2"]
+    assert verify_chain(coll)["intact"] is True
+
+
+def test_d54_a_slow_new_writer_still_hands_its_seq_on_without_a_fork(db, monkeypatch):
+    """Only a PREVIOUS-version writer's seq is never taken over. A new writer
+    whose insert is slower than the grace is still taken over: its own insert
+    is refused on the seq, it re-reads the tail and chains after the row that
+    took its place -- every row kept, one unbroken chain (R19)."""
+    monkeypatch.setattr(audit_chain, "_HOLDER_GRACE_S", 0.1)
+    coll = db.get_collection("audit_logs")
+    coll.create_index("seq", unique=True, sparse=True)
+    assert AuditRepository(coll).create(_audit_row(0)) is not None
+    slow = AuditRepository(_FlakyRows(coll, insert_delay=0.6))
+    got = {}
+    t = threading.Thread(target=lambda: got.update(slow=slow.create(_audit_row(1))))
+    t.start()
+    threading.Event().wait(0.2)                                # the slow writer holds seq 2
+    fast = AuditRepository(coll).create(_audit_row(2))
+    t.join(timeout=30)
+    assert fast is not None and got.get("slow") is not None
+    rows = _chained(db)
+    assert [r["entity_id"] for r in rows] == ["P-0", "P-2", "P-1"]
+    assert verify_chain(coll)["intact"] is True
+
+
 def test_d54_previous_and_new_writers_side_by_side_lose_nothing(mongo_db):
     """Real MongoDB: 3 previous-version and 3 new workers x 20 rows, released
     together. Every row is stored and no seq is used twice. (Rows of two
@@ -1430,10 +1526,13 @@ def test_r20_a_head_left_behind_or_ahead_by_old_writes_is_not_a_removed_tail(db,
         assert newest is not None
         res = verify_chain(coll)
         assert (res["intact"], res["entries_checked"]) == (True, 4 + n), (n, res)
-    # The head caught up with the newest row ...
-    assert (_head(db)["last_seq"], _head(db)["last_hash"]) == (6, newest["entry_hash"])
+    # The head caught up with the newest row. (failed_inserts: seqs 4 and 5
+    # stay with the old writer that claimed them -- never reused, D54 -- so
+    # the new rows are 6, 7, 8.)
+    assert newest["seq"] == (8 if legacy == "failed_inserts" else 6)
+    assert (_head(db)["last_seq"], _head(db)["last_hash"]) == (newest["seq"], newest["entry_hash"])
     # ... so removing that row is seen, and stays seen.
-    coll.delete_one({"seq": 6})
+    coll.delete_one({"seq": newest["seq"]})
     assert verify_chain(coll)["reason"] == "head_not_in_trail"
     assert repo.create(_audit_row(30)) is not None
     assert repo.create(_audit_row(31)) is not None

@@ -36,11 +36,16 @@ insert was refused and its audit row lost. So a new writer also takes its seq
 in that counter before it inserts (_reserve_seq: raises the counter to its
 seq only while the counter is still below it). A seq the counter has already
 handed out belongs to another writer, old or new: the new writer waits for
-that row to land and chains from it (_holder_landed). Only a holder that has
-not written its row within _HOLDER_GRACE_S is taken over -- that seq was
-abandoned (a claim whose insert failed), and the unique index still lets just
-one row have it. Every seq is handed out once by one counter, so old and new
-writers side by side never refuse each other's rows.
+that row to land and chains from it (_holder_landed; a read error there means
+"not seen yet", never "abandoned"). A seq a PREVIOUS-version writer holds is
+never taken over, however late its row is: the new writer claims a fresh seq
+above the counter instead, so a late old row can at worst show as a chain
+break, never be refused and lost. Only a seq a NEW writer holds (recorded in
+the head's `new_claims` ring when it was claimed) is taken over once its
+holder is slower than _HOLDER_GRACE_S: the unique index lets one row have it
+and the slow new writer re-reads the tail and chains after it (R19), so
+nothing is lost and the chain stays whole. Every seq is handed out once by one
+counter, so old and new writers side by side never refuse each other's rows.
 
 The `audit_chain_head` document is not the source of a row's place in the
 chain. Besides the claim counter it records the newest committed row
@@ -182,6 +187,20 @@ _MAX_BACKOFF_S = 0.05
 _HOLDER_GRACE_S = 0.5
 _HOLDER_POLL_S = 0.005
 
+# A new writer records each seq it claims in a ring on the head document
+# (`new_claims.s<seq % _CLAIM_SLOTS>` = seq), in the same write that claims
+# it; a seq the counter handed out that is NOT in the ring was claimed by a
+# previous-version writer ($inc), whose row must never be refused.
+_CLAIM_SLOTS = 256
+
+
+def _claim_slot(seq: int) -> str:
+    return f"s{seq % _CLAIM_SLOTS}"
+
+
+def _held_by_new_writer(head: Dict[str, Any], seq: int) -> bool:
+    return (head.get("new_claims") or {}).get(_claim_slot(seq)) == seq
+
 
 def _is_duplicate_key(exc: Exception) -> bool:
     return getattr(exc, "code", None) == 11000 or type(exc).__name__ == "DuplicateKeyError"
@@ -212,43 +231,51 @@ def _chain_tail(audit_collection) -> Tuple[int, str]:
     return 0, GENESIS_HASH
 
 
-def _reserve_seq(db, seq: int, prev_hash: str) -> bool:
+def _reserve_seq(db, seq: int, prev_hash: str) -> Optional[Dict[str, Any]]:
     """Take ``seq`` in the head document's claim counter -- the counter an
-    old-version writer $inc's (module docstring, ROLLING DEPLOY). True when
-    the counter was below ``seq`` (now raised to it: no writer of either
-    version holds it) or there was no head yet; False when the counter has
-    already handed ``seq`` out. Fail-open (True) when the head cannot be
-    reached: the unique seq index still decides between writers."""
+    old-version writer $inc's (module docstring, ROLLING DEPLOY) -- and record
+    it in the new-writer ring. None when this writer now holds it (the counter
+    was below ``seq``, or there was no head yet); otherwise the head document
+    that had already handed ``seq`` out ({} when its holder is unknown).
+    Fail-open (None) when the head cannot be reached: the unique seq index
+    still decides between writers."""
     if db is None:
-        return True
+        return None
     try:
         heads = db.get_collection(HEAD_COLLECTION)
         if heads.update_one({"_id": HEAD_DOC_ID, "seq": {"$lt": seq}},
-                            {"$set": {"seq": seq}}).matched_count:
-            return True
-        if heads.find_one({"_id": HEAD_DOC_ID}) is not None:
-            return False
+                            {"$set": {"seq": seq, f"new_claims.{_claim_slot(seq)}": seq}}).matched_count:
+            return None
+        head = heads.find_one({"_id": HEAD_DOC_ID})
+        if head is not None:
+            try:
+                handed_out = int(head.get("seq") or 0) >= seq
+            except (TypeError, ValueError):
+                handed_out = True
+            # A counter still below seq never handed it out (the guarded
+            # update did not apply for another reason): no writer holds it.
+            return head if handed_out else None
         heads.insert_one({"_id": HEAD_DOC_ID, "seq": seq, "last_hash": prev_hash,
-                          "last_seq": seq - 1})
-        return True
+                          "last_seq": seq - 1, "new_claims": {_claim_slot(seq): seq}})
+        return None
     except Exception as exc:  # noqa: BLE001
         if _is_duplicate_key(exc):
-            return False  # another writer created the head first
+            return {}  # another writer created the head first
         logger.warning("[AUDIT_CHAIN] could not reserve seq %s: %s", seq, exc)
-        return True
+        return None
 
 
 def _holder_landed(audit_collection, seq: int) -> bool:
     """Wait (up to _HOLDER_GRACE_S) for the writer the claim counter handed
-    ``seq`` to write its row. True when it did; False when the seq looks
-    abandoned (the caller then takes it over)."""
+    ``seq`` to write its row. True when it did; False when it has not within
+    the grace. A failed read is "not seen yet": the wait goes on."""
     deadline = time.monotonic() + _HOLDER_GRACE_S
     while True:
         try:
             if audit_collection.find_one({"seq": seq}) is not None:
                 return True
         except Exception:  # noqa: BLE001
-            return False
+            pass
         if time.monotonic() >= deadline:
             return False
         time.sleep(_HOLDER_POLL_S)
@@ -334,6 +361,7 @@ def append_audit_entry(
     if db is None:
         db = getattr(audit_collection, "database", None)
 
+    floor = 0  # the lowest seq to claim: above seqs old writers still hold
     for attempt in range(_MAX_CLAIM_ATTEMPTS):
         if attempt:
             time.sleep(random.uniform(0, min(_MAX_BACKOFF_S, 0.002 * attempt)))
@@ -344,9 +372,20 @@ def append_audit_entry(
             break
         if seq == 0:
             _ensure_seq_index(audit_collection)  # first row of the chain
-        seq += 1
-        if not _reserve_seq(db, seq, prev_hash) and _holder_landed(audit_collection, seq):
-            continue  # the writer holding this seq wrote it: chain from that row
+        seq = max(seq + 1, floor)
+        holder = _reserve_seq(db, seq, prev_hash)
+        if holder is not None:
+            if _holder_landed(audit_collection, seq):
+                continue  # the writer holding this seq wrote it: chain from that row
+            if not _held_by_new_writer(holder, seq):
+                # A previous-version writer holds it and is slow: never take
+                # its seq (its insert would be refused and its row lost).
+                # Claim one above the counter; its late row stays its own.
+                floor = max(int(holder.get("seq") or 0), seq) + 1
+                continue
+            # A new writer's claim slower than the grace: take it over. The
+            # unique index lets one row have it; the slow writer re-reads the
+            # tail and chains after this row.
         doc["seq"] = seq
         doc["prev_hash"] = prev_hash
         doc["entry_hash"] = compute_entry_hash(prev_hash, seq, doc)
