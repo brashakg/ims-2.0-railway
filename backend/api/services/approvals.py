@@ -990,6 +990,7 @@ class ApprovalEngine:
         expected_context: Optional[Dict[str, Any]] = None,
         min_tier: Optional[str] = None,
         consumer_roles: Optional[List[str]] = None,
+        consumed_for: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Spend an APPROVED approval EXACTLY ONCE. A SINGLE atomic
         find_one_and_update guards status==APPROVED, consumed==false, not
@@ -1011,6 +1012,11 @@ class ApprovalEngine:
         caller's): a supplier-money approval ('rtv', R1) is spent only by a role
         that may approve one -- anyone else gets "not_found", the answer a
         missing request gets, and the approval is left untouched.
+
+        ``consumed_for`` (opt-in) names what spent the approval, stored in the
+        SAME atomic write. A domain whose own write follows the spend reads it
+        back to finish a spend whose write was lost (je_service.post_je: a
+        journal's Post, D54) -- only ever for the action it names.
         """
         from pymongo import ReturnDocument
 
@@ -1048,6 +1054,7 @@ class ApprovalEngine:
                     "consumed": True,
                     "consumed_at": now,
                     "consumed_by": consumed_by,
+                    "consumed_for": consumed_for,
                 }
             },
             return_document=ReturnDocument.AFTER,
@@ -1119,6 +1126,7 @@ class ApprovalEngine:
                     "consumed": False,
                     "consumed_at": None,
                     "consumed_by": None,
+                    "consumed_for": None,
                 }},
             )
         except Exception:  # noqa: BLE001

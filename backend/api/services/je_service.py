@@ -753,51 +753,114 @@ def sync_with_request(db, req: Optional[Dict[str, Any]]) -> None:
         _take_request_decision(db, je)
 
 
+def _post_mark(je: Dict[str, Any]) -> str:
+    """What a journal's Post stamps on the approval it spends (consumed_for),
+    in the same write that spends it: the binding that lets a Post whose
+    journal write was lost finish that posting, and nothing else (D54)."""
+    return f"je_post:{je.get('je_id')}"
+
+
+def _approval_state(je: Dict[str, Any], req: Optional[Dict[str, Any]]) -> str:
+    """What the request linked to an APPROVED journal can still do for it:
+      spendable    an approval Post can spend now;
+      post_bound   already spent by THIS journal's Post (its journal write was
+                   lost): a Post retry finishes the posting;
+      pending      a request raised again, waiting for a checker;
+      unspendable  lapsed, spent anywhere else, refused, missing or not the
+                   journal's own: only a checker's fresh approval helps.
+    Read-only (no lazy expiry write), so a list can ask it."""
+    from .approvals import ApprovalStatus, _as_aware, _now as _engine_now
+
+    if not req or not _is_own_request(je, req):
+        return "unspendable"
+    status = req.get("status")
+    if req.get("consumed") or status == ApprovalStatus.CONSUMED.value:
+        return "post_bound" if req.get("consumed_for") == _post_mark(je) else "unspendable"
+    live = _as_aware(req.get("expires_at")) > _engine_now()
+    if status == ApprovalStatus.APPROVED.value:
+        return "spendable" if live else "unspendable"
+    if status == ApprovalStatus.REQUESTED.value:
+        return "pending" if live else "unspendable"
+    return "unspendable"
+
+
+def needs_reapproval(db, je: Dict[str, Any]) -> bool:
+    """An APPROVED journal that cannot post until a checker approves it again
+    (D54): its approval lapsed or was spent elsewhere, or the one raised in
+    its place still waits. The journal screen offers the checker the PIN box."""
+    if (je or {}).get("status") != STATUS_APPROVED:
+        return False
+    from .approvals import ApprovalEngine
+
+    req = ApprovalEngine(db=db)._raw(je.get("approval_request_id") or "")
+    return _approval_state(je, req) in ("pending", "unspendable")
+
+
+def with_reapproval_flags(db, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """``needs_reapproval`` on every APPROVED journal of ``rows`` (in place)."""
+    for row in rows:
+        if row.get("status") == STATUS_APPROVED:
+            row["needs_reapproval"] = needs_reapproval(db, row)
+    return rows
+
+
 def _open_request(db, je: Dict[str, Any], *, actor_id: str,
                   actor_roles: List[str]) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
-    """The request a checker's Approve / Reject of this SUBMITTED journal
-    decides: (request id, None), or (None, the refusal to answer).
+    """The request a checker's Approve / Reject of this SUBMITTED journal --
+    or Approve of an APPROVED one that can no longer post -- decides:
+    (request id, None), or (None, the refusal to answer).
 
-    Normally the request the journal is linked to. When that one was already
-    DECIDED while the journal still says SUBMITTED -- by a decision the
-    journal does not take (_take_request_decision): a store or area manager's
-    inbox click, or any inbox decision made before the inbox moved the journal
-    (L3-25) -- no door could decide the journal any more: the engine answers
-    already_reviewed for good. The journal then raises its own request again
+    Normally the request the journal is linked to. When that one can no
+    longer decide the journal, the journal raises its own request again
     (_raise_own_request) and the checker decides THAT one, through the
-    engine's usual role, maker-checker, shop and PIN gates. The decided
-    request is left exactly as it is stored -- it stays the record of what was
-    done -- and the journal's audit trail names both. The new link is guarded
-    on the one it replaces, so two checkers arriving together end on one
-    request.
-
-    A request that LAPSED undecided is not raised again: an expired request is
-    refused, as it always was (the engine's validity window)."""
+    engine's usual role, maker-checker, shop and PIN gates:
+      * SUBMITTED, request already DECIDED by a decision the journal does not
+        take (_take_request_decision: a store or area manager's inbox click,
+        an inbox decision made before the inbox moved the journal, L3-25);
+      * SUBMITTED, request LAPSED undecided (D54: the engine's validity
+        window ended before anyone decided; the maker cannot resubmit);
+      * APPROVED, approval no longer spendable by Post (D54: lapsed before
+        Post, or spent somewhere other than this journal's Post).
+    The old request is left exactly as it is stored -- it stays the record of
+    what happened -- and the journal's audit trail names both. The new link
+    is guarded on the one it replaces, so two checkers arriving together end
+    on one request. An approval spent by this journal's own Post is never
+    replaced: a Post retry finishes that posting (post_je)."""
     from .approvals import ApprovalEngine, ApprovalStatus
 
-    decided = (ApprovalStatus.APPROVED.value, ApprovalStatus.REJECTED.value,
-               ApprovalStatus.CONSUMED.value)
     old_id = je.get("approval_request_id")
     old = ApprovalEngine(db=db).get(old_id) or {}
-    if old.get("status") not in decided or not set(actor_roles or []) & JE_CHECKER_ROLES:
+    status = je.get("status")
+    if not set(actor_roles or []) & JE_CHECKER_ROLES:
+        if status == STATUS_SUBMITTED:
+            return old_id, None
+        return None, {"ok": False, "http": 409, "error": "not_submitted", "status": status}
+    if status == STATUS_APPROVED:
+        state = _approval_state(je, old)
+        if state == "pending":
+            return old_id, None
+        if state != "unspendable":
+            return None, {"ok": False, "http": 409, "error": "not_submitted", "status": status}
+    elif old.get("status") not in (ApprovalStatus.APPROVED.value, ApprovalStatus.REJECTED.value,
+                                   ApprovalStatus.CONSUMED.value, ApprovalStatus.EXPIRED.value):
         return old_id, None
     new_id = _raise_own_request(db, je, old.get("requested_by_roles"))
     if not new_id:
         return None, {"ok": False, "http": 503, "error": "approval_request_failed"}
     linked = _set(db, je["je_id"], {"approval_request_id": new_id},
-                  expect_status=STATUS_SUBMITTED, expect_request_id=old_id)
+                  expect_status=status, expect_request_id=old_id)
     if linked is None:
         # Another checker moved the journal first: decide whatever request it
         # is linked to now, or say it is no longer waiting.
         cur = get_je(db, je["je_id"]) or {}
-        if cur.get("status") == STATUS_SUBMITTED and cur.get("approval_request_id"):
+        if cur.get("status") == status and cur.get("approval_request_id") not in (None, old_id):
             return cur["approval_request_id"], None
         return None, {"ok": False, "http": 409, "error": "not_submitted",
                       "status": cur.get("status")}
     linked.pop("_id", None)
     _audit(db, "je_request_raised_again", linked, actor=actor_id,
-           reason=(f"request {old_id} was already decided ({old.get('status')}) without "
-                   f"deciding the journal; request {new_id} raised in its place"))
+           reason=(f"request {old_id} can no longer decide the journal "
+                   f"({old.get('status') or 'missing'}); request {new_id} raised in its place"))
     return new_id, None
 
 
@@ -810,7 +873,7 @@ def approve_je(db, *, je_id: str, approver_id: str, approver_roles: List[str],
     if je is None:
         return {"ok": False, "http": 404, "error": "not_found"}
     je = _take_request_decision(db, je)
-    if je.get("status") != STATUS_SUBMITTED:
+    if je.get("status") not in (STATUS_SUBMITTED, STATUS_APPROVED):
         return {"ok": False, "http": 409, "error": "not_submitted", "status": je.get("status")}
     request_id = je.get("approval_request_id")
     if not request_id:
@@ -841,7 +904,16 @@ def approve_je(db, *, je_id: str, approver_id: str, approver_roles: List[str],
                 out[k] = res[k]
         return out
 
-    updated = _record_decision(db, je, status=STATUS_APPROVED, checker_id=approver_id)
+    if je.get("status") == STATUS_APPROVED:
+        # Approved again (D54): the journal stays APPROVED, now on the
+        # approval just made; Post spends that one.
+        updated = _set(db, je_id, {"checker_id": approver_id, "checked_at": _now()},
+                       expect_status=STATUS_APPROVED, expect_request_id=request_id)
+        if updated is not None:
+            updated.pop("_id", None)
+            _audit(db, "je_reapproved", updated, actor=approver_id)
+    else:
+        updated = _record_decision(db, je, status=STATUS_APPROVED, checker_id=approver_id)
     if updated is None:
         cur = get_je(db, je_id)
         return {"ok": False, "http": 409, "error": "not_submitted",
@@ -915,13 +987,21 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
     from .approvals import ApprovalEngine
 
     amount_rupees = (je.get("total_debit") or 0) / 100.0
-    consume = ApprovalEngine(db=db).consume_approval(
+    engine = ApprovalEngine(db=db)
+    consume = engine.consume_approval(
         consumed_by=poster_id,
         action_type=JE_ACTION_TYPE,
         request_id=request_id,
         amount=amount_rupees,
+        consumed_for=_post_mark(je),
     )
-    if not consume.get("ok"):
+    # An approval THIS journal's Post already spent, whose journal write was
+    # then lost, is not an error: the guarded APPROVED -> POSTED write below
+    # finishes that posting exactly once (D54).
+    if not consume.get("ok") and not (
+        consume.get("error") == "already_consumed"
+        and _approval_state(je, engine._raw(request_id)) == "post_bound"
+    ):
         err = consume.get("error")
         code = {"already_consumed": 409, "expired": 410, "not_approved": 409,
                 "action_mismatch": 400, "amount_exceeded": 400, "not_found": 404}.get(err, 409)

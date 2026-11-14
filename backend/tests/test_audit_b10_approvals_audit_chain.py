@@ -11,6 +11,12 @@ L3-25  approving a journal's request in the approvals inbox left the journal
 R19    two legitimate concurrent audit writes both chained from the same
        predecessor, so verify reported a break nobody had made.
 R20    an audit trail that could not be read was reported intact.
+D54    (review round 1, PR-1411) an approval spent by Post whose journal write
+       was lost, or spent through the generic consume door, stranded the
+       journal APPROVED for good; an undecided request that lapsed left the
+       journal SUBMITTED for good; an approval that lapsed before Post left it
+       APPROVED for good; a previous-version audit writer still running during
+       a rolling deploy lost its row to a new writer that took its seq.
 
 Every DB-backed test runs TWICE: against an in-memory double that enforces
 the unique indexes real Mongo holds (strict_fakes + _UniqueColl), and against
@@ -388,6 +394,19 @@ def test_l3_25_post_refuses_an_approval_spent_elsewhere(db):
     assert not [r for r in db.get_collection("audit_logs").find({"action": "je_posted"})
                 if r.get("entity_id") == j["je_id"]]
 
+    # D54: that spend never posted anything, so a checker's fresh approval
+    # lets the journal post -- once. The spent request stays as stored.
+    spent_row = _request(db, j["request_id"])
+    assert je_service.needs_reapproval(db, _je(db, j["je_id"])) is True
+    _user(db, "boss", ["SUPERADMIN"])
+    res = _journal_approve(db, j["je_id"], "boss", ("SUPERADMIN",))
+    assert res.get("ok") is True, res
+    assert je_service.needs_reapproval(db, _je(db, j["je_id"])) is False
+    assert _post(db, j["je_id"]).get("ok") is True
+    assert _post(db, j["je_id"])["error"] == "already_posted"
+    assert _request(db, j["request_id"]) == spent_row
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
 
 def test_l3_25_maker_can_never_be_the_checker(db, monkeypatch):
     """The two-person rule survives the repair, through both doors and even
@@ -523,10 +542,17 @@ def test_l3_25_a_journal_request_is_read_only_by_the_journal_readers(db, monkeyp
                       {"user_id": "maker", "roles": ["ACCOUNTANT"], "store_ids": ["S1"]})[0] == 200
 
     # Spending it by id is refused to a manager the same way, approval untouched.
+    # (D54: the generic consume door never spends a journal approval for
+    # anyone; for a manager the answer is the one a missing id gets, whatever
+    # action type the call names.)
     assert _inbox_approve(db, monkeypatch, rid, admin)[0] == 200
-    code, body = _call(approvals_router.consume_request(
-        rid, approvals_router.ConsumeAction(action_type="journal_entry"), current_user=store_mgr))
-    assert code == 404, body
+    for action in ("journal_entry", "petty_cash"):
+        answers = [_call(approvals_router.consume_request(
+            req_id, approvals_router.ConsumeAction(action_type=action), current_user=store_mgr))
+            for req_id in (rid, "REQ-does-not-exist")]
+        assert answers[0] == answers[1], (action, answers)
+    assert _call(approvals_router.consume_request(
+        rid, approvals_router.ConsumeAction(action_type="petty_cash"), current_user=store_mgr))[0] == 404
     assert _request(db, rid)["status"] == "APPROVED"
     assert _post(db, j["je_id"], "admin").get("ok") is True
 
@@ -675,21 +701,46 @@ def test_l3_25_settling_a_stranded_pair_keeps_every_journal_gate(db, monkeypatch
     assert _request(db, s["request_id"]) == s["stored"]
 
 
-def test_l3_25_a_request_that_lapsed_undecided_is_not_raised_again(db):
-    """Only a request that was DECIDED without the journal is raised again. One
-    that lapsed with nobody deciding it is refused as it always was (the
-    engine's validity window is not reopened by this change)."""
+def test_d54_a_request_that_lapsed_undecided_is_raised_again_by_a_checker(db):
+    """Codex round 1, P2: the request lapsed with nobody deciding it; the
+    journal's Approve answered 410 expired and the maker's Submit 409
+    not_draft -- SUBMITTED for good. D54: an authorised checker approves it
+    again. The journal raises its own request again and the checker decides
+    that one with their PIN; the lapsed request is not reopened or rewritten
+    (its own expiry is the engine's), and the maker still cannot approve."""
+    _user(db, "maker", ["ADMIN"])
     _user(db, "checker", ["ADMIN"])
     j = _submitted_journal(db, "maker")
     requests = db.get_collection("approval_requests")
     requests.update_one({"request_id": j["request_id"]},
                         {"$set": {"expires_at": appr._now() - timedelta(minutes=5)}})
 
+    res = _journal_approve(db, j["je_id"], "maker")
+    assert (res["http"], res["error"]) == (403, "cannot_approve_own")
+    assert requests.count_documents({}) == 1                 # the maker raised nothing
+
     res = _journal_approve(db, j["je_id"])
-    assert (res["http"], res["error"]) == (410, "expired")
+    assert res.get("ok") is True, res                        # was 410 expired
     je = _je(db, j["je_id"])
-    assert (je["status"], je["approval_request_id"]) == ("SUBMITTED", j["request_id"])
-    assert requests.count_documents({}) == 1
+    assert (je["status"], je["checker_id"]) == ("APPROVED", "checker")
+    assert je["approval_request_id"] != j["request_id"]
+    old = _request(db, j["request_id"])
+    assert (old["status"], old.get("reviewed_by")) == ("EXPIRED", None)   # never decided
+    new = _request(db, je["approval_request_id"])
+    assert (new["status"], new["reviewed_by"], new["requested_by"]) == ("APPROVED", "checker", "maker")
+    assert _post(db, j["je_id"]).get("ok") is True
+    assert _post(db, j["je_id"])["error"] == "already_posted"
+
+
+def test_d54_a_lapsed_request_can_also_be_rejected_by_a_checker(db):
+    _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    db.get_collection("approval_requests").update_one(
+        {"request_id": j["request_id"]}, {"$set": {"expires_at": appr._now() - timedelta(minutes=5)}})
+    res = je_service.reject_je(db, je_id=j["je_id"], approver_id="checker",
+                               approver_roles=["ADMIN"], pin=PIN, note="Wrong account head")
+    assert res.get("ok") is True, res                        # was 410 expired
+    assert _je(db, j["je_id"])["status"] == "REJECTED"
 
 
 def test_l3_25_decision_with_no_recorded_checker_role_is_not_taken(db):
@@ -876,6 +927,200 @@ def test_l3_25_period_locked_after_inbox_approval_still_blocks_post(db, monkeypa
 
 
 # ===========================================================================
+# D54 -- a journal that could no longer post (Codex review round 1)
+# ===========================================================================
+
+
+def _posted_rows(db, je_id: str):
+    return [r for r in db.get_collection("audit_logs").find({"action": "je_posted"})
+            if r.get("entity_id") == je_id]
+
+
+class _PostedWriteLost:
+    """The journal collection, with the journal's APPROVED -> POSTED write
+    failing at the database (AutoReconnect) -- after Post has spent the
+    approval. Every other read and write goes through."""
+
+    def __init__(self, coll):
+        self._coll = coll
+
+    def find_one_and_update(self, flt, update, *a, **k):
+        from pymongo.errors import AutoReconnect
+
+        if (update.get("$set") or {}).get("status") == "POSTED":
+            raise AutoReconnect("journal write lost")
+        return self._coll.find_one_and_update(flt, update, *a, **k)
+
+    def __getattr__(self, name):
+        return getattr(self._coll, name)
+
+
+def test_d54_post_that_spent_its_approval_then_lost_the_journal_write_finishes(db, monkeypatch):
+    """Codex round 1, P2: Post spent the approval, then the journal's own
+    write was lost. Every retry answered 409 already_consumed and the journal
+    stayed APPROVED with nothing posted, for good. Now the spend is bound to
+    this journal's Post in the same write (consumed_for), and a retry finishes
+    the posting -- exactly once."""
+    _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+
+    real_coll = je_service._je_coll
+    monkeypatch.setattr(je_service, "_je_coll", lambda d: _PostedWriteLost(real_coll(d)))
+    res = _post(db, j["je_id"])
+    assert res.get("ok") is not True
+    monkeypatch.setattr(je_service, "_je_coll", real_coll)
+    req = _request(db, j["request_id"])
+    assert (req["status"], req["consumed_for"]) == ("CONSUMED", f"je_post:{j['je_id']}")
+    assert _je(db, j["je_id"])["status"] == "APPROVED"
+    assert _posted_rows(db, j["je_id"]) == []
+    # Nothing for a checker to re-approve: the retry is the way forward.
+    assert je_service.needs_reapproval(db, _je(db, j["je_id"])) is False
+    res = _journal_approve(db, j["je_id"])
+    assert (res["http"], res["error"]) == (409, "not_submitted")
+    assert db.get_collection("approval_requests").count_documents({}) == 1
+
+    res = _post(db, j["je_id"])
+    assert res.get("ok") is True, res                        # was 409 already_consumed
+    assert _je(db, j["je_id"])["status"] == "POSTED"
+    assert len(_posted_rows(db, j["je_id"])) == 1
+    assert _post(db, j["je_id"])["error"] == "already_posted"
+    assert len(_posted_rows(db, j["je_id"])) == 1            # one posting, however many retries
+
+
+def test_d54_a_post_bound_spend_finishes_only_its_own_journal(db):
+    """The binding is exact: an approval spent for ANOTHER journal's Post, or
+    spent by Post before the binding existed (no consumed_for), never posts
+    this journal."""
+    _user(db, "checker", ["ADMIN"])
+    for mark in ("je_post:JE-someone-else", None):
+        j = _submitted_journal(db, "maker")
+        assert _journal_approve(db, j["je_id"]).get("ok") is True
+        spent = appr.ApprovalEngine(db=db).consume_approval(
+            consumed_by="checker", action_type="journal_entry", request_id=j["request_id"],
+            amount=100.0, consumed_for=mark)
+        assert spent.get("ok") is True
+        res = _post(db, j["je_id"])
+        assert (res["http"], res["error"]) == (409, "already_consumed"), mark
+        assert _je(db, j["je_id"])["status"] == "APPROVED"
+        assert je_service.needs_reapproval(db, _je(db, j["je_id"])) is True
+
+
+def _consume_route(db, monkeypatch, request_id: str, user: Dict[str, Any]):
+    monkeypatch.setattr(approvals_router, "_get_db", lambda: db)
+    return _call(approvals_router.consume_request(
+        request_id, approvals_router.ConsumeAction(action_type="journal_entry", amount=100.0),
+        current_user=user))
+
+
+def test_d54_the_generic_consume_door_never_spends_a_journal_approval(db, monkeypatch):
+    """Codex round 1, P2 (alternate path): the maker's POST
+    /approvals/requests/{id}/consume answered 200 and spent the journal's
+    approval; Post then answered 409 already_consumed for good. A journal
+    approval is spent only by the journal's own Post (domain-only)."""
+    maker = _user(db, "maker", ["ACCOUNTANT"])
+    admin = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+
+    for who in (maker, admin):
+        code, body = _consume_route(db, monkeypatch, j["request_id"], who)
+        assert code == 400, (who["user_id"], code, body)    # maker was 200
+    req = _request(db, j["request_id"])
+    assert (req["status"], req["consumed"]) == ("APPROVED", False)
+    # Named as another action type, the request itself is still a journal's.
+    monkeypatch.setattr(approvals_router, "_get_db", lambda: db)
+    code, _ = _call(approvals_router.consume_request(
+        j["request_id"], approvals_router.ConsumeAction(action_type="petty_cash"), current_user=maker))
+    assert code == 400
+    assert _request(db, j["request_id"])["consumed"] is False
+
+    assert _post(db, j["je_id"]).get("ok") is True
+    assert _je(db, j["je_id"])["status"] == "POSTED"
+
+
+def _list_flag(db, monkeypatch, je_id: str, user: Dict[str, Any]):
+    monkeypatch.setattr(je_router, "_get_db", lambda: db)
+    code, body = _call(je_router.list_journal_entries(
+        store_id=None, status=None, maker_id=None, current_user=user))
+    assert code == 200, body
+    row = next(r for r in body["journal_entries"] if r["je_id"] == je_id)
+    code, one = _call(je_router.get_journal_entry(je_id, current_user=user))
+    assert code == 200, one
+    assert one.get("needs_reapproval") == row.get("needs_reapproval")
+    return row.get("needs_reapproval")
+
+
+def test_d54_an_approval_that_lapsed_before_post_is_approved_again(db, monkeypatch):
+    """D54: an APPROVED journal whose approval lapsed before Post (410
+    expired, Approve 409 not_submitted -- APPROVED for good) is approved again
+    by a checker other than the maker, with their PIN. The list and the
+    journal itself say so (needs_reapproval). A wrong PIN leaves one request
+    waiting, which the inbox can decide too; the lapsed approval is left as
+    stored; the journal posts once."""
+    _user(db, "maker", ["ADMIN"])
+    admin = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    requests = db.get_collection("approval_requests")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    assert _list_flag(db, monkeypatch, j["je_id"], admin) is False
+    requests.update_one({"request_id": j["request_id"]},
+                        {"$set": {"expires_at": appr._now() - timedelta(minutes=5)}})
+    lapsed = _request(db, j["request_id"])
+
+    res = _post(db, j["je_id"])
+    assert (res["http"], res["error"]) == (410, "expired")
+    assert _list_flag(db, monkeypatch, j["je_id"], admin) is True
+
+    res = _journal_approve(db, j["je_id"], "maker")
+    assert (res["http"], res["error"]) == (403, "cannot_approve_own")
+    res = _journal_approve(db, j["je_id"], "manager", ("STORE_MANAGER",))
+    assert (res["http"], res["error"]) == (409, "not_submitted")
+    assert requests.count_documents({}) == 1                 # neither raised anything
+
+    for _ in range(2):
+        res = je_service.approve_je(db, je_id=j["je_id"], approver_id="checker",
+                                    approver_roles=["ADMIN"], pin="0000")
+        assert (res["http"], res["error"]) == (403, "wrong_pin")
+    assert requests.count_documents({}) == 2                 # the lapsed one + one raised again
+    new_id = _je(db, j["je_id"])["approval_request_id"]
+    assert _request(db, new_id)["status"] == "REQUESTED"
+    assert _je(db, j["je_id"])["status"] == "APPROVED"
+    assert _list_flag(db, monkeypatch, j["je_id"], admin) is True
+    assert _post(db, j["je_id"])["error"] == "not_approved"
+
+    assert _inbox_approve(db, monkeypatch, new_id, admin)[0] == 200
+    assert _list_flag(db, monkeypatch, j["je_id"], admin) is False
+    assert _post(db, j["je_id"]).get("ok") is True
+    assert _je(db, j["je_id"])["status"] == "POSTED"
+    assert _post(db, j["je_id"])["error"] == "already_posted"
+    assert len(_posted_rows(db, j["je_id"])) == 1
+    assert _request(db, j["request_id"]) == lapsed           # history not rewritten
+    raised = [r for r in db.get_collection("audit_logs").find({"action": "je_request_raised_again"})
+              if r.get("entity_id") == j["je_id"]]
+    assert len(raised) == 1 and j["request_id"] in raised[0]["reason"]
+
+
+def test_d54_journal_screen_reapproval_moves_the_checker(db):
+    _user(db, "checker", ["ADMIN"])
+    _user(db, "boss", ["SUPERADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    db.get_collection("approval_requests").update_one(
+        {"request_id": j["request_id"]}, {"$set": {"expires_at": appr._now() - timedelta(minutes=5)}})
+    res = _journal_approve(db, j["je_id"], "boss", ("SUPERADMIN",))
+    assert res.get("ok") is True, res
+    je = _je(db, j["je_id"])
+    assert (je["status"], je["checker_id"]) == ("APPROVED", "boss")
+    assert len([r for r in db.get_collection("audit_logs").find({"action": "je_reapproved"})
+                if r.get("entity_id") == j["je_id"]]) == 1
+    # A valid approval is never replaced.
+    res = _journal_approve(db, j["je_id"], "checker")
+    assert (res["http"], res["error"]) == (409, "not_submitted")
+    assert _post(db, j["je_id"]).get("ok") is True
+
+
+# ===========================================================================
 # R19 -- concurrent audit writes
 # ===========================================================================
 
@@ -961,6 +1206,87 @@ def test_r19_refused_row_leaves_the_chain_whole(db):
     assert kept is not None and refused is None and after is not None
     assert [r["seq"] for r in _chained(db)] == [1, 2]
     assert verify_chain(coll)["intact"] is True
+
+
+def _previous_version_append(db, coll, doc, *, between=None):
+    """The audit writer of the version this PR replaces (origin/main before
+    #1411): claim the seq by $inc on the head counter, chain from the head's
+    last_hash, insert, then commit the hash. ``between`` runs after the claim
+    and before the insert (a slow round trip). Returns the row or None
+    (refused), exactly as that writer did."""
+    from pymongo import ReturnDocument
+
+    head = db.get_collection("audit_chain_head").find_one_and_update(
+        {"_id": "primary"}, {"$inc": {"seq": 1}, "$setOnInsert": {"last_hash": audit_chain.GENESIS_HASH}},
+        upsert=True, return_document=ReturnDocument.AFTER)
+    seq, prev = int(head["seq"]), head.get("last_hash") or audit_chain.GENESIS_HASH
+    doc.update(seq=seq, prev_hash=prev, entry_hash=audit_chain.compute_entry_hash(prev, seq, doc))
+    if between is not None:
+        between()
+    try:
+        coll.insert_one(doc)
+    except Exception:  # noqa: BLE001
+        return None
+    db.get_collection("audit_chain_head").update_one(
+        {"_id": "primary", "seq": seq}, {"$set": {"last_hash": doc["entry_hash"]}})
+    return doc
+
+
+def test_d54_a_previous_version_writer_mid_deploy_keeps_its_row(db):
+    """Rolling deploy (D54): a worker still on the previous version claims its
+    seq on the head counter and is slow to insert; a new worker writes
+    meanwhile. The new writer took the same seq first and the old row was
+    refused (lost). Now the new writer takes its seq in the same counter, waits
+    for the old writer's row and chains from it: both rows kept, one chain."""
+    coll = db.get_collection("audit_logs")
+    coll.create_index("seq", unique=True, sparse=True)
+    repo = AuditRepository(coll)
+    assert repo.create(_audit_row(0)) is not None            # an ordinary first row
+    new = {}
+
+    def _new_writer_meanwhile():
+        new["thread"] = threading.Thread(target=lambda: new.update(row=repo.create(_audit_row(2))))
+        new["thread"].start()
+        threading.Event().wait(0.1)                            # the old writer's slow round trip
+
+    old = _previous_version_append(db, coll, _audit_row(1), between=_new_writer_meanwhile)
+    new["thread"].join(timeout=30)
+    assert old is not None                                     # was None: E11000 on seq 2
+    assert new.get("row") is not None
+    rows = _chained(db)
+    assert [r["seq"] for r in rows] == [1, 2, 3]
+    assert [r["entity_id"] for r in rows] == ["P-0", "P-1", "P-2"]
+    assert verify_chain(coll)["intact"] is True
+
+
+def test_d54_previous_and_new_writers_side_by_side_lose_nothing(mongo_db):
+    """Real MongoDB: 3 previous-version and 3 new workers x 20 rows, released
+    together. Every row is stored and no seq is used twice. (Rows of two
+    previous-version writers can still chain from the same stale head -- that
+    writer's own R19 break, gone once the deploy finishes.)"""
+    coll = mongo_db.get_collection("audit_logs")
+    coll.create_index("seq", unique=True, sparse=True)
+    repo = AuditRepository(coll)
+    gate = threading.Barrier(6)
+    lost = []
+
+    def _work(kind: str, w: int) -> None:
+        gate.wait(timeout=20)
+        for i in range(20):
+            row = _audit_row(w * 100 + i)
+            done = (_previous_version_append(mongo_db, coll, row) if kind == "old"
+                    else repo.create(row))
+            if done is None:
+                lost.append((kind, w, i))
+
+    threads = [threading.Thread(target=_work, args=(k, w)) for k in ("old", "new") for w in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=120)
+    assert lost == []                                          # was 20+ old rows refused
+    seqs = [r["seq"] for r in _chained(mongo_db)]
+    assert len(seqs) == 120 and len(set(seqs)) == 120
 
 
 # ===========================================================================
@@ -1057,7 +1383,7 @@ def test_r20_removed_tail_stays_reported_after_later_writes(db, removed):
     for i in range(4):
         assert repo.create(_audit_row(i)) is not None
     lost = _chained(db)[-1]
-    assert (_head(db)["seq"], _head(db)["last_hash"]) == (4, lost["entry_hash"])
+    assert (_head(db)["last_seq"], _head(db)["last_hash"]) == (4, lost["entry_hash"])
 
     coll.delete_many({"seq": {"$gt": 4 - removed}})  # out-of-band removal of the tail
     for n in range(removed + 3):                      # well past the old head
@@ -1067,7 +1393,7 @@ def test_r20_removed_tail_stays_reported_after_later_writes(db, removed):
             False, True, "head_not_in_trail"), (n, res)
     # The surviving + new rows do link; the head still names the removed row.
     assert [r["seq"] for r in _chained(db)] == list(range(1, 4 + 3 + 1))
-    assert (_head(db)["seq"], _head(db)["last_hash"]) == (4, lost["entry_hash"])
+    assert (_head(db)["last_seq"], _head(db)["last_hash"]) == (4, lost["entry_hash"])
 
 
 @pytest.mark.parametrize("legacy", ["failed_inserts", "writer_died_before_head", "head_lagging"])
@@ -1094,7 +1420,8 @@ def test_r20_a_head_left_behind_or_ahead_by_old_writes_is_not_a_removed_tail(db,
         "writer_died_before_head": {"seq": 3, "last_hash": rows[1]["entry_hash"]},
         "head_lagging": {"seq": 1, "last_hash": rows[0]["entry_hash"]},
     }[legacy]
-    heads.update_one({"_id": "primary"}, {"$set": stale})
+    # As the previous version left it: no last_seq on the head.
+    heads.update_one({"_id": "primary"}, {"$set": stale, "$unset": {"last_seq": ""}})
     assert verify_chain(coll)["intact"] is True
 
     newest = None
@@ -1104,7 +1431,7 @@ def test_r20_a_head_left_behind_or_ahead_by_old_writes_is_not_a_removed_tail(db,
         res = verify_chain(coll)
         assert (res["intact"], res["entries_checked"]) == (True, 4 + n), (n, res)
     # The head caught up with the newest row ...
-    assert (_head(db)["seq"], _head(db)["last_hash"]) == (6, newest["entry_hash"])
+    assert (_head(db)["last_seq"], _head(db)["last_hash"]) == (6, newest["entry_hash"])
     # ... so removing that row is seen, and stays seen.
     coll.delete_one({"seq": 6})
     assert verify_chain(coll)["reason"] == "head_not_in_trail"
@@ -1122,5 +1449,6 @@ def test_r20_a_slower_writer_never_moves_the_head_back(db):
         assert repo.create(_audit_row(i)) is not None
     rows = _chained(db)
     audit_chain._note_head(db, coll, 2, rows[0]["entry_hash"], rows[1]["entry_hash"])
-    assert (_head(db)["seq"], _head(db)["last_hash"]) == (3, rows[2]["entry_hash"])
+    assert (_head(db)["last_seq"], _head(db)["last_hash"]) == (3, rows[2]["entry_hash"])
+    assert _head(db)["seq"] == 3                               # the claim counter never moves back
     assert verify_chain(coll)["intact"] is True

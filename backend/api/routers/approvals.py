@@ -400,6 +400,12 @@ async def reject_request(
     return _decode(res, success_keys=("status", "request_id"))
 
 
+_DOMAIN_ONLY = {
+    "REFUND_APPROVAL_MATRIX": "A refund approval is used by the refund itself.",
+    "journal_entry": "A journal approval is used by the journal's own Post.",
+}
+
+
 @router.post("/requests/{request_id}/consume")
 async def consume_request(
     request_id: str,
@@ -416,16 +422,18 @@ async def consume_request(
     the engine's shop rule over the caller's shops). Anyone else gets the 404
     a missing request gets here, and the approval is left unspent: a request
     id alone never spends another shop's approval."""
-    if body.action_type == "REFUND_APPROVAL_MATRIX":
-        # Only the refund door spends a refund approval: it binds the bill,
-        # the store, the amount and the tier. Spent here it would bind nothing.
-        raise HTTPException(status_code=400, detail="A refund approval is used by the refund itself.")
+    # Some approvals are spent only by their own door, which binds what they
+    # approve; spent here they would bind nothing. A refund approval: the
+    # refund (bill, store, amount, tier). A journal approval: the journal's
+    # Post (D54) -- spent here, the journal could never post.
+    if body.action_type in _DOMAIN_ONLY:
+        raise HTTPException(status_code=400, detail=_DOMAIN_ONLY[body.action_type])
     eng = _engine()
     doc = eng.get(request_id)
-    if doc is not None and doc.get("action_type") == "REFUND_APPROVAL_MATRIX":
-        raise HTTPException(status_code=400, detail="A refund approval is used by the refund itself.")
     if doc is not None and not _request_in_reach(eng, doc, current_user):
         raise HTTPException(status_code=404, detail="not_found")
+    if doc is not None and doc.get("action_type") in _DOMAIN_ONLY:
+        raise HTTPException(status_code=400, detail=_DOMAIN_ONLY[doc["action_type"]])
     res = eng.consume_approval(
         consumed_by=current_user.get("user_id"),
         action_type=body.action_type,
