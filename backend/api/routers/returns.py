@@ -393,6 +393,41 @@ def _sum_prior_refunds(
                 detail="Could not check earlier refunds on this bill - try again. Nothing was recorded.",
             )
         logger.debug("[RETURNS] _sum_prior_refunds lookup failed: %s", exc)
+    if field == "net_refund":
+        total += _shopify_money_off_returns(order_id, strict=strict)
+    return round(total, 2)
+
+
+def _shopify_money_off_returns(order_id: Optional[str], *, strict: bool = False) -> float:
+    """Money Shopify already sent back on this bill for an online refund IMS
+    booked no return for: its review row is its only record (queued, rejected,
+    money-only, or one whose items another door already took back -- D62).
+    Counted at what the row says Shopify sent back (the online door's rule,
+    shopify_refund._given_back_elsewhere); a refund whose returns doc counts
+    (_counts_as_refunded) is counted by that doc, never twice. Unreadable:
+    503 when ``strict`` (fail CLOSED), else 0."""
+    db = _get_db()
+    if db is None or not order_id:
+        return 0.0
+    total = 0.0
+    try:
+        booked = {d.get("shopify_refund_id") for d in db.get_collection("returns").find(
+            {"order_id": order_id, "shopify_refund_id": {"$nin": [None, ""]}}, {"_id": 0})
+            if _counts_as_refunded(d)}
+        for row in db.get_collection("shopify_refund_review").find({"order_id": order_id}, {"_id": 0}):
+            if not row.get("shopify_refund_id") or row.get("shopify_refund_id") in booked:
+                continue
+            cn = row.get("credit_note") or {}
+            back = cn.get("shopify_refunded_amount") if cn.get("money_back") is None else cn.get("money_back")
+            total += float(back or 0)
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            logger.error("[RETURNS] online refunds unreadable for %s: %s", order_id, exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Could not check earlier refunds on this bill - try again. Nothing was recorded.",
+            )
+        return 0.0
     return round(total, 2)
 
 
@@ -4398,7 +4433,8 @@ def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id:
         order = repo.find_by_id(order_id) or {}
         version = order.get("refund_holds_v")
         live, documented = _live_refund_holds(order_id, order.get("refund_holds") or {})
-        prior = round(documented + sum(float(h.get("amount") or 0) for h in live.values()), 2)
+        prior = round(documented + sum(float(h.get("amount") or 0) for h in live.values())
+                      + _shopify_money_off_returns(order_id, strict=True), 2)
         # A kept hold of a nothing-paid return is still there only while its
         # give-backs are unfinished: never counted, never dropped (its marks
         # are the trace).
