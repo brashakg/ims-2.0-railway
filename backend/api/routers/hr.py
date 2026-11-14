@@ -27,6 +27,7 @@ from ..dependencies import (
     user_store_scope,
 )
 from ..services import attendance_engine
+from database.repositories.hr_repository import AttendanceUnavailable
 from ..services.file_store import (
     ANY_KIND,
     get_file_store,
@@ -233,6 +234,12 @@ class AttendanceMarkRequest(BaseModel):
     status: str  # PRESENT, ABSENT, HALF_DAY, LEAVE, LWP, HOLIDAY, WEEK_OFF
     check_in: Optional[datetime] = None
     check_out: Optional[datetime] = None
+    # R15: the store the screen is showing. Omitted -> the login's active store
+    # (the old behaviour). Authorised by validate_store_access in the route.
+    store_id: Optional[str] = None
+    # D48: only when the stored day has NO shop -- the shop it is being
+    # recorded at, named explicitly (must equal store_id). Never inferred.
+    assign_store_id: Optional[str] = None
 
     @field_validator("status")
     @classmethod
@@ -432,7 +439,9 @@ def _empty_summary() -> dict:
     }
 
 
-def _build_grid(year: int, month: int, employees: list, records: list) -> dict:
+def _build_grid(
+    year: int, month: int, employees: list, records: list, no_shop_records: Optional[list] = None
+) -> dict:
     """Assemble the month grid from a roster + attendance records.
 
     Args:
@@ -460,6 +469,12 @@ def _build_grid(year: int, month: int, employees: list, records: list) -> dict:
         if rec.get("is_late"):
             slot["late_days"].add(day)
 
+    no_shop: dict = {}
+    for rec in no_shop_records or []:
+        day = _day_of_record(rec.get("date"))
+        if day is not None and 1 <= day <= n_days:
+            no_shop.setdefault(rec.get("employee_id"), set()).add(day)
+
     totals = _empty_summary()
     out_employees = []
     for emp in employees or []:
@@ -482,6 +497,7 @@ def _build_grid(year: int, month: int, employees: list, records: list) -> dict:
                 "store_id": emp.get("store_id", ""),
                 "days": day_codes,
                 "summary": summary,
+                "no_shop_days": [str(d) for d in sorted(no_shop.get(emp_id, ()))],
             }
         )
 
@@ -734,6 +750,7 @@ async def get_attendance_grid(
     # Pull the month's attendance records (string date range mirrors the actual
     # write path in POST /attendance/mark).
     records = []
+    no_shop_records: list = []
     if attendance_repo is not None:
         n_days = _days_in_month(year, mon)
         start = f"{year:04d}-{mon:02d}-01"
@@ -741,12 +758,24 @@ async def get_attendance_grid(
         rec_filter = {"date": {"$gte": start, "$lte": end}}
         if scope is not None:
             rec_filter["store_id"] = scope
-        try:
-            records = attendance_repo.find_many(rec_filter, limit=5000)
-        except Exception:
-            records = []
+        records = attendance_repo.find_many(rec_filter, limit=5000)
+        if scope is not None and employees:
+            # D48: legacy days saved without a shop, for this roster only. Shown
+            # read-only ("Shop not recorded"), never counted in this store.
+            ids = [e["employee_id"] for e in employees]
+            no_shop = attendance_repo.find_many(
+                {
+                    "date": {"$gte": start, "$lte": end},
+                    "employee_id": {"$in": ids},
+                    "store_id": {"$in": [None, ""]},
+                },
+                limit=5000,
+            )
+            no_shop_records = [
+                r for r in no_shop if not r.get("store_id") and r.get("employee_id") in ids
+            ]
 
-    return _build_grid(year, mon, employees, records)
+    return _build_grid(year, mon, employees, records, no_shop_records)
 
 
 @router.get("/attendance/summary")
@@ -792,10 +821,7 @@ async def get_attendance_summary(
         rec_filter = {"date": {"$gte": start, "$lte": end}}
         if scope is not None:
             rec_filter["store_id"] = scope
-        try:
-            records = attendance_repo.find_many(rec_filter, limit=5000)
-        except Exception:
-            records = []
+        records = attendance_repo.find_many(rec_filter, limit=5000)
 
     grid = _build_grid(year, mon, employees, records)
     return _summarise_grid(grid)
@@ -869,6 +895,27 @@ def _resolve_employee_shift(
     return None
 
 
+def _attendance_repo_or_503():
+    """The attendance repository for a WRITE door, or AttendanceUnavailable (503).
+
+    In production an unreachable Mongo leaves the seeded connection disconnected,
+    so get_attendance_repository() is None. A writer must then fail loud, never
+    skip the write and answer "recorded" (#1433 review)."""
+    repo = get_attendance_repository()
+    if repo is None:
+        raise AttendanceUnavailable("attendance store not connected")
+    return repo
+
+
+def _caller_or_401(current_user: dict) -> str:
+    """The caller's own user id for a self check-in / check-out; a token without
+    one cannot record attendance, so it is refused instead of faked."""
+    employee_id = current_user.get("user_id")
+    if not employee_id:
+        raise HTTPException(status_code=401, detail="No user identity on this login.")
+    return employee_id
+
+
 def _find_day_row(
     attendance_repo, employee_id: str, store_id: Optional[str], date_iso: str
 ):
@@ -880,27 +927,46 @@ def _find_day_row(
     written with a missing/old store_id (legacy `mark` rows persisted
     active_store_id, which can be None) is still matched -- otherwise a second
     check-in would fail to see it and mint a duplicate, which is the exact bug
-    being fixed. Fail-soft: any repo error -> None (treated as 'no row')."""
-    try:
-        row = attendance_repo.find_one({"employee_id": employee_id, "date": date_iso})
-        if row is not None:
-            return row
-    except Exception:
-        return None
-    # Defensive fallback: a legacy row may have stored `date` as a datetime
-    # (the repo's mark_check_in helper did). Match on the date prefix so we still
-    # attach to it instead of duplicating. Only attempted when the string lookup
-    # missed, so it never adds cost on the normal path.
-    try:
-        from datetime import datetime as _dt
+    being fixed. A failed read RAISES (AttendanceUnavailable -> 503): it is never
+    'no row', which would mint a second row or report a false empty day."""
+    row = attendance_repo.find_one({"employee_id": employee_id, "date": date_iso})
+    if row is not None:
+        return row
+    # Legacy rows stored `date` as a datetime (the repo's mark_check_in helper
+    # did). Match the day's range so we attach to it instead of duplicating.
+    # Only attempted when the string lookup missed.
+    return attendance_repo.find_one(
+        {"employee_id": employee_id, "date": legacy_day_range(date_iso)}
+    )
 
-        start = _dt.fromisoformat(f"{date_iso}T00:00:00")
-        end = _dt.fromisoformat(f"{date_iso}T23:59:59")
-        return attendance_repo.find_one(
-            {"employee_id": employee_id, "date": {"$gte": start, "$lte": end}}
+
+def legacy_day_range(date_iso: str) -> dict:
+    """Mongo range matching a legacy row whose `date` is a BSON datetime."""
+    return {
+        "$gte": datetime.fromisoformat(f"{date_iso}T00:00:00"),
+        "$lte": datetime.fromisoformat(f"{date_iso}T23:59:59"),
+    }
+
+
+def _update_day_row(attendance_repo, row_id, data: dict) -> None:
+    """Write `data` onto one attendance row and make sure it LANDED.
+
+    A database error whose write actually landed (the acknowledgement was
+    lost) is reconciled by reading the row back; any other failure raises
+    AttendanceUnavailable (503), so no caller reports or audits a change that
+    did not persist. A row that vanished meanwhile is a 409."""
+    try:
+        matched = attendance_repo.update(row_id, data)
+    except AttendanceUnavailable:
+        row = attendance_repo.find_one({"attendance_id": row_id})
+        if row is not None and all(row.get(k) == v for k, v in data.items()):
+            return
+        raise
+    if not matched:
+        raise HTTPException(
+            status_code=409,
+            detail="This attendance record was changed or removed meanwhile. Reload and try again.",
         )
-    except Exception:
-        return None
 
 
 def _create_day_row_safe(attendance_repo, data: dict):
@@ -909,25 +975,32 @@ def _create_day_row_safe(attendance_repo, data: dict):
     If two check-ins for the same (employee_id, date) race, the unique index
     makes the second insert raise DuplicateKeyError; we catch it and UPDATE the
     row the winner just created instead of surfacing a 500 or leaving a dup.
-    Fail-soft otherwise (the BaseRepository.create already swallows errors)."""
+    A database error raises (503) unless the row is found to have landed (a
+    lost acknowledgement), so a check-in is never "recorded" without a row."""
     try:
         attendance_repo.create(data)
-    except Exception:  # noqa: BLE001 - includes pymongo DuplicateKeyError
+        return
+    except AttendanceUnavailable:
+        if attendance_repo.find_one({"attendance_id": data["attendance_id"]}) is not None:
+            return
+        raise
+    except Exception:  # noqa: BLE001 - pymongo DuplicateKeyError: lost the race
         existing = _find_day_row(
             attendance_repo,
             data.get("employee_id"),
             data.get("store_id"),
             data.get("date"),
         )
-        if existing is not None:
-            patch = {
-                k: v
-                for k, v in data.items()
-                if k not in ("attendance_id", "date", "employee_id")
-            }
-            attendance_repo.update(
-                existing.get("attendance_id") or existing.get("_id"), patch
-            )
+        if existing is None:
+            raise
+    patch = {
+        k: v
+        for k, v in data.items()
+        if k not in ("attendance_id", "date", "employee_id", "_id", "created_at", "updated_at")
+    }
+    _update_day_row(
+        attendance_repo, existing.get("attendance_id") or existing.get("_id"), patch
+    )
 
 
 def _half_day_rule(store_id: Optional[str]) -> dict:
@@ -955,7 +1028,9 @@ def _half_day_rule(store_id: Optional[str]) -> dict:
         return {"auto": False, "min_hours": None, "late_after": None}
 
 
-@router.post("/attendance/check-in")
+# Self check-in / check-out are registered on hr_self_service's router (no
+# finance-role gate) so every employee can record their OWN attendance (R13).
+# They stay defined here beside the day-row helpers they use.
 async def check_in(
     latitude: Optional[float] = None,
     longitude: Optional[float] = None,
@@ -1042,61 +1117,62 @@ async def check_in(
     # `date` mismatch or a race could slip a second row past the constraint --
     # the "same user recorded twice" bug. find-then-update closes that here; the
     # DB unique index is the backstop.
-    employee_id = current_user.get("user_id")
-    attendance_repo = get_attendance_repository()
+    employee_id = _caller_or_401(current_user)
+    attendance_repo = _attendance_repo_or_503()
     already_checked_in = False
-    if attendance_repo is not None and employee_id:
-        today_iso = now.date().isoformat()
-        existing = _find_day_row(attendance_repo, employee_id, active_store, today_iso)
-        already_checked_in = bool(existing and existing.get("check_in"))
-        if existing is not None:
-            # Preserve an EARLIER check-in time + its late-mark: the first stamp
-            # of the day is the system of record. A repeat tap just keeps the row
-            # PRESENT and never duplicates.
-            base_status = (
-                existing.get("status")
-                if existing.get("status") in ("PRESENT", "HALF_DAY")
-                else "PRESENT"
-            )
-            # Only ever DOWNGRADE a PRESENT day to HALF_DAY (the late-arrival
-            # trigger); never touch a manual HALF_DAY / other status.
-            if base_status == "PRESENT" and checkin_half_day:
-                base_status = "HALF_DAY"
-            update_data = {
-                "employee_name": current_user.get("full_name")
-                or current_user.get("username"),
-                "store_id": existing.get("store_id") or active_store,
-                "status": base_status,
-                "shift_id": (shift or {}).get("shift_id") or existing.get("shift_id"),
-                "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
-            }
-            if not already_checked_in:
-                update_data["check_in"] = ist_event_iso(now)
-                update_data["is_late"] = late["is_late"]
-                update_data["late_minutes"] = late["late_minutes"]
-                update_data["marked_by"] = employee_id
-                update_data["marked_at"] = ist_event_iso(now)
-            attendance_repo.update(
-                existing.get("attendance_id") or existing.get("_id"), update_data
-            )
-        else:
-            data = {
-                "attendance_id": str(uuid.uuid4()),
-                "employee_id": employee_id,
-                "employee_name": current_user.get("full_name")
-                or current_user.get("username"),
-                "store_id": active_store,
-                "date": today_iso,
-                "status": "HALF_DAY" if checkin_half_day else "PRESENT",
-                "check_in": ist_event_iso(now),
-                "is_late": late["is_late"],
-                "late_minutes": late["late_minutes"],
-                "shift_id": (shift or {}).get("shift_id"),
-                "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
-                "marked_by": employee_id,
-                "marked_at": ist_event_iso(now),
-            }
-            _create_day_row_safe(attendance_repo, data)
+    today_iso = now.date().isoformat()
+    existing = _find_day_row(attendance_repo, employee_id, active_store, today_iso)
+    already_checked_in = bool(existing and existing.get("check_in"))
+    if existing is not None:
+        # Preserve an EARLIER check-in time + its late-mark: the first stamp
+        # of the day is the system of record. A repeat tap just keeps the row
+        # PRESENT and never duplicates.
+        base_status = (
+            existing.get("status")
+            if existing.get("status") in ("PRESENT", "HALF_DAY")
+            else "PRESENT"
+        )
+        # Only ever DOWNGRADE a PRESENT day to HALF_DAY (the late-arrival
+        # trigger); never touch a manual HALF_DAY / other status.
+        if base_status == "PRESENT" and checkin_half_day:
+            base_status = "HALF_DAY"
+        update_data = {
+            "employee_name": current_user.get("full_name")
+            or current_user.get("username"),
+            "store_id": existing.get("store_id") or active_store,
+            "status": base_status,
+            "shift_id": (shift or {}).get("shift_id") or existing.get("shift_id"),
+            "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
+        }
+        if not already_checked_in:
+            update_data["check_in"] = ist_event_iso(now)
+            update_data["is_late"] = late["is_late"]
+            update_data["late_minutes"] = late["late_minutes"]
+            update_data["marked_by"] = employee_id
+            update_data["marked_at"] = ist_event_iso(now)
+        _update_day_row(
+            attendance_repo,
+            existing.get("attendance_id") or existing.get("_id"),
+            update_data,
+        )
+    else:
+        data = {
+            "attendance_id": str(uuid.uuid4()),
+            "employee_id": employee_id,
+            "employee_name": current_user.get("full_name")
+            or current_user.get("username"),
+            "store_id": active_store,
+            "date": today_iso,
+            "status": "HALF_DAY" if checkin_half_day else "PRESENT",
+            "check_in": ist_event_iso(now),
+            "is_late": late["is_late"],
+            "late_minutes": late["late_minutes"],
+            "shift_id": (shift or {}).get("shift_id"),
+            "geo_verified": geo["reason"] in ("WITHIN_RADIUS", "EXEMPT_ROLE"),
+            "marked_by": employee_id,
+            "marked_at": ist_event_iso(now),
+        }
+        _create_day_row_safe(attendance_repo, data)
 
     return {
         "message": (
@@ -1113,7 +1189,6 @@ async def check_in(
     }
 
 
-@router.post("/attendance/check-out")
 async def check_out(
     store_id: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
@@ -1123,16 +1198,14 @@ async def check_out(
     Attaches the check-out stamp to the same (employee_id, store_id, date) day
     row that check-in created -- no second row, no orphan stamp. Previously this
     was a no-op stub that returned a timestamp but persisted nothing, so a
-    staff-side "check out" never actually recorded. Fail-soft: with no DB / no
-    row yet, returns a stub timestamp so the operator UI still works.
+    staff-side "check out" never actually recorded. With no attendance store it
+    is a 503, never a stub "recorded" (#1433 review).
     """
     now = now_ist_naive()
     now_iso = ist_event_iso(now)
-    employee_id = current_user.get("user_id")
+    employee_id = _caller_or_401(current_user)
     active_store = validate_store_access(store_id, current_user)  # as check_in
-    attendance_repo = get_attendance_repository()
-    if attendance_repo is None or not employee_id:
-        return {"message": "Check-out recorded", "checkOutTime": now_iso}
+    attendance_repo = _attendance_repo_or_503()
 
     today_iso = now.date().isoformat()
     existing = _find_day_row(attendance_repo, employee_id, active_store, today_iso)
@@ -1165,9 +1238,8 @@ async def check_out(
         )
         if hd["is_half_day"]:
             update["status"] = "HALF_DAY"
-    attendance_repo.update(
-        existing.get("attendance_id") or existing.get("_id"),
-        update,
+    _update_day_row(
+        attendance_repo, existing.get("attendance_id") or existing.get("_id"), update
     )
     return {
         "attendance_id": existing.get("attendance_id") or existing.get("_id"),
@@ -1184,15 +1256,9 @@ async def check_out_by_id(
     """Per-attendance-record check-out — frontend's hrApi was 404'ing
     because the original `/attendance/check-out` endpoint didn't accept
     an attendance_id in the path. Stamps the check-out timestamp on the
-    matching record. Falls back to a stub response if the repo isn't
-    available so the operator UI doesn't break in demo mode."""
-    repo = get_attendance_repository()
-    if repo is None:
-        return {
-            "attendance_id": attendance_id,
-            "message": "Check-out recorded",
-            "checkOutTime": datetime.now().isoformat(),
-        }
+    matching record. With no attendance store it is a 503, never a stub
+    "recorded" (#1433 review)."""
+    repo = _attendance_repo_or_503()
     existing = repo.find_one(
         {
             "$or": [
@@ -1219,7 +1285,8 @@ async def check_out_by_id(
         )
 
     now_iso = utc_now_iso()
-    repo.update(
+    _update_day_row(
+        repo,
         existing.get("attendance_id") or existing.get("_id"),
         {"check_out": now_iso, "checked_out_by": current_user.get("user_id")},
     )
@@ -1235,36 +1302,110 @@ async def mark_attendance(
     De-dupes on (employee_id, date) via the shared day-row helpers so a re-mark
     UPDATES the one row (also catching a legacy datetime-stored date) and a race
     can't slip a duplicate past the unique index.
-    """
-    attendance_repo = get_attendance_repository()
-    active_store = current_user.get("active_store_id")
 
-    if attendance_repo is not None:
-        date_iso = request.date.isoformat()
-        existing = _find_day_row(
-            attendance_repo, request.employee_id, active_store, date_iso
+    R15: the row is written to the store the caller names (the Attendance
+    page's store filter), authorised like every store read, and the employee
+    must belong to that store. A day already recorded at another store is
+    refused (409) rather than silently moved.
+    R14: a time the request OMITS keeps the stored value; only an explicit null
+    clears it. A change to an existing row writes an ATTENDANCE_EDIT audit row
+    with before/after, like the PUT correction door.
+    """
+    target_store = validate_store_access(request.store_id, current_user)
+    attendance_repo = _attendance_repo_or_503()
+    sent = request.model_fields_set
+
+    date_iso = request.date.isoformat()
+    _require_employee_at_store(request.employee_id, target_store)
+    existing = _find_day_row(
+        attendance_repo, request.employee_id, target_store, date_iso
+    )
+    row_store = (existing or {}).get("store_id")
+    # D48: a legacy day saved WITHOUT a shop is not adopted by the shop
+    # being viewed; the correction must name the shop explicitly.
+    if (
+        existing is not None
+        and not row_store
+        and target_store
+        and request.assign_store_id != target_store
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Shop not recorded: this day was saved without a shop, so it "
+                "is not moved into the shop you are viewing. A correction must "
+                "name the shop explicitly."
+            ),
+        )
+    if row_store and target_store and row_store != target_store:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"This day is already recorded at store {row_store}. "
+                "Open that store to correct it."
+            ),
         )
 
-        data = {
-            "employee_id": request.employee_id,
-            "store_id": active_store,
-            "date": date_iso,
-            "status": request.status,
-            "check_in": ist_event_iso(request.check_in) if request.check_in else None,
-            "check_out": ist_event_iso(request.check_out) if request.check_out else None,
-            "marked_by": current_user.get("user_id"),
-            "marked_at": utc_now_iso(),
-        }
+    data = {
+        "employee_id": request.employee_id,
+        "store_id": target_store or row_store,
+        "date": date_iso,
+        "status": request.status,
+        "marked_by": current_user.get("user_id"),
+        "marked_at": utc_now_iso(),
+    }
+    for field in ("check_in", "check_out"):
+        if existing is None or field in sent:
+            value = getattr(request, field)
+            data[field] = ist_event_iso(value) if value else None
 
-        if existing is not None:
-            attendance_repo.update(
-                existing.get("attendance_id") or existing.get("_id"), data
+    if existing is not None:
+        eff_ci = data.get("check_in", existing.get("check_in"))
+        eff_co = data.get("check_out", existing.get("check_out"))
+        if eff_ci and eff_co:
+            ci_dt = attendance_engine._coerce_check_in(eff_ci)
+            co_dt = attendance_engine._coerce_check_in(eff_co)
+            if ci_dt and co_dt and co_dt <= ci_dt:
+                raise HTTPException(
+                    status_code=422, detail="check_out must be after check_in"
+                )
+        row_id = existing.get("attendance_id") or existing.get("_id")
+        before = {k: v for k, v in existing.items() if k != "_id"}
+        changed = [
+            k
+            for k in ("store_id", "status", "check_in", "check_out")
+            if k in data and data[k] != before.get(k)
+        ]
+        _update_day_row(attendance_repo, row_id, data)  # raises before any audit
+        if changed:
+            _audit_attendance_edit(
+                current_user, row_id, before, {**before, **data}, changed
             )
-        else:
-            data["attendance_id"] = str(uuid.uuid4())
-            _create_day_row_safe(attendance_repo, data)
+    else:
+        data["attendance_id"] = str(uuid.uuid4())
+        _create_day_row_safe(attendance_repo, data)
 
     return {"message": "Attendance marked", "date": request.date.isoformat()}
+
+
+def _require_employee_at_store(employee_id: str, store_id: Optional[str]) -> None:
+    """R15: a manager may only mark someone who works at the store being
+    written -- the same membership the grid roster uses (users.store_ids).
+    Inactive staff still count (corrections for leavers). Skipped only when
+    there is no store to check or no user store (demo mode)."""
+    if not store_id:
+        return
+    user_repo = get_user_repository()
+    if user_repo is None:
+        return
+    emp = user_repo.find_one({"user_id": employee_id})
+    if emp is None:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    if store_id not in (emp.get("store_ids") or []):
+        raise HTTPException(
+            status_code=422,
+            detail=f"This employee does not work at store {store_id}.",
+        )
 
 
 # Roles allowed to EDIT/correct an existing attendance row. Stricter than the
@@ -1320,9 +1461,7 @@ async def edit_attendance(
     existing row on the target day (which the unique index would reject anyway).
     Every edit writes an immutable audit_logs entry with before/after state.
     """
-    attendance_repo = get_attendance_repository()
-    if attendance_repo is None:
-        raise HTTPException(status_code=503, detail="Attendance store unavailable")
+    attendance_repo = _attendance_repo_or_503()
 
     existing = attendance_repo.find_one(
         {"$or": [{"attendance_id": attendance_id}, {"_id": attendance_id}]}
@@ -1401,7 +1540,7 @@ async def edit_attendance(
     updates["edited_at"] = utc_now_iso()
 
     row_id = existing.get("attendance_id") or existing.get("_id")
-    attendance_repo.update(row_id, updates)
+    _update_day_row(attendance_repo, row_id, updates)  # raises before any audit
 
     after = {**before, **updates}
     changed = [k for k in updates if k not in ("edited_by", "edited_at")]
@@ -2047,10 +2186,7 @@ async def late_marks_report(
         flt["store_id"] = scope
     if employee_id:
         flt["employee_id"] = employee_id
-    try:
-        records = attendance_repo.find_many(flt, limit=5000)
-    except Exception:
-        records = []
+    records = attendance_repo.find_many(flt, limit=5000)
 
     by_emp: dict = {}
     total = 0
@@ -2365,10 +2501,7 @@ async def lwp_report(
         att_flt["store_id"] = scope
     if employee_id:
         att_flt["employee_id"] = employee_id
-    try:
-        att_records = attendance_repo.find_many(att_flt, limit=10000)
-    except Exception:
-        att_records = []
+    att_records = attendance_repo.find_many(att_flt, limit=10000)
 
     leaves = []
     if leave_repo is not None:

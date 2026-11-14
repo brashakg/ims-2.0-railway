@@ -42,7 +42,8 @@ import {
   TrendingDown,
 } from 'lucide-react';
 import clsx from 'clsx';
-import { hrApi, storeApi } from '../../services/api';
+import { hrApi } from '../../services/api';
+import { getErrorMessage } from '../../utils/errorHandler';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { useAttendance, useLeaveRequests } from './hrQueries';
@@ -124,50 +125,18 @@ export function HRLayout() {
         <div className="flex items-center gap-2 flex-wrap">
           <button
             onClick={async () => {
+              // R01: same rule as the Attendance card -- the server is the only
+              // geo-fence (no second client copy), and its reason is shown.
+              const pos = await new Promise<GeolocationPosition | null>((resolve) => {
+                if (!navigator.geolocation) { resolve(null); return; }
+                navigator.geolocation.getCurrentPosition(resolve, () => resolve(null), { timeout: 10000, enableHighAccuracy: true });
+              });
               try {
-                const pos = await new Promise<GeolocationPosition>((resolve, reject) =>
-                  navigator.geolocation.getCurrentPosition(resolve, reject, { timeout: 10000, enableHighAccuracy: true }));
-                const lat = pos.coords.latitude;
-                const lng = pos.coords.longitude;
-
-                // Geo-fence enforcement: fetch store location from API
-                if (storeId) {
-                  try {
-                    const storeData = await storeApi.getStore(storeId);
-                    const storeLat: number | undefined = storeData?.latitude ?? storeData?.lat;
-                    const storeLng: number | undefined = storeData?.longitude ?? storeData?.lng;
-                    const radius: number = storeData?.geofence_radius ?? storeData?.geofenceRadius ?? 200;
-
-                    if (storeLat == null || storeLng == null) {
-                      toast.warning('Store location coordinates are not configured. Geo-fence check skipped.');
-                    } else {
-                      // Haversine distance calculation
-                      const R = 6371000; // Earth radius in metres
-                      const dLat = (lat - storeLat) * Math.PI / 180;
-                      const dLng = (lng - storeLng) * Math.PI / 180;
-                      const a =
-                        Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-                        Math.cos(storeLat * Math.PI / 180) * Math.cos(lat * Math.PI / 180) *
-                        Math.sin(dLng / 2) * Math.sin(dLng / 2);
-                      const distance = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-                      if (distance > radius) {
-                        toast.error(`You are ${Math.round(distance)}m from the store. Check-in requires being within ${radius}m.`);
-                        return;
-                      }
-                    }
-                  } catch {
-                    // If we cannot fetch store data, skip geo-fence rather than blocking check-in
-                    toast.warning('Could not verify store location. Proceeding without geo-fence check.');
-                  }
-                }
-
-                await hrApi.checkIn(storeId || '', lat, lng);
+                await hrApi.checkIn(storeId || '', pos?.coords.latitude, pos?.coords.longitude);
                 toast.success('Checked in successfully');
                 await refresh();
-              } catch (err: any) {
-                if (err?.code === 1) toast.error('Location access is required for check-in. Please enable GPS.');
-                else if (err?.code === 3) toast.error('Location request timed out. Please try again.');
-                else toast.error('Check-in failed. Please try again.');
+              } catch (err) {
+                toast.error(getErrorMessage(err, 'Check-in was not saved. Please try again.'));
               }
             }}
             className="btn-primary flex items-center gap-2 text-sm"
@@ -176,21 +145,13 @@ export function HRLayout() {
           </button>
           <button
             onClick={async () => {
+              // R01: today's own row is found server-side; no row -> a clear 400.
               try {
-                // Get latest attendance to find the ID. getAttendance now maps
-                // the backend camel keys, so userId / checkOutTime / id resolve.
-                const data = await hrApi.getAttendance(storeId || '');
-                const records = data?.records || data || [];
-                const today = records.find((r: any) => r.userId === user?.id && !r.checkOutTime);
-                if (today?.id) {
-                  await hrApi.checkOut(today.id);
-                  toast.success('Checked out successfully');
-                  await refresh();
-                } else {
-                  toast.warning('No open check-in found to check out.');
-                }
-              } catch {
-                toast.error('Check-out failed. Please try again.');
+                await hrApi.checkOut(storeId || '');
+                toast.success('Checked out successfully');
+                await refresh();
+              } catch (err) {
+                toast.error(getErrorMessage(err, 'Check-out was not saved. Please try again.'));
               }
             }}
             className="btn-outline flex items-center gap-2 text-sm"

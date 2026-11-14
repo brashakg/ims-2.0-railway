@@ -8,8 +8,62 @@ from datetime import datetime, date, timedelta
 from .base_repository import BaseRepository
 
 
+class AttendanceUnavailable(RuntimeError):
+    """An attendance read or write did not complete (database error).
+
+    The base repository is fail-soft (None / False / []), which let a failed
+    check-in say "Check-in recorded", a failed correction write an audit row
+    for a change that never landed, and a failed read show "no attendance"
+    (#1433 Codex round 1). Attendance raises instead; main.py answers 503."""
+
+
+def _strict(call):
+    try:
+        return call()
+    except Exception as e:  # noqa: BLE001 -- driver errors of every kind
+        if e.__class__.__name__ == "DuplicateKeyError":
+            raise  # the day-row race: callers resolve it, it is not an outage
+        raise AttendanceUnavailable(str(e)) from e
+
+
 class AttendanceRepository(BaseRepository):
-    """Repository for Attendance operations"""
+    """Repository for Attendance operations.
+
+    Strict: every read/write either completes or raises AttendanceUnavailable
+    (a DuplicateKeyError on insert is re-raised as is). update() reports
+    whether the row was MATCHED, so an unchanged re-save is not a failure."""
+
+    def find_one(self, filter: Dict) -> Optional[Dict]:
+        return _strict(lambda: self._clean_id(self.collection.find_one(filter)))
+
+    def find_many(self, filter: Dict = None, sort: List[tuple] = None, skip: int = 0, limit: int = 100) -> List[Dict]:
+        def run():
+            cursor = self.collection.find(filter or {})
+            if sort:
+                cursor = cursor.sort(sort)
+            if skip:
+                cursor = cursor.skip(skip)
+            if limit:
+                cursor = cursor.limit(limit)
+            return [self._clean_id(doc) for doc in cursor]
+
+        return _strict(run)
+
+    def create(self, data: Dict, *, raise_on_duplicate: bool = True) -> Optional[Dict]:
+        if self.id_field not in data:
+            data[self.id_field] = self._generate_id()
+        data = self._add_timestamps(data)
+        data["_id"] = data[self.id_field]
+        _strict(lambda: self.collection.insert_one(data))
+        return data
+
+    def update(self, id: str, data: Dict) -> bool:
+        doc = {**data, "updated_at": datetime.now()}
+        result = _strict(lambda: self.collection.update_one({self.id_field: id}, {"$set": doc}))
+        matched = getattr(result, "matched_count", None)
+        if matched is None:  # MockCollection reports modified_count only
+            matched = getattr(result, "modified_count", 0)
+        return bool(matched)
     
     @property
     def entity_name(self) -> str:

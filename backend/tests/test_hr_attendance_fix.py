@@ -39,7 +39,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api.routers import hr  # noqa: E402
+from api.routers import hr, hr_self_service  # noqa: E402
 from api.utils.ist import ist_today  # noqa: E402  -- server uses IST for "today"
 
 SECRET = os.environ["JWT_SECRET_KEY"]
@@ -86,9 +86,12 @@ class _FakeAttendanceRepo:
                     return False
             elif isinstance(val, dict):
                 rv = r.get(key)
-                if "$gte" in val and not (rv is not None and rv >= val["$gte"]):
+                # Mongo brackets range matches by type: a string date never
+                # matches a datetime bound (and never raises).
+                lo, hi = val.get("$gte"), val.get("$lte")
+                if "$gte" in val and not (type(rv) is type(lo) and rv >= lo):
                     return False
-                if "$lte" in val and not (rv is not None and rv <= val["$lte"]):
+                if "$lte" in val and not (type(rv) is type(hi) and rv <= hi):
                     return False
             else:
                 if r.get(key) != val:
@@ -149,6 +152,8 @@ def _make_app(
 ):
     app = FastAPI()
     app.include_router(hr.router, prefix="/hr")
+    # Self check-in/out live on the self-service router (R13).
+    app.include_router(hr_self_service.router, prefix="/hr")
     monkeypatch.setattr(
         hr, "get_attendance_repository", lambda: attendance_repo or _FakeAttendanceRepo([])
     )

@@ -37,7 +37,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from api.routers import hr  # noqa: E402
+from api.routers import hr, hr_self_service  # noqa: E402
 from api.utils.ist import ist_today  # noqa: E402  -- server uses IST for "today"
 
 SECRET = os.environ["JWT_SECRET_KEY"]
@@ -143,8 +143,11 @@ class _FakeAttendanceRepo:
         return doc
 
     def update(self, aid, updates):
+        # Same contract as AttendanceRepository.update: True when matched.
         if aid in self._store:
             self._store[aid].update(updates)
+            return True
+        return False
 
 
 def _make_app(monkeypatch, attendance_records=None, leave_records=None,
@@ -152,6 +155,8 @@ def _make_app(monkeypatch, attendance_records=None, leave_records=None,
     """Build a TestClient with monkeypatched fake repos."""
     app = FastAPI()
     app.include_router(hr.router, prefix="/hr")
+    # Self check-in/out live on the self-service router (R13).
+    app.include_router(hr_self_service.router, prefix="/hr")
 
     monkeypatch.setattr(
         hr, "get_attendance_repository",

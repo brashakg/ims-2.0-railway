@@ -33,7 +33,6 @@ vi.mock('../../../context/ToastContext', () => ({
 
 import { DailyScorecardPage } from '../../incentive/DailyScorecardPage';
 import { PointsHistoryPage } from '../../incentive/PointsHistoryPage';
-import { AttendanceWidget } from '../../../components/hr/AttendanceWidget';
 import { WorkshopProductivityCard } from '../../reports/sections/WorkshopProductivityCard';
 import AdPerformancePage from '../../marketing/AdPerformancePage';
 import PromotionsReportPage from '../../promotions/PromotionsReportPage';
@@ -105,12 +104,8 @@ it.each(CLOCKS)('points history at %s runs to %s', async (clock, day) => {
   expect(m.staffHistory.mock.calls[0][2]).toBe(day);
 });
 
-it.each(CLOCKS)('attendance at %s reads %s', async (clock, day) => {
-  at(clock);
-  render(<AttendanceWidget />);
-  await waitFor(() => expect(m.getAttendance).toHaveBeenCalled());
-  expect(m.getAttendance.mock.calls[0][1]).toBe(day);
-});
+// The attendance card no longer picks a day in the browser: it reads the
+// server's own IST "today" row (R01, components/hr/__tests__/AttendanceWidget).
 
 it.each(CLOCKS)('workshop productivity at %s runs to %s', async (clock, day) => {
   at(clock);

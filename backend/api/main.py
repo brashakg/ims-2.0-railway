@@ -37,6 +37,8 @@ except ImportError:
     DATABASE_AVAILABLE = False
     logger.warning("Database module not available - running in stub mode")
 
+from database.repositories.hr_repository import AttendanceUnavailable  # noqa: E402
+
 # Import routers
 from .routers import (
     auth_router,
@@ -1059,6 +1061,22 @@ async def http_exception_handler(request: Request, exc: HTTPException):
             response.headers[header_name] = header_value
 
     return response
+
+
+ATTENDANCE_UNAVAILABLE_DETAIL = (
+    "Attendance could not be saved or read just now. Nothing was confirmed - "
+    "please try again."
+)
+
+
+# #1433: an attendance read/write that did not complete is a truthful 503,
+# never a 200 "recorded" or an empty day (the repository raises it).
+@app.exception_handler(AttendanceUnavailable)
+async def attendance_unavailable_handler(request: Request, exc: AttendanceUnavailable):
+    logger.error(f"Attendance store error on {request.method} {request.url.path}: {exc}")
+    return await http_exception_handler(
+        request, HTTPException(status_code=503, detail=ATTENDANCE_UNAVAILABLE_DETAIL)
+    )
 
 
 def _json_safe(value):
