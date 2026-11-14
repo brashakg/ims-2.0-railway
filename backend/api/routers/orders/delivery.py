@@ -249,6 +249,9 @@ async def deliver_order(
                 ),
             )
         if True:
+            from ...services.lens_stock_hook import commit_edit_holds
+
+            await commit_edit_holds(order, current_user)
             # CRM-9: Auto-trigger NPS survey on delivery (fail-soft — a survey
             # failure must NEVER block the delivery confirmation).
             try:

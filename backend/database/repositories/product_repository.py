@@ -815,7 +815,20 @@ class StockRepository(BaseRepository):
     def release_stock(self, stock_id: str) -> bool:
         return self.update(stock_id, {"status": "AVAILABLE", "reserved_at": None})
 
-    def mark_sold(self, stock_id: str, order_id: str) -> bool:
+    def read_unit(self, stock_id: str) -> Optional[Dict]:
+        """One unit by stock_id, or None when there is no such unit. A database
+        error RAISES: BaseRepository.find_by_id reports it as "no such unit",
+        and a sale must tell "try again" from "not in the stock records"."""
+        return self._clean_id(self.collection.find_one({self.id_field: stock_id}))
+
+    def mark_sold(
+        self,
+        stock_id: str,
+        order_id: str,
+        store_id: Optional[str] = None,
+        product_ids=None,
+        claim_op: Optional[str] = None,
+    ) -> bool:
         """Flip ONE SPECIFIC unit AVAILABLE -> SOLD (barcode-scan POS path).
 
         F7: this used to be an UNGUARDED update() -- it happily re-sold a unit
@@ -834,12 +847,26 @@ class StockRepository(BaseRepository):
         NOT widened to `in_stock`: that is a different status token which neither
         this method nor claim_one_available ever sold before, so accepting it
         here would be a NEW behaviour change rather than a regression fix.
+
+        `store_id` / `product_ids` (every id the line's product goes by) bind
+        the write to what the caller checked: a transfer can land the unit at
+        another shop between that check and this write, so a sale door passes
+        both and the shop that billed the unit is the shop that gives it up.
+
+        `claim_op`: the operation taking the unit, stamped in the same write.
+        A claim that wrote but lost its reply reads as a refusal; only this
+        stamp tells it from another press's claim, so only this operation
+        gives it back (release_sold_units_for_order(claim_op=...)).
         """
         flt: Dict = {
             "stock_id": stock_id,
             "status": {"$in": AVAILABLE_STATUS_VALUES},
             "$or": self._not_expired_or(),
         }
+        if store_id:
+            flt["store_id"] = store_id
+        if product_ids:
+            flt["product_id"] = {"$in": list(product_ids)}
         try:
             doc = self.collection.find_one_and_update(
                 flt,
@@ -848,6 +875,7 @@ class StockRepository(BaseRepository):
                         "status": "SOLD",
                         "sold_at": datetime.now(),
                         "order_id": order_id,
+                        "claim_op": claim_op,
                     }
                 },
             )
@@ -865,6 +893,7 @@ class StockRepository(BaseRepository):
         exclude_stock_ids=None,
         limit: Optional[int] = None,
         reason: str = "ORDER_CANCELLED",
+        claim_op: Optional[str] = None,
     ) -> "StockReleaseResult":
         """Flip units still SOLD against `order_id` back to AVAILABLE. Returns
         ``StockReleaseResult(released=[stock_ids], incomplete=bool)`` -- the
@@ -899,6 +928,9 @@ class StockRepository(BaseRepository):
             SOLD. Never guess when the line told us the answer.
           * `product_id` + `limit` -- the FIFO fallback for a line that never
             named a unit.
+          * `claim_op` -- every unit that one operation claimed (mark_sold /
+            claim_one_available): an edit that never saved gives back exactly
+            what it took, a lost-reply claim included, never another press's.
           * neither -- the whole order (cancel).
 
         `exclude_stock_ids` protects the FIFO fallback from SERIALIZED OVERSELL:
@@ -912,6 +944,8 @@ class StockRepository(BaseRepository):
         if not order_id:
             return StockReleaseResult(released, False)
         flt: Dict = {"order_id": order_id, "status": "SOLD"}
+        if claim_op:
+            flt["claim_op"] = claim_op
         if stock_id:
             flt["stock_id"] = stock_id
         elif exclude_stock_ids:
@@ -990,6 +1024,16 @@ class StockRepository(BaseRepository):
             logger.error("[STOCK] order %s released, its pieces' cost NOT re-averaged (product_cost.unsell)",
                          order_id, exc_info=True)
 
+    def sold_unit_ids(self, order_id: str, product_id: str, exclude=(), limit: int = 1) -> List[str]:
+        """Which units this order holds of a product: the names an edit writes
+        down before it frees a line that never named one, so its recovery
+        re-runs by name. A read fault raises: the caller refuses, unchanged."""
+        flt: Dict = {"order_id": order_id, "status": "SOLD", "product_id": product_id}
+        if exclude:
+            flt["stock_id"] = {"$nin": [str(s) for s in exclude]}
+        rows = self.collection.find(flt, {"_id": 0, "stock_id": 1}).limit(max(int(limit), 0))
+        return [str(r["stock_id"]) for r in rows if r.get("stock_id")]
+
     def count_sold_units_for_order(self, order_id: str) -> int:
         """How many units are STILL SOLD against this order. Lets the cancel
         path tell "nothing to release" apart from "release did not finish", and
@@ -1007,6 +1051,7 @@ class StockRepository(BaseRepository):
         store_id: str,
         order_id: str,
         exclude_ids=None,
+        claim_op: Optional[str] = None,
     ) -> Optional[str]:
         """Atomically claim one AVAILABLE unit for product+store and flip it
         SOLD; return its stock_id, or None when none is available. A stock
@@ -1052,6 +1097,7 @@ class StockRepository(BaseRepository):
                 "status": "SOLD",
                 "sold_at": datetime.now(),
                 "order_id": order_id,
+                "claim_op": claim_op,
             }
         }
         # Phase 1 (FEFO): earliest-expiring IN-DATE unit first, ISO strings.

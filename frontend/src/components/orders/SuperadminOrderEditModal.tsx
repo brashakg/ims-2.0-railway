@@ -18,6 +18,7 @@ import type { Order } from '../../types';
 import { orderApi } from '../../services/api/sales';
 import { useToast } from '../../context/ToastContext';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { mapCategory } from '../pos/orderPayload';
 
 interface EditLine {
   item_id?: string;
@@ -63,6 +64,13 @@ function lineFromOrderItem(it: Record<string, unknown>): EditLine {
   };
 }
 
+// A line typed here (no stored line, no product) is what its Category says, read
+// as the till reads it. The server refuses typed goods: they reach no product,
+// so no stock rule. A stored line keeps the type it was billed under.
+const typedHere = (l: EditLine) => !l.item_id && !l.product_id;
+const asSent = (l: EditLine): EditLine =>
+  typedHere(l) ? { ...l, item_type: mapCategory(l.category || '') || l.item_type } : l;
+
 export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
   const toast = useToast();
   const invoiceNumber =
@@ -90,9 +98,11 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
   );
   const [saving, setSaving] = useState(false);
 
+  const sentLines = useMemo(() => lines.map(asSent), [lines]);
+  const typedGoods = sentLines.some((l) => typedHere(l) && l.item_type !== 'SERVICE');
   const quoteBody = useMemo(() => ({
-    order_id: order.id, items: lines, cart_discount_percent: cartDiscountPct,
-  }), [order.id, lines, cartDiscountPct]);
+    order_id: order.id, items: sentLines, cart_discount_percent: cartDiscountPct,
+  }), [order.id, sentLines, cartDiscountPct]);
   const quoteKey = JSON.stringify(quoteBody);
   const [quote, setQuote] = useState<{ key: string; total?: number; error?: string } | null>(null);
   useEffect(() => {
@@ -106,7 +116,8 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
     return () => { live = false; clearTimeout(timer); };
   }, [quoteBody, quoteKey]);
   const currentQuote = quote?.key === quoteKey ? quote : null;
-  const newGrandTotal = currentQuote?.total ?? null;
+  // No total for a bill that cannot be saved: the save is refused, never priced.
+  const newGrandTotal = typedGoods ? null : currentQuote?.total ?? null;
 
   const originalGrandTotal = Number(order.grandTotal) || 0;
   const delta = newGrandTotal === null ? null : Math.round((newGrandTotal - originalGrandTotal) * 100) / 100;
@@ -153,7 +164,7 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
       if (!hasInvoice) {
         const res = await orderApi.superadminEditOrder(order.id, {
           reason: reason.trim(),
-          items: lines as unknown as Array<Record<string, unknown>>,
+          items: sentLines as unknown as Array<Record<string, unknown>>,
           cart_discount_percent: cartDiscountPct,
         });
         toast.success(
@@ -163,7 +174,7 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
         const res = await orderApi.superadminInvoiceChange(order.id, {
           mode,
           reason: reason.trim(),
-          items: lines as unknown as Array<Record<string, unknown>>,
+          items: sentLines as unknown as Array<Record<string, unknown>>,
           cart_discount_percent: cartDiscountPct,
         });
         if (mode === 'REVISED_INVOICE') {
@@ -394,8 +405,14 @@ export function SuperadminOrderEditModal({ order, onClose, onSaved }: Props) {
             </div>
             <div className="flex justify-between font-semibold">
               <span>New grand total</span>
-              <span>{newGrandTotal === null ? 'Pricing…' : inr(newGrandTotal)}</span>
+              <span>{typedGoods ? 'Cannot be saved' : newGrandTotal === null ? 'Pricing…' : inr(newGrandTotal)}</span>
             </div>
+            {typedGoods && (
+              <p role="alert" className="text-sm text-red-600">
+                Goods need a new bill, where the product is picked from the list.
+                Only a service line can be typed here: type SERVICE in its Category box, or remove the line.
+              </p>
+            )}
             {currentQuote?.error && <p role="alert" className="text-sm text-red-600">{currentQuote.error}</p>}
             {delta !== null && <div
               className={

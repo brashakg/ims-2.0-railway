@@ -25,6 +25,7 @@ from . import numbering
 from . import stock
 from . import workshop
 from . import release
+from . import edit_ops
 
 # ROUTE REGISTRATION ORDER == the original file's order. DO NOT REORDER.
 from . import lists
@@ -246,6 +247,7 @@ _SUBMODULES = (
     payments,
     delivery,
     release,
+    edit_ops,
     cancel,
     invoices,
     bopis,

@@ -128,6 +128,12 @@ def rebuild_edited_line(line: Dict[str, Any]) -> Dict[str, Any]:
         "add": line.get("add"),
         "axis": line.get("axis"),
         "item_note": line.get("item_note") or None,
+        # What the line physically holds: the router (admin_edit) carries these
+        # over from the stored line, so a correction keeps the unit, its lens
+        # cell and its legacy reservation key. Same keys create_order writes.
+        "stock_id": line.get("stock_id"),
+        "lens_line_id": line.get("lens_line_id"),
+        "line_index": line.get("line_index"),
     }
     return out
 
@@ -275,6 +281,7 @@ def build_revised_invoice_doc(
     after: Dict[str, Any],
     reason: str,
     user_id: Optional[str],
+    revision_key: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build the revised-invoice link/record persisted to ``revised_invoices``.
 
@@ -287,6 +294,8 @@ def build_revised_invoice_doc(
     now = utc_now_iso()
     return {
         "revision_id": str(uuid.uuid4()),
+        # The edit's identity: an identical retry finds this row and reuses it.
+        "revision_key": revision_key,
         "order_id": order.get("order_id"),
         "order_number": order.get("order_number"),
         "original_invoice_number": before.get("invoice_number"),
