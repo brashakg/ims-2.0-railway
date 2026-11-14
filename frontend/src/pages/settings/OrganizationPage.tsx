@@ -6,7 +6,10 @@
 // A store's GSTIN is derived server-side from its entity by state, so it is
 // shown read-only here.
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode, type Dispatch, type SetStateAction } from 'react';
+import {
+  cloneElement, useCallback, useEffect, useId, useMemo, useState,
+  type ReactElement, type ReactNode, type Dispatch, type SetStateAction,
+} from 'react';
 import {
   Building2, Plus, Pencil, ChevronDown, ChevronRight, MapPin, X, Loader2,
   Store as StoreIcon, Landmark, FileText, AlertTriangle,
@@ -19,6 +22,8 @@ import { validateGstin, validateIfsc, validatePincode, validatePhone, validateGe
 import { isOnlineStore } from '../../utils/storeMode';
 import { exactLocationMatch } from '../../utils/shopifyLocationMatch';
 import { getErrorMessage } from '../../utils/errorHandler';
+import { useAuth } from '../../context/AuthContext';
+import { hasNoActiveStore } from '../../utils/storeAccess';
 
 const BRANDS = ['BETTER_VISION', 'WIZOPT'];
 const STORE_TYPES = ['RETAIL', 'HQ', 'WAREHOUSE'];
@@ -31,17 +36,32 @@ const inputCls =
   'w-full border border-gray-300 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-200';
 const labelCls = 'block text-xs font-medium text-gray-600 mb-1';
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+/** A labelled control. The label is TIED to its control (htmlFor/id), so a
+ *  click on it focuses the control and assistive tech reads it as the name
+ *  (APP-03). `required` shows the * and marks the control; `error` shows the
+ *  message under the field and links it to the control. */
+function Field({
+  label, required, error, children,
+}: { label: string; required?: boolean; error?: string; children: ReactElement<Record<string, unknown>> }) {
+  const autoId = useId();
+  const id = (children.props.id as string | undefined) ?? autoId;
+  const errId = `${id}-error`;
   return (
     <div>
-      <label className={labelCls}>{label}</label>
-      {children}
+      <label htmlFor={id} className={labelCls}>{label}{required ? ' *' : ''}</label>
+      {cloneElement(children, {
+        id,
+        ...(required ? { 'aria-required': true } : {}),
+        ...(error ? { 'aria-invalid': true, 'aria-describedby': errId } : {}),
+      })}
+      {error && <p id={errId} className="text-xs text-red-600 mt-1">{error}</p>}
     </div>
   );
 }
 
 export default function OrganizationPage() {
   const toast = useToast();
+  const { user } = useAuth();
   const [entities, setEntities] = useState<Entity[]>([]);
   const [storesByEntity, setStoresByEntity] = useState<Record<string, Store[]>>({});
   const [meta, setMeta] = useState<OrgMeta>({ state_codes: [], entity_types: [] });
@@ -108,6 +128,15 @@ export default function OrganizationPage() {
       <p className="text-sm text-gray-500 mb-5">
         Legal entities (PAN) &rarr; their GSTINs (per state) &rarr; the stores under each.
       </p>
+
+      {/* APP-01: on an empty install the owner reaches this screen before any
+          store exists. Once an active store is here, point them to the picker. */}
+      {hasNoActiveStore(user) && Object.values(storesByEntity).flat().some((s) => s.is_active !== false) && (
+        <div role="status" className="mb-4 text-sm border border-blue-200 bg-blue-50 text-blue-900 rounded-lg p-3">
+          No store is chosen for this session yet.{' '}
+          <a href="/select-store" className="font-medium underline">Choose your store</a> to start working.
+        </div>
+      )}
 
       {entities.length === 0 ? (
         <div className="text-sm text-gray-500 border border-dashed border-gray-300 rounded-lg p-8 text-center">
@@ -343,7 +372,7 @@ function EntityModal({
   return (
     <Modal title={entity ? `Edit ${entity.name}` : 'New legal entity'} onClose={onClose}>
       <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
-        <Field label="Display name *"><input className={inputCls} value={form.name || ''} onChange={(e) => set('name', e.target.value)} /></Field>
+        <Field label="Display name" required><input className={inputCls} value={form.name || ''} onChange={(e) => set('name', e.target.value)} /></Field>
         <Field label="Legal name"><input className={inputCls} value={form.legal_name || ''} onChange={(e) => set('legal_name', e.target.value)} /></Field>
         <Field label="Entity type">
           <select className={inputCls} value={form.entity_type || ''} onChange={(e) => set('entity_type', e.target.value || undefined)}>
@@ -364,9 +393,9 @@ function EntityModal({
         onAdd={() => set('gstins', [...gstins, { gstin: '', state_code: '', is_primary: gstins.length === 0 }])} />
       {gstins.map((g, i) => (
         <div key={i} className="grid grid-cols-1 tablet:grid-cols-12 gap-2 mb-2 items-center">
-          <input className={`${inputCls} col-span-5 font-mono`} placeholder="15-digit GSTIN" value={g.gstin}
+          <input className={`${inputCls} col-span-5 font-mono`} aria-label={`GSTIN ${i + 1}`} placeholder="15-digit GSTIN" value={g.gstin}
             onChange={(e) => updateArr(setForm, 'gstins', i, { gstin: e.target.value.toUpperCase() })} />
-          <select className={`${inputCls} col-span-4`} value={g.state_code}
+          <select aria-label={`GSTIN ${i + 1} state`} className={`${inputCls} col-span-4`} value={g.state_code}
             onChange={(e) => updateArr(setForm, 'gstins', i, { state_code: e.target.value })}>
             <option value="">state...</option>
             {meta.state_codes.map((s) => <option key={s.code} value={s.code}>{s.code} {s.name}</option>)}
@@ -383,10 +412,10 @@ function EntityModal({
         onAdd={() => set('bank_accounts', [...banks, { account_no: '', ifsc: '' } as BankAccount])} />
       {banks.map((b, i) => (
         <div key={i} className="grid grid-cols-1 tablet:grid-cols-12 gap-2 mb-2 items-center">
-          <input className={`${inputCls} col-span-3`} placeholder="Account no" value={b.account_no} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { account_no: e.target.value })} />
-          <input className={`${inputCls} col-span-3`} placeholder="IFSC" value={b.ifsc} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { ifsc: e.target.value.toUpperCase() })} />
-          <input className={`${inputCls} col-span-3`} placeholder="Bank name" value={b.bank_name || ''} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { bank_name: e.target.value })} />
-          <select className={`${inputCls} col-span-2`} value={b.gstin || ''} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { gstin: e.target.value || undefined })}>
+          <input className={`${inputCls} col-span-3`} aria-label={`Bank account ${i + 1} number`} placeholder="Account no" value={b.account_no} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { account_no: e.target.value })} />
+          <input className={`${inputCls} col-span-3`} aria-label={`Bank account ${i + 1} IFSC`} placeholder="IFSC" value={b.ifsc} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { ifsc: e.target.value.toUpperCase() })} />
+          <input className={`${inputCls} col-span-3`} aria-label={`Bank account ${i + 1} bank name`} placeholder="Bank name" value={b.bank_name || ''} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { bank_name: e.target.value })} />
+          <select aria-label={`Bank account ${i + 1} GSTIN`} className={`${inputCls} col-span-2`} value={b.gstin || ''} onChange={(e) => updateArr(setForm, 'bank_accounts', i, { gstin: e.target.value || undefined })}>
             <option value="">GSTIN</option>
             {gstins.filter((g) => g.gstin).map((g) => <option key={g.gstin} value={g.gstin}>{g.state_code}</option>)}
           </select>
@@ -426,8 +455,17 @@ function StoreModal({
     entity_id: entity.entity_id, brand: BRANDS[0], store_type: 'RETAIL',
     geofence_radius_m: 500, enabled_categories: [],
   });
-  const set = (k: keyof StorePayload, v: unknown) => setForm((p) => ({ ...p, [k]: v }));
+  // Field-level messages from the last Save press; editing a field clears its own.
+  const [errors, setErrors] = useState<Partial<Record<keyof StorePayload, string>>>({});
+  const set = (k: keyof StorePayload, v: unknown) => {
+    setForm((p) => ({ ...p, [k]: v }));
+    setErrors((e) => (e[k] ? { ...e, [k]: undefined } : e));
+  };
   const cats = form.enabled_categories || [];
+  // A NEW store must carry every field POST /stores requires (StoreCreate);
+  // an existing store keeps the old rule (code + name) so a legacy row with a
+  // blank field can still be edited.
+  const isNew = !store;
 
   // Per-store Shopify location (owner ruling 2026-09-06: every physical shop
   // is a Shopify location; IMS writes that shop's own on-hand there). ONE read
@@ -469,14 +507,10 @@ function StoreModal({
   }, [entity, form.state_code]);
 
   const save = async () => {
-    if (!form.store_code || !form.store_name) { toast.error('Store code and name are required'); return; }
     if (!form.entity_id) { toast.error('Entity is required'); return; }
-    const fieldErr = firstError(
-      validatePincode(form.pincode),
-      validatePhone(form.phone),
-      validatePhone(form.whatsapp),
-      validateGeoRadius(form.geofence_radius_m),
-    );
+    const found = storeFormErrors(form, isNew);
+    setErrors(found);
+    const fieldErr = firstError(...Object.values(found));
     if (fieldErr) { toast.error(fieldErr); return; }
     setSaving(true);
     try {
@@ -492,9 +526,9 @@ function StoreModal({
   return (
     <Modal title={store ? `Edit ${store.store_name}` : `New store under ${entity.name}`} onClose={onClose}>
       <div className="grid grid-cols-1 tablet:grid-cols-2 gap-3">
-        <Field label="Store code *"><input className={inputCls} value={form.store_code || ''} onChange={(e) => set('store_code', e.target.value.toUpperCase())} /></Field>
-        <Field label="Store name *"><input className={inputCls} value={form.store_name || ''} onChange={(e) => set('store_name', e.target.value)} /></Field>
-        <Field label="Brand">
+        <Field label="Store code" required error={errors.store_code}><input className={inputCls} value={form.store_code || ''} onChange={(e) => set('store_code', e.target.value.toUpperCase())} /></Field>
+        <Field label="Store name" required error={errors.store_name}><input className={inputCls} value={form.store_name || ''} onChange={(e) => set('store_name', e.target.value)} /></Field>
+        <Field label="Brand" required={isNew} error={errors.brand}>
           <select className={inputCls} value={form.brand || ''} onChange={(e) => set('brand', e.target.value)}>
             {BRANDS.map((b) => <option key={b} value={b}>{b}</option>)}
           </select>
@@ -504,18 +538,18 @@ function StoreModal({
             {STORE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
           </select>
         </Field>
-        <Field label="State">
+        <Field label="State" required={isNew} error={errors.state_code}>
           <select className={inputCls} value={form.state_code || ''} onChange={(e) => { const sc = e.target.value; set('state_code', sc); set('state', meta.state_codes.find((s) => s.code === sc)?.name); }}>
             <option value="">state...</option>
             {meta.state_codes.map((s) => <option key={s.code} value={s.code}>{s.code} {s.name}</option>)}
           </select>
         </Field>
         <Field label="GSTIN (derived from entity)"><input className={`${inputCls} bg-gray-50 font-mono`} value={derivedGstin} readOnly placeholder="set state to derive" /></Field>
-        <Field label="City"><input className={inputCls} value={form.city || ''} onChange={(e) => set('city', e.target.value)} /></Field>
-        <Field label="PIN code"><input className={inputCls} value={form.pincode || ''} onChange={(e) => set('pincode', e.target.value)} /></Field>
-        <Field label="Phone"><input className={inputCls} value={form.phone || ''} onChange={(e) => set('phone', e.target.value)} /></Field>
-        <Field label="WhatsApp"><input className={inputCls} value={form.whatsapp || ''} onChange={(e) => set('whatsapp', e.target.value)} /></Field>
-        <div className="col-span-2"><Field label="Address"><input className={inputCls} value={form.address || ''} onChange={(e) => set('address', e.target.value)} /></Field></div>
+        <Field label="City" required={isNew} error={errors.city}><input className={inputCls} value={form.city || ''} onChange={(e) => set('city', e.target.value)} /></Field>
+        <Field label="PIN code" required={isNew} error={errors.pincode}><input className={inputCls} value={form.pincode || ''} onChange={(e) => set('pincode', e.target.value)} /></Field>
+        <Field label="Phone" required={isNew} error={errors.phone}><input className={inputCls} value={form.phone || ''} onChange={(e) => set('phone', e.target.value)} /></Field>
+        <Field label="WhatsApp" error={errors.whatsapp}><input className={inputCls} value={form.whatsapp || ''} onChange={(e) => set('whatsapp', e.target.value)} /></Field>
+        <div className="col-span-2"><Field label="Address" required={isNew} error={errors.address}><input className={inputCls} value={form.address || ''} onChange={(e) => set('address', e.target.value)} /></Field></div>
         <Field label="Locality"><input className={inputCls} value={form.locality || ''} onChange={(e) => set('locality', e.target.value)} /></Field>
         <Field label="Landmark"><input className={inputCls} value={form.landmark || ''} onChange={(e) => set('landmark', e.target.value)} /></Field>
       </div>
@@ -524,7 +558,7 @@ function StoreModal({
       <div className="grid grid-cols-1 tablet:grid-cols-2 lg:grid-cols-3 gap-3">
         <Field label="Latitude"><input className={inputCls} type="number" step="any" value={form.latitude ?? ''} onChange={(e) => set('latitude', e.target.value === '' ? null : parseFloat(e.target.value))} /></Field>
         <Field label="Longitude"><input className={inputCls} type="number" step="any" value={form.longitude ?? ''} onChange={(e) => set('longitude', e.target.value === '' ? null : parseFloat(e.target.value))} /></Field>
-        <Field label="Radius (m)"><input className={inputCls} type="number" value={form.geofence_radius_m ?? 500} onChange={(e) => set('geofence_radius_m', e.target.value === '' ? null : parseInt(e.target.value, 10))} /></Field>
+        <Field label="Radius (m)" error={errors.geofence_radius_m}><input className={inputCls} type="number" value={form.geofence_radius_m ?? 500} onChange={(e) => set('geofence_radius_m', e.target.value === '' ? null : parseInt(e.target.value, 10))} /></Field>
       </div>
 
       <SectionHeader icon={<StoreIcon className="w-3.5 h-3.5" />} title="Operations" />
@@ -610,6 +644,42 @@ function StoreModal({
       <ModalFooter saving={saving} onClose={onClose} onSave={save} />
     </Modal>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Store form contract
+// ---------------------------------------------------------------------------
+/** The fields POST /stores requires (backend StoreCreate: store_code,
+ *  store_name, brand, address, city, state, pincode, phone; entity_id comes
+ *  from the entity row). `state` is set together with `state_code` by the
+ *  State picker, so the picker's value is what is checked. */
+const STORE_REQUIRED: Array<[keyof StorePayload, string]> = [
+  ['store_code', 'Store code'], ['store_name', 'Store name'], ['brand', 'Brand'],
+  ['state_code', 'State'], ['city', 'City'], ['pincode', 'PIN code'],
+  ['phone', 'Phone'], ['address', 'Address'],
+];
+const ALWAYS_REQUIRED: Array<keyof StorePayload> = ['store_code', 'store_name'];
+
+/** Every problem with the store form, keyed by field (empty = can save). A NEW
+ *  store must fill every required field; an edit keeps the code + name rule.
+ *  Blank text (spaces only) counts as missing. */
+function storeFormErrors(
+  form: StorePayload,
+  isNew: boolean,
+): Partial<Record<keyof StorePayload, string>> {
+  const out: Partial<Record<keyof StorePayload, string>> = {};
+  for (const [k, label] of STORE_REQUIRED) {
+    if (!isNew && !ALWAYS_REQUIRED.includes(k)) continue;
+    if (!String(form[k] ?? '').trim()) out[k] = `${label} is required`;
+  }
+  const fmt: Array<[keyof StorePayload, string | null]> = [
+    ['pincode', validatePincode(form.pincode as string | undefined)],
+    ['phone', validatePhone(form.phone as string | undefined)],
+    ['whatsapp', validatePhone(form.whatsapp as string | undefined)],
+    ['geofence_radius_m', validateGeoRadius(form.geofence_radius_m as number | undefined)],
+  ];
+  for (const [k, msg] of fmt) if (msg && !out[k]) out[k] = msg;
+  return out;
 }
 
 // ---------------------------------------------------------------------------
