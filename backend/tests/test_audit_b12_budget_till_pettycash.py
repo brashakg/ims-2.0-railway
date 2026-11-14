@@ -534,12 +534,12 @@ class TestD40TwoDrawersCloseTheOpenOne:
         assert close["till_session_id"] == open_sid
         assert close["till_already_counted"] is False
         assert close["closing_cash"] == 3000.0
-        assert close["variance"] == 0.0
+        assert close["variance"] is None  # D53: two drawers, no whole-day variance
         assert close["counted_from_shared_record"] is False
         assert close["till_count_differs"] is False
         assert close["entered_closing_cash"] is None
         stored = _stored_close(db)
-        assert (stored["closing_cash"], stored["variance"]) == (3000.0, 0.0)
+        assert (stored["closing_cash"], stored["variance"]) == (3000.0, None)
         assert stored["till_session_id"] == open_sid
         # B is counted; A is untouched; no third drawer.
         b, a = _till(db, open_sid), _till(db, locked_sid)
@@ -584,7 +584,7 @@ class TestD40TwoDrawersCloseTheOpenOne:
         close = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
         assert close["till_session_id"] == open_sid
         assert close["till_already_counted"] is True
-        assert (close["closing_cash"], close["variance"]) == (3000.0, 0.0)
+        assert (close["closing_cash"], close["variance"]) == (3000.0, None)
         assert close["counted_from_shared_record"] is False
         assert _till(db, locked_sid)["blind_count_paisa"] == 100000
 
@@ -658,7 +658,7 @@ class TestD40BothDrawersLockedLinksTheLatest:
         close = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
 
         assert close["till_session_id"] == b
-        assert (close["closing_cash"], close["variance"]) == (3000.0, 0.0)
+        assert (close["closing_cash"], close["variance"]) == (3000.0, None)
         assert close["counted_from_shared_record"] is False
         assert close["entered_closing_cash"] is None
         assert close["till_drawers_on_day"] == 2
@@ -672,8 +672,14 @@ class TestD40BothDrawersLockedLinksTheLatest:
         close = day_end(closing_cash=1000.0, system_cash=3000.0)["close"]
 
         assert close["till_session_id"] == b
-        assert (close["closing_cash"], close["variance"]) == (1000.0, -2000.0)
+        assert (close["closing_cash"], close["variance"]) == (1000.0, None)
         assert close["counted_from_shared_record"] is False
+        # D53: the last drawer's shortage is on the record as THAT drawer's
+        # own count and variance, never folded into a whole-day figure.
+        drawers = {d["session_id"]: d for d in close["till_drawers"]}
+        assert drawers[a]["counted_paisa"] == 300000
+        assert drawers[b]["counted_paisa"] == 100000
+        assert drawers[b]["variance_paisa"] == _till(db, b)["variance_paisa"]
 
     def test_cash_register_after_both_locked_links_the_latest_drawer(
         self, db, monkeypatch
@@ -734,7 +740,7 @@ class TestD40BothDrawersLockedLinksTheLatest:
 
         close = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
         assert close["till_session_id"] == b
-        assert (close["closing_cash"], close["variance"]) == (3000.0, 0.0)
+        assert (close["closing_cash"], close["variance"]) == (3000.0, None)
         assert _stored_close(db)["closing_cash"] == 3000.0
         assert _till(db, a)["blind_count_paisa"] == 100000
 
@@ -761,12 +767,12 @@ class TestD40ReopenedOlderDrawerDoesNotOutrankTheLatest:
         close = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
 
         assert close["till_session_id"] == b
-        assert (close["closing_cash"], close["variance"]) == (3000.0, 0.0)
+        assert (close["closing_cash"], close["variance"]) == (3000.0, None)
         assert close["counted_from_shared_record"] is False
         assert close["entered_closing_cash"] is None
         assert close["till_drawers_on_day"] == 2
         stored = _stored_close(db)
-        assert (stored["closing_cash"], stored["variance"]) == (3000.0, 0.0)
+        assert (stored["closing_cash"], stored["variance"]) == (3000.0, None)
         # Nothing on the till moved: A still reopened with its count, B locked.
         ra, rb = _till(db, a), _till(db, b)
         assert (ra["status"], ra["blind_count_paisa"]) == (till.STATUS_BLIND_SUBMITTED, 100000)
@@ -779,7 +785,7 @@ class TestD40ReopenedOlderDrawerDoesNotOutrankTheLatest:
         close = day_end(closing_cash=1000.0, system_cash=3000.0)["close"]
 
         assert close["till_session_id"] == b
-        assert (close["closing_cash"], close["variance"]) == (1000.0, -2000.0)
+        assert (close["closing_cash"], close["variance"]) == (1000.0, None)
 
     def test_cash_register_links_the_latest_drawer_not_the_reopened_one(
         self, db, monkeypatch
@@ -842,7 +848,10 @@ def _real_till_db():
         client.admin.command("ping")
     except Exception as exc:  # noqa: BLE001
         pytest.skip(f"no MongoDB at {host}:{port} ({exc})")
-    name = f"ims_test_b12_{uuid.uuid4().hex[:8]}"
+    # A local run on a shared mongod can name its own throwaway prefix.
+    prefix = os.getenv("B12_NATIVE_DB_PREFIX", "ims_test_b12")
+    assert not prefix.startswith(("ims_codex_", "ims_audit_")), prefix
+    name = f"{prefix}_{uuid.uuid4().hex[:8]}"
     return client, client[name], name
 
 
@@ -1303,3 +1312,344 @@ def test_l3_15_jarvis_context_reads_the_shape_budgeting_writes():
     block = src[src.index('get_db_collection("budgets")'):][:1200]
     assert 'b.get("planned_amount")' in block and 'b.get("head")' in block
     assert 'b.get("allocated")' not in block and 'b.get("spent")' not in block
+
+
+# ===========================================================================
+# Round 7 (Codex PR-1421-round1): native read faults, simultaneous closes, D53
+# ===========================================================================
+
+from datetime import datetime  # noqa: E402
+
+from pymongo.errors import AutoReconnect  # noqa: E402
+
+from database.repositories.expense_repository import ExpenseRepository  # noqa: E402
+from database.repositories.order_repository import OrderRepository  # noqa: E402
+
+BUDGET_ORDER = {"order_id": "R7-ORD", "store_id": STORE, "status": "CONFIRMED",
+                "grand_total": 2500.0, "created_at": datetime(2026, 11, 15)}
+BUDGET_RENT = {"expense_id": "R7-RENT", "store_id": STORE, "category": "rent",
+               "amount": 250.0, "status": "APPROVED", "expense_date": "2026-11-15"}
+
+
+def _real_repos(monkeypatch, world):
+    """The REAL OrderRepository / ExpenseRepository over ``world`` -- their
+    find_many is the one that printed a failed read and answered []."""
+    monkeypatch.setattr(budgets_router, "_budgets_collection",
+                        lambda: world.get_collection("budgets"))
+    monkeypatch.setattr(budgets_router, "get_order_repository",
+                        lambda: OrderRepository(world.get_collection("orders")))
+    monkeypatch.setattr(budgets_router, "get_expense_repository",
+                        lambda: ExpenseRepository(world.get_collection("expenses")))
+
+
+def _assert_budget_reads_503():
+    for read in (_dashboard, _variance):
+        with pytest.raises(HTTPException) as exc:
+            read()
+        assert exc.value.status_code == 503
+        assert "Could not read the budget" in str(exc.value.detail)
+        assert "injected" not in str(exc.value.detail)
+
+
+class TestR7BudgetActualsFailBelowTheRepository:
+    """Codex P2: the budget readers caught a failure only ABOVE the repository,
+    but OrderRepository/ExpenseRepository.find_many (BaseRepository) and
+    reports._orders_in_window both swallow a failed read into []. A dropped
+    connection on `orders` read as revenue 0 (variance -10,000) and on
+    `expenses` as rent 0, both 200. The fault is injected at the COLLECTION,
+    under the real repositories."""
+
+    @pytest.mark.parametrize("broken", ["orders", "expenses"])
+    def test_a_collection_read_fault_is_503_never_a_zero_actual(
+        self, monkeypatch, broken
+    ):
+        world = StrictDB()
+        _real_repos(monkeypatch, world)
+        world.seed("orders", [dict(BUDGET_ORDER)])
+        world.seed("expenses", [dict(BUDGET_RENT)])
+        _save("REVENUE", 10000)
+        _save("rent", 1000)
+        healthy = _dashboard()
+        assert healthy["revenue"]["actual"] == 2500.0
+        assert healthy["categories"]["rent"]["actual"] == 250.0
+
+        coll = world.get_collection(broken)
+        real_find = coll.find
+
+        def _drop(*_a, **_k):
+            raise AutoReconnect("injected connection drop")
+
+        monkeypatch.setattr(coll, "find", _drop)
+        _assert_budget_reads_503()
+        monkeypatch.setattr(coll, "find", real_find)
+        assert _dashboard() == healthy
+
+    def test_other_reports_keep_their_fail_soft_contract(self):
+        """Only the budget reader is strict: _orders_in_window's default (the
+        sales reports) is unchanged."""
+
+        class _Repo:
+            def find_many(self, *_a, **_k):
+                raise AutoReconnect("x")
+
+        from api.routers.reports import _shared
+
+        kw = dict(store_id=STORE, start_dt=datetime(2026, 11, 1), end_dt=datetime(2026, 12, 1))
+        assert _shared._orders_in_window(_Repo(), **kw) == []
+        with pytest.raises(AutoReconnect):
+            _shared._orders_in_window(_Repo(), strict=True, **kw)
+
+
+@pytest.mark.parametrize("broken", ["orders", "expenses"])
+def test_r7_budget_actuals_native_read_fault_is_503_on_real_mongo(monkeypatch, broken):
+    """Codex's reproduction on a native PyMongo Database: Collection.find raises
+    AutoReconnect for that collection only. Both readers answered 200 with a
+    zero actual; they answer 503, and the true figures return afterwards."""
+    from pymongo.collection import Collection
+
+    client, real_db, name = _real_till_db()
+    try:
+        _real_repos(monkeypatch, real_db)
+        real_db.orders.insert_one(dict(BUDGET_ORDER))
+        real_db.expenses.insert_one(dict(BUDGET_RENT))
+        _save("REVENUE", 10000)
+        _save("rent", 1000)
+        healthy = _dashboard()
+        assert (healthy["revenue"]["actual"], healthy["categories"]["rent"]["actual"]) == (2500.0, 250.0)
+
+        real_find = Collection.find
+
+        def _drop(self, *a, **k):
+            if self.database.name == name and self.name == broken:
+                raise AutoReconnect("injected connection drop")
+            return real_find(self, *a, **k)
+
+        monkeypatch.setattr(Collection, "find", _drop)
+        _assert_budget_reads_503()
+        monkeypatch.setattr(Collection, "find", real_find)
+        assert _dashboard() == healthy
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+class TestR7OneCloseRecordPerShopDay:
+    """Codex P2: the "already closed?" read and the insert were separate, so
+    two closes that both read "not closed" both answered 200 and stored two
+    close records for one shop-day. The key is now the record's _id."""
+
+    def test_a_close_whose_precheck_missed_is_refused_409_and_stores_nothing(
+        self, db, day_end, monkeypatch
+    ):
+        """The race, deterministic: the second close's pre-check reads the day
+        as not closed (exactly what the loser of a simultaneous pair sees)."""
+        sid = _blind_count(db, rupees=1000, lock=False)
+        first = day_end(closing_cash=1000.0, system_cash=1000.0)["close"]
+
+        closes = db.get_collection("day_end_closes")
+        real_find_one = closes.find_one
+        calls = {"n": 0}
+
+        def _stale_precheck(query, *a, **k):
+            calls["n"] += 1
+            return None if calls["n"] == 1 else real_find_one(query, *a, **k)
+
+        monkeypatch.setattr(closes, "find_one", _stale_precheck)
+        with pytest.raises(HTTPException) as exc:
+            day_end(closing_cash=2000.0, system_cash=1000.0)
+        assert exc.value.status_code == 409
+        assert exc.value.detail["close"]["closing_cash"] == first["closing_cash"] == 1000.0
+        rows = list(closes.docs)
+        assert len(rows) == 1
+        assert rows[0]["_id"] == "DAYEND:%s:%s" % (STORE, DATE)
+        assert _till(db, sid)["blind_count_paisa"] == 100000
+
+    def test_control_a_legacy_close_with_a_random_id_still_blocks_a_new_one(
+        self, db, day_end
+    ):
+        db.get_collection("day_end_closes").insert_one(
+            {"store_id": STORE, "date": DATE, "closing_cash": 500.0}
+        )
+        with pytest.raises(HTTPException) as exc:
+            day_end(closing_cash=2000.0, system_cash=1000.0)
+        assert exc.value.status_code == 409
+        assert len(db.get_collection("day_end_closes").docs) == 1
+
+
+class _NativeDB:
+    """A native PyMongo Database behind the app's db handle shape."""
+
+    is_connected = True
+
+    def __init__(self, real_db):
+        self._db = real_db
+
+    def get_collection(self, name):
+        return self._db.get_collection(name)
+
+
+def test_r7_two_simultaneous_closes_store_one_record_on_real_mongo(monkeypatch):
+    """Codex's concurrent_close.py on a native PyMongo Database: both closes
+    pass the "already closed?" read (held at a barrier), then both insert. One
+    answers 200, the other 409 naming the same stored close; one record."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pymongo.collection import Collection
+
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        handle = _NativeDB(real_db)
+        monkeypatch.setattr(reports_router, "get_db", lambda: handle)
+        monkeypatch.setattr("api.services.stores_util.is_online_store", lambda _db, _sid: False)
+        till.open_session(handle, store_id=STORE, session_date=DATE,
+                          opening_float_paisa=100000, actor=CASHIER)
+
+        real_find_one = Collection.find_one
+        barrier = threading.Barrier(2)
+        lock = threading.Lock()
+        held = []
+
+        def _synced(self, query=None, *a, **k):
+            answer = real_find_one(self, query, *a, **k)
+            if (self.database.name == name and self.name == "day_end_closes"
+                    and query == {"store_id": STORE, "date": DATE} and answer is None):
+                with lock:
+                    first = len(held) < 2
+                    if first:
+                        held.append(1)
+                if first:
+                    barrier.wait(timeout=10)
+            return answer
+
+        monkeypatch.setattr(Collection, "find_one", _synced)
+
+        def _close(amount):
+            body = reports_router.DayEndCloseBody(
+                date=DATE, store_id=STORE, closing_cash=amount, system_cash=1000.0)
+            try:
+                return 200, asyncio.run(
+                    reports_router.create_day_end_close(body, current_user=MANAGER))["close"]
+            except HTTPException as exc:
+                return exc.status_code, exc.detail
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(_close, [1000.0, 2000.0]))
+        monkeypatch.setattr(Collection, "find_one", real_find_one)
+
+        assert sorted(r[0] for r in results) == [200, 409], results
+        stored = list(real_db.day_end_closes.find({"store_id": STORE, "date": DATE}))
+        assert len(stored) == 1
+        won = next(body for code, body in results if code == 200)
+        lost = next(body for code, body in results if code == 409)
+        assert lost["close"]["closing_cash"] == won["closing_cash"] == stored[0]["closing_cash"]
+        session = real_db.till_sessions.find_one({"store_id": STORE, "session_date": DATE})
+        assert session["blind_count_paisa"] == int(round(stored[0]["closing_cash"] * 100))
+        assert real_db.till_sessions.count_documents({}) == 1
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+class TestR7D53SeveralDrawersNoWholeDayVariance:
+    """D53: on a day with more than one drawer, drawers are not summed and
+    neither close door shows one whole-day variance or a "balanced" verdict;
+    each drawer's own count and variance are stored and the day's drawer count
+    is said. Codex's replay: drawers Rs 1,000 and Rs 3,000, typed/system
+    Rs 4,000, stored Rs 3,000 with variance -1,000."""
+
+    def test_day_end_two_locked_drawers_stores_each_drawer_and_no_day_variance(
+        self, db, day_end
+    ):
+        a, b = _two_locked_drawers(db, a_rupees=1000, b_rupees=3000)
+
+        close = day_end(closing_cash=4000.0, system_cash=4000.0)["close"]
+
+        assert close["variance"] is None
+        assert close["variance_withheld_several_drawers"] is True
+        assert close["till_drawers_on_day"] == 2
+        assert [d["session_id"] for d in close["till_drawers"]] == [a, b]
+        assert [d["counted_paisa"] for d in close["till_drawers"]] == [100000, 300000]
+        for d in close["till_drawers"]:
+            assert d["variance_paisa"] == _till(db, d["session_id"])["variance_paisa"]
+            assert d["status"] == till.STATUS_LOCKED
+        stored = _stored_close(db)
+        assert stored["variance"] is None and len(stored["till_drawers"]) == 2
+
+    def test_a_cashier_reading_the_close_never_sees_a_drawer_variance(self, db, day_end):
+        _two_locked_drawers(db, a_rupees=1000, b_rupees=3000)
+        day_end(closing_cash=4000.0, system_cash=4000.0)
+        read = asyncio.run(reports_router.get_day_end_close(
+            date=DATE, store_id=STORE, current_user=CASHIER))["close"]
+        assert [d["counted_paisa"] for d in read["till_drawers"]] == [100000, 300000]
+        assert all("variance_paisa" not in d for d in read["till_drawers"])
+        manager = asyncio.run(reports_router.get_day_end_close(
+            date=DATE, store_id=STORE, current_user=MANAGER))["close"]
+        assert all("variance_paisa" in d for d in manager["till_drawers"])
+
+    def test_an_unlocked_drawer_variance_stays_hidden_on_the_record(self, db, day_end):
+        """Blind rule: a drawer's variance is revealed by its lock, not by a
+        close of the day."""
+        a, b = _locked_then_second_drawer(db)
+        close = day_end(closing_cash=3000.0, system_cash=3000.0)["close"]
+        drawers = {d["session_id"]: d for d in close["till_drawers"]}
+        assert drawers[b]["status"] == till.STATUS_BLIND_SUBMITTED
+        assert drawers[b]["variance_paisa"] is None
+        assert drawers[a]["variance_paisa"] is not None
+
+    def test_control_one_drawer_keeps_its_variance_and_no_drawer_list(self, db, day_end):
+        _blind_count(db, rupees=1000, lock=True)
+        close = day_end(closing_cash=1000.0, system_cash=4000.0)["close"]
+        assert close["variance"] == -3000.0
+        assert close["till_drawers"] is None
+        assert close["variance_withheld_several_drawers"] is False
+
+    def test_cash_register_two_drawers_withholds_the_verdict_and_needs_no_note(
+        self, db, monkeypatch
+    ):
+        _two_locked_drawers(db, a_rupees=1000, b_rupees=3000)
+
+        out = _cr_close_two_drawers(
+            db, monkeypatch,
+            denominations=[{"face": 500, "kind": "note", "pieces": 8}],
+            closing_count_state="COUNTED",
+        )
+
+        assert out["variance"] is None
+        assert out["variance_status"] == "SEVERAL_DRAWERS"
+        assert [d["counted_paisa"] for d in out["till_drawers"]] == [100000, 300000]
+        stored = db.get_collection("cash_register_sessions").find_one({"_id": "CR-D40"})
+        assert (stored["variance"], stored["variance_status"]) == (None, "SEVERAL_DRAWERS")
+
+
+class TestR7D53DrawerOrder:
+    """D53 lookup order: an uncounted OPEN drawer first; otherwise the
+    latest-opened; a legacy row with no opened_at orders by created_at, then by
+    id. Legacy rows used to sort as the oldest whatever their created_at."""
+
+    @staticmethod
+    def _legacy(db, sid, created_at, rupees):
+        db.get_collection("till_sessions").insert_one({
+            "_id": sid, "session_id": sid, "store_id": STORE, "session_date": DATE,
+            "status": till.STATUS_LOCKED, "created_at": created_at,
+            "blind_count_paisa": rupees * 100, "variance_paisa": 0,
+        })
+
+    def test_legacy_rows_without_opened_at_order_by_created_at(self, db):
+        # The LATER row is inserted FIRST, so insertion order cannot pass this.
+        self._legacy(db, "TILL-LEGACY-B", datetime(2026, 11, 4, 15, 0), 3000)
+        self._legacy(db, "TILL-LEGACY-A", datetime(2026, 11, 4, 9, 0), 1000)
+        link = till.record_screen_close(
+            db, store_id=STORE, session_date=DATE, counted_paisa=300000, actor=MANAGER)
+        assert link["session_id"] == "TILL-LEGACY-B"
+        assert till.shared_counted_paisa(link) == 300000
+        assert [d["session_id"] for d in link["drawers"]] == ["TILL-LEGACY-A", "TILL-LEGACY-B"]
+
+    def test_a_created_at_tie_falls_back_to_the_id(self, db):
+        same = datetime(2026, 11, 4, 9, 0)
+        self._legacy(db, "TILL-LEGACY-2", same, 3000)
+        self._legacy(db, "TILL-LEGACY-1", same, 1000)
+        link = till.record_screen_close(
+            db, store_id=STORE, session_date=DATE, counted_paisa=300000, actor=MANAGER)
+        assert link["session_id"] == "TILL-LEGACY-2"
