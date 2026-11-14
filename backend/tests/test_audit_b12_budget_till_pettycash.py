@@ -1622,6 +1622,34 @@ class TestR7D53SeveralDrawersNoWholeDayVariance:
         stored = db.get_collection("cash_register_sessions").find_one({"_id": "CR-D40"})
         assert (stored["variance"], stored["variance_status"]) == (None, "SEVERAL_DRAWERS")
 
+        # Cash Reconciliation: drawer B is LOCKED, so this close folds into
+        # B's own Z-Read row; no row carries a whole-day variance.
+        rows = _recon(db, monkeypatch)
+        assert all(r["source"] == "BLIND_EOD" for r in rows), rows
+
+    def test_cash_reconciliation_does_not_rederive_the_withheld_variance(
+        self, db, monkeypatch
+    ):
+        """The second drawer is counted at Cash Register but not yet locked, so
+        the cash-register row stands on its own in Cash Reconciliation. It used
+        to recompute counted - expected there, bringing back the whole-day
+        variance the close withheld."""
+        _locked_then_second_drawer(db)
+        out = _cr_close_two_drawers(
+            db, monkeypatch,
+            denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+            closing_count_state="COUNTED",
+        )
+        assert (out["variance"], out["variance_status"]) == (None, "SEVERAL_DRAWERS")
+        row = next(r for r in _recon(db, monkeypatch) if r["session_id"] == "CR-D40")
+        assert (row["variance"], row["variance_status"]) == (None, "SEVERAL_DRAWERS")
+
+
+def _recon(db, monkeypatch):
+    monkeypatch.setattr(finance_router.cash_recon, "_get_db", lambda: db)
+    return asyncio.run(finance_router.cash_recon.cash_reconciliation_summary(
+        from_date=DATE, to_date=DATE, store_id=STORE, current_user=MANAGER))["rows"]
+
 
 class TestR7D53DrawerOrder:
     """D53 lookup order: an uncounted OPEN drawer first; otherwise the
