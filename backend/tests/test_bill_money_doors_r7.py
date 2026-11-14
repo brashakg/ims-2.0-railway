@@ -257,8 +257,44 @@ def test_an_online_refund_never_pays_again_for_a_line_the_counter_took_back(env)
     assert row["credit_note"]["store_credit"] == 0.0
     assert "already took back" in row["credit_note"]["store_credit_reason"]
     res = post_from_review(env, row)
-    assert res["status"] == "credited" and res.get("store_credit") in (0.0, None), res
+    # Round 8: and no second GST credit note for line A (the counter's note
+    # already reversed its tax): nothing is booked, the reviewer rejects it.
+    assert res["status"] == "already_returned" and res["credit_note_issued"] is False, res
     assert _balance(env) == (0.0, 0.0)
+    assert env.get_collection("credit_note_ledger").count_documents({}) == 0
+    assert env.get_collection("returns").count_documents({"shopify_refund_id": "700001"}) == 0
+
+
+def test_an_online_refund_of_a_line_the_counter_took_back_never_posts_under_auto(env, monkeypatch):
+    """ALREADY_RETURNED answers ask_a_person False; the credit cut still sends
+    the row to a person under AUTO (nothing posted automatically)."""
+    from api.services import shopify_refund as S
+
+    monkeypatch.setattr(S, "_refund_auto_enabled", lambda db: True)
+    _two_line_bill(env)
+    assert S.handle_shopify_refund(env, _line_refund(9001, "700003"), topic="refunds/create")["status"] == "queued"
+    assert env.get_collection("credit_note_ledger").count_documents({}) == 0
+
+
+def test_the_confirm_refuses_a_second_credit_note_for_a_line_already_back(env):
+    """The accountant's Confirm route answers 409 with the reason; the row
+    stays open for Reject."""
+    import asyncio
+
+    from fastapi import HTTPException as _H
+
+    from api.routers import online_store_refund_reviews as RR
+    from api.services.shopify_refund import handle_shopify_refund
+
+    _two_line_bill(env)
+    handle_shopify_refund(env, _line_refund(9001, "700004"), topic="refunds/create")
+    row = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "700004"})
+    with pytest.raises(_H) as err:
+        asyncio.run(RR.confirm_refund_review(row["review_id"], {"user_id": "acct", "roles": ["ADMIN"]}))
+    assert err.value.status_code == 409 and "press Reject" in err.value.detail
+    assert env.get_collection("credit_note_ledger").count_documents({}) == 0
+    asyncio.run(RR.reject_refund_review(row["review_id"], {"user_id": "acct", "roles": ["ADMIN"]}))
+    assert env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "700004"})["status"] == "REJECTED"
 
 
 def test_an_online_refund_of_the_other_line_is_still_paid(env):

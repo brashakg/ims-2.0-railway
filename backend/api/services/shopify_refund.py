@@ -1948,6 +1948,29 @@ def _queue_review(
     }
 
 
+ALREADY_RETURNED = "already_returned"
+ALREADY_RETURNED_NOTE = (
+    "Every item of this refund was already taken back and refunded at the counter (or by another "
+    "refund), with its own credit note. No second credit note is filed: press Reject. If Shopify "
+    "also sent money back for it, recover that by hand.")
+
+
+def _all_taken_back_elsewhere(db, order_id: str, refund_id: str, credit_note: Dict[str, Any]) -> bool:
+    """True when the refund's priced lines are wholly units another door
+    already took back (_already_back_value covers its whole gross). False
+    when it cannot tell (the post's own rules then decide)."""
+    gross = _f(credit_note.get("gross_refund"))
+    lines = credit_note.get("lines")
+    if not lines or gross <= 0 or not order_id:
+        return False
+    try:
+        order = db.get_collection("orders").find_one({"order_id": order_id})
+    except Exception:  # noqa: BLE001
+        return False
+    cut = _already_back_value(order, lines, refund_id) if order else None
+    return cut is not None and cut >= round(gross - 0.01, 2)
+
+
 def _post_credit_and_restock(
     db,
     *,
@@ -1992,6 +2015,14 @@ def _post_credit_and_restock(
         if expect_store_credit is not None and allowance[0] != expect_store_credit:
             return {"status": "review", "refund_id": refund_id, "order_id": order_id,
                     "store_credit": allowance[0], "store_credit_reason": allowance[1]}
+        if allowance[0] is not None and _all_taken_back_elsewhere(db, order_id, refund_id, credit_note):
+            # Every unit of this refund was already returned (and its GST
+            # reversed) at the counter or by another refund: a second credit
+            # note would reverse that output tax again (#1397 round 8). Book
+            # nothing; the reviewer rejects the row.
+            return {"status": ALREADY_RETURNED, "refund_id": refund_id, "order_id": order_id,
+                    "customer_id": _norm(order.get("customer_id")) or None,
+                    "credit_note_issued": False, "store_credit_reason": ALREADY_RETURNED_NOTE}
         return _post_locked(
             db, refund_id=refund_id, order=order, return_lines=return_lines,
             credit_note=credit_note, restock_store=restock_store,

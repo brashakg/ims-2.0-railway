@@ -462,6 +462,8 @@ async def confirm_refund_review(
         # saved; its credit may be booked, now or by IMS later. Say so: "could
         # not be issued" would send the accountant to book it by hand.
         raise HTTPException(status_code=422, detail=unfinished)
+    if post_status == "already_returned":
+        raise HTTPException(status_code=409, detail=result.get("store_credit_reason"))
     if not posted:
         # The post could not issue the credit note (e.g. no customer / ledger
         # error). Surface it so the accountant retries after fixing the cause.
