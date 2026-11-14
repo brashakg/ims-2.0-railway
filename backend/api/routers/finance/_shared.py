@@ -809,9 +809,10 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
     order-history import; IMS never held its stock, no unit ever goes back)
     gives back the cost its sale recorded with a credit note that brought
     goods back, at the note's date (decisions D42(c), D45(b)): its goods
-    lines, or the whole-order note scaled to its value; never an
-    amount-only, goodwill or shipping refund. Fail-soft: {} on a read
-    error."""
+    lines; never a lines-less note (the whole-order note made from
+    amount-only refunds included), a goodwill or shipping refund, or a
+    Shopify line not restocked unless Goods back brought it back.
+    Fail-soft: {} on a read error."""
     lo = _parse_range_dt(from_date, end=False)
     hi = _parse_range_dt(to_date, end=True)
 
@@ -955,21 +956,20 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 # stock, so a credit note that brought its goods back gives
                 # back the cost the sale recorded, at the note's date, once.
                 # D45(b): only such a note -- its goods lines (the live
-                # refund's, or those the importer stamped as goods_lines), or
-                # the whole-order note (orderfull:, the whole sale reversed:
-                # the order's lines scaled to the note's taxable value). A
-                # lines-less note for one refund (an amount-only, goodwill or
-                # shipping refund looks the same) and a shipping line give
-                # back no cost.
+                # refund's, or those the importer stamped as goods_lines). A
+                # lines-less note (the whole-order orderfull: note made from
+                # amount-only refunds, an amount-only, goodwill or shipping
+                # refund), a shipping line, and a Shopify refund line marked
+                # not restocked (no_restock: the customer kept it) give back
+                # no cost -- unless Goods back on its refund says the goods
+                # physically came back.
+                came_back = ret.get("shopify_refund_id") in goods
                 if noted:
-                    goods_back = [it for it in (items or ret.get("goods_lines") or [])
-                                  if (_line(it) or {}).get("item_type") != "SHIPPING"]
-                    if not (items or ret.get("goods_lines")) and str(
-                            ret.get("shopify_refund_id") or "").startswith("orderfull:"):
-                        base = sum(line_revenue_ex_gst(li) for li in lines)
-                        share = min(1.0, taxable / base) if base > 0 else 0.0
-                        goods_back = [{**it, "return_qty": it["return_qty"] * share} for it in whole]
-                    for it in goods_back:
+                    for it in items or ret.get("goods_lines") or []:
+                        if (_line(it) or {}).get("item_type") == "SHIPPING":
+                            continue
+                        if it.get("restock") is False and ret.get("shopify_refund_id") and not came_back:
+                            continue
                         _give_back(it, float(it.get("return_qty") or 0))
             else:
                 # Keyed on the physical unit: each piece back on sale gives its

@@ -1943,12 +1943,13 @@ def _book_historical_refund_credit_notes(
 
         # D45(b): a refund of goods lines for their full billed value brought
         # those goods back; one Shopify refunded LESS for (a partial or
-        # goodwill amount) is money only. The whole-order note is read by its
-        # orderfull: id.
+        # goodwill amount) is money only, and so is a line Shopify did not
+        # restock (no_restock: the customer kept it) and the whole-order note
+        # (amount-only refunds: no line says goods came back).
         goods = [] if refund.get("_reverse_whole_order") or (reconciled and not clamped) else [
             {"order_item_id": ln.get("order_item_id"), "product_id": ln.get("product_id"),
              "return_qty": float(ln.get("return_qty") or 0), "unit_price": float(ln.get("unit_price") or 0)}
-            for ln in priced if ln.get("product_id")]
+            for ln in priced if ln.get("product_id") and ln.get("restock") is not False]
         _stamp_returns_doc(refund_id, gross, gst_view, cn_date, goods_lines=goods)
 
         summary["credit_notes"] += 1

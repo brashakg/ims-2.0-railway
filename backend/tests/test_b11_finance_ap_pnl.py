@@ -594,7 +594,8 @@ def _GOODS(oid):
 def test_d42_c_a_refunded_historical_order_gives_its_estimated_cost_back_with_its_credit_note(db):
     db.orders.insert_many([_historical("H1"), _historical("H2"), _historical("H3")])
     db.returns.insert_many([
-        # The whole order refunded: the whole-order note, in November.
+        # The whole order refunded by amount-only refunds: the whole-order
+        # note, in November. No line says goods came back (D45 b): no cost.
         _hist_note("H1", "orderfull:H1", "2026-11-06T05:00:00+00:00", 1904.76, 95.24),
         # A refund covered by the whole-order note: no money of its own.
         {**_hist_note("H1", "RH1b", "2026-11-06T05:00:00+00:00", 0, 0), "gst_breakup": {},
@@ -602,8 +603,10 @@ def test_d42_c_a_refunded_historical_order_gives_its_estimated_cost_back_with_it
         # Half the order refunded (one of two pieces): the importer stamps
         # the goods line the refund gave back.
         _hist_note("H2", "RH2", "2026-11-07T05:00:00+00:00", 952.38, 47.62, goods_lines=_GOODS("H2")),
-        # A later refund through the live review on an imported order: its
-        # lines, any condition; Goods back hands it to stock-in (no unit).
+        # A later refund through the live review on an imported order, its
+        # line not restocked by Shopify, then Goods back (the goods came back
+        # after all; it hands them to stock-in, no unit): its lines, any
+        # condition.
         {**_ret("RH3", "2026-11-08T05:00:00+00:00", condition="DAMAGED", restock=False),
          "order_id": "H3", "shopify_refund_id": "RF-H3",
          "items": [{"order_item_id": "H3-L1", "product_id": "PH", "return_qty": 1.0, "unit_price": 952.38,
@@ -617,7 +620,7 @@ def test_d42_c_a_refunded_historical_order_gives_its_estimated_cost_back_with_it
     piece = 0.6 * 952.38  # the sale's own 60% estimate, a piece
     nov = _pnl()
     assert nov["returns_taxable"] == round(1904.76 + 952.38 + 952.38, 2)
-    assert nov["returns_cogs_reversal"] == round(4 * piece, 2)  # H1 whole, H2 half, H3 one
+    assert nov["returns_cogs_reversal"] == round(2 * piece, 2)  # H2 one, H3 one; H1's note none
     assert _by_store()["S1"]["cogs"] == nov["cogs"]
     cat = _by_category()
     assert cat["total_revenue"] == nov["revenue"]
@@ -657,7 +660,7 @@ def test_d45_b_only_a_note_that_brought_goods_back_gives_a_historical_cost_back(
             "taxable_value": 169.49, "gst_rate": 18.0}
     db.orders.insert_many([
         _historical("G1", items=big), _historical("G2", items=big + [ship]),
-        _historical("G3", items=big), _historical("G4", items=big)])
+        _historical("G3", items=big), _historical("G4", items=big), _historical("G5", items=big)])
     db.returns.insert_many([
         # A Rs 500 goodwill refund, stamped by the importer with no lines.
         _hist_note("G1", "RG1", "2026-11-06T05:00:00+00:00", 476.19, 23.81),
@@ -668,14 +671,22 @@ def test_d45_b_only_a_note_that_brought_goods_back_gives_a_historical_cost_back(
          "items": [{"order_item_id": "G-S", "return_qty": 1.0, "unit_price": 200.0, "condition": "GOOD",
                     "restock": False}],
          "gst_breakup": {"gross": 200.0, "taxable": 169.49, "tax": 30.51}},
-        # The whole order refunded (amount-only refunds): the whole-order note.
+        # The whole order refunded (amount-only refunds): the whole-order
+        # note. Nothing says goods came back: no cost back.
         _hist_note("G3", "orderfull:G3", "2026-11-08T05:00:00+00:00", 9523.81, 476.19),
         # A full refund of the frame line: the importer stamped its goods line.
         _hist_note("G4", "RG4", "2026-11-09T05:00:00+00:00", 9523.81, 476.19, goods_lines=[
             {"order_item_id": "G-L1", "product_id": "PG", "return_qty": 1.0, "unit_price": 10000.0}]),
+        # A live refund of the frame in full that Shopify did NOT restock
+        # (no_restock: the customer kept it), and no Goods back: money only.
+        {**_ret("RG5", "2026-11-10T05:00:00+00:00", restock=False), "order_id": "G5",
+         "shopify_refund_id": "RF-G5",
+         "items": [{"order_item_id": "G-L1", "product_id": "PG", "return_qty": 1.0, "unit_price": 10000.0,
+                    "condition": "GOOD", "restock": False}],
+         "gst_breakup": {"gross": 10000.0, "taxable": 9523.81, "tax": 476.19}},
     ])
     nov = _pnl()
-    assert nov["returns_cogs_reversal"] == 12000.0  # G3 and G4 only; G1 and G2 give back 0
+    assert nov["returns_cogs_reversal"] == 6000.0  # G4 only; G1, G2, G3 and G5 give back 0
     assert _by_store()["S1"]["cogs"] == nov["cogs"]
     cat = _by_category()
     assert cat["total_revenue"] == nov["revenue"]
@@ -709,6 +720,28 @@ def test_d45_b_the_importer_stamps_only_goods_refunded_in_full(db):
     assert [g["order_item_id"] for g in docs["FULL"]["goods_lines"]] == ["I1-L1"]
     assert "goods_lines" not in docs["GOODWILL"] and "goods_lines" not in docs["SHIP"]
     assert "items" not in docs["FULL"]  # the restock caps never read these
+
+
+def test_d45_b_the_importer_stamps_no_goods_for_a_line_shopify_did_not_restock(db):
+    from api.services import shopify_ingest
+
+    order = {**_historical("I2", items=[
+        {"item_id": "I2-L1", "product_id": "PI", "shopify_line_item_id": "LI2", "quantity": 1,
+         "unit_price": 1000.0, "item_total": 1000.0, "taxable_value": 952.38, "tax_amount": 47.62,
+         "gst_rate": 5.0, "cost_at_sale": 600.0}]), "shopify_order_id": "SH-I2"}
+    db.orders.insert_one(dict(order))
+    # Refunded in full, "Restock" unticked (no_restock): the customer kept it.
+    shopify_ingest._book_historical_refund_credit_notes(db, {
+        "id": "SH-I2", "financial_status": "refunded", "refunds": [
+            {"id": "KEPT", "processed_at": "2026-11-06T05:00:00+00:00",
+             "refund_line_items": [{"line_item_id": "LI2", "quantity": 1, "subtotal": 952.38,
+                                    "total_tax": 47.62, "restock_type": "no_restock"}],
+             "transactions": [{"kind": "refund", "status": "success", "amount": "1000.00"}]}]},
+        order)
+    doc = db.returns.find_one({"shopify_refund_id": "KEPT"}, {"_id": 0})
+    assert doc["gst_breakup"]["taxable"] == 952.38  # the GST note is booked as before
+    assert "goods_lines" not in doc
+    assert _pnl()["returns_cogs_reversal"] == 0.0
 
 
 def _gb_review(db, monkeypatch, results):
