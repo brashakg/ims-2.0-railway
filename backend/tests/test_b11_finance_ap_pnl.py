@@ -774,3 +774,29 @@ def test_d45_c2_a_restock_waiting_for_its_retry_gives_landed_pieces_back_when_th
     nov = _pnl()
     assert nov["returns_cogs_reversal"] == 500.0
     assert _by_store()["S1"]["cogs"] == nov["cogs"]
+
+
+def test_d45_c_a_landed_piece_whose_id_was_not_saved_still_gives_its_cost_back_once(db):
+    # The unit went back on sale (its audit row is written) but the door then
+    # failed to save the id on the return / review row (a fail-soft write).
+    _two_piece_order(db)
+    db.returns.insert_one({**_online_return("RG", "RF-G", "2026-11-02T05:00:00+00:00"),
+                           "items": [{"order_item_id": "L1", "product_id": "P1", "return_qty": 2.0,
+                                      "condition": "GOOD", "restock": False}],
+                           "gst_breakup": {"gross": 2000.0, "taxable": 1904.76, "tax": 95.24}})
+    db.stock_audit.insert_many([
+        # Goods back keys its restock on the refund; a second row for the same unit counts once.
+        {"stock_id": "U1", "new_status": "AVAILABLE", "source": "RETURN_RESTOCK", "return_id": "RF-G",
+         "at": "2026-11-05T05:00:00+00:00"},
+        {"stock_id": "U1", "new_status": "AVAILABLE", "source": "RETURN_RESTOCK", "return_id": "RG",
+         "at": "2026-11-06T05:00:00+00:00"},
+        # Another return's piece, and a set-aside move, are not this return's landing.
+        {"stock_id": "U2", "new_status": "AVAILABLE", "source": "RETURN_RESTOCK", "return_id": "OTHER",
+         "at": "2026-11-05T05:00:00+00:00"},
+        {"stock_id": "U2", "new_status": "QUARANTINED", "source": "RETURN_RESTOCK", "return_id": "RG",
+         "at": "2026-11-05T05:00:00+00:00"},
+    ])
+    nov = _pnl()
+    assert nov["returns_cogs_reversal"] == 500.0
+    assert _by_store()["S1"]["cogs"] == nov["cogs"]
+    assert round(sum(c["cogs"] for c in _by_category()["categories"]), 2) == nov["cogs"]

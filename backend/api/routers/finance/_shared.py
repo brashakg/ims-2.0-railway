@@ -851,6 +851,27 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 landed += [(e.get("stock_id"), parse_event_utc_naive(e.get("at")))
                            for e in row.get("goods_landed") or [] if isinstance(e, dict)]
                 goods.setdefault(row["shopify_refund_id"], []).extend(landed)
+        # When each piece a return's restock put back landed, whichever door
+        # ran it (the return, its retry, Goods back): the per-unit audit row
+        # the one restock writes once the unit is back on sale
+        # (returns._audit_stock_transition), keyed on the return or refund it
+        # was for. It also finds a landed piece whose id the door then failed
+        # to save on the return or review row.
+        # ponytail: scans stock_audit by return id (no index); add one on
+        # return_id if the collection grows large.
+        keys = list({k for r in rets for k in (r.get("return_id"), r.get("shopify_refund_id")) if k})
+        landed_at: Dict[tuple, datetime] = {}
+        audited: Dict[str, list] = {}
+        if keys:
+            for ev in db.get_collection("stock_audit").find(
+                {"return_id": {"$in": keys}, "source": "RETURN_RESTOCK", "new_status": "AVAILABLE"},
+                {"_id": 0, "stock_id": 1, "return_id": 1, "at": 1},
+            ):
+                at = parse_event_utc_naive(ev.get("at"))
+                key = (ev.get("stock_id"), ev.get("return_id"))
+                if at is not None and ev.get("stock_id") and (key not in landed_at or at < landed_at[key]):
+                    landed_at[key] = at
+                    audited.setdefault(ev.get("return_id"), []).append(ev.get("stock_id"))
         picked = []  # (return, when, taxable, tax, gross, its own credit note in range)
         for ret in rets:
             when = parse_event_utc_naive(ret.get("created_at"))
@@ -860,7 +881,8 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
             noted = _in_range(when) and (taxable > 0 or tax > 0)
             # Each unit is range-tested on its own below.
             if (noted or ret.get("quarantined_stock_ids") or ret.get("restock_stock_ids")
-                    or goods.get(ret.get("shopify_refund_id"))):
+                    or goods.get(ret.get("shopify_refund_id"))
+                    or audited.get(ret.get("return_id")) or audited.get(ret.get("shopify_refund_id"))):
                 picked.append((ret, when, taxable, tax, float(gb.get("gross") or (taxable + tax)), noted))
         order_ids = list({r[0].get("order_id") for r in picked if r[0].get("order_id")})
         orders = {
@@ -884,20 +906,6 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 at = parse_event_utc_naive(ev.get("at"))
                 if at is not None:
                     releases.setdefault(ev["stock_id"], []).append(at)
-        # When each unit a return's own restock put back landed: its per-unit
-        # audit row, written by the one restock every door runs
-        # (returns._audit_stock_transition), keyed on the return it was for.
-        own = {sid for p in picked for sid in (p[0].get("restock_stock_ids") or [])}
-        landed_at: Dict[tuple, datetime] = {}
-        if own:
-            for ev in db.get_collection("stock_audit").find(
-                {"stock_id": {"$in": list(own)}, "source": "RETURN_RESTOCK", "new_status": "AVAILABLE"},
-                {"_id": 0, "stock_id": 1, "return_id": 1, "at": 1},
-            ):
-                at = parse_event_utc_naive(ev.get("at"))
-                key = (ev.get("stock_id"), ev.get("return_id"))
-                if at is not None and (key not in landed_at or at < landed_at[key]):
-                    landed_at[key] = at
         units = db.get_collection("stock_units")
         empty = {"gross": 0.0, "taxable": 0.0, "tax": 0.0, "cogs_reversal": 0.0, "count": 0}
         for ret, when, taxable, tax, gross, noted in picked:
@@ -978,10 +986,13 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                         landed[sid] = (at, among)
 
                 good = [it for it in items if str(it.get("condition") or "").upper() == "GOOD"]
+                rkeys = [k for k in (ret.get("return_id"), ret.get("shopify_refund_id")) if k]
                 for sid in ret.get("restock_stock_ids") or []:
-                    at = min((landed_at[(sid, k)] for k in (ret.get("return_id"), ret.get("shopify_refund_id"))
-                              if (sid, k) in landed_at), default=None)
+                    at = min((landed_at[(sid, k)] for k in rkeys if (sid, k) in landed_at), default=None)
                     _lands(sid, max(when, at) if at is not None else _restocked_at(ret, when), good or items)
+                for k in rkeys:
+                    for sid in audited.get(k, []):
+                        _lands(sid, max(when, landed_at[(sid, k)]), items)
                 set_aside = [it for it in items if str(it.get("condition") or "").upper() != "GOOD"]
                 for sid in ret.get("quarantined_stock_ids") or []:
                     _lands(sid, min((t for t in releases.get(sid, []) if t >= when), default=None),
