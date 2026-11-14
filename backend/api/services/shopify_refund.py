@@ -1211,9 +1211,45 @@ def _shopify_said(money_back: float, pending: float) -> str:
     return " ".join(parts)
 
 
+def _already_back_value(order: Dict[str, Any], lines: List[Dict[str, Any]], refund_id: str) -> Optional[float]:
+    """The part of this refund's lines (priced: unit_price, return_qty) whose
+    units the counter or another refund already took back -- the line's
+    purchased qty less every OTHER door's units (returns._units_already_back,
+    the counter's own quantity rule). A unit is paid for once, whichever door
+    takes it first: the bill's total alone let a counter return and an online
+    refund of the SAME line each pay for it (#1397 round 7). None: unreadable."""
+    from types import SimpleNamespace
+
+    from ..routers.returns import (
+        _line_purchased_qty,
+        _order_line_index,
+        _resolve_original_line,
+        _units_already_back,
+    )
+
+    idx = _order_line_index(order)
+    left: Dict[int, float] = {}
+    cut = 0.0
+    for ln in lines or []:
+        qty, unit = _f(ln.get("return_qty")), _f(ln.get("unit_price"))
+        orig = _resolve_original_line(
+            SimpleNamespace(order_item_id=ln.get("order_item_id"), product_id=ln.get("product_id")), idx)
+        if orig is None:
+            continue  # a line no order line names: the bill's cap only
+        if id(orig) not in left:
+            got = _units_already_back(order.get("order_id"), orig, own_shopify_refund_id=refund_id)
+            if got is None:
+                return None
+            left[id(orig)] = _line_purchased_qty(orig) - (got[0] - got[1])
+        out = max(0.0, min(qty, left[id(orig)]))
+        left[id(orig)] -= out
+        cut += (qty - out) * unit
+    return round(cut, 2)
+
+
 def _store_credit_allowance(
     db, order_id: Any, refund_id: str, gross: float, money_back: Optional[float],
-    pending: float = 0.0,
+    pending: float = 0.0, lines: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[Optional[float], str, Optional[str], bool, float]:
     """THE rule for the redeemable store credit a Shopify refund may give: the
     refund less what Shopify itself sends back for it, and never more than the
@@ -1226,6 +1262,10 @@ def _store_credit_allowance(
     refund the customer paid with loyalty points (returns._points_paid_share,
     the counter's one rule) comes back AS POINTS, never as store credit -- it
     is the fifth answer, given back by the post (loyalty.restore_return_points).
+
+    LINES (#1397 round 7): ``lines`` (the refund's priced lines) are capped per
+    order line too -- a unit the counter or another refund already took back
+    is never paid for again (_already_back_value).
 
     Returns (credit, why, settlement, ask_a_person, points): settlement labels a
     credit cut below the note on its ledger row (EXTERNAL: Shopify paid it
@@ -1250,6 +1290,19 @@ def _store_credit_allowance(
                        exc_info=True)
         return None, ("IMS could not read this order just now, so no store credit is given "
                       "yet."), None, False, 0.0
+    back_note = ""
+    if lines and order:
+        cut = _already_back_value(order, lines, refund_id)
+        if cut is None:
+            return None, ("IMS could not read this order's earlier returns just now, so no store "
+                          "credit is given yet."), None, False, 0.0
+        if cut > 0:
+            back_note = (f"Rs {cut:.2f} of this refund is for items the counter or another refund "
+                         "already took back, so it is not paid again. ")
+            gross = round(max(gross - cut, 0.0), 2)
+            rest = round(gross - money_back, 2)
+            if rest <= 0:
+                return 0.0, f"{back_note}No store credit is given.", "ALREADY_RETURNED", False, 0.0
     # THE refundable ceiling: what was paid, and never above Shopify's own
     # total on a MISMATCH order (returns.refundable_ceiling).
     from ..routers.returns import refundable_ceiling
@@ -1305,7 +1358,7 @@ def _store_credit_allowance(
             else "it goes back as points, not store credit."))
     rest, held = round(rest - points, 2), round(held - points, 2)
     if rest <= 0 or held <= 0:
-        return 0.0, f"{said + '; ' if said else ''}No store credit is given.{points_note}", "PARTIAL", False, points
+        return 0.0, f"{back_note}{said + '; ' if said else ''}No store credit is given.{points_note}", "PARTIAL", False, points
     lead = f"{said}; " if said else ""
     if held < rest:
         credit, why, label = held, (
@@ -1333,6 +1386,8 @@ def _store_credit_allowance(
     if points > 0:
         why += points_note
         label = "PARTIAL"
+    if back_note:
+        why, label = back_note + why, label or "PARTIAL"
     return credit, why, label, ask, points
 
 
@@ -1372,71 +1427,23 @@ def _unlock_order_credit(db, order_id: Any, token: Optional[str]) -> None:
                        exc_info=True)
 
 
-def _landed(res: Any) -> bool:
-    """A compare-and-set update matched (a mock collection reports modified_count only)."""
-    matched = getattr(res, "matched_count", None)
-    return bool(getattr(res, "modified_count", 0) if matched is None else matched)
-
-
 def _hold_order_for_online(db, order_id: Any, refund_id: str, amount: float) -> bool:
-    """The online post's entry in the bill's refund holds, on the SAME
-    compare-and-set (refund_holds_v) every counter return reserves through
-    (returns._reserve_order_refund): one reservation for both doors (#1397,
-    Codex round 6). Taken under the credit lock, BEFORE the allowance is read,
-    so a counter return pressed meanwhile counts this refund (its cap; on a
-    points-paid bill it waits), and this post never prices beside a counter
-    return still being written. False -- a counter return of the bill is
-    mid-write, or the bill cannot be read: book nothing, retried. A KEPT
-    counter hold (its money went out) is no refusal: the allowance counts it
-    (_given_back_elsewhere). The hold lives as long as the credit lock."""
-    from ..routers.returns import ONLINE_HOLD_PREFIX, _live_refund_holds
+    """The online post's entry in the bill's refund holds (returns.take_bill_hold,
+    the one reservation every door takes): "shopify:<refund id>", taken under
+    the credit lock BEFORE the allowance is read, living as long as the lock.
+    False -- another door or a counter return of the bill is mid-write, or the
+    bill cannot be read: book nothing, retried."""
+    from ..routers.returns import ONLINE_HOLD_PREFIX, take_bill_hold
 
-    key = f"{ONLINE_HOLD_PREFIX}{refund_id}"
-    try:
-        coll = db.get_collection("orders")
-        for _ in range(8):
-            order = coll.find_one({"order_id": order_id})
-            if not order:
-                return True  # no bill: nothing to race (the credit lock said so too)
-            holds = dict(order.get("refund_holds") or {})
-            # Only another un-kept hold can refuse; the returns are read (to
-            # drop finished or aged ones) only when there is one.
-            others = {rid: h for rid, h in holds.items() if rid != key and not (h or {}).get("kept")}
-            if others and _live_refund_holds(order_id, others)[0]:
-                return False
-            version = order.get("refund_holds_v")
-            holds[key] = {"amount": round(_f(amount), 2), "at": datetime.now(timezone.utc).isoformat(),
-                          "ttl": _CLAIM_STALE_SECONDS, "online": True}
-            res = coll.update_one({"order_id": order_id, "refund_holds_v": version},
-                                  {"$set": {"refund_holds": holds, "refund_holds_v": int(version or 0) + 1}})
-            if _landed(res):
-                return True
-    except Exception:  # noqa: BLE001 -- unreadable (incl. the 503 of _live_refund_holds): busy
-        logger.warning("[SHOPIFY_REFUND] refund hold not taken for order=%s", order_id, exc_info=True)
-    return False
+    return take_bill_hold(db.get_collection("orders"), order_id, f"{ONLINE_HOLD_PREFIX}{refund_id}",
+                          _f(amount), door="online", ttl=_CLAIM_STALE_SECONDS)
 
 
 def _release_online_hold(db, order_id: Any, refund_id: str) -> None:
-    """Drop this post's hold (its claim, once written, counts itself). A
-    release that fails ages out with the credit lock."""
-    from ..routers.returns import ONLINE_HOLD_PREFIX
+    """Drop this post's hold (its claim, once written, counts itself)."""
+    from ..routers.returns import ONLINE_HOLD_PREFIX, drop_bill_hold
 
-    key = f"{ONLINE_HOLD_PREFIX}{refund_id}"
-    try:
-        coll = db.get_collection("orders")
-        for _ in range(8):
-            order = coll.find_one({"order_id": order_id}) or {}
-            holds = dict(order.get("refund_holds") or {})
-            if key not in holds:
-                return
-            holds.pop(key)
-            version = order.get("refund_holds_v")
-            res = coll.update_one({"order_id": order_id, "refund_holds_v": version},
-                                  {"$set": {"refund_holds": holds, "refund_holds_v": int(version or 0) + 1}})
-            if _landed(res):
-                return
-    except Exception:  # noqa: BLE001
-        logger.warning("[SHOPIFY_REFUND] refund hold not released for order=%s", order_id, exc_info=True)
+    drop_bill_hold(db.get_collection("orders"), order_id, f"{ONLINE_HOLD_PREFIX}{refund_id}")
 
 
 def _system_user(store_id: Optional[str]) -> Dict[str, Any]:
@@ -1652,7 +1659,7 @@ def handle_shopify_refund(
         # allowance here is what the reviewer is shown; the post asks again.
         settled_externally = money_back > 0
         store_credit, credit_why, _, ask_a_person, _points = _store_credit_allowance(
-            db, order.get("order_id"), refund_id, gross_refund, money_back, money_pending)
+            db, order.get("order_id"), refund_id, gross_refund, money_back, money_pending, lines=priced)
 
         credit_note = {
             "gross_refund": gross_refund,
@@ -1980,7 +1987,8 @@ def _post_credit_and_restock(
             return busy
         allowance = _store_credit_allowance(
             db, order_id, refund_id, _f(credit_note.get("gross_refund")),
-            credit_note.get("money_back"), _f(credit_note.get("money_pending")))
+            credit_note.get("money_back"), _f(credit_note.get("money_pending")),
+            lines=credit_note.get("lines"))
         if expect_store_credit is not None and allowance[0] != expect_store_credit:
             return {"status": "review", "refund_id": refund_id, "order_id": order_id,
                     "store_credit": allowance[0], "store_credit_reason": allowance[1]}

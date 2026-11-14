@@ -1559,8 +1559,7 @@ def test_a_counter_return_pressed_while_the_online_post_prices_the_bill_waits(en
     assert order["refund_holds"] == {}  # the online hold went with its post
 
 
-def test_a_counter_return_on_a_cash_bill_counts_the_online_refund_being_posted(env, points, monkeypatch):
-    import api.routers.returns as R
+def test_a_counter_return_on_a_cash_bill_waits_for_the_online_refund_being_posted(env, points, monkeypatch):
     from api.services import shopify_refund as S
 
     _cas_orders(monkeypatch, env)
@@ -1569,9 +1568,9 @@ def test_a_counter_return_on_a_cash_bill_counts_the_online_refund_being_posted(e
     review_id = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "700001"})["review_id"]
     seen = _counter_reserves_inside_the_online_post(monkeypatch, 1000.0)
     assert _confirm(review_id)[0] == 200
-    # The counter's prior already holds the online Rs 1,000: its cap refuses it.
-    assert seen[0][0] == 1000.0, seen
-    R._release_order_refund("ord-1", "RET-COUNTER")
+    # Round 7: another door's hold refuses the counter on EVERY bill (its
+    # units are not claimed on the line, so the same line could pay twice).
+    assert seen == [409], seen
     assert [r["delta"] for r in _ledger(env)] == [1000.0] and _balance(env) == (1000.0, 1000.0)
 
 
