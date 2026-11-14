@@ -201,6 +201,11 @@ export default function JournalEntriesPanel() {
       load();
     } catch (e: any) {
       toast.error(getErrorMessage(e, 'Post failed'));
+      // The approval lapsed or can no longer be used: offer approving again.
+      if (['expired', 'already_consumed', 'not_approved'].includes(e?.response?.data?.detail?.error)) {
+        setSelected({ ...je, needs_reapproval: true });
+        load();
+      }
     } finally {
       setActing(false);
     }
@@ -467,11 +472,33 @@ export default function JournalEntriesPanel() {
                 )
               )}
 
-              {/* Checker: post an APPROVED entry */}
-              {selected.status === 'APPROVED' && isChecker && (
+              {/* Checker: post an APPROVED entry -- or approve it again first
+                  when its approval lapsed or can no longer be used (D54) */}
+              {selected.status === 'APPROVED' && isChecker && !selected.needs_reapproval && (
                 <button onClick={() => doPost(selected)} disabled={acting} className="btn-primary text-sm disabled:opacity-50">
                   Post to ledger
                 </button>
+              )}
+              {selected.status === 'APPROVED' && isChecker && selected.needs_reapproval && (
+                <div className="space-y-3 border-t border-gray-200 pt-3">
+                  <div className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-3 py-2">
+                    This entry's approval has lapsed or can no longer be used. It must be approved again before it can be posted.
+                    {isOwnEntry(selected) && ' You drafted this entry, so a different checker must approve it.'}
+                  </div>
+                  {!isOwnEntry(selected) && (
+                    <>
+                      <label className="block">
+                        <span className="block text-gray-600 mb-1">Approval PIN</span>
+                        <input type="password" inputMode="numeric" value={pin} maxLength={6}
+                          onChange={(e) => setPin(e.target.value.replace(/\D/g, ''))}
+                          className="w-40 border border-gray-200 rounded px-3 py-2 text-sm focus:outline-none focus:border-bv-red-400" />
+                      </label>
+                      <button onClick={() => doApprove(selected)} disabled={acting} className="btn-primary text-sm disabled:opacity-50">
+                        Approve again
+                      </button>
+                    </>
+                  )}
+                </div>
               )}
 
               {/* Checker: reverse a POSTED entry */}
