@@ -984,8 +984,13 @@ def budget_world(monkeypatch):
         "get_expense_repository",
         lambda: _ExpenseRepo(world.get_collection("expenses")),
     )
-    # Revenue actuals come from orders; none are seeded here.
-    monkeypatch.setattr(budgets_router, "get_order_repository", lambda: None)
+    # Revenue actuals come from orders; none are seeded here. An EMPTY orders
+    # collection, not None: None now means "no database" and answers 503.
+    monkeypatch.setattr(
+        budgets_router,
+        "get_order_repository",
+        lambda: _ExpenseRepo(world.get_collection("orders")),
+    )
     return world
 
 
@@ -1151,6 +1156,29 @@ class TestL315OneBudgetAcrossBothScreens:
         monkeypatch.undo()
         # Nothing was lost: the plan reads back once the read works.
         assert budget_world.get_collection("budgets").find_one({"head": "rent"})["planned_amount"] == 1000
+
+
+    @pytest.mark.parametrize("missing", ["plan", "expenses", "revenue"])
+    def test_a_disconnected_database_is_a_503_never_no_budget_set(
+        self, budget_world, monkeypatch, missing
+    ):
+        """Reviewer finding on #1421: with the database disconnected the
+        budgets collection and both repositories come back None, and the
+        reader used to treat None as "nothing there" -- the Budgets tab
+        answered 200 `no_budget_set` with zero actuals (before this PR the
+        same outage was a 500). No database is unreadable, not "no plan"."""
+        _save("rent", 1000)
+        target = {
+            "plan": "_budgets_collection",
+            "expenses": "get_expense_repository",
+            "revenue": "get_order_repository",
+        }[missing]
+        monkeypatch.setattr(budgets_router, target, lambda: None)
+        for read in (_dashboard, _variance):
+            with pytest.raises(HTTPException) as exc:
+                read()
+            assert exc.value.status_code == 503
+            assert "Could not read the budget" in str(exc.value.detail)
 
 
 def test_l3_15_no_reader_still_looks_for_the_shape_nobody_writes():
@@ -1666,10 +1694,75 @@ class TestR7D53SeveralDrawersNoWholeDayVariance:
             db, monkeypatch,
             denominations=[{"face": 500, "kind": "note", "pieces": 6}],
             closing_count_state="COUNTED",
+            # Drawer B (float 0, no sales) holds Rs 3,000 over: its OWN
+            # variance is out of band, so the close needs the note.
+            note="PM drawer float was not entered",
         )
         assert (out["variance"], out["variance_status"]) == (None, "SEVERAL_DRAWERS")
         row = next(r for r in _recon(db, monkeypatch) if r["session_id"] == "CR-D40")
         assert (row["variance"], row["variance_status"]) == (None, "SEVERAL_DRAWERS")
+
+
+    def test_cash_register_judges_the_unlocked_drawer_it_counted_note_and_alert(
+        self, db, monkeypatch
+    ):
+        """Reviewer finding: on a several-drawer day the close set the variance
+        to None BEFORE the band check, so it never asked for the note and never
+        raised the manager alert (owner ruling 2026-08-25). The drawer it just
+        counted is BLIND_SUBMITTED, so nothing judged it until a lock that may
+        never come. Now that drawer is judged on its OWN stored variance."""
+        _locked_then_second_drawer(db)
+        alerts = []
+        monkeypatch.setattr(
+            finance_router.cash_drawer.till_service, "raise_variance_task",
+            lambda **kw: alerts.append(kw),
+        )
+        with pytest.raises(HTTPException) as exc:
+            _cr_close_two_drawers(
+                db, monkeypatch,
+                denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+                closing_count_state="COUNTED",
+            )
+        assert exc.value.status_code == 400
+        assert "variance_note_required" in str(exc.value.detail)
+        assert alerts == []
+
+        # The count already landed on drawer B; the retry with a note adopts
+        # it, closes, and alerts on B's own variance -- never a whole-day one.
+        out = asyncio.run(finance_router.close_cash_register(
+            body=finance_router.CashRegisterClose(
+                session_id="CR-D40",
+                denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+                closing_count_state="COUNTED",
+                note="PM drawer float was not entered",
+            ),
+            current_user=MANAGER,
+        ))
+        assert (out["variance"], out["variance_status"]) == (None, "SEVERAL_DRAWERS")
+        drawer_b = _till(db, out["till_session_id"])
+        assert drawer_b["status"] == till.STATUS_BLIND_SUBMITTED
+        assert len(alerts) == 1
+        assert alerts[0]["variance_paisa"] == drawer_b["variance_paisa"] != 0
+        assert alerts[0]["note"] == "PM drawer float was not entered"
+
+    def test_cash_register_a_drawer_already_locked_is_not_judged_again(
+        self, db, monkeypatch
+    ):
+        """Control: when the drawer this close lands on was LOCKED, its lock
+        already took the note and raised the alert -- no second ask."""
+        _two_locked_drawers(db, a_rupees=1000, b_rupees=3000)
+        alerts = []
+        monkeypatch.setattr(
+            finance_router.cash_drawer.till_service, "raise_variance_task",
+            lambda **kw: alerts.append(kw),
+        )
+        out = _cr_close_two_drawers(
+            db, monkeypatch,
+            denominations=[{"face": 500, "kind": "note", "pieces": 8}],
+            closing_count_state="COUNTED",
+        )
+        assert out["variance_status"] == "SEVERAL_DRAWERS"
+        assert alerts == []
 
 
 def _recon(db, monkeypatch):

@@ -166,11 +166,12 @@ def _revenue_actual(store_id: Optional[str], period: str) -> float:
 
     REUSES reports._orders_in_window (non-CANCELLED/non-DRAFT date-window
     filter) + reports._order_revenue (grand_total -> final_amount ->
-    total_amount fallback). No repository -> 0.0; a failed read -> 503.
+    total_amount fallback). No repository (no database) or a failed read
+    -> 503, never a revenue of 0.
     """
     order_repo = get_order_repository()
     if order_repo is None:
-        return 0.0
+        raise _unreadable("revenue actual: database not connected")
     start_dt, end_dt = _month_window(period)
     try:
         orders = _reports._orders_in_window(
@@ -194,11 +195,11 @@ def _expense_actuals_by_category(
 
     Mirrors expenses.py conventions: `expense_date` is an ISO string filtered
     by the ^YYYY-MM prefix, `status` is APPROVED, grouped by `category`,
-    summing `amount`. No repository -> {}; a failed read -> 503.
+    summing `amount`. No repository (no database) or a failed read -> 503.
     """
     repo = get_expense_repository()
     if repo is None:
-        return {}
+        raise _unreadable("expense actuals: database not connected")
     flt: Dict[str, Any] = {
         # expense_date is stored as an ISO string -> month prefix match.
         "expense_date": {"$regex": f"^{re.escape(period)}"},
@@ -236,20 +237,22 @@ def plan_and_actuals(store_id: Optional[str], period: str):
     to these SOURCE maps before deriving anything from them."""
     planned_by_head: Dict[str, float] = {}
     coll = _budgets_collection()
-    if coll is not None:
-        flt: Dict[str, Any] = {"period": period}
-        if store_id:
-            flt["store_id"] = store_id
-        try:
-            for r in coll.find(flt):
-                head = r.get("head")
-                if not head:
-                    continue
-                planned_by_head[head] = planned_by_head.get(head, 0.0) + float(
-                    r.get("planned_amount") or 0.0
-                )
-        except Exception as exc:
-            raise _unreadable("planned lines") from exc
+    if coll is None:
+        # No database is UNREADABLE, never "no budget set" with zero actuals.
+        raise _unreadable("planned lines: database not connected")
+    flt: Dict[str, Any] = {"period": period}
+    if store_id:
+        flt["store_id"] = store_id
+    try:
+        for r in coll.find(flt):
+            head = r.get("head")
+            if not head:
+                continue
+            planned_by_head[head] = planned_by_head.get(head, 0.0) + float(
+                r.get("planned_amount") or 0.0
+            )
+    except Exception as exc:
+        raise _unreadable("planned lines") from exc
 
     # Actuals are derived, never stored.
     actual_by_head: Dict[str, float] = {}

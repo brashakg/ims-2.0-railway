@@ -208,7 +208,10 @@ def _wire_budget_reader(monkeypatch, db):
         "get_expense_repository",
         lambda: _RepoOver(db.get_collection("expenses")),
     )
-    monkeypatch.setattr(budgets_mod, "get_order_repository", lambda: None)
+    # An empty orders collection; None would mean "no database" (-> 503).
+    monkeypatch.setattr(
+        budgets_mod, "get_order_repository", lambda: _RepoOver(db.get_collection("orders"))
+    )
 
 
 def test_budget_endpoint_returns_zeroes_when_none_configured(

@@ -363,12 +363,34 @@ async def close_cash_register(
     # `expected` is this window's arithmetic, so no single variance or
     # "balanced" verdict is true for the day, and drawers are never added
     # together. Withhold it; the record carries each drawer's own count and
-    # variance (till_drawers), whose own out-of-band variances were already
-    # noted and raised at each drawer's lock.
+    # variance (till_drawers).
     several_drawers = int(till_link.get("drawers_on_day") or 1) > 1
     if several_drawers:
         summary["variance"] = None
         summary["variance_status"] = cash_register.SEVERAL_DRAWERS
+
+    # WHAT THE BAND JUDGES. One drawer: the one counted figure for the day.
+    # Several drawers (D53): no whole-day figure, so the drawer THIS close
+    # counted is judged on ITS OWN variance (stored by the till at its blind
+    # count) -- unless a manager already LOCKED it, in which case its lock
+    # already took the note and raised the alert. Without this the note and
+    # the manager alert (owner ruling 2026-08-25) waited for a lock that might
+    # never come, and a shortage outside the band raised nothing.
+    judged_variance_paisa = (
+        cash_denom.rupees_to_paisa(summary["variance"])
+        if summary["variance"] is not None
+        else None
+    )
+    judged_band_paisa = cash_denom.rupees_to_paisa(tolerance_rupees)
+    if several_drawers:
+        drawer = till_link.get("session") or {}
+        judged_variance_paisa = (
+            drawer.get("variance_paisa")
+            if drawer.get("status") != till_service.STATUS_LOCKED
+            else None
+        )
+        if drawer.get("tolerance_paisa") is not None:
+            judged_band_paisa = int(drawer["tolerance_paisa"])
 
     # MANDATORY NOTE ABOVE THE BAND (owner ruling 2026-08-25). Checked AFTER
     # the shared-record adoption so the figure judged is the ONE counted figure
@@ -377,20 +399,15 @@ async def close_cash_register(
     # and a resubmit with the note adopts it back (already_counted) unchanged.
     close_note = (body.note or "").strip()
     variance_out_of_band = till_service.needs_variance_note(
-        (
-            cash_denom.rupees_to_paisa(summary["variance"])
-            if summary["variance"] is not None
-            else None
-        ),
-        cash_denom.rupees_to_paisa(tolerance_rupees),
+        judged_variance_paisa, judged_band_paisa
     )
     if variance_out_of_band and not close_note:
         raise HTTPException(
             status_code=400,
             detail=(
                 "variance_note_required: the drawer is over/short beyond the "
-                f"allowed band of Rs {tolerance_rupees:.0f} - a note explaining "
-                "the variance is required to close."
+                f"allowed band of Rs {judged_band_paisa / 100:.0f} - a note "
+                "explaining the variance is required to close."
             ),
         )
 
@@ -470,8 +487,8 @@ async def close_cash_register(
         till_service.raise_variance_task(
             store_id=store_id,
             session_date=ist_date_str(_to_dt(end_iso)) or str(end_iso)[:10],
-            variance_paisa=cash_denom.rupees_to_paisa(summary["variance"]),
-            tolerance_paisa=cash_denom.rupees_to_paisa(tolerance_rupees),
+            variance_paisa=judged_variance_paisa,
+            tolerance_paisa=judged_band_paisa,
             note=close_note,
             source="Finance cash-register close",
         )
