@@ -392,7 +392,10 @@ def prod_db_down(monkeypatch):
     from database import connection
 
     monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    # As after a failed boot connect: no handle, not connected (CI has a live
+    # Mongo, so the session's handle must be hidden for this test only).
     monkeypatch.setattr(connection.db, "_connected", False)
+    monkeypatch.setattr(connection.db, "_db", None)
     monkeypatch.setattr(connection.db, "connect", lambda *a, **kw: False)
     assert hr.get_attendance_repository() is None
     assert hr_self_service._get_db() is None
