@@ -1223,3 +1223,96 @@ def test_a_runner_whose_lease_was_taken_over_cannot_end_the_row(shop, monkeypatc
     assert coll.find_one({"op_id": "op-stale"})["state"] == "OPEN", "a stale close writes nothing"
     edit_ops._end(fresh, "SETTLED")
     assert coll.find_one({"op_id": "op-stale"})["state"] == "SETTLED"
+
+
+# ---------------------------------------------------------------------------
+# D61 -- a save that stalls past the sweep lands no line whose stock went back
+# ---------------------------------------------------------------------------
+
+
+def _stall_save_past_the_sweep(shop, monkeypatch, oid):
+    """The press has taken its stock and sleeps before its save for longer than
+    the sweep's window: the scheduler (another worker, its own loop) ticks with
+    the op aged, then the save goes ahead. Returns what the shelf held mid-stall."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from api.routers.orders import edit_ops
+    from database.repositories.order_repository import OrderRepository
+
+    real, seen = OrderRepository.update_if, []
+
+    def stalled(self, key, expected, data, *a, **k):
+        if key == oid and "items" in data and not seen:
+            shop["db"].get_collection("order_edit_ops").update_many(
+                {"order_id": oid, "state": "OPEN"},
+                {"$set": {"created_at": datetime.now() - timedelta(hours=1), "lease_until": None}},
+            )
+            with ThreadPoolExecutor(1) as pool:
+                seen.append(pool.submit(asyncio.run, edit_ops.sweep_edit_ops()).result())
+        return real(self, key, expected, data, *a, **k)
+
+    monkeypatch.setattr(OrderRepository, "update_if", stalled)
+    return seen
+
+
+def stalled_save_case(client, shop, cells, door, goods, monkeypatch):
+    """Shared by the in-memory suite and the native-Mongo file."""
+    from database.repositories.order_repository import OrderRepository
+
+    cells(on_hand=5)
+    other = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    if goods == "lens":
+        assert door.press(other, [_as_sent(_order(shop, other)["items"][0]), _lens()]).status_code == 200
+    oid = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    before = _order(shop, oid)
+    keep = _as_sent(before["items"][0])
+    new = _lens() if goods == "lens" else _line(FR, stock_id="SU-FR-A")
+    real = OrderRepository.update_if
+    seen = _stall_save_past_the_sweep(shop, monkeypatch, oid)
+    quiet = type(client)(client.app, raise_server_exceptions=False)
+    r = quiet.put(f"/api/v1/orders/{oid}/{door.name}",
+                  json={"reason": "correcting this bill", "items": [keep, new], **DOORS[door.name]},
+                  headers=_token(ADMIN))
+    monkeypatch.setattr(OrderRepository, "update_if", real)
+    assert seen and seen[0]["given_back"] == 1, seen
+    # Before D61 the late save landed (200): a bill line holding no stock.
+    assert r.status_code == 409, r.text
+    after = _order(shop, oid)
+    assert after["items"] == before["items"] and after["grand_total"] == before["grand_total"]
+    assert after.get("invoice_number") == before.get("invoice_number")
+    assert _op_states(shop, oid) == ["GIVEN_BACK"]
+    if goods == "lens":
+        assert cells.read() == (5, 1), "only the other bill's lens is held"
+    else:
+        assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
+    # The same edit pressed again takes its stock afresh and lands.
+    again = door.press(oid, [keep, new])
+    assert again.status_code == 200, again.text
+    if goods == "lens":
+        assert cells.read() == (5, 2)
+    else:
+        assert _sold_to(shop, oid) == ["SU-FR-A"]
+    _sweep(shop)
+    assert set(_op_states(shop, oid)) == {"GIVEN_BACK", "SETTLED"}
+    _no_flag_left(shop, oid)
+
+
+@pytest.mark.parametrize("goods", ["lens", "frame"])
+def test_a_save_stalled_past_the_sweep_lands_no_line_without_stock(client, shop, cells, door, goods, monkeypatch):
+    stalled_save_case(client, shop, cells, door, goods, monkeypatch)
+
+
+def test_a_give_back_that_finds_the_save_landed_settles_instead(client, shop, cells):
+    """The other order of the same race: the save lands between the sweep's read
+    and its give-back. The give-back finds the op on the bill and settles it: the
+    lens stays reserved for the line the bill now carries."""
+    from api.routers.orders import edit_ops
+
+    oid, _ = _lens_bill(client, shop, cells)
+    op = _ops(shop, oid)[0]
+    shop["db"].get_collection("order_edit_ops").update_one(
+        {"op_id": op["op_id"]}, {"$set": {"state": "OPEN", "lease_until": None}})
+    assert asyncio.run(edit_ops.give_back(op)) is True
+    assert cells.read() == (5, 1), "a landed lens is never given back"
+    assert _op_states(shop, oid) == ["SETTLED"]
+    assert op["op_id"] not in (_order(shop, oid).get("voided_edit_ops") or [])

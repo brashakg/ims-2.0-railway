@@ -143,6 +143,41 @@ def save_fields(op: dict, order: dict) -> Dict[str, Any]:
     return fields
 
 
+def unvoided(op: dict) -> Dict[str, Any]:
+    """What the edit's save filters on beside its own compare-and-set: this op was
+    never given back (D61). A press can stall between taking its stock and its save
+    for longer than the sweep's window; the sweep then gives that stock back and
+    shuts the bill to the op (`_shut_bill`), and the late save matches nothing: a
+    409, never a bill line holding no stock. One document arbitrates, so no window."""
+    return {"voided_edit_ops": {"$ne": op["op_id"]}}
+
+
+def _shut_bill(op: dict) -> Optional[str]:
+    """Before anything an op took goes back, its bill is closed to the op's save in
+    one write on the bill itself: "shut" (the save can never land now), "landed"
+    (it already did: settle instead), None (unknown: nothing moves, the row stays
+    OPEN for the next runner). Repeats are harmless ($addToSet)."""
+    repo = get_order_repository()
+    coll = getattr(repo, "collection", None)
+    if coll is None or _ops() is None:
+        return "shut"  # no database: no save can be in flight elsewhere
+    oid, op_id = op["order_id"], op["op_id"]
+    try:
+        res = coll.update_one({"order_id": oid, "edit_ops": {"$ne": op_id}},
+                              {"$addToSet": {"voided_edit_ops": op_id}})
+        if getattr(res, "matched_count", None):
+            return "shut"
+        bill = coll.find_one({"order_id": oid}, {"_id": 0, "edit_ops": 1, "voided_edit_ops": 1})
+    except Exception as exc:  # noqa: BLE001 -- the stock stays held; a runner retries
+        logger.warning("[STOCK] edit op %s: bill %s not shut: %s", op_id, oid, exc)
+        return None
+    if bill is None:
+        return None
+    if op_id in (bill.get("edit_ops") or []):
+        return "landed"
+    return "shut" if op_id in (bill.get("voided_edit_ops") or []) else None
+
+
 def _removed_line(entry: dict, op: dict, order: dict) -> dict:
     line = entry["line"]
     # A lowered line lives on under its own id: its pieces get one of their own.
@@ -201,11 +236,19 @@ def _end(op: dict, state: Optional[str]) -> None:
 
 async def give_back(op: dict) -> bool:
     """The edit never landed: what it took goes back, claims that lost their reply
-    included. False leaves the row OPEN: the units and cells stay held, and the
-    sweep tries again, then the Tasks board says so."""
+    included -- once its bill is shut to the op's save, so a save still in flight
+    cannot land a line whose stock went back (D61). False leaves the row OPEN: the
+    units and cells stay held, and the sweep tries again, then the Tasks board
+    says so."""
     from ...services.lens_stock_hook import release_for_cancel
 
-    if not _take_lease(op):
+    shut = _shut_bill(op)
+    if shut == "landed":
+        # The save landed after its caller looked: it is settled, never undone.
+        repo = get_order_repository()
+        bill = repo.find_by_id(op["order_id"])
+        return bill is not None and await settle(op, bill, repo)
+    if shut is None or not _take_lease(op):
         return False
     order_id, store_id = op["order_id"], op.get("store_id") or ""
     done = True

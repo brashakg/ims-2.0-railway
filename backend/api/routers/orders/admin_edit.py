@@ -38,7 +38,7 @@ from .models import (
     SuperadminInvoiceChange,
     SuperadminOrderEdit,
 )
-from .edit_ops import finish_landed, give_back, open_op, save_fields, settle
+from .edit_ops import finish_landed, give_back, open_op, save_fields, settle, unvoided
 from .release import _money_unchanged
 from .rx import _validate_line_rx_on_master
 from .stock import (
@@ -624,6 +624,7 @@ async def superadmin_edit_order(
              "advance_refund_id": order.get("advance_refund_id"),
              "status": order.get("status"),
              "items": order.get("items"),
+             **unvoided(op),
              **_money_unchanged(order)},
             update_data,
         ):
@@ -986,7 +987,7 @@ async def superadmin_invoice_change(
             if not repo.update_if(
                 order_id,
                 {"invoice_number": original_invoice, "advance_refund_id": None,
-                 "status": order.get("status"), **_money_unchanged(order)},
+                 "status": order.get("status"), **unvoided(op), **_money_unchanged(order)},
                 update_data,
             ):
                 # A twin press landed this very number: it stands, nothing is unused.
