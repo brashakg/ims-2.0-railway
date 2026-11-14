@@ -29,9 +29,23 @@ document and committed its hash in a second write; two workers interleaving
 between the two both chained from the same predecessor -- a "broken" chain
 nobody had edited.)
 
-The `audit_chain_head` document is no longer the source of the next seq. It
-records the newest committed row (seq + entry_hash), written AFTER the row, so
-verify can tell a trail whose last rows were removed from a whole one (R20).
+ROLLING DEPLOY (D54). During a deploy a worker still running the PREVIOUS
+version claims its seq with $inc on the head document's `seq` counter and
+inserts afterwards; if a new writer took that seq first, the old writer's
+insert was refused and its audit row lost. So a new writer also takes its seq
+in that counter before it inserts (_reserve_seq: raises the counter to its
+seq only while the counter is still below it). A seq the counter has already
+handed out belongs to another writer, old or new: the new writer waits for
+that row to land and chains from it (_holder_landed). Only a holder that has
+not written its row within _HOLDER_GRACE_S is taken over -- that seq was
+abandoned (a claim whose insert failed), and the unique index still lets just
+one row have it. Every seq is handed out once by one counter, so old and new
+writers side by side never refuse each other's rows.
+
+The `audit_chain_head` document is not the source of a row's place in the
+chain. Besides the claim counter it records the newest committed row
+(`last_seq` + `last_hash`), written AFTER the row, so verify can tell a trail
+whose last rows were removed from a whole one (R20).
 A writer moves it only off a row that is still in the trail (_note_head): a
 lagging head (a writer died between its row and this note) is moved on by the
 next writer, but a head whose row was removed stays there for good -- the
@@ -162,6 +176,12 @@ def compute_entry_hash(prev_hash: str, seq: int, doc: Dict[str, Any]) -> str:
 _MAX_CLAIM_ATTEMPTS = 60
 _MAX_BACKOFF_S = 0.05
 
+# How long a writer waits for the holder of a seq the claim counter already
+# handed out (an old-version writer mid-deploy, or a peer) to write its row
+# before treating the seq as abandoned. One slow round trip is milliseconds.
+_HOLDER_GRACE_S = 0.5
+_HOLDER_POLL_S = 0.005
+
 
 def _is_duplicate_key(exc: Exception) -> bool:
     return getattr(exc, "code", None) == 11000 or type(exc).__name__ == "DuplicateKeyError"
@@ -192,10 +212,55 @@ def _chain_tail(audit_collection) -> Tuple[int, str]:
     return 0, GENESIS_HASH
 
 
+def _reserve_seq(db, seq: int, prev_hash: str) -> bool:
+    """Take ``seq`` in the head document's claim counter -- the counter an
+    old-version writer $inc's (module docstring, ROLLING DEPLOY). True when
+    the counter was below ``seq`` (now raised to it: no writer of either
+    version holds it) or there was no head yet; False when the counter has
+    already handed ``seq`` out. Fail-open (True) when the head cannot be
+    reached: the unique seq index still decides between writers."""
+    if db is None:
+        return True
+    try:
+        heads = db.get_collection(HEAD_COLLECTION)
+        if heads.update_one({"_id": HEAD_DOC_ID, "seq": {"$lt": seq}},
+                            {"$set": {"seq": seq}}).matched_count:
+            return True
+        if heads.find_one({"_id": HEAD_DOC_ID}) is not None:
+            return False
+        heads.insert_one({"_id": HEAD_DOC_ID, "seq": seq, "last_hash": prev_hash,
+                          "last_seq": seq - 1})
+        return True
+    except Exception as exc:  # noqa: BLE001
+        if _is_duplicate_key(exc):
+            return False  # another writer created the head first
+        logger.warning("[AUDIT_CHAIN] could not reserve seq %s: %s", seq, exc)
+        return True
+
+
+def _holder_landed(audit_collection, seq: int) -> bool:
+    """Wait (up to _HOLDER_GRACE_S) for the writer the claim counter handed
+    ``seq`` to write its row. True when it did; False when the seq looks
+    abandoned (the caller then takes it over)."""
+    deadline = time.monotonic() + _HOLDER_GRACE_S
+    while True:
+        try:
+            if audit_collection.find_one({"seq": seq}) is not None:
+                return True
+        except Exception:  # noqa: BLE001
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(_HOLDER_POLL_S)
+
+
 def _note_head(db, audit_collection, seq: int, prev_hash: str, entry_hash: str) -> None:
     """Record the row just written (seq, entry_hash; chained from prev_hash)
-    as the newest committed row on the head document. Best-effort: verify
-    reads it to notice a trail whose last rows are gone; nothing chains from it.
+    as the newest committed row on the head document (`last_seq`,
+    `last_hash`). Best-effort: verify reads it to notice a trail whose last
+    rows are gone; nothing chains from it. The claim counter (`seq`) is never
+    written here: moving it back would hand an old-version writer a seq that
+    is already taken.
 
     The head only ever moves OFF a row that is still in the trail. Normally it
     names the very row this writer chained from, and one guarded update moves
@@ -211,32 +276,34 @@ def _note_head(db, audit_collection, seq: int, prev_hash: str, entry_hash: str) 
     """
     if db is None:
         return
-    new = {"seq": seq, "last_hash": entry_hash}
+    new = {"last_seq": seq, "last_hash": entry_hash}
     try:
         heads = db.get_collection(HEAD_COLLECTION)
         if heads.update_one({"_id": HEAD_DOC_ID, "last_hash": prev_hash}, {"$set": new}).matched_count:
             return
         head = heads.find_one({"_id": HEAD_DOC_ID})
         if head is None:  # the first row this database ever chained
-            heads.update_one({"_id": HEAD_DOC_ID}, {"$setOnInsert": new}, upsert=True)
+            heads.update_one({"_id": HEAD_DOC_ID}, {"$setOnInsert": dict(new, seq=seq)}, upsert=True)
             return
-        head_seq, head_hash = int(head.get("seq") or 0), head.get("last_hash")
-        if head.get("row_missing") or head_seq >= seq:
+        head_hash, noted = head.get("last_hash"), head.get("last_seq")
+        if head.get("row_missing") or (noted is not None and int(noted) >= seq):
             return
-        if head_hash and head_hash != GENESIS_HASH and not list(
-            audit_collection.find({"seq": {"$lte": head_seq}, "entry_hash": head_hash})
-            .sort("seq", -1).limit(1)
-        ):
-            # Marked so later writers skip the search above (it walks the
-            # whole trail when the row is not there).
-            heads.update_one({"_id": HEAD_DOC_ID, "last_hash": head_hash},
-                             {"$set": {"row_missing": True}})
-            logger.error(
-                "[AUDIT_CHAIN] CRITICAL: audit row seq %s recorded on the chain head is "
-                "no longer in the trail -- rows were removed", head_seq)
-            return
-        heads.update_one({"_id": HEAD_DOC_ID, "seq": head_seq, "last_hash": head_hash},
-                         {"$set": new})
+        if head_hash and head_hash != GENESIS_HASH:
+            # A head written by the previous version has no last_seq: the
+            # row its hash names tells where it stands.
+            named = list(audit_collection.find({"entry_hash": head_hash}).sort("seq", -1).limit(1))
+            if not named:
+                # Marked so later writers skip this search (it walks the
+                # whole trail when the row is not there).
+                heads.update_one({"_id": HEAD_DOC_ID, "last_hash": head_hash},
+                                 {"$set": {"row_missing": True}})
+                logger.error(
+                    "[AUDIT_CHAIN] CRITICAL: audit row seq %s recorded on the chain head is "
+                    "no longer in the trail -- rows were removed", noted)
+                return
+            if int(named[0].get("seq") or 0) >= seq:
+                return
+        heads.update_one({"_id": HEAD_DOC_ID, "last_hash": head_hash}, {"$set": new})
     except Exception as exc:  # noqa: BLE001
         # Duplicate key = another writer created the head first: fine.
         if not _is_duplicate_key(exc):
@@ -252,7 +319,9 @@ def append_audit_entry(
     (AuditRepository.create wraps it). It reads the chain tail, stamps
     seq / prev_hash / entry_hash onto the row and inserts it; the unique seq
     index makes that insert the claim (module docstring), so a writer that
-    lost the seq to a concurrent one re-reads the tail and tries again.
+    lost the seq to a concurrent one re-reads the tail and tries again. The
+    seq is first taken in the head's claim counter too, so a writer of the
+    previous version running alongside never loses its row (ROLLING DEPLOY).
 
     `db` is the database handle used to reach the head collection. When not
     supplied we derive it from the audit collection's `.database` (pymongo
@@ -276,6 +345,8 @@ def append_audit_entry(
         if seq == 0:
             _ensure_seq_index(audit_collection)  # first row of the chain
         seq += 1
+        if not _reserve_seq(db, seq, prev_hash) and _holder_landed(audit_collection, seq):
+            continue  # the writer holding this seq wrote it: chain from that row
         doc["seq"] = seq
         doc["prev_hash"] = prev_hash
         doc["entry_hash"] = compute_entry_hash(prev_hash, seq, doc)
