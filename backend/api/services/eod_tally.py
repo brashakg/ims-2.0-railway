@@ -410,6 +410,80 @@ def auto_cash_payouts_paisa(db, store_id: str, window_start: Any, window_end: An
         return 0, 0
 
 
+def _counted_drawers(db, session: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The OTHER drawers of this session's shop-day that already carry a
+    count (BLIND_SUBMITTED or LOCKED). Raises when the read fails."""
+    coll = _sessions_coll(db)
+    if coll is None:
+        raise RuntimeError("till sessions unavailable")
+    own = session.get("_id") or session.get("session_id")
+    return [
+        s
+        for s in coll.find(
+            {
+                "store_id": session.get("store_id"),
+                "session_date": session.get("session_date"),
+                "status": {"$in": [STATUS_BLIND_SUBMITTED, STATUS_LOCKED]},
+            }
+        )
+        if (s.get("_id") or s.get("session_id")) != own
+    ]
+
+
+def _own_share(exp: Dict[str, Any], earlier: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """D60: a drawer's expected cash is its OWN float plus the cash that moved
+    in its OWN shift, never the whole day's.
+
+    ``exp`` is the whole day so far. Every drawer of the day already counted
+    stored the cash it was charged with at its count, and those shares add up
+    to the day up to the last count. So this drawer's share is the day so far
+    minus theirs: the cash that moved after the last earlier count, including a
+    balance paid now on an order opened in an earlier shift, and payouts
+    (booked by day only) not already charged. Each earlier drawer is
+    subtracted once, whatever its order or opened_at. A one-drawer day never
+    comes here, so its figures are exactly as before."""
+
+    def _taken(field: str) -> int:
+        return sum(int(s.get(field) or 0) for s in earlier)
+
+    # ponytail: clamped at 0 -- a record edited after an earlier count can
+    # leave a negative remainder; a negative sale or payout is never this
+    # drawer's. Per-shift ledgers would remove the clamp if that ever matters.
+    sales = max(int(exp["cash_sales_paisa"]) - _taken("cash_sales_paisa"), 0)
+    refunds = max(int(exp["cash_refunds_paisa"]) - _taken("cash_refunds_paisa"), 0)
+    payouts = max(int(exp["cash_payouts_paisa"]) - _taken("cash_payouts_paisa"), 0)
+    expected = int(exp["opening_float_paisa"]) + sales - refunds - payouts
+
+    def _prior(tender: str, key: str) -> float:
+        return sum(
+            float((((s.get("by_mode") or {}).get(tender) or {}).get(key)) or 0)
+            for s in earlier
+        )
+
+    by_mode = {}
+    for tender, row in (exp.get("by_mode") or {}).items():
+        collected = max(round(float(row.get("collected") or 0) - _prior(tender, "collected"), 2), 0.0)
+        refunded = max(round(float(row.get("refunded") or 0) - _prior(tender, "refunded"), 2), 0.0)
+        count = max(int(row.get("count") or 0) - int(_prior(tender, "count")), 0)
+        by_mode[tender] = {
+            **row,
+            "collected": collected,
+            "refunded": refunded,
+            "net": round(collected - refunded, 2),
+            "count": count,
+        }
+    return {
+        **exp,
+        "cash_sales_paisa": sales,
+        "cash_refunds_paisa": refunds,
+        "cash_payouts_paisa": payouts,
+        "expected_cash_paisa": expected,
+        "refund_double_entry_advisory": refunds > 0 and payouts > 0,
+        "negative_expected_advisory": expected < 0,
+        "by_mode": by_mode,
+    }
+
+
 # ---------------------------------------------------------------------------
 # The per-face drawer ledger (denominated tally)
 # ---------------------------------------------------------------------------
@@ -853,15 +927,26 @@ def blind_submit(
     # reconciliation matches the day-close; the caller may override the bounds
     # (e.g. a sub-day shift). Computing at blind-submit time stamps computed_at so
     # a sale finalizing the same second is bounded by the day, not missed.
+    earlier: List[Dict[str, Any]] = []
     if window_start is not None:
         ws, we = window_start, window_end
     else:
         ws, we = _session_day_window(session)
+        # D60: the shop-day's drawers already counted. Unreadable is refused,
+        # never read as "none": that would charge this drawer with their cash.
+        try:
+            earlier = _counted_drawers(db, session)
+        except Exception:  # noqa: BLE001
+            logger.exception("Drawer read failed before counting %s", session_id)
+            return {"ok": False, "error": "drawer_read_failed", "http": 503}
     # AUTO-PULLED, never hand-typed (owner ruling 2026-08-25): the payouts leg
     # comes from the expenses book for the session window -- the same read the
     # Finance close charges the drawer with.
     payouts, off_till_excluded = auto_cash_payouts_paisa(db, store_id, ws, we)
     exp = compute_expected(db, store_id, ws, we, int(session.get("opening_float_paisa", 0) or 0), payouts)
+    if earlier:
+        exp = _own_share(exp, earlier)
+        payouts = exp["cash_payouts_paisa"]
     expected_cash_paisa = exp["expected_cash_paisa"]
     variance_paisa = counted - expected_cash_paisa
     tol = get_variance_tolerance_paisa(store_id=store_id)
@@ -909,6 +994,11 @@ def blind_submit(
                     "variance_paisa": variance_paisa,
                     "variance_status": vstatus,
                     "by_mode": exp["by_mode"],
+                    # D60: drawers of the day whose counted cash was taken off
+                    # this drawer's expected figure ([] on a one-drawer day).
+                    "expected_net_of_drawers": [
+                        s.get("_id") or s.get("session_id") for s in earlier
+                    ],
                     "tolerance_paisa": tol,
                     "computed_at": now,
                     "blind_submitted_at": now,
@@ -1560,6 +1650,39 @@ def redact_for_cashier(session: Optional[Dict[str, Any]]) -> Optional[Dict[str, 
     return out
 
 
+def _own_face_ledger(db, session: Dict[str, Any]) -> Dict[str, Any]:
+    """The per-face tally over THIS drawer's shift (D60): from the last other
+    drawer counted before it (else the start of the day) to its own count when
+    a later drawer was counted after it (else the end of the day). A one-drawer
+    day keeps the whole day, exactly as before. Sales are placed by the order's
+    time, so a balance paid in a later shift on an earlier order stays in the
+    earlier shift here (the rupee figures do not have that limit). Drawers
+    unreadable -> the whole day, marked read_ok False."""
+    from .tender_reconciliation import _to_dt
+
+    ws, we = _session_day_window(session)
+    read_ok = True
+    try:
+        others = _counted_drawers(db, session)
+    except Exception:  # noqa: BLE001
+        others, read_ok = [], False
+    mine = _to_dt(session.get("blind_submitted_at"))
+    stamps = [t for t in (_to_dt(o.get("blind_submitted_at")) for o in others) if t is not None]
+    before = [t for t in stamps if mine is None or t < mine]
+    start = max([ws] + before)
+    end = mine if mine is not None and any(t > mine for t in stamps) else we
+    ledger = compute_face_ledger(
+        db,
+        session.get("store_id"),
+        start,
+        end,
+        opening_count=session.get("opening_count"),
+        closing_count=session.get("closing_count"),
+    )
+    ledger["read_ok"] = bool(ledger.get("read_ok")) and read_ok
+    return ledger
+
+
 def build_zread(db, session_id: str) -> Dict[str, Any]:
     """Full Z-Read report payload for print: session metadata, opening float,
     denomination breakdown, sales-by-tender, expected, counted, variance, lock +
@@ -1599,13 +1722,7 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         or _denom.not_captured_block(opening),
         "closing_count": session.get("closing_count")
         or _denom.not_captured_block(int(counted or 0)),
-        "face_ledger": compute_face_ledger(
-            db,
-            session.get("store_id"),
-            *_session_day_window(session),
-            opening_count=session.get("opening_count"),
-            closing_count=session.get("closing_count"),
-        ),
+        "face_ledger": _own_face_ledger(db, session),
         "by_mode": session.get("by_mode") or {},
         # The Z-Read identity: opening + cash_sales - cash_refunds - payouts =
         # expected. cash_sales is GROSS collected; cash_refunds is the recorded

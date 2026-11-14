@@ -1801,3 +1801,221 @@ class TestR7D53DrawerOrder:
         link = till.record_screen_close(
             db, store_id=STORE, session_date=DATE, counted_paisa=300000, actor=MANAGER)
         assert link["session_id"] == "TILL-LEGACY-2"
+
+
+# ===========================================================================
+# D60  Each drawer's expected cash is its own float + its own shift's cash
+# ===========================================================================
+
+
+def _cash_sale(db, rupees, at="2026-11-04T05:00:00", *, paid=True):
+    """A cash sale on DATE (``at`` is naive UTC; a string for the in-memory
+    fake, a datetime on a native database)."""
+    oid = f"ORD-D60-{uuid.uuid4().hex[:8]}"
+    db.get_collection("orders").insert_one({
+        "_id": oid, "order_id": oid, "store_id": STORE, "created_at": at,
+        "payments": [{"method": "CASH", "amount": float(rupees)}] if paid else [],
+    })
+    return oid
+
+
+def _drawer_a_then_b(
+    db, *, a_sales, b_sales=(), between=(),
+    at=("2026-11-04T05:00:00", "2026-11-04T10:00:00"),
+):
+    """Drawer A takes ``a_sales``, is counted at exactly that and LOCKED.
+    ``between`` are sales after A's count but before its lock. Drawer B is then
+    opened (float 0) and takes ``b_sales``."""
+    for r in a_sales:
+        _cash_sale(db, r, at[0])
+    opened = till.open_session(
+        db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER
+    )
+    a = opened["session"]["session_id"]
+    assert till.blind_submit(
+        db, a,
+        blind_denominations=[{"face": 500, "kind": "note", "pieces": sum(a_sales) // 500}],
+        actor=CASHIER,
+    )["ok"]
+    for r in between:
+        _cash_sale(db, r, at[1])
+    assert till.lock_session(db, a, actor=MANAGER)["ok"]  # balanced: no note needed
+    b = till.open_session(
+        db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+        shift="PM", actor=CASHIER,
+    )["session"]["session_id"]
+    for r in b_sales:
+        _cash_sale(db, r, at[1])
+    return a, b
+
+
+def _alerts(monkeypatch):
+    alerts = []
+    monkeypatch.setattr(
+        finance_router.cash_drawer.till_service, "raise_variance_task",
+        lambda **kw: alerts.append(kw),
+    )
+    monkeypatch.setattr(till, "raise_variance_task", lambda **kw: alerts.append(kw))
+    return alerts
+
+
+def _cr_close_b(db, monkeypatch, pieces, note=None):
+    return _cr_close_two_drawers(
+        db, monkeypatch,
+        denominations=[{"face": 500, "kind": "note", "pieces": pieces}],
+        closing_count_state="COUNTED",
+        **({"note": note} if note else {}),
+    )
+
+
+class TestD60EachDrawerItsOwnExpectedCash:
+    """Lead's hold on head c1c4e2fa: blind_submit charged every drawer with the
+    WHOLE day's cash, so drawer B's stored variance carried drawer A's sales.
+    A Rs 1,000 counted and locked, B Rs 3,000 closed at Rs 3,000: B read
+    Rs 1,000 short, Cash Register refused the close for a note and the manager
+    was alerted to a shortage on a day that balanced."""
+
+    def test_cash_register_closes_b_at_its_own_cash_no_note_no_alert(self, db, monkeypatch):
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        alerts = _alerts(monkeypatch)
+
+        out = _cr_close_b(db, monkeypatch, 6)  # no note
+
+        assert out["variance_status"] == "SEVERAL_DRAWERS"
+        drawer = _till(db, b)
+        assert (drawer["blind_count_paisa"], drawer["expected_cash_paisa"]) == (300000, 300000)
+        assert (drawer["variance_paisa"], drawer["variance_status"]) == (0, "BALANCED")
+        assert drawer["cash_sales_paisa"] == 300000
+        assert drawer["by_mode"]["CASH"]["collected"] == 3000.0
+        assert drawer["by_mode"]["CASH"]["count"] == 1
+        assert drawer["expected_net_of_drawers"] == [a]
+        assert alerts == []
+        # A is untouched.
+        assert (_till(db, a)["expected_cash_paisa"], _till(db, a)["variance_paisa"]) == (100000, 0)
+
+    def test_reverse_a_3000_b_1000(self, db, monkeypatch):
+        a, b = _drawer_a_then_b(db, a_sales=[3000], b_sales=[1000])
+        alerts = _alerts(monkeypatch)
+        _cr_close_b(db, monkeypatch, 2)
+        assert (_till(db, b)["expected_cash_paisa"], _till(db, b)["variance_paisa"]) == (100000, 0)
+        assert alerts == []
+
+    def test_a_real_shortage_in_b_is_still_refused_without_a_note_and_alerted(
+        self, db, monkeypatch
+    ):
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        alerts = _alerts(monkeypatch)
+        with pytest.raises(HTTPException) as exc:
+            _cr_close_b(db, monkeypatch, 4)  # Rs 2,000 in a drawer that took 3,000
+        assert exc.value.status_code == 400
+        assert "variance_note_required" in str(exc.value.detail)
+        assert _till(db, b)["variance_paisa"] == -100000  # B's own shortage only
+        asyncio.run(finance_router.close_cash_register(
+            body=finance_router.CashRegisterClose(
+                session_id="CR-D40",
+                denominations=[{"face": 500, "kind": "note", "pieces": 4}],
+                closing_count_state="COUNTED",
+                note="Rs 1,000 missing from the PM drawer",
+            ),
+            current_user=MANAGER,
+        ))
+        assert [x["variance_paisa"] for x in alerts] == [-100000]
+
+    def test_overlap_sale_after_a_counted_before_its_lock_belongs_to_b(self, db, monkeypatch):
+        a, b = _drawer_a_then_b(db, a_sales=[1000], between=[500], b_sales=[2000])
+        alerts = _alerts(monkeypatch)
+        _cr_close_b(db, monkeypatch, 5)  # 2,500
+        assert (_till(db, b)["expected_cash_paisa"], _till(db, b)["variance_paisa"]) == (250000, 0)
+        assert alerts == []
+
+    def test_overlap_balance_paid_in_b_on_an_order_opened_in_a(self, db, monkeypatch):
+        held = _cash_sale(db, 0, paid=False)  # order opened in A's shift, unpaid
+        a, b = _drawer_a_then_b(db, a_sales=[1000])
+        db.get_collection("orders").update_one(
+            {"_id": held}, {"$push": {"payments": {"method": "CASH", "amount": 2000.0}}})
+        alerts = _alerts(monkeypatch)
+        _cr_close_b(db, monkeypatch, 4)
+        assert (_till(db, b)["expected_cash_paisa"], _till(db, b)["variance_paisa"]) == (200000, 0)
+        assert alerts == []
+
+    def test_payouts_booked_by_day_are_charged_once(self, db, monkeypatch):
+        """Expenses carry a day, not a time: B is charged only payouts its
+        predecessors were not already charged with."""
+        db.get_collection("expenses").insert_one({
+            "store_id": STORE, "expense_date": DATE, "payment_mode": "CASH",
+            "status": "APPROVED", "amount": 200.0, "category": "TEA",
+        })
+        a, b = _drawer_a_then_b(db, a_sales=[1200], b_sales=[3000])
+        assert (_till(db, a)["cash_payouts_paisa"], _till(db, a)["expected_cash_paisa"]) == (20000, 100000)
+        _cr_close_b(db, monkeypatch, 6)
+        assert (_till(db, b)["cash_payouts_paisa"], _till(db, b)["variance_paisa"]) == (0, 0)
+
+    def test_day_end_door_then_lock_b_needs_no_note(self, db, day_end, monkeypatch):
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        alerts = _alerts(monkeypatch)
+        day_end(closing_cash=3000.0, system_cash=4000.0)
+        locked = till.lock_session(db, b, actor=MANAGER)  # no note
+        assert locked["ok"], locked
+        assert (locked["session"]["variance_paisa"], locked["session"]["variance_status"]) == (0, "BALANCED")
+        assert alerts == []
+
+    def test_control_one_drawer_day_keeps_the_whole_day(self, db):
+        """A single drawer is charged with the WHOLE day as before, including a
+        sale rung up before it opened."""
+        _cash_sale(db, 1000)
+        sid = _blind_count(db, rupees=1500, lock=False)
+        row = _till(db, sid)
+        assert (row["expected_cash_paisa"], row["variance_paisa"]) == (100000, 50000)
+        assert row["expected_net_of_drawers"] == []
+
+    def test_unreadable_drawers_refuse_the_count_rather_than_charge_the_day(self, db):
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        coll = db.get_collection("till_sessions")
+
+        def _boom(*a_, **k):
+            raise AutoReconnect("till_sessions unreachable")
+
+        coll.find = _boom
+        try:
+            res = till.blind_submit(
+                db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}], actor=CASHIER)
+        finally:
+            del coll.find
+        assert (res["ok"], res["http"], res["error"]) == (False, 503, "drawer_read_failed")
+        assert (_till(db, b)["status"], _till(db, b)["variance_paisa"]) == (till.STATUS_OPEN, None)
+
+    def test_zread_face_tally_covers_each_drawer_own_shift(self, db):
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        coll = db.get_collection("till_sessions")
+        coll.update_one({"_id": a}, {"$set": {"blind_submitted_at": datetime(2026, 11, 4, 8, 0)}})
+        assert till.blind_submit(
+            db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}], actor=CASHIER)["ok"]
+        coll.update_one({"_id": b}, {"$set": {"blind_submitted_at": datetime(2026, 11, 4, 12, 0)}})
+        assert till.build_zread(db, b)["face_ledger"]["coverage"]["cash_sale_legs"] == 1
+        assert till.build_zread(db, a)["face_ledger"]["coverage"]["cash_sale_legs"] == 1
+
+
+def test_d60_second_drawer_own_cash_through_cash_register_on_real_mongo(monkeypatch):
+    """The lead's reproduction on a native PyMongo Database with the real till
+    indexes, through Finance > Cash Register's real close handler."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        a, b = _drawer_a_then_b(
+            real_db, a_sales=[1000], b_sales=[3000],
+            at=(datetime(2026, 11, 4, 5, 0), datetime(2026, 11, 4, 10, 0)),
+        )
+        alerts = _alerts(monkeypatch)
+
+        out = _cr_close_b(_NativeDB(real_db), monkeypatch, 6)  # no note
+
+        assert out["variance_status"] == "SEVERAL_DRAWERS"
+        coll = real_db.get_collection("till_sessions")
+        drawer = coll.find_one({"_id": b})
+        assert (drawer["expected_cash_paisa"], drawer["variance_paisa"]) == (300000, 0)
+        assert drawer["expected_net_of_drawers"] == [a]
+        assert coll.find_one({"_id": a})["variance_paisa"] == 0
+        assert alerts == []
+    finally:
+        client.drop_database(name)
+        client.close()
