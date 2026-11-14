@@ -112,6 +112,12 @@ export interface ReturnQuote {
   restocking_fee: number;
   /** THE figure the refund-tender split must sum to. */
   net_refund: number;
+  /** The part of the sale paid with loyalty points: it goes back as points,
+   *  never inside net_refund (owner ruling 2026-11-08). */
+  points_paid_share?: number;
+  /** True when an admin closed this bill's points exception: the share is
+   *  still held back, but no points go back automatically (D28). */
+  points_waived?: boolean;
   gst_breakup?: Record<string, number>;
   settlement?: { direction: 'COLLECT' | 'REFUND' | 'EVEN'; difference: number } | null;
   /** What each tender actually collected on the source order. */

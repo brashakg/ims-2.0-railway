@@ -30,6 +30,7 @@ from api.utils.event_time import utc_now_iso
 
 import logging
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -344,12 +345,45 @@ def _resolve_original_line(
     return None
 
 
+def _counts_as_refunded(doc: Dict[str, Any], own_refund: Optional[str] = None) -> bool:
+    """THE test every refund reader of a bill uses: a COMPLETED return, or an
+    online refund that is unfinished (shopify_refund.is_unfinished) -- counted
+    exactly as if it were finished (D38: its credit may be booked, its points
+    given back). ``own_refund``: a retry of that online refund pricing itself."""
+    from ..services.shopify_refund import is_unfinished
+
+    if own_refund and doc.get("shopify_refund_id") == own_refund:
+        return False
+    return doc.get("status") == "COMPLETED" or is_unfinished(doc)
+
+
+def _doc_amount(doc: Dict[str, Any], field: str = "net_refund") -> float:
+    """What one counted returns doc adds to a bill's ``field`` total. An online
+    refund's doc counts at least the money that left on it -- what Shopify
+    sent back plus its store credit and points share, the online door's rule
+    (shopify_refund._given_back_elsewhere): its note may file fewer lines than
+    Shopify paid for (D62(2), a line the counter already took back), but every
+    rupee Shopify sent back stays counted by the counter's cap (D62(1))."""
+    try:
+        val = float(doc.get(field) or 0)
+    except (TypeError, ValueError):
+        val = 0.0
+    if field == "net_refund" and doc.get("shopify_refund_id") and doc.get("money_back") is not None:
+        try:
+            out = (float(doc.get("money_back") or 0) + float((doc.get("credit_entry") or {}).get("delta") or 0)
+                   + float(doc.get("points_paid_share") or 0))
+        except (TypeError, ValueError):
+            out = 0.0
+        val = max(val, out)
+    return val
+
+
 def _sum_prior_refunds(
     order_id: Optional[str], field: str = "net_refund", *, strict: bool = False
 ) -> float:
     """Total ``field`` (net_refund by default) already issued for an order across
-    COMPLETED returns (BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when
-    unavailable.
+    COMPLETED returns and unfinished online refunds (_counts_as_refunded;
+    BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when unavailable.
 
     ``strict`` (the refund door: the Rs 2,000 approval rule and the over-refund
     cap, owner ruling 2026-10-23 -- FAIL CLOSED): a READ ERROR raises 503
@@ -364,14 +398,9 @@ def _sum_prior_refunds(
     total = 0.0
     try:
         for doc in coll.find({"order_id": order_id}, {"_id": 0}):
-            if doc.get("status") != "COMPLETED":
+            if not _counts_as_refunded(doc):
                 continue
-            net = doc.get(field)
-            if net is not None:
-                try:
-                    total += float(net)
-                except (TypeError, ValueError):
-                    pass
+            total += _doc_amount(doc, field)
     except Exception as exc:  # noqa: BLE001
         if strict:
             logger.error("[RETURNS] earlier refunds unreadable for %s: %s", order_id, exc)
@@ -380,6 +409,41 @@ def _sum_prior_refunds(
                 detail="Could not check earlier refunds on this bill - try again. Nothing was recorded.",
             )
         logger.debug("[RETURNS] _sum_prior_refunds lookup failed: %s", exc)
+    if field == "net_refund":
+        total += _shopify_money_off_returns(order_id, strict=strict)
+    return round(total, 2)
+
+
+def _shopify_money_off_returns(order_id: Optional[str], *, strict: bool = False) -> float:
+    """Money Shopify already sent back on this bill for an online refund IMS
+    booked no return for: its review row is its only record (queued, rejected,
+    money-only, or one whose items another door already took back -- D62).
+    Counted at what the row says Shopify sent back (the online door's rule,
+    shopify_refund._given_back_elsewhere); a refund whose returns doc counts
+    (_counts_as_refunded) is counted by that doc, never twice. Unreadable:
+    503 when ``strict`` (fail CLOSED), else 0."""
+    db = _get_db()
+    if db is None or not order_id:
+        return 0.0
+    total = 0.0
+    try:
+        booked = {d.get("shopify_refund_id") for d in db.get_collection("returns").find(
+            {"order_id": order_id, "shopify_refund_id": {"$nin": [None, ""]}}, {"_id": 0})
+            if _counts_as_refunded(d)}
+        for row in db.get_collection("shopify_refund_review").find({"order_id": order_id}, {"_id": 0}):
+            if not row.get("shopify_refund_id") or row.get("shopify_refund_id") in booked:
+                continue
+            cn = row.get("credit_note") or {}
+            back = cn.get("shopify_refunded_amount") if cn.get("money_back") is None else cn.get("money_back")
+            total += float(back or 0)
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            logger.error("[RETURNS] online refunds unreadable for %s: %s", order_id, exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Could not check earlier refunds on this bill - try again. Nothing was recorded.",
+            )
+        return 0.0
     return round(total, 2)
 
 
@@ -560,6 +624,32 @@ def _units_already_back(
     each = {r: (refunds.get(r, 0.0) + booked.get(r, 0.0)) if r == own
             else max(refunds.get(r, 0.0), booked.get(r, 0.0)) for r in {*refunds, *booked}}
     return (round(counter + sum(each.values()), 4), round(each.get(own, 0.0), 4))
+
+
+def _refuse_over_return(order_id: Optional[str], ret_line: Any, orig_line: Dict[str, Any]) -> None:
+    """400 when this return line asks back more units than the order line
+    still has out with the buyer (_units_already_back); 503 when the earlier
+    returns cannot be read."""
+    purchased = _line_purchased_qty(orig_line)
+    back = _units_already_back(order_id, orig_line)
+    if back is None:
+        raise HTTPException(
+            status_code=503,
+            detail=("Could not read this order's earlier returns just now - "
+                    "nothing was recorded. Try again."),
+        )
+    already = back[0]
+    remaining = round(purchased - already, 4)
+    if ret_line.return_qty > remaining + 1e-9:
+        name = ret_line.product_name or orig_line.get("product_name") or orig_line.get("product_id")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Return quantity {ret_line.return_qty:g} exceeds the "
+                f"returnable quantity {remaining:g} for '{name}' "
+                f"(purchased {purchased:g}, already returned {already:g})."
+            ),
+        )
 
 
 def _orders_coll():
@@ -1000,15 +1090,22 @@ _REFUND_CASH_IN = ("CASH", "UPI", "CARD", "BANK_TRANSFER")
 # CASH row -- which (before the aggregation fix) silently over-netted the
 # drawer. The refundable substitute is STORE_CREDIT, which is RECORDED on the
 # breakdown but NEVER netted into a drawer.
-_ORDER_NON_REFUNDABLE = ("GIFT_VOUCHER", "LOYALTY", "EMI", "CREDIT")
+_ORDER_NON_REFUNDABLE = ("GIFT_VOUCHER", "EMI", "CREDIT")
 
-# Non-drawer tenders a refund leg may legitimately name. STORE_CREDIT is the
-# standard substitute for any non-refundable instrument; the instrument itself
-# is accepted too (a voucher reissued as a voucher).
-_REFUND_NON_DRAWER = ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE
+# LOYALTY is NOT in that pool (owner ruling 2026-11-08): the part of a sale paid
+# with points comes back AS POINTS -- the loyalty reversal restores them -- so it
+# is never also paid as money or store credit. _points_paid_share takes it out
+# of what a return pays; no refund leg may name it.
+_POINTS_TENDER = "LOYALTY"
 
-# Every tender a refund leg may name.
-_REFUND_ALLOWED = _REFUND_CASH_IN + _REFUND_NON_DRAWER
+# Non-drawer tenders: never netted into a drawer. LOYALTY stays here so a leg
+# saved before the 2026-11-08 ruling is still read as not-drawer money.
+_REFUND_NON_DRAWER = ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE + (_POINTS_TENDER,)
+
+# Every tender a NEW refund leg may name. STORE_CREDIT is the standard
+# substitute for a non-refundable instrument; the instrument itself is accepted
+# too (a voucher reissued as a voucher).
+_REFUND_ALLOWED = _REFUND_CASH_IN + ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE
 
 # Ceilings on an EXCHANGE replacement. The exchange difference feeds the cash
 # drawer, so every client-supplied factor of it is a drawer input.
@@ -1069,7 +1166,8 @@ def _normalize_refund_tenders(
                 detail=(
                     f"Unrecognized refund tender '{method}'. Use CASH / UPI / "
                     "CARD / BANK, or STORE_CREDIT for the part of the sale paid "
-                    "with a gift voucher / loyalty / EMI / credit."
+                    "with a gift voucher / EMI / credit. Points paid on the sale "
+                    "go back as points by themselves."
                 ),
             )
         try:
@@ -1172,10 +1270,11 @@ def _order_captured_tenders(order: Optional[Dict[str, Any]]) -> Dict[str, float]
 
 
 def _order_non_refundable_tenders(
-    order: Optional[Dict[str, Any]],
+    order: Optional[Dict[str, Any]], kinds: Tuple[str, ...] = _ORDER_NON_REFUNDABLE,
 ) -> Dict[str, float]:
     """What the order collected on instruments that CANNOT be refunded back to
-    themselves as drawer/gateway money (gift voucher / loyalty / EMI / credit).
+    themselves as drawer/gateway money (gift voucher / EMI / credit), or on
+    ``kinds``.
 
     This portion is legitimately refundable only as STORE_CREDIT (or a reissued
     instrument), and it is what makes an otherwise-DOA refund completable on a
@@ -1185,7 +1284,7 @@ def _order_non_refundable_tenders(
         if not isinstance(p, dict):
             continue
         canon = canonicalize_tender(p.get("method"), p.get("mode"))
-        if canon not in _ORDER_NON_REFUNDABLE:
+        if canon not in kinds:
             continue
         try:
             amt = float(p.get("amount", 0) or 0)
@@ -1193,6 +1292,95 @@ def _order_non_refundable_tenders(
             amt = 0.0
         out[canon] = round(out.get(canon, 0.0) + amt, 2)
     return {k: v for k, v in out.items() if v > 0}
+
+
+def _points_paid(order: Optional[Dict[str, Any]]) -> float:
+    """Rupees the bill took as a LOYALTY tender (0 when its points paid nothing)."""
+    return _order_non_refundable_tenders(order, (_POINTS_TENDER,)).get(_POINTS_TENDER, 0.0)
+
+
+# D28: what every door says about the points-paid part of a return on a bill
+# whose points exception an admin closed (loyalty.points_waived). The share is
+# still held back from the money; nothing promises that points go back.
+POINTS_WAIVED_NOTE = "points for this bill are settled by head office and are not returned automatically"
+
+
+def points_restore_share(order: Optional[Dict[str, Any]], share: Optional[float]) -> Optional[float]:
+    """What a return hands loyalty.reverse_for_return: its points-paid share on
+    a bill whose points paid a LOYALTY tender, else None (the engine then gives
+    the whole redemption back, as before the ruling). The counter and the
+    reconciliation sweep both pass it this way."""
+    return round(float(share or 0), 2) if _points_paid(order) > 0 else None
+
+
+def _points_paid_share(
+    order: Optional[Dict[str, Any]], order_id: Optional[str], net_amount: float, *, strict: bool,
+    own_refund: Optional[str] = None,
+) -> float:
+    """THE rule (owner 2026-11-08 / 2026-11-09): the part of this return the
+    customer paid with loyalty points. It comes back as points -- exactly this
+    share, through loyalty.reverse_for_return -- so it is never ALSO paid out as
+    cash or store credit. A partial return gives back points IN PROPORTION
+    (Rs 1,000 bill, Rs 900 cash + 100 points: a Rs 50 item gives back 5 points
+    and Rs 45), cumulative per bill, never more than were spent.
+
+    Counted in whole points at the bill's own redemption rate
+    (loyalty.points_for_rupees), so the rupees held back here and the points
+    given back there are the same amount: the bill's points through this return
+    (its points x the bill's value returned so far, this return included, over
+    the bill's value) less the points earlier returns of the bill held back,
+    capped at this return's net. The share is a slice of the return's value
+    after any restocking fee. The return that reaches the whole redemption
+    takes the exact remainder. Cash caps and the partial-return rules are
+    untouched; only the money a return pays shrinks by this. Every return door
+    prices through here (quote, POST, Needs completing keeps it on the hold).
+
+    "Earlier returns" are the COMPLETED docs (and unfinished online refunds,
+    _counts_as_refunded; never ``own_refund``'s own claim) AND the live or kept refund holds
+    of returns still being written or kept for Needs completing
+    (_live_refund_holds). A hold carries its return's share from the moment it
+    is reserved (_reserve_order_refund prices through here inside its
+    compare-and-set). ``order`` must carry the bill's refund_holds as stored now."""
+    from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
+
+    from .loyalty import bill_redemption, points_for_rupees
+
+    paid = _points_paid(order)
+    if paid <= 0 or not order_id:
+        return 0.0
+    holds = (order or {}).get("refund_holds") or {}
+    try:
+        live, held = _live_refund_holds(order_id, holds, field="points_paid_share", own_refund=own_refund)
+        live_net, returned = _live_refund_holds(order_id, holds, own_refund=own_refund)
+        points, value = bill_redemption(order_id)
+    except HTTPException:
+        if strict:
+            raise
+        live, held, live_net, returned, points, value = {}, 0.0, {}, 0.0, 0, 0.0  # a preview only
+    except Exception as exc:  # noqa: BLE001 -- unknown is not none
+        if strict:
+            logger.error("[RETURNS] loyalty points of %s unreadable: %s", order_id, exc)
+            raise HTTPException(status_code=503, detail=(
+                "Could not check the loyalty points paid on this bill - try again. Nothing was recorded."))
+        live, held, live_net, returned, points, value = {}, 0.0, {}, 0.0, 0, 0.0
+    held += sum(float((h or {}).get("points_paid_share") or 0) for h in live.values())
+    returned += sum(float((h or {}).get("amount") or 0) for h in live_net.values())
+    if points <= 0 or value <= 0:
+        points, value = 1, 1.0  # no rupee value on the redemption: a point is a rupee
+    whole = points_for_rupees(paid, points, value)
+    billed = _order_billed_total(order)
+    upto = whole
+    if billed > 0:
+        upto = min(whole, int((Decimal(whole) * Decimal(str(round(returned + float(net_amount), 2)))
+                               / Decimal(str(billed))).quantize(Decimal(1), rounding=ROUND_HALF_UP)))
+    room = int((Decimal(str(net_amount)) * points / Decimal(str(value))).quantize(Decimal(1), rounding=ROUND_FLOOR))
+    held_points = points_for_rupees(held, points, value)
+    take = max(0, min(upto - held_points, room))
+    if take <= 0:
+        return 0.0
+    if held_points + take >= whole:
+        return round(max(0.0, min(paid - held, float(net_amount))), 2)
+    return round(take * value / points, 2)
 
 
 def _prior_refund_tenders(order_id: Optional[str]) -> Dict[str, float]:
@@ -1636,7 +1824,7 @@ def credit_notes_outside_returns(order_id: Optional[str]) -> float:
     try:
         rows = list(ledger.find({"order_id": order_id, "type": {"$in": [scl.ISSUED, "ISSUING"]}}))
         coll = _returns_coll()
-        documented = ({d.get("return_id") for d in coll.find({"order_id": order_id, "status": "COMPLETED"})}
+        documented = ({d.get("return_id") for d in coll.find({"order_id": order_id}) if _counts_as_refunded(d)}
                       if coll is not None and rows else set())
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] credit notes unreadable for %s: %s", order_id, exc)
@@ -1773,7 +1961,9 @@ def _reassert_return_claims(row: Dict[str, Any]) -> None:
                 lost.append(line)
         except Exception:  # noqa: BLE001
             lost.append(line)
-    _keep_order_refund_hold(order_id, spec.get("return_id"), amount=spec.get("net_amount"))
+    _keep_order_refund_hold(order_id, spec.get("return_id"), amount=spec.get("net_amount"),
+                            extra=({"points_paid_share": spec["points_paid_share"]}
+                                   if spec.get("points_paid_share") is not None else None))
     if lost:
         logger.error("[RETURNS] return %s: units could not be claimed again after a healed credit: %s",
                      spec.get("return_id"), lost)
@@ -3958,6 +4148,12 @@ async def quote_return(
             raise HTTPException(status_code=400, detail=str(exc))
         _gate_exchange_settlement(settlement, replacement_priced, gross_refund)
 
+    # The points-paid part goes back as points: the split covers the rest.
+    from .loyalty import points_waived as _points_waived
+
+    points_share = _points_paid_share(order, resolved_order_id, net_amount, strict=False)
+    return_value, net_amount = net_amount, round(net_amount - points_share, 2)
+
     captured = _order_captured_tenders(order)
     non_refundable = _order_non_refundable_tenders(order)
     prior = _prior_refund_tenders(resolved_order_id)
@@ -4013,8 +4209,15 @@ async def quote_return(
         # the bill) -- already inside gross_refund / net_refund.
         "round_off": refund_round_off,
         "restocking_fee": restocking_fee,
-        # THE authoritative figure the refund-tender split must sum to.
+        # THE authoritative figure the refund-tender split must sum to: the
+        # money this return pays (its value less the points-paid part).
         "net_refund": net_amount,
+        # The part paid with points, given back as points (never as money).
+        "points_paid_share": points_share,
+        # D28: True = an admin closed this bill's points; the share is still
+        # held back from the money but no points go back automatically.
+        "points_waived": points_share > 0 and _points_waived(resolved_order_id),
+        "return_value": return_value,
         "gst_breakup": engine.gst_breakup_lines(priced_lines),
         "settlement": settlement,
         # Server-resolved replacement lines + the total they sum to, so the till
@@ -4051,8 +4254,17 @@ def _refund_hold_ttl_seconds() -> int:
     return _STALE_CLAIM_SECONDS
 
 
-def _live_refund_holds(order_id: str, holds: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
-    """(holds still counting, the COMPLETED returns' total) -- read together.
+# The online refund door's entry in a bill's refund holds (shopify_refund.
+# _hold_order_for_online): "shopify:<refund id>". One reservation for both
+# doors, so an online refund and a counter return never price one bill at once
+# (#1397, Codex round 6).
+ONLINE_HOLD_PREFIX = "shopify:"
+
+
+def _live_refund_holds(order_id: str, holds: Dict[str, Any],
+                       field: str = "net_refund", own_refund: Optional[str] = None) -> Tuple[Dict[str, Any], float]:
+    """(holds still counting, the COMPLETED returns' total of ``field``) -- read together.
+    COMPLETED here is _counts_as_refunded (an unfinished online refund too).
     A hold counts only while its return has no COMPLETED doc (the doc's own
     total counts it then). A hold whose money went out is KEPT (marked by
     _keep_order_refund_hold) and never ages out: it stays the record of that
@@ -4070,13 +4282,13 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any]) -> Tuple[Dict[str, 
                 if doc.get("status") == "NOTHING_PAID":
                     done.add(doc.get("return_id"))  # finished, no money: its hold no longer counts
                     continue
-                if doc.get("status") != "COMPLETED":
+                if not _counts_as_refunded(doc, own_refund):
                     continue
                 done.add(doc.get("return_id"))
-                try:
-                    documented += float(doc.get("net_refund") or 0)
-                except (TypeError, ValueError):
-                    pass
+                if doc.get("shopify_refund_id"):
+                    # An online refund's claim counts itself: its hold, never twice.
+                    done.add(f"{ONLINE_HOLD_PREFIX}{doc.get('shopify_refund_id')}")
+                documented += _doc_amount(doc, field)
         except Exception as exc:  # noqa: BLE001 -- fail CLOSED (owner 2026-10-23)
             logger.error("[RETURNS] earlier refunds unreadable for %s: %s", order_id, exc)
             raise HTTPException(
@@ -4087,44 +4299,178 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any]) -> Tuple[Dict[str, 
     live: Dict[str, Any] = {}
     for rid, h in (holds or {}).items():
         at = parse_event_utc_naive((h or {}).get("at"))
-        if rid in done:
+        if rid in done or (own_refund and rid == f"{ONLINE_HOLD_PREFIX}{own_refund}"):
             continue
-        if not (h or {}).get("kept") and (at is None or (now - at).total_seconds() > _refund_hold_ttl_seconds()):
+        # An online post's hold lives as long as its credit lock (its "ttl").
+        ttl = float((h or {}).get("ttl") or _refund_hold_ttl_seconds())
+        if not (h or {}).get("kept") and (at is None or (now - at).total_seconds() > ttl):
             continue
         live[rid] = h
     return live, round(documented, 2)
 
 
-def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id: str) -> Tuple[float, bool]:
+_ANOTHER_RETURN_RUNNING = "Another return of this bill is being processed - try again. Nothing was recorded."
+
+
+def take_bill_hold(coll, order_id: Any, key: str, amount: float, *, door: str,
+                   ttl: Optional[float] = None) -> bool:
+    """THE one reservation every door that gives money back on a bill takes
+    (#1397, Codex round 6/7): the online refund post ("shopify:<refund id>"),
+    the admin invoice-change credit note ("credit-note:<line id>") and the
+    advance refund ("advance:<return id>") put an entry in the bill's
+    refund_holds, on the SAME compare-and-set (refund_holds_v) every counter
+    return reserves through (_reserve_order_refund), BEFORE they price what
+    the bill still owes, and drop it (drop_bill_hold) only once their own
+    record counts. A counter return pressed meanwhile is refused (a ``door``
+    hold), and a door never prices beside another un-kept hold: False -- book
+    nothing, try again. A KEPT counter hold (its money went out) is no
+    refusal: every reader counts it. No such bill: True (nothing to race)."""
+    try:
+        for _ in range(8):
+            order = coll.find_one({"order_id": order_id})
+            if not order:
+                return True
+            holds = dict(order.get("refund_holds") or {})
+            # Only another un-kept hold refuses; the returns are read (to drop
+            # finished or aged ones) only when there is one.
+            others = {rid: h for rid, h in holds.items() if rid != key and not (h or {}).get("kept")}
+            if others and _live_refund_holds(order_id, others)[0]:
+                return False
+            version = order.get("refund_holds_v")
+            holds[key] = {"amount": round(float(amount or 0), 2), "at": utc_now_iso(), "door": door,
+                          **({"ttl": ttl} if ttl else {})}
+            res = coll.update_one({"order_id": order_id, "refund_holds_v": version},
+                                  {"$set": {"refund_holds": holds, "refund_holds_v": int(version or 0) + 1}})
+            matched = getattr(res, "matched_count", None)
+            if getattr(res, "modified_count", 0) if matched is None else matched:
+                return True
+    except Exception:  # noqa: BLE001 -- unreadable (incl. the 503 of _live_refund_holds): busy
+        logger.warning("[RETURNS] refund hold %s not taken for %s", key, order_id, exc_info=True)
+    return False
+
+
+def drop_bill_hold(coll, order_id: Any, key: str) -> None:
+    """Drop a door's hold. A release that fails ages out (its ttl)."""
+    try:
+        for _ in range(8):
+            order = coll.find_one({"order_id": order_id}) or {}
+            holds = dict(order.get("refund_holds") or {})
+            if key not in holds:
+                return
+            holds.pop(key)
+            version = order.get("refund_holds_v")
+            res = coll.update_one({"order_id": order_id, "refund_holds_v": version},
+                                  {"$set": {"refund_holds": holds, "refund_holds_v": int(version or 0) + 1}})
+            matched = getattr(res, "matched_count", None)
+            if getattr(res, "modified_count", 0) if matched is None else matched:
+                return
+    except Exception:  # noqa: BLE001
+        logger.warning("[RETURNS] refund hold %s not released for %s", key, order_id, exc_info=True)
+
+
+_BILL_BUSY = ("Another refund, return or credit note of this bill is being processed - try again "
+              "in a minute. Nothing was issued.")
+
+
+@contextmanager
+def bill_money_door(db, coll, order_id: Any, key: str, amount: float, *, door: str):
+    """A door that gives money back on a bill outside the counter and the
+    online post (the admin credit note, the advance refund): the online
+    post's credit lock, then the shared hold (take_bill_hold), for as long as
+    it prices and books. Busy: 409, nothing issued."""
+    from ..services.shopify_refund import _CLAIM_STALE_SECONDS, _lock_order_credit, _unlock_order_credit
+
+    locked, token = _lock_order_credit(db, order_id) if db is not None else (True, None)
+    if not locked:
+        raise HTTPException(status_code=409, detail=_BILL_BUSY)
+    held = False
+    try:
+        held = coll is None or take_bill_hold(coll, order_id, key, amount, door=door, ttl=_CLAIM_STALE_SECONDS)
+        if not held:
+            raise HTTPException(status_code=409, detail=_BILL_BUSY)
+        yield
+    finally:
+        if held and coll is not None:
+            drop_bill_hold(coll, order_id, key)
+        if db is not None:
+            _unlock_order_credit(db, order_id, token)
+
+
+def bill_room_left(db, order: Dict[str, Any]) -> Optional[float]:
+    """What a correction note may still give back on this bill: what was paid
+    -- or, on a bill not fully paid yet that no return has paid back on, what
+    was billed (the note lowers what is still owed; staff steps unchanged) -- less everything every door already
+    gave back on it (the online door's reader, which counts counter returns,
+    kept holds, online refunds and earlier notes alike). None when the bill
+    tracks no payment. Read under bill_money_door."""
+    from ..services.shopify_refund import _given_back_elsewhere
+
+    paid = refundable_ceiling(order, include_credit_notes=False)
+    if paid is None or db is None:
+        return None
+    back = _given_back_elsewhere(db, order, "")
+    if back is None:
+        raise HTTPException(status_code=503, detail=(
+            "Could not check this bill's earlier refunds - try again. Nothing was issued."))
+    # Once a return or refund paid money back on the bill (goods came back),
+    # the note is capped by what was PAID (#1397 round 8): the billed figure
+    # let a note give back more than the cash taken while the returned item's
+    # balance stayed owed.
+    returned = _sum_prior_refunds(order.get("order_id"), strict=True) > 0.01 or any(
+        (h or {}).get("kept") for h in (order.get("refund_holds") or {}).values())
+    cap = paid if returned else max(paid, _order_billed_total(order))
+    return round(cap - back["given"], 2)
+
+
+def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id: str,
+                          bill: Optional[Dict[str, Any]] = None) -> Tuple[float, bool, float]:
     """Reserve this refund on the ORDER, atomically, BEFORE the over-refund
     cap and the Rs 2,000 approval rule decide (PR #1264): two returns fired at
     once each read the other's refund, so neither can dodge the rule or the
     cap. Each return holds its own entry in ``refund_holds`` (compare-and-set
     on ``refund_holds_v``); the prior total is the COMPLETED returns plus the
-    live holds of returns still being written. Returns (prior total,
-    reserved?). Released by _release_order_refund when the return fails; a
-    hold whose worker died ages out (_live_refund_holds). A repository
-    without compare-and-set (test doubles) reads the documented sum only."""
+    live holds of returns still being written. The hold also carries this
+    return's points-paid share, priced in the same compare-and-set
+    (_points_paid_share), so a return pressed alongside it never holds the
+    same points back again (#1397 round 7). Returns (prior total, reserved?,
+    points-paid share). Released by _release_order_refund when the return
+    fails; a hold whose worker died ages out (_live_refund_holds). A
+    repository without compare-and-set (test doubles) reads the documented
+    sum only, and prices the share from ``bill``."""
     documented = _sum_prior_refunds(order_id, strict=True)
     repo = get_order_repository()
     update_if = getattr(repo, "update_if", None) if repo is not None else None
     if not order_id or not callable(update_if) or getattr(repo, "collection", None) is None:
-        return documented, False
+        return documented, False, _points_paid_share(bill, order_id, net_amount, strict=True)
     for _ in range(8):
         order = repo.find_by_id(order_id) or {}
         version = order.get("refund_holds_v")
         live, documented = _live_refund_holds(order_id, order.get("refund_holds") or {})
-        prior = round(documented + sum(float(h.get("amount") or 0) for h in live.values()), 2)
+        prior = round(documented + sum(float(h.get("amount") or 0) for h in live.values())
+                      + _shopify_money_off_returns(order_id, strict=True), 2)
         # A kept hold of a nothing-paid return is still there only while its
         # give-backs are unfinished: never counted, never dropped (its marks
         # are the trace).
         unfinished = _nothing_paid_ids(order_id)
         keep = {rid: h for rid, h in (order.get("refund_holds") or {}).items()
                 if rid not in live and (rid in unfinished or "*" in unfinished) and (h or {}).get("kept")}
-        live[return_id] = {"amount": round(float(net_amount), 2), "at": utc_now_iso()}
+        # Another door (online refund, admin credit note, advance refund) is
+        # pricing this bill right now: wait for it, on every bill -- its units
+        # are not claimed on the line, so the same line could be paid twice
+        # (#1397 round 7).
+        if any(rid != return_id and (h or {}).get("door") for rid, h in live.items()):
+            raise HTTPException(status_code=409, detail=_ANOTHER_RETURN_RUNNING)
+        if _points_paid(order) > 0 and any(rid != return_id for rid in live):
+            # One return at a time on a points-paid bill (#1397): a return that
+            # fails after reserving releases its hold, and one priced beside it
+            # would then pay the points part again.
+            raise HTTPException(status_code=409, detail=_ANOTHER_RETURN_RUNNING)
+        share = _points_paid_share(order, order_id, net_amount, strict=True)
+        live[return_id] = {"amount": round(float(net_amount), 2), "at": utc_now_iso(),
+                           "points_paid_share": share}
         if update_if(order_id, {"refund_holds_v": version},
                      {"refund_holds": {**keep, **live}, "refund_holds_v": int(version or 0) + 1}):
-            return prior, True
+            return prior, True, share
     raise HTTPException(status_code=503, detail="Too many refunds on this bill at once - nothing was recorded. Try again.")
 
 
@@ -4366,6 +4712,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                         "gross_refund": existing.get("gross_refund"),
                         "restocking_fee": existing.get("restocking_fee"),
                         "net_refund": existing.get("net_refund"),
+                        "points_paid_share": existing.get("points_paid_share", 0.0),
                         "gst_breakup": existing.get("gst_breakup"),
                         "refund_amount": existing.get("refund_amount"),
                         "refund_method": existing.get("refund_method"),
@@ -4516,27 +4863,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                 ),
             )
         _refuse_shipping_line(orig_line)
-        purchased = _line_purchased_qty(orig_line)
-        product_id = orig_line.get("product_id")
-        back = _units_already_back(resolved_order_id, orig_line)
-        if back is None:
-            raise HTTPException(
-                status_code=503,
-                detail=("Could not read this order's earlier returns just now - "
-                        "nothing was recorded. Try again."),
-            )
-        already = back[0]
-        remaining = round(purchased - already, 4)
-        if ret_line.return_qty > remaining + 1e-9:
-            name = ret_line.product_name or orig_line.get("product_name") or product_id
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Return quantity {ret_line.return_qty:g} exceeds the "
-                    f"returnable quantity {remaining:g} for '{name}' "
-                    f"(purchased {purchased:g}, already returned {already:g})."
-                ),
-            )
+        _refuse_over_return(resolved_order_id, ret_line, orig_line)
         resolved_lines.append({"ret_line": ret_line, "orig_line": orig_line})
 
     # 0b. SERIAL-MISMATCH HARD-BLOCK (E3 acceptance #8, return half). Runs after
@@ -4580,6 +4907,22 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # refund on a never-paid order -> amount_paid 0 -> any refund rejected).
     # Checked HERE in the validation phase -- BEFORE the atomic qty claim below --
     # so a rejected over-refund never leaves a phantom reservation. 1-paisa epsilon.
+    _refuse_while_a_return_settles(order or {}, resolved_order_id)
+    return_id = generate_return_id()
+    _prior_refunds, _reserved, points_share = _reserve_order_refund(
+        resolved_order_id, net_amount, return_id, bill=order)
+    if _reserved:
+        held.update(order_id=resolved_order_id, return_id=return_id)
+        # Each line read AGAIN under the reservation (#1397 round 8): an online
+        # refund of the same line that posted after the read above (a
+        # no_restock one books no returned_qty, so the atomic claim cannot see
+        # it) is counted now; any later one waits on this hold.
+        fresh_idx = _order_line_index(get_order_repository().find_by_id(resolved_order_id) or order)
+        for rl in resolved_lines:
+            _refuse_over_return(resolved_order_id, rl["ret_line"],
+                                _resolve_original_line(rl["ret_line"], fresh_idx) or rl["orig_line"])
+    # The ceiling is read AFTER the reservation (#1397 round 7): an admin
+    # credit note booked while this return was being priced is in it.
     try:
         _refund_ceiling = refundable_ceiling(order)
         if _refund_ceiling is None:
@@ -4591,11 +4934,6 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     except CeilingUnreadable:
         raise HTTPException(status_code=503, detail=(
             "Could not check this bill's credit notes - try again. Nothing was recorded."))
-    _refuse_while_a_return_settles(order or {}, resolved_order_id)
-    return_id = generate_return_id()
-    _prior_refunds, _reserved = _reserve_order_refund(resolved_order_id, net_amount, return_id)
-    if _reserved:
-        held.update(order_id=resolved_order_id, return_id=return_id)
     if round(_prior_refunds + net_amount, 2) > _refund_ceiling + 0.01:
         raise HTTPException(
             status_code=400,
@@ -4628,12 +4966,19 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             raise HTTPException(status_code=400, detail=str(exc))
         _gate_exchange_settlement(settlement, replacement_dump, gross_refund)
 
+    # The points-paid part goes back as points (the loyalty reversal below):
+    # what this return PAYS -- the split, the refund, the store credit -- is the
+    # rest. net_amount stays the return's value: the cap, the approval rule and
+    # the credit note's tax all read it, unchanged. points_share was priced
+    # inside the reservation above (the one rule: _points_paid_share).
+    pays = round(net_amount - points_share, 2)
+
     refund_tenders: Optional[List[Dict[str, Any]]] = None
     collect_method: Optional[str] = None
     drawer_auto_netted = False
     if body.return_type == "RETURN":
         refund_tenders, drawer_auto_netted = _normalize_refund_tenders(
-            body.refund_tenders, net_amount
+            body.refund_tenders, pays
         )
         # AUTHORITATIVE cross-check: a tender may only be refunded up to what it
         # actually collected on this order (a UI rule is not a control).
@@ -4815,6 +5160,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             # What a recovered record needs to file the reversal once and
             # stay inside the cap (money review 14).
             "net_amount": round(float(net_amount), 2),
+            "points_paid_share": points_share,
             "gross_refund": round(float(gross_refund), 2),
             "restocking_fee": round(float(restocking_fee), 2),
             "round_off": round(float(_ro), 2),
@@ -4911,6 +5257,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                                "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in claimed],
                     "refund_tenders": refund_tenders,
                     "net_amount": round(float(net_amount), 2),
+                    "points_paid_share": points_share,
                     "return_type": body.return_type,
                 },
                 outcome=_outcome,
@@ -4966,7 +5313,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     if body.return_type == "RETURN":
         # Net of any restocking fee = the cash actually given back. The explicit
         # refund-tender breakdown was validated + cross-checked pre-claim.
-        refund_amount = net_amount
+        refund_amount = pays
         refund_method = body.refund_method or _order_payment_method(order)
 
         # ISSUE the NON-DRAWER portion. A STORE_CREDIT (or reissued voucher) leg
@@ -4997,7 +5344,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             credit_amount = _non_drawer_total
 
     elif body.return_type == "CREDIT_NOTE":
-        credit_amount = net_amount
+        credit_amount = pays
         refund_method = "STORE_CREDIT"
         # SAME GUARD AS THE RETURN BRANCH ABOVE. A restocking fee equal to the
         # gross is legitimate ("take the goods back, issue nothing") and the FE
@@ -5005,12 +5352,15 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # _issue_store_credit return None (it refuses amount <= 0), which the
         # fail-loud path then reported as a ledger outage, sending the cashier
         # into an infinite retry against a perfectly healthy ledger.
+        # The note reverses the whole return's tax; the balance moves by what
+        # this return pays (the points-paid part goes back as points).
         if net_amount > 0:
             credit_entry = _issue_credit_or_fail(
-                net_amount,
+                pays,
                 reason=f"Credit note for return {return_id}",
                 gross=gross_refund,
                 fee=restocking_fee,
+                note_amount=net_amount if points_share > 0 else None,
             )
 
     else:  # EXCHANGE (settlement + collect_method validated pre-claim above)
@@ -5049,12 +5399,15 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # it. A genuine failure flags the return doc for reconciliation. Walk-in /
     # no customer -> skip (walk-ins never earn loyalty).
     loyalty_reversal_failed = False
+    points_waived = False  # D28: an admin closed this bill's points; none go back
     _cust = customer_id
     if _cust and _cust != "walk-in" and not str(_cust).startswith("walkin-"):
         try:
             from .loyalty import reverse_for_return as _reverse_loyalty
 
-            _lr = _reverse_loyalty(return_id, resolved_order_id, _cust)
+            _lr = _reverse_loyalty(return_id, resolved_order_id, _cust,
+                                   points_paid_share=points_restore_share(order, points_share))
+            points_waived = bool(_lr.get("waived"))
             if _lr.get("ok"):
                 logger.info(
                     "[RETURNS] loyalty reversed for %s: clawed=%s restored=%s",
@@ -5062,7 +5415,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     _lr.get("earned_clawed", 0),
                     _lr.get("redeemed_restored", 0),
                 )
-            elif _lr.get("reason") not in ("missing_ids", "loyalty_db_unavailable"):
+            elif _lr.get("reason") != "missing_ids":
                 loyalty_reversal_failed = True
                 logger.error(
                     "[RETURNS] loyalty reversal FAILED for %s: %s",
@@ -5183,6 +5536,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "round_off": _ro,
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
+        # The part paid with points: given back as points, not in refund_amount
+        # / credit_amount. Later returns of the bill read it (_points_paid_share).
+        "points_paid_share": points_share,
         "gst_breakup": gst_view,
         # The credit note's Rule 53 number (None when nothing reverses tax).
         "credit_note_number": credit_note_number,
@@ -5294,9 +5650,15 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         if restocking_fee > 0
         else ""
     )
+    points_note = ""
+    if points_share > 0:
+        points_note = (
+            f"; Rs {points_share} was paid with points: {POINTS_WAIVED_NOTE}" if points_waived
+            else f"; Rs {points_share} paid with points goes back to the customer's points"
+        )
     message = {
-        "RETURN": f"Refund of Rs {net_amount} recorded{fee_note}",
-        "CREDIT_NOTE": f"Store credit of Rs {net_amount} issued{fee_note}",
+        "RETURN": f"Refund of Rs {pays} recorded{fee_note}{points_note}",
+        "CREDIT_NOTE": f"Store credit of Rs {pays} issued{fee_note}{points_note}",
         "EXCHANGE": "Exchange recorded",
     }[body.return_type]
 
@@ -5309,6 +5671,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "round_off": _ro,
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
+        "points_paid_share": points_share,
+        # D28: True = this bill's points are settled by head office; none went back.
+        "points_waived": points_waived,
         "gst_breakup": gst_view,
         "credit_note_number": credit_note_number,
         "refund_amount": refund_amount,
@@ -5696,6 +6061,8 @@ async def complete_return_record(
         # The whole refund: its credit note covers all of it; the reserved
         # amount, never more (it stays inside the cap).
         net = facts.get("net_amount") if facts.get("net_amount") is not None else round(credit + drawer, 2)
+        # The points-paid part went back as points, never in the money.
+        points_share = round(float(facts.get("points_paid_share") or 0.0), 2)
         doc = {
             "return_id": return_id,
             "order_id": order_id,
@@ -5716,9 +6083,10 @@ async def complete_return_record(
             # later as round off).
             "round_off": facts.get("round_off") or 0.0,
             "net_refund": net,
+            "points_paid_share": points_share,
             "gst_breakup": gst,
             "credit_note_number": base.get("note_number") or facts.get("note_number"),
-            "refund_amount": net if rtype == "RETURN" else None,
+            "refund_amount": round(net - points_share, 2) if rtype == "RETURN" else None,
             "refund_method": "STORE_CREDIT" if rtype == "CREDIT_NOTE" else None,
             "refund_tenders": tenders if rtype == "RETURN" else None,
             "drawer_auto_netted": bool(rtype == "RETURN" and _drawer(tenders)),
@@ -5728,6 +6096,11 @@ async def complete_return_record(
             "restock_applied": False,
             "restock_stock_ids": [],
             "created_by": current_user.get("user_id"),
+            # Nothing kept says whether the press reached its loyalty reversal,
+            # so the sweep (reconcile_loyalty_reversals) settles it: the engine
+            # is idempotent on the return, and a reversal already made moves
+            # nothing and clears this. A kept doc already holds the press's answer.
+            "loyalty_reversal_failed": True,
         }
         source = "credit line" if credit_landed else "held refund"
     if owed:
@@ -6953,154 +7326,159 @@ async def refund_advance_and_cancel(
                 {"return_id": _rid, "status": "PENDING"},
                 {"$set": {"status": "VOIDED", "voided_reason": "a later press found it without its claim"}},
             )
-    plan = _advance_refund_plan(order)
-    if not plan["ok"]:
-        raise HTTPException(status_code=plan.get("status_code", 400), detail=plan["reason"])
-    if coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}}):
-        raise HTTPException(
-            status_code=400,
-            detail="This order already has a return against it. Ask an admin to settle it.",
-        )
-    total, credit, refund_tenders = plan["total"], plan["credit"], plan["refund_tenders"]
-    status = order.get("status")
-
-    # Cash: from the shop's drawer or from HQ (THE rule, _place_cash_legs).
-    cash = round(sum(t["amount"] for t in refund_tenders if t["method"] == "CASH"), 2)
-    refund_tenders, paid_outside_drawer = _place_cash_legs(refund_tenders, body.cash_paid_from, store_id)
-
-    # A credit note for the WHOLE invoice (invoiced orders only).
-    priced_lines: List[Dict[str, Any]] = []
-    gst_view: Dict[str, Any] = {"taxable": 0.0, "tax": 0.0}
-    note_value = 0.0
-    if plan["invoice_number"]:
-        priced_lines, gst_view, note_value = _whole_invoice_credit_note(order, order_id)
-
-    # One refund per order, even under a double tap: claim the order first --
-    # only while its status AND the money on it are what was read, so a payment
-    # landing mid-refund makes this refuse instead of refunding a stale amount.
+    # One reservation with every other door that gives money back on this
+    # bill (#1397 round 7): the shared refund hold and the credit lock
+    # (bill_money_door) from the plan to the finished refund.
     return_id = generate_return_id()
-    if not repo.update_if(
-        order_id,
-        # ...and the invoice state the plan read: an invoice minted in
-        # between would mean a refund with no credit note for it.
-        {"status": status, "advance_refund_id": None, "amount_paid": order.get("amount_paid"),
-         "invoice_number": order.get("invoice_number"),
-         # An e-invoice landing mid-refund would need an e-invoice credit note.
-         "irn": order.get("irn"),
-         # A superadmin credit note claims the order the same way (admin_edit).
-         "post_invoice_credit_note_at": None},
-        {"advance_refund_id": return_id, "advance_refund_at": utc_now_iso(), "advance_refund_record": None},
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="This order changed or is already being refunded - reload it and check.",
-        )
+    with bill_money_door(_get_db(), getattr(repo, "collection", None), order_id, f"advance:{return_id}",
+                         float(order.get("amount_paid") or 0), door="advance"):
+        plan = _advance_refund_plan(order)
+        if not plan["ok"]:
+            raise HTTPException(status_code=plan.get("status_code", 400), detail=plan["reason"])
+        if coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}}):
+            raise HTTPException(
+                status_code=400,
+                detail="This order already has a return against it. Ask an admin to settle it.",
+            )
+        total, credit, refund_tenders = plan["total"], plan["credit"], plan["refund_tenders"]
+        status = order.get("status")
 
-    def _unclaim():
-        repo.update_if(order_id, {"advance_refund_id": return_id},
-                       {"advance_refund_id": None, "advance_refund_at": None, "advance_refund_record": None})
+        # Cash: from the shop's drawer or from HQ (THE rule, _place_cash_legs).
+        cash = round(sum(t["amount"] for t in refund_tenders if t["method"] == "CASH"), 2)
+        refund_tenders, paid_outside_drawer = _place_cash_legs(refund_tenders, body.cash_paid_from, store_id)
 
-    # A counter return reserves its units on the order BEFORE it writes its
-    # doc, and refuses once it sees advance_refund_id (create_return); a
-    # payment landing in the same instant changes amount_paid (its write is a
-    # compare-and-set on advance_refund_id too). Re-read after our claim: if
-    # either got in first, back out with nothing written.
-    fresh = repo.find_by_id(order_id) or {}
-    try:
-        handed_over = _goods_handed_over(fresh)
-        other_note = _order_has_other_credit_note(fresh)
-    except HTTPException:
-        _unclaim()
-        raise
-    if other_note:
-        _unclaim()
-        raise HTTPException(status_code=409, detail=(
-            "This order already has a credit note against it (a correction after the "
-            "invoice). Nothing was refunded. Ask an admin to settle it."))
-    if handed_over:
-        _unclaim()
-        raise HTTPException(status_code=409, detail=_HANDED_OVER)
-    if (
-        coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}})
-        or any(float((it or {}).get("returned_qty") or 0) > 0 for it in fresh.get("items") or [])
-        or abs(float(fresh.get("amount_paid") or 0) - float(order.get("amount_paid") or 0)) > 0.005
-        or (fresh.get("invoice_number") or None) != (order.get("invoice_number") or None)
-    ):
-        _unclaim()
-        raise HTTPException(
-            status_code=409,
-            detail="This order changed while the refund started (a return or a payment) - nothing was refunded. Reload and check.",
-        )
+        # A credit note for the WHOLE invoice (invoiced orders only).
+        priced_lines: List[Dict[str, Any]] = []
+        gst_view: Dict[str, Any] = {"taxable": 0.0, "tax": 0.0}
+        note_value = 0.0
+        if plan["invoice_number"]:
+            priced_lines, gst_view, note_value = _whole_invoice_credit_note(order, order_id)
 
-    actor_name = current_user.get("full_name", current_user.get("username", ""))
-    now = utc_now_iso()
-    doc: Dict[str, Any] = {
-        "return_id": return_id,
-        "order_id": order_id,
-        "order_number": order.get("order_number"),
-        "historical": bool(order.get("historical")),
-        "customer_id": order.get("customer_id"),
-        "customer_name": order.get("customer_name") or "",
-        "store_id": store_id,
-        "return_type": "RETURN",
-        "advance_refund": True,
-        # Invoiced: the whole invoice's lines and tax (THE credit note GSTR-1
-        # / 3B read from returns.gst_breakup). Not invoiced: no tax was charged.
-        "items": priced_lines,
-        "returned_value": note_value or total,
-        "gross_refund": note_value or total,
-        "credit_note_value": note_value or None,
-        "restocking_fee": 0.0,
-        # The money actually given back: the advance, never the invoice value.
-        "net_refund": total,
-        "gst_breakup": gst_view,
-        "credit_note_number": None,
-        "invoice_number": plan["invoice_number"],
-        "refund_amount": total,
-        "refund_method": (refund_tenders or paid_outside_drawer)[0]["method"],
-        # Drawer truth: the Day-End readers net these legs off -- only the
-        # cash handed back from this shop's own drawer is among them.
-        "refund_tenders": refund_tenders,
-        "drawer_auto_netted": not paid_outside_drawer,
-        "cash_paid_from": body.cash_paid_from if cash > 0 else None,
-        "paid_outside_drawer": paid_outside_drawer or None,
-        "credit_amount": credit or None,
-        "credit_entry": None,
-        # PENDING until every part is written (_finish_advance_refund): every
-        # money / GST reader reads COMPLETED only, and a crash part-way is
-        # finished by the next press, never rolled back.
-        "status": "PENDING",
-        "reason_summary": body.reason,
-        "refund_approval_by": current_user.get("user_id"),
-        "refund_approval_by_name": actor_name,
-        "refund_approval_status": "APPROVED",
-        "created_by": current_user.get("user_id"),
-        "created_by_name": actor_name,
-        # created_at is re-dated to the COMPLETION time when the refund
-        # completes (_finish_advance_refund): Day-End and the GST period read
-        # created_at, and a refund belongs to the day it went through.
-        "created_at": now,
-        "claimed_at": now,
-    }
-    try:
-        coll.insert_one(dict(doc))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("[RETURNS] advance refund %s not saved: %s", return_id, exc)
-        _unclaim()  # nothing else was written yet
-        raise HTTPException(
-            status_code=503, detail="The refund could not be saved - nothing was recorded. Try again."
-        )
-    # Stamp the record on the order while the claim is still ours -- the
-    # same single write the stale-claim free conditions on. Lost (the claim
-    # was freed meanwhile): stop here, before any credit or note; the record
-    # wrote nothing else and is voided later.
-    if not repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_record": return_id}):
-        raise HTTPException(
-            status_code=409,
-            detail="This refund's claim was released meanwhile - nothing was refunded. Reload and check.",
-        )
+        # One refund per order, even under a double tap: claim the order first --
+        # only while its status AND the money on it are what was read, so a payment
+        # landing mid-refund makes this refuse instead of refunding a stale amount.
+        if not repo.update_if(
+            order_id,
+            # ...and the invoice state the plan read: an invoice minted in
+            # between would mean a refund with no credit note for it.
+            {"status": status, "advance_refund_id": None, "amount_paid": order.get("amount_paid"),
+             "invoice_number": order.get("invoice_number"),
+             # An e-invoice landing mid-refund would need an e-invoice credit note.
+             "irn": order.get("irn"),
+             # A superadmin credit note claims the order the same way (admin_edit).
+             "post_invoice_credit_note_at": None},
+            {"advance_refund_id": return_id, "advance_refund_at": utc_now_iso(), "advance_refund_record": None},
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This order changed or is already being refunded - reload it and check.",
+            )
 
-    doc = _finish_advance_refund(repo, coll, doc, current_user)
+        def _unclaim():
+            repo.update_if(order_id, {"advance_refund_id": return_id},
+                           {"advance_refund_id": None, "advance_refund_at": None, "advance_refund_record": None})
+
+        # A counter return reserves its units on the order BEFORE it writes its
+        # doc, and refuses once it sees advance_refund_id (create_return); a
+        # payment landing in the same instant changes amount_paid (its write is a
+        # compare-and-set on advance_refund_id too). Re-read after our claim: if
+        # either got in first, back out with nothing written.
+        fresh = repo.find_by_id(order_id) or {}
+        try:
+            handed_over = _goods_handed_over(fresh)
+            other_note = _order_has_other_credit_note(fresh)
+        except HTTPException:
+            _unclaim()
+            raise
+        if other_note:
+            _unclaim()
+            raise HTTPException(status_code=409, detail=(
+                "This order already has a credit note against it (a correction after the "
+                "invoice). Nothing was refunded. Ask an admin to settle it."))
+        if handed_over:
+            _unclaim()
+            raise HTTPException(status_code=409, detail=_HANDED_OVER)
+        if (
+            coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}})
+            or any(float((it or {}).get("returned_qty") or 0) > 0 for it in fresh.get("items") or [])
+            or abs(float(fresh.get("amount_paid") or 0) - float(order.get("amount_paid") or 0)) > 0.005
+            or (fresh.get("invoice_number") or None) != (order.get("invoice_number") or None)
+        ):
+            _unclaim()
+            raise HTTPException(
+                status_code=409,
+                detail="This order changed while the refund started (a return or a payment) - nothing was refunded. Reload and check.",
+            )
+
+        actor_name = current_user.get("full_name", current_user.get("username", ""))
+        now = utc_now_iso()
+        doc: Dict[str, Any] = {
+            "return_id": return_id,
+            "order_id": order_id,
+            "order_number": order.get("order_number"),
+            "historical": bool(order.get("historical")),
+            "customer_id": order.get("customer_id"),
+            "customer_name": order.get("customer_name") or "",
+            "store_id": store_id,
+            "return_type": "RETURN",
+            "advance_refund": True,
+            # Invoiced: the whole invoice's lines and tax (THE credit note GSTR-1
+            # / 3B read from returns.gst_breakup). Not invoiced: no tax was charged.
+            "items": priced_lines,
+            "returned_value": note_value or total,
+            "gross_refund": note_value or total,
+            "credit_note_value": note_value or None,
+            "restocking_fee": 0.0,
+            # The money actually given back: the advance, never the invoice value.
+            "net_refund": total,
+            "gst_breakup": gst_view,
+            "credit_note_number": None,
+            "invoice_number": plan["invoice_number"],
+            "refund_amount": total,
+            "refund_method": (refund_tenders or paid_outside_drawer)[0]["method"],
+            # Drawer truth: the Day-End readers net these legs off -- only the
+            # cash handed back from this shop's own drawer is among them.
+            "refund_tenders": refund_tenders,
+            "drawer_auto_netted": not paid_outside_drawer,
+            "cash_paid_from": body.cash_paid_from if cash > 0 else None,
+            "paid_outside_drawer": paid_outside_drawer or None,
+            "credit_amount": credit or None,
+            "credit_entry": None,
+            # PENDING until every part is written (_finish_advance_refund): every
+            # money / GST reader reads COMPLETED only, and a crash part-way is
+            # finished by the next press, never rolled back.
+            "status": "PENDING",
+            "reason_summary": body.reason,
+            "refund_approval_by": current_user.get("user_id"),
+            "refund_approval_by_name": actor_name,
+            "refund_approval_status": "APPROVED",
+            "created_by": current_user.get("user_id"),
+            "created_by_name": actor_name,
+            # created_at is re-dated to the COMPLETION time when the refund
+            # completes (_finish_advance_refund): Day-End and the GST period read
+            # created_at, and a refund belongs to the day it went through.
+            "created_at": now,
+            "claimed_at": now,
+        }
+        try:
+            coll.insert_one(dict(doc))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[RETURNS] advance refund %s not saved: %s", return_id, exc)
+            _unclaim()  # nothing else was written yet
+            raise HTTPException(
+                status_code=503, detail="The refund could not be saved - nothing was recorded. Try again."
+            )
+        # Stamp the record on the order while the claim is still ours -- the
+        # same single write the stale-claim free conditions on. Lost (the claim
+        # was freed meanwhile): stop here, before any credit or note; the record
+        # wrote nothing else and is voided later.
+        if not repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_record": return_id}):
+            raise HTTPException(
+                status_code=409,
+                detail="This refund's claim was released meanwhile - nothing was refunded. Reload and check.",
+            )
+
+        doc = _finish_advance_refund(repo, coll, doc, current_user)
 
     try:
         from ..dependencies import get_audit_repository

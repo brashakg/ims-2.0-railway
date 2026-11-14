@@ -371,9 +371,13 @@ def test_the_reconciler_tick_runs_off_the_event_loop(monkeypatch):
     seen = []
     monkeypatch.setattr(asyncio, "to_thread", lambda fn, *a, **k: _done(seen.append(fn)))
     asyncio.run(cust_router.scheduled_credit_reconcile())
+    from api.routers.loyalty import reconcile_loyalty_reversals
+    from api.routers.online_store_refund_reviews import finish_unfinished_refunds
     from api.routers.returns import sweep_stuck_return_holds
 
-    assert seen == [cust_router.reconcile_pending_credits, sweep_stuck_return_holds]
+    # The refund finisher runs BEFORE the points sweep: a return it finishes is that sweep's the same tick.
+    assert seen == [cust_router.reconcile_pending_credits, sweep_stuck_return_holds,
+                    finish_unfinished_refunds, reconcile_loyalty_reversals]
 
 
 async def _done(_):

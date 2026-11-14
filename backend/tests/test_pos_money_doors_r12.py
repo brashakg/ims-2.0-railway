@@ -549,7 +549,7 @@ def test_the_shopify_allowance_is_capped_at_shopifys_total_on_a_mismatch(env):
     from api.services import shopify_refund as sr
 
     rr._order(env, amount_paid=1000.0, shopify_totals_check={"status": "MISMATCH", "shopify_total": 600.0})
-    credit, _why, label, _ask = sr._store_credit_allowance(env, "ord-1", "700001", 1000.0, 0.0)
+    credit, _why, label, _ask, _pts = sr._store_credit_allowance(env, "ord-1", "700001", 1000.0, 0.0)
     assert credit == 600.0 and label == "PARTIAL"
 
 

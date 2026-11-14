@@ -436,7 +436,10 @@ def test_a_refund_of_a_unit_the_counter_already_took_back_restocks_nothing(swept
     assert review["status"] == "PENDING" and "already booked a return" in review["note"]
     assert [r["restock"] for r in review["proposed_restock"]] == [False]
     res = shopify_refund.post_from_review(swept["db"], review)
-    assert res["status"] == "credited" and _units(swept) == [("stk-1", "AVAILABLE")]
+    # #1397 round 8: the counter's credit note already reversed this unit's
+    # GST -- the confirm files no second one (the accountant rejects the row).
+    assert res["status"] == "already_returned" and _units(swept) == [("stk-1", "AVAILABLE")]
+    assert swept["ledger"].count_documents({}) == 0
 
 
 def test_a_queued_refund_confirmed_after_a_counter_return_restocks_nothing(swept):
@@ -455,7 +458,8 @@ def test_a_queued_refund_confirmed_after_a_counter_return_restocks_nothing(swept
     _counter_return(swept, 41006)
     res = shopify_refund.post_from_review(swept["db"], review)
 
-    assert res["status"] == "credited" and _units(swept) == [("stk-1", "AVAILABLE")]
+    assert res["status"] == "already_returned" and _units(swept) == [("stk-1", "AVAILABLE")]
+    assert swept["ledger"].count_documents({}) == 0
 
 
 def test_a_refund_over_a_partial_counter_return_restocks_only_the_rest(swept):

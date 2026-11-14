@@ -59,6 +59,11 @@ def _claim_loyalty_redemption(order: dict, amount: float, payment_id: str, idem_
             status_code=503,
             detail="Loyalty points cannot be checked just now - nothing was recorded. Try again.",
         )
+    # The till's redeem may have debited but not recorded (its answer was "not
+    # confirmed"): complete that row, so the real burn can back this tender.
+    from ..loyalty import complete_bill_redemption
+
+    complete_bill_redemption(order_id, customer_id)
     unused = txns.collection.find(
         {"order_id": order_id, "customer_id": customer_id, "type": "REDEEM", "tender_payment_id": None}
     )
