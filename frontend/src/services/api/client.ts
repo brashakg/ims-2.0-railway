@@ -521,12 +521,18 @@ function _isPlainObject(v: unknown): v is Record<string, unknown> {
   return proto === Object.prototype || proto === null;
 }
 
-function addCamelAliases(value: any): any {
+// A product's `attributes` is a DICTIONARY (its keys are data: brand_name,
+// model_no, a custom field), not a transport shape -- aliased, every editor and
+// drawer showed Brand Name beside BrandName and the form saved the aliases back
+// (CAT-07). Its keys pass through exactly as stored.
+const _DICTIONARY_KEYS = new Set(['attributes']);
+
+export function addCamelAliases(value: any): any {
   if (Array.isArray(value)) return value.map(addCamelAliases);
   if (_isPlainObject(value)) {
     const out: Record<string, any> = {};
     for (const [k, v] of Object.entries(value)) {
-      const cv = addCamelAliases(v);
+      const cv = _DICTIONARY_KEYS.has(k) && _isPlainObject(v) ? v : addCamelAliases(v);
       out[k] = cv;
       if (k.includes('_')) {
         const camel = _toCamel(k);

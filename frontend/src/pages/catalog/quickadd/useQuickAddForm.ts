@@ -13,6 +13,8 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../../../context/AuthContext';
+import { useUnsavedGuard } from '../../../hooks/useUnsavedGuard';
+import { getErrorStatus } from '../../../utils/errorHandler';
 import { useToast } from '../../../context/ToastContext';
 import { COST_ROLES } from '../../../components/common/CostCell';
 import {
@@ -119,6 +121,15 @@ export function useQuickAddForm() {
 
   // Product images (Part 1): self-hosted URLs returned by the upload endpoint.
   const [images, setImages] = useState<string[]>([]);
+  // Upload / remove / remove-background, in their own module. Created up here
+  // so every door that moves the form to another product can abandon a photo
+  // still uploading for the last one (discardPending, CAT-01).
+  const imageCtl = useProductImages(setImages);
+  const { discardPending } = imageCtl;
+  // A photo still uploading or being cleaned: no save door may run until it
+  // settles, or the save goes without it (L1-F45 / CAT-01).
+  const imagesBusy = imageCtl.uploadingImages || imageCtl.editingImages.size > 0;
+  const IMAGES_BUSY_MSG = 'A photo is still uploading. Wait for it to finish, then save.';
 
   // UI state
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -501,8 +512,9 @@ export function useQuickAddForm() {
       setDisplayName('');
       setReviewTags([]);
       clearDifferent();
+      discardPending();
     },
-    [attributes.brand_name, clearDifferent]
+    [attributes.brand_name, clearDifferent, discardPending]
   );
 
   // Apply a ProductFormValues blob to every form field. The inverse of
@@ -630,6 +642,19 @@ export function useQuickAddForm() {
       // product that was open (?edit=A, then a sibling chip: Save used to PUT
       // B's fields onto A).
       setEditMode(null);
+      discardPending();
+      // ...and the address stops naming the product that was open (CAT-03:
+      // the ?edit= address now stays while editing, so a refresh reopens it).
+      setSearchParams(
+        (prev) => {
+          if (!prev.has('edit')) return prev;
+          const sp = new URLSearchParams(prev);
+          sp.delete('edit');
+          sp.delete('from');
+          return sp;
+        },
+        { replace: true },
+      );
       setVariantCtx({
         sourceProductId: seed.sourceProductId,
         leadId: seed.leadId,
@@ -661,7 +686,8 @@ export function useQuickAddForm() {
       focusAttrField(seed.cleared.find((k) => !typedKeys.has(k)) || null);
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
-    [applyFormValues, focusAttrField, toast, reorderShop, canSetReorderLevel]
+    [applyFormValues, focusAttrField, toast, reorderShop, canSetReorderLevel, discardPending,
+      setSearchParams]
   );
 
   // Leave variant mode -> a fresh blank form ("New model" button / Esc).
@@ -701,13 +727,14 @@ export function useQuickAddForm() {
     setAttributes(keptAttrs);
     setDescription('');
     setImages([]);
+    discardPending();
     setErrors({});
     setFlaggedFields(
       new Set([...attrFlags, ...variantFlaggedFormFields(currentValues())])
     );
     focusAttrField(variantCtx?.firstClearedField ?? null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
-  }, [attributes, selectedCategory, currentValues, focusAttrField, variantCtx]);
+  }, [attributes, selectedCategory, currentValues, focusAttrField, variantCtx, discardPending]);
 
   // Rescue popup: default action — fetch the existing product and flip into
   // variant mode seeded from it. The enriched 409 payload carries product_id.
@@ -774,10 +801,6 @@ export function useQuickAddForm() {
     [navigate]
   );
 
-  // ---- Product images (Part 1) ---------------------------------------------
-  // Upload / remove / remove-background, unchanged, in their own module.
-  const imageCtl = useProductImages(setImages);
-
 
   // ---- EDIT QUEUE (?edit= from the Catalog list) -----------------------------
   // The review queue's own stash (reviewQueue.ts), in its EDIT_QUEUE_KEY slot:
@@ -788,16 +811,25 @@ export function useQuickAddForm() {
   // True from the moment the walk moves on until the next product is in the
   // form: nothing can be saved meanwhile (the form still shows the last one).
   const [editBusy, setEditBusy] = useState(false);
+  // CAT-03: the ?edit= product would not open -- a lasting panel (not a toast
+  // over a dead form) says so. notFound = the server answered 404.
+  const [editLoadError, setEditLoadError] = useState<{ id: string; notFound: boolean } | null>(null);
+  const [editReload, setEditReload] = useState(0);
+  const retryEditLoad = useCallback(() => setEditReload((n) => n + 1), []);
+  // Set when the staff member chose to stay on a dirty edit and the address
+  // was put back: the loader must not re-fetch over their unsaved edits.
+  const keepEditFormRef = useRef<string | null>(null);
+  const editSearchRef = useRef<string>('');
   // The form as loaded -- the unsaved-changes check for Skip.
   const [editBaseline, setEditBaseline] = useState<string | null>(null);
   const editFingerprint = useMemo(
     () =>
       JSON.stringify([
         selectedCategory, typedAttributes(attributes), description, hsnCode, gstRate, weight,
-        mrp, offerPrice, costPrice, images,
+        mrp, offerPrice, costPrice, discountCategory, images,
       ]),
     [selectedCategory, attributes, description, hsnCode, gstRate, weight, mrp, offerPrice,
-      costPrice, images],
+      costPrice, discountCategory, images],
   );
   // Captured once the loaded product has settled into the form.
   useEffect(() => {
@@ -808,6 +840,8 @@ export function useQuickAddForm() {
     editMode?.kind === 'spine' &&
     ((editBaseline !== null && editBaseline !== editFingerprint) ||
       typedLevel(reorderLevel) !== typedLevel(levelText(editLevels?.[reorderShop])));
+  // CAT-04: refresh / tab close and any in-app link off this page ask first.
+  useUnsavedGuard(editDirty || imagesBusy);
 
   // Open the product after position `at` of the queue. Past the stashed rows,
   // the list's own query is asked for the rows after those queued, a page at
@@ -885,10 +919,27 @@ export function useQuickAddForm() {
     void advanceEdit(false);
   }, [editDirty, advanceEdit, editBusy]);
 
+  // Cancel (the save bar's and the edit banner's): back to the list, but
+  // unsaved changes -- or a photo still uploading -- ask first (CAT-04).
+  const handleEditCancel = useCallback(() => {
+    if (editMode?.kind !== 'spine') return;
+    if (
+      (editDirty || imagesBusy) &&
+      !window.confirm('You have unsaved changes on this product — leave without saving?')
+    ) return;
+    navigate(editListAddress(readReviewQueue(EDIT_QUEUE_KEY), editMode.id));
+  }, [editMode, editDirty, imagesBusy, navigate]);
+
   const handleSubmit = useCallback(
     async (saveAndNew: boolean, thenNext = false) => {
       // The walk is between products: the form is not the next one's yet.
       if (editBusy) return;
+      // Every save door (Save, Save + New, Save & next, Save variant, the
+      // keyboard, the near-duplicate re-send) waits for the photos (L1-F45).
+      if (imagesBusy) {
+        toast.info(IMAGES_BUSY_MSG);
+        return;
+      }
       const values = currentValues();
       const newErrors = validateProductForm(values, storedAttributes);
       setErrors(newErrors);
@@ -949,7 +1000,9 @@ export function useQuickAddForm() {
             offer_price: payload.offer_price,
             hsn_code: payload.hsn_code,
             gst_rate: payload.gst_rate,
-            description: values.description || undefined,
+            // Sent even when empty: a cleared description is a change, and an
+            // omitted one leaves the old text stored (L1-F44 / CAT-02).
+            description: values.description ?? '',
             weight: payload.weight,
             cost_price: payload.cost_price,
             images: payload.images,
@@ -1083,7 +1136,7 @@ export function useQuickAddForm() {
       currentValues, toast, resetForm, navigate, variantCtx, startNextVariant,
       optedOutLeadId, familyHint, enterVariantMode,
       editMode, editLevels, reorderLevel, reorderBadInput, canSetReorderLevel, reorderShop,
-      focusAttrField, storedAttributes, advanceEdit, editBusy, clearDifferent,
+      focusAttrField, storedAttributes, advanceEdit, editBusy, clearDifferent, imagesBusy,
     ]
   );
 
@@ -1269,6 +1322,10 @@ export function useQuickAddForm() {
   const handleReviewSave = useCallback(
     async (opts?: { silent?: boolean }): Promise<{ ok: boolean; saved: boolean }> => {
       if (editMode?.kind !== 'catalog' || !reviewSnapshot) return { ok: false, saved: false };
+      if (imagesBusy) {
+        toast.info(IMAGES_BUSY_MSG);
+        return { ok: false, saved: false };
+      }
       const values = currentValues();
       const newErrors = validateReviewForm(values, reviewSnapshot.values);
       setErrors(newErrors);
@@ -1345,7 +1402,7 @@ export function useQuickAddForm() {
       }
     },
     [
-      editMode, reviewSnapshot, currentValues, applyFormValues, runReviewDryRun, toast,
+      editMode, reviewSnapshot, currentValues, applyFormValues, runReviewDryRun, toast, imagesBusy,
     ]
   );
 
@@ -1355,6 +1412,10 @@ export function useQuickAddForm() {
   // (SKU clash / race) = toast + advance; anything else stays put.
   const handleReviewApprove = useCallback(async () => {
     if (editMode?.kind !== 'catalog' || reviewApproving || isSubmitting) return;
+    if (imagesBusy) {
+      toast.info(IMAGES_BUSY_MSG);
+      return;
+    }
     // Same per-invocation currency discipline as handleReviewSave: a slow
     // response must never steer state (or the queue) for a different item.
     const id = editMode.id;
@@ -1416,7 +1477,7 @@ export function useQuickAddForm() {
     }
   }, [
     editMode, reviewApproving, isSubmitting, handleReviewSave, currentValues,
-    advanceReview, runReviewDryRun, toast,
+    advanceReview, runReviewDryRun, toast, imagesBusy,
   ]);
 
   // Live gap chips for the ReviewQueueBar: dry-run gaps mapped onto the form's
@@ -1505,11 +1566,12 @@ export function useQuickAddForm() {
       // A clone replaces the whole form — leave variant mode if active.
       setVariantCtx(null);
       setFlaggedFields(new Set());
+      discardPending();
       applyFormValues(productToCloneValues(product));
       toast.success('Cloned into the form. Tweak the details and save as a NEW SKU.');
       window.scrollTo({ top: 0, behavior: 'smooth' });
     },
-    [applyFormValues, toast]
+    [applyFormValues, toast, discardPending]
   );
 
   const handleCloneFromSku = useCallback(async () => {
@@ -1583,6 +1645,14 @@ export function useQuickAddForm() {
   useEffect(() => {
     // ?review wins over a crafted combined URL.
     if (!editId || searchParams.get('review')) return;
+    editSearchRef.current = searchParams.toString();
+    // The address was put back after "stay": the form already holds this
+    // product with the staff member's edits -- never re-fetch over them.
+    if (keepEditFormRef.current === editId) {
+      keepEditFormRef.current = null;
+      return;
+    }
+    setEditLoadError(null);
     let cancelled = false;
     // Opened by the Catalog list (its Edit, or Save & next): its queue
     // applies. From anywhere else, the old list is dropped, so it can never
@@ -1590,6 +1660,7 @@ export function useQuickAddForm() {
     const fromList = searchParams.get('from') === 'list';
     if (!fromList) clearReviewQueue(EDIT_QUEUE_KEY);
     let forwarded = false;
+    let loadFailed = false;
     setEditBusy(true);
     (async () => {
       try {
@@ -1598,6 +1669,7 @@ export function useQuickAddForm() {
           // Edit replaces the whole form — leave variant mode if active.
           setVariantCtx(null);
           setFlaggedFields(new Set());
+          discardPending();
           const loaded = productToFormValues(product);
           applyFormValues(loaded);
           setEditStoredAttrs(loaded.attributes || {});
@@ -1627,9 +1699,17 @@ export function useQuickAddForm() {
           const levels = (product as { reorder_levels?: Record<string, unknown> }).reorder_levels;
           setEditLevels(levels && typeof levels === 'object' ? levels : {});
         }
-      } catch {
+      } catch (err) {
         if (!cancelled) {
-          toast.error('Could not load the product to edit.');
+          // CAT-03: the address still names this product and the form stays
+          // locked (editBusy) -- a failed load never turns into Add Product.
+          loadFailed = true;
+          const notFound = getErrorStatus(err) === 404;
+          toast.error(
+            notFound
+              ? `Product ${editId} does not exist any more.`
+              : `Could not open product ${editId}.`,
+          );
           // Walking the list: drop the product that will not open and move
           // on -- never leave the last product in the form as the Save target.
           const stash = fromList ? readReviewQueue(EDIT_QUEUE_KEY) : null;
@@ -1638,21 +1718,47 @@ export function useQuickAddForm() {
           if (stash && after) {
             forwarded = true;
             await goNext(after, at - 1, stash.ids[at - 1] ?? editId, true);
+          } else {
+            // Not walking: a lasting panel in place of the form (QuickAddPage).
+            setEditLoadError({ id: editId, notFound });
           }
         }
       } finally {
-        if (!cancelled && !forwarded) {
-          setEditBusy(false);
-          const next = new URLSearchParams(searchParams);
-          next.delete('edit');
-          next.delete('from');
-          setSearchParams(next, { replace: true });
-        }
+        // CAT-03: ?edit= (and ?from=) STAY in the address, so a refresh, a
+        // copied link or a duplicated tab reopens this same product.
+        if (!cancelled && !forwarded && !loadFailed) setEditBusy(false);
       }
     })();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editId, editReload]);
+
+  // Leaving the edit address (the sidebar's "Add product" on /catalog/add?edit=)
+  // drops back to a fresh create form: the product is never edited under an
+  // address that does not name it (CAT-03, as review mode does below).
+  useEffect(() => {
+    if (editId) return;
+    setEditLoadError(null);
+    // CAT-04: unsaved edits (or a photo still uploading) ask first. Staying
+    // puts the edit address back; the loader keeps the form as it is.
+    if (
+      editMode?.kind === 'spine' &&
+      (editDirty || imagesBusy) &&
+      !window.confirm('You have unsaved changes on this product — leave without saving?')
+    ) {
+      keepEditFormRef.current = editMode.id;
+      setSearchParams(new URLSearchParams(editSearchRef.current), { replace: true });
+      return;
+    }
+    setEditBusy(false);
+    if (editMode?.kind !== 'spine') return;
+    setEditMode(null);
+    setEditQueuePos(null);
+    setEditBaseline(null);
+    setEditLevels(null);
+    resetForm(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editId]);
 
@@ -1695,6 +1801,7 @@ export function useQuickAddForm() {
         setVariantCtx(null);
         setFlaggedFields(new Set());
         setDupInfo(null);
+        discardPending();
         const v = catalogDocToFormValues(doc);
         applyFormValues(v);
         setEditMode({ kind: 'catalog', id: reviewId, sku: String(doc.sku || '') });
@@ -1911,7 +2018,8 @@ export function useQuickAddForm() {
     // submit
     isSubmitting, handleSubmit,
     // edit queue (?edit= from the Catalog list)
-    editQueuePos, editDirty, handleEditSkip, editBusy,
+    editQueuePos, editDirty, handleEditSkip, handleEditCancel, editBusy, imagesBusy,
+    editLoadError, retryEditLoad,
     editListPath: editMode?.kind === 'spine'
       ? editListAddress(readReviewQueue(EDIT_QUEUE_KEY), editMode.id)
       : '/catalog',
