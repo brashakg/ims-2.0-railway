@@ -186,3 +186,19 @@ def test_a_refund_with_nothing_taken_back_files_its_whole_note(env):
     row = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "710004"})
     assert S.post_from_review(env, row)["status"] == "credited"
     assert [(r["gross_refund"], r["tax"], r["delta"]) for r in _ledger(env)] == [(1000.0, 47.62, 1000.0)]
+
+
+def test_a_zero_value_refund_is_never_called_already_returned(env):
+    """Only a note CUT to nothing is 'already returned': a refund whose own
+    value is 0 (nothing was taken back) posts as before."""
+    from api.services import shopify_refund as S
+
+    _two_line_bill(env)
+    env.get_collection("returns").delete_one({"return_id": "RET-C"})
+    order = env.get_collection("orders").find_one({"order_id": "ord-1"})
+    note = {"gross_refund": 0.0, "net_refund": 0.0, "money_back": 10.0, "money_pending": 0.0,
+            "lines": [{"order_item_id": "it-1", "product_id": "IMS-P-1", "return_qty": 1, "unit_price": 0.0,
+                       "gst_rate": 5.0}]}
+    res = S._post_credit_and_restock(env, refund_id="710005", order=order, return_lines=[], credit_note=note,
+                                     restock_store=None)
+    assert res["status"] != S.ALREADY_RETURNED, res

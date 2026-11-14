@@ -2073,7 +2073,7 @@ def _post_credit_and_restock(
             if note is None:
                 allowance = (None, ("IMS could not read this order's earlier returns just now, so "
                                     "nothing is booked yet."), None, False, 0.0)
-            elif note.get("gross_refund", 0) <= 0.01:
+            elif note is not credit_note and note["gross_refund"] <= 0.01:
                 # Every unit of this refund was already returned (and its GST
                 # reversed) at the counter or by another refund: a second credit
                 # note would reverse that output tax again (#1397 round 8). Book
