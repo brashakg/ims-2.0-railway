@@ -992,8 +992,12 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 if rid and items:
                     # Booked at the confirm: dated at the note. Left open there
                     # (a blocked restock), booked later by the retry or Goods
-                    # back: dated when that booking happened (D64 b).
-                    late = [t for t in (parse_event_utc_naive(ret.get("restock_completed_at")), back_at) if t]
+                    # back: dated when that booking happened (D64 b). A retry
+                    # stamps restock_completed_at even when it booked nothing
+                    # (its stock-in task not saved: restock_applied False), so
+                    # only an applied retry's stamp is a booking time.
+                    retried = parse_event_utc_naive(ret.get("restock_completed_at")) if ret.get("restock_applied") else None
+                    late = [t for t in (retried, back_at) if t]
                     booked_at = (max(when, min(late)) if late and (
                         ret.get("restock_completed_at") or ret.get("restock_applied") is False) else when)
                     mark: Dict[int, float] = {}

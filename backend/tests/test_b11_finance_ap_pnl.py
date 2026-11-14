@@ -965,6 +965,10 @@ D66_DOORS = [
     ("off", "webhook counter goods confirm"), ("off", "webhook goods counter confirm"),
     ("off", "webhook confirm counter"), ("off", "webhook confirm goods counter"),
     ("off", "webhook blocked counter goods"), ("off", "webhook counter blocked goods"),
+    # The /restock retry door on a blocked row: its stock-in task not saved
+    # (nothing booked, yet the door stamps restock_completed_at), then saved.
+    ("off", "webhook blocked retryfail goods"), ("off", "webhook blocked retryfail retry goods"),
+    ("off", "webhook blocked retryfail counter goods"),
     ("on", "counter webhook confirm"), ("on", "counter webhook confirm goods"),
     ("on", "webhook counter"), ("on", "webhook counter goods"),
 ]
@@ -1068,6 +1072,14 @@ def test_d66_each_piece_cost_comes_back_once_whatever_order_the_doors_run(db, mo
         elif door in ("confirm", "blocked"):
             if st["queued"] and not st["posted"]:
                 post(at, blocked=door == "blocked")
+        elif door in ("retry", "retryfail") and st["posted"]:
+            # returns.retry_restock: _restock_booked, then the doc stamped
+            # whatever it booked (restock_applied False when nothing was).
+            monkeypatch.setattr(sr, "raise_stock_in_task", lambda *a, **k: {
+                "applied": door == "retry", "restocked": [], "restock_stock_ids": []})
+            res = sr._restock_booked(order(), cap(st["proposed"])[0], "RF-D66", lambda _l: {}) or {"applied": True}
+            db.returns.update_one({"return_id": "RS-D66"}, {"$set": {
+                "restock_applied": bool(res.get("applied")), "restock_completed_at": at}})
         elif door == "goods" and st["queued"]:
             lines = cap([ln.model_copy(update={"restock": True}) for ln in st["proposed"]])[0]
             if sr._hold_returned_qty(order(), lines, "RF-D66"):
@@ -1088,3 +1100,35 @@ def test_d66_each_piece_cost_comes_back_once_whatever_order_the_doors_run(db, mo
     assert out["SUNGLASS"]["cogs_reversal"] == 6000.0, "B's cost comes back exactly once"
     for to, then in closed:  # D64 b: a closed day is never changed after the fact
         assert customer_return_adjustments(db, {}, from_date="2026-11-01", to_date=to) == then, to
+
+
+def test_d66_the_counter_never_takes_back_a_piece_an_imported_note_already_gave_back(db, monkeypatch):
+    """An imported RET-HIST note's goods_lines are what the P&L gives cost
+    back for, so the counter's returnable count (the one every door reads)
+    counts them too: on a partly refunded imported order the counter can no
+    longer take back (refund and give cost back for) the same piece again."""
+    from api.routers import returns as rr
+    from api.routers.finance._shared import customer_return_adjustments
+
+    monkeypatch.setattr(rr, "_orders_coll", lambda: _Positional(db.orders))
+    monkeypatch.setattr(rr, "_returns_coll", lambda: db.returns)
+    db.orders.insert_one(_historical("HC", status="PARTIALLY_REFUNDED"))  # 2 pieces of HC-L1
+    db.returns.insert_one(_hist_note("HC", "RHC", "2026-11-03T05:00:00+00:00", 952.38, 47.62,
+                                     goods_lines=_GOODS("HC")))
+
+    def counter(n, at):  # the counter door's own check, then its atomic claim
+        line = db.orders.find_one({"order_id": "HC"})["items"][0]
+        if rr._line_purchased_qty(line) - rr._units_already_back("HC", line)[0] < 1 \
+                or not rr._claim_returnable_qty("HC", line, 1.0):
+            return False
+        db.returns.insert_one({"return_id": f"RC-HC{n}", "order_id": "HC", "store_id": "S1",
+                               "status": "COMPLETED", "created_at": at,
+                               "gst_breakup": {"gross": 1000.0, "taxable": 952.38, "tax": 47.62},
+                               "items": [{"order_item_id": "HC-L1", "product_id": "PH", "return_qty": 1.0,
+                                          "unit_price": 952.38, "condition": "GOOD"}]})
+        return True
+
+    assert counter(1, "2026-11-05T05:00:00+00:00")  # the piece Shopify never refunded
+    assert not counter(2, "2026-11-06T05:00:00+00:00")  # the imported note already took the other back
+    # Two pieces came back in all: two costs (the sale's 60% estimate each).
+    assert customer_return_adjustments(db, {})["S1"]["cogs_reversal"] == round(2 * 0.6 * 952.38, 2)
