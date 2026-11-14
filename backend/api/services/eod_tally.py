@@ -380,7 +380,7 @@ def auto_cash_payouts_paisa(db, store_id: str, window_start: Any, window_end: An
     Z-Read identity is no longer a figure a cashier types into a box -- it is
     what the Expenses screen already recorded. ONE implementation on purpose:
     this delegates to finance's ``_cash_expenses_for_window`` (CASH-mode,
-    APPROVED/PAID/SENT_TO_ACCOUNTANT/REIMBURSED, payroll-shaped heads
+    committed per utils/expense_status (ENTERED included), payroll-shaped heads
     excluded), the SAME function the Finance close charges the drawer with --
     so the two doors can never disagree about the day's payouts.
 

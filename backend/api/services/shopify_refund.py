@@ -2355,7 +2355,13 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
         processing_store_id, refund_id=refund_id)
     if not out["applied"]:
         _release_unlanded(order, held, {}, refund_id)
-    return out
+        return out
+    # What this booking put on each order line's mark: Goods back stamps it on
+    # its review row, so the P&L dates those units at the press (D64 b), never
+    # at a note that booked nothing.
+    return {**out, "booked_lines": [
+        {"order_item_id": orig.get("item_id") or orig.get("id"), "product_id": orig.get("product_id"),
+         "qty": qty} for orig, qty, _pid, _token in held]}
 
 
 def raise_stock_in_task(order: Dict[str, Any], units: float, items: Any, source: str, task_ref: str,
@@ -2472,12 +2478,12 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
     "not_restocked", ...}."""
     review_id = review.get("review_id")
     refund_id = _norm(review.get("shopify_refund_id"))
+    pressed_at = datetime.now(timezone.utc).isoformat()
     try:
         coll = db.get_collection(_REVIEW_COLLECTION)
         claim = coll.update_one(
             {"review_id": review_id, "goods_back_at": None},
-            {"$set": {"goods_back_at": datetime.now(timezone.utc).isoformat(),
-                      "goods_back_by": user_id}},
+            {"$set": {"goods_back_at": pressed_at, "goods_back_by": user_id}},
         )
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] goods-back claim failed for review=%s", review_id,
@@ -2526,13 +2532,21 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
         "restock_store_ids": result.get("restock_store_ids", []),
         "stock_in_task": result.get("stock_in_task"),
         "stock_in_store_id": result.get("stock_in_store_id"),
+        # A historical order's units this press booked, per order line.
+        "booked_lines": result.get("booked_lines") or [],
     }
-    # Landed: record it. Nothing landed: release the press so it can be pressed
-    # again (the caps make a re-press safe even after a partial restock).
-    stamp = ({"goods_restock": out} if out["restock_applied"]
-             else {"goods_back_at": None, "goods_back_by": None})
+    # Landed: record it. Not all landed: release the press so it can be
+    # pressed again (the caps make a re-press safe even after a partial
+    # restock). Every unit that did land is recorded, a partial press's too,
+    # with when it landed (goods_landed): the P&L gives each landed piece's
+    # cost back once from it.
+    stamp: Dict[str, Any] = {"$set": {"goods_restock": out} if out["restock_applied"]
+                             else {"goods_back_at": None, "goods_back_by": None}}
+    landed = [sid for sid in out["restock_stock_ids"] if sid]
+    if landed:
+        stamp["$push"] = {"goods_landed": {"$each": [{"stock_id": sid, "at": pressed_at} for sid in landed]}}
     try:
-        coll.update_one({"review_id": review_id}, {"$set": stamp})
+        coll.update_one({"review_id": review_id}, stamp)
     except Exception:  # noqa: BLE001
         logger.warning("[SHOPIFY_REFUND] goods-back stamp failed for review=%s", review_id,
                        exc_info=True)

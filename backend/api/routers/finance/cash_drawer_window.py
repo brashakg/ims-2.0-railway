@@ -11,6 +11,7 @@ from ...utils.ist import ist_date_str, ist_today
 from typing import Optional, List, Dict, NamedTuple
 from pydantic import BaseModel, Field
 from ...services.salary_visibility import is_payroll_shaped_expense
+from ...utils.expense_status import is_committed_expense
 from ...services import cash_denominations as cash_denom
 from ._shared import logger
 
@@ -426,8 +427,8 @@ def _cash_expenses_for_window(
 
     Expenses use `expense_date` (ISO date) and `payment_mode`. Only CASH-mode
     expenses come out of the physical drawer; UPI/CARD/BANK don't. Counts
-    APPROVED / PAID / SENT_TO_ACCOUNTANT spends (anything that represents money
-    actually disbursed). Payroll-shaped heads are excluded outright -- see the
+    committed spends (utils/expense_status: APPROVED, SENT_TO_ACCOUNTANT,
+    ENTERED, PAID -- anything that represents money actually disbursed). Payroll-shaped heads are excluded outright -- see the
     block above. Fail-soft to (0.0, 0)."""
     if db is None:
         return _CashExpenseWindow(0.0, 0)
@@ -463,7 +464,7 @@ def _cash_expenses_for_window(
             if mode and mode != "CASH":
                 continue  # unknown mode counts as cash (conservative)
             status = str(e.get("status") or "").upper()
-            if status not in ("APPROVED", "PAID", "SENT_TO_ACCOUNTANT", "REIMBURSED"):
+            if not is_committed_expense(status):
                 continue
             # Salaries, advances and PF/ESI never come out of a shop till
             # (owner, 2026-08-14). Same matcher as /pnl and /budgets, imported
@@ -591,7 +592,7 @@ def _refund_double_entry_advisory(
             if mode and mode != "CASH":
                 continue
             status = str(e.get("status") or "").upper()
-            if status not in ("APPROVED", "PAID", "SENT_TO_ACCOUNTANT", "REIMBURSED"):
+            if not is_committed_expense(status):
                 continue
             try:
                 amt = round(float(e.get("amount", 0) or 0), 2)

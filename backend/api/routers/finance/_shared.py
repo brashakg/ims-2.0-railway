@@ -488,7 +488,8 @@ def _customer_state_map(db, *, strict=False) -> dict:
     return out
 
 
-def pnl_by_category(orders, cost_by_product: dict, variance_by_category: Optional[dict] = None) -> list:
+def pnl_by_category(orders, cost_by_product: dict, variance_by_category: Optional[dict] = None,
+                    returns_by_category: Optional[dict] = None) -> list:
     """Revenue + COGS per product category (item_type), from order line items.
     Pure. Prefers item.cost_at_sale snapshot; 60%-of-line COGS fallback when
     a product's cost is unknown. Includes cogs_is_estimated flag per category
@@ -496,10 +497,17 @@ def pnl_by_category(orders, cost_by_product: dict, variance_by_category: Optiona
     without flagging them). `variance_by_category`: the cost-of-goods
     variance of pieces sold before their bill (product_cost.variance_by
     keyed "item_type": the sold lines' item_type-or-category, as here),
-    added to each category's COGS."""
+    added to each category's COGS. `returns_by_category`: the completed
+    customer returns of the period (customer_return_adjustments by
+    "category", RUN-04), their taxable value off revenue and the cost they
+    give back off COGS, as on GET /pnl."""
     acc: dict = {}
     for cat, v in (variance_by_category or {}).items():
         acc.setdefault(cat or "OTHER", {"revenue": 0.0, "cogs": 0.0, "estimated_lines": 0})["cogs"] += v
+    for cat, r in (returns_by_category or {}).items():
+        d = acc.setdefault(cat or "OTHER", {"revenue": 0.0, "cogs": 0.0, "estimated_lines": 0})
+        d["revenue"] -= r["taxable"]
+        d["cogs"] -= r["cogs_reversal"]
     for o in orders:
         for it in o.get("items") or []:
             cat = it.get("item_type") or it.get("category") or "OTHER"
@@ -681,3 +689,421 @@ def _je_cal_day(s, *, end: bool = False) -> Optional[datetime]:
     if end:
         return dt.replace(hour=23, minute=59, second=59, microsecond=999999)
     return dt
+
+
+# -- Supplier services bills and customer returns in the P&L ----------------
+# Bill states that never were (or no longer are) a cost. Stored header bills
+# are OUTSTANDING / PARTIAL / PAID; the rest are tolerated legacy spellings.
+_NOT_A_COST_BILL_STATUSES = ("DRAFT", "CANCELLED", "CANCELED", "VOID", "VOIDED", "REJECTED")
+
+
+def services_bill_costs(db, store_ids=None, from_date=None, to_date=None) -> List[dict]:
+    """Supplier SERVICES bills (rent, repairs, freight, ...) as P&L costs
+    (audit L3-04): one row ``{store_id, head, amount}`` per bill dated in the
+    range (``bill_date``, a 'YYYY-MM-DD' string, like ``expense_date``).
+
+    A services bill is the same cost whether the accounts team records it as
+    an Expense or as a supplier bill, so it is recognised when it is BOOKED,
+    as an approved expense is -- paying it later is a cash event, not a second
+    cost. Its value is the taxable amount; its GST too when that GST is NOT
+    input credit (17(5) tick or unregistered supplier: the CA's 2026-10-23
+    answer, unclaimed GST is cost). Goods bills (a goods receipt, or
+    bill_kind GOODS / unstated) are stock, already costed through COGS when
+    the pieces sell, and an inter-shop transfer mirror bill is never a cost.
+    A supplier credit (debit note) against such a bill lowers its cost in the
+    credit's own period, by the bill's cost share of the credit (cost /
+    bill total: a credit's input-credit GST is not cost). Fail-soft: [] on a
+    read error, as the other P&L legs."""
+    match: dict = {
+        "bill_kind": ap_engine.BILL_KIND_SERVICES,
+        "status": {"$nin": list(_NOT_A_COST_BILL_STATUSES)},
+        "grn_id": {"$in": [None, ""]},
+        "source_transfer_id": {"$in": [None, ""]},
+        # Goods typed onto a services bill are stock, costed through COGS when
+        # they sell: expensed here they were charged twice.
+        "expense_type": {"$ne": "STOCK"},
+    }
+    if store_ids is not None:
+        match["store_id"] = {"$in": list(store_ids)}
+    days: dict = {}
+    if from_date:
+        days["$gte"] = str(from_date)[:10]
+    if to_date:
+        days["$lte"] = str(to_date)[:10]
+    labels = {key: label for key, label, _blocked in ap_engine.EXPENSE_TYPES}
+
+    def _cost(b) -> float:
+        amount = float(b.get("taxable_amount") or 0)
+        if b.get("itc_eligible") is False:
+            amount += float(b.get("tax_amount") or 0)
+        return amount
+
+    def _row(b, amount) -> dict:
+        head = labels.get(b.get("expense_type") or "", "Other business expense")
+        return {"store_id": b.get("store_id"), "head": f"Supplier bills: {head}", "amount": round(amount, 2)}
+
+    rows: List[dict] = []
+    try:
+        bills = db.get_collection("vendor_bills")
+        for b in bills.find({**match, **({"bill_date": days} if days else {})}, {"_id": 0}):
+            rows.append(_row(b, _cost(b)))
+        credits = list(db.get_collection("vendor_debit_notes").find(
+            {"bill_id": {"$nin": [None, ""]}, **({"date": days} if days else {})},
+            {"_id": 0, "bill_id": 1, "amount": 1},
+        ))
+        if credits:
+            credited = {b["bill_id"]: b for b in bills.find(
+                {**match, "bill_id": {"$in": list({c["bill_id"] for c in credits})}}, {"_id": 0})}
+            for c in credits:
+                b = credited.get(c["bill_id"])
+                total = float((b or {}).get("total_amount") or 0)
+                if b is None or total <= 0:
+                    continue
+                rows.append(_row(b, -float(c.get("amount") or 0) * _cost(b) / total))
+    except Exception:  # noqa: BLE001
+        logger.warning("[PNL] services bills could not be read", exc_info=True)
+        return []
+    return rows
+
+
+def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_date=None, to_date=None,
+                                by: str = "store_id") -> Dict[str, dict]:
+    """What COMPLETED customer returns take back off the P&L in the range
+    (audit RUN-04): ``{gross, taxable, tax, cogs_reversal, count}`` per
+    store_id, or with ``by="category"`` per product category (the sale line's
+    item_type-or-category, as pnl_by_category: the credit note split across
+    its lines by their value, each piece's cost to its own line), so the store
+    and category P&Ls add up to the statement.
+
+    Dated by the return (its credit note), never by the original sale: a
+    return in a later month reduces THAT month, and the sale's own month is
+    left as it was. The money is the return's own ``gst_breakup`` -- the same
+    figures GSTR-3B nets off output tax, whatever the refund tender (cash, UPI,
+    card or store credit).
+
+    Only a return whose order is still a sale in the BOOKS (utils/real_sale,
+    the rule the P&L reads its orders by): an order the books already drop --
+    cancelled (an invoiced advance refunded through its whole-invoice credit
+    note, a Shopify order imported cancelled and refunded), refund completed,
+    a pre-IMS import, or no order on record -- adds no revenue, so its credit
+    note must not be taken off a second time.
+
+    The cost of goods comes back for a piece that really went back on sale,
+    at the cost the original sale line was charged at (cost_at_sale, else the
+    live cost, else the same 60% estimate the sale used), so one piece is
+    never costed twice. It is keyed on the physical UNIT, so one piece gives
+    its cost back once whichever door moved it (PR #1423 review: a Shopify
+    refund whose unit Goods back put back before the confirm was given back
+    by its lines AND by its unit). Each give-back is dated when the unit
+    FIRST went back, and never before the return itself, so an earlier month
+    is never changed: a unit the return's restock put back (restock_stock_ids,
+    a partial restock still waiting for its retry too), by its own restock
+    audit row (stock_audit RETURN_RESTOCK for this return), else the retry
+    (restock_completed_at), else the return; a piece the return set aside in
+    quarantine, by its first release back to sale (item_events quarantine.out
+    -> AVAILABLE, the ledger both release doors write); a Shopify refund's
+    unit put back through Goods back (its review row's goods_landed, one
+    entry per landed unit of every press, a partial one too; a legacy row's
+    goods_restock by goods_back_at). A set-aside piece written off or sent to
+    the supplier stays in the cost of goods. A HISTORICAL order (our Shopify
+    order-history import; IMS never held its stock, no unit ever goes back)
+    gives back the cost its sale recorded with a credit note that brought
+    goods back, at the note's date (decisions D42(c), D45(b)): its goods
+    lines; never a lines-less note (the whole-order note made from
+    amount-only refunds included), a goodwill or shipping refund, or a
+    Shopify line not restocked unless Goods back brought it back -- that one
+    dated when the goods landed, max(note, Goods back) (D64). A live Shopify
+    refund's cost comes back only for the units its order-line mark says it
+    booked, so a piece the counter also took back gives its cost once,
+    whichever door ran first (D65, D66).
+    Fail-soft: {} on a read error."""
+    lo = _parse_range_dt(from_date, end=False)
+    hi = _parse_range_dt(to_date, end=True)
+
+    def _in_range(when) -> bool:
+        return when is not None and not (lo is not None and when < lo) and not (hi is not None and when > hi)
+
+    match: dict = {"status": {"$in": ["COMPLETED", "completed"]}}
+    if store_ids is not None:
+        match["store_id"] = {"$in": list(store_ids)}
+    out: Dict[str, dict] = {}
+    try:
+        from ...utils.event_time import parse_event_utc_naive
+        from ...utils.real_sale import is_real_sale
+
+        def _restocked_at(ret, when):
+            return max(when, parse_event_utc_naive(ret.get("restock_completed_at")) or when)
+
+        # ponytail: the date tests run in Python because returns store
+        # created_at as ISO strings AND BSON dates; returns are few.
+        rets = [r for r in db.get_collection("returns").find(match, {"_id": 0})
+                if parse_event_utc_naive(r.get("created_at")) is not None]
+        # Goods back on a Shopify refund (stamped on the review row only):
+        # every unit a press landed, with when it landed -- goods_landed (each
+        # press, a partial one too), else a legacy row's goods_restock.
+        refund_ids = [r["shopify_refund_id"] for r in rets if r.get("shopify_refund_id")]
+        goods: Dict[str, list] = {}
+        # When Goods back first landed a refund's goods (D64 b): a historical
+        # order's press lands no unit, so its date is the press itself.
+        goods_at: Dict[str, datetime] = {}
+        # The units each historical Goods back press booked on each order
+        # line (goods_restock.booked_lines), with when it was pressed.
+        pressed: Dict[str, list] = {}
+        if refund_ids:
+            for row in db.get_collection("shopify_refund_review").find(
+                {"shopify_refund_id": {"$in": refund_ids},
+                 "$or": [{"goods_restock.restock_applied": True}, {"goods_landed.0": {"$exists": True}}]},
+                {"_id": 0, "shopify_refund_id": 1, "goods_back_at": 1, "goods_restock": 1, "goods_landed": 1},
+            ):
+                at = parse_event_utc_naive(row.get("goods_back_at"))
+                rs = row.get("goods_restock") or {}
+                landed = [(sid, at) for sid in (rs.get("restock_stock_ids") or [])
+                          if rs.get("restock_applied") and at is not None]
+                landed += [(e.get("stock_id"), parse_event_utc_naive(e.get("at")))
+                           for e in row.get("goods_landed") or [] if isinstance(e, dict)]
+                goods.setdefault(row["shopify_refund_id"], []).extend(landed)
+                if rs.get("restock_applied"):
+                    pressed.setdefault(row["shopify_refund_id"], []).extend(
+                        (b, at) for b in rs.get("booked_lines") or [] if isinstance(b, dict))
+                times = [t for t in [at] + [t for _s, t in landed] if t is not None]
+                if times:
+                    goods_at[row["shopify_refund_id"]] = min(times)
+        # When each piece a return's restock put back landed, whichever door
+        # ran it (the return, its retry, Goods back): the per-unit audit row
+        # the one restock writes once the unit is back on sale
+        # (returns._audit_stock_transition), keyed on the return or refund it
+        # was for. It also finds a landed piece whose id the door then failed
+        # to save on the return or review row.
+        # ponytail: scans stock_audit by return id (no index); add one on
+        # return_id if the collection grows large.
+        keys = list({k for r in rets for k in (r.get("return_id"), r.get("shopify_refund_id")) if k})
+        landed_at: Dict[tuple, datetime] = {}
+        audited: Dict[str, list] = {}
+        if keys:
+            for ev in db.get_collection("stock_audit").find(
+                {"return_id": {"$in": keys}, "source": "RETURN_RESTOCK", "new_status": "AVAILABLE"},
+                {"_id": 0, "stock_id": 1, "return_id": 1, "at": 1},
+            ):
+                at = parse_event_utc_naive(ev.get("at"))
+                key = (ev.get("stock_id"), ev.get("return_id"))
+                if at is not None and ev.get("stock_id") and (key not in landed_at or at < landed_at[key]):
+                    landed_at[key] = at
+                    audited.setdefault(ev.get("return_id"), []).append(ev.get("stock_id"))
+        picked = []  # (return, when, taxable, tax, gross, its own credit note in range)
+        for ret in rets:
+            when = parse_event_utc_naive(ret.get("created_at"))
+            gb = ret.get("gst_breakup") if isinstance(ret.get("gst_breakup"), dict) else {}
+            taxable = float(gb.get("taxable") or 0)
+            tax = float(gb.get("tax") or 0)
+            noted = _in_range(when) and (taxable > 0 or tax > 0)
+            # Each unit is range-tested on its own below.
+            if (noted or ret.get("quarantined_stock_ids") or ret.get("restock_stock_ids")
+                    or goods.get(ret.get("shopify_refund_id")) or ret.get("shopify_refund_id") in goods_at
+                    or ret.get("restock_completed_at")
+                    or audited.get(ret.get("return_id")) or audited.get(ret.get("shopify_refund_id"))):
+                picked.append((ret, when, taxable, tax, float(gb.get("gross") or (taxable + tax)), noted))
+        order_ids = list({r[0].get("order_id") for r in picked if r[0].get("order_id")})
+        orders = {
+            o["order_id"]: o
+            for o in db.get_collection("orders").find(
+                {"order_id": {"$in": order_ids}},
+                {"_id": 0, "order_id": 1, "items": 1, "status": 1, "advance_refund_status": 1,
+                 "advance_refund_credit_note": 1, "invoice_number": 1, "status_before_void": 1,
+                 "historical": 1},
+            )
+        } if order_ids else {}
+        picked = [p for p in picked if p[0].get("order_id") in orders and is_real_sale(orders[p[0]["order_id"]])]
+        # The first release back to sale of each set-aside piece.
+        held = {sid for p in picked for sid in (p[0].get("quarantined_stock_ids") or [])}
+        releases: Dict[str, list] = {}
+        if held:
+            for ev in db.get_collection("item_events").find(
+                {"stock_id": {"$in": list(held)}, "event_type": "quarantine.out", "to_state": "AVAILABLE"},
+                {"_id": 0, "stock_id": 1, "at": 1},
+            ):
+                at = parse_event_utc_naive(ev.get("at"))
+                if at is not None:
+                    releases.setdefault(ev["stock_id"], []).append(at)
+        units = db.get_collection("stock_units")
+        empty = {"gross": 0.0, "taxable": 0.0, "tax": 0.0, "cogs_reversal": 0.0, "count": 0}
+        for ret, when, taxable, tax, gross, noted in picked:
+            lines = orders[ret["order_id"]].get("items") or []
+            by_item = {str(i.get("item_id")): i for i in lines if i.get("item_id")}
+            by_product = {str(i.get("product_id")): i for i in lines if i.get("product_id")}
+            items = ret.get("items") or []
+            # A note stamped with no lines (RET-HIST) is the order's lines,
+            # whole, for its category split.
+            whole = [{"order_item_id": li.get("item_id"), "product_id": li.get("product_id"),
+                      "return_qty": float(li.get("quantity", 1) or 1),
+                      "unit_price": line_revenue_ex_gst(li) / float(li.get("quantity", 1) or 1)}
+                     for li in lines]
+            split = items or ret.get("goods_lines") or whole
+
+            def _line(it, by_item=by_item, by_product=by_product):
+                return by_item.get(str(it.get("order_item_id"))) or by_product.get(str(it.get("product_id")))
+
+            def _key(it, ret=ret, _line=_line) -> str:
+                if by != "category":
+                    return ret.get("store_id")
+                line = _line(it) or {}
+                return line.get("item_type") or line.get("category") or "OTHER"
+
+            def _piece_cost(it, _line=_line) -> float:
+                line = _line(it)
+                if line is None:
+                    return 0.0
+                cost = _item_cost(line, cost_by_product)
+                if cost is None:  # the sale's own 60% estimate, per piece
+                    cost = line_revenue_ex_gst(line) * 0.6 / float(line.get("quantity", 1) or 1)
+                return cost
+
+            def _unit_item(sid, among):
+                # The unit carries its product; the return line is found by it.
+                pid = str((units.find_one({"stock_id": sid}, {"_id": 0, "product_id": 1}) or {}).get("product_id"))
+                return next((i for i in among if str(i.get("product_id")) == pid),
+                            among[0] if among else {"product_id": pid})
+
+            reversal: Dict[str, float] = {}
+
+            def _give_back(it, qty=1.0, reversal=reversal, _key=_key, _piece_cost=_piece_cost):
+                reversal[_key(it)] = reversal.get(_key(it), 0.0) + _piece_cost(it) * qty
+
+            if orders[ret["order_id"]].get("historical"):
+                # Decision D42(c): IMS never held an imported Shopify order's
+                # stock, so a credit note that brought its goods back gives
+                # back the cost the sale recorded, at the note's date, once.
+                # D45(b): only such a note -- its goods lines (the live
+                # refund's, or those the importer stamped as goods_lines). A
+                # lines-less note (the whole-order orderfull: note made from
+                # amount-only refunds, an amount-only, goodwill or shipping
+                # refund), a shipping line, and a Shopify refund line marked
+                # not restocked (no_restock: the customer kept it) give back
+                # no cost -- unless Goods back on its refund says the goods
+                # physically came back (D64 a); then dated when they landed,
+                # max(note, Goods back), so an earlier month is never changed
+                # (D64 b). A press with no landing date gives no cost back.
+                # D65/D66: per piece, never per refund. A live Shopify refund
+                # (its doc's items are the webhook's lines, which no later
+                # door rewrites) gives cost back ONLY for the units its order
+                # line's mark says this refund booked (restocked_refunds:
+                # the confirm, AUTO post, retry and Goods back all book
+                # through it), restocked lines first, then the lines Goods
+                # back rescued. A piece the counter took back is never in the
+                # mark, whichever door ran first, so its cost comes back once.
+                # The units a Goods back press booked (its review row's
+                # booked_lines) are dated at that press, the rest of the mark
+                # at the note or the retry (D64 b).
+                # The counter's own note and an imported note (goods_lines)
+                # give back what their own door booked, at the note's date.
+                rid = ret.get("shopify_refund_id")
+                back_at = goods_at.get(rid)
+                give: list = []
+                if rid and items:
+                    # Booked at the confirm: dated at the note. Left open there
+                    # (a blocked restock), booked later by the retry or Goods
+                    # back: dated when that booking happened (D64 b). A retry
+                    # stamps restock_completed_at even when it booked nothing
+                    # (its stock-in task not saved: restock_applied False), so
+                    # only an applied retry's stamp is a booking time.
+                    retried = parse_event_utc_naive(ret.get("restock_completed_at")) if ret.get("restock_applied") else None
+                    late = [t for t in (retried, back_at) if t]
+                    booked_at = (max(when, min(late)) if late and (
+                        ret.get("restock_completed_at") or ret.get("restock_applied") is False) else when)
+                    # Each order line's mark, split by who booked it: the
+                    # units a Goods back press booked there (its review row)
+                    # dated at that press (none: no landing date, no cost),
+                    # the rest at booked_at. A line the refund lists twice is
+                    # never dated by the other listing's door.
+                    mark: Dict[int, list] = {}
+                    for it in items:
+                        line = _line(it)
+                        if line is None or id(line) in mark:
+                            continue
+                        rest = float((line.get("restocked_refunds") or {}).get(str(rid)) or 0)
+                        slots = []
+                        for b, at in pressed.get(rid, []):
+                            q = min(float(b.get("qty") or 0), rest) if _line(b) is line else 0.0
+                            if q > 0:
+                                rest -= q
+                                slots.append([q, max(when, at) if at is not None else None])
+                        mark[id(line)] = [[rest, booked_at]] + slots
+                    for restocked in (True, False):
+                        for it in items:
+                            line = _line(it)
+                            if line is None or (it.get("restock") is not False) is not restocked:
+                                continue
+                            if not restocked and back_at is None:
+                                continue  # only Goods back books a line not restocked
+                            want = float(it.get("return_qty") or 0)
+                            for slot in mark[id(line)]:
+                                qty = min(want, slot[0])
+                                if qty <= 0:
+                                    continue
+                                slot[0] -= qty
+                                want -= qty
+                                if slot[1] is not None:
+                                    give.append((it, qty, slot[1] if restocked
+                                                 else max(slot[1], when, back_at)))
+                else:
+                    give = [(it, float(it.get("return_qty") or 0), when) for it in items or ret.get("goods_lines") or []]
+                if taxable > 0 or tax > 0:
+                    for it, qty, at in give:
+                        if (_line(it) or {}).get("item_type") != "SHIPPING" and _in_range(at):
+                            _give_back(it, qty)
+            else:
+                # Keyed on the physical unit: each piece back on sale gives its
+                # cost back once, on the day it FIRST went back, whichever door
+                # moved it -- the return's own restock (its restock_stock_ids:
+                # every unit it reactivated or minted, a partial restock still
+                # waiting for its retry too; "applied" with none put nothing
+                # back), a set-aside piece's first release, or Goods back on a
+                # Shopify refund (every press, a partial one too).
+                landed: Dict[str, tuple] = {}
+
+                def _lands(sid, at, among, landed=landed):
+                    if at is not None and (sid not in landed or at < landed[sid][0]):
+                        landed[sid] = (at, among)
+
+                good = [it for it in items if str(it.get("condition") or "").upper() == "GOOD"]
+                rkeys = [k for k in (ret.get("return_id"), ret.get("shopify_refund_id")) if k]
+                for sid in ret.get("restock_stock_ids") or []:
+                    at = min((landed_at[(sid, k)] for k in rkeys if (sid, k) in landed_at), default=None)
+                    _lands(sid, max(when, at) if at is not None else _restocked_at(ret, when), good or items)
+                for k in rkeys:
+                    for sid in audited.get(k, []):
+                        _lands(sid, max(when, landed_at[(sid, k)]), items)
+                set_aside = [it for it in items if str(it.get("condition") or "").upper() != "GOOD"]
+                for sid in ret.get("quarantined_stock_ids") or []:
+                    _lands(sid, min((t for t in releases.get(sid, []) if t >= when), default=None),
+                           set_aside or items)
+                for sid, at in goods.get(ret.get("shopify_refund_id")) or []:
+                    if sid and at is not None:
+                        _lands(sid, max(when, at), items)
+                for sid, (at, among) in landed.items():
+                    if _in_range(at):
+                        _give_back(_unit_item(sid, among))
+            if not noted and not reversal:
+                continue
+            shares = [(ret.get("store_id"), 1.0)]
+            if noted and by == "category":
+                worth = [(_key(it), float(it.get("unit_price") or 0) * float(it.get("return_qty") or 0))
+                         for it in split]
+                total = sum(w for _k, w in worth)
+                shares = ([(k, w / total) for k, w in worth if w] if total > 0
+                          else [(_key(split[0]) if split else "OTHER", 1.0)])
+            if noted:
+                for key, share in shares:
+                    row = out.setdefault(key, dict(empty))
+                    row["gross"] += gross * share
+                    row["taxable"] += taxable * share
+                    row["tax"] += tax * share
+                    row["count"] += 1
+            for key, amount in reversal.items():
+                out.setdefault(key, dict(empty))["cogs_reversal"] += amount
+    except Exception:  # noqa: BLE001
+        logger.warning("[PNL] customer returns could not be read", exc_info=True)
+        return {}
+    for row in out.values():
+        for k in ("gross", "taxable", "tax", "cogs_reversal"):
+            row[k] = round(row[k], 2)
+    return out

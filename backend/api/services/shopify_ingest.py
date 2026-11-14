@@ -1578,6 +1578,53 @@ def _hist_cn_note_number(refund_id: str) -> str:
     return f"CNH-{tail}" if tail else "CNH-0"
 
 
+def _book_import_goods(
+    order_doc: Dict[str, Any], refund_id: str, goods: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[Any]]:
+    """Decision D66: an imported refund note's goods lines give their cost
+    back in the P&L, so each piece is booked back on its order line the way
+    every other door books one -- the counter's own check
+    (returns._units_already_back) and its atomic claim, with this refund's
+    mark (returns._claim_returnable_qty). Only the units it could book stay
+    goods lines: a piece the counter (or another refund) already took back
+    is never given back a second time, and the claim the counter's own
+    atomic guard reads now counts the imported piece. Fail-soft: a unit that
+    cannot be checked or booked is money only (less cost given back, never
+    more). Returns (goods lines kept, claims held for a release)."""
+    from ..routers import returns as _r
+
+    idx = _r._order_line_index(order_doc)
+    want: Dict[int, list] = {}
+    for g in goods:
+        orig = (idx["by_item"].get(str(g.get("order_item_id")))
+                or idx["by_product"].get(str(g.get("product_id"))))
+        if orig is not None:
+            row = want.setdefault(id(orig), [orig, 0.0, []])
+            row[1] += float(g.get("return_qty") or 0)
+            row[2].append(g)
+    kept: List[Dict[str, Any]] = []
+    held: List[Any] = []
+    order_id = order_doc.get("order_id")
+    for orig, qty, lines in want.values():
+        token = uuid.uuid4().hex
+        try:
+            back = _r._units_already_back(order_id, orig)
+            keep = 0.0 if back is None else max(0.0, min(qty, _r._line_purchased_qty(orig) - back[0]))
+            if keep <= 0 or not _r._claim_returnable_qty(order_id, orig, keep, refund_id, qty, token):
+                continue
+        except Exception:  # noqa: BLE001
+            logger.warning("[SHOPIFY_INGEST] historical refund %s goods not booked", refund_id,
+                           exc_info=True)
+            continue
+        held.append((orig, keep, str(orig.get("product_id") or ""), token))
+        for g in lines:
+            q = min(float(g.get("return_qty") or 0), keep)
+            keep -= q
+            if q > 0:
+                kept.append({**g, "return_qty": q})
+    return kept, held
+
+
 def _book_historical_refund_credit_notes(
     db, payload: Dict[str, Any], order_doc: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -1695,12 +1742,16 @@ def _book_historical_refund_credit_notes(
 
     def _stamp_returns_doc(
         refund_id: str, gross: float, gst_view: Dict[str, Any], cn_date: str,
-        covered_by: Optional[str] = None,
-    ) -> None:
+        covered_by: Optional[str] = None, goods_lines: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
         """Minimal returns doc stamped with the refund id so a FUTURE real refund
-        webhook for this same refund is recognised as already-credited."""
+        webhook for this same refund is recognised as already-credited.
+        `goods_lines`: the goods this note refunded (read by the P&L only, for
+        the cost it gives back -- decision D45(b), and by the returnable count,
+        returns._already_returned_qty, so the counter never takes the same
+        piece back again); kept off `items`, which the restock doors read."""
         if returns_coll is None:
-            return
+            return False
         try:
             doc = {
                 "return_id": f"RET-HIST-{refund_id}",
@@ -1724,9 +1775,12 @@ def _book_historical_refund_credit_notes(
             }
             if covered_by:
                 doc["covered_by_ref"] = covered_by
+            if goods_lines:
+                doc["goods_lines"] = goods_lines
             returns_coll.insert_one(doc)
+            return True
         except Exception:  # noqa: BLE001
-            pass
+            return False
 
     def _process(refund: Dict[str, Any]) -> str:
         """Book ONE refund's credit note. Returns 'booked' | 'duplicate' |
@@ -1936,7 +1990,20 @@ def _book_historical_refund_credit_notes(
             )
             return "skipped"
 
-        _stamp_returns_doc(refund_id, gross, gst_view, cn_date)
+        # D45(b): a refund of goods lines for their full billed value brought
+        # those goods back; one Shopify refunded LESS for (a partial or
+        # goodwill amount) is money only, and so is a line Shopify did not
+        # restock (no_restock: the customer kept it) and the whole-order note
+        # (amount-only refunds: no line says goods came back).
+        goods = [] if refund.get("_reverse_whole_order") or (reconciled and not clamped) else [
+            {"order_item_id": ln.get("order_item_id"), "product_id": ln.get("product_id"),
+             "return_qty": float(ln.get("return_qty") or 0), "unit_price": float(ln.get("unit_price") or 0)}
+            for ln in priced if ln.get("product_id") and ln.get("restock") is not False]
+        # D66: only the pieces booked back on their order lines (never one the
+        # counter already took back); a note that did not land un-books them.
+        goods, held = _book_import_goods(order_doc, refund_id, goods) if goods else ([], [])
+        if not _stamp_returns_doc(refund_id, gross, gst_view, cn_date, goods_lines=goods) and held:
+            shopify_refund._release_unlanded(order_doc, held, {}, refund_id)
 
         summary["credit_notes"] += 1
         summary["gross"] = round(summary["gross"] + gross, 2)

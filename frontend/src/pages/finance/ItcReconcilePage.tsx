@@ -25,6 +25,7 @@ import {
 } from '../../services/api/itc';
 import { useToast } from '../../context/ToastContext';
 import { istDayString } from '../../utils/datetime';
+import { csvMoney, csvRows } from '../../utils/csvRows';
 
 const inr = (n?: number) => `₹${Math.round(Number(n) || 0).toLocaleString('en-IN')}`;
 
@@ -36,13 +37,16 @@ function isoDay(value?: string): string | undefined {
   return m ? `${m[3]}-${m[2]}-${m[1]}` : undefined;
 }
 
+// Real CSV (quoted cells keep their commas, audit L3-26). A taxable or tax
+// cell that is not a number throws, naming the sheet row: the paste is refused
+// rather than reconciled with a made-up zero.
 function parseCsv(text: string): Gstr2bRow[] {
-  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  const lines = csvRows(text);
   if (!lines.length) return [];
   let start = 0;
   let idx = { gstin: 0, invoice_no: 1, taxable: 2, tax: 3, invoice_date: -1 };
-  if (/gstin|invoice|inv|tax/i.test(lines[0])) {
-    const cols = lines[0].split(',').map((c) => c.trim().toLowerCase());
+  if (/gstin|invoice|inv|tax/i.test(lines[0].join(','))) {
+    const cols = lines[0].map((c) => c.toLowerCase());
     // A date column ('Invoice date') is only ever the date, and the taxable
     // value is never the tax ('Taxable' contains 'tax': the tax was read off
     // the taxable column, so every row mismatched by its whole value).
@@ -63,13 +67,23 @@ function parseCsv(text: string): Gstr2bRow[] {
   }
   const rows: Gstr2bRow[] = [];
   for (let i = start; i < lines.length; i++) {
-    const c = lines[i].split(',').map((x) => x.trim());
+    const c = lines[i];
     if (!c[idx.gstin] && !c[idx.invoice_no]) continue;
+    const taxable = csvMoney(c[idx.taxable]);
+    const tax = csvMoney(c[idx.tax]);
+    if (taxable === null || tax === null) {
+      const what = taxable === null ? 'taxable value' : 'tax';
+      const cell = (taxable === null ? c[idx.taxable] : c[idx.tax]) ?? '';
+      throw new Error(
+        `Row ${i + 1} (${c[idx.invoice_no] || 'no invoice number'}): the ${what} "${cell}" is not an amount. ` +
+          'Correct it and reconcile again.',
+      );
+    }
     rows.push({
       gstin: c[idx.gstin],
       invoice_no: c[idx.invoice_no],
-      taxable: parseFloat(c[idx.taxable]) || 0,
-      tax: parseFloat(c[idx.tax]) || 0,
+      taxable,
+      tax,
       invoice_date: isoDay(c[idx.invoice_date]),
     });
   }
@@ -153,7 +167,13 @@ export default function ItcReconcilePage() {
   };
 
   const runReconcile = async () => {
-    const rows = parseCsv(csv);
+    let rows: Gstr2bRow[];
+    try {
+      rows = parseCsv(csv);
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : 'The GSTR-2B sheet could not be read.');
+      return;
+    }
     if (!rows.length) {
       toast.error('No rows found. Paste GSTR-2B CSV with columns: GSTIN, Invoice, Taxable, Tax.');
       return;

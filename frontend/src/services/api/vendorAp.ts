@@ -114,6 +114,8 @@ export interface DebitNote {
   grn_id?: string;
   // As VendorPayment.store_id; a note naming a goods receipt is that receipt's shop's.
   store_id?: string | null;
+  // Sent by the form so a retried save is answered with the note it recorded.
+  request_id?: string;
 }
 
 // ---- Purchase Invoice (first-class AP + ITC document) -------------------
