@@ -15,6 +15,7 @@ from ...dependencies import (
 )
 from ...services import cash_denominations as cash_denom
 from ...services import eod_tally as till_service
+from ..till import _is_cashier_only
 from ._shared import (
     logger,
     router,
@@ -71,12 +72,25 @@ class DayEndCloseBody(BaseModel):
     notes: Optional[str] = Field(None, max_length=2000)
 
 
-def _day_end_doc_public(doc: dict) -> dict:
-    """Strip the Mongo _id for a JSON-safe response."""
+def day_end_close_key(store_id: str, day: str) -> str:
+    """The _id of a shop-day's close: one per (store_id, date), enforced by
+    Mongo's own unique _id index."""
+    return f"DAYEND:{store_id}:{day}"
+
+
+def _day_end_doc_public(doc: dict, user: Optional[dict] = None) -> dict:
+    """Strip the Mongo _id for a JSON-safe response. A cashier-only caller
+    never sees a drawer's till variance (blind enforcement, as on every till
+    read): the per-drawer counts stay, the variances go."""
     if not doc:
         return {}
     out = dict(doc)
     out.pop("_id", None)
+    if user is not None and out.get("till_drawers") and _is_cashier_only(user):
+        out["till_drawers"] = [
+            {k: v for k, v in d.items() if k not in ("variance_paisa", "variance_status")}
+            for d in out["till_drawers"]
+        ]
     return out
 
 
@@ -100,7 +114,7 @@ async def get_day_end_close(
         "closed": bool(doc),
         "store_id": sid,
         "date": date,
-        "close": _day_end_doc_public(doc) if doc else None,
+        "close": _day_end_doc_public(doc, current_user) if doc else None,
     }
 
 
@@ -143,7 +157,7 @@ async def create_day_end_close(
             status_code=409,
             detail={
                 "message": f"Day {body.date} already closed for store {sid}",
-                "close": _day_end_doc_public(existing),
+                "close": _day_end_doc_public(existing, current_user),
             },
         )
 
@@ -221,9 +235,17 @@ async def create_day_end_close(
     # No count -> no variance. A fabricated variance against a fabricated zero
     # is what made this record unreadable. Derived AFTER the adoption above, so
     # it is the variance of the one counted figure for the day.
+    #
+    # SEVERAL DRAWERS ON THE DAY (D53): closing_cash is ONE drawer's count and
+    # system_cash is the whole day's, so their difference is no variance at
+    # all (two drawers of Rs 1,000 and Rs 3,000 read "Rs 1,000 short").
+    # Drawers are never added together either -- cash carried from one drawer
+    # to the next is not recorded. So no whole-day variance is stored; each
+    # drawer's own count and variance are (till_drawers).
+    several_drawers = int(till_link.get("drawers_on_day") or 1) > 1
     variance = (
         round(closing_cash - system_cash, 2)
-        if (closing_cash is not None and system_cash is not None)
+        if (closing_cash is not None and system_cash is not None and not several_drawers)
         else None
     )
 
@@ -258,23 +280,35 @@ async def create_day_end_close(
         # Drawers on this shop-day. Above 1, closing_cash is the latest
         # drawer's count only, not the day's total (D40); the screen says so.
         "till_drawers_on_day": till_link.get("drawers_on_day"),
+        # D53: each drawer's own count and (once locked) variance, oldest
+        # first; None on a one-drawer day or when the list could not be read.
+        "till_drawers": till_link.get("drawers") if several_drawers else None,
+        "variance_withheld_several_drawers": several_drawers,
         "notes": (body.notes or "").strip() or None,
         "closed_by": current_user.get("user_id"),
         "closed_at": utc_event_iso(now),
     }
 
     try:
-        closes.insert_one(dict(doc))
+        # ONE CLOSE PER SHOP-DAY, ATOMICALLY. The find_one above is only a
+        # fast path: two closes that both read "not closed" used to both
+        # insert, leaving two different close records for one day. The key is
+        # now the record's _id, which Mongo keeps unique on every collection,
+        # so the second insert is refused by the database itself -- no index
+        # to build and nothing stored rewritten. Older closes keep their
+        # random ids; the find_one above still finds them.
+        closes.insert_one({"_id": day_end_close_key(sid, body.date), **doc})
     except Exception:  # pragma: no cover - surfaced as 500 by FastAPI
-        # A duplicate-key race (two closes at once) lands here too; re-read and
-        # report the winner as a 409 rather than a 500.
+        # The race loser (or a retry whose first insert landed but whose
+        # acknowledgement was lost) lands here; re-read and report the one
+        # stored close as a 409 rather than a 500.
         winner = closes.find_one({"store_id": sid, "date": body.date})
         if winner:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "message": f"Day {body.date} already closed for store {sid}",
-                    "close": _day_end_doc_public(winner),
+                    "close": _day_end_doc_public(winner, current_user),
                 },
             )
         logger.exception("Day-end close record failed")
@@ -315,5 +349,5 @@ async def create_day_end_close(
         "closed": True,
         "store_id": sid,
         "date": body.date,
-        "close": _day_end_doc_public(doc),
+        "close": _day_end_doc_public(doc, current_user),
     }
