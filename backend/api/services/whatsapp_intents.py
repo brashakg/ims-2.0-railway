@@ -11,7 +11,11 @@ Intents:
   STOP   / "opt out"    -> record marketing opt-out (DPDP + WhatsApp STOP)
 
 Design contract:
-  - FAIL-SOFT: every function catches all exceptions, never raises.
+  - FAIL-SOFT by default: every function catches all exceptions, never raises.
+  - STRICT for the durable receiver (webhooks._process_whatsapp_message):
+    with strict=True a storage failure RAISES instead of being swallowed, so
+    the message's inbox row stays unfinished and is retried; and every write
+    is keyed on the inbound message id, so a retry cannot apply it twice.
   - DARK when DISPATCH_MODE != live (outbound replies are SIMULATED).
   - Consent/opt-out is checked before any outbound action.
   - No emojis in Python (Windows cp1252 risk).
@@ -26,7 +30,30 @@ from typing import Any, Dict, Optional, Tuple
 
 from ..utils.ist import ist_date_str
 
+# L1-F30: this module had its own `_get_db` that did
+# `getattr(d, "db", None) or d`. PyMongo refuses bool(Database), so with the
+# real connection it always raised, was swallowed, and every intent ran as if
+# there were no database (no customer lookup, no STOP record, no human handoff,
+# no follow-up). The copy is gone: the messaging services share the one helper
+# that never truth-tests a pymongo object. Tests still patch
+# `api.services.whatsapp_intents._get_db`.
+from .message_events import _get_db
+
 logger = logging.getLogger(__name__)
+
+
+class IntentNotApplied(RuntimeError):
+    """Strict mode only: an intent's effect could not be stored."""
+
+
+def _need_db(strict: bool):
+    """The database, or None when it is unreachable (strict: raise instead --
+    "no database" must never read as "nothing to do")."""
+    db = _get_db()
+    if db is None and strict:
+        raise IntentNotApplied("storage unavailable")
+    return db
+
 
 # ============================================================================
 # Keyword matching tables
@@ -114,21 +141,11 @@ def detect_intent(text: str, button_payload: Optional[str] = None) -> str:
 # ============================================================================
 
 
-def _get_db():
-    try:
-        from database.connection import get_db as _gd
-        d = _gd()
-        if d is None:
-            return None
-        return getattr(d, "db", None) or d
-    except Exception as e:
-        logger.debug("[WA_INTENTS] _get_db failed: %s", e)
-        return None
-
-
-def _lookup_customer_by_phone(phone: str) -> Optional[Dict[str, Any]]:
+def _lookup_customer_by_phone(
+    phone: str, strict: bool = False
+) -> Optional[Dict[str, Any]]:
     """Find a customer by normalised mobile number. Fail-soft -> None."""
-    db = _get_db()
+    db = _need_db(strict)
     if db is None or not phone:
         return None
     try:
@@ -145,6 +162,8 @@ def _lookup_customer_by_phone(phone: str) -> Optional[Dict[str, Any]]:
         coll = db.get_collection("customers")
         return coll.find_one(query)
     except Exception as e:
+        if strict:
+            raise
         logger.debug("[WA_INTENTS] customer lookup failed: %s", e)
         return None
 
@@ -164,16 +183,19 @@ def _is_opted_out(customer: Optional[Dict[str, Any]]) -> bool:
     return False
 
 
-def _record_opt_out(phone: str, customer: Optional[Dict[str, Any]]) -> None:
-    """Mark customer opted out. Fail-soft."""
-    db = _get_db()
+def _record_opt_out(
+    phone: str, customer: Optional[Dict[str, Any]], strict: bool = False
+) -> None:
+    """Mark customer opted out. Fail-soft. Safe to repeat: the customer's
+    first STOP stamp is kept, and the opt-out row is one per phone."""
+    db = _need_db(strict)
     if db is None:
         return
     try:
         now = datetime.now(timezone.utc).isoformat()
         if customer and customer.get("_id"):
             db.get_collection("customers").update_one(
-                {"_id": customer["_id"]},
+                {"_id": customer["_id"], "whatsapp_opted_out": {"$ne": True}},
                 {
                     "$set": {
                         "whatsapp_opted_out": True,
@@ -194,12 +216,14 @@ def _record_opt_out(phone: str, customer: Optional[Dict[str, Any]]) -> None:
             upsert=True,
         )
     except Exception as e:
+        if strict:
+            raise
         logger.warning("[WA_INTENTS] opt-out persist failed: %s", e)
 
 
-def _phone_is_opted_out(phone: str) -> bool:
+def _phone_is_opted_out(phone: str, strict: bool = False) -> bool:
     """Check the opt-out collection directly (covers non-registered senders)."""
-    db = _get_db()
+    db = _need_db(strict)
     if db is None or not phone:
         return False
     try:
@@ -210,13 +234,17 @@ def _phone_is_opted_out(phone: str) -> bool:
         )
         return row is not None
     except Exception as e:
+        if strict:
+            raise
         logger.debug("[WA_INTENTS] opt-out check failed: %s", e)
         return False
 
 
-def _get_last_cl_order(customer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+def _get_last_cl_order(
+    customer: Dict[str, Any], strict: bool = False
+) -> Optional[Dict[str, Any]]:
     """Fetch the most recent contact-lens order for the customer. Fail-soft."""
-    db = _get_db()
+    db = _need_db(strict)
     if db is None or not customer:
         return None
     try:
@@ -254,6 +282,8 @@ def _get_last_cl_order(customer: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     return order
         return None
     except Exception as e:
+        if strict:
+            raise
         logger.debug("[WA_INTENTS] CL order lookup failed: %s", e)
         return None
 
@@ -263,13 +293,19 @@ def _create_follow_up(
     follow_up_type: str,
     notes: str,
     store_id: str,
+    message_id: Optional[str] = None,
+    strict: bool = False,
 ) -> Optional[str]:
     """
     Create a follow-up record (same schema as follow_ups router).
     Returns the new follow_up_id or None on failure.
+
+    With `message_id` (the inbound WhatsApp message that asked for it) the
+    follow-up is created AT MOST ONCE for that message: a retry of the same
+    message finds the first one and returns its id.
     """
     import uuid
-    db = _get_db()
+    db = _need_db(strict)
     if db is None:
         return None
     try:
@@ -289,7 +325,17 @@ def _create_follow_up(
             "updated_at": now,
             "source": "whatsapp_inbound",
         }
-        db.get_collection("follow_ups").insert_one(doc)
+        coll = db.get_collection("follow_ups")
+        if message_id:
+            # ponytail: find-or-insert in one upsert with no unique index
+            # behind it -- the inbox row's claim keeps two runs of one message
+            # apart. Add a partial unique index on source_message_id if two
+            # runs can ever overlap.
+            key = {"source": "whatsapp_inbound", "source_message_id": message_id}
+            doc["source_message_id"] = message_id
+            coll.update_one(key, {"$setOnInsert": doc}, upsert=True)
+            return (coll.find_one(key, {"follow_up_id": 1}) or {}).get("follow_up_id")
+        coll.insert_one(doc)
         logger.info(
             "[WA_INTENTS] created follow_up %s type=%s for customer %s",
             doc["follow_up_id"],
@@ -298,6 +344,8 @@ def _create_follow_up(
         )
         return doc["follow_up_id"]
     except Exception as e:
+        if strict:
+            raise
         logger.warning("[WA_INTENTS] follow_up create failed: %s", e)
         return None
 
@@ -305,12 +353,19 @@ def _create_follow_up(
 # ============================================================================
 # Intent handlers
 # ============================================================================
+# `ctx` is empty for a plain call, or {"message_id": <inbound message id>,
+# "strict": True} when the durable receiver applies a stored message.
+
+
+def _strict_kw(ctx: Dict[str, Any]) -> Dict[str, Any]:
+    return {"strict": True} if ctx.get("strict") else {}
 
 
 async def handle_book(
     phone: str,
     customer: Optional[Dict[str, Any]],
     store_id: str,
+    **ctx: Any,
 ) -> str:
     """Create an eye-test appointment follow-up and return reply text."""
     name = "Customer"
@@ -321,6 +376,7 @@ async def handle_book(
             "eye_test_reminder",
             "Inbound WhatsApp: customer requested eye test booking.",
             store_id,
+            **ctx,
         )
     return _REPLY_TEMPLATES["BOOK"].format(name=name)
 
@@ -329,13 +385,14 @@ async def handle_reorder(
     phone: str,
     customer: Optional[Dict[str, Any]],
     store_id: str,
+    **ctx: Any,
 ) -> str:
     """Look up last CL order and draft a reorder follow-up."""
     name = "Customer"
     notes = "Inbound WhatsApp: customer requested contact lens reorder."
     if customer:
         name = customer.get("name") or customer.get("full_name") or "Customer"
-        last_order = _get_last_cl_order(customer)
+        last_order = _get_last_cl_order(customer, **_strict_kw(ctx))
         if last_order:
             order_num = last_order.get("order_number") or last_order.get("order_id", "")
             # BUG-104: this date is read by the CUSTOMER on WhatsApp, so it is
@@ -347,7 +404,7 @@ async def handle_reorder(
                 f"Last CL order: {order_num} on "
                 f"{ist_date_str(last_order.get('created_at'))}."
             )
-        _create_follow_up(customer, "general", notes, store_id)
+        _create_follow_up(customer, "general", notes, store_id, **ctx)
     return _REPLY_TEMPLATES["REORDER"].format(name=name)
 
 
@@ -355,22 +412,34 @@ async def handle_agent(
     phone: str,
     customer: Optional[Dict[str, Any]],
     store_id: str,
+    **ctx: Any,
 ) -> str:
     """Flag conversation for human handoff."""
-    db = _get_db()
+    strict = bool(ctx.get("strict"))
+    message_id = ctx.get("message_id")
+    db = _need_db(strict)
     if db is not None:
         try:
             digits = re.sub(r"\D", "", phone)
-            db.get_collection("whatsapp_conversations").update_one(
-                {"phone": digits[-10:] if len(digits) >= 10 else digits},
-                {
-                    "$set": {
-                        "needs_human": True,
-                        "needs_human_since": datetime.now(timezone.utc).isoformat(),
-                    }
-                },
-            )
+            thread = {"phone": digits[-10:] if len(digits) >= 10 else digits}
+            flag: Dict[str, Any] = {
+                "needs_human": True,
+                "needs_human_since": datetime.now(timezone.utc).isoformat(),
+            }
+            fresh = dict(thread)
+            if message_id:
+                # One hand-off per asking message: a retry of the same message
+                # leaves the flag and its time exactly as first written.
+                flag["needs_human_message_id"] = message_id
+                fresh["needs_human_message_id"] = {"$ne": message_id}
+            coll = db.get_collection("whatsapp_conversations")
+            flagged = coll.update_one(fresh, {"$set": flag}).matched_count
+            if strict and not flagged and coll.find_one(thread, {"_id": 1}) is None:
+                # No thread to flag: staff would never see the request.
+                raise IntentNotApplied("no conversation thread to hand off")
         except Exception as e:
+            if strict:
+                raise
             logger.debug("[WA_INTENTS] agent flag update failed: %s", e)
     name = "Customer"
     if customer:
@@ -382,9 +451,10 @@ async def handle_opt_out(
     phone: str,
     customer: Optional[Dict[str, Any]],
     store_id: str,
+    **ctx: Any,
 ) -> str:
     """Record STOP and send confirmation reply (no further messages sent)."""
-    _record_opt_out(phone, customer)
+    _record_opt_out(phone, customer, **_strict_kw(ctx))
     return _REPLY_TEMPLATES["OPT_OUT"].format(name="")
 
 
@@ -392,6 +462,7 @@ async def handle_unknown(
     phone: str,
     customer: Optional[Dict[str, Any]],
     store_id: str,
+    **ctx: Any,
 ) -> str:
     name = "Customer"
     if customer:
@@ -498,6 +569,10 @@ async def dispatch_intent(
     text: str,
     button_payload: Optional[str],
     store_id: str,
+    *,
+    message_id: Optional[str] = None,
+    strict: bool = False,
+    send_reply: bool = True,
 ) -> Dict[str, Any]:
     """
     High-level dispatcher called by the webhook handler.
@@ -509,6 +584,13 @@ async def dispatch_intent(
     5. Send reply via outbound provider (DARK when DISPATCH_MODE != live).
 
     Returns a dict with intent, reply_sent, and customer_id for logging.
+
+    The durable receiver calls it with `message_id` + `strict=True` +
+    `send_reply=False`: steps 1-4 then RAISE if an effect could not be stored
+    (nothing is swallowed), every write is keyed on the message so a retry
+    applies it once, and the reply is left to `send_intent_reply` -- which the
+    receiver calls only after it has durably recorded "intent applied", so a
+    retry can never send a customer the same reply twice.
     """
     result: Dict[str, Any] = {
         "phone": phone[-4:] if len(phone) >= 4 else phone,
@@ -517,10 +599,12 @@ async def dispatch_intent(
         "customer_id": None,
         "opted_out": False,
     }
+    ctx: Dict[str, Any] = {"message_id": message_id, "strict": True} if strict else {}
+    lookup = _strict_kw(ctx)
 
     try:
         # Hard opt-out gate (check collection first -- fastest path).
-        if _phone_is_opted_out(phone):
+        if _phone_is_opted_out(phone, **lookup):
             result["opted_out"] = True
             logger.info("[WA_INTENTS] blocked: phone %s is opted out", phone[-4:])
             return result
@@ -528,7 +612,7 @@ async def dispatch_intent(
         intent = detect_intent(text, button_payload)
         result["intent"] = intent
 
-        customer = _lookup_customer_by_phone(phone)
+        customer = _lookup_customer_by_phone(phone, **lookup)
         if customer:
             result["customer_id"] = customer.get("customer_id") or str(customer.get("_id", ""))
 
@@ -542,8 +626,26 @@ async def dispatch_intent(
             return result
 
         handler = _HANDLER_MAP.get(intent, handle_unknown)
-        reply_text = await handler(phone, customer, store_id)
+        result["reply_text"] = await handler(phone, customer, store_id, **ctx)
+        if send_reply:
+            await send_intent_reply(phone, store_id, result)
 
+    except Exception as e:
+        if strict:
+            raise
+        logger.error("[WA_INTENTS] dispatch_intent unhandled error: %s", e, exc_info=True)
+
+    return result
+
+
+async def send_intent_reply(phone: str, store_id: str, result: Dict[str, Any]) -> None:
+    """Step 5: send the handler's reply (taken out of `result`) when policy
+    allows, and record the outcome on `result`. Never raises: a reply is
+    best-effort and is attempted AT MOST ONCE per inbound message."""
+    reply_text = result.pop("reply_text", None)
+    if not reply_text:
+        return
+    try:
         # Coexistence double-answer guard: the handler ran (opt-outs are
         # recorded, follow-ups created) but the automated REPLY only goes
         # out when policy allows -- by default a human on the shop phone
@@ -553,25 +655,19 @@ async def dispatch_intent(
             result["reply_sent"] = False
             result["reply_suppressed"] = why
             logger.info("[WA_INTENTS] auto-reply suppressed: %s", why)
-            return result
+            return
 
         # Send reply via outbound provider (fail-soft).
-        try:
-            from agents.providers import send_whatsapp
+        from agents.providers import send_whatsapp
 
-            dispatch_result = await send_whatsapp(
-                phone,
-                reply_text,
-                template_id="WA_INTENT_REPLY",
-                store_id=store_id,
-            )
-            result["reply_sent"] = dispatch_result.ok
-            result["reply_status"] = dispatch_result.status
-        except Exception as e:
-            logger.warning("[WA_INTENTS] send_whatsapp failed: %s", e)
-            result["reply_sent"] = False
-
+        dispatch_result = await send_whatsapp(
+            phone,
+            reply_text,
+            template_id="WA_INTENT_REPLY",
+            store_id=store_id,
+        )
+        result["reply_sent"] = dispatch_result.ok
+        result["reply_status"] = dispatch_result.status
     except Exception as e:
-        logger.error("[WA_INTENTS] dispatch_intent unhandled error: %s", e, exc_info=True)
-
-    return result
+        logger.warning("[WA_INTENTS] send_whatsapp failed: %s", e)
+        result["reply_sent"] = False

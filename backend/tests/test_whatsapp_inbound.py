@@ -260,7 +260,14 @@ class TestReceiveInbound:
         body_bytes = json.dumps(_make_meta_body(text="book eye test")).encode()
         sig = _sign_body(body_bytes, secret)
 
+        # PR #1416: a message is acknowledged only once its own inbox row is
+        # stored, so the door needs an inbox to answer 200.
+        import mongomock
+
+        inbox = mongomock.MongoClient()["zz_wa_inbound"]["webhook_inbox"]
         with patch.dict(os.environ, {"WABA_APP_SECRET": secret}), patch(
+            "api.routers.webhooks._get_inbox_collection", return_value=inbox
+        ), patch(
             "api.routers.webhooks._upsert_conversation", return_value=None
         ), patch(
             "api.services.whatsapp_intents.dispatch_intent",
@@ -281,6 +288,27 @@ class TestReceiveInbound:
         assert resp.status_code == 200
         data = resp.json()
         assert data["messages_processed"] == 1
+        assert inbox.find_one({"vendor": "whatsapp"})["status"] == "succeeded"
+
+    def test_good_signature_without_storage_asks_meta_to_resend(self, client):
+        """No inbox, no acknowledgement (PR #1416): the old door answered 200
+        and ran the intent with nothing recorded."""
+        secret = "test_secret_123"
+        body_bytes = json.dumps(_make_meta_body(text="book eye test")).encode()
+        intent = AsyncMock()
+        with patch.dict(os.environ, {"WABA_APP_SECRET": secret}), patch(
+            "api.routers.webhooks._get_inbox_collection", return_value=None
+        ), patch("api.services.whatsapp_intents.dispatch_intent", new=intent):
+            resp = client.post(
+                "/api/v1/webhooks/whatsapp",
+                content=body_bytes,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Hub-Signature-256": _sign_body(body_bytes, secret),
+                },
+            )
+        assert resp.status_code == 503
+        intent.assert_not_called()
 
     def test_db_absent_still_returns_200(self, client):
         """Fail-soft: Mongo down => 200 (not 5xx)."""

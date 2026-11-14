@@ -894,6 +894,25 @@ class NexusAgent(JarvisAgent):
                 await self._handle_shopify_webhook(webhook_payload)
             elif vendor == "shiprocket":
                 await self._handle_shiprocket_webhook(webhook_payload)
+            elif vendor == "msg91":
+                # L1-F26: the msg91 receiver runs this interpreter inline on
+                # arrival; a row it could not finish (status=failed, or a run
+                # that died) is retried here. It raises on an unapplied effect.
+                # Without this branch the sweep parked such a row as
+                # "unknown_vendor" -> processed, i.e. deduped for ever.
+                from api.routers.webhooks import _process_msg91_events
+
+                outcome = _process_msg91_events(
+                    str(doc.get("channel") or ""), webhook_payload
+                )
+            elif vendor == "whatsapp":
+                # 1416-P2a/P2b: one row per inbound Meta message. The receiver
+                # runs this interpreter inline; a message it could not finish
+                # is finished here, and its intent is applied exactly once
+                # (the row carries intent_applied_at). Raises when unapplied.
+                from api.routers.webhooks import _process_whatsapp_message
+
+                outcome = await _process_whatsapp_message(coll, doc)
             else:
                 # Explicit terminal skip: no retry can grow a handler.
                 terminal = True

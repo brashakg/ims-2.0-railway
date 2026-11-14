@@ -69,7 +69,7 @@ The inbox doc shape:
 
     {
       "webhook_id": "<uuid>",
-      "vendor": "razorpay" | "shopify" | "shiprocket",
+      "vendor": "razorpay" | "shopify" | "shiprocket" | "msg91" | "whatsapp",
       "received_at": <utc datetime>,
       "headers": {...selected headers...},
       "payload": {...parsed json body...},
@@ -81,6 +81,10 @@ The inbox doc shape:
       "attempts": <int>, "handler_error": <str>,   # set by NEXUS on failure
       "skipped_reason": None | str,
       "event_id": None | str,          # vendor delivery id header, if any
+                                       # (whatsapp: Meta's message id -- one
+                                       # row per inbound message, which also
+                                       # carries intent_applied_at once its
+                                       # intent has been applied)
       "body_fingerprint": "sha256:..." # content-bound replay key
     }
 
@@ -120,11 +124,14 @@ router = APIRouter()
 #         endpoint be registered in Meta Business Manager before creds land.
 #   GET conversations: role-gated — caller must supply a valid IMS JWT.
 #
-# Fail-soft contract (same as other vendors above):
+# Contract (same as other vendors above):
 #   - WABA creds unset   -> 200 skipped; never 5xx to Meta's retry queue.
 #   - Bad signature      -> 401 (Meta will retry; logs let you debug).
-#   - Mongo down         -> 200, log warning (inbox is best-effort).
-#   - Intent dispatch err-> 200, log warning (reply is best-effort).
+#   - Mongo down         -> 503 so Meta redelivers: a message is acknowledged
+#                           only once its own webhook_inbox row is stored.
+#   - Message not applied-> 200 (its row is durable, status=failed); it is
+#                           run again by a redelivery or NEXUS's hourly sweep.
+#                           The reply itself stays best-effort, at most once.
 # ============================================================================
 
 _WABA_VERIFY_TOKEN = os.getenv("WABA_VERIFY_TOKEN", "")
@@ -1281,9 +1288,11 @@ async def receive_msg91_delivery(request: Request):
     handler always did, AND records the spine event in message_events --
     the same shape the channel receiver below writes.
 
-    Fail-soft like the other receivers: over rate limit -> 429, missing
-    secret -> 200 skipped (so MSG91 won't hammer its retry queue), bad
-    signature -> 401, Mongo down -> 200.
+    Over rate limit -> 429, missing secret -> 200 skipped (so MSG91 won't
+    hammer its retry queue), bad signature -> 401. A report whose effects
+    could not be stored (Mongo down, a failed write) -> 503 so MSG91 resends:
+    this door has no inbox row for the hourly sweep to retry (L1-F26). A
+    report that matches no log row is still a plain 200.
     """
     _enforce_webhook_rate_limit(request, "msg91")
 
@@ -1337,6 +1346,18 @@ async def receive_msg91_delivery(request: Request):
             at=_first(body_obj, "timestamp", "date", "deliveredAt")
             or _first(data_obj, "timestamp", "date", "deliveredAt"),
         )
+        if applied.get("error"):
+            # L1-F26, this door: it keeps no inbox row, so nothing in IMS can
+            # retry for it. A report that could not be stored is not
+            # acknowledged -- 503 makes MSG91 resend (its retries are bounded),
+            # and the spine's (channel, id, event) dedupe makes the re-run safe.
+            logger.error(
+                "[WEBHOOKS] msg91 DLR request_id=%s NOT applied (%s) -- "
+                "returning 503 so the vendor retries",
+                request_id,
+                applied["error"],
+            )
+            raise HTTPException(status_code=503, detail="storage temporarily unavailable")
         canonical = applied["delivery_status"]
         updated = applied["logs_updated"]
     else:
@@ -1377,9 +1398,15 @@ async def receive_msg91_delivery(request: Request):
 # checked constant-time against the msg91 integration doc's webhook_secret
 # with the MSG91_WEBHOOK_TOKEN env fallback (_load_secret).
 #
-# Processing is INLINE (a few Mongo writes), not dispatched to NEXUS: the
-# inbox row is the durable audit record ("queue"), and everything after it is
-# fail-soft -- a processing hiccup never turns into a 5xx retry storm.
+# Processing is INLINE (a few Mongo writes) on arrival: the inbox row is the
+# durable record, and a processing hiccup never turns into a 5xx retry storm.
+# But a hiccup is not success (audit L1-F26): the row follows the SAME state
+# machine as the other vendors' rows (processing -> succeeded | failed | dead,
+# see the module docstring). A delivery whose effects could not be applied
+# stays processed=false / status=failed, so NEXUS's hourly sweep retries it
+# (NexusAgent._handle_inbox_webhook runs this same interpreter) and an MSG91
+# redelivery re-runs it at once through _duplicate_response -- it used to be
+# stamped processed=true and answered "duplicate" for ever.
 # ============================================================================
 
 _MSG91_CHANNELS = frozenset(
@@ -1520,43 +1547,125 @@ def _iter_meta_referrals(payload: Any) -> list:
 
 
 def _process_msg91_events(channel: str, payload: Any) -> Dict[str, int]:
-    """Inline, fail-soft processing of a persisted msg91 channel delivery:
-    feed each report through the ONE interpreter, and stamp CTWA attribution
-    from WhatsApp inbound referrals. Never raises."""
+    """THE interpreter of a persisted msg91 channel delivery: feed each report
+    through the ONE delivery-report rule, stamp CTWA attribution from WhatsApp
+    inbound referrals, apply voice-IVR acknowledgements.
+
+    RAISES when an effect could not be applied (storage failed part-way), so
+    its two callers -- the receiver's first attempt and NEXUS's retry of a
+    failed row -- leave the inbox row unprocessed instead of calling it done
+    (audit L1-F26: it used to swallow the failure and return zero counts).
+    Re-running the whole delivery is safe: a spine event is deduped on
+    (channel, provider id, event) so an already-recorded report resolves
+    "duplicate" (and never re-fires the SMS fallback), the log advance is a
+    plain $set, and a voice ack leaves an acknowledged task alone. The one
+    effect that is not idempotent is the CTWA touch COUNTER: a re-run after a
+    stamp that had already landed counts that ad touch once more
+    (capture-only analytics; first/last touch stay correct).
+    """
     counts = {"events_recorded": 0, "ctwa_stamped": 0}
-    try:
-        from ..services.message_events import (
-            apply_delivery_report,
-            stamp_ctwa_attribution,
+    from ..services.message_events import (
+        apply_delivery_report,
+        stamp_ctwa_attribution,
+    )
+
+    for ev in _iter_msg91_events(payload):
+        applied = apply_delivery_report(
+            provider_message_id=ev["provider_message_id"],
+            raw_status=ev["raw_status"],
+            channel=channel,
+            mobile=ev.get("mobile"),
+            at=ev.get("at"),
+            url=ev.get("url"),
         )
-
-        for ev in _iter_msg91_events(payload):
-            applied = apply_delivery_report(
-                provider_message_id=ev["provider_message_id"],
-                raw_status=ev["raw_status"],
-                channel=channel,
-                mobile=ev.get("mobile"),
-                at=ev.get("at"),
-                url=ev.get("url"),
+        if applied.get("error"):
+            raise RuntimeError(
+                f"delivery report {ev['provider_message_id']} not applied: "
+                f"{applied['error']}"
             )
-            if applied.get("event_result") == "recorded":
-                counts["events_recorded"] += 1
+        if applied.get("event_result") == "recorded":
+            counts["events_recorded"] += 1
 
-        if channel == "whatsapp":
-            for phone, referral in _iter_meta_referrals(payload):
-                if stamp_ctwa_attribution(phone, referral):
-                    counts["ctwa_stamped"] += 1
+    if channel == "whatsapp":
+        for phone, referral in _iter_meta_referrals(payload):
+            if stamp_ctwa_attribution(phone, referral, strict=True):
+                counts["ctwa_stamped"] += 1
 
-        # Voice-escalation IVR: a pressed "1" on the escalation call
-        # acknowledges the matching task (mirrors POST /tasks/{id}/acknowledge
-        # + a history row naming channel=voice_ivr). Fail-soft like the rest.
-        if channel == "voice":
-            from ..services.voice_escalation import apply_voice_acks
+    # Voice-escalation IVR: a pressed "1" on the escalation call
+    # acknowledges the matching task (mirrors POST /tasks/{id}/acknowledge
+    # + a history row naming channel=voice_ivr).
+    if channel == "voice":
+        from ..services.voice_escalation import apply_voice_acks
 
-            counts["voice_acks"] = apply_voice_acks(payload)
-    except Exception as exc:  # noqa: BLE001
-        logger.error("[WEBHOOKS] msg91 %s event processing failed: %s", channel, exc)
+        counts["voice_acks"] = apply_voice_acks(payload, strict=True)
     return counts
+
+
+def _insert_claimed_row(coll, row: Dict[str, Any]) -> Optional[str]:
+    """Store a verified delivery's inbox row ALREADY HELD by this request,
+    exactly as a NEXUS drain would hold it (status=processing + claim): a fast
+    redelivery does not start a second run beside this one, and a run that
+    dies here is picked up by the hourly sweep once the lease runs out.
+
+    Returns the claim; None when the unique dedupe index says another request
+    stored this delivery first. Any other failure is a 503 -- never
+    ack-without-persist. Shared by the two doors that run their handler inline
+    (MSG91 channels, Meta WhatsApp inbound).
+    """
+    now = datetime.now(timezone.utc)
+    claim = uuid.uuid4().hex
+    try:
+        coll.insert_one(
+            {
+                "received_at": now,
+                "processed": False,
+                "processed_at": None,
+                "status": "processing",
+                "processing_at": now,
+                "attempts": 1,
+                "claim": claim,
+                "skipped_reason": None,
+                "signature_verified": True,
+                **row,
+            }
+        )
+    except Exception as e:  # noqa: BLE001
+        if _is_duplicate_key_error(e):
+            return None
+        logger.error("[WEBHOOKS] %s inbox insert failed: %s", row.get("vendor"), e)
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
+    return claim
+
+
+def _write_inline_outcome(
+    coll, webhook_id: str, claim: str, handler_error: str, done: Dict[str, Any]
+) -> None:
+    """Record how the receiver's own first run of an inbox row ended: failed
+    (left processed=false for the hourly retry / a redelivery) or succeeded
+    (plus the `done` fields). Never raises: a lost outcome write leaves the
+    row status=processing, and the sweep takes it over after the lease.
+    """
+    done_at = datetime.now(timezone.utc)
+    if handler_error:
+        outcome = {
+            "processed": False,
+            "status": "failed",
+            "handler_error": handler_error[:500],
+            "failed_at": done_at.isoformat(),
+        }
+    else:
+        outcome = {
+            "processed": True,
+            "processed_at": done_at,
+            "status": "succeeded",
+            **done,
+        }
+    try:
+        # Fenced on this run's claim: if the lease ran out and a NEXUS drain
+        # took the row over, its outcome stands, not this one.
+        coll.update_one({"webhook_id": webhook_id, "claim": claim}, {"$set": outcome})
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[WEBHOOKS] inbox outcome write failed on %s: %s", webhook_id, e)
 
 
 @msg91_events_router.post("/{channel}")
@@ -1620,63 +1729,55 @@ async def receive_msg91_channel(channel: str, request: Request):
     except Exception:  # noqa: BLE001
         existing = None
     if existing is not None:
-        # Processing is inline and idempotent (the spine dedupes per event),
-        # so a retry of an already-recorded delivery just ACKs.
-        return {
-            "status": "duplicate",
-            "vendor": "msg91",
-            "channel": channel,
-            "webhook_id": existing.get("webhook_id"),
-        }
+        # A retry of a delivery that was fully applied just ACKs. One whose
+        # effects never finished (status=failed, or a run that died mid-way)
+        # is handed to NEXUS's drain again -- the shared rule for every
+        # vendor's unfinished row (L1-F26).
+        out = await _duplicate_response(existing, "msg91", None)
+        out["channel"] = channel
+        return out
 
     webhook_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc)
-    try:
-        coll.insert_one(
-            {
-                "webhook_id": webhook_id,
-                "vendor": "msg91",
-                "channel": channel,
-                "received_at": now,
-                "headers": _filter_headers(request),
-                "payload": payload,
-                "raw_body_size": len(raw_body or b""),
-                "processed": False,
-                "processed_at": None,
-                "skipped_reason": None,
-                "event_id": None,
-                "body_fingerprint": fingerprint,
-                "signature_verified": True,
-            }
-        )
-    except Exception as e:  # noqa: BLE001
-        if _is_duplicate_key_error(e):
-            return {"status": "duplicate", "vendor": "msg91", "channel": channel}
-        logger.error("[WEBHOOKS] msg91/%s inbox insert failed: %s", channel, e)
-        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
+    claim = _insert_claimed_row(
+        coll,
+        {
+            "webhook_id": webhook_id,
+            "vendor": "msg91",
+            "channel": channel,
+            "headers": _filter_headers(request),
+            "payload": payload,
+            "raw_body_size": len(raw_body or b""),
+            "event_id": None,
+            "body_fingerprint": fingerprint,
+        },
+    )
+    if claim is None:
+        return {"status": "duplicate", "vendor": "msg91", "channel": channel}
 
-    # Durable row written -- everything after this is fail-soft and the
-    # response is 200 regardless (the inbox row is the recovery surface).
-    counts = _process_msg91_events(channel, payload)
+    # Durable row written -- the response is 200 from here on (the inbox row
+    # is the recovery surface), but the row only reads processed once its
+    # effects were really applied.
+    counts: Dict[str, int] = {}
+    handler_error = ""
     try:
-        coll.update_one(
-            {"webhook_id": webhook_id},
-            {
-                "$set": {
-                    "processed": True,
-                    "processed_at": datetime.now(timezone.utc),
-                    **counts,
-                }
-            },
+        counts = _process_msg91_events(channel, payload)
+    except Exception as exc:  # noqa: BLE001
+        handler_error = f"{type(exc).__name__}: {exc}"
+        logger.error(
+            "[WEBHOOKS] msg91/%s webhook %s NOT applied (%s) -- row left "
+            "status=failed for the hourly retry / a vendor redelivery",
+            channel,
+            webhook_id,
+            handler_error,
         )
-    except Exception as e:  # noqa: BLE001
-        logger.warning("[WEBHOOKS] msg91/%s inbox mark-processed failed: %s", channel, e)
+    _write_inline_outcome(coll, webhook_id, claim, handler_error, counts)
 
     return {
         "status": "received",
         "vendor": "msg91",
         "channel": channel,
         "webhook_id": webhook_id,
+        "processed": not handler_error,
         **counts,
     }
 
@@ -1777,37 +1878,104 @@ def _upsert_conversation(
     customer_id: Optional[str],
     customer_name: Optional[str],
     message_doc: Dict[str, Any],
-) -> None:
-    """Upsert the per-customer conversation thread in whatsapp_conversations. Fail-soft."""
+    strict: bool = False,
+) -> Optional[bool]:
+    """Append an inbound message to its phone-keyed thread in
+    whatsapp_conversations (created on first contact).
+
+    True when stored; False when the thread ALREADY holds this message (same
+    Meta message id) -- so repeating the append is harmless. When the thread
+    could not be written: None, or with `strict` the failure is RAISED (the
+    durable receiver must not call an unsaved message handled).
+
+    This append is NOT what keeps an intent from running twice: that is the
+    message's own webhook_inbox row (see _process_whatsapp_message). It used
+    to be, and both ways of failing were live (1416-P2a / 1416-P2b).
+    """
     coll = _get_wa_conversations_collection()
     if coll is None:
-        return
+        if strict:
+            raise RuntimeError("whatsapp_conversations unavailable")
+        return None
     try:
         now = datetime.now(timezone.utc)
         digits = "".join(c for c in phone if c.isdigit())
         phone_key = digits[-10:] if len(digits) >= 10 else digits
-        coll.update_one(
-            {"phone": phone_key},
-            {
-                "$set": {
-                    "phone": phone_key,
-                    "phone_e164": phone,
-                    "customer_id": customer_id,
-                    "customer_name": customer_name or "Unknown",
-                    "last_message_at": now,
-                },
-                "$push": {
-                    "messages": {
-                        "$each": [message_doc],
-                        "$slice": -200,  # keep last 200 messages per thread
-                    }
-                },
-                "$setOnInsert": {"created_at": now, "needs_human": False},
+        thread = {"phone": phone_key}
+        append = {
+            "$set": {
+                "phone": phone_key,
+                "phone_e164": phone,
+                "customer_id": customer_id,
+                "customer_name": customer_name or "Unknown",
+                "last_message_at": now,
             },
+            "$push": {
+                "messages": {
+                    "$each": [message_doc],
+                    "$slice": -200,  # keep last 200 messages per thread
+                }
+            },
+        }
+        wa_id = message_doc.get("wa_message_id")
+        # Each write is one atomic single-document update: the append only
+        # lands on a thread that does not hold this message id yet.
+        fresh = {**thread, "messages.wa_message_id": {"$ne": wa_id}} if wa_id else thread
+        if coll.update_one(fresh, append).matched_count:
+            return True
+        # No thread yet, or it already holds the message: make sure the
+        # thread exists, then try the same guarded append once more.
+        coll.update_one(
+            thread,
+            {"$setOnInsert": {"created_at": now, "needs_human": False}},
             upsert=True,
         )
+        return bool(coll.update_one(fresh, append).matched_count)
     except Exception as e:
+        if strict:
+            raise
         logger.warning("[WA_INBOUND] conversation upsert failed: %s", e)
+        return None
+
+
+def _inbox_phones_in_reach(coll, filt: Dict[str, Any], current_user: dict):
+    """The thread phones a store-level login may see in the WhatsApp inbox, or
+    None when the login reaches every thread (ADMIN / SUPERADMIN).
+
+    Audit L1-F24: the inbox listed every shop's chats to a shop manager. A
+    thread is keyed by phone and carries no shop of its own, so its shop is
+    DERIVED, at read time, from the customer record(s) holding that mobile --
+    judged by THE customer ownership rule (customers.customer_in_scope), the
+    same one that decides whether this login may open that customer. So:
+      * a number that is a customer of one of the login's shops -> visible;
+      * the same number held by customers of two shops -> each shop sees it;
+      * a number no customer record holds (or only other shops') -> head
+        office only. An unowned thread is never visible to every shop.
+    Derived on read, never stored: threads written before this fix carry no
+    customer id at all (L1-F30), and a customer's shop can change.
+    """
+    from ..dependencies import user_store_scope
+    from .customers import customer_in_scope
+
+    is_cross_store, _stores = user_store_scope(current_user)
+    if is_cross_store:
+        return None
+    db = _get_db()
+    if db is None:
+        return []
+    phones = [d.get("phone") for d in coll.find(filt, {"_id": 0, "phone": 1})]
+    phones = [p for p in phones if p]
+    if not phones:
+        return []
+    # ponytail: whole customer docs for the threads' numbers (bounded by the
+    # 180-day thread TTL); project the ownership keys if the inbox grows.
+    return sorted(
+        {
+            cust.get("mobile")
+            for cust in db.get_collection("customers").find({"mobile": {"$in": phones}})
+            if customer_in_scope(cust, current_user)
+        }
+    )
 
 
 def _extract_message_parts(body: Dict[str, Any]) -> list[Dict[str, Any]]:
@@ -1867,6 +2035,88 @@ def _extract_message_parts(body: Dict[str, Any]) -> list[Dict[str, Any]]:
     return messages
 
 
+async def _process_whatsapp_message(coll, row: Dict[str, Any]) -> Dict[str, Any]:
+    """THE interpreter of ONE stored inbound WhatsApp message: a webhook_inbox
+    row with vendor="whatsapp", event_id = Meta's message id and payload = the
+    extracted message; `coll` is the inbox collection holding it. The row is
+    the message's state:
+
+        processing, no intent_applied_at   received, intent still owed
+        intent_applied_at set              intent applied (never applied again)
+        succeeded / processed=true         everything done
+
+    Its two callers -- the receiver's own first run and NEXUS's re-run of an
+    unfinished row (redelivery or hourly sweep) -- each hold the row's claim,
+    so one message is never worked by two runs at once. It RAISES when a step
+    could not be stored; the caller then leaves the row unfinished and it is
+    run again. Running it again is safe at every step:
+
+      1. thread append  guarded on the message id;
+      2. the intent     skipped once the row carries intent_applied_at; before
+                        that each of its writes is keyed on the message id
+                        (follow-up, hand-off) or is a plain flag (STOP), so a
+                        run that died between the write and the mark cannot
+                        write it twice;
+      3. the reply      sent only by the run that set the mark: at most once;
+      4. ad-click stamp best-effort, as before.
+    """
+    from ..services.whatsapp_intents import (
+        _lookup_customer_by_phone,
+        dispatch_intent,
+        send_intent_reply,
+    )
+
+    msg = row.get("payload") or {}
+    phone = msg.get("from_phone") or ""
+
+    customer = _lookup_customer_by_phone(phone, strict=True)
+    customer_id = customer.get("customer_id") if customer else None
+    customer_name = (
+        customer.get("name") or customer.get("full_name") if customer else msg.get("sender_name")
+    )
+    _upsert_conversation(phone, customer_id, customer_name, msg, strict=True)
+
+    if row.get("intent_applied_at"):
+        result = dict(row.get("intent_result") or {})
+    else:
+        result = await dispatch_intent(
+            phone=phone,
+            text=msg.get("text") or "",
+            button_payload=msg.get("button_payload"),
+            store_id=_WABA_DEFAULT_STORE_ID,
+            message_id=row.get("event_id"),
+            strict=True,
+            send_reply=False,
+        )
+        reply_text = result.pop("reply_text", None)
+        marked = coll.update_one(
+            {"webhook_id": row.get("webhook_id")},
+            {
+                "$set": {
+                    "intent_applied_at": datetime.now(timezone.utc),
+                    "intent_result": dict(result),
+                }
+            },
+        )
+        if not marked.matched_count:
+            raise RuntimeError("inbox row missing: the intent could not be marked applied")
+        if reply_text:
+            result["reply_text"] = reply_text
+            await send_intent_reply(phone, _WABA_DEFAULT_STORE_ID, result)
+
+    # CTWA ads attribution -- capture only, fail-soft, and LAST so a re-run
+    # reaches it again only if the earlier run never finished. (The other
+    # stamping site is _process_msg91_events for the MSG91 door.)
+    if msg.get("referral"):
+        try:
+            from ..services.message_events import stamp_ctwa_attribution
+
+            stamp_ctwa_attribution(phone, msg["referral"])
+        except Exception as _ctwa_exc:  # noqa: BLE001
+            logger.debug("[WA_INBOUND] CTWA stamp failed: %s", _ctwa_exc)
+    return result
+
+
 @router.get("/whatsapp")
 async def whatsapp_verify_challenge(
     hub_mode: Optional[str] = Query(None, alias="hub.mode"),
@@ -1918,8 +2168,10 @@ async def receive_whatsapp_inbound(request: Request):
       1. Read raw body.
       2. Verify X-Hub-Signature-256 (skip if WABA_APP_SECRET unset).
       3. Parse payload -> extract messages.
-      4. For each message: upsert conversation thread + dispatch intent.
-      5. Return 200 (never 5xx to Meta).
+      4. For each message: store its own inbox row (503 if that is not
+         possible), then thread append + intent (_process_whatsapp_message).
+         A message whose row already exists is a redelivery.
+      5. Return 200.
     """
     _enforce_webhook_rate_limit(request, "whatsapp")
 
@@ -1968,51 +2220,85 @@ async def receive_whatsapp_inbound(request: Request):
         # Status update or other non-message event -- ack and exit.
         return {"status": "received", "messages_processed": 0}
 
+    # 1416-P2a/P2b: every message gets its OWN durable inbox row before
+    # anything is done for it, and that row -- not the conversation thread --
+    # says whether its intent is still owed. No row, no acknowledgement: a 200
+    # with nothing stored was a lost message, and running the intent with
+    # nothing stored was a repeated one.
+    coll = _get_inbox_collection()
+    if coll is None:
+        logger.error(
+            "[WA_INBOUND] inbox collection unavailable -- returning 503 so Meta "
+            "redelivers (refusing to ack-and-drop)"
+        )
+        raise HTTPException(status_code=503, detail="storage temporarily unavailable")
+
     results = []
     for msg in messages:
         phone = msg.get("from_phone") or ""
-        text = msg.get("text") or ""
-        button_payload = msg.get("button_payload")
+        last4 = phone[-4:] if len(phone) >= 4 else phone
+        # Meta's message id; a content hash for the id-less message Meta does
+        # not send but a signed caller could.
+        key = msg.get("wa_message_id") or "sha256:" + hashlib.sha256(
+            json.dumps(
+                [msg.get(k) for k in ("from_phone", "timestamp", "type", "text", "button_payload")],
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        by_key = {"vendor": "whatsapp", "event_id": key}
 
-        # Lazy import to avoid circular at module load time.
+        claim = None
         try:
-            from ..services.whatsapp_intents import dispatch_intent, _lookup_customer_by_phone
+            existing = coll.find_one(by_key)
+        except Exception:  # noqa: BLE001 - the insert below decides
+            existing = None
+        if existing is None:
+            row = {
+                "webhook_id": str(uuid.uuid4()),
+                "vendor": "whatsapp",
+                "headers": _filter_headers(request),
+                "payload": msg,
+                "raw_body_size": len(raw_body or b""),
+                "event_id": key,
+            }
+            claim = _insert_claimed_row(coll, row)  # 503 when it cannot be stored
+            if claim is None:  # another request stored this message first
+                existing = coll.find_one(by_key) or {}
+        if claim is None:
+            # A redelivery. Fully applied -> just acknowledged. Unfinished
+            # (its run failed, or died) -> handed to NEXUS's drain again, the
+            # shared rule for every vendor's unfinished row.
+            dup = await _duplicate_response(existing, "whatsapp", key)
+            out = {"duplicate": True, "phone": last4}
+            if "redispatched" in dup:
+                out["redispatched"] = dup["redispatched"]
+            results.append(out)
+            continue
 
-            customer = _lookup_customer_by_phone(phone)
-            customer_id = customer.get("customer_id") if customer else None
-            customer_name = (
-                customer.get("name") or customer.get("full_name") if customer else msg.get("sender_name")
-            )
-
-            # Persist message to conversation thread.
-            _upsert_conversation(phone, customer_id, customer_name, msg)
-
-            # CTWA ads attribution -- capture only, fail-soft. (The other
-            # stamping site is _process_msg91_events for the MSG91 door.)
-            if msg.get("referral"):
-                try:
-                    from ..services.message_events import stamp_ctwa_attribution
-
-                    stamp_ctwa_attribution(phone, msg["referral"])
-                except Exception as _ctwa_exc:  # noqa: BLE001
-                    logger.debug("[WA_INBOUND] CTWA stamp failed: %s", _ctwa_exc)
-
-            intent_result = await dispatch_intent(
-                phone=phone,
-                text=text,
-                button_payload=button_payload,
-                store_id=_WABA_DEFAULT_STORE_ID,
-            )
-            results.append(intent_result)
+        result: Dict[str, Any] = {}
+        handler_error = ""
+        try:
+            result = await _process_whatsapp_message(coll, row)
             logger.info(
                 "[WA_INBOUND] phone=...%s intent=%s reply_sent=%s",
-                phone[-4:] if len(phone) >= 4 else phone,
-                intent_result.get("intent"),
-                intent_result.get("reply_sent"),
+                last4,
+                result.get("intent"),
+                result.get("reply_sent"),
             )
-        except Exception as e:
-            logger.error("[WA_INBOUND] message processing error: %s", e, exc_info=True)
-            results.append({"error": str(e), "phone": phone[-4:] if len(phone) >= 4 else ""})
+        except Exception as e:  # noqa: BLE001
+            handler_error = f"{type(e).__name__}: {e}"
+            logger.error(
+                "[WA_INBOUND] message %s NOT applied (%s) -- row left status=failed "
+                "for the hourly retry / a Meta redelivery",
+                row["webhook_id"],
+                handler_error,
+                exc_info=True,
+            )
+            result = {"error": str(e), "phone": last4}
+        _write_inline_outcome(
+            coll, row["webhook_id"], claim, handler_error, {"outcome": result}
+        )
+        results.append(result)
 
     return {"status": "received", "messages_processed": len(messages), "results": results}
 
@@ -2027,6 +2313,9 @@ async def list_whatsapp_conversations(
     """
     WhatsApp inbox: list conversation threads (most recent first).
     Role-gated: requires a valid IMS JWT with SUPERADMIN, ADMIN, or STORE_MANAGER.
+    Shop-scoped (L1-F24): a STORE_MANAGER sees only the chats of customers of
+    their own shop(s); ADMIN / SUPERADMIN see every chat, including numbers
+    that are nobody's customer yet (see _inbox_phones_in_reach).
     Read-only v1 -- no reply composition in this endpoint.
     """
     # Role gate on the SHARED session check (L1-F25: a hand-rolled decode here
@@ -2053,6 +2342,9 @@ async def list_whatsapp_conversations(
         filt: Dict[str, Any] = {}
         if needs_human is not None:
             filt["needs_human"] = needs_human
+        in_reach = _inbox_phones_in_reach(coll, filt, payload)
+        if in_reach is not None:
+            filt["phone"] = {"$in": in_reach}
 
         total = coll.count_documents(filt)
         cursor = (

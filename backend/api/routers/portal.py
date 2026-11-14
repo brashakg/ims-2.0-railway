@@ -340,18 +340,10 @@ class RxOtpVerify(BaseModel):
     otp: str = Field(..., min_length=4, max_length=8)
 
 
-def _normalize_phone(phone: str) -> str:
-    """Digits only, drop trunk 0, add 91 for bare 10-digit Indian numbers.
-    Mirrors agents.providers._normalize_phone so OTP lookups match the form
-    used when sending."""
-    p = "".join(c for c in (phone or "") if c.isdigit())
-    if not p:
-        return ""
-    if p.startswith("0"):
-        p = p[1:]
-    if not p.startswith("91") and len(p) == 10:
-        p = "91" + p
-    return p
+# THE provider phone form -- the same function the send uses, so an OTP row
+# is always looked up under the number it was sent to. This was a hand copy
+# ("mirrors agents.providers") carrying the same leading-91 bug (L1-F31).
+from agents.providers import _normalize_phone  # noqa: E402
 
 
 def _hash_otp(otp: str, phone_norm: str) -> str:
