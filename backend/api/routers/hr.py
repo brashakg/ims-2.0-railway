@@ -27,6 +27,7 @@ from ..dependencies import (
     user_store_scope,
 )
 from ..services import attendance_engine
+from database.repositories.hr_repository import AttendanceUnavailable
 from ..services.file_store import (
     ANY_KIND,
     get_file_store,
@@ -236,6 +237,9 @@ class AttendanceMarkRequest(BaseModel):
     # R15: the store the screen is showing. Omitted -> the login's active store
     # (the old behaviour). Authorised by validate_store_access in the route.
     store_id: Optional[str] = None
+    # D48: only when the stored day has NO shop -- the shop it is being
+    # recorded at, named explicitly (must equal store_id). Never inferred.
+    assign_store_id: Optional[str] = None
 
     @field_validator("status")
     @classmethod
@@ -435,7 +439,9 @@ def _empty_summary() -> dict:
     }
 
 
-def _build_grid(year: int, month: int, employees: list, records: list) -> dict:
+def _build_grid(
+    year: int, month: int, employees: list, records: list, no_shop_records: Optional[list] = None
+) -> dict:
     """Assemble the month grid from a roster + attendance records.
 
     Args:
@@ -463,6 +469,12 @@ def _build_grid(year: int, month: int, employees: list, records: list) -> dict:
         if rec.get("is_late"):
             slot["late_days"].add(day)
 
+    no_shop: dict = {}
+    for rec in no_shop_records or []:
+        day = _day_of_record(rec.get("date"))
+        if day is not None and 1 <= day <= n_days:
+            no_shop.setdefault(rec.get("employee_id"), set()).add(day)
+
     totals = _empty_summary()
     out_employees = []
     for emp in employees or []:
@@ -485,6 +497,7 @@ def _build_grid(year: int, month: int, employees: list, records: list) -> dict:
                 "store_id": emp.get("store_id", ""),
                 "days": day_codes,
                 "summary": summary,
+                "no_shop_days": [str(d) for d in sorted(no_shop.get(emp_id, ()))],
             }
         )
 
@@ -737,6 +750,7 @@ async def get_attendance_grid(
     # Pull the month's attendance records (string date range mirrors the actual
     # write path in POST /attendance/mark).
     records = []
+    no_shop_records: list = []
     if attendance_repo is not None:
         n_days = _days_in_month(year, mon)
         start = f"{year:04d}-{mon:02d}-01"
@@ -744,12 +758,24 @@ async def get_attendance_grid(
         rec_filter = {"date": {"$gte": start, "$lte": end}}
         if scope is not None:
             rec_filter["store_id"] = scope
-        try:
-            records = attendance_repo.find_many(rec_filter, limit=5000)
-        except Exception:
-            records = []
+        records = attendance_repo.find_many(rec_filter, limit=5000)
+        if scope is not None and employees:
+            # D48: legacy days saved without a shop, for this roster only. Shown
+            # read-only ("Shop not recorded"), never counted in this store.
+            ids = [e["employee_id"] for e in employees]
+            no_shop = attendance_repo.find_many(
+                {
+                    "date": {"$gte": start, "$lte": end},
+                    "employee_id": {"$in": ids},
+                    "store_id": {"$in": [None, ""]},
+                },
+                limit=5000,
+            )
+            no_shop_records = [
+                r for r in no_shop if not r.get("store_id") and r.get("employee_id") in ids
+            ]
 
-    return _build_grid(year, mon, employees, records)
+    return _build_grid(year, mon, employees, records, no_shop_records)
 
 
 @router.get("/attendance/summary")
@@ -795,10 +821,7 @@ async def get_attendance_summary(
         rec_filter = {"date": {"$gte": start, "$lte": end}}
         if scope is not None:
             rec_filter["store_id"] = scope
-        try:
-            records = attendance_repo.find_many(rec_filter, limit=5000)
-        except Exception:
-            records = []
+        records = attendance_repo.find_many(rec_filter, limit=5000)
 
     grid = _build_grid(year, mon, employees, records)
     return _summarise_grid(grid)
@@ -883,27 +906,46 @@ def _find_day_row(
     written with a missing/old store_id (legacy `mark` rows persisted
     active_store_id, which can be None) is still matched -- otherwise a second
     check-in would fail to see it and mint a duplicate, which is the exact bug
-    being fixed. Fail-soft: any repo error -> None (treated as 'no row')."""
-    try:
-        row = attendance_repo.find_one({"employee_id": employee_id, "date": date_iso})
-        if row is not None:
-            return row
-    except Exception:
-        return None
-    # Defensive fallback: a legacy row may have stored `date` as a datetime
-    # (the repo's mark_check_in helper did). Match on the date prefix so we still
-    # attach to it instead of duplicating. Only attempted when the string lookup
-    # missed, so it never adds cost on the normal path.
-    try:
-        from datetime import datetime as _dt
+    being fixed. A failed read RAISES (AttendanceUnavailable -> 503): it is never
+    'no row', which would mint a second row or report a false empty day."""
+    row = attendance_repo.find_one({"employee_id": employee_id, "date": date_iso})
+    if row is not None:
+        return row
+    # Legacy rows stored `date` as a datetime (the repo's mark_check_in helper
+    # did). Match the day's range so we attach to it instead of duplicating.
+    # Only attempted when the string lookup missed.
+    return attendance_repo.find_one(
+        {"employee_id": employee_id, "date": legacy_day_range(date_iso)}
+    )
 
-        start = _dt.fromisoformat(f"{date_iso}T00:00:00")
-        end = _dt.fromisoformat(f"{date_iso}T23:59:59")
-        return attendance_repo.find_one(
-            {"employee_id": employee_id, "date": {"$gte": start, "$lte": end}}
+
+def legacy_day_range(date_iso: str) -> dict:
+    """Mongo range matching a legacy row whose `date` is a BSON datetime."""
+    return {
+        "$gte": datetime.fromisoformat(f"{date_iso}T00:00:00"),
+        "$lte": datetime.fromisoformat(f"{date_iso}T23:59:59"),
+    }
+
+
+def _update_day_row(attendance_repo, row_id, data: dict) -> None:
+    """Write `data` onto one attendance row and make sure it LANDED.
+
+    A database error whose write actually landed (the acknowledgement was
+    lost) is reconciled by reading the row back; any other failure raises
+    AttendanceUnavailable (503), so no caller reports or audits a change that
+    did not persist. A row that vanished meanwhile is a 409."""
+    try:
+        matched = attendance_repo.update(row_id, data)
+    except AttendanceUnavailable:
+        row = attendance_repo.find_one({"attendance_id": row_id})
+        if row is not None and all(row.get(k) == v for k, v in data.items()):
+            return
+        raise
+    if not matched:
+        raise HTTPException(
+            status_code=409,
+            detail="This attendance record was changed or removed meanwhile. Reload and try again.",
         )
-    except Exception:
-        return None
 
 
 def _create_day_row_safe(attendance_repo, data: dict):
@@ -912,25 +954,32 @@ def _create_day_row_safe(attendance_repo, data: dict):
     If two check-ins for the same (employee_id, date) race, the unique index
     makes the second insert raise DuplicateKeyError; we catch it and UPDATE the
     row the winner just created instead of surfacing a 500 or leaving a dup.
-    Fail-soft otherwise (the BaseRepository.create already swallows errors)."""
+    A database error raises (503) unless the row is found to have landed (a
+    lost acknowledgement), so a check-in is never "recorded" without a row."""
     try:
         attendance_repo.create(data)
-    except Exception:  # noqa: BLE001 - includes pymongo DuplicateKeyError
+        return
+    except AttendanceUnavailable:
+        if attendance_repo.find_one({"attendance_id": data["attendance_id"]}) is not None:
+            return
+        raise
+    except Exception:  # noqa: BLE001 - pymongo DuplicateKeyError: lost the race
         existing = _find_day_row(
             attendance_repo,
             data.get("employee_id"),
             data.get("store_id"),
             data.get("date"),
         )
-        if existing is not None:
-            patch = {
-                k: v
-                for k, v in data.items()
-                if k not in ("attendance_id", "date", "employee_id")
-            }
-            attendance_repo.update(
-                existing.get("attendance_id") or existing.get("_id"), patch
-            )
+        if existing is None:
+            raise
+    patch = {
+        k: v
+        for k, v in data.items()
+        if k not in ("attendance_id", "date", "employee_id", "_id", "created_at", "updated_at")
+    }
+    _update_day_row(
+        attendance_repo, existing.get("attendance_id") or existing.get("_id"), patch
+    )
 
 
 def _half_day_rule(store_id: Optional[str]) -> dict:
@@ -1081,8 +1130,10 @@ async def check_in(
                 update_data["late_minutes"] = late["late_minutes"]
                 update_data["marked_by"] = employee_id
                 update_data["marked_at"] = ist_event_iso(now)
-            attendance_repo.update(
-                existing.get("attendance_id") or existing.get("_id"), update_data
+            _update_day_row(
+                attendance_repo,
+                existing.get("attendance_id") or existing.get("_id"),
+                update_data,
             )
         else:
             data = {
@@ -1169,9 +1220,8 @@ async def check_out(
         )
         if hd["is_half_day"]:
             update["status"] = "HALF_DAY"
-    attendance_repo.update(
-        existing.get("attendance_id") or existing.get("_id"),
-        update,
+    _update_day_row(
+        attendance_repo, existing.get("attendance_id") or existing.get("_id"), update
     )
     return {
         "attendance_id": existing.get("attendance_id") or existing.get("_id"),
@@ -1223,7 +1273,8 @@ async def check_out_by_id(
         )
 
     now_iso = utc_now_iso()
-    repo.update(
+    _update_day_row(
+        repo,
         existing.get("attendance_id") or existing.get("_id"),
         {"check_out": now_iso, "checked_out_by": current_user.get("user_id")},
     )
@@ -1259,6 +1310,22 @@ async def mark_attendance(
             attendance_repo, request.employee_id, target_store, date_iso
         )
         row_store = (existing or {}).get("store_id")
+        # D48: a legacy day saved WITHOUT a shop is not adopted by the shop
+        # being viewed; the correction must name the shop explicitly.
+        if (
+            existing is not None
+            and not row_store
+            and target_store
+            and request.assign_store_id != target_store
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Shop not recorded: this day was saved without a shop, so it "
+                    "is not moved into the shop you are viewing. A correction must "
+                    "name the shop explicitly."
+                ),
+            )
         if row_store and target_store and row_store != target_store:
             raise HTTPException(
                 status_code=409,
@@ -1298,7 +1365,7 @@ async def mark_attendance(
                 for k in ("store_id", "status", "check_in", "check_out")
                 if k in data and data[k] != before.get(k)
             ]
-            attendance_repo.update(row_id, data)
+            _update_day_row(attendance_repo, row_id, data)  # raises before any audit
             if changed:
                 _audit_attendance_edit(
                     current_user, row_id, before, {**before, **data}, changed
@@ -1464,7 +1531,7 @@ async def edit_attendance(
     updates["edited_at"] = utc_now_iso()
 
     row_id = existing.get("attendance_id") or existing.get("_id")
-    attendance_repo.update(row_id, updates)
+    _update_day_row(attendance_repo, row_id, updates)  # raises before any audit
 
     after = {**before, **updates}
     changed = [k for k in updates if k not in ("edited_by", "edited_at")]
@@ -2110,10 +2177,7 @@ async def late_marks_report(
         flt["store_id"] = scope
     if employee_id:
         flt["employee_id"] = employee_id
-    try:
-        records = attendance_repo.find_many(flt, limit=5000)
-    except Exception:
-        records = []
+    records = attendance_repo.find_many(flt, limit=5000)
 
     by_emp: dict = {}
     total = 0
@@ -2428,10 +2492,7 @@ async def lwp_report(
         att_flt["store_id"] = scope
     if employee_id:
         att_flt["employee_id"] = employee_id
-    try:
-        att_records = attendance_repo.find_many(att_flt, limit=10000)
-    except Exception:
-        att_records = []
+    att_records = attendance_repo.find_many(att_flt, limit=10000)
 
     leaves = []
     if leave_repo is not None:

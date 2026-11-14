@@ -86,9 +86,12 @@ class _FakeAttendanceRepo:
                     return False
             elif isinstance(val, dict):
                 rv = r.get(key)
-                if "$gte" in val and not (rv is not None and rv >= val["$gte"]):
+                # Mongo brackets range matches by type: a string date never
+                # matches a datetime bound (and never raises).
+                lo, hi = val.get("$gte"), val.get("$lte")
+                if "$gte" in val and not (type(rv) is type(lo) and rv >= lo):
                     return False
-                if "$lte" in val and not (rv is not None and rv <= val["$lte"]):
+                if "$lte" in val and not (type(rv) is type(hi) and rv <= hi):
                     return False
             else:
                 if r.get(key) != val:

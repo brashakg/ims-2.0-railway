@@ -44,6 +44,7 @@ from ..services.online_order_status import SALE_DONE_STATUSES
 # DELEGATES to it -- no second implementation of the apply rule.
 from .hr import LeaveCreate, apply_leave as _hr_apply_leave
 from .hr import check_in as _hr_check_in, check_out as _hr_check_out
+from .hr import legacy_day_range
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,9 @@ async def my_attendance(
 
     Returns per-day status codes plus rolled-up counts (present / absent /
     half_day / leave / late). Reads the ``attendance`` collection filtered to
-    the caller's employee_id -- never another employee's. Fail-soft.
+    the caller's employee_id -- never another employee's. A failed read is a
+    503, never an empty month / "not checked in" (#1433). Legacy rows whose
+    ``date`` is a BSON datetime are read like the string rows the writers use.
     """
     mon, yr = _month_year(month, year)
     caller = _caller_id(current_user)
@@ -145,11 +148,27 @@ async def my_attendance(
         n_days = monthrange(yr, mon)[1]
         start = f"{yr:04d}-{mon:02d}-01"
         end = f"{yr:04d}-{mon:02d}-{n_days:02d}"
-        records = list(
-            db.get_collection("attendance").find(
-                {"employee_id": caller, "date": {"$gte": start, "$lte": end}}
+        legacy = legacy_day_range(start)
+        legacy["$lte"] = legacy_day_range(end)["$lte"]
+        coll = db.get_collection("attendance")
+        found = list(
+            coll.find(
+                {
+                    "employee_id": caller,
+                    "$or": [
+                        {"date": {"$gte": start, "$lte": end}},
+                        {"date": legacy},
+                    ],
+                }
             ).limit(400)
         )
+        # One row per day; the string-dated (current) row wins over a legacy one.
+        by_day: dict = {}
+        for r in found:
+            d = str(r.get("date", ""))[:10]
+            if d and (d not in by_day or isinstance(r.get("date"), str)):
+                by_day[d] = r
+        records = list(by_day.values())
 
         # Code map mirrors the HR grid (P/A/HD/L/LWP/WO).
         code_for = {
@@ -184,8 +203,8 @@ async def my_attendance(
                 summary["late"] += 1
 
         today_iso = now_ist().date().isoformat()
-        t = db.get_collection("attendance").find_one(
-            {"employee_id": caller, "date": today_iso}, {"_id": 0}
+        t = coll.find_one({"employee_id": caller, "date": today_iso}) or coll.find_one(
+            {"employee_id": caller, "date": legacy_day_range(today_iso)}
         )
         today = t and {
             "attendance_id": t.get("attendance_id"),
@@ -205,7 +224,10 @@ async def my_attendance(
         }
     except Exception as e:
         logger.error("Self attendance read failed: %s", e)
-        return empty
+        raise HTTPException(
+            status_code=503,
+            detail="Your attendance could not be loaded just now. Please try again.",
+        ) from e
 
 
 # ============================================================================

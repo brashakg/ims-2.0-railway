@@ -217,3 +217,161 @@ def test_f02_status_names_zero_activity_staff(monkeypatch):
     body = r.json()
     assert body["staff_missing"] == ["5b0f7f0a-new"]
     assert body["staff_names"] == {"5b0f7f0a-new": "New Sales Person"}
+
+
+# ------------------------------------------- #1433 Codex round 1 (real repository)
+#
+# These run the REAL AttendanceRepository over a mongomock collection that
+# carries the production unique (employee_id, date) index, through the real
+# app (main.py handlers, JWT, RBAC). Faults are injected on the collection the
+# way Codex did on native PyMongo: AutoReconnect from insert_one / update_one /
+# find_one / find, plus a "landed, acknowledgement lost" variant.
+# Discriminating power (measured by restoring the round-0 head's hr.py,
+# hr_self_service.py, hr_repository.py, main.py): every 503 case answered 200
+# with no row / an unchanged row and a false audit row; the legacy-date today
+# read was null; the no-shop day was adopted into S1.
+
+from datetime import datetime as _dt  # noqa: E402
+
+import mongomock  # noqa: E402
+from pymongo.errors import AutoReconnect  # noqa: E402
+
+from database.repositories.hr_repository import AttendanceRepository  # noqa: E402
+
+DAY = "2026-11-05"
+
+
+@pytest.fixture
+def real(monkeypatch):
+    from api.main import app
+
+    coll = mongomock.MongoClient().db.attendance
+    coll.create_index([("employee_id", 1), ("date", 1)], unique=True)
+    audit = _FakeAuditRepo()
+    _patch_hr(monkeypatch, AttendanceRepository(coll), audit)
+
+    class _Db:
+        def get_collection(self, name):
+            return coll
+
+    monkeypatch.setattr(hr_self_service, "_get_db", lambda: _Db())
+    return TestClient(app, raise_server_exceptions=False), coll, audit
+
+
+def _boom(*a, **kw):
+    raise AutoReconnect("injected attendance failure")
+
+
+def _lost_ack(method):
+    def run(*a, **kw):
+        method(*a, **kw)
+        raise AutoReconnect("write landed, acknowledgement lost")
+
+    return run
+
+
+def _admin():
+    return _headers(["ADMIN"], user_id="adm", store_id="S1")
+
+
+GEO = {"store_id": "S1"}
+
+
+def _seed(c):
+    r = c.post("/api/v1/hr/attendance/mark", headers=_admin(), json={"employee_id": "emp-a", "store_id": "S1", "date": DAY, "status": "PRESENT", "check_in": DAY + "T10:00:00+05:30"})
+    assert r.status_code == 200, r.text
+
+
+def test_codex_failed_mark_and_put_are_503_with_no_audit(real, monkeypatch):
+    c, coll, audit = real
+    _seed(c)
+    before = coll.find_one({"employee_id": "emp-a"})
+    monkeypatch.setattr(coll, "update_one", _boom)
+    r = c.post("/api/v1/hr/attendance/mark", headers=_admin(), json={"employee_id": "emp-a", "store_id": "S1", "date": DAY, "status": "ABSENT"})
+    assert r.status_code == 503, r.text
+    r2 = c.put(f"/api/v1/hr/attendance/{before['attendance_id']}", headers=_admin(), json={"status": "ABSENT"})
+    assert r2.status_code == 503, r2.text
+    assert coll.find_one({"employee_id": "emp-a"}) == before
+    assert audit.rows == []  # no audit of a change that never landed
+
+
+def test_codex_mark_lost_ack_is_reconciled_and_audited_once(real, monkeypatch):
+    c, coll, audit = real
+    _seed(c)
+    upd = coll.update_one
+    monkeypatch.setattr(coll, "update_one", _lost_ack(upd))
+    body = {"employee_id": "emp-a", "store_id": "S1", "date": DAY, "status": "HALF_DAY"}
+    assert c.post("/api/v1/hr/attendance/mark", headers=_admin(), json=body).status_code == 200
+    monkeypatch.setattr(coll, "update_one", upd)
+    assert c.post("/api/v1/hr/attendance/mark", headers=_admin(), json=body).status_code == 200  # identical retry
+    assert coll.find_one({"employee_id": "emp-a"})["status"] == "HALF_DAY"
+    assert [a["detail"]["changed_fields"] for a in audit.rows] == [["status"]]
+
+
+def test_codex_self_check_in_and_out_failures_are_503(real, monkeypatch):
+    c, coll, _ = real
+    h = _headers(["CASHIER"], user_id="u-cash", store_id="S1")
+    ins = coll.insert_one
+    monkeypatch.setattr(coll, "insert_one", _boom)
+    assert c.post("/api/v1/hr/attendance/check-in", params=GEO, headers=h).status_code == 503
+    assert coll.count_documents({"employee_id": "u-cash"}) == 0
+    # landed but unacknowledged: success, one row, and a retry keeps the time
+    monkeypatch.setattr(coll, "insert_one", _lost_ack(ins))
+    assert c.post("/api/v1/hr/attendance/check-in", params=GEO, headers=h).status_code == 200
+    monkeypatch.setattr(coll, "insert_one", ins)
+    first = coll.find_one({"employee_id": "u-cash"})
+    r = c.post("/api/v1/hr/attendance/check-in", params=GEO, headers=h)
+    assert r.json()["already_checked_in"] is True
+    assert coll.count_documents({"employee_id": "u-cash"}) == 1
+    assert coll.find_one({"employee_id": "u-cash"})["check_in"] == first["check_in"]
+    upd = coll.update_one
+    monkeypatch.setattr(coll, "update_one", _boom)
+    assert c.post("/api/v1/hr/attendance/check-out", params=GEO, headers=h).status_code == 503
+    assert c.post(f"/api/v1/hr/attendance/{first['attendance_id']}/check-out", headers=_admin()).status_code == 503
+    assert coll.find_one({"employee_id": "u-cash"}).get("check_out") is None
+    monkeypatch.setattr(coll, "update_one", upd)
+    assert c.post("/api/v1/hr/attendance/check-out", params=GEO, headers=h).status_code == 200
+    assert coll.find_one({"employee_id": "u-cash"})["check_out"]
+
+
+def test_codex_own_read_failure_is_503_not_an_empty_day(real, monkeypatch):
+    c, coll, _ = real
+    h = _headers(["SALES_STAFF"], user_id="u-s", store_id="S1")
+    assert c.post("/api/v1/hr/attendance/check-in", params=GEO, headers=h).status_code == 200
+    monkeypatch.setattr(coll, "find_one", _boom)
+    r = c.get("/api/v1/hr/me/attendance", headers=h)
+    assert r.status_code == 503, r.text
+    monkeypatch.setattr(coll, "find", _boom)
+    g = c.get("/api/v1/hr/attendance/grid", params={"month": DAY[:7], "store_id": "S1"}, headers=_admin())
+    assert g.status_code == 503, g.text
+
+
+def test_codex_legacy_datetime_day_is_today(real):
+    from api.utils.ist import now_ist
+
+    c, coll, _ = real
+    today = now_ist().date().isoformat()
+    coll.insert_one({"_id": "L1", "attendance_id": "L1", "employee_id": "u-w", "store_id": "S1", "date": _dt.fromisoformat(today), "status": "PRESENT", "check_in": today + "T04:30:00+05:30"})
+    h = _headers(["WORKSHOP_STAFF"], user_id="u-w", store_id="S1")
+    body = c.get("/api/v1/hr/me/attendance", headers=h).json()
+    assert body["today"]["check_in"] == today + "T04:30:00+05:30"
+    assert body["days"][today] == "P" and body["summary"]["present"] == 1
+    r = c.post("/api/v1/hr/attendance/check-in", params=GEO, headers=h)
+    assert r.json()["already_checked_in"] is True
+    assert coll.count_documents({"employee_id": "u-w"}) == 1
+
+
+def test_d48_store_less_day_is_not_adopted_and_shows_read_only(real):
+    c, coll, audit = real
+    coll.insert_one({"_id": "N1", "attendance_id": "N1", "employee_id": "emp-a", "date": DAY, "status": "PRESENT"})
+    sm = _headers(["STORE_MANAGER"], user_id="sm", store_id="S1")
+    g = c.get("/api/v1/hr/attendance/grid", params={"month": DAY[:7], "store_id": "S1"}, headers=sm).json()
+    (emp,) = [e for e in g["employees"] if e["employee_id"] == "emp-a"]
+    assert emp["no_shop_days"] == ["5"] and "5" not in emp["days"]
+    body = {"employee_id": "emp-a", "store_id": "S1", "date": DAY, "status": "ABSENT"}
+    r = c.post("/api/v1/hr/attendance/mark", headers=sm, json=body)
+    assert r.status_code == 409 and "Shop not recorded" in r.json()["detail"]
+    assert coll.find_one({"_id": "N1"}).get("store_id") is None and audit.rows == []
+    r = c.post("/api/v1/hr/attendance/mark", headers=sm, json={**body, "assign_store_id": "S1"})
+    assert r.status_code == 200, r.text
+    assert coll.find_one({"_id": "N1"})["store_id"] == "S1"

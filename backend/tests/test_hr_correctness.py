@@ -143,8 +143,11 @@ class _FakeAttendanceRepo:
         return doc
 
     def update(self, aid, updates):
+        # Same contract as AttendanceRepository.update: True when matched.
         if aid in self._store:
             self._store[aid].update(updates)
+            return True
+        return False
 
 
 def _make_app(monkeypatch, attendance_records=None, leave_records=None,
