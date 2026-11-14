@@ -1372,6 +1372,71 @@ def _unlock_order_credit(db, order_id: Any, token: Optional[str]) -> None:
                        exc_info=True)
 
 
+def _landed(res: Any) -> bool:
+    """A compare-and-set update matched (a mock collection reports modified_count only)."""
+    matched = getattr(res, "matched_count", None)
+    return bool(getattr(res, "modified_count", 0) if matched is None else matched)
+
+
+def _hold_order_for_online(db, order_id: Any, refund_id: str, amount: float) -> bool:
+    """The online post's entry in the bill's refund holds, on the SAME
+    compare-and-set (refund_holds_v) every counter return reserves through
+    (returns._reserve_order_refund): one reservation for both doors (#1397,
+    Codex round 6). Taken under the credit lock, BEFORE the allowance is read,
+    so a counter return pressed meanwhile counts this refund (its cap; on a
+    points-paid bill it waits), and this post never prices beside a counter
+    return still being written. False -- a counter return of the bill is
+    mid-write, or the bill cannot be read: book nothing, retried. A KEPT
+    counter hold (its money went out) is no refusal: the allowance counts it
+    (_given_back_elsewhere). The hold lives as long as the credit lock."""
+    from ..routers.returns import ONLINE_HOLD_PREFIX, _live_refund_holds
+
+    key = f"{ONLINE_HOLD_PREFIX}{refund_id}"
+    try:
+        coll = db.get_collection("orders")
+        for _ in range(8):
+            order = coll.find_one({"order_id": order_id})
+            if not order:
+                return True  # no bill: nothing to race (the credit lock said so too)
+            holds = dict(order.get("refund_holds") or {})
+            live, _ = _live_refund_holds(order_id, holds)
+            if any(rid != key and not (h or {}).get("kept") for rid, h in live.items()):
+                return False
+            version = order.get("refund_holds_v")
+            holds[key] = {"amount": round(_f(amount), 2), "at": datetime.now(timezone.utc).isoformat(),
+                          "ttl": _CLAIM_STALE_SECONDS, "online": True}
+            res = coll.update_one({"order_id": order_id, "refund_holds_v": version},
+                                  {"$set": {"refund_holds": holds, "refund_holds_v": int(version or 0) + 1}})
+            if _landed(res):
+                return True
+    except Exception:  # noqa: BLE001 -- unreadable (incl. the 503 of _live_refund_holds): busy
+        logger.warning("[SHOPIFY_REFUND] refund hold not taken for order=%s", order_id, exc_info=True)
+    return False
+
+
+def _release_online_hold(db, order_id: Any, refund_id: str) -> None:
+    """Drop this post's hold (its claim, once written, counts itself). A
+    release that fails ages out with the credit lock."""
+    from ..routers.returns import ONLINE_HOLD_PREFIX
+
+    key = f"{ONLINE_HOLD_PREFIX}{refund_id}"
+    try:
+        coll = db.get_collection("orders")
+        for _ in range(8):
+            order = coll.find_one({"order_id": order_id}) or {}
+            holds = dict(order.get("refund_holds") or {})
+            if key not in holds:
+                return
+            holds.pop(key)
+            version = order.get("refund_holds_v")
+            res = coll.update_one({"order_id": order_id, "refund_holds_v": version},
+                                  {"$set": {"refund_holds": holds, "refund_holds_v": int(version or 0) + 1}})
+            if _landed(res):
+                return
+    except Exception:  # noqa: BLE001
+        logger.warning("[SHOPIFY_REFUND] refund hold not released for order=%s", order_id, exc_info=True)
+
+
 def _system_user(store_id: Optional[str]) -> Dict[str, Any]:
     """A synthetic actor for the reused return helpers (they read user_id +
     active_store_id off a current_user dict)."""
@@ -1894,14 +1959,23 @@ def _post_credit_and_restock(
     different answer now books nothing ("review": a person confirms it)."""
     order_id = _norm(order.get("order_id"))
     locked, token = _lock_order_credit(db, order_id)
+    busy = {"status": "credit_failed", "reason": "order_busy", "refund_id": refund_id,
+            "order_id": order_id, "customer_id": _norm(order.get("customer_id")) or None,
+            "credit_note_issued": False,
+            "store_credit_reason": ("Another refund or return of this order was being posted at "
+                                    "the same moment, so nothing was booked (no credit "
+                                    "note, no restock). Confirm it again here.")}
     if not locked:
-        return {"status": "credit_failed", "reason": "order_busy", "refund_id": refund_id,
-                "order_id": order_id, "customer_id": _norm(order.get("customer_id")) or None,
-                "credit_note_issued": False,
-                "store_credit_reason": ("Another refund of this order was being posted at "
-                                        "the same moment, so nothing was booked (no credit "
-                                        "note, no restock). Confirm it again here.")}
+        return busy
+    held = False
     try:
+        # One reservation with the counter (_hold_order_for_online): taken
+        # BEFORE the allowance is read, released only after the claim is
+        # written (or nothing was booked).
+        held = token is None or _hold_order_for_online(
+            db, order_id, refund_id, _f(credit_note.get("gross_refund")))
+        if not held:
+            return busy
         allowance = _store_credit_allowance(
             db, order_id, refund_id, _f(credit_note.get("gross_refund")),
             credit_note.get("money_back"), _f(credit_note.get("money_pending")))
@@ -1914,6 +1988,8 @@ def _post_credit_and_restock(
             settled_externally=settled_externally, restock_unverified=restock_unverified,
             allowance=allowance)
     finally:
+        if held and token:
+            _release_online_hold(db, order_id, refund_id)
         _unlock_order_credit(db, order_id, token)
 
 
