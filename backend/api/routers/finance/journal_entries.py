@@ -40,7 +40,7 @@ from ._shared import (
 # Roles allowed to draft + submit a JE (the maker side).
 _JE_MAKER_ROLES = {"ACCOUNTANT", "ADMIN", "SUPERADMIN"}
 # Roles allowed to approve / reject / post / reverse a JE (the checker side).
-_JE_CHECKER_ROLES = {"ADMIN", "SUPERADMIN"}
+_JE_CHECKER_ROLES = je_service.JE_CHECKER_ROLES
 # Roles allowed to READ the vouchers: the accounts roles (owner decision
 # 2026-10-18, audit FU-17). The store managers' read was dropped.
 _JE_READER_ROLES = COST_VISIBLE_ROLES
@@ -178,9 +178,9 @@ async def list_journal_entries(
     _require_roles_for(current_user, _JE_READER_ROLES, _JE_READ_REFUSED)
     db = _get_db()
     store_id = resolve_store_scope(store_id, current_user)
-    rows = je_service.list_jes(
+    rows = je_service.with_reapproval_flags(db, je_service.list_jes(
         db, store_id=store_id, status=status, maker_id=maker_id, limit=200
-    )
+    ))
     return {"journal_entries": rows, "total": len(rows)}
 
 
@@ -199,7 +199,7 @@ async def get_journal_entry(
         je_service.get_je(db, je_id), current_user, "Journal entry not found"
     )
     je.pop("_id", None)
-    return je_service._jsonable(je)
+    return je_service._jsonable(je_service.with_reapproval_flags(db, [je])[0])
 
 
 @router.post("/journal-entries/{je_id}/submit")
@@ -230,7 +230,9 @@ async def approve_journal_entry(
     current_user: dict = Depends(get_current_user),
 ):
     """SUBMITTED -> APPROVED (checker, PIN-gated, via E4). The maker cannot
-    approve their own entry -- E4 enforces approver != maker."""
+    approve their own entry -- E4 enforces approver != maker. An APPROVED
+    entry whose approval can no longer be spent by Post (needs_reapproval:
+    lapsed, or spent elsewhere) is approved again here (D54)."""
     _je_require_enabled()
     _require_roles_for(
         current_user,

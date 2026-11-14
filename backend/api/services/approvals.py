@@ -50,7 +50,7 @@ from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from .cost_mask import AP_ROLES
+from .cost_mask import AP_ROLES, COST_VISIBLE_ROLES
 from .payables_mask import SUPPLIER_MONEY_ACTIONS, can_see_payables
 
 logger = logging.getLogger(__name__)
@@ -151,12 +151,30 @@ def _is_supplier_money(doc: Optional[Dict[str, Any]]) -> bool:
     return (doc or {}).get("action_type") in SUPPLIER_MONEY_ACTIONS
 
 
+# Journal approvals (decision D4, 2026-11-11; audit L3-25). Only ADMIN /
+# SUPERADMIN may approve or reject a journal -- the journal screen's rule
+# (je_service reads this same set). A small journal's request was routed by
+# its amount tier to store and area managers as well: they got the bell and
+# the Approve / Reject buttons, and their click decided the request while the
+# journal stayed SUBMITTED for good. A 'journal_entry' request is therefore
+# routed to the checker roles AMONG its tier's roles -- narrowed, never
+# widened (a journal in the Superadmin tier stays the Superadmin's). Like the
+# supplier-money rule above, the check reads the action type, so a request
+# stored with the manager roles before the decision is held to it too, and no
+# stored row is rewritten.
+JOURNAL_CHECKER_ROLES: frozenset = frozenset({"ADMIN", "SUPERADMIN"})
+
+
 def approver_roles_for(doc: Optional[Dict[str, Any]]) -> List[str]:
     """The roles a request is routed to: the accounts roles for a supplier-money
-    request, else the roles its amount tier resolved to."""
+    request, else the roles its amount tier resolved to -- for a journal, the
+    journal checker roles among them."""
     if _is_supplier_money(doc):
         return ["SUPERADMIN", *AP_ROLES]
-    return list((doc or {}).get("required_roles") or [])
+    roles = list((doc or {}).get("required_roles") or [])
+    if (doc or {}).get("action_type") == "journal_entry":
+        roles = [r for r in roles if r in JOURNAL_CHECKER_ROLES]
+    return roles
 
 
 def _may_approve_supplier_money(roles) -> bool:
@@ -166,18 +184,32 @@ def _may_approve_supplier_money(roles) -> bool:
 def may_approve(doc: Optional[Dict[str, Any]], roles) -> bool:
     """True when a caller holding ``roles`` may approve / reject ``doc`` by role
     (store scope and maker-checker are separate checks). A supplier-money
-    request asks the payables rule; any other asks its tier's roles, and
-    SUPERADMIN passes everything."""
+    request asks the payables rule; any other asks the roles it is routed to
+    (approver_roles_for), and SUPERADMIN passes everything."""
     if _is_supplier_money(doc):
         return _may_approve_supplier_money(roles)
     have = {r for r in (roles or []) if r}
-    return "SUPERADMIN" in have or bool(have & set((doc or {}).get("required_roles") or []))
+    return "SUPERADMIN" in have or bool(have & set(approver_roles_for(doc)))
+
+
+def _journal_hidden(doc: Optional[Dict[str, Any]], roles) -> bool:
+    """A journal's request is read only by the journal readers -- the accounts
+    roles (owner decision 2026-10-18, audit FU-17: the store managers' read of
+    journal vouchers was dropped; the journal routes' _JE_READER_ROLES is this
+    same set). Decision D4 already took the managers' bell and buttons away."""
+    return (doc or {}).get("action_type") == "journal_entry" and not (
+        {r for r in (roles or []) if r} & COST_VISIBLE_ROLES
+    )
 
 
 def _hidden_from(doc: Optional[Dict[str, Any]], roles) -> bool:
-    """A supplier-money request the caller may not approve answers them exactly
-    like a request that does not exist (404 not_found), never 'not your tier'."""
-    return _is_supplier_money(doc) and not may_approve(doc, roles)
+    """A request the caller may not see answers them exactly like a request
+    that does not exist (404 not_found), never 'not your tier': a
+    supplier-money request they may not approve (R1), a journal's request
+    they may not read (_journal_hidden)."""
+    if _is_supplier_money(doc):
+        return not may_approve(doc, roles)
+    return _journal_hidden(doc, roles)
 
 
 def _is_maker_checker(doc: Optional[Dict[str, Any]]) -> bool:
@@ -621,7 +653,11 @@ class ApprovalEngine:
             "reviewed_by": None,
             "reviewed_at": None,
             "reject_reason": None,
-            "approval_token": None,
+            # NO "approval_token" key until approve() mints one (L3-01). The
+            # unique SPARSE index on approval_token skips a row only when the
+            # field is MISSING: an explicit null IS indexed, so a second
+            # pending request collided E11000 with the first one's null (and a
+            # rejected / expired request held the null slot for good).
             "consumed": False,
             "consumed_at": None,
             "consumed_by": None,
@@ -816,6 +852,10 @@ class ApprovalEngine:
                     "status": ApprovalStatus.APPROVED.value,
                     "approval_token": token,
                     "reviewed_by": approver_user_id,
+                    # The roles the decider held when deciding. A domain that
+                    # lets fewer roles decide than the tier routes to reads it
+                    # (je_service: a journal takes only a checker's decision).
+                    "reviewed_by_roles": sorted(roles),
                     "reviewed_at": now,
                     # Re-arm the validity window FROM THE APPROVAL (same atomic op):
                     # without this an approval minted at minute 50 of the request's
@@ -921,6 +961,7 @@ class ApprovalEngine:
                 "$set": {
                     "status": ApprovalStatus.REJECTED.value,
                     "reviewed_by": approver_user_id,
+                    "reviewed_by_roles": sorted(roles),
                     "reviewed_at": now,
                     "reject_reason": reason or "",
                 }
@@ -949,6 +990,7 @@ class ApprovalEngine:
         expected_context: Optional[Dict[str, Any]] = None,
         min_tier: Optional[str] = None,
         consumer_roles: Optional[List[str]] = None,
+        consumed_for: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Spend an APPROVED approval EXACTLY ONCE. A SINGLE atomic
         find_one_and_update guards status==APPROVED, consumed==false, not
@@ -970,6 +1012,11 @@ class ApprovalEngine:
         caller's): a supplier-money approval ('rtv', R1) is spent only by a role
         that may approve one -- anyone else gets "not_found", the answer a
         missing request gets, and the approval is left untouched.
+
+        ``consumed_for`` (opt-in) names what spent the approval, stored in the
+        SAME atomic write. A domain whose own write follows the spend reads it
+        back to finish a spend whose write was lost (je_service.post_je: a
+        journal's Post, D54) -- only ever for the action it names.
         """
         from pymongo import ReturnDocument
 
@@ -1007,6 +1054,7 @@ class ApprovalEngine:
                     "consumed": True,
                     "consumed_at": now,
                     "consumed_by": consumed_by,
+                    "consumed_for": consumed_for,
                 }
             },
             return_document=ReturnDocument.AFTER,
@@ -1078,6 +1126,7 @@ class ApprovalEngine:
                     "consumed": False,
                     "consumed_at": None,
                     "consumed_by": None,
+                    "consumed_for": None,
                 }},
             )
         except Exception:  # noqa: BLE001
@@ -1161,10 +1210,12 @@ class ApprovalEngine:
         if status and status.upper() != "ALL":
             q["status"] = status.upper()
         roles = set(approver_roles or [])
-        if not _may_approve_supplier_money(roles):
-            # Named positively (ACTION_TYPES is the closed set request() admits)
-            # so the filter is a plain $in.
-            q["action_type"] = {"$in": sorted(ACTION_TYPES - SUPPLIER_MONEY_ACTIONS)}
+        # The action types _hidden_from keeps from this caller, named positively
+        # (ACTION_TYPES is the closed set request() admits) so the filter is a
+        # plain $in.
+        hidden = {a for a in ACTION_TYPES if _hidden_from({"action_type": a}, roles)}
+        if hidden:
+            q["action_type"] = {"$in": sorted(ACTION_TYPES - hidden)}
         if not (roles & _HQ_ROLES):
             scoped = list(store_ids or [])
             # A scoped approver sees their stores' requests plus store-less ones.

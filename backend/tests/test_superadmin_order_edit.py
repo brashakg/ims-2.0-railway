@@ -55,6 +55,9 @@ def _matches(doc, filt):
                 elif op == "$in":
                     if actual not in val:
                         return False
+                elif op == "$gt":
+                    if actual is None or not actual > val:
+                        return False
                 else:
                     return False
         elif actual != expected:
@@ -67,11 +70,15 @@ class _Cursor:
         self._docs = list(docs)
 
     def sort(self, *_a, **_k):
-        # Audit verify sorts by seq asc; emulate.
+        # Audit verify sorts by seq asc, the chain-tail read by seq desc; emulate.
         try:
-            self._docs.sort(key=lambda d: d.get("seq") or 0)
+            self._docs.sort(key=lambda d: d.get("seq") or 0, reverse=-1 in _a)
         except Exception:  # noqa: BLE001
             pass
+        return self
+
+    def limit(self, n):
+        self._docs = self._docs[: int(n)]
         return self
 
     def __iter__(self):
@@ -315,8 +322,8 @@ def test_pre_invoice_edit_recomputes_gst_and_audits(client, auth_headers, wired)
     assert row["before_state"]["grand_total"] == 1000.0
     assert row["after_state"]["grand_total"] == 2000.0
     assert "grand_total" in row["diff"]
-    # Hash-chained (seq/entry_hash present because our fake supports
-    # find_one_and_update on the head collection).
+    # Hash-chained (seq/entry_hash present because our fake supports the
+    # chain-tail read: find + sort + limit).
     assert row.get("seq") == 1
     assert isinstance(row.get("entry_hash"), str)
 
