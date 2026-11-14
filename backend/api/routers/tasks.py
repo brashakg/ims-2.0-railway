@@ -1816,11 +1816,16 @@ async def get_task_summary(
     """Status + overdue counts of the tasks the caller can see -- the same
     scope as GET /tasks and GET /tasks/overdue, so every count equals its list."""
     repo = get_task_repository()
-
     if repo is None:
-        return {"summary": {}, "overdue_count": 0, "escalated_count": 0}
+        raise HTTPException(status_code=503, detail=_TASKS_DOWN)
 
-    return task_counts(repo, current_user, _shop_filter(store_id, current_user))
+    # Every count reads strictly (R26): an outage is a 503, never all zeros.
+    class _StrictCounts:
+        @staticmethod
+        def count(filters):
+            return _strict(repo, "count", filters)
+
+    return task_counts(_StrictCounts, current_user, _shop_filter(store_id, current_user))
 
 
 # ============================================================================

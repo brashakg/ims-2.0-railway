@@ -216,6 +216,14 @@ def test_task_list_read_outage_is_503_not_an_empty_list(world, path, op):
     assert client.get(path).status_code == 200
 
 
+def test_task_summary_count_outage_is_503_not_zeros(world):
+    client, db, state = world
+    assert client.post("/tasks", json=_body("k-sum")).status_code == 201
+    assert client.get("/tasks/summary?store_id=S1").json()["total"] == 1
+    state["tasks"].failing.add("count_documents")
+    assert client.get("/tasks/summary?store_id=S1").status_code == 503
+
+
 def test_task_detail_read_outage_is_503_not_not_found(world):
     client, db, state = world
     task_id = client.post("/tasks", json=_body("k-detail")).json()["task_id"]
