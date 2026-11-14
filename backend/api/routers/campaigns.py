@@ -12,8 +12,9 @@ What this adds (and what it deliberately REUSES):
       COMPLETED | PAUSED lifecycle).
     - A segment layer (services/campaign_segments.py) with LIVE audience counts
       + a preview sample so the builder can show "Estimated audience: N".
-    - Scheduling (ONE_TIME | RECURRING | TRIGGERED) -- persisted; a SCHEDULED
-      campaign is what MEGAPHONE (or a future tick) will action.
+    - Scheduling: ONE_TIME only. A SCHEDULED campaign is sent by MEGAPHONE's
+      tick once its send_at has passed. RECURRING / TRIGGERED are refused
+      (no executor exists; see _require_executable_schedule).
     - Per-campaign analytics aggregated from notification_logs by campaign_id.
     - An immutable audit row (campaign_audit) for every send / lifecycle change.
 
@@ -62,6 +63,7 @@ from .marketing import (
 )
 from ..services.notification_service import send_notification
 from ..services import campaign_segments as seg
+from ..services.campaign_dispatch import fan_out_campaign
 
 router = APIRouter()
 
@@ -73,6 +75,25 @@ _CAMPAIGN_ROLES = ("ADMIN", "AREA_MANAGER", "STORE_MANAGER")
 _CAMPAIGN_TYPES = {"rx_renewal", "birthday", "winback", "custom"}
 _SCHEDULE_KINDS = {"ONE_TIME", "RECURRING", "TRIGGERED"}
 _STATUS_FLOW = {"DRAFT", "SCHEDULED", "ACTIVE", "COMPLETED", "PAUSED"}
+
+# The ONLY schedule kind anything executes (L1-F28). MEGAPHONE's tick picks up
+# ONE_TIME campaigns; no recurrence clock and no campaign trigger listener
+# exist, so a RECURRING or TRIGGERED schedule would sit on "Scheduled" forever
+# and never send. Until an executor is built (its rules are an owner decision)
+# those kinds are refused at every door that stores a schedule.
+_EXECUTABLE_SCHEDULE_KINDS = {"ONE_TIME"}
+_UNSUPPORTED_SCHEDULE_MSG = (
+    "Repeating and event-triggered campaigns cannot run yet, so they cannot be "
+    "saved or scheduled. Choose a one-time date and time, or send the campaign "
+    "by hand."
+)
+
+
+def _require_executable_schedule(schedule: Optional["CampaignSchedule"]) -> None:
+    """422 for a schedule kind nothing will ever execute. One rule for create,
+    edit and schedule. Stored legacy rows are left alone (no data rewrite)."""
+    if schedule is not None and schedule.kind not in _EXECUTABLE_SCHEDULE_KINDS:
+        raise HTTPException(status_code=422, detail=_UNSUPPORTED_SCHEDULE_MSG)
 
 
 # ============================================================================
@@ -435,6 +456,7 @@ async def create_campaign(
     if db is None:
         raise HTTPException(status_code=503, detail="Database unavailable")
     store_id = _write_store(req.store_id, current_user)
+    _require_executable_schedule(req.schedule)
 
     schedule = req.schedule.model_dump() if req.schedule else None
     campaign_id = _new_campaign_id()
@@ -524,6 +546,7 @@ async def update_campaign(
         if field in payload and payload[field] is not None:
             updates[field] = payload[field]
     if "schedule" in payload and payload["schedule"] is not None:
+        _require_executable_schedule(req.schedule)
         updates["schedule"] = req.schedule.model_dump() if req.schedule else None
     # A store change goes through the create rule: never out of reach.
     if "store_id" in updates:
@@ -604,8 +627,10 @@ async def schedule_campaign(
     current_user: dict = Depends(require_roles(*_CAMPAIGN_ROLES)),
 ):
     """Set/update the schedule and mark the campaign SCHEDULED. A SCHEDULED
-    campaign is what MEGAPHONE (or a future tick) will action; for now we persist
-    + flag it. ONE_TIME requires send_at; RECURRING requires frequency."""
+    ONE_TIME campaign is sent by MEGAPHONE's tick once send_at has passed.
+    ONE_TIME requires send_at. RECURRING and TRIGGERED are refused (422): no
+    executor exists for them, so "Scheduled" would be a promise nothing keeps
+    (L1-F28)."""
     db = _marketing_get_db()
     doc = _get_campaign_or_404(db, campaign_id)
     _enforce_store_scope(doc, current_user)
@@ -615,14 +640,11 @@ async def schedule_campaign(
             detail="A completed campaign cannot be re-scheduled; duplicate it",
         )
 
+    _require_executable_schedule(schedule)
     sched = schedule.model_dump()
-    if sched["kind"] == "ONE_TIME" and not sched.get("send_at"):
+    if not sched.get("send_at"):
         raise HTTPException(
             status_code=422, detail="ONE_TIME schedule requires send_at"
-        )
-    if sched["kind"] == "RECURRING" and not sched.get("frequency"):
-        raise HTTPException(
-            status_code=422, detail="RECURRING schedule requires frequency"
         )
 
     db.get_collection("campaigns").update_one(
@@ -719,96 +741,22 @@ async def send_campaign(
     # a transactional template. Block out-of-window before any send.
     _enforce_promo_window(template_id)
 
-    channels = doc.get("channels") or ["WHATSAPP"]
-    primary_channel = channels[0]
-    store_id = doc.get("store_id") or current_user.get("active_store_id", "")
-
-    audience = seg.resolve_segment(
+    # ONE fan-out loop for both doors (L1-F27): this manual send and
+    # MEGAPHONE's scheduled tick share consent (flag + STOP ledger), the 30-day
+    # frequency cap and its comms_ledger row. See services/campaign_dispatch.
+    out = await fan_out_campaign(
         db,
-        doc.get("segment_key", ""),
-        store_id=doc.get("store_id") or None,
-        params=doc.get("segment_params") or {},
+        doc,
+        send_store_id=doc.get("store_id") or current_user.get("active_store_id", ""),
+        triggered_by=current_user.get("user_id", "unknown"),
+        send_notification=send_notification,
     )
+    audience_count = out["audience"]
+    sent, skipped, failed = out["sent"], out["skipped"], out["failed"]
+    results = out["results"]
 
-    # E6: the full 3-signal consent check (flag + STOP ledger) supersedes the
-    # inline marketing_consent==False test, and the shared 30-day frequency cap
-    # (comms_ledger) is applied here so MANUAL campaigns share the SAME cap as the
-    # automated reminder rail. Reuse the engines -- never reimplement.
-    from .marketing import is_opted_out as _is_opted_out
-    from ..services import reminder_rail as _rail
-
-    results: List[Dict[str, Any]] = []
-    sent = skipped = failed = 0
-    for r in audience:
-        cid = r.get("customer_id")
-        # Consent gate (full is_opted_out): flag OR a STOP/OPT_OUT ledger entry.
-        # Ad-hoc rows w/o customer_id send (no consent record to check).
-        if cid and _is_opted_out(cid, db):
-            skipped += 1
-            results.append(
-                {"customer_id": cid, "status": "skipped", "reason": "opted_out"}
-            )
-            continue
-        # Shared 30-day frequency cap (soft ceiling). A campaign whose template is
-        # transactional rides category check inside check_frequency_cap (exempt).
-        if cid and not _rail.check_frequency_cap(db, cid, category="MARKETING"):
-            skipped += 1
-            results.append(
-                {"customer_id": cid, "status": "skipped", "reason": "freqcap"}
-            )
-            continue
-        phone = r.get("phone") or ""
-        if not phone:
-            skipped += 1
-            results.append(
-                {"customer_id": cid, "status": "skipped", "reason": "no_phone"}
-            )
-            continue
-        try:
-            res = await send_notification(
-                store_id=store_id,
-                customer_id=cid or "",
-                customer_phone=phone,
-                customer_name=r.get("name", "Customer"),
-                template_id=template_id,
-                channel=primary_channel,
-                variables={**(r.get("variables") or {}), "campaign_id": campaign_id},
-                category="MARKETING",
-                triggered_by=current_user.get("user_id", "unknown"),
-                related_entity_type="campaign",
-                related_entity_id=campaign_id,
-            )
-            # Tag the just-queued notification_logs row with campaign_id so
-            # analytics can aggregate it. send_notification doesn't take a
-            # campaign_id, so we stamp it on the row it created.
-            nid = res.get("notification_id")
-            if nid:
-                try:
-                    db.get_collection("notification_logs").update_one(
-                        {"notification_id": nid},
-                        {"$set": {"campaign_id": campaign_id}},
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
-            # Record the cap ledger row so this manual send counts against the
-            # shared 30-day cap (transactional categories are skipped inside).
-            if cid:
-                _rail.record_outbound(
-                    db,
-                    cid,
-                    channel=primary_channel,
-                    category="MARKETING",
-                    campaign_id=campaign_id,
-                )
-            sent += 1
-            results.append(
-                {"customer_id": cid, "status": "queued", "notification_id": nid}
-            )
-        except Exception as exc:  # noqa: BLE001
-            failed += 1
-            results.append({"customer_id": cid, "status": "failed", "error": str(exc)})
-
-    # ONE_TIME -> COMPLETED; RECURRING/TRIGGERED stay ACTIVE for the next tick.
+    # ONE_TIME -> COMPLETED. A legacy RECURRING/TRIGGERED row stays ACTIVE so
+    # staff can send it again by hand; nothing re-sends it automatically.
     sched = doc.get("schedule") or {}
     kind = (sched.get("kind") or "ONE_TIME") if sched else "ONE_TIME"
     new_status = "COMPLETED" if kind == "ONE_TIME" else "ACTIVE"
@@ -818,7 +766,7 @@ async def send_campaign(
         {
             "$set": {
                 "status": new_status,
-                "audience_count": len(audience),
+                "audience_count": audience_count,
                 "last_sent_at": _now_iso(),
                 "updated_at": _now_iso(),
             },
@@ -835,21 +783,21 @@ async def send_campaign(
         "SEND",
         current_user,
         {
-            "audience": len(audience),
+            "audience": audience_count,
             "queued": sent,
             "skipped": skipped,
             "failed": failed,
             "status": new_status,
         },
     )
-    msg = f"{sent}/{len(audience)} queued"
+    msg = f"{sent}/{audience_count} queued"
     if skipped:
         msg += f" ({skipped} skipped)"
     return {
         "message": msg,
         "campaign_id": campaign_id,
         "status": new_status,
-        "audience_count": len(audience),
+        "audience_count": audience_count,
         "queued": sent,
         "skipped": skipped,
         "failed": failed,

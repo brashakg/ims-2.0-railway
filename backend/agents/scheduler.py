@@ -14,6 +14,7 @@ from typing import Dict, Optional, Any
 import asyncio
 import logging
 import os
+import time
 import uuid
 
 from .base import JarvisAgent
@@ -48,9 +49,23 @@ except ImportError:
 #      that across N processes that all have RUN_AGENT_SCHEDULER=true, exactly
 #      ONE wins and runs the jobs; the lock is refreshed while we hold it.
 #
-# Fail-soft: no Redis / Redis error -> log a warning and RUN anyway. That
-# preserves today's single-worker behavior (the common dev + small-deploy
-# case) rather than silently scheduling nothing.
+# Redis NOT CONFIGURED -> run (the single-worker dev / small-deploy case).
+#
+# Redis CONFIGURED but unreachable, or the lock SET fails -> do NOT run here
+# (audit L1-F21). "Run anyway" made every worker a leader at once during a
+# Redis outage, so every agent ticked N times. Leadership that cannot be
+# established is not leadership: the worker waits in the leader-retry loop and
+# takes over within SCHEDULER_LEADER_RETRY seconds of Redis answering again.
+# A leader that finds ANOTHER worker's id on the lock stands down (removes its
+# jobs) instead of running beside the new leader. So does a leader that has
+# not been able to RENEW the lock for a whole TTL: by then its lease has run
+# out and a worker that can still reach Redis may hold the lock, so it can no
+# longer know it is the only leader. It goes back to the leader-retry loop.
+#
+# ponytail: a lock with a TTL, not a fencing token. A tick that is already
+# running when the lease runs out still finishes. Work that must happen once
+# carries its own per-item claim (MEGAPHONE's drain, the campaign SCHEDULED ->
+# ACTIVE flip); add fencing tokens if a non-idempotent job ever cannot.
 
 # Redis key the scheduler leader holds. Short, namespaced.
 SCHEDULER_LEADER_KEY = os.getenv(
@@ -76,6 +91,13 @@ def _scheduler_enabled() -> bool:
     """RUN_AGENT_SCHEDULER env gate. Default true (preserve prior behavior)."""
     val = os.getenv("RUN_AGENT_SCHEDULER", "true").strip().lower()
     return val not in ("0", "false", "no", "off")
+
+
+def _redis_configured() -> bool:
+    """True when this deploy names a Redis (REDIS_URL or REDIS_HOST). Only
+    then is a leader lock expected, so only then is a missing lock a reason
+    not to schedule."""
+    return bool(os.getenv("REDIS_URL") or os.getenv("REDIS_HOST"))
 
 
 def _make_redis_client():
@@ -139,6 +161,7 @@ class AgentScheduler:
         self._instance_id = str(uuid.uuid4())      # unique per process
         self._redis = None                          # set if we hold the lock
         self._is_leader = False                     # did this process win?
+        self._lease_renewed_at = 0.0                # monotonic time of the last lock renewal
         self._leader_refresh_task: Optional[asyncio.Task] = None
         # Background retry loop for a worker that lost the startup race but must
         # take over if the current leader later exits (deploy rollover fix).
@@ -185,9 +208,9 @@ class AgentScheduler:
             # the race, gives up forever, and after the old leader stops NOBODY
             # schedules -> the live dead-scheduler bug.
             logger.warning(
-                "[SCHEDULER] Another process holds the scheduler leader lock "
-                "-> not scheduling here yet (worker %s). Will retry every %ss to "
-                "take over if that leader exits.",
+                "[SCHEDULER] Scheduler leader lock not acquired (held by another "
+                "process, or Redis unreachable) -> not scheduling here yet "
+                "(worker %s). Will retry every %ss to take over.",
                 self._instance_id[:8], SCHEDULER_LEADER_RETRY,
             )
             self._start_leader_wait_loop()
@@ -317,8 +340,10 @@ class AgentScheduler:
             logger.error(f"[SCHEDULER] credit reconcile job not scheduled: {e}", exc_info=True)
 
     def _start_leader_wait_loop(self):
-        """Spawn the background leadership-retry task (idempotent)."""
-        if self._leader_wait_task is not None:
+        """Spawn the background leadership-retry task (idempotent). A finished
+        loop (an earlier takeover) is replaced, so a worker that stands down
+        later can wait again."""
+        if self._leader_wait_task is not None and not self._leader_wait_task.done():
             return
         try:
             self._leader_wait_task = asyncio.create_task(
@@ -401,11 +426,13 @@ class AgentScheduler:
     async def _acquire_leadership(self) -> bool:
         """Decide whether THIS process should run the scheduler.
 
-        - Redis not configured  -> True  (fail-soft: keep single-worker behavior)
+        - Redis not configured  -> True  (single-worker deploy, no lock expected)
         - Redis configured       -> try SET key uuid NX EX TTL.
             - acquired           -> True,  spawn the refresh task
             - not acquired       -> False (someone else is the leader)
-            - Redis error         -> True  (fail-soft + warning)
+            - unreachable / SET error -> False (L1-F21: leadership was NOT
+              established, so this worker must not act as a leader; the
+              leader-retry loop asks again every SCHEDULER_LEADER_RETRY s)
         """
         # Idempotent re-entry: if we already hold the lock (or are the fail-soft
         # no-Redis leader), don't SET NX again -- our own key would deny us and
@@ -416,11 +443,22 @@ class AgentScheduler:
 
         client = _make_redis_client()
         if client is None:
-            # Either Redis isn't set up at all, or we couldn't reach it. Both
-            # cases fall back to running so a no-Redis deploy still schedules.
+            if _redis_configured():
+                # A lock is expected here but cannot be taken. Another worker
+                # may be in exactly the same position: if both "ran anyway"
+                # every job would tick twice.
+                logger.warning(
+                    "[SCHEDULER] Redis is configured but unreachable -> leader "
+                    "lock NOT acquired; not scheduling in this process (worker "
+                    "%s). Retrying every %ss.",
+                    self._instance_id[:8], SCHEDULER_LEADER_RETRY,
+                )
+                self._is_leader = False
+                return False
+            # Redis isn't set up at all: a no-Redis deploy still schedules.
             logger.info(
-                "[SCHEDULER] No Redis leader lock (not configured/unreachable) "
-                "-> running scheduler in this process (single-worker assumption)."
+                "[SCHEDULER] No Redis configured -> running scheduler in this "
+                "process (single-worker assumption)."
             )
             self._is_leader = True
             return True
@@ -435,10 +473,16 @@ class AgentScheduler:
             )
         except Exception as e:
             logger.warning(
-                f"[SCHEDULER] Leader lock SET failed ({e}) -> running anyway."
+                f"[SCHEDULER] Leader lock SET failed ({e}) -> lock NOT acquired; "
+                f"not scheduling in this process. Retrying every "
+                f"{SCHEDULER_LEADER_RETRY}s."
             )
-            self._is_leader = True
-            return True
+            try:
+                client.close()
+            except Exception:
+                pass
+            self._is_leader = False
+            return False
 
         if not acquired:
             # Someone else holds it. Don't run jobs here. Keep no client ref.
@@ -452,6 +496,7 @@ class AgentScheduler:
         # We are the leader. Hold the client + refresh the TTL while we run.
         self._redis = client
         self._is_leader = True
+        self._lease_renewed_at = time.monotonic()
         logger.info(
             "[SCHEDULER] Acquired leader lock '%s' (worker %s, ttl=%ss).",
             SCHEDULER_LEADER_KEY, self._instance_id[:8], SCHEDULER_LEADER_TTL,
@@ -484,17 +529,62 @@ class AgentScheduler:
                 current = self._redis.get(SCHEDULER_LEADER_KEY)
                 if current == self._instance_id:
                     self._redis.expire(SCHEDULER_LEADER_KEY, SCHEDULER_LEADER_TTL)
-                else:
-                    # Lost the lock (expired + reclaimed). Stop refreshing; the
-                    # process keeps its already-scheduled jobs until restart,
-                    # but won't fight the new leader for the key.
-                    logger.warning(
-                        "[SCHEDULER] Leader lock no longer ours (worker %s) -- "
-                        "stopping refresh.", self._instance_id[:8],
-                    )
-                    break
+                    self._lease_renewed_at = time.monotonic()
+                    continue
+                if current is None and self._redis.set(
+                    SCHEDULER_LEADER_KEY,
+                    self._instance_id,
+                    nx=True,
+                    ex=SCHEDULER_LEADER_TTL,
+                ):
+                    # Our lock lapsed (e.g. Redis restarted) and nobody took
+                    # it: we re-took it atomically, still the only leader.
+                    self._lease_renewed_at = time.monotonic()
+                    continue
+                why = "now held by another worker"
             except Exception as e:
-                logger.warning(f"[SCHEDULER] Leader lock refresh error ({e}).")
+                # Redis did not answer. The lock we last renewed is still ours
+                # until its TTL runs out, so keep running and ask again. Past
+                # the TTL the lease is gone: a worker that CAN reach Redis may
+                # have taken it (L1-F21: leadership that cannot be renewed is
+                # not leadership).
+                unrenewed = time.monotonic() - self._lease_renewed_at
+                if unrenewed < SCHEDULER_LEADER_TTL:
+                    logger.warning(f"[SCHEDULER] Leader lock refresh error ({e}).")
+                    continue
+                why = f"could not be renewed for {int(unrenewed)}s ({e})"
+            # Two leaders would tick every job twice, so this one stands down
+            # (L1-F21) and waits its turn in the leader-retry loop.
+            logger.warning(
+                "[SCHEDULER] Leader lock %s -> standing down (worker %s): "
+                "scheduled jobs removed.", why, self._instance_id[:8],
+            )
+            self._stand_down()
+            break
+
+    def _stand_down(self):
+        """Stop being the scheduler: remove every scheduled job, drop the lock
+        client and go back to waiting for leadership. A tick already running
+        finishes; nothing new starts here. Called from the refresh loop, so it
+        must not cancel that task (the loop exits on its own)."""
+        self._running = False
+        self._is_leader = False
+        try:
+            if APSCHEDULER_AVAILABLE and self._scheduler:
+                self._scheduler.remove_all_jobs()
+            for task in self._fallback_tasks.values():
+                task.cancel()
+            self._fallback_tasks.clear()
+        except Exception as e:
+            logger.warning(f"[SCHEDULER] stand-down job removal error: {e}")
+        if self._redis is not None:
+            try:
+                self._redis.close()
+            except Exception:
+                pass
+            self._redis = None
+        self._leader_refresh_task = None
+        self._start_leader_wait_loop()
 
     async def _release_leadership(self):
         """Cancel the refresh task and delete the lock if we own it."""
@@ -596,10 +686,15 @@ class AgentScheduler:
                 # Parse cron string: "minute hour day month day_of_week"
                 parts = schedule_value.split()
                 if len(parts) == 5:
+                    # timezone=IST is REQUIRED (L1-F22). A CronTrigger built
+                    # without one takes the HOST timezone and keeps it even
+                    # inside a scheduler configured for IST, so on a UTC box
+                    # "0 2 * * *" fired at 07:30 IST instead of 02:00 IST.
                     return CronTrigger(
                         minute=parts[0], hour=parts[1],
                         day=parts[2], month=parts[3],
                         day_of_week=parts[4],
+                        timezone=IST,
                     )
             return None
         except Exception as e:
@@ -609,7 +704,12 @@ class AgentScheduler:
     # --- Fallback asyncio loop ---
 
     def _add_fallback_task(self, agent: JarvisAgent, schedule_type: str, schedule_value: str):
-        """Create a simple asyncio loop as fallback when APScheduler is not available."""
+        """Create a simple asyncio loop as fallback when APScheduler is not available.
+
+        The fallback has NO clock: a cron agent does not fire at its IST
+        wall-clock time here, it simply ticks once an hour from process start
+        (so no timezone applies). APScheduler is a declared dependency; this
+        path only runs if it failed to import."""
         if schedule_type == "interval":
             seconds = int(schedule_value)
         elif schedule_type == "cron":

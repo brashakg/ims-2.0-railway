@@ -9,9 +9,10 @@ agent schedule. Two layers of guard:
      have the env gate on, exactly ONE acquires the lock and runs jobs; the
      rest skip.
 
-Fail-soft: when Redis is not configured / unreachable, the scheduler RUNS
-(preserving today's single-worker behavior) rather than silently scheduling
-nothing.
+When Redis is NOT CONFIGURED the scheduler RUNS (single-worker deploy). When
+Redis IS configured but unreachable, or the lock SET fails, leadership was not
+established and this process does NOT schedule (audit L1-F21: "run anyway"
+made every worker a leader at once); the leader-retry loop asks again.
 
 No real Redis: a shared in-memory FakeRedis simulates SET NX semantics across
 multiple AgentScheduler instances. No MongoDB: AgentScheduler(db=None) reads
@@ -119,6 +120,8 @@ async def test_runs_when_no_redis_configured(monkeypatch):
     """No REDIS_* env -> _make_redis_client returns None -> we still run
     (single-worker assumption preserved)."""
     monkeypatch.setenv("RUN_AGENT_SCHEDULER", "true")
+    monkeypatch.delenv("REDIS_URL", raising=False)
+    monkeypatch.delenv("REDIS_HOST", raising=False)
     monkeypatch.setattr(scheduler_mod, "_make_redis_client", lambda: None)
 
     sched = AgentScheduler(db=None)
@@ -131,8 +134,10 @@ async def test_runs_when_no_redis_configured(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_runs_when_redis_set_raises(monkeypatch):
-    """Redis reachable but SET blows up -> fail-soft to running + warning."""
+async def test_does_not_lead_when_redis_set_raises(monkeypatch):
+    """Redis reachable but SET blows up -> the lock was NOT taken, so this
+    worker is not a leader (L1-F21). The old contract answered True here,
+    which let two workers both "run anyway" and tick every job twice."""
     monkeypatch.setenv("RUN_AGENT_SCHEDULER", "true")
 
     class BoomRedis(FakeRedis):
@@ -146,8 +151,8 @@ async def test_runs_when_redis_set_raises(monkeypatch):
     sched = AgentScheduler(db=None)
     acquired = await sched._acquire_leadership()
 
-    assert acquired is True
-    assert sched._is_leader is True
+    assert acquired is False
+    assert sched._is_leader is False
     await sched.shutdown()
 
 

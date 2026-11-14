@@ -197,18 +197,41 @@ def _record_opt_out(phone: str, customer: Optional[Dict[str, Any]]) -> None:
         logger.warning("[WA_INTENTS] opt-out persist failed: %s", e)
 
 
+def find_phone_stop(db, phone: str) -> Optional[Dict[str, Any]]:
+    """THE one reader of the phone-keyed STOP record that _record_opt_out
+    writes. Returns the row for this mobile number, or None.
+
+    A number is matched on its last 10 digits, so "919000000001",
+    "+91 90000 00001", "09000000001" and "9000000001" are one number however
+    the STOP arrived and however the caller holds it.
+
+    RAISES on a read error. The caller picks the failure direction: the
+    inbound auto-reply gate below is fail-soft; the outbound consent check
+    (marketing.is_opted_out, strict) is fail-closed (audit L1-F20).
+    """
+    digits = re.sub(r"\D", "", phone or "")
+    if not digits:
+        return None
+    if len(digits) >= 10:
+        # ponytail: a suffix regex cannot use an index. The collection holds
+        # one row per number that ever sent STOP; store a normalised 10-digit
+        # key and index it if that ever grows large.
+        query = {"phone": {"$regex": digits[-10:] + "$"}}
+    else:
+        query = {"phone": digits}
+    # Newest first: the same number may have sent STOP in two written forms.
+    return db.get_collection("whatsapp_opt_outs").find_one(
+        query, sort=[("opted_out_at", -1)]
+    )
+
+
 def _phone_is_opted_out(phone: str) -> bool:
     """Check the opt-out collection directly (covers non-registered senders)."""
     db = _get_db()
     if db is None or not phone:
         return False
     try:
-        digits = re.sub(r"\D", "", phone)
-        suffixes = list({digits, digits[-10:] if len(digits) >= 10 else digits})
-        row = db.get_collection("whatsapp_opt_outs").find_one(
-            {"phone": {"$in": suffixes}}
-        )
-        return row is not None
+        return find_phone_stop(db, phone) is not None
     except Exception as e:
         logger.debug("[WA_INTENTS] opt-out check failed: %s", e)
         return False

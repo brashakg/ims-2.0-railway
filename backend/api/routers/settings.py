@@ -1270,9 +1270,16 @@ def _template_payload(template: NotificationTemplate) -> dict:
 
 @router.get("/notifications/templates")
 async def get_notification_templates(current_user: dict = Depends(get_current_user)):
-    """Get all notification templates"""
+    """Get all notification templates.
+
+    `templates` is the SAVED rows (owner edits / toggles), unchanged. `catalog`
+    is the effective list a picker should offer: the server's built-in
+    templates plus the saved ones, each marked sendable or not (L1-F11). A
+    fresh database therefore still offers the built-ins."""
+    from ..services.notification_templates import effective_catalog
+
     templates = _get_notification_templates_from_db()
-    return {"templates": templates}
+    return {"templates": templates, "catalog": effective_catalog(templates)}
 
 
 @router.get("/notifications/templates/{template_id}")
