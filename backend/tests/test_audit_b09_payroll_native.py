@@ -959,3 +959,28 @@ def test_d58_the_sweep_takes_only_the_late_rows_named_in_the_guard(rig):
     assert rig.run().status_code == 423
     assert _saved_figures(rig)[:2] == approved
     assert rig.db.get_collection("payroll").find_one({"payroll_id": "PAY-B09-HISTORIC"})
+
+
+def test_d58_insert_whose_ack_is_lost_and_lands_after_the_lock_is_taken_back(rig, monkeypatch):
+    """Reviewer's must-fix: insert_one raises on the client (connection
+    dropped) while the server still holds the write. The month is open, so
+    the release succeeds -- and must NOT take the id out of ``pending``, or a
+    row landing after a later lock can never be swept."""
+    rig.db.get_collection("salary_config").delete_one({"employee_id": EMP2})
+    original = rig.coll_cls.insert_one
+    held = []
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == "payroll" and not held:
+            held.append(dict(doc))
+            raise pymongo.errors.AutoReconnect("connection dropped; server still holds the insert")
+        return original(self, doc, *a, **k)
+
+    monkeypatch.setattr(rig.coll_cls, "insert_one", insert_one)
+    assert rig.run().status_code == 500
+    assert rig.rows() == [] and len(held) == 1
+    assert rig.lock(without_payroll=True).status_code == 200
+    rig.db.get_collection("payroll").insert_one(held[0])  # the server applies it now
+    assert rig.stranded()
+    assert rig.run().status_code == 423  # the next payroll touch
+    assert rig.rows() == [] and not rig.stranded() and rig.pnl() == 0

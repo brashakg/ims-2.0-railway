@@ -1965,8 +1965,11 @@ async def run_payroll(
                     else:
                         doc["created_at"] = utc_now_iso()
                         doc["created_by"] = current_user.get("user_id")
-                        inserted.append(doc["payroll_id"])
                         payroll_coll.insert_one(doc)
+                        # Only once the insert is acknowledged: an insert
+                        # that raised may still land later, so its id stays
+                        # in the guard's ``pending`` for the sweep.
+                        inserted.append(doc["payroll_id"])
                 rows.append(_strip_id({k: v for k, v in doc.items()}))
                 totals["gross"] += breakdown["earnings"]["total_earnings"]
                 totals["deductions"] += breakdown["deductions"]["total_deductions"]
