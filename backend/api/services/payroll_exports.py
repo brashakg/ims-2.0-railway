@@ -16,6 +16,14 @@ from xml.sax.saxutils import escape
 
 EPS_WAGE_CEILING = 15000
 
+# A payroll row's status in plain words, as the printed payslip says it. The
+# screens use the same three wordings (frontend payrollShared.ts).
+PAYSLIP_STATUS_LABEL = {
+    "DRAFT": "Draft - not yet approved",
+    "APPROVED": "Approved",
+    "PAID": "Paid",
+}
+
 
 def _b(row: dict) -> dict:
     return row.get("breakdown") or {}
@@ -173,6 +181,7 @@ def build_payslip_html(
     designation = escape((employee or {}).get("designation", "") or "")
     month = row.get("month") or b.get("month") or 0
     year = row.get("year") or b.get("year") or 0
+    status = PAYSLIP_STATUS_LABEL.get(row.get("status") or "", "")
 
     def erow(label, value):
         return f"<tr><td>{escape(label)}</td><td style='text-align:right'>{_inr(value)}</td></tr>"
@@ -213,7 +222,7 @@ def build_payslip_html(
 <body>
   <div class="head">
     <h1>{entity_name}</h1>
-    <div class="sub">Payslip — {month:02d}/{year}</div>
+    <div class="sub">Payslip — {month:02d}/{year}{(' · ' + status) if status else ''}</div>
   </div>
   <p><strong>{emp_name}</strong>{(' · ' + designation) if designation else ''}<br>
      <span class="sub">Employee ID: {escape(row.get('employee_id',''))} · LWP: {b.get('lwp_days',0)} day(s)</span></p>

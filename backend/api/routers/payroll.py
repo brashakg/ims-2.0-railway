@@ -35,7 +35,10 @@ from ..services.payroll_engine import (
     pt_for,
     pt_code_for_state,
     compute_payroll,
+    PayrollInputError,
+    POSTED_PAYROLL_STATUSES,
 )
+from ..services import payroll_period_guard
 from ..services.payroll_exports import (
     statutory_summary,
     build_salary_jv_xml,
@@ -271,7 +274,7 @@ def _get_db():
 
 def _get_employee_details(db, employee_id: str) -> dict:
     """Get employee details from users collection"""
-    if not db:
+    if db is None:
         return {}
     try:
         users_coll = db.get_collection("users")
@@ -284,7 +287,7 @@ def _get_employee_details(db, employee_id: str) -> dict:
 
 def _get_salary_config(db, employee_id: str) -> Optional[dict]:
     """Get salary configuration for employee"""
-    if not db:
+    if db is None:
         return None
     try:
         salary_config_coll = db.get_collection("salary_config")
@@ -565,7 +568,7 @@ async def create_salary_config(
     so it is restricted to ADMIN; SUPERADMIN auto-passes via require_roles.
     """
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
 
     try:
@@ -622,7 +625,7 @@ async def get_salary_config(
     """
     _assert_self_or_salary_admin(employee_id, current_user, "salary details")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"config": None}
 
     try:
@@ -651,7 +654,7 @@ async def update_salary_config(
 ):
     """Update an employee's salary configuration (admin-only). Partial update."""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
         coll = db.get_collection("salary_config")
@@ -690,7 +693,7 @@ async def list_salary_configs(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if not db:
+    if db is None:
         return {"configs": [], "total": 0}
     # BUG-062 tail: salary configs carry bank/PAN/UAN PII -- a store-scoped role
     # must not read another store's by passing ?store_id (validate), nor all
@@ -738,7 +741,7 @@ async def bulk_upsert_salary_config(
 ):
     """Bulk create/update salary configs (upsert by employee_id). CSV import target."""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
         coll = db.get_collection("salary_config")
@@ -874,10 +877,11 @@ async def get_salary_sheet(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if not db:
+    if db is None:
         return {"salaries": [], "total": 0, "store_id": store_id}
 
     active_store = store_in_view(store_id, current_user)
+    payroll_period_guard.sweep_stranded(db, year, month)
 
     try:
         query: dict = {"month": month, "year": year}
@@ -947,7 +951,7 @@ async def calculate_salary(
     """
     _assert_salary_admin(current_user, "create or recalculate a salary record")
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
 
     try:
@@ -1053,7 +1057,7 @@ async def record_salary_advance(
     """
     _assert_salary_admin(current_user, "record a salary advance")
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
 
     try:
@@ -1104,7 +1108,7 @@ async def get_salary_advances(
     """
     _assert_self_or_salary_admin(employee_id, current_user, "salary advances")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"advances": [], "total": 0}
 
     try:
@@ -1114,12 +1118,15 @@ async def get_salary_advances(
         if status:
             query["status"] = status
 
-        advances = list(salary_advances_coll.find(query))
+        # _strip_id: a stored advance carries Mongo's ObjectId, which cannot be
+        # serialised -- the raw rows made this read answer 500 from the first
+        # advance onwards (the empty list was the only case that worked).
+        advances = [_strip_id(a) for a in salary_advances_coll.find(query)]
 
         return {
             "employee_id": employee_id,
-            "advances": advances or [],
-            "total": len(advances) if advances else 0,
+            "advances": advances,
+            "total": len(advances),
         }
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
@@ -1145,7 +1152,7 @@ async def settle_salary_advance(
     """
     _assert_salary_admin(current_user, "settle a salary advance")
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
 
     try:
@@ -1209,9 +1216,97 @@ def _build_payslip_from_run_row(run_row: dict, employee: dict, db: object) -> di
         "generated_at": run_row.get("updated_at")
         or run_row.get("created_at")
         or datetime.now().isoformat(),
-        # Include payroll status so FE can show DRAFT/APPROVED/PAID badge.
+        # DRAFT / APPROVED / PAID: every payslip screen and print shows it.
         "status": run_row.get("status", "DRAFT"),
     }
+
+
+def _is_posted(run_row: dict) -> bool:
+    """True once an administrator has approved the row (APPROVED or PAID)."""
+    return run_row.get("status") in POSTED_PAYROLL_STATUSES
+
+
+def _copy_issued(copy: dict) -> bool:
+    """May staff see this STORED payslip copy (``payslips`` collection)?
+
+    The staff rule for a run row applied to a copy: a copy that says what it
+    is must say APPROVED or PAID. A copy explicitly marked DRAFT (or any other
+    status) is withheld from staff exactly like a DRAFT run row; an
+    administrator still sees it, labelled with its status.
+
+    A copy with NO status at all is an old-format slip, written before
+    payslips carried a status (the salary-record path below still writes
+    them). Those have always been shown to their employee as issued payslips
+    and still are -- nothing on them says draft, and hiding them would take
+    away history staff can see today.
+    """
+    status = copy.get("status")
+    return not status or str(status).upper() in POSTED_PAYROLL_STATUSES
+
+
+def _not_ready(run_row: dict) -> dict:
+    """The payslip-door answer for a DRAFT the caller may not see yet: no
+    figures, only which month is still being prepared."""
+    return {"month": run_row.get("month"), "year": run_row.get("year")}
+
+
+def _latest_payslip(db, employee_id: str, include_draft: bool) -> dict:
+    """An employee's most recent payslip, as the door's whole answer:
+    ``{"payslip": ...}`` plus ``"not_ready": {month, year}`` when a newer DRAFT
+    was withheld. The ONE read behind GET /payroll/payslip/{employee_id} and
+    the staff GET /hr/me/payslip.
+
+    The ``payroll`` run row is the payslip: it is rebuilt from that row on
+    every read and nothing is stored. The old code materialised a copy in
+    ``payslips`` on the first read and served that copy forever, so a draft
+    that was rerun, approved or paid afterwards kept showing its first figures.
+    A copy is served only for a month NEWER than the newest run row (a month
+    the run engine never computed); for the same month the run row wins.
+
+    ``include_draft`` is True only for an administrator preparing payroll.
+    Staff see a payslip once it is APPROVED or PAID: while the newest run row
+    is a DRAFT they get their newest approved one (if any) and ``not_ready``.
+    A stored copy is never the fallback then -- it may be the draft itself, as
+    the old code materialised it. A stored copy explicitly marked DRAFT is
+    withheld from staff too, wherever it sits (see _copy_issued); it is simply
+    not shown, with no ``not_ready``, because no payroll run exists that
+    could ever approve it.
+    """
+
+    def _newest(coll_name: str, extra: Optional[dict] = None) -> Optional[dict]:
+        found = list(
+            db.get_collection(coll_name)
+            .find({"employee_id": employee_id, **(extra or {})})
+            .sort([("year", -1), ("month", -1)])
+            .limit(1)
+        )
+        return found[0] if found else None
+
+    def _period(doc: dict) -> tuple:
+        return (doc.get("year") or 0, doc.get("month") or 0)
+
+    def _built(row: Optional[dict]) -> Optional[dict]:
+        if not row:
+            return None
+        return _build_payslip_from_run_row(
+            row, _get_employee_details(db, employee_id), db
+        )
+
+    run_row = _newest("payroll")
+    # Newest stored copy this caller may see: staff skip a copy that is
+    # explicitly not approved (see _copy_issued), the same rule as a run row.
+    copies = (
+        db.get_collection("payslips")
+        .find({"employee_id": employee_id})
+        .sort([("year", -1), ("month", -1)])
+    )
+    copy = next((c for c in copies if include_draft or _copy_issued(c)), None)
+    if copy and (not run_row or _period(copy) > _period(run_row)):
+        return {"payslip": _strip_id(copy)}
+    if not run_row or include_draft or _is_posted(run_row):
+        return {"payslip": _built(run_row)}
+    posted = _newest("payroll", {"status": {"$in": list(POSTED_PAYROLL_STATUSES)}})
+    return {"payslip": _built(posted), "not_ready": _not_ready(run_row)}
 
 
 @router.get("/payslip/{employee_id}/{month}/{year}")
@@ -1221,12 +1316,20 @@ async def get_payslip(
     year: int,
     current_user: dict = Depends(get_current_user),
 ):
-    """Generate or retrieve payslip for an employee.
+    """Retrieve the payslip for an employee and month.
 
-    Reads from the ``payroll`` collection (run engine output) first, then falls
-    back to the legacy ``salary_records`` collection so existing data is never
-    lost.  A payslip record is materialised in ``payslips`` collection only
-    once; subsequent calls return the cached version.
+    Built from the ``payroll`` run row on EVERY read, so the payslip always
+    agrees with the payroll run, the salary sheet and the printed slip -- while
+    the run is a draft, after a rerun, and once it is approved and paid.
+    Nothing is stored for a run row (see _latest_payslip for why).
+
+    A DRAFT is shown only to an administrator (who is preparing it). Anyone
+    else reading their OWN payslip gets ``payslip: None`` and ``not_ready``
+    until the run is approved.
+
+    A month the run engine never computed falls back to the legacy
+    ``salary_records`` collection, materialised once in ``payslips`` exactly as
+    before, so existing data is never lost.
 
     Self-or-ADMIN: see _assert_self_or_salary_admin. Live caller is the payslip
     tab of PayrollDashboard; under the owner ruling an ACCOUNTANT / AREA_MANAGER
@@ -1236,31 +1339,33 @@ async def get_payslip(
     # Mongo is reachable (the fail-soft branch below returns 200/None).
     _assert_self_or_salary_admin(employee_id, current_user)
     db = _get_db()
-    if not db:
+    if db is None:
         return {"payslip": None}
 
     try:
-        payslips_coll = db.get_collection("payslips")
-
-        # Return cached payslip if one already exists.
-        payslip = payslips_coll.find_one(
-            {"employee_id": employee_id, "month": month, "year": year}
-        )
-        if payslip:
-            return {"payslip": _strip_id(payslip)}
-
         employee = _get_employee_details(db, employee_id)
 
-        # Try the run-engine ``payroll`` collection first.
+        # The run-engine ``payroll`` row IS the payslip. Never cached.
         run_row = db.get_collection("payroll").find_one(
             {"employee_id": employee_id, "month": month, "year": year}
         )
         if run_row:
-            payslip = _build_payslip_from_run_row(run_row, employee, db)
-            payslips_coll.insert_one({**payslip})
+            if not (_is_posted(run_row) or _is_salary_admin(current_user)):
+                return {"payslip": None, "not_ready": _not_ready(run_row)}
+            return {"payslip": _build_payslip_from_run_row(run_row, employee, db)}
+
+        # No run row for this month: the legacy path, unchanged.
+        payslips_coll = db.get_collection("payslips")
+        payslip = payslips_coll.find_one(
+            {"employee_id": employee_id, "month": month, "year": year}
+        )
+        if payslip:
+            # A stored copy explicitly marked DRAFT is a draft like any other:
+            # only an administrator sees it (see _copy_issued).
+            if not (_copy_issued(payslip) or _is_salary_admin(current_user)):
+                return {"payslip": None}
             return {"payslip": _strip_id(payslip)}
 
-        # Legacy fallback: salary_records collection.
         salary_record = db.get_collection("salary_records").find_one(
             {"employee_id": employee_id, "month": month, "year": year}
         )
@@ -1296,10 +1401,7 @@ async def get_payslip(
 async def get_latest_payslip(
     employee_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get the most recent payslip for an employee.
-
-    Searches ``payslips`` cache, then the ``payroll`` run collection, so staff
-    see their slip even before a manager has clicked 'generate payslip'.
+    """Get the most recent payslip for an employee (see _latest_payslip).
 
     Self-or-ADMIN: see _assert_self_or_salary_admin. Staff self-service on the
     /my-work page goes through GET /hr/me/payslip (self-only, mounted WITHOUT
@@ -1308,39 +1410,13 @@ async def get_latest_payslip(
     """
     _assert_self_or_salary_admin(employee_id, current_user)
     db = _get_db()
-    if not db:
+    if db is None:
         return {"payslip": None}
 
     try:
-        payslips_coll = db.get_collection("payslips")
-
-        # Cached payslips (newest first).
-        cached = list(
-            payslips_coll.find({"employee_id": employee_id})
-            .sort([("year", -1), ("month", -1)])
-            .limit(1)
+        return _latest_payslip(
+            db, employee_id, include_draft=_is_salary_admin(current_user)
         )
-        if cached:
-            return {"payslip": _strip_id(cached[0])}
-
-        # Fall through to the run collection and synthesise a payslip.
-        run_row = (
-            list(
-                db.get_collection("payroll")
-                .find({"employee_id": employee_id})
-                .sort([("year", -1), ("month", -1)])
-                .limit(1)
-            )
-            or [None]
-        )[0]
-        if not run_row:
-            return {"payslip": None}
-
-        employee = _get_employee_details(db, employee_id)
-        payslip = _build_payslip_from_run_row(run_row, employee, db)
-        # Persist so the next call is instant.
-        payslips_coll.insert_one({**payslip})
-        return {"payslip": _strip_id(payslip)}
     except Exception as e:
         logger.error("Payroll operation failed: %s", e)
         raise HTTPException(
@@ -1367,7 +1443,7 @@ async def get_incentive_summary(
     """
     _assert_self_or_salary_admin(employee_id, current_user, "incentive earnings")
     db = _get_db()
-    if not db:
+    if db is None:
         return {"incentive": None}
 
     try:
@@ -1377,7 +1453,7 @@ async def get_incentive_summary(
             incentive = incentives_coll.find_one(
                 {"staff_id": employee_id, "month": month, "year": year}
             )
-            return {"incentive": incentive}
+            return {"incentive": _strip_id(incentive)}
         except Exception as e:
             logger.error(f"Error fetching incentive: {str(e)}", exc_info=True)
             return {"incentive": None, "message": "Incentive data not found"}
@@ -1400,7 +1476,7 @@ async def get_incentive_summary(
 async def list_pt_slabs(current_user: dict = Depends(get_current_user)):
     """List Professional Tax slabs for all states (returns seed defaults if none stored)."""
     db = _get_db()
-    if not db:
+    if db is None:
         return {
             "pt_slabs": list(DEFAULT_PT_SLABS.values()),
             "total": len(DEFAULT_PT_SLABS),
@@ -1428,7 +1504,7 @@ async def get_pt_slab(state_code: str, current_user: dict = Depends(get_current_
     state_code = state_code.upper()
     db = _get_db()
     default = DEFAULT_PT_SLABS.get(state_code)
-    if not db:
+    if db is None:
         return {"pt_slab": default}
     try:
         slab = db.get_collection("pt_slabs").find_one({"state_code": state_code})
@@ -1489,7 +1565,7 @@ async def upsert_pt_slab(
             detail=f"Unknown state_code '{state_code}'. Must be a 2-digit GST state code.",
         )
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
         coll = db.get_collection("pt_slabs")
@@ -1512,7 +1588,7 @@ async def upsert_pt_slab(
 async def seed_pt_slabs(current_user: dict = Depends(require_roles("ADMIN"))):
     """Seed default Jharkhand + Maharashtra PT slabs (idempotent; admin-only)."""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
         coll = db.get_collection("pt_slabs")
@@ -1564,6 +1640,19 @@ class PayrollRunRequest(BaseModel):
         default_factory=dict
     )  # employee_id -> recovery amount
     dry_run: bool = False  # true = preview, do not persist
+
+    @field_validator("advances")
+    @classmethod
+    def _no_negative_recovery(cls, v: Dict[str, float]) -> Dict[str, float]:
+        """A recovery takes money back. A negative one RAISED net pay, in the
+        preview and in the saved run alike (the engine refuses it too)."""
+        for emp, amount in v.items():
+            if not math.isfinite(amount) or amount < 0:
+                raise ValueError(
+                    f"Advance recovery cannot be negative (employee {emp}). "
+                    "Enter 0 or a positive amount."
+                )
+        return v
 
 
 class PayrollBatchAction(BaseModel):
@@ -1677,6 +1766,19 @@ def _scope_configs(db, store_id: Optional[str], entity_id: Optional[str]) -> lis
     return list(db.get_collection("salary_config").find(query))
 
 
+def _refuse_if_month_locked(db, year: int, month: int) -> None:
+    """423 when the month's accounting period is locked. A locked month is
+    also where a stalled run's late draft could sit, so it is swept first:
+    that clean-up never waits for support."""
+    from .finance import check_period_locked
+
+    try:
+        check_period_locked(db, date(year, month, 1))
+    except HTTPException:
+        payroll_period_guard.sweep_stranded(db, year, month)
+        raise
+
+
 @router.post("/run")
 async def run_payroll(
     req: PayrollRunRequest,
@@ -1685,7 +1787,9 @@ async def run_payroll(
     """Compute payroll for every active employee in scope.
 
     Persists DRAFT rows (idempotent per employee+month+year) unless dry_run.
-    Already APPROVED/PAID rows are never overwritten.
+    Already APPROVED/PAID rows are never overwritten. Saving is refused (423)
+    when the month's accounting period is locked; a preview writes nothing and
+    stays available.
 
     OWNER RULING 2026-08-09: ADMIN/SUPERADMIN only. This is a WRITE, but its
     RESPONSE returns ``rows`` -- the full per-employee breakdown for everyone in
@@ -1695,8 +1799,14 @@ async def run_payroll(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
+    # Financial control: saving a run writes payroll rows into the run's month,
+    # the same as approve and lock below. Those two were gated and this was
+    # not, so a draft could still be rewritten inside a closed month. A preview
+    # (dry_run) writes nothing, so it is not gated.
+    if not req.dry_run:
+        _refuse_if_month_locked(db, req.year, req.month)
     try:
         configs = _scope_configs(db, req.store_id, req.entity_id)
         payroll_coll = db.get_collection("payroll")
@@ -1705,6 +1815,7 @@ async def run_payroll(
         # P0-4: incentive feed comes from the LOCKED payout snapshot ONLY, one
         # store-scoped fetch per store (cached across configs in the loop).
         _feed_cache: Dict[str, dict] = {}
+        consumed: set = set()  # stores whose locked payout this run paid from
 
         def _store_feed(store_id: Optional[str]) -> dict:
             if not store_id:
@@ -1715,32 +1826,57 @@ async def run_payroll(
                 )
             return _feed_cache[store_id]
 
+        # Every employee is computed BEFORE anything is written, so a run the
+        # engine refuses (PayrollInputError) saves nothing for anyone.
+        computed = []
         for cfg in configs:
             emp = cfg.get("employee_id")
             cfg_store = cfg.get("store_id")
             lwp = float(req.lwp_days.get(emp, 0) or 0)
             incentive = (req.incentives or {}).get(emp)
+            clawback = set_aside = 0.0
+            try:
+                locked = round(float(_store_feed(cfg_store).get(emp, 0.0)), 2)
+            except (TypeError, ValueError):
+                locked = 0.0
             if incentive is None:
-                feed = _store_feed(cfg_store)
-                try:
-                    incentive = round(float(feed.get(emp, 0.0)), 2)
-                except (TypeError, ValueError):
-                    incentive = 0.0
+                consumed.add(cfg_store)
+                incentive = locked
+                # A net clawback in the LOCKED payout (roadmap decision #31:
+                # returns took back more kicker than was earned) is not a
+                # typed negative incentive. The engine takes it off pay under
+                # its own name, never below zero; a typed negative is refused.
+                if incentive < 0:
+                    incentive, clawback = 0.0, -incentive
+            elif locked < 0:
+                # An override replaces the locked payout figure, as it always
+                # has. When that figure is a clawback, this run does not take
+                # it back and nothing carries it to a later month, so the
+                # amount is kept on the row instead of vanishing.
+                set_aside = -locked
             advance = float(req.advances.get(emp, 0) or 0)
             pt_slab = _resolve_pt_slab(db, cfg)
-            breakdown = compute_payroll(
-                cfg,
-                month=req.month,
-                year=req.year,
-                lwp_days=lwp,
-                incentive=incentive,
-                advance_recovery=advance,
-                pt_slab=pt_slab,
-                gender=cfg.get("gender", "ANY"),
-            )
+            employee_name = _get_employee_details(db, emp).get("full_name", "")
+            try:
+                breakdown = compute_payroll(
+                    cfg,
+                    month=req.month,
+                    year=req.year,
+                    lwp_days=lwp,
+                    incentive=incentive,
+                    incentive_clawback=clawback,
+                    advance_recovery=advance,
+                    pt_slab=pt_slab,
+                    gender=cfg.get("gender", "ANY"),
+                )
+            except PayrollInputError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{employee_name}: {exc}" if employee_name else str(exc),
+                )
             doc = {
                 "employee_id": emp,
-                "employee_name": _get_employee_details(db, emp).get("full_name", ""),
+                "employee_name": employee_name,
                 "store_id": cfg.get("store_id"),
                 "entity_id": cfg.get("entity_id"),
                 "year": req.year,
@@ -1753,50 +1889,123 @@ async def run_payroll(
                     2,
                 ),
                 "incentives": breakdown["earnings"]["incentive"],
+                "incentive_clawback_not_recovered": set_aside,
                 "deductions": breakdown["deductions"]["total_deductions"],
                 "advance_deduction": breakdown["deductions"]["advance_recovery"],
                 "net_salary": breakdown["net_pay"],
                 "status": "DRAFT",
                 "updated_at": utc_now_iso(),
             }
-            if not req.dry_run:
-                existing = payroll_coll.find_one(
-                    {"employee_id": emp, "year": req.year, "month": req.month}
+            computed.append(doc)
+
+        # The run and the period lock share one guard per month (see
+        # payroll_period_guard): the claim is refused once the month is locked,
+        # and the lock is refused while this run holds, or has touched, it.
+        saving = not req.dry_run
+        month_open = True  # False once the month is found locked under this run
+        inserted: List[str] = []
+        if saving:
+            payroll_period_guard.claim_run(db, req.year, req.month)
+        try:
+            for doc in computed:
+                emp = doc["employee_id"]
+                breakdown = doc["breakdown"]
+                if saving:
+                    existing = payroll_coll.find_one(
+                        {"employee_id": emp, "year": req.year, "month": req.month}
+                    )
+                    if existing and existing.get("status") in POSTED_PAYROLL_STATUSES:
+                        rows.append(
+                            {
+                                "employee_id": emp,
+                                "skipped": True,
+                                "reason": f"already {existing.get('status')}",
+                                "net_salary": existing.get("net_salary"),
+                            }
+                        )
+                        continue
+                    if not existing:
+                        doc["payroll_id"] = str(uuid.uuid4())
+                    # A new row's id is recorded in the guard in the same
+                    # step, so if this insert stalls past a lock it is taken
+                    # back (payroll_period_guard.sweep_stranded).
+                    month_open = payroll_period_guard.renew_run(
+                        db,
+                        req.year,
+                        req.month,
+                        inserting=None if existing else doc["payroll_id"],
+                    )
+                    if not month_open:
+                        break
+                    if existing:
+                        doc["payroll_id"] = existing.get("payroll_id")
+                        # Written only if the row still has the status it was
+                        # read with. Approve is one atomic update per row, so
+                        # an approval given since that read wins: the row is
+                        # never put back to DRAFT (D1: it is a cost from the
+                        # moment it is approved), in an open month or behind a
+                        # lock that this run stalled past.
+                        key = {"employee_id": emp, "year": req.year, "month": req.month}
+                        written = payroll_coll.update_one(
+                            {**key, "status": existing.get("status")}, {"$set": doc}
+                        )
+                        if not getattr(written, "matched_count", 1):
+                            now = payroll_coll.find_one(key)
+                            rows.append(
+                                {
+                                    "employee_id": emp,
+                                    "skipped": True,
+                                    "reason": f"already {now.get('status')}"
+                                    if now
+                                    else "removed while this run was saving",
+                                    "net_salary": (now or {}).get("net_salary"),
+                                }
+                            )
+                            continue
+                    else:
+                        doc["created_at"] = utc_now_iso()
+                        doc["created_by"] = current_user.get("user_id")
+                        payroll_coll.insert_one(doc)
+                        # Only once the insert is acknowledged: an insert
+                        # that raised may still land later, so its id stays
+                        # in the guard's ``pending`` for the sweep.
+                        inserted.append(doc["payroll_id"])
+                rows.append(_strip_id({k: v for k, v in doc.items()}))
+                totals["gross"] += breakdown["earnings"]["total_earnings"]
+                totals["deductions"] += breakdown["deductions"]["total_deductions"]
+                totals["net"] += breakdown["net_pay"]
+                totals["employer_cost"] += breakdown["ctc_cost"]
+        finally:
+            # Release, and take back any draft that landed behind a lock (only
+            # after the run stalled past the guard's lease) -- also when the
+            # release write fails, so none is left where it can never be
+            # approved. A crash before this line is swept by the next payroll
+            # request for the month (_refuse_if_month_locked).
+            if saving and month_open:
+                month_open = payroll_period_guard.finish_run(
+                    db, req.year, req.month, inserted
                 )
-                if existing and existing.get("status") in ("APPROVED", "PAID"):
-                    rows.append(
-                        {
-                            "employee_id": emp,
-                            "skipped": True,
-                            "reason": f"already {existing.get('status')}",
-                            "net_salary": existing.get("net_salary"),
-                        }
-                    )
-                    continue
-                if existing:
-                    doc["payroll_id"] = existing.get("payroll_id")
-                    payroll_coll.update_one(
-                        {"employee_id": emp, "year": req.year, "month": req.month},
-                        {"$set": doc},
-                    )
-                else:
-                    doc["payroll_id"] = str(uuid.uuid4())
-                    doc["created_at"] = utc_now_iso()
-                    doc["created_by"] = current_user.get("user_id")
-                    payroll_coll.insert_one(doc)
-            rows.append(_strip_id({k: v for k, v in doc.items()}))
-            totals["gross"] += breakdown["earnings"]["total_earnings"]
-            totals["deductions"] += breakdown["deductions"]["total_deductions"]
-            totals["net"] += breakdown["net_pay"]
-            totals["employer_cost"] += breakdown["ctc_cost"]
+            elif saving:
+                payroll_period_guard.sweep_stranded(db, req.year, req.month)
+        if not month_open:
+            raise HTTPException(
+                status_code=423,
+                detail=f"Accounting period {req.month:02d}/{req.year} is locked; "
+                "cannot post to a closed month.",
+            )
         # P0-4 double-feed guard: stamp payroll_fed_at on each consumed
         # snapshot. The repo's find_one_and_update is guarded on
         # payroll_fed_at:null so a SECOND run for the same month sees it
         # already stamped and the (re-read) feed is NOT added twice -- the
         # rows above already reflect the same single snapshot total.
         if not req.dry_run:
-            _stamp_consumed_snapshots(db, _feed_cache, req.month, req.year,
-                                      current_user.get("user_id"))
+            _stamp_consumed_snapshots(
+                db,
+                {s: f for s, f in _feed_cache.items() if s in consumed},
+                req.month,
+                req.year,
+                current_user.get("user_id"),
+            )
         totals = {k: round(v, 2) for k, v in totals.items()}
         return {
             "status": "success",
@@ -1831,10 +2040,13 @@ async def list_payroll_rows(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if not db:
+    if db is None:
         return {"rows": [], "total": 0, "totals": {}}
     # BUG-062 tail: scope the salary register to the caller's store reach.
     store_id = resolve_store_scope(store_id, current_user)
+    # A stalled run's draft that landed behind a lock is gone before anyone
+    # reads the register (payroll_period_guard.sweep_stranded).
+    payroll_period_guard.sweep_stranded(db, year, month)
     try:
         query: dict = {"month": month, "year": year}
         if store_id:
@@ -1877,14 +2089,12 @@ async def approve_payroll(
     """
     _assert_salary_admin(current_user, "approve a payroll run")
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     # Financial control: approving payroll is a posting into the run's month.
     # Block it if that accounting period is locked (mirrors orders/returns/
     # vendors/expenses/finance-JE). Raises HTTPException(423) when locked.
-    from .finance import check_period_locked
-
-    check_period_locked(db, date(req.year, req.month, 1))
+    _refuse_if_month_locked(db, req.year, req.month)
     try:
         query: dict = {"month": req.month, "year": req.year, "status": "DRAFT"}
         if req.store_id:
@@ -1918,14 +2128,12 @@ async def lock_payroll(
 ):
     """Lock APPROVED payroll rows as PAID for a month + scope (final)."""
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     # Financial control: locking payroll as PAID is a posting into the run's
     # month. Block it if that accounting period is locked (mirrors orders/
     # returns/vendors/expenses/finance-JE). Raises HTTPException(423) when locked.
-    from .finance import check_period_locked
-
-    check_period_locked(db, date(req.year, req.month, 1))
+    _refuse_if_month_locked(db, req.year, req.month)
     try:
         query: dict = {"month": req.month, "year": req.year, "status": "APPROVED"}
         if req.store_id:
@@ -1951,8 +2159,15 @@ async def lock_payroll(
 # ============================================================================
 
 
-def _payroll_rows(db, month: int, year: int, store_id, entity_id) -> list:
+def _payroll_rows(
+    db, month: int, year: int, store_id, entity_id, posted_only: bool = False
+) -> list:
+    """Payroll rows for a month + scope. ``posted_only`` keeps APPROVED and
+    PAID rows only: what goes to Tally and to the PF file is what the P&L
+    counts as a cost, never a DRAFT that can still be rerun."""
     query: dict = {"month": month, "year": year}
+    if posted_only:
+        query["status"] = {"$in": list(POSTED_PAYROLL_STATUSES)}
     if store_id:
         query["store_id"] = store_id
     if entity_id:
@@ -1977,7 +2192,7 @@ async def payroll_statutory_summary(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if not db:
+    if db is None:
         return {
             "summary": statutory_summary([]),
             "month": month,
@@ -2017,15 +2232,17 @@ async def payroll_tally_jv(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     # BUG-062 tail: scope the Tally salary-JV export to the caller's store reach.
     store_id = resolve_store_scope(store_id, current_user)
     try:
-        rows = _payroll_rows(db, month, year, store_id, entity_id)
+        rows = _payroll_rows(db, month, year, store_id, entity_id, posted_only=True)
         if not rows:
             raise HTTPException(
-                status_code=404, detail="No payroll rows for this month/scope"
+                status_code=404,
+                detail="No approved payroll for this month and scope. "
+                "Approve the payroll run first - a draft is not exported.",
             )
         entity = None
         if entity_id:
@@ -2062,12 +2279,12 @@ async def payroll_pf_ecr(
     """
     _assert_salary_admin(current_user)
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     # BUG-062 tail: scope the PF ECR export to the caller's store reach.
     store_id = resolve_store_scope(store_id, current_user)
     try:
-        rows = _payroll_rows(db, month, year, store_id, entity_id)
+        rows = _payroll_rows(db, month, year, store_id, entity_id, posted_only=True)
         emps = [r.get("employee_id") for r in rows]
         cfgs = (
             {
@@ -2111,7 +2328,7 @@ async def payslip_print(
     """
     _assert_self_or_salary_admin(employee_id, current_user)
     db = _get_db()
-    if not db:
+    if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
         row = db.get_collection("payroll").find_one(
@@ -2120,6 +2337,14 @@ async def payslip_print(
         if not row:
             raise HTTPException(
                 status_code=404, detail="Payroll row not found for this month"
+            )
+        # Same rule as the payslip reads: a DRAFT prints only for the
+        # administrator preparing it (and the print says Draft).
+        if not (_is_posted(row) or _is_salary_admin(current_user)):
+            raise HTTPException(
+                status_code=404,
+                detail="This month's payslip is not ready yet. "
+                "It can be printed once payroll is approved.",
             )
         row = _strip_id(row)
         entity = None

@@ -313,7 +313,7 @@ class _Cursor:
         return len(self._materialise())
 
 
-_UPDATE_OPS = {"$set", "$unset", "$push", "$inc", "$setOnInsert", "$addToSet", "$pull"}
+_UPDATE_OPS = {"$set", "$unset", "$push", "$inc", "$setOnInsert", "$addToSet", "$pull", "$pullAll"}
 
 
 class StrictCollection:
@@ -410,6 +410,10 @@ class StrictCollection:
             if v not in arr:
                 arr.append(v)
             _set_path(doc, k, arr)
+        for k, v in (update.get("$pullAll") or {}).items():
+            arr = _get_path(doc, k)
+            if isinstance(arr, list):
+                _set_path(doc, k, [x for x in arr if x not in v])
         for k, v in (update.get("$pull") or {}).items():
             arr = _get_path(doc, k)
             if isinstance(arr, list):

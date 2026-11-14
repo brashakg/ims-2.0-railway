@@ -123,8 +123,19 @@ export function PayrollRunPage() {
 
   const anyLocked = rows.some((r) => r.status === 'PAID');
   const anyApproved = rows.some((r) => r.status === 'APPROVED');
+  // Tally and the PF file carry APPROVED and PAID rows only (what the P&L
+  // counts as a cost); a draft is never exported.
+  const nothingToExport = !anyApproved && !anyLocked;
+  const exportHint = nothingToExport ? 'Approve the payroll run first - a draft is not exported' : undefined;
 
   const doRun = async (dryRun: boolean) => {
+    // A recovery takes money back; a negative one would RAISE net pay. The
+    // server refuses it too -- this just says so before the round trip.
+    const negative = Object.entries(advances).find(([, amount]) => !(amount >= 0));
+    if (negative) {
+      toast.error(`Advance recovery cannot be negative (${negative[0]}). Enter 0 or a positive amount.`);
+      return;
+    }
     setBusy(true);
     try {
       const res = await payrollApi.runPayroll({
@@ -338,8 +349,8 @@ export function PayrollRunPage() {
           </span>
           {rows.length > 0 && (
             <div className="flex flex-wrap gap-2">
-              <button className="btn-secondary" onClick={exportTally} disabled={busy}>Tally JV</button>
-              <button className="btn-secondary" onClick={exportEcr} disabled={busy}>PF ECR</button>
+              <button className="btn-secondary" onClick={exportTally} disabled={busy || nothingToExport} title={exportHint}>Tally JV</button>
+              <button className="btn-secondary" onClick={exportEcr} disabled={busy || nothingToExport} title={exportHint}>PF ECR</button>
               {canApprove && (
                 <button className="btn-secondary" onClick={doApprove} disabled={busy || !rows.some((r) => r.status === 'DRAFT')}>Approve</button>
               )}
