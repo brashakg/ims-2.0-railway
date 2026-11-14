@@ -14,6 +14,7 @@ Run: JWT_SECRET_KEY=test python -m pytest \
        backend/tests/test_product_image_upload.py -q
 """
 
+import base64
 import io
 import os
 import sys
@@ -30,9 +31,12 @@ from api.services.file_store import InMemoryFileStore, set_file_store  # noqa: E
 _UPLOAD_PATH = "/api/v1/products/image"
 _CATALOG_SET = {"ADMIN", "CATALOG_MANAGER"}
 
-# A tiny valid-enough PNG header + a few bytes (the endpoint trusts the declared
-# content-type, not the magic bytes -- it only needs SOME bytes to persist).
-_PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+# A REAL (1x1) PNG: the endpoint checks the bytes, not the declared
+# content-type (audit L1-F41), so a signature plus padding no longer uploads.
+_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jF90A"
+    "AAAASUVORK5CYII="
+)
 
 
 @pytest.fixture

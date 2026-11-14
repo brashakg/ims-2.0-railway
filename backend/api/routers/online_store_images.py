@@ -40,6 +40,7 @@ Everything is FAIL-SOFT: no DB -> reads return empty / writes 503; never 500.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from typing import Dict, Optional
 
@@ -402,6 +403,23 @@ async def upload_image(
             detail=f"Image exceeds the {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB cap",
         )
 
+    # 2b. The declared content-type is only a label (audit L1-F41): the BYTES
+    # must be a complete image of an allowed type, and the stored type +
+    # extension are what the bytes are. Same gate as the product-image doors.
+    from ..services.image_content import image_mime_of
+
+    content_type = image_mime_of(data) or ""
+    ext = _ALLOWED_IMAGE_TYPES.get(content_type)
+    if ext is None:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                "This file is not a valid image (it may be damaged, cut short, "
+                "a JPEG larger than 50 megapixels, or not a photo at all). "
+                f"Allowed: {sorted(_ALLOWED_IMAGE_TYPES)}"
+            ),
+        )
+
     # 3. Generate a SAFE storage key -- never trust the client filename. The path
     # is product-scoped (when given) + a uuid + the validated extension, so two
     # uploads never collide and there is no traversal vector.
@@ -601,21 +619,27 @@ async def attach_edited_image(
 
 async def _fetch_image_bytes(url: str) -> bytes:
     """Fetch the RAW image bytes from its stored url -- an http(s) URL (durable
-    storage / Shopify CDN) or a local server path. Raises on failure (the
-    auto-edit route fail-softs)."""
-    u = (url or "").strip()
-    if not u:
-        raise RuntimeError("image has no source url")
-    if u.startswith("http://") or u.startswith("https://"):
-        import httpx
+    storage / Shopify CDN) or a locally stored upload. Raises on failure (the
+    auto-edit route fail-softs).
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(u)
-        if resp.status_code != 200:
-            raise RuntimeError(f"could not fetch raw image ({resp.status_code})")
-        return resp.content
-    with open(u.lstrip("/"), "rb") as fh:  # local path, e.g. /uploads/...
-        return fh.read()
+    The url is whatever staff saved on the image row, and the bytes go on to a
+    third-party editor, so (audit L1-F32) it is read ONLY through the shared
+    guard -- public addresses, or a file inside the uploads folder -- and the
+    bytes must be an image (L1-F41), whatever the url or its header claims."""
+    from ..services.file_store import MAX_FILE_SIZE_BYTES
+    from ..services.image_content import image_mime_of
+    from ..services.image_rehost import ImageFetchError, read_stored_image
+
+    # The shared file-store cap, not the 10 MB queue-upload cap: a website
+    # original can be larger than a queue upload.
+    raw = await asyncio.to_thread(
+        read_stored_image, url, max_bytes=MAX_FILE_SIZE_BYTES
+    )
+    if image_mime_of(raw) is None:
+        raise ImageFetchError(
+            400, "Image not fetched: its saved address did not return an image."
+        )
+    return raw
 
 
 @router.post("/{image_id}/auto-edit")
@@ -680,10 +704,18 @@ async def auto_edit_image(
 
         raw = await _fetch_image_bytes(img.get("url"))
         edited = await editor.edit(raw, EditSpec.from_env())
+        # The editor's reply is checked like an upload (audit L1-F41): an error
+        # body must not be stored as the edited photo and sent for approval.
+        from ..services.image_content import image_mime_of
+
+        edited_mime = image_mime_of(edited) or ""
+        ext = _ALLOWED_IMAGE_TYPES.get(edited_mime)
+        if ext is None:
+            raise ValueError("The photo editor did not return a valid image")
         # A NEW file name every edit: the website matches its copy of a photo
         # by file name, so a re-edit under the old name would never reach it.
-        key = f"{img.get('product_id') or 'product'}/{image_id}-{uuid.uuid4().hex}.png"
-        edited_url = storage.put(key, edited, "image/png")
+        key = f"{img.get('product_id') or 'product'}/{image_id}-{uuid.uuid4().hex}.{ext}"
+        edited_url = storage.put(key, edited, edited_mime)
 
         updated = repo.attach_edited(image_id, edited_url, by=user_id)
         if updated is None:

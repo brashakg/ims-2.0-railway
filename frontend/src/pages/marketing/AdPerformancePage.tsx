@@ -325,6 +325,19 @@ export function AdPerformancePage() {
         </div>
       )}
 
+      {/* A CONNECTED channel whose report could not be fetched (L1-F33). Said
+          out loud, so a failed fetch never reads as "no spend". */}
+      {data && (data.google_error || data.meta_error) && (
+        <div role="alert" className="bg-amber-50 border border-amber-200 rounded-lg p-4 flex items-start gap-3">
+          <AlertCircle size={16} className="text-amber-600 mt-0.5 flex-shrink-0" />
+          <div className="text-sm text-amber-800 space-y-0.5">
+            <p className="font-medium">These figures are incomplete</p>
+            {data.google_error && <p>{data.google_error}</p>}
+            {data.meta_error && <p>{data.meta_error}</p>}
+          </div>
+        </div>
+      )}
+
       {/* Summary cards */}
       {data && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

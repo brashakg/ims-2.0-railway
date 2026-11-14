@@ -850,6 +850,99 @@ def test_redrive_does_not_count_its_own_dead_run_credit(env):
     assert [r["entry_id"] for r in _ledger(env)] == ["own-1"]
 
 
+@pytest.mark.parametrize("invoice_date", [None, "2025-01-15"],
+                         ids=["window-open", "window-closed-since-the-dead-run"])
+def test_redrive_books_the_credit_once_whichever_reads_fail(env, monkeypatch, invoice_date):
+    """Decision D13 (audit L1-F29): a refund is never booked twice after a
+    read failure. The dead run's own Rs 1000 note is already in the ledger and
+    the re-drive is pressed again and again, each time with different reads
+    failing (find_one / find / count / aggregate, on any collection).
+    Run twice: with the invoice's section 34 window open, and with it CLOSED
+    since the dead run posted its note (the re-drive would then book the
+    credit as ADJUSTED -- a row of another type than the dead run's ISSUED
+    note, so the credit door's own same-type lookup cannot catch a repeat and
+    the "what did the dead run post?" read is the only guard):
+      * every single read of the press, failing once;
+      * every PAIR of reads (the second chosen from the reads the press makes
+        AFTER the first failed - the guard behind a guard);
+      * every read failing with its whole collection staying down from then on.
+    Whatever fails, the ledger still holds the one note and the balance is not
+    bumped again; and the press after the outage books nothing more."""
+    import copy
+
+    _order(env, **({"invoice_date": invoice_date} if invoice_date else {}))
+    from api.services import shopify_refund as sr
+
+    sr.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")
+    _dead_run_claim(env)
+    env.get_collection("credit_note_ledger").insert_one({
+        "customer_id": "CUST-1", "type": "ISSUED", "amount": 1000.0, "delta": 1000.0,
+        "ref": "RET-261020-AB12CD", "order_id": "ord-1", "entry_id": "own-1"})
+    start = {n: copy.deepcopy(c.docs) for n, c in env._collections.items()}
+    calls, plan = [], {"fail": set(), "down_from": None, "down": None}
+
+    def counted(method):
+        real = getattr(StrictCollection, method)
+
+        def read(self, *a, **kw):
+            calls.append((self.name, method))
+            if len(calls) == plan["down_from"]:
+                plan["down"] = self.name
+            if len(calls) in plan["fail"] or plan["down"] == self.name:
+                raise TimeoutError(f"synthetic outage on {self.name}.{method}")
+            return real(self, *a, **kw)
+
+        monkeypatch.setattr(StrictCollection, method, read)
+
+    for method in ("find_one", "find", "count_documents", "aggregate"):
+        counted(method)
+
+    def press():
+        row = next(d for d in env.get_collection("shopify_refund_review").docs
+                   if d.get("shopify_refund_id") == "700001")
+        calls.clear()  # count the door's own reads only
+        try:
+            return sr.post_from_review(env, row)["status"]
+        except Exception as exc:  # noqa: BLE001 - a refusal; the rows decide
+            return f"raised:{type(exc).__name__}"
+
+    def money():
+        cust = env.get_collection("customers").find_one({"customer_id": "CUST-1"})
+        return sorted(r["entry_id"] for r in _ledger(env)), cust.get("store_credit")
+
+    begin = money()
+    assert press() == "credited"
+    reads, clean = list(calls), money()
+    assert begin[0] == clean[0] == ["own-1"], (begin, clean)
+    assert {"credit_note_ledger", "returns"} <= {name for name, _ in reads}, reads
+
+    def outage(fail=(), down_from=None):
+        for name, coll in env._collections.items():
+            coll.docs = copy.deepcopy(start.get(name, []))
+        plan.update(fail=set(fail), down_from=down_from, down=None)
+        outcome = press()
+        made = list(calls)
+        plan.update(fail=set(), down_from=None, down=None)
+        said = (sorted(fail), down_from, outcome, made)
+        assert money() in (begin, clean), (said, money())
+        press()  # the outage is over
+        assert money() in (begin, clean), (said, money())
+        return outcome, made
+
+    pairs, down = 0, {}
+    for n in range(1, len(reads) + 1):
+        _, made = outage(fail={n})
+        assert len(made) >= n  # the failing read was reached
+        for m in range(n + 1, len(made) + 1):
+            outage(fail={n, m})
+            pairs += 1
+        down[reads[n - 1]] = outage(down_from=n)[0]
+    assert pairs >= len(reads), pairs
+    # With the ledger down the door refuses (nothing booked, the row stays
+    # open) rather than answering as if the note had been read.
+    assert down[("credit_note_ledger", "find_one")] == "credit_failed", down
+
+
 def test_hand_credit_typed_like_the_refunds_return_id_is_counted(env):
     """Round 4 (a): a hand credit typed with the re-drive's own return id in
     other case ('ret-261020-ab12cd', no order stamp) is not the refund's own

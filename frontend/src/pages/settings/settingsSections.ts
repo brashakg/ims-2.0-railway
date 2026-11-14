@@ -57,7 +57,7 @@ export const SETTINGS_SECTIONS = [
   // keeps the default credit limit, editable by SUPERADMIN/ADMIN - the same
   // roles GET/PUT /settings/admin-controls admit.
   { id: 'rules' as SettingsTab, label: 'Operational Rules', icon: Settings, description: 'Default credit limit for customers', role: ['SUPERADMIN', 'ADMIN'] },
-  { id: 'system' as SettingsTab, label: 'System', icon: Database, description: 'Backup, sync, maintenance', role: ['SUPERADMIN', 'ADMIN'] },
+  { id: 'system' as SettingsTab, label: 'System', icon: Database, description: 'Status, auto-logout, maintenance', role: ['SUPERADMIN', 'ADMIN'] },
 ];
 
 export type GroupId = 'account' | 'org' | 'catalog' | 'compliance' | 'system';
