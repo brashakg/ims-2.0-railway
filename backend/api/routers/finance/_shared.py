@@ -811,7 +811,8 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
     goods back, at the note's date (decisions D42(c), D45(b)): its goods
     lines; never a lines-less note (the whole-order note made from
     amount-only refunds included), a goodwill or shipping refund, or a
-    Shopify line not restocked unless Goods back brought it back.
+    Shopify line not restocked unless Goods back brought it back -- that one
+    dated when the goods landed, max(note, Goods back) (D64).
     Fail-soft: {} on a read error."""
     lo = _parse_range_dt(from_date, end=False)
     hi = _parse_range_dt(to_date, end=True)
@@ -839,6 +840,9 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
         # press, a partial one too), else a legacy row's goods_restock.
         refund_ids = [r["shopify_refund_id"] for r in rets if r.get("shopify_refund_id")]
         goods: Dict[str, list] = {}
+        # When Goods back first landed a refund's goods (D64 b): a historical
+        # order's press lands no unit, so its date is the press itself.
+        goods_at: Dict[str, datetime] = {}
         if refund_ids:
             for row in db.get_collection("shopify_refund_review").find(
                 {"shopify_refund_id": {"$in": refund_ids},
@@ -852,6 +856,9 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 landed += [(e.get("stock_id"), parse_event_utc_naive(e.get("at")))
                            for e in row.get("goods_landed") or [] if isinstance(e, dict)]
                 goods.setdefault(row["shopify_refund_id"], []).extend(landed)
+                times = [t for t in [at] + [t for _s, t in landed] if t is not None]
+                if times:
+                    goods_at[row["shopify_refund_id"]] = min(times)
         # When each piece a return's restock put back landed, whichever door
         # ran it (the return, its retry, Goods back): the per-unit audit row
         # the one restock writes once the unit is back on sale
@@ -882,7 +889,7 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
             noted = _in_range(when) and (taxable > 0 or tax > 0)
             # Each unit is range-tested on its own below.
             if (noted or ret.get("quarantined_stock_ids") or ret.get("restock_stock_ids")
-                    or goods.get(ret.get("shopify_refund_id"))
+                    or goods.get(ret.get("shopify_refund_id")) or ret.get("shopify_refund_id") in goods_at
                     or audited.get(ret.get("return_id")) or audited.get(ret.get("shopify_refund_id"))):
                 picked.append((ret, when, taxable, tax, float(gb.get("gross") or (taxable + tax)), noted))
         order_ids = list({r[0].get("order_id") for r in picked if r[0].get("order_id")})
@@ -962,15 +969,21 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 # refund), a shipping line, and a Shopify refund line marked
                 # not restocked (no_restock: the customer kept it) give back
                 # no cost -- unless Goods back on its refund says the goods
-                # physically came back.
-                came_back = ret.get("shopify_refund_id") in goods
-                if noted:
+                # physically came back (D64 a); then dated when they landed,
+                # max(note, Goods back), so an earlier month is never changed
+                # (D64 b). A press with no landing date gives no cost back.
+                back_at = goods_at.get(ret.get("shopify_refund_id"))
+                if taxable > 0 or tax > 0:
                     for it in items or ret.get("goods_lines") or []:
                         if (_line(it) or {}).get("item_type") == "SHIPPING":
                             continue
-                        if it.get("restock") is False and ret.get("shopify_refund_id") and not came_back:
-                            continue
-                        _give_back(it, float(it.get("return_qty") or 0))
+                        at = when
+                        if it.get("restock") is False and ret.get("shopify_refund_id"):
+                            if back_at is None:
+                                continue
+                            at = max(when, back_at)
+                        if _in_range(at):
+                            _give_back(it, float(it.get("return_qty") or 0))
             else:
                 # Keyed on the physical unit: each piece back on sale gives its
                 # cost back once, on the day it FIRST went back, whichever door

@@ -833,3 +833,49 @@ def test_d45_c_a_landed_piece_whose_id_was_not_saved_still_gives_its_cost_back_o
     assert nov["returns_cogs_reversal"] == 500.0
     assert _by_store()["S1"]["cogs"] == nov["cogs"]
     assert round(sum(c["cogs"] for c in _by_category()["categories"]), 2) == nov["cogs"]
+
+
+# --------------------------------------------------------------------------
+# Decision D64 (b), PR #1423 round 8
+# --------------------------------------------------------------------------
+
+
+def test_d64_b_goods_back_on_a_not_restocked_historical_refund_gives_cost_back_when_the_goods_landed(db):
+    # Rs 10,000 imported orders (cost 6,000 each). Each refund's frame line
+    # Shopify did NOT restock; Goods back later said the goods came back.
+    big = [{"item_id": "G-L1", "product_id": "PG", "item_type": "FRAME", "quantity": 1, "unit_price": 10000.0,
+            "item_total": 10000.0, "taxable_value": 9523.81, "gst_rate": 5.0, "cost_at_sale": 6000.0}]
+    db.orders.insert_many([_historical(o, items=big) for o in ("K1", "K2", "K3")])
+
+    def _live(rid, oid, refund, at):
+        return {**_ret(rid, at, restock=False), "order_id": oid, "shopify_refund_id": refund,
+                "items": [{"order_item_id": "G-L1", "product_id": "PG", "return_qty": 1.0, "unit_price": 10000.0,
+                           "condition": "GOOD", "restock": False}],
+                "gst_breakup": {"gross": 10000.0, "taxable": 9523.81, "tax": 476.19}}
+
+    db.returns.insert_many([
+        _live("RK1", "K1", "RF-K1", "2026-11-10T05:00:00+00:00"),  # Goods back in December
+        _live("RK2", "K2", "RF-K2", "2026-11-12T05:00:00+00:00"),  # Goods back in October, before the note
+        _live("RK3", "K3", "RF-K3", "2026-11-14T05:00:00+00:00"),  # Goods back pressed, no landing date
+    ])
+    # As goods_back stamps a historical order (stock-in task, no unit).
+    stamp = {"restock_applied": True, "restock_stock_ids": [], "stock_in_task": "T"}
+    db.shopify_refund_review.insert_many([
+        {"review_id": "VK1", "shopify_refund_id": "RF-K1", "goods_back_at": "2026-12-03T05:00:00+00:00",
+         "goods_restock": stamp},
+        {"review_id": "VK2", "shopify_refund_id": "RF-K2", "goods_back_at": "2026-10-30T05:00:00+00:00",
+         "goods_restock": stamp},
+        {"review_id": "VK3", "shopify_refund_id": "RF-K3", "goods_back_at": None, "goods_restock": stamp},
+    ])
+    nov = _pnl()
+    # The money stays with each credit note, in November.
+    assert nov["returns_taxable"] == round(3 * 9523.81, 2)
+    # K2 landed before its note: dated at the note. K1 landed in December:
+    # November's P&L is never changed by it. K3 has no landing date: no cost.
+    assert nov["returns_cogs_reversal"] == 6000.0
+    assert _by_store()["S1"]["cogs"] == nov["cogs"]
+    assert round(sum(c["cogs"] for c in _by_category()["categories"]), 2) == nov["cogs"]
+    dec = _pnl_range("2026-12-01", "2026-12-31")
+    assert dec["returns_cogs_reversal"] == 6000.0  # K1, the month its goods landed
+    assert dec["returns_taxable"] == 0.0  # no second credit note
+    assert _pnl_range("2026-10-01", "2026-10-31")["returns_cogs_reversal"] == 0.0  # never before the note
