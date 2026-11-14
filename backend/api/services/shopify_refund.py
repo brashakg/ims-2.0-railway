@@ -2355,7 +2355,13 @@ def _stock_in_task(order: Dict[str, Any], lines: List[Any], held: _Held, refund_
         processing_store_id, refund_id=refund_id)
     if not out["applied"]:
         _release_unlanded(order, held, {}, refund_id)
-    return out
+        return out
+    # What this booking put on each order line's mark: Goods back stamps it on
+    # its review row, so the P&L dates those units at the press (D64 b), never
+    # at a note that booked nothing.
+    return {**out, "booked_lines": [
+        {"order_item_id": orig.get("item_id") or orig.get("id"), "product_id": orig.get("product_id"),
+         "qty": qty} for orig, qty, _pid, _token in held]}
 
 
 def raise_stock_in_task(order: Dict[str, Any], units: float, items: Any, source: str, task_ref: str,
@@ -2526,6 +2532,8 @@ def goods_back(db, review: Dict[str, Any], *, user_id: Optional[str]) -> Dict[st
         "restock_store_ids": result.get("restock_store_ids", []),
         "stock_in_task": result.get("stock_in_task"),
         "stock_in_store_id": result.get("stock_in_store_id"),
+        # A historical order's units this press booked, per order line.
+        "booked_lines": result.get("booked_lines") or [],
     }
     # Landed: record it. Not all landed: release the press so it can be
     # pressed again (the caps make a re-press safe even after a partial

@@ -846,6 +846,9 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
         # When Goods back first landed a refund's goods (D64 b): a historical
         # order's press lands no unit, so its date is the press itself.
         goods_at: Dict[str, datetime] = {}
+        # The units each historical Goods back press booked on each order
+        # line (goods_restock.booked_lines), with when it was pressed.
+        pressed: Dict[str, list] = {}
         if refund_ids:
             for row in db.get_collection("shopify_refund_review").find(
                 {"shopify_refund_id": {"$in": refund_ids},
@@ -859,6 +862,9 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 landed += [(e.get("stock_id"), parse_event_utc_naive(e.get("at")))
                            for e in row.get("goods_landed") or [] if isinstance(e, dict)]
                 goods.setdefault(row["shopify_refund_id"], []).extend(landed)
+                if rs.get("restock_applied"):
+                    pressed.setdefault(row["shopify_refund_id"], []).extend(
+                        (b, at) for b in rs.get("booked_lines") or [] if isinstance(b, dict))
                 times = [t for t in [at] + [t for _s, t in landed] if t is not None]
                 if times:
                     goods_at[row["shopify_refund_id"]] = min(times)
@@ -984,6 +990,9 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 # through it), restocked lines first, then the lines Goods
                 # back rescued. A piece the counter took back is never in the
                 # mark, whichever door ran first, so its cost comes back once.
+                # The units a Goods back press booked (its review row's
+                # booked_lines) are dated at that press, the rest of the mark
+                # at the note or the retry (D64 b).
                 # The counter's own note and an imported note (goods_lines)
                 # give back what their own door booked, at the note's date.
                 rid = ret.get("shopify_refund_id")
@@ -1000,11 +1009,24 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                     late = [t for t in (retried, back_at) if t]
                     booked_at = (max(when, min(late)) if late and (
                         ret.get("restock_completed_at") or ret.get("restock_applied") is False) else when)
-                    mark: Dict[int, float] = {}
+                    # Each order line's mark, split by who booked it: the
+                    # units a Goods back press booked there (its review row)
+                    # dated at that press (none: no landing date, no cost),
+                    # the rest at booked_at. A line the refund lists twice is
+                    # never dated by the other listing's door.
+                    mark: Dict[int, list] = {}
                     for it in items:
                         line = _line(it)
-                        if line is not None and id(line) not in mark:
-                            mark[id(line)] = float((line.get("restocked_refunds") or {}).get(str(rid)) or 0)
+                        if line is None or id(line) in mark:
+                            continue
+                        rest = float((line.get("restocked_refunds") or {}).get(str(rid)) or 0)
+                        slots = []
+                        for b, at in pressed.get(rid, []):
+                            q = min(float(b.get("qty") or 0), rest) if _line(b) is line else 0.0
+                            if q > 0:
+                                rest -= q
+                                slots.append([q, max(when, at) if at is not None else None])
+                        mark[id(line)] = [[rest, booked_at]] + slots
                     for restocked in (True, False):
                         for it in items:
                             line = _line(it)
@@ -1012,10 +1034,16 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                                 continue
                             if not restocked and back_at is None:
                                 continue  # only Goods back books a line not restocked
-                            qty = min(float(it.get("return_qty") or 0), mark[id(line)])
-                            if qty > 0:
-                                mark[id(line)] -= qty
-                                give.append((it, qty, booked_at if restocked else max(when, back_at)))
+                            want = float(it.get("return_qty") or 0)
+                            for slot in mark[id(line)]:
+                                qty = min(want, slot[0])
+                                if qty <= 0:
+                                    continue
+                                slot[0] -= qty
+                                want -= qty
+                                if slot[1] is not None:
+                                    give.append((it, qty, slot[1] if restocked
+                                                 else max(slot[1], when, back_at)))
                 else:
                     give = [(it, float(it.get("return_qty") or 0), when) for it in items or ret.get("goods_lines") or []]
                 if taxable > 0 or tax > 0:

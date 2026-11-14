@@ -697,8 +697,12 @@ def test_d45_b_only_a_note_that_brought_goods_back_gives_a_historical_cost_back(
     assert round(sum(c["cogs"] for c in cat["categories"]), 2) == nov["cogs"]
 
 
-def test_d45_b_the_importer_stamps_only_goods_refunded_in_full(db):
+def test_d45_b_the_importer_stamps_only_goods_refunded_in_full(db, monkeypatch):
+    from api.routers import returns as rr
     from api.services import shopify_ingest
+
+    monkeypatch.setattr(rr, "_orders_coll", lambda: _Positional(db.orders))
+    monkeypatch.setattr(rr, "_returns_coll", lambda: db.returns)
 
     order = {**_historical("I1", items=[
         {"item_id": "I1-L1", "product_id": "PI", "shopify_line_item_id": "LI1", "quantity": 1,
@@ -726,8 +730,12 @@ def test_d45_b_the_importer_stamps_only_goods_refunded_in_full(db):
     assert "items" not in docs["FULL"]  # the restock caps never read these
 
 
-def test_d45_b_the_importer_stamps_no_goods_for_a_line_shopify_did_not_restock(db):
+def test_d45_b_the_importer_stamps_no_goods_for_a_line_shopify_did_not_restock(db, monkeypatch):
+    from api.routers import returns as rr
     from api.services import shopify_ingest
+
+    monkeypatch.setattr(rr, "_orders_coll", lambda: _Positional(db.orders))
+    monkeypatch.setattr(rr, "_returns_coll", lambda: db.returns)
 
     order = {**_historical("I2", items=[
         {"item_id": "I2-L1", "product_id": "PI", "shopify_line_item_id": "LI2", "quantity": 1,
@@ -1065,8 +1073,10 @@ def test_d66_each_piece_cost_comes_back_once_whatever_order_the_doors_run(db, mo
             st["proposed"], overlapped, _ = cap(lines)
             st["queued"] = auto == "off" or overlapped
             if st["queued"]:
-                db.shopify_refund_review.insert_one({"review_id": "V-D66", "shopify_refund_id": "RF-D66",
-                                                     "goods_back_at": None})
+                db.shopify_refund_review.insert_one({
+                    "review_id": "V-D66", "shopify_refund_id": "RF-D66", "order_id": "D66", "store_id": "S1",
+                    "return_id": "RS-D66", "goods_back_at": None,
+                    "proposed_restock": [ln.model_dump() for ln in st["proposed"]]})
             else:
                 post(at)
         elif door in ("confirm", "blocked"):
@@ -1080,13 +1090,9 @@ def test_d66_each_piece_cost_comes_back_once_whatever_order_the_doors_run(db, mo
             res = sr._restock_booked(order(), cap(st["proposed"])[0], "RF-D66", lambda _l: {}) or {"applied": True}
             db.returns.update_one({"return_id": "RS-D66"}, {"$set": {
                 "restock_applied": bool(res.get("applied")), "restock_completed_at": at}})
-        elif door == "goods" and st["queued"]:
-            lines = cap([ln.model_copy(update={"restock": True}) for ln in st["proposed"]])[0]
-            if sr._hold_returned_qty(order(), lines, "RF-D66"):
-                st["pressed"] = True
-                db.shopify_refund_review.update_one({"review_id": "V-D66"}, {"$set": {
-                    "goods_back_at": at,
-                    "goods_restock": {"restock_applied": True, "restock_stock_ids": [], "stock_in_task": "T"}}})
+        elif door == "goods" and st["queued"]:  # the REAL Goods back door
+            res = _real_goods_back(db, monkeypatch, sr, rr, at)("V-D66")
+            st["pressed"] = st["pressed"] or any(b["order_item_id"] == "D66-A" for b in res["booked_lines"])
 
     closed = []
     for door in doors.split():
@@ -1132,3 +1138,157 @@ def test_d66_the_counter_never_takes_back_a_piece_an_imported_note_already_gave_
     assert not counter(2, "2026-11-06T05:00:00+00:00")  # the imported note already took the other back
     # Two pieces came back in all: two costs (the sale's 60% estimate each).
     assert customer_return_adjustments(db, {})["S1"]["cogs_reversal"] == round(2 * 0.6 * 952.38, 2)
+
+
+def _real_goods_back(db, monkeypatch, sr, rr, at):
+    """The REAL Goods back door (shopify_refund.goods_back), pressed at `at`:
+    the order read from this db, the stock-in task saved."""
+    from datetime import timezone as _tz
+
+    class _At(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime.fromisoformat(at).astimezone(tz or _tz.utc)
+
+    monkeypatch.setattr(sr, "datetime", _At)
+    monkeypatch.setattr(rr, "_load_order_for_restock",
+                        lambda oid: db.orders.find_one({"order_id": oid}, {"_id": 0}))
+    monkeypatch.setattr(sr, "raise_stock_in_task", lambda *a, **k: {
+        "applied": True, "restocked": [], "restock_stock_ids": [], "stock_in_task": "T"})
+    return lambda review_id: sr.goods_back(db, db.shopify_refund_review.find_one({"review_id": review_id}),
+                                           user_id="u")
+
+
+def test_d64_b_a_goods_back_unit_on_a_line_the_confirm_also_lists_is_dated_at_the_press(db, monkeypatch):
+    """Codex/Claude review of 34048de7: one Shopify refund lists order line L
+    twice (no_restock 1, cancel 1). AUTO off. The counter takes one piece of
+    L back, the confirm then books nothing (the cap), and the days to the
+    confirm are closed. Goods back later books the other piece: its cost
+    comes back on the press day, never inside the closed days."""
+    from api.routers import returns as rr
+    from api.routers.finance._shared import customer_return_adjustments
+    from api.services import shopify_refund as sr
+
+    monkeypatch.setattr(rr, "_orders_coll", lambda: _Positional(db.orders))
+    monkeypatch.setattr(rr, "_returns_coll", lambda: db.returns)
+    db.orders.insert_one(_historical("SL", items=[
+        {"item_id": "SL-L", "product_id": "PL", "item_type": "FRAME", "quantity": 2, "unit_price": 10000.0,
+         "item_total": 20000.0, "taxable_value": 19047.62, "gst_rate": 5.0, "cost_at_sale": 6000.0}]))
+    money = {"gross": 10000.0, "taxable": 9523.81, "tax": 476.19}
+
+    def order():
+        return db.orders.find_one({"order_id": "SL"}, {"_id": 0})
+
+    def cap(lines):
+        return sr._cap_restock_to_returnable(lines, order(), "RF-SL")[0]
+
+    # Day 2, the webhook (AUTO off): queued with the capped proposal.
+    proposed = cap([rr.ReturnLine(order_item_id="SL-L", product_id="PL", return_qty=1, unit_price=9523.81,
+                                  restock=False),
+                    rr.ReturnLine(order_item_id="SL-L", product_id="PL", return_qty=1, unit_price=9523.81)])
+    assert [(ln.return_qty, ln.restock) for ln in proposed] == [(1, False), (1, True)]
+    db.shopify_refund_review.insert_one({
+        "review_id": "V-SL", "shopify_refund_id": "RF-SL", "order_id": "SL", "store_id": "S1",
+        "return_id": "RS-SL", "goods_back_at": None, "proposed_restock": [ln.model_dump() for ln in proposed]})
+    # Day 3, the counter takes one piece of L back.
+    line = order()["items"][0]
+    assert rr._line_purchased_qty(line) - rr._units_already_back("SL", line)[0] >= 1
+    assert rr._claim_returnable_qty("SL", line, 1.0)
+    db.returns.insert_one({"return_id": "RC-SL", "order_id": "SL", "store_id": "S1", "status": "COMPLETED",
+                           "created_at": "2026-11-03T05:00:00+00:00", "gst_breakup": money,
+                           "items": [{"order_item_id": "SL-L", "product_id": "PL", "return_qty": 1.0,
+                                      "unit_price": 9523.81, "condition": "GOOD"}]})
+    # Day 4, the confirm: re-capped, booked through _restock_booked (nothing
+    # left to book), the doc keeps the webhook's lines.
+    monkeypatch.setattr(sr, "raise_stock_in_task", lambda *a, **k: {
+        "applied": True, "restocked": [], "restock_stock_ids": []})
+    assert sr._restock_booked(order(), cap(proposed), "RF-SL", lambda _l: {})["applied"]
+    assert float((order()["items"][0].get("restocked_refunds") or {}).get("RF-SL") or 0) == 0.0
+    db.returns.insert_one({"return_id": "RS-SL", "order_id": "SL", "store_id": "S1", "status": "COMPLETED",
+                           "shopify_refund_id": "RF-SL", "created_at": "2026-11-04T05:00:00+00:00",
+                           "restock_applied": True, "items": [ln.model_dump() for ln in proposed],
+                           "gst_breakup": {k: 2 * v for k, v in money.items()}})
+    closed = customer_return_adjustments(db, {}, from_date="2026-11-01", to_date="2026-11-05")
+    assert closed["S1"]["cogs_reversal"] == 6000.0  # the counter's piece only
+    # Day 6, Goods back books the other piece.
+    res = _real_goods_back(db, monkeypatch, sr, rr, "2026-11-06T05:00:00+00:00")("V-SL")
+    assert res["status"] == "stock_in", res
+    assert float(order()["items"][0]["restocked_refunds"]["RF-SL"]) == 1.0
+    # The closed days never change; the press's piece lands on its own day.
+    assert customer_return_adjustments(db, {}, from_date="2026-11-01", to_date="2026-11-05") == closed
+    assert customer_return_adjustments(db, {}, from_date="2026-11-06", to_date="2026-11-06")["S1"][
+        "cogs_reversal"] == 6000.0
+    assert customer_return_adjustments(db, {})["S1"]["cogs_reversal"] == 2 * 6000.0  # two pieces, once each
+
+
+def _import_refund(db, order, refund_id, line_item_id, at="2026-11-08T05:00:00+00:00"):
+    from api.services import shopify_ingest
+
+    shopify_ingest._book_historical_refund_credit_notes(db, {
+        "id": order["shopify_order_id"], "financial_status": "partially_refunded", "refunds": [
+            {"id": refund_id, "processed_at": at,
+             "refund_line_items": [{"line_item_id": line_item_id, "quantity": 1, "subtotal": 952.38,
+                                    "total_tax": 47.62}],
+             "transactions": [{"kind": "refund", "status": "success", "amount": "1000.00"}]}]}, order)
+
+
+def _imported_two_piece(db, oid):
+    order = {**_historical(oid, items=[
+        {"item_id": f"{oid}-L1", "product_id": "PI", "shopify_line_item_id": f"LI-{oid}", "quantity": 2,
+         "unit_price": 1000.0, "item_total": 2000.0, "taxable_value": 1904.76, "tax_amount": 95.24,
+         "gst_rate": 5.0, "cost_at_sale": 600.0}]), "shopify_order_id": f"SH-{oid}"}
+    db.orders.insert_one(dict(order))
+    return order
+
+
+def _counter_claim(db, rr, oid, n, at, precheck=True):
+    line = db.orders.find_one({"order_id": oid})["items"][0]
+    if precheck and rr._line_purchased_qty(line) - rr._units_already_back(oid, line)[0] < 1:
+        return False
+    if not rr._claim_returnable_qty(oid, line, 1.0):
+        return False
+    db.returns.insert_one({"return_id": f"RC-{oid}{n}", "order_id": oid, "store_id": "S1", "status": "COMPLETED",
+                           "created_at": at, "gst_breakup": {"gross": 1000.0, "taxable": 952.38, "tax": 47.62},
+                           "items": [{"order_item_id": f"{oid}-L1", "product_id": "PI", "return_qty": 1.0,
+                                      "unit_price": 952.38, "condition": "GOOD"}]})
+    return True
+
+
+def test_d66_a_re_import_never_gives_back_cost_for_a_piece_the_counter_already_took_back(db, monkeypatch):
+    """Both pieces of an imported order went back at the counter; Shopify
+    then refunded one of them too, its webhook lost, and the import was run
+    again. The re-import's credit note is booked (the money is the GST
+    note's), but it brought no goods back: each piece's cost comes back once."""
+    from api.routers import returns as rr
+
+    monkeypatch.setattr(rr, "_orders_coll", lambda: _Positional(db.orders))
+    monkeypatch.setattr(rr, "_returns_coll", lambda: db.returns)
+    order = _imported_two_piece(db, "RI")
+    assert _counter_claim(db, rr, "RI", 1, "2026-11-03T05:00:00+00:00")
+    assert _counter_claim(db, rr, "RI", 2, "2026-11-04T05:00:00+00:00")
+    _import_refund(db, order, "RF-RI", "LI-RI")
+    note = db.returns.find_one({"shopify_refund_id": "RF-RI"}, {"_id": 0})
+    assert note["gst_breakup"]["taxable"] == 952.38  # the GST note is booked as before
+    assert not note.get("goods_lines")
+    assert _pnl()["returns_cogs_reversal"] == 2 * 600.0  # two pieces, once each
+
+
+def test_d66_the_imported_note_books_its_piece_so_two_counter_returns_at_once_cannot_both_take_the_last(
+        db, monkeypatch):
+    """The import books the piece its note brought back on the order line (the
+    counter's own atomic claim, with the refund's mark), so the atomic claim --
+    the only guard two counter returns running at the same moment both pass
+    the pre-check of -- sees it."""
+    from api.routers import returns as rr
+
+    monkeypatch.setattr(rr, "_orders_coll", lambda: _Positional(db.orders))
+    monkeypatch.setattr(rr, "_returns_coll", lambda: db.returns)
+    order = _imported_two_piece(db, "RJ")
+    _import_refund(db, order, "RF-RJ", "LI-RJ")
+    line = db.orders.find_one({"order_id": "RJ"})["items"][0]
+    assert line.get("returned_qty") == 1.0 and line["restocked_refunds"]["RF-RJ"] == 1.0
+    # Both pass the pre-check before either claims (the race), then claim.
+    assert rr._line_purchased_qty(line) - rr._units_already_back("RJ", line)[0] == 1.0
+    assert _counter_claim(db, rr, "RJ", 1, "2026-11-09T05:00:00+00:00", precheck=False)
+    assert not _counter_claim(db, rr, "RJ", 2, "2026-11-09T05:00:00+00:00", precheck=False)
+    assert _pnl()["returns_cogs_reversal"] == 2 * 600.0
