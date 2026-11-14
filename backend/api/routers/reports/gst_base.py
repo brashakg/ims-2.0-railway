@@ -266,7 +266,8 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, 
     stamp is derived from its GST-inclusive ``item_total``
     (taxable = item_total * 100 / (100 + rate)), its rate the item's
     ``gst_rate`` or else the category table rate (api.services.gst_rates).
-    A line's HSN is its ``hsn_code`` (9004 when blank). With no usable line,
+    A line's HSN is its ``hsn_code`` (a 9004 placeholder when blank, flagged in
+    ``issues``). With no usable line,
     one line carries the order totals at the order's own stamped ``tax_rate``,
     else at the GST slab its own tax / taxable gives (flagged in ``issues``),
     else at its effective rate flagged as an ERROR -- never a guessed 5%. A 0% line
@@ -295,6 +296,7 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, 
 
     raw = []
     line_qtys: list = []
+    no_hsn = 0
     for it in (items or []):
         if not isinstance(it, dict):
             continue
@@ -325,6 +327,9 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, 
             rate = int(round(float(rate)))
         except (TypeError, ValueError):
             raise UnfileableOrder(order, f"a line's GST rate is unreadable ({rate!r})") from None
+        # A line with no HSN is filed under the 9004 placeholder and SAID
+        # (audit L1-F38) -- never silently: the CA confirms it before filing.
+        no_hsn += not it.get("hsn_code")
         hsn = str(it.get("hsn_code") or "9004")
         if not stamped:
             taxable = gross * 100.0 / (100.0 + rate)
@@ -351,12 +356,15 @@ def _order_rate_lines(items, order_taxable, order_tax, order=None, issues=None, 
                 issues.append({"level": "error", "invoice": oid, "issue": (
                     f"No line carries a GST rate and its tax is {rate}% of its taxable value -- "
                     "no GST slab; correct the order before filing.")})
+        _flag("No line carries an HSN; filed under 9004 as a placeholder -- confirm the HSN before filing.")
         raw = [(rate, "9004", order_taxable, order_tax)]
         if rate == 0 and order_taxable > 0:
             _flag(f"Rs {order_taxable:,.2f} at 0% (nil / exempt) belongs in GSTR-1 Table 8, not built yet (batch 7) -- filed at 0% here; the CA moves it.")
         if qtys is not None:
             qtys[:] = [0.0]
         return [(rate, "9004", round(order_taxable, 2), round(order_tax, 2))]
+    if no_hsn:
+        _flag(f"{no_hsn} line(s) carry no HSN; filed under 9004 as a placeholder -- confirm the HSN before filing.")
     for rate, _h, taxable, _x in raw:
         if rate == 0 and taxable > 0:
             _flag(f"Rs {taxable:,.2f} at 0% (nil / exempt) belongs in GSTR-1 Table 8, not built yet (batch 7) -- filed at 0% here; the CA moves it.")
