@@ -56,9 +56,14 @@ export default function StockLookupPage() {
   const [q, setQ] = useState('');
   const input = useRef<HTMLInputElement>(null);
   // The Power Grid's own route gate, asked the way ProtectedRoute asks it.
-  const canOpenGrid = useAuth().hasRole(POWER_GRID_ROLES);
+  const { hasRole, user } = useAuth();
+  const canOpenGrid = hasRole(POWER_GRID_ROLES);
+  // The answer is for the shop in the sign-in token, so it is kept under that
+  // shop: after a store switch the server confirmed (AuthContext moves
+  // activeStoreId only then) this asks again, and until the new shop answers
+  // no count is shown and nothing is marked "this shop" (audit SP-06).
   const { data, isFetching, error, refetch } = useQuery({
-    queryKey: ['inventory', 'lookup', q],
+    queryKey: ['inventory', 'lookup', q, user?.activeStoreId],
     queryFn: async () => (await api.get<LookupResult>('/inventory/lookup', { params: { q } })).data,
     enabled: q.length > 0,
     staleTime: 0,

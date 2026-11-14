@@ -26,8 +26,10 @@ export function toDate(value: string | number | Date | null | undefined): Date |
   // Already has timezone info? (ends with Z, or +HH:MM / -HH:MM / +HHMM)
   const hasTz = /[zZ]$/.test(s) || /[+-]\d{2}:?\d{2}$/.test(s);
   if (!hasTz) {
-    // Normalize "YYYY-MM-DD HH:MM:SS" -> ISO, then mark as UTC.
-    s = s.replace(' ', 'T') + 'Z';
+    // Normalize "YYYY-MM-DD HH:MM:SS" -> ISO, then mark as UTC. A date-only
+    // value gets its midnight spelled out: "2026-10-25Z" is not a standard
+    // date string and Safari (every iPhone/iPad browser) refuses it.
+    s = (/^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T00:00:00` : s.replace(' ', 'T')) + 'Z';
   }
   const d = new Date(s);
   return isNaN(d.getTime()) ? null : d;

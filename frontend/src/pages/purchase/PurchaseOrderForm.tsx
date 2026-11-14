@@ -23,6 +23,7 @@ import type {
   ComposerLine,
 } from '../../components/purchase/PurchaseOrderComposer';
 import { mapPOtoPurchaseOrder } from './purchaseMappers';
+import { istDayString } from '../../utils/datetime';
 import { CATEGORIES } from '../../domain/catalog/productAdd';
 import type { Supplier, PurchaseOrder, POItem } from './purchaseTypes';
 import { getCategoryFields } from '../../domain/catalog/productAdd/categoryFields';
@@ -754,7 +755,8 @@ export function PurchaseOrderForm({
                 poNumber: resp.po_number ?? `PO-${String(existingPOCount + 1).padStart(3, '0')}`,
                 supplierId: payload.vendorId,
                 supplierName: payload.vendorName,
-                date: new Date().toISOString().split('T')[0],
+                // Today in India, as the mapper dates a stored order (not the UTC day).
+                date: istDayString(new Date()) ?? '',
                 expectedDelivery: payload.expectedDate,
                 status: 'DRAFT',
                 items: poItems,

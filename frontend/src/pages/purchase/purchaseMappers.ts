@@ -6,6 +6,7 @@
 // Suppliers and Analytics sections.
 
 import { gstinStateCode } from '../../constants/gst';
+import { istDayString } from '../../utils/datetime';
 import type { POItem, POStatus, Supplier, PurchaseOrder } from './purchaseTypes';
 
 // ============================================================================
@@ -98,7 +99,10 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
     supplierId: po.vendor_id ?? '',
     supplierName: po.vendor_name ?? '',
     deliveryStoreId: po.delivery_store_id || undefined,
-    date: po.created_at ? po.created_at.split('T')[0] : '',
+    // The India calendar day the order was raised on (the stored instant is
+    // UTC: its first ten letters are the wrong day after 18:30 UTC). A stored
+    // value that is not a date is passed on as it is, for poDay to name.
+    date: istDayString(po.created_at) ?? (po.created_at ? String(po.created_at) : ''),
     expectedDelivery: po.expected_date ?? '',
     status: (po.status ?? 'DRAFT') as POStatus,
     items,
@@ -120,6 +124,18 @@ export function mapPOtoPurchaseOrder(po: any): PurchaseOrder {
 
 /** What a PO line's price reads as: the rupees, or that accounts still have
  *  to agree it (a line nobody priced -- never shown as a real 0). */
+/** A purchase order's day as every screen and the downloaded copy print it.
+ *  The expected delivery date is optional: none reads 'Not set', a stored
+ *  value that is not a date reads 'Unreadable date' -- never "Invalid Date"
+ *  (audit APP-02). A real one is written as it always was (the browser's own
+ *  short date). A date-only value is a calendar day, not an instant: read at
+ *  local midnight it is the same day in any browser timezone. */
+export function poDay(value: string | null | undefined): string {
+  if (!value) return 'Not set';
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00` : value);
+  return Number.isNaN(d.getTime()) ? 'Unreadable date' : d.toLocaleDateString();
+}
+
 export const PRICE_NEEDED = 'Price needed';
 export function poMoney(value: number | null): string {
   return value == null ? PRICE_NEEDED : `₹${value.toLocaleString()}`;
