@@ -277,7 +277,10 @@ def test_second_refund_after_earlier_credit_is_capped(env):
     assert _balance(env) == (1000.0, 1000.0)
     row, res = _queue_and_confirm(env, _payload(refund_id="700002", txns=[]))
     assert row["credit_note"]["store_credit"] == 0.0
-    assert [r["delta"] for r in _ledger(env)] == [1000.0, 0.0]
+    # The same unit, refunded again: no second GST credit note either (#1397
+    # round 8 -- the first one already reversed its tax); the reviewer rejects.
+    assert res["status"] == "already_returned", res
+    assert [r["delta"] for r in _ledger(env)] == [1000.0]
     assert _balance(env) == (1000.0, 1000.0)
 
 
@@ -842,7 +845,7 @@ def test_redrive_does_not_count_its_own_dead_run_credit(env):
     env.get_collection("credit_note_ledger").insert_one({
         "customer_id": "CUST-1", "type": "ISSUED", "amount": 1000.0, "delta": 1000.0,
         "ref": "RET-261020-AB12CD", "order_id": "ord-1", "entry_id": "own-1"})
-    credit, why, label, _ = sr._store_credit_allowance(env, "ord-1", "700001", 1000.0, 0.0)
+    credit, why, label, _, _pts = sr._store_credit_allowance(env, "ord-1", "700001", 1000.0, 0.0)
     assert (credit, label) == (1000.0, None)
     res = sr.post_from_review(env, row)
     assert res["status"] == "credited"

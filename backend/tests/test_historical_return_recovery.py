@@ -126,11 +126,11 @@ def test_legacy_id_only_unit_is_reactivated_by_its_exact_identity(sid, lost_repl
     repo = SimpleNamespace(collection=LostReply())
     used = set()
     assert returns_router._reactivate_original_unit(
-        repo, "P1", "S1", "O1", used, exact_order_only=True,
+        repo, "P1", "S1", "O1", used,
     ) == str(sid)
     restored = coll.find_one({"_id": sid})
     assert restored["status"] == "AVAILABLE" and restored["order_id"] is None
     assert restored["returned_from_order_id"] == "O1" and coll.count_documents({}) == 1
     assert returns_router._reactivate_original_unit(
-        repo, "P1", "S1", "O1", used, exact_order_only=True,
+        repo, "P1", "S1", "O1", used,
     ) is None

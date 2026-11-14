@@ -328,6 +328,9 @@ class _FakeAccounts:
         # tier moves in the SAME adjust_balance call as the lifetime decrement.
         self.tiers_set = []
 
+    def read_or_raise(self, cid):
+        return None    # falls through to find_or_create, which tests hook
+
     def find_or_create(self, cid):
         return dict(self.acct)
 
@@ -1436,7 +1439,7 @@ def test_burn_direction_also_applies_once(wired):
     first = L.reverse_for_cancel("ORD-1", "C1")
     marker = _marker_of(wired)
     # A second flow completes the SAME marker directly.
-    second = L._ensure_reversal_applied(wired["accounts"], marker)
+    second = L._ensure_reversal_applied(wired["accounts"], marker, wired["accounts"].acct)
 
     assert first["ok"] and second["ok"]
     assert wired["accounts"].acct["balance_points"] == 4000
@@ -1829,3 +1832,25 @@ def test_a_refused_guarded_write_invents_no_field(wired):
     assert doc is None                              # the write was refused
     assert "applied_reversals" not in acct          # ...so nothing was written
     assert acct["balance_points"] == 0
+
+
+def test_loyalty_store_unavailable_on_cancel_is_flagged_and_the_retry_restores(wired):
+    """UNAVAILABLE is not ABSENT at the door either: no loyalty store means the
+    reversal did not run, so the cancel may not stamp a finished undo and close
+    its retry door."""
+    wired["txns"].rows.append(_earn("C1", "ORD-1", 100))
+    wired["accounts"].acct.update({"balance_points": 150, "lifetime_earned": 100})
+    accounts = wired["accounts"]
+    wired["monkeypatch"].setattr(L, "get_loyalty_account_repository", lambda: None)
+
+    first = _cancel()
+
+    assert first["loyalty_reversal_failed"] is True
+    assert wired["orders"].orders["ORD-1"]["loyalty_reversal_failed"] is True
+    assert accounts.acct["balance_points"] == 150
+
+    wired["monkeypatch"].setattr(L, "get_loyalty_account_repository", lambda: accounts)
+    retry = _cancel()
+
+    assert retry["loyalty_reversal_failed"] is False
+    assert accounts.acct["balance_points"] == 50

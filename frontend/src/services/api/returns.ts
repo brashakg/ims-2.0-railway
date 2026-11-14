@@ -112,6 +112,12 @@ export interface ReturnQuote {
   restocking_fee: number;
   /** THE figure the refund-tender split must sum to. */
   net_refund: number;
+  /** The part of the sale paid with loyalty points: it goes back as points,
+   *  never inside net_refund (owner ruling 2026-11-08). */
+  points_paid_share?: number;
+  /** True when an admin closed this bill's points exception: the share is
+   *  still held back, but no points go back automatically (D28). */
+  points_waived?: boolean;
   gst_breakup?: Record<string, number>;
   settlement?: { direction: 'COLLECT' | 'REFUND' | 'EVEN'; difference: number } | null;
   /** What each tender actually collected on the source order. */
@@ -172,6 +178,20 @@ export interface UnbilledPayment {
 
 export type OwedPaidMethod = 'CASH' | 'UPI' | 'CARD' | 'BANK_TRANSFER';
 
+/** A completed return whose GOOD pieces are still out of stock: "Retry stock
+ *  step" puts each back once (never a hand entry). */
+export interface StockOpenReturn {
+  return_id: string;
+  order_id?: string;
+  order_number?: string;
+  store_id?: string;
+  /** The GOOD pieces still out, by name: "2 x RB-123, 1 x OAK-55" ('' for none). */
+  pieces: string;
+  /** Damaged or opened pieces still reading sold, which the retry sets aside
+   *  in Quarantine ('' for none). */
+  aside_pieces?: string;
+}
+
 export const returnsApi = {
   advanceRefundPreview: async (orderId: string): Promise<AdvanceRefundPlan> => {
     const response = await api.get(`/returns/advance-refund/${encodeURIComponent(orderId)}`);
@@ -198,7 +218,9 @@ export const returnsApi = {
   },
 
   /** Returns > Needs completing: unfinished counter returns (Accounts / Admin). */
-  needsCompleting: async (): Promise<{ items: NeedsCompletingItem[]; owed?: OwedReturn[]; unbilled?: UnbilledPayment[] }> => {
+  needsCompleting: async (): Promise<{
+    items: NeedsCompletingItem[]; owed?: OwedReturn[]; unbilled?: UnbilledPayment[]; stock_open?: StockOpenReturn[];
+  }> => {
     const response = await api.get('/returns/needs-completing');
     return response.data;
   },
@@ -209,6 +231,13 @@ export const returnsApi = {
     answer: { cash_leg_paid?: boolean; nothing_paid?: boolean; note?: string },
   ) => {
     const response = await api.post(`/returns/${encodeURIComponent(returnId)}/complete-record`, answer);
+    return response.data;
+  },
+
+  /** "Retry stock step": put a completed return's pieces still out of stock
+   *  back, each once. */
+  retryStockStep: async (returnId: string) => {
+    const response = await api.post(`/returns/${encodeURIComponent(returnId)}/complete-record/restock`);
     return response.data;
   },
 

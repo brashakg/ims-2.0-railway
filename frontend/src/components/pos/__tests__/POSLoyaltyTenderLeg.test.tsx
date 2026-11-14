@@ -223,6 +223,8 @@ describe('POS loyalty tender leg', () => {
     expect(res.warning).toMatch(/could not be confirmed/);
     expect(res.warning).toMatch(/check the customer's points/);
     expect(res.warning).not.toMatch(/re-apply the points/);
+    // Owner ruling 2026-11-07: a cancelled bill takes no payment; its points come back by themselves.
+    expect(res.warning).toMatch(/on a cancelled bill they return to the customer on their own/);
   });
 
   it('a LOYALTY line with no pending intent behind it burns nothing, posts nothing, and is flagged', async () => {

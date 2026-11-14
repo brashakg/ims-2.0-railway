@@ -355,10 +355,7 @@ async def cancel_order_core(order_id: str, reason: str, current_user: dict):
                     loyalty_reversal.get("earned_clawed", 0),
                     loyalty_reversal.get("redeemed_restored", 0),
                 )
-            elif loyalty_reversal.get("reason") not in (
-                "missing_ids",
-                "loyalty_db_unavailable",
-            ):
+            elif loyalty_reversal.get("reason") != "missing_ids":
                 loyalty_reversal_failed = True
                 logger.error(
                     "[ORDERS] loyalty reversal FAILED on cancel %s: %s",

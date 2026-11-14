@@ -30,6 +30,7 @@ from api.utils.event_time import utc_now_iso
 
 import logging
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
@@ -344,12 +345,45 @@ def _resolve_original_line(
     return None
 
 
+def _counts_as_refunded(doc: Dict[str, Any], own_refund: Optional[str] = None) -> bool:
+    """THE test every refund reader of a bill uses: a COMPLETED return, or an
+    online refund that is unfinished (shopify_refund.is_unfinished) -- counted
+    exactly as if it were finished (D38: its credit may be booked, its points
+    given back). ``own_refund``: a retry of that online refund pricing itself."""
+    from ..services.shopify_refund import is_unfinished
+
+    if own_refund and doc.get("shopify_refund_id") == own_refund:
+        return False
+    return doc.get("status") == "COMPLETED" or is_unfinished(doc)
+
+
+def _doc_amount(doc: Dict[str, Any], field: str = "net_refund") -> float:
+    """What one counted returns doc adds to a bill's ``field`` total. An online
+    refund's doc counts at least the money that left on it -- what Shopify
+    sent back plus its store credit and points share, the online door's rule
+    (shopify_refund._given_back_elsewhere): its note may file fewer lines than
+    Shopify paid for (D62(2), a line the counter already took back), but every
+    rupee Shopify sent back stays counted by the counter's cap (D62(1))."""
+    try:
+        val = float(doc.get(field) or 0)
+    except (TypeError, ValueError):
+        val = 0.0
+    if field == "net_refund" and doc.get("shopify_refund_id") and doc.get("money_back") is not None:
+        try:
+            out = (float(doc.get("money_back") or 0) + float((doc.get("credit_entry") or {}).get("delta") or 0)
+                   + float(doc.get("points_paid_share") or 0))
+        except (TypeError, ValueError):
+            out = 0.0
+        val = max(val, out)
+    return val
+
+
 def _sum_prior_refunds(
     order_id: Optional[str], field: str = "net_refund", *, strict: bool = False
 ) -> float:
     """Total ``field`` (net_refund by default) already issued for an order across
-    COMPLETED returns (BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when
-    unavailable.
+    COMPLETED returns and unfinished online refunds (_counts_as_refunded;
+    BUG-096 cumulative monetary cap). Fail-soft -> 0.0 when unavailable.
 
     ``strict`` (the refund door: the Rs 2,000 approval rule and the over-refund
     cap, owner ruling 2026-10-23 -- FAIL CLOSED): a READ ERROR raises 503
@@ -364,14 +398,9 @@ def _sum_prior_refunds(
     total = 0.0
     try:
         for doc in coll.find({"order_id": order_id}, {"_id": 0}):
-            if doc.get("status") != "COMPLETED":
+            if not _counts_as_refunded(doc):
                 continue
-            net = doc.get(field)
-            if net is not None:
-                try:
-                    total += float(net)
-                except (TypeError, ValueError):
-                    pass
+            total += _doc_amount(doc, field)
     except Exception as exc:  # noqa: BLE001
         if strict:
             logger.error("[RETURNS] earlier refunds unreadable for %s: %s", order_id, exc)
@@ -380,6 +409,41 @@ def _sum_prior_refunds(
                 detail="Could not check earlier refunds on this bill - try again. Nothing was recorded.",
             )
         logger.debug("[RETURNS] _sum_prior_refunds lookup failed: %s", exc)
+    if field == "net_refund":
+        total += _shopify_money_off_returns(order_id, strict=strict)
+    return round(total, 2)
+
+
+def _shopify_money_off_returns(order_id: Optional[str], *, strict: bool = False) -> float:
+    """Money Shopify already sent back on this bill for an online refund IMS
+    booked no return for: its review row is its only record (queued, rejected,
+    money-only, or one whose items another door already took back -- D62).
+    Counted at what the row says Shopify sent back (the online door's rule,
+    shopify_refund._given_back_elsewhere); a refund whose returns doc counts
+    (_counts_as_refunded) is counted by that doc, never twice. Unreadable:
+    503 when ``strict`` (fail CLOSED), else 0."""
+    db = _get_db()
+    if db is None or not order_id:
+        return 0.0
+    total = 0.0
+    try:
+        booked = {d.get("shopify_refund_id") for d in db.get_collection("returns").find(
+            {"order_id": order_id, "shopify_refund_id": {"$nin": [None, ""]}}, {"_id": 0})
+            if _counts_as_refunded(d)}
+        for row in db.get_collection("shopify_refund_review").find({"order_id": order_id}, {"_id": 0}):
+            if not row.get("shopify_refund_id") or row.get("shopify_refund_id") in booked:
+                continue
+            cn = row.get("credit_note") or {}
+            back = cn.get("shopify_refunded_amount") if cn.get("money_back") is None else cn.get("money_back")
+            total += float(back or 0)
+    except Exception as exc:  # noqa: BLE001
+        if strict:
+            logger.error("[RETURNS] online refunds unreadable for %s: %s", order_id, exc)
+            raise HTTPException(
+                status_code=503,
+                detail="Could not check earlier refunds on this bill - try again. Nothing was recorded.",
+            )
+        return 0.0
     return round(total, 2)
 
 
@@ -548,7 +612,7 @@ def _units_already_back(
     docs = _already_returned_qty(
         order_id,
         orig_line.get("item_id") or orig_line.get("id"),
-        orig_line.get("ims_product_id") or orig_line.get("product_id"),
+        restock_engine.line_product_id(orig_line),
         own_shopify_refund_id=own_shopify_refund_id,
     )
     if docs is None:
@@ -560,6 +624,32 @@ def _units_already_back(
     each = {r: (refunds.get(r, 0.0) + booked.get(r, 0.0)) if r == own
             else max(refunds.get(r, 0.0), booked.get(r, 0.0)) for r in {*refunds, *booked}}
     return (round(counter + sum(each.values()), 4), round(each.get(own, 0.0), 4))
+
+
+def _refuse_over_return(order_id: Optional[str], ret_line: Any, orig_line: Dict[str, Any]) -> None:
+    """400 when this return line asks back more units than the order line
+    still has out with the buyer (_units_already_back); 503 when the earlier
+    returns cannot be read."""
+    purchased = _line_purchased_qty(orig_line)
+    back = _units_already_back(order_id, orig_line)
+    if back is None:
+        raise HTTPException(
+            status_code=503,
+            detail=("Could not read this order's earlier returns just now - "
+                    "nothing was recorded. Try again."),
+        )
+    already = back[0]
+    remaining = round(purchased - already, 4)
+    if ret_line.return_qty > remaining + 1e-9:
+        name = ret_line.product_name or orig_line.get("product_name") or orig_line.get("product_id")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Return quantity {ret_line.return_qty:g} exceeds the "
+                f"returnable quantity {remaining:g} for '{name}' "
+                f"(purchased {purchased:g}, already returned {already:g})."
+            ),
+        )
 
 
 def _orders_coll():
@@ -822,19 +912,58 @@ def _refuse_shipping_line(orig_line: Optional[Dict[str, Any]]) -> None:
         )
 
 
-def _refuse_counter_shipping(lines: List[ReturnLine], order: Optional[Dict[str, Any]]) -> None:
-    """The counter's shipping rule over a return's lines, matched as the
-    pricing matches them -- for the quote (the create runs it per resolved
-    line). The Shopify refund door prices through the same helpers and DOES
-    refund shipping, so the rule lives at the counter doors only."""
+def _returnable_lines(
+    lines: List[ReturnLine], order: Optional[Dict[str, Any]], order_id: Optional[str]
+) -> List[Dict[str, Any]]:
+    """THE counter's eligibility rule for a return's lines, for the quote and
+    the create alike, so the quote never prices what the create refuses: every
+    line must be a line of the original sale (400), never a shipping line
+    (400), and its quantity never more than is still returnable -- purchased
+    less every unit already back (400, naming what is left; 503 when the
+    earlier returns cannot be read). Reads only: the create's atomic claim on
+    the order line still caps two presses racing each other.
+
+    Each line then takes its IDENTITY from the sale, never from the client:
+    the bill line's own id and STOCK product (the Returns screen sends no
+    product, so a GOOD piece was credited and left SOLD; a client-sent one
+    could put another product back in stock), and a blank sku / name is
+    filled from the line. A line whose sale took no stock unit (a lens, a
+    service, a virtual till item: restock_engine.line_stock_product_id) names
+    no product, so nothing is put back, set aside or minted for it. Every
+    later step -- pricing, the saved record, restock, quarantine, the restock
+    retry -- reads these lines, and matches them by the line id.
+
+    Returns ``[{"ret_line", "orig_line"}]`` in the lines' order."""
     idx = _order_line_index(order)
-    for ln in lines:
-        orig = None
-        if ln.order_item_id and str(ln.order_item_id) in idx["by_item"]:
-            orig = idx["by_item"][str(ln.order_item_id)]
-        elif ln.product_id and str(ln.product_id) in idx["by_product"]:
-            orig = idx["by_product"][str(ln.product_id)]
-        _refuse_shipping_line(orig)
+    resolved: List[Dict[str, Any]] = []
+    for ret_line in lines:
+        orig_line = _resolve_original_line(ret_line, idx)
+        if orig_line is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Return line does not match any line on the original order "
+                    f"(order_item_id={ret_line.order_item_id!r}, "
+                    f"product_id={ret_line.product_id!r}). Cannot refund an "
+                    "item that was not on this sale."
+                ),
+            )
+        _refuse_shipping_line(orig_line)
+        _refuse_over_return(order_id, ret_line, orig_line)
+        item_id = orig_line.get("item_id") or orig_line.get("id")
+        stock_product = restock_engine.line_stock_product_id(orig_line)
+        if item_id:
+            ret_line.order_item_id = str(item_id)
+            ret_line.product_id = stock_product
+        elif not stock_product:
+            # A legacy line with no id was matched BY its product and keeps it
+            # (the returnable-quantity book reads it); it still moves no stock.
+            ret_line.restock = False
+        ret_line.sku = ret_line.sku or str(orig_line.get("sku") or "")
+        ret_line.product_name = ret_line.product_name or str(
+            orig_line.get("product_name") or orig_line.get("name") or "")
+        resolved.append({"ret_line": ret_line, "orig_line": orig_line})
+    return resolved
 
 
 def _priced_return_lines(
@@ -1000,15 +1129,22 @@ _REFUND_CASH_IN = ("CASH", "UPI", "CARD", "BANK_TRANSFER")
 # CASH row -- which (before the aggregation fix) silently over-netted the
 # drawer. The refundable substitute is STORE_CREDIT, which is RECORDED on the
 # breakdown but NEVER netted into a drawer.
-_ORDER_NON_REFUNDABLE = ("GIFT_VOUCHER", "LOYALTY", "EMI", "CREDIT")
+_ORDER_NON_REFUNDABLE = ("GIFT_VOUCHER", "EMI", "CREDIT")
 
-# Non-drawer tenders a refund leg may legitimately name. STORE_CREDIT is the
-# standard substitute for any non-refundable instrument; the instrument itself
-# is accepted too (a voucher reissued as a voucher).
-_REFUND_NON_DRAWER = ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE
+# LOYALTY is NOT in that pool (owner ruling 2026-11-08): the part of a sale paid
+# with points comes back AS POINTS -- the loyalty reversal restores them -- so it
+# is never also paid as money or store credit. _points_paid_share takes it out
+# of what a return pays; no refund leg may name it.
+_POINTS_TENDER = "LOYALTY"
 
-# Every tender a refund leg may name.
-_REFUND_ALLOWED = _REFUND_CASH_IN + _REFUND_NON_DRAWER
+# Non-drawer tenders: never netted into a drawer. LOYALTY stays here so a leg
+# saved before the 2026-11-08 ruling is still read as not-drawer money.
+_REFUND_NON_DRAWER = ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE + (_POINTS_TENDER,)
+
+# Every tender a NEW refund leg may name. STORE_CREDIT is the standard
+# substitute for a non-refundable instrument; the instrument itself is accepted
+# too (a voucher reissued as a voucher).
+_REFUND_ALLOWED = _REFUND_CASH_IN + ("STORE_CREDIT",) + _ORDER_NON_REFUNDABLE
 
 # Ceilings on an EXCHANGE replacement. The exchange difference feeds the cash
 # drawer, so every client-supplied factor of it is a drawer input.
@@ -1069,7 +1205,8 @@ def _normalize_refund_tenders(
                 detail=(
                     f"Unrecognized refund tender '{method}'. Use CASH / UPI / "
                     "CARD / BANK, or STORE_CREDIT for the part of the sale paid "
-                    "with a gift voucher / loyalty / EMI / credit."
+                    "with a gift voucher / EMI / credit. Points paid on the sale "
+                    "go back as points by themselves."
                 ),
             )
         try:
@@ -1172,10 +1309,11 @@ def _order_captured_tenders(order: Optional[Dict[str, Any]]) -> Dict[str, float]
 
 
 def _order_non_refundable_tenders(
-    order: Optional[Dict[str, Any]],
+    order: Optional[Dict[str, Any]], kinds: Tuple[str, ...] = _ORDER_NON_REFUNDABLE,
 ) -> Dict[str, float]:
     """What the order collected on instruments that CANNOT be refunded back to
-    themselves as drawer/gateway money (gift voucher / loyalty / EMI / credit).
+    themselves as drawer/gateway money (gift voucher / EMI / credit), or on
+    ``kinds``.
 
     This portion is legitimately refundable only as STORE_CREDIT (or a reissued
     instrument), and it is what makes an otherwise-DOA refund completable on a
@@ -1185,7 +1323,7 @@ def _order_non_refundable_tenders(
         if not isinstance(p, dict):
             continue
         canon = canonicalize_tender(p.get("method"), p.get("mode"))
-        if canon not in _ORDER_NON_REFUNDABLE:
+        if canon not in kinds:
             continue
         try:
             amt = float(p.get("amount", 0) or 0)
@@ -1193,6 +1331,95 @@ def _order_non_refundable_tenders(
             amt = 0.0
         out[canon] = round(out.get(canon, 0.0) + amt, 2)
     return {k: v for k, v in out.items() if v > 0}
+
+
+def _points_paid(order: Optional[Dict[str, Any]]) -> float:
+    """Rupees the bill took as a LOYALTY tender (0 when its points paid nothing)."""
+    return _order_non_refundable_tenders(order, (_POINTS_TENDER,)).get(_POINTS_TENDER, 0.0)
+
+
+# D28: what every door says about the points-paid part of a return on a bill
+# whose points exception an admin closed (loyalty.points_waived). The share is
+# still held back from the money; nothing promises that points go back.
+POINTS_WAIVED_NOTE = "points for this bill are settled by head office and are not returned automatically"
+
+
+def points_restore_share(order: Optional[Dict[str, Any]], share: Optional[float]) -> Optional[float]:
+    """What a return hands loyalty.reverse_for_return: its points-paid share on
+    a bill whose points paid a LOYALTY tender, else None (the engine then gives
+    the whole redemption back, as before the ruling). The counter and the
+    reconciliation sweep both pass it this way."""
+    return round(float(share or 0), 2) if _points_paid(order) > 0 else None
+
+
+def _points_paid_share(
+    order: Optional[Dict[str, Any]], order_id: Optional[str], net_amount: float, *, strict: bool,
+    own_refund: Optional[str] = None,
+) -> float:
+    """THE rule (owner 2026-11-08 / 2026-11-09): the part of this return the
+    customer paid with loyalty points. It comes back as points -- exactly this
+    share, through loyalty.reverse_for_return -- so it is never ALSO paid out as
+    cash or store credit. A partial return gives back points IN PROPORTION
+    (Rs 1,000 bill, Rs 900 cash + 100 points: a Rs 50 item gives back 5 points
+    and Rs 45), cumulative per bill, never more than were spent.
+
+    Counted in whole points at the bill's own redemption rate
+    (loyalty.points_for_rupees), so the rupees held back here and the points
+    given back there are the same amount: the bill's points through this return
+    (its points x the bill's value returned so far, this return included, over
+    the bill's value) less the points earlier returns of the bill held back,
+    capped at this return's net. The share is a slice of the return's value
+    after any restocking fee. The return that reaches the whole redemption
+    takes the exact remainder. Cash caps and the partial-return rules are
+    untouched; only the money a return pays shrinks by this. Every return door
+    prices through here (quote, POST, Needs completing keeps it on the hold).
+
+    "Earlier returns" are the COMPLETED docs (and unfinished online refunds,
+    _counts_as_refunded; never ``own_refund``'s own claim) AND the live or kept refund holds
+    of returns still being written or kept for Needs completing
+    (_live_refund_holds). A hold carries its return's share from the moment it
+    is reserved (_reserve_order_refund prices through here inside its
+    compare-and-set). ``order`` must carry the bill's refund_holds as stored now."""
+    from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
+
+    from .loyalty import bill_redemption, points_for_rupees
+
+    paid = _points_paid(order)
+    if paid <= 0 or not order_id:
+        return 0.0
+    holds = (order or {}).get("refund_holds") or {}
+    try:
+        live, held = _live_refund_holds(order_id, holds, field="points_paid_share", own_refund=own_refund)
+        live_net, returned = _live_refund_holds(order_id, holds, own_refund=own_refund)
+        points, value = bill_redemption(order_id)
+    except HTTPException:
+        if strict:
+            raise
+        live, held, live_net, returned, points, value = {}, 0.0, {}, 0.0, 0, 0.0  # a preview only
+    except Exception as exc:  # noqa: BLE001 -- unknown is not none
+        if strict:
+            logger.error("[RETURNS] loyalty points of %s unreadable: %s", order_id, exc)
+            raise HTTPException(status_code=503, detail=(
+                "Could not check the loyalty points paid on this bill - try again. Nothing was recorded."))
+        live, held, live_net, returned, points, value = {}, 0.0, {}, 0.0, 0, 0.0
+    held += sum(float((h or {}).get("points_paid_share") or 0) for h in live.values())
+    returned += sum(float((h or {}).get("amount") or 0) for h in live_net.values())
+    if points <= 0 or value <= 0:
+        points, value = 1, 1.0  # no rupee value on the redemption: a point is a rupee
+    whole = points_for_rupees(paid, points, value)
+    billed = _order_billed_total(order)
+    upto = whole
+    if billed > 0:
+        upto = min(whole, int((Decimal(whole) * Decimal(str(round(returned + float(net_amount), 2)))
+                               / Decimal(str(billed))).quantize(Decimal(1), rounding=ROUND_HALF_UP)))
+    room = int((Decimal(str(net_amount)) * points / Decimal(str(value))).quantize(Decimal(1), rounding=ROUND_FLOOR))
+    held_points = points_for_rupees(held, points, value)
+    take = max(0, min(upto - held_points, room))
+    if take <= 0:
+        return 0.0
+    if held_points + take >= whole:
+        return round(max(0.0, min(paid - held, float(net_amount))), 2)
+    return round(take * value / points, 2)
 
 
 def _prior_refund_tenders(order_id: Optional[str]) -> Dict[str, float]:
@@ -1636,7 +1863,7 @@ def credit_notes_outside_returns(order_id: Optional[str]) -> float:
     try:
         rows = list(ledger.find({"order_id": order_id, "type": {"$in": [scl.ISSUED, "ISSUING"]}}))
         coll = _returns_coll()
-        documented = ({d.get("return_id") for d in coll.find({"order_id": order_id, "status": "COMPLETED"})}
+        documented = ({d.get("return_id") for d in coll.find({"order_id": order_id}) if _counts_as_refunded(d)}
                       if coll is not None and rows else set())
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] credit notes unreadable for %s: %s", order_id, exc)
@@ -1773,7 +2000,9 @@ def _reassert_return_claims(row: Dict[str, Any]) -> None:
                 lost.append(line)
         except Exception:  # noqa: BLE001
             lost.append(line)
-    _keep_order_refund_hold(order_id, spec.get("return_id"), amount=spec.get("net_amount"))
+    _keep_order_refund_hold(order_id, spec.get("return_id"), amount=spec.get("net_amount"),
+                            extra=({"points_paid_share": spec["points_paid_share"]}
+                                   if spec.get("points_paid_share") is not None else None))
     if lost:
         logger.error("[RETURNS] return %s: units could not be claimed again after a healed credit: %s",
                      spec.get("return_id"), lost)
@@ -2380,41 +2609,116 @@ def _line_unit_first(
     return sorted(candidates, key=rank)
 
 
+def _with_removed_lines(order: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The order with the goods an edit took off the bill (`removed_lines`)
+    after its billed lines, so a removed line's own unit and product are
+    found too (decision D43; the counter return door reads them the same way)."""
+    if not order or not order.get("removed_lines"):
+        return order
+    return {**order, "items": [*(order.get("items") or []), *(order.get("removed_lines") or [])]}
+
+
+class _SlotTaken(Exception):
+    """The return slot a write carried is already held (decision D45a): a
+    concurrent attempt of this return moved this piece. `holder` is its unit."""
+
+    def __init__(self, holder: Dict[str, Any]):
+        super().__init__(str(holder.get("stock_id") or holder.get("_id")))
+        self.holder = holder
+
+
+def _credit_landed(row: Dict[str, Any], result: Dict[str, Any], landed_stores: List[str],
+                   holder: Dict[str, Any], return_id: str) -> None:
+    """A piece whose slot another attempt already filled (_SlotTaken): it is
+    back, on the holder's record -- counted, never moved again, its audit row
+    the other attempt's."""
+    store = holder.get("store_id")
+    for stores in (landed_stores, row["store_ids"]):
+        if store and store not in stores:
+            stores.append(store)
+    minted = holder.get("source_type") == "RETURN" and holder.get("source_id") == return_id
+    row["minted" if minted else "reactivated"] += 1
+    row["quantity"] += 1
+    result["restock_stock_ids"].append(str(holder.get("stock_id") or holder.get("_id")))
+
+
+def _slot_holder(stock_repo: Any, slot: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The unit holding return slot `slot`, or None."""
+    coll = getattr(stock_repo, "collection", None)
+    if not slot or coll is None:
+        return None
+    return coll.find_one({"return_slot": slot})
+
+
+def _own_moved_units(stock_repo: Any, return_id: str, ids: Optional[set] = None) -> List[Dict[str, Any]]:
+    """The units THIS return stamped: flipped (`returned_by_return_id`) or
+    minted (`source_id`) -- every return_slot write carries one of the two.
+    `ids` keeps only those, by str(stock_id or _id): a legacy unit has only a
+    BSON _id. RAISES when they cannot be read."""
+    rows = [*_find_stock(stock_repo, {"returned_by_return_id": return_id}),
+            *_find_stock(stock_repo, {"source_type": "RETURN", "source_id": return_id})]
+    if ids is None:
+        return rows
+    return [u for u in rows if str(u.get("stock_id") or u.get("_id")) in ids]
+
+
+def _return_slot_keys(stock_repo: Any, return_id: str, kind: str,
+                      units: List[Dict[str, Any]], moved_ids: Optional[set]) -> List[str]:
+    """One key per unit still to move: "<return>|<kind>|<product>|<n>", the
+    lowest n the return's units do not hold yet (decision D45a). Every put-back
+    or set-aside carries its key in `return_slot`, unique in the database
+    (uniq_stock_unit_return_slot), so one piece can never become two stock
+    records: two live retries of a return read the same pieces still out and
+    pick the same keys, and the second write of a key fails instead of
+    flipping a second unit or minting a second record.
+
+    Pieces of one product in one return are interchangeable and credited per
+    product (_units_still_out), so n counts per product, not per line. The
+    keys held are read from `moved_ids` -- the units the retry already
+    counted as moved, the same snapshot its pieces-still-out came from (a
+    unit that landed after it is not in it, and its key is the one this
+    retry picks too) -- or, with no snapshot (the press, the Shopify doors),
+    from every unit this return moved. RAISES when they cannot be read."""
+    held = {u.get("return_slot") for u in _own_moved_units(stock_repo, return_id, moved_ids)}
+    keys: List[str] = []
+    for u in units:
+        n = 0
+        while (key := f"{return_id}|{kind}|{u.get('product_id')}|{n}") in held:
+            n += 1
+        held.add(key)
+        keys.append(key)
+    return keys
+
+
 def _reactivate_original_unit(
     stock_repo: Any,
     product_id: str,
     store_id: Optional[str],
     order_id: Optional[str],
     used_ids: set,
-    exact_order_only: bool = False,
     own_stock_id: Optional[str] = None,
     named_ids: Optional[set] = None,
     set_aside: Optional[Dict[str, Any]] = None,
+    return_id: Optional[str] = None,
+    slot: Optional[str] = None,
 ) -> Optional[str]:
     """Find the original serialized unit sold for this product and flip it back
     to AVAILABLE. Returns its stock_id, or None when no candidate is found.
     ``set_aside`` (F21-3, a DAMAGED return) is merged over the flip instead:
     the unit comes back QUARANTINED, off sale, never left SOLD.
 
-    Preference order (most-specific first):
-      1. a unit for (product_id, store_id) tied to THIS order_id with status
-         SOLD - i.e. the exact unit that was sold on this order;
-      2. any SOLD unit for (product_id, store_id).
-    Within a step, ``own_stock_id`` (the unit the returned order line names)
-    comes first and units ``named_ids`` holds for other lines come last
-    (_line_unit_first).
+    ONLY a unit for (product_id, store_id) tied to THIS order_id with status
+    SOLD -- the unit this bill sold. ``own_stock_id`` (the unit the returned
+    order line names) comes first and units ``named_ids`` holds for other
+    lines come last (_line_unit_first).
 
-    ``exact_order_only`` DROPS step 2. It MUST be set whenever the store was not
-    the store the sale was booked against -- i.e. the F9 online-order redirect.
-    Step 2 is only safe when the caller's store IS the store the sale happened
-    at (an ordinary counter return): there, "some SOLD unit of this product at
-    this shop" is a reasonable stand-in for a lost row. On the redirected path
-    it is not: the sale was booked against the ONLINE store, so step 1 misses
-    for every historical import, and step 2 would then grab an UNRELATED
-    walk-in customer's SOLD unit -- flipping a frame that is on somebody's face
-    to AVAILABLE, erasing that customer's sale lineage, and still leaving the
-    frame that actually came back with no stock row. The caller mints instead,
-    which is the honest record for goods whose original row is untraceable.
+    Never "some SOLD unit of this product at this shop" (decision D5,
+    2026-11-11; it was the counter's stand-in for a lost row, and already
+    barred on an online order): that unit is another customer's -- a frame on
+    somebody's face flipped to AVAILABLE, their sale lineage erased. With no
+    unit of its own the caller mints, the honest record for goods whose
+    original row is untraceable, and the return says a new label is needed
+    (_new_label_note).
 
     IMPORTANT: only status=="SOLD" units are eligible. Earlier code used
     `$ne: AVAILABLE`, which would happily resurrect DAMAGED / SCRAPPED /
@@ -2428,6 +2732,18 @@ def _reactivate_original_unit(
     unit to reactivate" and the caller mints, so a failure read as None
     minted a phantom AVAILABLE unit beside the one still SOLD. The write is
     itself filtered on SOLD and read back on an error (_flip_sold_unit).
+
+    Decision D43 (the Retry stock step): a unit ANOTHER line of the bill
+    names is never flipped -- that frame is still with the customer. The
+    flip stamps `returned_by_return_id`, so a retry reads what THIS return
+    already moved from the stock itself (_units_moved_by_return) and never
+    asks for that piece again (_units_still_out). A line whose own unit an
+    EARLIER return took back (a quantity-2 line naming one scanned unit)
+    takes the bill's next SOLD unit, as before.
+
+    `slot` (_return_slot_keys, decision D45a) is written with the flip; a
+    flip refused because another unit already holds it raises _SlotTaken:
+    a concurrent attempt of this return moved this piece, never a second unit.
     """
     if stock_repo is None or not product_id:
         return None
@@ -2443,16 +2759,15 @@ def _reactivate_original_unit(
         q["order_id"] = order_id
         q.update(sold_only)
         candidates = _find_stock(stock_repo, q)
-    if not candidates and not exact_order_only:
-        q = dict(base)
-        q.update(sold_only)
-        candidates = _find_stock(stock_repo, q)
 
+    own = str(own_stock_id) if own_stock_id else ""
     failed = False
     for unit in _line_unit_first(candidates, own_stock_id, named_ids or set()):
         sid = unit.get("stock_id") or unit.get("_id")
         if not sid or sid in used_ids:
             continue
+        if str(sid) in (named_ids or set()) and str(sid) != own:
+            continue  # another line's piece: still with the customer (D43)
         # P1-C CLEAN RESALE LINEAGE: the unit is going BACK on the sellable
         # shelf, so it must NOT keep the attribution of the sale it was returned
         # from. Strip the stale order_id / sold_at / sold_to_customer_id (else an
@@ -2478,11 +2793,21 @@ def _reactivate_original_unit(
                     # Preserve the lineage for audit / reconciliation.
                     "returned_from_order_id": prior_order_id,
                     "prior_sold_order_id": prior_order_id,
+                    # Which return moved it, written with the flip (D43).
+                    **({"returned_by_return_id": return_id} if return_id else {}),
+                    # An earlier return's set-aside reason (kept by the lift,
+                    # the unit resold) never makes THIS put-back read as a
+                    # set-aside (_units_moved_by_return); a set-aside writes its own.
+                    "quarantine_reason": None,
+                    **({"return_slot": slot} if slot else {}),
                     **(set_aside or {}),
                 },
                 id_field="stock_id" if unit.get("stock_id") else "_id",
             )
         except Exception as exc:  # noqa: BLE001
+            holder = _slot_holder(stock_repo, slot) if type(exc).__name__ == "DuplicateKeyError" else None
+            if holder:
+                raise _SlotTaken(holder) from exc
             logger.warning("[RETURNS] stock reactivate failed: %s", exc)
             failed = True
             continue
@@ -3048,6 +3373,333 @@ def _refund_takes_goods_back(refund_id: str) -> bool:
         return False
 
 
+def _units_still_out(
+    units: List[Dict[str, Any]], already_back: Optional[Dict[str, float]],
+    moved_ids: Optional[set] = None, line_units: Optional[Dict[str, str]] = None,
+) -> List[Dict[str, Any]]:
+    """A plan's units (to put back, or to set aside) less the ones already
+    dealt with: what is still to do. The restock, the set-aside, the recovery
+    door's stock note and the panel read it -- one rule.
+
+    Each moved unit is credited ONCE (decision D43). First a unit whose bill
+    line names it (`line_units` {order item id: stock id}) and that THIS
+    return already moved (`moved_ids`, _units_moved_by_return) takes that
+    line's slot; then the rest of `already_back` {product id: units}
+    (_landed_units, the moved counts) takes the remaining slots of the
+    product, those of lines that name no unit first. A unit moved by an
+    EARLIER return is no credit here: the
+    line's next SOLD unit is still out (a quantity-2 line that names one
+    scanned unit)."""
+    left = dict(already_back or {})
+    moved = set(moved_ids or ())
+    rest: List[Dict[str, Any]] = []
+    for u in units or []:
+        own = (line_units or {}).get(str(u.get("order_item_id") or ""))
+        if own and own in moved:
+            moved.discard(own)
+            pid = str(u.get("product_id"))
+            left[pid] = left.get(pid, 0) - 1
+        else:
+            rest.append(u)
+    # The rest of the credit is units no line names (a first-available unit,
+    # a minted one): it goes to the slots of lines that name no unit first.
+    credited: set = set()
+    for i in sorted(range(len(rest)),
+                    key=lambda i: bool((line_units or {}).get(str(rest[i].get("order_item_id") or "")))):
+        pid = str(rest[i].get("product_id"))
+        if left.get(pid, 0) >= 1:
+            left[pid] -= 1
+            credited.add(i)
+    return [u for i, u in enumerate(rest) if i not in credited]
+
+
+def _units_moved_by_return(return_id: str) -> Tuple[Dict[str, float], Dict[str, float], set, set]:
+    """({product id: units put back}, {product id: units set aside}, the ids
+    put back, the ids set aside) that THIS return already moved, read from
+    the stock itself (decision D43): a unit
+    it flipped carries `returned_by_return_id`, a unit it minted its
+    `source_id`, and an older flip its stock_audit row. So a record whose
+    `restocked` rows were never saved (the press died, or Needs completing
+    rebuilt it) never moves a unit twice. RAISES when the stock cannot be
+    read: an unread answer is never "nothing moved yet". With no stock
+    repository at all nothing can move either (the restock records intent,
+    unapplied), so the answer is empty."""
+    stock_repo = get_stock_repository()
+    if stock_repo is None:
+        return {}, {}, set(), set()
+    units: Dict[str, Tuple[Dict[str, Any], Optional[str]]] = {
+        str(u.get("stock_id") or u.get("_id")): (u, None) for u in _own_moved_units(stock_repo, return_id)}
+    db = _get_db()
+    audit = db.get_collection("stock_audit") if db is not None else None
+    for row in (list(audit.find({"return_id": return_id})) if audit is not None else []):
+        sid = str(row.get("stock_id") or "")
+        if sid in units:
+            # THIS return's own row says what it did with a stamped unit too:
+            # its quarantine_reason may be an earlier return's.
+            units[sid] = (units[sid][0], row.get("new_status") or units[sid][1])
+        elif sid:
+            for u in _find_stock(stock_repo, {"stock_id": sid}):
+                units[sid] = (u, row.get("new_status"))
+    back: Dict[str, float] = {}
+    aside: Dict[str, float] = {}
+    back_ids: set = set()
+    aside_ids: set = set()
+    for sid, (u, audited) in units.items():
+        set_aside = (audited == "QUARANTINED") if audited else str(
+            u.get("quarantine_reason") or "").startswith("CUSTOMER_RETURN_")
+        pool = aside if set_aside else back
+        (aside_ids if set_aside else back_ids).add(sid)
+        pid = str(u.get("product_id"))
+        pool[pid] = pool.get(pid, 0.0) + 1
+    return back, aside, back_ids, aside_ids
+
+
+def _with_recorded_ids(doc: Dict[str, Any], back_ids: set, aside_ids: set) -> Tuple[set, set]:
+    """The moved ids read from the stock, plus the ones the record itself
+    kept (restock_stock_ids / quarantined_stock_ids: an older press stamped
+    no unit), so a line's own unit is credited to its line."""
+    return ({*back_ids, *map(str, doc.get("restock_stock_ids") or [])},
+            {*aside_ids, *map(str, doc.get("quarantined_stock_ids") or [])})
+
+
+def _plus(a: Dict[str, float], b: Dict[str, float]) -> Dict[str, float]:
+    """Per product, two counts of DIFFERENT units added."""
+    return {k: a.get(k, 0.0) + b.get(k, 0.0) for k in {*a, *b}}
+
+
+def _condition_not_kept(doc: Optional[Dict[str, Any]]) -> bool:
+    """A rebuilt record from a press that kept no condition (before the press
+    kept it): its pieces are set aside blind, so EVERY unit the return
+    already moved -- put back or set aside -- is one of them (D43)."""
+    return _rebuilt(doc) and any(isinstance(it, dict) and not it.get("condition")
+                                 for it in (doc or {}).get("items") or [])
+
+
+def _back_since_record(return_id: str, doc: Dict[str, Any], landed: Dict[str, float],
+                       moved_back: Dict[str, float], back_ids: set) -> Dict[str, float]:
+    """Per product, the pieces this return put back -- the retry and the
+    panel read it (one rule): the larger of what the record's `restocked`
+    rows say landed (`landed`; an older record's rows may count a unit the
+    stock cannot trace) and the stock's count (`moved_back`, `back_ids`,
+    _units_moved_by_return), PLUS every unit a retry put back after the
+    record was saved -- a back slot of this return, its id not on the record
+    (rows and ids are saved together). Those are never inside the larger-of:
+    a taker reads the landing of the attempt it took over as one more piece
+    back, never as the gap's, so it never moves a second unit (D45a).
+    RAISES when the stock cannot be read."""
+    recorded = set(map(str, doc.get("restock_stock_ids") or []))
+    fresh: Dict[str, float] = {}
+    stock_repo = get_stock_repository()
+    for u in _own_moved_units(stock_repo, return_id, back_ids) if stock_repo is not None else []:
+        if (str(u.get("stock_id") or u.get("_id")) not in recorded
+                and str(u.get("return_slot") or "").startswith(f"{return_id}|back|")):
+            pid = str(u.get("product_id"))
+            fresh[pid] = fresh.get(pid, 0.0) + 1
+    return {k: max(landed.get(k, 0.0), moved_back.get(k, 0.0) - fresh.get(k, 0.0)) + fresh.get(k, 0.0)
+            for k in {*landed, *moved_back}}
+
+
+def _rebuilt(doc: Optional[Dict[str, Any]]) -> bool:
+    """A record Needs completing REBUILT (from the credit line or the held
+    refund), not the one the press composed: its `restocked` rows were never
+    kept, so what the press already moved is read from the stock itself
+    (_units_moved_by_return), and its lines are read with _retry_lines."""
+    return (((doc or {}).get("recovered") or {}).get("source") or "unsaved doc") != "unsaved doc"
+
+
+def _piece_product(it: Dict[str, Any], orig: Optional[Dict[str, Any]], rebuilt: bool,
+                   order: Optional[Dict[str, Any]]) -> Optional[str]:
+    """The stock product of a returned line, for every record, the panel and
+    the retry alike (one rule): its BILL line's (line_stock_product_id -- a
+    record saved before the line took its product still names its piece, a
+    line that was never stock names none). A rebuilt line not on the bill
+    names none; a line whose bill could not be read keeps its own."""
+    if orig:
+        return restock_engine.line_stock_product_id(orig)
+    if rebuilt and order is not None:
+        return None
+    return it.get("product_id")
+
+
+def _recovered_stock_state(
+    doc: Dict[str, Any], order: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """A record's pieces by what happened to each, from its own stock state
+    (the completion message and the panel's open-stock-step list read it):
+    `damaged` {name: pieces} -- the pieces to SET ASIDE (damaged or opened;
+    on a rebuilt record, a piece whose condition was not kept) --, `held`
+    (GOOD, kept out by the return), `out` {name: pieces} -- the GOOD pieces
+    NOT back in stock --, `aside_out` -- while the stock step is open, the
+    pieces to set aside that still read sold --, `back` / `aside` (how many are dealt
+    with) and `open`: its stock step is still retryable (POST
+    /returns/{id}/complete-record/restock deals with each piece once).
+
+    A line is read with the product of its BILL line (line_stock_product_id):
+    a record saved before the line took its product still names its piece,
+    and a line that was never stock (a lens, a service) names none. A REBUILT
+    record (no restocked rows kept), and any record whose step is open, reads
+    what already moved from the stock itself (_units_moved_by_return), with
+    the retry's own credit (_units_still_out); an unreadable answer leaves
+    the step open (the retry reads it again and moves nothing on a failed
+    read)."""
+    rebuilt = _rebuilt(doc)
+    order = _with_removed_lines(order)
+    by_item = _order_line_index(order)["by_item"]
+    good: List[Dict[str, Any]] = []
+    damaged: Dict[str, int] = {}
+    aside_units: List[Dict[str, Any]] = []
+    held: Dict[str, int] = {}
+    for it in doc.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        orig = by_item.get(str(it.get("order_item_id") or it.get("item_id") or ""))
+        line = {**it, "product_id": _piece_product(it, orig, rebuilt, order)}
+        try:
+            qty = int(round(float(line.get("return_qty") or 0)))
+        except (TypeError, ValueError):
+            qty = 0
+        if not line["product_id"] or qty <= 0:
+            continue
+        # A rebuilt line keeps no name: the bill line's.
+        line["sku"] = line.get("sku") or (orig or {}).get("sku") or ""
+        name = str(line["sku"] or line.get("product_name") or (orig or {}).get("product_name")
+                   or line["product_id"])
+        condition = str(line.get("condition") or ("OPENED" if rebuilt else "GOOD")).upper()
+        if condition in _SET_ASIDE_CONDITIONS:
+            damaged[name] = damaged.get(name, 0) + qty
+            aside_units += [{"product_id": line["product_id"], "sku": name,
+                             "order_item_id": line.get("order_item_id")}] * qty
+        elif restock_engine.should_restock(line):
+            good.append(line)
+        else:
+            held[name] = held.get(name, 0) + qty
+
+    # Dealt with: the units that landed, and an online order's units its claim
+    # never covered (they never left a shop: nothing goes back for them).
+    dealt = _landed_units(doc.get("restocked"))
+    for row in doc.get("restocked") or []:
+        if isinstance(row, dict) and row.get("never_claimed"):
+            pid = str(row.get("product_id"))
+            dealt[pid] = dealt.get(pid, 0.0) + float(row.get("never_claimed") or 0)
+    moved_back: Dict[str, float] = {}
+    moved_aside: Dict[str, float] = {}
+    back_ids: set = set()
+    aside_ids: set = set()
+    step_open = not doc.get("restock_applied")
+    credit = dealt
+    if step_open:
+        try:
+            moved_back, moved_aside, back_ids, aside_ids = _units_moved_by_return(str(doc.get("return_id")))
+            credit = _back_since_record(str(doc.get("return_id")), doc, dealt, moved_back, back_ids)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] %s: what moved could not be read: %s", doc.get("return_id"), exc)
+        back_ids, aside_ids = _with_recorded_ids(doc, back_ids, aside_ids)
+    line_units = _order_line_units(order)[0]
+    out: Dict[str, int] = {}
+    for u in _units_still_out(restock_engine.plan_restock(good).get("units", []), credit,
+                              back_ids, line_units):
+        name = str(u.get("sku") or u.get("product_name") or u.get("product_id"))
+        out[name] = out.get(name, 0) + 1
+    aside_out: Dict[str, int] = {}
+    # The same credit the retry gives (_retry_claimed): a blind rebuilt
+    # record's pieces include the ones its press already put back.
+    blind = _condition_not_kept(doc)
+    if step_open:
+        for u in _units_still_out(aside_units, _plus(moved_aside, moved_back) if blind else moved_aside,
+                                  aside_ids | back_ids if blind else aside_ids, line_units):
+            aside_out[u["sku"]] = aside_out.get(u["sku"], 0) + 1
+    back = max(len(doc.get("restock_stock_ids") or []), int(sum(moved_back.values())))
+    aside = max(len(doc.get("quarantined_stock_ids") or []), int(sum(moved_aside.values())))
+    return {"damaged": damaged, "held": held, "out": out, "aside_out": aside_out,
+            "back": back, "aside": aside,
+            # The pieces to set aside that are dealt with: on a blind record
+            # the ones its press put back are those pieces too.
+            "aside_dealt": aside + (back if blind else 0),
+            "open": bool(out or aside_out) and not doc.get("restock_applied")}
+
+
+def _named(counts: Dict[str, int]) -> str:
+    return ", ".join(f"{n} x {name}" for name, n in sorted(counts.items()))
+
+
+def _recovered_stock_note(doc: Dict[str, Any], order: Optional[Dict[str, Any]] = None) -> str:
+    """What a completed record tells staff about its pieces, PIECE BY PIECE,
+    from the record's own stock state (_recovered_stock_state) -- never from
+    the one restock_applied flag (it is also True when nothing was put back:
+    an older imported order, an opened piece, a line saved with no product).
+
+    It says, each part only when it has pieces:
+      * what IS dealt with: the units back in stock and the ones set aside,
+        damaged or opened;
+      * a HISTORICAL order's pieces: IMS puts none back by rule and the store
+        manager's stock-in task covers them (raise_stock_in_task) -- never a
+        second entry beside that task;
+      * each GOOD piece NOT back in stock, by name, with its ONE action: the
+        panel's Retry stock step while the restock is open
+        (_raise_restock_blocked_task's rule: a hand entry beside the retry is
+        one frame counted twice); a record whose stock step reads finished
+        has no retry, and still no hand entry;
+      * while the stock step is open, each piece to set aside that still
+        reads sold: the Retry stock step sets it aside, once (D7, D43);
+      * each DAMAGED or OPENED piece not set aside (it still reads sold; no
+        screen sets a sold piece aside);
+      * the GOOD pieces the return itself kept out of stock (restock
+        switched off)."""
+    state = _recovered_stock_state(doc, order)
+    damaged, held, out, aside_out = state["damaged"], state["held"], dict(state["out"]), state["aside_out"]
+    historical = bool(doc.get("historical") or (order or {}).get("historical"))
+    via_task = 0
+    if doc.get("restock_applied") and historical:
+        via_task, out = sum(out.values()), {}
+
+    back, aside = state["back"], state["aside"]
+    not_aside = 0 if aside_out else max(0, sum(damaged.values()) - state["aside_dealt"])
+    done = ", ".join(part for part in (
+        f"{back} piece(s) back in stock" if back else "",
+        f"{aside} set aside (damaged or opened)" if aside else "") if part)
+    parts = [f"Already dealt with: {done}."] if done else []
+    if via_task:
+        parts.append(f"{via_task} piece(s) are from an older imported order: IMS put none back - the "
+                     "stock-in task raised for the store manager covers them, so do not add them a "
+                     "second time.")
+    if out and state["open"]:
+        parts.append(f"NOT back in stock: {_named(out)}. Do not add these by hand - IMS would count "
+                     "them twice. Press Retry stock step on this return (Returns > Needs completing): "
+                     "IMS puts each piece back once."
+                     + (" This is an older imported order, so the retry adds no stock row itself: it "
+                        "raises one stock-in task for the store manager." if historical else ""))
+    elif out:
+        parts.append(f"NOT back in stock: {_named(out)}. This record's stock step is closed, so Retry "
+                     "stock step cannot put them back, and a hand entry would leave each piece with "
+                     "two stock records: ask the IMS admin to put them back.")
+    if aside_out:
+        parts.append(f"Still reading sold: {_named(aside_out)} (damaged or opened, or its condition was "
+                     "not kept). Keep it off the shelf and press Retry stock step: IMS sets it aside in "
+                     "Quarantine for the store manager to check, once.")
+    if not_aside:
+        parts.append("Damaged or opened and NOT set aside by IMS: "
+                     + (_named(damaged) if not state["aside_dealt"] else f"{not_aside} of {_named(damaged)}")
+                     + ". It still reads sold: keep it off the shelf and tell the IMS admin.")
+    if held:
+        parts.append(f"Left out of stock, as the return said (not for resale): {_named(held)}.")
+    if not (via_task or out or aside_out or not_aside or held):
+        parts.append("Nothing to add by hand." if done
+                     else "No piece of this return is waiting to go back into stock.")
+    return " ".join(parts)
+
+
+def _new_label_note(restocked: Any) -> str:
+    """What a return says when a piece went back under a NEW stock record
+    (minted: its own sold record was not found, decision D5): the label has
+    to be printed before the piece is on the shelf. Empty when none was."""
+    minted = sum(int(row.get("minted") or 0) for row in restocked or [] if isinstance(row, dict))
+    if not minted:
+        return ""
+    return (f"{minted} piece(s) went back into stock under a NEW barcode, because the sold record of "
+            "this bill was not found. Before it goes on the shelf, print the new label: Inventory, "
+            "open the product, Labels.")
+
+
 def _restock_good_items(
     items: List[ReturnLine],
     store_id: Optional[str],
@@ -3058,6 +3710,7 @@ def _restock_good_items(
     processing_store_id: Optional[str] = None,
     order: Optional[Dict[str, Any]] = None,
     already_back: Optional[Dict[str, float]] = None,
+    moved_ids: Optional[set] = None,
 ) -> Dict[str, Any]:
     """Put GOOD-condition returned units BACK into sellable serialized stock.
 
@@ -3084,6 +3737,9 @@ def _restock_good_items(
 
     `already_back` {product id: units}: what an earlier attempt of this
     return put back (_landed_units); those units are not restocked again.
+    `moved_ids`: the units this return already put back (the Retry stock
+    step, _units_moved_by_return) -- a line whose own unit is among them is
+    dealt with, each unit credited once (_units_still_out).
 
     Returns a dict with `restocked` (per-line summary for the return doc),
     `restock_stock_ids` (every stock row touched), `applied`, `skipped`, and the
@@ -3111,13 +3767,8 @@ def _restock_good_items(
         result["applied"] = True
         return result
 
-    units = plan.get("units", [])
-    left = dict(already_back or {})
-    for u in list(units):
-        pid = str(u.get("product_id"))
-        if left.get(pid, 0) >= 1:
-            left[pid] -= 1
-            units.remove(u)
+    line_units, named_ids = _order_line_units(order)
+    units = _units_still_out(plan.get("units", []), already_back, moved_ids, line_units)
     if not units:
         # Nothing resellable -> trivially "applied" (no work left to retry).
         result["applied"] = True
@@ -3201,18 +3852,7 @@ def _restock_good_items(
     #     line split 1+1 across two shops sends one unit to each), and
     #   * a per-PRODUCT default for anything the breakdown does not cover.
     # The physical-store path never runs this block at all.
-    # exact_order_only must be keyed on "is the store I am searching the store
-    # the sale was booked against?", not merely on "did I redirect?". A legacy
-    # ONLINE order carrying NO store_id key at all resolves to the caller's own
-    # shop, is judged physical, and would otherwise reach the order-agnostic
-    # fallback and grab an unrelated walk-in's SOLD unit. Channel/source is the
-    # cheap, precise tell for that population.
     is_redirected = bool(routing["redirected_from"])
-    is_online_order = (
-        is_redirected
-        or str((order or {}).get("channel") or "").strip().upper() == "ONLINE"
-        or bool((order or {}).get("shopify_order_id"))
-    )
     # Multi-location PR 5: a routed online order's units are exactly the ones
     # its claim SOLD to it. A line the claim never covered (a stock miss, a
     # short or empty claim) never left any shop: nothing goes back for it,
@@ -3244,13 +3884,15 @@ def _restock_good_items(
             if hit["store_id"]:
                 per_product_default[pid] = hit["store_id"]
 
-    # We have a stock repo - actually re-add each unit.
-    line_units, named_ids = _order_line_units(order)
+    # We have a stock repo - actually re-add each unit, each under its own
+    # return slot (decision D45a).
+    slots = iter(_return_slot_keys(stock_repo, return_id, "back", units, moved_ids))
     used_ids: set = set()
     per_line_applied: Dict[str, Dict[str, Any]] = {}
     landed_stores: List[str] = []
     all_ok = True
     for u in units:
+        slot = next(slots)
         pid = u.get("product_id")
         row = per_line_applied.setdefault(
             pid,
@@ -3286,17 +3928,14 @@ def _restock_good_items(
                 unit_store,
                 order_id,
                 used_ids,
-                # MUST-FIX 1: on the redirected path the sale was booked against
-                # the ONLINE store, so the order-scoped lookup legitimately
-                # misses (every historical import). Without this flag the
-                # order-AGNOSTIC fallback would grab an unrelated walk-in
-                # customer's SOLD unit at this shop -- flipping a frame that is
-                # on somebody's face to AVAILABLE and erasing their sale. Mint
-                # instead; that is the honest record.
-                exact_order_only=is_online_order,
                 own_stock_id=line_units.get(str(u.get("order_item_id") or "")),
                 named_ids=named_ids,
+                return_id=return_id,
+                slot=slot,
             )
+        except _SlotTaken as taken:
+            _credit_landed(row, result, landed_stores, taken.holder, return_id)
+            continue
         except Exception as exc:  # noqa: BLE001
             # A stock read or write that failed is no answer: never a mint
             # beside a unit that may still be SOLD (a phantom). Not applied,
@@ -3325,7 +3964,8 @@ def _restock_good_items(
                 user_id=user_id,
             )
             continue
-        # Mint a fresh AVAILABLE serialized unit.
+        # This bill has no SOLD unit of its own for the piece: mint a fresh
+        # AVAILABLE serialized unit, never another bill's (decision D5).
         # P1-C: stamp returned_from_order_id (the sale this return reverses) so
         # the minted unit has a forward audit link to its origin -- without it a
         # fresh return-unit has NO connection back to the reversed sale. It
@@ -3352,11 +3992,24 @@ def _restock_good_items(
                     # because the order billed to a stockless online store.
                     "restocked_from_store_id": routing["redirected_from"],
                     "restock_route_reason": routing["reason"],
+                    # One record per piece (D45a): a second mint of the slot is refused.
+                    "return_slot": slot,
                 }
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] stock mint failed: %s", exc)
             created = None
+        if not created:
+            # Refused (the repository answers None): the slot's holder is
+            # the piece, moved by a concurrent attempt -- or by this mint,
+            # its reply lost.
+            try:
+                holder = _slot_holder(stock_repo, slot)
+            except Exception:  # noqa: BLE001
+                holder = None
+            if holder:
+                _credit_landed(row, result, landed_stores, holder, return_id)
+                continue
         if created:
             new_id = created.get("stock_id") or created.get("_id")
             row["minted"] += 1
@@ -3398,78 +4051,111 @@ def _restock_good_items(
     return result
 
 
+# The conditions a returned piece is SET ASIDE for (QUARANTINED, off sale):
+# never put back on sale, never left reading SOLD.
+_SET_ASIDE_CONDITIONS = ("DAMAGED", "OPENED")
+
+
 def _quarantine_damaged_units(
     items: List[ReturnLine],
     order_id: Optional[str],
     order: Optional[Dict[str, Any]],
     return_id: str,
     user_id: Optional[str],
-) -> List[Dict[str, Any]]:
+    already_aside: Optional[Dict[str, float]] = None,
+    moved_ids: Optional[set] = None,
+) -> Tuple[List[Dict[str, Any]], bool]:
     """F21-3: a returned piece marked DAMAGED comes back QUARANTINED -- off
-    sale, tracked, ready to go to the supplier -- never left SOLD. Only the
-    unit THIS order sold (exact_order_only: never another customer's piece);
+    sale, tracked, ready to go to the supplier -- never left SOLD. So does an
+    OPENED piece (decision D6, 2026-11-11): it is in the shop, so stock shows
+    it, off sale until the manager has looked at it (it used to stay SOLD).
+    Only the unit THIS order sold (never another customer's piece);
     a line whose sold unit cannot be found (a historical import) moves
-    nothing. Fail-soft per unit. Returns the units set aside.
+    nothing. Fail-soft per unit. Returns (the units set aside, ok): ok is
+    False when a stock read or write failed, so the piece still reads SOLD
+    and the return's stock step stays open for the retry (D7).
 
     The unit stays quarantined at the shop it was sold from (an online
-    order's damaged piece handed in at another counter is not moved)."""
-    lines = [it for it in items or [] if it.condition == "DAMAGED" and it.product_id]
+    order's damaged piece handed in at another counter is not moved).
+
+    `already_aside` {product id: units} and `moved_ids` (the Retry stock
+    step, _units_moved_by_return): the units this return already set aside
+    are not set aside again, each credited once (_units_still_out)."""
+    lines = [it for it in items or [] if it.condition in _SET_ASIDE_CONDITIONS and it.product_id]
     if not order_id or not lines:
-        return []
+        return [], True
     try:
         stock_repo = get_stock_repository()
     except Exception:  # noqa: BLE001
         stock_repo = None
     if stock_repo is None:
-        return []
+        return [], True
     line_units, named_ids = _order_line_units(order)
+    slots = _units_still_out(
+        [{"product_id": line.product_id, "order_item_id": line.order_item_id, "line": line}
+         for line in lines for _ in range(int(round(line.return_qty)))],
+        already_aside, moved_ids, line_units)
+    try:
+        keys = _return_slot_keys(stock_repo, return_id, "aside", slots, moved_ids)
+    except Exception as exc:  # noqa: BLE001 -- unread is never "nothing held"
+        logger.warning("[RETURNS] damaged units not set aside, return slots unread: %s", exc)
+        return [], False
     used: set = set()
     out: List[Dict[str, Any]] = []
-    for line in lines:
-        for _ in range(int(round(line.return_qty))):
-            try:
-                sid = _reactivate_original_unit(
-                    stock_repo, line.product_id, None, order_id, used,
-                    exact_order_only=True,
-                    own_stock_id=line_units.get(str(line.order_item_id or "")),
-                    named_ids=named_ids,
-                    set_aside={
-                        "status": "QUARANTINED",
-                        "quarantine_reason": "CUSTOMER_RETURN_DAMAGED",
-                        "quarantine_at": datetime.now(timezone.utc),
-                        "quarantine_by": user_id,
-                        "quarantine_generation": uuid.uuid4().hex,
-                        "quarantine_notes": f"Damaged, customer return {return_id}"[:200],
-                        "quarantine_label_printed": False,
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[RETURNS] damaged unit not set aside: %s", exc)
-                continue
-            if not sid:
-                break
-            try:
-                unit = (_find_stock(stock_repo, {"stock_id": sid}) or [{}])[0]
-            except Exception:  # noqa: BLE001 -- the flip landed; only the shop is unknown
-                unit = {}
-            out.append({"stock_id": sid, "store_id": unit.get("store_id"),
-                        "product_id": line.product_id})
-            _audit_stock_transition(sid, "SOLD", "QUARANTINED", return_id,
-                                    unit.get("store_id"), user_id)
-            try:
-                from ..services import item_events as ie
+    ok = True
+    for slot, key in zip(slots, keys):
+        line = slot["line"]
+        try:
+            sid = _reactivate_original_unit(
+                stock_repo, line.product_id, None, order_id, used,
+                own_stock_id=line_units.get(str(line.order_item_id or "")),
+                named_ids=named_ids,
+                return_id=return_id,
+                slot=key,
+                set_aside={
+                    "status": "QUARANTINED",
+                    "quarantine_reason": f"CUSTOMER_RETURN_{line.condition}",
+                    "quarantine_at": datetime.now(timezone.utc),
+                    "quarantine_by": user_id,
+                    "quarantine_generation": uuid.uuid4().hex,
+                    "quarantine_notes": f"{line.condition.capitalize()}, customer return {return_id}"[:200],
+                    "quarantine_label_printed": False,
+                },
+            )
+        except _SlotTaken as taken:  # a concurrent attempt set this piece aside (D45a)
+            h = taken.holder
+            out.append({"stock_id": str(h.get("stock_id") or h.get("_id")), "store_id": h.get("store_id"),
+                        "product_id": line.product_id, "reason": f"CUSTOMER_RETURN_{line.condition}"})
+            continue
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] damaged unit not set aside: %s", exc)
+            ok = False
+            continue
+        if not sid:
+            continue  # no SOLD unit of this bill left for it (a historical import)
+        try:
+            unit = (_find_stock(stock_repo, {"stock_id": sid}) or [{}])[0]
+        except Exception:  # noqa: BLE001 -- the flip landed; only the shop is unknown
+            unit = {}
+        out.append({"stock_id": sid, "store_id": unit.get("store_id"),
+                    "product_id": line.product_id,
+                    "reason": f"CUSTOMER_RETURN_{line.condition}"})
+        _audit_stock_transition(sid, "SOLD", "QUARANTINED", return_id,
+                                unit.get("store_id"), user_id)
+        try:
+            from ..services import item_events as ie
 
-                ie.record_post_write_event(
-                    _get_db(), event_type=ie.ItemEventType.QUARANTINE_IN,
-                    actor_id=user_id or "", stock_id=sid,
-                    from_state=ie.StockState.SOLD, to_state=ie.StockState.QUARANTINED,
-                    store_id=unit.get("store_id"), product_id=line.product_id,
-                    source_type="RETURN", source_id=return_id,
-                    payload={"quarantine_reason": "CUSTOMER_RETURN_DAMAGED"},
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[RETURNS] damaged unit ledger row failed: %s", exc)
-    return out
+            ie.record_post_write_event(
+                _get_db(), event_type=ie.ItemEventType.QUARANTINE_IN,
+                actor_id=user_id or "", stock_id=sid,
+                from_state=ie.StockState.SOLD, to_state=ie.StockState.QUARANTINED,
+                store_id=unit.get("store_id"), product_id=line.product_id,
+                source_type="RETURN", source_id=return_id,
+                payload={"quarantine_reason": f"CUSTOMER_RETURN_{line.condition}"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[RETURNS] damaged unit ledger row failed: %s", exc)
+    return out, ok
 
 
 def _reason_summary(items: List[ReturnLine]) -> str:
@@ -3931,7 +4617,9 @@ async def quote_return(
         raise HTTPException(status_code=400, detail="No returnable lines supplied")
 
     resolved_order_id = body.order_id or order.get("order_id")
-    _refuse_counter_shipping(active_lines, order)
+    # The create's own line rule: never a figure for a line or a quantity the
+    # create would refuse (a return made elsewhere since this form opened).
+    _returnable_lines(active_lines, order, resolved_order_id)
     priced_lines, gross_refund, refund_round_off = _price_return(
         active_lines, order, resolved_order_id
     )
@@ -3957,6 +4645,12 @@ async def quote_return(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         _gate_exchange_settlement(settlement, replacement_priced, gross_refund)
+
+    # The points-paid part goes back as points: the split covers the rest.
+    from .loyalty import points_waived as _points_waived
+
+    points_share = _points_paid_share(order, resolved_order_id, net_amount, strict=False)
+    return_value, net_amount = net_amount, round(net_amount - points_share, 2)
 
     captured = _order_captured_tenders(order)
     non_refundable = _order_non_refundable_tenders(order)
@@ -4013,8 +4707,15 @@ async def quote_return(
         # the bill) -- already inside gross_refund / net_refund.
         "round_off": refund_round_off,
         "restocking_fee": restocking_fee,
-        # THE authoritative figure the refund-tender split must sum to.
+        # THE authoritative figure the refund-tender split must sum to: the
+        # money this return pays (its value less the points-paid part).
         "net_refund": net_amount,
+        # The part paid with points, given back as points (never as money).
+        "points_paid_share": points_share,
+        # D28: True = an admin closed this bill's points; the share is still
+        # held back from the money but no points go back automatically.
+        "points_waived": points_share > 0 and _points_waived(resolved_order_id),
+        "return_value": return_value,
         "gst_breakup": engine.gst_breakup_lines(priced_lines),
         "settlement": settlement,
         # Server-resolved replacement lines + the total they sum to, so the till
@@ -4051,8 +4752,17 @@ def _refund_hold_ttl_seconds() -> int:
     return _STALE_CLAIM_SECONDS
 
 
-def _live_refund_holds(order_id: str, holds: Dict[str, Any]) -> Tuple[Dict[str, Any], float]:
-    """(holds still counting, the COMPLETED returns' total) -- read together.
+# The online refund door's entry in a bill's refund holds (shopify_refund.
+# _hold_order_for_online): "shopify:<refund id>". One reservation for both
+# doors, so an online refund and a counter return never price one bill at once
+# (#1397, Codex round 6).
+ONLINE_HOLD_PREFIX = "shopify:"
+
+
+def _live_refund_holds(order_id: str, holds: Dict[str, Any],
+                       field: str = "net_refund", own_refund: Optional[str] = None) -> Tuple[Dict[str, Any], float]:
+    """(holds still counting, the COMPLETED returns' total of ``field``) -- read together.
+    COMPLETED here is _counts_as_refunded (an unfinished online refund too).
     A hold counts only while its return has no COMPLETED doc (the doc's own
     total counts it then). A hold whose money went out is KEPT (marked by
     _keep_order_refund_hold) and never ages out: it stays the record of that
@@ -4070,13 +4780,13 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any]) -> Tuple[Dict[str, 
                 if doc.get("status") == "NOTHING_PAID":
                     done.add(doc.get("return_id"))  # finished, no money: its hold no longer counts
                     continue
-                if doc.get("status") != "COMPLETED":
+                if not _counts_as_refunded(doc, own_refund):
                     continue
                 done.add(doc.get("return_id"))
-                try:
-                    documented += float(doc.get("net_refund") or 0)
-                except (TypeError, ValueError):
-                    pass
+                if doc.get("shopify_refund_id"):
+                    # An online refund's claim counts itself: its hold, never twice.
+                    done.add(f"{ONLINE_HOLD_PREFIX}{doc.get('shopify_refund_id')}")
+                documented += _doc_amount(doc, field)
         except Exception as exc:  # noqa: BLE001 -- fail CLOSED (owner 2026-10-23)
             logger.error("[RETURNS] earlier refunds unreadable for %s: %s", order_id, exc)
             raise HTTPException(
@@ -4087,44 +4797,178 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any]) -> Tuple[Dict[str, 
     live: Dict[str, Any] = {}
     for rid, h in (holds or {}).items():
         at = parse_event_utc_naive((h or {}).get("at"))
-        if rid in done:
+        if rid in done or (own_refund and rid == f"{ONLINE_HOLD_PREFIX}{own_refund}"):
             continue
-        if not (h or {}).get("kept") and (at is None or (now - at).total_seconds() > _refund_hold_ttl_seconds()):
+        # An online post's hold lives as long as its credit lock (its "ttl").
+        ttl = float((h or {}).get("ttl") or _refund_hold_ttl_seconds())
+        if not (h or {}).get("kept") and (at is None or (now - at).total_seconds() > ttl):
             continue
         live[rid] = h
     return live, round(documented, 2)
 
 
-def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id: str) -> Tuple[float, bool]:
+_ANOTHER_RETURN_RUNNING = "Another return of this bill is being processed - try again. Nothing was recorded."
+
+
+def take_bill_hold(coll, order_id: Any, key: str, amount: float, *, door: str,
+                   ttl: Optional[float] = None) -> bool:
+    """THE one reservation every door that gives money back on a bill takes
+    (#1397, Codex round 6/7): the online refund post ("shopify:<refund id>"),
+    the admin invoice-change credit note ("credit-note:<line id>") and the
+    advance refund ("advance:<return id>") put an entry in the bill's
+    refund_holds, on the SAME compare-and-set (refund_holds_v) every counter
+    return reserves through (_reserve_order_refund), BEFORE they price what
+    the bill still owes, and drop it (drop_bill_hold) only once their own
+    record counts. A counter return pressed meanwhile is refused (a ``door``
+    hold), and a door never prices beside another un-kept hold: False -- book
+    nothing, try again. A KEPT counter hold (its money went out) is no
+    refusal: every reader counts it. No such bill: True (nothing to race)."""
+    try:
+        for _ in range(8):
+            order = coll.find_one({"order_id": order_id})
+            if not order:
+                return True
+            holds = dict(order.get("refund_holds") or {})
+            # Only another un-kept hold refuses; the returns are read (to drop
+            # finished or aged ones) only when there is one.
+            others = {rid: h for rid, h in holds.items() if rid != key and not (h or {}).get("kept")}
+            if others and _live_refund_holds(order_id, others)[0]:
+                return False
+            version = order.get("refund_holds_v")
+            holds[key] = {"amount": round(float(amount or 0), 2), "at": utc_now_iso(), "door": door,
+                          **({"ttl": ttl} if ttl else {})}
+            res = coll.update_one({"order_id": order_id, "refund_holds_v": version},
+                                  {"$set": {"refund_holds": holds, "refund_holds_v": int(version or 0) + 1}})
+            matched = getattr(res, "matched_count", None)
+            if getattr(res, "modified_count", 0) if matched is None else matched:
+                return True
+    except Exception:  # noqa: BLE001 -- unreadable (incl. the 503 of _live_refund_holds): busy
+        logger.warning("[RETURNS] refund hold %s not taken for %s", key, order_id, exc_info=True)
+    return False
+
+
+def drop_bill_hold(coll, order_id: Any, key: str) -> None:
+    """Drop a door's hold. A release that fails ages out (its ttl)."""
+    try:
+        for _ in range(8):
+            order = coll.find_one({"order_id": order_id}) or {}
+            holds = dict(order.get("refund_holds") or {})
+            if key not in holds:
+                return
+            holds.pop(key)
+            version = order.get("refund_holds_v")
+            res = coll.update_one({"order_id": order_id, "refund_holds_v": version},
+                                  {"$set": {"refund_holds": holds, "refund_holds_v": int(version or 0) + 1}})
+            matched = getattr(res, "matched_count", None)
+            if getattr(res, "modified_count", 0) if matched is None else matched:
+                return
+    except Exception:  # noqa: BLE001
+        logger.warning("[RETURNS] refund hold %s not released for %s", key, order_id, exc_info=True)
+
+
+_BILL_BUSY = ("Another refund, return or credit note of this bill is being processed - try again "
+              "in a minute. Nothing was issued.")
+
+
+@contextmanager
+def bill_money_door(db, coll, order_id: Any, key: str, amount: float, *, door: str):
+    """A door that gives money back on a bill outside the counter and the
+    online post (the admin credit note, the advance refund): the online
+    post's credit lock, then the shared hold (take_bill_hold), for as long as
+    it prices and books. Busy: 409, nothing issued."""
+    from ..services.shopify_refund import _CLAIM_STALE_SECONDS, _lock_order_credit, _unlock_order_credit
+
+    locked, token = _lock_order_credit(db, order_id) if db is not None else (True, None)
+    if not locked:
+        raise HTTPException(status_code=409, detail=_BILL_BUSY)
+    held = False
+    try:
+        held = coll is None or take_bill_hold(coll, order_id, key, amount, door=door, ttl=_CLAIM_STALE_SECONDS)
+        if not held:
+            raise HTTPException(status_code=409, detail=_BILL_BUSY)
+        yield
+    finally:
+        if held and coll is not None:
+            drop_bill_hold(coll, order_id, key)
+        if db is not None:
+            _unlock_order_credit(db, order_id, token)
+
+
+def bill_room_left(db, order: Dict[str, Any]) -> Optional[float]:
+    """What a correction note may still give back on this bill: what was paid
+    -- or, on a bill not fully paid yet that no return has paid back on, what
+    was billed (the note lowers what is still owed; staff steps unchanged) -- less everything every door already
+    gave back on it (the online door's reader, which counts counter returns,
+    kept holds, online refunds and earlier notes alike). None when the bill
+    tracks no payment. Read under bill_money_door."""
+    from ..services.shopify_refund import _given_back_elsewhere
+
+    paid = refundable_ceiling(order, include_credit_notes=False)
+    if paid is None or db is None:
+        return None
+    back = _given_back_elsewhere(db, order, "")
+    if back is None:
+        raise HTTPException(status_code=503, detail=(
+            "Could not check this bill's earlier refunds - try again. Nothing was issued."))
+    # Once a return or refund paid money back on the bill (goods came back),
+    # the note is capped by what was PAID (#1397 round 8): the billed figure
+    # let a note give back more than the cash taken while the returned item's
+    # balance stayed owed.
+    returned = _sum_prior_refunds(order.get("order_id"), strict=True) > 0.01 or any(
+        (h or {}).get("kept") for h in (order.get("refund_holds") or {}).values())
+    cap = paid if returned else max(paid, _order_billed_total(order))
+    return round(cap - back["given"], 2)
+
+
+def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id: str,
+                          bill: Optional[Dict[str, Any]] = None) -> Tuple[float, bool, float]:
     """Reserve this refund on the ORDER, atomically, BEFORE the over-refund
     cap and the Rs 2,000 approval rule decide (PR #1264): two returns fired at
     once each read the other's refund, so neither can dodge the rule or the
     cap. Each return holds its own entry in ``refund_holds`` (compare-and-set
     on ``refund_holds_v``); the prior total is the COMPLETED returns plus the
-    live holds of returns still being written. Returns (prior total,
-    reserved?). Released by _release_order_refund when the return fails; a
-    hold whose worker died ages out (_live_refund_holds). A repository
-    without compare-and-set (test doubles) reads the documented sum only."""
+    live holds of returns still being written. The hold also carries this
+    return's points-paid share, priced in the same compare-and-set
+    (_points_paid_share), so a return pressed alongside it never holds the
+    same points back again (#1397 round 7). Returns (prior total, reserved?,
+    points-paid share). Released by _release_order_refund when the return
+    fails; a hold whose worker died ages out (_live_refund_holds). A
+    repository without compare-and-set (test doubles) reads the documented
+    sum only, and prices the share from ``bill``."""
     documented = _sum_prior_refunds(order_id, strict=True)
     repo = get_order_repository()
     update_if = getattr(repo, "update_if", None) if repo is not None else None
     if not order_id or not callable(update_if) or getattr(repo, "collection", None) is None:
-        return documented, False
+        return documented, False, _points_paid_share(bill, order_id, net_amount, strict=True)
     for _ in range(8):
         order = repo.find_by_id(order_id) or {}
         version = order.get("refund_holds_v")
         live, documented = _live_refund_holds(order_id, order.get("refund_holds") or {})
-        prior = round(documented + sum(float(h.get("amount") or 0) for h in live.values()), 2)
+        prior = round(documented + sum(float(h.get("amount") or 0) for h in live.values())
+                      + _shopify_money_off_returns(order_id, strict=True), 2)
         # A kept hold of a nothing-paid return is still there only while its
         # give-backs are unfinished: never counted, never dropped (its marks
         # are the trace).
         unfinished = _nothing_paid_ids(order_id)
         keep = {rid: h for rid, h in (order.get("refund_holds") or {}).items()
                 if rid not in live and (rid in unfinished or "*" in unfinished) and (h or {}).get("kept")}
-        live[return_id] = {"amount": round(float(net_amount), 2), "at": utc_now_iso()}
+        # Another door (online refund, admin credit note, advance refund) is
+        # pricing this bill right now: wait for it, on every bill -- its units
+        # are not claimed on the line, so the same line could be paid twice
+        # (#1397 round 7).
+        if any(rid != return_id and (h or {}).get("door") for rid, h in live.items()):
+            raise HTTPException(status_code=409, detail=_ANOTHER_RETURN_RUNNING)
+        if _points_paid(order) > 0 and any(rid != return_id for rid in live):
+            # One return at a time on a points-paid bill (#1397): a return that
+            # fails after reserving releases its hold, and one priced beside it
+            # would then pay the points part again.
+            raise HTTPException(status_code=409, detail=_ANOTHER_RETURN_RUNNING)
+        share = _points_paid_share(order, order_id, net_amount, strict=True)
+        live[return_id] = {"amount": round(float(net_amount), 2), "at": utc_now_iso(),
+                           "points_paid_share": share}
         if update_if(order_id, {"refund_holds_v": version},
                      {"refund_holds": {**keep, **live}, "refund_holds_v": int(version or 0) + 1}):
-            return prior, True
+            return prior, True, share
     raise HTTPException(status_code=503, detail="Too many refunds on this bill at once - nothing was recorded. Try again.")
 
 
@@ -4340,6 +5184,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # isinstance guard: when this endpoint is called directly (unit tests), the
     # default is the FastAPI Header(...) object, not a str -- don't .strip() it.
     idem_key = idempotency_key.strip() if isinstance(idempotency_key, str) else ""
+    # Of the press AS SENT: taken before its lines take the sale's identity
+    # (_returnable_lines), so a retry of the same press matches it.
+    idem_fingerprint = _return_fingerprint(body) if idem_key else None
     if idem_key:
         try:
             coll = _returns_coll()
@@ -4366,6 +5213,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                         "gross_refund": existing.get("gross_refund"),
                         "restocking_fee": existing.get("restocking_fee"),
                         "net_refund": existing.get("net_refund"),
+                        "points_paid_share": existing.get("points_paid_share", 0.0),
                         "gst_breakup": existing.get("gst_breakup"),
                         "refund_amount": existing.get("refund_amount"),
                         "refund_method": existing.get("refund_method"),
@@ -4375,6 +5223,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                         "restocked": existing.get("restocked", []),
                         "restock_applied": existing.get("restock_applied", False),
                         "restock_stock_ids": existing.get("restock_stock_ids", []),
+                        "stock_note": _new_label_note(existing.get("restocked")),
                         "message": "Return already recorded (idempotent replay)",
                         "_idempotent_replay": True,
                     }
@@ -4495,49 +5344,14 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             ),
         )
 
-    line_idx = _order_line_index(order)
     resolved_order_id = body.order_id or order.get("order_id")
 
     # Resolve every line + validate the cumulative cap BEFORE touching money or
-    # claiming anything, so a bad line rejects with nothing reserved. Resolution
-    # is stashed for the atomic claim that runs only AFTER every 400/422 input
-    # check passes (so a validation error never leaves a phantom reservation).
-    resolved_lines: List[Dict[str, Any]] = []
-    for ret_line in active_lines:
-        orig_line = _resolve_original_line(ret_line, line_idx)
-        if orig_line is None:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Return line does not match any line on the original order "
-                    f"(order_item_id={ret_line.order_item_id!r}, "
-                    f"product_id={ret_line.product_id!r}). Cannot refund an "
-                    "item that was not on this sale."
-                ),
-            )
-        _refuse_shipping_line(orig_line)
-        purchased = _line_purchased_qty(orig_line)
-        product_id = orig_line.get("product_id")
-        back = _units_already_back(resolved_order_id, orig_line)
-        if back is None:
-            raise HTTPException(
-                status_code=503,
-                detail=("Could not read this order's earlier returns just now - "
-                        "nothing was recorded. Try again."),
-            )
-        already = back[0]
-        remaining = round(purchased - already, 4)
-        if ret_line.return_qty > remaining + 1e-9:
-            name = ret_line.product_name or orig_line.get("product_name") or product_id
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Return quantity {ret_line.return_qty:g} exceeds the "
-                    f"returnable quantity {remaining:g} for '{name}' "
-                    f"(purchased {purchased:g}, already returned {already:g})."
-                ),
-            )
-        resolved_lines.append({"ret_line": ret_line, "orig_line": orig_line})
+    # claiming anything, so a bad line rejects with nothing reserved (the rule
+    # the quote runs too). Resolution is stashed for the atomic claim that runs
+    # only AFTER every 400/422 input check passes (so a validation error never
+    # leaves a phantom reservation).
+    resolved_lines = _returnable_lines(active_lines, order, resolved_order_id)
 
     # 0b. SERIAL-MISMATCH HARD-BLOCK (E3 acceptance #8, return half). Runs after
     #     the quantity guard and BEFORE any money math / atomic claim, so a
@@ -4580,6 +5394,22 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # refund on a never-paid order -> amount_paid 0 -> any refund rejected).
     # Checked HERE in the validation phase -- BEFORE the atomic qty claim below --
     # so a rejected over-refund never leaves a phantom reservation. 1-paisa epsilon.
+    _refuse_while_a_return_settles(order or {}, resolved_order_id)
+    return_id = generate_return_id()
+    _prior_refunds, _reserved, points_share = _reserve_order_refund(
+        resolved_order_id, net_amount, return_id, bill=order)
+    if _reserved:
+        held.update(order_id=resolved_order_id, return_id=return_id)
+        # Each line read AGAIN under the reservation (#1397 round 8): an online
+        # refund of the same line that posted after the read above (a
+        # no_restock one books no returned_qty, so the atomic claim cannot see
+        # it) is counted now; any later one waits on this hold.
+        fresh_idx = _order_line_index(get_order_repository().find_by_id(resolved_order_id) or order)
+        for rl in resolved_lines:
+            _refuse_over_return(resolved_order_id, rl["ret_line"],
+                                _resolve_original_line(rl["ret_line"], fresh_idx) or rl["orig_line"])
+    # The ceiling is read AFTER the reservation (#1397 round 7): an admin
+    # credit note booked while this return was being priced is in it.
     try:
         _refund_ceiling = refundable_ceiling(order)
         if _refund_ceiling is None:
@@ -4591,11 +5421,6 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     except CeilingUnreadable:
         raise HTTPException(status_code=503, detail=(
             "Could not check this bill's credit notes - try again. Nothing was recorded."))
-    _refuse_while_a_return_settles(order or {}, resolved_order_id)
-    return_id = generate_return_id()
-    _prior_refunds, _reserved = _reserve_order_refund(resolved_order_id, net_amount, return_id)
-    if _reserved:
-        held.update(order_id=resolved_order_id, return_id=return_id)
     if round(_prior_refunds + net_amount, 2) > _refund_ceiling + 0.01:
         raise HTTPException(
             status_code=400,
@@ -4628,12 +5453,19 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             raise HTTPException(status_code=400, detail=str(exc))
         _gate_exchange_settlement(settlement, replacement_dump, gross_refund)
 
+    # The points-paid part goes back as points (the loyalty reversal below):
+    # what this return PAYS -- the split, the refund, the store credit -- is the
+    # rest. net_amount stays the return's value: the cap, the approval rule and
+    # the credit note's tax all read it, unchanged. points_share was priced
+    # inside the reservation above (the one rule: _points_paid_share).
+    pays = round(net_amount - points_share, 2)
+
     refund_tenders: Optional[List[Dict[str, Any]]] = None
     collect_method: Optional[str] = None
     drawer_auto_netted = False
     if body.return_type == "RETURN":
         refund_tenders, drawer_auto_netted = _normalize_refund_tenders(
-            body.refund_tenders, net_amount
+            body.refund_tenders, pays
         )
         # AUTHORITATIVE cross-check: a tender may only be refunded up to what it
         # actually collected on this order (a UI rule is not a control).
@@ -4807,7 +5639,10 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         return {
             "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
                        "product_id": d["orig_line"].get("product_id"),
-                       "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in claimed],
+                       "qty": float(d["ret_line"].return_qty), "token": d["token"],
+                       # A rebuilt record restocks it as returned (D43).
+                       "condition": d["ret_line"].condition, "restock": d["ret_line"].restock}
+                      for d in claimed],
             "tenders": refund_tenders,
             "note_number": credit_note_number,
             "store_id": store_id,
@@ -4815,6 +5650,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             # What a recovered record needs to file the reversal once and
             # stay inside the cap (money review 14).
             "net_amount": round(float(net_amount), 2),
+            "points_paid_share": points_share,
             "gross_refund": round(float(gross_refund), 2),
             "restocking_fee": round(float(restocking_fee), 2),
             "round_off": round(float(_ro), 2),
@@ -4908,9 +5744,12 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     "lines": [{"item_id": d["orig_line"].get("item_id") or d["orig_line"].get("id"),
                                "product_id": d["orig_line"].get("product_id"),
                                "purchased": _line_purchased_qty(d["orig_line"]),
-                               "qty": float(d["ret_line"].return_qty), "token": d["token"]} for d in claimed],
+                               "qty": float(d["ret_line"].return_qty), "token": d["token"],
+                               "condition": d["ret_line"].condition, "restock": d["ret_line"].restock}
+                              for d in claimed],
                     "refund_tenders": refund_tenders,
                     "net_amount": round(float(net_amount), 2),
+                    "points_paid_share": points_share,
                     "return_type": body.return_type,
                 },
                 outcome=_outcome,
@@ -4966,7 +5805,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     if body.return_type == "RETURN":
         # Net of any restocking fee = the cash actually given back. The explicit
         # refund-tender breakdown was validated + cross-checked pre-claim.
-        refund_amount = net_amount
+        refund_amount = pays
         refund_method = body.refund_method or _order_payment_method(order)
 
         # ISSUE the NON-DRAWER portion. A STORE_CREDIT (or reissued voucher) leg
@@ -4997,7 +5836,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             credit_amount = _non_drawer_total
 
     elif body.return_type == "CREDIT_NOTE":
-        credit_amount = net_amount
+        credit_amount = pays
         refund_method = "STORE_CREDIT"
         # SAME GUARD AS THE RETURN BRANCH ABOVE. A restocking fee equal to the
         # gross is legitimate ("take the goods back, issue nothing") and the FE
@@ -5005,12 +5844,15 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # _issue_store_credit return None (it refuses amount <= 0), which the
         # fail-loud path then reported as a ledger outage, sending the cashier
         # into an infinite retry against a perfectly healthy ledger.
+        # The note reverses the whole return's tax; the balance moves by what
+        # this return pays (the points-paid part goes back as points).
         if net_amount > 0:
             credit_entry = _issue_credit_or_fail(
-                net_amount,
+                pays,
                 reason=f"Credit note for return {return_id}",
                 gross=gross_refund,
                 fee=restocking_fee,
+                note_amount=net_amount if points_share > 0 else None,
             )
 
     else:  # EXCHANGE (settlement + collect_method validated pre-claim above)
@@ -5049,12 +5891,15 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # it. A genuine failure flags the return doc for reconciliation. Walk-in /
     # no customer -> skip (walk-ins never earn loyalty).
     loyalty_reversal_failed = False
+    points_waived = False  # D28: an admin closed this bill's points; none go back
     _cust = customer_id
     if _cust and _cust != "walk-in" and not str(_cust).startswith("walkin-"):
         try:
             from .loyalty import reverse_for_return as _reverse_loyalty
 
-            _lr = _reverse_loyalty(return_id, resolved_order_id, _cust)
+            _lr = _reverse_loyalty(return_id, resolved_order_id, _cust,
+                                   points_paid_share=points_restore_share(order, points_share))
+            points_waived = bool(_lr.get("waived"))
             if _lr.get("ok"):
                 logger.info(
                     "[RETURNS] loyalty reversed for %s: clawed=%s restored=%s",
@@ -5062,7 +5907,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                     _lr.get("earned_clawed", 0),
                     _lr.get("redeemed_restored", 0),
                 )
-            elif _lr.get("reason") not in ("missing_ids", "loyalty_db_unavailable"):
+            elif _lr.get("reason") != "missing_ids":
                 loyalty_reversal_failed = True
                 logger.error(
                     "[RETURNS] loyalty reversal FAILED for %s: %s",
@@ -5107,9 +5952,10 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # A stock-write failure must never break the return record - leave
         # applied=False so it can be retried later.
         logger.warning("[RETURNS] restock failed (recorded, not applied): %s", exc)
-    # F21-3: a DAMAGED piece comes back QUARANTINED (tracked, can go to the
-    # supplier), and the task agent raises its 7-day follow-up.
-    quarantined = _quarantine_damaged_units(
+    # F21-3: a DAMAGED or OPENED piece comes back QUARANTINED (tracked, can
+    # go to the supplier or be cleared), and the task agent raises its 7-day
+    # follow-up.
+    quarantined, aside_ok = _quarantine_damaged_units(
         active_lines, resolved_order_id, order, return_id, current_user.get("user_id"))
     for unit in quarantined:
         try:
@@ -5118,13 +5964,15 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
             await dispatch_event(
                 "stock.quarantined",
                 {"stock_id": unit["stock_id"], "store_id": unit["store_id"] or store_id,
-                 "reason": "CUSTOMER_RETURN_DAMAGED", "actor_id": current_user.get("user_id")},
+                 "reason": unit["reason"], "actor_id": current_user.get("user_id")},
                 source="returns_router",
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] stock.quarantined dispatch failed: %s", exc)
     restocked = restock_result.get("restocked", [])
-    restock_applied = bool(restock_result.get("applied"))
+    # A piece whose set-aside failed still reads SOLD: the stock step stays
+    # open for the retry (D7), which sets it aside once.
+    restock_applied = bool(restock_result.get("applied")) and aside_ok
     restock_stock_ids = restock_result.get("restock_stock_ids", [])
     # F9: the PHYSICAL store the units actually landed on (== store_id for an
     # ordinary counter return; the redirected shop for an online-order return;
@@ -5138,7 +5986,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # back on the shelf, so the online AVAILABLE count goes UP -- re-push it to
     # Shopify. Gated (IMS_SHOPIFY_WRITES + DISPATCH_MODE) + fail-soft: never
     # blocks the return. No online mapping for a SKU -> no-op.
-    if restock_applied and restocked:
+    # The GOOD units landed (a failed set-aside of another piece does not
+    # hold their write-back: the retry credits them and adds no row).
+    if restock_result.get("applied") and restocked:
         try:
             from ..services.online_stock_writeback import writeback_after_restock
 
@@ -5183,6 +6033,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "round_off": _ro,
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
+        # The part paid with points: given back as points, not in refund_amount
+        # / credit_amount. Later returns of the bill read it (_points_paid_share).
+        "points_paid_share": points_share,
         "gst_breakup": gst_view,
         # The credit note's Rule 53 number (None when nothing reverses tax).
         "credit_note_number": credit_note_number,
@@ -5204,7 +6057,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "restocked": restocked,
         "restock_applied": restock_applied,
         "restock_stock_ids": restock_stock_ids,
-        # F21-3: the DAMAGED pieces this return set aside (QUARANTINED).
+        # F21-3: the DAMAGED / OPENED pieces this return set aside (QUARANTINED).
         "quarantined_stock_ids": [u["stock_id"] for u in quarantined],
         # F9 audit stamp: WHICH store the returned units were put back on, and
         # -- when the order billed to a stockless ONLINE store -- what it was
@@ -5244,7 +6097,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # POS-14: stamp the idempotency key so a duplicate POST with the same key
         # is caught by the guard at the top of this handler without double-refunding.
         "idempotency_key": (idem_key or None),
-        "idempotency_fingerprint": _return_fingerprint(body) if idem_key else None,
+        "idempotency_fingerprint": idem_fingerprint,
     }
 
     coll = _returns_coll()
@@ -5294,9 +6147,15 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         if restocking_fee > 0
         else ""
     )
+    points_note = ""
+    if points_share > 0:
+        points_note = (
+            f"; Rs {points_share} was paid with points: {POINTS_WAIVED_NOTE}" if points_waived
+            else f"; Rs {points_share} paid with points goes back to the customer's points"
+        )
     message = {
-        "RETURN": f"Refund of Rs {net_amount} recorded{fee_note}",
-        "CREDIT_NOTE": f"Store credit of Rs {net_amount} issued{fee_note}",
+        "RETURN": f"Refund of Rs {pays} recorded{fee_note}{points_note}",
+        "CREDIT_NOTE": f"Store credit of Rs {pays} issued{fee_note}{points_note}",
         "EXCHANGE": "Exchange recorded",
     }[body.return_type]
 
@@ -5309,6 +6168,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "round_off": _ro,
         "restocking_fee": restocking_fee,
         "net_refund": net_amount,
+        "points_paid_share": points_share,
+        # D28: True = this bill's points are settled by head office; none went back.
+        "points_waived": points_waived,
         "gst_breakup": gst_view,
         "credit_note_number": credit_note_number,
         "refund_amount": refund_amount,
@@ -5325,6 +6187,8 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         "restocked": restocked,
         "restock_applied": restock_applied,
         "restock_stock_ids": restock_stock_ids,
+        # Said on the screen: a piece that went back under a new barcode.
+        "stock_note": _new_label_note(restocked),
         "restock_store_id": restock_store_id,
         "restock_store_ids": restock_store_ids,
         "restock_store_redirected_from": restock_result.get(
@@ -5403,6 +6267,25 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                          "owed_tenders": doc.get("owed_tenders") or []})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the owed returns - try again.") from exc
+    # Completed records with pieces still reading sold ("Retry stock step"):
+    # GOOD ones to put back and ones to set aside, named until the retry
+    # deals with each.
+    stock_open: List[Dict[str, Any]] = []
+    try:
+        for doc in coll.find({"status": "COMPLETED", "recovered": {"$ne": None},
+                              "restock_applied": {"$ne": True}}):
+            if not can_access_store_scoped(doc.get("store_id"), current_user):
+                continue
+            state = _recovered_stock_state(doc, _load_order_for_restock(doc.get("order_id")))
+            if state["open"]:
+                stock_open.append({"return_id": doc.get("return_id"), "order_id": doc.get("order_id"),
+                                   "order_number": doc.get("order_number"), "store_id": doc.get("store_id"),
+                                   "pieces": _named(state["out"]),
+                                   # Damaged or opened (or condition not kept):
+                                   # the retry sets these aside, never on sale.
+                                   "aside_pieces": _named(state["aside_out"])})
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the open stock steps - try again.") from exc
     # Till store-credit / gift-voucher payments taken but never on their bill
     # (the unbilled tasks' list): each has one action, "Give back this
     # unbilled payment" (money review 20).
@@ -5428,7 +6311,8 @@ async def needs_completing(current_user: dict = Depends(require_roles(*_COMPLETE
                                  leg.get("voucher"), order, leg["key"])})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail="Could not read the unbilled payments - try again.") from exc
-    return {"items": sorted(out, key=lambda r: str(r.get("at") or "")), "owed": owed, "unbilled": unbilled}
+    return {"items": sorted(out, key=lambda r: str(r.get("at") or "")), "owed": owed, "unbilled": unbilled,
+            "stock_open": stock_open}
 
 
 class GiveBackBody(BaseModel):
@@ -5696,6 +6580,8 @@ async def complete_return_record(
         # The whole refund: its credit note covers all of it; the reserved
         # amount, never more (it stays inside the cap).
         net = facts.get("net_amount") if facts.get("net_amount") is not None else round(credit + drawer, 2)
+        # The points-paid part went back as points, never in the money.
+        points_share = round(float(facts.get("points_paid_share") or 0.0), 2)
         doc = {
             "return_id": return_id,
             "order_id": order_id,
@@ -5707,7 +6593,9 @@ async def complete_return_record(
             # The return-line shape every reader counts (the over-return
             # book reads return_qty and order_item_id).
             "items": [{"order_item_id": ln.get("item_id"), "item_id": ln.get("item_id"),
-                       "product_id": ln.get("product_id"), "return_qty": float(ln.get("qty") or 0)}
+                       "product_id": ln.get("product_id"), "return_qty": float(ln.get("qty") or 0),
+                       # As returned, when the press kept it (_retry_lines).
+                       **{k: ln[k] for k in ("condition", "restock") if ln.get(k) is not None}}
                       for ln in (spec.get("lines") or facts.get("lines") or [])],
             "replacement_items": [],
             "gross_refund": base.get("gross_refund") or facts.get("gross_refund") or net,
@@ -5716,9 +6604,10 @@ async def complete_return_record(
             # later as round off).
             "round_off": facts.get("round_off") or 0.0,
             "net_refund": net,
+            "points_paid_share": points_share,
             "gst_breakup": gst,
             "credit_note_number": base.get("note_number") or facts.get("note_number"),
-            "refund_amount": net if rtype == "RETURN" else None,
+            "refund_amount": round(net - points_share, 2) if rtype == "RETURN" else None,
             "refund_method": "STORE_CREDIT" if rtype == "CREDIT_NOTE" else None,
             "refund_tenders": tenders if rtype == "RETURN" else None,
             "drawer_auto_netted": bool(rtype == "RETURN" and _drawer(tenders)),
@@ -5728,6 +6617,11 @@ async def complete_return_record(
             "restock_applied": False,
             "restock_stock_ids": [],
             "created_by": current_user.get("user_id"),
+            # Nothing kept says whether the press reached its loyalty reversal,
+            # so the sweep (reconcile_loyalty_reversals) settles it: the engine
+            # is idempotent on the return, and a reversal already made moves
+            # nothing and clears this. A kept doc already holds the press's answer.
+            "loyalty_reversal_failed": True,
         }
         source = "credit line" if credit_landed else "held refund"
     if owed:
@@ -5745,8 +6639,10 @@ async def complete_return_record(
         _audit_credit_event("RETURN_RECORD_REDATED", {"entry_id": f"return:{return_id}", "store_id": store_id,
                                                       "order_id": order_id})
     _audit_complete(return_id, store_id, current_user, recovered, now)
-    return {**doc, "message": "Return record completed. Put its units back in stock by hand."
-            + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else "")}
+    return {**doc, "message": "Return record completed. " + _recovered_stock_note(doc, order)
+            + (f" The customer is owed Rs {owed:.2f} - a task was raised." if owed else ""),
+            # The panel offers Retry stock step exactly when the message does.
+            "stock_step_open": _recovered_stock_state(doc, order)["open"]}
 
 
 class OwedPaidBody(BaseModel):
@@ -5953,21 +6849,81 @@ async def retry_restock(
 
     Also lets a transient DB failure during create() be retried without
     re-recording any money movement.
+
+    A record completed in Returns > Needs completing is refused here (403):
+    its retry is the panel's, for Accounts and Admin (decision D7).
     """
+    # The retrier's own counter: where an online order's goods were handed back.
+    return _retry_restock(return_id, current_user, current_user.get("active_store_id"))
+
+
+def _return_slot_index_ok() -> bool:
+    """Is uniq_stock_unit_return_slot on the stock? It IS the D45(a)
+    guarantee (_return_slot_keys): without it a stalled retry and its taker
+    can both move one piece. ensure_indexes builds it fail-soft, so the
+    Retry stock step checks before every claim and refuses when it is
+    missing or cannot be read. An in-memory double (no pymongo collection)
+    runs in one process and has no index to check."""
+    from pymongo.collection import Collection
+
+    stock_repo = get_stock_repository()
+    coll = getattr(stock_repo, "collection", None)
+    if not isinstance(coll, Collection):
+        return True
+    try:
+        ok = "uniq_stock_unit_return_slot" in (coll.index_information() or {})
+    except Exception:  # noqa: BLE001
+        ok = False
+    if not ok:
+        logger.critical("[RETURNS] Retry stock step REFUSED: unique index uniq_stock_unit_return_slot "
+                        "is missing (or unreadable) on stock_units -- rebuild it (ensure_indexes)")
+    return ok
+
+
+def _retry_restock(return_id: str, current_user: dict, processing_store_id: Optional[str],
+                   panel: bool = False) -> Dict[str, Any]:
+    """retry_restock's work, for both of its doors. `processing_store_id`: the
+    physical shop an ONLINE order's units go back to when the order names none
+    (_resolve_restock_store) -- the store door's own counter; never the shop
+    of a head-office user who was not where the goods were handed back.
+
+    `panel`: the Needs completing door (Accounts / Admin, decision D7). A
+    record completed there is retried THERE only; the store door refuses it.
+    Any failure after the claim gives the claim back (D43): a record is never
+    left reading "Restock in progress" for good."""
     coll = _returns_coll()
     if coll is None:
         raise HTTPException(status_code=404, detail="Return not found")
     # Another shop's return is never claimed, restocked or described: the
     # same 404 as GET /returns/{id}, before any flag or unit moves.
     try:
-        owner = coll.find_one({"return_id": return_id}, {"_id": 0, "store_id": 1})
+        owner = coll.find_one({"return_id": return_id},
+                              {"_id": 0, "store_id": 1, "recovered": 1, "status": 1})
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock retry lookup failed: %s", exc)
         owner = None
     in_reach_or_404(owner, current_user, "Return not found")
+    if owner.get("recovered") and not panel:
+        raise HTTPException(status_code=403, detail=(
+            "This return was completed in Returns > Needs completing: its Retry stock step is there, "
+            "for Accounts and Admin."))
+    if owner.get("status") == "NOTHING_PAID":
+        raise HTTPException(status_code=409, detail=(
+            "Nothing was paid on this return and its goods were never taken back: it has no stock step."))
+    if not _return_slot_index_ok():
+        raise HTTPException(status_code=503, detail=(
+            "The Retry stock step is paused: the database check that keeps one returned piece to "
+            "one stock record is not installed. Nothing was changed. Tell head office."))
 
     # Atomic claim: succeed only if NOT already applied AND NOT in progress.
+    # Its token (D45a): every later write of this attempt to the record --
+    # its release, its result -- lands only while the claim is still its own,
+    # so a retry that stalled past a takeover never overwrites its taker.
     now_iso = utc_now_iso()
+    token = uuid.uuid4().hex
+    mine = {"return_id": return_id, "restock_claim": token}
+    take = {"$set": {"restock_in_progress": True, "restock_started_at": now_iso, "restock_claim": token,
+                     "restock_booking_released": False}}
     try:
         claim = coll.find_one_and_update(
             {
@@ -5975,14 +6931,26 @@ async def retry_restock(
                 "restock_applied": {"$ne": True},
                 "restock_in_progress": {"$ne": True},
             },
-            {
-                "$set": {
-                    "restock_in_progress": True,
-                    "restock_started_at": now_iso,
-                }
-            },
+            take,
             return_document=ReturnDocument.AFTER,
         )
+        if claim is None:
+            # A retry killed between its claim and its release (OOM, a hard
+            # restart) left the flag up for good, and this door is the only
+            # remedy (D7): a claim older than a retry runs is taken over. A
+            # retry still alive past it (a hung socket) runs beside its taker:
+            # each piece's write carries its return slot, so the second write
+            # of a piece is refused (_return_slot_keys), and the stale one's
+            # record writes miss on the token.
+            from datetime import timedelta
+
+            stale = (datetime.now(timezone.utc) - timedelta(seconds=_STALE_CLAIM_SECONDS)).isoformat()
+            claim = coll.find_one_and_update(
+                {"return_id": return_id, "restock_applied": {"$ne": True}, "restock_in_progress": True,
+                 "restock_started_at": {"$not": {"$gte": stale}}},
+                take,
+                return_document=ReturnDocument.AFTER,
+            )
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock claim failed: %s", exc)
         claim = None
@@ -6010,18 +6978,101 @@ async def retry_restock(
             "restock_stock_ids": doc.get("restock_stock_ids", []),
             "message": "Restock in progress - retry shortly",
         }
+    try:
+        return _retry_claimed(coll, mine, claim, current_user, processing_store_id)
+    except Exception:
+        # The claim goes back whatever failed (a line that cannot be read, an
+        # unreadable stock answer): the panel keeps its Retry stock step.
+        try:
+            coll.update_one(mine, {"$set": {"restock_in_progress": False}})
+        except Exception:  # noqa: BLE001
+            logger.error("[RETURNS] restock claim of %s NOT released", return_id)
+        raise
 
+
+def _reopen_by_booking(coll: Any, return_id: str, write: Any) -> None:
+    """A Shopify refund's retry whose units did not all land, and whose claim
+    was taken over meanwhile (`write`, its own record write, matched
+    nothing). Its booking may already have made the taker save 'applied' on
+    it (restock_applied_by_booking: the taker found this refund's mark on
+    the order and restocked less for it). The un-booked pieces are out of
+    stock, so that record is reopened: the Retry stock step stays (D7), and
+    the next retry books them again. A taker still running keeps its claim
+    -- its own landed pieces still reach the record -- and is told instead
+    (restock_booking_released): it reopens what it saves on a booking
+    (_reopen_if_released). Never a unit moved here: the bookings keep every
+    door from putting a piece back twice.
+
+    ORDER MATTERS: the flag first, then the reopen. The taker's save and its
+    _reopen_if_released can land between the two writes; flag-first, every
+    interleaving ends reopened (a save before the flag is caught by the
+    reopen, a save after it by the taker's own check). Reopen-first, a save
+    between them matched neither and the record stayed 'applied' with the
+    piece SOLD (#1413 round 9 review)."""
+    if getattr(write, "matched_count", 1):
+        return
+    coll.update_one(
+        {"return_id": return_id, "restock_in_progress": True},
+        {"$set": {"restock_booking_released": True}})
+    coll.update_one(
+        {"return_id": return_id, "restock_applied_by_booking": True},
+        {"$set": {"restock_applied": False, "restock_applied_by_booking": False}})
+
+
+def _reopen_if_released(coll: Any, return_id: str) -> None:
+    """A taker that saved 'applied' on a booking a stale retry released while
+    it ran (_reopen_by_booking's flag): reopened, as that retry would have."""
+    coll.update_one(
+        {"return_id": return_id, "restock_booking_released": True,
+         "restock_applied_by_booking": True, "restock_in_progress": False},
+        {"$set": {"restock_applied": False, "restock_applied_by_booking": False,
+                  "restock_booking_released": False}})
+
+
+def _retry_lines(doc: Dict[str, Any], order: Optional[Dict[str, Any]]) -> List[ReturnLine]:
+    """A return's lines for its stock step. No money moves here, so a line
+    with no price reads Rs 0. A record Needs completing REBUILT (_rebuilt)
+    keeps only the bill line, product and quantity (complete_return_record):
+    its piece is its bill line's (line_stock_product_id, the press's rule;
+    a removed line's too, _with_removed_lines), and a piece whose condition
+    was not kept is SET ASIDE for the manager to check, never put on sale
+    blind (decision, the D6 rule for a piece nobody has looked at)."""
+    rebuilt = _rebuilt(doc)
+    by_item = _order_line_index(order)["by_item"]
+    out: List[ReturnLine] = []
+    for it in doc.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        fields = set(ReturnLine.model_fields)
+        data = {k: v for k, v in it.items() if k in fields and v is not None}
+        data.setdefault("unit_price", 0.0)
+        orig = by_item.get(str(it.get("order_item_id") or it.get("item_id") or ""))
+        data["product_id"] = _piece_product(it, orig, rebuilt, order)
+        if rebuilt:
+            data["sku"] = data.get("sku") or str((orig or {}).get("sku") or "")
+            data["product_name"] = data.get("product_name") or str((orig or {}).get("product_name") or "")
+            data["condition"] = it.get("condition") or "OPENED"
+        out.append(ReturnLine(**data))
+    return out
+
+
+def _retry_claimed(coll: Any, mine: Dict[str, Any], claim: Dict[str, Any], current_user: dict,
+                   processing_store_id: Optional[str]) -> Dict[str, Any]:
+    """_retry_restock once it holds the claim. `mine`: the record while the
+    claim is still this attempt's -- the filter of every write to it."""
+    return_id = mine["return_id"]
     # We hold the claim. Already-restocked units are tracked in restock_stock_ids
     # on the doc; we re-run plan_restock fresh, then mark sold+commit.
     existing_ids = list(claim.get("restock_stock_ids") or [])
-    lines = [ReturnLine(**it) for it in (claim.get("items") or [])]
 
     # F9: the order is the ONLY record of which physical shop shipped each unit.
     # Load it ONCE here and hand it to the router, so this door runs on VERIFIED
-    # routing evidence exactly like the Shopify confirm door does.
+    # routing evidence exactly like the Shopify confirm door does. With its
+    # removed lines: a removed line's own unit comes first too (D43).
     claim_store = claim.get("store_id")
     claim_order_id = claim.get("order_id")
-    retry_order = _load_order_for_restock(claim_order_id)
+    retry_order = _with_removed_lines(_load_order_for_restock(claim_order_id))
+    lines = _retry_lines(claim, retry_order)
 
     # THIS DOOR IS THE RECOVERY PATH. _raise_restock_blocked_task and the refund
     # -review banner both send the operator here, so it must hold the SAME rule
@@ -6051,7 +7102,7 @@ async def retry_restock(
             claim_order_id,
             claim_store,
             blocked_units,
-            current_user.get("active_store_id"),
+            processing_store_id,
             unread="the order",
             historical=claim.get("historical") if isinstance(claim.get("historical"), bool) else None,
             order_number=claim.get("order_number"),
@@ -6069,7 +7120,7 @@ async def retry_restock(
             "restock_store_reason": _RESTOCK_ROUTE_UNRESOLVED,
         }
         try:
-            coll.update_one({"return_id": return_id}, {"$set": blocked_update})
+            coll.update_one(mine, {"$set": blocked_update})
         except Exception as exc:  # noqa: BLE001
             logger.warning("[RETURNS] blocked-retry persist failed: %s", exc)
         return {
@@ -6099,7 +7150,7 @@ async def retry_restock(
         lines, _, unknown = _cap_restock_to_returnable(lines, retry_order, str(refund_id))
         if unknown:
             try:
-                coll.update_one({"return_id": return_id}, {"$set": {"restock_in_progress": False}})
+                coll.update_one(mine, {"$set": {"restock_in_progress": False}})
             except Exception:  # noqa: BLE001
                 pass
             return {
@@ -6109,7 +7160,7 @@ async def retry_restock(
                 "message": "Could not read the stock just now - nothing was restocked. Retry shortly.",
             }
 
-    def _restock(retry_lines, already_back=None):
+    def _restock(retry_lines, already_back=None, moved_ids=None):
         return _restock_good_items(
             retry_lines,
             claim_store,
@@ -6119,33 +7170,61 @@ async def retry_restock(
             user_id=current_user.get("user_id"),
             # F9: same online-store redirect as the create path -- a retry must
             # never be the door that mints a phantom unit on BV/WO-ONLINE-01.
-            processing_store_id=current_user.get("active_store_id"),
+            processing_store_id=processing_store_id,
             # VERIFIED evidence (non-None was checked above).
             order=retry_order,
             already_back=already_back,
+            moved_ids=moved_ids,
         )
 
+    set_aside: List[Dict[str, Any]] = []
+    aside_ok = True
+    by_booking = False
     try:
         if refund_id and retry_order is not None:
             # None: another door just put the units back -- nothing left to do.
+            # A mark of this refund already on the order (read before this
+            # retry booked anything) made the cap restock less for it. Either
+            # way the record's 'applied' rests on a booking this retry did not
+            # land: if it was a stale retry of this record whose writes then
+            # failed, that retry reopens the record (_reopen_by_booking).
+            from ..services.shopify_refund import _booked_for
+
+            booked_before = _booked_for(retry_order, str(refund_id))
             restock_result = _restock_booked(
                 retry_order, lines, str(refund_id), _restock,
-                processing_store_id=current_user.get("active_store_id"),
-            ) or {"applied": True}
+                processing_store_id=processing_store_id,
+            )
+            by_booking = restock_result is None or booked_before
+            restock_result = restock_result or {"applied": True}
         else:
             # Only the units still out: re-run, the units an earlier attempt
-            # put back went again -- a counter order's order-agnostic fallback
-            # flipped another customer's SOLD unit to AVAILABLE, or minted.
-            restock_result = _restock(lines, _landed_units(claim.get("restocked")))
+            # put back went again -- no SOLD unit of the bill was left for
+            # them, so each was minted a second time. "Earlier" is read from
+            # the stock as well as the doc (D43): a press that died before
+            # its doc was saved, or a rebuilt record, keeps no restocked rows.
+            moved_back, moved_aside, back_ids, aside_ids = _units_moved_by_return(return_id)
+            back_ids, aside_ids = _with_recorded_ids(claim, back_ids, aside_ids)
+            if not (retry_order or {}).get("historical"):
+                # A piece to set aside (damaged, opened, or -- on a rebuilt
+                # record -- its condition not kept) still reading SOLD. A
+                # blind rebuilt record's pieces include the ones its press
+                # already put back (_condition_not_kept): never a second unit.
+                blind = _condition_not_kept(claim)
+                set_aside, aside_ok = _quarantine_damaged_units(
+                    lines, claim_order_id, retry_order, return_id, current_user.get("user_id"),
+                    already_aside=_plus(moved_aside, moved_back) if blind else moved_aside,
+                    moved_ids=aside_ids | back_ids if blind else aside_ids)
+            restock_result = _restock(lines, _back_since_record(
+                return_id, claim, _landed_units(claim.get("restocked")), moved_back, back_ids), back_ids)
     except Exception as exc:  # noqa: BLE001
         # Even on failure we MUST release the in-progress flag so a future
         # retry isn't deadlocked.
         logger.warning("[RETURNS] restock retry stock writes failed: %s", exc)
         try:
-            coll.update_one(
-                {"return_id": return_id},
-                {"$set": {"restock_in_progress": False}},
-            )
+            released = coll.update_one(mine, {"$set": {"restock_in_progress": False}})
+            if refund_id:
+                _reopen_by_booking(coll, return_id, released)
         except Exception:  # noqa: BLE001
             pass
         raise HTTPException(status_code=500, detail="Restock retry failed")
@@ -6164,7 +7243,8 @@ async def retry_restock(
         # MERGED: the units an earlier attempt put back stay on the doc.
         "restocked": _merge_restocked(claim.get("restocked"),
                                       restock_result.get("restocked", [])),
-        "restock_applied": bool(restock_result.get("applied")),
+        # A piece whose set-aside failed keeps the step open (D7).
+        "restock_applied": bool(restock_result.get("applied")) and aside_ok,
         "restock_stock_ids": merged_ids,
         "restock_in_progress": False,
         "restock_completed_at": utc_now_iso(),
@@ -6176,17 +7256,29 @@ async def retry_restock(
         ),
         "restock_store_reason": restock_result.get("restock_store_reason"),
     }
+    if set_aside:
+        update["quarantined_stock_ids"] = [*(claim.get("quarantined_stock_ids") or []),
+                                           *(row["stock_id"] for row in set_aside)]
+    if refund_id:
+        update["restock_applied_by_booking"] = by_booking
     try:
-        coll.update_one({"return_id": return_id}, {"$set": update})
+        saved = coll.update_one(mine, {"$set": update})
+        if refund_id and not update["restock_applied"]:
+            _reopen_by_booking(coll, return_id, saved)
+        if by_booking and update["restock_applied"]:
+            _reopen_if_released(coll, return_id)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[RETURNS] restock retry persist failed: %s", exc)
+        # The stock rows are the truth (_units_moved_by_return): a later
+        # press finds what moved. The claim is given back either way.
+        coll.update_one(mine, {"$set": {"restock_in_progress": False}})
 
     # A successful retry raised the shelf count exactly like the create path
     # did, so Shopify has to hear about it too. Without this the online path --
     # which now routinely DEFERS recovery to this endpoint -- leaves the
     # recovered frame sellable in-shop but invisible online. Fail-soft.
     restocked_rows = restock_result.get("restocked") or []
-    if update["restock_applied"] and restocked_rows:
+    if restock_result.get("applied") and restocked_rows:
         try:
             from ..services.online_stock_writeback import writeback_after_restock
 
@@ -6224,7 +7316,39 @@ async def retry_restock(
             if restock_result.get("reason") == "stock_in_task_not_saved"
             else "Restock partial - retry again"
         ),
+        "quarantined_stock_ids": [row["stock_id"] for row in set_aside],
+        "stock_note": " ".join(part for part in (
+            _new_label_note(restocked_rows),
+            f"{len(set_aside)} piece(s) set aside in Quarantine for the store manager to check "
+            "(damaged, opened, or its condition was not kept): not on sale until the manager decides."
+            if set_aside else "") if part),
     }
+
+
+@router.post("/{return_id}/complete-record/restock")
+async def retry_completed_record_restock(
+    return_id: str = Path(..., description="Return ID"),
+    current_user: dict = Depends(require_roles(*_COMPLETE_RECORD_ROLES)),
+):
+    """Returns > Needs completing > Retry stock step (decision D7, 2026-11-11):
+    Accounts / Admin re-run the restock of a record they completed there --
+    the ONE action for its pieces still out of stock, never a hand entry. It
+    is the store's retry (_retry_restock: its claim, its units-still-out rule,
+    its store scope), for a completed record only: an ordinary return is not
+    theirs, and the store door refuses a completed one. A REBUILT record is
+    retried too (decision D43): each line's own unit first (a removed line's
+    included), never another SOLD unit of the product, never a mint for a
+    unit already back, the claim given back on any failure. An online order's units go back to the shop the press itself
+    resolved (kept on the record), never to the presser's own shop."""
+    coll = _returns_coll()
+    try:
+        doc = (coll.find_one({"return_id": return_id}, {"_id": 0, "recovered": 1, "restock_store_id": 1})
+               if coll is not None else None)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail="Could not read the returns - try again.") from exc
+    if not (doc or {}).get("recovered"):
+        raise HTTPException(status_code=404, detail="Return not found")
+    return _retry_restock(return_id, current_user, doc.get("restock_store_id"), panel=True)
 
 
 # ============================================================================
@@ -6953,154 +8077,159 @@ async def refund_advance_and_cancel(
                 {"return_id": _rid, "status": "PENDING"},
                 {"$set": {"status": "VOIDED", "voided_reason": "a later press found it without its claim"}},
             )
-    plan = _advance_refund_plan(order)
-    if not plan["ok"]:
-        raise HTTPException(status_code=plan.get("status_code", 400), detail=plan["reason"])
-    if coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}}):
-        raise HTTPException(
-            status_code=400,
-            detail="This order already has a return against it. Ask an admin to settle it.",
-        )
-    total, credit, refund_tenders = plan["total"], plan["credit"], plan["refund_tenders"]
-    status = order.get("status")
-
-    # Cash: from the shop's drawer or from HQ (THE rule, _place_cash_legs).
-    cash = round(sum(t["amount"] for t in refund_tenders if t["method"] == "CASH"), 2)
-    refund_tenders, paid_outside_drawer = _place_cash_legs(refund_tenders, body.cash_paid_from, store_id)
-
-    # A credit note for the WHOLE invoice (invoiced orders only).
-    priced_lines: List[Dict[str, Any]] = []
-    gst_view: Dict[str, Any] = {"taxable": 0.0, "tax": 0.0}
-    note_value = 0.0
-    if plan["invoice_number"]:
-        priced_lines, gst_view, note_value = _whole_invoice_credit_note(order, order_id)
-
-    # One refund per order, even under a double tap: claim the order first --
-    # only while its status AND the money on it are what was read, so a payment
-    # landing mid-refund makes this refuse instead of refunding a stale amount.
+    # One reservation with every other door that gives money back on this
+    # bill (#1397 round 7): the shared refund hold and the credit lock
+    # (bill_money_door) from the plan to the finished refund.
     return_id = generate_return_id()
-    if not repo.update_if(
-        order_id,
-        # ...and the invoice state the plan read: an invoice minted in
-        # between would mean a refund with no credit note for it.
-        {"status": status, "advance_refund_id": None, "amount_paid": order.get("amount_paid"),
-         "invoice_number": order.get("invoice_number"),
-         # An e-invoice landing mid-refund would need an e-invoice credit note.
-         "irn": order.get("irn"),
-         # A superadmin credit note claims the order the same way (admin_edit).
-         "post_invoice_credit_note_at": None},
-        {"advance_refund_id": return_id, "advance_refund_at": utc_now_iso(), "advance_refund_record": None},
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="This order changed or is already being refunded - reload it and check.",
-        )
+    with bill_money_door(_get_db(), getattr(repo, "collection", None), order_id, f"advance:{return_id}",
+                         float(order.get("amount_paid") or 0), door="advance"):
+        plan = _advance_refund_plan(order)
+        if not plan["ok"]:
+            raise HTTPException(status_code=plan.get("status_code", 400), detail=plan["reason"])
+        if coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}}):
+            raise HTTPException(
+                status_code=400,
+                detail="This order already has a return against it. Ask an admin to settle it.",
+            )
+        total, credit, refund_tenders = plan["total"], plan["credit"], plan["refund_tenders"]
+        status = order.get("status")
 
-    def _unclaim():
-        repo.update_if(order_id, {"advance_refund_id": return_id},
-                       {"advance_refund_id": None, "advance_refund_at": None, "advance_refund_record": None})
+        # Cash: from the shop's drawer or from HQ (THE rule, _place_cash_legs).
+        cash = round(sum(t["amount"] for t in refund_tenders if t["method"] == "CASH"), 2)
+        refund_tenders, paid_outside_drawer = _place_cash_legs(refund_tenders, body.cash_paid_from, store_id)
 
-    # A counter return reserves its units on the order BEFORE it writes its
-    # doc, and refuses once it sees advance_refund_id (create_return); a
-    # payment landing in the same instant changes amount_paid (its write is a
-    # compare-and-set on advance_refund_id too). Re-read after our claim: if
-    # either got in first, back out with nothing written.
-    fresh = repo.find_by_id(order_id) or {}
-    try:
-        handed_over = _goods_handed_over(fresh)
-        other_note = _order_has_other_credit_note(fresh)
-    except HTTPException:
-        _unclaim()
-        raise
-    if other_note:
-        _unclaim()
-        raise HTTPException(status_code=409, detail=(
-            "This order already has a credit note against it (a correction after the "
-            "invoice). Nothing was refunded. Ask an admin to settle it."))
-    if handed_over:
-        _unclaim()
-        raise HTTPException(status_code=409, detail=_HANDED_OVER)
-    if (
-        coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}})
-        or any(float((it or {}).get("returned_qty") or 0) > 0 for it in fresh.get("items") or [])
-        or abs(float(fresh.get("amount_paid") or 0) - float(order.get("amount_paid") or 0)) > 0.005
-        or (fresh.get("invoice_number") or None) != (order.get("invoice_number") or None)
-    ):
-        _unclaim()
-        raise HTTPException(
-            status_code=409,
-            detail="This order changed while the refund started (a return or a payment) - nothing was refunded. Reload and check.",
-        )
+        # A credit note for the WHOLE invoice (invoiced orders only).
+        priced_lines: List[Dict[str, Any]] = []
+        gst_view: Dict[str, Any] = {"taxable": 0.0, "tax": 0.0}
+        note_value = 0.0
+        if plan["invoice_number"]:
+            priced_lines, gst_view, note_value = _whole_invoice_credit_note(order, order_id)
 
-    actor_name = current_user.get("full_name", current_user.get("username", ""))
-    now = utc_now_iso()
-    doc: Dict[str, Any] = {
-        "return_id": return_id,
-        "order_id": order_id,
-        "order_number": order.get("order_number"),
-        "historical": bool(order.get("historical")),
-        "customer_id": order.get("customer_id"),
-        "customer_name": order.get("customer_name") or "",
-        "store_id": store_id,
-        "return_type": "RETURN",
-        "advance_refund": True,
-        # Invoiced: the whole invoice's lines and tax (THE credit note GSTR-1
-        # / 3B read from returns.gst_breakup). Not invoiced: no tax was charged.
-        "items": priced_lines,
-        "returned_value": note_value or total,
-        "gross_refund": note_value or total,
-        "credit_note_value": note_value or None,
-        "restocking_fee": 0.0,
-        # The money actually given back: the advance, never the invoice value.
-        "net_refund": total,
-        "gst_breakup": gst_view,
-        "credit_note_number": None,
-        "invoice_number": plan["invoice_number"],
-        "refund_amount": total,
-        "refund_method": (refund_tenders or paid_outside_drawer)[0]["method"],
-        # Drawer truth: the Day-End readers net these legs off -- only the
-        # cash handed back from this shop's own drawer is among them.
-        "refund_tenders": refund_tenders,
-        "drawer_auto_netted": not paid_outside_drawer,
-        "cash_paid_from": body.cash_paid_from if cash > 0 else None,
-        "paid_outside_drawer": paid_outside_drawer or None,
-        "credit_amount": credit or None,
-        "credit_entry": None,
-        # PENDING until every part is written (_finish_advance_refund): every
-        # money / GST reader reads COMPLETED only, and a crash part-way is
-        # finished by the next press, never rolled back.
-        "status": "PENDING",
-        "reason_summary": body.reason,
-        "refund_approval_by": current_user.get("user_id"),
-        "refund_approval_by_name": actor_name,
-        "refund_approval_status": "APPROVED",
-        "created_by": current_user.get("user_id"),
-        "created_by_name": actor_name,
-        # created_at is re-dated to the COMPLETION time when the refund
-        # completes (_finish_advance_refund): Day-End and the GST period read
-        # created_at, and a refund belongs to the day it went through.
-        "created_at": now,
-        "claimed_at": now,
-    }
-    try:
-        coll.insert_one(dict(doc))
-    except Exception as exc:  # noqa: BLE001
-        logger.error("[RETURNS] advance refund %s not saved: %s", return_id, exc)
-        _unclaim()  # nothing else was written yet
-        raise HTTPException(
-            status_code=503, detail="The refund could not be saved - nothing was recorded. Try again."
-        )
-    # Stamp the record on the order while the claim is still ours -- the
-    # same single write the stale-claim free conditions on. Lost (the claim
-    # was freed meanwhile): stop here, before any credit or note; the record
-    # wrote nothing else and is voided later.
-    if not repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_record": return_id}):
-        raise HTTPException(
-            status_code=409,
-            detail="This refund's claim was released meanwhile - nothing was refunded. Reload and check.",
-        )
+        # One refund per order, even under a double tap: claim the order first --
+        # only while its status AND the money on it are what was read, so a payment
+        # landing mid-refund makes this refuse instead of refunding a stale amount.
+        if not repo.update_if(
+            order_id,
+            # ...and the invoice state the plan read: an invoice minted in
+            # between would mean a refund with no credit note for it.
+            {"status": status, "advance_refund_id": None, "amount_paid": order.get("amount_paid"),
+             "invoice_number": order.get("invoice_number"),
+             # An e-invoice landing mid-refund would need an e-invoice credit note.
+             "irn": order.get("irn"),
+             # A superadmin credit note claims the order the same way (admin_edit).
+             "post_invoice_credit_note_at": None},
+            {"advance_refund_id": return_id, "advance_refund_at": utc_now_iso(), "advance_refund_record": None},
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="This order changed or is already being refunded - reload it and check.",
+            )
 
-    doc = _finish_advance_refund(repo, coll, doc, current_user)
+        def _unclaim():
+            repo.update_if(order_id, {"advance_refund_id": return_id},
+                           {"advance_refund_id": None, "advance_refund_at": None, "advance_refund_record": None})
+
+        # A counter return reserves its units on the order BEFORE it writes its
+        # doc, and refuses once it sees advance_refund_id (create_return); a
+        # payment landing in the same instant changes amount_paid (its write is a
+        # compare-and-set on advance_refund_id too). Re-read after our claim: if
+        # either got in first, back out with nothing written.
+        fresh = repo.find_by_id(order_id) or {}
+        try:
+            handed_over = _goods_handed_over(fresh)
+            other_note = _order_has_other_credit_note(fresh)
+        except HTTPException:
+            _unclaim()
+            raise
+        if other_note:
+            _unclaim()
+            raise HTTPException(status_code=409, detail=(
+                "This order already has a credit note against it (a correction after the "
+                "invoice). Nothing was refunded. Ask an admin to settle it."))
+        if handed_over:
+            _unclaim()
+            raise HTTPException(status_code=409, detail=_HANDED_OVER)
+        if (
+            coll.count_documents({"order_id": order_id, "status": {"$ne": "VOIDED"}})
+            or any(float((it or {}).get("returned_qty") or 0) > 0 for it in fresh.get("items") or [])
+            or abs(float(fresh.get("amount_paid") or 0) - float(order.get("amount_paid") or 0)) > 0.005
+            or (fresh.get("invoice_number") or None) != (order.get("invoice_number") or None)
+        ):
+            _unclaim()
+            raise HTTPException(
+                status_code=409,
+                detail="This order changed while the refund started (a return or a payment) - nothing was refunded. Reload and check.",
+            )
+
+        actor_name = current_user.get("full_name", current_user.get("username", ""))
+        now = utc_now_iso()
+        doc: Dict[str, Any] = {
+            "return_id": return_id,
+            "order_id": order_id,
+            "order_number": order.get("order_number"),
+            "historical": bool(order.get("historical")),
+            "customer_id": order.get("customer_id"),
+            "customer_name": order.get("customer_name") or "",
+            "store_id": store_id,
+            "return_type": "RETURN",
+            "advance_refund": True,
+            # Invoiced: the whole invoice's lines and tax (THE credit note GSTR-1
+            # / 3B read from returns.gst_breakup). Not invoiced: no tax was charged.
+            "items": priced_lines,
+            "returned_value": note_value or total,
+            "gross_refund": note_value or total,
+            "credit_note_value": note_value or None,
+            "restocking_fee": 0.0,
+            # The money actually given back: the advance, never the invoice value.
+            "net_refund": total,
+            "gst_breakup": gst_view,
+            "credit_note_number": None,
+            "invoice_number": plan["invoice_number"],
+            "refund_amount": total,
+            "refund_method": (refund_tenders or paid_outside_drawer)[0]["method"],
+            # Drawer truth: the Day-End readers net these legs off -- only the
+            # cash handed back from this shop's own drawer is among them.
+            "refund_tenders": refund_tenders,
+            "drawer_auto_netted": not paid_outside_drawer,
+            "cash_paid_from": body.cash_paid_from if cash > 0 else None,
+            "paid_outside_drawer": paid_outside_drawer or None,
+            "credit_amount": credit or None,
+            "credit_entry": None,
+            # PENDING until every part is written (_finish_advance_refund): every
+            # money / GST reader reads COMPLETED only, and a crash part-way is
+            # finished by the next press, never rolled back.
+            "status": "PENDING",
+            "reason_summary": body.reason,
+            "refund_approval_by": current_user.get("user_id"),
+            "refund_approval_by_name": actor_name,
+            "refund_approval_status": "APPROVED",
+            "created_by": current_user.get("user_id"),
+            "created_by_name": actor_name,
+            # created_at is re-dated to the COMPLETION time when the refund
+            # completes (_finish_advance_refund): Day-End and the GST period read
+            # created_at, and a refund belongs to the day it went through.
+            "created_at": now,
+            "claimed_at": now,
+        }
+        try:
+            coll.insert_one(dict(doc))
+        except Exception as exc:  # noqa: BLE001
+            logger.error("[RETURNS] advance refund %s not saved: %s", return_id, exc)
+            _unclaim()  # nothing else was written yet
+            raise HTTPException(
+                status_code=503, detail="The refund could not be saved - nothing was recorded. Try again."
+            )
+        # Stamp the record on the order while the claim is still ours -- the
+        # same single write the stale-claim free conditions on. Lost (the claim
+        # was freed meanwhile): stop here, before any credit or note; the record
+        # wrote nothing else and is voided later.
+        if not repo.update_if(order_id, {"advance_refund_id": return_id}, {"advance_refund_record": return_id}):
+            raise HTTPException(
+                status_code=409,
+                detail="This refund's claim was released meanwhile - nothing was refunded. Reload and check.",
+            )
+
+        doc = _finish_advance_refund(repo, coll, doc, current_user)
 
     try:
         from ..dependencies import get_audit_repository
