@@ -73,9 +73,16 @@ class MockCollection:
                     return False
             elif isinstance(v, dict):
                 pass  # skip complex operators in tests (not needed here)
-            elif doc.get(k) != v:
+            elif self._get(doc, k) != v:
                 return False
         return True
+
+    @staticmethod
+    def _get(doc, dotted):
+        # 'config.gstin' reads the nested field, as Mongo does.
+        for part in dotted.split("."):
+            doc = doc.get(part) if isinstance(doc, dict) else None
+        return doc
 
 
 class MockDB:
@@ -120,23 +127,22 @@ def _sample_order(with_irn=False):
         "invoice_number": "INV/2026/001",
         "store_id": "BV-BOK-01",
         "customer_name": "Test Customer",
+        # The tax fields a real POS bill stores (audit L3-19): the order's
+        # tax_amount + grand_total and each line's stamped taxable_value /
+        # tax_amount / gst_rate -- the only ones the payload is built from.
         "grand_total": 590.0,
-        "taxable_amount": 500.0,
-        "cgst_amount": 45.0,
-        "sgst_amount": 45.0,
-        "igst_amount": 0.0,
+        "tax_amount": 90.0,
+        "tax_rate": 18.0,
         "items": [
             {
                 "name": "Spectacle Frame",
                 "hsn_code": "9003",
                 "quantity": 1,
-                "unit_price": 500.0,
-                "taxable_amount": 500.0,
-                "cgst_amount": 45.0,
-                "sgst_amount": 45.0,
-                "igst_amount": 0.0,
+                "unit_price": 590.0,
+                "item_total": 590.0,
                 "gst_rate": 18.0,
-                "total": 590.0,
+                "taxable_value": 500.0,
+                "tax_amount": 90.0,
             }
         ],
     }
