@@ -236,6 +236,7 @@ def earliest_refill(
     now = now or datetime.utcnow()
     clock_order: Dict[tuple, int] = {}
     best: Optional[Dict[str, Any]] = None
+    best_days: Optional[int] = None
     for order, line in supplies:
         key = _clock_key(line)
         if clock_order.setdefault(key, id(order)) != id(order):
@@ -243,7 +244,8 @@ def earliest_refill(
         refill = compute_refill(
             line, order.get("created_at") or order.get("order_date"), now=now
         )
-        if best is None or refill["days_remaining"] < best["days_remaining"]:
+        if best_days is None or refill["days_remaining"] < best_days:
+            best_days = refill["days_remaining"]
             best = {
                 **refill,
                 "last_cl_order_id": order.get("order_id"),
