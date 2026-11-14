@@ -438,6 +438,77 @@ def test_delete_allowed_when_stock_is_zero(fake_db):
     assert deleted["status"] == "success"
 
 
+def _stock_cell(slug, on_hand=0, reserved=0, cell_id="ls-f03"):
+    return {
+        "line_stock_id": cell_id,
+        "lens_line_id": slug,
+        "store_id": "STR-001",
+        "sph": -2.0,
+        "cyl": 0.0,
+        "add": None,
+        "on_hand": on_hand,
+        "reserved": reserved,
+    }
+
+
+@pytest.mark.parametrize("cell", [{"on_hand": 5}, {"reserved": 2}])
+def test_patch_cannot_retire_a_stocked_line(fake_db, cell):
+    """L2-LENS-F03: PATCH is_active=false is the same act as DELETE, so it
+    is refused 409 while a cell carries on_hand or reserved; the line stays
+    active and its other fields are not written either."""
+    admin = _user(["SUPERADMIN"])
+    out = asyncio.run(catalog_router.create_lens_line(_payload_line(), admin))
+    slug = out["lens_line"]["lens_line_id"]
+    fake_db["lens_stock_lines"].insert_one(_stock_cell(slug, **cell))
+
+    upd = catalog_router.LensLineUpdate(is_active=False, notes="retire")
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(catalog_router.update_lens_line(slug, upd, admin))
+    assert exc.value.status_code == 409
+    assert "stock" in exc.value.detail.lower()
+    raw = fake_db["lens_catalog"].find_one({"lens_line_id": slug})
+    assert raw["is_active"] is True
+    assert raw.get("notes") != "retire"
+    listed = asyncio.run(catalog_router.list_lens_lines(
+        brand=None, series=None, index=None, material=None, lens_type=None,
+        coating=None, q=None, active=True, limit=50, current_user=admin))
+    assert [d["lens_line_id"] for d in listed["lens_lines"]] == [slug]
+
+
+def test_patch_retires_a_zero_stock_line_and_reactivates(fake_db):
+    """The rule keeps what was legitimate: a zero-stock line retires
+    through PATCH, a stocked ACTIVE line still takes ordinary edits, and an
+    inactive line that has since received stock can be edited and switched
+    back on."""
+    admin = _user(["SUPERADMIN"])
+    out = asyncio.run(catalog_router.create_lens_line(_payload_line(), admin))
+    slug = out["lens_line"]["lens_line_id"]
+    fake_db["lens_stock_lines"].insert_one(_stock_cell(slug))
+
+    off = asyncio.run(catalog_router.update_lens_line(
+        slug, catalog_router.LensLineUpdate(is_active=False), admin))
+    assert off["lens_line"]["is_active"] is False
+
+    # Stock lands on the inactive line.
+    fake_db["lens_stock_lines"].update_one(
+        {"line_stock_id": "ls-f03"}, {"$set": {"on_hand": 4}})
+    edited = asyncio.run(catalog_router.update_lens_line(
+        slug, catalog_router.LensLineUpdate(is_active=False, notes="n"), admin))
+    assert edited["lens_line"]["notes"] == "n"
+    on = asyncio.run(catalog_router.update_lens_line(
+        slug, catalog_router.LensLineUpdate(is_active=True), admin))
+    assert on["lens_line"]["is_active"] is True
+
+    # Active + stocked: ordinary edits pass, retirement does not.
+    priced = asyncio.run(catalog_router.update_lens_line(
+        slug, catalog_router.LensLineUpdate(mrp=5000.0), admin))
+    assert priced["lens_line"]["mrp"] == 5000.0
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(catalog_router.update_lens_line(
+            slug, catalog_router.LensLineUpdate(is_active=False), admin))
+    assert exc.value.status_code == 409
+
+
 def test_get_unknown_returns_404(fake_db):
     admin = _user(["SUPERADMIN"])
     with pytest.raises(HTTPException) as exc:

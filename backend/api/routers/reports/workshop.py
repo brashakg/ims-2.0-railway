@@ -3,8 +3,10 @@
 from fastapi import Depends, Query
 from typing import Any, Dict, Optional
 from datetime import date, datetime, timedelta
+from ...utils.event_time import parse_event_utc_naive
 from ...utils.ist import (
     now_ist_naive,
+    ist_date_str,
     ist_day_start_utc,
     ist_today,
 )
@@ -319,7 +321,8 @@ async def workshop_productivity(
         return empty
 
     def _to_dt(v):
-        """Parse a stored timestamp (str or datetime) to a naive datetime, or None."""
+        """A CALENDAR field (expected_date) as a naive datetime, or None: its
+        wall-clock day is the business day, so no zone shift."""
         if not v:
             return None
         try:
@@ -368,11 +371,16 @@ async def workshop_productivity(
     for job in all_jobs:
         if job.get("status") not in CLOSED:
             continue
-        completed = _to_dt(job.get("completed_at"))
+        # completed_at / created_at are EVENT instants: read them in the one
+        # stored frame (naive UTC; an explicit offset or Z is converted, not
+        # dropped) so the elapsed time below is true for every stored shape.
+        completed = parse_event_utc_naive(job.get("completed_at"))
         if completed is None:
             continue
-        # Window filter on the CLOSE (completed) date.
-        comp_date = completed.date()
+        # Window filter on the CLOSE day -- the IST business day of that
+        # instant (L3-30), not its UTC calendar day: a job closed at 01:30 IST
+        # belongs to the day the shop was open, and to exactly one window.
+        comp_date = date.fromisoformat(ist_date_str(completed))
         if comp_date < start_d or comp_date > end_d:
             continue
 
@@ -381,7 +389,7 @@ async def workshop_productivity(
         tot_completed += 1
 
         # Turnaround: completed_at - created_at in days (>= 0 only).
-        created = _to_dt(job.get("created_at"))
+        created = parse_event_utc_naive(job.get("created_at"))
         if created is not None:
             days = (completed - created).total_seconds() / 86400.0
             if days >= 0:

@@ -154,7 +154,7 @@ def _enum_coll():
 
 
 def _stock_coll():
-    """Loaded on DELETE so we can refuse delete when stock exists."""
+    """Loaded when a line is retired so we can refuse while stock exists."""
     db = _get_db()
     if db is None:
         return None
@@ -162,6 +162,35 @@ def _stock_coll():
         return db.get_collection("lens_stock_lines")
     except Exception:  # noqa: BLE001
         return None
+
+
+def _refuse_retire_with_stock(lens_line_id: str) -> None:
+    """THE retirement rule for a lens line, shared by every door that
+    switches one off (DELETE, and PATCH is_active=false): refuse with 409
+    while ANY stock cell of the line still carries on_hand or reserved."""
+    stock = _stock_coll()
+    if stock is None:
+        return
+    try:
+        n = stock.count_documents(
+            {
+                "lens_line_id": lens_line_id,
+                "$or": [
+                    {"on_hand": {"$gt": 0}},
+                    {"reserved": {"$gt": 0}},
+                ],
+            }
+        )
+    except Exception:  # noqa: BLE001
+        n = 0
+    if n:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot retire this lens line: {n} stock cell(s) still carry "
+                "on_hand or reserved units. Zero them out first.".format(n=n)
+            ),
+        )
 
 
 def load_enum_config() -> Dict[str, Any]:
@@ -462,6 +491,11 @@ async def update_lens_line(
             changed[k] = v
     if not changed:
         return {"status": "no_changes", "lens_line": mask_cost(_clean(existing), current_user, "product")}
+    # Switching a live line off here is the same act as DELETE, so it obeys
+    # the same stock rule (L2-LENS-F03). Reactivation, and edits to a line
+    # that is already off, are not retirements.
+    if changed.get("is_active") is False and existing.get("is_active") is not False:
+        _refuse_retire_with_stock(lens_line_id)
     changed["updated_at"] = _now()
 
     try:
@@ -499,29 +533,7 @@ async def delete_lens_line(
     if not existing:
         raise HTTPException(status_code=404, detail="Lens line not found")
 
-    # Block soft-delete if ANY stock cell still carries on_hand or reserved.
-    stock = _stock_coll()
-    if stock is not None:
-        try:
-            n = stock.count_documents(
-                {
-                    "lens_line_id": lens_line_id,
-                    "$or": [
-                        {"on_hand": {"$gt": 0}},
-                        {"reserved": {"$gt": 0}},
-                    ],
-                }
-            )
-        except Exception:  # noqa: BLE001
-            n = 0
-        if n:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "Cannot delete lens line: {n} stock cell(s) still carry "
-                    "on_hand or reserved units. Zero them out first.".format(n=n)
-                ),
-            )
+    _refuse_retire_with_stock(lens_line_id)
 
     try:
         coll.update_one(

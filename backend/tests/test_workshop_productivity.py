@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 import pytest
@@ -44,7 +44,8 @@ def _mk_job(
     remake: bool = False,
 ) -> Dict[str, Any]:
     """Build a CLOSED workshop_jobs doc for the productivity window."""
-    now = datetime.now()
+    # The stored frame: the naive UTC wall clock, whatever zone the box is in.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     completed = now - timedelta(days=completed_days_ago)
     created = now - timedelta(days=created_days_ago)
     expected = completed + timedelta(days=expected_days_from_completed)
@@ -242,3 +243,76 @@ def test_remake_rate(client, auth_headers, install):
     install(jobs)
     body = client.get(URL, headers=auth_headers).json()
     assert body["totals"]["remake_rate"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# L3-30 -- the close day is the IST business day, in every stored shape
+# ---------------------------------------------------------------------------
+
+# One instant, 4 Nov 2026 01:30 IST (== 3 Nov 20:00 UTC), in each shape a
+# workshop job's completed_at has been stored in.
+_L330_SHAPES = {
+    "naive-utc-datetime": datetime(2026, 11, 3, 20, 0, 0),
+    "aware-utc-datetime": datetime(2026, 11, 3, 20, 0, 0, tzinfo=timezone.utc),
+    "naive-utc-string": "2026-11-03T20:00:00",
+    "utc-offset-string": "2026-11-03T20:00:00+00:00",
+    "z-string": "2026-11-03T20:00:00Z",
+    "ist-offset-string": "2026-11-04T01:30:00+05:30",
+}
+
+
+def _l330_job(job_id: str, completed_at, expected_date: str) -> Dict[str, Any]:
+    return {
+        "job_id": job_id,
+        "job_number": f"WSJ-{job_id}",
+        "order_id": f"ORD-{job_id}",
+        "status": "COMPLETED",
+        "store_id": STORE,
+        "technician_id": "tech-a",
+        # Exactly 24 h before the close, in the plain stored frame.
+        "created_at": "2026-11-02T20:00:00",
+        "completed_at": completed_at,
+        "expected_date": expected_date,
+    }
+
+
+def _window(client, auth_headers, day_from: str, day_to: str) -> Dict[str, Any]:
+    resp = client.get(
+        URL, headers=auth_headers, params={"from_date": day_from, "to_date": day_to}
+    )
+    assert resp.status_code == 200
+    return resp.json()["totals"]
+
+
+@pytest.mark.parametrize("shape", sorted(_L330_SHAPES))
+def test_close_after_ist_midnight_counts_on_the_ist_day(
+    client, auth_headers, install, shape
+):
+    """A job closed at 01:30 IST on 4 Nov is 4 Nov's work, not 3 Nov's (its UTC
+    calendar day), and it is counted in exactly one of two adjacent windows."""
+    install([_l330_job("j", _L330_SHAPES[shape], expected_date="2026-11-03")])
+
+    on_4th = _window(client, auth_headers, "2026-11-04", "2026-11-04")
+    on_3rd = _window(client, auth_headers, "2026-11-03", "2026-11-03")
+    assert on_4th["jobs_completed"] == 1
+    assert on_3rd["jobs_completed"] == 0
+    # Promised for the 3rd, closed on the 4th (IST): late, not on time.
+    assert on_4th["on_time_rate"] == 0.0
+    # Elapsed time is the true 24 h whatever shape the close was stored in.
+    assert on_4th["avg_turnaround_days"] == 1.0
+
+
+def test_last_second_of_the_ist_day_stays_on_that_day(client, auth_headers, install):
+    """23:59:59 IST on 3 Nov (18:29:59 UTC) is still 3 Nov, and on time for a
+    3 Nov promise; one second later belongs to the 4th."""
+    install([
+        _l330_job("before", "2026-11-03T18:29:59", expected_date="2026-11-03"),
+        _l330_job("after", "2026-11-03T18:30:00", expected_date="2026-11-04"),
+    ])
+    on_3rd = _window(client, auth_headers, "2026-11-03", "2026-11-03")
+    on_4th = _window(client, auth_headers, "2026-11-04", "2026-11-04")
+    both = _window(client, auth_headers, "2026-11-03", "2026-11-04")
+    assert (on_3rd["jobs_completed"], on_4th["jobs_completed"]) == (1, 1)
+    assert both["jobs_completed"] == 2
+    assert on_3rd["on_time_rate"] == 1.0
+    assert on_4th["on_time_rate"] == 1.0
