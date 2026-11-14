@@ -14,7 +14,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { financeApi } from '../../services/api/finance';
 import type { JournalEntry, JeStatus, ChartAccount } from './financeTypes';
-import { getErrorDetail, getErrorMessage } from '../../utils/errorHandler';
+import { getErrorMessage } from '../../utils/errorHandler';
 import { istDayString } from '../../utils/datetime';
 
 const STATUS_STYLE: Record<JeStatus, string> = {
@@ -158,6 +158,17 @@ export default function JournalEntriesPanel() {
     }
   };
 
+  // Re-read the open entry and the list after a refused action, so the buttons
+  // follow the server's state instead of a stale local copy.
+  const refreshSelected = async (je: JournalEntry) => {
+    try {
+      setSelected(await financeApi.getJournalEntry(je.je_id));
+    } catch {
+      // Keep the open entry; the list reload below still refreshes the rows.
+    }
+    load();
+  };
+
   const doApprove = async (je: JournalEntry) => {
     if (pin.length < 4) { toast.error('Enter your approval PIN'); return; }
     setActing(true);
@@ -169,6 +180,7 @@ export default function JournalEntriesPanel() {
       load();
     } catch (e: any) {
       toast.error(getErrorMessage(e, 'Approve failed'));
+      await refreshSelected(je);
     } finally {
       setActing(false);
     }
@@ -201,11 +213,11 @@ export default function JournalEntriesPanel() {
       load();
     } catch (e: any) {
       toast.error(getErrorMessage(e, 'Post failed'));
-      // The approval lapsed or can no longer be used: offer approving again.
-      if (['expired', 'already_consumed', 'not_approved'].includes((getErrorDetail(e) as { error?: string } | undefined)?.error ?? '')) {
-        setSelected({ ...je, needs_reapproval: true });
-        load();
-      }
+      // Show the entry as the server now sees it (D54). Its needs_reapproval
+      // says whether a checker must approve again (lapsed or spent approval) or
+      // whether pressing Post again finishes the posting (a Post whose journal
+      // write was lost keeps its approval). Never guess it from the refusal.
+      await refreshSelected(je);
     } finally {
       setActing(false);
     }

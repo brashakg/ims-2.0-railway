@@ -22,6 +22,7 @@ vi.mock('../../../services/api/finance', () => ({
     getChartOfAccounts: vi.fn().mockResolvedValue({ accounts: [] }),
     approveJournalEntry: vi.fn().mockResolvedValue({ ok: true }),
     postJournalEntry: vi.fn(),
+    getJournalEntry: vi.fn(),
   },
 }));
 
@@ -73,8 +74,26 @@ describe('journal re-approval (D54)', () => {
 
   it('a Post refused as expired switches to Approve again', async () => {
     api.postJournalEntry.mockRejectedValue({ response: { status: 410, data: { detail: { error: 'expired' } } } });
+    api.getJournalEntry.mockResolvedValue(entry({ needs_reapproval: true }));
     await open({});
     fireEvent.click(screen.getByRole('button', { name: 'Post to ledger' }));
     expect(await screen.findByRole('button', { name: 'Approve again' })).toBeTruthy();
+  });
+
+  // Lost journal write after the approval was spent by this Post (D54): the
+  // server answers 409 not_approved but its own row still says the approval is
+  // usable (bound to this Post). The screen must follow the server and keep
+  // "Post to ledger", because pressing Post again finishes the posting once;
+  // "Approve again" would only ever be refused.
+  it('a Post refused as not_approved follows the server and keeps Post', async () => {
+    api.postJournalEntry.mockRejectedValueOnce({ response: { status: 409, data: { detail: { error: 'not_approved', status: 'APPROVED' } } } });
+    api.getJournalEntry.mockResolvedValue(entry({ needs_reapproval: false }));
+    await open({});
+    fireEvent.click(screen.getByRole('button', { name: 'Post to ledger' }));
+    await waitFor(() => expect(api.getJournalEntry).toHaveBeenCalledWith('JE-1'));
+    expect(screen.queryByRole('button', { name: 'Approve again' })).toBeNull();
+    api.postJournalEntry.mockResolvedValueOnce({ ok: true });
+    fireEvent.click(await screen.findByRole('button', { name: 'Post to ledger' }));
+    await waitFor(() => expect(api.postJournalEntry).toHaveBeenCalledTimes(2));
   });
 });
