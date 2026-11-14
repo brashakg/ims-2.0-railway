@@ -1399,8 +1399,10 @@ def _hold_order_for_online(db, order_id: Any, refund_id: str, amount: float) -> 
             if not order:
                 return True  # no bill: nothing to race (the credit lock said so too)
             holds = dict(order.get("refund_holds") or {})
-            live, _ = _live_refund_holds(order_id, holds)
-            if any(rid != key and not (h or {}).get("kept") for rid, h in live.items()):
+            # Only another un-kept hold can refuse; the returns are read (to
+            # drop finished or aged ones) only when there is one.
+            others = {rid: h for rid, h in holds.items() if rid != key and not (h or {}).get("kept")}
+            if others and _live_refund_holds(order_id, others)[0]:
                 return False
             version = order.get("refund_holds_v")
             holds[key] = {"amount": round(_f(amount), 2), "at": datetime.now(timezone.utc).isoformat(),
