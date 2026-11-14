@@ -2015,7 +2015,9 @@ def _post_credit_and_restock(
         if expect_store_credit is not None and allowance[0] != expect_store_credit:
             return {"status": "review", "refund_id": refund_id, "order_id": order_id,
                     "store_credit": allowance[0], "store_credit_reason": allowance[1]}
-        if allowance[0] is not None and _all_taken_back_elsewhere(db, order_id, refund_id, credit_note):
+        # A full credit (no settlement label) had nothing cut: skip the read.
+        if (allowance[0] is not None and allowance[2] is not None
+                and _all_taken_back_elsewhere(db, order_id, refund_id, credit_note)):
             # Every unit of this refund was already returned (and its GST
             # reversed) at the counter or by another refund: a second credit
             # note would reverse that output tax again (#1397 round 8). Book
