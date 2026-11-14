@@ -1316,3 +1316,147 @@ def test_a_give_back_that_finds_the_save_landed_settles_instead(client, shop, ce
     assert cells.read() == (5, 1), "a landed lens is never given back"
     assert _op_states(shop, oid) == ["SETTLED"]
     assert op["op_id"] not in (_order(shop, oid).get("voided_edit_ops") or [])
+
+
+def _stall_take_past_the_sweep(shop, monkeypatch, oid, where):
+    """The press has written its op and sleeps BEFORE (or partway through) its
+    take for longer than the sweep's window: the sweep gives the op back while it
+    holds nothing, then the take lands. Returns what the sweep reported."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from api.routers.orders import admin_edit, edit_ops
+    from api.services import lens_stock_hook
+
+    seen = []
+
+    def tick():
+        if seen:
+            return
+        shop["db"].get_collection("order_edit_ops").update_many(
+            {"order_id": oid, "state": "OPEN"},
+            {"$set": {"created_at": datetime.now() - timedelta(hours=1), "lease_until": None}},
+        )
+        with ThreadPoolExecutor(1) as pool:
+            seen.append(pool.submit(asyncio.run, edit_ops.sweep_edit_ops()).result())
+
+    if where == "before the take":
+        real_reserve = lens_stock_hook.reserve_for_order_item
+
+        async def stalled_reserve(*, order_id, **k):
+            if order_id == oid:
+                tick()
+            return await real_reserve(order_id=order_id, **k)
+
+        monkeypatch.setattr(lens_stock_hook, "reserve_for_order_item", stalled_reserve)
+    else:
+        real_claim = admin_edit._claim_units
+
+        def stalled_claim(order_id, *a, **k):
+            if order_id == oid:
+                tick()
+            return real_claim(order_id, *a, **k)
+
+        monkeypatch.setattr(admin_edit, "_claim_units", stalled_claim)
+    return seen
+
+
+def stalled_take_case(client, shop, cells, door, where, monkeypatch):
+    """Shared by the in-memory suite and the native-Mongo file. Before the fix the
+    press's own give-back found the row already GIVEN_BACK, could not take its
+    lease and released nothing: a lens reserved and a frame SOLD to a bill that
+    bills neither, with nothing left to reconcile them."""
+    cells(on_hand=5)
+    other = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    assert door.press(other, [_as_sent(_order(shop, other)["items"][0]), _lens()]).status_code == 200
+    oid = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    before = _order(shop, oid)
+    lines = [_as_sent(before["items"][0]), _lens(), _line(FR, stock_id="SU-FR-A")]
+    quiet = type(client)(client.app, raise_server_exceptions=False)
+    with monkeypatch.context() as m:
+        seen = _stall_take_past_the_sweep(shop, m, oid, where)
+        r = quiet.put(f"/api/v1/orders/{oid}/{door.name}",
+                      json={"reason": "correcting this bill", "items": lines, **DOORS[door.name]},
+                      headers=_token(ADMIN))
+    assert seen and seen[0]["given_back"] == 1, seen
+    assert r.status_code == 409, r.text
+    after = _order(shop, oid)
+    assert after["items"] == before["items"] and after["grand_total"] == before["grand_total"]
+    assert cells.read() == (5, 1), "only the other bill's lens is held"
+    assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE", "no piece stays SOLD to a bill that lacks it"
+    _sweep(shop)
+    assert cells.read() == (5, 1) and _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
+    again = door.press(oid, lines)
+    assert again.status_code == 200, again.text
+    assert cells.read() == (5, 2) and _sold_to(shop, oid) == ["SU-FR-A"]
+    _sweep(shop)
+    assert cells.read() == (5, 2)
+    assert set(_op_states(shop, oid)) == {"GIVEN_BACK", "SETTLED"}
+    _no_flag_left(shop, oid)
+
+
+@pytest.mark.parametrize("where", ["before the take", "between the takes"])
+def test_a_take_that_lands_after_the_sweep_gave_back_goes_back(client, shop, cells, door, where, monkeypatch):
+    stalled_take_case(client, shop, cells, door, where, monkeypatch)
+
+
+def test_a_take_after_the_sweep_whose_press_died_is_swept_back(client, shop, cells, monkeypatch):
+    """The same stall, and the press then dies before its own give-back runs (the
+    process is gone, no handler). The sweep re-runs a given-back row's named
+    releases for a day: the stranded lens and frame go back on its next tick."""
+    from api.routers.orders import admin_edit
+
+    cells(on_hand=5)
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    before = _order(shop, oid)
+    lines = [_as_sent(before["items"][0]), _lens(), _line(FR, stock_id="SU-FR-A")]
+    quiet = type(client)(client.app, raise_server_exceptions=False)
+
+    async def died(op):
+        return False
+
+    with monkeypatch.context() as m:
+        seen = _stall_take_past_the_sweep(shop, m, oid, "before the take")
+        m.setattr(admin_edit, "give_back", died)
+        r = quiet.put(f"/api/v1/orders/{oid}/superadmin-edit",
+                      json={"reason": "correcting this bill", "items": lines}, headers=_token(ADMIN))
+    assert seen and r.status_code == 409, r.text
+    assert cells.read() == (5, 1) and _unit(shop, "SU-FR-A")["status"] == "SOLD", "stranded by the dead press"
+    _sweep(shop)
+    assert cells.read() == (5, 0), "the sweep put the lens back"
+    assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
+    assert _op_states(shop, oid) == ["GIVEN_BACK"]
+    assert _order(shop, oid)["items"] == before["items"]
+    _sweep(shop)
+    assert cells.read() == (5, 0), "a repeat moves nothing"
+    _no_flag_left(shop, oid)
+
+
+def test_a_save_that_lands_under_the_sweep_raises_no_false_flag(client, shop, cells, monkeypatch):
+    """The sweep reads the bill before the save lands; its give-back then finds the
+    op on the bill and settles, but the press's own settle holds the row. Before
+    the fix the sweep took that for a failed give-back and flagged a bill whose
+    lens is held exactly as billed: a false P1 'stock did not settle' Task."""
+    from api.routers.orders import edit_ops
+    from database.repositories.order_repository import OrderRepository
+
+    oid, _ = _lens_bill(client, shop, cells)
+    op = _ops(shop, oid)[0]
+    shop["db"].get_collection("order_edit_ops").update_one({"op_id": op["op_id"]}, {"$set": {
+        "state": "OPEN", "created_at": datetime.now() - timedelta(hours=1),
+        "lease_until": datetime.now() + timedelta(seconds=60)}})
+    real, stale = OrderRepository.find_by_id, []
+
+    def read_before_the_save(self, key, *a, **k):
+        bill = real(self, key, *a, **k)
+        if key == oid and not stale and bill:
+            stale.append(True)
+            return {**bill, "edit_ops": []}
+        return bill
+
+    monkeypatch.setattr(OrderRepository, "find_by_id", read_before_the_save)
+    out = asyncio.run(edit_ops.sweep_edit_ops())
+    monkeypatch.setattr(OrderRepository, "find_by_id", real)
+    assert stale and out["given_back"] == 0, out
+    assert not _order(shop, oid).get(FLAG), "no false flag on a bill that holds its lens"
+    assert cells.read() == (5, 1)
+    assert op["op_id"] not in (_order(shop, oid).get("voided_edit_ops") or [])

@@ -234,22 +234,40 @@ def _end(op: dict, state: Optional[str]) -> None:
         logger.warning("[STOCK] edit op %s not closed: %s", op["op_id"], exc)
 
 
+def _reopen(op: dict) -> None:
+    """A given-back row whose stock turned out to be still held (D61) is OPEN
+    again, so the sweep retries it and the Tasks board hears of it."""
+    coll = _ops()
+    if coll is None:
+        return
+    with suppress(Exception):
+        coll.update_one({"op_id": op["op_id"], "state": "GIVEN_BACK"},
+                        {"$set": {"state": "OPEN", "lease_until": None}})
+
+
 async def give_back(op: dict) -> bool:
     """The edit never landed: what it took goes back, claims that lost their reply
     included -- once its bill is shut to the op's save, so a save still in flight
     cannot land a line whose stock went back (D61). False leaves the row OPEN: the
     units and cells stay held, and the sweep tries again, then the Tasks board
-    says so."""
+    says so.
+
+    Once shut, nothing the op took can ever be billed, so its releases run by
+    name whoever holds the row and whatever state it is in: a press stalled
+    before or inside its take can take AFTER the sweep gave the row back, and
+    only a re-run then puts that stock back. The lease decides who ends the row."""
     from ...services.lens_stock_hook import release_for_cancel
 
     shut = _shut_bill(op)
     if shut == "landed":
         # The save landed after its caller looked: it is settled, never undone.
+        op["landed"] = True
         repo = get_order_repository()
         bill = repo.find_by_id(op["order_id"])
         return bill is not None and await settle(op, bill, repo)
-    if shut is None or not _take_lease(op):
+    if shut is None:
         return False
+    leased = _take_lease(op)
     order_id, store_id = op["order_id"], op.get("store_id") or ""
     done = True
     if any(_takes_serialized_stock(ln) for ln in op["added"]):
@@ -268,7 +286,10 @@ async def give_back(op: dict) -> bool:
         done = done and (rec or {}).get("status") != "failed"
     if not done:
         logger.error("[STOCK] edit %s of order %s not given back; the sweep retries it", op["op_id"], order_id)
-    _end(op, "GIVEN_BACK" if done else None)
+    if leased:
+        _end(op, "GIVEN_BACK" if done else None)
+    elif not done:
+        _reopen(op)
     return done
 
 
@@ -450,6 +471,13 @@ async def sweep_edit_ops() -> Dict[str, int]:
         return out
     cutoff = datetime.now() - timedelta(minutes=CLAIM_SWEEP_MINUTES)
     try:
+        # A press stalled past the window may take after its row was given back
+        # and die before its own give-back: for a day (sweep_unsaved_claims's
+        # horizon) the sweep re-runs given-back rows' named releases. A repeat
+        # moves nothing; what is still held re-opens the row (D61).
+        recent = {"state": "GIVEN_BACK", "created_at": {"$gte": datetime.now() - timedelta(days=1)}}
+        for op in list(coll.find(recent, {"_id": 0}).limit(200)):
+            await give_back(op)
         rows = list(coll.find({"state": "OPEN", "created_at": {"$lt": cutoff}}, {"_id": 0}).limit(200))
         for op in rows:
             order = repo.find_by_id(op["order_id"])
@@ -458,6 +486,9 @@ async def sweep_edit_ops() -> Dict[str, int]:
                 continue
             landed = op["op_id"] in (order.get("edit_ops") or [])
             done = await (settle(op, order, repo) if landed else give_back(op))
+            # A save that landed after this read was settled (or is being, by its
+            # own press): never a "stock did not settle" flag for a line it holds.
+            landed = landed or bool(op.get("landed"))
             out["settled" if done and landed else "given_back" if done else "unfinished"] += 1
             if not landed and not done:
                 line = (op["added"] or [{}])[0]

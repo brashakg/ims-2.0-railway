@@ -33,3 +33,11 @@ from tests.test_removed_goods_return_native import shop  # noqa: E402,F401  (nat
 def test_a_stalled_save_is_refused_on_real_mongo(client, shop, cells, door, goods, monkeypatch):
     assert type(shop["db"].client).__module__.startswith("pymongo"), "native Mongo only"
     stalled_save_case(client, shop, cells, door, goods, monkeypatch)
+
+
+@pytest.mark.parametrize("where", ["before the take", "between the takes"])
+def test_a_take_after_the_sweep_goes_back_on_real_mongo(client, shop, cells, door, where, monkeypatch):
+    from tests.test_order_edit_recovery import stalled_take_case
+
+    assert type(shop["db"].client).__module__.startswith("pymongo"), "native Mongo only"
+    stalled_take_case(client, shop, cells, door, where, monkeypatch)
