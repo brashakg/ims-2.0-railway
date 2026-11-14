@@ -33,6 +33,7 @@ import { customerApi, prescriptionApi, orderApi } from '../../services/api';
 import {
   CUSTOMER_SPEND_LABEL,
   CUSTOMER_SPEND_NOTE,
+  CUSTOMER_SPEND_CAPPED_NOTE,
   CUSTOMER_SPEND_ORDER_LIMIT,
   summariseCustomerSpend,
   type CustomerSpend,
@@ -790,6 +791,7 @@ export function CustomersPage() {
           <p className="text-xs text-gray-500 uppercase tracking-wide">{CUSTOMER_SPEND_LABEL}</p>
           <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(totalSpend)}</p>
           <p className="text-[11px] text-gray-400">{CUSTOMER_SPEND_NOTE}</p>
+          {spend?.capped && <p className="text-[11px] text-amber-700">{CUSTOMER_SPEND_CAPPED_NOTE}</p>}
         </div>
         <div className="card text-center">
           <p className="text-xs text-gray-500 uppercase tracking-wide">Total Orders</p>

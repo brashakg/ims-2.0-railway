@@ -35,6 +35,7 @@ import { fetchCustomerOrders } from '../../hooks/useCustomerDues';
 import {
   CUSTOMER_SPEND_LABEL,
   CUSTOMER_SPEND_NOTE,
+  CUSTOMER_SPEND_CAPPED_NOTE,
   CUSTOMER_SPEND_ORDER_LIMIT,
   summariseCustomerSpend,
 } from '../../utils/customerSpend';
@@ -67,6 +68,8 @@ interface CustomerStats {
   visitFrequency: number;
   referralCount: number;
   activeLoans: number;
+  /** The orders read hit CUSTOMER_SPEND_ORDER_LIMIT (D50: say so on screen). */
+  spendCapped: boolean;
 }
 
 interface InteractionRecord {
@@ -247,6 +250,7 @@ export function Customer360Dashboard() {
         visitFrequency: Math.round((ordersData?.length || 0) / Math.max(1, monthsAsSinceDate(customerData.created_at))),
         referralCount: 0,
         activeLoans: 0,
+        spendCapped: spend.capped,
       };
       setStats(calculatedStats);
 
@@ -560,6 +564,7 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
             <p className="text-gray-500 text-sm">{CUSTOMER_SPEND_LABEL}</p>
             <p className="text-green-600 font-semibold">₹{stats.totalLifetimeValue.toLocaleString('en-IN')}</p>
             <p className="text-[11px] text-gray-400">{CUSTOMER_SPEND_NOTE}</p>
+            {stats.spendCapped && <p className="text-[11px] text-amber-700">{CUSTOMER_SPEND_CAPPED_NOTE}</p>}
           </div>
           <div className="text-center">
             <p className="text-gray-500 text-sm">Visit Frequency</p>

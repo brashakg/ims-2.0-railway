@@ -14,6 +14,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { crmApi } from '../../services/api/crm';
+import { getErrorMessage } from '../../utils/errorHandler';
 import type { NbaCard, NbaDismissReason } from '../../services/api/crm';
 
 const SKIP_REASONS: { value: NbaDismissReason; label: string }[] = [
@@ -58,6 +59,8 @@ export function NBADashboardPage() {
   const [nextDate, setNextDate] = useState('');
   const [skipReason, setSkipReason] = useState<NbaDismissReason>('no_answer');
   const [busy, setBusy] = useState(false);
+  // A refused / failed save is SHOWN (Codex PR-1428 r1); the modal stays for the retry.
+  const [saveError, setSaveError] = useState('');
 
   const load = useCallback(async () => {
     if (!storeId) {
@@ -86,17 +89,19 @@ export function NBADashboardPage() {
     setNotes('');
     setNextDate('');
     setSkipReason('no_answer');
+    setSaveError('');
   };
 
   const submitDone = async () => {
     if (!doneFor || notes.trim().length < 10) return;
     setBusy(true);
+    setSaveError('');
     try {
       await crmApi.completeNbaCard(storeId, doneFor.customer_id, notes.trim(), nextDate || undefined);
       closeModals();
       await load();
-    } catch {
-      /* fail-soft: leave the card so the associate can retry */
+    } catch (error) {
+      setSaveError(getErrorMessage(error, 'The call was not saved; try again.'));
     } finally {
       setBusy(false);
     }
@@ -105,12 +110,13 @@ export function NBADashboardPage() {
   const submitSkip = async () => {
     if (!skipFor) return;
     setBusy(true);
+    setSaveError('');
     try {
       await crmApi.dismissNbaCard(storeId, skipFor.customer_id, skipReason);
       closeModals();
       await load();
-    } catch {
-      /* fail-soft */
+    } catch (error) {
+      setSaveError(getErrorMessage(error, 'The skip was not saved; try again.'));
     } finally {
       setBusy(false);
     }
@@ -245,6 +251,9 @@ export function NBADashboardPage() {
               onChange={(e) => setNextDate(e.target.value)}
               className="border border-gray-200 rounded px-2 py-1 text-sm"
             />
+            {saveError && (
+              <p role="alert" className="text-sm text-red-700 mt-3">{saveError}</p>
+            )}
             <div className="flex justify-end gap-2 mt-4">
               <button type="button" onClick={closeModals} className="text-gray-600 text-sm px-3 py-1.5">Cancel</button>
               <button
@@ -279,6 +288,9 @@ export function NBADashboardPage() {
                 </label>
               ))}
             </div>
+            {saveError && (
+              <p role="alert" className="text-sm text-red-700 mt-3">{saveError}</p>
+            )}
             <div className="flex justify-end gap-2 mt-4">
               <button type="button" onClick={closeModals} className="text-gray-600 text-sm px-3 py-1.5">Cancel</button>
               <button

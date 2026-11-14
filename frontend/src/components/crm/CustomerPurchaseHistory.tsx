@@ -9,6 +9,7 @@ import { orderApi } from '../../services/api';
 import {
   CUSTOMER_SPEND_LABEL,
   CUSTOMER_SPEND_NOTE,
+  CUSTOMER_SPEND_CAPPED_NOTE,
   CUSTOMER_SPEND_ORDER_LIMIT,
   summariseCustomerSpend,
 } from '../../utils/customerSpend';
@@ -149,7 +150,7 @@ export function CustomerPurchaseHistory({ customerId }: CustomerPurchaseHistoryP
       )}
 
       {data.capped && (
-        <p className="text-xs text-gray-600 mt-2">Figures cover the latest {CUSTOMER_SPEND_ORDER_LIMIT} orders.</p>
+        <p className="text-xs text-gray-600 mt-2">{CUSTOMER_SPEND_CAPPED_NOTE}</p>
       )}
 
       {data.orderCount === 0 && (

@@ -20,6 +20,8 @@ export const CUSTOMER_SPEND_NOTE = 'Excludes draft, cancelled, refunded; returns
 /** GET /orders allows at most 500 per call; a customer-scoped read is not
  *  date-limited, so this is the customer's latest 500 orders. */
 export const CUSTOMER_SPEND_ORDER_LIMIT = 500;
+/** Shown on EVERY door whose figures hit the limit (D50: never stop silently). */
+export const CUSTOMER_SPEND_CAPPED_NOTE = `Figures cover the latest ${CUSTOMER_SPEND_ORDER_LIMIT} orders only; older orders are not included.`;
 
 const EXCLUDED = new Set(['DRAFT', 'CANCELLED', 'REFUNDED']);
 

@@ -10,7 +10,7 @@
 import { useState, useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import api from '../../services/api/client';
+import api, { WRITE_UNCONFIRMED_MESSAGE } from '../../services/api/client';
 import { getErrorMessage } from '../../utils/errorHandler';
 import { istDayString } from '../../utils/datetime';
 import { Phone, Clock, AlertCircle, CheckCircle2, RotateCcw, Calendar } from 'lucide-react';
@@ -170,10 +170,13 @@ export function FollowUpDashboard() {
       clearRow(setNextDate, followUpId);
       await reload();
     } catch (error) {
-      // Keep the chosen outcome / date so a deliberate retry is one click.
+      // Keep the chosen outcome / date so a deliberate retry is one click. A
+      // lost answer is NOT "not saved": it may have landed, so say only that
+      // (the server treats a repeated identical move as already done).
+      const message = getErrorMessage(error, 'please try again.');
       setRowError((prev) => ({
         ...prev,
-        [followUpId]: `Not saved: ${getErrorMessage(error, 'please try again.')}`,
+        [followUpId]: message === WRITE_UNCONFIRMED_MESSAGE ? message : `Not saved: ${message}`,
       }));
     } finally {
       setCompleting(null);

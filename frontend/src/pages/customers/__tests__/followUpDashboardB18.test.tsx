@@ -26,6 +26,7 @@ vi.mock('../../../services/api/client', async (importOriginal) => {
 });
 
 import { FollowUpDashboard } from '../FollowUpDashboard';
+import { buildApiError, WRITE_UNCONFIRMED_MESSAGE } from '../../../services/api/client';
 
 const FU = {
   follow_up_id: 'FU-1', customer_id: 'C1', customer_name: 'Asha', customer_phone: '9',
@@ -85,6 +86,22 @@ describe('FollowUpDashboard', () => {
         outcome: 'rescheduled', notes: '', next_date: '2099-01-15',
       }),
     );
+  });
+
+  it('a lost answer on a reschedule is uncertain, never "Not saved" (Codex PR-1428 r1)', async () => {
+    okReads();
+    // The REAL client transform for a PATCH whose response never arrived.
+    const lost = buildApiError({
+      isAxiosError: true, code: 'ERR_NETWORK', message: 'Network Error',
+      config: { method: 'patch', url: '/follow-ups/FU-1/complete' },
+    } as never);
+    api.patch.mockImplementationOnce(() => Promise.reject(lost));
+    render(<FollowUpDashboard />);
+    fireEvent.change(await screen.findByLabelText('Outcome for Asha'), { target: { value: 'rescheduled' } });
+    fireEvent.change(screen.getByLabelText('New date for Asha'), { target: { value: '2099-01-15' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save new date' }));
+    expect(await screen.findByText(WRITE_UNCONFIRMED_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(/Not saved/)).toBeNull();
   });
 
   it('a failed Auto-generate says so', async () => {
