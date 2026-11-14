@@ -38,6 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+import hashlib
 import logging
 import os
 
@@ -45,6 +46,7 @@ import httpx
 from fastapi import HTTPException
 
 from ..utils.ist import ist_date_str, ist_today
+from . import cred_crypto
 from .delivery_gate import cod_collectable
 
 try:
@@ -100,23 +102,35 @@ class ShipResult:
 # ============================================================================
 
 
+_UNREADABLE_PASSWORD = (
+    "The saved Shiprocket password cannot be read (it was saved under a "
+    "different encryption key). Enter it again in Settings > Integrations."
+)
+
+
 def _creds_from_integrations(db) -> Dict[str, str]:
-    """Read {email, password} from the integrations collection. {} if absent."""
-    if db is None:
-        return {}
+    """Read {email, password} from the integrations collection. {} if absent.
+
+    Through THE decrypting reader the other providers use
+    (nexus_providers._load_integration_config): the password is stored
+    ``fernet:``-encrypted (BUG-155), and reading the raw document logged in to
+    Shiprocket with the CIPHERTEXT as the password (audit L2-INTEGRATION-F02).
+    A password that will not decrypt comes back with no password and an
+    ``error`` - nothing is ever sent in its place."""
     try:
-        coll = db.get_collection("integrations")
-        doc = coll.find_one({"type": "shiprocket", "enabled": True})
-        if not doc:
-            return {}
-        cfg = doc.get("config") or {}
-        return {
-            "email": cfg.get("email") or "",
-            "password": cfg.get("password") or "",
-        }
+        from agents.nexus_providers import _load_integration_config
+
+        cfg = _load_integration_config(db, "shiprocket")
     except Exception as exc:  # noqa: BLE001
         logger.debug("[SHIPROCKET] integrations read failed: %s", exc)
         return {}
+    if not cfg:
+        return {}
+    creds = {"email": cfg.get("email") or "", "password": cfg.get("password") or ""}
+    if cred_crypto.is_encrypted(creds["password"]):
+        logger.warning("[SHIPROCKET] saved password could not be decrypted")
+        return {**creds, "password": "", "error": _UNREADABLE_PASSWORD}
+    return creds
 
 
 def _resolve_credentials(db=None) -> Dict[str, str]:
@@ -134,20 +148,32 @@ def credentials_present(db=None) -> bool:
     return bool(creds.get("email") and creds.get("password"))
 
 
+def credential_error(db=None) -> Optional[str]:
+    """Why the saved credentials cannot be used, or None. Not the same as
+    "none saved": a live call on broken credentials FAILS, it is not a dry
+    run."""
+    return _resolve_credentials(db).get("error")
+
+
 # ============================================================================
 # Auth - cache the bearer token in-process
 # ============================================================================
 
 # Module-level token cache. Shiprocket tokens are valid for ~240h; we keep a
-# generous safety margin and just re-auth if a call 401s. Key includes the
-# email so switching creds doesn't reuse a stale token.
-_token_cache: Dict[str, Any] = {"email": None, "token": None, "fetched_at": 0.0}
+# generous safety margin and just re-auth if a call 401s. Keyed by the email
+# AND the password (hashed), so a changed password logs in again instead of
+# riding the old password's token for nine days.
+_token_cache: Dict[str, Any] = {"key": None, "token": None, "fetched_at": 0.0}
 # Re-auth after this many seconds even if the token would technically still work.
 _TOKEN_TTL_SECONDS = float(os.getenv("SHIPROCKET_TOKEN_TTL", str(9 * 24 * 3600)))
 
 
-def _cached_token(email: str) -> Optional[str]:
-    if _token_cache.get("email") != email or not _token_cache.get("token"):
+def _cache_key(email: str, password: str) -> str:
+    return hashlib.sha256(f"{email}\0{password}".encode("utf-8")).hexdigest()
+
+
+def _cached_token(key: str) -> Optional[str]:
+    if _token_cache.get("key") != key or not _token_cache.get("token"):
         return None
     age = datetime.now(timezone.utc).timestamp() - float(
         _token_cache.get("fetched_at") or 0.0
@@ -157,14 +183,14 @@ def _cached_token(email: str) -> Optional[str]:
     return _token_cache.get("token")
 
 
-def _store_token(email: str, token: str) -> None:
-    _token_cache["email"] = email
+def _store_token(key: str, token: str) -> None:
+    _token_cache["key"] = key
     _token_cache["token"] = token
     _token_cache["fetched_at"] = datetime.now(timezone.utc).timestamp()
 
 
 def _reset_token_cache() -> None:
-    _token_cache["email"] = None
+    _token_cache["key"] = None
     _token_cache["token"] = None
     _token_cache["fetched_at"] = 0.0
 
@@ -178,6 +204,8 @@ async def authenticate(db=None, *, force: bool = False) -> ShipResult:
     creds = _resolve_credentials(db)
     email = creds.get("email") or ""
     password = creds.get("password") or ""
+    if creds.get("error"):
+        return ShipResult(ok=False, status="FAILED", error=creds["error"])
     if not email or not password:
         return ShipResult(
             ok=False,
@@ -185,8 +213,9 @@ async def authenticate(db=None, *, force: bool = False) -> ShipResult:
             error="shiprocket credentials not configured",
         )
 
+    key = _cache_key(email, password)
     if not force:
-        cached = _cached_token(email)
+        cached = _cached_token(key)
         if cached:
             return ShipResult(ok=True, status="TRACKED", raw={"token": cached})
 
@@ -207,7 +236,7 @@ async def authenticate(db=None, *, force: bool = False) -> ShipResult:
             return ShipResult(
                 ok=False, status="FAILED", error="no token in auth response"
             )
-        _store_token(email, token)
+        _store_token(key, token)
         return ShipResult(ok=True, status="TRACKED", raw={"token": token})
     except httpx.TimeoutException:
         return ShipResult(ok=False, status="FAILED", error="auth timeout")
@@ -423,6 +452,10 @@ async def create_shipment(
             raw={"payload": payload},
         )
 
+    broken = credential_error(db)
+    if broken:
+        return ShipResult(ok=False, status="FAILED", error=broken)
+
     if not credentials_present(db):
         return ShipResult(
             ok=True,
@@ -511,6 +544,12 @@ async def track(
     if not awb and not shipment_id:
         return ShipResult(
             ok=False, status="FAILED", error="awb or shipment_id required"
+        )
+
+    broken = credential_error(db)
+    if broken:
+        return ShipResult(
+            ok=False, status="FAILED", awb=awb, shipment_id=shipment_id, error=broken
         )
 
     if not credentials_present(db):
