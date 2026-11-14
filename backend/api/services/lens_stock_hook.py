@@ -356,7 +356,8 @@ async def reserve_for_order_item(
         }
 
     return {
-        "status": "reserved",
+        # another runner of this very move landed it first: nothing moved here
+        "status": "already_reserved" if (result or {}).get("status") == "already_applied" else "reserved",
         "lens_line_id": cell["lens_line_id"],
         "sph": cell["sph"],
         "cyl": cell["cyl"],
@@ -510,7 +511,8 @@ async def _commit_one(
         }
 
     return {
-        "status": "committed",
+        # another runner of this very move landed it first: nothing moved here
+        "status": "already_committed" if (result or {}).get("status") == "already_applied" else "committed",
         "lens_line_id": cell["lens_line_id"],
         "sph": cell["sph"],
         "cyl": cell["cyl"],
@@ -652,7 +654,8 @@ async def release_for_cancel(
         }
 
     return {
-        "status": "released",
+        # another runner of this very move landed it first: nothing moved here
+        "status": "already_released" if (result or {}).get("status") == "already_applied" else "released",
         "lens_line_id": cell["lens_line_id"],
         "sph": cell["sph"],
         "cyl": cell["cyl"],

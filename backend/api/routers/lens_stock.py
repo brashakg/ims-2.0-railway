@@ -191,12 +191,12 @@ def _now() -> datetime:
 
 
 def _clean(doc: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Strip _id, ISO-format datetimes."""
+    """Strip _id and the cell's move memory, ISO-format datetimes."""
     if doc is None:
         return None
     out: Dict[str, Any] = {}
     for k, v in doc.items():
-        if k == "_id":
+        if k in ("_id", APPLIED_MOVES):
             continue
         if isinstance(v, datetime):
             out[k] = v.isoformat()
@@ -240,12 +240,15 @@ def _write_audit(
     source_type: Optional[str] = None,
     source_id: Optional[str] = None,
     notes: Optional[str] = None,
+    move: Optional[str] = None,
 ) -> None:
-    """Append a row to lens_stock_audit. Fail-soft."""
+    """Append a row to lens_stock_audit. Fail-soft. A fenced move's row is keyed
+    by the move (`_id`), so it is written once however many runners report it."""
     coll = _audit_coll()
     if coll is None:
         return
     doc: Dict[str, Any] = {
+        **({"_id": move} if move else {}),
         "audit_id": uuid.uuid4().hex,
         "line_stock_id": line_stock_id,
         "lens_line_id": lens_line_id,
@@ -271,6 +274,8 @@ def _write_audit(
     try:
         coll.insert_one(doc)
     except Exception as exc:  # noqa: BLE001
+        if move and type(exc).__name__ == "DuplicateKeyError":
+            return  # this move's record is already written
         logger.warning(
             "[LENS_STOCK] audit insert failed for %s: %s",
             line_stock_id,
@@ -822,25 +827,74 @@ def _cell_filter(
     }
 
 
+# A cell remembers the moves it has taken (`applied_moves`), so a move named by
+# its source can land on the counter once only, in the same write that moves it.
+# Two runners of one move (an edit whose lease lapsed while its first runner was
+# still alive, a retry racing its original) cannot both decrement: the second
+# finds the move already there. A pre-check of the audit is a read, not a fence.
+APPLIED_MOVES = "applied_moves"
+# ponytail: per-cell memory of the last 500 moves; a runner stalled across 500
+# later moves of the same cell would no longer be fenced (its audit pre-check
+# still is). Move to a keyed collection if cells ever churn that fast.
+APPLIED_MOVES_KEEP = 500
+
+
+def _move_key(action: str, source_id: Optional[str]) -> Optional[str]:
+    """The name of one reserve / commit / release; None for an unnamed manual move."""
+    return "{0}:{1}".format(action, source_id) if source_id else None
+
+
 def _atomic_update(
     coll: Any,
     filter_q: Dict[str, Any],
     update: Dict[str, Any],
     extra_predicate: Optional[Dict[str, Any]] = None,
+    move: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Wrapper around find_one_and_update so the routers stay DRY.
 
     `extra_predicate` is merged into the filter -- this is where the
-    $expr CAS condition goes. Returns the AFTER document, or None when
-    no doc matched (the CAS failed -> caller raises 409)."""
+    $expr CAS condition goes. `move` fences the write: it lands only if the
+    cell has not taken that move, and records it in the same write. Returns
+    the AFTER document, or None when no doc matched (the CAS failed, or the
+    move already landed: `_already_moved` tells which)."""
     full_filter = dict(filter_q)
     if extra_predicate:
         full_filter.update(extra_predicate)
+    if move:
+        full_filter[APPLIED_MOVES] = {"$ne": move}
+        update = {
+            **update,
+            "$push": {APPLIED_MOVES: {"$each": [move], "$slice": -APPLIED_MOVES_KEEP}},
+        }
     return coll.find_one_and_update(
         full_filter,
         update,
         return_document=_return_document_after(),
     )
+
+
+def _already_moved(cell: Optional[Dict[str, Any]], move: Optional[str]) -> bool:
+    return bool(move and cell and move in (cell.get(APPLIED_MOVES) or []))
+
+
+def _moved_before(action: str, move: str, cell: Dict[str, Any], lens_line_id: str,
+                  store_id: str, user: Dict[str, Any], payload: Any,
+                  d_on_hand: int, d_reserved: int) -> Dict[str, Any]:
+    """This exact move already landed (another runner of it won): nothing moves
+    again. Its record is written only if the winner died before writing it
+    (keyed by the move, so never twice), carrying the move's own deltas."""
+    after = {"on_hand": int(cell.get("on_hand") or 0), "reserved": int(cell.get("reserved") or 0)}
+    _write_audit(
+        action=action, line_stock_id=str(cell.get("line_stock_id") or ""),
+        lens_line_id=lens_line_id, store_id=store_id,
+        delta_on_hand=d_on_hand, delta_reserved=d_reserved,
+        prior={"on_hand": after["on_hand"] - d_on_hand, "reserved": after["reserved"] - d_reserved},
+        after=after, user=user, source_type=payload.source_type,
+        source_id=payload.source_id, move=move,
+        notes="Recorded late: the move landed but its record was lost; nothing moved again.",
+    )
+    return {"status": "already_applied", "cell": _enrich(cell)}
 
 
 @router.post("/{lens_line_id}/reserve")
@@ -876,6 +930,7 @@ async def reserve_cell(
     filt = _cell_filter(
         lens_line_id, active_store, payload.sph, payload.cyl, payload.add
     )
+    move = _move_key("reserve", payload.source_id)
     # CAS: only update when on_hand - reserved >= qty.
     cas = {"$expr": {"$gte": [{"$subtract": ["$on_hand", "$reserved"]}, payload.qty]}}
     update = {
@@ -883,7 +938,7 @@ async def reserve_cell(
         "$set": {"last_movement_at": _now()},
     }
     try:
-        result = _atomic_update(coll, filt, update, extra_predicate=cas)
+        result = _atomic_update(coll, filt, update, extra_predicate=cas, move=move)
     except Exception as exc:  # noqa: BLE001
         logger.error("[LENS_STOCK] reserve failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to reserve stock")
@@ -893,6 +948,9 @@ async def reserve_cell(
         cell = coll.find_one(filt)
         if cell is None:
             raise HTTPException(status_code=404, detail="Stock cell not found")
+        if _already_moved(cell, move):
+            return _moved_before("reserve", move, cell, lens_line_id, active_store,
+                                 current_user, payload, 0, payload.qty)
         avail = compute_available(cell.get("on_hand", 0), cell.get("reserved", 0))
         raise HTTPException(
             status_code=409,
@@ -923,6 +981,7 @@ async def reserve_cell(
         source_type=payload.source_type or "POS",
         source_id=payload.source_id,
         notes=payload.notes,
+        move=move,
     )
     _ledger_lens_event(
         "RESERVE",
@@ -967,6 +1026,7 @@ async def commit_cell(
     filt = _cell_filter(
         lens_line_id, active_store, payload.sph, payload.cyl, payload.add
     )
+    move = _move_key("commit", payload.source_id)
     cas = {
         "$expr": {
             "$and": [
@@ -980,7 +1040,7 @@ async def commit_cell(
         "$set": {"last_movement_at": _now()},
     }
     try:
-        result = _atomic_update(coll, filt, update, extra_predicate=cas)
+        result = _atomic_update(coll, filt, update, extra_predicate=cas, move=move)
     except Exception as exc:  # noqa: BLE001
         logger.error("[LENS_STOCK] commit failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to commit stock")
@@ -988,6 +1048,9 @@ async def commit_cell(
         cell = coll.find_one(filt)
         if cell is None:
             raise HTTPException(status_code=404, detail="Stock cell not found")
+        if _already_moved(cell, move):
+            return _moved_before("commit", move, cell, lens_line_id, active_store,
+                                 current_user, payload, -payload.qty, -payload.qty)
         raise HTTPException(
             status_code=409,
             detail=(
@@ -1021,6 +1084,7 @@ async def commit_cell(
         source_type=payload.source_type or "WORKSHOP",
         source_id=payload.source_id,
         notes=payload.notes,
+        move=move,
     )
     return {"status": "success", "cell": _enrich(result)}
 
@@ -1044,13 +1108,14 @@ async def release_cell(
     filt = _cell_filter(
         lens_line_id, active_store, payload.sph, payload.cyl, payload.add
     )
+    move = _move_key("release", payload.source_id)
     cas = {"$expr": {"$gte": ["$reserved", payload.qty]}}
     update = {
         "$inc": {"reserved": -payload.qty},
         "$set": {"last_movement_at": _now()},
     }
     try:
-        result = _atomic_update(coll, filt, update, extra_predicate=cas)
+        result = _atomic_update(coll, filt, update, extra_predicate=cas, move=move)
     except Exception as exc:  # noqa: BLE001
         logger.error("[LENS_STOCK] release failed: %s", exc)
         raise HTTPException(status_code=500, detail="Failed to release stock")
@@ -1058,6 +1123,9 @@ async def release_cell(
         cell = coll.find_one(filt)
         if cell is None:
             raise HTTPException(status_code=404, detail="Stock cell not found")
+        if _already_moved(cell, move):
+            return _moved_before("release", move, cell, lens_line_id, active_store,
+                                 current_user, payload, 0, -payload.qty)
         raise HTTPException(
             status_code=409,
             detail=(
@@ -1088,6 +1156,7 @@ async def release_cell(
         source_type=payload.source_type or "ORDER_CANCEL",
         source_id=payload.source_id,
         notes=payload.notes,
+        move=move,
     )
     _ledger_lens_event(
         "RELEASE",

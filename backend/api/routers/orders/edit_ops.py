@@ -161,18 +161,25 @@ def _removed_line(entry: dict, op: dict, order: dict) -> dict:
 
 
 def _take_lease(op: dict) -> bool:
-    """One runner per row: the lens hook's dedupe is a read, so two at once could
-    release a cell twice. A lost lease means someone else is on it."""
+    """One runner per row at a time. A lost lease means someone else is on it.
+    A lease can lapse under a runner that is still alive (a stalled worker), so
+    the lease is not what keeps a move single: every stock move is fenced by its
+    own name where it lands (a unit by its claim, a lens cell by `applied_moves`).
+    The token only stops a stale runner closing or handing back a row it no
+    longer holds."""
     coll = _ops()
     if coll is None:
         return True
-    now = datetime.now()
+    now, token = datetime.now(), uuid4().hex
     try:
-        return coll.find_one_and_update(
+        taken = coll.find_one_and_update(
             {"op_id": op["op_id"], "state": "OPEN",
              "$or": [{"lease_until": None}, {"lease_until": {"$lt": now}}]},
-            {"$set": {"lease_until": now + timedelta(seconds=LEASE_SECONDS)}},
+            {"$set": {"lease_until": now + timedelta(seconds=LEASE_SECONDS), "lease_token": token}},
         ) is not None
+        if taken:
+            op["lease_token"] = token
+        return taken
     except Exception as exc:  # noqa: BLE001 -- the row stays OPEN for the next runner
         logger.warning("[STOCK] edit op %s not taken up: %s", op["op_id"], exc)
         return False
@@ -185,7 +192,9 @@ def _end(op: dict, state: Optional[str]) -> None:
         return
     fields = {"lease_until": None, **({"state": state, "closed_at": utc_now_iso()} if state else {})}
     try:
-        coll.update_one({"op_id": op["op_id"]}, {"$set": fields})
+        # Only the lease's holder ends it: a runner whose lease lapsed and was
+        # taken over writes nothing here (the new holder decides the row).
+        coll.update_one({"op_id": op["op_id"], "lease_token": op.get("lease_token")}, {"$set": fields})
     except Exception as exc:  # noqa: BLE001 -- a re-run moves nothing twice
         logger.warning("[STOCK] edit op %s not closed: %s", op["op_id"], exc)
 

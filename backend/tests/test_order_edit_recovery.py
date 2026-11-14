@@ -1092,3 +1092,134 @@ def test_an_unreadable_revision_link_takes_no_second_number(client, shop, invoic
     assert serials == ["BV-INV-REV-1"] and len(_revisions(shop, oid)) == 1
     assert _order(shop, oid)["invoice_number"] == "BV-INV-REV-1"
     assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# Codex round 6 (2026-11-14) P1 -- a lapsed edit lease let a second runner
+# release one lens twice, taking another bill's reservation with it
+# ---------------------------------------------------------------------------
+
+
+from tests.test_order_edit_stock_identity import CELL  # noqa: E402
+
+ADMIN_USER = {"user_id": "u-admin", "username": "admin", "roles": ["SUPERADMIN"],
+              "store_ids": [STORE], "active_store_id": STORE}
+
+
+def _release_audits(shop, source_prefix):
+    return [row for row in shop["db"].get_collection("lens_stock_audit").find({"action": "release"})
+            if str(row.get("source_id") or "").startswith(source_prefix)]
+
+
+@pytest.mark.parametrize("takeover", ["second edit", "sweep"])
+def test_a_lapsed_lease_never_releases_another_bills_lens(client, shop, cells, monkeypatch, takeover):
+    """Bill A's edit drops its lens and stalls just before the cell write; its
+    lease lapses and a second runner (the next edit of A, or the sweep) takes the
+    row over and releases the lens. The first runner then wakes. Before the fix
+    both writes landed: reserved fell to 0 while bill B still held one lens, with
+    two release records for one source."""
+    from api.routers import lens_stock as stock_router
+    from api.routers.orders import edit_ops
+
+    oid, stored = _lens_bill(client, shop, cells)
+    other = _saved_bill(client, shop, [_line(SVC)])
+    assert _edit(client, other, [_as_sent(_order(shop, other)["items"][0]), _lens()]).status_code == 200
+    assert cells.read() == (5, 2)
+    ops = shop["db"].get_collection("order_edit_ops")
+    real, fired = stock_router.release_cell, []
+
+    async def stall_then_takeover(lens_line_id, payload, user):
+        if not fired and str(payload.source_id).startswith(oid):
+            fired.append(payload.source_id)
+            ops.update_many({"order_id": oid, "state": "OPEN"}, {"$set": {
+                "lease_until": datetime.now() - timedelta(seconds=1),
+                "created_at": datetime.now() - timedelta(hours=1)}})
+            if takeover == "sweep":
+                await edit_ops.sweep_edit_ops()
+            else:
+                # another worker: its own client, off this request's event loop
+                again = [_as_sent(ln) for ln in _order(shop, oid)["items"]]
+                assert _edit(type(client)(client.app), oid, again).status_code == 200
+            assert cells.read() == (5, 1), "the second runner released A's lens"
+        return await real(lens_line_id, payload, user)
+
+    keep = [_other_line(shop, oid)]
+    monkeypatch.setattr(stock_router, "release_cell", stall_then_takeover)
+    assert _edit(client, oid, keep).status_code == 200
+    monkeypatch.setattr(stock_router, "release_cell", real)
+    assert fired
+    assert cells.read() == (5, 1), "bill B's reservation must survive the stale runner"
+    assert len(_release_audits(shop, oid)) == 1, "one release, one record"
+    assert _edit(client, oid, keep).status_code == 200
+    _sweep(shop)
+    assert cells.read() == (5, 1)
+    assert set(_op_states(shop, oid)) <= {"SETTLED", "GIVEN_BACK"}
+    _no_flag_left(shop, oid)
+
+
+@pytest.mark.parametrize("action", ["reserve", "commit", "release"])
+def test_one_named_cell_move_lands_once_whoever_runs_it(shop, cells, action):
+    """The shared rule under every lens hook: two runners of one named move (a
+    stale one and its successor) past the audit pre-check move the cell once,
+    and write one record. An unnamed manual move is not fenced."""
+    from api.routers import lens_stock as stock_router
+
+    cells(on_hand=10, reserved=3)
+    payload = stock_router.ReserveCommitReleasePayload(
+        store_id=STORE, sph=-1.0, cyl=0.0, add=None, qty=1, source_id=f"ORD-1#L1#{action}",
+    )
+    move = getattr(stock_router, f"{action}_cell")
+    first = asyncio.run(move(CELL, payload, ADMIN_USER))
+    second = asyncio.run(move(CELL, payload, ADMIN_USER))
+    assert first["status"] == "success" and second["status"] == "already_applied"
+    expected = {"reserve": (10, 4), "commit": (9, 2), "release": (10, 2)}[action]
+    assert cells.read() == expected
+    rows = list(shop["db"].get_collection("lens_stock_audit").find({"source_id": payload.source_id}))
+    assert len(rows) == 1 and rows[0]["action"] == action
+    assert "applied_moves" not in second["cell"], "the move memory stays off the API"
+    manual = payload.model_copy(update={"source_id": None})
+    asyncio.run(move(CELL, manual, ADMIN_USER))
+    asyncio.run(move(CELL, manual, ADMIN_USER))
+    after = {"reserve": (10, 6), "commit": (7, 0), "release": (10, 0)}[action]
+    assert cells.read() == after
+
+
+def test_a_move_whose_record_was_lost_is_recorded_once_by_its_retry(shop, cells, monkeypatch):
+    """The winner moved the cell and died before its record: the retry moves
+    nothing and writes the one missing record, with the move's own delta."""
+    from api.routers import lens_stock as stock_router
+
+    cells(on_hand=5, reserved=2)
+    payload = stock_router.ReserveCommitReleasePayload(
+        store_id=STORE, sph=-1.0, cyl=0.0, add=None, qty=1, source_id="ORD-2#L1#release",
+    )
+    with monkeypatch.context() as m:
+        m.setattr(stock_router, "_write_audit", lambda **k: None)
+        asyncio.run(stock_router.release_cell(CELL, payload, ADMIN_USER))
+    assert cells.read() == (5, 1)
+    for _ in range(2):
+        assert asyncio.run(stock_router.release_cell(CELL, payload, ADMIN_USER))["status"] == "already_applied"
+    assert cells.read() == (5, 1)
+    rows = list(shop["db"].get_collection("lens_stock_audit").find({"source_id": payload.source_id}))
+    assert [(r["action"], r["delta_reserved"]) for r in rows] == [("release", -1)]
+
+
+def test_a_runner_whose_lease_was_taken_over_cannot_end_the_row(shop, monkeypatch):
+    """The stale runner wakes after a successor took the row: its close or
+    hand-back writes nothing; only the holder's token ends the row."""
+    from api.routers.orders import edit_ops
+
+    coll = shop["db"].get_collection("order_edit_ops")
+    monkeypatch.setattr(edit_ops, "_ops", lambda: coll)
+    coll.insert_one({"op_id": "op-stale", "state": "OPEN", "lease_until": None})
+    stale, fresh = {"op_id": "op-stale"}, {"op_id": "op-stale"}
+    assert edit_ops._take_lease(stale)
+    coll.update_one({"op_id": "op-stale"}, {"$set": {"lease_until": datetime.now() - timedelta(seconds=1)}})
+    assert edit_ops._take_lease(fresh)
+    edit_ops._end(stale, None)
+    row = coll.find_one({"op_id": "op-stale"})
+    assert row["lease_until"] is not None and row["lease_token"] == fresh["lease_token"], "hand-back refused"
+    edit_ops._end(stale, "SETTLED")
+    assert coll.find_one({"op_id": "op-stale"})["state"] == "OPEN", "a stale close writes nothing"
+    edit_ops._end(fresh, "SETTLED")
+    assert coll.find_one({"op_id": "op-stale"})["state"] == "SETTLED"
