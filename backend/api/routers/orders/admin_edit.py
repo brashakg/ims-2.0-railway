@@ -730,7 +730,7 @@ async def superadmin_invoice_change(
             room = bill_room_left(db, repo.find_by_id(order_id) or order)
             if room is not None and _amount > room + 0.01:
                 raise HTTPException(status_code=409, detail=(
-                    f"Only Rs {max(room, 0.0):.2f} of what was paid on this bill has not been given back "
+                    f"Only Rs {max(room, 0.0):.2f} of this bill has not been given back already "
                     f"(returns, refunds and credit notes so far), so a credit note of Rs {_amount:.2f} "
                     "cannot be issued. Nothing was issued."))
         marker = utc_now_iso()

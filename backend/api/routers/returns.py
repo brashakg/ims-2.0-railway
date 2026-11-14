@@ -4323,10 +4323,12 @@ def bill_money_door(db, coll, order_id: Any, key: str, amount: float, *, door: s
 
 
 def bill_room_left(db, order: Dict[str, Any]) -> Optional[float]:
-    """What this bill may still give back: what was paid less everything every
-    door already gave back on it (the online door's reader, which counts
-    counter returns, kept holds, online refunds and credit notes alike). None
-    when the bill tracks no payment. Read under bill_money_door."""
+    """What a correction note may still give back on this bill: what was paid
+    -- or, on a bill not fully paid yet, what was billed (the note lowers what
+    is still owed; staff steps unchanged) -- less everything every door already
+    gave back on it (the online door's reader, which counts counter returns,
+    kept holds, online refunds and earlier notes alike). None when the bill
+    tracks no payment. Read under bill_money_door."""
     from ..services.shopify_refund import _given_back_elsewhere
 
     paid = refundable_ceiling(order, include_credit_notes=False)
@@ -4336,7 +4338,7 @@ def bill_room_left(db, order: Dict[str, Any]) -> Optional[float]:
     if back is None:
         raise HTTPException(status_code=503, detail=(
             "Could not check this bill's earlier refunds - try again. Nothing was issued."))
-    return round(paid - back["given"], 2)
+    return round(max(paid, _order_billed_total(order)) - back["given"], 2)
 
 
 def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id: str,

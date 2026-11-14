@@ -152,7 +152,7 @@ async def test_an_admin_note_never_gives_back_more_than_was_paid(till, monkeypat
         "items": [{"order_item_id": "li1", "product_id": "P1", "return_qty": 1}]})
     with pytest.raises(HTTPException) as exc:
         await _admin_note(till, monkeypatch)
-    assert exc.value.status_code == 409 and "Only Rs 0.00" in exc.value.detail
+    assert exc.value.status_code == 409 and "Only Rs 0.00 of this bill" in exc.value.detail
     assert _credit_rows(till) == []
     assert _stored(till).get("post_invoice_credit_note_at") is None
     assert _stored(till).get("refund_holds") == {}
