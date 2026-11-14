@@ -63,6 +63,7 @@ from ...services.margin_basis import (
     line_revenue_ex_gst,
     line_unit_cost as _item_cost,
 )
+from ...services.payroll_engine import POSTED_PAYROLL_STATUSES
 from ...services.salary_visibility import (
     SALARY_RESTRICTED_MESSAGE,
     is_payroll_shaped_expense,
@@ -284,20 +285,35 @@ def _months_in_range(from_date, to_date):
     return months
 
 
+def _posted_payroll_costs(db, from_date, to_date, store_id=None):
+    """(store_id, cost-to-company) of every POSTED payroll row in the months
+    overlapping the range. The ONE payroll read behind the P&L.
+
+    Only APPROVED and PAID rows are a cost. A DRAFT is a working calculation
+    that can be rerun at will: counting it let an unapproved figure move the
+    P&L, including the P&L of a month that had since been locked.
+    """
+    months = _months_in_range(from_date, to_date)
+    if not months:
+        return
+    q: dict = {
+        "$or": [{"year": y, "month": m} for (y, m) in months],
+        "status": {"$in": list(POSTED_PAYROLL_STATUSES)},
+    }
+    if store_id:
+        q["store_id"] = store_id
+    for r in db.get_collection("payroll").find(q):
+        bd = r.get("breakdown") or {}
+        yield r.get("store_id"), bd.get("ctc_cost", r.get("net_salary", 0)) or 0
+
+
 def _payroll_cost(db, store_id, from_date, to_date) -> float:
     """Cost-to-company payroll for the months overlapping the P&L range."""
     try:
-        months = _months_in_range(from_date, to_date)
-        if not months:
-            return 0.0
-        q: dict = {"$or": [{"year": y, "month": m} for (y, m) in months]}
-        if store_id:
-            q["store_id"] = store_id
-        total = 0.0
-        for r in db.get_collection("payroll").find(q):
-            bd = r.get("breakdown") or {}
-            total += bd.get("ctc_cost", r.get("net_salary", 0)) or 0
-        return round(total, 2)
+        return round(
+            sum(c for _sid, c in _posted_payroll_costs(db, from_date, to_date, store_id)),
+            2,
+        )
     except Exception:
         return 0.0
 
@@ -573,16 +589,8 @@ def _payroll_by_store(db, from_date, to_date) -> dict:
     """store_id -> payroll cost-to-company over the months in the range."""
     out: dict = {}
     try:
-        months = _months_in_range(from_date, to_date)
-        if not months:
-            return out
-        q = {"$or": [{"year": y, "month": m} for (y, m) in months]}
-        for r in db.get_collection("payroll").find(q):
-            sid = r.get("store_id")
-            bd = r.get("breakdown") or {}
-            out[sid] = out.get(sid, 0) + (
-                bd.get("ctc_cost", r.get("net_salary", 0)) or 0
-            )
+        for sid, cost in _posted_payroll_costs(db, from_date, to_date):
+            out[sid] = out.get(sid, 0) + cost
     except Exception:
         pass
     return out

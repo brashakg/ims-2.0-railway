@@ -289,6 +289,9 @@ ROWS: List[Dict[str, object]] = [
         "path": "/api/v1/payroll/config/{employee_id}",
         "allowed": ["ADMIN"],
     },
+    # D15 (2026-11-11): removing a payroll DRAFT. ADMIN-only like every other
+    # payroll write, so the payroll:write grant union stays ADMIN.
+    {"method": "POST", "path": "/api/v1/payroll/discard-draft", "allowed": ["ADMIN"]},
     {
         "method": "GET",
         "path": "/api/v1/payroll/incentive-summary/{employee_id}/{month}/{year}",

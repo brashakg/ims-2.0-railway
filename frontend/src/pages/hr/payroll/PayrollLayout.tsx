@@ -17,7 +17,7 @@
 // page's editorial header stays, as an h2 under HRLayout's h1 (one h1 per
 // page), and its tab buttons are HRLayout's nav.
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Outlet } from 'react-router-dom';
 import { AlertCircle } from 'lucide-react';
 import { useAuth } from '../../../context/AuthContext';
@@ -68,7 +68,7 @@ export function PayrollLayout() {
   // State
   const [selectedMonth, setSelectedMonth] = useState(currentMonth);
   const [selectedYear, setSelectedYear] = useState(currentYear);
-  const [selectedEmployee, setSelectedEmployee] = useState<string>('');
+  const [selectedEmployee, setEmployee] = useState<string>('');
   
   // Data
   const [salarySheet, setSalarySheet] = useState<SalaryRecord[]>([]);
@@ -77,6 +77,12 @@ export function PayrollLayout() {
   
   // UI
   const [isLoading, setIsLoading] = useState(true);
+  // The payslip has its own flag and request counter: its load runs next to
+  // the salary-sheet reload on every month change, and whichever answered
+  // first used to decide what the Payslips section showed.
+  const [payslipLoading, setPayslipLoading] = useState(false);
+  const payslipRequest = useRef(0);
+  const advancesRequest = useRef(0);
   const [error, setError] = useState<string | null>(null);
   // Owner ruling 2026-08-09: salary data is ADMIN-only. A 403 must show an
   // explicit access notice -- an empty table would read as "nobody was paid".
@@ -88,6 +94,24 @@ export function PayrollLayout() {
   useEffect(() => {
     loadSalarySheet();
   }, [selectedMonth, selectedYear, user?.activeStoreId]);
+
+  // Advances and Payslips share ONE picked employee, and what each of them has
+  // loaded belongs to that employee. Every change of the pick goes through
+  // here and drops both, so one person's advances or payslip can never sit
+  // under another person's name; each section then loads for the new pick.
+  const setSelectedEmployee = (employeeId: string) => {
+    setEmployee(employeeId);
+    setAdvances([]);
+    setPayslip(null);
+  };
+
+  // The picked employee belongs to the shop they were picked in. The shop
+  // switches in place (no page reload), so drop the pick with it: the Advances
+  // and Payslips sections show nothing until someone on the new shop's list is
+  // picked, instead of the previous shop's employee under the new shop's list.
+  useEffect(() => {
+    setSelectedEmployee('');
+  }, [user?.activeStoreId]);
 
   const loadSalarySheet = async () => {
     setIsLoading(true);
@@ -113,14 +137,18 @@ export function PayrollLayout() {
   };
 
   const loadAdvances = async (employeeId: string) => {
+    // Same rule as loadPayslip below: drop the previous employee's list before
+    // asking, and ignore any answer that is not for the latest ask.
+    const request = ++advancesRequest.current;
+    setAdvances([]);
     setIsLoading(true);
     setError(null);
     setNoAccess(null);
     try {
       const data = await payrollApi.getAdvances(employeeId);
-      setAdvances(data?.advances || []);
+      if (request === advancesRequest.current) setAdvances(data?.advances || []);
     } catch (err) {
-      setAdvances([]);
+      if (request !== advancesRequest.current) return;
       if (isForbiddenError(err)) {
         setNoAccess(
           forbiddenDetail(err, "Another employee's salary advances are restricted to administrators.")
@@ -129,19 +157,24 @@ export function PayrollLayout() {
         setError('Failed to load advances');
       }
     } finally {
-      setIsLoading(false);
+      if (request === advancesRequest.current) setIsLoading(false);
     }
   };
 
   const loadPayslip = async (employeeId: string) => {
-    setIsLoading(true);
+    // The slip on screen belongs to the PREVIOUS employee / month / year: drop
+    // it before asking, and ignore any answer that is not for the latest ask,
+    // so one month's payslip can never sit under another month's selector.
+    const request = ++payslipRequest.current;
+    setPayslip(null);
+    setPayslipLoading(true);
     setError(null);
     setNoAccess(null);
     try {
       const data = await payrollApi.getPayslip(employeeId, selectedMonth, selectedYear);
-      setPayslip(data?.payslip || null);
+      if (request === payslipRequest.current) setPayslip(data?.payslip || null);
     } catch (err) {
-      setPayslip(null);
+      if (request !== payslipRequest.current) return;
       if (isForbiddenError(err)) {
         setNoAccess(
           forbiddenDetail(err, "Another employee's payslip is restricted to administrators.")
@@ -150,7 +183,7 @@ export function PayrollLayout() {
         setError('Failed to load payslip');
       }
     } finally {
-      setIsLoading(false);
+      if (request === payslipRequest.current) setPayslipLoading(false);
     }
   };
 
@@ -194,7 +227,7 @@ export function PayrollLayout() {
     selectedYear, setSelectedYear,
     selectedEmployee, setSelectedEmployee,
     salarySheet, advances, payslip,
-    isLoading, noAccess,
+    isLoading, payslipLoading, noAccess,
     showAdvanceForm, setShowAdvanceForm,
     advanceForm, setAdvanceForm,
     loadAdvances, loadPayslip, handleRecordAdvance, exportSalarySheet,

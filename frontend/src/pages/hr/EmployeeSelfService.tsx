@@ -26,6 +26,7 @@ import type {
 } from '../../services/api/hr';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
+import { PAYSLIP_STATUS_LABEL, payslipStatusBadge } from './payroll/payrollShared';
 
 // Leave types offered in the picker. The SERVER's _VALID_LEAVE_TYPES whitelist
 // (backend hr.LeaveCreate) is the authority -- it also accepts LWP/LOP, which
@@ -99,6 +100,8 @@ export function EmployeeSelfService() {
   const [attendance, setAttendance] = useState<MyAttendance | null>(null);
   const [commission, setCommission] = useState<MyCommission | null>(null);
   const [payslip, setPayslip] = useState<MyPayslip | null>(null);
+  // A newer month whose payroll is still a draft: said plainly, no figures.
+  const [payslipNotReady, setPayslipNotReady] = useState<{ month: number; year: number } | null>(null);
   const [leaves, setLeaves] = useState<MyLeaves | null>(null);
   const [loadingMonth, setLoadingMonth] = useState(false);
   const [loadingStatic, setLoadingStatic] = useState(true);
@@ -123,10 +126,11 @@ export function EmployeeSelfService() {
     setLoadingStatic(true);
     try {
       const [slip, lv] = await Promise.all([
-        hrApi.getMyPayslip().catch(() => ({ payslip: null })),
+        hrApi.getMyPayslip().catch(() => ({ payslip: null, not_ready: undefined })),
         hrApi.getMyLeaves({ year: now.getFullYear() }).catch(() => null),
       ]);
       setPayslip(slip?.payslip ?? null);
+      setPayslipNotReady(slip?.not_ready ?? null);
       setLeaves(lv);
     } finally {
       setLoadingStatic(false);
@@ -211,14 +215,31 @@ export function EmployeeSelfService() {
     });
   }, [attendance, month, year]);
 
+  const payslipStatus = PAYSLIP_STATUS_LABEL[payslip?.status ?? ''];
+  const notReadyNote = payslipNotReady && (
+    <p className="text-sm text-gray-600" role="status">
+      Your {MONTH_NAMES[payslipNotReady.month - 1]} {payslipNotReady.year} payslip is not ready yet.
+      It will show here once payroll is approved.
+    </p>
+  );
+
   const downloadPayslip = () => {
     if (!payslip) return;
     const bd = (payslip.breakdown || {}) as Record<string, any>;
     const monthLabel = payslip.month
       ? `${MONTH_NAMES[(payslip.month || 1) - 1]} ${payslip.year}`
       : '';
-    const w = window.open('', '_blank', 'noopener,noreferrer');
-    if (!w) return;
+    // No 'noopener' here: with it window.open returns null BY SPECIFICATION,
+    // so this function gave up and left the staff member looking at an empty
+    // about:blank tab. The tab is ours (we write the slip into it), like every
+    // other print window in the app.
+    const w = window.open('', '_blank');
+    if (!w) {
+      toast.error('Could not open the payslip. Please allow pop-ups for this site and try again.');
+      return;
+    }
+    const esc = (v: unknown) =>
+      String(v ?? '').replace(/[&<>"']/g, (ch) => `&#${ch.charCodeAt(0)};`);
     w.document.write(`<!doctype html><html><head><meta charset="utf-8">
       <title>Payslip ${monthLabel}</title>
       <style>
@@ -231,16 +252,20 @@ export function EmployeeSelfService() {
         .net td{font-weight:bold;border-top:2px solid #111;border-bottom:none;font-size:16px;padding-top:10px;}
         @media print{button{display:none;}}
       </style></head><body>
-      <h1>${(payslip.employee_name as string) || 'Payslip'}</h1>
-      <div class="sub">${monthLabel}${payslip.employee_id ? ' &middot; ' + payslip.employee_id : ''}</div>
+      <h1>${esc(payslip.employee_name) || 'Payslip'}</h1>
+      <div class="sub">${monthLabel}${payslip.employee_id ? ' &middot; ' + esc(payslip.employee_id) : ''}${payslipStatus ? ' &middot; ' + payslipStatus : ''}</div>
       <table>
         <tr><td>Gross Salary</td><td class="r">${rupee(bd.gross_salary)}</td></tr>
         <tr><td>Total Deductions</td><td class="r">${rupee(bd.total_deductions)}</td></tr>
         <tr class="net"><td>Net Pay</td><td class="r">${rupee(bd.net_pay)}</td></tr>
       </table>
-      <p style="margin-top:24px"><button onclick="window.print()">Print / Save as PDF</button></p>
+      <p style="margin-top:24px"><button type="button">Print / Save as PDF</button></p>
       </body></html>`);
     w.document.close();
+    // Wired from HERE, not with an onclick attribute: the site's
+    // Content-Security-Policy refuses inline script, the new tab inherits that
+    // policy, and the button did nothing on the live site.
+    w.document.querySelector('button')?.addEventListener('click', () => w.print());
   };
 
   const payslipBd = (payslip?.breakdown || {}) as Record<string, any>;
@@ -336,8 +361,10 @@ export function EmployeeSelfService() {
             <CardSpinner />
           ) : payslip ? (
             <div>
-              <p className="text-xs text-gray-500">
+              {notReadyNote && <div className="mb-3">{notReadyNote}</div>}
+              <p className="text-xs text-gray-500 flex items-center gap-2">
                 {payslip.month ? `${MONTH_NAMES[(payslip.month || 1) - 1]} ${payslip.year}` : 'Most recent'}
+                {payslipStatus && <span className={payslipStatusBadge(payslip.status)}>{payslipStatus}</span>}
               </p>
               <p className="text-3xl font-bold text-green-700 mt-1">
                 {rupee(payslipBd.net_pay)}
@@ -361,7 +388,7 @@ export function EmployeeSelfService() {
                 <Download className="w-4 h-4" /> View / Download
               </button>
             </div>
-          ) : (
+          ) : notReadyNote || (
             <p className="text-sm text-gray-400">No payslip generated yet.</p>
           )}
         </section>

@@ -123,8 +123,19 @@ export function PayrollRunPage() {
 
   const anyLocked = rows.some((r) => r.status === 'PAID');
   const anyApproved = rows.some((r) => r.status === 'APPROVED');
+  // Tally and the PF file carry APPROVED and PAID rows only (what the P&L
+  // counts as a cost); a draft is never exported.
+  const nothingToExport = !anyApproved && !anyLocked;
+  const exportHint = nothingToExport ? 'Approve the payroll run first - a draft is not exported' : undefined;
 
   const doRun = async (dryRun: boolean) => {
+    // A recovery takes money back; a negative one would RAISE net pay. The
+    // server refuses it too -- this just says so before the round trip.
+    const negative = Object.entries(advances).find(([, amount]) => !(amount >= 0));
+    if (negative) {
+      toast.error(`Advance recovery cannot be negative (${negative[0]}). Enter 0 or a positive amount.`);
+      return;
+    }
     setBusy(true);
     try {
       const res = await payrollApi.runPayroll({
@@ -177,6 +188,33 @@ export function PayrollRunPage() {
         isForbiddenError(e)
           ? forbiddenDetail(e, 'Only an administrator may lock a payroll run as paid.')
           : e instanceof Error ? e.message : 'Lock failed',
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // A draft whose salary setup was switched off cannot be rerun, and a month
+  // with a draft cannot be locked: discarding it is the way out. The server
+  // removes a DRAFT only, never in a locked month, and logs who discarded it.
+  const doDiscard = async (r: PayrollRow) => {
+    const who = r.employee_name || r.employee_id;
+    const ask =
+      `Discard the payroll draft of ${who} for ${MONTHS[month - 1]} ${year} (net ${inr(r.net_salary)})?
+
+` +
+      'Only this draft is removed. You can run payroll again afterwards.';
+    if (!window.confirm(ask)) return;
+    setBusy(true);
+    try {
+      await payrollApi.discardDraft({ month, year, employee_id: r.employee_id });
+      toast.success(`Payroll draft of ${who} discarded`);
+      await loadRows();
+    } catch (e) {
+      toast.error(
+        isForbiddenError(e)
+          ? forbiddenDetail(e, 'Only an administrator may discard a payroll draft.')
+          : e instanceof Error ? e.message : 'Discard failed',
       );
     } finally {
       setBusy(false);
@@ -338,8 +376,8 @@ export function PayrollRunPage() {
           </span>
           {rows.length > 0 && (
             <div className="flex flex-wrap gap-2">
-              <button className="btn-secondary" onClick={exportTally} disabled={busy}>Tally JV</button>
-              <button className="btn-secondary" onClick={exportEcr} disabled={busy}>PF ECR</button>
+              <button className="btn-secondary" onClick={exportTally} disabled={busy || nothingToExport} title={exportHint}>Tally JV</button>
+              <button className="btn-secondary" onClick={exportEcr} disabled={busy || nothingToExport} title={exportHint}>PF ECR</button>
               {canApprove && (
                 <button className="btn-secondary" onClick={doApprove} disabled={busy || !rows.some((r) => r.status === 'DRAFT')}>Approve</button>
               )}
@@ -379,6 +417,12 @@ export function PayrollRunPage() {
                   <td className="px-3 py-2 text-right">
                     {r.breakdown && (
                       <button className="text-bv-red-600 hover:underline" onClick={() => setPayslip(r)}>Payslip</button>
+                    )}
+                    {/* payroll_id: a saved row, not a preview. */}
+                    {canRun && r.status === 'DRAFT' && r.payroll_id && (
+                      <button className="ml-3 text-gray-600 hover:underline disabled:opacity-50" onClick={() => doDiscard(r)} disabled={busy}>
+                        Discard draft
+                      </button>
                     )}
                   </td>
                 </tr>

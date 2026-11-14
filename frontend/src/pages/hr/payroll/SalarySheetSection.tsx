@@ -2,6 +2,7 @@
 // PayrollDashboard 'sheet' tab; its state and handlers live in PayrollLayout
 // and arrive through <Outlet context>.
 
+import { Link } from 'react-router-dom';
 import { Calendar, Loader2, DownloadCloud } from 'lucide-react';
 import { PayrollAccessNotice } from '../../../components/hr/PayrollAccessNotice';
 import { MONTHS, usePayrollContext } from './payrollShared';
@@ -62,8 +63,12 @@ export function SalarySheetSection() {
       ) : noAccess ? (
         <PayrollAccessNotice message={noAccess} what="the salary sheet" />
       ) : salarySheet.length === 0 ? (
+        // Owner ruling 2026-11-11 (audit L3-16): this sheet shows the payroll
+        // run and nothing else, so an empty month says exactly that.
         <div className="text-center py-8 text-gray-500">
-          No salary data for {MONTHS[selectedMonth - 1]} {selectedYear}
+          No payroll run is saved for {MONTHS[selectedMonth - 1]} {selectedYear}.
+          {' '}Salaries are calculated in{' '}
+          <Link to="/hr/payroll-run" className="text-bv-red-600 hover:underline">Payroll Run</Link>.
         </div>
       ) : (
         <div className="overflow-x-auto">
