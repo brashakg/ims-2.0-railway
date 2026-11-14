@@ -277,6 +277,7 @@ function EnumEditor({ enumType, label, hint, numeric, items, onChanged, onError,
           type={numeric ? 'number' : 'text'}
           step={numeric ? '0.01' : undefined}
           value={addValue}
+          aria-label={`New value for ${label}`}
           disabled={adding}
           onChange={(e) => setAddValue(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter') onAdd(); }}
@@ -318,6 +319,7 @@ function EnumEditor({ enumType, label, hint, numeric, items, onChanged, onError,
                     type={numeric ? 'number' : 'text'}
                     step={numeric ? '0.01' : undefined}
                     value={renameDraft}
+                    aria-label={`Rename ${it}`}
                     autoFocus
                     disabled={busy}
                     onChange={(e) => setRenameDraft(e.target.value)}

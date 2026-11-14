@@ -6,7 +6,7 @@
 // side at SUPERADMIN. The form mirrors DEFAULT_SETTINGS in
 // backend/database/repositories/loyalty_repository.py.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Loader2, Save, RotateCcw, Plus, Trash2 } from 'lucide-react';
 import { loyaltyApi, type LoyaltySettings } from '../../services/api/loyalty';
 import { useAuth } from '../../context/AuthContext';
@@ -156,6 +156,7 @@ export function LoyaltySettingsSection() {
           type="button"
           disabled={!canEdit}
           onClick={() => update('enabled', !draft.enabled)}
+          role="switch" aria-checked={!!draft.enabled} aria-label="Programme enabled"
           className={`relative w-11 h-6 rounded-full transition-colors ${draft.enabled ? 'bg-bv-red-600' : 'bg-gray-300'} ${canEdit ? '' : 'opacity-60'}`}
         >
           <span className={`absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full transition-transform ${draft.enabled ? 'translate-x-5' : ''}`} />
@@ -341,10 +342,12 @@ function NumField({
   disabled?: boolean;
   onChange: (v: number) => void;
 }) {
+  const id = useId();
   return (
     <div>
-      <label className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
+      <label htmlFor={id} className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
       <input
+        id={id}
         type="number"
         step={step}
         min={min}
@@ -409,6 +412,7 @@ function KeyValueEditor({
             type="number"
             step={step}
             value={entries[k]}
+            aria-label={`Value for ${k}`}
             disabled={disabled}
             onChange={(e) => {
               const n = parseFloat(e.target.value);
@@ -420,6 +424,7 @@ function KeyValueEditor({
             <button
               type="button"
               onClick={() => onRemove(k)}
+              aria-label={`Remove ${k}`}
               className="p-1.5 text-gray-400 hover:text-red-600"
               title="Remove"
             >
@@ -434,6 +439,7 @@ function KeyValueEditor({
           <input
             type="text"
             value={newKey}
+            aria-label="New entry name"
             onChange={(e) => setNewKey(e.target.value)}
             placeholder={placeholder || 'key'}
             list="loyalty-known-keys"
@@ -443,6 +449,7 @@ function KeyValueEditor({
             type="number"
             step={step}
             value={newVal}
+            aria-label="New entry value"
             onChange={(e) => setNewVal(e.target.value)}
             placeholder="value"
             className="px-2 py-1.5 text-sm border border-gray-300 rounded w-32"

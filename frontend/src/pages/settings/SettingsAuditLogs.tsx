@@ -230,6 +230,7 @@ function AuditLogSection({
                 type="text"
                 placeholder="Search by user name..."
                 value={auditSearchQuery}
+                aria-label="Search User"
                 onChange={e => setAuditSearchQuery(e.target.value)}
                 className="input-field pl-8 w-full"
               />
@@ -237,8 +238,9 @@ function AuditLogSection({
           </div>
 
           <div className="min-w-[150px]">
-            <label className="block text-xs text-gray-500 mb-1">Action Type</label>
+            <label htmlFor="audit-action-type" className="block text-xs text-gray-500 mb-1">Action Type</label>
             <select
+              id="audit-action-type"
               value={auditActionFilter}
               onChange={e => setAuditActionFilter(e.target.value as AuditAction | '')}
               className="input-field w-full"
@@ -260,6 +262,7 @@ function AuditLogSection({
             <input
               type="date"
               value={auditDateFrom}
+              aria-label="From date"
               onChange={e => setAuditDateFrom(e.target.value)}
               className="input-field w-full"
             />
@@ -272,6 +275,7 @@ function AuditLogSection({
             <input
               type="date"
               value={auditDateTo}
+              aria-label="To date"
               onChange={e => setAuditDateTo(e.target.value)}
               className="input-field w-full"
             />

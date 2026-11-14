@@ -1716,6 +1716,9 @@ async def get_approval_pin_status(
     from database.connection import get_db
 
     db = get_db().db
+    if db is None:
+        # Unknown is not "no PIN" (audit R43); the PUT below answers the same.
+        raise HTTPException(status_code=503, detail="User store unavailable")
     return _appr.has_approver_pin(db, user_id)
 
 

@@ -2,7 +2,7 @@
 // IMS 2.0 - Settings: Category, Brand & Discount Management
 // ============================================================================
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   Tag, Plus, Edit2, Trash2, X, Check,
@@ -210,9 +210,17 @@ export function BrandSection() {
     }
   };
 
+  // Audit L1-F02 (brand door): the page-wide loading flag unmounted the open
+  // form, so a refused save came back blank. The form stays mounted behind
+  // its own busy flag and keeps the draft.
+  const [savingBrand, setSavingBrand] = useState(false);
+  const savingBrandRef = useRef(false);
+
   const handleSaveBrand = async (brandData: Partial<Brand>) => {
+    if (savingBrandRef.current) return; // one save at a time
+    savingBrandRef.current = true;
     try {
-      setIsLoading(true);
+      setSavingBrand(true);
       const apiData = brandSavePayload(brandData, editingBrand, (authUser?.roles || []).includes('SUPERADMIN'));
 
       const saved = editingBrand?.id
@@ -230,7 +238,8 @@ export function BrandSection() {
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to save brand');
     } finally {
-      setIsLoading(false);
+      savingBrandRef.current = false;
+      setSavingBrand(false);
     }
   };
 
@@ -487,6 +496,7 @@ export function BrandSection() {
                     <input
                       className="input-field !w-44 !h-7 text-xs"
                       placeholder="Add sub-brand…"
+                      aria-label={`Add sub-brand to ${brand.brandName}`}
                       value={newSubbrand[brand.id] || ''}
                       onChange={(e) => setNewSubbrand((prev) => ({ ...prev, [brand.id]: e.target.value }))}
                       onKeyDown={(e) => {
@@ -522,6 +532,7 @@ export function BrandSection() {
             setEditingBrand(null);
           }}
           onSave={handleSaveBrand}
+          saving={savingBrand}
         />
       )}
     </>
@@ -706,11 +717,13 @@ function BrandModal({
   categories,
   onClose,
   onSave,
+  saving = false,
 }: {
   brand: Brand | null;
   categories: Category[];
   onClose: () => void;
   onSave: (data: Partial<Brand>) => void;
+  saving?: boolean;
 }) {
   const [formData, setFormData] = useState<Partial<Brand>>(
     brand ? { ...brand, syncToShopifyDefault: !brand.neverSellOnline && brand.syncToShopifyDefault } : {
@@ -742,8 +755,9 @@ function BrandModal({
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Brand Name *</label>
+              <label htmlFor="brand-brand-name" className="block text-sm font-medium text-gray-700 mb-1">Brand Name *</label>
               <input
+                id="brand-brand-name"
                 type="text"
                 value={formData.brandName || ''}
                 onChange={e => setFormData(prev => ({ ...prev, brandName: e.target.value }))}
@@ -752,8 +766,9 @@ function BrandModal({
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Brand Code *</label>
+              <label htmlFor="brand-brand-code" className="block text-sm font-medium text-gray-700 mb-1">Brand Code *</label>
               <input
+                id="brand-brand-code"
                 type="text"
                 value={formData.brandCode || ''}
                 onChange={e => setFormData(prev => ({ ...prev, brandCode: e.target.value.toUpperCase() }))}
@@ -764,8 +779,9 @@ function BrandModal({
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Tier *</label>
+            <label htmlFor="brand-tier" className="block text-sm font-medium text-gray-700 mb-1">Tier *</label>
             <select
+              id="brand-tier"
               value={formData.tier || 'MASS'}
               onChange={e => setFormData(prev => ({ ...prev, tier: e.target.value as Brand['tier'] }))}
               className="w-full px-3 py-2 border border-gray-200 rounded-lg focus:border-bv-red-500 focus:outline-none"
@@ -846,7 +862,7 @@ function BrandModal({
           <button onClick={onClose} className="btn-outline">
             Cancel
           </button>
-          <button onClick={() => onSave(formData)} className="btn-primary">
+          <button onClick={() => onSave(formData)} disabled={saving} className="btn-primary">
             {brand ? 'Update Brand' : 'Create Brand'}
           </button>
         </div>

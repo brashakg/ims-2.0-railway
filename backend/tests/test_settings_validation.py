@@ -36,7 +36,11 @@ from pydantic import ValidationError
 def _no_db(put_resp) -> bool:
     """True when the PUT ran without a DB (so round-trip GET can't be checked)."""
     try:
-        return "(no DB)" in (put_resp.json().get("message", "") or "")
+        # The settings singletons answer 503 with no DB (audit L1-F05: never a
+        # 200 "updated (no DB)"); the list-style settings still say "(no DB)".
+        return put_resp.status_code == 503 or "(no DB)" in (
+            put_resp.json().get("message", "") or ""
+        )
     except Exception:  # noqa: BLE001
         return False
 
@@ -430,9 +434,9 @@ class TestSystemSettingsPersistence:
             json=payload,
             headers=auth_headers,
         )
-        assert put.status_code == 200, put.text
         if _no_db(put):
             pytest.skip("system_settings collection unavailable (no DB)")
+        assert put.status_code == 200, put.text
         get = client.get("/api/v1/settings/system", headers=auth_headers)
         assert get.status_code == 200
         body = get.json()
@@ -522,6 +526,8 @@ class TestTaxSettingsHttp:
             json={"company_gstin": "27ABCDE1234F1Z5"},
             headers=auth_headers,
         )
+        if _no_db(resp):
+            pytest.skip("tax_settings collection unavailable (no DB)")
         assert resp.status_code == 200
 
     def test_negative_gst_rate_returns_422(self, client, auth_headers):
