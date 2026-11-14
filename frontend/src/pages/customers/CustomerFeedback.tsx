@@ -2,8 +2,9 @@
 // IMS 2.0 - Customer Feedback & NPS
 // ============================================================================
 // NPS dashboard wired to GET /marketing/nps-dashboard (store-scoped). Only the
-// data the backend actually returns is shown — score distribution comes from
-// real responses, segments from real promoter/passive/detractor counts.
+// data the backend actually returns is shown — the score distribution is the
+// server's per-score count over every response (the same population as the
+// promoter/passive/detractor counts); only the verbatim list is the latest 20.
 // Wave 6 B12: the 'sentiment', 'complaints' and 'comparison' tabs (static
 // "isn't available yet" cards, no backend source, no API call) are deleted;
 // this page is the NPS dashboard only.
@@ -34,6 +35,9 @@ interface NpsDashboard {
   total_surveys?: number;
   total_responses?: number;
   nps_score?: number;
+  // L1-F51: per-score counts over the SAME population as the summary (not the
+  // latest-twenty verbatim list). Keys "0".."10".
+  score_distribution?: Record<string, number>;
   responses: NpsResponse[];
 }
 
@@ -155,8 +159,8 @@ export function CustomerFeedback() {
               ) : (
                 <div className="space-y-3">
                   {[10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0].map((score) => {
-                    const count = responses.filter((r) => (r.score ?? -1) === score).length;
-                    const percentage = responses.length > 0 ? (count / responses.length) * 100 : 0;
+                    const count = dashboard.score_distribution?.[String(score)] ?? 0;
+                    const percentage = totalResponses > 0 ? (count / totalResponses) * 100 : 0;
                     return (
                       <div key={score}>
                         <div className="flex items-center justify-between mb-1">

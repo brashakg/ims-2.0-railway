@@ -32,6 +32,13 @@ import {
 import type { Customer } from '../../types';
 import { customerApi, prescriptionApi } from '../../services/api';
 import { fetchCustomerOrders } from '../../hooks/useCustomerDues';
+import {
+  CUSTOMER_SPEND_LABEL,
+  CUSTOMER_SPEND_NOTE,
+  CUSTOMER_SPEND_CAPPED_NOTE,
+  CUSTOMER_SPEND_ORDER_LIMIT,
+  summariseCustomerSpend,
+} from '../../utils/customerSpend';
 import { buildCustomerSearchHits } from '../../utils/customerSearchHits';
 import { loyaltyApi } from '../../services/api/loyalty';
 import { marketingApi } from '../../services/api/marketing';
@@ -61,6 +68,8 @@ interface CustomerStats {
   visitFrequency: number;
   referralCount: number;
   activeLoans: number;
+  /** The orders read hit CUSTOMER_SPEND_ORDER_LIMIT (D50: say so on screen). */
+  spendCapped: boolean;
 }
 
 interface InteractionRecord {
@@ -221,25 +230,27 @@ export function Customer360Dashboard() {
       // envelope, so a bare .reduce can never blank this page again. Orders
       // come back camelCase (grandTotal/createdAt), so read those with snake
       // fallbacks.
-      const ordersData: any[] = await fetchCustomerOrders(customerId!);
+      const ordersData: any[] = await fetchCustomerOrders(customerId!, CUSTOMER_SPEND_ORDER_LIMIT);
       setOrders(ordersData);
 
       const orderAmount = (o: any) => o?.grandTotal ?? o?.total_amount ?? 0;
       const orderDate = (o: any) => o?.createdAt ?? o?.order_date ?? o?.created_at ?? null;
 
-      // Calculate stats
-      const totalLTV = ordersData.reduce((sum: number, order: any) => sum + orderAmount(order), 0);
+      // Calculate stats: THE spend rule every customer door uses (L2-CUST-F01).
+      const spend = summariseCustomerSpend(ordersData);
+      const totalLTV = spend.totalSpend;
       const calculatedStats: CustomerStats = {
         totalLifetimeValue: totalLTV,
-        totalOrders: ordersData.length,
+        totalOrders: spend.orderCount,
         lastOrderDate: ordersData[0] ? orderDate(ordersData[0]) : null,
         lastOrderAmount: ordersData[0] ? orderAmount(ordersData[0]) : null,
         customerSinceDate: customerData.created_at,
         preferredStore: customerData.store_id || 'Main Store',
-        averageOrderValue: (ordersData?.length || 0) > 0 ? totalLTV / (ordersData?.length || 1) : 0,
+        averageOrderValue: spend.avgOrderValue,
         visitFrequency: Math.round((ordersData?.length || 0) / Math.max(1, monthsAsSinceDate(customerData.created_at))),
         referralCount: 0,
         activeLoans: 0,
+        spendCapped: spend.capped,
       };
       setStats(calculatedStats);
 
@@ -313,7 +324,7 @@ export function Customer360Dashboard() {
 
       // CRM-9: fetch the most recent NPS score for this customer (fail-soft)
       try {
-        const npsData = await marketingApi.getNpsDashboard(customerData.store_id);
+        const npsData = await marketingApi.getNpsDashboard(customerData.store_id, customerId);
         const responses: any[] = npsData?.responses || [];
         const customerNps = responses.find(
           (r: any) => r.customer_id === customerId && r.score != null
@@ -550,8 +561,10 @@ function CustomerHeaderCard({ customer, stats, loyaltyData }: CustomerHeaderCard
             <p className="text-gray-900 font-semibold">{new Date(stats.customerSinceDate).toLocaleDateString()}</p>
           </div>
           <div className="text-center">
-            <p className="text-gray-500 text-sm">Lifetime Value</p>
+            <p className="text-gray-500 text-sm">{CUSTOMER_SPEND_LABEL}</p>
             <p className="text-green-600 font-semibold">₹{stats.totalLifetimeValue.toLocaleString('en-IN')}</p>
+            <p className="text-[11px] text-gray-400">{CUSTOMER_SPEND_NOTE}</p>
+            {stats.spendCapped && <p className="text-[11px] text-amber-700">{CUSTOMER_SPEND_CAPPED_NOTE}</p>}
           </div>
           <div className="text-center">
             <p className="text-gray-500 text-sm">Visit Frequency</p>

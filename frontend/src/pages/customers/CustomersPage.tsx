@@ -30,6 +30,14 @@ import {
 } from 'lucide-react';
 import type { Customer, Patient, Prescription } from '../../types';
 import { customerApi, prescriptionApi, orderApi } from '../../services/api';
+import {
+  CUSTOMER_SPEND_LABEL,
+  CUSTOMER_SPEND_NOTE,
+  CUSTOMER_SPEND_CAPPED_NOTE,
+  CUSTOMER_SPEND_ORDER_LIMIT,
+  summariseCustomerSpend,
+  type CustomerSpend,
+} from '../../utils/customerSpend';
 import { loyaltyApi, type LoyaltyAccount } from '../../services/api/loyalty';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
@@ -117,6 +125,7 @@ export function CustomersPage() {
   const [selectedPatient, setSelectedPatient] = useState<Patient | null>(null);
   const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
   const [purchaseHistory, setPurchaseHistory] = useState<Array<{ id: string; orderNumber: string; date: string; total: number; items: number }>>([]);
+  const [spend, setSpend] = useState<CustomerSpend | null>(null);
   // Real loyalty account for the selected customer (null = not enrolled / no
   // loyalty engine). Replaces the old fabricated spend/100 + rupee-band tier.
   const [loyaltyAccount, setLoyaltyAccount] = useState<LoyaltyAccount | null>(null);
@@ -200,8 +209,12 @@ export function CustomersPage() {
   const loadPurchaseHistory = useCallback(async (customerId: string) => {
     setIsLoadingHistory(true);
     try {
-      const response = await orderApi.getOrders({ customerId, limit: 10 });
+      // L2-CUST-F01: the cards read the same orders and spend rule as the
+      // Purchase History summary and Customer 360 (utils/customerSpend); the
+      // list below still shows the latest ten.
+      const response = await orderApi.getOrders({ customerId, limit: CUSTOMER_SPEND_ORDER_LIMIT });
       const orders = response.orders || response || [];
+      setSpend(summariseCustomerSpend(orders));
       setPurchaseHistory(orders.map((order: { id: string; orderNumber: string; createdAt: string; grandTotal: number; items: unknown[] }) => ({
         id: order.id,
         orderNumber: order.orderNumber,
@@ -211,6 +224,7 @@ export function CustomersPage() {
       })));
     } catch {
       setPurchaseHistory([]);
+      setSpend(null);
     } finally {
       setIsLoadingHistory(false);
     }
@@ -676,10 +690,10 @@ export function CustomersPage() {
   }
 
   // ---- Customer 360 Computed Values ----
-  const totalSpend = purchaseHistory.reduce((sum, o) => sum + o.total, 0);
-  const totalOrders = purchaseHistory.length;
-  const avgOrderValue = totalOrders > 0 ? totalSpend / totalOrders : 0;
-  const lastVisit = purchaseHistory.length > 0 ? purchaseHistory[0].date : null;
+  const totalSpend = spend?.totalSpend ?? 0;
+  const totalOrders = spend?.orderCount ?? 0;
+  const avgOrderValue = spend?.avgOrderValue ?? 0;
+  const lastVisit = spend?.lastOrderDate ?? null;
   const customerLifetimeDays = selectedCustomer?.createdAt
     ? Math.floor((Date.now() - new Date(selectedCustomer.createdAt).getTime()) / (1000 * 60 * 60 * 24))
     : 0;
@@ -774,8 +788,10 @@ export function CustomersPage() {
       {/* Customer Summary Stats Row */}
       <div className="grid grid-cols-2 tablet:grid-cols-5 gap-4">
         <div className="card text-center">
-          <p className="text-xs text-gray-500 uppercase tracking-wide">Total Spend</p>
+          <p className="text-xs text-gray-500 uppercase tracking-wide">{CUSTOMER_SPEND_LABEL}</p>
           <p className="text-xl font-bold text-gray-900 mt-1">{formatCurrency(totalSpend)}</p>
+          <p className="text-[11px] text-gray-400">{CUSTOMER_SPEND_NOTE}</p>
+          {spend?.capped && <p className="text-[11px] text-amber-700">{CUSTOMER_SPEND_CAPPED_NOTE}</p>}
         </div>
         <div className="card text-center">
           <p className="text-xs text-gray-500 uppercase tracking-wide">Total Orders</p>
@@ -833,11 +849,11 @@ export function CustomersPage() {
                 customerId: selectedCustomer?.id || '',
                 customerName: selectedCustomer?.name || '',
                 phone: selectedCustomer?.phone || '',
-                lastPurchaseDate: purchaseHistory[0]?.date || null,
-                totalOrders: purchaseHistory.length,
-                totalSpend: purchaseHistory.reduce((sum, o) => sum + o.total, 0),
-                daysSinceLastPurchase: purchaseHistory[0]?.date
-                  ? Math.floor((Date.now() - new Date(purchaseHistory[0].date).getTime()) / (1000 * 60 * 60 * 24))
+                lastPurchaseDate: lastVisit,
+                totalOrders,
+                totalSpend,
+                daysSinceLastPurchase: lastVisit
+                  ? Math.floor((Date.now() - new Date(lastVisit).getTime()) / (1000 * 60 * 60 * 24))
                   : 999,
               };
               const rfm = calculateRFMScore(rfmData);
@@ -1042,7 +1058,7 @@ export function CustomersPage() {
           </div>
         ) : purchaseHistory.length > 0 ? (
           <div className="divide-y divide-gray-200">
-            {purchaseHistory.map(order => (
+            {purchaseHistory.slice(0, 10).map(order => (
               <div key={order.id} className="py-3 flex items-center justify-between">
                 <div>
                   <p className="font-medium text-gray-900">{order.orderNumber}</p>

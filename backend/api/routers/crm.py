@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional, Literal
 from datetime import datetime, date, timedelta, timezone
 import re
+import hashlib
 import uuid
 import logging
 
@@ -810,6 +811,47 @@ def _nba_card_for(doc: dict, customer_id: str) -> Optional[dict]:
     return None
 
 
+_OUTCOME_NOT_SAVED = (
+    "The call outcome could not be saved. Try again; if it did save, the "
+    "retry says so and records nothing twice."
+)
+_ALREADY_RECORDED = "This call was already recorded; its outcome is kept. Reload the list."
+
+
+def _close_linked_follow_up(db, follow_up_id: str, store_id: str, update: dict) -> str:
+    """Close the follow-up a work-list card is linked to, through THE open
+    predicate the follow-ups page uses (follow_ups.close_open_follow_up):
+    "closed" / "already_closed" / "missing". A write that fails is a 503, so
+    staff never get a success for an outcome that was not saved (Codex
+    PR-1428 r1)."""
+    from .follow_ups import close_open_follow_up
+
+    try:
+        return close_open_follow_up(
+            db.get_collection("follow_ups"), follow_up_id, store_id, update
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CRM] linked follow-up %s not saved: %s", follow_up_id, exc)
+        raise HTTPException(status_code=503, detail=_OUTCOME_NOT_SAVED)
+
+
+def _mark_list_entry_done(coll, store_id: str, day: str, array: str, customer_id: str) -> None:
+    """Take a customer off today's work-list (NBA card / reactivation entry).
+    Runs AFTER the outcome is saved; a failure is a 503 telling staff to
+    reload (a retry then answers already-recorded, never a second outcome)."""
+    try:
+        coll.find_one_and_update(
+            {"store_id": store_id, "date": day, f"{array}.customer_id": customer_id},
+            {"$set": {f"{array}.$.dismissed": True}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CRM] work-list entry %s not cleared: %s", customer_id, exc)
+        raise HTTPException(
+            status_code=503,
+            detail="The outcome was saved but the list could not be updated. Reload the list.",
+        )
+
+
 def _nba_audit(
     action: str, customer_id: str, store_id: str, current_user: dict, detail: dict
 ) -> None:
@@ -913,36 +955,33 @@ async def dismiss_nba_card(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     target_date = nba._today_ist()
-    # Single-document update on nba_scores: flip the matching card's dismissed flag.
-    updated = db.get_collection("nba_scores").find_one_and_update(
-        {
-            "store_id": store_id,
-            "date": target_date,
-            "cards.customer_id": body.customer_id,
-        },
-        {"$set": {"cards.$.dismissed": True}},
-        return_document=True,
+    scores = db.get_collection("nba_scores")
+    doc = scores.find_one(
+        {"store_id": store_id, "date": target_date, "cards.customer_id": body.customer_id}
     )
-    card = _nba_card_for(updated, body.customer_id) if updated else None
+    card = _nba_card_for(doc, body.customer_id) if doc else None
+    if card and card.get("dismissed"):
+        raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
     follow_up_id = (card or {}).get("follow_up_id")
 
-    # Resolve the linked follow_up (single-document update on follow_ups).
+    # Outcome first, through the shared open predicate: a closed follow-up
+    # keeps its outcome (409), a failed write is a 503 and the card stays.
     if follow_up_id:
-        try:
-            db.get_collection("follow_ups").find_one_and_update(
-                {"follow_up_id": follow_up_id, "store_id": store_id},
-                {
-                    "$set": {
-                        "status": "skipped",
-                        "outcome": body.reason,
-                        "completed_at": utc_now_iso(),
-                        "completed_by": current_user.get("user_id")
-                        or current_user.get("id"),
-                    }
-                },
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        from .follow_ups import close_follow_up_update
+
+        state = _close_linked_follow_up(
+            db, follow_up_id, store_id,
+            close_follow_up_update(
+                "skipped", body.reason, "",
+                current_user.get("user_id") or current_user.get("id"),
+                utc_now_iso(),
+            ),
+        )
+        if state == "already_closed":
+            _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
+            raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
+    if card:
+        _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
 
     _nba_audit(
         "nba.dismissed",
@@ -974,36 +1013,36 @@ async def complete_nba_card(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     target_date = nba._today_ist()
-    updated = db.get_collection("nba_scores").find_one_and_update(
-        {
-            "store_id": store_id,
-            "date": target_date,
-            "cards.customer_id": body.customer_id,
-        },
-        {"$set": {"cards.$.dismissed": True}},
-        return_document=True,
+    scores = db.get_collection("nba_scores")
+    doc = scores.find_one(
+        {"store_id": store_id, "date": target_date, "cards.customer_id": body.customer_id}
     )
-    card = _nba_card_for(updated, body.customer_id) if updated else None
+    card = _nba_card_for(doc, body.customer_id) if doc else None
+    if card and card.get("dismissed"):
+        raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
     follow_up_id = (card or {}).get("follow_up_id")
 
     now_iso = utc_now_iso()
     user_id = current_user.get("user_id") or current_user.get("id")
     if follow_up_id:
-        try:
-            db.get_collection("follow_ups").find_one_and_update(
-                {"follow_up_id": follow_up_id, "store_id": store_id},
-                {
-                    "$set": {
-                        "status": "completed",
-                        "outcome": "completed",
-                        "notes": body.outcome_notes,
-                        "completed_at": now_iso,
-                        "completed_by": user_id,
-                    }
-                },
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        from .follow_ups import close_follow_up_update
+
+        # L1-F48: the call's notes go into the attempt history; the card's
+        # headline stays as the follow-up's context note. Saved FIRST through
+        # the shared open predicate (Codex PR-1428 r1): a closed follow-up
+        # keeps its outcome (409, and no next follow-up is added twice); a
+        # failed write is a 503 and the card stays for the retry.
+        state = _close_linked_follow_up(
+            db, follow_up_id, store_id,
+            close_follow_up_update(
+                "completed", "completed", body.outcome_notes, user_id, now_iso
+            ),
+        )
+        if state == "already_closed":
+            _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
+            raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
+    if card:
+        _mark_list_entry_done(scores, store_id, target_date, "cards", body.customer_id)
 
     next_follow_up_id = None
     if body.follow_up_scheduled_date:
@@ -1162,69 +1201,73 @@ async def log_reactivation_outcome(
         raise HTTPException(status_code=503, detail="Database unavailable")
 
     target_date = react._today_ist()
-    updated = db.get_collection("reactivation_cohorts").find_one_and_update(
-        {
-            "store_id": store_id,
-            "date": target_date,
-            "entries.customer_id": body.customer_id,
-        },
-        {"$set": {"entries.$.dismissed": True}},
-        return_document=True,
+    cohorts = db.get_collection("reactivation_cohorts")
+    doc = cohorts.find_one(
+        {"store_id": store_id, "date": target_date, "entries.customer_id": body.customer_id}
     )
-    if updated is None:
+    entry = _reactivation_entry_for(doc, body.customer_id) if doc else None
+    if entry is None:
         # Off-list outcome (audit F41-P3): the customer is NOT on today's
         # persisted work-list (no cohort doc for today, or no matching entry).
         # Inserting a reactivation_call follow_up here would orphan-pollute the
         # analytics, so record NOTHING and fail loudly.
         raise HTTPException(status_code=404, detail="not_on_todays_list")
-    entry = _reactivation_entry_for(updated, body.customer_id)
-    follow_up_id = (entry or {}).get("follow_up_id")
+    if entry.get("dismissed"):
+        raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
+    follow_up_id = entry.get("follow_up_id")
     now_iso = utc_now_iso()
     user_id = current_user.get("user_id") or current_user.get("id")
     reached = body.outcome in ("reached", "scheduled_visit")
+    status = "completed" if reached else "skipped"
 
     if follow_up_id:
+        from .follow_ups import close_follow_up_update
+
+        state = _close_linked_follow_up(
+            db, follow_up_id, store_id,
+            close_follow_up_update(status, body.outcome, body.notes, user_id, now_iso),
+        )
+        if state == "already_closed":
+            _mark_list_entry_done(cohorts, store_id, target_date, "entries", body.customer_id)
+            raise HTTPException(status_code=409, detail=_ALREADY_RECORDED)
+    else:
+        # MEGAPHONE had not pre-created one (e.g. synchronous fallback work-list):
+        # write the in-app reactivation_call follow_up RECORD now (NOT a message).
+        # Its id is fixed per store / day / customer and written with
+        # $setOnInsert, so a retry after a lost answer finds the same record
+        # instead of adding a second one; a failed write is a 503.
+        follow_up_id = "FU-{}-{}".format(
+            target_date.replace("-", ""),
+            hashlib.sha256(
+                f"reactivation|{store_id}|{target_date}|{body.customer_id}".encode()
+            ).hexdigest()[:8].upper(),
+        )
         try:
-            db.get_collection("follow_ups").find_one_and_update(
-                {"follow_up_id": follow_up_id, "store_id": store_id},
+            db.get_collection("follow_ups").update_one(
+                {"follow_up_id": follow_up_id},
                 {
-                    "$set": {
-                        "status": "completed" if reached else "skipped",
+                    "$setOnInsert": {
+                        "follow_up_id": follow_up_id,
+                        "customer_id": body.customer_id,
+                        "customer_name": entry.get("customer_name", ""),
+                        "customer_phone": entry.get("customer_mobile", ""),
+                        "store_id": store_id,
+                        "type": "reactivation_call",
+                        "scheduled_date": target_date,
+                        "status": status,
                         "outcome": body.outcome,
                         "notes": body.notes,
+                        "created_at": now_iso,
                         "completed_at": now_iso,
                         "completed_by": user_id,
                     }
                 },
+                upsert=True,
             )
-        except Exception:  # noqa: BLE001
-            pass
-    else:
-        # MEGAPHONE had not pre-created one (e.g. synchronous fallback work-list):
-        # write the in-app reactivation_call follow_up RECORD now (NOT a message).
-        follow_up_id = (
-            f"FU-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
-        )
-        try:
-            db.get_collection("follow_ups").insert_one(
-                {
-                    "follow_up_id": follow_up_id,
-                    "customer_id": body.customer_id,
-                    "customer_name": (entry or {}).get("customer_name", ""),
-                    "customer_phone": (entry or {}).get("customer_mobile", ""),
-                    "store_id": store_id,
-                    "type": "reactivation_call",
-                    "scheduled_date": target_date,
-                    "status": "completed" if reached else "skipped",
-                    "outcome": body.outcome,
-                    "notes": body.notes,
-                    "created_at": now_iso,
-                    "completed_at": now_iso,
-                    "completed_by": user_id,
-                }
-            )
-        except Exception:  # noqa: BLE001
-            follow_up_id = None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[CRM] reactivation record %s not saved: %s", follow_up_id, exc)
+            raise HTTPException(status_code=503, detail=_OUTCOME_NOT_SAVED)
+    _mark_list_entry_done(cohorts, store_id, target_date, "entries", body.customer_id)
 
     next_follow_up_id = None
     if body.follow_up_scheduled_date:
@@ -1345,6 +1388,11 @@ async def get_reactivation_analytics(
     }
 
 
+# One customer's received CL orders read for the refill clock: far above any
+# real customer's contact-lens history (frame sales are not read at all).
+CUSTOMER_CL_HISTORY_LIMIT = 500
+
+
 @router.get("/customers/{customer_id}/cl-refill-status")
 async def get_cl_refill_status(
     customer_id: str = Path(..., description="Customer ID"),
@@ -1358,8 +1406,8 @@ async def get_cl_refill_status(
     or pack_size/30 days for monthlies) to predict when they will run out,
     and returns a refill_due_date + days_remaining.
 
-    Fail-soft: returns a safe empty result when the DB is unavailable or no
-    CL orders are found.
+    No supplied CL order -> has_cl_history false. Orders that cannot be read
+    (no DB, a failed query) -> 503, so "no history" is never a guess.
 
     GET /crm/customers/{customer_id}/cl-refill-status
     """
@@ -1376,84 +1424,54 @@ async def get_cl_refill_status(
         "pack_size": None,
         "note": "No contact-lens order history found",
     }
-    if db_conn is None:
-        return empty
     # Object-level store scope, the SAME rule + non-disclosing 404 as the 360
     # view (L1-F17): this payload is the customer's last order id/date, SKU and
     # pack -- a guessed id from another shop must not even confirm it exists.
     customer = db.query_customer(customer_id)
     if not customer or not customer_in_scope(customer, current_user):
         raise HTTPException(status_code=404, detail="Customer not found")
+    from ..services import cl_refill as clr
 
+    # THE supply rule + CL categories + refill clock the store worklist uses
+    # (L1-F18/F19, D50): received CL orders only (selected BEFORE the limit,
+    # so newer frame sales never hide them), one clock per product / eye, the
+    # earliest due drives. An unreadable history is a 503, never "No
+    # contact-lens order history found".
+    if db_conn is None:
+        raise HTTPException(status_code=503, detail="Order history unavailable; try again")
     try:
-        # CL categories used across the codebase (see inventory.py _CL_CATEGORIES).
-        cl_categories = {
-            "CONTACT_LENS",
-            "CONTACT_LENSES",
-            "CONTACT LENS",
-            "CONTACT LENSES",
-            "CL",
-            "CONTACTS",
-        }
-
-        # Find the customer's most recent order that contains a CL line item.
-        # Scan orders newest-first; stop on the first CL hit.
-        orders_coll = db_conn.get_collection("orders")
-        cursor = (
-            orders_coll.find(
-                {"customer_id": customer_id},
-                {"_id": 0, "order_id": 1, "created_at": 1, "items": 1, "order_date": 1},
-            )
-            .sort("created_at", -1)
-            .limit(50)
+        supplies = clr.latest_supplies(
+            db_conn.get_collection("orders"), {"customer_id": customer_id},
+            CUSTOMER_CL_HISTORY_LIMIT,
         )
-
-        cl_line = None
-        cl_order = None
-        for order in cursor:
-            for item in order.get("items") or []:
-                cat = str(item.get("category") or item.get("item_type") or "").upper()
-                if cat in cl_categories:
-                    cl_line = item
-                    cl_order = order
-                    break
-            if cl_line is not None:
-                break
-
-        if cl_line is None:
-            return empty
-
-        # Refill maths via the shared pure helper so this per-customer view and
-        # the store worklist (GET /crm/cl-refill/{store_id}/due) never diverge.
-        from ..services import cl_refill as clr
-
-        order_date_raw = cl_order.get("created_at") or cl_order.get("order_date")
-        refill = clr.compute_refill(cl_line, order_date_raw)
-        days_remaining = refill["days_remaining"]
-
-        return {
-            "customer_id": customer_id,
-            "has_cl_history": True,
-            "refill_due_date": refill["refill_due_date"],
-            "days_remaining": days_remaining,
-            "last_cl_order_id": cl_order.get("order_id"),
-            "last_cl_order_date": refill["last_cl_order_date"],
-            "sku": refill["sku"] or "",
-            "modality": refill["modality"],
-            "pack_size": refill["pack_size"],
-            "note": (
-                "Refill overdue"
-                if days_remaining < 0
-                else (
-                    "Refill due within 7 days"
-                    if days_remaining <= 7
-                    else "Refill due within 30 days" if days_remaining <= 30 else None
-                )
-            ),
-        }
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.warning("[CRM] cl-refill-status failed for %s: %s", customer_id, exc)
+        raise HTTPException(status_code=503, detail="Order history unavailable; try again")
+    refill = clr.earliest_refill(supplies)
+    if refill is None:
         return empty
+    days_remaining = refill["days_remaining"]
+
+    return {
+        "customer_id": customer_id,
+        "has_cl_history": True,
+        "refill_due_date": refill["refill_due_date"],
+        "days_remaining": days_remaining,
+        "last_cl_order_id": refill["last_cl_order_id"],
+        "last_cl_order_date": refill["last_cl_order_date"],
+        "sku": refill["sku"] or "",
+        "modality": refill["modality"],
+        "pack_size": refill["pack_size"],
+        "note": (
+            "Refill overdue"
+            if days_remaining < 0
+            else (
+                "Refill due within 7 days"
+                if days_remaining <= 7
+                else "Refill due within 30 days" if days_remaining <= 30 else None
+            )
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1474,6 +1492,22 @@ class CLRefillReminderBody(BaseModel):
     )
 
 
+def _due_refills_or_503(store_id: str, due_within_days: int) -> List[dict]:
+    """The store's refill-due rows, or 503 when the orders cannot be read: an
+    empty worklist must mean nobody is due (L1-F19), and the reminder creator
+    must not report "0 candidates" for an outage."""
+    from ..services import cl_refill as clr
+
+    db_conn = _crm_get_db()
+    if db_conn is None:
+        raise HTTPException(status_code=503, detail="Order history unavailable; try again")
+    try:
+        return clr.scan_due_refills(db_conn, store_id, due_within_days=due_within_days)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[CRM] cl-refill worklist failed for %s: %s", store_id, exc)
+        raise HTTPException(status_code=503, detail="Order history unavailable; try again")
+
+
 @router.get("/cl-refill/{store_id}/due")
 async def get_cl_refill_worklist(
     store_id: str = Path(..., description="Store ID"),
@@ -1487,14 +1521,12 @@ async def get_cl_refill_worklist(
     most-overdue first. Read-only -- NO message sent.
 
     Store-scoped (validate_store_access): a store-scoped role gets 403 for
-    another store. Fail-soft: no DB -> empty list.
+    another store. Orders that cannot be read -> 503, never an empty list.
     """
     from ..dependencies import validate_store_access
-    from ..services import cl_refill as clr
 
     store_id = validate_store_access(store_id, current_user)
-    db = _crm_get_db()
-    rows = clr.scan_due_refills(db, store_id, due_within_days=due_within_days)
+    rows = _due_refills_or_503(store_id, due_within_days)
     return {
         "store_id": store_id,
         "due_within_days": due_within_days,
@@ -1530,8 +1562,7 @@ async def create_cl_refill_reminders(
         )
 
     store_id = validate_store_access(store_id, current_user)
-    db = _crm_get_db()
-    rows = clr.scan_due_refills(db, store_id, due_within_days=body.due_within_days)
+    rows = _due_refills_or_503(store_id, body.due_within_days)
 
     repo = get_task_repository()
     assigned_to = body.assigned_to or current_user.get("user_id")

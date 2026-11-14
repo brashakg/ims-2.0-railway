@@ -93,10 +93,18 @@ class CreateFollowUpRequest(BaseModel):
 
 
 class CompleteFollowUpRequest(BaseModel):
-    """Request to complete a follow-up"""
+    """Record a call outcome on a follow-up.
+
+    ``notes`` is the note for THIS attempt: it is kept in the follow-up's
+    ``attempts`` history, never written over the follow-up's own context notes
+    (L1-F48). ``next_date`` is required for ``rescheduled`` (owner ruling
+    2026-11-04, L1-F50) and ignored otherwise."""
 
     outcome: FollowUpOutcome = Field(..., description="Outcome of follow-up")
-    notes: str = Field(default="", description="Additional notes")
+    notes: str = Field(default="", description="Note for this call attempt")
+    next_date: Optional[str] = Field(
+        default=None, description="Rescheduled only: the new date (YYYY-MM-DD)"
+    )
 
 
 class FollowUpResponse(BaseModel):
@@ -115,6 +123,7 @@ class FollowUpResponse(BaseModel):
     created_at: str
     completed_at: Optional[str] = None
     completed_by: Optional[str] = None
+    attempts: List[dict] = Field(default_factory=list)
 
 
 class FollowUpSummary(BaseModel):
@@ -161,7 +170,103 @@ def _to_response(fu: dict) -> FollowUpResponse:
         created_at=(_iso(fu.get("created_at")) or ""),
         completed_at=_iso(fu.get("completed_at")),
         completed_by=(str(fu["completed_by"]) if fu.get("completed_by") else None),
+        attempts=[a for a in (fu.get("attempts") or []) if isinstance(a, dict)],
     )
+
+
+def outcome_attempt(outcome: str, notes: str, user_id, now_iso: str, **extra) -> dict:
+    """One call attempt for a follow-up's ``attempts`` history."""
+    return {"outcome": outcome, "notes": notes or "", "at": now_iso, "by": user_id, **extra}
+
+
+CLOSED_STATUSES = ("completed", "skipped")
+
+
+def _event_day(value) -> Optional[date]:
+    """The calendar day of a source record's date (BSON datetime, date or ISO
+    string) for Auto-generate, or None when it cannot be read. The same date
+    part the ISO strings always gave (to_date_str), so the BUG-104 day and the
+    dedupe key do not move; one unreadable row is skipped, never a 500 for the
+    whole store (Codex PR-1428 r1)."""
+    day = to_date_str(value)
+    try:
+        return date.fromisoformat(day) if day else None
+    except ValueError:
+        return None
+
+
+def open_follow_up_filter(follow_up_id: str, store_id) -> dict:
+    """THE predicate for "this follow-up still takes an outcome". Every door
+    that records one (this router, the NBA call list, the reactivation
+    work-list) writes only through it: a closed follow-up keeps the outcome it
+    was closed with, so a second click, a stale screen or another door gets a
+    409, never an overwrite (Codex PR-1428 r1)."""
+    return {
+        "follow_up_id": follow_up_id,
+        "store_id": store_id,
+        "status": {"$nin": list(CLOSED_STATUSES)},
+    }
+
+
+def close_open_follow_up(collection, follow_up_id: str, store_id, update: dict) -> str:
+    """Apply a closing ``update`` only while the follow-up is open.
+
+    Returns "closed" (written), "already_closed" (it exists but is closed:
+    nothing written) or "missing". RAISES when the store cannot be written or
+    read, so a caller never acknowledges an outcome that was not saved."""
+    if collection.find_one_and_update(open_follow_up_filter(follow_up_id, store_id), update):
+        return "closed"
+    if collection.find_one({"follow_up_id": follow_up_id, "store_id": store_id}):
+        return "already_closed"
+    return "missing"
+
+
+def close_follow_up_update(status: str, outcome: str, notes: str, user_id, now_iso: str) -> dict:
+    """THE update that closes a follow-up with a call outcome (L1-F48).
+
+    Every door that closes one (this router, the NBA call list, the
+    reactivation work-list) uses it: status / outcome / completed_* are set and
+    the attempt (with its note) is APPENDED to ``attempts``. The follow-up's own
+    ``notes`` -- the context staff were given for the call -- is never touched;
+    correcting it is a separate, deliberate edit."""
+    return {
+        "$set": {
+            "status": status,
+            "outcome": outcome,
+            "completed_at": now_iso,
+            "completed_by": user_id,
+        },
+        "$push": {"attempts": outcome_attempt(outcome, notes, user_id, now_iso)},
+    }
+
+
+def _already_generated(collection, customer_id, fu_type: str, event_date: str) -> bool:
+    """THE dedupe for Auto-generate: a follow-up already exists for this event.
+
+    A Rescheduled follow-up moves ``scheduled_date`` (L1-F50) but keeps the
+    date it was raised for in ``event_date`` (set on the first move, never
+    rewritten), so it still answers for that event and is not raised twice."""
+    return collection.find_one(
+        {
+            "customer_id": customer_id,
+            "type": fu_type,
+            "$or": [{"scheduled_date": event_date}, {"event_date": event_date}],
+        }
+    ) is not None
+
+
+def _valid_future_date(raw: Optional[str], field: str) -> str:
+    """A YYYY-MM-DD date that is today (IST) or later: the create door's own
+    date policy, shared by Rescheduled. 422 otherwise."""
+    try:
+        day = date.fromisoformat(str(raw or ""))
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail=f"{field} must be a valid YYYY-MM-DD date, got: {raw!r}"
+        )
+    if day < ist_today():
+        raise HTTPException(status_code=422, detail=f"{field} cannot be in the past (got {raw})")
+    return day.isoformat()
 
 
 # ============================================================================
@@ -237,18 +342,7 @@ async def create_follow_up(
     # Validate that scheduled_date is not in the past.  Follow-ups scheduled
     # for yesterday would appear overdue immediately and never be worked — they
     # should be rejected at creation time so staff notice the error.
-    try:
-        sched = date.fromisoformat(request.scheduled_date)
-    except ValueError:
-        raise HTTPException(
-            status_code=422,
-            detail=f"scheduled_date must be a valid YYYY-MM-DD date, got: {request.scheduled_date!r}",
-        )
-    if sched < ist_today():
-        raise HTTPException(
-            status_code=422,
-            detail=f"scheduled_date cannot be in the past (got {request.scheduled_date})",
-        )
+    _valid_future_date(request.scheduled_date, "scheduled_date")
 
     collection = db.get_collection("follow_ups")
 
@@ -286,7 +380,8 @@ async def complete_follow_up(
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Mark a follow-up as completed with outcome.
+    Record a call outcome. Rescheduled moves the date and stays pending; every
+    other outcome closes the follow-up. Context notes are never overwritten.
     """
     db = _get_db()
     if not db or not db.is_connected:
@@ -309,21 +404,59 @@ async def complete_follow_up(
     if not can_access_store_scoped(follow_up.get("store_id"), current_user):
         raise HTTPException(status_code=403, detail="No access to this follow-up's store")
 
-    # Update the follow-up, including store_id in the filter to prevent accidental
-    # updates due to concurrent deletes or ID collisions.
-    result = collection.find_one_and_update(
-        {"follow_up_id": follow_up_id, "store_id": follow_up.get("store_id")},
-        {
-            "$set": {
-                "status": "completed",
-                "outcome": request.outcome.value,
-                "notes": request.notes,
-                "completed_at": utc_now_iso(),
-                "completed_by": current_user.get("user_id") or current_user.get("id"),
-            }
-        },
-        return_document=True,
-    )
+    # Only an OPEN follow-up takes an outcome: a closed one keeps the outcome
+    # it was closed with (a second click / a stale screen gets 409).
+    open_filter = open_follow_up_filter(follow_up_id, follow_up.get("store_id"))
+    now_iso = utc_now_iso()
+    user_id = current_user.get("user_id") or current_user.get("id")
+    if request.outcome == FollowUpOutcome.rescheduled:
+        # Owner ruling 2026-11-04 (L1-F50): Rescheduled asks a new date, saves
+        # it and KEEPS THE FOLLOW-UP PENDING; the attempt is kept in history.
+        # Validated before any write, so a bad date changes nothing.
+        if not request.next_date:
+            raise HTTPException(status_code=422, detail="Rescheduled needs the new date")
+        next_date = _valid_future_date(request.next_date, "next_date")
+        if (
+            follow_up.get("status") not in CLOSED_STATUSES
+            and _iso(follow_up.get("scheduled_date")) == next_date
+        ):
+            # Already on that date: a repeat of the same move (a retry after a
+            # lost answer) is the move already done, not another call attempt
+            # (Codex PR-1428 r1). Nothing is written.
+            return _to_response(follow_up)
+        # event_date: the date this follow-up was raised for, kept through every
+        # move so Auto-generate's dedupe still finds it (_already_generated).
+        event_date = follow_up.get("event_date") or _iso(follow_up.get("scheduled_date")) or ""
+        # The move applies only while the date is still not next_date, so two
+        # identical presses racing each other record ONE attempt.
+        open_filter["scheduled_date"] = {"$ne": next_date}
+        update = {
+            "$set": {"scheduled_date": next_date, "status": "pending", "event_date": event_date},
+            "$push": {
+                "attempts": outcome_attempt(
+                    "rescheduled", request.notes, user_id, now_iso,
+                    previous_date=_iso(follow_up.get("scheduled_date")) or "",
+                    next_date=next_date,
+                )
+            },
+        }
+    else:
+        update = close_follow_up_update(
+            "completed", request.outcome.value, request.notes, user_id, now_iso
+        )
+    result = collection.find_one_and_update(open_filter, update, return_document=True)
+    if not result:
+        current = collection.find_one({"follow_up_id": follow_up_id})
+        if (
+            current
+            and request.outcome == FollowUpOutcome.rescheduled
+            and current.get("status") not in CLOSED_STATUSES
+        ):
+            return _to_response(current)  # the racing identical move won
+        if current:
+            raise HTTPException(
+                status_code=409, detail="This follow-up is already closed; reload the list"
+            )
 
     if not result:
         # This should never happen (we already fetched it), but handle gracefully.
@@ -387,6 +520,7 @@ async def auto_generate_follow_ups(
     prescriptions_collection = db.get_collection("prescriptions")
 
     generated_count = 0
+    unreadable = 0  # source rows whose date could not be read (skipped, counted)
     today = date.today()
 
     try:
@@ -416,20 +550,16 @@ async def auto_generate_follow_ups(
                     # If exactness is ever wanted it needs a migration that
                     # re-keys the existing scheduled_date values, not a code
                     # change on its own.
-                    day = to_date_str(order["created_at"])
-                    if not day:
+                    order_date = _event_day(order["created_at"])
+                    if order_date is None:
+                        unreadable += 1
                         continue
-                    order_date = datetime.fromisoformat(day).date()
                     reminder_date = order_date + timedelta(days=730)  # 2 years
 
                     if reminder_date >= today:
                         # Check if reminder already exists
-                        existing = follow_ups_collection.find_one(
-                            {
-                                "customer_id": order.get("customer_id"),
-                                "type": "frame_replacement",
-                                "scheduled_date": reminder_date.isoformat(),
-                            }
+                        existing = _already_generated(
+                            follow_ups_collection, order.get("customer_id"), "frame_replacement", reminder_date.isoformat()
                         )
 
                         if not existing:
@@ -471,16 +601,18 @@ async def auto_generate_follow_ups(
                     # reminder landing one day earlier on a 365-day horizon.
                     # Exactness here needs a migration that re-keys the stored
                     # scheduled_date values, not a code change on its own.
-                    test_date = datetime.fromisoformat(test["created_at"]).date()
+                    # Native eye tests store created_at as a BSON datetime;
+                    # _event_day takes the same date part the ISO string
+                    # gave, so the BUG-104 day and dedupe key are unchanged.
+                    test_date = _event_day(test["created_at"])
+                    if test_date is None:
+                        unreadable += 1
+                        continue
                     reminder_date = test_date + timedelta(days=365)  # 1 year
 
                     if reminder_date >= today:
-                        existing = follow_ups_collection.find_one(
-                            {
-                                "customer_id": test.get("customer_id"),
-                                "type": "eye_test_reminder",
-                                "scheduled_date": reminder_date.isoformat(),
-                            }
+                        existing = _already_generated(
+                            follow_ups_collection, test.get("customer_id"), "eye_test_reminder", reminder_date.isoformat()
                         )
 
                         if not existing:
@@ -509,18 +641,15 @@ async def auto_generate_follow_ups(
             prescriptions = list(prescriptions_collection.find({"store_id": store_id}))
             for prescription in prescriptions:
                 if prescription.get("issue_date"):
-                    issue_date = datetime.fromisoformat(
-                        prescription["issue_date"]
-                    ).date()
+                    issue_date = _event_day(prescription["issue_date"])
+                    if issue_date is None:
+                        unreadable += 1
+                        continue
                     expiry_date = issue_date + timedelta(days=365)
 
                     if expiry_date >= today:
-                        existing = follow_ups_collection.find_one(
-                            {
-                                "customer_id": prescription.get("customer_id"),
-                                "type": "prescription_expiry",
-                                "scheduled_date": expiry_date.isoformat(),
-                            }
+                        existing = _already_generated(
+                            follow_ups_collection, prescription.get("customer_id"), "prescription_expiry", expiry_date.isoformat()
                         )
 
                         if not existing:
@@ -556,7 +685,9 @@ async def auto_generate_follow_ups(
     return {
         "status": "success",
         "generated_count": generated_count,
-        "message": f"{generated_count} follow-ups auto-generated",
+        "skipped_unreadable_dates": unreadable,
+        "message": f"{generated_count} follow-ups auto-generated"
+        + (f"; {unreadable} records skipped (date unreadable)" if unreadable else ""),
     }
 
 

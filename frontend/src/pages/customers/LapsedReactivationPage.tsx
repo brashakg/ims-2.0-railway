@@ -16,6 +16,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { crmApi } from '../../services/api/crm';
+import { getErrorMessage } from '../../utils/errorHandler';
 import type {
   ReactivationEntry,
   ReactivationOutcome,
@@ -56,6 +57,8 @@ export function LapsedReactivationPage() {
   const [notes, setNotes] = useState('');
   const [nextDate, setNextDate] = useState('');
   const [busy, setBusy] = useState(false);
+  // A refused / failed save is SHOWN (Codex PR-1428 r1); the modal stays for the retry.
+  const [saveError, setSaveError] = useState('');
 
   const load = useCallback(async () => {
     if (!storeId) {
@@ -87,11 +90,13 @@ export function LapsedReactivationPage() {
     setOutcome('reached');
     setNotes('');
     setNextDate('');
+    setSaveError('');
   };
 
   const submit = async () => {
     if (!actFor) return;
     setBusy(true);
+    setSaveError('');
     try {
       await crmApi.logReactivationOutcome(storeId, actFor.customer_id, outcome, {
         notes: notes.trim(),
@@ -99,8 +104,8 @@ export function LapsedReactivationPage() {
       });
       closeModal();
       await load();
-    } catch {
-      /* fail-soft: leave the entry so the associate can retry */
+    } catch (error) {
+      setSaveError(getErrorMessage(error, 'The outcome was not saved; try again.'));
     } finally {
       setBusy(false);
     }
@@ -259,6 +264,9 @@ export function LapsedReactivationPage() {
               onChange={(e) => setNextDate(e.target.value)}
               className="border border-gray-200 rounded px-2 py-1 text-sm"
             />
+            {saveError && (
+              <p role="alert" className="text-sm text-red-700 mt-3">{saveError}</p>
+            )}
             <div className="flex justify-end gap-2 mt-4">
               <button type="button" onClick={closeModal} className="text-gray-600 text-sm px-3 py-1.5">Cancel</button>
               <button

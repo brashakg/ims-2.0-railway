@@ -6,6 +6,13 @@
 import { useState, useEffect } from 'react';
 import { ShoppingBag, Calendar, Loader2 } from 'lucide-react';
 import { orderApi } from '../../services/api';
+import {
+  CUSTOMER_SPEND_LABEL,
+  CUSTOMER_SPEND_NOTE,
+  CUSTOMER_SPEND_CAPPED_NOTE,
+  CUSTOMER_SPEND_ORDER_LIMIT,
+  summariseCustomerSpend,
+} from '../../utils/customerSpend';
 
 interface PurchaseHistoryData {
   totalSpend: number;
@@ -13,6 +20,7 @@ interface PurchaseHistoryData {
   avgOrderValue: number;
   favoriteBrand?: string;
   lastVisitDate?: string;
+  capped?: boolean;
 }
 
 interface CustomerPurchaseHistoryProps {
@@ -30,12 +38,13 @@ export function CustomerPurchaseHistory({ customerId }: CustomerPurchaseHistoryP
   const loadPurchaseHistory = async () => {
     setIsLoading(true);
     try {
-      const orders = await orderApi.getOrders({ customerId, limit: 100 });
+      // L2-CUST-F01: the same orders and the same spend rule as the page's
+      // own cards and Customer 360 (utils/customerSpend).
+      const orders = await orderApi.getOrders({ customerId, limit: CUSTOMER_SPEND_ORDER_LIMIT });
       const orderList = orders?.orders || orders || [];
 
       if (Array.isArray(orderList) && orderList.length > 0) {
-        const totalSpend = orderList.reduce((sum: number, o: any) => sum + (o.totalAmount || o.total_amount || 0), 0);
-        const avgOrderValue = Math.round(totalSpend / orderList.length);
+        const spend = summariseCustomerSpend(orderList);
 
         // Find favorite brand
         const brandCounts: Record<string, number> = {};
@@ -49,17 +58,13 @@ export function CustomerPurchaseHistory({ customerId }: CustomerPurchaseHistoryP
         });
         const favoriteBrand = Object.entries(brandCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
 
-        // Last visit
-        const lastOrder = orderList.sort((a: any, b: any) => 
-          new Date(b.createdAt || b.created_at).getTime() - new Date(a.createdAt || a.created_at).getTime()
-        )[0];
-
         setData({
-          totalSpend,
-          orderCount: orderList.length,
-          avgOrderValue,
+          totalSpend: spend.totalSpend,
+          orderCount: spend.orderCount,
+          avgOrderValue: spend.avgOrderValue,
           favoriteBrand,
-          lastVisitDate: lastOrder?.createdAt || lastOrder?.created_at,
+          lastVisitDate: spend.lastOrderDate || undefined,
+          capped: spend.capped,
         });
       } else {
         setData({
@@ -105,8 +110,9 @@ export function CustomerPurchaseHistory({ customerId }: CustomerPurchaseHistoryP
       <div className="grid grid-cols-2 gap-4 mb-4">
         {/* Total Spend */}
         <div className="bg-white rounded-lg p-3 border border-bv-red-100">
-          <p className="text-xs text-gray-600 uppercase font-semibold">Total Spend</p>
+          <p className="text-xs text-gray-600 uppercase font-semibold">{CUSTOMER_SPEND_LABEL}</p>
           <p className="text-2xl font-bold text-bv-red-600">₹{data.totalSpend.toLocaleString('en-IN')}</p>
+          <p className="text-[11px] text-gray-400">{CUSTOMER_SPEND_NOTE}</p>
         </div>
 
         {/* Order Count */}
@@ -141,6 +147,10 @@ export function CustomerPurchaseHistory({ customerId }: CustomerPurchaseHistoryP
             </p>
           </div>
         </div>
+      )}
+
+      {data.capped && (
+        <p className="text-xs text-gray-600 mt-2">{CUSTOMER_SPEND_CAPPED_NOTE}</p>
       )}
 
       {data.orderCount === 0 && (

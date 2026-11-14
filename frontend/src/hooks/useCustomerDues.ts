@@ -16,8 +16,8 @@ import { customerApi } from '../services/api/customers';
 /** GET /orders returns an envelope {orders,total,data,...}, NOT a bare array
  *  (calling .reduce on it once blanked the whole Customer 360 page). Orders come
  *  back camelCase (grandTotal/createdAt/balanceDue) via order_to_frontend. */
-export async function fetchCustomerOrders(customerId: string): Promise<any[]> {
-  const resp: any = await orderApi.getOrders({ customerId });
+export async function fetchCustomerOrders(customerId: string, limit?: number): Promise<any[]> {
+  const resp: any = await orderApi.getOrders({ customerId, ...(limit ? { limit } : {}) });
   return Array.isArray(resp) ? resp : resp?.orders || resp?.data || [];
 }
 

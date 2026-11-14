@@ -156,6 +156,9 @@ class _FakeColl:
                     doc.setdefault(head, {})[tail] = v
                 else:
                     doc[k] = v
+        if "$push" in update:
+            for k, v in update["$push"].items():
+                doc.setdefault(k, []).append(v)
         if "$addToSet" in update:
             for k, v in update["$addToSet"].items():
                 arr = doc.setdefault(k, [])
@@ -255,7 +258,7 @@ def _seed_db_for_scoring():
     rx = [{"prescription_id": "RX1", "customer_id": "RXFAST", "store_id": STORE,
            "created_at": _rx_created_for_days_until(5)}]
     # CLDUE: a CL order 120 days ago -> reorder due (cadence 30d).
-    orders = [{"order_id": "O-CL", "customer_id": "CLDUE", "store_id": STORE,
+    orders = [{"order_id": "O-CL", "customer_id": "CLDUE", "store_id": STORE, "status": "DELIVERED",
                "created_at": NOW - timedelta(days=120),
                "items": [{"item_type": "CONTACT_LENS", "qty": 1}]}]
     return _FakeDB({
@@ -322,7 +325,7 @@ def test_t1_signal_attribution_rx_and_cl():
     ]
     rx = [{"prescription_id": "RX", "customer_id": "BOTH", "store_id": STORE,
            "created_at": _rx_created_for_days_until(5)}]
-    orders = [{"order_id": "O", "customer_id": "BOTH", "store_id": STORE,
+    orders = [{"order_id": "O", "customer_id": "BOTH", "store_id": STORE, "status": "DELIVERED",
                "created_at": NOW - timedelta(days=120),
                "items": [{"item_type": "CONTACT_LENS", "qty": 1}]}]
     db = _FakeDB({
@@ -509,7 +512,9 @@ def test_t6_complete_validation_and_persist(monkeypatch):
     assert ok.status_code == 200
     fu = db.get_collection("follow_ups").find_one({"follow_up_id": "FU-X1"})
     assert fu["status"] == "completed"
-    assert fu["notes"] == "Called, will visit Saturday."
+    # L1-F48: the call notes are the attempt's; the card context is not erased.
+    assert fu["attempts"][-1]["notes"] == "Called, will visit Saturday."
+    assert fu.get("notes") != "Called, will visit Saturday."
 
 
 def test_t6b_complete_schedules_next_followup(monkeypatch):
