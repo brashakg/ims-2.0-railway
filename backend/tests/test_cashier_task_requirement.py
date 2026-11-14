@@ -2,6 +2,7 @@
 
 import pytest
 
+from api.services.sop_checklist import steps_revision
 from test_task_visibility import MANAGERS, S1, USERS, _task, uid, world
 
 
@@ -88,6 +89,7 @@ def test_cashier_sop_checklist_and_legacy_named_task_enforce_the_same_role(world
     task_response = as_role(role).patch("/api/v1/tasks/OLD-NAMED-SOP/complete", json={"completion_notes": "finished"})
     checklist_response = as_role(role).post("/api/v1/tasks/sop-checklist/item", json={
         "template_id": "CASH-CHECK", "step_number": 1, "completed": True, "store_id": S1,
+        "revision": steps_revision([{"step_number": 1, "instruction": "Count cash"}]),
     })
     expected = 200 if role == "CASHIER" else 403
     assert task_response.status_code == checklist_response.status_code == expected

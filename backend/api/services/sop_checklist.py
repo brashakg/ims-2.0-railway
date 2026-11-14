@@ -11,6 +11,8 @@ view / progress / toggled items out) so it unit-tests without a DB.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -158,6 +160,20 @@ def assign_step_ids(
                 s["legacy_step_number"] = legacy
         out.append(s)
     return out
+
+
+def steps_revision(steps: Optional[List[Dict[str, Any]]]) -> str:
+    """A short fingerprint of the instructions a checklist page shows
+    (decision D47, audit R28). Any reorder, renumber, reword, warning change,
+    add or remove gives a new revision, so a page opened on an older one can
+    be refused instead of signing whatever now holds that step number. Derived
+    from the stored steps, so templates saved before this existed need no
+    migration."""
+    shown = [
+        [s.get("step_id"), s.get("step_number"), s.get("instruction"), s.get("warning")]
+        for s in steps or []
+    ]
+    return hashlib.sha256(json.dumps(shown, default=str).encode("utf-8")).hexdigest()[:16]
 
 
 def completion_status(progress: Dict[str, int]) -> str:

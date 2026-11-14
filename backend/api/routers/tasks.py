@@ -65,6 +65,7 @@ from ..services.sop_checklist import (
     default_template_steps,
     merge_checklist,
     progress_of,
+    steps_revision,
 )
 
 logger = logging.getLogger(__name__)
@@ -2194,6 +2195,14 @@ class SopChecklistItemToggle(BaseModel):
     completed: bool
     date: Optional[str] = None  # YYYY-MM-DD; defaults to today
     store_id: Optional[str] = None
+    # Decision D47 / audit R28: the step the page showed and the checklist
+    # revision it was opened on. A submission without them, or against an
+    # older revision, is refused rather than signing a different instruction.
+    step_id: Optional[str] = Field(default=None, max_length=40)
+    revision: Optional[str] = Field(default=None, max_length=64)
+
+
+SOP_STALE_DETAIL = "This checklist was changed by an editor; refresh to continue"
 
 
 @router.get("/sop-checklist")
@@ -2232,6 +2241,7 @@ async def get_sop_checklist(
         "items": items,
         "progress": progress,
         "status": (completion or {}).get("status") or completion_status(progress),
+        "revision": steps_revision(tpl.get("steps")),
     }
 
 
@@ -2260,6 +2270,13 @@ async def toggle_sop_checklist_item(
     now = datetime.now()
     steps = tpl.get("steps") or []
 
+    # Decision D47 / audit R28: the tick must be for the instruction the
+    # page showed. A page opened on an older revision (a colleague reordered,
+    # renumbered or reworded the SOP meanwhile) is refused; it never signs
+    # whatever now holds that step number. Signed history stays as signed.
+    if payload.revision != steps_revision(steps):
+        raise HTTPException(status_code=409, detail=SOP_STALE_DETAIL)
+
     # Validate that the requested step_number actually exists in this template.
     valid_step_numbers = {s.get("step_number") for s in steps}
     if payload.step_number not in valid_step_numbers:
@@ -2270,6 +2287,10 @@ async def toggle_sop_checklist_item(
                 f"'{payload.template_id}'. Valid steps: {sorted(valid_step_numbers)}"
             ),
         )
+    if payload.step_id is not None and payload.step_id != next(
+        (s.get("step_id") for s in steps if s.get("step_number") == payload.step_number), None
+    ):
+        raise HTTPException(status_code=409, detail=SOP_STALE_DETAIL)
 
     existing = ccol.find_one(
         {"template_id": payload.template_id, "store_id": active_store, "date": day}
@@ -2319,6 +2340,7 @@ async def toggle_sop_checklist_item(
         "items": merged,
         "progress": progress,
         "status": status,
+        "revision": steps_revision(steps),
     }
 
 

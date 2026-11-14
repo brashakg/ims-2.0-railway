@@ -3,7 +3,8 @@
 R12  a deliberately cleared SOP description is saved as cleared.
 R28  reordering / renumbering SOP steps never moves a stored tick onto a
      different instruction (a tick follows the step's stable step_id, and a
-     reworded step does not inherit the old wording's tick).
+     reworded step does not inherit the old wording's tick); D47: a page
+     opened on an older revision is refused (409) and signs nothing.
 R22  a snoozed handoff is hidden when Mongo hands snooze_until back NAIVE.
 R06  a notification snooze sent with an offset is stored as naive UTC (the
      offset is converted, not dropped), so "1 hour" is never "in the past".
@@ -68,9 +69,26 @@ def _checklist(c, tid):
     return {i["instruction"]: i["completed"] for i in r.json()["items"]}
 
 
+def _open(c, tid):
+    """What the checklist page holds after loading: its items and revision."""
+    r = c.get("/tasks/sop-checklist", params={"template_id": tid, "store_id": A, "date": "2026-11-12"})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def _submit(c, tid, page, instruction, completed=True):
+    """Tick the step the PAGE shows with this instruction, exactly as the
+    page sends it (its step_number, step_id and revision)."""
+    item = next(i for i in page["items"] if i["instruction"] == instruction)
+    return c.post("/tasks/sop-checklist/item", json={
+        "template_id": tid, "step_number": item["step_number"], "step_id": item["step_id"],
+        "revision": page["revision"], "completed": completed, "store_id": A, "date": "2026-11-12"})
+
+
 def _tick(c, tid, n):
-    r = c.post("/tasks/sop-checklist/item", json={
-        "template_id": tid, "step_number": n, "completed": True, "store_id": A, "date": "2026-11-12"})
+    page = _open(c, tid)
+    item = next(i for i in page["items"] if i["step_number"] == n)
+    r = _submit(c, tid, page, item["instruction"])
     assert r.status_code == 200, r.text
 
 
@@ -128,6 +146,68 @@ def test_r28_legacy_ticks_stay_with_the_step_that_had_their_number(sop):
         {"step_number": 1, "instruction": SAFE}, {"step_number": 2, "instruction": COUNT}]})
     assert r.status_code == 200
     assert _checklist(c, tid) == {COUNT: True, SAFE: False}
+
+
+REORDERED = {"steps": [{"step_number": 1, "instruction": SAFE}, {"step_number": 2, "instruction": COUNT}]}
+STALE = "This checklist was changed by an editor; refresh to continue"
+
+
+@pytest.mark.parametrize("edit", [
+    REORDERED,
+    {"steps": [{"step_number": 1, "instruction": "Count AND photograph display pieces"},
+               {"step_number": 2, "instruction": SAFE}]},
+    {"steps": [{"step_number": 1, "instruction": COUNT, "warning": "Use the count sheet"},
+               {"step_number": 2, "instruction": SAFE}]},
+])
+def test_r28_d47_page_opened_on_an_older_revision_is_refused_and_signs_nothing(sop, edit):
+    """Codex PR-1436 round 1 P2: the page is opened, a colleague reorders /
+    rewords the SOP, the stale page ticks "Count display pieces". It used to
+    sign "Verify safe is locked" (step 1 now). D47: refuse, sign nothing."""
+    c, tid, _, ccol = sop
+    page = _open(c, tid)
+    assert c.patch(f"/tasks/sop-templates/{tid}", json=edit).status_code == 200
+    before = list(ccol.docs)
+    r = _submit(c, tid, page, COUNT)
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"] == STALE
+    assert ccol.docs == before
+    assert not any(_checklist(c, tid).values())
+
+
+def test_r28_d47_old_client_without_a_revision_is_refused(sop):
+    c, tid, _, ccol = sop
+    r = c.post("/tasks/sop-checklist/item", json={
+        "template_id": tid, "step_number": 1, "completed": True, "store_id": A, "date": "2026-11-12"})
+    assert r.status_code == 409 and r.json()["detail"] == STALE
+    assert ccol.docs == []
+
+
+def test_r28_d47_step_id_that_does_not_hold_that_number_is_refused(sop):
+    c, tid, _, ccol = sop
+    page = _open(c, tid)
+    safe = next(i for i in page["items"] if i["instruction"] == SAFE)
+    r = c.post("/tasks/sop-checklist/item", json={
+        "template_id": tid, "step_number": 1, "step_id": safe["step_id"], "revision": page["revision"],
+        "completed": True, "store_id": A, "date": "2026-11-12"})
+    assert r.status_code == 409
+    assert ccol.docs == []
+
+
+def test_r28_d47_refresh_then_tick_signs_the_right_step_and_retry_is_idempotent(sop):
+    c, tid, _, ccol = sop
+    _tick(c, tid, 2)  # SAFE signed on the original revision
+    old_page = _open(c, tid)
+    assert c.patch(f"/tasks/sop-templates/{tid}", json=REORDERED).status_code == 200
+    assert _submit(c, tid, old_page, COUNT).status_code == 409
+    page = _open(c, tid)
+    assert page["revision"] != old_page["revision"]
+    first = _submit(c, tid, page, COUNT)
+    assert first.status_code == 200, first.text
+    assert first.json()["revision"] == page["revision"]
+    assert _submit(c, tid, page, COUNT).status_code == 200  # identical retry
+    assert _checklist(c, tid) == {COUNT: True, SAFE: True}
+    items = ccol.find_one({"template_id": tid})["items"]
+    assert sorted(i["instruction"] for i in items) == [COUNT, SAFE]  # one row each, as signed
 
 
 def test_r28_pure_merge_never_joins_an_id_tick_by_number():

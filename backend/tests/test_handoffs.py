@@ -613,3 +613,70 @@ def test_r23_revoking_the_original_keeps_a_live_forwarded_copy_and_last_revoke_c
     assert client.delete(f"/api/v1/handoffs/{child['handoff_id']}",
                          headers={"Authorization": f"Bearer {mgr}"}).status_code == 200
     assert file_id not in fs._files  # last reference gone -> bytes cleaned
+
+
+# Codex PR-1436 round 1 P2 / decision D47: a reshare racing the sender's
+# revoke must never answer 201 for a copy whose file is gone.
+
+def _race(patched_handoffs, parent, *, revoke_before_insert):
+    """Run the sender's revoke (delete the row, then free the bytes when no
+    row still uses them -- exactly what DELETE does) inside the reshare's
+    child insert, before or after the child row lands."""
+    coll = patched_handoffs["db"].get_collection("handoffs")
+    fs = patched_handoffs["file_store"]
+    real_insert = coll.insert_one
+
+    def revoke():
+        coll.delete_one({"handoff_id": parent["handoff_id"]})
+        fid = parent["file"]["file_id"]
+        if coll.count_documents({"file.file_id": fid}) == 0:
+            fs.delete(fid)
+
+    def racing_insert(doc):
+        if doc.get("parent_handoff_id") == parent["handoff_id"]:
+            if revoke_before_insert:
+                revoke()
+                return real_insert(doc)
+            out = real_insert(doc)
+            revoke()
+            return out
+        return real_insert(doc)
+
+    coll.insert_one = racing_insert
+
+
+@pytest.mark.parametrize("revoke_before_insert", [True, False])
+def test_r23_d47_reshare_racing_revoke_never_answers_201_without_the_file(
+        client, patched_handoffs, revoke_before_insert):
+    cashier = _token("u-uploader", "Anil", ["SALES_STAFF"])
+    mgr = _token("u-store-mgr", "Smita", ["STORE_MANAGER"])
+    acct = _token("u-acct", "Asha", ["ACCOUNTANT"])
+    parent = _upload(client, cashier, recipients=["u-store-mgr"]).json()
+    file_id = parent["file"]["file_id"]
+    _race(patched_handoffs, parent, revoke_before_insert=revoke_before_insert)
+
+    r = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare",
+                    headers={"Authorization": f"Bearer {mgr}"},
+                    json={"recipient_user_ids": ["u-acct"]})
+    assert r.status_code == 409, r.text
+    assert "withdrew" in r.json()["detail"]
+    coll = patched_handoffs["db"].get_collection("handoffs")
+    assert coll.count_documents({"parent_handoff_id": parent["handoff_id"]}) == 0
+    assert coll.count_documents({"recipients.user_id": "u-acct"}) == 0
+    # Nothing left pointing at the file, so no orphaned bytes either.
+    assert file_id not in patched_handoffs["file_store"]._files
+
+
+def test_r23_d47_every_201_reshare_child_can_open_its_file(client, patched_handoffs):
+    """Control: no race -> 201, and the child's bytes survive a later revoke."""
+    cashier = _token("u-uploader", "Anil", ["SALES_STAFF"])
+    mgr = _token("u-store-mgr", "Smita", ["STORE_MANAGER"])
+    acct = _token("u-acct", "Asha", ["ACCOUNTANT"])
+    parent = _upload(client, cashier, recipients=["u-store-mgr"]).json()
+    r = client.post(f"/api/v1/handoffs/{parent['handoff_id']}/reshare",
+                    headers={"Authorization": f"Bearer {mgr}"},
+                    json={"recipient_user_ids": ["u-acct"]})
+    assert r.status_code == 201
+    assert client.delete(f"/api/v1/handoffs/{parent['handoff_id']}",
+                         headers={"Authorization": f"Bearer {cashier}"}).status_code == 200
+    assert _download(client, r.json()["handoff_id"], acct).status_code == 200

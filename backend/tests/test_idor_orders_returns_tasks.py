@@ -38,6 +38,7 @@ from api.routers import orders as orders_mod  # noqa: E402
 from api.routers import returns as returns_mod  # noqa: E402
 from api.routers import tasks as tasks_mod  # noqa: E402
 from api.routers.auth import get_current_user  # noqa: E402
+from api.services.sop_checklist import steps_revision  # noqa: E402
 
 # Reuse the battle-tested returns fakes (same pattern as test_returns_refund_cap).
 from tests.strict_fakes import matches  # noqa: E402
@@ -991,7 +992,8 @@ def test_sop_toggle_uses_ist_day_key(monkeypatch):
 
     r = client.post(
         "/api/v1/tasks/sop-checklist/item",
-        json={"template_id": "TPL1", "step_number": 1, "completed": True},
+        json={"template_id": "TPL1", "step_number": 1, "completed": True,
+              "revision": steps_revision(tpl["steps"])},
     )
     assert r.status_code == 200
     assert r.json()["date"] == _IST_SENTINEL.isoformat()
