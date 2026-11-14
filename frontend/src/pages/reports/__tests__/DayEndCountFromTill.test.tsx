@@ -171,4 +171,61 @@ describe('Day-End Report - the till was already counted', () => {
     expect(list).toMatch(/Drawer 1: counted ₹1,000, variance -₹50/);
     expect(list).toMatch(/Drawer 2: counted ₹3,000, variance shown once a manager locks it/);
   });
+
+  // Reviewer replay of 1421-R5 IN THE SAME SESSION: drawers A Rs 1,000 and
+  // B Rs 3,000, POS cash Rs 4,000. After Close the Cash Reconciliation card
+  // used to work out its own whole-day verdict from the typed box ("Matches"
+  // for 4000, "Cash short" -1,000 for 3000) above a panel saying no whole-day
+  // variance is shown. After Close the card reads the RECORD, never the box.
+  const cashDay = [{ orderStatus: 'COMPLETED', grandTotal: 4000, items: [], payments: [{ method: 'CASH', amount: 4000 }] }];
+  const severalDrawerClose = () => ({
+    closed: true,
+    close: closeRecord({
+      closing_cash: 3000, system_cash: 4000, variance: null, till_drawers_on_day: 2,
+      variance_withheld_several_drawers: true,
+      till_drawers: [
+        { session_id: 'A', status: 'LOCKED', counted_paisa: 100000, variance_paisa: 0 },
+        { session_id: 'B', status: 'BLIND_SUBMITTED', counted_paisa: 300000, variance_paisa: null },
+      ],
+    }),
+  });
+
+  it.each(['4000', '3000'])('D53 in session: typed %s, several-drawer close -> the card shows no Matches and no Cash short', async (typed) => {
+    getOrders.mockImplementation(async () => ({ orders: cashDay }));
+    createDayEndClose.mockImplementation(async () => severalDrawerClose());
+    await typeAndClose(typed);
+    expect(screen.getByTestId('day-end-several-drawers')).toBeInTheDocument();
+    expect(screen.queryByText(/Matches/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Cash short/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Excess cash/)).not.toBeInTheDocument();
+    expect(screen.getByTestId('day-end-card-variance').textContent).toMatch(/each drawer/i);
+  });
+
+  it('L3-12 in session: till locked at Rs 1,000, typed 3000 -> the card shows the stored count and its variance, not the typed one', async () => {
+    getOrders.mockImplementation(async () => ({ orders: cashDay }));
+    createDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({
+        closing_cash: 1000, system_cash: 4000, variance: -3000,
+        till_already_counted: true, counted_from_shared_record: true, till_count_differs: true,
+        entered_closing_cash: 3000,
+      }),
+    }));
+    await typeAndClose('3000');
+    const box = screen.getByTestId('day-end-card-variance').textContent ?? '';
+    // 3000 typed against 4000 system would say -1,000. The record says -3,000.
+    expect(box).toMatch(/₹-3,000/);
+    expect(box).not.toMatch(/1,000/);
+    expect(screen.getByTestId('day-end-card-counted').textContent).toMatch(/₹1,000/);
+  });
+
+  it('in session, one drawer, record matches: the card says Matches from the record', async () => {
+    getOrders.mockImplementation(async () => ({ orders: cashDay }));
+    createDayEndClose.mockImplementation(async () => ({
+      closed: true,
+      close: closeRecord({ closing_cash: 4000, system_cash: 4000, variance: 0 }),
+    }));
+    await typeAndClose('4000');
+    expect(screen.getByTestId('day-end-card-variance').textContent).toMatch(/Matches/);
+  });
 });
