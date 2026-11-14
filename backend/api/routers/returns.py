@@ -4694,6 +4694,13 @@ def _refund_hold_ttl_seconds() -> int:
     return _STALE_CLAIM_SECONDS
 
 
+# The online refund door's entry in a bill's refund holds (shopify_refund.
+# _hold_order_for_online): "shopify:<refund id>". One reservation for both
+# doors, so an online refund and a counter return never price one bill at once
+# (#1397, Codex round 6).
+ONLINE_HOLD_PREFIX = "shopify:"
+
+
 def _live_refund_holds(order_id: str, holds: Dict[str, Any],
                        field: str = "net_refund", own_refund: Optional[str] = None) -> Tuple[Dict[str, Any], float]:
     """(holds still counting, the COMPLETED returns' total of ``field``) -- read together.
@@ -4718,6 +4725,9 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
                 if not _counts_as_refunded(doc, own_refund):
                     continue
                 done.add(doc.get("return_id"))
+                if doc.get("shopify_refund_id"):
+                    # An online refund's claim counts itself: its hold, never twice.
+                    done.add(f"{ONLINE_HOLD_PREFIX}{doc.get('shopify_refund_id')}")
                 try:
                     documented += float(doc.get(field) or 0)
                 except (TypeError, ValueError):
@@ -4732,9 +4742,11 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
     live: Dict[str, Any] = {}
     for rid, h in (holds or {}).items():
         at = parse_event_utc_naive((h or {}).get("at"))
-        if rid in done:
+        if rid in done or (own_refund and rid == f"{ONLINE_HOLD_PREFIX}{own_refund}"):
             continue
-        if not (h or {}).get("kept") and (at is None or (now - at).total_seconds() > _refund_hold_ttl_seconds()):
+        # An online post's hold lives as long as its credit lock (its "ttl").
+        ttl = float((h or {}).get("ttl") or _refund_hold_ttl_seconds())
+        if not (h or {}).get("kept") and (at is None or (now - at).total_seconds() > ttl):
             continue
         live[rid] = h
     return live, round(documented, 2)

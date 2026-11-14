@@ -1491,3 +1491,104 @@ def test_a_zero_store_credit_note_whose_acknowledgement_was_lost_leaves_the_refu
     assert reviews.find_one({"review_id": review_id})["status"] == "POSTED"
     assert task_states() == []
     _nothing_twice(env, points, monkeypatch, review_id, done)
+
+
+# --- #1397 Codex round 6 (P1): one reservation for both refund doors ---------
+# The online post read its allowance under its OWN credit lock and only then
+# wrote its claim; the counter reserved through the bill's refund_holds and
+# saw nothing in between. Rs 1,000 bill (Rs 900 cash + Rs 100 points): a
+# counter return pressed in that gap issued Rs 900 credit and the online post
+# issued a second Rs 900 on its stale answer (Rs 1,800). The reverse order (the
+# counter's hold live, the online post pricing beside it) gave Rs 1,000 credit
+# and no points. Both doors now hold the bill through refund_holds.
+
+
+def _cas_orders(monkeypatch, env):
+    """The counter's order repository with the compare-and-set the real one has
+    (BaseRepository.update_if), over the same strict `orders` collection."""
+    import api.routers.returns as R
+
+    coll = env.get_collection("orders")
+
+    class _Repo:
+        collection = coll
+
+        def find_by_id(self, oid):
+            return coll.find_one({"order_id": oid})
+
+        def update_if(self, oid, expected, data):
+            return bool(coll.update_one({**expected, "order_id": oid}, {"$set": data}).matched_count)
+
+    monkeypatch.setattr(R, "get_order_repository", lambda: _Repo())
+
+
+def _counter_reserves_inside_the_online_post(monkeypatch, net):
+    """Run the counter's reservation at the moment Codex paused the online
+    post: its allowance read, its claim not yet written."""
+    from fastapi import HTTPException
+
+    import api.routers.returns as R
+    from api.services import shopify_refund as S
+
+    real, seen = S._post_locked, []
+
+    def interleave(*a, **k):
+        if not seen:
+            order = R.get_order_repository().find_by_id("ord-1")
+            try:
+                seen.append(R._reserve_order_refund("ord-1", net, "RET-COUNTER", order))
+            except HTTPException as exc:
+                seen.append(exc.status_code)
+        return real(*a, **k)
+
+    monkeypatch.setattr(S, "_post_locked", interleave)
+    return seen
+
+
+def test_a_counter_return_pressed_while_the_online_post_prices_the_bill_waits(env, points, monkeypatch):
+    _cas_orders(monkeypatch, env)
+    _reviews, review_id = _queued(env)
+    seen = _counter_reserves_inside_the_online_post(monkeypatch, 900.0)
+    status, body = _confirm(review_id)
+    assert status == 200 and body["result"]["status"] == "credited", (status, body)
+    # Points-paid bill: one return at a time -- nothing reserved, nothing paid.
+    assert seen == [409], seen
+    assert [r["delta"] for r in _ledger(env)] == [900.0]
+    assert _balance(env) == (900.0, 900.0) and points() == (150, 0, 50)
+    order = env.get_collection("orders").find_one({"order_id": "ord-1"})
+    assert order["refund_holds"] == {}  # the online hold went with its post
+
+
+def test_a_counter_return_on_a_cash_bill_counts_the_online_refund_being_posted(env, points, monkeypatch):
+    import api.routers.returns as R
+    from api.services import shopify_refund as S
+
+    _cas_orders(monkeypatch, env)
+    _order(env, payments=[{"method": "CASH", "amount": 1000.0}])
+    assert S.handle_shopify_refund(env, _payload(txns=[]), topic="refunds/create")["status"] == "queued"
+    review_id = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "700001"})["review_id"]
+    seen = _counter_reserves_inside_the_online_post(monkeypatch, 1000.0)
+    assert _confirm(review_id)[0] == 200
+    # The counter's prior already holds the online Rs 1,000: its cap refuses it.
+    assert seen[0][0] == 1000.0, seen
+    R._release_order_refund("ord-1", "RET-COUNTER")
+    assert [r["delta"] for r in _ledger(env)] == [1000.0] and _balance(env) == (1000.0, 1000.0)
+
+
+def test_an_online_post_never_prices_beside_a_counter_return_still_being_written(env, points, monkeypatch):
+    import api.routers.returns as R
+
+    _cas_orders(monkeypatch, env)
+    _reviews, review_id = _queued(env)
+    order = env.get_collection("orders").find_one({"order_id": "ord-1"})
+    assert R._reserve_order_refund("ord-1", 900.0, "RET-COUNTER", order)[1] is True
+    status, _body = _confirm(review_id)
+    assert status == 422  # busy: nothing booked, the row stays open
+    assert _ledger(env) == [] and _balance(env) == (0.0, 0.0) and points() == (50, 100, 50)
+    assert env.get_collection("returns").find_one({"shopify_refund_id": "700001"}) is None
+    # The counter return failed and gave its hold back: the online post now
+    # prices the whole bill, the points part as points.
+    assert R._release_order_refund("ord-1", "RET-COUNTER") is True
+    status, body = _confirm(review_id)
+    assert status == 200 and body["result"]["status"] == "credited", (status, body)
+    assert [r["delta"] for r in _ledger(env)] == [900.0] and points() == (150, 0, 50)
