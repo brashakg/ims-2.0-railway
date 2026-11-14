@@ -95,6 +95,7 @@ const STATUS_CHIP: Record<ReconStatus, string> = {
   // colouring them as one is how a drawer nobody counted read as stolen cash.
   NEGATIVE_EXPECTED: 'bg-gray-100 text-gray-600',
   NOT_COUNTED: 'bg-gray-100 text-gray-600',
+  SEVERAL_DRAWERS: 'bg-gray-100 text-gray-600',
 };
 const STATUS_ROW: Record<ReconStatus, string> = {
   BALANCED: '',
@@ -102,6 +103,7 @@ const STATUS_ROW: Record<ReconStatus, string> = {
   SHORTAGE: 'bg-red-50/40',
   NEGATIVE_EXPECTED: '',
   NOT_COUNTED: '',
+  SEVERAL_DRAWERS: '',
 };
 
 const HQ_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'ACCOUNTANT'];
@@ -688,6 +690,16 @@ function VarianceChip({ status, variance }: { status: ReconStatus; variance: num
   // A withheld verdict shows WHY it is withheld -- never a number that reads
   // as a real over or short. NOT_COUNTED is a drawer nobody counted;
   // NEGATIVE_EXPECTED is an expected figure that computed below zero.
+  if (status === 'SEVERAL_DRAWERS') {
+    return (
+      <span
+        title="This day had several cash drawers, so no single variance is true for it. Each drawer's own variance is on its Z-Read row."
+        className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${STATUS_CHIP.SEVERAL_DRAWERS}`}
+      >
+        Several drawers
+      </span>
+    );
+  }
   if (status === 'NOT_COUNTED' || variance == null) {
     return (
       <span

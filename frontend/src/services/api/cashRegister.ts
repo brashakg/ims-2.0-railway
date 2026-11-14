@@ -6,6 +6,7 @@
 // Import directly (not via the api barrel) per the established convention.
 
 import api from './client';
+import type { TillDrawerSummary } from './reports';
 
 export type DenomKind = 'note' | 'coin';
 
@@ -47,6 +48,8 @@ export interface CashRegisterSession {
     | 'SHORT'
     | 'NEGATIVE_EXPECTED'
     | 'NOT_COUNTED'
+    // D53: the day had several drawers; no single verdict is true for it.
+    | 'SEVERAL_DRAWERS'
     | null;
   tolerance?: number | null;
   closing_note?: string | null;
@@ -64,6 +67,8 @@ export interface CashRegisterSession {
   // Cash drawers on this shop-day. Above 1, `counted` is the latest drawer's
   // count only, not the day's total (D40).
   till_drawers_on_day?: number | null;
+  // D53: each drawer's own count and (once locked) variance; never summed.
+  till_drawers?: TillDrawerSummary[] | null;
   // The day already carried a declared opening float; that one stands.
   till_float_already_declared?: boolean;
 }

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import clsx from 'clsx';
 import DenominationGrid from '../../components/cash/DenominationGrid';
+import TillDrawerList from '../../components/cash/TillDrawerList';
 import {
   blankDenoms,
   denomTotal,
@@ -517,6 +518,17 @@ export default function DayEndReport() {
                   <p className="text-sm text-green-600 mt-1">
                     Closed {new Date(closeInfo.closed_at).toLocaleString('en-IN')}
                   </p>
+                  {(closeInfo.till_drawers_on_day ?? 1) > 1 ? (
+                    // D53: several drawers. No whole-day comparison: each
+                    // drawer's own count and variance, never added together.
+                    <div className="text-sm mt-1 text-gray-600" data-testid="day-end-several-drawers">
+                      <p>
+                        This day had {closeInfo.till_drawers_on_day} cash drawers. Drawers are not added
+                        together and no whole-day variance is shown. System cash {fc(closeInfo.system_cash ?? 0)}.
+                      </p>
+                      <TillDrawerList drawers={closeInfo.till_drawers} testId="day-end-drawer-list" />
+                    </div>
+                  ) : (
                   <p className="text-sm mt-1 text-gray-600">
                     {closeInfo.closing_cash == null ? (
                       <>Cash was not counted. System cash {fc(closeInfo.system_cash ?? 0)}.</>
@@ -531,6 +543,7 @@ export default function DayEndReport() {
                       </>
                     )}
                   </p>
+                  )}
                   {/* One drawer, one count: the till's blind count is the close.
                       Say so, or a figure the closer did not type appears
                       unexplained (audit L3-12). */}
@@ -544,14 +557,6 @@ export default function DayEndReport() {
                         {closeInfo.entered_closing_cash != null && <> ({fc(closeInfo.entered_closing_cash)})</>}.
                         The notes count is the one recorded for the day, here and at the till.</>
                       )}
-                    </p>
-                  )}
-                  {/* Two drawers on one day (D40): the figure above is ONE
-                      drawer's count, not the day's total. Say so. */}
-                  {(closeInfo.till_drawers_on_day ?? 1) > 1 && (
-                    <p className="text-xs text-amber-700 mt-1" data-testid="day-end-several-drawers">
-                      This day had {closeInfo.till_drawers_on_day} cash drawers. The count above is the
-                      last drawer only, not the day's total; check each drawer's Z-Read on Blind EOD.
                     </p>
                   )}
                   {closeInfo.notes && <p className="text-xs text-gray-500 mt-1 italic">{closeInfo.notes}</p>}
