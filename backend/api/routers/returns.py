@@ -575,6 +575,32 @@ def _units_already_back(
     return (round(counter + sum(each.values()), 4), round(each.get(own, 0.0), 4))
 
 
+def _refuse_over_return(order_id: Optional[str], ret_line: Any, orig_line: Dict[str, Any]) -> None:
+    """400 when this return line asks back more units than the order line
+    still has out with the buyer (_units_already_back); 503 when the earlier
+    returns cannot be read."""
+    purchased = _line_purchased_qty(orig_line)
+    back = _units_already_back(order_id, orig_line)
+    if back is None:
+        raise HTTPException(
+            status_code=503,
+            detail=("Could not read this order's earlier returns just now - "
+                    "nothing was recorded. Try again."),
+        )
+    already = back[0]
+    remaining = round(purchased - already, 4)
+    if ret_line.return_qty > remaining + 1e-9:
+        name = ret_line.product_name or orig_line.get("product_name") or orig_line.get("product_id")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Return quantity {ret_line.return_qty:g} exceeds the "
+                f"returnable quantity {remaining:g} for '{name}' "
+                f"(purchased {purchased:g}, already returned {already:g})."
+            ),
+        )
+
+
 def _orders_coll():
     """Raw `orders` collection for the atomic per-line returnable-qty claim.
 
@@ -4781,27 +4807,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
                 ),
             )
         _refuse_shipping_line(orig_line)
-        purchased = _line_purchased_qty(orig_line)
-        product_id = orig_line.get("product_id")
-        back = _units_already_back(resolved_order_id, orig_line)
-        if back is None:
-            raise HTTPException(
-                status_code=503,
-                detail=("Could not read this order's earlier returns just now - "
-                        "nothing was recorded. Try again."),
-            )
-        already = back[0]
-        remaining = round(purchased - already, 4)
-        if ret_line.return_qty > remaining + 1e-9:
-            name = ret_line.product_name or orig_line.get("product_name") or product_id
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    f"Return quantity {ret_line.return_qty:g} exceeds the "
-                    f"returnable quantity {remaining:g} for '{name}' "
-                    f"(purchased {purchased:g}, already returned {already:g})."
-                ),
-            )
+        _refuse_over_return(resolved_order_id, ret_line, orig_line)
         resolved_lines.append({"ret_line": ret_line, "orig_line": orig_line})
 
     # 0b. SERIAL-MISMATCH HARD-BLOCK (E3 acceptance #8, return half). Runs after
@@ -4851,6 +4857,14 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         resolved_order_id, net_amount, return_id, bill=order)
     if _reserved:
         held.update(order_id=resolved_order_id, return_id=return_id)
+        # Each line read AGAIN under the reservation (#1397 round 8): an online
+        # refund of the same line that posted after the read above (a
+        # no_restock one books no returned_qty, so the atomic claim cannot see
+        # it) is counted now; any later one waits on this hold.
+        fresh_idx = _order_line_index(get_order_repository().find_by_id(resolved_order_id) or order)
+        for rl in resolved_lines:
+            _refuse_over_return(resolved_order_id, rl["ret_line"],
+                                _resolve_original_line(rl["ret_line"], fresh_idx) or rl["orig_line"])
     # The ceiling is read AFTER the reservation (#1397 round 7): an admin
     # credit note booked while this return was being priced is in it.
     try:

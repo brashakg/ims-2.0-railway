@@ -271,3 +271,29 @@ def test_an_online_refund_of_the_other_line_is_still_paid(env):
     assert row["credit_note"]["store_credit"] == 500.0
     assert post_from_review(env, row)["status"] == "credited"
     assert _balance(env) == (500.0, 500.0)
+
+
+def test_a_counter_return_rechecks_the_line_after_its_reservation(ctx, monkeypatch):
+    """Paused ordering (#1397 round 8): the counter reads line A's units, then
+    the online refund of the same line A (no_restock: it books no
+    returned_qty) posts before the counter reserves. The counter must read the
+    line again under its reservation, not pay line A a second time within the
+    bill total while line B is still with the customer."""
+    c = ctx([{"method": "CASH", "amount": 2 * _BILLED_GROSS}])
+    _with_compare_and_set(c)
+    c["order"]["items"].append(dict(c["order"]["items"][0], item_id="li2", product_id="PRD-2"))
+    real = returns_router._refuse_while_a_return_settles
+
+    def _online_lands(order, order_id):
+        c["returns"].docs.append({
+            "return_id": "RET-ONL", "order_id": "ORD-INC-1", "status": "COMPLETED",
+            "shopify_refund_id": "700001", "net_refund": _BILLED_GROSS,
+            "items": [{"order_item_id": "li1", "product_id": "PRD-1", "return_qty": 1}]})
+        return real(order, order_id)
+
+    monkeypatch.setattr(returns_router, "_refuse_while_a_return_settles", _online_lands)
+    r = _post(c, [{"method": "CASH", "amount": _BILLED_GROSS}])
+    assert r.status_code == 400 and "returnable quantity" in r.text, r.text
+    assert [d["return_id"] for d in c["returns"].docs] == ["RET-ONL"]
+    assert c["order"].get("refund_holds") == {}
+    assert not [d for d in c["ledger"].docs if d.get("type") == "ISSUED"]
