@@ -9,12 +9,12 @@
 //   • Priority chips P0-P4, each carrying a sensible default "due-in".
 //   • Due-in presets that compute a real FUTURE due_at (backend rejects past).
 //   • Owner picker sourced from the active store's users.
-//   • Attach-SOP + watchers + auto-escalation are shown as CONTEXT/preview only
-//     because the backend create contract persists none of them — surfacing
-//     them as live preview keeps the screen honest (no silently-ignored inputs).
+//   • Attach-SOP and auto-escalation are stated as information, never offered
+//     as controls: the create contract stores neither a watcher list nor an
+//     escalation switch, and every overdue task escalates (R03, audit
+//     2026-11-04 - the old Watchers picker and on/off switch were silently
+//     dropped on save).
 //   • Live preview card + escalation-ladder preview on the right.
-//
-// No backend / API shape change: the only network call is tasksApi.createTask.
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Plus, Paperclip, FileText, Image as ImageIcon, Loader2 } from 'lucide-react';
@@ -22,7 +22,8 @@ import { tasksApi } from '../../services/api';
 import { adminStoreApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { getErrorMessage } from '../../utils/errorHandler';
+import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 
 type PCode = 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
 
@@ -50,14 +51,32 @@ const PRI_META: PriMeta[] = [
     hint: 'Backlog. Visible in reports but not the daily board.' },
 ];
 
-const DUE_PRESETS: { k: string; m: number }[] = [
+// The shops run on India time (UTC+5:30, no daylight saving), whatever clock
+// the device is set to.
+const IST_OFFSET_MS = 330 * 60_000;
+
+/** 10:00 India time on the calendar day after `now`'s India date (R04: the
+ *  old preset was a flat +20 hours, so 10:47 gave 06:47 next morning). */
+export function tomorrowAt10Ist(now: Date): Date {
+  const ist = new Date(now.getTime() + IST_OFFSET_MS);
+  return new Date(
+    Date.UTC(ist.getUTCFullYear(), ist.getUTCMonth(), ist.getUTCDate() + 1, 10, 0) - IST_OFFSET_MS,
+  );
+}
+
+const minutesUntil = (d: Date): number => Math.max(1, Math.round((d.getTime() - Date.now()) / 60_000));
+
+// Fixed-length presets are labelled as the durations they are. The old
+// "End of shift" (always +6h) and "This week" (always +3 days) named business
+// times no shift or calendar rule backed (R04).
+const DUE_PRESETS: { k: string; m?: number; at?: (now: Date) => Date }[] = [
   { k: '15m', m: 15 },
   { k: '30m', m: 30 },
   { k: '1h', m: 60 },
   { k: '2h', m: 120 },
-  { k: 'End of shift', m: 360 },
-  { k: 'Tomorrow 10am', m: 60 * 20 },
-  { k: 'This week', m: 60 * 24 * 3 },
+  { k: 'In 6 hours', m: 360 },
+  { k: 'Tomorrow 10am', at: tomorrowAt10Ist },
+  { k: 'In 3 days', m: 60 * 24 * 3 },
 ];
 
 interface StaffOption {
@@ -75,6 +94,11 @@ function humanSize(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
 }
+
+const newRequestKey = (): string =>
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
 const fmtDue = (m: number): string =>
   m < 60 ? `${m}m` : m < 60 * 24 ? `${Math.round(m / 60)}h` : `${Math.round(m / (60 * 24))}d`;
@@ -114,14 +138,30 @@ export function NewTaskModal({
   const { user } = useAuth();
   const toast = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const modalRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLInputElement>(null);
+  useFocusTrap(modalRef, isOpen, titleRef);
+  // R44: one create in flight per modal, whichever door pressed it (button,
+  // Ctrl/Cmd+Enter); the button's disabled state does not stop the keyboard.
+  const inFlight = useRef(false);
+  // One key per task being written: a retry after a lost reply returns the
+  // task the server already made instead of a second one.
+  const requestKey = useRef('');
+  // A retry must resend the SAME request (D49: the server refuses a changed
+  // form under the same key). So the deadline worked out for a key and a
+  // due choice is kept, and an attached file is uploaded once per key, not
+  // again on every retry.
+  const sentDue = useRef<{ sig: string; at: Date } | null>(null);
+  const sentFile = useRef<{ file: File; key: string; att: Record<string, string> } | null>(null);
 
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
   const [pri, setPri] = useState<PCode>('P2');
   const [due, setDue] = useState<number>(120);
+  // True while "Tomorrow 10am" is picked: the deadline is that clock time,
+  // recomputed at submit, not a duration.
+  const [dueAtClock, setDueAtClock] = useState(false);
   const [owner, setOwner] = useState<string>('');
-  const [watchers, setWatchers] = useState<string[]>([]);
-  const [escalate, setEscalate] = useState(true);
   const [staff, setStaff] = useState<StaffOption[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -180,8 +220,8 @@ export function NewTaskModal({
       setDesc('');
       setPri('P2');
       setDue(120);
-      setWatchers([]);
-      setEscalate(true);
+      setDueAtClock(false);
+      requestKey.current = newRequestKey();
       setFile(initialFile);
       setFileError(null);
     }
@@ -215,6 +255,7 @@ export function NewTaskModal({
   const canSubmit = title.trim().length >= 3 && !!owner && !submitting;
 
   const submit = async () => {
+    if (inFlight.current) return;
     if (title.trim().length < 3) {
       toast.error('Title must be at least 3 characters');
       return;
@@ -227,27 +268,38 @@ export function NewTaskModal({
       toast.error(fileError);
       return;
     }
+    inFlight.current = true;
     setSubmitting(true);
     try {
       // If a file is attached, upload it first to get a file_id. A failed
       // upload aborts the create (the task should not silently lose its file).
-      let attachment: {
-        attachment_file_id?: string;
-        attachment_filename?: string;
-        attachment_mime?: string;
-      } = {};
+      let attachment: Record<string, string> = {};
       if (file) {
-        const up = await tasksApi.uploadTaskFile(file);
-        attachment = {
-          attachment_file_id: up.file_id,
-          attachment_filename: up.filename,
-          attachment_mime: up.mime,
+        const sent = sentFile.current;
+        if (sent && sent.file === file && sent.key === requestKey.current) {
+          attachment = sent.att;
+        } else {
+          const up = await tasksApi.uploadTaskFile(file);
+          attachment = {
+            attachment_file_id: up.file_id,
+            attachment_filename: up.filename,
+            attachment_mime: up.mime,
+          };
+          sentFile.current = { file, key: requestKey.current, att: attachment };
+        }
+      }
+      // A clock preset is that clock time; otherwise "due in N minutes", with
+      // +30s padding so the backend's 5-minute past-guard never trips on a
+      // tiny preset (e.g. 15m) due to request latency. Worked out once per
+      // key and due choice, so a retry sends the same deadline.
+      const dueSig = `${requestKey.current}|${dueAtClock ? 'tomorrow10' : due}`;
+      if (sentDue.current?.sig !== dueSig) {
+        sentDue.current = {
+          sig: dueSig,
+          at: dueAtClock ? tomorrowAt10Ist(new Date()) : new Date(Date.now() + due * 60_000 + 30_000),
         };
       }
-      // Compute a real future due_at from the "due in N minutes" selection.
-      // +30s padding so the backend's 5-minute past-guard never trips on a
-      // tiny preset (e.g. 15m) due to request latency.
-      const dueAt = new Date(Date.now() + due * 60_000 + 30_000);
+      const dueAt = sentDue.current.at;
       await tasksApi.createTask({
         title: title.trim(),
         description: desc.trim() || undefined,
@@ -255,14 +307,21 @@ export function NewTaskModal({
         assigned_to: owner,
         due_date: dueAt,
         type: 'manual',
+        client_request_id: requestKey.current,
         ...attachment,
       });
+      requestKey.current = newRequestKey();
       toast.success(file ? 'Task created with file attached' : 'Task created');
       onClose();
       onCreated();
     } catch (e) {
       toast.error(getErrorMessage(e, 'Failed to create task'));
+      // 409: this form was already saved under its key with the earlier
+      // details (the message names that task). Refresh the list so the saved
+      // task shows; the form stays open and nothing new is created.
+      if (getErrorStatus(e) === 409) onCreated();
     } finally {
+      inFlight.current = false;
       setSubmitting(false);
     }
   };
@@ -277,7 +336,7 @@ export function NewTaskModal({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, title, desc, pri, due, owner, file]);
+  }, [isOpen, title, desc, pri, due, dueAtClock, owner, file]);
 
   if (!isOpen) return null;
 
@@ -288,7 +347,7 @@ export function NewTaskModal({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="nt-modal" role="dialog" aria-modal="true" aria-label="New task">
+      <div ref={modalRef} className="nt-modal" role="dialog" aria-modal="true" aria-label="New task">
         <div className="nt-head">
           <div>
             <h2>{heading || 'New task'}</h2>
@@ -314,7 +373,7 @@ export function NewTaskModal({
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="e.g. Reconcile Vision-Express invoice VE-8821"
-                autoFocus
+                ref={titleRef}
               />
             </div>
 
@@ -405,6 +464,7 @@ export function NewTaskModal({
                     onClick={() => {
                       setPri(p.id);
                       setDue(p.defaultMin);
+                      setDueAtClock(false);
                     }}
                   >
                     <div className="bar" style={{ background: p.bar }} />
@@ -422,16 +482,28 @@ export function NewTaskModal({
                   Due in <span className="req">*</span>
                 </label>
                 <div className="nt-preset-row">
-                  {DUE_PRESETS.map((p) => (
-                    <button
-                      key={p.k}
-                      type="button"
-                      className={'nt-preset' + (due === p.m ? ' on' : '')}
-                      onClick={() => setDue(p.m)}
-                    >
-                      {p.k} <span className="mono">· {fmtDue(p.m)}</span>
-                    </button>
-                  ))}
+                  {DUE_PRESETS.map((p) => {
+                    const on = p.at ? dueAtClock : !dueAtClock && due === p.m;
+                    return (
+                      <button
+                        key={p.k}
+                        type="button"
+                        className={'nt-preset' + (on ? ' on' : '')}
+                        onClick={() => {
+                          if (p.at) {
+                            setDueAtClock(true);
+                            setDue(minutesUntil(p.at(new Date())));
+                          } else {
+                            setDueAtClock(false);
+                            setDue(p.m ?? 120);
+                          }
+                        }}
+                      >
+                        {p.k}
+                        {p.at && on && <span className="mono"> · {fmtDue(due)}</span>}
+                      </button>
+                    );
+                  })}
                 </div>
                 {willOverdue && (
                   <div className="nt-hint" style={{ color: 'var(--err)', fontStyle: 'normal' }}>
@@ -467,10 +539,7 @@ export function NewTaskModal({
                       key={t.user_id}
                       type="button"
                       className={'nt-owner-opt' + (owner === t.user_id ? ' on' : '')}
-                      onClick={() => {
-                        setOwner(t.user_id);
-                        setWatchers((ws) => ws.filter((w) => w !== t.user_id));
-                      }}
+                      onClick={() => setOwner(t.user_id)}
                     >
                       <span className="av">{initials(t.name)}</span>
                       <span>
@@ -485,62 +554,11 @@ export function NewTaskModal({
               )}
             </div>
 
-            {staff.length > 1 && (
-              <div className="nt-field">
-                <label>Watchers</label>
-                <div className="nt-owner-pick">
-                  {staff
-                    .filter((t) => t.user_id !== owner)
-                    .map((t) => (
-                      <button
-                        key={t.user_id}
-                        type="button"
-                        className={'nt-owner-opt' + (watchers.includes(t.user_id) ? ' on' : '')}
-                        onClick={() =>
-                          setWatchers((ws) =>
-                            ws.includes(t.user_id)
-                              ? ws.filter((x) => x !== t.user_id)
-                              : [...ws, t.user_id],
-                          )
-                        }
-                      >
-                        <span className="av">{initials(t.name)}</span>
-                        <span>{t.name}</span>
-                      </button>
-                    ))}
-                </div>
-                <div className="nt-hint">
-                  Notified on status change. Not responsible for completion.
-                </div>
-              </div>
-            )}
-
             <div className="nt-field">
               <label>Auto-escalation</label>
-              <div
-                className={'nt-esc-toggle' + (escalate ? ' on' : '')}
-                onClick={() => setEscalate((e) => !e)}
-                role="switch"
-                aria-checked={escalate}
-                tabIndex={0}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    setEscalate((v) => !v);
-                  }
-                }}
-              >
-                <div className="sw" />
-                <div>
-                  <div className="t">
-                    {escalate
-                      ? 'Enabled — auto-escalates up the role ladder when overdue'
-                      : 'Disabled — stays with the owner'}
-                  </div>
-                  <div className="s">
-                    Uses the per-priority SLA + role ladder. Preview on the right.
-                  </div>
-                </div>
+              <div className="nt-hint" style={{ fontStyle: 'normal', color: 'var(--ink-3)', marginTop: 0 }}>
+                Always on: an overdue task escalates up the role ladder automatically,
+                using the per-priority SLA. Preview on the right.
               </div>
             </div>
           </div>
@@ -586,10 +604,12 @@ export function NewTaskModal({
               </div>
             </div>
 
-            {escalate && (
-              <>
+            <>
                 <div className="nt-eyebrow" style={{ marginTop: 24 }}>
-                  Escalation ladder
+                  Escalation ladder · example timings
+                </div>
+                <div className="nt-hint" style={{ marginBottom: 6 }}>
+                  Example only: the real timing follows the shop&apos;s escalation settings.
                 </div>
                 <div className="nt-prv-ladder">
                   <div className="step cur">
@@ -613,31 +633,19 @@ export function NewTaskModal({
                     <div className="when">+{fmtDue(due * 4)}</div>
                   </div>
                 </div>
-              </>
-            )}
+            </>
 
             <div className="nt-eyebrow" style={{ marginTop: 24 }}>
               Notifications
             </div>
             <div className="nt-notif">
               <div style={{ marginBottom: 6 }}>
-                <span className="k">On create →</span> {ownerName} (in-app + WhatsApp)
+                <span className="k">On create →</span> shows in {ownerName}&apos;s task list. No message is sent.
               </div>
-              {watchers.length > 0 && (
-                <div style={{ marginBottom: 6 }}>
-                  <span className="k">Watchers →</span>{' '}
-                  {watchers
-                    .map((w) => staff.find((s) => s.user_id === w)?.name?.split(' ')[0])
-                    .filter(Boolean)
-                    .join(', ')}{' '}
-                  (in-app)
-                </div>
-              )}
-              {escalate && (
-                <div>
-                  <span className="k">On overdue →</span> Role ladder kicks in automatically
-                </div>
-              )}
+              <div>
+                <span className="k">On overdue →</span> moves up the role ladder with an in-app alert.
+                WhatsApp alerts go out only if messaging is switched on for the business.
+              </div>
             </div>
           </aside>
         </div>

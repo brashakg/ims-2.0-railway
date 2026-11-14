@@ -109,12 +109,24 @@ export function TasksPerformancePage() {
             </button>
           )}
         </div>
-        <p className="text-xs text-gray-500 mb-4">
-          Computed from the {tasks.length} task{tasks.length === 1 ? '' : 's'} loaded on this page
-          {listQ.hasNextPage ? ' — load more for the full picture.' : '.'}
-        </p>
+        {!(listQ.isError && tasks.length === 0) && (
+          <p className="text-xs text-gray-500 mb-4">
+            Computed from the {tasks.length} task{tasks.length === 1 ? '' : 's'} loaded on this page
+            {listQ.hasNextPage ? ' — load more for the full picture.' : '.'}
+          </p>
+        )}
 
-        {listQ.isPending ? (
+        {listQ.isError && tasks.length === 0 ? (
+          // R26: the task list failed - never "No tasks yet" beside real totals.
+          <div
+            className="s-section flex items-center gap-2"
+            style={{ padding: 12, borderColor: 'var(--err-50)', background: 'var(--err-50)' }}
+          >
+            <AlertTriangle className="w-5 h-5" style={{ color: 'var(--err)' }} />
+            <span style={{ color: 'var(--err)' }}>Could not load the tasks this ranking is built from.</span>
+            <button onClick={() => listQ.refetch()} className="btn sm ml-auto">Retry</button>
+          </div>
+        ) : listQ.isPending ? (
           <div className="flex items-center justify-center h-40">
             <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
           </div>
