@@ -82,7 +82,7 @@ def _submit(c, tid, page, instruction, completed=True):
     item = next(i for i in page["items"] if i["instruction"] == instruction)
     return c.post("/tasks/sop-checklist/item", json={
         "template_id": tid, "step_number": item["step_number"], "step_id": item["step_id"],
-        "revision": page["revision"], "completed": completed, "store_id": A, "date": "2026-11-12"})
+        "revision": page.get("revision"), "completed": completed, "store_id": A, "date": "2026-11-12"})
 
 
 def _tick(c, tid, n):
@@ -187,7 +187,7 @@ def test_r28_d47_step_id_that_does_not_hold_that_number_is_refused(sop):
     page = _open(c, tid)
     safe = next(i for i in page["items"] if i["instruction"] == SAFE)
     r = c.post("/tasks/sop-checklist/item", json={
-        "template_id": tid, "step_number": 1, "step_id": safe["step_id"], "revision": page["revision"],
+        "template_id": tid, "step_number": 1, "step_id": safe["step_id"], "revision": page.get("revision"),
         "completed": True, "store_id": A, "date": "2026-11-12"})
     assert r.status_code == 409
     assert ccol.docs == []
