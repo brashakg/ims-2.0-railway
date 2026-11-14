@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react';
 import { Loader2, Save, RotateCcw, Plus, Trash2 } from 'lucide-react';
 import { loyaltyApi, type LoyaltySettings } from '../../services/api/loyalty';
 import { useAuth } from '../../context/AuthContext';
+import { isSuperAdmin } from '../../utils/capabilities';
 import { useToast } from '../../context/ToastContext';
 import { getErrorMessage } from '../../utils/errorHandler';
 
@@ -31,9 +32,9 @@ const KNOWN_CATEGORIES = [
 ];
 
 export function LoyaltySettingsSection() {
-  const { hasRole } = useAuth();
+  const { user } = useAuth();
   const toast = useToast();
-  const canEdit = hasRole(['SUPERADMIN']);
+  const canEdit = isSuperAdmin(user?.roles);
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);

@@ -60,7 +60,10 @@ export interface UserData {
   phone: string;
   roles: string[];
   accessibleStores: string[];
-  discountCap: number;
+  /** Per-user OVERRIDE as stored (undefined = none: the role standard applies). */
+  discountCap?: number;
+  /** The cap the server actually enforces (role standard vs override). */
+  effectiveDiscountCap?: number;
   isActive: boolean;
   createdAt: string;
   /** Per-user deny-only module override (canonical module key -> bool). A key
@@ -144,24 +147,10 @@ export interface LensAddon {
   price: number;
 }
 
-// Available (assignable) roles. SALES_CASHIER was merged into SALES_STAFF
-// (backlog #12) and is no longer assignable to new users -- the backend
-// normalizes any lingering SALES_CASHIER to SALES_STAFF.
-export const AVAILABLE_ROLES = [
-  'SUPERADMIN',
-  'ADMIN',
-  'AREA_MANAGER',
-  'STORE_MANAGER',
-  'ACCOUNTANT',
-  'CATALOG_MANAGER',
-  'OPTOMETRIST',
-  'SALES_STAFF',
-  'WORKSHOP_STAFF',
-];
-
-// Role hierarchy - higher index = higher privilege. SALES_CASHIER is retained
-// here (with the same level it always had) only so a legacy user still carrying
-// the deprecated role renders/levels correctly; it is not in AVAILABLE_ROLES.
+// Role hierarchy - higher index = higher privilege. Same ORDER as the backend
+// ROLE_LEVEL (services/user_roles.py). SALES_CASHIER is retained only so a
+// legacy user still carrying the deprecated role renders/levels correctly; it is
+// not in the catalogue below.
 export const ROLE_HIERARCHY: Record<string, number> = {
   'SUPERADMIN': 10,
   'ADMIN': 9,
@@ -170,17 +159,61 @@ export const ROLE_HIERARCHY: Record<string, number> = {
   'ACCOUNTANT': 5,
   'CATALOG_MANAGER': 5,
   'OPTOMETRIST': 4,
+  'CASHIER': 3,
   'SALES_CASHIER': 2, // deprecated alias of SALES_STAFF (same effective level)
   'SALES_STAFF': 2,
   'WORKSHOP_STAFF': 2,
+  'DESIGN_MANAGER': 2,
+  'INVESTOR': 1,
 };
 
-// Which roles each user type can assign
-export const ASSIGNABLE_ROLES: Record<string, string[]> = {
-  'SUPERADMIN': AVAILABLE_ROLES,
-  'ADMIN': AVAILABLE_ROLES.filter(r => r !== 'SUPERADMIN'),
-  'STORE_MANAGER': ['OPTOMETRIST', 'SALES_STAFF', 'WORKSHOP_STAFF'],
-};
+// THE staff role catalogue (L1-F04): User Management and Staff Onboarding both
+// read this one list, so the two doors can never offer different roles again.
+// Plain-English labels because the owner is not a developer. `geoFenced` marks
+// the store-staff tiers whose login is fenced to their assigned store.
+export interface RoleOption {
+  id: string;
+  label: string;
+  desc: string;
+  level: number;
+  geoFenced: boolean;
+}
+
+export const ROLE_CATALOGUE: RoleOption[] = [
+  // Sales Cashier was merged into Sales Staff (backlog #12) -- one floor-sales
+  // role now: rings up sales, takes payments, opens the drawer, discount up to 10%.
+  { id: 'SALES_STAFF', label: 'Sales Staff', desc: 'Rings up sales, takes payments, opens the cash drawer, and searches the catalogue. Discount up to 10%.', level: ROLE_HIERARCHY.SALES_STAFF, geoFenced: true },
+  { id: 'CASHIER', label: 'Cashier', desc: 'Takes payments only — no selling, no discounts.', level: ROLE_HIERARCHY.CASHIER, geoFenced: true },
+  { id: 'OPTOMETRIST', label: 'Optometrist', desc: 'Runs eye tests and writes prescriptions. No selling.', level: ROLE_HIERARCHY.OPTOMETRIST, geoFenced: true },
+  { id: 'WORKSHOP_STAFF', label: 'Workshop / Fitting', desc: 'Updates job status — frame fitting, lens mounting. No selling.', level: ROLE_HIERARCHY.WORKSHOP_STAFF, geoFenced: true },
+  { id: 'STORE_MANAGER', label: 'Store Manager', desc: 'Runs one store end-to-end. Discount up to 20%.', level: ROLE_HIERARCHY.STORE_MANAGER, geoFenced: false },
+  { id: 'ACCOUNTANT', label: 'Accountant', desc: 'Finance, GST and reconciliation. No POS or inventory.', level: ROLE_HIERARCHY.ACCOUNTANT, geoFenced: false },
+  { id: 'CATALOG_MANAGER', label: 'Catalog Manager', desc: 'Owns the head-office product catalogue and pricing.', level: ROLE_HIERARCHY.CATALOG_MANAGER, geoFenced: false },
+  { id: 'DESIGN_MANAGER', label: 'Design Manager', desc: 'Online-store design work: product photos, collections and menus. No selling.', level: ROLE_HIERARCHY.DESIGN_MANAGER, geoFenced: false },
+  { id: 'AREA_MANAGER', label: 'Area Manager', desc: 'Oversees several stores. Discount up to 25%.', level: ROLE_HIERARCHY.AREA_MANAGER, geoFenced: false },
+  { id: 'ADMIN', label: 'Admin (Director)', desc: 'Head-office administration across all stores and staff.', level: ROLE_HIERARCHY.ADMIN, geoFenced: false },
+  { id: 'SUPERADMIN', label: 'Superadmin (CEO)', desc: 'Full control of the entire system, including AI.', level: ROLE_HIERARCHY.SUPERADMIN, geoFenced: false },
+  { id: 'INVESTOR', label: 'Investor (read-only)', desc: 'Sees reports and figures only. Cannot change anything.', level: ROLE_HIERARCHY.INVESTOR, geoFenced: false },
+];
+
+export const ROLE_LABEL: Record<string, string> = Object.fromEntries(
+  ROLE_CATALOGUE.map((r) => [r.id, r.label]),
+);
+
+// Every recognised role, for the User Management role FILTER (so an existing
+// Cashier / Design Manager / Investor can be found).
+export const AVAILABLE_ROLES = ROLE_CATALOGUE.map((r) => r.id);
+
+/** The roles an actor may give someone, in BOTH staff doors. Mirrors the server:
+ *  POST/PUT /users are ADMIN/SUPERADMIN only (rbac_policy), and can_assign_roles
+ *  lets an actor assign only roles at or below their own level. The read-only
+ *  Investor seat is offered to the SUPERADMIN only. */
+export function assignableRolesFor(actorRoles: string[] | null | undefined): RoleOption[] {
+  const roles = actorRoles || [];
+  if (roles.includes('SUPERADMIN')) return ROLE_CATALOGUE;
+  if (!roles.includes('ADMIN')) return [];
+  return ROLE_CATALOGUE.filter((r) => r.level <= ROLE_HIERARCHY.ADMIN && r.id !== 'INVESTOR');
+}
 
 // Get the highest role level from a list of roles
 export const getHighestRoleLevel = (roles: string[]): number => {

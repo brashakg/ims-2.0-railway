@@ -47,6 +47,7 @@ import {
 } from 'lucide-react';
 import { useToast } from '../../context/ToastContext';
 import { useAuth } from '../../context/AuthContext';
+import { isSuperAdmin } from '../../utils/capabilities';
 import {
   collectionsApi,
   pushApi,
@@ -151,7 +152,7 @@ interface EditorDraft {
 // ===========================================================================
 export default function CollectionsPage() {
   const toast = useToast();
-  const { hasRole } = useAuth();
+  const { hasRole, user } = useAuth();
   // Publishing to the live storefront is integration-critical -> SUPERADMIN /
   // ADMIN only (matches the backend push router gate). The backend is the real
   // enforcement; this just hides the control from everyone else.
@@ -159,7 +160,7 @@ export default function CollectionsPage() {
   // "Block from online sale" is contractual (some brands forbid online sale) and
   // takes products OFF the storefront -> SUPERADMIN ONLY (matches the backend
   // gate). Non-SUPERADMIN users never see the control.
-  const canBlock = hasRole(['SUPERADMIN']);
+  const canBlock = isSuperAdmin(user?.roles);
 
   const [collections, setCollections] = useState<EcomCollection[]>([]);
   const [loading, setLoading] = useState(true);

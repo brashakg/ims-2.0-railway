@@ -10,7 +10,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 vi.mock('../../../context/AuthContext', () => ({
-  useAuth: () => ({ hasRole: () => true }),
+  useAuth: () => ({ hasRole: () => true, user: { roles: ['SUPERADMIN'] } }),
 }));
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),

@@ -59,3 +59,11 @@ export function permissionToCapability(permission: string): string | null {
 export function isUngrantableCapability(cap: string): boolean {
   return cap.startsWith('jarvis:');
 }
+
+/** Exact SUPERADMIN check for screens whose server write is SUPERADMIN-only
+ *  (L1-F12). AuthContext.hasRole(['SUPERADMIN']) is TRUE for an ADMIN too
+ *  (ADMIN inherits every role), which offered an ADMIN edit controls whose Save
+ *  the server then refused with 403. */
+export function isSuperAdmin(roles: readonly string[] | null | undefined): boolean {
+  return (roles || []).includes('SUPERADMIN');
+}
