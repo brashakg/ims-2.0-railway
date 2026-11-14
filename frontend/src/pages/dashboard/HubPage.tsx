@@ -644,9 +644,10 @@ export default function HubPage() {
           setShareFile(null);
         }}
         onCreated={() => {
-          setShowShareFile(false);
-          setShareFile(null);
-          // Refresh the work row so the new task shows up.
+          // Refresh the work row so the new task shows up. Closing is
+          // onClose's job (the modal calls it on success): a 409 "already
+          // saved with earlier details" also refreshes, and must keep the
+          // form open with that message (D49).
           setInboxRefreshKey((k) => k + 1);
         }}
       />
