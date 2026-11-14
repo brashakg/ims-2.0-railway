@@ -1464,6 +1464,33 @@ class TestR7OneCloseRecordPerShopDay:
         assert rows[0]["_id"] == "DAYEND:%s:%s" % (STORE, DATE)
         assert _till(db, sid)["blind_count_paisa"] == 100000
 
+    def test_a_lost_acknowledgement_then_retry_leaves_one_close_and_one_count(
+        self, db, day_end, monkeypatch
+    ):
+        """The insert LANDS but its acknowledgement is lost (500); the retry
+        answers 409 with that one stored close. One close row, one till count."""
+        sid = _blind_count(db, rupees=1000, lock=False)
+        closes = db.get_collection("day_end_closes")
+        real_insert = closes.insert_one
+        fired = []
+
+        def _lands_then_raises(doc, *a, **k):
+            result = real_insert(doc, *a, **k)
+            if not fired:
+                fired.append(1)
+                raise AutoReconnect("acknowledgement lost after commit")
+            return result
+
+        monkeypatch.setattr(closes, "insert_one", _lands_then_raises)
+        with pytest.raises(HTTPException) as first:
+            day_end(closing_cash=1000.0, system_cash=1000.0)
+        assert first.value.status_code == 409  # the re-read finds the landed row
+        with pytest.raises(HTTPException) as retry:
+            day_end(closing_cash=1000.0, system_cash=1000.0)
+        assert retry.value.status_code == 409
+        assert len(closes.docs) == 1 and closes.docs[0]["closing_cash"] == 1000.0
+        assert _till(db, sid)["blind_count_paisa"] == 100000
+
     def test_control_a_legacy_close_with_a_random_id_still_blocks_a_new_one(
         self, db, day_end
     ):
