@@ -22,7 +22,7 @@ import { tasksApi } from '../../services/api';
 import { adminStoreApi } from '../../services/api';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
-import { getErrorMessage } from '../../utils/errorHandler';
+import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 import { useFocusTrap } from '../../hooks/useFocusTrap';
 
 type PCode = 'P0' | 'P1' | 'P2' | 'P3' | 'P4';
@@ -147,6 +147,12 @@ export function NewTaskModal({
   // One key per task being written: a retry after a lost reply returns the
   // task the server already made instead of a second one.
   const requestKey = useRef('');
+  // A retry must resend the SAME request (D49: the server refuses a changed
+  // form under the same key). So the deadline worked out for a key and a
+  // due choice is kept, and an attached file is uploaded once per key, not
+  // again on every retry.
+  const sentDue = useRef<{ sig: string; at: Date } | null>(null);
+  const sentFile = useRef<{ file: File; key: string; att: Record<string, string> } | null>(null);
 
   const [title, setTitle] = useState('');
   const [desc, setDesc] = useState('');
@@ -267,25 +273,33 @@ export function NewTaskModal({
     try {
       // If a file is attached, upload it first to get a file_id. A failed
       // upload aborts the create (the task should not silently lose its file).
-      let attachment: {
-        attachment_file_id?: string;
-        attachment_filename?: string;
-        attachment_mime?: string;
-      } = {};
+      let attachment: Record<string, string> = {};
       if (file) {
-        const up = await tasksApi.uploadTaskFile(file);
-        attachment = {
-          attachment_file_id: up.file_id,
-          attachment_filename: up.filename,
-          attachment_mime: up.mime,
-        };
+        const sent = sentFile.current;
+        if (sent && sent.file === file && sent.key === requestKey.current) {
+          attachment = sent.att;
+        } else {
+          const up = await tasksApi.uploadTaskFile(file);
+          attachment = {
+            attachment_file_id: up.file_id,
+            attachment_filename: up.filename,
+            attachment_mime: up.mime,
+          };
+          sentFile.current = { file, key: requestKey.current, att: attachment };
+        }
       }
       // A clock preset is that clock time; otherwise "due in N minutes", with
       // +30s padding so the backend's 5-minute past-guard never trips on a
-      // tiny preset (e.g. 15m) due to request latency.
-      const dueAt = dueAtClock
-        ? tomorrowAt10Ist(new Date())
-        : new Date(Date.now() + due * 60_000 + 30_000);
+      // tiny preset (e.g. 15m) due to request latency. Worked out once per
+      // key and due choice, so a retry sends the same deadline.
+      const dueSig = `${requestKey.current}|${dueAtClock ? 'tomorrow10' : due}`;
+      if (sentDue.current?.sig !== dueSig) {
+        sentDue.current = {
+          sig: dueSig,
+          at: dueAtClock ? tomorrowAt10Ist(new Date()) : new Date(Date.now() + due * 60_000 + 30_000),
+        };
+      }
+      const dueAt = sentDue.current.at;
       await tasksApi.createTask({
         title: title.trim(),
         description: desc.trim() || undefined,
@@ -302,6 +316,10 @@ export function NewTaskModal({
       onCreated();
     } catch (e) {
       toast.error(getErrorMessage(e, 'Failed to create task'));
+      // 409: this form was already saved under its key with the earlier
+      // details (the message names that task). Refresh the list so the saved
+      // task shows; the form stays open and nothing new is created.
+      if (getErrorStatus(e) === 409) onCreated();
     } finally {
       inFlight.current = false;
       setSubmitting(false);
@@ -588,7 +606,10 @@ export function NewTaskModal({
 
             <>
                 <div className="nt-eyebrow" style={{ marginTop: 24 }}>
-                  Escalation ladder
+                  Escalation ladder · example timings
+                </div>
+                <div className="nt-hint" style={{ marginBottom: 6 }}>
+                  Example only: the real timing follows the shop&apos;s escalation settings.
                 </div>
                 <div className="nt-prv-ladder">
                   <div className="step cur">
@@ -619,10 +640,11 @@ export function NewTaskModal({
             </div>
             <div className="nt-notif">
               <div style={{ marginBottom: 6 }}>
-                <span className="k">On create →</span> {ownerName} (in-app + WhatsApp)
+                <span className="k">On create →</span> shows in {ownerName}&apos;s task list. No message is sent.
               </div>
               <div>
-                <span className="k">On overdue →</span> Role ladder kicks in automatically
+                <span className="k">On overdue →</span> moves up the role ladder with an in-app alert.
+                WhatsApp alerts go out only if messaging is switched on for the business.
               </div>
             </div>
           </aside>

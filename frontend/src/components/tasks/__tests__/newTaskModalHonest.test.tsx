@@ -128,6 +128,74 @@ describe('R44 one create in flight', () => {
   });
 });
 
+describe('D49 a retry resends the same request; a changed form is told the truth', () => {
+  it('a retry minutes later sends the same deadline under the same key', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-11-04T05:00:00Z'));
+    createTask
+      .mockRejectedValueOnce(new Error('network'))
+      .mockResolvedValueOnce({ task_id: 'TASK-1' });
+    await openModal();
+    typeTitle();
+    fireEvent.click(screen.getByRole('button', { name: /Create task/ }));
+    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Create task/ })).not.toBeDisabled(),
+    );
+    vi.setSystemTime(new Date('2026-11-04T05:03:00Z'));
+    fireEvent.click(screen.getByRole('button', { name: /Create task/ }));
+    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(2));
+    const [first, second] = createTask.mock.calls.map((c) => c[0]);
+    expect(second.client_request_id).toBe(first.client_request_id);
+    expect(new Date(second.due_date).toISOString()).toBe(new Date(first.due_date).toISOString());
+  });
+
+  it('a retry does not upload the attached file a second time', async () => {
+    const upload = tasksApi.uploadTaskFile as unknown as ReturnType<typeof vi.fn>;
+    upload.mockReset();
+    upload.mockResolvedValue({ file_id: 'F-1', filename: 'count.pdf', mime: 'application/pdf', size: 3 });
+    createTask
+      .mockRejectedValueOnce(new Error('network'))
+      .mockResolvedValueOnce({ task_id: 'TASK-1' });
+    const file = new File(['abc'], 'count.pdf', { type: 'application/pdf' });
+    render(<NewTaskModal isOpen onClose={vi.fn()} onCreated={vi.fn()} initialFile={file} />);
+    await screen.findAllByText('Cashier One');
+    typeTitle();
+    fireEvent.click(screen.getByRole('button', { name: /Create task/ }));
+    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Create task/ })).not.toBeDisabled(),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Create task/ }));
+    await waitFor(() => expect(createTask).toHaveBeenCalledTimes(2));
+    expect(upload).toHaveBeenCalledTimes(1);
+    expect(createTask.mock.calls[1][0].attachment_file_id).toBe('F-1');
+  });
+
+  it('a 409 (form already saved with earlier details) keeps the form open and refreshes the list', async () => {
+    createTask.mockRejectedValueOnce({
+      response: { status: 409, data: { detail: 'This form was already saved as task TASK-R1. Your later changes were NOT saved.' } },
+    });
+    const onClose = vi.fn();
+    const onCreated = vi.fn();
+    render(<NewTaskModal isOpen onClose={onClose} onCreated={onCreated} />);
+    await screen.findAllByText('Cashier One');
+    typeTitle();
+    fireEvent.click(screen.getByRole('button', { name: /Create task/ }));
+    await waitFor(() => expect(onCreated).toHaveBeenCalledTimes(1));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'New task' })).toBeInTheDocument();
+  });
+
+  it('promises no WhatsApp on create and labels the ladder timings as examples', async () => {
+    await openModal();
+    expect(screen.queryByText(/in-app \+ WhatsApp/)).toBeNull();
+    expect(screen.getByText(/No message is sent/)).toBeInTheDocument();
+    expect(screen.getByText(/only if messaging is switched on/)).toBeInTheDocument();
+    expect(screen.getByText(/example timings/)).toBeInTheDocument();
+  });
+});
+
 describe('R29 focus stays in the dialog', () => {
   it('Tab wraps inside the dialog both ways and focus returns to the opener on close', async () => {
     const opener = document.createElement('button');
