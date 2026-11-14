@@ -70,10 +70,10 @@ def _invoiced(till, **over):
     till["db"].get_collection("customers").insert_one({"customer_id": "CUST-1", "store_credit": 0.0})
     line = dict(_LINE, item_type="FRAME", unit_price=1000.0, item_total=1000.0,
                 taxable_value=952.38, tax_amount=47.62)
-    till["db"].get_collection("orders").insert_one(_order(
-        invoice_number="BOK01/2627/00009", items=[line], grand_total=1000.0, amount_paid=1000.0,
-        balance_due=0.0, payment_status="PAID",
-        payments=[{"payment_id": "p1", "method": "CASH", "amount": 1000.0}], **over))
+    bill = dict(invoice_number="BOK01/2627/00009", items=[line], grand_total=1000.0, amount_paid=1000.0,
+                balance_due=0.0, payment_status="PAID",
+                payments=[{"payment_id": "p1", "method": "CASH", "amount": 1000.0}])
+    till["db"].get_collection("orders").insert_one(_order(**{**bill, **over}))
 
 
 async def _admin_note(till, monkeypatch):
@@ -164,6 +164,31 @@ async def test_an_admin_note_within_what_is_left_is_issued(till, monkeypatch):
     _invoiced(till)
     till["db"].get_collection("returns").insert_one({
         "return_id": "RET-C", "order_id": "ORD-1", "status": "COMPLETED", "net_refund": 500.0, "items": []})
+    out = await _admin_note(till, monkeypatch)
+    assert out["amount"] == 100.0 and _credit_rows(till) == [("ISSUED", 100.0)]
+
+
+@pytest.mark.asyncio
+async def test_an_admin_note_on_a_part_paid_bill_is_capped_by_what_was_paid_after_a_return(till, monkeypatch):
+    """Round 8: Rs 1,000 bill, Rs 500 paid, the counter refunded Rs 500 for
+    the returned item. A Rs 100 note would give Rs 600 back on Rs 500 paid."""
+    _invoiced(till, amount_paid=500.0, balance_due=500.0, payment_status="PARTIAL",
+              payments=[{"payment_id": "p1", "method": "CASH", "amount": 500.0}])
+    till["db"].get_collection("returns").insert_one({
+        "return_id": "RET-C", "order_id": "ORD-1", "status": "COMPLETED", "net_refund": 500.0,
+        "items": [{"order_item_id": "li1", "product_id": "P1", "return_qty": 1}]})
+    with pytest.raises(HTTPException) as exc:
+        await _admin_note(till, monkeypatch)
+    assert exc.value.status_code == 409 and "Only Rs 0.00 of this bill" in exc.value.detail
+    assert _credit_rows(till) == []
+
+
+@pytest.mark.asyncio
+async def test_an_admin_note_on_a_part_paid_bill_with_no_return_still_goes_out(till, monkeypatch):
+    """Control (staff step kept): no return on the bill, Rs 500 of Rs 1,000
+    paid -- the Rs 100 correction note is issued as before."""
+    _invoiced(till, amount_paid=500.0, balance_due=500.0, payment_status="PARTIAL",
+              payments=[{"payment_id": "p1", "method": "CASH", "amount": 500.0}])
     out = await _admin_note(till, monkeypatch)
     assert out["amount"] == 100.0 and _credit_rows(till) == [("ISSUED", 100.0)]
 

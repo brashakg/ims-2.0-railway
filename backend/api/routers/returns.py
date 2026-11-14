@@ -4350,8 +4350,8 @@ def bill_money_door(db, coll, order_id: Any, key: str, amount: float, *, door: s
 
 def bill_room_left(db, order: Dict[str, Any]) -> Optional[float]:
     """What a correction note may still give back on this bill: what was paid
-    -- or, on a bill not fully paid yet, what was billed (the note lowers what
-    is still owed; staff steps unchanged) -- less everything every door already
+    -- or, on a bill not fully paid yet that no return has paid back on, what
+    was billed (the note lowers what is still owed; staff steps unchanged) -- less everything every door already
     gave back on it (the online door's reader, which counts counter returns,
     kept holds, online refunds and earlier notes alike). None when the bill
     tracks no payment. Read under bill_money_door."""
@@ -4364,7 +4364,14 @@ def bill_room_left(db, order: Dict[str, Any]) -> Optional[float]:
     if back is None:
         raise HTTPException(status_code=503, detail=(
             "Could not check this bill's earlier refunds - try again. Nothing was issued."))
-    return round(max(paid, _order_billed_total(order)) - back["given"], 2)
+    # Once a return or refund paid money back on the bill (goods came back),
+    # the note is capped by what was PAID (#1397 round 8): the billed figure
+    # let a note give back more than the cash taken while the returned item's
+    # balance stayed owed.
+    returned = _sum_prior_refunds(order.get("order_id"), strict=True) > 0.01 or any(
+        (h or {}).get("kept") for h in (order.get("refund_holds") or {}).values())
+    cap = paid if returned else max(paid, _order_billed_total(order))
+    return round(cap - back["given"], 2)
 
 
 def _reserve_order_refund(order_id: Optional[str], net_amount: float, return_id: str,
