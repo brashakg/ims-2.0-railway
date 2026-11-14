@@ -58,6 +58,7 @@ from ..services.salary_visibility import (
 # budget variance can never drift from what the Reports module shows.
 from ..utils.ist import ist_month_window_utc
 from . import reports as _reports
+from ..services import product_master as _pm
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,8 @@ def _revenue_actual(store_id: Optional[str], period: str) -> float:
             start_dt=start_dt,
             end_dt=end_dt,
             end_exclusive=True,
+            # A failed read RAISES (-> 503), never [] (-> a revenue of 0).
+            strict=True,
         )
         return float(sum(_reports._order_revenue(o) for o in orders))
     except Exception as exc:
@@ -205,7 +208,9 @@ def _expense_actuals_by_category(
         flt["store_id"] = store_id
     out: Dict[str, float] = {}
     try:
-        rows = repo.find_many(flt, limit=100000) or []
+        # find_many prints a failed read and answers [] -- an actual of zero
+        # nobody measured. The strict read raises instead (-> 503).
+        rows = _pm.strict_find_many(repo, flt)
     except Exception as exc:
         raise _unreadable("expense actuals") from exc
     for row in rows:
