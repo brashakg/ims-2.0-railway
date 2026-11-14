@@ -1700,8 +1700,9 @@ def _book_historical_refund_credit_notes(
         """Minimal returns doc stamped with the refund id so a FUTURE real refund
         webhook for this same refund is recognised as already-credited.
         `goods_lines`: the goods this note refunded (read by the P&L only, for
-        the cost it gives back -- decision D45(b)); kept off `items`, which the
-        restock caps read."""
+        the cost it gives back -- decision D45(b), and by the returnable count,
+        returns._already_returned_qty, so the counter never takes the same
+        piece back again); kept off `items`, which the restock doors read."""
         if returns_coll is None:
             return
         try:
