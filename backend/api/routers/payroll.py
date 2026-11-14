@@ -881,6 +881,7 @@ async def get_salary_sheet(
         return {"salaries": [], "total": 0, "store_id": store_id}
 
     active_store = store_in_view(store_id, current_user)
+    payroll_period_guard.sweep_stranded(db, year, month)
 
     try:
         query: dict = {"month": month, "year": year}
@@ -1765,6 +1766,19 @@ def _scope_configs(db, store_id: Optional[str], entity_id: Optional[str]) -> lis
     return list(db.get_collection("salary_config").find(query))
 
 
+def _refuse_if_month_locked(db, year: int, month: int) -> None:
+    """423 when the month's accounting period is locked. A locked month is
+    also where a stalled run's late draft could sit, so it is swept first:
+    that clean-up never waits for support."""
+    from .finance import check_period_locked
+
+    try:
+        check_period_locked(db, date(year, month, 1))
+    except HTTPException:
+        payroll_period_guard.sweep_stranded(db, year, month)
+        raise
+
+
 @router.post("/run")
 async def run_payroll(
     req: PayrollRunRequest,
@@ -1792,9 +1806,7 @@ async def run_payroll(
     # not, so a draft could still be rewritten inside a closed month. A preview
     # (dry_run) writes nothing, so it is not gated.
     if not req.dry_run:
-        from .finance import check_period_locked
-
-        check_period_locked(db, date(req.year, req.month, 1))
+        _refuse_if_month_locked(db, req.year, req.month)
     try:
         configs = _scope_configs(db, req.store_id, req.entity_id)
         payroll_coll = db.get_collection("payroll")
@@ -1912,8 +1924,16 @@ async def run_payroll(
                             }
                         )
                         continue
+                    if not existing:
+                        doc["payroll_id"] = str(uuid.uuid4())
+                    # A new row's id is recorded in the guard in the same
+                    # step, so if this insert stalls past a lock it is taken
+                    # back (payroll_period_guard.sweep_stranded).
                     month_open = payroll_period_guard.renew_run(
-                        db, req.year, req.month
+                        db,
+                        req.year,
+                        req.month,
+                        inserting=None if existing else doc["payroll_id"],
                     )
                     if not month_open:
                         break
@@ -1943,7 +1963,6 @@ async def run_payroll(
                             )
                             continue
                     else:
-                        doc["payroll_id"] = str(uuid.uuid4())
                         doc["created_at"] = utc_now_iso()
                         doc["created_by"] = current_user.get("user_id")
                         inserted.append(doc["payroll_id"])
@@ -1954,15 +1973,17 @@ async def run_payroll(
                 totals["net"] += breakdown["net_pay"]
                 totals["employer_cost"] += breakdown["ctc_cost"]
         finally:
+            # Release, and take back any draft that landed behind a lock (only
+            # after the run stalled past the guard's lease) -- also when the
+            # release write fails, so none is left where it can never be
+            # approved. A crash before this line is swept by the next payroll
+            # request for the month (_refuse_if_month_locked).
             if saving and month_open:
-                month_open = payroll_period_guard.release_run(db, req.year, req.month)
-            if not month_open and inserted:
-                # The month was locked under this run (only after the run
-                # stalled past the guard's lease): take back the drafts it
-                # added, so none is left where it can never be approved.
-                payroll_coll.delete_many(
-                    {"payroll_id": {"$in": inserted}, "status": "DRAFT"}
+                month_open = payroll_period_guard.finish_run(
+                    db, req.year, req.month, inserted
                 )
+            elif saving:
+                payroll_period_guard.sweep_stranded(db, req.year, req.month)
         if not month_open:
             raise HTTPException(
                 status_code=423,
@@ -2020,6 +2041,9 @@ async def list_payroll_rows(
         return {"rows": [], "total": 0, "totals": {}}
     # BUG-062 tail: scope the salary register to the caller's store reach.
     store_id = resolve_store_scope(store_id, current_user)
+    # A stalled run's draft that landed behind a lock is gone before anyone
+    # reads the register (payroll_period_guard.sweep_stranded).
+    payroll_period_guard.sweep_stranded(db, year, month)
     try:
         query: dict = {"month": month, "year": year}
         if store_id:
@@ -2067,9 +2091,7 @@ async def approve_payroll(
     # Financial control: approving payroll is a posting into the run's month.
     # Block it if that accounting period is locked (mirrors orders/returns/
     # vendors/expenses/finance-JE). Raises HTTPException(423) when locked.
-    from .finance import check_period_locked
-
-    check_period_locked(db, date(req.year, req.month, 1))
+    _refuse_if_month_locked(db, req.year, req.month)
     try:
         query: dict = {"month": req.month, "year": req.year, "status": "DRAFT"}
         if req.store_id:
@@ -2108,9 +2130,7 @@ async def lock_payroll(
     # Financial control: locking payroll as PAID is a posting into the run's
     # month. Block it if that accounting period is locked (mirrors orders/
     # returns/vendors/expenses/finance-JE). Raises HTTPException(423) when locked.
-    from .finance import check_period_locked
-
-    check_period_locked(db, date(req.year, req.month, 1))
+    _refuse_if_month_locked(db, req.year, req.month)
     try:
         query: dict = {"month": req.month, "year": req.year, "status": "APPROVED"}
         if req.store_id:

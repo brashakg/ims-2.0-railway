@@ -42,23 +42,26 @@ async def lock_period(
             422, f"{month}/{year} is not a month that has started - check the month and year"
         )
 
-    existing = db.get_collection("period_locks").find_one(
-        {"month": month, "year": year}
-    )
-    if existing:
-        raise HTTPException(400, f"Period {month}/{year} is already locked")
-
     # The payroll run and this lock share one guard document per month, so a
     # run that is being saved can never land behind the lock (see
     # payroll_period_guard). Read it BEFORE payroll: the commit below is
     # refused if any run touched the month after this read.
     from ...services import payroll_period_guard
 
+    existing = db.get_collection("period_locks").find_one(
+        {"month": month, "year": year}
+    )
+    if existing:
+        # A stalled payroll run's late draft is taken back on every touch.
+        payroll_period_guard.sweep_stranded(db, year, month)
+        raise HTTPException(400, f"Period {month}/{year} is already locked")
+
     guard = payroll_period_guard.read(db, year, month)
     if guard and guard.get("locked"):
         # An earlier lock passed every check and committed, then stopped
         # before its period_locks row was written. Payroll has been refused
         # since, so nothing below can have changed: finish that lock.
+        payroll_period_guard.sweep_stranded(db, year, month)
         return _write_lock(db, month, year, guard)
     if payroll_period_guard.run_in_flight(guard):
         raise HTTPException(
@@ -126,6 +129,9 @@ async def lock_period(
             f"Payroll for {month}/{year} changed while the month was being "
             "locked. Check HR > Payroll Run, then lock the month again.",
         )
+    # A run that stalled past its lease may have inserted after the payroll
+    # read above: its row is named in the guard, and goes now.
+    payroll_period_guard.sweep_stranded(db, year, month)
     return _write_lock(db, month, year, lock)
 
 

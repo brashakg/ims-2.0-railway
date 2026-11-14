@@ -641,10 +641,13 @@ def test_d30_engine_refuses_what_would_take_pay_below_zero():
     assert _engine(advance_recovery=net)["net_pay"] == 0
     assert _engine(incentive=500, advance_recovery=net + 500)["net_pay"] == 0
     # nothing left to recover from: the message says so instead of "Rs 0.00 or less"
+    exactly_used_up = {**_CONFIG, "tds_monthly": 100 + net}
+    assert compute_payroll(exactly_used_up, month=MONTH, year=YEAR)["net_pay"] == 0
     with pytest.raises(ValueError, match="Enter 0"):
-        compute_payroll({**_CONFIG, "tds_monthly": 99999}, month=MONTH, year=YEAR, advance_recovery=1)
-    # a month with no recovery typed is not refused by this rule
-    assert compute_payroll({**_CONFIG, "tds_monthly": 99999}, month=MONTH, year=YEAR)["net_pay"] < 0
+        compute_payroll(exactly_used_up, month=MONTH, year=YEAR, advance_recovery=1)
+    # D58: below zero is refused even with no recovery typed (see test_d58_*)
+    with pytest.raises(ValueError, match="never takes pay below zero"):
+        compute_payroll({**_CONFIG, "tds_monthly": 99999}, month=MONTH, year=YEAR)
 
 
 @pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
@@ -800,3 +803,159 @@ def test_p1_second_lock_arriving_before_the_first_has_written_leaves_one_lock_ro
     (row,) = rig.lock_rows()
     assert row["locked_by"] == ADMIN["user_id"] and row["without_payroll_for"] == 2
     assert rig.lock().status_code == 400  # already locked, as before
+
+
+# ===========================================================================
+# D58 (Codex round 2) -- net pay below zero is refused whatever its source;
+# a stalled run's late draft is fenced even when the run's own clean-up
+# fails or never runs.
+# ===========================================================================
+
+
+def test_d58_engine_refuses_fixed_tds_against_a_month_of_unpaid_leave():
+    """Codex's preview: basic 15000 / HRA 5000, the full month unpaid, fixed
+    TDS 100 -> net -100 with HTTP 200. Now refused, with what to change."""
+    with pytest.raises(ValueError, match="never takes pay below zero") as refused:
+        _engine(lwp_days=30)
+    assert "lower this month's TDS" in str(refused.value) and "TDS Rs 100.00" in str(refused.value)
+    # the same leave with no fixed deduction is a zero month, not a refusal
+    assert compute_payroll({**_CONFIG, "tds_monthly": 0}, month=MONTH, year=YEAR, lwp_days=30)["net_pay"] == 0
+    # a partial month that still covers the TDS is untouched
+    assert _engine(lwp_days=20)["net_pay"] > 0
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_d58_run_with_tds_above_leave_reduced_pay_is_refused_and_saves_nothing(rig, dry_run):
+    reply = rig.run(dry_run=dry_run, lwp_days={EMP: 30})
+    assert reply.status_code == 422, reply.text
+    assert "never takes pay below zero" in _detail(reply) and "ZZ Native One" in _detail(reply)
+    assert rig.rows() == []
+    g = rig.guard()
+    assert g is None or g.get("runs") == 0
+
+
+def _late_insert_after_lock(monkeypatch, rig, fail_release=False):
+    """Codex's P1: the run's first insert stalls past the guard's lease, the
+    month is locked "anyway" meanwhile, then the insert lands. With
+    ``fail_release`` the run's final guard write (runs -1) fails once."""
+    original = rig.coll_cls.insert_one
+    original_touch = rig.coll_cls.find_one_and_update
+    locked, failed = [], []
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == "payroll" and not locked:
+            rig.db.get_collection(guard.COLLECTION).update_one(
+                {"_id": f"{YEAR}-{MONTH:02d}"},
+                {"$set": {"beat": time.time() - guard.LEASE_SECONDS - 1}},
+            )
+            locked.append(rig.lock(without_payroll=True))
+        return original(self, doc, *a, **k)
+
+    def find_one_and_update(self, query, update, *a, **k):
+        if (fail_release and self.name == guard.COLLECTION and not failed
+                and (update.get("$inc") or {}).get("runs") == -1):
+            failed.append(True)
+            raise OSError("transient failure of the final guard write")
+        return original_touch(self, query, update, *a, **k)
+
+    monkeypatch.setattr(rig.coll_cls, "insert_one", insert_one)
+    monkeypatch.setattr(rig.coll_cls, "find_one_and_update", find_one_and_update)
+    return locked, failed
+
+
+def test_d58_final_guard_write_failing_after_a_late_insert_leaves_no_draft(rig, monkeypatch):
+    rig.db.get_collection("salary_config").delete_one({"employee_id": EMP2})
+    locked, failed = _late_insert_after_lock(monkeypatch, rig, fail_release=True)
+    ran = rig.run()
+
+    assert locked[0].status_code == 200 and failed == [True]
+    assert ran.status_code == 423, ran.text  # the month closed under it: said so
+    assert rig.rows() == [] and not rig.stranded()
+    assert rig.run().status_code == 423 and rig.approve().status_code == 423
+    assert rig.rows() == [] and rig.pnl() == 0
+
+
+def test_d58_the_same_run_without_the_fault_still_cleans_up(rig, monkeypatch):
+    rig.db.get_collection("salary_config").delete_one({"employee_id": EMP2})
+    locked, failed = _late_insert_after_lock(monkeypatch, rig, fail_release=False)
+    assert rig.run().status_code == 423
+    assert locked[0].status_code == 200 and failed == []
+    assert rig.rows() == [] and not rig.stranded()
+
+
+def test_d58_release_failure_in_an_open_month_is_a_500_and_a_retry_succeeds(rig, monkeypatch):
+    """The final write fails but the month was NOT locked: the drafts are
+    ordinary drafts of an open month, nothing is deleted, and the retry
+    rewrites them (one row per employee)."""
+    original_touch = rig.coll_cls.find_one_and_update
+    failed = []
+
+    def find_one_and_update(self, query, update, *a, **k):
+        if self.name == guard.COLLECTION and not failed and (update.get("$inc") or {}).get("runs") == -1:
+            failed.append(True)
+            raise OSError("transient")
+        return original_touch(self, query, update, *a, **k)
+
+    monkeypatch.setattr(rig.coll_cls, "find_one_and_update", find_one_and_update)
+    assert rig.run().status_code == 500
+    assert rig.statuses() == ["DRAFT", "DRAFT"]
+    assert rig.run().status_code == 200 and rig.statuses() == ["DRAFT", "DRAFT"]
+    assert rig.approve().status_code == 200 and rig.statuses() == ["APPROVED", "APPROVED"]
+
+
+def _crashed_late_insert(rig) -> str:
+    """Stored state a run leaves when its server dies after a late insert and
+    before any clean-up: claim + renew (id recorded), stall past the lease,
+    lock anyway, the insert lands, nothing more."""
+    pid = "PAY-B09-LATE"
+    guard.claim_run(rig.db, YEAR, MONTH)
+    assert guard.renew_run(rig.db, YEAR, MONTH, inserting=pid) is True
+    rig.db.get_collection(guard.COLLECTION).update_one(
+        {"_id": f"{YEAR}-{MONTH:02d}"}, {"$set": {"beat": time.time() - guard.LEASE_SECONDS - 1}})
+    assert rig.lock(without_payroll=True).status_code == 200
+    rig.db.get_collection("payroll").insert_one(
+        {"payroll_id": pid, "employee_id": EMP, "store_id": STORE, "entity_id": ENTITY,
+         "year": YEAR, "month": MONTH, "status": "DRAFT", "net_salary": 19900,
+         "breakdown": {"ctc_cost": 20000}})
+    assert rig.stranded()
+    return pid
+
+
+@pytest.mark.parametrize(
+    "touch, status",
+    [
+        (lambda rig: rig.run(), 423),
+        (lambda rig: rig.approve(), 423),
+        (lambda rig: rig.pay(), 423),
+        (lambda rig: rig.lock(), 400),
+        (lambda rig: rig.client().get(
+            f"/api/v1/payroll/run/rows?month={MONTH}&year={YEAR}&entity_id={ENTITY}"), 200),
+        (lambda rig: rig.client().get(
+            f"/api/v1/payroll/salary-sheet?month={MONTH}&year={YEAR}&store_id={STORE}"), 200),
+    ],
+    ids=["run", "approve", "mark-paid", "lock-again", "register", "salary-sheet"],
+)
+def test_d58_a_crash_before_clean_up_is_put_right_by_the_next_payroll_touch(rig, touch, status):
+    _crashed_late_insert(rig)
+    reply = touch(rig)
+    assert reply.status_code == status, reply.text
+    assert rig.rows() == [] and not rig.stranded()
+    if reply.request.method == "GET":
+        body = reply.json()
+        assert (body.get("rows") if "rows" in body else body.get("salaries")) == []
+
+
+def test_d58_the_sweep_takes_only_the_late_rows_named_in_the_guard(rig):
+    """An APPROVED row, and a DRAFT nobody's stalled run inserted (e.g. from
+    before the guard existed), are never touched."""
+    assert rig.run().status_code == 200 and rig.approve().status_code == 200
+    approved = _saved_figures(rig)
+    assert guard.read(rig.db, YEAR, MONTH).get("pending") == []  # released rows leave it
+    assert rig.lock().status_code == 200
+    rig.db.get_collection("payroll").insert_one(
+        {"payroll_id": "PAY-B09-HISTORIC", "employee_id": "EMP-HIST", "year": YEAR,
+         "month": MONTH, "status": "DRAFT", "net_salary": 0})
+    assert guard.sweep_stranded(rig.db, YEAR, MONTH) == 0
+    assert rig.run().status_code == 423
+    assert _saved_figures(rig)[:2] == approved
+    assert rig.db.get_collection("payroll").find_one({"payroll_id": "PAY-B09-HISTORIC"})
