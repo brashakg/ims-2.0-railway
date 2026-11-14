@@ -79,29 +79,36 @@ async def list_orders(
         from_date = max(from_date, _floor) if from_date else _floor
 
     if repo is not None:
+        # ONE query for every branch (audit R30): scope, filters, sort, count
+        # and skip/limit all run on the same filter, so the total is the true
+        # eligible count and page N is rows N*limit.. -- not the same capped
+        # 500 every time.
+        filt = repo.list_filter(
+            None if customer_id else active_store,
+            from_date=from_date,
+            to_date=to_date,
+            status=status.value if status else None,
+        )
+        clauses = [filt]
         if customer_id:
-            orders = repo.find_by_customer(customer_id, limit=limit)
+            clauses.append({"customer_id": customer_id})
             # Store-scope: a store-level role must not enumerate a customer's
             # orders from OTHER stores via ?customer_id (cross-store IDOR).
             # Cross-store roles (ADMIN/AREA_MANAGER/SUPERADMIN) are unaffected.
-            from ...dependencies import filter_docs_by_store
+            from ...dependencies import user_store_scope
 
-            orders = filter_docs_by_store(orders, current_user)
-        elif active_store:
-            orders = repo.find_by_store(
-                active_store,
-                from_date=from_date,
-                to_date=to_date,
-                status=status.value if status else None,
+            is_cross, stores = user_store_scope(current_user)
+            if not is_cross:
+                clauses.append({"store_id": {"$in": sorted(stores or [])}})
+        if _horizon is not None:
+            # The exact instant, on both field shapes (the from_date clamp
+            # above is whole IST days; this keeps the window to the second).
+            clauses.append(
+                {"$or": [{"created_at": {"$gte": _horizon}}, {"createdAt": {"$gte": _horizon}}]}
             )
-        else:
-            filter_dict = {}
-            if status:
-                filter_dict["status"] = status.value
-            # This branch takes no from_date, so the horizon goes on the query.
-            if _horizon is not None:
-                filter_dict["created_at"] = {"$gte": _horizon}
-            orders = repo.find_many(filter_dict, skip=skip, limit=limit)
+        query = {"$and": clauses}
+        total = repo.count(query)
+        orders = repo.find_many(query, sort=repo.LIST_SORT, skip=skip, limit=limit)
 
         # Convert to frontend format (camelCase)
         from ...utils.pagination import paginate
@@ -109,7 +116,7 @@ async def list_orders(
         _stamp_status_actor_names(orders)
         orders_formatted = [order_to_frontend(o, current_user) for o in orders]
         page = (skip // limit) + 1 if limit > 0 else 1
-        result = paginate(orders_formatted, page=page, page_size=limit)
+        result = paginate(orders_formatted, page=page, page_size=limit, total=total)
         result["orders"] = result["data"]  # backward compat
         return result
 

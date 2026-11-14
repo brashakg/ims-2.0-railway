@@ -559,19 +559,6 @@ def _row_is_online_origin(row: Dict[str, Any]) -> bool:
     return bool(sid) and sid not in (None, "")
 
 
-def _row_matches_channel(row: Dict[str, Any], channel: Optional[str]) -> bool:
-    """In-Python equivalent of `_build_channel_clause` for the search path (which
-    returns repo rows, not a Mongo cursor). Unknown channel -> keep the row."""
-    if not channel:
-        return True
-    val = str(channel).strip().upper()
-    if val in _ONLINE_CHANNEL_VALUES:
-        return _row_is_online_origin(row)
-    if val in _STORE_CHANNEL_VALUES:
-        return not _row_is_online_origin(row)
-    return True
-
-
 def _build_channel_clause(channel: Optional[str]) -> Optional[Dict[str, Any]]:
     """Return a Mongo filter fragment segregating online-origin vs in-store
     customers, or None when no recognised channel was requested (no filtering).
@@ -787,24 +774,19 @@ async def list_customers(
         elif sub_clauses:
             filter_dict.update(sub_clauses[0])
 
-        # If search provided, use search method (also respects store filter).
-        # The search path can't compose the $and, so the channel tag is applied
-        # post-hoc to the search results to keep segregation consistent.
+        # Search pages on the SAME filter as the browse list (store, channel,
+        # customer_type, exclude_marketing) and is counted on it, so skip/limit
+        # and the total are real (audit R31: it used to return the first 100
+        # matches for every page and filter channel/tier after that cap).
         if search:
-            rows = repo.search_customers(search, effective_store)
-            if channel_clause is not None:
-                rows = [r for r in rows if _row_matches_channel(r, channel)]
-            if exclude_marketing:
-                # Mirror the Mongo $ne filter for the search path (repo rows, not a
-                # cursor): drop only rows explicitly tagged MARKETING.
-                rows = [
-                    r
-                    for r in rows
-                    if str(r.get("contact_tier") or "").upper() != "MARKETING"
-                ]
-            customers = _annotate_customer_matches(rows, search)
+            customers = _annotate_customer_matches(
+                repo.search_customers(search, filter=filter_dict, skip=skip, limit=limit),
+                search,
+            )
+            total = repo.count_search_customers(search, filter=filter_dict)
         else:
-            customers = repo.find_many(filter_dict, skip=skip, limit=limit)
+            customers = repo.find_many(filter_dict, sort=[("_id", 1)], skip=skip, limit=limit)
+            total = repo.count(filter_dict)
 
         # OS-026: the online-segment list drives the Online-customers screen's
         # Orders / Lifetime columns -- fields nothing persists. Enrich the page
@@ -816,7 +798,6 @@ async def list_customers(
 
         from ..utils.pagination import paginate
 
-        total = repo.count(filter_dict) if not search else len(customers)
         page = (skip // limit) + 1 if limit > 0 else 1
         result = paginate(customers, page=page, page_size=limit, total=total)
         # Keep backward compat: also include "customers" key

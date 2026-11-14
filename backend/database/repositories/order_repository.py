@@ -430,8 +430,23 @@ class OrderRepository(BaseRepository):
         Now each branch ANDs onto the two store-shape arms (mirrors
         find_by_salesperson) and the bound stays a datetime.
         """
-        snake: Dict = {"store_id": store_id}
-        camel: Dict = {"storeId": store_id}
+        return self.find_many(
+            self.list_filter(store_id, from_date, to_date, status),
+            sort=self.LIST_SORT,
+            limit=500,
+        )
+
+    # Newest first, _id breaking created_at ties, so skip/limit pages are
+    # stable and disjoint (audit R30).
+    LIST_SORT = [("created_at", -1), ("_id", -1)]
+
+    @staticmethod
+    def list_filter(store_id: Optional[str] = None, from_date: date = None,
+                    to_date: date = None, status: str = None) -> Dict:
+        """THE order-list filter: GET /orders counts and pages on it, and
+        find_by_store reads it. store_id None = no shop clause."""
+        snake: Dict = {"store_id": store_id} if store_id else {}
+        camel: Dict = {"storeId": store_id} if store_id else {}
 
         if from_date:
             start = ist_day_start_utc(from_date)
@@ -445,8 +460,7 @@ class OrderRepository(BaseRepository):
             snake["status"] = status
             camel["orderStatus"] = status
 
-        filter = {"$or": [snake, camel]}
-        return self.find_many(filter, sort=[("created_at", -1)], limit=500)
+        return {"$or": [snake, camel]}
     
     def find_by_salesperson(self, user_id: str, from_date: date = None, 
                             to_date: date = None) -> List[Dict]:

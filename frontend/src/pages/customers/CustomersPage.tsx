@@ -129,6 +129,9 @@ export function CustomersPage() {
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const pageSize = 50;
+  // The server's count of every customer in scope (audit R31). The list is
+  // the server's page; it is never sliced again here.
+  const [serverTotal, setServerTotal] = useState(0);
 
   // Loading state
   const [isLoading, setIsLoading] = useState(true);
@@ -174,10 +177,13 @@ export function CustomersPage() {
         limit: pageSize,
         skip: (currentPage - 1) * pageSize,
       });
-      setCustomers(response.customers || response || []);
+      const list = response.customers || response || [];
+      setCustomers(list);
+      setServerTotal(response.pagination?.total ?? list.length);
     } catch {
       setError('Failed to load customers. Please try again.');
       setCustomers([]);
+      setServerTotal(0);
     } finally {
       setIsLoading(false);
     }
@@ -249,11 +255,10 @@ export function CustomersPage() {
     return matchesSearch && matchesType;
   });
 
-  // Paginate filtered results
-  const paginatedCustomers = filteredCustomers.slice(
-    (currentPage - 1) * pageSize,
-    currentPage * pageSize
-  );
+  // The page IS the server's page; the search box / type chips only narrow
+  // what is on it.
+  const paginatedCustomers = filteredCustomers;
+  const narrowed = searchQuery !== '' || filterType !== 'ALL';
 
   const handleSelectCustomer = (customer: Customer) => {
     // API rows come back keyed by customer_id/_id, NOT `id`. Using the raw
@@ -657,7 +662,7 @@ export function CustomersPage() {
             </div>
             <Pagination
               currentPage={currentPage}
-              totalItems={filteredCustomers.length}
+              totalItems={narrowed ? filteredCustomers.length : serverTotal}
               pageSize={pageSize}
               onPageChange={setCurrentPage}
             />

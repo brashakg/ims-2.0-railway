@@ -166,7 +166,8 @@ def test_the_orders_repo_bounds_a_real_date_field():
 
     from database.repositories.order_repository import OrderRepository
 
-    src = inspect.getsource(OrderRepository.find_by_store)
+    # find_by_store and GET /orders share list_filter (audit R30).
+    src = inspect.getsource(OrderRepository.list_filter)
     assert 'snake["created_at"] = {"$gte": start}' in src
 
 

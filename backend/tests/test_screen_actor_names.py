@@ -102,8 +102,18 @@ class _OrderRepo:
     def __init__(self, docs):
         self.docs = docs
 
-    def find_by_store(self, store_id, from_date=None, to_date=None, status=None):
-        return [dict(d) for d in self.docs]
+    # GET /orders lists through list_filter + count + find_many (audit R30).
+    LIST_SORT = []
+
+    @staticmethod
+    def list_filter(*_a, **_k):
+        return {}
+
+    def count(self, _query):
+        return len(self.docs)
+
+    def find_many(self, _query, sort=None, skip=0, limit=100):
+        return [dict(d) for d in self.docs[skip:skip + limit]]
 
 
 def _order(order_id="O1", changed_by="user-superadmin"):

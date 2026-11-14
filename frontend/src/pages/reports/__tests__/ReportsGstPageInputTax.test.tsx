@@ -19,6 +19,8 @@ vi.mock('../ReportsLayout', () => ({
 vi.mock('../reportsQueries', () => ({
   useDiscountAnalysis: () => ({ isPending: false, data: null }),
   useSalesSummary: () => ({ data: undefined }),
+  useStockCount: () => ({ data: undefined }),
+  useCustomerAcquisition: () => ({ data: undefined }),
 }));
 vi.mock('../../../context/ToastContext', () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn(), info: vi.fn() }),

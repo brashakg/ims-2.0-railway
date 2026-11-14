@@ -231,6 +231,41 @@ async def list_overrides(
     return {"entity_id": eid, "overrides": rows, "total": len(rows)}
 
 
+# Re-export the template key catalog for the editor UI. Declared BEFORE
+# /{entity_id}/{template_key}: Starlette matches in order, so declared after it
+# "/_meta/templates" was read as entity "_meta", template "templates" -> 400
+# (audit L3-29).
+@router.get("/_meta/templates")
+async def list_template_keys(
+    current_user: dict = Depends(get_current_user),  # noqa: ARG001 - auth gate
+) -> Dict[str, Any]:
+    """Surface the canonical list of editable templates + their addressable
+    fields so the frontend doesn't hard-code the list."""
+    _ = current_user
+    field_specs: List[Dict[str, Any]] = []
+    schema = OverrideFields.model_json_schema()
+    properties = schema.get("properties", {}) or {}
+    for fname, fdef in properties.items():
+        field_specs.append(
+            {
+                "name": fname,
+                "label": fname.replace("_", " ").title(),
+                "description": fdef.get("description", ""),
+                "type": fdef.get("type", "string"),
+            }
+        )
+    return {
+        "templates": [
+            {
+                "key": k,
+                "label": k.replace("_", " ").title(),
+            }
+            for k in TEMPLATE_KEYS
+        ],
+        "fields": field_specs,
+    }
+
+
 @router.get("/{entity_id}/{template_key}")
 async def get_override(
     entity_id: str,
@@ -384,36 +419,4 @@ async def delete_override(
         "deleted": deleted,
         "entity_id": eid,
         "template_key": key,
-    }
-
-
-# Re-export the template key catalog for the editor UI.
-@router.get("/_meta/templates")
-async def list_template_keys(
-    current_user: dict = Depends(get_current_user),  # noqa: ARG001 - auth gate
-) -> Dict[str, Any]:
-    """Surface the canonical list of editable templates + their addressable
-    fields so the frontend doesn't hard-code the list."""
-    _ = current_user
-    field_specs: List[Dict[str, Any]] = []
-    schema = OverrideFields.model_json_schema()
-    properties = schema.get("properties", {}) or {}
-    for fname, fdef in properties.items():
-        field_specs.append(
-            {
-                "name": fname,
-                "label": fname.replace("_", " ").title(),
-                "description": fdef.get("description", ""),
-                "type": fdef.get("type", "string"),
-            }
-        )
-    return {
-        "templates": [
-            {
-                "key": k,
-                "label": k.replace("_", " ").title(),
-            }
-            for k in TEMPLATE_KEYS
-        ],
-        "fields": field_specs,
     }

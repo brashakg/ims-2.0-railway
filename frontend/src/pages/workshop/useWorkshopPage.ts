@@ -228,7 +228,7 @@ const loadJobs = async () => {
   const searchOrdersForJob = async () => {
     if (!createOrderSearch.trim()) return;
     try {
-      const res = await orderApi.getOrders({ storeId: user?.activeStoreId });
+      const res = await orderApi.getOrders({ storeId: user?.activeStoreId, limit: 500 });
       const all = res?.orders || res || [];
       setCreateOrders(all.filter((o: any) =>
         (o.orderNumber || '').toLowerCase().includes(createOrderSearch.toLowerCase()) ||
