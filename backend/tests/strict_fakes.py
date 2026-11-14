@@ -130,6 +130,48 @@ def _set_path(doc: Dict[str, Any], key: str, value) -> None:
     cur[parts[-1]] = value
 
 
+def _apply_positional(doc: Dict[str, Any], update: Dict[str, Any], flt) -> Dict[str, Any]:
+    """Mongo's positional ``$`` in a ``$set`` key (``"cards.$.dismissed"``):
+    write into the FIRST array element the query matched on that array
+    (``{"cards.customer_id": X}``). Applied here, directly on ``doc``; the
+    rest of the update is returned for the ordinary path. Before this a
+    positional key fell through ``_set_path`` and REPLACED the array with
+    ``{"$": {...}}`` -- a corrupted doc a test could pass over. Only ``$set``
+    with plain conditions on the array is modelled (other operators keep
+    their old handling); a query that matched no element raises, as Mongo
+    itself does."""
+    sets = update.get("$set") or {}
+    pos = {k: v for k, v in sets.items() if "$" in k.split(".")}
+    if not pos:
+        return update
+    for key, value in pos.items():
+        parts = key.split(".")
+        i = parts.index("$")
+        arr_path, rest = ".".join(parts[:i]), ".".join(parts[i + 1:])
+        conds = {
+            k[len(arr_path) + 1:]: v for k, v in (flt or {}).items()
+            if k.startswith(arr_path + ".")
+        }
+        arr = _get_path(doc, arr_path)
+        if not conds or not isinstance(arr, list):
+            raise MongoWriteError(
+                "The positional operator did not find the match needed from the query."
+            )
+        idx = next(
+            (n for n, el in enumerate(arr) if isinstance(el, dict) and matches(el, conds)),
+            None,
+        )
+        if idx is None:
+            raise MongoWriteError(
+                "The positional operator did not find the match needed from the query."
+            )
+        if rest:
+            _set_path(arr[idx], rest, value)
+        else:
+            arr[idx] = value
+    return {**update, "$set": {k: v for k, v in sets.items() if k not in pos}}
+
+
 def _del_path(doc: Dict[str, Any], key: str) -> None:
     """Dotted-path delete ($unset), the mirror of :func:`_set_path`."""
     parts = key.split(".")
@@ -448,7 +490,7 @@ class StrictCollection:
     def update_one(self, filter, update, upsert=False, **kwargs):
         for d in self.docs:
             if matches(d, filter):
-                self._apply(d, update)
+                self._apply(d, _apply_positional(d, update, filter))
                 return type(
                     "R", (), {"matched_count": 1, "modified_count": 1, "upserted_id": None}
                 )()
@@ -489,7 +531,7 @@ class StrictCollection:
         for d in self.docs:
             if matches(d, filter):
                 before = copy.deepcopy(d)
-                self._apply(d, update or {})
+                self._apply(d, _apply_positional(d, update or {}, filter))
                 return _project(d if return_document else before, projection)
         if upsert:
             # The atomic CLAIM shape (an upsert keyed on a unique field with

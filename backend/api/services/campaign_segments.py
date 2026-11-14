@@ -447,11 +447,11 @@ def _resolve_cl_reorder(
     customer carrying the days-since-last-CL as a template var.
 
     "A CL order" is the refill doors' own supply rule (cl_refill.
-    supplied_cl_line, L1-F18/F19): a received sale whose CL line (coloured
+    supplied_cl_lines, L1-F18/F19, D50): a received sale whose CL line (coloured
     lenses included) was not fully returned. A draft or cancelled order is not
     a purchase and must not hide a customer who is due.
     """
-    from .cl_refill import supplied_cl_line
+    from .cl_refill import supplied_cl_lines
 
     now = now or datetime.now()
     cutoff = now - timedelta(days=cadence_days)
@@ -464,7 +464,7 @@ def _resolve_cl_reorder(
     latest_cl: Dict[str, datetime] = {}
     try:
         for o in order_coll.find(q).limit(_SCAN_LIMIT):
-            if supplied_cl_line(o) is None:
+            if not supplied_cl_lines(o):
                 continue
             cid = o.get("customer_id")
             if not cid:

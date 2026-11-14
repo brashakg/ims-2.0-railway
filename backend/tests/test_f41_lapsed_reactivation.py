@@ -152,7 +152,7 @@ class _FakeColl:
                 self._apply_update(d, update, query)
                 return type("R", (), {"modified_count": 1, "matched_count": 1})()
         if kw.get("upsert"):
-            self.docs.append({})
+            self.docs.append(copy.deepcopy(update.get("$setOnInsert") or {}))
             self._apply_update(self.docs[-1], update, query)
         return type("R", (), {"modified_count": 0, "matched_count": 0})()
 

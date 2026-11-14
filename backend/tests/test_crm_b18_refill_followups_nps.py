@@ -94,7 +94,9 @@ def _both_doors(cid):
 
 
 @pytest.mark.parametrize("newer_status", ["CANCELLED", "DRAFT", "cancelled", "REFUNDED",
-                                          "CONFIRMED", "READY"])
+                                          "CONFIRMED", "READY",
+                                          # D50: shipped / paid is not received goods
+                                          "SHIPPED", "shipped", "PAID", "FULFILLED"])
 def test_newer_order_without_goods_does_not_reset_supply(monkeypatch, newer_status):
     _wire_refill(monkeypatch, [_cl("OLD", "C1", 40, "DELIVERED"),
                                _cl("NEW", "C1", 1, newer_status)])
@@ -104,7 +106,7 @@ def test_newer_order_without_goods_does_not_reset_supply(monkeypatch, newer_stat
     assert row is not None and row["last_cl_order_id"] == "OLD" and row["overdue"] is True
 
 
-@pytest.mark.parametrize("done", ["DELIVERED", "SHIPPED", "COMPLETED", "completed", "FULFILLED",
+@pytest.mark.parametrize("done", ["DELIVERED", "delivered", "COMPLETED", "completed", "COLLECTED",
                                   "HISTORICAL"])
 def test_newer_received_order_does_reset_supply(monkeypatch, done):
     _wire_refill(monkeypatch, [_cl("OLD", "C1", 40, "DELIVERED"), _cl("NEW", "C1", 1, done)])
@@ -123,7 +125,7 @@ def test_fully_returned_line_is_not_supply(monkeypatch):
 
 def test_partial_return_counts_only_kept_boxes():
     order = _cl("NEW", "C1", 0, "DELIVERED", qty=3, returned=2)
-    line = clr.supplied_cl_line(order)
+    (line,) = clr.supplied_cl_lines(order)
     assert line["quantity"] == 1
     assert clr.compute_refill(line, order["created_at"])["days_remaining"] in (29, 30)
 

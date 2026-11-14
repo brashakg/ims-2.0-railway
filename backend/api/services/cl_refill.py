@@ -25,10 +25,9 @@ No emoji (Windows cp1252). Fail-soft: a missing DB yields an empty worklist.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
-
-from .online_order_status import SALE_DONE_ANY_CASE
 
 logger = logging.getLogger(__name__)
 
@@ -53,13 +52,29 @@ DAILY_MODALITIES = {"DAILY", "DAILY DISPOSABLE", "1-DAY"}
 MONTHLY_MODALITIES = {"MONTHLY", "MONTHLY DISPOSABLE", "30-DAY"}
 BIWEEKLY_MODALITIES = {"BIWEEKLY", "2-WEEK", "FORTNIGHTLY"}
 
-# L1-F18: only goods the customer RECEIVED are supply. A draft, a quote, a
-# cancelled / refunded / void order, or one still being made (CONFIRMED /
-# PROCESSING / READY) supplied nothing, so it must not restart the refill
-# clock. The done-sale set the reports use (any case, FULFILLED included),
-# plus HISTORICAL: a pre-IMS order imported for customer history was settled
-# outside IMS books, but the customer DID receive those lenses.
-SUPPLIED_STATUSES = SALE_DONE_ANY_CASE + ("HISTORICAL", "historical", "Historical")
+# L1-F18 + D50: only goods the customer RECEIVED are supply, so only received
+# evidence restarts the refill clock: DELIVERED (courier / counter hand-over),
+# COMPLETED, COLLECTED, and HISTORICAL (a pre-IMS order imported for customer
+# history: the customer DID receive those lenses). Never SHIPPED (still with
+# the courier), PAID (money, not goods), FULFILLED (Shopify's word for
+# shipped), a draft / quote, a cancelled / refunded / void order, or one still
+# being made (CONFIRMED / PROCESSING / READY). Any case (imports wrote any).
+RECEIVED_STATUSES = ("DELIVERED", "COMPLETED", "COLLECTED", "HISTORICAL")
+SUPPLIED_STATUSES = tuple(
+    v for s in RECEIVED_STATUSES for v in (s, s.lower(), s.title())
+)
+
+# The CL-line match as a Mongo filter, so the order reads select CL supply
+# BEFORE their limit (Codex PR-1428 r1: 50 newer frame orders hid an overdue
+# CL order from the per-customer door). Exact category, any case; the Python
+# rule (_is_cl_line) still decides each line.
+_CL_RE = "^(" + "|".join(re.escape(c) for c in sorted(CL_CATEGORIES)) + ")$"
+CL_ORDER_FILTER = {
+    "$or": [
+        {"items.category": {"$regex": _CL_RE, "$options": "i"}},
+        {"items.item_type": {"$regex": _CL_RE, "$options": "i"}},
+    ]
+}
 
 # Refill priority bands -> task priority. Overdue is the loudest follow-up.
 DEFAULT_DUE_WITHIN_DAYS = 14
@@ -139,18 +154,17 @@ def _is_cl_line(item: Dict[str, Any]) -> bool:
     return cat in CL_CATEGORIES
 
 
-def supplied_cl_line(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The contact-lens line this order actually left with the customer, or
-    None. THE supply rule for every refill door (L1-F18).
+def supplied_cl_lines(order: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every contact-lens line this order actually left with the customer.
+    THE supply rule for every refill door (L1-F18, D50).
 
     The order must be a received sale (SUPPLIED_STATUSES). Returned boxes are
-    not supply: the line's quantity is reduced by its ``returned_qty`` (the
-    count the Returns door increments), and a fully returned line is skipped.
-    The first CL line still held wins (one line per order drives the date, as
-    before: a two-eye order is one supply). Pure.
-    """
+    not supply: each line's quantity is reduced by its ``returned_qty`` (the
+    count the Returns door increments), and a fully returned line is dropped.
+    Pure."""
     if order.get("status") not in SUPPLIED_STATUSES:
-        return None
+        return []
+    out = []
     for item in order.get("items") or []:
         if not _is_cl_line(item):
             continue
@@ -161,20 +175,25 @@ def supplied_cl_line(order: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             qty, returned = 1.0, 0.0
         kept = int(qty - returned)
         if kept > 0:
-            return {**item, "quantity": kept}
-    return None
+            out.append({**item, "quantity": kept})
+    return out
 
 
 def latest_supplies(
     orders_coll, query: Dict[str, Any], limit: int
 ) -> List[tuple]:
-    """(order, supplied CL line) pairs, newest order first, for the orders
-    matching ``query``. Only received sales are read (the status filter is in
-    the query so cancelled rows never use up the scan limit). RAISES when the
-    orders cannot be read: an unreadable history is not "no history"."""
+    """(order, supplied CL line) pairs -- one per kept CL line -- newest order
+    first, for the orders matching ``query``. Only received orders WITH a CL
+    line are read (status and CL filter are in the query, so frame sales and
+    cancelled rows never use up the limit). RAISES when the orders cannot be
+    read: an unreadable history is not "no history"."""
     cursor = (
         orders_coll.find(
-            {**query, "status": {"$in": list(SUPPLIED_STATUSES)}},
+            {
+                **query,
+                "$and": [CL_ORDER_FILTER],
+                "status": {"$in": list(SUPPLIED_STATUSES)},
+            },
             {
                 "_id": 0,
                 "order_id": 1,
@@ -191,10 +210,46 @@ def latest_supplies(
     )
     out = []
     for order in cursor:
-        line = supplied_cl_line(order)
-        if line is not None:
+        for line in supplied_cl_lines(order):
             out.append((order, line))
     return out
+
+
+def _clock_key(line: Dict[str, Any]) -> tuple:
+    """Which refill clock a line feeds (D50): one per product and eye."""
+    product = str(
+        line.get("sku") or line.get("product_id") or line.get("product_name")
+        or line.get("name") or ""
+    ).strip().upper()
+    eye = str(line.get("eye") or line.get("side") or "").strip().upper()
+    return (product, eye)
+
+
+def earliest_refill(
+    supplies: List[tuple], *, now: Optional[datetime] = None
+) -> Optional[Dict[str, Any]]:
+    """THE refill for one customer, from their (order, line) supplies newest
+    first (D50). Each product / eye keeps its own clock from its LATEST
+    received line (an older line for the same clock is ignored; lines of the
+    same order all count); the EARLIEST-due clock drives the reminder. None
+    when there is no supply. Pure."""
+    now = now or datetime.utcnow()
+    clock_order: Dict[tuple, int] = {}
+    best: Optional[Dict[str, Any]] = None
+    for order, line in supplies:
+        key = _clock_key(line)
+        if clock_order.setdefault(key, id(order)) != id(order):
+            continue  # an older supply of a clock a newer order already set
+        refill = compute_refill(
+            line, order.get("created_at") or order.get("order_date"), now=now
+        )
+        if best is None or refill["days_remaining"] < best["days_remaining"]:
+            best = {
+                **refill,
+                "last_cl_order_id": order.get("order_id"),
+                "customer_name": order.get("customer_name"),
+            }
+    return best
 
 
 def scan_due_refills(
@@ -207,10 +262,10 @@ def scan_due_refills(
 ) -> List[Dict[str, Any]]:
     """Worklist of customers whose CL refill is DUE (<= horizon) or overdue.
 
-    Scans recent RECEIVED orders (optionally store-scoped; latest_supplies),
-    keeps the most-recent supplied CL line PER customer (newest first; the
-    first supplied CL order per customer wins), computes the refill, keeps rows where
-    days_remaining <= due_within_days. Sorted most-overdue first.
+    Scans recent RECEIVED CL orders (optionally store-scoped; latest_supplies),
+    groups them per customer, takes THE refill (earliest_refill: per product /
+    eye clock, earliest due drives) and keeps rows where days_remaining <=
+    due_within_days. Sorted most-overdue first.
 
     db None -> []. An orders read that FAILS raises (the router turns it into
     a 503): an empty worklist must mean nobody is due, not "could not read".
@@ -234,23 +289,20 @@ def scan_due_refills(
     # that looks like "nobody is due" (L1-F19).
     supplies = latest_supplies(orders_coll, query, scan_limit)
 
-    seen: set = set()
-    out: List[Dict[str, Any]] = []
+    by_customer: Dict[str, List[tuple]] = {}
     for order, cl_line in supplies:
         cid = order.get("customer_id")
-        if not cid or cid in seen:
-            continue
-        # First (newest) supplied CL order for this customer is authoritative.
-        seen.add(cid)
-        order_date_raw = order.get("created_at") or order.get("order_date")
-        refill = compute_refill(cl_line, order_date_raw, now=now)
-        if refill["days_remaining"] > int(due_within_days):
+        if cid:
+            by_customer.setdefault(cid, []).append((order, cl_line))
+
+    out: List[Dict[str, Any]] = []
+    for cid, rows in by_customer.items():
+        refill = earliest_refill(rows, now=now)
+        if refill is None or refill["days_remaining"] > int(due_within_days):
             continue
         out.append(
             {
                 "customer_id": cid,
-                "customer_name": order.get("customer_name"),
-                "last_cl_order_id": order.get("order_id"),
                 "overdue": refill["days_remaining"] < 0,
                 **refill,
             }
