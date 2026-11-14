@@ -23,6 +23,8 @@ import clsx from 'clsx';
 import { useAuth } from '../../context/AuthContext';
 import { useToast } from '../../context/ToastContext';
 import { tasksApi } from '../../services/api';
+import type { SopChecklistItem } from '../../services/api/hr';
+import { getErrorMessage, getErrorStatus } from '../../utils/errorHandler';
 import { canSeeTeamTasks } from './taskRoles';
 import { useSopChecklist, useSopTemplates } from './tasksQueries';
 
@@ -49,17 +51,25 @@ export function TasksChecklistPage() {
   const checklist = checklistQ.data;
   const canManageSops = canSeeTeamTasks(user?.roles);
 
-  const toggle = async (stepNumber: number, completed: boolean) => {
-    if (!templateId) return;
+  // Decision D47: a tick names the step this page shows and the revision it
+  // was read with. If an editor changed the SOP meanwhile the server refuses
+  // (409) instead of signing a different instruction; reload the checklist.
+  const toggle = async (item: SopChecklistItem, completed: boolean) => {
+    if (!templateId || !checklist) return;
     try {
       const data = await tasksApi.toggleSopChecklistItem({
         template_id: templateId,
-        step_number: stepNumber,
+        step_number: item.step_number,
+        step_id: item.step_id ?? null,
+        revision: checklist.revision,
         completed,
       });
       queryClient.setQueryData(['tasks', 'sop-checklist', templateId], data);
-    } catch {
-      toast.error('Failed to update checklist');
+    } catch (err) {
+      toast.error(getErrorMessage(err, 'Failed to update checklist'));
+      if (getErrorStatus(err) === 409) {
+        queryClient.invalidateQueries({ queryKey: ['tasks', 'sop-checklist', templateId] });
+      }
     }
   };
 
@@ -155,13 +165,13 @@ export function TasksChecklistPage() {
           <div className="space-y-3">
             {checklist.items.map((item) => (
               <label
-                key={item.step_number}
+                key={item.step_id ?? item.step_number}
                 className="flex items-start gap-3 p-3 rounded-lg hover:bg-gray-100 transition-colors cursor-pointer"
               >
                 <input
                   type="checkbox"
                   checked={item.completed}
-                  onChange={() => toggle(item.step_number, !item.completed)}
+                  onChange={() => toggle(item, !item.completed)}
                   className="mt-1 w-5 h-5 rounded border-gray-200 text-green-500 cursor-pointer"
                 />
                 <span className="flex-1">

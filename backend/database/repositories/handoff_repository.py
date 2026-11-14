@@ -173,6 +173,16 @@ class HandoffRepository(BaseRepository):
         except Exception:
             return []
 
+    def file_still_referenced(self, file_id: str) -> bool:
+        """True when any handoff row still points at this blob (audit R23:
+        a reshare shares its parent's file). Fails SAFE: on any read error
+        the blob counts as still in use, so a revoke never deletes bytes it
+        could not prove are unused."""
+        try:
+            return self.collection.count_documents({"file.file_id": file_id}, limit=1) > 0
+        except Exception:
+            return True
+
     # ------------------------------------------------------------------
     # Recipient-level mutations
     # ------------------------------------------------------------------

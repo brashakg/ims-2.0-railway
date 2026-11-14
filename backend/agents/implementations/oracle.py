@@ -250,8 +250,10 @@ class OracleAgent(JarvisAgent):
             }))
             if not staff:
                 return
-            now = now_ist().replace(tzinfo=None)
-            day = now.strftime("%Y%m%d")
+            # R06: notification instants are naive UTC (the bell/page read
+            # zone-less values as UTC); the id keeps the IST business day.
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
+            day = now_ist().strftime("%Y%m%d")
             docs = []
             for u in staff:
                 uid = u.get("user_id") or str(u.get("_id"))

@@ -47,6 +47,7 @@ from ..dependencies import (
     get_prescription_repository,
     get_audit_repository,
 )
+from ..utils.event_time import parse_event_utc
 from ..services.file_store import (
     ANY_KIND,
     get_file_store,
@@ -212,18 +213,12 @@ def _is_visible_on_hub(my_recipient: Dict, now: datetime) -> bool:
         return True  # explicit keep overrides everything
     if my_recipient.get("dismissed"):
         return False
-    snooze = my_recipient.get("snooze_until")
-    if snooze:
-        try:
-            snooze_dt = (
-                snooze
-                if isinstance(snooze, datetime)
-                else datetime.fromisoformat(str(snooze).replace("Z", "+00:00"))
-            )
-            if snooze_dt > now:
-                return False
-        except Exception:
-            pass
+    # Audit R22: ordinary PyMongo hands snooze_until back NAIVE (UTC), and
+    # comparing that with the aware `now` raised a TypeError that was
+    # swallowed -- so every snoozed card stayed on the Hub. Read it as UTC.
+    snooze_dt = parse_event_utc(my_recipient.get("snooze_until"))
+    if snooze_dt is not None and snooze_dt > now:
+        return False
     return True
 
 
@@ -639,6 +634,19 @@ async def reshare_handoff(
         raise HTTPException(
             status_code=500, detail="Failed to persist reshared handoff"
         )
+    # Audit R23 / decision D47: the sender may have revoked the original
+    # between our read and the insert above, and revoke frees the bytes when
+    # it sees no other handoff using them. The parent still being there NOW
+    # proves its revoke (and its reference check) comes after our child
+    # exists, so the bytes stay. If it is gone we cannot prove that: take the
+    # copy back and refuse, never a 201 for a copy whose file may be gone.
+    if repo.find_by_id(handoff_id) is None:
+        repo.delete(new_handoff_id)
+        _release_file(repo, parent_file.get("file_id"))
+        raise HTTPException(
+            status_code=409,
+            detail="The sender withdrew this handoff while you were forwarding it; nothing was forwarded",
+        )
 
     # Mark the parent recipient's record as 'reshared'
     repo.update_recipient(
@@ -723,14 +731,30 @@ async def revoke_handoff(
 
     file_id = (handoff.get("file") or {}).get("file_id")
     repo.delete(handoff_id)
-    if file_id:
-        fs = get_file_store()
-        if fs is not None:
-            try:
-                fs.delete(file_id)
-            except Exception:
-                pass
+    _release_file(repo, file_id)
     return {"deleted": True, "handoff_id": handoff_id}
+
+
+def _release_file(repo, file_id: Optional[str]) -> None:
+    """Free a handoff's bytes once no handoff uses them (audit R23). A
+    reshare points its child at the SAME blob, so revoking one handoff never
+    breaks the original's (or a forwarded) copy. Runs only AFTER the handoff
+    doc is deleted; reshare re-checks its parent after inserting the child, so
+    a child that answered 201 is always seen here. A failed check keeps the
+    bytes (the orphan sweep is the fallback)."""
+    if not file_id:
+        return
+    try:
+        if repo.file_still_referenced(file_id):
+            return
+    except Exception:
+        return
+    fs = get_file_store()
+    if fs is not None:
+        try:
+            fs.delete(file_id)
+        except Exception:
+            pass
 
 
 # ============================================================================

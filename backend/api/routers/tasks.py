@@ -60,10 +60,12 @@ from ..services.user_roles import VALID_ROLES
 from ..services.task_requirements import requires_cashier
 from ..services.sop_checklist import (
     apply_item_toggle,
+    assign_step_ids,
     completion_status,
     default_template_steps,
     merge_checklist,
     progress_of,
+    steps_revision,
 )
 
 logger = logging.getLogger(__name__)
@@ -1810,6 +1812,9 @@ VALID_SOP_FREQUENCIES = {"DAILY", "WEEKLY", "MONTHLY", "AD_HOC"}
 
 
 class SopStep(BaseModel):
+    # The step's stable identity (audit R28). Optional on input: the server
+    # keeps a known id, matches an unchanged instruction, or mints a new one.
+    step_id: Optional[str] = Field(default=None, max_length=40)
     step_number: int = Field(..., ge=1)
     instruction: str = Field(..., min_length=1, max_length=1000)
     warning: Optional[str] = Field(default=None, max_length=500)
@@ -2024,7 +2029,7 @@ async def create_sop_template(
         "category": payload.category,
         "frequency": payload.frequency,
         "estimated_time": payload.estimated_time,
-        "steps": [s.model_dump() for s in payload.steps],
+        "steps": assign_step_ids([s.model_dump() for s in payload.steps], None),
         "assigned_roles": payload.assigned_roles,
         "assigned_users": payload.assigned_users,
         "store_id": store,
@@ -2069,9 +2074,12 @@ async def update_sop_template(
 
     col, tpl = _sop_in_reach(template_id, current_user, editing=True)
 
-    update_data = {
-        k: v for k, v in updates.model_dump(exclude_unset=True).items() if v is not None
-    }
+    sent = updates.model_dump(exclude_unset=True)
+    update_data = {k: v for k, v in sent.items() if v is not None}
+    # Audit R12: a description the editor deliberately cleared is saved as
+    # cleared. Only a field the request leaves out is left unchanged.
+    if "description" in sent:
+        update_data["description"] = (sent["description"] or "").strip()
     # Archiving is admin-only on DELETE; is_active here is the same switch.
     if "is_active" in update_data and not user_store_scope(current_user)[0]:
         raise HTTPException(
@@ -2081,10 +2089,12 @@ async def update_sop_template(
     _sop_people(update_data.get("assigned_users"), tpl)
     # Serialize nested steps
     if "steps" in update_data and update_data["steps"] is not None:
-        update_data["steps"] = [
-            s.model_dump() if hasattr(s, "model_dump") else s
-            for s in update_data["steps"]
-        ]
+        # Audit R28: steps keep their identity across reorder / renumber so a
+        # stored tick can never move onto a different instruction.
+        update_data["steps"] = assign_step_ids(
+            [s.model_dump() if hasattr(s, "model_dump") else s for s in update_data["steps"]],
+            tpl.get("steps"),
+        )
     update_data["updated_at"] = datetime.now()
     update_data["updated_by"] = current_user.get("user_id")
 
@@ -2185,6 +2195,14 @@ class SopChecklistItemToggle(BaseModel):
     completed: bool
     date: Optional[str] = None  # YYYY-MM-DD; defaults to today
     store_id: Optional[str] = None
+    # Decision D47 / audit R28: the step the page showed and the checklist
+    # revision it was opened on. A submission without them, or against an
+    # older revision, is refused rather than signing a different instruction.
+    step_id: Optional[str] = Field(default=None, max_length=40)
+    revision: Optional[str] = Field(default=None, max_length=64)
+
+
+SOP_STALE_DETAIL = "This checklist was changed by an editor; refresh to continue"
 
 
 @router.get("/sop-checklist")
@@ -2223,6 +2241,7 @@ async def get_sop_checklist(
         "items": items,
         "progress": progress,
         "status": (completion or {}).get("status") or completion_status(progress),
+        "revision": steps_revision(tpl.get("steps")),
     }
 
 
@@ -2251,6 +2270,13 @@ async def toggle_sop_checklist_item(
     now = datetime.now()
     steps = tpl.get("steps") or []
 
+    # Decision D47 / audit R28: the tick must be for the instruction the
+    # page showed. A page opened on an older revision (a colleague reordered,
+    # renumbered or reworded the SOP meanwhile) is refused; it never signs
+    # whatever now holds that step number. Signed history stays as signed.
+    if payload.revision != steps_revision(steps):
+        raise HTTPException(status_code=409, detail=SOP_STALE_DETAIL)
+
     # Validate that the requested step_number actually exists in this template.
     valid_step_numbers = {s.get("step_number") for s in steps}
     if payload.step_number not in valid_step_numbers:
@@ -2261,6 +2287,10 @@ async def toggle_sop_checklist_item(
                 f"'{payload.template_id}'. Valid steps: {sorted(valid_step_numbers)}"
             ),
         )
+    if payload.step_id is not None and payload.step_id != next(
+        (s.get("step_id") for s in steps if s.get("step_number") == payload.step_number), None
+    ):
+        raise HTTPException(status_code=409, detail=SOP_STALE_DETAIL)
 
     existing = ccol.find_one(
         {"template_id": payload.template_id, "store_id": active_store, "date": day}
@@ -2310,6 +2340,7 @@ async def toggle_sop_checklist_item(
         "items": merged,
         "progress": progress,
         "status": status,
+        "revision": steps_revision(steps),
     }
 
 

@@ -12,6 +12,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useNow } from '../../hooks/useNow';
+import { toDate } from '../../utils/datetime';
 import { handoffsApi, type ClinicalHandover } from '../../services/api/handoffs';
 // PATIENT SAFETY: one power formatter, and a recorded 0 is not a blank.
 import { formatPowerOrDash, hasRecordedPower } from '../../utils/rxPowerValue';
@@ -20,8 +21,8 @@ const TICK_MS = 30 * 1000;
 
 function timeAgo(then: string | null, now: Date): string {
   if (!then) return '';
-  const date = new Date(then);
-  if (Number.isNaN(date.getTime())) return '';
+  const date = toDate(then); // zone-less server instant = UTC (audit R06)
+  if (!date) return '';
   const seconds = Math.max(0, Math.floor((now.getTime() - date.getTime()) / 1000));
   if (seconds < 60) return 'just now';
   const minutes = Math.floor(seconds / 60);
