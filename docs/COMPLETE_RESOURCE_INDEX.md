@@ -124,7 +124,7 @@ Start here to track progress:
 
 ### Phase 4: Database & Infrastructure
 - **[ARCHITECTURE_GUIDE.md](./ARCHITECTURE_GUIDE.md)** - Database design
-- **Terraform Files** - `/terraform/` directory
+- **Terraform Files** - ARCHIVED, never deployed: `docs/archive/legacy-aws-monitoring/` (production is Railway + MongoDB)
   - AWS infrastructure setup
   - Security groups
   - RDS PostgreSQL
@@ -210,7 +210,7 @@ ims-2.0-railway/
 │   ├── api_integration_test.py       ... API integration tester
 │   └── requirements.txt              ... Python dependencies
 │
-├── terraform/ (Infrastructure as Code)
+├── docs/archive/legacy-aws-monitoring/ (ARCHIVED AWS/Prometheus templates - never deployed)
 │   ├── main.tf                       ... AWS infrastructure
 │   ├── variables.tf                  ... Configuration variables
 │   ├── monitoring.tf                 ... CloudWatch setup
@@ -225,7 +225,7 @@ ims-2.0-railway/
 │   ├── Dockerfile.backend            ... Backend container image
 │   └── docker-compose.yml            ... Local development environment
 │
-└── k6-load-test.js .......................... Load testing script (10,000 users)
+└── k6-load-test.js .......................... Read-only k6 load test; loopback target + synthetic login required (INFRA-01)
 ```
 
 ---
@@ -381,7 +381,7 @@ Before going to production, verify:
 **Code**:
 - Frontend: `frontend/` (React/TypeScript)
 - Backend: `backend/` (FastAPI/Python)
-- Infrastructure: `terraform/` (AWS IaC)
+- Infrastructure: Railway (backend, MongoDB, Redis) + Vercel (frontend); old AWS templates archived in `docs/archive/legacy-aws-monitoring/`
 - CI/CD: `.github/workflows/`
 - Tests: `backend/e2e_test_runner.py`, `backend/api_integration_test.py`
 

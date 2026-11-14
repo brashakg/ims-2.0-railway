@@ -1,3 +1,5 @@
+> ARCHIVED - never deployed. See README.md in this folder for what actually runs (INFRA-02).
+
 # IMS 2.0 - Monitoring & Analytics Setup
 
 ## Phase 6: Monitoring & Analytics - Complete Implementation

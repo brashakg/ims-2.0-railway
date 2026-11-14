@@ -12,7 +12,8 @@ pydantic==2.13.4
 pydantic-settings==2.14.2
 
 # Authentication & Security
-pyjwt==2.13.0
+# 2.15.x clears the PyJWT advisory ranges in the 11-04 audit (R32).
+pyjwt==2.15.1
 bcrypt==4.2.0
 # 0.0.31 fixes GHSA-v9pg-7xvm-68hf / CVE-2026-53540 (negative Content-Length
 # buffers the whole request body in memory -> DoS).
@@ -28,7 +29,8 @@ python-multipart==0.0.32
 cryptography==50.0.0
 
 # Database
-pymongo==4.17.0
+# 4.18.3 clears the PyMongo advisory ranges in the 11-04 audit (R32).
+pymongo==4.18.3
 # Read-only bridge to the e-commerce (BVI) Postgres for online catalog/stock
 psycopg2-binary==2.9.12
 
