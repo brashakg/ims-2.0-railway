@@ -145,17 +145,30 @@ describe('Day-End Report - the till was already counted', () => {
     expect(screen.queryByTestId('day-end-several-drawers')).not.toBeInTheDocument();
   });
 
-  it('D40: a day with two drawers says the count is the last drawer only', async () => {
+  it('D53: a day with two drawers shows each drawer and no whole-day comparison', async () => {
+    // Codex's replay: drawers Rs 1,000 and Rs 3,000, system Rs 4,000. The
+    // record holds no day variance; each drawer carries its own.
     getDayEndClose.mockImplementation(async () => ({
       closed: true,
       close: closeRecord({
-        closing_cash: 3000, system_cash: 3000, variance: 0, till_drawers_on_day: 2,
+        closing_cash: 3000, system_cash: 4000, variance: null, till_drawers_on_day: 2,
+        variance_withheld_several_drawers: true,
+        till_drawers: [
+          { session_id: 'A', status: 'LOCKED', counted_paisa: 100000, variance_paisa: -5000 },
+          { session_id: 'B', status: 'BLIND_SUBMITTED', counted_paisa: 300000, variance_paisa: null },
+        ],
       }),
     }));
     render(<DayEndReport />);
     await waitFor(() => expect(screen.getByText('Day Closed')).toBeInTheDocument());
     const note = screen.getByTestId('day-end-several-drawers').textContent ?? '';
     expect(note).toMatch(/2 cash drawers/);
-    expect(note).toMatch(/last drawer only/);
+    expect(note).toMatch(/not added together/);
+    // No single "Counted X vs system Y" comparison and no "Matches".
+    expect(screen.queryByText(/Counted ₹3,000 vs system/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Matches/)).not.toBeInTheDocument();
+    const list = screen.getByTestId('day-end-drawer-list').textContent ?? '';
+    expect(list).toMatch(/Drawer 1: counted ₹1,000, variance -₹50/);
+    expect(list).toMatch(/Drawer 2: counted ₹3,000, variance shown once a manager locks it/);
   });
 });
