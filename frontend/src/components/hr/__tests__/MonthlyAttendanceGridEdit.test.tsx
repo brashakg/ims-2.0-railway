@@ -62,4 +62,51 @@ describe('MonthlyAttendanceGrid edit (R14, R15)', () => {
     expect(m.markAttendance.mock.calls[0][0].check_out).toBeNull();
     expect(m.markAttendance.mock.calls[0][0].check_in).toBeUndefined();
   });
+  // #1433 Codex round 1: a held GET used to land after the manager typed 09:30
+  // and put 11:00 back. The boxes now stay locked until the answer arrives, and
+  // an answer for an earlier modal is dropped.
+  it('a late prefill cannot overwrite a typed time: boxes and Save are locked until it lands', async () => {
+    let release: (v: unknown) => void = () => {};
+    m.getAttendance.mockReturnValueOnce(new Promise((r) => { release = r; }));
+    render(<MonthlyAttendanceGrid storeId="AUDTB" initialMonth="2026-11" />);
+    fireEvent.click(await screen.findByRole('button', { name: /Edit Opto One day 3/ }));
+    const inp = document.getElementById('att-in') as HTMLInputElement;
+    expect(inp.disabled).toBe(true);
+    expect((screen.getByRole('button', { name: /save/i }) as HTMLButtonElement).disabled).toBe(true);
+    release({ records: [{ employeeId: 'opt', date: '2026-11-03', checkIn: '2026-11-03T11:00:00+05:30', checkOut: null }] });
+    await waitFor(() => expect(inp.disabled).toBe(false));
+    expect(inp.value).toBe('11:00');
+    fireEvent.change(inp, { target: { value: '09:30' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => expect(m.markAttendance).toHaveBeenCalled());
+    expect(m.markAttendance.mock.calls[0][0].check_in).toBe('2026-11-03T09:30:00');
+  });
+
+  it('an answer for an earlier modal is dropped', async () => {
+    let releaseOld: (v: unknown) => void = () => {};
+    m.getAttendance
+      .mockReturnValueOnce(new Promise((r) => { releaseOld = r; }))
+      .mockResolvedValueOnce({ records: [{ employeeId: 'opt', date: '2026-11-03', checkIn: '2026-11-03T12:00:00+05:30', checkOut: null }] });
+    render(<MonthlyAttendanceGrid storeId="AUDTB" initialMonth="2026-11" />);
+    fireEvent.click(await screen.findByRole('button', { name: /Edit Opto One day 3/ }));
+    fireEvent.click(screen.getByRole('button', { name: /cancel/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /Edit Opto One day 3/ }));
+    const inp = document.getElementById('att-in') as HTMLInputElement;
+    await waitFor(() => expect(inp.value).toBe('12:00'));
+    releaseOld({ records: [{ employeeId: 'opt', date: '2026-11-03', checkIn: '2026-11-03T08:00:00+05:30', checkOut: null }] });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(inp.value).toBe('12:00');
+  });
+
+  // D48: a day saved without a shop is shown read-only, never opened for edit.
+  it('a day with no recorded shop shows "Shop not recorded" and cannot be edited', async () => {
+    m.getAttendanceGrid.mockResolvedValue({
+      month: '2026-11', days: [1, 2, 3],
+      employees: [{ employee_id: 'opt', name: 'Opto One', days: {}, no_shop_days: ['2'], summary: {} }],
+      totals: {},
+    });
+    render(<MonthlyAttendanceGrid storeId="AUDTB" initialMonth="2026-11" />);
+    expect(await screen.findByLabelText('Opto One day 2: Shop not recorded')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Edit Opto One day 2/ })).toBeNull();
+  });
 });

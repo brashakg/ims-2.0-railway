@@ -501,6 +501,8 @@ export interface AttendanceGridEmployee {
   store_id: string;
   days: Record<string, AttendanceCode>;
   summary: AttendanceGridSummary;
+  // D48: days saved without a shop (read-only "Shop not recorded").
+  no_shop_days?: string[];
 }
 
 export interface AttendanceGrid {
