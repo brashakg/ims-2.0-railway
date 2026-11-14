@@ -184,7 +184,13 @@ async def cash_reconciliation_summary(
         # along, which is where a manager actually reads it.
         raw_counted = s.get("counted")
         counted = None if raw_counted is None else round(float(raw_counted or 0), 2)
-        variance = None if counted is None else round(counted - expected, 2)
+        # D53: a close on a day with several drawers holds ONE drawer's count
+        # against this window's expected figure -- no variance is true for it,
+        # so none is re-derived here either (the close withheld it).
+        several = s.get("variance_status") == cash_register.SEVERAL_DRAWERS
+        variance = (
+            None if (counted is None or several) else round(counted - expected, 2)
+        )
         tol = float(s.get("tolerance", 0) or 0)
         closed_by = s.get("closed_by")
         if closed_by and not s.get("closed_by_name"):
@@ -215,6 +221,8 @@ async def cash_reconciliation_summary(
                 "variance_status": (
                     cash_register.NOT_COUNTED
                     if counted is None
+                    else cash_register.SEVERAL_DRAWERS
+                    if several
                     else (
                         cash_register.NEGATIVE_EXPECTED
                         if s.get("negative_expected_advisory")

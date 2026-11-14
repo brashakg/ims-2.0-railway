@@ -359,6 +359,17 @@ async def close_cash_register(
             else cash_register.variance_status(summary["variance"], tolerance_rupees)
         )
 
+    # SEVERAL DRAWERS ON THE DAY (D53): `counted` is ONE drawer's count and
+    # `expected` is this window's arithmetic, so no single variance or
+    # "balanced" verdict is true for the day, and drawers are never added
+    # together. Withhold it; the record carries each drawer's own count and
+    # variance (till_drawers), whose own out-of-band variances were already
+    # noted and raised at each drawer's lock.
+    several_drawers = int(till_link.get("drawers_on_day") or 1) > 1
+    if several_drawers:
+        summary["variance"] = None
+        summary["variance_status"] = cash_register.SEVERAL_DRAWERS
+
     # MANDATORY NOTE ABOVE THE BAND (owner ruling 2026-08-25). Checked AFTER
     # the shared-record adoption so the figure judged is the ONE counted figure
     # for the day. Same rule, same helper as the blind Z-Read lock. Refusing
@@ -405,6 +416,8 @@ async def close_cash_register(
         # Drawers on this shop-day. Above 1, `counted` is the latest drawer's
         # count only, not the day's total (D40); the screen says so.
         "till_drawers_on_day": till_link.get("drawers_on_day"),
+        # D53: each drawer's own count and (once locked) variance.
+        "till_drawers": till_link.get("drawers") if several_drawers else None,
         # True when this screen's counted figure and the shared record's differ
         # -- a manual override typed over the notes, or a drawer the other door
         # had already counted. Either way the shared figure is what is stored

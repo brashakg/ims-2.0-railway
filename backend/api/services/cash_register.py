@@ -134,6 +134,9 @@ def variance_status(variance: float, tolerance: float = 0.0) -> str:
 # the count of emptying the till. Absence is a state, here as everywhere else
 # in the count block.
 NOT_COUNTED = "NOT_COUNTED"
+# D53: the shop-day had more than one cash drawer. No single variance is true
+# for it; each drawer's own count and variance are on the record instead.
+SEVERAL_DRAWERS = "SEVERAL_DRAWERS"
 NOT_COUNTED_MESSAGE = (
     "This drawer was closed without a count, so it is recorded as never "
     "counted - not as an empty drawer. There is no variance to report."

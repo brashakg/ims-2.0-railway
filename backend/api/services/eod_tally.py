@@ -964,6 +964,55 @@ def record_screen_open(db, **kwargs: Any) -> Dict[str, Any]:
         return {"ok": False, "error": f"link_failed:{exc}"}
 
 
+def _drawer_order(session: Dict[str, Any]) -> tuple:
+    """D53 order of a shop-day's drawers, oldest first: opened_at, else
+    created_at (legacy rows), then the id. Datetimes and ISO strings compare
+    in one frame (a datetime's str() has a space where ISO has a 'T')."""
+
+    def _ts(value: Any) -> str:
+        if hasattr(value, "isoformat"):
+            return value.isoformat()
+        return str(value or "")
+
+    stamp = session.get("opened_at") or session.get("created_at")
+    return (_ts(stamp), str(session.get("_id") or session.get("session_id") or ""))
+
+
+def day_drawers(db, store_id: str, session_date: str) -> Optional[List[Dict[str, Any]]]:
+    """Each drawer of a shop-day, oldest first, with ITS OWN count and variance
+    (D53: drawers are never added together and a multi-drawer day has no
+    whole-day variance). The variance is the till's own, and only once a
+    manager has LOCKED that drawer (revealed it); before that it is None, as on
+    the Z-Read. None when the read fails -- the caller still says how many
+    drawers the day had."""
+    coll = _sessions_coll(db)
+    if coll is None:
+        return None
+    try:
+        rows = [
+            s
+            for s in coll.find({"store_id": store_id, "session_date": session_date})
+            if s.get("status") in (STATUS_OPEN, STATUS_BLIND_SUBMITTED, STATUS_LOCKED)
+        ]
+    except Exception:  # noqa: BLE001
+        logger.exception("Drawer list read failed for %s %s", store_id, session_date)
+        return None
+    out = []
+    for s in sorted(rows, key=_drawer_order):
+        locked = s.get("status") == STATUS_LOCKED
+        out.append(
+            {
+                "session_id": s.get("session_id") or s.get("_id"),
+                "status": s.get("status"),
+                "opened_at": s.get("opened_at"),
+                "counted_paisa": s.get("blind_count_paisa"),
+                "variance_paisa": s.get("variance_paisa") if locked else None,
+                "variance_status": s.get("variance_status") if locked else None,
+            }
+        )
+    return out
+
+
 def record_screen_close(db, **kwargs: Any) -> Dict[str, Any]:
     """Fail-soft wrapper. See ``_record_screen_close``.
 
@@ -973,9 +1022,14 @@ def record_screen_close(db, **kwargs: Any) -> Dict[str, Any]:
     than a 500 on the close screen. The screen's own record is written either
     way, and the failure is stored on it rather than swallowed."""
     try:
-        return _record_screen_close(db, **kwargs)
+        link = _record_screen_close(db, **kwargs)
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"link_failed:{exc}"}
+    # More than one drawer on the day (D53): the caller stores each drawer's
+    # own count and variance, read AFTER this close's count landed.
+    if link.get("ok") and int(link.get("drawers_on_day") or 1) > 1:
+        link["drawers"] = day_drawers(db, kwargs["store_id"], kwargs["session_date"])
+    return link
 
 
 def _record_screen_close(
@@ -1021,9 +1075,10 @@ def _record_screen_close(
     # oldest. A BLIND_SUBMITTED drawer does NOT outrank it: an older drawer can
     # only be BLIND_SUBMITTED beside a later one through a reopen (the partial
     # unique index allows one active drawer), and a reopened drawer was
-    # already counted and can never be recounted. On an opened_at tie the
-    # later-inserted row wins. A day with one drawer finds that drawer either
-    # way, exactly as before.
+    # already counted and can never be recounted. Order (D53): opened_at; a
+    # legacy row with no opened_at uses created_at; ties and rows with
+    # neither fall back to the id. A day with one drawer finds that drawer
+    # either way, exactly as before.
     try:
         on_day = [
             s
@@ -1033,9 +1088,7 @@ def _record_screen_close(
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": f"read_failed:{exc}"}
     uncounted = [s for s in on_day if s.get("status") == STATUS_OPEN]
-    existing = uncounted[0] if uncounted else max(
-        reversed(on_day), key=lambda s: str(s.get("opened_at") or ""), default=None
-    )
+    existing = max(uncounted or on_day, key=_drawer_order, default=None)
     # How many drawers the day has. More than one means the count linked here
     # is ONE drawer's, not the day's total; the close records say so.
     drawers_on_day = max(len(on_day), 1)
