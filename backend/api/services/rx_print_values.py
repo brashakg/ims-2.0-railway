@@ -178,3 +178,68 @@ def rx_axis_or(value, fallback: str = "-") -> str:
         return fallback
     rendered = format_axis_value(value)
     return rendered if rendered != "" else fallback
+
+
+# ---------------------------------------------------------------------------
+# Binocular IPD and the recorded issue date (audit L2-CLIN-F02 / L2-CLIN-F03)
+# ---------------------------------------------------------------------------
+# Every Rx writer stores these under different keys: the clinical exam writes
+# `ipd` + `test_date`, the counter/POS create writes `ipd` + `prescription_date`
+# (and mirrors test_date), the 4-version finalize mirrors a top-level `pd`, and
+# older imports carry `pupillary_distance`. Each reader picked ONE spelling, so
+# the same saved exam printed without its IPD and reached the patient portal as
+# "Issued -". One reader rule, used by every print door and the portal.
+#
+# The binocular IPD is NEVER derived from the per-eye monocular PDs (and never
+# the reverse): a missing measurement stays missing.
+
+
+def rx_binocular_pd(rx: Any) -> Any:
+    """The recorded binocular (inter-pupillary) distance, else None."""
+    if not isinstance(rx, dict):
+        return None
+    return first_present_rx_value(
+        rx.get("ipd"), rx.get("pd"), rx.get("pupillary_distance")
+    )
+
+
+def rx_issue_date_value(rx: Any) -> Any:
+    """The recorded issue date of an Rx (raw stored value), else None.
+
+    `prescription_date` (counter/POS Rx) first, then `test_date` (the clinical
+    exam's Rx). `created_at` is deliberately NOT here: it is when the row was
+    written, not a date a clinician recorded.
+    """
+    if not isinstance(rx, dict):
+        return None
+    return first_present_rx_value(
+        rx.get("prescription_date"), rx.get("test_date"), rx.get("testDate")
+    )
+
+
+def rx_date_ymd(raw: Any) -> str:
+    """A stored Rx date as the IST calendar day 'YYYY-MM-DD' ('' when absent).
+
+    BUG-104 VALUE rule, shared by the print doors: the clinical exam stamps
+    `test_date` as a UTC instant ('...+00:00'), so slicing [:10] printed
+    YESTERDAY for an exam recorded 00:00-05:30 IST. Offset-bearing strings and
+    datetimes are shifted to IST; a naive string is a business date already
+    and passes through; an unparseable string falls back to its first 10 chars.
+    """
+    from datetime import datetime
+
+    from ..utils.ist import ist_date_str
+
+    if is_absent_rx_value(raw):
+        return ""
+    if isinstance(raw, datetime):
+        return ist_date_str(raw)
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return raw[:10]
+        if parsed.tzinfo is not None:
+            return ist_date_str(parsed)
+        return parsed.strftime("%Y-%m-%d")
+    return str(raw)

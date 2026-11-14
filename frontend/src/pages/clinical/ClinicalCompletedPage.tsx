@@ -136,7 +136,10 @@ export function ClinicalCompletedPage() {
                       // per concept is what keeps it that way.
                       rightEye: { sphere: powerNumberOrNull(readEyePower(test, 'right', 'sphere')), cylinder: powerNumberOrNull(readEyePower(test, 'right', 'cylinder')), axis: axisOrNull(readEyePower(test, 'right', 'axis')), add: powerNumberOrNull(readEyePower(test, 'right', 'add')) },
                       leftEye: { sphere: powerNumberOrNull(readEyePower(test, 'left', 'sphere')), cylinder: powerNumberOrNull(readEyePower(test, 'left', 'cylinder')), axis: axisOrNull(readEyePower(test, 'left', 'axis')), add: powerNumberOrNull(readEyePower(test, 'left', 'add')) },
-                      pd: null,
+                      // L2-CLIN-F02: the exam's recorded binocular IPD
+                      // (was hard-coded null, so this card never carried it).
+                      // Blank stays blank; nothing is derived from the eyes.
+                      pd: powerNumberOrNull(test.prescription?.ipd),
                       visualAcuity: '',
                       notes: '',
                       storeName: storeInfo?.storeName || storeInfo?.storeCode || '',

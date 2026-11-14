@@ -82,8 +82,10 @@ function renderCard(rx: Record<string, unknown>) {
 }
 
 describe('PrescriptionPrint - junk values never reach the patient', () => {
-  it('falls back to the binocular PD when a per-eye PD is the string "None"', () => {
-    // THE REPORTED BUG. `??` kept "None" and masked the binocular 62.
+  it('a "None" per-eye PD prints a dash, and the binocular IPD prints on its OWN line', () => {
+    // L2-CLIN-F02: the binocular 62 used to be copied into BOTH monocular
+    // cells ("62 per eye"). It is a different measurement: it prints once,
+    // labelled, and a missing monocular stays missing.
     const container = renderCard({
       rightEye: { sphere: -1.25, cylinder: -0.5, axis: 90, add: null, pd: 'None' },
       leftEye: { sphere: -1.0, cylinder: -0.75, axis: 85, add: null, pd: 'None' },
@@ -91,12 +93,25 @@ describe('PrescriptionPrint - junk values never reach the patient', () => {
     });
     const rows = distanceRows(container);
     expect(rows[0][EYE]).toBe('OD (R)');
-    expect(rows[0][PD]).toBe('62');
-    expect(rows[1][PD]).toBe('62');
+    expect(rows[0][PD]).toBe('-');
+    expect(rows[1][PD]).toBe('-');
+    expect(container.querySelector('[data-testid="rx-print-ipd"]')?.textContent).toBe('IPD (binocular): 62 mm');
     expect(container.textContent).not.toContain('None');
   });
 
-  it('renders "-" for a "None" PD when there is no binocular PD to fall back to', () => {
+  it('keeps asymmetric monocular PDs and the IPD distinct (OD 31 / OS 32.5 / IPD 63.5)', () => {
+    const container = renderCard({
+      rightEye: { sphere: -1, cylinder: null, axis: null, add: null, pd: 31 },
+      leftEye: { sphere: -1, cylinder: null, axis: null, add: null, pd: 32.5 },
+      pd: 63.5,
+    });
+    const rows = distanceRows(container);
+    expect(rows[0][PD]).toBe('31');
+    expect(rows[1][PD]).toBe('32.5');
+    expect(container.querySelector('[data-testid="rx-print-ipd"]')?.textContent).toBe('IPD (binocular): 63.5 mm');
+  });
+
+  it('renders "-" for a "None" PD and no IPD line when no binocular PD was recorded', () => {
     const container = renderCard({
       rightEye: { sphere: -1.25, cylinder: -0.5, axis: 90, add: null, pd: 'None' },
       leftEye: { sphere: -1.0, cylinder: -0.75, axis: 85, add: null, pd: 'None' },
@@ -106,6 +121,7 @@ describe('PrescriptionPrint - junk values never reach the patient', () => {
     expect(rows[0][PD]).toBe('-');
     expect(rows[1][PD]).toBe('-');
     expect(container.textContent).not.toContain('None');
+    expect(container.querySelector('[data-testid="rx-print-ipd"]')).toBeNull();
   });
 
   it.each(['None', 'NONE', 'null', 'undefined', 'NaN', '   ', ''])(
