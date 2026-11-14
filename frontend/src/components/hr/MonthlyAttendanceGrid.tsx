@@ -105,6 +105,9 @@ export function MonthlyAttendanceGrid({
   const [grid, setGrid] = useState<AttendanceGrid | null>(null);
   const [lwp, setLwp] = useState<LwpReport | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  // #1433: a failed read is said out loud, never shown as an empty month.
+  const [loadError, setLoadError] = useState(false);
+  const [lwpError, setLwpError] = useState(false);
 
   // Admin edit modal state.
   const canEdit = hasRole(['SUPERADMIN', 'ADMIN', 'STORE_MANAGER']);
@@ -130,20 +133,28 @@ export function MonthlyAttendanceGrid({
     if (!effectiveStore) {
       setGrid(null);
       setLwp(null);
+      setLoadError(false);
+      setLwpError(false);
       return;
     }
     setIsLoading(true);
+    setLoadError(false);
+    setLwpError(false);
     const [y, m] = month.split('-').map(Number);
     try {
       const [gridData, lwpData] = await Promise.all([
         hrApi.getAttendanceGrid({ month, storeId: effectiveStore }),
-        hrApi.getLwpReport({ year: y, month: m, storeId: effectiveStore }).catch(() => null),
+        hrApi.getLwpReport({ year: y, month: m, storeId: effectiveStore }).catch(() => {
+          setLwpError(true);
+          return null;
+        }),
       ]);
       setGrid(gridData);
       setLwp(lwpData);
     } catch {
       setGrid(null);
       setLwp(null);
+      setLoadError(true);
     } finally {
       setIsLoading(false);
     }
@@ -285,6 +296,15 @@ export function MonthlyAttendanceGrid({
         <div className="flex justify-center py-12">
           <Loader2 className="w-8 h-8 animate-spin text-bv-red-600" />
         </div>
+      ) : loadError ? (
+        <div className="card text-center py-12 text-red-700" role="alert">
+          <p className="flex items-center justify-center gap-2">
+            <AlertTriangle className="w-4 h-4" /> Attendance could not be loaded. Nothing is shown so a blank day is not mistaken for an absence.
+          </p>
+          <button type="button" onClick={() => void load()} className="btn-outline text-sm mt-3">
+            Retry
+          </button>
+        </div>
       ) : employees.length === 0 ? (
         <div className="card text-center py-12 text-gray-500">
           <p>No employees / attendance for this month</p>
@@ -419,6 +439,13 @@ export function MonthlyAttendanceGrid({
               </tfoot>
             )}
           </table>
+        </div>
+      )}
+
+      {!isLoading && !loadError && lwpError && (
+        <div className="card text-sm text-red-700" role="alert">
+          LWP report could not be loaded.{' '}
+          <button type="button" onClick={() => void load()} className="underline">Retry</button>
         </div>
       )}
 

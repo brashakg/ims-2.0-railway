@@ -109,4 +109,24 @@ describe('MonthlyAttendanceGrid edit (R14, R15)', () => {
     expect(await screen.findByLabelText('Opto One day 2: Shop not recorded')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Edit Opto One day 2/ })).toBeNull();
   });
+  // #1433 review: a failed grid read (the server's 503) used to show
+  // "No employees / attendance for this month" -- a false empty. It must say
+  // the attendance could not be loaded and offer a retry that reloads.
+  it('a failed grid read says it could not be loaded (not an empty month) and Retry reloads', async () => {
+    m.getAttendanceGrid.mockRejectedValueOnce(Object.assign(new Error('Attendance is unavailable'), { response: { status: 503 } }));
+    render(<MonthlyAttendanceGrid storeId="AUDTB" initialMonth="2026-11" />);
+    expect(await screen.findByText(/Attendance could not be loaded/)).toBeTruthy();
+    expect(screen.queryByText(/No employees \/ attendance for this month/)).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /retry/i }));
+    expect(await screen.findByRole('button', { name: /Edit Opto One day 3/ })).toBeTruthy();
+    expect(screen.queryByText(/Attendance could not be loaded/)).toBeNull();
+    expect(m.getAttendanceGrid).toHaveBeenCalledTimes(2);
+  });
+
+  it('a failed LWP read says so instead of hiding the LWP report', async () => {
+    m.getLwpReport.mockRejectedValueOnce(new Error('down'));
+    render(<MonthlyAttendanceGrid storeId="AUDTB" initialMonth="2026-11" />);
+    await screen.findByRole('button', { name: /Edit Opto One day 3/ });
+    expect(screen.getByText(/LWP report could not be loaded/)).toBeTruthy();
+  });
 });
