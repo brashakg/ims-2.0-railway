@@ -11,8 +11,12 @@ from fastapi import APIRouter, HTTPException, Depends, Query, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import AliasChoices, BaseModel, Field, model_validator
 from typing import Optional, List, Dict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 import uuid
+
+from database.repositories.base_repository import BaseRepository
 
 from .auth import get_current_user, require_roles
 from ..dependencies import store_in_view
@@ -100,16 +104,10 @@ def _named_target(user_id: str, task: dict, *, any_shop: bool = False) -> dict:
     stranger from another shop, or a name nobody signs in as. ``any_shop``: a
     chain-wide SOP (only an admin edits one) may name any active colleague;
     the generator issues it only at a shop that person works at."""
-    user_repo = get_user_repository()
-    if user_repo is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Staff records are not available right now. Try again in a minute.",
-        )
-    try:
-        target = user_repo.find_by_id(user_id)
-    except Exception:
-        target = None
+    target = _strict(
+        get_user_repository(), "find_by_id", user_id,
+        detail="Staff records are not available right now. Try again in a minute.",
+    )
     if (
         not target
         or target.get("is_active", True) is False
@@ -122,13 +120,34 @@ def _named_target(user_id: str, task: dict, *, any_shop: bool = False) -> dict:
     return target
 
 
+_TASKS_DOWN = "Task records are not available right now. Try again."
+
+
+def _strict(repo, op: str, *args, detail: str = _TASKS_DOWN, **kwargs):
+    """One repository read that fails HONESTLY (R26/R27/R44): a database error
+    is a 503, never the None / [] / 0 BaseRepository's fail-soft reads turn it
+    into -- an outage must not read as "no tasks", "no such colleague" or "no
+    earlier create". A missing repository is the same 503. Stand-ins that are
+    not a BaseRepository are called as they are."""
+    if repo is None:
+        raise HTTPException(status_code=503, detail=detail)
+    if isinstance(repo, BaseRepository):
+        kwargs["strict"] = True
+    try:
+        return getattr(repo, op)(*args, **kwargs)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 -- any driver error is "unavailable"
+        raise HTTPException(status_code=503, detail=detail) from exc
+
+
 def _visible_task(repo, task_id: str, current_user: dict) -> dict:
     """THE single-task door: the task, if the caller may see it (owner ruling
     2026-10-12, services/task_visibility.py), else 404 -- never 403, so a
     task id that exists but is not yours reads exactly like one that does not.
     Seeing a task is what lets a person act on it: every read and every
     lifecycle action opens the task through here."""
-    task = repo.find_one(visible({"task_id": task_id}, current_user))
+    task = _strict(repo, "find_one", visible({"task_id": task_id}, current_user))
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return task
@@ -259,8 +278,12 @@ class TaskCreate(BaseModel):
         # 5-minute grace covers minor clock drift and quick unit-test runs.
         due = self.due_at or self.due_date
         if due is not None:
-            due_naive = due.replace(tzinfo=None) if due.tzinfo else due
-            if due_naive < datetime.now() - timedelta(minutes=5):
+            # An offset-aware deadline is compared with the aware current
+            # moment: dropping its offset and comparing with the host's local
+            # clock refused a deadline 5 hours ahead (in UTC) as "past" on an
+            # India-time host (D49). A naive deadline keeps the host-clock rule.
+            now = datetime.now(timezone.utc) if due.tzinfo else datetime.now()
+            if due < now - timedelta(minutes=5):
                 raise ValueError(
                     "due_at must not be in the past. "
                     "Use a future date/time for the task deadline."
@@ -502,9 +525,6 @@ async def list_tasks(
     """List tasks with filters (status, priority, assigned_to, type)"""
     repo = get_task_repository()
 
-    if repo is None:
-        return {"tasks": [], "total": 0}
-
     filters: dict = {}
 
     if status:
@@ -528,11 +548,12 @@ async def list_tasks(
     # would 404 on opening. An explicit ?store_id narrows to that shop.
     filters = visible({**filters, **_shop_filter(store_id, current_user)}, current_user)
 
+    # A read that fails is a 503 (R26): "0 tasks" must mean none were found.
     tasks = [
-        _canon_task_out(t) for t in repo.find_many(filters, skip=skip, limit=limit)
+        _canon_task_out(t) for t in _strict(repo, "find_many", filters, skip=skip, limit=limit)
     ]
     _enrich_assignee_names(tasks)
-    total = repo.count(filters)
+    total = _strict(repo, "count", filters)
 
     return {"tasks": tasks, "total": total}
 
@@ -550,20 +571,36 @@ async def create_task(
     repo = get_task_repository()
 
     if repo is None:
-        return {"task_id": generate_task_id(), "message": "Task created"}
+        raise HTTPException(status_code=503, detail=_TASKS_DOWN)
 
     due_at = task.due_at or task.due_date
     if due_at is None:
         raise HTTPException(status_code=422, detail="due_at (or due_date) is required")
     now = datetime.now()
 
+    user_id = current_user.get("user_id")
+    store_id = current_user.get("active_store_id")
+    # A role name ("cashier") is stored as the role ("CASHIER"); anyone else
+    # named must pass the SAME rule the edit / reassign / escalate doors use
+    # (R27) -- checked below, before anything is written, so no orphan task.
+    assignee = task.assigned_to.strip()
+    is_role = assignee.upper() in VALID_ROLES
+    if is_role:
+        assignee = assignee.upper()
+
+    # R44 / D49: one request key is ONE task. The key fixes the task id, and
+    # the task id is the document _id -- unique in every Mongo collection --
+    # so two overlapping submits cannot both insert (no new index needed).
+    # The same key with the same content returns the task already made; the
+    # same key with CHANGED content is refused (409), never acknowledged as
+    # if the edited form had been saved.
     request_key = (task.client_request_id or "").strip() or None
+    fingerprint = _create_fingerprint(task, assignee, due_at, store_id) if request_key else None
+    task_id = _keyed_task_id(user_id, request_key) if request_key else generate_task_id()
     if request_key:
-        # ponytail: find-then-insert, no unique index (no migrations in this
-        # batch); the screen's in-flight guard covers simultaneous presses.
-        already = repo.find_one({"client_request_id": request_key, "assigned_by": current_user.get("user_id")})
-        if already:
-            return {"task_id": already.get("task_id"), "message": "Task already created", "replayed": True}
+        existing = _strict(repo, "find_one", {"task_id": task_id})
+        if existing:
+            return _replay_or_conflict(existing, fingerprint)
 
     # Optional attachment: validate the referenced file actually exists in the
     # store BEFORE persisting (a forged/missing id -> 400, not a later 404 at
@@ -578,18 +615,11 @@ async def create_task(
             "mime_type": task.attachment_mime,
         }
 
-    store_id = current_user.get("active_store_id")
-    # A role name ("cashier") is stored as the role ("CASHIER"); anyone else
-    # named must pass the SAME rule the edit / reassign / escalate doors use
-    # (R27) -- checked before anything is written, so no orphan task.
-    assignee = task.assigned_to.strip()
-    if assignee.upper() in VALID_ROLES:
-        assignee = assignee.upper()
-    else:
+    if not is_role:
         _named_target(assignee, {"store_id": store_id})
 
     task_data = {
-        "task_id": generate_task_id(),
+        "task_id": task_id,
         "title": task.title,
         "description": task.description,
         "category": task.category or "General",
@@ -605,6 +635,7 @@ async def create_task(
         "due_at": due_at,
         "attachment": attachment,
         "client_request_id": request_key,
+        "request_fingerprint": fingerprint,
         "created_at": now,
         "updated_at": now,
         "escalation_level": 0,
@@ -618,7 +649,14 @@ async def create_task(
         ],
     }
 
-    result = repo.create(task_data)
+    try:
+        result = repo.create(task_data, raise_on_duplicate=True) if request_key else repo.create(task_data)
+    except Exception as exc:  # noqa: BLE001 -- only DuplicateKeyError is re-raised
+        # The overlapping submit that lost the insert: answer from the winner.
+        existing = _strict(repo, "find_one", {"task_id": task_id})
+        if existing:
+            return _replay_or_conflict(existing, fingerprint)
+        raise HTTPException(status_code=503, detail=_TASKS_DOWN) from exc
 
     if result:
         return {
@@ -626,7 +664,48 @@ async def create_task(
             "message": "Task created successfully",
         }
 
-    raise HTTPException(status_code=500, detail="Failed to create task")
+    # The write may or may not have landed: a retry with the same key returns
+    # the task if it did, and creates it once if it did not.
+    raise HTTPException(status_code=503, detail="Could not confirm the task was saved. Try again.")
+
+
+def _keyed_task_id(user_id, request_key: str) -> str:
+    """The task id one person's one request key always gives. Longer than a
+    generate_task_id() id (8 hex), so it never collides with one."""
+    digest = hashlib.sha256(f"{user_id}\x00{request_key}".encode("utf-8")).hexdigest()
+    return f"TASK-R{digest[:12].upper()}"
+
+
+def _create_fingerprint(task: "TaskCreate", assignee: str, due_at: datetime, store_id) -> str:
+    """What the person asked for in one create, so a retry can be told apart
+    from an edited form sent under the same key."""
+    due = due_at.astimezone(timezone.utc) if due_at.tzinfo else due_at
+    material = {
+        "title": task.title,
+        "description": task.description,
+        "category": task.category or "General",
+        "priority": task.priority,
+        "assigned_to": assignee,
+        "due_at": due.isoformat(),
+        "source": canon_source(task.source or task.type),
+        "attachment_file_id": (task.attachment_file_id or "").strip() or None,
+        "store_id": store_id,
+    }
+    return hashlib.sha256(json.dumps(material, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _replay_or_conflict(existing: dict, fingerprint) -> dict:
+    task_id = existing.get("task_id")
+    if existing.get("request_fingerprint") == fingerprint:
+        return {"task_id": task_id, "message": "Task already created", "replayed": True}
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"This form was already saved as task {task_id} "
+            f"(\"{existing.get('title')}\"). Your later changes were NOT saved. "
+            f"Open {task_id} to change it, or close this form and start a new task."
+        ),
+    )
 
 
 # ============================================================================
@@ -741,9 +820,6 @@ async def get_my_tasks(
     """Get current user's assigned tasks"""
     repo = get_task_repository()
 
-    if repo is None:
-        return {"tasks": []}
-
     filters: dict = {"assigned_to": current_user.get("user_id")}
 
     if status:
@@ -766,7 +842,9 @@ async def get_my_tasks(
     # silently dropped tasks past the first 100 from the user's work list.
     tasks = [
         _canon_task_out(t)
-        for t in repo.find_many(
+        for t in _strict(
+            repo,
+            "find_many",
             visible(filters, current_user),
             sort=[("priority", 1), ("due_at", 1)],
             limit=0,
@@ -785,9 +863,6 @@ async def get_overdue_tasks(
     """Get overdue tasks for escalation"""
     repo = get_task_repository()
 
-    if repo is None:
-        return {"tasks": []}
-
     # Same scope as GET /tasks and GET /tasks/summary (counts equal lists).
     filters = visible(
         {**overdue_filter(), **_shop_filter(store_id, current_user)}, current_user
@@ -797,7 +872,7 @@ async def get_overdue_tasks(
     # overdue tasks past the first 100 from the escalation view.
     tasks = [
         _canon_task_out(t)
-        for t in repo.find_many(filters, sort=[("due_at", 1)], limit=0)
+        for t in _strict(repo, "find_many", filters, sort=[("due_at", 1)], limit=0)
     ]
     _enrich_assignee_names(tasks)
 
@@ -1662,20 +1737,11 @@ async def scan_payment_variance(
 
 def _integrity_candidates(repo, filters: dict) -> list:
     """The tasks an integrity check reads (R45). A read that fails is a 503,
-    never an empty list: "0 suspect tasks" must mean none were found. Reads
-    the collection directly because BaseRepository.find_many turns a driver
-    error into []."""
-    if repo is None:
-        raise HTTPException(status_code=503, detail="Task records are not available right now. Try again.")
-    try:
-        coll = getattr(repo, "collection", None)
-        if coll is None:
-            return repo.find_many(filters, limit=1000) or []
-        return [repo._clean_id(d) for d in coll.find(filters).limit(1000)]
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(
-            status_code=503, detail="Could not read tasks for this check. Try again."
-        ) from exc
+    never an empty list: "0 suspect tasks" must mean none were found."""
+    return _strict(
+        repo, "find_many", filters, limit=1000,
+        detail="Could not read tasks for this check. Try again.",
+    ) or []
 
 
 @router.get("/integrity/fake-closures")
@@ -2241,16 +2307,20 @@ async def get_sop_checklist(
     # day (datetime.now() on Railway) put late-night reads on yesterday's doc.
     day = date or ist_today().isoformat()
 
+    # An unreadable completion record is a 503 (R26), never "nothing ticked":
+    # the merge below would show saved ticks as undone.
     ccol = _sop_completions_collection()
-    completion = None
-    if ccol is not None:
-        try:
-            completion = ccol.find_one(
-                {"template_id": template_id, "store_id": active_store, "date": day},
-                {"_id": 0},
-            )
-        except Exception:
-            completion = None
+    if ccol is None:
+        raise HTTPException(status_code=503, detail="Checklist records are not available right now. Try again.")
+    try:
+        completion = ccol.find_one(
+            {"template_id": template_id, "store_id": active_store, "date": day},
+            {"_id": 0},
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=503, detail="Could not read today's ticks. Try again."
+        ) from exc
 
     items, progress = merge_checklist(
         tpl.get("steps") or [], (completion or {}).get("items")

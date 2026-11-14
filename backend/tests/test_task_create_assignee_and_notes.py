@@ -139,11 +139,14 @@ def test_a_note_on_a_closed_task_is_refused_and_writes_nothing(world):
 
 # R44: one create intent -> one task, also when the reply is lost and the
 # screen sends the same request again.
+# A retry resends the SAME body (the screen keeps the deadline it computed).
+KEYED_DUE = (datetime.now() + timedelta(hours=3)).isoformat()
+
+
 def _create_keyed(client, key, title="Count display pieces"):
-    due = (datetime.now() + timedelta(hours=3)).isoformat()
     return client.post("/tasks", json={
         "title": title, "priority": "P3", "assigned_to": "same-shop",
-        "due_date": due, "type": "manual", "client_request_id": key,
+        "due_date": KEYED_DUE, "type": "manual", "client_request_id": key,
     })
 
 
