@@ -1238,7 +1238,7 @@ async def log_reactivation_outcome(
         # instead of adding a second one; a failed write is a 503.
         follow_up_id = "FU-{}-{}".format(
             target_date.replace("-", ""),
-            hashlib.sha1(
+            hashlib.sha256(
                 f"reactivation|{store_id}|{target_date}|{body.customer_id}".encode()
             ).hexdigest()[:8].upper(),
         )
