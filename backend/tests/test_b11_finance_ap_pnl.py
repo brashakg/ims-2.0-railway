@@ -592,7 +592,11 @@ def _GOODS(oid):
 
 
 def test_d42_c_a_refunded_historical_order_gives_its_estimated_cost_back_with_its_credit_note(db):
-    db.orders.insert_many([_historical("H1"), _historical("H2"), _historical("H3")])
+    h3 = _historical("H3")
+    # Goods back booked RH3's piece on its order line (D65: the press gives
+    # back only the pieces it booked).
+    h3["items"][0].update(returned_qty=1.0, restocked_refunds={"RF-H3": 1.0})
+    db.orders.insert_many([_historical("H1"), _historical("H2"), h3])
     db.returns.insert_many([
         # The whole order refunded by amount-only refunds: the whole-order
         # note, in November. No line says goods came back (D45 b): no cost.
@@ -845,7 +849,10 @@ def test_d64_b_goods_back_on_a_not_restocked_historical_refund_gives_cost_back_w
     # Shopify did NOT restock; Goods back later said the goods came back.
     big = [{"item_id": "G-L1", "product_id": "PG", "item_type": "FRAME", "quantity": 1, "unit_price": 10000.0,
             "item_total": 10000.0, "taxable_value": 9523.81, "gst_rate": 5.0, "cost_at_sale": 6000.0}]
-    db.orders.insert_many([_historical(o, items=big) for o in ("K1", "K2", "K3")])
+    # Each press booked its refund's piece on the order line (D65).
+    db.orders.insert_many([_historical(o, items=[{**big[0], "returned_qty": 1.0,
+                                                  "restocked_refunds": {f"RF-{o}": 1.0}}])
+                           for o in ("K1", "K2", "K3")])
 
     def _live(rid, oid, refund, at):
         return {**_ret(rid, at, restock=False), "order_id": oid, "shopify_refund_id": refund,
@@ -879,3 +886,66 @@ def test_d64_b_goods_back_on_a_not_restocked_historical_refund_gives_cost_back_w
     assert dec["returns_cogs_reversal"] == 6000.0  # K1, the month its goods landed
     assert dec["returns_taxable"] == 0.0  # no second credit note
     assert _pnl_range("2026-10-01", "2026-10-31")["returns_cogs_reversal"] == 0.0  # never before the note
+
+
+# --------------------------------------------------------------------------
+# Decision D65, PR #1423 round 9: a piece's cost comes back once
+# --------------------------------------------------------------------------
+
+
+def test_d65_goods_back_gives_back_only_the_pieces_it_booked_never_one_a_counter_return_took_back(db):
+    # An imported order: frames A and B (Rs 10,000 each, cost 6,000 each) and
+    # two pieces of C (Rs 10,000 each, cost 6,000 each).
+    def frame(iid, pid, qty=1, **kw):
+        return {"item_id": iid, "product_id": pid, "item_type": "FRAME", "quantity": qty, "unit_price": 10000.0,
+                "item_total": 10000.0 * qty, "taxable_value": 9523.81 * qty, "gst_rate": 5.0,
+                "cost_at_sale": 6000.0, **kw}
+
+    db.orders.insert_one(_historical("M1", items=[
+        # Each order line as the doors leave it (returns._claim_returnable_qty):
+        # returned_qty counts every unit taken back, restocked_refunds what
+        # this refund's restock booked. A: booked by the Goods back press.
+        frame("M-A", "PA", returned_qty=1.0, restocked_refunds={"RF-M": 1.0}),
+        # B: the counter return took it back; the press capped it out.
+        frame("M-B", "PB", returned_qty=1.0),
+        # C: one piece back at the counter, the other restocked by the
+        # refund's confirm (its mark); the press had nothing left to book.
+        frame("M-C", "PC", qty=2, returned_qty=2.0, restocked_refunds={"RF-M": 1.0}),
+    ]))
+
+    def piece(iid, pid, **kw):
+        return {"order_item_id": iid, "product_id": pid, "return_qty": 1.0, "unit_price": 10000.0,
+                "condition": "GOOD", **kw}
+
+    money = {"gross": 10000.0, "taxable": 9523.81, "tax": 476.19}
+    db.returns.insert_many([
+        # The counter return of B and of one C, in November: their cost comes
+        # back with their notes.
+        {"return_id": "RC-M", "order_id": "M1", "store_id": "S1", "status": "COMPLETED",
+         "created_at": "2026-11-05T05:00:00+00:00", "items": [piece("M-B", "PB"), piece("M-C", "PC")],
+         "gst_breakup": {k: 2 * v for k, v in money.items()}},
+        # Then Shopify refunds A (not restocked: no_restock), B and both C.
+        # The proposal capped B and one C to not restocked (the counter
+        # already took them back: the 'IMS already booked a return' row the
+        # accountant confirmed anyway).
+        {"return_id": "RS-M", "order_id": "M1", "store_id": "S1", "status": "COMPLETED",
+         "shopify_refund_id": "RF-M", "created_at": "2026-11-10T05:00:00+00:00",
+         "items": [piece("M-A", "PA", restock=False), piece("M-B", "PB", restock=False),
+                   piece("M-C", "PC", restock=True), piece("M-C", "PC", restock=False)],
+         "gst_breakup": {k: 4 * v for k, v in money.items()}},
+    ])
+    # Goods back pressed in December: A booked, its stock-in task raised.
+    db.shopify_refund_review.insert_one(
+        {"review_id": "VM", "shopify_refund_id": "RF-M", "goods_back_at": "2026-12-03T05:00:00+00:00",
+         "goods_restock": {"restock_applied": True, "restock_stock_ids": [], "stock_in_task": "T"}})
+    nov = _pnl()
+    # B and one C at the counter, the other C restocked by the refund.
+    assert nov["returns_cogs_reversal"] == 3 * 6000.0
+    assert _by_store()["S1"]["cogs"] == nov["cogs"]
+    assert round(sum(c["cogs"] for c in _by_category()["categories"]), 2) == nov["cogs"]
+    # December: A only, the one piece the press booked. B and the second C
+    # came back once already; their cost is never given back a second time.
+    dec = _pnl_range("2026-12-01", "2026-12-31")
+    assert dec["returns_cogs_reversal"] == 6000.0
+    # Four pieces came back in all: four costs, across both months.
+    assert nov["returns_cogs_reversal"] + dec["returns_cogs_reversal"] == 4 * 6000.0
