@@ -357,6 +357,27 @@ def _counts_as_refunded(doc: Dict[str, Any], own_refund: Optional[str] = None) -
     return doc.get("status") == "COMPLETED" or is_unfinished(doc)
 
 
+def _doc_amount(doc: Dict[str, Any], field: str = "net_refund") -> float:
+    """What one counted returns doc adds to a bill's ``field`` total. An online
+    refund's doc counts at least the money that left on it -- what Shopify
+    sent back plus its store credit and points share, the online door's rule
+    (shopify_refund._given_back_elsewhere): its note may file fewer lines than
+    Shopify paid for (D62(2), a line the counter already took back), but every
+    rupee Shopify sent back stays counted by the counter's cap (D62(1))."""
+    try:
+        val = float(doc.get(field) or 0)
+    except (TypeError, ValueError):
+        val = 0.0
+    if field == "net_refund" and doc.get("shopify_refund_id") and doc.get("money_back") is not None:
+        try:
+            out = (float(doc.get("money_back") or 0) + float((doc.get("credit_entry") or {}).get("delta") or 0)
+                   + float(doc.get("points_paid_share") or 0))
+        except (TypeError, ValueError):
+            out = 0.0
+        val = max(val, out)
+    return val
+
+
 def _sum_prior_refunds(
     order_id: Optional[str], field: str = "net_refund", *, strict: bool = False
 ) -> float:
@@ -379,12 +400,7 @@ def _sum_prior_refunds(
         for doc in coll.find({"order_id": order_id}, {"_id": 0}):
             if not _counts_as_refunded(doc):
                 continue
-            net = doc.get(field)
-            if net is not None:
-                try:
-                    total += float(net)
-                except (TypeError, ValueError):
-                    pass
+            total += _doc_amount(doc, field)
     except Exception as exc:  # noqa: BLE001
         if strict:
             logger.error("[RETURNS] earlier refunds unreadable for %s: %s", order_id, exc)
@@ -4272,10 +4288,7 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
                 if doc.get("shopify_refund_id"):
                     # An online refund's claim counts itself: its hold, never twice.
                     done.add(f"{ONLINE_HOLD_PREFIX}{doc.get('shopify_refund_id')}")
-                try:
-                    documented += float(doc.get(field) or 0)
-                except (TypeError, ValueError):
-                    pass
+                documented += _doc_amount(doc, field)
         except Exception as exc:  # noqa: BLE001 -- fail CLOSED (owner 2026-10-23)
             logger.error("[RETURNS] earlier refunds unreadable for %s: %s", order_id, exc)
             raise HTTPException(

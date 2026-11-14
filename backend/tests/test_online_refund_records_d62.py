@@ -202,3 +202,51 @@ def test_a_zero_value_refund_is_never_called_already_returned(env):
     res = S._post_credit_and_restock(env, refund_id="710005", order=order, return_lines=[], credit_note=note,
                                      restock_store=None)
     assert res["status"] != S.ALREADY_RETURNED, res
+
+
+def test_after_a_shopify_paid_partial_overlap_the_counter_cap_counts_all_shopify_sent(env, monkeypatch):
+    """Review of 420ec51d: three lines A, B, C at Rs 500, Rs 1,500 paid. The
+    counter took A (Rs 500); Shopify refunds A + B and sends Rs 1,000 back; the
+    Confirm files B only (D62(2)). Every cap must still count the Rs 1,000
+    Shopify sent: the counter's prior is 1,500, so a counter return of C is
+    refused -- the online door reads the same 1,500."""
+    from api.routers import returns as R
+    from api.services import shopify_refund as S
+
+    monkeypatch.setattr(S, "_refund_auto_enabled", lambda db: True)
+    _two_line_bill(env)
+    orders = env.get_collection("orders")
+    order = orders.find_one({"order_id": "ord-1"})
+    third = dict(order["items"][1], item_id="it-3", product_id="7003", ims_product_id="IMS-P-3",
+                 shopify_line_item_id=9003, sku="RB-3")
+    orders.update_one({"order_id": "ord-1"}, {"$set": {
+        "items": order["items"] + [third], "grand_total": 1500.0, "amount_paid": 1500.0,
+        "payments": [{"method": "CASH", "amount": 1500.0}]}})
+    res = S.handle_shopify_refund(env, _two_lines(env, [_txn(1000.0, "manual")], "710006"), topic="refunds/create")
+    assert res["status"] == "queued", res
+    row = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "710006"})
+    assert S.post_from_review(env, row)["gross_refund"] == 500.0  # the note files B only
+    doc = env.get_collection("returns").find_one({"shopify_refund_id": "710006"})
+    assert (doc["net_refund"], doc["money_back"]) == (500.0, 1000.0)
+    # RET-C 500 + Shopify's 1,000 = the whole Rs 1,500 bill: nothing left for C.
+    assert R._sum_prior_refunds("ord-1", strict=True) == 1500.0
+    assert R._live_refund_holds("ord-1", {})[1] == 1500.0
+    assert S._given_back_elsewhere(env, orders.find_one({"order_id": "ord-1"}), "")["given"] == 1500.0
+
+
+def test_the_counter_refuses_a_return_beyond_shopify_money_on_a_cut_online_doc(ctx):
+    """The counter door itself (POST /returns): an online refund's doc whose
+    note was cut to fewer lines (net_refund 0 here) but whose Shopify money
+    took the whole bill leaves nothing to refund."""
+    from tests.test_return_points_paid_once import _post
+    from tests.test_returns_endpoint_tender_capture import _BILLED_GROSS
+
+    c = ctx([{"method": "CASH", "amount": _BILLED_GROSS}])
+    c["returns"].insert_one({"return_id": "RET-ONL", "order_id": c["order"]["order_id"], "status": "COMPLETED",
+                             "shopify_refund_id": "R-CUT", "net_refund": 0.0, "money_back": _BILLED_GROSS})
+    r = _post(c, [{"method": "CASH", "amount": _BILLED_GROSS}])
+    assert r.status_code == 400 and "exceed" in r.text, r.text
+    assert [d["return_id"] for d in c["returns"].docs] == ["RET-ONL"]
+    # Control: a doc with no Shopify money counts at its net refund.
+    c["returns"].docs[0]["money_back"] = 0.0
+    assert _post(c, [{"method": "CASH", "amount": _BILLED_GROSS}]).status_code == 201
