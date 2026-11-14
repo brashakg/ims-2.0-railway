@@ -10,7 +10,7 @@ import logging
 import re
 
 from fastapi import APIRouter, HTTPException, Depends, Query
-from pydantic import BaseModel, Field, EmailStr, field_validator
+from pydantic import BaseModel, Field, EmailStr, TypeAdapter, ValidationError, field_validator
 from typing import List, Optional, Dict
 from datetime import datetime
 import uuid
@@ -223,6 +223,18 @@ class UserUpdate(BaseModel):
     uan_no: Optional[str] = None
     pf_no: Optional[str] = None
     esic_no: Optional[str] = None
+    # Login identity. Both were missing here, so pydantic dropped them and an
+    # edit "saved" without changing anything. Trimmed + lower-cased (the login
+    # form looks both up lower-cased); format is checked in the route ONLY when
+    # the value actually changes, so the edit form re-sending a user's existing
+    # (possibly legacy-format) value never blocks an unrelated edit.
+    username: Optional[str] = None
+    email: Optional[str] = None
+
+    @field_validator("username", "email", mode="before")
+    @classmethod
+    def _v_login_identity(cls, v):
+        return v.strip().lower() if isinstance(v, str) else v
 
     @field_validator("phone")
     @classmethod
@@ -632,19 +644,71 @@ def _is_admin_user(user: dict) -> bool:
 
 
 def _find_by_email_ci(repo, email: str):
-    """Case-insensitive email-existence lookup. Tries a regex match against the
-    Mongo collection (anchored, escaped); falls back to the repo's exact
-    find_by_email when the collection isn't available (e.g. a fake test repo).
+    """Case-insensitive email-existence lookup (see _find_ci)."""
+    return _find_ci(repo, "email", email)
+
+
+def _find_ci(repo, field: str, value: str):
+    """Case-insensitive lookup of a user by ``field`` (email / username). Tries
+    an anchored, escaped regex against the Mongo collection; falls back to the
+    repo's exact find_by_<field> when the collection isn't available (e.g. a
+    fake test repo).
     """
     try:
         coll = getattr(repo, "collection", None)
         if coll is not None:
             return coll.find_one(
-                {"email": {"$regex": f"^{re.escape(email)}$", "$options": "i"}}
+                {field: {"$regex": f"^{re.escape(value)}$", "$options": "i"}}
             )
     except Exception:
         pass
-    return repo.find_by_email(email)
+    return getattr(repo, f"find_by_{field}")(value)
+
+
+def _apply_login_identity_edit(repo, user_id: str, existing: dict, update_data: dict) -> dict:
+    """An edit may change a user's username / email (both are login keys).
+    Mutates ``update_data`` and returns {field: (old, new)} for what really changes.
+
+    * an explicit null, or the exact stored value, is dropped: no write;
+    * a case-only difference (a legacy "Ravi" that login, which lower-cases,
+      cannot find) is written lower-cased, which repairs that login -- unless
+      another user already holds exactly the lower-cased value (a legacy
+      "Ravi"/"ravi" pair), when it is left alone instead of hitting the unique
+      index as a 500;
+    * any other change must be well-formed (username 3-50 of [a-z0-9._-], a
+      valid email) and not held by another user, compared case-insensitively.
+    """
+    changed = {}
+    for field, label in (("username", "Username"), ("email", "Email")):
+        if field not in update_data:
+            continue
+        value = update_data[field]
+        old = existing.get(field) or ""
+        if value is None or value == old:
+            update_data.pop(field)
+            continue
+        if value == old.strip().lower():
+            twin = getattr(repo, f"find_by_{field}")(value)
+            if twin and twin.get("user_id") != user_id:
+                update_data.pop(field)
+            else:
+                changed[field] = (old, value)
+            continue
+        if field == "username" and not re.fullmatch(r"[a-z0-9._-]{3,50}", value):
+            raise HTTPException(
+                status_code=422,
+                detail="Username must be 3-50 letters, digits, dots, dashes or underscores",
+            )
+        if field == "email":
+            try:
+                TypeAdapter(EmailStr).validate_python(value)
+            except ValidationError:
+                raise HTTPException(status_code=422, detail="Enter a valid email address")
+        other = _find_ci(repo, field, value)
+        if other and other.get("user_id") != user_id:
+            raise HTTPException(status_code=400, detail=f"{label} already exists")
+        changed[field] = (old, value)
+    return changed
 
 
 # ============================================================================
@@ -1031,6 +1095,7 @@ async def update_user(
         # an unrelated edit can't wipe module_access (or any other field). When
         # module_access IS sent it round-trips through (sanitized) and overwrites.
         update_data = user.model_dump(exclude_unset=True)
+        _login_changed = _apply_login_identity_edit(repo, user_id, existing, update_data)
 
         # PRIVILEGE GUARD 2: if roles are being changed, the actor must be
         # allowed to assign the NEW set (can't escalate a user -- or themselves
@@ -1112,6 +1177,15 @@ async def update_user(
             # keep 401ing off a stale entry either).
             if "is_active" in update_data:
                 invalidate_user_status(user_id)
+            if _login_changed:
+                _write_password_reset_audit(
+                    current_user, existing, action="USER_LOGIN_CHANGED",
+                    extra={
+                        # the shape the Activity Log's change panel already reads
+                        "before_state": {f: o for f, (o, _n) in _login_changed.items()},
+                        "after_state": {f: n for f, (_o, n) in _login_changed.items()},
+                    },
+                )
             return {"user_id": user_id, "message": "User updated successfully"}
 
         raise HTTPException(status_code=500, detail="Failed to update user")
@@ -1269,7 +1343,7 @@ class ResetPasswordBody(BaseModel):
 
 
 def _write_password_reset_audit(
-    actor: dict, target: dict, action: str = "PASSWORD_RESET"
+    actor: dict, target: dict, action: str = "PASSWORD_RESET", extra: Optional[dict] = None
 ) -> None:
     """Append ONE fail-soft ``PASSWORD_RESET`` audit row.
 
@@ -1297,7 +1371,9 @@ def _write_password_reset_audit(
                 "store_id": target.get("primary_store_id"),
                 "severity": "INFO",
                 "timestamp": datetime.now(),
-                # Deliberately NO password field of any kind.
+                # Deliberately NO password field of any kind. ``extra`` carries
+                # a login rename's before_state/after_state (USER_LOGIN_CHANGED).
+                **(extra or {}),
             }
         )
     except Exception:  # noqa: BLE001 - audit must never block the reset
