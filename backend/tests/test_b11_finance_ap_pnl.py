@@ -1292,3 +1292,161 @@ def test_d66_the_imported_note_books_its_piece_so_two_counter_returns_at_once_ca
     assert _counter_claim(db, rr, "RJ", 1, "2026-11-09T05:00:00+00:00", precheck=False)
     assert not _counter_claim(db, rr, "RJ", 2, "2026-11-09T05:00:00+00:00", precheck=False)
     assert _pnl()["returns_cogs_reversal"] == 2 * 600.0
+
+
+# --------------------------------------------------------------------------
+# Codex round 1 on 3aa291d5 (corrections A-D)
+# --------------------------------------------------------------------------
+
+
+def _two_lines_one_product(db, costs, named=True):
+    """Two pieces of ONE product, one on each order line, at different costs."""
+    items = [{"item_id": f"L{i}", "product_id": "P1", "quantity": 1, "unit_price": 900.0,
+              "item_total": 900.0, "taxable_value": 900.0, "gst_rate": 0.0, "cost_at_sale": c,
+              **({"stock_id": f"U{i}"} if named else {})} for i, c in enumerate(costs)]
+    db.orders.insert_one({"order_id": "O2", "store_id": "S1", "status": "DELIVERED", "payment_status": "PAID",
+                          "created_at": datetime(2026, 11, 4, 5, 0), "grand_total": 1800.0, "tax_amount": 0.0,
+                          "items": items})
+    prefix = "U" if named else "M"
+    db.stock_units.insert_many([{"stock_id": f"{prefix}{i}", "product_id": "P1"} for i in range(2)])
+    return {"return_id": "R2", "order_id": "O2", "store_id": "S1", "status": "COMPLETED",
+            "created_at": "2026-11-05T05:00:00+00:00", "restock_applied": True,
+            "restock_stock_ids": [f"{prefix}{i}" for i in (1, 0)],
+            "items": [{"order_item_id": f"L{i}", "product_id": "P1", "return_qty": 1.0,
+                       "condition": "GOOD", "restock": True} for i in range(2)],
+            "gst_breakup": {"gross": 1800.0, "taxable": 1800.0, "tax": 0.0}}
+
+
+@pytest.mark.parametrize("costs", [[500.0, 900.0], [900.0, 500.0]])
+@pytest.mark.parametrize("named", [True, False])
+def test_review_a_two_pieces_of_one_product_each_give_back_their_own_line_cost(db, costs, named):
+    """Codex A: both pieces of one product returned together gave back the
+    FIRST line's cost twice (1000 or 1800, not 1400). A unit its order line
+    names gives back that line's cost; a unit found only by its product takes
+    a line with room left, each line at most its own pieces."""
+    db.returns.insert_one(_two_lines_one_product(db, costs, named))
+    assert _pnl()["returns_cogs_reversal"] == 1400.0
+    assert _by_store()["S1"]["cogs"] == 0.0
+
+
+def test_review_b_a_retried_credit_with_another_shop_or_receipt_is_refused(ap):
+    d, cli = ap
+    d.stores.insert_one({"store_id": "S2", "store_code": "BV-S2"})
+    body = {"amount": 5.0, "date": "2026-11-04", "reason": "scheme", "cn_type": "SCHEME_CN",
+            "store_id": "S1", "request_id": "req-b11-shop"}
+    first = cli.post("/vendors/V1/debit-notes", json=body)
+    assert first.status_code == 201, first.text
+    moved = cli.post("/vendors/V1/debit-notes", json={**body, "store_id": "S2"})
+    assert moved.status_code == 409, moved.text  # never the S1 note passed off as an S2 save
+    receipt = cli.post("/vendors/V1/debit-notes", json={**body, "grn_id": "GRN-NONE"})
+    assert receipt.status_code == 404, receipt.text  # as a new note naming it
+    d.grns.insert_one({"grn_id": "GRN-1", "vendor_id": "V1", "store_id": "S1"})
+    other = cli.post("/vendors/V1/debit-notes", json={**body, "grn_id": "GRN-1"})
+    assert other.status_code == 409, other.text
+    assert cli.post("/vendors/V1/debit-notes", json=body).json()["debit_note_id"] == first.json()["debit_note_id"]
+    assert d.vendor_debit_notes.count_documents({}) == 1
+
+
+def test_review_b_a_retried_payment_with_another_shop_or_mode_is_refused(ap):
+    d, cli = ap
+    d.stores.insert_one({"store_id": "S2", "store_code": "BV-S2"})
+    body = {"amount": 50.0, "payment_date": "2026-11-04", "mode": "BANK", "store_id": "S1",
+            "reference": "UTR1", "request_id": "req-b11-pay1"}
+    first = cli.post("/vendors/V1/payments", json=body)
+    assert first.status_code == 201, first.text
+    assert cli.post("/vendors/V1/payments", json={**body, "store_id": "S2"}).status_code == 409
+    assert cli.post("/vendors/V1/payments", json={**body, "mode": "CASH"}).status_code == 409
+    assert cli.post("/vendors/V1/payments", json=body).json()["payment_id"] == first.json()["payment_id"]
+    assert d.vendor_payments.count_documents({}) == 1
+
+
+def test_review_b_no_request_id_write_without_its_unique_index(ap, monkeypatch):
+    """Two copies of one request at once could both save when the unique
+    index could not be built: a 503 now, nothing written."""
+    d, cli = ap
+
+    def broken(self, *_a, **_k):
+        raise RuntimeError("index build refused")
+
+    monkeypatch.setattr(mongomock.collection.Collection, "create_index", broken)
+    assert _credit(cli, "req-b11-noidx").status_code == 503
+    assert d.vendor_debit_notes.count_documents({}) == 0
+
+
+@pytest.mark.parametrize("coll", ["vendor_bills", "returns"])
+def test_review_c_an_unreadable_pnl_leg_is_unavailable_never_zero(db, monkeypatch, coll):
+    """Codex C: an unreadable supplier-bill or returns read made the P&L a
+    200 with those legs read as zero."""
+    from fastapi import HTTPException
+
+    _sale(db)
+    db.returns.insert_one(_ret("R1", "2026-11-04T06:00:00+00:00"))
+    db.vendor_bills.insert_one(_bill("B1"))
+    real = mongomock.collection.Collection.find
+
+    def find(self, *a, **k):
+        if self.name == coll:
+            raise RuntimeError(f"{coll} unavailable")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "find", find)
+    # (By category reads no supplier bills: its rows are product categories.)
+    for read in (_pnl, _by_store) + ((_by_category,) if coll == "returns" else ()):
+        with pytest.raises(HTTPException) as err:
+            read()
+        assert err.value.status_code == 503
+
+
+def _failing_returns_insert(monkeypatch, lost_ack):
+    real = mongomock.collection.Collection.insert_one
+    seen = []
+
+    def insert_one(self, doc, *a, **k):
+        if self.name == "returns" and str(doc.get("return_id", "")).startswith("RET-HIST-") and not seen:
+            seen.append(doc["return_id"])
+            if lost_ack:
+                real(self, doc, *a, **k)
+            raise RuntimeError("returns write: no reply")
+        return real(self, doc, *a, **k)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "insert_one", insert_one)
+    return seen
+
+
+@pytest.mark.parametrize("lost_ack", [False, True])
+def test_review_d_an_imported_note_whose_return_record_did_not_land_is_failed_and_healed(db, monkeypatch, lost_ack):
+    """Codex D: the RET-HIST insert failed (or landed with its reply lost),
+    the importer released the booking anyway and said 'booked', and every
+    re-run said 'duplicate' without repairing it. Now the booking stays (it is
+    the real Shopify return), a record that did not land is reported failed,
+    and the next run completes it from the line's mark: one note, one
+    booking, each piece's cost once."""
+    from api.routers import returns as rr
+    from api.services import shopify_ingest
+
+    monkeypatch.setattr(rr, "_orders_coll", lambda: _Positional(db.orders))
+    monkeypatch.setattr(rr, "_returns_coll", lambda: db.returns)
+    order = _imported_two_piece(db, "RD")
+    seen = _failing_returns_insert(monkeypatch, lost_ack)
+    payload = {"id": order["shopify_order_id"], "financial_status": "partially_refunded", "refunds": [
+        {"id": "RF-RD", "processed_at": "2026-11-08T05:00:00+00:00",
+         "refund_line_items": [{"line_item_id": "LI-RD", "quantity": 1, "subtotal": 952.38, "total_tax": 47.62}],
+         "transactions": [{"kind": "refund", "status": "success", "amount": "1000.00"}]}]}
+    first = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
+    assert seen
+    assert (first["credit_notes"], first["cn_failed"]) == ((1, 0) if lost_ack else (0, 1))
+    line = db.orders.find_one({"order_id": "RD"})["items"][0]
+    assert line["returned_qty"] == 1.0 and line["restocked_refunds"]["RF-RD"] == 1.0  # the booking stays
+    again = shopify_ingest._book_historical_refund_credit_notes(db, payload, order)
+    assert again["cn_failed"] == 0 and again["duplicate_refunds"] == 1
+    assert again.get("healed", 0) == (0 if lost_ack else 1)
+    shopify_ingest._book_historical_refund_credit_notes(db, payload, order)  # healthy: nothing more
+    notes = list(db.returns.find({"shopify_refund_id": "RF-RD"}))
+    assert len(notes) == 1 and notes[0]["goods_lines"][0]["return_qty"] == 1.0
+    assert db.credit_note_ledger.count_documents({"shopify_refund_id": "RF-RD"}) == 1
+    assert db.orders.find_one({"order_id": "RD"})["items"][0]["returned_qty"] == 1.0
+    # The counter takes the other piece, never a third.
+    assert _counter_claim(db, rr, "RD", 1, "2026-11-09T05:00:00+00:00")
+    assert not _counter_claim(db, rr, "RD", 2, "2026-11-09T05:00:00+00:00")
+    pnl = _pnl()
+    assert pnl["returns_cogs_reversal"] == 2 * 600.0 and pnl["returns_taxable"] == 2 * 952.38
