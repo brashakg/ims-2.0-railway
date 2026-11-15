@@ -24,7 +24,7 @@ os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-for-unit-tests")
 
 pytest.importorskip("mongomock")  # the shared helpers import it
 
-from tests.test_order_edit_recovery import stalled_save_case  # noqa: E402
+from tests.test_order_edit_recovery import ledger, stalled_save_case  # noqa: E402,F401
 from tests.test_order_edit_stock_identity import cells, door, invoiced  # noqa: E402,F401
 from tests.test_removed_goods_return_native import shop  # noqa: E402,F401  (native shop)
 
@@ -41,3 +41,49 @@ def test_a_take_after_the_sweep_goes_back_on_real_mongo(client, shop, cells, doo
 
     assert type(shop["db"].client).__module__.startswith("pymongo"), "native Mongo only"
     stalled_take_case(client, shop, cells, door, where, monkeypatch)
+
+
+# Codex round 7 (15 Nov 2026), on the same native shop: each case is the
+# in-memory suite's own test body, run here against real Mongo.
+
+
+def _native(shop):
+    assert type(shop["db"].client).__module__.startswith("pymongo"), "native Mongo only"
+
+
+def test_a_stale_removal_keeps_the_resold_piece_on_real_mongo(client, shop, door, monkeypatch):
+    from tests.test_order_edit_recovery import (
+        test_a_stale_removal_never_frees_the_piece_sold_again_to_this_bill as case,
+    )
+
+    _native(shop)
+    case(client, shop, door, monkeypatch)
+
+
+def test_a_lost_reserve_record_still_goes_back_on_real_mongo(client, shop, cells, door, monkeypatch):
+    from tests.test_order_edit_recovery import test_a_reservation_whose_record_was_lost_still_goes_back as case
+
+    _native(shop)
+    case(client, shop, cells, door, monkeypatch)
+
+
+@pytest.mark.parametrize("where", ["before the take", "between the takes"])
+def test_a_dead_press_strands_nothing_on_real_mongo(client, shop, cells, where, monkeypatch):
+    from tests.test_order_edit_recovery import test_a_take_after_the_sweep_whose_press_died_is_swept_back as case
+
+    _native(shop)
+    case(client, shop, cells, where, monkeypatch)
+
+
+def test_overlapping_regates_claw_once_on_real_mongo(shop, ledger, monkeypatch):
+    from tests.test_order_edit_recovery import test_two_overlapping_regates_claw_the_earn_once as case
+
+    _native(shop)
+    case(ledger, monkeypatch)
+
+
+def test_a_lost_claw_move_is_completed_once_on_real_mongo(shop, ledger, monkeypatch):
+    from tests.test_order_edit_recovery import test_a_claw_whose_balance_move_was_lost_is_completed_once as case
+
+    _native(shop)
+    case(ledger, monkeypatch)
