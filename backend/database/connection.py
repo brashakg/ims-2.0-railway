@@ -352,6 +352,15 @@ class DatabaseConnection:
         # (product_id, store_id, status) covers both filtering + grouping in the
         # aggregation for per-product rolled-up stock lookups across the catalog.
         _idx("stock_units", [("store_id", 1), ("status", 1)], background=True)
+        # The pieces a bill holds: every release, count and edit-op sweep asks
+        # {order_id, status: "SOLD", ...}. PARTIAL on SOLD, so only sold pieces
+        # are indexed (#1393: the edit sweep looks every tick, with no window).
+        _idx("stock_units", [("order_id", 1)], partialFilterExpression={"status": "SOLD"},
+             name="stock_units_sold_by_order", background=True)
+        # A bill edit's stock work (orders/edit_ops): each runner finds its row
+        # by op_id, the sweep by state and age.
+        _idx("order_edit_ops", "op_id", unique=True, background=True)
+        _idx("order_edit_ops", [("state", 1), ("created_at", 1)], background=True)
         _idx(
             "stock_units",
             [("product_id", 1), ("store_id", 1), ("status", 1)],
