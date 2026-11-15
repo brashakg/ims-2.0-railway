@@ -1006,6 +1006,160 @@ def test_d54_a_post_bound_spend_finishes_only_its_own_journal(db):
         assert je_service.needs_reapproval(db, _je(db, j["je_id"])) is True
 
 
+class _PostedAckLost:
+    """The journal collection, with the APPROVED -> POSTED write landing at
+    the database but its reply lost (AutoReconnect after the write): the
+    journal IS posted, the caller is told it failed."""
+
+    def __init__(self, coll):
+        self._coll = coll
+
+    def find_one_and_update(self, flt, update, *a, **k):
+        from pymongo.errors import AutoReconnect
+
+        out = self._coll.find_one_and_update(flt, update, *a, **k)
+        if (update.get("$set") or {}).get("status") == "POSTED":
+            raise AutoReconnect("journal reply lost")
+        return out
+
+    def __getattr__(self, name):
+        return getattr(self._coll, name)
+
+
+def test_d68_a_post_whose_reply_was_lost_still_gets_its_posted_event(db, monkeypatch):
+    """Codex round 2 (d54-additional): the POSTED write landed, its reply was
+    lost, and every later Post answered already_posted -- the journal stayed
+    POSTED with no je_posted audit event, for good. D68: a Post that finds the
+    journal already POSTED writes the missing event exactly once (keyed by the
+    journal id) and then answers already_posted."""
+    _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+
+    real_coll = je_service._je_coll
+    monkeypatch.setattr(je_service, "_je_coll", lambda d: _PostedAckLost(real_coll(d)))
+    res = _post(db, j["je_id"])
+    monkeypatch.setattr(je_service, "_je_coll", real_coll)
+    assert (res.get("ok"), res.get("error")) == (False, "already_posted")
+    assert _je(db, j["je_id"])["status"] == "POSTED"
+    rows = _posted_rows(db, j["je_id"])
+    assert len(rows) == 1                                       # was 0
+    assert rows[0]["user_id"] == "checker"                      # the poster, from the journal
+    assert rows[0]["after_state"]["status"] == "POSTED"
+
+    for _ in range(2):                                          # retries: one event, ever
+        assert _post(db, j["je_id"], poster="someone-else")["error"] == "already_posted"
+    assert len(_posted_rows(db, j["je_id"])) == 1
+    assert verify_chain(db.get_collection("audit_logs"))["intact"] is True
+
+
+def test_d68_a_retry_repairs_a_posted_journal_missing_its_event(db):
+    """A journal left POSTED without its event (the reply-lost case before
+    D68, or an audit write that failed) is repaired by the next Post retry --
+    once -- and a journal that already has its event (written before D68,
+    under a random log id) is never given a second one."""
+    _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    assert _post(db, j["je_id"]).get("ok") is True
+    coll = db.get_collection("audit_logs")
+    assert len(_posted_rows(db, j["je_id"])) == 1
+    assert _post(db, j["je_id"])["error"] == "already_posted"
+    assert len(_posted_rows(db, j["je_id"])) == 1               # legacy/normal event kept, no second
+
+    coll.delete_many({"action": "je_posted"})                   # the event that never got written
+    assert _post(db, j["je_id"], poster="retrier")["error"] == "already_posted"
+    rows = _posted_rows(db, j["je_id"])
+    assert len(rows) == 1                                       # was 0
+    assert _post(db, j["je_id"])["error"] == "already_posted"
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
+def test_d68_racing_posts_and_repairs_write_one_event(mongo_db):
+    """Real MongoDB, two requests at once: two Posts of one APPROVED journal,
+    then (event removed) four repairs released together. One posting, and one
+    je_posted event each time: the event's log id is the journal id."""
+    db = mongo_db
+    _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+
+    def _together(n):
+        gate, got = threading.Barrier(n), []
+
+        def _go():
+            gate.wait(timeout=20)
+            got.append(_post(db, j["je_id"]))
+        threads = [threading.Thread(target=_go) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        return got
+
+    got = _together(2)
+    assert sorted(bool(r.get("ok")) for r in got) == [False, True]
+    assert len(_posted_rows(db, j["je_id"])) == 1
+    db.get_collection("audit_logs").delete_many({"action": "je_posted"})
+    assert all(r["error"] == "already_posted" for r in _together(4))
+    assert len(_posted_rows(db, j["je_id"])) == 1
+    assert db.get_collection("journal_entries").count_documents({"je_id": j["je_id"]}) == 1
+
+
+def test_d68_a_period_locked_after_posting_does_not_block_the_repair(db, monkeypatch):
+    """The month was locked after the journal posted (reply lost). The Post
+    route's lock gate stopped the retry with 423 before the repair could run.
+    A journal already POSTED posts nothing more, so the route lets the retry
+    through: 409 already_posted, event written; an APPROVED journal in a
+    locked month is still refused."""
+    checker = _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    assert _post(db, j["je_id"]).get("ok") is True
+    db.get_collection("audit_logs").delete_many({"action": "je_posted"})
+    monkeypatch.setattr(je_router, "_get_db", lambda: db)
+
+    def _locked(_db, _day):
+        raise HTTPException(status_code=423, detail="Accounting period 05/2026 is locked")
+
+    monkeypatch.setattr(je_router, "check_period_locked", _locked)
+    code, _body = _call(je_router.post_journal_entry(j["je_id"], current_user=checker))
+    assert code == 409                                          # was 423, event never written
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+    other = _submitted_journal(db, "maker")
+    assert _journal_approve(db, other["je_id"]).get("ok") is True
+    code, _body = _call(je_router.post_journal_entry(other["je_id"], current_user=checker))
+    assert code == 423
+    assert _je(db, other["je_id"])["status"] == "APPROVED"
+
+
+def test_d68_an_unreadable_trail_never_writes_a_second_event(db, monkeypatch):
+    """When the trail cannot be read the repair is skipped (the next retry
+    makes it), so an event already there is never doubled."""
+    _user(db, "checker", ["ADMIN"])
+    j = _submitted_journal(db, "maker")
+    assert _journal_approve(db, j["je_id"]).get("ok") is True
+    assert _post(db, j["je_id"]).get("ok") is True
+    real_get = db.get_collection
+
+    class _NoReads:
+        def __init__(self, coll):
+            self._coll = coll
+
+        def find_one(self, *a, **k):
+            raise RuntimeError("audit read lost")
+
+        def __getattr__(self, name):
+            return getattr(self._coll, name)
+
+    monkeypatch.setattr(db, "get_collection",
+                        lambda n: _NoReads(real_get(n)) if n == "audit_logs" else real_get(n))
+    assert _post(db, j["je_id"])["error"] == "already_posted"
+    monkeypatch.setattr(db, "get_collection", real_get)
+    assert len(_posted_rows(db, j["je_id"])) == 1
+
+
 def _consume_route(db, monkeypatch, request_id: str, user: Dict[str, Any]):
     monkeypatch.setattr(approvals_router, "_get_db", lambda: db)
     return _call(approvals_router.consume_request(
@@ -1352,6 +1506,136 @@ def test_d54_a_slow_new_writer_still_hands_its_seq_on_without_a_fork(db, monkeyp
     assert fast is not None and got.get("slow") is not None
     rows = _chained(db)
     assert [r["entity_id"] for r in rows] == ["P-0", "P-2", "P-1"]
+    assert verify_chain(coll)["intact"] is True
+
+
+class _HeadFails:
+    """The database as the NEW writer sees it, with its claim-counter head
+    failing once: ``fault="update"`` -- the guarded reservation update raises
+    (AutoReconnect); ``fault="read"`` -- the head read after it raises;
+    ``fault="update_landed"`` -- the update applies but its reply is lost."""
+
+    def __init__(self, db, fault: str):
+        self._db, self.fault, self.fired = db, fault, 0
+
+    def get_collection(self, name):
+        coll = self._db.get_collection(name)
+        return self._Head(coll, self) if name == audit_chain.HEAD_COLLECTION else coll
+
+    class _Head:
+        def __init__(self, coll, owner):
+            self._coll, self._o = coll, owner
+
+        def __getattr__(self, name):
+            return getattr(self._coll, name)
+
+        def _fire(self, kind):
+            from pymongo.errors import AutoReconnect
+
+            if self._o.fault == kind and not self._o.fired:
+                self._o.fired += 1
+                raise AutoReconnect(f"head {kind} lost")
+
+        def update_one(self, flt, update, *a, **k):
+            if isinstance((flt or {}).get("seq"), dict):
+                self._fire("update")
+                out = self._coll.update_one(flt, update, *a, **k)
+                self._fire("update_landed")
+                return out
+            return self._coll.update_one(flt, update, *a, **k)
+
+        def find_one(self, *a, **k):
+            self._fire("read")
+            return self._coll.find_one(*a, **k)
+
+
+class _RowsOn(_FlakyRows):
+    """The audit collection, reaching the head through ``db``."""
+
+    def __init__(self, coll, db, **kw):
+        super().__init__(coll, **kw)
+        self.database = db
+
+
+@pytest.mark.parametrize("fault", ["update", "read"])
+def test_d54_a_head_error_never_takes_a_previous_version_writers_seq(db, monkeypatch, fault):
+    """Codex round 2 (mixed_head_failure): one transient error on the claim
+    counter (its guarded update, or the read after it) made the new writer
+    treat the seq as its own -- 'could not reserve' answered like 'reserved'
+    -- so it took the seq a previous-version writer held, that writer's insert
+    was refused and its audit row lost. An unknown owner is now never
+    permission: the writer asks again, finds the old writer's claim, waits for
+    its row and chains after it. Every row kept."""
+    flaky = _HeadFails(db, fault)
+    new_repo = AuditRepository(_RowsOn(db.get_collection("audit_logs"), flaky))
+    old, new, coll = _old_writer_with_new_writer_meanwhile(db, new_repo, stall=0.3)
+    assert flaky.fired == 1
+    assert old is not None                                     # was None: E11000, row lost
+    assert new is not None
+    assert [r["entity_id"] for r in _chained(db)] == ["P-0", "P-1", "P-2"]
+    assert verify_chain(coll)["intact"] is True
+
+
+def test_d54_a_reservation_whose_reply_was_lost_still_writes_the_row(db, monkeypatch):
+    """The reservation landed but its reply was lost: the writer does not know
+    it holds the seq. Asking again finds its own claim in the new-writer ring;
+    after the grace it takes the seq it already holds -- one row, one chain."""
+    monkeypatch.setattr(audit_chain, "_HOLDER_GRACE_S", 0.05)
+    coll = db.get_collection("audit_logs")
+    coll.create_index("seq", unique=True, sparse=True)
+    assert AuditRepository(coll).create(_audit_row(0)) is not None
+    flaky = _HeadFails(db, "update_landed")
+    assert AuditRepository(_RowsOn(coll, flaky)).create(_audit_row(1)) is not None
+    assert flaky.fired == 1
+    assert [r["entity_id"] for r in _chained(db)] == ["P-0", "P-1"]
+    assert verify_chain(coll)["intact"] is True
+
+
+def test_d54_a_head_that_stays_unreachable_keeps_the_row_unchained(db, monkeypatch):
+    """A head that never answers: ownership is never known, so no seq is
+    taken -- the row is still written (fail-soft, counted as unchained)."""
+    monkeypatch.setattr(audit_chain, "_MAX_CLAIM_ATTEMPTS", 3)
+    coll = db.get_collection("audit_logs")
+    coll.create_index("seq", unique=True, sparse=True)
+    assert AuditRepository(coll).create(_audit_row(0)) is not None
+    class _HeadDown:
+        def get_collection(self, name):
+            if name != audit_chain.HEAD_COLLECTION:
+                return db.get_collection(name)
+            from pymongo.errors import AutoReconnect
+
+            class _Down:
+                def __getattr__(self, _n):
+                    def _fail(*_a, **_k):
+                        raise AutoReconnect("head down")
+                    return _fail
+            return _Down()
+
+    row = AuditRepository(_RowsOn(coll, _HeadDown())).create(_audit_row(1))
+    assert row is not None and "seq" not in row
+    assert [r["entity_id"] for r in _chained(db)] == ["P-0"]
+    assert coll.count_documents({"seq": {"$exists": False}}) == 1
+
+
+def test_d54_a_seq_check_that_fails_after_a_refused_insert_keeps_the_row(db, monkeypatch):
+    """A new writer slower than the grace is taken over (R19); its own insert
+    is refused on the seq. If the read confirming that then failed, the row
+    was given up as 'refused for another reason' and lost. A duplicate-key
+    refusal now chains again from the new tail whatever that read said."""
+    monkeypatch.setattr(audit_chain, "_HOLDER_GRACE_S", 0.1)
+    coll = db.get_collection("audit_logs")
+    coll.create_index("seq", unique=True, sparse=True)
+    assert AuditRepository(coll).create(_audit_row(0)) is not None
+    slow = AuditRepository(_FlakyRows(coll, insert_delay=0.6, fail_reads=1))
+    got = {}
+    t = threading.Thread(target=lambda: got.update(slow=slow.create(_audit_row(1))))
+    t.start()
+    threading.Event().wait(0.2)                                # the slow writer holds seq 2
+    fast = AuditRepository(coll).create(_audit_row(2))
+    t.join(timeout=30)
+    assert fast is not None
+    assert got.get("slow") is not None                         # was None: row lost
+    assert [r["entity_id"] for r in _chained(db)] == ["P-0", "P-2", "P-1"]
     assert verify_chain(coll)["intact"] is True
 
 

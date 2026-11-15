@@ -393,7 +393,8 @@ def validate_lines(db, lines: List[Dict[str, Any]]) -> Tuple[Optional[str], List
 # ============================================================================
 
 
-def _audit(db, action: str, je: Dict[str, Any], *, actor: str, reason: str = "") -> None:
+def _audit(db, action: str, je: Dict[str, Any], *, actor: str, reason: str = "",
+           log_id: Optional[str] = None) -> None:
     """Hash-chained audit row per JE transition via AuditRepository.create.
     Fail-soft -> the transition still stands."""
     if db is None:
@@ -419,7 +420,7 @@ def _audit(db, action: str, je: Dict[str, Any], *, actor: str, reason: str = "")
         "entity_id": je.get("entity_id"),
     }
     doc = {
-        "log_id": f"AUD-{uuid.uuid4().hex[:12]}",
+        "log_id": log_id or f"AUD-{uuid.uuid4().hex[:12]}",
         "action": action,
         "entity_type": "journal_entry",
         "entity_id": je.get("je_id"),
@@ -966,6 +967,33 @@ def reject_je(db, *, je_id: str, approver_id: str, approver_roles: List[str],
     return {"ok": True, "je": _jsonable(updated)}
 
 
+def _posted_event_id(je_id: str) -> str:
+    """The je_posted audit row's log id: one per journal, so the unique
+    _id/log_id index lets that event be written exactly once (D68)."""
+    return f"AUD-JE-POSTED-{je_id}"
+
+
+def _already_posted(db, je: Dict[str, Any], poster_id: str) -> Dict[str, Any]:
+    """A Post that finds the journal POSTED (a retry, a racing poster, or this
+    Post's own write whose reply was lost) first writes the je_posted event if
+    the journal has none (D68), then answers already_posted. The event is
+    keyed by the journal id, so racing retries write it once. A trail that
+    cannot be read is left for the next retry: never risk a second event for a
+    journal posted before D68 (random log id)."""
+    je_id = je.get("je_id")
+    try:
+        missing = db.get_collection("audit_logs").find_one(
+            {"entity_id": je_id, "action": "je_posted"}) is None
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[JE] could not check the posted event of %s: %s", je_id, e)
+        missing = False
+    if missing:
+        snapshot = {k: v for k, v in je.items() if k != "_id"}
+        _audit(db, "je_posted", snapshot, actor=je.get("posted_by") or poster_id,
+               reason="recorded_on_retry", log_id=_posted_event_id(je_id))
+    return {"ok": False, "http": 409, "error": "already_posted"}
+
+
 def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
     """APPROVED -> POSTED. Consumes the E4 approval EXACTLY ONCE (single-use
     guard), then atomically flips the JE to POSTED. The status==APPROVED filter
@@ -977,7 +1005,7 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
     je = _take_request_decision(db, je)
     status = je.get("status")
     if status == STATUS_POSTED:
-        return {"ok": False, "http": 409, "error": "already_posted"}
+        return _already_posted(db, je, poster_id)
     if status != STATUS_APPROVED:
         return {"ok": False, "http": 409, "error": "not_approved", "status": status}
     request_id = je.get("approval_request_id")
@@ -1009,19 +1037,20 @@ def post_je(db, *, je_id: str, poster_id: str) -> Dict[str, Any]:
 
     updated = _set(
         db, je_id,
-        {"status": STATUS_POSTED, "posted_at": _now()},
+        {"status": STATUS_POSTED, "posted_at": _now(), "posted_by": poster_id},
         expect_status=STATUS_APPROVED,
     )
     if updated is None:
         # The approval was consumed but the JE was already moved by a racing
-        # poster -- treat as already posted (idempotent post).
+        # poster, or by this very write whose reply was lost -- treat as
+        # already posted (idempotent post), with its event (D68).
         cur = get_je(db, je_id)
         if (cur or {}).get("status") == STATUS_POSTED:
-            return {"ok": False, "http": 409, "error": "already_posted"}
+            return _already_posted(db, cur, poster_id)
         return {"ok": False, "http": 409, "error": "not_approved",
                 "status": (cur or {}).get("status")}
     updated.pop("_id", None)
-    _audit(db, "je_posted", updated, actor=poster_id)
+    _audit(db, "je_posted", updated, actor=poster_id, log_id=_posted_event_id(je_id))
     logger.info("[JE] %s POSTED by %s", je_id, poster_id)
     return {"ok": True, "je": _jsonable(updated)}
 

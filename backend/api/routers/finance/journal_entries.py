@@ -295,8 +295,10 @@ async def post_journal_entry(
     if not je:
         raise HTTPException(status_code=404, detail="Journal entry not found")
     # Gate 2 (double period-lock): a period locked after approval blocks posting.
+    # A journal already POSTED posts nothing more: its retry only records a
+    # missing je_posted event (D68), so a lock never stands in its way.
     entry_date = je.get("entry_date")
-    if isinstance(entry_date, datetime):
+    if isinstance(entry_date, datetime) and je.get("status") != je_service.STATUS_POSTED:
         check_period_locked(db, entry_date.date())
     res = je_service.post_je(db, je_id=je_id, poster_id=current_user.get("user_id"))
     return _je_raise(res)
