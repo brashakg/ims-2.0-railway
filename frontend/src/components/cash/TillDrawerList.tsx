@@ -21,9 +21,11 @@ export default function TillDrawerList({
           {d.counted_paisa == null ? 'not counted' : `counted ${rupees(d.counted_paisa)}`}
           {d.variance_paisa != null
             ? `, variance ${d.variance_paisa > 0 ? '+' : d.variance_paisa < 0 ? '-' : ''}${rupees(Math.abs(d.variance_paisa))}`
-            : d.counted_paisa != null && d.status !== 'LOCKED'
-              ? ', variance shown once a manager locks it'
-              : ''}
+            : d.variance_status === 'COMPARISON_UNAVAILABLE'
+              ? ', comparison not available (an earlier drawer was recorded by an older version)'
+              : d.counted_paisa != null && d.status !== 'LOCKED'
+                ? ', variance shown once a manager locks it'
+                : ''}
         </li>
       ))}
     </ul>

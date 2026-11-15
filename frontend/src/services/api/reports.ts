@@ -69,6 +69,8 @@ export interface DayEndClose {
   till_drawers?: TillDrawerSummary[] | null;
   /** D53: the day had several drawers, so no whole-day variance was stored. */
   variance_withheld_several_drawers?: boolean;
+  // The close could not read the day's drawers: no variance was worked out.
+  variance_comparison_unavailable?: boolean;
   notes: string | null;
   closed_by: string | null;
   closed_at: string;

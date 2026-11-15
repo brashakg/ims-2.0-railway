@@ -21,7 +21,10 @@ export type ReconStatus =
   | 'NOT_COUNTED'
   // D53: a Cash Register close on a day with several drawers; no single
   // variance is true for it (each drawer has its own Z-Read row).
-  | 'SEVERAL_DRAWERS';
+  | 'SEVERAL_DRAWERS'
+  // No comparison could be trusted: the close could not read the day's
+  // drawers, or an earlier drawer was recorded by an older version (D76).
+  | 'COMPARISON_UNAVAILABLE';
 export type ReconSource = 'CASH_REGISTER' | 'BLIND_EOD';
 
 export interface ReconByModeRow {
@@ -49,7 +52,8 @@ export interface ReconRow {
   cash_refunds: number;
   cash_expenses: number;
   bank_deposit: number;
-  expected_cash: number;
+  // NULL: no comparison is made for this drawer (COMPARISON_UNAVAILABLE).
+  expected_cash: number | null;
   // NULL means nobody counted this drawer -- there is no counted figure and no
   // variance. Never render a null as zero.
   counted_cash: number | null;

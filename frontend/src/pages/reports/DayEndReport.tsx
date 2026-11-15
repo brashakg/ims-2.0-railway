@@ -208,6 +208,8 @@ export default function DayEndReport() {
   const severalDrawers =
     !!closeInfo &&
     ((closeInfo.till_drawers_on_day ?? 1) > 1 || !!closeInfo.variance_withheld_several_drawers);
+  // The close could not read the day's drawers: no variance is claimed.
+  const comparisonUnavailable = !!closeInfo?.variance_comparison_unavailable;
   const shownSystemCash =
     isClosed && closeInfo?.system_cash != null ? closeInfo.system_cash : summary.cashCollected;
   const shownCash = isClosed ? (closeInfo?.closing_cash ?? null) : recordedCash;
@@ -425,15 +427,24 @@ export default function DayEndReport() {
                       Count what is actually in the drawer &mdash; the system figure stays hidden until you close.
                     </p>
                   </div>
-                ) : isClosed && (severalDrawers || !closeInfo) ? (
+                ) : isClosed && (severalDrawers || comparisonUnavailable || !closeInfo) ? (
                   <div className="p-3 rounded-lg bg-gray-50 border border-gray-200" data-testid="day-end-card-variance">
                     <p className="text-xs text-gray-500">Variance</p>
                     <p className="text-sm font-semibold text-gray-600">
-                      {severalDrawers ? 'Shown for each drawer below' : 'See the close record'}
+                      {severalDrawers
+                        ? 'Shown for each drawer below'
+                        : comparisonUnavailable
+                          ? 'Comparison not available'
+                          : 'See the close record'}
                     </p>
                     {severalDrawers && (
                       <p className="text-xs text-gray-500 mt-0.5">
                         This day had several cash drawers. No whole-day variance is worked out.
+                      </p>
+                    )}
+                    {comparisonUnavailable && !severalDrawers && (
+                      <p className="text-xs text-gray-500 mt-0.5">
+                        The day&apos;s cash drawers could not be read at close, so no variance is worked out. The drawer&apos;s own Z-Read compares it.
                       </p>
                     )}
                   </div>

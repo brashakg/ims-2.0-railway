@@ -137,6 +137,10 @@ NOT_COUNTED = "NOT_COUNTED"
 # D53: the shop-day had more than one cash drawer. No single variance is true
 # for it; each drawer's own count and variance are on the record instead.
 SEVERAL_DRAWERS = "SEVERAL_DRAWERS"
+# The close could not tell how many drawers the day had (or an earlier drawer
+# was recorded by older code, D76), so no comparison is made. Same string as
+# eod_tally.COMPARISON_UNAVAILABLE.
+COMPARISON_UNAVAILABLE = "COMPARISON_UNAVAILABLE"
 NOT_COUNTED_MESSAGE = (
     "This drawer was closed without a count, so it is recorded as never "
     "counted - not as an empty drawer. There is no variance to report."

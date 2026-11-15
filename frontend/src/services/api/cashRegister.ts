@@ -50,6 +50,8 @@ export interface CashRegisterSession {
     | 'NOT_COUNTED'
     // D53: the day had several drawers; no single verdict is true for it.
     | 'SEVERAL_DRAWERS'
+    // The close could not read the day's drawers: no verdict is claimed.
+    | 'COMPARISON_UNAVAILABLE'
     | null;
   tolerance?: number | null;
   closing_note?: string | null;

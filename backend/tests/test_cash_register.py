@@ -172,8 +172,14 @@ class _FakeCollection:
         return _R()
 
     def update_one(self, flt, upd):
+        def _eq(d, k, v):
+            # {"$ne": x}: the guarded close's "not yet CLOSED" filter.
+            if isinstance(v, dict) and "$ne" in v:
+                return d.get(k) != v["$ne"]
+            return d.get(k) == v
+
         for d in self.docs:
-            if all(d.get(k) == v for k, v in flt.items()):
+            if all(_eq(d, k, v) for k, v in flt.items()):
                 if "$set" in upd:
                     d.update(upd["$set"])
 

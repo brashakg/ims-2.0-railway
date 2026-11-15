@@ -154,6 +154,12 @@ export default function CashRegisterPage() {
         toast.warning(
           'Closed without a count — recorded as NOT COUNTED, not as an empty drawer. No variance was calculated.',
         );
+      } else if (closed.variance_status === 'COMPARISON_UNAVAILABLE') {
+        // The day's drawers could not be read, so nobody knows whether this
+        // count is the whole day's: no variance is claimed.
+        toast.warning(
+          'Closed. The day\'s cash drawers could not be read, so no variance is shown. Count the drawer on the Z-Read screen to compare it.',
+        );
       } else if (closed.variance_status === 'SEVERAL_DRAWERS') {
         // D53: no single variance is true for a day with several drawers.
         toast.warning(
@@ -557,6 +563,17 @@ function VarianceChip({ session }: { session: CashRegisterSession }) {
   const status = session.variance_status;
   // D53: several drawers on the day -- no single variance or "balanced". The
   // drawers' own counts and variances, never added together.
+  if (status === 'COMPARISON_UNAVAILABLE') {
+    return (
+      <span
+        data-testid="comparison-unavailable-verdict"
+        title="The day's cash drawers could not be read at close, so no variance is shown."
+        className="inline-block rounded px-2 py-0.5 text-xs font-medium bg-gray-100 text-gray-600"
+      >
+        Comparison not available
+      </span>
+    );
+  }
   if (status === 'SEVERAL_DRAWERS') {
     return (
       <div className="text-left inline-block">

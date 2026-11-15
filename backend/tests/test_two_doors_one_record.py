@@ -269,7 +269,12 @@ class TestLinkingNeverStopsTheDayClosing:
         # The day still closed, with its own figures intact.
         assert res["closed"] is True
         assert close["closing_cash"] == 1000.0
-        assert close["variance"] == 0.0
+        # The link failed before the day's drawers were read, so nobody knows
+        # whether this count is the whole day's: no variance is claimed
+        # (Codex PR-1421-round2 F-A; a whole-day figure here could be a false
+        # shortage on a several-drawer day).
+        assert close["variance"] is None
+        assert close["variance_comparison_unavailable"] is True
         # ...and the failure is on the record, not swallowed into a fake success.
         assert close["till_link_ok"] is False
         assert "mongo went away" in str(close["till_link_error"])

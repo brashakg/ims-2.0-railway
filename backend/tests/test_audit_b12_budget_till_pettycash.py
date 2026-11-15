@@ -2152,3 +2152,375 @@ def test_d63_second_drawer_alert_on_real_mongo(monkeypatch):
     finally:
         client.drop_database(name)
         client.close()
+
+
+# ===========================================================================
+# Round 8 (Codex PR-1421-round2): F-1421-R2-A/B/C/D and the lead's D76
+# ===========================================================================
+
+
+def _fail_till_reads(coll, *, counted_only):
+    """Make the till_sessions READS fail the way Codex injected them: the
+    counted-drawers query (it filters on status) or, with counted_only False,
+    every read of the shop-day."""
+    real_find = coll.find
+
+    def _find(query=None, *a, **k):
+        if isinstance(query, dict) and query.get("session_date") == DATE:
+            if not counted_only or isinstance(query.get("status"), dict):
+                raise AutoReconnect("till_sessions read fault")
+        return real_find(query, *a, **k)
+
+    coll.find = _find
+    return lambda: delattr(coll, "find")
+
+
+class TestR8AReadFaultNeverInventsAShortage:
+    """F-1421-R2-A: drawer A Rs 1,000 counted and locked, B takes Rs 3,000; the
+    counted-drawers read fails while Finance > Cash Register closes B at
+    Rs 3,000. The close used to judge B against the WHOLE day (Rs 4,000): a
+    note was demanded, a SHORT close was stored and the manager alerted, and
+    none of it went away after the read recovered and B balanced."""
+
+    def test_register_close_during_the_fault_withholds_the_comparison(self, db, monkeypatch):
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        alerts = _alerts(monkeypatch)
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
+        try:
+            out = _cr_close_b(db, monkeypatch, 6)  # no note: none is owed
+        finally:
+            restore()
+        assert out["variance"] is None
+        assert out["variance_status"] == "SEVERAL_DRAWERS"
+        assert (out["till_link_ok"], out["till_link_error"]) == (False, "drawer_read_failed")
+        assert out["till_drawers_on_day"] == 2
+        assert alerts == []
+        stored = db.get_collection("cash_register_sessions").find_one({"session_id": "CR-D40"})
+        assert (stored["variance"], stored["variance_status"]) == (None, "SEVERAL_DRAWERS")
+        # Recovery: B is counted on the till and balances; nothing false remains.
+        assert till.blind_submit(
+            db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}], actor=CASHIER)["ok"]
+        assert till.lock_session(db, b, actor=MANAGER)["ok"]
+        assert (_till(db, b)["variance_paisa"], _till(db, b)["variance_status"]) == (0, "BALANCED")
+        assert alerts == []
+
+    def test_unreadable_drawer_list_is_comparison_unavailable_not_a_shortage(self, db, monkeypatch):
+        _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        alerts = _alerts(monkeypatch)
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=False)
+        try:
+            out = _cr_close_b(db, monkeypatch, 6)
+        finally:
+            restore()
+        assert (out["variance"], out["variance_status"]) == (None, "COMPARISON_UNAVAILABLE")
+        assert out["till_link_ok"] is False and alerts == []
+
+    def test_day_end_door_during_the_fault_stores_no_whole_day_variance(self, db, day_end):
+        _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
+        try:
+            day_end(closing_cash=3000.0, system_cash=4000.0)
+        finally:
+            restore()
+        close = _stored_close(db)
+        assert close["variance"] is None
+        assert close["till_drawers_on_day"] == 2 and close["variance_withheld_several_drawers"]
+
+    def test_day_end_unreadable_drawer_list_stores_no_variance(self, db, day_end):
+        _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=False)
+        try:
+            day_end(closing_cash=3000.0, system_cash=4000.0)
+        finally:
+            restore()
+        close = _stored_close(db)
+        assert close["variance"] is None and close["variance_comparison_unavailable"] is True
+
+    def test_control_one_drawer_day_still_judged_when_the_count_read_fails(self, db, monkeypatch):
+        """One drawer read before the fault: the whole window IS that drawer,
+        so the comparison and the note demand stand as before."""
+        till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER)
+        _cash_sale(db, 3000)
+        alerts = _alerts(monkeypatch)
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
+        try:
+            with pytest.raises(HTTPException) as exc:
+                _cr_close_b(db, monkeypatch, 4)
+        finally:
+            restore()
+        assert exc.value.status_code == 400 and "variance_note_required" in str(exc.value.detail)
+        assert alerts == []
+
+
+def test_r8_a_read_fault_on_real_mongo(monkeypatch):
+    """F-1421-R2-A on a native PyMongo Database: the real Collection.find of
+    the counted-drawers query raises; the Cash Register close of balanced B
+    stores no shortage and raises no alert; after recovery B balances."""
+    from pymongo.collection import Collection
+
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        a, b = _drawer_a_then_b(
+            real_db, a_sales=[1000], b_sales=[3000],
+            at=(datetime(2026, 11, 4, 5, 0), datetime(2026, 11, 4, 10, 0)),
+        )
+        alerts = _alerts(monkeypatch)
+        real_find = Collection.find
+
+        def _fault(self, query=None, *a_, **k):
+            if (self.database.name == name and self.name == "till_sessions"
+                    and isinstance(query, dict) and isinstance(query.get("status"), dict)):
+                raise AutoReconnect("native counted-drawers read fault")
+            return real_find(self, query, *a_, **k)
+
+        monkeypatch.setattr(Collection, "find", _fault)
+        out = _cr_close_b(_NativeDB(real_db), monkeypatch, 6)
+        monkeypatch.setattr(Collection, "find", real_find)
+
+        assert (out["variance"], out["variance_status"]) == (None, "SEVERAL_DRAWERS")
+        stored = real_db.cash_register_sessions.find_one({"session_id": "CR-D40"})
+        assert (stored["variance"], stored["variance_status"]) == (None, "SEVERAL_DRAWERS")
+        assert alerts == []
+        assert till.blind_submit(
+            real_db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+            actor=CASHIER)["ok"]
+        assert till.lock_session(real_db, b, actor=MANAGER)["ok"]
+        assert real_db.till_sessions.find_one({"_id": b})["variance_paisa"] == 0
+        assert alerts == []
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+def _through_the_app_handler(exc):
+    """The app's own HTTPException handler, which turns detail into JSON."""
+    import json
+
+    from starlette.requests import Request
+
+    from api.main import http_exception_handler
+
+    request = Request({"type": "http", "method": "POST", "path": "/", "headers": []})
+    response = asyncio.run(http_exception_handler(request, exc))
+    return response.status_code, json.loads(response.body)
+
+
+class TestR8BConflictCarriesTheSavedCloseAsJson:
+    """F-1421-R2-B: the saved multi-drawer close carries till_drawers[].opened_at
+    (a BSON datetime). The 409 for an identical retry or a lost acknowledgement
+    put that record in HTTPException.detail and the app's handler could not
+    encode it: 500 instead of 409."""
+
+    def test_identical_retry_of_a_two_drawer_close_is_a_json_409(self, db, day_end):
+        a, b = _two_locked_drawers(db, a_rupees=1000, b_rupees=3000)
+        db.get_collection("till_sessions").update_one(
+            {"_id": a}, {"$set": {"opened_at": datetime(2026, 11, 4, 4, 0)}})
+        day_end(closing_cash=3000.0, system_cash=4000.0)
+        with pytest.raises(HTTPException) as exc:
+            day_end(closing_cash=3000.0, system_cash=4000.0)
+        code, body = _through_the_app_handler(exc.value)
+        assert code == 409
+        drawers = body["detail"]["close"]["till_drawers"]
+        assert [d["session_id"] for d in drawers] == [a, b]
+        assert drawers[0]["opened_at"].startswith("2026-11-04T04:00")
+
+    def test_cashier_conflict_stays_redacted(self, db, monkeypatch):
+        monkeypatch.setattr(reports_router, "get_db", lambda: db)
+        monkeypatch.setattr("api.services.stores_util.is_online_store", lambda _db, _sid: False)
+        _two_locked_drawers(db, a_rupees=1000, b_rupees=3000)
+        body = reports_router.DayEndCloseBody(date=DATE, store_id=STORE, closing_cash=3000.0)
+        asyncio.run(reports_router.create_day_end_close(body, current_user=MANAGER))
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(reports_router.create_day_end_close(body, current_user=CASHIER))
+        code, out = _through_the_app_handler(exc.value)
+        assert code == 409
+        for d in out["detail"]["close"]["till_drawers"]:
+            assert "variance_paisa" not in d and "variance_status" not in d
+
+
+def _face_cash(rupees, at):
+    from api.services import cash_denominations as den
+
+    block = den.block_from_input(
+        den.CashCountInput(state="COUNTED", rows=[{"face": 500, "pieces": rupees // 500}]),
+        rupees * 100)
+    return {"method": "CASH", "amount": float(rupees), "received_at": at,
+            "cash_tendered_count": block}
+
+
+class TestR8CFaceLedgerFollowsTheCash:
+    """F-1421-R2-C: an order opened in drawer A's shift and paid (Rs 2,000 in
+    four Rs 500 notes) in drawer B's shift. Both drawers balance in rupees,
+    but A's note tally expected the four notes (4 missing) and B's expected
+    none (4 extra), both reported as readable."""
+
+    def test_a_later_balance_counts_in_the_later_drawer(self, db):
+        orders = db.get_collection("orders")
+        orders.insert_one({"_id": "O-A", "store_id": STORE, "created_at": "2026-11-04T05:00:00",
+                           "payments": [_face_cash(1000, "2026-11-04T05:00:00")]})
+        orders.insert_one({"_id": "O-LATER", "store_id": STORE, "created_at": "2026-11-04T05:00:00",
+                           "payments": []})
+        coll = db.get_collection("till_sessions")
+        a = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                              actor=CASHIER)["session"]["session_id"]
+        assert till.blind_submit(db, a, blind_denominations=[{"face": 500, "kind": "note", "pieces": 2}],
+                                 actor=CASHIER)["ok"]
+        coll.update_one({"_id": a}, {"$set": {"blind_submitted_at": datetime(2026, 11, 4, 8, 0)}})
+        assert till.lock_session(db, a, actor=MANAGER)["ok"]
+        b = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                              shift="PM", actor=CASHIER)["session"]["session_id"]
+        orders.update_one({"_id": "O-LATER"},
+                          {"$push": {"payments": _face_cash(2000, "2026-11-04T10:00:00+00:00")}})
+        assert till.blind_submit(db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 4}],
+                                 actor=CASHIER)["ok"]
+        coll.update_one({"_id": b}, {"$set": {"blind_submitted_at": datetime(2026, 11, 4, 12, 0)}})
+        assert till.lock_session(db, b, actor=MANAGER)["ok"]
+
+        fa = till.build_zread(db, a)["face_ledger"]
+        fb = till.build_zread(db, b)["face_ledger"]
+        assert (fa["difference_paisa"], fb["difference_paisa"]) == (0, 0)
+        assert (fa["coverage"]["cash_sale_legs"], fb["coverage"]["cash_sale_legs"]) == (1, 1)
+        assert fa["read_ok"] and fb["read_ok"]
+
+    def test_control_one_drawer_day_keeps_every_payment_of_the_day(self, db):
+        db.get_collection("orders").insert_one(
+            {"_id": "O-1", "store_id": STORE, "created_at": "2026-11-04T05:00:00",
+             "payments": [_face_cash(1000, "2026-11-04T05:00:00"),
+                          _face_cash(2000, "2026-11-05T03:00:00")]})
+        sid = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                                actor=CASHIER)["session"]["session_id"]
+        assert till.blind_submit(db, sid, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+                                 actor=CASHIER)["ok"]
+        ledger = till.build_zread(db, sid)["face_ledger"]
+        assert ledger["coverage"]["cash_sale_legs"] == 2 and ledger["difference_paisa"] == 0
+
+
+class TestR8DOneCanonicalBusinessDate:
+    """F-1421-R2-D: '2026-7-12', '2026-07-12T00:00:00' and 'not-a-date' each
+    stored their own immutable close (and touched the till)."""
+
+    @pytest.mark.parametrize(
+        "literal",
+        ["2026-7-12", "2026-07-12T00:00:00", "not-a-date", "2026-02-30", "20260712", ""],
+    )
+    def test_a_non_canonical_date_is_refused(self, literal):
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            reports_router.DayEndCloseBody(date=literal, store_id=STORE, closing_cash=1000.0)
+
+    def test_control_a_real_date_is_accepted(self):
+        assert reports_router.DayEndCloseBody(date="2026-07-12", store_id=STORE).date == "2026-07-12"
+
+
+class TestR8D76OlderCodeDrawers:
+    """D76: older code stored WHOLE-DAY cash on each drawer. A new-code drawer
+    counted after one such snapshot subtracted it as if it were that drawer's
+    own share: with old A (Rs 1,000) and old B (whole day Rs 4,000), new C
+    taking Rs 500 read expected 0 and a Rs 500 OVERAGE, demanding a note."""
+
+    @staticmethod
+    def _old_drawer(db, sid, sales_paisa, counted_paisa, opened):
+        db.get_collection("till_sessions").insert_one({
+            "_id": sid, "session_id": sid, "store_id": STORE, "session_date": DATE,
+            "status": till.STATUS_LOCKED, "opening_float_paisa": 0, "opened_at": opened,
+            "blind_count_paisa": counted_paisa, "cash_sales_paisa": sales_paisa,
+            "cash_refunds_paisa": 0, "cash_payouts_paisa": 0, "expected_cash_paisa": sales_paisa,
+            "variance_paisa": counted_paisa - sales_paisa, "variance_status": "BALANCED",
+            "tolerance_paisa": 0, "by_mode": {},
+        })
+
+    def test_a_later_drawer_gets_no_comparison_no_note_no_alert(self, db, monkeypatch):
+        for rupees, at in ((1000, "2026-11-04T03:00:00"), (3000, "2026-11-04T06:00:00"),
+                           (500, "2026-11-04T11:00:00")):
+            _cash_sale(db, rupees, at)
+        self._old_drawer(db, "OLD-A", 100000, 100000, "2026-11-04T02:00:00")
+        self._old_drawer(db, "OLD-B", 400000, 300000, "2026-11-04T05:00:00")
+        alerts = _alerts(monkeypatch)
+        c = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                              actor=CASHIER)["session"]["session_id"]
+        assert till.blind_submit(db, c, blind_denominations=[{"face": 500, "kind": "note", "pieces": 1}],
+                                 actor=CASHIER)["ok"]
+        row = _till(db, c)
+        assert (row["expected_cash_paisa"], row["variance_paisa"]) == (None, None)
+        assert row["variance_status"] == till.COMPARISON_UNAVAILABLE
+        assert row["blind_count_paisa"] == 50000
+        locked = till.lock_session(db, c, actor=MANAGER)  # no note owed
+        assert locked["ok"] and alerts == []
+        z = till.build_zread(db, c)
+        assert z["comparison_unavailable_message"].startswith("Comparison not available")
+        rows = [r for r in _recon(db, monkeypatch) if r["session_id"] == c]
+        assert rows and rows[0]["variance"] is None and rows[0]["expected_cash"] is None
+        assert rows[0]["variance_status"] == till.COMPARISON_UNAVAILABLE
+
+    def test_control_new_code_earlier_drawer_still_takes_its_own_share(self, db):
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        assert till.blind_submit(db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+                                 actor=CASHIER)["ok"]
+        assert (_till(db, b)["expected_cash_paisa"], _till(db, b)["variance_status"]) == (300000, "BALANCED")
+
+    def test_old_writer_close_landing_beside_ours_wins_and_ours_is_taken_back(self, db, day_end, monkeypatch):
+        sid = _blind_count(db, rupees=1000, lock=False)
+        closes = db.get_collection("day_end_closes")
+        real_insert = closes.insert_one
+        raced = []
+
+        def _old_writer_first(doc, *a, **k):
+            if not raced:
+                raced.append(1)
+                real_insert({"store_id": STORE, "date": DATE, "closing_cash": 1000.0,
+                             "closed_by": "old-writer"})
+            return real_insert(doc, *a, **k)
+
+        monkeypatch.setattr(closes, "insert_one", _old_writer_first)
+        with pytest.raises(HTTPException) as exc:
+            day_end(closing_cash=1000.0, system_cash=1000.0)
+        assert exc.value.status_code == 409
+        assert exc.value.detail["close"]["closed_by"] == "old-writer"
+        rows = [d for d in closes.docs if d.get("date") == DATE]
+        assert len(rows) == 1 and rows[0]["closed_by"] == "old-writer"
+        assert _till(db, sid)["blind_count_paisa"] == 100000
+
+
+class TestR8RegisterCloseLandsOnce:
+    """Two Cash Register closes sent at once both read the session OPEN; the
+    second's unguarded update overwrote the first record. The update is now
+    guarded on not-yet-CLOSED: the second answers 409 and changes nothing."""
+
+    def test_a_close_whose_read_was_stale_is_refused_409(self, db, monkeypatch):
+        till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER)
+        _cash_sale(db, 1000)
+        first = _cr_close_b(db, monkeypatch, 2)
+        assert first["status"] == "CLOSED"
+        coll = db.get_collection("cash_register_sessions")
+        real_find_one = coll.find_one
+        stale = dict(real_find_one({"session_id": "CR-D40"}), status="OPEN")
+        monkeypatch.setattr(coll, "find_one", lambda q, *a, **k: dict(stale))
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(finance_router.close_cash_register(
+                body=finance_router.CashRegisterClose(
+                    session_id="CR-D40", counted_override=5000.0, note="second"),
+                current_user=MANAGER))
+        assert exc.value.status_code == 409
+        stored = [d for d in coll.docs if d.get("session_id") == "CR-D40"]
+        assert len(stored) == 1
+        assert stored[0]["counted"] == first["counted"] == 1000.0
+        assert stored[0].get("closing_note") is None
+
+
+class TestR8ReconReadFaultIsNotAnEmptyConsole:
+    """The reconciliation console turned an unreadable close collection into
+    an empty list: a range with closes read as a range with none."""
+
+    @pytest.mark.parametrize("name", ["cash_register_sessions", "till_sessions"])
+    def test_unreadable_closes_are_503(self, db, monkeypatch, name):
+        coll = db.get_collection(name)
+
+        def _boom(*a, **k):
+            raise AutoReconnect("closes unreadable")
+
+        coll.find = _boom
+        with pytest.raises(HTTPException) as exc:
+            _recon(db, monkeypatch)
+        assert exc.value.status_code == 503

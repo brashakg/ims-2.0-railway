@@ -15,8 +15,11 @@ export type TillStatus = 'OPEN' | 'BLIND_SUBMITTED' | 'LOCKED';
 // nothing (more cash refunded than it took in) -- a cash-in is missing, so the
 // server withholds the over/short VERDICT rather than crediting a phantom
 // overage. The figures themselves are still shown.
+// COMPARISON_UNAVAILABLE (D76): an earlier drawer of the day was recorded by
+// an older version (whole-day cash), so this drawer has no expected figure,
+// no variance and no verdict; its count is kept.
 export type VarianceStatus =
-  | 'BALANCED' | 'OVERAGE' | 'SHORTAGE' | 'NEGATIVE_EXPECTED' | null;
+  | 'BALANCED' | 'OVERAGE' | 'SHORTAGE' | 'NEGATIVE_EXPECTED' | 'COMPARISON_UNAVAILABLE' | null;
 
 export interface DenominationLine {
   face: number;

@@ -192,6 +192,13 @@ class FakeCollection:
         self.insert_one(base)
         return base
 
+    def delete_one(self, query):
+        for i, d in enumerate(self.docs):
+            if _matches(d, query):
+                del self.docs[i]
+                return type("R", (), {"deleted_count": 1})()
+        return type("R", (), {"deleted_count": 0})()
+
     def create_index(self, *a, **k):
         return "idx"
 

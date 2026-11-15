@@ -68,6 +68,16 @@ NEGATIVE_EXPECTED_MESSAGE = (
     "this variance."
 )
 
+# No comparison can be trusted, so none is made (no variance, no verdict, no
+# note demand, no manager alert); the count itself is kept. Two causes: an
+# earlier drawer of the day was recorded by older code that stored WHOLE-DAY
+# cash (D76), or a close could not read the day's drawers.
+COMPARISON_UNAVAILABLE = "COMPARISON_UNAVAILABLE"
+COMPARISON_UNAVAILABLE_MESSAGE = (
+    "Comparison not available: an earlier drawer was recorded by an older "
+    "version"
+)
+
 # Indian denomination ladder (paisa-exact) -- defined ONCE in
 # services/cash_denominations.py and re-exported here so the till module has no
 # second copy of the face values to drift from.
@@ -508,8 +518,15 @@ def compute_face_ledger(
     *,
     opening_count: Optional[Dict[str, Any]] = None,
     closing_count: Optional[Dict[str, Any]] = None,
+    orders_window: Optional[tuple] = None,
 ) -> Dict[str, Any]:
     """Tally the drawer FACE BY FACE across the day.
+
+    ``orders_window`` (one drawer of a several-drawer day): orders are read
+    over that window (the whole day) and each cash payment is placed by WHEN
+    ITS CASH MOVED (received_at / paid_at, else the order's time) inside
+    [window_start, window_end). Without it, as before: every payment of an
+    order created in the window.
 
         opening float
           + notes taken in on every cash sale
@@ -555,14 +572,31 @@ def compute_face_ledger(
 
     read_ok = True
     if db is not None:
-        match = tr.window_match(store_id, window_start, window_end)
+        if orders_window is not None:
+            match = tr.window_match(store_id, orders_window[0], orders_window[1])
+            # The day's first drawer takes everything before its count and the
+            # last everything after the previous count, so the drawers share
+            # the day's payments exactly (a payment received after midnight on
+            # a day's order stays with the day, as on a one-drawer day).
+            lo = None if window_start == orders_window[0] else tr._to_dt(window_start)
+            hi = None if window_end == orders_window[1] else tr._to_dt(window_end)
+        else:
+            match = tr.window_match(store_id, window_start, window_end)
         try:
             for order in db.get_collection("orders").find(
-                match, {"_id": 0, "payments": 1}
+                match, {"_id": 0, "payments": 1, "created_at": 1}
             ):
                 for pay in order.get("payments") or []:
                     if str((pay or {}).get("method") or "").upper() != "CASH":
                         continue
+                    if orders_window is not None:
+                        moved = tr._to_dt(
+                            (pay or {}).get("received_at")
+                            or (pay or {}).get("paid_at")
+                            or order.get("created_at")
+                        )
+                        if moved is None or (lo and moved < lo) or (hi and moved >= hi):
+                            continue
                     coverage["cash_sale_legs"] += 1
                     tendered = (pay or {}).get("cash_tendered_count")
                     change = (pay or {}).get("cash_change_count")
@@ -955,20 +989,29 @@ def blind_submit(
     # Finance close charges the drawer with.
     payouts, off_till_excluded = auto_cash_payouts_paisa(db, store_id, ws, we)
     exp = compute_expected(db, store_id, ws, we, int(session.get("opening_float_paisa", 0) or 0), payouts)
-    if earlier:
+    # D76: older code stored WHOLE-DAY cash on every drawer (no
+    # expected_net_of_drawers key). Taking such a snapshot off this drawer's
+    # figure would charge it with the wrong cash, so no comparison is made.
+    old_snapshot = any("expected_net_of_drawers" not in s for s in earlier)
+    if earlier and not old_snapshot:
         exp = _own_share(exp, earlier)
         payouts = exp["cash_payouts_paisa"]
-    expected_cash_paisa = exp["expected_cash_paisa"]
-    variance_paisa = counted - expected_cash_paisa
     tol = get_variance_tolerance_paisa(store_id=store_id)
-    # A negative expected drawer means a cash-in is missing (see
-    # compute_expected). Suppress the variance VERDICT rather than crediting the
-    # cashier with a phantom overage; the raw variance number is still stored.
     negative_expected = bool(exp.get("negative_expected_advisory"))
-    vstatus = (
-        NEGATIVE_EXPECTED if negative_expected
-        else variance_status(variance_paisa, tol)
-    )
+    if old_snapshot:
+        expected_cash_paisa = variance_paisa = None
+        negative_expected = False
+        vstatus = COMPARISON_UNAVAILABLE
+    else:
+        expected_cash_paisa = exp["expected_cash_paisa"]
+        variance_paisa = counted - expected_cash_paisa
+        # A negative expected drawer means a cash-in is missing (see
+        # compute_expected). Suppress the variance VERDICT rather than crediting
+        # the cashier with a phantom overage; the raw variance is still stored.
+        vstatus = (
+            NEGATIVE_EXPECTED if negative_expected
+            else variance_status(variance_paisa, tol)
+        )
 
     now = datetime.utcnow()
     # Guarded transition OPEN -> BLIND_SUBMITTED (only one count can land).
@@ -1203,7 +1246,11 @@ def _record_screen_close(
             actor=actor,
         )
         if not opened.get("ok"):
-            return {"ok": False, "error": opened.get("error", "open_failed")}
+            return {
+                "ok": False,
+                "error": opened.get("error", "open_failed"),
+                "drawers_on_day": drawers_on_day,
+            }
         existing = opened["session"]
         created = not opened.get("already_open", False)
 
@@ -1278,7 +1325,14 @@ def _record_screen_close(
                 "already_counted": True,
                 "counted": True,
             }
-        return {"ok": False, "error": res.get("error", "submit_failed")}
+        # The day's drawer count is known even though this count did not land:
+        # the closing screen must not judge one drawer against the whole
+        # day's cash (D53) just because the link failed.
+        return {
+            "ok": False,
+            "error": res.get("error", "submit_failed"),
+            "drawers_on_day": drawers_on_day,
+        }
     submitted = int((res["session"] or {}).get("blind_count_paisa") or 0)
     return {
         "ok": True,
@@ -1297,6 +1351,29 @@ def _record_screen_close(
             counted_paisa is not None and int(counted_paisa) != submitted
         ),
     }
+
+
+def withheld_comparison(till_link: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Why a closing screen must NOT judge its count against its own window's
+    whole-day expected cash, or None when it may. ONE rule for both close
+    doors (Finance > Cash Register and Day-End):
+
+    * more than one drawer on the shop-day -> SEVERAL_DRAWERS (D53), whether
+      or not this close's count landed on the till;
+    * the link failed before the day's drawers could be read -> the drawer
+      count is unknown, so a whole-day comparison could be a false shortage
+      -> COMPARISON_UNAVAILABLE. Nothing is judged and no alert is raised
+      here; the till's own blind count still judges the drawer.
+
+    A one-drawer day (link ok, or failed after the drawers were read) keeps
+    exactly its old comparison."""
+    link = till_link or {}
+    drawers = link.get("drawers_on_day")
+    if drawers is not None and int(drawers) > 1:
+        return "SEVERAL_DRAWERS"
+    if not link.get("ok") and drawers is None:
+        return COMPARISON_UNAVAILABLE
+    return None
 
 
 def shared_counted_paisa(till_link: Optional[Dict[str, Any]]) -> Optional[int]:
@@ -1666,10 +1743,11 @@ def _own_face_ledger(db, session: Dict[str, Any]) -> Dict[str, Any]:
     """The per-face tally over THIS drawer's shift (D60): from the last other
     drawer counted before it (else the start of the day) to its own count when
     a later drawer was counted after it (else the end of the day). A one-drawer
-    day keeps the whole day, exactly as before. Sales are placed by the order's
-    time, so a balance paid in a later shift on an earlier order stays in the
-    earlier shift here (the rupee figures do not have that limit). Drawers
-    unreadable -> the whole day, marked read_ok False."""
+    day keeps the whole day, exactly as before. On a several-drawer day each
+    cash payment is placed by when its cash moved (received_at), so a balance
+    paid in a later shift on an earlier order counts in the later drawer, as
+    the rupee figures do. Drawers unreadable -> the whole day, marked read_ok
+    False."""
     from .tender_reconciliation import _to_dt
 
     ws, we = _session_day_window(session)
@@ -1690,6 +1768,7 @@ def _own_face_ledger(db, session: Dict[str, Any]) -> Dict[str, Any]:
         end,
         opening_count=session.get("opening_count"),
         closing_count=session.get("closing_count"),
+        orders_window=None if (start, end) == (ws, we) else (ws, we),
     )
     ledger["read_ok"] = bool(ledger.get("read_ok")) and read_ok
     return ledger
@@ -1762,6 +1841,11 @@ def build_zread(db, session_id: str) -> Dict[str, Any]:
         "counted_cash_paisa": counted,
         "variance_paisa": variance,
         "variance_status": session.get("variance_status"),
+        "comparison_unavailable_message": (
+            COMPARISON_UNAVAILABLE_MESSAGE
+            if session.get("variance_status") == COMPARISON_UNAVAILABLE
+            else None
+        ),
         "variance_note": session.get("variance_note"),
         "tolerance_paisa": session.get("tolerance_paisa"),
         "locked_at": session.get("locked_at"),

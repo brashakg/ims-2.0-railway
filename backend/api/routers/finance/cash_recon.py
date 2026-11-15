@@ -159,7 +159,10 @@ async def cash_reconciliation_summary(
         cr_cursor = db.get_collection(_CASH_SESSIONS).find(cr_match, {"_id": 0})
         cr_sessions = list(cr_cursor)
     except Exception:  # noqa: BLE001
-        cr_sessions = []
+        # Unreadable is not "no closes": an empty console would read as a
+        # range with nothing to reconcile.
+        logger.exception("Cash register sessions unreadable")
+        raise HTTPException(status_code=503, detail="Cash closes could not be read - try again")
 
     for s in cr_sessions:
         # The "business day" is the close date (these sessions have no
@@ -187,7 +190,12 @@ async def cash_reconciliation_summary(
         # D53: a close on a day with several drawers holds ONE drawer's count
         # against this window's expected figure -- no variance is true for it,
         # so none is re-derived here either (the close withheld it).
-        several = s.get("variance_status") == cash_register.SEVERAL_DRAWERS
+        # COMPARISON_UNAVAILABLE: the close could not read the day's drawers.
+        withheld = s.get("variance_status") in (
+            cash_register.SEVERAL_DRAWERS,
+            cash_register.COMPARISON_UNAVAILABLE,
+        )
+        several = withheld
         variance = (
             None if (counted is None or several) else round(counted - expected, 2)
         )
@@ -221,7 +229,7 @@ async def cash_reconciliation_summary(
                 "variance_status": (
                     cash_register.NOT_COUNTED
                     if counted is None
-                    else cash_register.SEVERAL_DRAWERS
+                    else s.get("variance_status")
                     if several
                     else (
                         cash_register.NEGATIVE_EXPECTED
@@ -263,7 +271,8 @@ async def cash_reconciliation_summary(
         till_cursor = db.get_collection("till_sessions").find(till_match, {"_id": 0})
         till_sessions = list(till_cursor)
     except Exception:  # noqa: BLE001
-        till_sessions = []
+        logger.exception("Till sessions unreadable")
+        raise HTTPException(status_code=503, detail="Till closes could not be read - try again")
 
     def _p2r(paisa) -> float:
         try:
@@ -275,7 +284,10 @@ async def cash_reconciliation_summary(
         sess_day = str(s.get("session_date") or "")[:10]
         if sess_day and not (start_day <= sess_day <= end_day):
             continue
-        expected = _p2r(s.get("expected_cash_paisa"))
+        # D76: a drawer counted after an older-code drawer has no comparison
+        # (expected and variance stored as None); none is rebuilt here.
+        no_comparison = s.get("variance_status") == cash_register.COMPARISON_UNAVAILABLE
+        expected = None if no_comparison else _p2r(s.get("expected_cash_paisa"))
         # Same rule on the Z-Read side: `blind_count_paisa` stays None until
         # somebody counts, so an uncounted drawer reports no figure, not zero.
         counted = (
@@ -283,7 +295,9 @@ async def cash_reconciliation_summary(
             if s.get("blind_count_paisa") is None
             else _p2r(s.get("blind_count_paisa"))
         )
-        variance = None if counted is None else round(counted - expected, 2)
+        variance = (
+            None if (counted is None or no_comparison) else round(counted - expected, 2)
+        )
         tol = _p2r(s.get("tolerance_paisa"))
         locked_by = s.get("locked_by")
         if locked_by and not s.get("locked_by_name"):

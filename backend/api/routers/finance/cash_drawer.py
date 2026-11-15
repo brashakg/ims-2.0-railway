@@ -364,10 +364,13 @@ async def close_cash_register(
     # "balanced" verdict is true for the day, and drawers are never added
     # together. Withhold it; the record carries each drawer's own count and
     # variance (till_drawers).
-    several_drawers = int(till_link.get("drawers_on_day") or 1) > 1
+    # The same withholding when the link failed before the day's drawers could
+    # be read: a whole-window comparison there could be a false shortage.
+    withheld = till_service.withheld_comparison(till_link)
+    several_drawers = withheld is not None
     if several_drawers:
         summary["variance"] = None
-        summary["variance_status"] = cash_register.SEVERAL_DRAWERS
+        summary["variance_status"] = withheld
 
     # WHAT THE BAND JUDGES. One drawer: the one counted figure for the day.
     # Several drawers (D53): no whole-day figure, so the drawer THIS close
@@ -471,14 +474,22 @@ async def close_cash_register(
         "tolerance": summary["tolerance"],
         "closing_note": body.note,
     }
+    # Guarded on "not yet CLOSED": of two closes sent at once only one lands,
+    # so the second can neither overwrite the first record nor raise a second
+    # alert; it is told the session is already closed.
     try:
-        coll.update_one({"session_id": body.session_id}, {"$set": update})
+        landed = coll.update_one(
+            {"session_id": body.session_id, "status": {"$ne": "CLOSED"}},
+            {"$set": update},
+        )
     except Exception:  # noqa: BLE001
         logger.exception("Cash session close failed")
         raise HTTPException(
             status_code=500,
             detail="Could not close the cash session - try again or contact support",
         )
+    if getattr(landed, "matched_count", 1) == 0:
+        raise HTTPException(status_code=409, detail="Session already closed")
 
     # Manager alert above the band (owner ruling 2026-08-25). SAME helper and
     # SAME per-drawer dedupe (D63) as the blind Z-Read lock, so the two doors

@@ -96,6 +96,7 @@ const STATUS_CHIP: Record<ReconStatus, string> = {
   NEGATIVE_EXPECTED: 'bg-gray-100 text-gray-600',
   NOT_COUNTED: 'bg-gray-100 text-gray-600',
   SEVERAL_DRAWERS: 'bg-gray-100 text-gray-600',
+  COMPARISON_UNAVAILABLE: 'bg-gray-100 text-gray-600',
 };
 const STATUS_ROW: Record<ReconStatus, string> = {
   BALANCED: '',
@@ -104,6 +105,7 @@ const STATUS_ROW: Record<ReconStatus, string> = {
   NEGATIVE_EXPECTED: '',
   NOT_COUNTED: '',
   SEVERAL_DRAWERS: '',
+  COMPARISON_UNAVAILABLE: '',
 };
 
 const HQ_ROLES = ['SUPERADMIN', 'ADMIN', 'AREA_MANAGER', 'ACCOUNTANT'];
@@ -462,7 +464,7 @@ function RowGroup({
         </td>
         <td className="px-3 py-2 text-right text-gray-600">{inr(row.opening_float)}</td>
         <td className="px-3 py-2 text-right text-gray-600">{inr(row.cash_sales)}</td>
-        <td className="px-3 py-2 text-right text-gray-700">{inr(row.expected_cash)}</td>
+        <td className="px-3 py-2 text-right text-gray-700">{row.expected_cash == null ? '—' : inr(row.expected_cash)}</td>
         <td className="px-3 py-2 text-right text-gray-900 font-medium">
           {row.counted_cash == null ? (
             <span className="text-gray-500 text-xs font-normal">Not counted</span>
@@ -521,7 +523,7 @@ function RowGroup({
                     <DRow label="− Bank deposit" value={inr(row.bank_deposit)} tone="bad" />
                   )}
                   <div className="border-t border-gray-100 pt-1.5">
-                    <DRow label="Expected in drawer" value={inr(row.expected_cash)} strong />
+                    <DRow label="Expected in drawer" value={row.expected_cash == null ? '—' : inr(row.expected_cash)} strong />
                   </div>
                   <DRow
                     label="Counted (physical)"
@@ -697,6 +699,16 @@ function VarianceChip({ status, variance }: { status: ReconStatus; variance: num
         className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${STATUS_CHIP.SEVERAL_DRAWERS}`}
       >
         Several drawers
+      </span>
+    );
+  }
+  if (status === 'COMPARISON_UNAVAILABLE') {
+    return (
+      <span
+        title="No comparison is made for this drawer: the day's drawers could not be read, or an earlier drawer was recorded by an older version."
+        className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs font-medium ${STATUS_CHIP.COMPARISON_UNAVAILABLE}`}
+      >
+        Comparison not available
       </span>
     );
   }

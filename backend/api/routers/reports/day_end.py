@@ -3,7 +3,7 @@
 from api.utils.event_time import utc_event_iso
 
 from fastapi import Depends, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 from datetime import date, datetime
 from ..auth import require_roles
@@ -52,6 +52,22 @@ class DayEndCloseBody(BaseModel):
     server-side (never trusted from the client)."""
 
     date: str = Field(..., description="Business date being closed (YYYY-MM-DD)")
+
+    @field_validator("date")
+    @classmethod
+    def _canonical_date(cls, value: str) -> str:
+        """One business day has ONE key: a real calendar date written exactly
+        YYYY-MM-DD. '2026-7-12', '2026-07-12T00:00:00' or 'not-a-date' used to
+        store their own immutable close beside the real one; refused (422)
+        before anything is written, so the till is never touched either."""
+        text = str(value or "").strip()
+        try:
+            parsed = date.fromisoformat(text)
+        except ValueError:
+            parsed = None
+        if parsed is None or parsed.isoformat() != text:
+            raise ValueError("date must be a real calendar date written YYYY-MM-DD")
+        return text
     store_id: Optional[str] = Field(
         None, description="Store; defaults to the user's active store"
     )
@@ -242,10 +258,15 @@ async def create_day_end_close(
     # Drawers are never added together either -- cash carried from one drawer
     # to the next is not recorded. So no whole-day variance is stored; each
     # drawer's own count and variance are (till_drawers).
-    several_drawers = int(till_link.get("drawers_on_day") or 1) > 1
+    #
+    # Same rule, same helper as Finance > Cash Register: a link that failed
+    # before the day's drawers could be read cannot say the day had one
+    # drawer, so no whole-day variance is stored then either.
+    withheld = till_service.withheld_comparison(till_link)
+    several_drawers = withheld == "SEVERAL_DRAWERS"
     variance = (
         round(closing_cash - system_cash, 2)
-        if (closing_cash is not None and system_cash is not None and not several_drawers)
+        if (closing_cash is not None and system_cash is not None and withheld is None)
         else None
     )
 
@@ -284,6 +305,8 @@ async def create_day_end_close(
         # first; None on a one-drawer day or when the list could not be read.
         "till_drawers": till_link.get("drawers") if several_drawers else None,
         "variance_withheld_several_drawers": several_drawers,
+        # True when the drawer count could not be read: no variance is given.
+        "variance_comparison_unavailable": withheld == till_service.COMPARISON_UNAVAILABLE,
         "notes": (body.notes or "").strip() or None,
         "closed_by": current_user.get("user_id"),
         "closed_at": utc_event_iso(now),
@@ -315,6 +338,32 @@ async def create_day_end_close(
         raise HTTPException(
             status_code=500,
             detail="Could not record the day-end close - try again or contact support",
+        )
+
+    # D76, ROLLING DEPLOY: an older writer keys its close with a random id, so
+    # the database cannot stop it and this writer both storing one for the
+    # same shop-day. Re-read after the insert: if any OTHER close of this
+    # shop-day exists, it stands and this one is taken back (it was only just
+    # written and has no audit row yet), and the caller gets the usual 409.
+    key = day_end_close_key(sid, body.date)
+    try:
+        rival = closes.find_one(
+            {"store_id": sid, "date": body.date, "_id": {"$ne": key}}
+        )
+    except Exception:  # noqa: BLE001
+        rival = None
+        logger.exception("Day-end close rival check failed for %s %s", sid, body.date)
+    if rival:
+        try:
+            closes.delete_one({"_id": key})
+        except Exception:  # noqa: BLE001
+            logger.exception("Day-end close %s could not be taken back", key)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": f"Day {body.date} already closed for store {sid}",
+                "close": _day_end_doc_public(rival, current_user),
+            },
         )
 
     # Audit (fail-soft: an audit hiccup must not undo the business record).

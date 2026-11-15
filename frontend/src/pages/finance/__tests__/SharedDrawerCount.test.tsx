@@ -182,3 +182,27 @@ describe('CashRegisterPage - a count that came from the other door says so', () 
     expect(screen.queryByText('Not counted')).not.toBeInTheDocument();
   });
 });
+
+describe('CashRegisterPage - a close that could not read the drawers claims no variance', () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('Codex PR-1421-round2 F-A: says "Comparison not available", never short or not counted', async () => {
+    primeHistory({
+      ...CLOSED_OWN,
+      session_id: 'ZZ-CR-4',
+      counted: 3000,
+      expected: 4000,
+      variance: null,
+      variance_status: 'COMPARISON_UNAVAILABLE',
+      till_link_ok: false,
+      till_link_error: 'read_failed',
+    });
+    render(<CashRegisterPage />);
+
+    const cell = await screen.findByText('ZZ-CR-4');
+    const row = within(cell.closest('tr') as HTMLElement);
+    expect(row.getByTestId('comparison-unavailable-verdict')).toHaveTextContent('Comparison not available');
+    expect(row.queryByText('-₹1,000')).not.toBeInTheDocument();
+    expect(row.queryByText('Not counted')).not.toBeInTheDocument();
+  });
+});
