@@ -125,3 +125,17 @@ def test_a_row_naming_no_sale_frees_nothing_on_real_mongo(client, shop, door, mo
 
     _native(shop)
     case(client, shop, door, monkeypatch)
+
+
+# Round 11 (lead's review of head c217cdb1): an edit's claw paused at its row
+# while a cancel or return reverses the same bill, and the mirror. A real
+# unique _id is the shared fence.
+
+
+@pytest.mark.parametrize("door", ["cancel", "return"])
+@pytest.mark.parametrize("paused", ["the edit claw", "the reversal"])
+def test_an_edit_claw_and_a_reversal_take_the_earn_once_on_real_mongo(shop, ledger, monkeypatch, door, paused):
+    from tests.test_order_edit_recovery import test_an_edit_claw_and_a_reversal_take_the_earn_once as case
+
+    _native(shop)
+    case(ledger, monkeypatch, door, paused)

@@ -1626,6 +1626,10 @@ def ledger(shop, monkeypatch):
             return accounts.find_by_id("cust-rg")["balance_points"]
 
         @staticmethod
+        def lifetime():
+            return accounts.find_by_id("cust-rg")["lifetime_earned"]
+
+        @staticmethod
         def rows():
             return sorted((t["type"], t["points"]) for t in txns.collection.find({"order_id": "ORD-RG"}))
 
@@ -1805,6 +1809,51 @@ def test_a_claw_row_whose_move_underflowed_stays_owed(ledger, monkeypatch):
     assert ledger.rows() == [("ADJUST", -10), ("EARN", 10)] and ledger.balance() == 40
     assert loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-2")["ok"]
     assert ledger.balance() == 30
+
+
+# Round 11 (lead's review of head c217cdb1): an edit's claw and a full reversal
+# (cancel or return) of the same bill read the ledger and wrote with no shared
+# fence, so both took the same earn: +10 -10 -10 and 10 points lost.
+
+
+def _reverse(loyalty, door):
+    if door == "cancel":
+        return loyalty.reverse_for_cancel("ORD-RG", "cust-rg")
+    return loyalty.reverse_for_return("RET-RG", "ORD-RG", "cust-rg")
+
+
+@pytest.mark.parametrize("door", ["cancel", "return"])
+@pytest.mark.parametrize("paused", ["the edit claw", "the reversal"])
+def test_an_edit_claw_and_a_reversal_take_the_earn_once(ledger, monkeypatch, door, paused):
+    """One runner has read the ledger and is paused at its row; the other runs to
+    the end; the first resumes. Either way the bill's earn is taken once."""
+    from api.routers import loyalty
+    from database.repositories.loyalty_repository import LoyaltyTransactionRepository
+
+    real, fired = LoyaltyTransactionRepository.create, []
+    is_claw = (lambda d: d.get("edit_regate_of_order_id") == "ORD-RG") if paused == "the edit claw" \
+        else (lambda d: d.get("reversal_of_order_id") == "ORD-RG")
+
+    def stall(self, data, *a, **k):
+        if is_claw(data) and not fired:
+            fired.append(True)
+            other = _reverse(loyalty, door) if paused == "the edit claw" else \
+                loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-2")
+            assert other["ok"], other
+        return real(self, data, *a, **k)
+
+    monkeypatch.setattr(LoyaltyTransactionRepository, "create", stall)
+    first = loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-1") \
+        if paused == "the edit claw" else _reverse(loyalty, door)
+    monkeypatch.setattr(LoyaltyTransactionRepository, "create", real)
+    assert fired and first["ok"], first
+    assert sum(p for _, p in ledger.rows()) == 0, ledger.rows()
+    assert ledger.balance() == 30, "40 less the 10 earned, once"
+    assert ledger.lifetime() == 30, "lifetime earned falls by 10, once"
+    # Every retry and every later runner leaves it there.
+    loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-3")
+    assert _reverse(loyalty, door)["ok"]
+    assert ledger.balance() == 30 and sum(p for _, p in ledger.rows()) == 0
 
 
 def test_a_lens_given_back_before_its_cell_existed_is_swept_back(client, shop, cells, monkeypatch):

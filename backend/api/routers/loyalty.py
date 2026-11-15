@@ -1532,7 +1532,25 @@ def _ensure_reversal_applied(accounts, marker: Dict[str, Any]) -> Dict[str, Any]
     return out
 
 
-def _reverse_order_loyalty(
+def _earn_claw_id(customer_id: str, order_id: str, net: int) -> str:
+    """The id of the step that takes a bill's earn down from `net`, whichever door
+    takes it: an edit's claw or a full reversal (cancel / return). Both doors key
+    their row on it, so two that read the same ledger collide on one _id and the
+    loser reads again: the earn is taken once, never by both (round 11)."""
+    return f"earnclaw:{customer_id}:{order_id}:{net}"
+
+
+def _reverse_order_loyalty(**kw) -> Dict[str, Any]:
+    """A pass that lost its claw step to an edit's claw reads again (see
+    _earn_claw_id); bounded, and an unfinished one is not ok (flagged)."""
+    for _ in range(_REGATE_PASSES):
+        out = _reverse_order_loyalty_pass(**kw)
+        if not out.get("retry"):
+            return out
+    return {"ok": False, "reason": "reversal_not_settled"}
+
+
+def _reverse_order_loyalty_pass(
     *,
     order_id: str,
     customer_id: str,
@@ -1682,7 +1700,9 @@ def _reverse_order_loyalty(
     # Marker-before-balance also means the only partial-failure mode is "marker
     # written, balance not moved" -- we fail toward NOT clawing (customer keeps
     # their points) and the caller flags the doc for reconciliation.
-    txn_id = str(uuid.uuid4())
+    # An earn to claw takes the shared claw step id, so an edit's claw that read
+    # the same ledger collides with this row (and this one with it).
+    txn_id = _earn_claw_id(customer_id, order_id, earned) if earned > 0 else str(uuid.uuid4())
     marker: Dict[str, Any] = {
         "txn_id": txn_id,
         "customer_id": customer_id,
@@ -1719,6 +1739,10 @@ def _reverse_order_loyalty(
         claimed = txns.create(marker, raise_on_duplicate=True)
     except Exception as exc:  # noqa: BLE001
         if exc.__class__.__name__ == "DuplicateKeyError":
+            if earned > 0:
+                # The claw step may have gone to an edit's claw, not a reversal:
+                # read again (a reversal row then short-circuits above).
+                return {"ok": False, "retry": True}
             # A concurrent reversal won the claim. Do NOT move the balance.
             logger.info(
                 "%s lost the reversal claim race (already reversed) cust=%s",
@@ -1922,7 +1946,7 @@ def _regate_pass(order_doc, order_id, customer_id, accounts, txns, user_id) -> D
                 "balance": balance, "delta": delta}
 
     step = f"{customer_id}:{order_id}:{net}"
-    txn_id = f"regate:{step}"
+    txn_id = _earn_claw_id(customer_id, order_id, net)
     try:
         row = txns.create(
             {
@@ -1945,9 +1969,10 @@ def _regate_pass(order_doc, order_id, customer_id, accounts, txns, user_id) -> D
     except Exception as exc:  # noqa: BLE001
         if exc.__class__.__name__ != "DuplicateKeyError":
             raise
-        # Another runner took this very step: its row stands, once. The next
-        # pass reads again, completes that row's move if it was lost, and takes
-        # this bill's own remaining step (its target may be lower).
+        # Another runner took this very step (an edit's claw, or a cancel /
+        # return reversal): its row stands, once. The next pass reads again,
+        # completes that row's move if it was lost (or stops at the reversal),
+        # and takes this bill's own remaining step (its target may be lower).
         return {"ok": False, "retry": True}
     if row is None:
         return {"ok": False, "reason": "claw_write_failed"}
@@ -1986,10 +2011,12 @@ def regate_earn_after_edit(
     dict, never raises.
 
     Exactly once per step (Codex r7 P2): the claw row's id is the step it
-    takes, ``regate:<customer>:<order>:<net before>``. Net only falls (one EARN
-    per order, claws only), so a step is never taken twice legitimately, and two
-    overlapping runners that read the same ledger compute the same id: the row
-    is the claim (its _id). The loser reads again and takes its own next step,
+    takes, ``earnclaw:<customer>:<order>:<net before>`` (_earn_claw_id). Net
+    only falls (one EARN per order, claws only), so a step is never taken twice
+    legitimately, and two overlapping runners that read the same ledger compute
+    the same id: the row is the claim (its _id). A full reversal (cancel /
+    return) claims the same id for the earn it takes, so an edit's claw and a
+    reversal never both take it (round 11). The loser reads again and takes its own next step,
     because its bill may earn less than the winner's (round 10). The balance
     moves under the row's id through _apply_reversal_balance (applied_reversals),
     so a row whose move was lost is completed by the next call, never repeated;
