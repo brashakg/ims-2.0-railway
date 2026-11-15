@@ -1399,11 +1399,15 @@ def test_a_take_that_lands_after_the_sweep_gave_back_goes_back(client, shop, cel
     stalled_take_case(client, shop, cells, door, where, monkeypatch)
 
 
-def test_a_take_after_the_sweep_whose_press_died_is_swept_back(client, shop, cells, monkeypatch):
+@pytest.mark.parametrize("where", ["before the take", "between the takes"])
+def test_a_take_after_the_sweep_whose_press_died_is_swept_back(client, shop, cells, where, monkeypatch):
     """The same stall, and the press then dies before its own give-back runs (the
-    process is gone, no handler). The sweep re-runs a given-back row's named
-    releases for a day: the stranded lens and frame go back on its next tick."""
-    from api.routers.orders import admin_edit
+    process is gone, no handler). D77: no window. A lens the op had not reserved
+    when the sweep gave it back was voided on its cell, so the late reserve is
+    refused and nothing is held. A unit cannot be voided ahead (first-available),
+    so one claimed after the give-back is found by the sweep however old the op
+    is (here 30 days: the old one-day re-run would have missed it)."""
+    from api.routers.orders import admin_edit, edit_ops
 
     cells(on_hand=5)
     oid = _saved_bill(client, shop, [_line(SVC)])
@@ -1415,19 +1419,23 @@ def test_a_take_after_the_sweep_whose_press_died_is_swept_back(client, shop, cel
         return False
 
     with monkeypatch.context() as m:
-        seen = _stall_take_past_the_sweep(shop, m, oid, "before the take")
+        seen = _stall_take_past_the_sweep(shop, m, oid, where)
         m.setattr(admin_edit, "give_back", died)
         r = quiet.put(f"/api/v1/orders/{oid}/superadmin-edit",
                       json={"reason": "correcting this bill", "items": lines}, headers=_token(ADMIN))
     assert seen and r.status_code == 409, r.text
-    assert cells.read() == (5, 1) and _unit(shop, "SU-FR-A")["status"] == "SOLD", "stranded by the dead press"
-    _sweep(shop)
-    assert cells.read() == (5, 0), "the sweep put the lens back"
-    assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE"
+    assert cells.read() == (5, 0), "the late reserve was refused (or given back by the sweep)"
+    stranded = where == "between the takes"
+    assert _unit(shop, "SU-FR-A")["status"] == ("SOLD" if stranded else "AVAILABLE")
+    shop["db"].get_collection("order_edit_ops").update_many(
+        {"order_id": oid}, {"$set": {"created_at": datetime.now() - timedelta(days=30)}})
+    asyncio.run(edit_ops.sweep_edit_ops())
+    assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE", "the stranded frame went back"
+    assert cells.read() == (5, 0)
     assert _op_states(shop, oid) == ["GIVEN_BACK"]
     assert _order(shop, oid)["items"] == before["items"]
-    _sweep(shop)
-    assert cells.read() == (5, 0), "a repeat moves nothing"
+    asyncio.run(edit_ops.sweep_edit_ops())
+    assert cells.read() == (5, 0) and _unit(shop, "SU-FR-A")["status"] == "AVAILABLE", "a repeat moves nothing"
     _no_flag_left(shop, oid)
 
 
@@ -1460,3 +1468,212 @@ def test_a_save_that_lands_under_the_sweep_raises_no_false_flag(client, shop, ce
     assert not _order(shop, oid).get(FLAG), "no false flag on a bill that holds its lens"
     assert cells.read() == (5, 1)
     assert op["op_id"] not in (_order(shop, oid).get("voided_edit_ops") or [])
+
+
+# ---------------------------------------------------------------------------
+# Codex round 7 (15 Nov 2026) and D77 -- every stale runner is fenced at the
+# write it makes, with no window
+# ---------------------------------------------------------------------------
+
+
+def test_a_stale_removal_never_frees_the_piece_sold_again_to_this_bill(client, shop, door, monkeypatch):
+    """r7 P1: edit 1 takes the frame off and stalls just before its release; its
+    lease lapses, edit 2 recovers the removal (the frame goes back once) and puts
+    the very same frame back on the bill. Edit 1 then wakes. Before the fix its
+    release (same order, SOLD, same stock_id) freed the re-sold frame: a billed
+    piece on the shelf, which a second bill then sold."""
+    from database.repositories.product_repository import StockRepository
+
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A"), _line(SVC)]))
+    svc = _as_sent(next(ln for ln in _order(shop, oid)["items"] if ln["product_id"] == SVC))
+    ops = shop["db"].get_collection("order_edit_ops")
+    real, fired = StockRepository.release_sold_units_for_order, []
+
+    def stalled(self, order_id, *a, **k):
+        if order_id == oid and k.get("stock_id") == "SU-FR-A" and not fired:
+            fired.append(True)
+            ops.update_many({"order_id": oid, "state": "OPEN"},
+                            {"$set": {"lease_until": datetime.now() - timedelta(seconds=1)}})
+            other = type(client)(client.app)  # another worker
+            now = [_as_sent(ln) for ln in _order(shop, oid)["items"]]
+            assert _edit(other, oid, now, route=door.name, **DOORS[door.name]).status_code == 200
+            assert _unit(shop, "SU-FR-A")["status"] == "AVAILABLE", "edit 2 recovered the removal"
+            again = [*now, _line(FR, stock_id="SU-FR-A")]
+            assert _edit(other, oid, again, route=door.name, **DOORS[door.name]).status_code == 200
+            assert _sold_to(shop, oid) == ["SU-FR-A"]
+        return real(self, order_id, *a, **k)
+
+    monkeypatch.setattr(StockRepository, "release_sold_units_for_order", stalled)
+    assert door.press(oid, [svc]).status_code == 200
+    monkeypatch.setattr(StockRepository, "release_sold_units_for_order", real)
+    assert fired
+    bill = _order(shop, oid)
+    assert any(ln.get("stock_id") == "SU-FR-A" for ln in bill["items"])
+    assert _sold_to(shop, oid) == ["SU-FR-A"], "the stale runner freed the re-sold frame"
+    _no_flag_left(shop, oid)
+    assert door.press(oid, [_as_sent(ln) for ln in bill["items"]]).status_code == 200
+    _sweep(shop)
+    _sweep(shop)
+    assert _sold_to(shop, oid) == ["SU-FR-A"]
+    assert set(_op_states(shop, oid)) <= {"SETTLED"}
+    assert _sell(client, [_line(FR, stock_id="SU-FR-A")]).status_code == 409, "no second bill sells it"
+
+
+def test_a_reservation_whose_record_was_lost_still_goes_back(client, shop, cells, door, monkeypatch):
+    """r7 P2: the lens's reserve moved the cell but its separate record was lost.
+    Before the fix the removal read the missing record as "never reserved",
+    skipped the release and settled: reserved 1 for a bill that owes no lens,
+    for good. The cell's own move memory is the proof now; the record is
+    written late, once."""
+    from api.routers import lens_stock as stock_router
+
+    cells(on_hand=5)
+    oid = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    keep = _as_sent(_order(shop, oid)["items"][0])
+    real, lost = stock_router._write_audit, []
+
+    def drop_reserve_record(**k):
+        if k.get("action") == "reserve" and not lost:
+            lost.append(k.get("source_id"))
+            return None
+        return real(**k)
+
+    with monkeypatch.context() as m:
+        m.setattr(stock_router, "_write_audit", drop_reserve_record)
+        assert door.press(oid, [keep, _lens()]).status_code == 200
+    assert lost and cells.read() == (5, 1)
+    assert door.press(oid, [keep]).status_code == 200
+    assert cells.read() == (5, 0), "the lens went back although its record was lost"
+    assert door.press(oid, [keep]).status_code == 200
+    _sweep(shop)
+    _sweep(shop)
+    assert cells.read() == (5, 0)
+    rows = [(r["action"], r["delta_reserved"]) for r in shop["db"].get_collection("lens_stock_audit").find(
+        {"source_id": {"$regex": f"^{oid}#"}})]
+    assert sorted(rows) == [("release", -1), ("reserve", 1)], rows
+    assert set(_op_states(shop, oid)) == {"SETTLED"}
+    _no_flag_left(shop, oid)
+
+
+def test_a_cell_that_cannot_be_read_is_not_nothing_to_release(client, shop, cells, monkeypatch):
+    """The read that decides "was it reserved" fails: the release is 'failed', the
+    edit stays OPEN and flagged, and the sweep finishes it. Never a settle on a
+    guess (a read failure turning into a false empty)."""
+    from api.routers import lens_stock as stock_router
+
+    oid, _ = _lens_bill(client, shop, cells)
+    shop["db"].get_collection("lens_stock_audit").delete_many({"action": "reserve"})
+    keep = [_other_line(shop, oid)]
+
+    def dark(*_a, **_k):
+        raise TimeoutError("the cell cannot be read")
+
+    with monkeypatch.context() as m:
+        m.setattr(stock_router, "cell_doc", dark)
+        assert _edit(client, oid, keep).status_code == 200
+    assert cells.read() == (5, 1), "nothing moved on a guess"
+    assert "OPEN" in _op_states(shop, oid) and _order(shop, oid)[FLAG] is True
+    _sweep(shop)
+    assert cells.read() == (5, 0)
+    assert set(_op_states(shop, oid)) == {"SETTLED"}
+    _no_flag_left(shop, oid)
+
+
+def test_a_named_move_stays_fenced_after_any_number_of_later_moves(shop, cells):
+    """D77: the cell's move memory is kept whole. Before, it kept the last 500
+    moves, so a runner stalled across 500 later moves of the same cell moved
+    the counter again."""
+    from api.routers import lens_stock as stock_router
+
+    cells(on_hand=2000, reserved=0)
+    first = stock_router.ReserveCommitReleasePayload(
+        store_id=STORE, sph=-1.0, cyl=0.0, add=None, qty=1, source_id="ORD-OLD#L1")
+    asyncio.run(stock_router.reserve_cell(CELL, first, ADMIN_USER))
+    for n in range(600):
+        later = first.model_copy(update={"source_id": f"ORD-{n}#L1"})
+        asyncio.run(stock_router.reserve_cell(CELL, later, ADMIN_USER))
+    assert cells.read() == (2000, 601)
+    assert asyncio.run(stock_router.reserve_cell(CELL, first, ADMIN_USER))["status"] == "already_applied"
+    assert cells.read() == (2000, 601), "the old move landed twice"
+
+
+@pytest.fixture
+def ledger(shop, monkeypatch):
+    """The real loyalty repositories on this shop's database (real unique _id)."""
+    from api.routers import loyalty
+    from database.repositories.loyalty_repository import (
+        LoyaltyAccountRepository,
+        LoyaltyTransactionRepository,
+    )
+
+    accounts = LoyaltyAccountRepository(shop["db"].get_collection("loyalty_accounts"))
+    txns = LoyaltyTransactionRepository(shop["db"].get_collection("loyalty_transactions"))
+    monkeypatch.setattr(loyalty, "get_loyalty_account_repository", lambda: accounts)
+    monkeypatch.setattr(loyalty, "get_loyalty_transaction_repository", lambda: txns)
+    accounts.find_or_create("cust-rg")
+    txns.claim_earn_for_order("cust-rg", "ORD-RG", {
+        "txn_id": "earn-rg", "customer_id": "cust-rg", "type": "EARN", "points": 10,
+        "order_id": "ORD-RG", "tier_at_earn": "BRONZE", "created_at": datetime.now()})
+    accounts.adjust_balance("cust-rg", delta_points=40, delta_lifetime_earned=40)
+
+    class Ledger:
+        edited = {"order_id": "ORD-RG", "customer_id": "cust-rg", "grand_total": 1000.0,
+                  "tax_amount": 0.0, "cart_discount_percent": 40.0,
+                  "items": [{"category": "FRAME", "item_total": 1000}]}
+
+        @staticmethod
+        def balance():
+            return accounts.find_by_id("cust-rg")["balance_points"]
+
+        @staticmethod
+        def rows():
+            return sorted((t["type"], t["points"]) for t in txns.collection.find({"order_id": "ORD-RG"}))
+
+    return Ledger
+
+
+def test_two_overlapping_regates_claw_the_earn_once(ledger, monkeypatch):
+    """r7 P2 (loyalty): edit 1's regate has read the ledger and stalls before its
+    claw row; its lease lapses and edit 2's regate claws. Edit 1 then wakes.
+    Before the fix both wrote -10 and both took 10 off the balance: the bill's
+    earn +10 -10 -10. The claw's id is its step now, so one lands."""
+    from api.routers import loyalty
+    from database.repositories.loyalty_repository import LoyaltyTransactionRepository
+
+    real, fired = LoyaltyTransactionRepository.create, []
+
+    def stall(self, data, *a, **k):
+        if data.get("edit_regate_of_order_id") == "ORD-RG" and not fired:
+            fired.append(True)
+            loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-2")
+        return real(self, data, *a, **k)
+
+    monkeypatch.setattr(LoyaltyTransactionRepository, "create", stall)
+    loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-1")
+    monkeypatch.setattr(LoyaltyTransactionRepository, "create", real)
+    assert fired
+    assert ledger.rows() == [("ADJUST", -10), ("EARN", 10)], "one claw, net zero"
+    assert ledger.balance() == 30, "40 less the 10 earned, once"
+    loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-3")
+    assert ledger.balance() == 30 and len(ledger.rows()) == 2
+
+
+def test_a_claw_whose_balance_move_was_lost_is_completed_once(ledger, monkeypatch):
+    """The claw row landed and its balance move did not (the reply or the process
+    was lost). Before the fix the next regate read net 0 and never moved the
+    balance: a ledger saying -10 over an account that kept the points."""
+    from api.routers import loyalty
+    from database.repositories.loyalty_repository import LoyaltyAccountRepository
+
+    def lost(*_a, **_k):
+        raise TimeoutError("the balance move was lost")
+
+    with monkeypatch.context() as m:
+        m.setattr(loyalty, "_apply_reversal_balance", lambda *a, **k: ("failed", None))
+        m.setattr(LoyaltyAccountRepository, "adjust_balance", lost)
+        loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-1")
+    assert ledger.rows() == [("ADJUST", -10), ("EARN", 10)] and ledger.balance() == 40
+    loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-2")
+    assert ledger.balance() == 30, "the lost move was completed"
+    loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-3")
+    assert ledger.balance() == 30 and len(ledger.rows()) == 2, "and never twice"
