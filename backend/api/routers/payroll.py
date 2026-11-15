@@ -1673,18 +1673,16 @@ def _incentive_feed_for_store(db, store_id: Optional[str], month: int, year: int
     """
     if db is None or not store_id:
         return {}
-    try:
-        from database.repositories.payout_snapshot_repository import (
-            PayoutSnapshotRepository,
-        )
-        from api.services import scorecard_engine
+    from database.repositories.payout_snapshot_repository import (
+        PayoutSnapshotRepository,
+    )
+    from api.services import scorecard_engine
 
-        repo = PayoutSnapshotRepository(db.get_collection("payout_snapshots"))
-        return scorecard_engine.get_incentive_for_payroll(
-            store_id, year, month, snapshot_repo=repo
-        )
-    except Exception:  # pragma: no cover - defensive
-        return {}
+    # A read failure raises: an unreadable payout is not an empty one.
+    repo = PayoutSnapshotRepository(db.get_collection("payout_snapshots"))
+    return scorecard_engine.get_incentive_for_payroll(
+        store_id, year, month, snapshot_repo=repo
+    )
 
 
 def _stamp_consumed_snapshots(db, feed_cache: dict, month: int, year: int,
@@ -1738,12 +1736,11 @@ def _resolve_pt_slab(db, config: dict) -> Optional[dict]:
     state = None
     store_id = config.get("store_id")
     if db is not None and store_id:
-        try:
-            store = db.get_collection("stores").find_one({"store_id": store_id})
-            if store:
-                state = store.get("state") or store.get("gst_state_code")
-        except Exception:
-            state = None
+        # A read failure raises: an unreadable shop is not a shop with no
+        # Professional Tax, and pay saved without PT would overpay.
+        store = db.get_collection("stores").find_one({"store_id": store_id})
+        if store:
+            state = store.get("state") or store.get("gst_state_code")
     code = pt_code_for_state(state)
     if not code:
         return None
@@ -1821,9 +1818,20 @@ async def run_payroll(
             if not store_id:
                 return {}
             if store_id not in _feed_cache:
-                _feed_cache[store_id] = _incentive_feed_for_store(
-                    db, store_id, req.month, req.year
-                )
+                try:
+                    _feed_cache[store_id] = _incentive_feed_for_store(
+                        db, store_id, req.month, req.year
+                    )
+                except Exception as exc:
+                    # A failed read is not "no incentive": saving 0 would
+                    # underpay, or drop a clawback without a trace.
+                    logger.error("Payroll incentive feed read failed: %s", exc)
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"The locked incentive payout for shop {store_id}, "
+                        f"{req.month:02d}/{req.year}, could not be read, so nothing "
+                        "was calculated or saved. Try again.",
+                    )
             return _feed_cache[store_id]
 
         # Every employee is computed BEFORE anything is written, so a run the
@@ -1834,26 +1842,16 @@ async def run_payroll(
             cfg_store = cfg.get("store_id")
             lwp = float(req.lwp_days.get(emp, 0) or 0)
             incentive = (req.incentives or {}).get(emp)
-            clawback = set_aside = 0.0
-            try:
-                locked = round(float(_store_feed(cfg_store).get(emp, 0.0)), 2)
-            except (TypeError, ValueError):
-                locked = 0.0
+            locked = round(float(_store_feed(cfg_store).get(emp, 0.0)), 2)
             if incentive is None:
                 consumed.add(cfg_store)
-                incentive = locked
-                # A net clawback in the LOCKED payout (roadmap decision #31:
-                # returns took back more kicker than was earned) is not a
-                # typed negative incentive. The engine takes it off pay under
-                # its own name, never below zero; a typed negative is refused.
-                if incentive < 0:
-                    incentive, clawback = 0.0, -incentive
-            elif locked < 0:
-                # An override replaces the locked payout figure, as it always
-                # has. When that figure is a clawback, this run does not take
-                # it back and nothing carries it to a later month, so the
-                # amount is kept on the row instead of vanishing.
-                set_aside = -locked
+                incentive = max(locked, 0.0)
+            # D67 (corrects D30, confirms D58(3)): a net clawback in the LOCKED
+            # payout (roadmap decision #31: returns took back more kicker than
+            # was earned) is never taken off pay by a run, with or without an
+            # override. The full amount is kept on the row as not recovered;
+            # only an explicit Accounts action deducts it (F-1410-A).
+            set_aside = -locked if locked < 0 else 0.0  # never -0.0
             advance = float(req.advances.get(emp, 0) or 0)
             pt_slab = _resolve_pt_slab(db, cfg)
             employee_name = _get_employee_details(db, emp).get("full_name", "")
@@ -1864,7 +1862,6 @@ async def run_payroll(
                     year=req.year,
                     lwp_days=lwp,
                     incentive=incentive,
-                    incentive_clawback=clawback,
                     advance_recovery=advance,
                     pt_slab=pt_slab,
                     gender=cfg.get("gender", "ANY"),

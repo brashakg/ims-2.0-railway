@@ -685,11 +685,12 @@ def test_d30_recovery_up_to_the_months_pay_is_saved(rig):
 
 
 # ---------------------------------------------------------------------------
-# D30 and the LOCKED incentive payout. Roadmap decision #31: a clawback (a
-# kicker taken back on a return) is a negative line folded into the locked
-# payout snapshot, the one incentive feed payroll reads. Nobody types it, so
-# it is not D30's "negative incentive override": it still comes off that
-# month's pay as it always did -- but never below zero.
+# D67 (corrects D30, confirms D58(3)) and the LOCKED incentive payout. Roadmap
+# decision #31: a clawback (a kicker taken back on a return) is a negative line
+# folded into the locked payout snapshot, the one incentive feed payroll reads.
+# An ordinary run never takes it off pay: the full amount is written on the
+# row as incentive_clawback_not_recovered and net pay is untouched. Only an
+# explicit Accounts action deducts it (follow-up F-1410-A).
 # ---------------------------------------------------------------------------
 
 SNAPSHOT = "SNAP-B09-N"
@@ -706,59 +707,31 @@ def _fed(rig):
     return rig.db.get_collection("payout_snapshots").find_one({"snapshot_id": SNAPSHOT}).get("payroll_fed_at")
 
 
-def test_d30_engine_takes_a_payout_clawback_off_pay_but_never_below_zero():
-    net = _engine()["net_pay"]
-    clawed = _engine(incentive_clawback=500)
-    assert clawed["earnings"]["incentive"] == -500 and clawed["net_pay"] == net - 500
-    assert _engine(incentive=200, incentive_clawback=500)["earnings"]["incentive"] == -300
-    assert _engine(incentive_clawback=net)["net_pay"] == 0
-    with pytest.raises(ValueError, match="clawback"):
-        _engine(incentive_clawback=net + 0.01)
-    with pytest.raises(ValueError):
-        _engine(incentive_clawback=-1)  # a clawback is an amount taken back
-    # with a recovery typed as well, the recovery is what the Admin can change
-    with pytest.raises(ValueError, match="Enter a smaller recovery"):
-        _engine(incentive_clawback=500, advance_recovery=net)
-    assert _engine(incentive_clawback=500, advance_recovery=net - 500)["net_pay"] == 0
+def _owed(rows):
+    return {r["employee_id"]: (r["incentives"], r["net_salary"], r["incentive_clawback_not_recovered"])
+            for r in rows}
 
 
 @pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
-def test_d30_a_clawback_in_the_locked_payout_does_not_stop_the_shops_payroll(rig, dry_run):
+@pytest.mark.parametrize("clawed", [500.0, 90000.0], ids=["small", "bigger-than-pay"])
+def test_d67_a_locked_payout_clawback_is_recorded_and_never_taken_off_pay(rig, dry_run, clawed):
     plain = {r["employee_id"]: r["net_salary"] for r in rig.run(dry_run=True).json()["rows"]}
-    _lock_payout(rig, **{EMP: -500.0, EMP2: 300.0})
+    _lock_payout(rig, **{EMP: -clawed, EMP2: 300.0})
 
     reply = rig.run(dry_run=dry_run)
     assert reply.status_code == 200, reply.text
-    got = {r["employee_id"]: (r["incentives"], r["net_salary"]) for r in reply.json()["rows"]}
-    assert got == {EMP: (-500, plain[EMP] - 500), EMP2: (300, plain[EMP2] + 300)}
-    assert [(r["incentives"], r["net_salary"]) for r in rig.rows()] == (
-        [] if dry_run else [got[EMP], got[EMP2]])
+    want = {EMP: (0, plain[EMP], clawed), EMP2: (300, plain[EMP2] + 300, 0)}
+    assert _owed(reply.json()["rows"]) == want
+    assert _owed(rig.rows()) == ({} if dry_run else want)
+    assert (_fed(rig) is None) is dry_run  # a saving run used the payout, as before
     # a TYPED negative incentive is still refused, even a small one
     assert rig.run(dry_run=dry_run, incentives={EMP: -1}).status_code == 422
 
 
-def test_d30_a_payout_clawback_bigger_than_the_months_pay_is_refused(rig):
-    _lock_payout(rig, **{EMP: -90000.0, EMP2: 300.0})
-    for dry_run in (True, False):
-        reply = rig.run(dry_run=dry_run)
-        assert reply.status_code == 422, reply.text
-        assert "clawback" in _detail(reply) and "ZZ Native One" in _detail(reply)
-    assert rig.rows() == [] and _fed(rig) is None  # nothing saved, payout not consumed
-    g = rig.guard()
-    assert g is None or g.get("runs") == 0
-    # The message promises nothing IMS cannot do: no clawback is carried into
-    # a later month, so it does not tell the Admin to have it "spread".
-    said = _detail(reply)
-    assert "spread" not in said and "does not carry a clawback into later months" in said
-    assert "head office support" in said and "still owed" in said
-
-
 @pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
-def test_d30_a_clawback_an_override_sets_aside_is_kept_on_the_row(rig, dry_run):
-    """The one way past a clawback bigger than the month's pay is the incentive
-    override (support, by API), which replaces the locked payout figure as it
-    always has. The clawback it did not take back is written on the payroll
-    row, so it is never dropped without a trace."""
+def test_d67_an_override_also_keeps_the_clawback_on_the_row(rig, dry_run):
+    """The incentive override (API only) replaces the locked figure as it always
+    has; the clawback is still recorded, never dropped without a trace."""
     _lock_payout(rig, **{EMP: -90000.0, EMP2: 300.0})
     reply = rig.run(dry_run=dry_run, incentives={EMP: 0})
     assert reply.status_code == 200, reply.text
@@ -768,20 +741,67 @@ def test_d30_a_clawback_an_override_sets_aside_is_kept_on_the_row(rig, dry_run):
 
     assert owed(reply.json()["rows"]) == {EMP: (0, 90000), EMP2: (300, 0)}
     assert owed(rig.rows()) == ({} if dry_run else {EMP: (0, 90000), EMP2: (300, 0)})
-    assert all(r["net_salary"] >= 0 for r in reply.json()["rows"])
     # an override where the locked figure is not a clawback sets nothing aside
     both = rig.run(dry_run=True, incentives={EMP: 0, EMP2: 100})
     assert owed(both.json()["rows"]) == {EMP: (0, 90000), EMP2: (100, 0)}
 
 
-def test_d30_a_rerun_that_takes_the_clawback_clears_the_amount_set_aside(rig):
+def test_d67_reruns_keep_the_clawback_recorded_and_pay_unchanged(rig):
+    plain = {r["employee_id"]: r["net_salary"] for r in rig.run(dry_run=True).json()["rows"]}
     _lock_payout(rig, **{EMP: -500.0})
     assert rig.run(incentives={EMP: 0, EMP2: 0}).status_code == 200
-    assert [(r["incentives"], r["incentive_clawback_not_recovered"]) for r in rig.rows()] == [(0, 500), (0, 0)]
+    want = {EMP: (0, plain[EMP], 500), EMP2: (0, plain[EMP2], 0)}
+    assert _owed(rig.rows()) == want
+    assert [str(r["incentive_clawback_not_recovered"]) for r in rig.rows()] == ["500.0", "0.0"]  # never -0.0
     assert _fed(rig) is None  # every figure was overridden: the payout is not marked as fed, as before
-    assert rig.run().status_code == 200  # no override: the clawback comes off this month's pay
-    assert [(r["incentives"], r["incentive_clawback_not_recovered"]) for r in rig.rows()] == [(-500, 0), (0, 0)]
-    assert _fed(rig) is not None  # now the payout was used
+    for _ in range(2):  # ordinary rerun, then its identical retry
+        assert rig.run().status_code == 200
+        assert _owed(rig.rows()) == want and len(rig.rows()) == 2
+    assert _fed(rig) is not None
+    # approving posts the untouched pay; the clawback stays recorded
+    assert rig.approve().status_code == 200
+    assert _owed(rig.rows()) == want and rig.statuses() == ["APPROVED", "APPROVED"]
+
+
+# A read that fails is not an empty read: the run refuses and saves nothing
+# rather than paying without the locked incentive (or its clawback) or without
+# Professional Tax.
+
+
+def _fail_reads_of(monkeypatch, rig, collection):
+    original = rig.coll_cls.find_one
+
+    def find_one(self, *a, **k):
+        if self.name == collection:
+            raise RuntimeError(f"{collection} read failed")
+        return original(self, *a, **k)
+
+    monkeypatch.setattr(rig.coll_cls, "find_one", find_one)
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_locked_payout_that_cannot_be_read_refuses_the_run(rig, monkeypatch, dry_run):
+    _lock_payout(rig, **{EMP: 500.0, EMP2: -200.0})
+    _fail_reads_of(monkeypatch, rig, "payout_snapshots")
+    reply = rig.run(dry_run=dry_run)
+    assert reply.status_code == 503, reply.text
+    assert "could not be read" in _detail(reply) and "nothing was calculated or saved" in _detail(reply)
+    monkeypatch.undo()
+    assert rig.rows() == [] and _fed(rig) is None
+    g = rig.guard()
+    assert g is None or g.get("runs") == 0
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["preview", "save"])
+def test_shop_that_cannot_be_read_refuses_the_run_instead_of_dropping_pt(rig, monkeypatch, dry_run):
+    rig.db.get_collection("stores").insert_one({"store_id": STORE, "state": "Maharashtra"})
+    with_pt = rig.run(dry_run=True).json()["rows"][0]
+    assert with_pt["breakdown"]["deductions"]["professional_tax"] > 0  # the shop's state charges PT
+    _fail_reads_of(monkeypatch, rig, "stores")
+    reply = rig.run(dry_run=dry_run)
+    assert reply.status_code >= 500, reply.text
+    monkeypatch.undo()
+    assert rig.rows() == []
 
 
 # ---------------------------------------------------------------------------
