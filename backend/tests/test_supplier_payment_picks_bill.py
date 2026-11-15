@@ -340,7 +340,7 @@ def test_the_same_payment_request_racing_itself_records_one(ap, monkeypatch):
             seen.append(1)
             memory.vendor_payments.insert_one(  # the twin saved in between
                 payment(300, "B1", store_id=PUN, payment_id="TWIN", request_id=request_id,
-                        payment_date="2026-10-15", tds_amount=0.0))
+                        payment_date="2026-10-15", tds_amount=0.0, mode="BANK"))  # as the request saves it
             return None
         return real(db, request_id, sent, user)
 
