@@ -2524,3 +2524,206 @@ class TestR8ReconReadFaultIsNotAnEmptyConsole:
         with pytest.raises(HTTPException) as exc:
             _recon(db, monkeypatch)
         assert exc.value.status_code == 503
+
+
+# ===========================================================================
+# Round 9 (review of head 4b470d57): a failed orders / expenses read while a
+# drawer is counted is REFUSED, never stored as zero sales or zero payouts
+# (D53: read faults shown as zero are corrections; D60 carried that zero onto
+# the next drawer as a false shortage with a manager alert).
+# ===========================================================================
+
+
+def _fail_reads(db, name):
+    coll = db.get_collection(name)
+
+    def _boom(*a, **k):
+        raise AutoReconnect(f"{name} read fault")
+
+    coll.find = _boom
+    return lambda: delattr(coll, "find")
+
+
+def _follow_ups(monkeypatch):
+    """Capture the "count it on the Z-Read" manager task at both doors."""
+    raised = []
+    monkeypatch.setattr(till, "raise_count_not_on_till_task", lambda **kw: raised.append(kw))
+    return raised
+
+
+def _open(db, **kw):
+    return till.open_session(
+        db, store_id=STORE, session_date=DATE, opening_float_paisa=0, actor=CASHIER, **kw
+    )["session"]["session_id"]
+
+
+class TestR9CashReadFaultIsRefusedNotZero:
+    """Reviewer's steps: drawer A takes Rs 1,000; A's blind count runs while the
+    orders read fails once, and used to be SAVED with cash sales 0 (a +Rs 1,000
+    OVERAGE). After recovery drawer B takes Rs 3,000 and is counted at Rs 3,000;
+    D60 took A's 0 off the day so B was expected Rs 4,000: SHORT Rs 1,000 and a
+    manager alert on a day that balanced."""
+
+    @pytest.mark.parametrize("name", ["orders", "returns", "expenses"])
+    def test_a_count_during_the_read_fault_is_refused_and_a_stays_open(self, db, name):
+        _cash_sale(db, 1000)
+        a = _open(db)
+        restore = _fail_reads(db, name)
+        try:
+            res = till.blind_submit(
+                db, a, blind_denominations=[{"face": 500, "kind": "note", "pieces": 2}], actor=CASHIER)
+        finally:
+            restore()
+        assert (res["ok"], res["http"], res["error"]) == (False, 503, "cash_read_failed")
+        assert "not saved" in res["message"]
+        row = _till(db, a)
+        assert row["status"] == till.STATUS_OPEN
+        assert (row.get("expected_cash_paisa"), row.get("cash_sales_paisa"), row.get("variance_paisa")) == (None, None, None)
+
+    @pytest.mark.parametrize("name", ["orders", "expenses"])
+    def test_after_recovery_both_drawers_balance_and_nobody_is_alerted(self, db, monkeypatch, name):
+        db.get_collection("expenses").insert_one({
+            "store_id": STORE, "expense_date": DATE, "payment_mode": "CASH",
+            "status": "APPROVED", "amount": 200.0, "category": "TEA",
+        })
+        _cash_sale(db, 1000)
+        alerts = _alerts(monkeypatch)
+        a = _open(db)
+        notes = [{"face": 100, "kind": "note", "pieces": 8}]  # Rs 1,000 less Rs 200 paid out
+        restore = _fail_reads(db, name)
+        try:
+            assert till.blind_submit(db, a, blind_denominations=notes, actor=CASHIER)["http"] == 503
+        finally:
+            restore()
+        assert till.blind_submit(db, a, blind_denominations=notes, actor=CASHIER)["ok"]
+        assert till.lock_session(db, a, actor=MANAGER)["ok"]  # no note owed
+        b = _open(db, shift="PM")
+        _cash_sale(db, 3000, "2026-11-04T10:00:00")
+        assert till.blind_submit(
+            db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}], actor=CASHIER)["ok"]
+        locked = till.lock_session(db, b, actor=MANAGER)
+        assert locked["ok"], locked
+        assert (_till(db, a)["variance_paisa"], _till(db, b)["variance_paisa"]) == (0, 0)
+        assert (_till(db, a)["cash_payouts_paisa"], _till(db, b)["cash_payouts_paisa"]) == (20000, 0)
+        assert alerts == []
+
+    def test_through_the_zread_door_the_refusal_is_a_503_with_a_sentence(self, db):
+        a = _open(db)
+        restore = _fail_reads(db, "orders")
+        try:
+            res = till.blind_submit(db, a, blind_denominations=[], blind_count_paisa=0, actor=CASHIER)
+        finally:
+            restore()
+        with pytest.raises(HTTPException) as exc:
+            till_router._raise(res)
+        assert exc.value.status_code == 503
+        assert exc.value.detail["code"] == "cash_read_failed"
+        assert "Try again" in exc.value.detail["message"]
+
+    @pytest.mark.parametrize("name", ["orders", "returns", "expenses"])
+    def test_cash_register_close_during_the_fault_writes_nothing(self, db, monkeypatch, name):
+        a = _open(db)
+        _cash_sale(db, 1000)
+        alerts = _alerts(monkeypatch)
+        follow = _follow_ups(monkeypatch)
+        restore = _fail_reads(db, name)
+        try:
+            with pytest.raises(HTTPException) as exc:
+                _cr_close_b(db, monkeypatch, 2, note="should not be needed")
+        finally:
+            restore()
+        assert exc.value.status_code == 503
+        stored = db.get_collection("cash_register_sessions").find_one({"session_id": "CR-D40"})
+        assert (stored["status"], stored.get("variance")) == ("OPEN", None)
+        assert _till(db, a)["status"] == till.STATUS_OPEN
+        assert alerts == [] and follow == []
+
+    def test_day_end_during_the_fault_leaves_the_till_open_and_tells_the_manager(self, db, day_end, monkeypatch):
+        a = _open(db)
+        _cash_sale(db, 1000)
+        follow = _follow_ups(monkeypatch)
+        restore = _fail_reads(db, "orders")
+        try:
+            day_end(closing_cash=1000.0, system_cash=1000.0)
+        finally:
+            restore()
+        close = _stored_close(db)
+        assert (close["till_link_ok"], close["till_link_error"]) == (False, "cash_read_failed")
+        row = _till(db, a)
+        assert (row["status"], row.get("cash_sales_paisa")) == (till.STATUS_OPEN, None)
+        assert follow == [{"store_id": STORE, "session_date": DATE, "source": "Day-End close"}]
+
+    def test_register_close_whose_count_missed_the_till_tells_the_manager(self, db, monkeypatch):
+        """F-1421-R2-A's withheld case: the comparison is withheld (no false
+        shortage), and the manager gets a task to count the drawer on the
+        Z-Read, so a real shortage on it is still checked (ruling 2026-08-25)."""
+        _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        _alerts(monkeypatch)
+        follow = _follow_ups(monkeypatch)
+        restore = _fail_till_reads(db.get_collection("till_sessions"), counted_only=True)
+        try:
+            out = _cr_close_b(db, monkeypatch, 6)
+        finally:
+            restore()
+        assert (out["till_link_ok"], out["variance_status"]) == (False, "SEVERAL_DRAWERS")
+        assert follow == [{"store_id": STORE, "session_date": DATE, "source": "Finance cash-register close"}]
+
+    def test_control_a_close_that_reached_the_till_raises_no_follow_up(self, db, monkeypatch):
+        _open(db)
+        _cash_sale(db, 1000)
+        follow = _follow_ups(monkeypatch)
+        out = _cr_close_b(db, monkeypatch, 2)
+        assert (out["till_link_ok"], out["variance_status"]) == (True, "BALANCED")
+        assert follow == []
+
+    def test_the_follow_up_task_is_one_per_shop_day(self, monkeypatch):
+        import mongomock
+
+        tasks = _real_task_repo(monkeypatch, mongomock.MongoClient().db)
+        for src in ("Day-End close", "Finance cash-register close"):
+            till.raise_count_not_on_till_task(store_id=STORE, session_date=DATE, source=src)
+        rows = list(tasks.find({}))
+        assert len(rows) == 1
+        assert rows[0]["source_ref"] == f"till_uncounted:{STORE}:{DATE}"
+        assert "Z-Read" in rows[0]["title"]
+
+
+def test_r9_cash_read_fault_on_real_mongo(monkeypatch):
+    """The reviewer's sequence on a native PyMongo Database: the real
+    Collection.find of the orders collection raises during A's count; the
+    count is refused and A stays OPEN; after recovery A and B both balance."""
+    from pymongo.collection import Collection
+
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        _cash_sale(real_db, 1000, datetime(2026, 11, 4, 5, 0))
+        alerts = _alerts(monkeypatch)
+        a = _open(real_db)
+        notes = [{"face": 500, "kind": "note", "pieces": 2}]
+        real_find = Collection.find
+
+        def _fault(self, *a_, **k):
+            if self.database.name == name and self.name == "orders":
+                raise AutoReconnect("native orders read fault")
+            return real_find(self, *a_, **k)
+
+        monkeypatch.setattr(Collection, "find", _fault)
+        res = till.blind_submit(real_db, a, blind_denominations=notes, actor=CASHIER)
+        monkeypatch.setattr(Collection, "find", real_find)
+        assert (res["ok"], res["http"], res["error"]) == (False, 503, "cash_read_failed")
+        assert real_db.till_sessions.find_one({"_id": a})["status"] == till.STATUS_OPEN
+
+        assert till.blind_submit(real_db, a, blind_denominations=notes, actor=CASHIER)["ok"]
+        assert till.lock_session(real_db, a, actor=MANAGER)["ok"]
+        b = _open(real_db, shift="PM")
+        _cash_sale(real_db, 3000, datetime(2026, 11, 4, 10, 0))
+        assert till.blind_submit(
+            real_db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}], actor=CASHIER)["ok"]
+        assert till.lock_session(real_db, b, actor=MANAGER)["ok"]
+        rows = {s["_id"]: s for s in real_db.till_sessions.find({})}
+        assert (rows[a]["variance_paisa"], rows[b]["variance_paisa"]) == (0, 0)
+        assert alerts == []
+    finally:
+        client.drop_database(name)
+        client.close()

@@ -293,6 +293,42 @@ def raise_variance_task(
         return
 
 
+def raise_count_not_on_till_task(
+    *, store_id: Optional[str], session_date: Optional[str], source: str
+) -> None:
+    """A SYSTEM task for the store manager when a close's count did NOT reach
+    the till (the link failed). That drawer is still OPEN on the till, so no
+    blind count has judged it: without this, a real shortage on it could go
+    unchecked and unalerted (owner ruling 2026-08-25). One task per shop-day.
+    Fail-soft, like raise_variance_task."""
+    try:
+        from ..dependencies import get_task_repository
+        from .task_triggers import create_system_task
+
+        day = str(session_date or "")
+        create_system_task(
+            get_task_repository(),
+            title=f"Count the cash drawer on the Z-Read at {store_id} ({day})",
+            description=(
+                f"The {day} close at store {store_id} ({source}) could not record "
+                "its count on the till, so the drawer is still open there and has "
+                "not been checked against expected cash. Count it on the Z-Read "
+                "screen and lock it."
+            ),
+            priority="P2",
+            category="Finance",
+            store_id=store_id,
+            assigned_to="STORE_MANAGER",
+            dedupe_ref=f"till_uncounted:{store_id}:{day}",
+            extra={
+                "link": "/finance/cash-register",
+                "payload": {"store_id": store_id, "session_date": day},
+            },
+        )
+    except Exception:  # noqa: BLE001
+        return
+
+
 def variance_status(variance_paisa: int, tolerance_paisa: int = 0) -> str:
     """Classify a signed variance against a tolerance band (absolute paisa).
     BALANCED (|v| <= tol), OVERAGE (drawer over beyond tol), SHORTAGE (short)."""
@@ -350,11 +386,13 @@ def compute_expected(
 
     The per-tender ``by_mode`` from E5 rides along so the Z-Read can show sales by
     tender (UPI/CARD/etc.) -- only CASH feeds the drawer-expected figure. DB
-    absent -> a zero-sales envelope (never raises)."""
+    absent -> a zero-sales envelope. A FAILED orders or returns read RAISES
+    (strict): a zero from a read that failed would be stored as this drawer's
+    sales and, under D60, pushed onto the next drawer as a false shortage."""
     from . import tender_reconciliation as tr
 
     recon = tr.reconcile_window(
-        db, store_id, window_start, window_end, include_returns=True
+        db, store_id, window_start, window_end, include_returns=True, strict=True
     )
     by_mode = recon.get("by_mode") or {}
     cash_row = by_mode.get("CASH") or {}
@@ -412,23 +450,22 @@ def auto_cash_payouts_paisa(db, store_id: str, window_start: Any, window_end: An
     so the upper bound handed to the IST-day filter is the last instant INSIDE
     the window -- passing the exclusive end verbatim would pull in a whole
     extra day of expenses. Lazy import (the router imports this module).
-    Fail-soft to (0, 0), same as the finance close's own read.
+    A FAILED expenses read RAISES (strict), never (0, 0): a payout leg of zero
+    from a read that failed made this drawer short and, under D60, the next
+    drawer over by the same amount. blind_submit refuses the count (503).
 
     Returns ``(payouts_paisa, off_till_excluded_count)`` -- the second figure
     is a COUNT of payroll-shaped expenses deliberately left out (never their
     amount), so the session can say its payouts leg omits something."""
     from datetime import timedelta
 
-    try:
-        from ..routers.finance import _cash_expenses_for_window
+    from ..routers.finance import _cash_expenses_for_window
 
-        start_iso = window_start.isoformat() if hasattr(window_start, "isoformat") else str(window_start)
-        end_inside = window_end - timedelta(seconds=1) if hasattr(window_end, "isoformat") else window_end
-        end_iso = end_inside.isoformat() if hasattr(end_inside, "isoformat") else str(end_inside)
-        win = _cash_expenses_for_window(db, store_id, start_iso, end_iso)
-        return _to_int_paisa_from_rupees(win.total), int(win.excluded_count or 0)
-    except Exception:  # noqa: BLE001
-        return 0, 0
+    start_iso = window_start.isoformat() if hasattr(window_start, "isoformat") else str(window_start)
+    end_inside = window_end - timedelta(seconds=1) if hasattr(window_end, "isoformat") else window_end
+    end_iso = end_inside.isoformat() if hasattr(end_inside, "isoformat") else str(end_inside)
+    win = _cash_expenses_for_window(db, store_id, start_iso, end_iso, strict=True)
+    return _to_int_paisa_from_rupees(win.total), int(win.excluded_count or 0)
 
 
 def _counted_drawers(db, session: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -987,8 +1024,22 @@ def blind_submit(
     # AUTO-PULLED, never hand-typed (owner ruling 2026-08-25): the payouts leg
     # comes from the expenses book for the session window -- the same read the
     # Finance close charges the drawer with.
-    payouts, off_till_excluded = auto_cash_payouts_paisa(db, store_id, ws, we)
-    exp = compute_expected(db, store_id, ws, we, int(session.get("opening_float_paisa", 0) or 0), payouts)
+    # A failed orders / returns / expenses read is REFUSED, never stored as a
+    # zero: the drawer stays OPEN and the same count can simply be sent again.
+    try:
+        payouts, off_till_excluded = auto_cash_payouts_paisa(db, store_id, ws, we)
+        exp = compute_expected(db, store_id, ws, we, int(session.get("opening_float_paisa", 0) or 0), payouts)
+    except Exception:  # noqa: BLE001
+        logger.exception("Cash read failed before counting %s", session_id)
+        return {
+            "ok": False,
+            "error": "cash_read_failed",
+            "http": 503,
+            "message": (
+                "The day's cash sales or expenses could not be read, so this "
+                "count was not saved. Try again in a moment."
+            ),
+        }
     # D76: older code stored WHOLE-DAY cash on every drawer (no
     # expected_net_of_drawers key). Taking such a snapshot off this drawer's
     # figure would charge it with the wrong cash, so no comparison is made.

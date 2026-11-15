@@ -210,8 +210,26 @@ async def close_cash_register(
         till_service.get_variance_tolerance_paisa(store_id=store_id) / 100.0
     )
 
-    cash_sales, cash_refunds = _cash_sales_for_window(db, store_id, start_iso, end_iso)
-    _cash_exp = _cash_expenses_for_window(db, store_id, start_iso, end_iso)
+    # A failed sales / refunds / expenses read is REFUSED before anything is
+    # written: answering zero stored a false variance, demanded a note and
+    # alerted the manager for a drawer that balanced (D53). The session stays
+    # OPEN and the same close can be sent again.
+    try:
+        cash_sales, cash_refunds = _cash_sales_for_window(
+            db, store_id, start_iso, end_iso, strict=True
+        )
+        _cash_exp = _cash_expenses_for_window(
+            db, store_id, start_iso, end_iso, strict=True
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("Cash register close: cash read failed for %s", body.session_id)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The day's cash sales or expenses could not be read, so the "
+                "register was not closed. Try again in a moment."
+            ),
+        )
     cash_expenses = _cash_exp.total
     opening_float = float(session.get("opening_float", 0) or 0)
 
@@ -504,6 +522,14 @@ async def close_cash_register(
             note=close_note,
             source="Finance cash-register close",
             session_id=till_link.get("session_id"),
+        )
+    # The count did not reach the till: that drawer is still OPEN there and
+    # nothing has checked it. The manager is told to count it on the Z-Read.
+    if counted is not None and not till_link.get("ok"):
+        till_service.raise_count_not_on_till_task(
+            store_id=store_id,
+            session_date=ist_date_str(_to_dt(end_iso)) or str(end_iso)[:10],
+            source="Finance cash-register close",
         )
 
     merged = dict(session)

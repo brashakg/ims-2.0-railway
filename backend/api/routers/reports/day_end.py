@@ -394,6 +394,13 @@ async def create_day_end_close(
     except Exception:
         pass
 
+    # The count did not reach the till: that drawer is still OPEN there and
+    # nothing has checked it. The manager is told to count it on the Z-Read.
+    if closing_cash is not None and not till_link.get("ok"):
+        till_service.raise_count_not_on_till_task(
+            store_id=sid, session_date=body.date, source="Day-End close"
+        )
+
     return {
         "closed": True,
         "store_id": sid,
