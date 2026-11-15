@@ -39,6 +39,9 @@ RELEASE_FAILED = "line_remove_stock_release_failed"
 RELEASE_FAILED_ITEM = "line_remove_stock_failed_item_id"
 # A regate outcome no retry changes: points already spent, or no loyalty store.
 _LOYALTY_FINAL = ("balance_underflow", "loyalty_db_unavailable")
+# Points the bill no longer earns that the customer had already spent: before the
+# claw row (nothing written, a person's call) or after it (owed, lands by itself).
+_POINTS_SPENT = ("balance_underflow", "claw_move_underflow")
 _ACTOR_FIELDS = ("user_id", "username", "full_name", "roles", "store_ids", "active_store_id")
 
 
@@ -448,15 +451,54 @@ async def settle(op: dict, after: dict, repo) -> bool:
     # loyalty earn standing. Each claw lands once per step (regate_earn_after_edit);
     # one that could not finish (its row landed without its balance move, or the
     # ledger could not be read) keeps this row OPEN, so the next runner completes
-    # it. Points already spent (underflow) are a person's call, as before.
+    # it. Points already spent (underflow) go on the Tasks board (_points_task).
     regated: Dict[str, Any] = {"ok": False, "reason": "error"}
     with suppress(Exception):
         from ..loyalty import regate_earn_after_edit
 
         regated = regate_earn_after_edit(after, user_id=op["user"].get("user_id")) or {}
     owed = not regated.get("ok") and regated.get("reason") not in _LOYALTY_FINAL
+    _points_task(after, regated)
     _end(op, None if failed or owed else "SETTLED")
     return not failed
+
+
+def _points_task(order: dict, regated: dict) -> None:
+    """Points a bill no longer earns, already spent by the customer, are on the
+    Tasks board while they stand (not only in a log), and IMS closes the task
+    once the edit's claw has landed. Fail-soft: never stops a settle."""
+    from ...dependencies import get_task_repository
+    from ...services.task_triggers import create_system_task
+    from ..returns import _close_task as close
+
+    order_id, reason = order.get("order_id"), regated.get("reason")
+    ref = f"order_points_unclawed:{order_id}"
+    with suppress(Exception):
+        if regated.get("ok"):
+            close(ref, {"user_id": "system"}, "IMS took back the points this bill no longer earns.")
+            return
+        if reason not in _POINTS_SPENT:
+            return
+        number, points = order.get("order_number") or order_id, regated.get("delta")
+        owed = reason == "claw_move_underflow"
+        create_system_task(
+            get_task_repository(),
+            title=f"Order {number}: {points} loyalty points not yet taken back",
+            description=(
+                f"An edit of order {number} lowered the points it earns by {points}, but customer "
+                f"{order.get('customer_id')} had already spent them. "
+                + ("IMS has recorded taking them back and takes them as soon as the customer's "
+                   "balance covers them, then closes this task." if owed else
+                   "IMS has not taken them back. Head office decides what to do; IMS closes this "
+                   "task if a later edit takes them back.")
+            ),
+            priority="P2",
+            category="Accounts",
+            store_id=order.get("store_id"),
+            dedupe_ref=ref,
+            extra={"payload": {"order_id": order_id, "customer_id": order.get("customer_id"),
+                               "points": points, "owed": owed}},
+        )
 
 
 async def finish_landed(order: dict, repo) -> dict:
@@ -548,7 +590,11 @@ async def sweep_edit_ops() -> Dict[str, int]:
     except Exception as exc:  # noqa: BLE001 -- the rest of the tick still runs
         logger.warning("[STOCK] stranded-claim check stopped: %s", exc)
     try:
-        rows = list(coll.find({"state": "OPEN", "created_at": {"$lt": cutoff}}, {"_id": 0}).limit(200))
+        # Least recently tried first (never tried sorts first), so rows that stay
+        # OPEN for long (owed points, stuck stock) rotate and never crowd out newer ones.
+        rows = list(coll.find({"state": "OPEN", "created_at": {"$lt": cutoff}}, {"_id": 0})
+                    .sort("tried_at", 1).limit(200))
+        coll.update_many({"op_id": {"$in": [op["op_id"] for op in rows]}}, {"$set": {"tried_at": datetime.now()}})
         for op in rows:
             order = repo.find_by_id(op["order_id"])
             if order is None:

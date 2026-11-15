@@ -139,3 +139,22 @@ def test_an_edit_claw_and_a_reversal_take_the_earn_once_on_real_mongo(shop, ledg
 
     _native(shop)
     case(ledger, monkeypatch, door, paused)
+
+
+@pytest.mark.parametrize("when", ["before the claw row", "after the claw row"])
+def test_points_already_spent_reach_the_tasks_board_on_real_mongo(client, shop, door, monkeypatch, when):
+    from tests.test_order_edit_recovery import test_points_already_spent_reach_the_tasks_board as case
+    from api import dependencies as dm
+    from database.repositories.task_repository import TaskRepository
+
+    _native(shop)
+    repo = TaskRepository(shop["db"].get_collection("tasks"))
+    monkeypatch.setattr(dm, "get_task_repository", lambda: repo)
+    case(client, shop, door, shop["db"].get_collection("tasks"), monkeypatch, when)
+
+
+def test_the_sweep_reaches_every_open_edit_row_in_turn_on_real_mongo(shop, monkeypatch):
+    from tests.test_order_edit_recovery import test_the_sweep_reaches_every_open_edit_row_in_turn as case
+
+    _native(shop)
+    case(shop, monkeypatch)

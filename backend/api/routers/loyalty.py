@@ -1887,7 +1887,7 @@ def _regate_pass(order_doc, order_id, customer_id, accounts, txns, user_id) -> D
             pts = int(row.get("points") or 0)
             status, _ = _apply_reversal_balance(accounts, customer_id, row["txn_id"], pts, -pts, 0, None)
             if status not in _CLAW_MOVED:
-                return _claw_owed(customer_id, order_id, row["txn_id"], status)
+                return _claw_owed(customer_id, order_id, row["txn_id"], status, -pts)
 
     earn_rows = [
         t for t in ledger
@@ -1978,20 +1978,21 @@ def _regate_pass(order_doc, order_id, customer_id, accounts, txns, user_id) -> D
         return {"ok": False, "reason": "claw_write_failed"}
     status, _ = _apply_reversal_balance(accounts, customer_id, txn_id, -delta, delta, 0, None)
     if status not in _CLAW_MOVED:
-        return _claw_owed(customer_id, order_id, txn_id, status)
+        return _claw_owed(customer_id, order_id, txn_id, status, delta)
     return {"ok": True, "clawed": delta, "txn_id": txn_id}
 
 
-def _claw_owed(customer_id, order_id, txn_id, status) -> Dict[str, Any]:
+def _claw_owed(customer_id, order_id, txn_id, status, points) -> Dict[str, Any]:
     """A claw row stands whose balance move has not landed (the write failed, or
     a redeem spent the points between the balance check and the move). Owed,
     never final: the edit stays OPEN and every runner retries the move by its
-    id (once), so the ledger never shows a claw the account did not take."""
+    id (once), so the ledger never shows a claw the account did not take. An
+    underflow also puts a task on the Tasks board (edit_ops._points_task)."""
     logger.error(
         "edit-regate claw %s cust=%s order=%s: balance move %s -- the claw row "
         "stands; the edit stays open until the move lands", txn_id, customer_id, order_id, status,
     )
-    return {"ok": False, "reason": f"claw_move_{status}", "txn_id": txn_id}
+    return {"ok": False, "reason": f"claw_move_{status}", "txn_id": txn_id, "delta": points}
 
 
 def regate_earn_after_edit(

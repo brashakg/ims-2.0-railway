@@ -1856,6 +1856,55 @@ def test_an_edit_claw_and_a_reversal_take_the_earn_once(ledger, monkeypatch, doo
     assert ledger.balance() == 30 and sum(p for _, p in ledger.rows()) == 0
 
 
+@pytest.mark.parametrize("when", ["before the claw row", "after the claw row"])
+def test_points_already_spent_reach_the_tasks_board(client, shop, door, tasks, monkeypatch, when):
+    """Round 11 (ruling of 11-07: a visible exception for anything unresolved).
+    Before, points the customer had spent were only an ERROR log: before the claw
+    row the edit closed with nobody told; after it the edit stayed OPEN for good
+    with nobody told. Both now put one task on the board, which IMS closes once
+    the claw lands; the edit's own states are unchanged."""
+    from api.routers import loyalty
+
+    oid = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    reason = "balance_underflow" if when == "before the claw row" else "claw_move_underflow"
+    answer = {"r": {"ok": False, "reason": reason, "delta": 10}}
+    monkeypatch.setattr(loyalty, "regate_earn_after_edit", lambda doc, user_id=None: answer["r"])
+    lines = [_as_sent(ln, discount_percent=10) for ln in _order(shop, oid)["items"]]
+    assert door.press(oid, lines).status_code == 200
+    ref = {"source_ref": f"order_points_unclawed:{oid}"}
+    assert _op_states(shop, oid) == (["SETTLED"] if reason == "balance_underflow" else ["OPEN"])
+    _sweep(shop)
+    rows = list(tasks.find(ref))
+    assert len(rows) == 1 and rows[0]["status"] == "OPEN", rows
+    assert "10 loyalty points" in rows[0]["title"] and rows[0]["store_id"] == STORE
+    answer["r"] = {"ok": True, "clawed": 10}
+    if reason == "balance_underflow":  # a person's call: a later edit may take them
+        assert door.press(oid, [_as_sent(ln, discount_percent=20)
+                                for ln in _order(shop, oid)["items"]]).status_code == 200
+    else:
+        _sweep(shop)
+    assert tasks.find_one(ref)["status"] == "COMPLETED"
+    assert set(_op_states(shop, oid)) == {"SETTLED"}
+
+
+def test_the_sweep_reaches_every_open_edit_row_in_turn(shop, monkeypatch):
+    """Round 11: the sweep reads 200 OPEN rows a tick, unsorted. Rows that stay
+    OPEN for long (owed points) filled every tick and a newer stuck row was never
+    read. Rows are now read least recently tried first."""
+    from api.routers.orders import edit_ops
+
+    old = datetime.now() - timedelta(hours=2)
+    coll = shop["db"].get_collection("order_edit_ops")
+    coll.insert_many([{"op_id": f"op-{n:03d}", "order_id": f"gone-{n:03d}", "state": "OPEN",
+                       "created_at": old + timedelta(seconds=n)} for n in range(201)])
+    first = asyncio.run(edit_ops.sweep_edit_ops())
+    assert first["unfinished"] == 200
+    late = coll.find_one({"tried_at": None}, {"_id": 0, "op_id": 1})
+    assert late is not None, "200 of 201 tried"
+    asyncio.run(edit_ops.sweep_edit_ops())
+    assert coll.count_documents({"tried_at": None}) == 0, "the row left out is read on the next tick"
+
+
 def test_a_lens_given_back_before_its_cell_existed_is_swept_back(client, shop, cells, monkeypatch):
     """D77, no window: the press stalls before its reserve, the sweep gives the op
     back while the lens's cell does not exist yet (nothing to void), the cell is

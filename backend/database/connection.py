@@ -361,6 +361,7 @@ class DatabaseConnection:
         # by op_id, the sweep by state and age.
         _idx("order_edit_ops", "op_id", unique=True, background=True)
         _idx("order_edit_ops", [("state", 1), ("created_at", 1)], background=True)
+        _idx("order_edit_ops", [("state", 1), ("tried_at", 1)], background=True)
         _idx(
             "stock_units",
             [("product_id", 1), ("store_id", 1), ("status", 1)],
