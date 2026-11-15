@@ -152,7 +152,7 @@ export default function CashRegisterPage() {
         // The count never reached the till: that drawer is still open there
         // and nothing has checked it, whatever this close's verdict says.
         toast.warning(
-          'Closed, but this count did not reach the till, so the drawer is still open there and has not been checked. Count it on the Z-Read screen.',
+          'Closed, but this count did not reach the till, so the drawer is still open there and has not been checked. Count it on the Blind EOD Tally (Z-Read) screen.',
         );
       } else if (closed.variance_status === 'NOT_COUNTED') {
         // Blank is not zero. Say what was recorded, so nobody goes looking for
@@ -164,7 +164,7 @@ export default function CashRegisterPage() {
         // The day's drawers could not be read, so nobody knows whether this
         // count is the whole day's: no variance is claimed.
         toast.warning(
-          'Closed. The day\'s cash drawers could not be read, so no variance is shown. Count the drawer on the Z-Read screen to compare it.',
+          'Closed. The day\'s cash drawers could not be read, so no variance is shown. Count the drawer on the Blind EOD Tally (Z-Read) screen to compare it.',
         );
       } else if (closed.variance_status === 'SEVERAL_DRAWERS') {
         // D53: no single variance is true for a day with several drawers.
@@ -574,7 +574,7 @@ function VarianceChip({ session }: { session: CashRegisterSession }) {
       <div className="text-left inline-block">
         <VarianceChip session={{ ...session, till_link_ok: true }} />
         <p data-testid="count-not-on-till" className="text-xs text-amber-700 mt-1">
-          Count not on the till. Count this drawer on the Z-Read screen.
+          Count not on the till. Count this drawer on the Blind EOD Tally (Z-Read) screen.
         </p>
       </div>
     );

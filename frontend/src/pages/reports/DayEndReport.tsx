@@ -248,7 +248,7 @@ export default function DayEndReport() {
       setCloseInfo(res.close ?? null);
       if (res.close?.till_link_ok === false && res.close?.closing_cash != null) {
         toast.warning(
-          `Day ${reportDate} closed, but the count did not reach the till, so the drawer is still open there and has not been checked. Count it on the Z-Read screen.`,
+          `Day ${reportDate} closed, but the count did not reach the till, so the drawer is still open there and has not been checked. Count it on the Blind EOD Tally (Z-Read) screen.`,
         );
       } else {
         toast.success(`Day ${reportDate} closed`);
@@ -442,7 +442,7 @@ export default function DayEndReport() {
                     <p className="text-xs text-gray-500">Variance</p>
                     <p className="text-sm font-semibold text-gray-600">
                       {countNotOnTill
-                        ? 'Count the drawer on the Z-Read'
+                        ? 'Count the drawer on the Blind EOD Tally (Z-Read)'
                         : severalDrawers
                         ? 'Shown for each drawer below'
                         : comparisonUnavailable
@@ -456,7 +456,7 @@ export default function DayEndReport() {
                     )}
                     {comparisonUnavailable && !severalDrawers && (
                       <p className="text-xs text-gray-500 mt-0.5">
-                        The day&apos;s cash drawers could not be read at close, so no variance is worked out. The drawer&apos;s own Z-Read compares it.
+                        The day&apos;s cash drawers could not be read at close, so no variance is worked out. The drawer&apos;s own Blind EOD Tally (Z-Read) compares it.
                       </p>
                     )}
                   </div>
@@ -607,7 +607,7 @@ export default function DayEndReport() {
                   {countNotOnTill && (
                     <p className="text-xs text-amber-700 mt-1" data-testid="day-end-count-not-on-till">
                       This count did not reach the till, so that drawer is still open there and has not
-                      been checked. Count it on the Z-Read screen.
+                      been checked. Count it on the Blind EOD Tally (Z-Read) screen.
                     </p>
                   )}
                   {/* One drawer, one count: the till's blind count is the close.

@@ -2454,6 +2454,36 @@ class TestR8D76OlderCodeDrawers:
         assert rows and rows[0]["variance"] is None and rows[0]["expected_cash"] is None
         assert rows[0]["variance_status"] == till.COMPARISON_UNAVAILABLE
 
+    def test_an_uncompared_count_gives_the_manager_a_check_by_hand_task(self, db, monkeypatch):
+        """No comparison means no automatic alert, so a drawer that may be
+        short would go unchecked (owner ruling 2026-08-25). The manager gets
+        one task per drawer to check it by hand, on the Blind EOD Tally."""
+        import mongomock
+
+        _cash_sale(db, 1000, "2026-11-04T03:00:00")
+        self._old_drawer(db, "OLD-A", 100000, 100000, "2026-11-04T02:00:00")
+        tasks = _real_task_repo(monkeypatch, mongomock.MongoClient().db)
+        c = till.open_session(db, store_id=STORE, session_date=DATE, opening_float_paisa=0,
+                              actor=CASHIER)["session"]["session_id"]
+        assert till.blind_submit(db, c, blind_denominations=[{"face": 500, "kind": "note", "pieces": 1}],
+                                 actor=CASHIER)["ok"]
+        assert till.lock_session(db, c, actor=MANAGER)["ok"]
+        rows = list(tasks.find({}))
+        assert len(rows) == 1, rows
+        assert rows[0]["source_ref"] == f"till_uncompared:{STORE}:{DATE}:{c}"
+        assert rows[0]["link"] == "/finance/blind-eod"
+        assert rows[0]["assigned_to"] == "u-mgr"  # the shop's store manager
+        assert "Blind EOD Tally (Z-Read)" in rows[0]["description"]
+
+    def test_control_a_compared_count_raises_no_check_task(self, db, monkeypatch):
+        import mongomock
+
+        tasks = _real_task_repo(monkeypatch, mongomock.MongoClient().db)
+        a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
+        assert till.blind_submit(db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}],
+                                 actor=CASHIER)["ok"]
+        assert list(tasks.find({})) == []
+
     def test_control_new_code_earlier_drawer_still_takes_its_own_share(self, db):
         a, b = _drawer_a_then_b(db, a_sales=[1000], b_sales=[3000])
         assert till.blind_submit(db, b, blind_denominations=[{"face": 500, "kind": "note", "pieces": 6}],
@@ -2685,7 +2715,12 @@ class TestR9CashReadFaultIsRefusedNotZero:
         rows = list(tasks.find({}))
         assert len(rows) == 1
         assert rows[0]["source_ref"] == f"till_uncounted:{STORE}:{DATE}"
-        assert "Z-Read" in rows[0]["title"]
+        # #1421 review: the button must open the screen that counts and locks
+        # a till drawer (Finance > Blind EOD Tally), not Cash Register, whose
+        # register is already CLOSED; the text names it as the menu does.
+        assert rows[0]["link"] == "/finance/blind-eod"
+        assert "Blind EOD Tally" in rows[0]["title"]
+        assert "Blind EOD Tally (Z-Read)" in rows[0]["description"]
 
 
 def test_r9_cash_read_fault_on_real_mongo(monkeypatch):
@@ -2724,6 +2759,37 @@ def test_r9_cash_read_fault_on_real_mongo(monkeypatch):
         rows = {s["_id"]: s for s in real_db.till_sessions.find({})}
         assert (rows[a]["variance_paisa"], rows[b]["variance_paisa"]) == (0, 0)
         assert alerts == []
+    finally:
+        client.drop_database(name)
+        client.close()
+
+
+def test_r10_uncompared_count_task_on_real_mongo(monkeypatch):
+    """#1421 review, on a native PyMongo Database: an older-code drawer A
+    (whole-day snapshot) then a new-code drawer C. C's count is kept with no
+    comparison, and the REAL task repository stores one check-by-hand task
+    for the store manager that opens the Blind EOD Tally. The link-failed
+    task on the same day opens the same screen."""
+    client, real_db, name = _real_till_db()
+    try:
+        till.ensure_till_indexes(real_db)
+        tasks = _real_task_repo(monkeypatch, real_db)
+        _cash_sale(real_db, 1000, datetime(2026, 11, 4, 3, 0))
+        TestR8D76OlderCodeDrawers._old_drawer(
+            real_db, "OLD-A", 100000, 100000, datetime(2026, 11, 4, 2, 0))
+        c = _open(real_db)
+        notes = [{"face": 500, "kind": "note", "pieces": 1}]
+        assert till.blind_submit(real_db, c, blind_denominations=notes, actor=CASHIER)["ok"]
+        # Same drawer again: the guarded update refuses it, no second task.
+        assert till.blind_submit(real_db, c, blind_denominations=notes, actor=CASHIER)["http"] == 409
+        assert till.lock_session(real_db, c, actor=MANAGER)["ok"]
+        row = real_db.till_sessions.find_one({"_id": c})
+        assert (row["variance_status"], row["blind_count_paisa"]) == (till.COMPARISON_UNAVAILABLE, 50000)
+        till.raise_count_not_on_till_task(store_id=STORE, session_date=DATE, source="Day-End close")
+        rows = {t["source_ref"]: t for t in tasks.find({})}
+        assert set(rows) == {f"till_uncompared:{STORE}:{DATE}:{c}", f"till_uncounted:{STORE}:{DATE}"}
+        assert {t["link"] for t in rows.values()} == {"/finance/blind-eod"}
+        assert all(t["assigned_to"] == "u-mgr" for t in rows.values())
     finally:
         client.drop_database(name)
         client.close()

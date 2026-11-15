@@ -90,7 +90,7 @@ describe('Cash Register - a count that did not reach the till', () => {
     await waitFor(() => expect(toast.warning).toHaveBeenCalledTimes(1));
     const said = String(toast.warning.mock.calls[0][0]);
     expect(said).toMatch(/did not reach the till/);
-    expect(said).toMatch(/Z-Read/);
+    expect(said).toMatch(/Blind EOD Tally \(Z-Read\)/);
     expect(said).not.toMatch(/recorded/);
   });
 
@@ -99,7 +99,7 @@ describe('Cash Register - a count that did not reach the till', () => {
     render(<CashRegisterPage />);
 
     const row = within((await screen.findByText('ZZ-CR-B')).closest('tr') as HTMLElement);
-    expect(row.getByTestId('count-not-on-till')).toHaveTextContent(/Z-Read/);
+    expect(row.getByTestId('count-not-on-till')).toHaveTextContent(/Blind EOD Tally \(Z-Read\)/);
   });
 
   it('control: a close that reached the till shows no such notice', async () => {
@@ -137,7 +137,7 @@ describe('Day-End - a count that did not reach the till', () => {
     fireEvent.click(await screen.findByRole('button', { name: /Confirm Day Closing/i }));
     await waitFor(() => expect(screen.getByText('Day Closed')).toBeInTheDocument());
 
-    expect(screen.getByTestId('day-end-count-not-on-till')).toHaveTextContent(/Z-Read/);
+    expect(screen.getByTestId('day-end-count-not-on-till')).toHaveTextContent(/Blind EOD Tally \(Z-Read\)/);
     expect(screen.queryByText('Shown for each drawer below')).not.toBeInTheDocument();
     expect(toast.warning).toHaveBeenCalledTimes(1);
     expect(String(toast.warning.mock.calls[0][0])).toMatch(/did not reach the till/);

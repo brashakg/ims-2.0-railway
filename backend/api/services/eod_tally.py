@@ -69,7 +69,8 @@ NEGATIVE_EXPECTED_MESSAGE = (
 )
 
 # No comparison can be trusted, so none is made (no variance, no verdict, no
-# note demand, no manager alert); the count itself is kept. Two causes: an
+# note demand, no variance alert); the count itself is kept and the manager
+# gets a check-by-hand task instead (raise_count_not_compared_task). Two causes: an
 # earlier drawer of the day was recorded by older code that stored WHOLE-DAY
 # cash (D76), or a close could not read the day's drawers.
 COMPARISON_UNAVAILABLE = "COMPARISON_UNAVAILABLE"
@@ -293,40 +294,81 @@ def raise_variance_task(
         return
 
 
-def raise_count_not_on_till_task(
-    *, store_id: Optional[str], session_date: Optional[str], source: str
+# Where a till drawer is counted and locked, named as the menu names it
+# (navConfig 'Blind EOD Tally', route finance/blind-eod). A drawer follow-up
+# task links here, never to Cash Register, which cannot count a till drawer.
+ZREAD_SCREEN_LINK = "/finance/blind-eod"
+ZREAD_SCREEN_NAME = "Blind EOD Tally (Z-Read)"
+
+
+def _drawer_check_task(
+    *, store_id: Optional[str], title: str, description: str,
+    dedupe_ref: str, payload: Dict[str, Any],
 ) -> None:
-    """A SYSTEM task for the store manager when a close's count did NOT reach
-    the till (the link failed). That drawer is still OPEN on the till, so no
-    blind count has judged it: without this, a real shortage on it could go
-    unchecked and unalerted (owner ruling 2026-08-25). One task per shop-day.
-    Fail-soft, like raise_variance_task."""
+    """One SYSTEM task for the store manager about a drawer nothing has
+    judged. Fail-soft, like raise_variance_task."""
     try:
         from ..dependencies import get_task_repository
         from .task_triggers import create_system_task
 
-        day = str(session_date or "")
         create_system_task(
             get_task_repository(),
-            title=f"Count the cash drawer on the Z-Read at {store_id} ({day})",
-            description=(
-                f"The {day} close at store {store_id} ({source}) could not record "
-                "its count on the till, so the drawer is still open there and has "
-                "not been checked against expected cash. Count it on the Z-Read "
-                "screen and lock it."
-            ),
+            title=title,
+            description=description,
             priority="P2",
             category="Finance",
             store_id=store_id,
             assigned_to="STORE_MANAGER",
-            dedupe_ref=f"till_uncounted:{store_id}:{day}",
-            extra={
-                "link": "/finance/cash-register",
-                "payload": {"store_id": store_id, "session_date": day},
-            },
+            dedupe_ref=dedupe_ref,
+            extra={"link": ZREAD_SCREEN_LINK, "payload": payload},
         )
     except Exception:  # noqa: BLE001
         return
+
+
+def raise_count_not_on_till_task(
+    *, store_id: Optional[str], session_date: Optional[str], source: str
+) -> None:
+    """A close's count did NOT reach the till (the link failed). That drawer
+    is still OPEN on the till, so no blind count has judged it: without this,
+    a real shortage on it could go unchecked and unalerted (owner ruling
+    2026-08-25). One task per shop-day."""
+    day = str(session_date or "")
+    _drawer_check_task(
+        store_id=store_id,
+        title=f"Count the cash drawer on the Blind EOD Tally at {store_id} ({day})",
+        description=(
+            f"The {day} close at store {store_id} ({source}) could not record "
+            "its count on the till, so the drawer is still open there and has "
+            "not been checked against expected cash. Count it on the "
+            f"{ZREAD_SCREEN_NAME} screen (Finance menu) and lock it."
+        ),
+        dedupe_ref=f"till_uncounted:{store_id}:{day}",
+        payload={"store_id": store_id, "session_date": day},
+    )
+
+
+def raise_count_not_compared_task(
+    *, store_id: Optional[str], session_date: Optional[str], session_id: Optional[str]
+) -> None:
+    """A drawer was counted but NOT compared (COMPARISON_UNAVAILABLE, D76):
+    with no variance there is no automatic alert, so a drawer that may be
+    short would go unchecked (owner ruling 2026-08-25). The manager checks it
+    by hand. One task per drawer."""
+    day = str(session_date or "")
+    _drawer_check_task(
+        store_id=store_id,
+        title=f"Check a cash drawer count by hand at {store_id} ({day})",
+        description=(
+            f"A {day} cash drawer at store {store_id} was counted, but its "
+            "count could not be compared with expected cash because an earlier "
+            "drawer that day was recorded by an older version. Check the count "
+            f"against the drawer's own sales on the {ZREAD_SCREEN_NAME} screen "
+            "(Finance menu)."
+        ),
+        dedupe_ref=f"till_uncompared:{store_id}:{day}:{session_id}",
+        payload={"store_id": store_id, "session_date": day, "session_id": session_id},
+    )
 
 
 def variance_status(variance_paisa: int, tolerance_paisa: int = 0) -> str:
@@ -1135,6 +1177,11 @@ def blind_submit(
         store_id=store_id,
         detail={"session_date": session.get("session_date")},
     )
+    if vstatus == COMPARISON_UNAVAILABLE:
+        # Only the one count that landed reaches here (guarded update above).
+        raise_count_not_compared_task(
+            store_id=store_id, session_date=session.get("session_date"), session_id=session_id
+        )
     updated["session_id"] = updated.get("_id")
     return {"ok": True, "session": updated}
 
