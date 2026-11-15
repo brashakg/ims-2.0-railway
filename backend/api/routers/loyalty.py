@@ -1854,9 +1854,13 @@ def regate_earn_after_edit(
     edits converge (net == target -> no write). Fail-soft: always returns a
     dict, never raises.
 
-    ponytail: the read-compare-claw is not race-guarded per delta (unlike the
-    unique-indexed full reversals); superadmin edits are a rare single-human
-    flow. Add a per-(order, net) claim key if concurrent edits ever appear.
+    Exactly once per step (Codex r7 P2): the claw row's id is the step it
+    takes, ``regate:<customer>:<order>:<net before>``. Net only falls (one EARN
+    per order, claws only), so a step is never taken twice legitimately, and two
+    overlapping runners that read the same ledger compute the same id: the row
+    is the claim (its _id), the loser moves nothing. The balance then moves
+    under that id through _apply_reversal_balance (applied_reversals), so a row
+    whose balance move was lost is completed by the next call, never repeated.
     """
     try:
         order_id = str(order_doc.get("order_id") or "")
@@ -1877,6 +1881,15 @@ def regate_earn_after_edit(
                 "to claw on an unreadable ledger", customer_id, order_id,
             )
             return {"ok": False, "reason": "ledger_read_failed"}
+
+        # A step whose row landed but whose balance move did not (lost reply,
+        # crash, a loser of the race below) is completed first, by its own id.
+        applied = set(account.get(_APPLIED_REVERSALS) or [])
+        for row in ledger:
+            if (row.get("edit_regate_step") and row.get("edit_regate_of_order_id") == order_id
+                    and row.get("txn_id") not in applied):
+                pts = int(row.get("points") or 0)
+                _apply_reversal_balance(accounts, customer_id, row["txn_id"], pts, -pts, 0, None)
 
         earn_rows = [
             t for t in ledger
@@ -1934,28 +1947,44 @@ def regate_earn_after_edit(
             return {"ok": False, "reason": "balance_underflow",
                     "balance": balance, "delta": delta}
 
-        txn_id = str(uuid.uuid4())
-        txns.create(
-            {
-                "txn_id": txn_id,
-                "customer_id": customer_id,
-                "type": "ADJUST",
-                "points": -delta,
-                "order_id": order_id,
-                "edit_regate_of_order_id": order_id,
-                "reason": (
-                    f"earn re-gate after order edit: order {order_id} now "
-                    f"eligible for {min(target, net)} of {net} earned points"
-                ),
-                "created_by": user_id,
-                "created_at": datetime.now(),
-            }
-        )
-        accounts.adjust_balance(
-            customer_id,
-            delta_points=-delta,
-            delta_lifetime_earned=-delta,
-        )
+        step = f"{customer_id}:{order_id}:{net}"
+        txn_id = f"regate:{step}"
+        try:
+            row = txns.create(
+                {
+                    "txn_id": txn_id,
+                    "customer_id": customer_id,
+                    "type": "ADJUST",
+                    "points": -delta,
+                    "order_id": order_id,
+                    "edit_regate_of_order_id": order_id,
+                    "edit_regate_step": step,
+                    "reason": (
+                        f"earn re-gate after order edit: order {order_id} now "
+                        f"eligible for {min(target, net)} of {net} earned points"
+                    ),
+                    "created_by": user_id,
+                    "created_at": datetime.now(),
+                },
+                raise_on_duplicate=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            if exc.__class__.__name__ != "DuplicateKeyError":
+                raise
+            # Another runner took this very step: its row stands, once. Its
+            # balance move is completed here too (by its id: never twice), in
+            # case that runner died between its row and its move.
+            taken = txns.find_by_id(txn_id) or {}
+            pts = int(taken.get("points") or 0)
+            if pts:
+                _apply_reversal_balance(accounts, customer_id, txn_id, pts, -pts, 0, None)
+            return {"ok": True, "clawed": 0, "already_clawed": True, "txn_id": txn_id}
+        if row is None:
+            return {"ok": False, "reason": "claw_write_failed"}
+        status, _ = _apply_reversal_balance(accounts, customer_id, txn_id, -delta, delta, 0, None)
+        if status not in ("applied", "already_applied", "unguarded"):
+            # The row stands and the next call completes its balance move.
+            return {"ok": False, "reason": f"balance_{status}", "txn_id": txn_id}
         return {"ok": True, "clawed": delta, "txn_id": txn_id}
     except Exception as exc:  # noqa: BLE001
         logger.warning("regate_earn_after_edit failed: %s", exc)
