@@ -1579,50 +1579,68 @@ def _hist_cn_note_number(refund_id: str) -> str:
 
 
 def _book_import_goods(
-    order_doc: Dict[str, Any], refund_id: str, goods: List[Dict[str, Any]]
-) -> Tuple[List[Dict[str, Any]], List[Any]]:
+    db, order_doc: Dict[str, Any], refund_id: str, goods: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
     """Decision D66: an imported refund note's goods lines give their cost
     back in the P&L, so each piece is booked back on its order line the way
     every other door books one -- the counter's own check
     (returns._units_already_back) and its atomic claim, with this refund's
-    mark (returns._claim_returnable_qty). Only the units it could book stay
-    goods lines: a piece the counter (or another refund) already took back
-    is never given back a second time, and the claim the counter's own
-    atomic guard reads now counts the imported piece. Fail-soft: a unit that
-    cannot be checked or booked is money only (less cost given back, never
-    more). Returns (goods lines kept, claims held for a release)."""
+    mark (returns._claim_returnable_qty). The goods lines kept are what the
+    line's mark for THIS refund says, read back from the stored order after
+    the claim: a piece the counter (or another refund) already took back is
+    never given back a second time, and a re-run (the import's duplicate-path
+    heal) books nothing twice -- the mark is per refund, so a claim already on
+    the line matches no second time -- and stamps the same lines again.
+
+    PR #1423 review D: an answer that cannot be read (the docs, the claim, the
+    order read back) raises -- never "money only" taken as final: the caller
+    leaves the note unstamped and reports it failed, and the next import run
+    heals it from the mark."""
     from ..routers import returns as _r
 
-    idx = _r._order_line_index(order_doc)
-    want: Dict[int, list] = {}
+    order_id = order_doc.get("order_id")
+    orders = db.get_collection("orders")
+
+    def _fresh():
+        doc = orders.find_one({"order_id": order_id}, {"_id": 0, "items": 1})
+        if doc is None:
+            raise RuntimeError(f"order {order_id} not found")
+        return _r._order_line_index(doc)
+
+    def _mark(line) -> float:
+        return float((line.get("restocked_refunds") or {}).get(str(refund_id)) or 0)
+
+    idx = _fresh()
+    want: Dict[str, list] = {}
     for g in goods:
         orig = (idx["by_item"].get(str(g.get("order_item_id")))
                 or idx["by_product"].get(str(g.get("product_id"))))
         if orig is not None:
-            row = want.setdefault(id(orig), [orig, 0.0, []])
+            key = str(orig.get("item_id") or orig.get("product_id"))
+            row = want.setdefault(key, [orig, 0.0, []])
             row[1] += float(g.get("return_qty") or 0)
             row[2].append(g)
-    kept: List[Dict[str, Any]] = []
-    held: List[Any] = []
-    order_id = order_doc.get("order_id")
-    for orig, qty, lines in want.values():
-        token = uuid.uuid4().hex
-        try:
-            back = _r._units_already_back(order_id, orig)
-            keep = 0.0 if back is None else max(0.0, min(qty, _r._line_purchased_qty(orig) - back[0]))
-            if keep <= 0 or not _r._claim_returnable_qty(order_id, orig, keep, refund_id, qty, token):
-                continue
-        except Exception:  # noqa: BLE001
-            logger.warning("[SHOPIFY_INGEST] historical refund %s goods not booked", refund_id,
-                           exc_info=True)
+    for orig, qty, _lines in want.values():
+        need = qty - _mark(orig)
+        if need <= 0:
             continue
-        held.append((orig, keep, str(orig.get("product_id") or ""), token))
+        back = _r._units_already_back(order_id, orig)
+        if back is None:
+            raise RuntimeError(f"returns of order {order_id} could not be read")
+        keep = max(0.0, min(need, _r._line_purchased_qty(orig) - back[0]))
+        if keep > 0:
+            _r._claim_returnable_qty(order_id, orig, keep, refund_id, qty, uuid.uuid4().hex)
+    idx = _fresh()
+    kept: List[Dict[str, Any]] = []
+    for key, (_orig, _qty, lines) in want.items():
+        line = idx["by_item"].get(key) or idx["by_product"].get(key) or {}
+        left = _mark(line)
         for g in lines:
-            q = min(float(g.get("return_qty") or 0), keep)
-            keep -= q
+            q = min(float(g.get("return_qty") or 0), left)
+            left -= q
             if q > 0:
                 kept.append({**g, "return_qty": q})
-    return kept, held
+    return kept
 
 
 def _book_historical_refund_credit_notes(
@@ -1777,10 +1795,19 @@ def _book_historical_refund_credit_notes(
                 doc["covered_by_ref"] = covered_by
             if goods_lines:
                 doc["goods_lines"] = goods_lines
+            # Its own _id: one RET-HIST doc per refund even with no
+            # uniq_shopify_refund_id index (a racing heal, a lost reply).
+            doc["_id"] = doc["return_id"]
             returns_coll.insert_one(doc)
             return True
         except Exception:  # noqa: BLE001
-            return False
+            # A lost reply, or another run's insert: landed if it is there
+            # (PR #1423 review D). No answer: not landed -- reported failed,
+            # and the next run's heal stamps it.
+            try:
+                return returns_coll.find_one({"shopify_refund_id": refund_id}, {"_id": 1}) is not None
+            except Exception:  # noqa: BLE001
+                return False
 
     def _process(refund: Dict[str, Any]) -> str:
         """Book ONE refund's credit note. Returns 'booked' | 'duplicate' |
@@ -1792,8 +1819,22 @@ def _book_historical_refund_credit_notes(
 
         # Idempotency: the ONE "is this refund booked" rule (a re-run of the
         # import, a webhook, the status sweep or a queued review row booked it).
+        # PR #1423 review D: booked means its ledger row AND its RET-HIST doc;
+        # a ledger row whose doc never landed is finished here (heal), with no
+        # second ledger row.
+        heal = False
         if shopify_refund._refund_already_processed(db, refund_id):
-            return "duplicate"
+            try:
+                heal = (ledger.find_one({"ref": ref}, {"_id": 1}) is not None
+                        and returns_coll is not None
+                        and returns_coll.find_one({"shopify_refund_id": refund_id}, {"_id": 1}) is None
+                        and db.get_collection(shopify_refund._REVIEW_COLLECTION).find_one(
+                            {"shopify_refund_id": refund_id,
+                             "status": {"$nin": ["UNMATCHED", "unmatched"]}}, {"_id": 1}) is None)
+            except Exception:  # noqa: BLE001
+                return "skipped"  # cannot tell: reported failed, a later run heals it
+            if not heal:
+                return "duplicate"
 
         # Build return lines: ALL order lines for a whole-order full-refund reversal,
         # else the refund's own refund_line_items (reusing the live refund mapper).
@@ -1971,7 +2012,8 @@ def _book_historical_refund_credit_notes(
                 # recorded for accountant reconciliation.
                 entry["unreconciled_excess"] = excess
         try:
-            ledger.insert_one(dict(entry))
+            if not heal:
+                ledger.insert_one(dict(entry))
         except Exception as exc:  # noqa: BLE001
             if shopify_refund._is_dup_key(exc):
                 # A concurrent run (create-branch booking vs duplicate-path
@@ -2000,10 +2042,23 @@ def _book_historical_refund_credit_notes(
              "return_qty": float(ln.get("return_qty") or 0), "unit_price": float(ln.get("unit_price") or 0)}
             for ln in priced if ln.get("product_id") and ln.get("restock") is not False]
         # D66: only the pieces booked back on their order lines (never one the
-        # counter already took back); a note that did not land un-books them.
-        goods, held = _book_import_goods(order_doc, refund_id, goods) if goods else ([], [])
-        if not _stamp_returns_doc(refund_id, gross, gst_view, cn_date, goods_lines=goods) and held:
-            shopify_refund._release_unlanded(order_doc, held, {}, refund_id)
+        # counter already took back). PR #1423 review D: the booking stays --
+        # Shopify did take those pieces back -- and a note whose return record
+        # did not land (or whose booking cannot be read) is reported failed,
+        # never booked: the next run heals it from the line's mark above.
+        try:
+            goods = _book_import_goods(db, order_doc, refund_id, goods) if goods else []
+        except Exception:  # noqa: BLE001
+            logger.warning("[SHOPIFY_INGEST] historical refund %s goods not booked", refund_id,
+                           exc_info=True)
+            return "skipped"
+        if not _stamp_returns_doc(refund_id, gross, gst_view, cn_date, goods_lines=goods):
+            logger.warning("[SHOPIFY_INGEST] historical refund %s: credit note saved, its return "
+                           "record not -- reported failed, the next import run completes it", refund_id)
+            return "skipped"
+        if heal:
+            summary["healed"] = summary.get("healed", 0) + 1
+            return "duplicate"
 
         summary["credit_notes"] += 1
         summary["gross"] = round(summary["gross"] + gross, 2)

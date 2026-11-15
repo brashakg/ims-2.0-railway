@@ -965,8 +965,10 @@ def test_stamp_failure_healed_on_rerun_via_duplicate_fallback(wired):
     finally:
         returns_coll.insert_one = orig_insert
     rcn1 = res1["refund_credit_notes"]
-    assert rcn1["credit_notes"] == 1
-    assert rcn1.get("whole_order_fallback") is True
+    # PR #1423 review D: its ledger row landed, its return record did not --
+    # reported FAILED (healed by the re-run), never as a booked credit note.
+    assert rcn1["credit_notes"] == 0
+    assert rcn1["cn_failed"] == 1
     assert not any(
         r.get("shopify_refund_id") == "88050" for r in returns_coll.docs
     ), "stamp silently failed on run 1"
@@ -981,6 +983,8 @@ def test_stamp_failure_healed_on_rerun_via_duplicate_fallback(wired):
     assert rcn2["credit_notes"] == 0, "no second whole-order CN"
     assert "whole_order_fallback" not in rcn2, "flag only set on a fresh booking"
     assert rcn2["unmapped_refunds"] == 0, "covered residual clears on the heal"
+    assert rcn2.get("healed") == 1 and rcn2["cn_failed"] == 0, "the missing return record is completed"
+    assert any(r.get("return_id") == "RET-HIST-orderfull:21048" for r in returns_coll.docs)
     assert any(
         r.get("shopify_refund_id") == "88050" for r in returns_coll.docs
     ), "missing stamp healed"
