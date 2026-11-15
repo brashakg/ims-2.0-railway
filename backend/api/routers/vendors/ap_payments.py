@@ -214,6 +214,19 @@ def _money_shop(
     return _shop_by_the_suppliers_bills(db, vendor_id, money or {})
 
 
+def _asked_shop(bill, asked_query, asked_body, current_user, receipt=None) -> dict:
+    """The shop a retried payment or supplier credit must match (PR #1423
+    review B): the one this request itself decides -- its bill's, its
+    receipt's, the shop it names, a non-admin's own -- by _money_shop's own
+    rule (its refusals too). {} when it decides none (an admin naming no
+    bill, receipt or shop: the shop then comes from the supplier's bills, not
+    from the request)."""
+    shop = _money_shop(bill, asked_query, asked_body, current_user, receipt)
+    if shop is None and bill is None and not (receipt or {}).get("store_id"):
+        return {}
+    return {"store_id": shop}
+
+
 def _month(day) -> Optional[tuple]:
     """(year, month) of a stored day on the IST clock (ap_engine.parse_date:
     '2026-09-30T20:00:00+00:00' is 1 October in India), else None."""
@@ -326,9 +339,11 @@ async def create_vendor_payment(
     # A retried request (the client retries a 5xx; a 504 may come after the
     # save) answers the payment it already recorded -- the same payment only.
     db = _get_db()
+    named = _named_bill_in_scope_or_404(db, vendor_id, payment.bill_id, current_user)
     sent = {
         "vendor_id": vendor_id, "amount": round(payment.amount, 2), "bill_id": payment.bill_id,
         "payment_date": payment.payment_date, "tds_amount": tds_amount, "reference": payment.reference,
+        "mode": payment.mode, **_asked_shop(named, store_id, payment.store_id, current_user),
     }
     if payment.request_id and db is not None:
         done = _replayed_payment(db, payment.request_id, sent, current_user)
@@ -346,7 +361,6 @@ async def create_vendor_payment(
     # stamped with its shop (an admin's naming no bill and no shop: the
     # supplier's shop by its bills, worked out on this row's own dates).
     created_at = utc_now_iso()
-    named = _named_bill_in_scope_or_404(db, vendor_id, payment.bill_id, current_user)
     shop = _money_shop(
         named,
         store_id,
@@ -387,9 +401,9 @@ async def create_vendor_payment(
     }
     db = _get_db()
     if db is not None:
+        if payment.request_id:
+            _ensure_request_index(db)
         try:
-            if payment.request_id:
-                _ensure_request_index(db)
             db.get_collection("vendor_payments").insert_one(dict(doc))
         except Exception as exc:
             # The same request racing itself: the unique request_id index let
@@ -439,12 +453,15 @@ def _ensure_request_index(db, collection: str = "vendor_payments") -> None:
     """Unique on request_id (sparse: older payments carry none), so the same
     request racing itself can record only one payment. create_index is a
     no-op once the index exists; payments are few, so it runs each time.
-    Never blocks a payment: without it the read-first check still answers a
-    retry that arrives after the save."""
+    Without it two copies of one request at once could both save (twice the
+    money), so a request id whose index cannot be ensured is a 503 before
+    anything is written (PR #1423 review: a missing index); the form's retry
+    saves it once."""
     try:
         db.get_collection(collection).create_index("request_id", unique=True, sparse=True)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
         logger.warning("[AP] %s.request_id index could not be ensured", collection, exc_info=True)
+        raise HTTPException(status_code=503, detail="Could not save safely right now. Try again.") from exc
 
 
 class AdvanceApply(BaseModel):
@@ -615,18 +632,20 @@ async def create_debit_note(
     # shop (a receipt with no shop on record: the shop asked for; an admin's
     # naming none: the supplier's shop by its bills).
     db_early = _get_db()
+    named = _named_bill_in_scope_or_404(db_early, vendor_id, note.bill_id, current_user)
+    receipt = _named_receipt_in_scope_or_404(db_early, vendor_id, note.grn_id, current_user)
     # A retried request (a 5xx retried, a 504 after the save) answers the note
-    # it already recorded -- the same note only (audit L3-27).
+    # it already recorded -- the same note only (audit L3-27): its receipt
+    # and its shop too (PR #1423 review B), checked as a new note's are.
     sent = {
         "vendor_id": vendor_id, "amount": round(note.amount, 2), "bill_id": note.bill_id,
-        "date": note.date, "cn_type": note.cn_type, "reason": note.reason,
+        "date": note.date, "cn_type": note.cn_type, "reason": note.reason, "grn_id": note.grn_id,
+        **_asked_shop(named, store_id, note.store_id, current_user, receipt),
     }
     if note.request_id and db_early is not None:
         done = _replayed_payment(db_early, note.request_id, sent, current_user, "vendor_debit_notes")
         if done is not None:
             return done
-    named = _named_bill_in_scope_or_404(db_early, vendor_id, note.bill_id, current_user)
-    receipt = _named_receipt_in_scope_or_404(db_early, vendor_id, note.grn_id, current_user)
     created_at = utc_now_iso()
     shop = _money_shop(
         named,
@@ -666,9 +685,9 @@ async def create_debit_note(
     }
     db = _get_db()
     if db is not None:
+        if note.request_id:
+            _ensure_request_index(db, "vendor_debit_notes")
         try:
-            if note.request_id:
-                _ensure_request_index(db, "vendor_debit_notes")
             db.get_collection("vendor_debit_notes").insert_one(dict(doc))
         except Exception as exc:
             # The same request racing itself: the unique index let one through.
