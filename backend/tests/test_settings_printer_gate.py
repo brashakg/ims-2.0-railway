@@ -29,7 +29,10 @@ def _call(user_roles):
     # asyncio.run() spins up a FRESH event loop per call. get_event_loop() +
     # run_until_complete reuses a process-wide loop that an earlier async test in
     # the full suite can leave closed -> "RuntimeError: Event loop is closed".
-    return asyncio.run(update_printer_settings(PrinterSettings(), user)), HTTPException
+    # A real one-field save: an EMPTY body is refused (audit L1-F05), and the
+    # role gate must be what answers here, not that refusal.
+    body = PrinterSettings(receipt_printer_width=58)
+    return asyncio.run(update_printer_settings(body, user)), HTTPException
 
 
 def test_workshop_staff_blocked():
@@ -48,9 +51,15 @@ def test_cashier_blocked():
     assert exc.value.status_code == 403
 
 
-def test_privileged_roles_pass_the_gate():
-    # SUPERADMIN/ADMIN/STORE_MANAGER must get PAST the 403 (they may then hit the
-    # no-DB return, which is fine -- the point is they are NOT rejected).
+def test_privileged_roles_pass_the_gate(monkeypatch):
+    # SUPERADMIN/ADMIN/STORE_MANAGER must get PAST the 403 and really save. (With
+    # no database the save is a 503 now, never "updated (no DB)" -- audit L1-F05 --
+    # so the test brings its own collection.)
+    from api.routers import settings as settings_router
+    from tests.strict_fakes import StrictCollection
+
+    coll = StrictCollection()
+    monkeypatch.setattr(settings_router, "_get_settings_collection", lambda _name: coll)
     for role in ("SUPERADMIN", "ADMIN", "STORE_MANAGER"):
         result, _ = _call([role])
         assert "Printer settings updated" in result["message"]
