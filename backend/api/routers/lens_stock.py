@@ -903,7 +903,9 @@ def void_move(lens_line_id: str, payload: "ReserveCommitReleasePayload",
     """Close `move` on its cell if it has not landed: True when it never landed
     and now never can (a repeat is True again), False when it landed. One write
     on the cell, so a racing take either lands first (False) or is refused. A
-    cell that does not exist holds nothing (True). Faults raise."""
+    cell that does not exist holds nothing, but carries no void either: "no_cell"
+    (truthy), so the caller re-runs the give-back once the cell exists (D77).
+    Faults raise."""
     coll = _stock_coll()
     if coll is None:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -912,7 +914,8 @@ def void_move(lens_line_id: str, payload: "ReserveCommitReleasePayload",
     if coll.find_one_and_update({**filt, APPLIED_MOVES: {"$ne": move}},
                                 {"$addToSet": {APPLIED_MOVES: VOID + move}}) is not None:
         return True
-    return not _already_moved(coll.find_one(filt), move)
+    cell = coll.find_one(filt)
+    return "no_cell" if cell is None else not _already_moved(cell, move)
 
 
 def _moved_before(action: str, move: str, cell: Dict[str, Any], lens_line_id: str,

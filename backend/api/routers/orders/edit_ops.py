@@ -27,8 +27,6 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from api.utils.event_time import utc_now_iso
-from database.repositories.product_repository import ANY_SALE
-
 from ...dependencies import get_order_repository, get_stock_repository
 from ...services.lens_stock_hook import _is_lens_item, takes_lens_cell
 from ._shared import logger
@@ -286,7 +284,7 @@ async def give_back(op: dict) -> bool:
         return False
     leased = _take_lease(op)
     order_id, store_id = op["order_id"], op.get("store_id") or ""
-    done = True
+    done, unfenced = True, False
     if any(_takes_serialized_stock(ln) for ln in op["added"]):
         done = _release_op_claims(order_id, op["op_id"])
     for line in op["added"]:
@@ -301,6 +299,9 @@ async def give_back(op: dict) -> bool:
             logger.warning("[LENS_HOOK] give back failed (order %s): %s", order_id, exc)
             rec = {"status": "failed"}
         done = done and (rec or {}).get("status") != "failed"
+        unfenced = unfenced or (rec or {}).get("status") == "voided_no_cell"
+    if done and any(takes_lens_cell(ln) for ln in op["added"]):
+        done = _mark_lens_unfenced(op, unfenced)
     if not done:
         logger.error("[STOCK] edit %s of order %s not given back; the sweep retries it", op["op_id"], order_id)
     if leased:
@@ -308,6 +309,23 @@ async def give_back(op: dict) -> bool:
     elif not done:
         _reopen(op)
     return done
+
+
+def _mark_lens_unfenced(op: dict, unfenced: bool) -> bool:
+    """D77: a lens whose cell did not exist at give-back carries no void, so a
+    press stalled before its reserve could still reserve there once the cell is
+    created. Such a row is marked and re-run by the sweep (_stranded_claims)
+    until the cell carries the void or the reservation went back. False: the
+    mark is unwritten, so the row is not given back yet (the sweep retries)."""
+    coll = _ops()
+    if coll is None:
+        return True
+    try:
+        coll.update_one({"op_id": op["op_id"]}, {"$set": {"lens_unfenced": unfenced}})
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[STOCK] edit op %s: lens fence not recorded: %s", op["op_id"], exc)
+        return False
 
 
 def flag_order(repo, order_id: str, item_id) -> None:
@@ -370,8 +388,12 @@ def _give_back_units(op: dict, after: dict, failed: List[Any]) -> None:
     stock_repo = get_stock_repository()
     keep = {str(ln.get("stock_id")) for ln in after.get("items") or [] if ln.get("stock_id")}
     for entry in op["give_back"]:
-        # A row written before marks existed names units only (no fence).
-        marks = dict(entry["marks"]) if "marks" in entry else {sid: ANY_SALE for sid in entry["units"]}
+        if "marks" not in entry and entry["units"]:
+            # A row that names no sale of its units frees nothing by stock id
+            # alone (D77): the unit stays SOLD and the bill is flagged.
+            failed.append(entry["line"].get("item_id"))
+            continue
+        marks = dict(entry.get("marks") or [])
         units = [sid for sid in marks if sid not in keep]
         if not units:
             continue
@@ -381,8 +403,7 @@ def _give_back_units(op: dict, after: dict, failed: List[Any]) -> None:
                     op["order_id"], stock_id=sid, reason="ORDER_LINE_REMOVED", sale_mark=marks[sid]
                 )
             left = stock_repo.count({"order_id": op["order_id"], "status": "SOLD", "$or": [
-                {"stock_id": sid, **({} if marks[sid] is ANY_SALE else {"sale_mark": marks[sid]})}
-                for sid in units]})
+                {"stock_id": sid, "sale_mark": marks[sid]} for sid in units]})
         except Exception as exc:  # noqa: BLE001
             logger.error("[STOCK] edit restock FAILED (order %s): %s", op["order_id"], exc)
             left = len(units)
@@ -494,17 +515,20 @@ async def _stranded_claims(coll) -> None:
     available, so it cannot be voided ahead: a press stalled past its give-back
     may still claim one and die before its own give-back. Every tick looks, in one
     query over all such rows whatever their age, for a unit still SOLD under such
-    an op's claim, and gives that op back again (by its claim: nothing else)."""
-    rows = list(coll.find({"state": "GIVEN_BACK", "takes_units": True},
-                          {"_id": 0, "op_id": 1, "order_id": 1}))
+    an op's claim, and gives that op back again (by its claim: nothing else). A
+    lens whose cell did not exist at give-back (`lens_unfenced`) is given back
+    again every tick until its cell carries the void or the reservation went back."""
+    rows = list(coll.find({"state": "GIVEN_BACK", "$or": [{"takes_units": True}, {"lens_unfenced": True}]},
+                          {"_id": 0, "op_id": 1, "order_id": 1, "takes_units": 1, "lens_unfenced": 1}))
     if not rows:
         return
-    held = get_stock_repository().collection.distinct("claim_op", {
-        "order_id": {"$in": sorted({r["order_id"] for r in rows})},
+    units = [r for r in rows if r.get("takes_units")]
+    held = set(get_stock_repository().collection.distinct("claim_op", {
+        "order_id": {"$in": sorted({r["order_id"] for r in units})},
         "status": "SOLD",
-        "claim_op": {"$in": [r["op_id"] for r in rows]},
-    })
-    for op_id in held:
+        "claim_op": {"$in": [r["op_id"] for r in units]},
+    })) if units else set()
+    for op_id in sorted(held | {r["op_id"] for r in rows if r.get("lens_unfenced")}):
         op = coll.find_one({"op_id": op_id}, {"_id": 0})
         if op is not None:
             await give_back(op)

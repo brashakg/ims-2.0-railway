@@ -613,15 +613,17 @@ async def release_for_cancel(
     try:
         from ..routers import lens_stock as stock_router
 
-        if void and stock_router.void_move(
+        voided = void and stock_router.void_move(
             cell["lens_line_id"],
             stock_router.ReserveCommitReleasePayload(
                 store_id=store_id, sph=cell["sph"], cyl=cell["cyl"], add=cell["add"], qty=qty,
             ),
             user,
             stock_router._move_key("reserve", reserve_source_id),  # noqa: SLF001
-        ):
-            return {"status": "voided", **shape}
+        )
+        if voided:
+            # "voided_no_cell": nothing held, but nothing fenced either (D77).
+            return {"status": "voided" if voided is True else "voided_no_cell", **shape}
         if _acted(release_source_id, "release", order_item, cell, store_id, user):
             return {"status": "already_released", **shape}
         # If reserve never happened for this line, skip (nothing to release).
