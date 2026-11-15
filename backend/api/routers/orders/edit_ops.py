@@ -39,6 +39,8 @@ OPS_COLLECTION = "order_edit_ops"
 LEASE_SECONDS = 120  # one runner at a time; a dead runner's lease lapses
 RELEASE_FAILED = "line_remove_stock_release_failed"
 RELEASE_FAILED_ITEM = "line_remove_stock_failed_item_id"
+# A regate outcome no retry changes: points already spent, or no loyalty store.
+_LOYALTY_FINAL = ("balance_underflow", "loyalty_db_unavailable")
 _ACTOR_FIELDS = ("user_id", "username", "full_name", "roles", "store_ids", "active_store_id")
 
 
@@ -422,12 +424,17 @@ async def settle(op: dict, after: dict, repo) -> bool:
 
         writeback_after_sale(None, moved, store_id)
     # Owner hard rule: an edit that raises discounts must not leave the create-time
-    # loyalty earn standing. Delta-claw (repeats converge), fail-soft.
+    # loyalty earn standing. Each claw lands once per step (regate_earn_after_edit);
+    # one that could not finish (its row landed without its balance move, or the
+    # ledger could not be read) keeps this row OPEN, so the next runner completes
+    # it. Points already spent (underflow) are a person's call, as before.
+    regated: Dict[str, Any] = {"ok": False, "reason": "error"}
     with suppress(Exception):
         from ..loyalty import regate_earn_after_edit
 
-        regate_earn_after_edit(after, user_id=op["user"].get("user_id"))
-    _end(op, None if failed else "SETTLED")
+        regated = regate_earn_after_edit(after, user_id=op["user"].get("user_id")) or {}
+    owed = not regated.get("ok") and regated.get("reason") not in _LOYALTY_FINAL
+    _end(op, None if failed or owed else "SETTLED")
     return not failed
 
 

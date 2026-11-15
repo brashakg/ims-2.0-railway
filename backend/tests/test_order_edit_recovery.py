@@ -1677,3 +1677,31 @@ def test_a_claw_whose_balance_move_was_lost_is_completed_once(ledger, monkeypatc
     assert ledger.balance() == 30, "the lost move was completed"
     loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-3")
     assert ledger.balance() == 30 and len(ledger.rows()) == 2, "and never twice"
+
+
+def test_an_unfinished_claw_keeps_the_edit_open_until_it_lands(client, shop, door, monkeypatch):
+    """The edit's claw row landed but its balance move did not (a lost reply).
+    Before, settle ignored the regate's answer and closed the op SETTLED: no
+    runner ever called the regate for that bill again, so the ledger said -10
+    over an account that kept the points. The op now stays OPEN and the sweep's
+    re-settle completes it; points already spent stay a person's call."""
+    from api.routers import loyalty
+
+    oid = door.arm(_saved_bill(client, shop, [_line(SVC)]))
+    calls = []
+
+    def regate(doc, user_id=None):
+        calls.append(doc["order_id"])
+        return {"ok": False, "reason": "balance_failed"} if len(calls) == 1 else {"ok": True, "clawed": 0}
+
+    monkeypatch.setattr(loyalty, "regate_earn_after_edit", regate)
+    lines = [_as_sent(ln, discount_percent=10) for ln in _order(shop, oid)["items"]]
+    assert door.press(oid, lines).status_code == 200
+    assert _op_states(shop, oid) == ["OPEN"], "an unfinished claw is not settled"
+    _no_flag_left(shop, oid)
+    _sweep(shop)
+    assert len(calls) == 2 and _op_states(shop, oid) == ["SETTLED"]
+    monkeypatch.setattr(loyalty, "regate_earn_after_edit",
+                        lambda doc, user_id=None: {"ok": False, "reason": "balance_underflow"})
+    assert door.press(oid, [_as_sent(ln, discount_percent=20) for ln in _order(shop, oid)["items"]]).status_code == 200
+    assert _op_states(shop, oid) == ["SETTLED", "SETTLED"], "spent points: a person's call, not a loop"
