@@ -697,6 +697,10 @@ def _je_cal_day(s, *, end: bool = False) -> Optional[datetime]:
 _NOT_A_COST_BILL_STATUSES = ("DRAFT", "CANCELLED", "CANCELED", "VOID", "VOIDED", "REJECTED")
 
 
+PNL_UNAVAILABLE = ("Profit and loss is not available right now: part of the accounts could not be "
+                   "read. Try again in a minute.")
+
+
 def services_bill_costs(db, store_ids=None, from_date=None, to_date=None) -> List[dict]:
     """Supplier SERVICES bills (rent, repairs, freight, ...) as P&L costs
     (audit L3-04): one row ``{store_id, head, amount}`` per bill dated in the
@@ -712,8 +716,8 @@ def services_bill_costs(db, store_ids=None, from_date=None, to_date=None) -> Lis
     the pieces sell, and an inter-shop transfer mirror bill is never a cost.
     A supplier credit (debit note) against such a bill lowers its cost in the
     credit's own period, by the bill's cost share of the credit (cost /
-    bill total: a credit's input-credit GST is not cost). Fail-soft: [] on a
-    read error, as the other P&L legs."""
+    bill total: a credit's input-credit GST is not cost). A read error is a 503, never
+    an empty list read as no costs."""
     match: dict = {
         "bill_kind": ap_engine.BILL_KIND_SERVICES,
         "status": {"$nin": list(_NOT_A_COST_BILL_STATUSES)},
@@ -760,9 +764,11 @@ def services_bill_costs(db, store_ids=None, from_date=None, to_date=None) -> Lis
                 if b is None or total <= 0:
                     continue
                 rows.append(_row(b, -float(c.get("amount") or 0) * _cost(b) / total))
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # Never a P&L without them (PR #1423 review C): a read failure is an
+        # unavailable answer, not supplier costs of zero.
         logger.warning("[PNL] services bills could not be read", exc_info=True)
-        return []
+        raise HTTPException(status_code=503, detail=PNL_UNAVAILABLE) from exc
     return rows
 
 
@@ -816,7 +822,7 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
     refund's cost comes back only for the units its order-line mark says it
     booked, so a piece the counter also took back gives its cost once,
     whichever door ran first (D65, D66).
-    Fail-soft: {} on a read error."""
+    A read error is a 503 (PNL_UNAVAILABLE), never no returns."""
     lo = _parse_range_dt(from_date, end=False)
     hi = _parse_range_dt(to_date, end=True)
 
@@ -957,11 +963,33 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                     cost = line_revenue_ex_gst(line) * 0.6 / float(line.get("quantity", 1) or 1)
                 return cost
 
-            def _unit_item(sid, among):
-                # The unit carries its product; the return line is found by it.
+            # A unit's return line (PR #1423 review A): the order line that
+            # names it (its own cost_at_sale), else a line of its product with
+            # room left -- each return line gives back at most its own pieces,
+            # so two pieces of one product never both take the first line's
+            # cost.
+            line_of_unit = {str(li["stock_id"]): li for li in lines if li.get("stock_id")}
+            used: Dict[int, float] = {}
+
+            def _unit_item(sid, among, items=items, used=used, line_of_unit=line_of_unit):
+                named = line_of_unit.get(str(sid))
+                if named is not None:
+                    own = str(named.get("item_id"))
+                    it = next((i for i in items if str(i.get("order_item_id")) == own), None)
+                    if it is None:
+                        return {"order_item_id": named.get("item_id"), "product_id": named.get("product_id")}
+                    used[id(it)] = used.get(id(it), 0.0) + 1
+                    return it
                 pid = str((units.find_one({"stock_id": sid}, {"_id": 0, "product_id": 1}) or {}).get("product_id"))
-                return next((i for i in among if str(i.get("product_id")) == pid),
-                            among[0] if among else {"product_id": pid})
+                if not items:
+                    return {"product_id": pid}
+                for same in (True, False):
+                    for i in [*among, *items]:
+                        if (str(i.get("product_id")) == pid or not same) and \
+                                used.get(id(i), 0.0) < float(i.get("return_qty") or 1):
+                            used[id(i)] = used.get(id(i), 0.0) + 1
+                            return i
+                return None  # no line left for it: no cost given back (never twice)
 
             reversal: Dict[str, float] = {}
 
@@ -1079,9 +1107,12 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                 for sid, at in goods.get(ret.get("shopify_refund_id")) or []:
                     if sid and at is not None:
                         _lands(sid, max(when, at), items)
-                for sid, (at, among) in landed.items():
-                    if _in_range(at):
-                        _give_back(_unit_item(sid, among))
+                # Units their order line names first, so a unit found only by
+                # its product never takes a line another unit owns.
+                for sid, (at, among) in sorted(landed.items(), key=lambda kv: str(kv[0]) not in line_of_unit):
+                    it = _unit_item(sid, among)
+                    if it is not None and _in_range(at):
+                        _give_back(it)
             if not noted and not reversal:
                 continue
             shares = [(ret.get("store_id"), 1.0)]
@@ -1100,9 +1131,10 @@ def customer_return_adjustments(db, cost_by_product: dict, store_ids=None, from_
                     row["count"] += 1
             for key, amount in reversal.items():
                 out.setdefault(key, dict(empty))["cogs_reversal"] += amount
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # As the supplier bills: never a P&L with its returns read as none.
         logger.warning("[PNL] customer returns could not be read", exc_info=True)
-        return {}
+        raise HTTPException(status_code=503, detail=PNL_UNAVAILABLE) from exc
     for row in out.values():
         for k in ("gross", "taxable", "tax", "cogs_reversal"):
             row[k] = round(row[k], 2)
