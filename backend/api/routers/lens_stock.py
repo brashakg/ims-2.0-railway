@@ -833,10 +833,14 @@ def _cell_filter(
 # still alive, a retry racing its original) cannot both decrement: the second
 # finds the move already there. A pre-check of the audit is a read, not a fence.
 APPLIED_MOVES = "applied_moves"
-# ponytail: per-cell memory of the last 500 moves; a runner stalled across 500
-# later moves of the same cell would no longer be fenced (its audit pre-check
-# still is). Move to a keyed collection if cells ever churn that fast.
-APPLIED_MOVES_KEEP = 500
+# The memory is kept whole (D77: no window on a fence). A move is ~60-120 bytes,
+# so one cell holds well over 100,000 of them inside Mongo's 16 MB document;
+# a cell that ever filled would refuse its next move (a 500, fail closed),
+# never move twice.
+# A move given back before it landed is VOIDED (`void:<move>`, voided_move): it
+# can never land afterwards, so a press stalled past its give-back finds its
+# take refused instead of holding stock for a bill that will never carry it.
+VOID = "void:"
 
 
 def _move_key(action: str, source_id: Optional[str]) -> Optional[str]:
@@ -862,11 +866,8 @@ def _atomic_update(
     if extra_predicate:
         full_filter.update(extra_predicate)
     if move:
-        full_filter[APPLIED_MOVES] = {"$ne": move}
-        update = {
-            **update,
-            "$push": {APPLIED_MOVES: {"$each": [move], "$slice": -APPLIED_MOVES_KEEP}},
-        }
+        full_filter[APPLIED_MOVES] = {"$nin": [move, VOID + move]}
+        update = {**update, "$push": {APPLIED_MOVES: move}}
     return coll.find_one_and_update(
         full_filter,
         update,
@@ -876,6 +877,42 @@ def _atomic_update(
 
 def _already_moved(cell: Optional[Dict[str, Any]], move: Optional[str]) -> bool:
     return bool(move and cell and move in (cell.get(APPLIED_MOVES) or []))
+
+
+def _refuse_voided(cell: Optional[Dict[str, Any]], move: Optional[str]) -> None:
+    if move and cell and VOID + move in (cell.get(APPLIED_MOVES) or []):
+        raise HTTPException(
+            status_code=409,
+            detail="This edit was already given back, so it can take no stock now. Press it again.",
+        )
+
+
+def cell_doc(lens_line_id: str, payload: "ReserveCommitReleasePayload",
+             current_user: dict) -> Optional[Dict[str, Any]]:
+    """The cell with its move memory, None when there is no such cell. A read
+    fault raises: what a cell has taken is never guessed as nothing."""
+    coll = _stock_coll()
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    store = validate_store_access(payload.store_id, current_user)
+    return coll.find_one(_cell_filter(lens_line_id, store, payload.sph, payload.cyl, payload.add))
+
+
+def void_move(lens_line_id: str, payload: "ReserveCommitReleasePayload",
+              current_user: dict, move: str) -> bool:
+    """Close `move` on its cell if it has not landed: True when it never landed
+    and now never can (a repeat is True again), False when it landed. One write
+    on the cell, so a racing take either lands first (False) or is refused. A
+    cell that does not exist holds nothing (True). Faults raise."""
+    coll = _stock_coll()
+    if coll is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    store = validate_store_access(payload.store_id, current_user)
+    filt = _cell_filter(lens_line_id, store, payload.sph, payload.cyl, payload.add)
+    if coll.find_one_and_update({**filt, APPLIED_MOVES: {"$ne": move}},
+                                {"$addToSet": {APPLIED_MOVES: VOID + move}}) is not None:
+        return True
+    return not _already_moved(coll.find_one(filt), move)
 
 
 def _moved_before(action: str, move: str, cell: Dict[str, Any], lens_line_id: str,
@@ -948,6 +985,7 @@ async def reserve_cell(
         cell = coll.find_one(filt)
         if cell is None:
             raise HTTPException(status_code=404, detail="Stock cell not found")
+        _refuse_voided(cell, move)
         if _already_moved(cell, move):
             return _moved_before("reserve", move, cell, lens_line_id, active_store,
                                  current_user, payload, 0, payload.qty)

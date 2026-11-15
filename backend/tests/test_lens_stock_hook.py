@@ -68,6 +68,11 @@ def _install_fake_router(monkeypatch, *, reserve=None, commit=None, release=None
     fake.commit_cell = commit or _default_ok
     fake.release_cell = release or _default_ok
     fake._get_db = lambda: None  # noqa: SLF001
+    # The cell's own move memory (read when a record is missing): this fake
+    # cell has taken no named move.
+    fake.cell_doc = lambda *_a, **_k: {"applied_moves": []}
+    fake._move_key = lambda action, source_id: f"{action}:{source_id}"  # noqa: SLF001
+    fake._already_moved = lambda cell, move: move in (cell or {}).get("applied_moves", [])  # noqa: SLF001
 
     # Inject on BOTH sys.modules AND the parent package attribute, because
     # `from ..routers import lens_stock` resolves via the package attribute,
