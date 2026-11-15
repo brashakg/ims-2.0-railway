@@ -1838,6 +1838,137 @@ def _with_effective_discounts(items):
     return out
 
 
+_REGATE_PASSES = 8  # each lost race is one other runner's step; net falls every pass
+_CLAW_MOVED = ("applied", "already_applied", "unguarded")
+
+
+def _regate_pass(order_doc, order_id, customer_id, accounts, txns, user_id) -> Dict[str, Any]:
+    """One read-compute-claw step of regate_earn_after_edit. `retry`: another
+    runner took this very step first; read again and take the next one."""
+    account = accounts.find_or_create(customer_id)
+    ledger, read_ok = _read_order_ledger(txns, customer_id, order_id, account)
+    if not read_ok:
+        logger.error(
+            "edit-regate ledger read FAILED cust=%s order=%s -- refusing "
+            "to claw on an unreadable ledger", customer_id, order_id,
+        )
+        return {"ok": False, "reason": "ledger_read_failed"}
+
+    # A step whose row landed but whose balance move did not (lost reply,
+    # crash, a loser of the race below) is completed first, by its own id.
+    applied = set(account.get(_APPLIED_REVERSALS) or [])
+    for row in ledger:
+        if (row.get("edit_regate_step") and row.get("edit_regate_of_order_id") == order_id
+                and row.get("txn_id") not in applied):
+            pts = int(row.get("points") or 0)
+            status, _ = _apply_reversal_balance(accounts, customer_id, row["txn_id"], pts, -pts, 0, None)
+            if status not in _CLAW_MOVED:
+                return _claw_owed(customer_id, order_id, row["txn_id"], status)
+
+    earn_rows = [
+        t for t in ledger
+        if t.get("order_id") == order_id and t.get("type") == "EARN"
+    ]
+    earned = sum(int(t.get("points") or 0) for t in earn_rows)
+    prior_claw = sum(
+        int(t.get("points") or 0)
+        for t in ledger
+        if t.get("type") == "ADJUST"
+        and t.get("edit_regate_of_order_id") == order_id
+    )
+    # A full reversal (cancel/return) already zeroed this order's loyalty.
+    if any(
+        t.get("type") == "ADJUST"
+        and t.get(_REVERSAL_ORDER_FIELD) == order_id
+        for t in ledger
+    ):
+        return {"ok": True, "clawed": 0, "skipped_reason": "already_reversed"}
+
+    net = earned + prior_claw  # prior_claw rows carry negative points
+    if net <= 0:
+        return {"ok": True, "clawed": 0, "skipped_reason": "nothing_earned"}
+
+    settings = _settings_safe()
+    basis = _earn_basis(order_doc)
+    tier = (earn_rows[0].get("tier_at_earn") if earn_rows else None) or (
+        account.get("tier", "BRONZE")
+    )
+    target = int(
+        calc_earn_points(
+            basis,
+            _with_effective_discounts(order_doc.get("items") or []),
+            tier,
+            settings,
+            cart_discount_percent=float(
+                order_doc.get("cart_discount_percent") or 0.0
+            ),
+        ).get("points")
+        or 0
+    )
+    delta = net - min(target, net)  # never credit
+    if delta <= 0:
+        return {"ok": True, "clawed": 0}
+
+    balance = int(account.get("balance_points", 0))
+    if balance < delta:
+        # Mirror the full-reversal stance: fail toward NOT clawing and
+        # escalate loudly rather than driving the balance negative.
+        logger.error(
+            "edit-regate BALANCE UNDERFLOW cust=%s order=%s balance=%s "
+            "delta=%s -- points already spent; human reconciliation needed",
+            customer_id, order_id, balance, delta,
+        )
+        return {"ok": False, "reason": "balance_underflow",
+                "balance": balance, "delta": delta}
+
+    step = f"{customer_id}:{order_id}:{net}"
+    txn_id = f"regate:{step}"
+    try:
+        row = txns.create(
+            {
+                "txn_id": txn_id,
+                "customer_id": customer_id,
+                "type": "ADJUST",
+                "points": -delta,
+                "order_id": order_id,
+                "edit_regate_of_order_id": order_id,
+                "edit_regate_step": step,
+                "reason": (
+                    f"earn re-gate after order edit: order {order_id} now "
+                    f"eligible for {min(target, net)} of {net} earned points"
+                ),
+                "created_by": user_id,
+                "created_at": datetime.now(),
+            },
+            raise_on_duplicate=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if exc.__class__.__name__ != "DuplicateKeyError":
+            raise
+        # Another runner took this very step: its row stands, once. The next
+        # pass reads again, completes that row's move if it was lost, and takes
+        # this bill's own remaining step (its target may be lower).
+        return {"ok": False, "retry": True}
+    if row is None:
+        return {"ok": False, "reason": "claw_write_failed"}
+    status, _ = _apply_reversal_balance(accounts, customer_id, txn_id, -delta, delta, 0, None)
+    if status not in _CLAW_MOVED:
+        return _claw_owed(customer_id, order_id, txn_id, status)
+    return {"ok": True, "clawed": delta, "txn_id": txn_id}
+
+
+def _claw_owed(customer_id, order_id, txn_id, status) -> Dict[str, Any]:
+    """A claw row stands whose balance move has not landed (the write failed, or
+    a redeem spent the points between the balance check and the move). Owed,
+    never final: the edit stays OPEN and every runner retries the move by its
+    id (once), so the ledger never shows a claw the account did not take."""
+    logger.error(
+        "edit-regate claw %s cust=%s order=%s: balance move %s -- the claw row "
+        "stands; the edit stays open until the move lands", txn_id, customer_id, order_id, status,
+    )
+    return {"ok": False, "reason": f"claw_move_{status}", "txn_id": txn_id}
+
+
 def regate_earn_after_edit(
     order_doc: Dict[str, Any],
     user_id: Optional[str] = None,
@@ -1858,9 +1989,11 @@ def regate_earn_after_edit(
     takes, ``regate:<customer>:<order>:<net before>``. Net only falls (one EARN
     per order, claws only), so a step is never taken twice legitimately, and two
     overlapping runners that read the same ledger compute the same id: the row
-    is the claim (its _id), the loser moves nothing. The balance then moves
-    under that id through _apply_reversal_balance (applied_reversals), so a row
-    whose balance move was lost is completed by the next call, never repeated.
+    is the claim (its _id). The loser reads again and takes its own next step,
+    because its bill may earn less than the winner's (round 10). The balance
+    moves under the row's id through _apply_reversal_balance (applied_reversals),
+    so a row whose move was lost is completed by the next call, never repeated;
+    until it lands the answer is not ok, and the edit stays OPEN.
     """
     try:
         order_id = str(order_doc.get("order_id") or "")
@@ -1873,119 +2006,14 @@ def regate_earn_after_edit(
         txns = get_loyalty_transaction_repository()
         if accounts is None or txns is None:
             return {"ok": False, "reason": "loyalty_db_unavailable"}
-        account = accounts.find_or_create(customer_id)
-        ledger, read_ok = _read_order_ledger(txns, customer_id, order_id, account)
-        if not read_ok:
-            logger.error(
-                "edit-regate ledger read FAILED cust=%s order=%s -- refusing "
-                "to claw on an unreadable ledger", customer_id, order_id,
-            )
-            return {"ok": False, "reason": "ledger_read_failed"}
-
-        # A step whose row landed but whose balance move did not (lost reply,
-        # crash, a loser of the race below) is completed first, by its own id.
-        applied = set(account.get(_APPLIED_REVERSALS) or [])
-        for row in ledger:
-            if (row.get("edit_regate_step") and row.get("edit_regate_of_order_id") == order_id
-                    and row.get("txn_id") not in applied):
-                pts = int(row.get("points") or 0)
-                _apply_reversal_balance(accounts, customer_id, row["txn_id"], pts, -pts, 0, None)
-
-        earn_rows = [
-            t for t in ledger
-            if t.get("order_id") == order_id and t.get("type") == "EARN"
-        ]
-        earned = sum(int(t.get("points") or 0) for t in earn_rows)
-        prior_claw = sum(
-            int(t.get("points") or 0)
-            for t in ledger
-            if t.get("type") == "ADJUST"
-            and t.get("edit_regate_of_order_id") == order_id
-        )
-        # A full reversal (cancel/return) already zeroed this order's loyalty.
-        if any(
-            t.get("type") == "ADJUST"
-            and t.get(_REVERSAL_ORDER_FIELD) == order_id
-            for t in ledger
-        ):
-            return {"ok": True, "clawed": 0, "skipped_reason": "already_reversed"}
-
-        net = earned + prior_claw  # prior_claw rows carry negative points
-        if net <= 0:
-            return {"ok": True, "clawed": 0, "skipped_reason": "nothing_earned"}
-
-        settings = _settings_safe()
-        basis = _earn_basis(order_doc)
-        tier = (earn_rows[0].get("tier_at_earn") if earn_rows else None) or (
-            account.get("tier", "BRONZE")
-        )
-        target = int(
-            calc_earn_points(
-                basis,
-                _with_effective_discounts(order_doc.get("items") or []),
-                tier,
-                settings,
-                cart_discount_percent=float(
-                    order_doc.get("cart_discount_percent") or 0.0
-                ),
-            ).get("points")
-            or 0
-        )
-        delta = net - min(target, net)  # never credit
-        if delta <= 0:
-            return {"ok": True, "clawed": 0}
-
-        balance = int(account.get("balance_points", 0))
-        if balance < delta:
-            # Mirror the full-reversal stance: fail toward NOT clawing and
-            # escalate loudly rather than driving the balance negative.
-            logger.error(
-                "edit-regate BALANCE UNDERFLOW cust=%s order=%s balance=%s "
-                "delta=%s -- points already spent; human reconciliation needed",
-                customer_id, order_id, balance, delta,
-            )
-            return {"ok": False, "reason": "balance_underflow",
-                    "balance": balance, "delta": delta}
-
-        step = f"{customer_id}:{order_id}:{net}"
-        txn_id = f"regate:{step}"
-        try:
-            row = txns.create(
-                {
-                    "txn_id": txn_id,
-                    "customer_id": customer_id,
-                    "type": "ADJUST",
-                    "points": -delta,
-                    "order_id": order_id,
-                    "edit_regate_of_order_id": order_id,
-                    "edit_regate_step": step,
-                    "reason": (
-                        f"earn re-gate after order edit: order {order_id} now "
-                        f"eligible for {min(target, net)} of {net} earned points"
-                    ),
-                    "created_by": user_id,
-                    "created_at": datetime.now(),
-                },
-                raise_on_duplicate=True,
-            )
-        except Exception as exc:  # noqa: BLE001
-            if exc.__class__.__name__ != "DuplicateKeyError":
-                raise
-            # Another runner took this very step: its row stands, once. Its
-            # balance move is completed here too (by its id: never twice), in
-            # case that runner died between its row and its move.
-            taken = txns.find_by_id(txn_id) or {}
-            pts = int(taken.get("points") or 0)
-            if pts:
-                _apply_reversal_balance(accounts, customer_id, txn_id, pts, -pts, 0, None)
-            return {"ok": True, "clawed": 0, "already_clawed": True, "txn_id": txn_id}
-        if row is None:
-            return {"ok": False, "reason": "claw_write_failed"}
-        status, _ = _apply_reversal_balance(accounts, customer_id, txn_id, -delta, delta, 0, None)
-        if status not in ("applied", "already_applied", "unguarded"):
-            # The row stands and the next call completes its balance move.
-            return {"ok": False, "reason": f"balance_{status}", "txn_id": txn_id}
-        return {"ok": True, "clawed": delta, "txn_id": txn_id}
+        # A lost step race reads again and takes the next step, so overlapping
+        # runners end where a serial order would: net = min(earned, each
+        # runner's target), each step once.
+        for _ in range(_REGATE_PASSES):
+            out = _regate_pass(order_doc, order_id, customer_id, accounts, txns, user_id)
+            if not out.get("retry"):
+                return out
+        return {"ok": False, "reason": "regate_not_settled"}
     except Exception as exc:  # noqa: BLE001
         logger.warning("regate_earn_after_edit failed: %s", exc)
         return {"ok": False, "reason": "error", "error": str(exc)}

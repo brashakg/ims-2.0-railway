@@ -45,7 +45,7 @@ def _doc_matches(doc, filter):
                     return False
                 if op == "$lte" and not (actual is not None and actual <= op_val):
                     return False
-                if op == "$ne" and actual == op_val:
+                if op == "$ne" and (actual == op_val or (isinstance(actual, list) and op_val in actual)):
                     return False
                 if op == "$gt" and not (actual is not None and actual > op_val):
                     return False
@@ -128,6 +128,12 @@ class FakeCollection:
             if not isinstance(arr, list):
                 arr = []
             arr.append(v)
+            d[k] = arr
+        # Mongo semantics: the exactly-once balance move records its id here.
+        for k, v in ((update or {}).get("$addToSet") or {}).items():
+            arr = d.get(k) if isinstance(d.get(k), list) else []
+            if v not in arr:
+                arr.append(v)
             d[k] = arr
 
     def update_one(self, filter, update):
