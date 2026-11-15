@@ -1889,7 +1889,10 @@ def _refuse_while_a_return_settles(order: Dict[str, Any], order_id: Optional[str
         if ledger is not None and ledger.find_one(
                 {"order_id": order_id, "type": "ISSUING", "undo_on_void": {"$ne": None}}) is not None:
             raise HTTPException(status_code=409, detail=_RETURN_STILL_SETTLING)
-        kept = [rid for rid, h in (order.get("refund_holds") or {}).items() if (h or {}).get("kept")]
+        # A door's kept hold (fence_bill_hold) is not a counter return: the
+        # reservation refuses it with its own answer (_reserve_order_refund).
+        kept = [rid for rid, h in (order.get("refund_holds") or {}).items()
+                if (h or {}).get("kept") and not (h or {}).get("door")]
         coll = _returns_coll()
         if kept and coll is not None:
             done = {d.get("return_id") for d in coll.find(
@@ -1992,8 +1995,8 @@ def sweep_stuck_return_holds() -> int:
     for order in bills:
         for rid, hold in (order.get("refund_holds") or {}).items():
             hold = hold or {}
-            if hold.get("doc"):
-                continue  # its own task (return_doc_missing)
+            if hold.get("doc") or hold.get("door"):
+                continue  # its own task (return_doc_missing); a door's hold is no counter return
             try:
                 if coll.find_one({"return_id": rid, "status": {"$in": list(_NO_MONEY_DOC_STATUSES)}}):
                     continue
@@ -4271,8 +4274,6 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
     refund until its doc exists. An un-kept hold younger than a press can run
     counts; an older one is a worker killed before any money moved, and ages
     out instead of blocking the bill forever."""
-    from api.utils.event_time import parse_event_utc_naive
-
     documented = 0.0
     done: set = set()
     coll = _returns_coll()
@@ -4295,18 +4296,67 @@ def _live_refund_holds(order_id: str, holds: Dict[str, Any],
                 status_code=503,
                 detail="Could not check earlier refunds on this bill - try again. Nothing was recorded.",
             )
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
     live: Dict[str, Any] = {}
     for rid, h in (holds or {}).items():
-        at = parse_event_utc_naive((h or {}).get("at"))
         if rid in done or (own_refund and rid == f"{ONLINE_HOLD_PREFIX}{own_refund}"):
             continue
-        # An online post's hold lives as long as its credit lock (its "ttl").
-        ttl = float((h or {}).get("ttl") or _refund_hold_ttl_seconds())
-        if not (h or {}).get("kept") and (at is None or (now - at).total_seconds() > ttl):
+        if _hold_aged_out(h):
             continue
         live[rid] = h
     return live, round(documented, 2)
+
+
+def _hold_aged_out(h: Optional[Dict[str, Any]]) -> bool:
+    """An UN-kept hold older than its ttl (an online post's or a door's lives
+    as long as its credit lock, its "ttl"; a counter return's
+    _refund_hold_ttl_seconds): every other door may take the bill over, and
+    its holder may no longer write (fence_bill_hold). A kept hold never ages."""
+    from api.utils.event_time import parse_event_utc_naive
+
+    h = h or {}
+    if h.get("kept"):
+        return False
+    at = parse_event_utc_naive(h.get("at"))
+    ttl = float(h.get("ttl") or _refund_hold_ttl_seconds())
+    return at is None or (datetime.now(timezone.utc).replace(tzinfo=None) - at).total_seconds() > ttl
+
+
+_HOLD_LOST = ("This took too long and another refund or return of this bill may have been "
+              "booked meanwhile, so NOTHING was issued. Check the bill and try again.")
+
+
+def fence_bill_hold(coll, order_id: Any, key: str, *, extra: Optional[Dict[str, Any]] = None,
+                    repo: Any = None) -> bool:
+    """D79 (#1397): THE fence every door passes at the moment it starts to
+    write money, credit, restock or a unit change on a bill. In ONE
+    compare-and-set (refund_holds_v) its own hold must still be there -- not
+    aged out (_hold_aged_out), not dropped by a door that took the bill over
+    (take_bill_hold, _reserve_order_refund) -- and it becomes KEPT, so it never
+    ages out while the writes run. False: the hold expired or was taken
+    over -- the holder writes nothing (a stalled press never turns its old
+    allowance into a new kept hold). An already-kept hold passes. A database
+    error raises (the caller writes nothing). No such bill: True. ``repo``:
+    the order repository's own compare-and-set (update_if) instead of ``coll``."""
+    for _ in range(8):
+        order = repo.find_by_id(order_id) if repo is not None else coll.find_one({"order_id": order_id})
+        if not order:
+            return True  # no such bill: nothing to race (as take_bill_hold)
+        holds = dict(order.get("refund_holds") or {})
+        mine = holds.get(key)
+        if not mine or _hold_aged_out(mine):
+            return False
+        holds[key] = {**mine, **(extra or {}), "kept": True}
+        version = order.get("refund_holds_v")
+        sets = {"refund_holds": holds, "refund_holds_v": int(version or 0) + 1}
+        if repo is not None:
+            if repo.update_if(order_id, {"refund_holds_v": version}, sets):
+                return True
+            continue
+        res = coll.update_one({"order_id": order_id, "refund_holds_v": version}, {"$set": sets})
+        matched = getattr(res, "matched_count", None)
+        if getattr(res, "modified_count", 0) if matched is None else matched:
+            return True
+    raise HTTPException(status_code=503, detail="Too many refunds on this bill at once - nothing was issued. Try again.")
 
 
 _ANOTHER_RETURN_RUNNING = "Another return of this bill is being processed - try again. Nothing was recorded."
@@ -4322,20 +4372,29 @@ def take_bill_hold(coll, order_id: Any, key: str, amount: float, *, door: str,
     return reserves through (_reserve_order_refund), BEFORE they price what
     the bill still owes, and drop it (drop_bill_hold) only once their own
     record counts. A counter return pressed meanwhile is refused (a ``door``
-    hold), and a door never prices beside another un-kept hold: False -- book
-    nothing, try again. A KEPT counter hold (its money went out) is no
-    refusal: every reader counts it. No such bill: True (nothing to race)."""
+    hold), and a door never prices beside another un-kept hold or a door's
+    kept one: False -- book nothing, try again. A KEPT counter hold (its money
+    went out) is no refusal: every reader counts it. No such bill: True
+    (nothing to race)."""
     try:
         for _ in range(8):
             order = coll.find_one({"order_id": order_id})
             if not order:
                 return True
             holds = dict(order.get("refund_holds") or {})
-            # Only another un-kept hold refuses; the returns are read (to drop
-            # finished or aged ones) only when there is one.
-            others = {rid: h for rid, h in holds.items() if rid != key and not (h or {}).get("kept")}
+            # Another un-kept hold refuses, and so does a door fenced mid-write
+            # (its hold KEPT, fence_bill_hold) until its record counts; the
+            # returns are read (to drop finished or aged ones) only when there is one.
+            others = {rid: h for rid, h in holds.items()
+                      if rid != key and (not (h or {}).get("kept") or (h or {}).get("door"))}
             if others and _live_refund_holds(order_id, others)[0]:
                 return False
+            # Taking the bill over drops every un-kept hold no longer live (aged
+            # out, or its record counts): a stalled holder that wakes finds its
+            # hold gone and writes nothing (fence_bill_hold, D79).
+            for rid in others:
+                if not (holds[rid] or {}).get("kept"):
+                    holds.pop(rid, None)
             version = order.get("refund_holds_v")
             holds[key] = {"amount": round(float(amount or 0), 2), "at": utc_now_iso(), "door": door,
                           **({"ttl": ttl} if ttl else {})}
@@ -4377,18 +4436,26 @@ def bill_money_door(db, coll, order_id: Any, key: str, amount: float, *, door: s
     """A door that gives money back on a bill outside the counter and the
     online post (the admin credit note, the advance refund): the online
     post's credit lock, then the shared hold (take_bill_hold), for as long as
-    it prices and books. Busy: 409, nothing issued."""
+    it prices and books. Busy: 409, nothing issued. Yields the door's fence:
+    called right before its first write (fence_bill_hold, D79) -- a press
+    whose hold aged out or was taken over meanwhile gets 409 and writes
+    nothing."""
     from ..services.shopify_refund import _CLAIM_STALE_SECONDS, _lock_order_credit, _unlock_order_credit
 
     locked, token = _lock_order_credit(db, order_id) if db is not None else (True, None)
     if not locked:
         raise HTTPException(status_code=409, detail=_BILL_BUSY)
     held = False
+
+    def fence() -> None:
+        if coll is not None and not fence_bill_hold(coll, order_id, key):
+            raise HTTPException(status_code=409, detail=_HOLD_LOST)
+
     try:
         held = coll is None or take_bill_hold(coll, order_id, key, amount, door=door, ttl=_CLAIM_STALE_SECONDS)
         if not held:
             raise HTTPException(status_code=409, detail=_BILL_BUSY)
-        yield
+        yield fence
     finally:
         if held and coll is not None:
             drop_bill_hold(coll, order_id, key)
@@ -4485,14 +4552,23 @@ def _nothing_paid_ids(order_id: Optional[str]) -> set:
 
 
 def _keep_order_refund_hold(order_id: Optional[str], return_id: Optional[str], *,
-                            amount: Optional[float] = None, extra: Optional[Dict[str, Any]] = None) -> None:
+                            amount: Optional[float] = None, extra: Optional[Dict[str, Any]] = None,
+                            fence: bool = False) -> None:
     """The money went out (or is about to): the hold becomes the refund's
     record until its doc lands -- it never ages out from here
     (_live_refund_holds). ``amount``: re-create a hold that aged out (the
     reconciler finishing a return's credit). ``extra``: fields stamped on it
-    (the unsaved doc, for Returns > Complete record)."""
+    (the unsaved doc, for Returns > Complete record). ``fence``: the press
+    itself, about to move money -- its hold must still be its own and live
+    (fence_bill_hold, D79), else 409 and nothing is issued."""
     repo = get_order_repository()
     if not order_id or not return_id or repo is None or not callable(getattr(repo, "update_if", None)):
+        return
+    if fence:
+        if not fence_bill_hold(None, order_id, return_id, extra=extra, repo=repo):
+            logger.error("[RETURNS] refund hold %s on %s expired or taken over: nothing issued",
+                         return_id, order_id)
+            raise HTTPException(status_code=409, detail=_HOLD_LOST)
         return
     for _ in range(8):
         order = repo.find_by_id(order_id) or {}
@@ -5219,7 +5295,9 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
         # Rs 2,000 tier would forget a paid credit). A clean refusal releases
         # it (create_return); the reconciler's undo is the only other releaser.
         # It carries what Needs completing needs if the press dies here.
-        _keep_order_refund_hold(resolved_order_id, held.get("return_id"), extra=_hold_facts())
+        # D79: fenced -- a press whose hold aged out or was taken over while
+        # it stalled issues nothing (409; create_return gives everything back).
+        _keep_order_refund_hold(resolved_order_id, held.get("return_id"), extra=_hold_facts(), fence=True)
         _outcome: Dict[str, Any] = {}
         try:
             entry = _issue_store_credit(
@@ -5383,7 +5461,7 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # after units were restocked (money review 15).
     if held.get("return_id"):
         _keep_order_refund_hold(held.get("order_id"), held.get("return_id"),
-                                extra={**_hold_facts(), "money_out": True})
+                                extra={**_hold_facts(), "money_out": True}, fence=True)
     held["money_out"] = True
 
     # BUG-099 loyalty reversal. ORDER MATTERS: this runs AFTER the credit
@@ -7331,7 +7409,7 @@ async def refund_advance_and_cancel(
     # (bill_money_door) from the plan to the finished refund.
     return_id = generate_return_id()
     with bill_money_door(_get_db(), getattr(repo, "collection", None), order_id, f"advance:{return_id}",
-                         float(order.get("amount_paid") or 0), door="advance"):
+                         float(order.get("amount_paid") or 0), door="advance") as _fence:
         plan = _advance_refund_plan(order)
         if not plan["ok"]:
             raise HTTPException(status_code=plan.get("status_code", 400), detail=plan["reason"])
@@ -7357,6 +7435,8 @@ async def refund_advance_and_cancel(
         # One refund per order, even under a double tap: claim the order first --
         # only while its status AND the money on it are what was read, so a payment
         # landing mid-refund makes this refuse instead of refunding a stale amount.
+        # D79: first the fence -- the hold is still this press's and kept from here.
+        _fence()
         if not repo.update_if(
             order_id,
             # ...and the invoice state the plan read: an invoice minted in
