@@ -361,10 +361,10 @@ def has_approver_pin(db, user_id: str) -> Dict[str, Any]:
     coll = _users_coll(db)
     if coll is None:
         return {"has_pin": False}
-    try:
-        u = coll.find_one({"user_id": user_id})
-    except Exception:  # noqa: BLE001
-        return {"has_pin": False}
+    # A failed read is NOT "no PIN" (audit R43): let it raise, so the status
+    # screen shows "could not check" and a self-rotation is refused instead of
+    # skipping the current-PIN check.
+    u = coll.find_one({"user_id": user_id})
     if not u:
         return {"has_pin": False}
     return {
