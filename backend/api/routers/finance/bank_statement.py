@@ -159,6 +159,9 @@ _DEAD_LEG_STATUSES = ("VOID", "VOIDED", "REVERSED", "FAILED", "REFUNDED", "CANCE
 _LEG_DATE_FIELDS = ("received_at", "recorded_at", "paid_at", "created_at", "payment_date")
 
 
+_BOOKS_UNREADABLE = "The books could not be read to match this statement. Nothing was saved; upload it again."
+
+
 def bank_receipt_legs(db, min_date: str, max_date: str, store_id: Optional[str]) -> List[dict]:
     """The money an order actually RECEIVED into the bank, one row per
     payment leg (audit L3-22): ``{receipt_id, order_id, amount, receipt_date,
@@ -384,10 +387,12 @@ async def import_bank_statement(
     receipts: List[dict] = []
     payments: List[dict] = []
     if db is not None:
+        # An unreadable book is a 503, never every bank line UNMATCHED saved
+        # for review as if nothing in the books matched (PR #1423 review).
         try:
             receipts = bank_receipt_legs(db, min_date, max_date, effective_store)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail=_BOOKS_UNREADABLE) from exc
         try:
             payments = list(
                 db.get_collection("vendor_payments").find(
@@ -404,8 +409,8 @@ async def import_bank_statement(
                     },
                 )
             )
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=503, detail=_BOOKS_UNREADABLE) from exc
 
     matched_rows = _auto_match_statement(rows, receipts, payments)
 

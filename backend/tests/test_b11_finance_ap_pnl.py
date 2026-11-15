@@ -1450,3 +1450,28 @@ def test_review_d_an_imported_note_whose_return_record_did_not_land_is_failed_an
     assert not _counter_claim(db, rr, "RD", 2, "2026-11-09T05:00:00+00:00")
     pnl = _pnl()
     assert pnl["returns_cogs_reversal"] == 2 * 600.0 and pnl["returns_taxable"] == 2 * 952.38
+
+
+@pytest.mark.parametrize("coll", ["orders", "vendor_payments"])
+def test_l3_22_an_unreadable_book_is_unavailable_never_every_line_unmatched(monkeypatch, coll):
+    """A read failure of the order receipts (or supplier payments) made the
+    import a 200 with every bank line UNMATCHED, saved for review as if
+    nothing in the books matched: now a 503 and nothing saved."""
+    from fastapi import HTTPException
+
+    d = mongomock.MongoClient()[f"b11_{uuid.uuid4().hex[:8]}"]
+    d.orders.insert_one({"order_id": "O-B", "store_id": "S1", "created_at": datetime(2026, 11, 4),
+                         "payments": [{"payment_id": "P-B", "method": "UPI", "amount": 100.0,
+                                       "received_at": "2026-11-04T06:00:00+00:00"}]})
+    real = mongomock.collection.Collection.find
+
+    def find(self, *a, **k):
+        if self.name == coll:
+            raise RuntimeError(f"{coll} unavailable")
+        return real(self, *a, **k)
+
+    monkeypatch.setattr(mongomock.collection.Collection, "find", find)
+    with pytest.raises(HTTPException) as err:
+        _import(d, 100, monkeypatch)
+    assert err.value.status_code == 503
+    assert d.bank_statements.count_documents({}) == 0
