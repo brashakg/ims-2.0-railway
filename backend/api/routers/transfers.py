@@ -287,6 +287,27 @@ def _coerce(value):
     return value
 
 
+def _no_courier_booking() -> None:
+    """Every door that used to "book Shiprocket" for a transfer ends here
+    (audit L2-INTEGRATION-F01). IMS has NO courier booking for a transfer box:
+    the Shiprocket adapter (services/shiprocket.py) books customer orders
+    only. Those doors answered 200 with a made-up SHP_/AWB/SR_ id, replaced it
+    on every retry (over a tracking no. staff had typed) and let a box ship on
+    it. A number no courier issued is never written: the door refuses and the
+    box ships on the courier and tracking no. typed at Ship."""
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "TRANSFER_COURIER_NOT_CONNECTED",
+            "message": (
+                "IMS does not book a courier for a transfer box, so nothing "
+                "was booked. Book the courier yourself, then add the courier "
+                "and the tracking no. when the box ships."
+            ),
+        },
+    )
+
+
 def _append_status_history(transfer: Dict, entry: Dict) -> None:
     """Append a status-history entry, tolerating a missing/null field.
 
@@ -1602,6 +1623,9 @@ async def create_transfer(
             detail="You can ask for stock for your own shop, or send your own shop's stock.",
         )
 
+    if transfer.create_shiprocket_shipment:
+        _no_courier_booking()
+
     # Both ends are named: a blank end (an admin with no active shop asking
     # for stock) would make a transfer to nowhere only an admin could ever
     # receive.
@@ -1761,11 +1785,6 @@ async def create_transfer(
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
     }
-
-    # Create Shiprocket shipment if requested
-    if transfer.create_shiprocket_shipment:
-        # In production, would call Shiprocket API
-        transfer_data["shiprocket_order_id"] = f"SR_{uuid.uuid4().hex[:8].upper()}"
 
     _save_transfer(transfer_data)
 
@@ -2042,9 +2061,9 @@ async def ship_transfer(
             detail="Scan the pieces into the box first: a box ships only the pieces "
             "scanned out.",
         )
-    if not create_shiprocket and not (
-        (courier_name or "").strip() and (tracking_number or "").strip()
-    ):
+    if create_shiprocket:
+        _no_courier_booking()
+    if not ((courier_name or "").strip() and (tracking_number or "").strip()):
         raise HTTPException(
             status_code=400, detail="Add the courier and the tracking no. before the box ships."
         )
@@ -2057,18 +2076,9 @@ async def ship_transfer(
         "source": list(src), "destination": list(dst), "crosses": crosses,
     }
 
-    if create_shiprocket:
-        # In production, would call Shiprocket API
-        shipment_id = f"SHP_{uuid.uuid4().hex[:8].upper()}"
-        awb = f"AWB{uuid.uuid4().hex[:10].upper()}"
-        transfer["shiprocket_shipment_id"] = shipment_id
-        transfer["tracking_number"] = awb
-        transfer["tracking_url"] = f"https://shiprocket.co/tracking/{awb}"
-        transfer["courier_name"] = courier_name or "Delhivery"
-    else:
-        transfer["tracking_number"] = tracking_number.strip()
-        transfer["tracking_url"] = tracking_url
-        transfer["courier_name"] = courier_name.strip()
+    transfer["tracking_number"] = tracking_number.strip()
+    transfer["tracking_url"] = tracking_url
+    transfer["courier_name"] = courier_name.strip()
 
     # The box is taken, then the pieces are claimed FIRST, so a box that
     # cannot ship (a piece sold meanwhile) never takes a tax invoice number.
@@ -3590,7 +3600,8 @@ async def create_shiprocket_shipment_for_transfer(
     courier_code: Optional[str] = None,
     current_user: dict = Depends(get_current_user),
 ):
-    """Create Shiprocket shipment for a transfer"""
+    """Kept so an old caller is TOLD nothing was booked (_no_courier_booking),
+    after the same role / shop / state checks as before: it writes nothing."""
     if not any(
         role in current_user.get("roles", [])
         for role in ["SUPERADMIN", "ADMIN", "STORE_MANAGER"]
@@ -3609,32 +3620,18 @@ async def create_shiprocket_shipment_for_transfer(
             status_code=400, detail="Transfer must be approved or packed"
         )
 
-    # In production, would call Shiprocket API
-    shipment_id = f"SHP_{uuid.uuid4().hex[:8].upper()}"
-    awb = f"AWB{uuid.uuid4().hex[:10].upper()}"
-
-    transfer["shiprocket_shipment_id"] = shipment_id
-    transfer["tracking_number"] = awb
-    transfer["tracking_url"] = f"https://shiprocket.co/tracking/{awb}"
-    transfer["courier_name"] = courier_code or "Delhivery"
-    transfer["updated_at"] = utc_now_iso()
-
-    _save_transfer(transfer)
-    return {
-        "transfer_id": transfer_id,
-        "shiprocket_shipment_id": shipment_id,
-        "awb": awb,
-        "tracking_url": transfer["tracking_url"],
-        "courier": transfer["courier_name"],
-        "message": "Shiprocket shipment created",
-    }
+    _no_courier_booking()
 
 
 @router.get("/{transfer_id}/tracking")
 async def get_transfer_tracking(
     transfer_id: str, current_user: dict = Depends(get_current_user)
 ):
-    """Get tracking information for a transfer"""
+    """The courier + tracking no. typed at Ship, and IMS's OWN record of the
+    box. No courier feeds a transfer, so nothing here is a courier scan
+    (`provider_events` stays empty, every entry says `source: internal`): the
+    made-up PICKUP_SCHEDULED / "Distribution Hub" rows are gone (audit
+    L2-INTEGRATION-F01)."""
     transfer = _get_transfer(transfer_id)
     if not transfer:
         raise HTTPException(status_code=404, detail="Transfer not found")
@@ -3645,36 +3642,22 @@ async def get_transfer_tracking(
     if not transfer.get("tracking_number"):
         raise HTTPException(status_code=400, detail="No tracking information available")
 
-    # In production, would call Shiprocket tracking API
     return {
         "transfer_id": transfer_id,
         "tracking_number": transfer.get("tracking_number"),
         "tracking_url": transfer.get("tracking_url"),
         "courier": transfer.get("courier_name"),
         "current_status": transfer.get("status"),
+        "source": "internal",
+        "provider_events": [],
         "tracking_history": [
             {
-                "status": "PICKUP_SCHEDULED",
-                "location": transfer.get("from_location_name"),
-                "timestamp": transfer.get("created_at"),
-            },
-            (
-                {
-                    "status": "PICKED_UP",
-                    "location": transfer.get("from_location_name"),
-                    "timestamp": transfer.get("shipped_at"),
-                }
-                if transfer.get("shipped_at")
-                else None
-            ),
-            (
-                {
-                    "status": "IN_TRANSIT",
-                    "location": "Distribution Hub",
-                    "timestamp": transfer.get("shipped_at"),
-                }
-                if transfer.get("shipped_at")
-                else None
-            ),
+                "status": step.get("status"),
+                "timestamp": step.get("timestamp"),
+                "notes": step.get("notes"),
+                "source": "internal",
+            }
+            for step in transfer.get("status_history") or []
+            if isinstance(step, dict)
         ],
     }

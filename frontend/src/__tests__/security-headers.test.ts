@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import * as fs from 'fs';
 import * as path from 'path';
+import { QZ_ORIGINS } from '../services/qzEndpoint';
 
 // The catch-all header rule's `source`. It used to be `/(.*)` but that ONLY
 // matched the literal source files. The real SPA routes (/, /dashboard, ...)
@@ -113,6 +114,26 @@ describe('vercel.json security headers', () => {
     const indexHtml = fs.readFileSync(path.join(__dirname, '../..', 'index.html'), 'utf-8');
     expect(/<script>[\s\S]*?<\/script>/.test(indexHtml)).toBe(false);
     expect(scriptSrc).not.toContain("'unsafe-inline'");
+  });
+
+  // Audit L2-INTEGRATION-F03: connect-src allowed only the app and the API, so
+  // the browser refused the QZ Tray websocket (wss://localhost:8181) before it
+  // started and every label fell to the print window. The policy must allow
+  // exactly the endpoints qz.ts connects to (services/qzEndpoint.ts) - and no
+  // other websocket: no bare ws:/wss:, no wildcard, no other local port.
+  // (e2e/tests/qz-csp.spec.ts enforces the same header in a real browser.)
+  it('CSP connect-src allows the QZ Tray endpoints the app connects to, and no other socket', () => {
+    const rootRoute = vercelConfig.headers.find((h: any) => h.source === ROUTE_SOURCE);
+    const csp = rootRoute.headers.find((h: any) => h.key === 'Content-Security-Policy').value as string;
+    const sources = ((csp.match(/connect-src ([^;]+)/) || [])[1] || '').trim().split(/\s+/);
+    expect(QZ_ORIGINS.length).toBeGreaterThan(0);
+    for (const origin of QZ_ORIGINS) expect(sources).toContain(origin);
+    const sockets = sources.filter((src) => /^wss?:/i.test(src));
+    expect([...sockets].sort()).toEqual([...QZ_ORIGINS].sort());
+    expect(sources).not.toContain('*');
+    // What was already allowed stays allowed.
+    expect(sources).toContain("'self'");
+    expect(sources).toContain('https://ims-20-railway-production.up.railway.app');
   });
 
   it('preserves existing rewrites for SPA routing', () => {
