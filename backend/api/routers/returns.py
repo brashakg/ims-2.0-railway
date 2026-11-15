@@ -2065,10 +2065,11 @@ def _task_door_hold_stuck(order: Dict[str, Any], key: str, hold: Dict[str, Any])
         bill = order.get("order_number") or order.get("order_id")
         create_system_task(
             get_task_repository(),
-            title=f"Bill {bill}: a refund stopped part way - the bill takes no refund",
+            title=f"Bill {bill}: a refund or credit note left the bill locked - it takes no refund",
             description=(
                 f"A {hold.get('door')} refund or credit note on bill {bill} (Rs {float(hold.get('amount') or 0):.2f}, "
-                f"{key}) stopped after it started to write. Until it is cleared, every return, online refund and "
+                f"{key}) either stopped after it started to write, or finished but could not unlock the bill. "
+                "Until it is cleared, every return, online refund and "
                 "credit note of this bill is refused. Do this: check the customer's store credit and the bill's "
                 "history for it, then ask the IMS team to clear it. Nothing is released by itself."
             ),
@@ -4435,8 +4436,12 @@ def take_bill_hold(coll, order_id: Any, key: str, amount: float, *, door: str,
             # Another un-kept hold refuses, and so does a door fenced mid-write
             # (its hold KEPT, fence_bill_hold) until its record counts; the
             # returns are read (to drop finished or aged ones) only when there is one.
+            # So does a counter return fenced mid-write (KEPT "writing", its
+            # units claimed, its money not yet out): a door never prices on a
+            # claim that may still be given back (D79).
             others = {rid: h for rid, h in holds.items()
-                      if rid != key and (not (h or {}).get("kept") or (h or {}).get("door"))}
+                      if rid != key and (not (h or {}).get("kept") or (h or {}).get("door")
+                                         or ((h or {}).get("writing") and not (h or {}).get("money_out")))}
             if others and _live_refund_holds(order_id, others)[0]:
                 return False
             # Taking the bill over drops every hold here no longer live: an
@@ -5194,11 +5199,23 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     #     a concurrent double-submit we release the ones already taken and reject
     #     (all-or-nothing) so a partial reservation never lingers, and so we
     #     never issue store credit / persist a return that lost the race.
-    claimed: List[Dict[str, Any]] = []
     for idx, rl in enumerate(resolved_lines):
         # The claim's own token (this return, this line): its release matches
         # only while the token is on the line and pulls it -- exactly once.
         rl["token"] = f"{return_id}:{idx}"
+    # D79: the unit claim is this press's FIRST write, so it is fenced: a press
+    # whose hold aged out or was taken over while it stalled claims nothing
+    # (409) -- no other door ever prices on a claim that is then given back.
+    # From here the hold is KEPT and marked "writing" (no door takes the bill
+    # until the money is out, take_bill_hold), with the lines a crash leaves
+    # for Needs completing. A refusal below gives it back (create_return).
+    _keep_order_refund_hold(resolved_order_id, held.get("return_id"), fence=True, extra={
+        "writing": True, "store_id": store_id,
+        "lines": [{"item_id": rl["orig_line"].get("item_id") or rl["orig_line"].get("id"),
+                   "product_id": rl["orig_line"].get("product_id"),
+                   "qty": float(rl["ret_line"].return_qty), "token": rl["token"]} for rl in resolved_lines]})
+    claimed: List[Dict[str, Any]] = []
+    for rl in resolved_lines:
         ok = _claim_returnable_qty(
             resolved_order_id, rl["orig_line"], float(rl["ret_line"].return_qty), token=rl["token"]
         )
@@ -5514,8 +5531,12 @@ async def _create_return(body: "ReturnCreate", current_user: dict, idempotency_k
     # the hold and the approval for a person (money_out) -- never a give-back
     # after units were restocked (money review 15).
     if held.get("return_id"):
+        # Fenced only while nothing has gone out (a cash-only refund): once a
+        # credit landed (money_out) the hold has been kept since the first
+        # fence, and a refusal here would tell staff "nothing was issued"
+        # with the credit on the balance -- the plain keep, fail-soft.
         _keep_order_refund_hold(held.get("order_id"), held.get("return_id"),
-                                extra={**_hold_facts(), "money_out": True}, fence=True)
+                                extra={**_hold_facts(), "money_out": True}, fence=not held.get("money_out"))
     held["money_out"] = True
 
     # BUG-099 loyalty reversal. ORDER MATTERS: this runs AFTER the credit

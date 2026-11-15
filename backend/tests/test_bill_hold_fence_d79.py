@@ -122,14 +122,16 @@ def test_a_kept_counter_hold_is_still_no_refusal_and_is_never_dropped():
 
 
 def _stall_past_the_hold(c, monkeypatch, take_over=False):
-    """The press stalls right before its unit claim (after its checks): its
-    hold ages out (or another door takes the bill over and drops it)."""
-    real, seen = returns_router._claim_returnable_qty, []
+    """The press stalls right before its FIRST write (after its checks, before
+    its unit claim -- its first fence): its hold ages out (or another door takes
+    the bill over and drops it)."""
+    real, seen = returns_router._keep_order_refund_hold, []
 
-    def _claim(order_id, *a, **k):
-        if not seen:
+    def _keep(order_id, *a, fence=False, **k):
+        if fence and not seen:
             holds = c["order"].get("refund_holds") or {}
             assert len(holds) == 1 and not any(h.get("kept") for h in holds.values()), holds
+            assert not any(l.get("returned_qty") for l in c["order"].get("items") or []), "claimed before the fence"
             seen.append(list(holds))
             if take_over:
                 c["order"]["refund_holds"] = {}
@@ -137,9 +139,9 @@ def _stall_past_the_hold(c, monkeypatch, take_over=False):
             else:
                 for h in holds.values():
                     h["at"] = _aged(returns_router._refund_hold_ttl_seconds())
-        return real(order_id, *a, **k)
+        return real(order_id, *a, fence=fence, **k)
 
-    monkeypatch.setattr(returns_router, "_claim_returnable_qty", _claim)
+    monkeypatch.setattr(returns_router, "_keep_order_refund_hold", _keep)
     return seen
 
 
@@ -270,7 +272,7 @@ def test_a_stale_advance_refund_writes_nothing(till, monkeypatch):
 # --- round 8 (internal review of D79) ----------------------------------------------
 
 
-def _fence_read_fails_once(monkeypatch):
+def _fence_read_fails_once(monkeypatch, when=lambda: True):
     """One transient database error on the fence's OWN read of the bill (a
     network blip, a primary step-down): BaseRepository.find_by_id swallows it
     into None, read_or_raise raises -- as the production repository does."""
@@ -290,7 +292,7 @@ def _fence_read_fails_once(monkeypatch):
         return False
 
     def read_or_raise(oid):
-        if not hit and _in_fence():
+        if not hit and _in_fence() and when():
             hit.append(oid)
             raise AutoReconnect("primary stepped down")
         return real(oid)
@@ -397,3 +399,80 @@ def test_a_door_hold_stuck_after_its_fence_raises_one_p1_task(till, monkeypatch)
     assert [t["dedupe_ref"] for t in out] == ["door_hold_stuck:ORD-S:advance:RET-X"] * 2
     assert out[0]["priority"] == "P1"
     assert orders.find_one({"order_id": "ORD-S"})["refund_holds"]["advance:RET-X"]["kept"] is True  # never released
+
+
+# --- round 9 (internal review of D79): the unit claim is a write too --------------
+
+
+class _Bill:
+    """The ctx fake's order dict, as the collection take_bill_hold reads."""
+
+    def __init__(self, order):
+        self.order = order
+
+    def find_one(self, q):
+        return self.order if q.get("order_id") == self.order["order_id"] else None
+
+    def update_one(self, q, u):
+        class _R:
+            matched_count = 0
+
+        if all(self.order.get(k) == v for k, v in q.items() if k != "order_id"):
+            self.order.update(u["$set"])
+            _R.matched_count = 1
+        return _R()
+
+
+@pytest.mark.parametrize("stalls", [True, False])
+def test_no_door_takes_the_bill_while_the_counters_unit_claim_stands(ctx, monkeypatch, stalls):
+    """Internal review of D79: the counter's unit claim (returned_qty) landed
+    under an UN-kept hold, before its fence. Stalled there past 120 s, the
+    online door took the bill over, priced on that claim as 'already returned'
+    (its credit cut for good), and the counter was then refused and gave the
+    claim back: owed credit and tax reversal lost. The claim is fenced: from
+    it until the money is out the hold is kept and no door takes the bill
+    (busy -- try again); the counter finishes."""
+    c = ctx([{"method": "CASH", "amount": _BILLED_GROSS}])
+    _with_compare_and_set(c)
+    real, tried = returns_router._claim_returnable_qty, []
+
+    def _claim(order_id, *a, **k):
+        out = real(order_id, *a, **k)
+        if not tried:
+            if stalls:
+                for h in (c["order"].get("refund_holds") or {}).values():
+                    h["at"] = _aged(returns_router._refund_hold_ttl_seconds())
+            tried.append(returns_router.take_bill_hold(_Bill(c["order"]), order_id, "shopify:R1", 900.0,
+                                                       door="online", ttl=900))
+        return out
+
+    monkeypatch.setattr(returns_router, "_claim_returnable_qty", _claim)
+    r = _post(c, None, return_type="CREDIT_NOTE")
+    assert tried == [False], "a door took the bill while the counter's claim stood"
+    assert r.status_code == 201, r.text
+    assert len([d for d in c["ledger"].docs if d.get("type") == "ISSUED"]) == 1
+    assert "shopify:R1" not in c["order"]["refund_holds"]
+
+
+def test_a_counter_hold_mid_write_refuses_a_door_until_its_money_is_out():
+    writing = {"amount": 900.0, "at": _aged(3600), "kept": True, "writing": True}
+    o = _Orders(refund_holds={"RET-1": dict(writing)}, refund_holds_v=1)
+    assert returns_router.take_bill_hold(o, "O1", "shopify:R1", 100.0, door="online", ttl=900) is False
+    o = _Orders(refund_holds={"RET-1": {**writing, "money_out": True}}, refund_holds_v=1)
+    assert returns_router.take_bill_hold(o, "O1", "shopify:R1", 100.0, door="online", ttl=900) is True
+
+
+def test_a_fence_after_the_credit_landed_never_says_nothing_was_issued(ctx, monkeypatch):
+    """Internal review of D79: the money-out mark went through the fence again
+    AFTER the store credit had landed; one failed bill read there answered 503
+    'nothing was issued' with Rs 900 on the balance, no return doc, no loyalty
+    reversal. Once the credit is out the hold has been kept since the first
+    fence: the mark is the plain keep, and the press finishes."""
+    c = ctx([{"method": "CASH", "amount": _BILLED_GROSS}])
+    _with_compare_and_set(c)
+    hit = _fence_read_fails_once(
+        monkeypatch, when=lambda: any(d.get("type") == "ISSUED" for d in c["ledger"].docs))
+    r = _post(c, None, return_type="CREDIT_NOTE")
+    assert r.status_code == 201, (hit, r.text)
+    assert len([d for d in c["ledger"].docs if d.get("type") == "ISSUED"]) == 1
+    assert len(c["returns"].docs) == 1
