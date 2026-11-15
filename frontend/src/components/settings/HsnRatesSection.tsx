@@ -87,10 +87,13 @@ export function HsnRatesSection() {
     }
     setSaving(true);
     try {
+      // Audit L1-F13: an emptied box is sent as '' (clear it), never left out
+      // (the server reads a missing field as "unchanged" and kept the old text
+      // while this screen said Updated).
       await hsnApi.update(row.hsn_id, {
         gst_rate: rate,
-        description: draft.description || undefined,
-        category_hint: draft.category_hint || undefined,
+        description: draft.description.trim(),
+        category_hint: draft.category_hint,
       });
       toast.success(`Updated ${row.hsn_code} -> ${rate}%`);
       cancelEdit();
@@ -177,29 +180,29 @@ export function HsnRatesSection() {
         {showAdd && (
           <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200 grid grid-cols-1 sm:grid-cols-5 gap-2 items-end">
             <div>
-              <label className="block text-xs text-gray-500 mb-1">HSN Code</label>
-              <input className="input-field font-mono" value={newRow.hsn_code}
+              <label htmlFor="hsn-hsn-code" className="block text-xs text-gray-500 mb-1">HSN Code</label>
+              <input id="hsn-hsn-code" className="input-field font-mono" value={newRow.hsn_code}
                 onChange={(e) => setNewRow({ ...newRow, hsn_code: e.target.value })} placeholder="900130" />
             </div>
             <div className="sm:col-span-2">
-              <label className="block text-xs text-gray-500 mb-1">Description</label>
-              <input className="input-field" value={newRow.description}
+              <label htmlFor="hsn-description" className="block text-xs text-gray-500 mb-1">Description</label>
+              <input id="hsn-description" className="input-field" value={newRow.description}
                 onChange={(e) => setNewRow({ ...newRow, description: e.target.value })} placeholder="Contact lenses" />
             </div>
             <div>
-              <label className="block text-xs text-gray-500 mb-1">Category</label>
-              <select className="input-field" value={newRow.category_hint}
+              <label htmlFor="hsn-category" className="block text-xs text-gray-500 mb-1">Category</label>
+              <select id="hsn-category" className="input-field" value={newRow.category_hint}
                 onChange={(e) => setNewRow({ ...newRow, category_hint: e.target.value })}>
                 <option value="">—</option>
                 {hintOpts(newRow.category_hint).map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
             </div>
             <div>
-              <label className="block text-xs text-gray-500 mb-1">GST %</label>
+              <label htmlFor="hsn-gst-rate" className="block text-xs text-gray-500 mb-1">GST %</label>
               <div className="flex gap-1">
-                <input className="input-field" type="number" min={0} max={40} step={0.5} value={newRow.gst_rate}
+                <input id="hsn-gst-rate" className="input-field" type="number" min={0} max={40} step={0.5} value={newRow.gst_rate}
                   onChange={(e) => setNewRow({ ...newRow, gst_rate: e.target.value })} placeholder="5" />
-                <button onClick={addRow} disabled={saving} className="btn-primary px-2" title="Save">
+                <button onClick={addRow} disabled={saving} className="btn-primary px-2" title="Save" aria-label="Save new HSN rate">
                   <Save className="w-4 h-4" />
                 </button>
               </div>
@@ -233,13 +236,13 @@ export function HsnRatesSection() {
                       <td className="px-4 py-3 font-mono text-sm text-gray-900">{row.hsn_code}</td>
                       <td className="px-4 py-3 text-sm text-gray-600">
                         {isEditing ? (
-                          <input className="input-field" value={draft.description}
+                          <input className="input-field" aria-label={`Description for HSN ${row.hsn_code}`} value={draft.description}
                             onChange={(e) => setDraft({ ...draft, description: e.target.value })} />
                         ) : (row.description || '—')}
                       </td>
                       <td className="px-4 py-3 text-sm text-gray-600">
                         {isEditing ? (
-                          <select className="input-field" value={draft.category_hint}
+                          <select className="input-field" aria-label={`Category for HSN ${row.hsn_code}`} value={draft.category_hint}
                             onChange={(e) => setDraft({ ...draft, category_hint: e.target.value })}>
                             <option value="">—</option>
                             {hintOpts(draft.category_hint).map((c) => <option key={c} value={c}>{c}</option>)}
@@ -249,6 +252,7 @@ export function HsnRatesSection() {
                       <td className="px-4 py-3 text-right text-sm font-semibold text-gray-900">
                         {isEditing ? (
                           <input className="input-field text-right w-24 ml-auto" type="number" min={0} max={40} step={0.5}
+                            aria-label={`GST rate for HSN ${row.hsn_code}`}
                             value={draft.gst_rate} onChange={(e) => setDraft({ ...draft, gst_rate: e.target.value })} />
                         ) : `${row.gst_rate}%`}
                       </td>
