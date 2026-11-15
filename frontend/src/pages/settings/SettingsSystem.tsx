@@ -16,6 +16,20 @@ import { financeApi } from '../../services/api/finance';
 import { AutoLogoutSettings } from '../../components/settings/AutoLogoutSettings';
 import { settingsApi } from '../../services/api/settings';
 import { useAuth } from '../../context/AuthContext';
+import { useLoadedSettings, settingsLoadErrorText } from '../../hooks/useLoadedSettings';
+import { SettingsLoadError } from '../../components/settings/SettingsLoadError';
+
+/**
+ * Audit L1-F16: the milestone list as typed -> whole numbers 1..100, or null
+ * when ANY token is not exactly that. `25.9,bogus,50xyz` used to be saved as
+ * [25, 50] (parseInt cut each token short and the rest were dropped).
+ */
+function parseMilestones(csv: string): number[] | null {
+  const tokens = csv.split(',').map((t) => t.trim());
+  if (tokens.length === 0 || tokens.some((t) => !/^\d{1,3}$/.test(t))) return null;
+  const pcts = tokens.map(Number);
+  return pcts.some((n) => n < 1 || n > 100) ? null : pcts;
+}
 
 export function SystemSettingsPage() {
   const [isLoading, setIsLoading] = useState(true);
@@ -138,18 +152,19 @@ export function WebPageTypesSetting() {
   const toast = useToast();
   const { hasRole } = useAuth();
   const canEdit = hasRole(['SUPERADMIN']);
-  const [current, setCurrent] = useState<Record<string, unknown> | null>(null);
-
-  useEffect(() => {
-    settingsApi.getSystemSettings().then((d: Record<string, unknown>) => setCurrent(d || {})).catch(() => setCurrent({}));
-  }, []);
+  // A failed read is not "off": the box stays locked and says so.
+  const { data: current, status, reload, update: setCurrent } = useLoadedSettings<Record<string, unknown>>(async () => {
+    const d = await settingsApi.getSystemSettings();
+    if (!d || typeof d !== 'object') throw new Error('empty settings answer');
+    return d;
+  });
 
   const enabled = current?.web_page_types_enabled === true;
   const toggle = async (on: boolean) => {
     try {
       // Only this key: the server merges it into the settings record.
       await settingsApi.updateSystemSettings({ web_page_types_enabled: on });
-      setCurrent((prev) => ({ ...(prev || {}), web_page_types_enabled: on }));
+      setCurrent((prev) => ({ ...prev, web_page_types_enabled: on }));
       toast.success(on ? 'Pre-order and Preview only pages are on.' : 'Every website page is Standard again.');
     } catch {
       toast.error('Could not save the website page setting.');
@@ -167,51 +182,47 @@ export function WebPageTypesSetting() {
         <input
           type="checkbox"
           checked={enabled}
-          disabled={!canEdit || current === null}
+          disabled={!canEdit || status !== 'ready'}
           onChange={(e) => void toggle(e.target.checked)}
           className="h-4 w-4"
         />
         <span className="text-sm font-medium text-gray-700">Pre-order and Preview only pages</span>
       </label>
+      {status === 'error' && (
+        <div className="mt-3">
+          <SettingsLoadError message={settingsLoadErrorText('website page setting')} onRetry={() => void reload()} />
+        </div>
+      )}
       {!canEdit && <p className="text-xs text-gray-400 mt-2">Superadmin can change this.</p>}
     </div>
   );
 }
 
-function TargetTickerSettings() {
+export function TargetTickerSettings() {
   const toast = useToast();
   const [milestonesCsv, setMilestonesCsv] = useState('25,50,75,100');
   const [refreshSeconds, setRefreshSeconds] = useState(60);
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    let alive = true;
-    policiesApi
-      .getAll('global')
-      .then((res) => {
-        if (!alive) return;
-        const pol = res?.policies || {};
-        const pcts = pol['ticker.milestone_pcts']?.value;
-        const refresh = pol['ticker.refresh_seconds']?.value;
-        if (Array.isArray(pcts) && pcts.length > 0) setMilestonesCsv(pcts.join(','));
-        if (typeof refresh === 'number' && refresh > 0) setRefreshSeconds(refresh);
-      })
-      .catch(() => {
-        /* fall back to defaults */
-      });
-    return () => {
-      alive = false;
-    };
-  }, []);
+  // The stored values must be read before they can be saved: a failed read
+  // used to leave 25,50,75,100 / 60 on screen with Save enabled.
+  const { status, reload } = useLoadedSettings(async () => {
+    const res = await policiesApi.getAll('global');
+    const pol = res?.policies || {};
+    const pcts = pol['ticker.milestone_pcts']?.value;
+    const refresh = pol['ticker.refresh_seconds']?.value;
+    if (Array.isArray(pcts) && pcts.length > 0) setMilestonesCsv(pcts.join(','));
+    if (typeof refresh === 'number' && refresh > 0) setRefreshSeconds(refresh);
+    return true;
+  });
+  const ready = status === 'ready';
 
   const save = async () => {
-    // Parse + validate the comma-separated thresholds (1..100 integers).
-    const pcts = milestonesCsv
-      .split(',')
-      .map((s) => parseInt(s.trim(), 10))
-      .filter((n) => !Number.isNaN(n));
-    if (pcts.length === 0 || pcts.some((n) => n < 1 || n > 100)) {
-      toast.error('Milestone thresholds must be integers between 1 and 100');
+    // Every token must be a whole number 1..100; nothing is silently dropped
+    // or rounded, and the text stays as typed for the correction.
+    const pcts = parseMilestones(milestonesCsv);
+    if (!pcts) {
+      toast.error('Milestone thresholds must be whole numbers between 1 and 100, separated by commas. Nothing was saved.');
       return;
     }
     if (refreshSeconds < 30 || refreshSeconds > 300) {
@@ -241,11 +252,19 @@ function TargetTickerSettings() {
         The monthly-target progress card on the Hub. Milestone crossings push a one-time celebratory
         bell to store-floor staff.
       </p>
+      {status === 'error' && (
+        <div className="mb-3">
+          <SettingsLoadError message={settingsLoadErrorText('target ticker settings')} onRetry={() => void reload()} />
+        </div>
+      )}
       <div className="grid grid-cols-1 tablet:grid-cols-2 gap-4">
         <div>
-          <label className="block text-sm font-medium text-gray-600 mb-1">Milestone thresholds (%)</label>
+          <label htmlFor="system-milestone-thresholds" className="block text-sm font-medium text-gray-600 mb-1">Milestone thresholds (%)</label>
           <input
+            id="system-milestone-thresholds"
             type="text"
+            disabled={!ready}
+            aria-invalid={ready && parseMilestones(milestonesCsv) === null}
             value={milestonesCsv}
             onChange={(e) => setMilestonesCsv(e.target.value)}
             placeholder="25,50,75,100"
@@ -254,21 +273,23 @@ function TargetTickerSettings() {
           <p className="text-xs text-gray-400 mt-1">Comma-separated integers, each 1-100.</p>
         </div>
         <div>
-          <label className="block text-sm font-medium text-gray-600 mb-1">Refresh every (seconds)</label>
+          <label htmlFor="system-refresh-every-seconds" className="block text-sm font-medium text-gray-600 mb-1">Refresh every (seconds)</label>
           <input
+            id="system-refresh-every-seconds"
             type="number"
             min={30}
             max={300}
             value={refreshSeconds}
             placeholder="60"
             title="Refresh interval in seconds"
+            disabled={!ready}
             onChange={(e) => setRefreshSeconds(parseInt(e.target.value, 10) || 0)}
             className="input-field"
           />
           <p className="text-xs text-gray-400 mt-1">How often the Hub card re-polls (30-300).</p>
         </div>
       </div>
-      <button type="button" onClick={save} disabled={saving} className="btn-primary mt-4">
+      <button type="button" onClick={save} disabled={saving || !ready} className="btn-primary mt-4">
         <Save className="w-4 h-4 mr-2" />
         {saving ? 'Saving…' : 'Save Target Ticker Settings'}
       </button>
