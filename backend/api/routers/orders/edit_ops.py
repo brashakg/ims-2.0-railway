@@ -9,8 +9,9 @@ in the SAME write (`edit_ops`). The bill then says which way the row ends:
   id on the bill      the edit landed: give back what it dropped;
   id not on the bill  it never landed: give back what it took.
 
-Both ends go by name (a unit's stock_id and the claim stamped on it, a lens's own
-release key), so running either twice moves nothing twice. They run in the press
+Both ends go by name (a unit's stock_id and the sale mark stamped on it, a lens's
+own release key), so running either twice moves nothing twice, and a runner left
+behind by a later edit cannot move what that later edit put back. They run in the press
 itself; on an identical retry or the next edit of that bill (landed rows only: a
 row not on the bill may be a press still in flight); and in the scheduler's sweep,
 which also takes the rows nobody came back for. What the sweep cannot finish stays
@@ -26,6 +27,7 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from api.utils.event_time import utc_now_iso
+from database.repositories.product_repository import ANY_SALE
 
 from ...dependencies import get_order_repository, get_stock_repository
 from ...services.lens_stock_hook import _is_lens_item, takes_lens_cell
@@ -74,6 +76,16 @@ def _name_units(order: dict, entries: List[dict], new_items: List[dict]) -> None
                 ) from exc
         named.update(units)
         entry["units"] = units
+        # Which sale of each unit this edit gives back (its sale_mark, read before
+        # the save): a later edit may sell the very piece to this bill again, and
+        # a runner of THIS op must never free that sale (Codex r7 P1).
+        try:
+            entry["marks"] = [[sid, mark] for sid, mark in stock_repo.sale_marks(order_id, units).items()]
+        except Exception as exc:  # noqa: BLE001 -- nothing has moved: a refusal
+            logger.error("[STOCK] units of order %s unreadable: %s", order_id, exc)
+            raise HTTPException(
+                status_code=503, detail="Stock could not be checked for this edit. Try again."
+            ) from exc
         # A legacy line billed before POS 4 may hold none: that is no shortfall.
         entry["short"] = len(units) < qty and _is_unit_tracked(stock_repo, pid, store_id)
 
@@ -112,6 +124,9 @@ def open_op(order: dict, added: List[dict], removed: List[dict], new_items: List
         "lease_until": None,
         "user": {k: user.get(k) for k in _ACTOR_FIELDS},
         "added": [dict(ln) for ln in added],
+        # A press stalled past its give-back can still claim a unit afterwards and
+        # die; such a row is re-checked by the sweep until nothing it took is held.
+        "takes_units": any(_takes_serialized_stock(ln) for ln in added),
         "give_back": entries if open_bill else [],
         # A lens billed on a bill that left reaches no workshop step: it is out now.
         "commit": [] if open_bill else [dict(ln) for ln in added if takes_lens_cell(ln)],
@@ -278,7 +293,7 @@ async def give_back(op: dict) -> bool:
         try:
             rec = await release_for_cancel(
                 order_item=line, order_id=order_id, line_index=line["item_id"],
-                store_id=store_id, user=op["user"],
+                store_id=store_id, user=op["user"], void=True,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("[LENS_HOOK] give back failed (order %s): %s", order_id, exc)
@@ -347,21 +362,25 @@ async def _give_back_cells(op: dict, failed: List[Any]) -> None:
 
 
 def _give_back_units(op: dict, after: dict, failed: List[Any]) -> None:
-    """By name, sparing a unit the bill bills now; 'gone' is what the shelf says."""
+    """By name and by sale: only the sale this edit took the unit off (its mark)
+    goes back, so a stale runner of this op cannot free the piece a later edit
+    sold to the bill again. 'gone' is what the shelf says."""
     stock_repo = get_stock_repository()
     keep = {str(ln.get("stock_id")) for ln in after.get("items") or [] if ln.get("stock_id")}
     for entry in op["give_back"]:
-        units = [sid for sid in entry["units"] if sid not in keep]
+        # A row written before marks existed names units only (no fence).
+        marks = dict(entry["marks"]) if "marks" in entry else {sid: ANY_SALE for sid in entry["units"]}
+        units = [sid for sid in marks if sid not in keep]
         if not units:
             continue
         try:
             for sid in units:
                 stock_repo.release_sold_units_for_order(
-                    op["order_id"], stock_id=sid, reason="ORDER_LINE_REMOVED"
+                    op["order_id"], stock_id=sid, reason="ORDER_LINE_REMOVED", sale_mark=marks[sid]
                 )
-            left = stock_repo.count(
-                {"order_id": op["order_id"], "status": "SOLD", "stock_id": {"$in": units}}
-            )
+            left = stock_repo.count({"order_id": op["order_id"], "status": "SOLD", "$or": [
+                {"stock_id": sid, **({} if marks[sid] is ANY_SALE else {"sale_mark": marks[sid]})}
+                for sid in units]})
         except Exception as exc:  # noqa: BLE001
             logger.error("[STOCK] edit restock FAILED (order %s): %s", op["order_id"], exc)
             left = len(units)
@@ -461,6 +480,29 @@ def _close_task(order_id: str, user: dict) -> None:
     close(_task_ref(order_id), user, "IMS finished settling this order's stock.")
 
 
+async def _stranded_claims(coll) -> None:
+    """D77: a given-back op is fenced for as long as it exists, with no window. A
+    lens it had not reserved was voided on its cell (release_for_cancel void=True),
+    so a stalled press can never reserve it later. A unit is claimed first-
+    available, so it cannot be voided ahead: a press stalled past its give-back
+    may still claim one and die before its own give-back. Every tick looks, in one
+    query over all such rows whatever their age, for a unit still SOLD under such
+    an op's claim, and gives that op back again (by its claim: nothing else)."""
+    rows = list(coll.find({"state": "GIVEN_BACK", "takes_units": True},
+                          {"_id": 0, "op_id": 1, "order_id": 1}))
+    if not rows:
+        return
+    held = get_stock_repository().collection.distinct("claim_op", {
+        "order_id": {"$in": sorted({r["order_id"] for r in rows})},
+        "status": "SOLD",
+        "claim_op": {"$in": [r["op_id"] for r in rows]},
+    })
+    for op_id in held:
+        op = coll.find_one({"op_id": op_id}, {"_id": 0})
+        if op is not None:
+            await give_back(op)
+
+
 async def sweep_edit_ops() -> Dict[str, int]:
     """The scheduler's tick: every edit row left OPEN past an in-flight press's
     lifetime is ended by what its bill says, and any bill still flagged (here, or
@@ -471,13 +513,10 @@ async def sweep_edit_ops() -> Dict[str, int]:
         return out
     cutoff = datetime.now() - timedelta(minutes=CLAIM_SWEEP_MINUTES)
     try:
-        # A press stalled past the window may take after its row was given back
-        # and die before its own give-back: for a day (sweep_unsaved_claims's
-        # horizon) the sweep re-runs given-back rows' named releases. A repeat
-        # moves nothing; what is still held re-opens the row (D61).
-        recent = {"state": "GIVEN_BACK", "created_at": {"$gte": datetime.now() - timedelta(days=1)}}
-        for op in list(coll.find(recent, {"_id": 0}).limit(200)):
-            await give_back(op)
+        await _stranded_claims(coll)
+    except Exception as exc:  # noqa: BLE001 -- the rest of the tick still runs
+        logger.warning("[STOCK] stranded-claim check stopped: %s", exc)
+    try:
         rows = list(coll.find({"state": "OPEN", "created_at": {"$lt": cutoff}}, {"_id": 0}).limit(200))
         for op in rows:
             order = repo.find_by_id(op["order_id"])

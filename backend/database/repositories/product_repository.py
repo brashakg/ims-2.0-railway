@@ -9,7 +9,7 @@ from api.utils.event_time import utc_now_iso
 import logging
 import re
 import uuid
-from typing import List, NamedTuple, Optional, Dict
+from typing import Any, List, NamedTuple, Optional, Dict
 from datetime import datetime, date, timedelta, timezone
 
 from api.services.barcode import find_unit_by_code
@@ -18,6 +18,9 @@ from api.utils.expiry import first_sellable_expiry
 from api.utils.ist import ist_today
 
 from .base_repository import BaseRepository
+
+# release_sold_units_for_order(sale_mark=...) left at this: any sale of the unit.
+ANY_SALE: Any = object()
 
 logger = logging.getLogger(__name__)
 
@@ -876,6 +879,7 @@ class StockRepository(BaseRepository):
                         "sold_at": datetime.now(),
                         "order_id": order_id,
                         "claim_op": claim_op,
+                        "sale_mark": uuid.uuid4().hex,
                     }
                 },
             )
@@ -894,6 +898,7 @@ class StockRepository(BaseRepository):
         limit: Optional[int] = None,
         reason: str = "ORDER_CANCELLED",
         claim_op: Optional[str] = None,
+        sale_mark: Any = ANY_SALE,
     ) -> "StockReleaseResult":
         """Flip units still SOLD against `order_id` back to AVAILABLE. Returns
         ``StockReleaseResult(released=[stock_ids], incomplete=bool)`` -- the
@@ -931,6 +936,10 @@ class StockRepository(BaseRepository):
           * `claim_op` -- every unit that one operation claimed (mark_sold /
             claim_one_available): an edit that never saved gives back exactly
             what it took, a lost-reply claim included, never another press's.
+          * `sale_mark` -- only THAT sale of the unit (the mark its SOLD write
+            stamped; None = a sale stamped before marks existed). A runner
+            that read the mark before a later edit sold the very piece to this
+            order again matches nothing (Codex r7 P1).
           * neither -- the whole order (cancel).
 
         `exclude_stock_ids` protects the FIFO fallback from SERIALIZED OVERSELL:
@@ -946,6 +955,8 @@ class StockRepository(BaseRepository):
         flt: Dict = {"order_id": order_id, "status": "SOLD"}
         if claim_op:
             flt["claim_op"] = claim_op
+        if sale_mark is not ANY_SALE:
+            flt["sale_mark"] = sale_mark
         if stock_id:
             flt["stock_id"] = stock_id
         elif exclude_stock_ids:
@@ -1034,6 +1045,16 @@ class StockRepository(BaseRepository):
         rows = self.collection.find(flt, {"_id": 0, "stock_id": 1}).limit(max(int(limit), 0))
         return [str(r["stock_id"]) for r in rows if r.get("stock_id")]
 
+    def sale_marks(self, order_id: str, stock_ids) -> Dict[str, Optional[str]]:
+        """{stock_id: sale_mark} for those of `stock_ids` SOLD to this order now
+        (None: sold before marks existed). A read fault raises."""
+        ids = [str(s) for s in stock_ids or [] if s]
+        if not ids:
+            return {}
+        rows = self.collection.find({"order_id": order_id, "status": "SOLD", "stock_id": {"$in": ids}},
+                                    {"_id": 0, "stock_id": 1, "sale_mark": 1})
+        return {str(r["stock_id"]): r.get("sale_mark") for r in rows if r.get("stock_id")}
+
     def count_sold_units_for_order(self, order_id: str) -> int:
         """How many units are STILL SOLD against this order. Lets the cancel
         path tell "nothing to release" apart from "release did not finish", and
@@ -1098,6 +1119,9 @@ class StockRepository(BaseRepository):
                 "sold_at": datetime.now(),
                 "order_id": order_id,
                 "claim_op": claim_op,
+                # this sale, by name: a stale release of an earlier sale of the
+                # same piece to the same order cannot match it
+                "sale_mark": uuid.uuid4().hex,
             }
         }
         # Phase 1 (FEFO): earliest-expiring IN-DATE unit first, ISO strings.
