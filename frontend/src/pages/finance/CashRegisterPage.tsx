@@ -148,7 +148,13 @@ export default function CashRegisterPage() {
         note: closeNote.trim() || undefined,
       });
       const v = closed.variance ?? 0;
-      if (closed.variance_status === 'NOT_COUNTED') {
+      if (closed.till_link_ok === false && closed.variance_status !== 'NOT_COUNTED') {
+        // The count never reached the till: that drawer is still open there
+        // and nothing has checked it, whatever this close's verdict says.
+        toast.warning(
+          'Closed, but this count did not reach the till, so the drawer is still open there and has not been checked. Count it on the Z-Read screen.',
+        );
+      } else if (closed.variance_status === 'NOT_COUNTED') {
         // Blank is not zero. Say what was recorded, so nobody goes looking for
         // a shortfall that was never measured.
         toast.warning(
@@ -561,6 +567,18 @@ function Stat({
 
 function VarianceChip({ session }: { session: CashRegisterSession }) {
   const status = session.variance_status;
+  // The count never reached the till: whatever the verdict below says, that
+  // drawer is still open there and unchecked until counted on the Z-Read.
+  if (session.till_link_ok === false && status !== 'NOT_COUNTED') {
+    return (
+      <div className="text-left inline-block">
+        <VarianceChip session={{ ...session, till_link_ok: true }} />
+        <p data-testid="count-not-on-till" className="text-xs text-amber-700 mt-1">
+          Count not on the till. Count this drawer on the Z-Read screen.
+        </p>
+      </div>
+    );
+  }
   // D53: several drawers on the day -- no single variance or "balanced". The
   // drawers' own counts and variances, never added together.
   if (status === 'COMPARISON_UNAVAILABLE') {

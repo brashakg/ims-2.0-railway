@@ -126,6 +126,7 @@ export default function CashReconciliationPage() {
   const [stores, setStores] = useState<StoreOpt[]>([]);
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<CashReconSummary | null>(null);
+  const [loadError, setLoadError] = useState(false);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [signingId, setSigningId] = useState<string | null>(null);
 
@@ -147,12 +148,15 @@ export default function CashReconciliationPage() {
         store_id: storeId || undefined,
       });
       setData(res);
+      setLoadError(false);
     } catch (e: unknown) {
       const msg =
         getErrorMessage(e, '') ||
         (e instanceof Error ? e.message : 'Failed to load reconciliation');
       toast.error(msg);
       setData(null);
+      // A failed read is not an empty range: the table says so until a load works.
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -375,6 +379,12 @@ export default function CashReconciliationPage() {
                 <tr>
                   <td colSpan={11} className="px-4 py-10 text-center text-gray-400">
                     <Loader2 className="w-4 h-4 animate-spin inline mr-2" /> Loading…
+                  </td>
+                </tr>
+              ) : loadError ? (
+                <tr>
+                  <td colSpan={11} className="px-4 py-10 text-center text-red-600" data-testid="recon-load-error">
+                    Closes could not be read - try again.
                   </td>
                 </tr>
               ) : rows.length === 0 ? (

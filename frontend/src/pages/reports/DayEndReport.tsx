@@ -210,6 +210,10 @@ export default function DayEndReport() {
     ((closeInfo.till_drawers_on_day ?? 1) > 1 || !!closeInfo.variance_withheld_several_drawers);
   // The close could not read the day's drawers: no variance is claimed.
   const comparisonUnavailable = !!closeInfo?.variance_comparison_unavailable;
+  // The count never reached the till: that drawer is still open there and
+  // has not been checked, so no per-drawer figures exist to show.
+  const countNotOnTill =
+    !!closeInfo && closeInfo.till_link_ok === false && closeInfo.closing_cash != null;
   const shownSystemCash =
     isClosed && closeInfo?.system_cash != null ? closeInfo.system_cash : summary.cashCollected;
   const shownCash = isClosed ? (closeInfo?.closing_cash ?? null) : recordedCash;
@@ -242,7 +246,13 @@ export default function DayEndReport() {
       });
       setIsClosed(true);
       setCloseInfo(res.close ?? null);
-      toast.success(`Day ${reportDate} closed`);
+      if (res.close?.till_link_ok === false && res.close?.closing_cash != null) {
+        toast.warning(
+          `Day ${reportDate} closed, but the count did not reach the till, so the drawer is still open there and has not been checked. Count it on the Z-Read screen.`,
+        );
+      } else {
+        toast.success(`Day ${reportDate} closed`);
+      }
     } catch (e: any) {
       // 409 = already closed: reflect that truthfully (and surface the
       // existing close) rather than faking a fresh success.
@@ -431,7 +441,9 @@ export default function DayEndReport() {
                   <div className="p-3 rounded-lg bg-gray-50 border border-gray-200" data-testid="day-end-card-variance">
                     <p className="text-xs text-gray-500">Variance</p>
                     <p className="text-sm font-semibold text-gray-600">
-                      {severalDrawers
+                      {countNotOnTill
+                        ? 'Count the drawer on the Z-Read'
+                        : severalDrawers
                         ? 'Shown for each drawer below'
                         : comparisonUnavailable
                           ? 'Comparison not available'
@@ -591,6 +603,12 @@ export default function DayEndReport() {
                       </>
                     )}
                   </p>
+                  )}
+                  {countNotOnTill && (
+                    <p className="text-xs text-amber-700 mt-1" data-testid="day-end-count-not-on-till">
+                      This count did not reach the till, so that drawer is still open there and has not
+                      been checked. Count it on the Z-Read screen.
+                    </p>
                   )}
                   {/* One drawer, one count: the till's blind count is the close.
                       Say so, or a figure the closer did not type appears
