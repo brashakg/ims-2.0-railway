@@ -37,7 +37,9 @@ in that counter before it inserts (_reserve_seq: raises the counter to its
 seq only while the counter is still below it). A seq the counter has already
 handed out belongs to another writer, old or new: the new writer waits for
 that row to land and chains from it (_holder_landed; a read error there means
-"not seen yet", never "abandoned"). A seq a PREVIOUS-version writer holds is
+"not seen yet", never "abandoned"). A reservation whose outcome is unknown (the
+head errored or its reply was lost) is never taken as "mine": the writer asks
+again, and a head that never answers leaves the row unchained, not refused. A seq a PREVIOUS-version writer holds is
 never taken over, however late its row is: the new writer claims a fresh seq
 above the counter instead, so a late old row can at worst show as a chain
 break, never be refused and lost. Only a seq a NEW writer holds (recorded in
@@ -231,18 +233,25 @@ def _chain_tail(audit_collection) -> Tuple[int, str]:
     return 0, GENESIS_HASH
 
 
+# _reserve_seq could not tell who holds the seq (the head errored, or its
+# reply was lost): never permission to take it.
+_OWNER_UNKNOWN: Dict[str, Any] = {}
+
+
 def _reserve_seq(db, seq: int, prev_hash: str) -> Optional[Dict[str, Any]]:
     """Take ``seq`` in the head document's claim counter -- the counter an
     old-version writer $inc's (module docstring, ROLLING DEPLOY) -- and record
     it in the new-writer ring. None when this writer now holds it (the counter
     was below ``seq``, or there was no head yet); otherwise the head document
-    that had already handed ``seq`` out ({} when its holder is unknown).
-    Fail-open (None) when the head cannot be reached: the unique seq index
-    still decides between writers."""
-    if db is None:
+    that had already handed ``seq`` out ({} when its holder is unknown);
+    _OWNER_UNKNOWN when the head errored, so the outcome is unknown (Codex
+    round 2: a previous-version writer may hold ``seq``). None too when there
+    is no head collection at all (no database handle)."""
+    get_collection = getattr(db, "get_collection", None)
+    if not callable(get_collection):
         return None
     try:
-        heads = db.get_collection(HEAD_COLLECTION)
+        heads = get_collection(HEAD_COLLECTION)
         if heads.update_one({"_id": HEAD_DOC_ID, "seq": {"$lt": seq}},
                             {"$set": {"seq": seq, f"new_claims.{_claim_slot(seq)}": seq}}).matched_count:
             return None
@@ -262,7 +271,7 @@ def _reserve_seq(db, seq: int, prev_hash: str) -> Optional[Dict[str, Any]]:
         if _is_duplicate_key(exc):
             return {}  # another writer created the head first
         logger.warning("[AUDIT_CHAIN] could not reserve seq %s: %s", seq, exc)
-        return None
+        return _OWNER_UNKNOWN
 
 
 def _holder_landed(audit_collection, seq: int) -> bool:
@@ -374,6 +383,8 @@ def append_audit_entry(
             _ensure_seq_index(audit_collection)  # first row of the chain
         seq = max(seq + 1, floor)
         holder = _reserve_seq(db, seq, prev_hash)
+        if holder is _OWNER_UNKNOWN:
+            continue  # ask again; out of attempts -> unchained, never refused
         if holder is not None:
             if _holder_landed(audit_collection, seq):
                 continue  # the writer holding this seq wrote it: chain from that row
@@ -397,7 +408,9 @@ def append_audit_entry(
                     audit_collection.find_one({"seq": seq}) is not None
                 )
             except Exception:  # noqa: BLE001
-                seq_taken = False
+                # Unknown: chain again. A row refused on its _id/log_id is
+                # refused every time and ends as before (None).
+                seq_taken = _is_duplicate_key(exc)
             if seq_taken:
                 continue  # another writer took this seq: chain from the new tail
             # Any other failure (a duplicate _id / log_id, the DB) loses this
