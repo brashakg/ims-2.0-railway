@@ -87,3 +87,41 @@ def test_a_lost_claw_move_is_completed_once_on_real_mongo(shop, ledger, monkeypa
 
     _native(shop)
     case(ledger, monkeypatch)
+
+
+# Round 10 (lead's review of head f8b722f0), the same in-memory test bodies on
+# real Mongo: a real unique _id decides the claw step race.
+
+
+@pytest.mark.parametrize("first", ["the smaller claw lands first", "the full claw lands first"])
+def test_overlapping_regates_with_different_bills_on_real_mongo(shop, ledger, monkeypatch, first):
+    from tests.test_order_edit_recovery import test_overlapping_regates_with_different_bills_end_at_the_lowest as case
+
+    _native(shop)
+    case(ledger, monkeypatch, first)
+
+
+@pytest.mark.parametrize("name", [
+    "test_a_claw_move_that_fails_again_is_still_owed",
+    "test_a_loser_whose_completing_move_fails_is_still_owed",
+    "test_a_claw_row_whose_move_underflowed_stays_owed",
+])
+def test_an_unlanded_claw_stays_owed_on_real_mongo(shop, ledger, monkeypatch, name):
+    from tests import test_order_edit_recovery as suite
+
+    _native(shop)
+    getattr(suite, name)(ledger, monkeypatch)
+
+
+def test_a_lens_given_back_before_its_cell_existed_on_real_mongo(client, shop, cells, monkeypatch):
+    from tests.test_order_edit_recovery import test_a_lens_given_back_before_its_cell_existed_is_swept_back as case
+
+    _native(shop)
+    case(client, shop, cells, monkeypatch)
+
+
+def test_a_row_naming_no_sale_frees_nothing_on_real_mongo(client, shop, door, monkeypatch):
+    from tests.test_order_edit_recovery import test_a_row_naming_no_sale_never_frees_a_unit_unfenced as case
+
+    _native(shop)
+    case(client, shop, door, monkeypatch)

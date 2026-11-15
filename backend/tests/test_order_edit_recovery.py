@@ -1705,3 +1705,167 @@ def test_an_unfinished_claw_keeps_the_edit_open_until_it_lands(client, shop, doo
                         lambda doc, user_id=None: {"ok": False, "reason": "balance_underflow"})
     assert door.press(oid, [_as_sent(ln, discount_percent=20) for ln in _order(shop, oid)["items"]]).status_code == 200
     assert _op_states(shop, oid) == ["SETTLED", "SETTLED"], "spent points: a person's call, not a loop"
+
+
+# Round 10 (lead's review of head f8b722f0): the claw step id names the net a
+# runner read, not its target, so two overlapping runners carrying DIFFERENT
+# bills collide on one id. The loser used to report "already clawed" and its
+# edit closed SETTLED with the bill's earn still above what the bill now earns.
+
+_HALF = {"cart_discount_percent": 0.0,
+         "items": [{"category": "FRAME", "item_total": 500, "discount_percent": 10},
+                   {"category": "FRAME", "item_total": 500}]}
+
+
+@pytest.mark.parametrize("first", ["the smaller claw lands first", "the full claw lands first"])
+def test_overlapping_regates_with_different_bills_end_at_the_lowest(ledger, monkeypatch, first):
+    """Edit A leaves half the bill eligible, edit B none of it. Both read net 10.
+    Whichever lands first, the bill ends at what its latest state earns (0),
+    exactly as either serial order would: +10, then claws summing to -10."""
+    from api.routers import loyalty
+    from database.repositories.loyalty_repository import LoyaltyTransactionRepository
+
+    half, none = {**ledger.edited, **_HALF}, dict(ledger.edited)
+    winner, loser = (half, none) if first == "the smaller claw lands first" else (none, half)
+    real, fired, mid = LoyaltyTransactionRepository.create, [], []
+
+    def stall(self, data, *a, **k):
+        if data.get("edit_regate_of_order_id") == "ORD-RG" and not fired:
+            fired.append(True)
+            loyalty.regate_earn_after_edit(dict(winner), user_id="runner-2")
+            mid.append(sum(p for _, p in ledger.rows()))
+        return real(self, data, *a, **k)
+
+    monkeypatch.setattr(LoyaltyTransactionRepository, "create", stall)
+    out = loyalty.regate_earn_after_edit(dict(loser), user_id="runner-1")
+    monkeypatch.setattr(LoyaltyTransactionRepository, "create", real)
+    assert fired and (0 < mid[0] < 10 if winner is half else mid[0] == 0), mid
+    assert out["ok"], out
+    assert sum(p for _, p in ledger.rows()) == 0, ledger.rows()
+    assert ledger.balance() == 30, "40 less the 10 earned, once"
+    loyalty.regate_earn_after_edit(dict(none), user_id="runner-3")
+    assert ledger.balance() == 30 and sum(p for _, p in ledger.rows()) == 0
+
+
+def test_a_claw_move_that_fails_again_is_still_owed(ledger, monkeypatch):
+    """The row landed, its move failed, and the completing move fails too. Before,
+    the second call ignored that answer, read net 0 and said ok (nothing earned):
+    settle closed the edit SETTLED over an account that kept the points."""
+    from api.routers import loyalty
+    from api.routers.orders import edit_ops
+
+    with monkeypatch.context() as m:
+        m.setattr(loyalty, "_apply_reversal_balance", lambda *a, **k: ("failed", None))
+        first = loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-1")
+        second = loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-2")
+    assert not first["ok"] and not second["ok"], second
+    assert second["reason"] not in edit_ops._LOYALTY_FINAL
+    assert ledger.balance() == 40
+    assert loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-3")["ok"]
+    assert ledger.balance() == 30 and len(ledger.rows()) == 2
+
+
+def test_a_loser_whose_completing_move_fails_is_still_owed(ledger, monkeypatch):
+    """The winner's row landed but its move did not, and the loser's completing
+    move fails as well. Before, the loser returned ok (already clawed)."""
+    from api.routers import loyalty
+    from api.routers.orders import edit_ops
+    from database.repositories.loyalty_repository import LoyaltyTransactionRepository
+
+    real, fired = LoyaltyTransactionRepository.create, []
+
+    def stall(self, data, *a, **k):
+        if data.get("edit_regate_of_order_id") == "ORD-RG" and not fired:
+            fired.append(True)
+            loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-2")
+        return real(self, data, *a, **k)
+
+    with monkeypatch.context() as m:
+        m.setattr(loyalty, "_apply_reversal_balance", lambda *a, **k: ("failed", None))
+        m.setattr(LoyaltyTransactionRepository, "create", stall)
+        out = loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-1")
+    assert fired and not out["ok"] and out["reason"] not in edit_ops._LOYALTY_FINAL, out
+    assert loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-3")["ok"]
+    assert ledger.balance() == 30 and len(ledger.rows()) == 2
+
+
+def test_a_claw_row_whose_move_underflowed_stays_owed(ledger, monkeypatch):
+    """A redeem lands between the balance check and the claw's move: the row
+    stands and the move underflows. Before, that was the final 'balance_underflow'
+    and the edit closed SETTLED over a ledger claiming a claw the account never
+    took. Now it stays owed (the sweep completes it once the balance covers it);
+    an underflow found BEFORE any row (nothing written) stays final, as before."""
+    from api.routers import loyalty
+    from api.routers.orders import edit_ops
+
+    with monkeypatch.context() as m:
+        m.setattr(loyalty, "_apply_reversal_balance", lambda *a, **k: ("underflow", {}))
+        out = loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-1")
+    assert not out["ok"] and out["reason"] not in edit_ops._LOYALTY_FINAL, out
+    assert ledger.rows() == [("ADJUST", -10), ("EARN", 10)] and ledger.balance() == 40
+    assert loyalty.regate_earn_after_edit(dict(ledger.edited), user_id="runner-2")["ok"]
+    assert ledger.balance() == 30
+
+
+def test_a_lens_given_back_before_its_cell_existed_is_swept_back(client, shop, cells, monkeypatch):
+    """D77, no window: the press stalls before its reserve, the sweep gives the op
+    back while the lens's cell does not exist yet (nothing to void), the cell is
+    then created (stock received) and the stalled press reserves on it and dies.
+    Before, the reservation stayed held for a bill that never carries it and the
+    GIVEN_BACK op was never looked at again. The give-back now remembers that it
+    fenced nothing, and the sweep re-runs it (whatever its age) until the cell
+    carries the void or the reservation went back."""
+    from api.routers.orders import admin_edit, edit_ops
+
+    oid = _saved_bill(client, shop, [_line(SVC)])
+    before = _order(shop, oid)
+    lines = [_as_sent(before["items"][0]), _lens()]
+    quiet = type(client)(client.app, raise_server_exceptions=False)
+    real_sweep = edit_ops.sweep_edit_ops
+
+    async def sweep_then_receive():
+        out = await real_sweep()
+        cells(on_hand=5)  # the cell is created after the give-back
+        return out
+
+    async def died(op):
+        return False
+
+    with monkeypatch.context() as m:
+        m.setattr(edit_ops, "sweep_edit_ops", sweep_then_receive)
+        seen = _stall_take_past_the_sweep(shop, m, oid, "before the take")
+        m.setattr(admin_edit, "give_back", died)
+        r = quiet.put(f"/api/v1/orders/{oid}/superadmin-edit",
+                      json={"reason": "correcting this bill", "items": lines}, headers=_token(ADMIN))
+    assert seen and seen[0]["given_back"] == 1 and r.status_code == 409, (seen, r.text)
+    assert cells.read() == (5, 1), "the late reserve landed on the new cell"
+    shop["db"].get_collection("order_edit_ops").update_many(
+        {"order_id": oid}, {"$set": {"created_at": datetime.now() - timedelta(days=30)}})
+    asyncio.run(edit_ops.sweep_edit_ops())
+    assert cells.read() == (5, 0), "the stranded reservation went back"
+    asyncio.run(edit_ops.sweep_edit_ops())
+    assert cells.read() == (5, 0), "a repeat moves nothing"
+    assert _op_states(shop, oid) == ["GIVEN_BACK"] and _order(shop, oid)["items"] == before["items"]
+    assert not shop["db"].get_collection("order_edit_ops").find_one({"order_id": oid}).get("lens_unfenced")
+
+
+def test_a_row_naming_no_sale_never_frees_a_unit_unfenced(client, shop, door, monkeypatch):
+    """D77: an edit row that names its removed units but not which sale of each
+    (a row written before marks existed) used to release them by stock id alone
+    (ANY_SALE), the unfenced release Codex r7 P1 reproduced. Such a row now
+    frees nothing: the unit stays SOLD and the bill is flagged for a person."""
+    from api.routers.orders import edit_ops
+
+    oid = door.arm(_saved_bill(client, shop, [_line(FR, stock_id="SU-FR-A"), _line(SVC)]))
+    svc = _as_sent(next(ln for ln in _order(shop, oid)["items"] if ln["product_id"] == SVC))
+    real = edit_ops._name_units
+
+    def unmarked(order, entries, new_items):
+        real(order, entries, new_items)
+        for entry in entries:
+            entry.pop("marks", None)
+
+    monkeypatch.setattr(edit_ops, "_name_units", unmarked)
+    assert door.press(oid, [svc]).status_code == 200
+    assert _sold_to(shop, oid) == ["SU-FR-A"], "freed by stock id alone"
+    assert _order(shop, oid)[FLAG] is True
