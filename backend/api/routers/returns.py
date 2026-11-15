@@ -1981,7 +1981,9 @@ def sweep_stuck_return_holds() -> int:
     line -- or a VOID one -- and no unsaved doc (those carry their own task).
     Each raises ONE P1 task (return_hold_stuck:<return id>) for the store and
     Accounts. Never released here: a cash-only return may already have put
-    its units back. Returns the number found. ponytail: one pass over orders
+    its units back. A door's kept hold older than its ttl whose record does
+    not count raises door_hold_stuck:<order>:<key> the same way (D79: it
+    refuses every refund of the bill). Returns the number found. ponytail: one pass over orders
     holding refund holds; fine at shop scale."""
     orders, coll, ledger = _orders_coll(), _returns_coll(), _ledger_coll()
     if orders is None or coll is None:
@@ -1995,8 +1997,23 @@ def sweep_stuck_return_holds() -> int:
     for order in bills:
         for rid, hold in (order.get("refund_holds") or {}).items():
             hold = hold or {}
-            if hold.get("doc") or hold.get("door"):
-                continue  # its own task (return_doc_missing); a door's hold is no counter return
+            if hold.get("door"):
+                # A door fenced (kept) and never released, older than its ttl,
+                # whose record does not count: every refund of the bill is
+                # refused. Never released here (the press may still be
+                # writing) -- a person is told.
+                try:
+                    stuck = (hold.get("kept") and _hold_aged_out({**hold, "kept": False})
+                             and _live_refund_holds(order.get("order_id"), {rid: hold})[0])
+                except Exception as exc:  # noqa: BLE001
+                    logger.error("[RETURNS] door hold %s unreadable: %s", rid, exc)
+                    continue
+                if stuck:
+                    found += 1
+                    _task_door_hold_stuck(order, rid, hold)
+                continue
+            if hold.get("doc"):
+                continue  # its own task (return_doc_missing)
             try:
                 if coll.find_one({"return_id": rid, "status": {"$in": list(_NO_MONEY_DOC_STATUSES)}}):
                     continue
@@ -2038,6 +2055,31 @@ def _task_return_hold_stuck(order: Dict[str, Any], rid: str, hold: Dict[str, Any
         )
     except Exception as exc:  # noqa: BLE001
         logger.error("[RETURNS] stuck-hold task not raised for %s: %s", rid, exc)
+
+
+def _task_door_hold_stuck(order: Dict[str, Any], key: str, hold: Dict[str, Any]) -> None:
+    try:
+        from ..dependencies import get_task_repository
+        from ..services.task_triggers import create_system_task
+
+        bill = order.get("order_number") or order.get("order_id")
+        create_system_task(
+            get_task_repository(),
+            title=f"Bill {bill}: a refund stopped part way - the bill takes no refund",
+            description=(
+                f"A {hold.get('door')} refund or credit note on bill {bill} (Rs {float(hold.get('amount') or 0):.2f}, "
+                f"{key}) stopped after it started to write. Until it is cleared, every return, online refund and "
+                "credit note of this bill is refused. Do this: check the customer's store credit and the bill's "
+                "history for it, then ask the IMS team to clear it. Nothing is released by itself."
+            ),
+            priority="P1",
+            category="Accounts",
+            store_id=order.get("store_id"),
+            dedupe_ref=f"door_hold_stuck:{order.get('order_id')}:{key}",
+            extra={"payload": {"order_id": order.get("order_id"), "hold": key}},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[RETURNS] stuck door-hold task not raised for %s: %s", key, exc)
 
 
 def _task_return_doc_missing(doc: Dict[str, Any]) -> None:
@@ -4335,12 +4377,20 @@ def fence_bill_hold(coll, order_id: Any, key: str, *, extra: Optional[Dict[str, 
     ages out while the writes run. False: the hold expired or was taken
     over -- the holder writes nothing (a stalled press never turns its old
     allowance into a new kept hold). An already-kept hold passes. A database
-    error raises (the caller writes nothing). No such bill: True. ``repo``:
-    the order repository's own compare-and-set (update_if) instead of ``coll``."""
+    error raises 503 (the caller writes nothing): an unreadable bill is never
+    an absent one. No such bill: True for a door (as take_bill_hold), False
+    for the counter (``repo``), whose hold was reserved ON the bill. ``repo``:
+    the order repository's own read (read_or_raise, never find_by_id, which
+    turns an error into None) and compare-and-set (update_if)."""
     for _ in range(8):
-        order = repo.find_by_id(order_id) if repo is not None else coll.find_one({"order_id": order_id})
+        try:
+            order = repo.read_or_raise(order_id) if repo is not None else coll.find_one({"order_id": order_id})
+        except Exception as exc:  # noqa: BLE001 -- unknown is not "no such bill"
+            logger.error("[RETURNS] bill %s unreadable at the fence of %s: %s", order_id, key, exc)
+            raise HTTPException(status_code=503, detail=(
+                "Could not check this bill just now, so nothing was issued. Try again."))
         if not order:
-            return True  # no such bill: nothing to race (as take_bill_hold)
+            return repo is None  # a door: nothing to race; the counter: its hold is gone with the bill
         holds = dict(order.get("refund_holds") or {})
         mine = holds.get(key)
         if not mine or _hold_aged_out(mine):
@@ -4389,12 +4439,13 @@ def take_bill_hold(coll, order_id: Any, key: str, amount: float, *, door: str,
                       if rid != key and (not (h or {}).get("kept") or (h or {}).get("door"))}
             if others and _live_refund_holds(order_id, others)[0]:
                 return False
-            # Taking the bill over drops every un-kept hold no longer live (aged
-            # out, or its record counts): a stalled holder that wakes finds its
-            # hold gone and writes nothing (fence_bill_hold, D79).
+            # Taking the bill over drops every hold here no longer live: an
+            # un-kept one (aged out, or its record counts) -- a stalled holder
+            # that wakes finds it gone and writes nothing (fence_bill_hold,
+            # D79) -- and a door's kept one whose record counts (its release
+            # failed), as _reserve_order_refund drops it too.
             for rid in others:
-                if not (holds[rid] or {}).get("kept"):
-                    holds.pop(rid, None)
+                holds.pop(rid, None)
             version = order.get("refund_holds_v")
             holds[key] = {"amount": round(float(amount or 0), 2), "at": utc_now_iso(), "door": door,
                           **({"ttl": ttl} if ttl else {})}
@@ -4409,7 +4460,10 @@ def take_bill_hold(coll, order_id: Any, key: str, amount: float, *, door: str,
 
 
 def drop_bill_hold(coll, order_id: Any, key: str) -> None:
-    """Drop a door's hold. A release that fails ages out (its ttl)."""
+    """Drop a door's hold. A release that fails: an un-kept hold ages out (its
+    ttl); a kept one (fenced) is dropped by the next door or counter return
+    that takes the bill once its record counts, else the stuck-hold sweep
+    raises a task (sweep_stuck_return_holds)."""
     try:
         for _ in range(8):
             order = coll.find_one({"order_id": order_id}) or {}

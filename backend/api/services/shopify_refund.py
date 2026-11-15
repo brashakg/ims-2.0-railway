@@ -1148,8 +1148,12 @@ def _given_back_elsewhere(db, order: Dict[str, Any], refund_id: str) -> Optional
         # COMPLETED yet: its KEPT refund hold is its record (the same rule as
         # returns._live_refund_holds) -- counted at its amount, and its own
         # credit line through it, never twice.
+        # A door's hold (online post, admin note, advance refund) is never its
+        # record: its own doc or ledger row counts it, and while it is live it
+        # refuses every other pricer -- counted here it would count twice
+        # once a failed release left it kept (internal review of D79).
         for hrid, hold in (order.get("refund_holds") or {}).items():
-            if (hold or {}).get("kept") and _norm(hrid) not in completed:
+            if (hold or {}).get("kept") and not (hold or {}).get("door") and _norm(hrid) not in completed:
                 total += _f((hold or {}).get("amount"))
                 doc_entries.add(_norm(f"{hrid}:credit"))
         for row in db.get_collection(_REVIEW_COLLECTION).find({"order_id": order_id}):
