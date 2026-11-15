@@ -265,3 +265,135 @@ def test_a_stale_advance_refund_writes_nothing(till, monkeypatch):
     assert till["db"].get_collection("returns").count_documents({}) == 0
     assert _stored(till).get("advance_refund_id") is None and _stored(till)["status"] == "CONFIRMED"
     assert _stored(till).get("refund_holds") == {}
+
+
+# --- round 8 (internal review of D79) ----------------------------------------------
+
+
+def _fence_read_fails_once(monkeypatch):
+    """One transient database error on the fence's OWN read of the bill (a
+    network blip, a primary step-down): BaseRepository.find_by_id swallows it
+    into None, read_or_raise raises -- as the production repository does."""
+    from pymongo.errors import AutoReconnect
+
+    repo = returns_router.get_order_repository()
+    real, hit = repo.find_by_id, []
+
+    def _in_fence():
+        f = sys._getframe(1)
+        for _ in range(4):
+            if f is None:
+                return False
+            if f.f_code.co_name == "fence_bill_hold":
+                return True
+            f = f.f_back
+        return False
+
+    def read_or_raise(oid):
+        if not hit and _in_fence():
+            hit.append(oid)
+            raise AutoReconnect("primary stepped down")
+        return real(oid)
+
+    def find_by_id(oid):
+        try:
+            return read_or_raise(oid)
+        except Exception:  # noqa: BLE001 -- BaseRepository.find_by_id
+            return None
+
+    monkeypatch.setattr(repo, "read_or_raise", read_or_raise, raising=False)
+    monkeypatch.setattr(repo, "find_by_id", find_by_id)
+    return hit
+
+
+@pytest.mark.parametrize("take_over", [False, True])
+def test_a_counter_fence_that_cannot_read_the_bill_issues_nothing(ctx, monkeypatch, take_over):
+    """Internal review of D79: the counter's fence read the bill through
+    find_by_id, which turns a database error into None -- "no such bill",
+    passed. With the online door's take-over (Codex round 7 P1) that issued a
+    second Rs 900 credit. An unreadable bill is not an absent one: refused,
+    nothing issued."""
+    c = ctx([{"method": "CASH", "amount": _BILLED_GROSS}])
+    _with_compare_and_set(c)
+    hit = _fence_read_fails_once(monkeypatch)
+    seen = _stall_past_the_hold(c, monkeypatch, take_over=True) if take_over else [1]
+    r = _post(c, None, return_type="CREDIT_NOTE")
+    assert seen and hit, "the fence never read the bill"
+    assert r.status_code == 503 and "nothing was issued" in r.text.lower(), r.text
+    _nothing_issued(c)
+
+
+def test_the_counter_fence_refuses_a_bill_that_is_gone():
+    """The counter reserved its hold ON the bill: a bill the fence cannot find
+    is no licence to write (the doors' coll path keeps "no such bill: True")."""
+
+    class _Repo:
+        def read_or_raise(self, oid):
+            return None
+
+        def update_if(self, *a):
+            raise AssertionError("nothing to write")
+
+    assert returns_router.fence_bill_hold(None, "O1", "RET-1", repo=_Repo()) is False
+
+
+def _two_paid_units(env):
+    _online_order(env, grand_total=2000.0, amount_paid=2000.0,
+                  items=[{"item_id": "it-1", "product_id": "7001", "ims_product_id": "IMS-P-1",
+                          "shopify_line_item_id": 9001, "sku": "RB-1", "product_name": "RB",
+                          "quantity": 2, "gst_rate": 5.0, "taxable_value": 1904.76, "tax_amount": 95.24}])
+
+
+def test_a_door_hold_whose_release_failed_is_never_counted_twice(env, monkeypatch):
+    """Internal review of D79: online refund A's release failed after its
+    claim doc landed, so its KEPT 'shopify:A' hold stayed. Refund B of the
+    other unit then counted A twice (its doc and its hold) and got no store
+    credit for Rs 1,000 owed. A door's hold is never a record of money given
+    back (its own doc / ledger row is): not counted; and the next door that
+    takes the bill drops it once its record counts."""
+    from api.services import shopify_refund as S
+
+    _two_paid_units(env)
+    real_drop = returns_router.drop_bill_hold
+    monkeypatch.setattr(returns_router, "drop_bill_hold", lambda *a, **k: None)  # the release is lost
+    assert S.handle_shopify_refund(env, _payload(refund_id="710101", txns=[]), topic="refunds/create")["status"] \
+        == "queued"
+    row = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "710101"})
+    assert S.post_from_review(env, row)["status"] == "credited"
+    order = env.get_collection("orders").find_one({"order_id": "ord-1"})
+    assert order["refund_holds"]["shopify:710101"]["kept"] is True  # left behind
+    # The shared reader alone: A counts once (its doc), never again through its hold.
+    assert S._given_back_elsewhere(env, order, "710102")["given"] == 1000.0
+
+    monkeypatch.setattr(returns_router, "drop_bill_hold", real_drop)
+    assert S.handle_shopify_refund(env, _payload(refund_id="710102", txns=[]), topic="refunds/create")["status"] \
+        == "queued"
+    row = env.get_collection("shopify_refund_review").find_one({"shopify_refund_id": "710102"})
+    assert S.post_from_review(env, row)["status"] == "credited"
+    assert sorted(r["delta"] for r in env.get_collection("credit_note_ledger").find({})) == [1000.0, 1000.0]
+    assert _balance(env) == (2000.0, 2000.0)
+    assert not (env.get_collection("orders").find_one({"order_id": "ord-1"}).get("refund_holds") or {})
+
+
+def test_a_door_hold_stuck_after_its_fence_raises_one_p1_task(till, monkeypatch):
+    """A door (here an advance refund) died after its fence: its KEPT hold
+    refuses every refund of the bill and no record of it counts. Never
+    released by itself (the press may still be writing) -- but a person is
+    told, once. A young door hold, or one whose record counts, is no task."""
+    from tests.test_pos_money_doors_r9 import _ago
+
+    out = []
+    monkeypatch.setattr("api.services.task_triggers.create_system_task", lambda repo, **k: out.append(k) or k)
+    monkeypatch.setattr("api.dependencies.get_task_repository", lambda: object(), raising=False)
+    orders = till["db"].get_collection("orders")
+    orders.insert_one({"order_id": "ORD-S", "order_number": "BV-S", "store_id": "BV-TEST-01",
+                       "refund_holds_v": 1, "refund_holds": {
+                           "advance:RET-X": {"amount": 500.0, "at": _ago(30), "kept": True, "door": "advance",
+                                             "ttl": 900},
+                           "credit-note:young": {"amount": 100.0, "at": _ago(2), "kept": True,
+                                                 "door": "credit_note", "ttl": 900}}})
+    assert returns_router.sweep_stuck_return_holds() == 1
+    assert returns_router.sweep_stuck_return_holds() == 1  # the task itself is deduped
+    assert [t["dedupe_ref"] for t in out] == ["door_hold_stuck:ORD-S:advance:RET-X"] * 2
+    assert out[0]["priority"] == "P1"
+    assert orders.find_one({"order_id": "ORD-S"})["refund_holds"]["advance:RET-X"]["kept"] is True  # never released

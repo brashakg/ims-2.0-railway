@@ -197,6 +197,8 @@ class _RepoWithColl:
     def find_by_id(self, oid):
         return self._order if self._order.get("order_id") == oid else None
 
+    read_or_raise = find_by_id  # the production repository's raising read (fence_bill_hold)
+
     def find_by_order_number(self, num):
         return self._order if self._order.get("order_number") == num else None
 
